@@ -24,6 +24,7 @@ pub mod capabilities;
 pub mod client_bridge;
 pub mod core_bridge;
 pub mod core_component;
+pub mod core_pool;
 pub mod file_search;
 pub mod graph;
 pub mod host;

@@ -25,6 +25,13 @@ pub struct Slot {
 extern "C" {
     fn wa_core_run(entry: *const c_char, elen: usize, argc: c_int, argv: *const *const c_char,
                    argl: *const usize, err: *mut *mut c_char, errlen: *mut usize) -> c_int;
+    /// One work item against the instance's long-lived `lua_State` (see `glue.c`): `0` answered,
+    /// `1` the item raised, `2` no such function, `3` the core could not boot.
+    fn wa_core_call(name: *const c_char, nlen: usize, argc: c_int, argv: *const *const c_char,
+                    argl: *const usize, out: *mut *mut c_char, outlen: *mut usize,
+                    err: *mut *mut c_char, errlen: *mut usize) -> c_int;
+    fn wa_core_reset();
+    fn wa_core_free(p: *mut c_char);
     fn malloc(size: usize) -> *mut u8;
 }
 
@@ -230,10 +237,51 @@ impl Guest for Core {
         if status == 0 {
             Ok(())
         } else {
-            let text = unsafe { std::slice::from_raw_parts(err as *const u8, errlen) };
-            Err(String::from_utf8_lossy(text).into_owned())
+            Err(unsafe { take_c_string(err, errlen) })
         }
     }
+
+    /// The long-lived form: one `lua_State` per instance, booted by the first call.
+    ///
+    /// The error side keeps the four cases apart in the guest's own words, because the kernel maps
+    /// them back to what a native call answers: `not-a-function:<name>`, `boot:<message>`, or the
+    /// script's own error text.
+    fn call(name: String, args: Vec<String>) -> Result<String, String> {
+        let argv: Vec<*const c_char> = args.iter().map(|a| a.as_ptr() as *const c_char).collect();
+        let argl: Vec<usize> = args.iter().map(|a| a.len()).collect();
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let mut outlen = 0usize;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let mut errlen = 0usize;
+        let status = unsafe {
+            wa_core_call(name.as_ptr() as *const c_char, name.len(), args.len() as c_int,
+                         argv.as_ptr(), argl.as_ptr(), &mut out, &mut outlen, &mut err, &mut errlen)
+        };
+        match status {
+            0 => Ok(unsafe { take_c_string(out, outlen) }),
+            2 => {
+                unsafe { wa_core_free(err) };
+                let missing = unsafe { take_c_string(out, outlen) };
+                Err(format!("not-a-function:{missing}"))
+            }
+            3 => Err(format!("boot:{}", unsafe { take_c_string(err, errlen) })),
+            _ => Err(unsafe { take_c_string(err, errlen) }),
+        }
+    }
+
+    fn reset() {
+        unsafe { wa_core_reset() }
+    }
+}
+
+/// Copy a `malloc`'d buffer out of guest C and release it.
+unsafe fn take_c_string(ptr: *mut c_char, len: usize) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }).into_owned();
+    unsafe { wa_core_free(ptr) };
+    text
 }
 
 export!(Core);

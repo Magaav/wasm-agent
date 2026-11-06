@@ -141,6 +141,26 @@ JSON
   local hooks; hooks="$(grep -o '"hook_event_name"' "$hook_log" 2>/dev/null | wc -l | tr -d ' ')"
   echo "smoke[$mode]: UserPromptSubmit hook recorded $hooks payloads"
 
+  # A2.5: one `lua_State` per node thread, so a boot is paid once per node thread and not once per
+  # request. The check is semantic rather than a latency: the node counts calls and the calls that had to
+  # boot the guest (`core.boots`), and a core that rebuilt its Lua state per request would make those two
+  # equal. A2.4 ran every call through a fresh `lua_State` (`guest_run_ms / calls` ~680 ms).
+  if [ "$mode" = component ]; then
+    local ch calls boots per_call
+    ch="$(get "$port" /health)"
+    calls="$(printf '%s' "$ch" | json core.calls)"
+    boots="$(printf '%s' "$ch" | json core.boots)"
+    per_call="$(printf '%s' "$ch" | node -e '
+      let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+        let h={};try{h=JSON.parse(s)}catch(e){}
+        const c=h.core||{};
+        const calls=Number(c.calls||0), ms=Number(c.guest_run_ms||0);
+        process.stdout.write(calls>0?(ms/calls).toFixed(0):"");
+      })')"
+    echo "smoke[$mode]: ${calls} core calls, ${boots} of them booted the guest (${per_call}ms of guest time per call); reservation $(printf '%s' "$ch" | json core.reservation_bytes)B, deadline $(printf '%s' "$ch" | json core.run_deadline_ms)ms, deadlines $(printf '%s' "$ch" | json core.deadlines)"
+    printf '%s %s' "$calls" "$boots" > "$home/calls.txt"
+  fi
+
   printf '%s\n' "$replies" > "$home/replies.txt"
   printf '%s\n' "$subagent_summary" > "$home/subagent.txt"
   printf '%s\n' "$wake_delta" > "$home/self_wakes.txt"
@@ -180,4 +200,13 @@ for mode in native component; do
     || { echo "FAIL  $mode: the hook recorded fewer payloads than turns"; fail=1; }
 done
 echo
+# The long-lived core's own number: a boot per request would make calls == boots, whatever the latencies
+# say. Fewer than half the calls booting the guest is "one `lua_State` per node thread" holding.
+calls="$(cut -d" " -f1 "$work/component/calls.txt" 2>/dev/null)"
+boots="$(cut -d" " -f2 "$work/component/calls.txt" 2>/dev/null)"
+if [ -n "${calls:-}" ] && [ "${boots:-0}" -gt 0 ] && [ $((boots * 2)) -le "$calls" ]; then
+  echo "ok    component: $boots of $calls core calls booted the guest (one Lua state per node thread)"
+else
+  echo "FAIL  component: ${boots:-?} of ${calls:-?} core calls booted the guest (>half means the core is rebuilt per request again)"; fail=1
+fi
 [ "$fail" = 0 ] && echo "serve core smoke ok: three turns, one hook, one subagent and one self-wake on both cores" || { echo "serve core smoke FAILED (logs in $work)" >&2; exit 1; }

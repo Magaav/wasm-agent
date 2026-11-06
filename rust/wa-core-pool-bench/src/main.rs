@@ -58,6 +58,9 @@ fn config(max_instances: usize, warm: usize) -> CorePoolConfig {
         warm,
         acquire_timeout: Duration::from_secs(30),
         memory_limit: 256 << 20,
+        // A measurement of the pool itself: the fixtures are short and a deadline would only make a
+        // slow machine look like a wedged guest (docs/KERNEL.md, "A2.5").
+        run_deadline: Duration::ZERO,
     }
 }
 

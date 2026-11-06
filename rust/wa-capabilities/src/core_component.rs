@@ -669,6 +669,14 @@ fn now_epoch() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_secs() as i64).unwrap_or(0)
 }
 
+/// What a store's epoch-deadline callback returns, and therefore the text a deadline trap carries.
+const DEADLINE_TRAP: &str = "core_run_deadline_exceeded";
+
+/// Was this error the run's own deadline (`CorePoolConfig::run_deadline`) rather than a guest bug?
+pub fn is_run_deadline(error: &wasmtime::Error) -> bool {
+    format!("{error:#}").contains(DEADLINE_TRAP)
+}
+
 /// Compiled code for `bytes`, from the cache when this engine has compiled them before.
 /// The cache key is the module's sha256 plus the engine's compatibility hash, and the cache
 /// directory is the node's own (`~/.wasm-agent/cache/core-component`), never a shared one.
@@ -939,17 +947,93 @@ pub struct CorePoolConfig {
     pub acquire_timeout: Duration,
     /// Per-instance linear-memory cap (a `StoreLimits` limiter, so a guest cannot grow past it).
     pub memory_limit: usize,
+    /// Guest-CPU budget of one work item (`call`) or one script run. The guest is interrupted when it
+    /// reaches it, the item fails and its instance is recycled - a wedged guest costs one run, not a
+    /// wedged node thread. `Duration::ZERO` means no deadline (what `--core-component` has).
+    pub run_deadline: Duration,
 }
+
+/// The linear memory one pooled instance reserves when nothing says otherwise: a ceiling for one
+/// memory slot of the pooling allocator (docs/KERNEL.md, "A2.5"). It is the knob that decides what a
+/// node's wasm footprint costs, because the allocator reserves `limits.memories` slots of this size.
+/// Measured guests hold 1-3 MiB (the report in docs/KERNEL.md has the run-by-run numbers); 64 MiB is
+/// the headroom for a Lua-heavy turn, not a guess at the guest's size.
+pub const DEFAULT_RESERVE_PER_INSTANCE: usize = 64 << 20;
+
+/// What one work item may spend in the guest before the pool gives up on it.
+///
+/// Generous on purpose: the deadline counts guest instructions, and a turn spends most of its wall
+/// time blocked inside a host call (the model), which the epoch does not count. A minute of Lua is a
+/// broken run, not a slow one.
+pub const DEFAULT_RUN_DEADLINE: Duration = Duration::from_secs(60);
 
 impl Default for CorePoolConfig {
     fn default() -> Self {
+        CorePoolConfig::pooled(8, 0, DEFAULT_RESERVE_PER_INSTANCE)
+    }
+}
+
+impl CorePoolConfig {
+    /// The pooling numbers for `max_instances` instances reserving `reserve_per_instance` bytes of
+    /// linear memory each.
+    ///
+    /// `memories` is what the allocator reserves (`limits.memories * reserve` bytes of address space),
+    /// so it is sized from the instance count instead of the fixed 40 slots a default of 8 instances
+    /// leaves behind: a node with 16 node-threads gets `max_instances + 8` memory slots at this size,
+    /// not 40 slots of 256 MiB. Every other bound keeps a spare over the instance count for the same
+    /// reason `wa_kernel_runtime`'s default does - a bound that is too tight fails an acquire rather
+    /// than a guest.
+    pub fn pooled(max_instances: usize, warm: usize, reserve_per_instance: usize) -> Self {
+        let instances = max_instances.max(1) as u32;
+        let reserve = reserve_per_instance.max(16 << 20);
+        let limits = wa_kernel_runtime::components::PoolLimits {
+            component_instances: instances,
+            core_instances: instances * 4 + 8,
+            // One linear memory per component instance, plus the instantiation spares.
+            memories: instances + 8,
+            tables: instances + 8,
+            stacks: instances * 4 + 8,
+            gc_heaps: instances * 2 + 8,
+            max_memory_bytes: reserve,
+        };
         CorePoolConfig {
-            limits: wa_kernel_runtime::components::PoolLimits::default(),
-            max_instances: 8,
-            warm: 0,
+            limits,
+            max_instances: max_instances.max(1),
+            warm: warm.min(max_instances.max(1)),
             acquire_timeout: Duration::from_secs(5),
-            memory_limit: 256 << 20,
+            memory_limit: reserve,
+            run_deadline: DEFAULT_RUN_DEADLINE,
         }
+    }
+
+    /// The same pool with a different per-item guest-CPU budget (`Duration::ZERO` = none).
+    pub fn with_run_deadline(mut self, budget: Duration) -> Self {
+        self.run_deadline = budget;
+        self
+    }
+
+    /// The same pool with a different linear-memory reserve per instance. The engine keeps the old
+    /// reservation only if it was built before this call - a pool is built once, from its config.
+    pub fn with_reserve_per_instance(mut self, bytes: usize) -> Self {
+        self.limits.max_memory_bytes = bytes.max(16 << 20);
+        self.memory_limit = self.limits.max_memory_bytes;
+        self
+    }
+
+    /// Address space the pooling allocator reserves: every memory slot at its one-memory cap. This is
+    /// what an operator's process pays (reserved, not resident) for a `core = "component"` node.
+    pub fn reservation_bytes(&self) -> usize {
+        self.limits.memories as usize * self.limits.max_memory_bytes
+    }
+
+    /// The reserve one instance gets (its largest linear memory).
+    pub fn reserve_per_instance(&self) -> usize {
+        self.limits.max_memory_bytes
+    }
+
+    /// Epoch ticks one work item may run for (`u64::MAX` = no deadline).
+    pub fn deadline_ticks(&self) -> u64 {
+        crate::core_pool::ticks_for(self.run_deadline)
     }
 }
 
@@ -966,6 +1050,8 @@ pub struct PoolStats {
     pub reuses: u64,
     pub exhausted: u64,
     pub runs: u64,
+    /// Work items the guest's deadline interrupted (`0` unless a `run_deadline` is configured).
+    pub deadlines: u64,
 }
 
 /// What a pooled run executes: the text itself (a turn from the supervisor, a fixture), or a file the
@@ -1002,6 +1088,40 @@ pub struct RunReport {
     pub runs_on_instance: u64,
 }
 
+/// One work item's answer against an instance's **long-lived** core, and what it cost
+/// (docs/KERNEL.md, "A2.5").
+#[derive(Clone, Debug)]
+pub struct CallReport {
+    /// `Ok` is what the Lua function returned (`tostring`, empty for `nil`); `Err` is the script's own
+    /// error text - the same words a native `call_string` answers with.
+    pub answer: Result<String, String>,
+    pub run_ms: f64,
+    pub host_calls: u64,
+    pub streams_open: usize,
+    pub memory_bytes: usize,
+    /// Items this instance has answered including this one.
+    pub runs_on_instance: u64,
+}
+
+impl CallReport {
+    fn exit_message(code: i32) -> String {
+        format!("core_call_exited: the guest exited with code {code}")
+    }
+}
+
+/// The guest's error text with its two structural cases turned back into the words a native call
+/// answers: a name no module defines, and a core that could not boot (which the guest keeps and
+/// repeats, so a broken module is never a silent empty answer).
+fn guest_error(message: &str) -> String {
+    if let Some(name) = message.strip_prefix("not-a-function:") {
+        return format!("{name} is not a function");
+    }
+    if let Some(detail) = message.strip_prefix("boot:") {
+        return format!("core_bridge_boot_failed: {detail}");
+    }
+    message.to_string()
+}
+
 struct Slot {
     store: Store<State>,
     core: CoreComponent,
@@ -1018,6 +1138,7 @@ struct Pooled {
     reuses: u64,
     exhausted: u64,
     runs: u64,
+    deadlines: u64,
 }
 
 /// A bounded pool of agent-core instances over one compiled component and one pooling engine.
@@ -1027,6 +1148,10 @@ struct Pooled {
 /// the `Send` this needs sound: nothing else touches a store while it is leased.
 pub struct CoreComponentPool {
     engine: Engine,
+    /// Advances this engine's epoch, which is what a store's deadline counts. Never read: it is held
+    /// because dropping it is what stops the ticker thread.
+    #[allow(dead_code)]
+    ticker: crate::core_pool::EpochTicker,
     component: Component,
     compiled_from: &'static str,
     /// The linker touches no per-instance state, but it is behind a mutex because instantiating is
@@ -1067,15 +1192,29 @@ impl CoreComponentPool {
             )));
         }
         config.warm = config.warm.min(config.max_instances);
-        let engine = wa_kernel_runtime::components::pooled_engine(&config.limits)
+        let (engine, ticker) = crate::core_pool::epoch_engine(&config.limits)
             .map_err(|e| wasmtime::Error::msg(format!("pool_engine_failed: {e:#}")))?;
         let (component, compiled_from) = load_component(&engine, wasm)?;
+        // The pool answers work items through the guest's long-lived entry points (docs/KERNEL.md,
+        // "A2.5"). A component built before them exports `run` alone: refuse it here, naming the fix,
+        // rather than failing on the first acquire with a wasmtime link error about `call`.
+        let exports: Vec<String> = component.component_type().exports(&engine).map(|(name, _)| name.to_string()).collect();
+        for required in ["call", "reset"] {
+            if !exports.iter().any(|name| name == required) {
+                return Err(wasmtime::Error::msg(format!(
+                    "core_component_outdated: the agent-core component does not export {required} (it exports: {}); \
+                     rebuild it with bash scripts/build-agent-core.sh",
+                    exports.join(", ")
+                )));
+            }
+        }
         let mut linker: Linker<State> = Linker::new(&engine);
         // wasi:cli/exit `exit-with-code` is always linked since wasmtime 46 (no LinkOptions switch).
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         CoreComponent::add_to_linker::<State, HasSelf<State>>(&mut linker, |state| state)?;
         let pool = CoreComponentPool {
             engine,
+            ticker,
             component,
             compiled_from,
             linker: Mutex::new(linker),
@@ -1100,6 +1239,11 @@ impl CoreComponentPool {
     fn instantiate(&self) -> wasmtime::Result<Slot> {
         let mut store = Store::new(&self.engine, self.state());
         store.limiter(|state| &mut state.limits);
+        // A work item that reaches its store's epoch delta is interrupted here. The message is the
+        // pool's own, so a caller can tell "this guest is wedged" from any other trap.
+        store.epoch_deadline_callback(|_| Err(wasmtime::Error::msg(DEADLINE_TRAP)));
+        // Nothing runs before the first item arms its deadline; an unarmed store must not trap.
+        store.set_epoch_deadline(u64::MAX);
         let started = Instant::now();
         let core = {
             let linker = self.linker.lock().expect("pool linker lock");
@@ -1107,6 +1251,12 @@ impl CoreComponentPool {
         };
         let _ = started;
         Ok(Slot { store, core, runs: 0 })
+    }
+
+    /// Give the store its budget for the work item about to run. The deadline is relative to the
+    /// epoch the ticker is at now, so this is called once per item, never once per instance.
+    fn arm(&self, store: &mut Store<State>) {
+        store.set_epoch_deadline(self.config.deadline_ticks());
     }
 
     /// The state a slot starts with: fresh WASI (stdio inherited, cwd preopened as `.`, as the
@@ -1236,6 +1386,7 @@ impl CoreComponentPool {
             reuses: inner.reuses,
             exhausted: inner.exhausted,
             runs: inner.runs,
+            deadlines: inner.deadlines,
         }
     }
 
@@ -1258,6 +1409,76 @@ impl CoreInstance<'_> {
             eprintln!("lua error: {message}");
         }
         Ok(report)
+    }
+
+    /// One work item against the instance's **long-lived** `lua_State` (docs/KERNEL.md, "A2.5"):
+    /// call the global `name` with `args` and answer what it returned.
+    ///
+    /// The first call boots the Lua core; every later call on the same lease reuses it, which is what
+    /// makes a node thread pay `lua/core/server.lua`'s module bodies once instead of once per request.
+    /// The item gets the store's deadline before the guest runs, and a trap leaves the instance
+    /// recycled rather than handed to the next caller.
+    ///
+    /// Errors:
+    /// * `Ok(CallReport)` - the guest answered; `answer` is `Err` with the script's own message when
+    ///   the item raised (a Lua error is an answer, not a trap),
+    /// * `Err` - the store cannot serve another item (a trap, the deadline, or a `wasi:cli/exit`),
+    ///   and the instance was retired.
+    pub fn call_entry(&mut self, name: &str, args: &[String]) -> wasmtime::Result<CallReport> {
+        let pool = self.pool;
+        let started = Instant::now();
+        let slot = self.slot.as_mut().ok_or_else(|| wasmtime::Error::msg("core_instance_released: this lease was already released"))?;
+        {
+            let data = slot.store.data_mut();
+            data.calls = 0;
+            data.run_first_call_ms = None;
+            data.run_started = Some(started);
+            // A run's script text is only for `run`; a work item is a call into the already-booted core.
+            data.script = None;
+            data.abort_streams();
+        }
+        slot.runs += 1;
+        pool.arm(&mut slot.store);
+        let outcome = slot.core.call_call(&mut slot.store, name, args);
+        let run_ms = ms(started);
+        let data = slot.store.data();
+        let report = CallReport {
+            answer: Ok(String::new()),
+            run_ms,
+            host_calls: data.calls,
+            streams_open: data.streams.len(),
+            memory_bytes: data.limits.bytes,
+            runs_on_instance: slot.runs,
+        };
+        {
+            let mut inner = pool.inner.lock().expect("pool lock");
+            inner.runs += 1;
+        }
+        match outcome {
+            Ok(Ok(text)) => Ok(CallReport { answer: Ok(text), ..report }),
+            Ok(Err(message)) => Ok(CallReport { answer: Err(guest_error(&message)), ..report }),
+            Err(error) => match error.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                Some(exit) => Ok(CallReport {
+                    answer: Err(CallReport::exit_message(exit.0)),
+                    ..report
+                }),
+                None => {
+                    if is_run_deadline(&error) {
+                        pool.inner.lock().expect("pool lock").deadlines += 1;
+                    }
+                    self.retire();
+                    Err(error)
+                }
+            },
+        }
+    }
+
+    /// Drop the instance's long-lived Lua state, so the next `call` boots a fresh one. The pool calls
+    /// this when a lease changes hands: a retired node thread's interpreter - its `local agent`, its
+    /// pending `/bind` table, its `package.loaded` - must not reach whoever acquires the slot next.
+    pub fn reset(&mut self) -> wasmtime::Result<()> {
+        let Some(slot) = self.slot.as_mut() else { return Ok(()) };
+        slot.core.call_reset(&mut slot.store)
     }
 
     /// The same run, with the guest's own failure text handed back instead of printed.
@@ -1286,6 +1507,7 @@ impl CoreInstance<'_> {
             data.abort_streams();
         }
         slot.runs += 1;
+        pool.arm(&mut slot.store);
         let outcome = slot.core.call_run(&mut slot.store, &name, args);
         let run_ms = ms(started);
         let data = slot.store.data();
@@ -1310,6 +1532,9 @@ impl CoreInstance<'_> {
                 // A trap leaves the store unusable, so the instance is dropped instead of being
                 // handed to the next caller - and the pool's count of what it created stays true.
                 None => {
+                    if is_run_deadline(&error) {
+                        pool.inner.lock().expect("pool lock").deadlines += 1;
+                    }
                     self.retire();
                     Err(error)
                 }
@@ -1359,11 +1584,25 @@ impl CoreInstance<'_> {
             data.calls = 0;
             data.run_started = None;
             data.run_first_call_ms = None;
+            data.script = None;
         }
-        let mut inner = self.pool.inner.lock().expect("pool lock");
-        inner.leased = inner.leased.saturating_sub(1);
-        inner.idle.push(slot);
-        drop(inner);
+        // The guest's long-lived core belongs to the lease, not to the instance (docs/KERNEL.md,
+        // "A2.5"): whoever acquires this slot next gets a fresh `lua_State`, exactly as a newly spawned
+        // node thread gets a fresh interpreter natively. A reset that fails leaves a Lua state nobody
+        // can vouch for, so the slot is retired instead.
+        let reset = slot.core.call_reset(&mut slot.store);
+        let mut rejected = None;
+        {
+            let mut inner = self.pool.inner.lock().expect("pool lock");
+            inner.leased = inner.leased.saturating_sub(1);
+            if reset.is_ok() {
+                inner.idle.push(slot);
+            } else {
+                inner.created = inner.created.saturating_sub(1);
+                rejected = Some(slot);
+            }
+        }
+        drop(rejected);
         self.pool.ready.notify_one();
     }
 }

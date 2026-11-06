@@ -1050,8 +1050,16 @@ fn core_health() -> serde_json::Value {
                 "exhausted": stats.exhausted,
                 "runs": stats.runs,
                 "calls": bridge.calls(),
+                // Items that paid the guest's Lua boot: with one `lua_State` per node thread this is
+                // the number of node threads that ran, not the number of requests.
+                "boots": bridge.boots(),
                 "failures": bridge.failures(),
                 "guest_run_ms": bridge.run_ms(),
+                // A2.5: what the pooling allocator reserves for this node (address space, not RSS),
+                // and the guest-CPU budget one work item gets before the pool gives up on it.
+                "reservation_bytes": bridge.reservation_bytes(),
+                "run_deadline_ms": bridge.run_deadline().as_millis() as u64,
+                "deadlines": stats.deadlines,
             })
         }
     }

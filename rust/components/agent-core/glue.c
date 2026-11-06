@@ -554,10 +554,12 @@ static int fail(lua_State *L, char **err, size_t *errlen) {
 
 typedef struct { const char *entry; size_t elen; int argc; const char **argv; const size_t *argl; } RunArgs;
 
-/* Everything runs under one lua_pcall, so a refusal from the kernel during boot is an error, not an abort. */
-static int boot(lua_State *L) {
-  RunArgs *a = (RunArgs *)lua_touserdata(L, 1);
-  lua_settop(L, 0);
+/* The tables every entry point installs: `host` (the registry's names from the instance snapshot, then
+ * a lazy closure per name), `args`, `EMBEDDED` (the instance snapshot of the shipping modules) and
+ * `dofile` (the native bootstrap, byte for byte). A non-zero return leaves the error on the stack for
+ * the caller's pcall; on success the stack is as it was found. */
+static int install_globals(lua_State *L, int argc, const char **argv, const size_t *argl) {
+  int base = lua_gettop(L);
 
   /* host: the registry's names (the instance snapshot), then the lazy table */
   lua_newtable(L);                                     /* 1 host */
@@ -573,14 +575,15 @@ static int boot(lua_State *L) {
       p = nl + 1;
     }
   }
-  lua_settop(L, 3);
+  /* relative to `base`: index 1 host, 2 metatable, 3 names set */
+  lua_settop(L, base + 3);
   lua_pushcclosure(L, host_index, 1);
   lua_setfield(L, 2, "__index");
   lua_setmetatable(L, 1);
   lua_setglobal(L, "host");
 
-  lua_createtable(L, a->argc, 0);
-  for (int k = 0; k < a->argc; k++) { lua_pushlstring(L, a->argv[k], a->argl[k]); lua_rawseti(L, -2, k + 1); }
+  lua_createtable(L, argc, 0);
+  for (int k = 0; k < argc; k++) { lua_pushlstring(L, argv[k], argl[k]); lua_rawseti(L, -2, k + 1); }
   lua_setglobal(L, "args");
 
   lua_newtable(L);
@@ -590,8 +593,17 @@ static int boot(lua_State *L) {
   lua_setmetatable(L, -2);
   lua_setglobal(L, "EMBEDDED");
 
-  if (luaL_loadbufferx(L, BOOTSTRAP, strlen(BOOTSTRAP), "bootstrap", NULL) != LUA_OK) return lua_error(L);
-  lua_call(L, 0, 0);
+  if (luaL_loadbufferx(L, BOOTSTRAP, strlen(BOOTSTRAP), "bootstrap", NULL) != LUA_OK) return 1;
+  if (lua_pcall(L, 0, 0, 0) != LUA_OK) return 1;
+  lua_settop(L, base);
+  return 0;
+}
+
+/* Everything runs under one lua_pcall, so a refusal from the kernel during boot is an error, not an abort. */
+static int boot(lua_State *L) {
+  RunArgs *a = (RunArgs *)lua_touserdata(L, 1);
+  lua_settop(L, 0);
+  if (install_globals(L, a->argc, a->argv, a->argl)) return lua_error(L);
 
   /* the script, read through the bridge as the native WA_SCRIPT run reads it from disk */
   lua_settop(L, 0);
@@ -617,3 +629,177 @@ int wa_core_run(const char *entry, size_t elen, int argc, const char **argv, con
   lua_close(L);
   return 0;
 }
+
+/* ---- the long-lived core (A2.5) ---------------------------------------------------------------
+ *
+ * A node thread answers its work items on one instance (`serve`'s node-thread loop leases once, the
+ * control and placement interpreters once each), so the guest keeps ONE `lua_State` for the life of
+ * the instance instead of building one per request: `lua/core/server.lua`'s module bodies and
+ * `memory.setup()` run once per node thread, and the core's own `local agent` and in-Lua tables
+ * survive between items exactly as they do in the native interpreter. Nothing of the *run* lives
+ * here: a work item's arguments are copied in and its answer copied out, and the sink, cancel flag
+ * and run id stay on the host, where the capability layer keeps them per item.
+ *
+ * A lease that changes hands is reset (`wa_core_reset`, called by the pool on release), so an
+ * instance never hands one caller's Lua state to the next.
+ *
+ * Status: 0 answered, 1 the item raised (the script's own text), 2 no such function,
+ * 3 the core could not boot (sticky: reported on every later call rather than silently retried). */
+static lua_State *LOOP_L = NULL;
+static char *LOOP_FAILED = NULL;
+static size_t LOOP_FAILED_LEN = 0;
+static int LOOP_SUBAGENTS = 0;      /* 0 not asked for yet, 1 loaded, 2 tried and failed */
+
+static void copy_out(const char *text, size_t len, char **out, size_t *outlen) {
+  char *buffer = (char *)malloc(len + 1);
+  if (!buffer) { *out = NULL; *outlen = 0; return; }
+  if (len) memcpy(buffer, text, len);
+  buffer[len] = 0;
+  *out = buffer;
+  *outlen = len;
+}
+
+/* The loader/entry modules the binary's interpreter factory boots, in the same order: server.lua at
+ * boot, subagents.lua by the first item that needs it. */
+static void loop_dofile(lua_State *L, const char *path) {
+  lua_getglobal(L, "dofile");
+  lua_pushstring(L, path);
+  lua_call(L, 1, 0);
+}
+
+static int loop_boot(lua_State *L) {
+  lua_settop(L, 0);
+  if (install_globals(L, 0, NULL, NULL)) return lua_error(L);
+  loop_dofile(L, "lua/core/server.lua");
+  return 0;
+}
+
+static int loop_load_subagents(lua_State *L) {
+  loop_dofile(L, "lua/core/subagents.lua");
+  return 0;
+}
+
+/* `_G[name]` with a byte-exact name (a Lua global name need not be a C string). */
+static void push_global(lua_State *L, const char *name, size_t nlen) {
+  lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+  lua_pushlstring(L, name, nlen);
+  lua_gettable(L, -2);
+  lua_remove(L, -2);
+}
+
+typedef struct {
+  const char *name; size_t nlen;
+  int argc; const char **argv; const size_t *argl;
+  char **out; size_t *outlen;
+  char **err; size_t *errlen;
+} CallArgs;
+
+/* One work item, under its own pcall so that a structural failure (a stack too small to push the
+ * arguments, a global whose name is not readable) is this item's error and not an unprotected throw.
+ * Pushes the status and returns it as the one result: 0 answered, 1 raised or refused with a message,
+ * 2 no such function (the name in *out). */
+static int loop_item(lua_State *L) {
+  CallArgs *a = (CallArgs *)lua_touserdata(L, 1);
+  lua_settop(L, 0);
+  luaL_checkstack(L, a->argc + 4, "core loop call");
+
+  /* the item's arguments, where a native run has the script's `args` */
+  lua_createtable(L, a->argc, 0);
+  for (int k = 0; k < a->argc; k++) { lua_pushlstring(L, a->argv[k], a->argl[k]); lua_rawseti(L, -2, k + 1); }
+  lua_setglobal(L, "args");
+
+  push_global(L, a->name, a->nlen);
+  if (lua_type(L, -1) != LUA_TFUNCTION) {
+    lua_pop(L, 1);
+    /* subagents.lua defines the placement tick and the subagent entry. A read never needs it, so a
+     * node thread's read path does not pay for it; the first item that does loads it once. */
+    if (LOOP_SUBAGENTS == 0) {
+      LOOP_SUBAGENTS = 2;
+      lua_pushcfunction(L, loop_load_subagents);
+      if (lua_pcall(L, 0, 0, 0) == LUA_OK) LOOP_SUBAGENTS = 1;
+      else lua_pop(L, 1);   /* the item's own "not a function" answer is the useful one */
+    }
+    push_global(L, a->name, a->nlen);
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+      lua_settop(L, 0);
+      copy_out(a->name, a->nlen, a->out, a->outlen);
+      lua_pushinteger(L, 2);
+      return 1;
+    }
+  }
+
+  for (int k = 0; k < a->argc; k++) lua_pushlstring(L, a->argv[k], a->argl[k]);
+  fflush(stdout);
+  if (lua_pcall(L, a->argc, 1, 0) != LUA_OK) {
+    size_t len = 0;
+    const char *msg = lua_tolstring(L, -1, &len);
+    if (!msg) { msg = "lua error"; len = 9; }
+    copy_out(msg, len, a->err, a->errlen);
+    lua_settop(L, 0);
+    lua_pushinteger(L, 1);
+    fflush(stdout);
+    return 1;
+  }
+  if (lua_type(L, -1) == LUA_TNIL) {
+    copy_out("", 0, a->out, a->outlen);
+  } else {
+    size_t len = 0;
+    const char *value = lua_tolstring(L, -1, &len);
+    if (value) copy_out(value, len, a->out, a->outlen);
+    else copy_out("", 0, a->out, a->outlen);
+  }
+  lua_settop(L, 0);
+  lua_pushinteger(L, 0);
+  fflush(stdout);
+  return 1;
+}
+
+int wa_core_call(const char *name, size_t nlen, int argc, const char **argv, const size_t *argl,
+                 char **out, size_t *outlen, char **err, size_t *errlen) {
+  *out = NULL; *outlen = 0; *err = NULL; *errlen = 0;
+  if (!LOOP_L) {
+    if (LOOP_FAILED) { copy_out(LOOP_FAILED, LOOP_FAILED_LEN, err, errlen); return 3; }
+    lua_State *L = luaL_newstate();
+    luaL_openlibs(L);
+    lua_pushcfunction(L, loop_boot);
+    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+      size_t len = 0;
+      const char *msg = lua_tolstring(L, -1, &len);
+      if (!msg) { msg = "lua error"; len = 9; }
+      char *kept = NULL; size_t keptlen = 0;
+      copy_out(msg, len, &kept, &keptlen);
+      LOOP_FAILED = kept;
+      LOOP_FAILED_LEN = keptlen;
+      copy_out(msg, len, err, errlen);
+      lua_close(L);
+      return 3;
+    }
+    LOOP_L = L;
+  }
+  lua_State *L = LOOP_L;
+  CallArgs a = { name, nlen, argc, argv, argl, out, outlen, err, errlen };
+  lua_pushcfunction(L, loop_item);
+  lua_pushlightuserdata(L, &a);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    size_t len = 0;
+    const char *msg = lua_tolstring(L, -1, &len);
+    if (!msg) { msg = "lua error"; len = 9; }
+    copy_out(msg, len, err, errlen);
+    lua_settop(L, 0);
+    return 1;
+  }
+  int status = (int)lua_tointegerx(L, -1, NULL);
+  lua_settop(L, 0);
+  return status;
+}
+
+void wa_core_reset(void) {
+  if (LOOP_L) { lua_close(LOOP_L); LOOP_L = NULL; }
+  free(LOOP_FAILED);
+  LOOP_FAILED = NULL;
+  LOOP_FAILED_LEN = 0;
+  LOOP_SUBAGENTS = 0;
+}
+
+void wa_core_free(void *p) { free(p); }
+

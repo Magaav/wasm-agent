@@ -568,6 +568,124 @@ mapping is CLDR's `windowsZones` table, and a partial one would be worse than th
 capability list), so `zone_id` is absent from a native `local_clock` — which is why the parity test does
 not print it. (3) `docs/HOST.md`'s "The clock" section describes the native contract and should gain a
 sentence about `zone_id`/`zone_source`; that file belongs to another lane.
+### A2.5 results — a long-lived agent-core guest, a deadline and a memory knob (07/11, wasm_the_first)
+
+A2.4's cost had one cause: every request rebuilt the Lua core inside the guest (`lua/core/server.lua`'s
+module bodies plus `memory.setup()`), and its state could not survive between requests — `local agent` and the pending
+`/bind` table in `server.lua` were recreated per turn. A2.4 listed the fix and why it was not possible
+yet: `run(entry, args)` creates the `lua_State` and returns. A2.5 adds the second entry point and turns
+on the two engine knobs that were waiting.
+
+**The guest exports `call` (and `reset`).** `wit/kernel/host.wit`'s world `core-component` now has
+`call(name, args) -> result<string, string>` beside `run` and `reset()`. `call` runs the named global on
+the instance's **own** `lua_State`: the first call boots it (`lua/core/server.lua`, and
+`lua/core/subagents.lua` the first time an item needs it), every later call reuses it. A node thread —
+which leases once and keeps the lease for its life — therefore boots the core once, not once per
+request, and `local agent`, `package.loaded` and the in-Lua caches are the ones the native interpreter
+has. `run` is unchanged, which is what `wa --core-component` and `CoreComponentPool::run_script` still
+use: a one-shot run keeps its promise of a fresh interpreter per run.
+
+**Nothing of the run lives in the guest.** The work item carries its own context: `serve` installs the
+item's sink, cancel flag and run id on the node thread before it calls in (as it always did), the bridge
+copies the item's arguments in, the guest copies the answer out. The guest holds no run id, no sink and
+no thread-local, which is exactly what makes a `lua_State` that outlives one request sound. The old
+per-call reply file (`<home>/.wasm-agent/core-bridge/<pid>-<n>.reply`) is gone with the dispatch script:
+a call writes nothing to disk and answers in the `Result<String, String>` the native
+`Lua::call_string` returns.
+
+**A lease resets the core; an instance does not.** A retired node thread is replaced in the same pool
+slot, and a subagent turn leases per turn (a native subagent turn builds its own interpreter), so the
+pool calls the guest's `reset` when a lease goes back. The persistence guarantee is therefore "one
+`lua_State` per **lease**", which is "per node thread" because that is how `serve` leases — and a fresh
+caller never inherits a previous one's `local agent` or its pending `/bind` table.
+
+**Epoch interruption on the pooling engine, with a per-run deadline.** `wa_kernel_runtime`'s
+`pooled_engine` keeps the feature off on purpose (A2.3: the feature without a ticker traps every guest
+on its first instruction, and that engine is shared with callers that have no budget). The pool is the
+caller that has one, so it builds its own engine — `rust/wa-capabilities/src/core_pool.rs`, same
+`PoolLimits`, plus `epoch_interruption(true)` and one ticker thread (10 ms ticks, stopped when the engine
+is dropped) — and every store gets a deadline armed **per work item** (`CorePoolConfig::run_deadline`,
+`WASM_AGENT_CORE_RUN_DEADLINE_MS`, default 60 s, `0` = none). A guest that reaches it is interrupted,
+that item fails with `core_bridge_run_deadline`, the pool counts it (`core.deadlines`) and the instance
+is retired — and the lease takes a replacement from the pool, so the failure belongs to the item and not
+to every later request on that node thread. What the budget counts is guest instructions: a run blocked
+in a host call (the model, an HTTP read, an SSE stream) is not executing wasm and is not interrupted.
+Measured cost of the boot it must not trip over: ~600 ms of guest instructions for the first call on an
+instance (2.4 s in a debug host build), which is why the default is a minute and not a second.
+
+**The memory knob.** The pooling allocator reserves `limits.memories` linear-memory slots of
+`limits.max_memory_bytes` each, so A2.4's numbers (`memories = 40`, 256 MiB) reserved 10 GiB of address
+space for a node sized for ten instances, and grew with neither the instance count nor anything a guest
+measured. `CorePoolConfig::pooled(instances, warm, reserve)` now sizes `memories` from the instance
+count (`instances + 8`) and takes the one-memory cap from `WASM_AGENT_CORE_POOL_RESERVE_MB` (default
+64 MiB). A node sized for 16 node threads (23 instances) reserves **31 × 64 MiB ≈ 2 GiB** of address
+space instead of 10 GiB, and `/health`'s `core` block reports `reservation_bytes` and
+`run_deadline_ms` beside the counters, so the number is an operator's and not an allocator's default.
+The guests measured 1-3 MiB of linear memory; 64 MiB is the headroom for a Lua-heavy turn
+(`test-batch-tools`' 245 checks run inside it), and cutting it further is a knob with a measurement
+behind it rather than a guess.
+
+**Cost.** `scripts/bench-serve-core-component.sh <port> 10 4`, release build, one node per core, the
+same stub model, medians of 10 turns (each in its own thread) after two warm-up turns, four alternating
+rounds — the modes run one after the other on a machine that is also an operator's desktop (`wa-sentinel`
+and two browsers were live), so a pair from a quiet minute and one from a busy minute are two samples of
+the same two cores:
+
+| round | turn native / component | read native / component | component/native (turn, read) |
+| --- | --- | --- | --- |
+| 1 | 319 / 351 ms | 7.0 / 9.0 ms | 1.10× , 1.29× |
+| 2 | 222 / 412 ms | 9.5 / 11.5 ms | 1.86× , 1.21× |
+| 3 | 316 / 546 ms | 11.0 / 28.5 ms | 1.73× , 2.59× |
+| 4 | 706 / 728 ms | 30.5 / 38.5 ms | 1.03× , 1.26× |
+| **median** | 318 / 479 ms | 10 / 20 ms | **1.42× , 1.28×** |
+| serve RSS after the run | 110 MiB | 190 MiB | +80 MiB |
+
+A2.4 measured 1 410 ms per turn and 357 ms per read on the same pair of cores (6.4× and 34× native).
+The variance here is the host's, not the core's: the same native node answers a turn in 222 ms in one
+round and 706 ms in another, and the component node's per-round ratio moves from 1.03× to 1.86× with
+it. What the numbers support is that the per-request boot is gone — the component column sits inside
+the native column's noise band — and that the target (turn ≤ 1.5×, read ≤ 3×) holds at the median of
+those rounds (1.42× / 1.28×); a run on a quiet machine (this session's first, 1 round) measured 1.17×
+and 2.00×. `/health` at the end of a round: `calls=41-48`, `boots=4` (one per instance), so the guest's
+boot is paid once per instance and not per call — a per-request boot would make those two numbers equal.
+The `guest_run_ms / calls` figure (a round here: 6.3-20.6 s over 41-48 calls) is *time inside the core
+call*, which includes the model call the core makes, so it is not a boot measure and is not used as one.
+
+**Parity is unchanged.** `scripts/test-core-parity.sh` runs the fast path's self-contained Lua tests
+once natively and once through the one-shot `--core-component` path, whose guest `run` A2.5 refactored
+(the boot's tables moved into one `install_globals` both entry points use). Result: **100/115 identical, 12/115 fail identically on both
+cores, 3/115 differ** — the same three A2.4 had (`test-cli-ticker` and `test-cli-view` draw one extra
+ticker frame from the slot's interpreter, `test-completion-packet` calls `os.remove` on an absolute path
+the guest has no preopen for), and the same 12 environment failures (`test-codemode-*` without the QuickJS
+assets, `test-graph-*` without the component, `test-patch-audit`, `test-toolcall-gate`,
+`test-experiment-verify`, `test-capability-inventory`). No new difference, which is what the refactor had
+to prove.
+
+**Serve smoke, with the long-lived core.** `scripts/test-serve-core-component.sh` (three `/chat` turns,
+one `UserPromptSubmit` hook, one subagent, one self-wake) passes identically on both cores. It now also
+checks the thing this step is about, semantically rather than by latency: `/health` counts the core calls
+and how many of them had to boot the guest (`core.boots`, the first item on an instance or on a lease
+after its reset), and the smoke fails when more than half of the calls booted — a per-request `lua_State`
+would make those two numbers equal, which is exactly A2.4's shape. The last run reported `46 core calls,
+6 of them booted the guest`. `guest_run_ms` is *not* that check: it is time inside the core call and
+includes the model call the core makes, so it measures the stub as much as the boot.
+
+**Tests.** `cargo test -p wa-capabilities core_pool core_bridge` — `core_pool`'s 2 (the tick
+arithmetic; the engine really has epoch interruption and its ticker), and `core_bridge`'s 5 new ones:
+one `lua_State` across work items (a probe module the factory publishes in `EMBEDDED` answers `1`, `2`,
+`3` where A2.4 answered `1` three times), a released lease handing out a fresh core, a wedged guest
+(`while true do end`) hitting its deadline, being counted, and its lease getting a replacement instance
+— plus the two A2.4 tests (a call from inside the guest, a Lua error keeping its own text) unchanged.
+The pool's own A2.3 tests still pass on the epoch engine.
+
+**Not done here.** (1) A subagent turn still leases per turn, so it still pays the guest boot once per
+turn: a small warm pool of subagent cores, or keeping a subagent's lease across its own tool loop, is
+the next step and moves ~600 ms off the subagent path. (2) The reservation is address space, not RSS:
+`+80-99 MiB` resident with 4-5 instances alive is measured and the ~1.94 GiB figure is reserved. (3) A lease's
+replacement after a deadline trap is a fresh instance (`created` churns by one): a node that wedges a
+guest often enough pays instantiations, which is visible in `/health` (`instances`, `deadlines`) rather
+than silent. (4) `wa --core-component` keeps no state between runs — the one-shot promise — so the CLI
+cannot demonstrate what a node thread's second request gets; the Rust tests do.
 
 ### C1 results — the code graph as a component (05/11, wasm_the_first)
 

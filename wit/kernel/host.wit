@@ -79,5 +79,20 @@ world core-component {
     import log;
 
     /// Run `entry` (a script path, read through the bridge) with `args` as the global `args`.
+    /// This is the one-shot form (`wa --core-component`, `CoreComponentPool::run_script`): a fresh
+    /// `lua_State`, the script's `run`-time cost paid in full.
     export run: func(entry: string, args: list<string>) -> result<_, string>;
+
+    /// The long-lived form (docs/KERNEL.md, "A2.5"): call the global `name` with `args` on the
+    /// instance's *own* `lua_State`, booting it (`lua/core/server.lua`, and `lua/core/subagents.lua`
+    /// on the first call that needs it) once per instance. `ok` carries what the Lua function
+    /// returned, as `tostring` would print it (empty for `nil`); `err` carries the script's own
+    /// error text. A name that is not a function is answered with `not-a-function:<name>` so a
+    /// caller can keep its own wording.
+    export call: func(name: string, args: list<string>) -> result<string, string>;
+
+    /// Drop that `lua_State`, so the next `call` boots a fresh one. The pool calls it when a lease
+    /// changes hands (a retired node-thread's instance must not keep its Lua state, its `local
+    /// agent` or its pending `/bind` table for whoever acquires the lease next).
+    export reset: func();
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A2.4 measurement: what the component core costs a *serving* node (docs/KERNEL.md, "A2.4").
 #
-#   bash scripts/bench-serve-core-component.sh [port-base] [turns]
+#   bash scripts/bench-serve-core-component.sh [port-base] [turns] [rounds]
 #
 # One node per core, the same stub model, the same scratch home shape, on loopback: median wall time of
 # `turns` chat turns (each in its own thread, so the prompt does not grow), median wall time of a read
@@ -15,6 +15,7 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 BASE="${1:-8961}"
 TURNS="${2:-10}"
+ROUNDS="${3:-1}"
 bin="${WA_BIN:-}"
 for c in "$(command -v wa 2>/dev/null)" "$ROOT/rust/target/release/wa" "$ROOT/rust/target/release/wa.exe"; do
   [ -n "$bin" ] && break; [ -n "$c" ] && [ -x "$c" ] && bin="$c"
@@ -104,6 +105,13 @@ measure() { # measure <mode> <port>
   # Let the node go quiet, then take the memory number and the pool's own counters.
   sleep 4
   local health; health="$(curl -s -m 10 "http://127.0.0.1:$port/health" 2>/dev/null)"
+  local served; served="$(printf '%s' "$health" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let h={};try{h=JSON.parse(s)}catch(e){}process.stdout.write(String((h.core||{}).mode||""))})' 2>/dev/null)"
+  if [ "$served" != "$mode" ]; then
+    echo "bench[$mode]: the node on port $port answered core.mode='$served' (not '$mode'); this round is not a measurement" >&2
+    tail -3 "$home/serve.log" >&2
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    return 1
+  fi
   local rss; rss="$(rss_mb "$pid")"
   local turn_median read_median
   turn_median="$(median < "$turn_times")"
@@ -127,15 +135,58 @@ measure() { # measure <mode> <port>
   return 0
 }
 
-measure native "$BASE" || exit 1
-measure component "$((BASE + 10))" || exit 1
+# Rounds: the two modes run one after the other, so a machine that is busy for one of them (this is
+# often an operator's desktop, not a quiet benchmark box) shows up as drift between the columns rather
+# than as a difference between the cores. `rounds` (third argument, default 1) alternates the modes and
+# reports each round; the summary then quotes the least-contended round per mode, the standard treatment
+# of a noisy host, and prints every round so the noise is visible instead of hidden.
+rounds=${3:-1}
+: > "$work/rounds.txt"
+for round in $(seq 1 "$rounds"); do
+  base=$((BASE + (round - 1) * 100))
+  [ "$rounds" -gt 1 ] && echo "bench: round $round"
+  measure native "$base" || exit 1
+  measure component "$((base + 10))" || exit 1
+  printf '%s %s %s %s %s %s %s
+' "$round"     "$(cat "$work/native.turn.txt")" "$(cat "$work/component.turn.txt")"     "$(cat "$work/native.read.txt")" "$(cat "$work/component.read.txt")"     "$(cat "$work/native.rss.txt")" "$(cat "$work/component.rss.txt")" >> "$work/rounds.txt"
+done
 
-nt="$(cat "$work/native.turn.txt")"; ct="$(cat "$work/component.turn.txt")"
-nr="$(cat "$work/native.read.txt")"; cr="$(cat "$work/component.read.txt")"
-nm="$(cat "$work/native.rss.txt")"; cm="$(cat "$work/component.rss.txt")"
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b+0>0) printf "%.2f", a/b; else print "?" }'; }
-echo
 delta() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%+.0f", a-b}'; }
-echo "turn   native ${nt}ms  component ${ct}ms   component/native $(ratio "$ct" "$nt")x  ($(delta "$ct" "$nt")ms per turn)"
-echo "read   native ${nr}ms  component ${cr}ms   component/native $(ratio "$cr" "$nr")x  ($(delta "$cr" "$nr")ms per read)"
+least() { awk -v column="$2" 'NR==1 || $column+0 < best+0 {best=$column; line=$0} END{print line}' "$1"; }
+
+if [ "$rounds" -gt 1 ]; then
+  echo
+  echo "per round: turn native/component, read native/component, rss native/component (ms, ms, MiB)"
+  awk '{print "  round", $1, "  turn", $2, "/", $3, "  read", $4, "/", $5, "  rss", $6, "/", $7}' "$work/rounds.txt"
+fi
+# The ratio per round, then the median across rounds: the two modes run one after the other on a host
+# that is often an operator's desktop, so a pair from a quiet minute and a pair from a busy one are two
+# samples of the same two cores, and a median is what they can support.
+median_of() { sort -n | awk '{v[NR]=$1} END{ if (NR==0) {print "?"; exit} if (NR%2) print v[(NR+1)/2]; else printf "%.0f", (v[NR/2]+v[NR/2+1])/2 }'; }
+# The same for a ratio, which needs its two decimals: a median rounded to a whole number is not a ratio.
+median_ratio() { sort -n | awk '{v[NR]=$1} END{ if (NR==0) {print "?"; exit} if (NR%2) printf "%.2f", v[(NR+1)/2]; else printf "%.2f", (v[NR/2]+v[NR/2+1])/2 }'; }
+awk '{print sprintf("%.2f", ($3+0)/(($2+0)>0?$2:1))}' "$work/rounds.txt" > "$work/turn.ratios"
+awk '{print sprintf("%.2f", ($5+0)/(($4+0)>0?$4:1))}' "$work/rounds.txt" > "$work/read.ratios"
+awk '{print $2}' "$work/rounds.txt" | median_of > "$work/native.turn.median"
+awk '{print $3}' "$work/rounds.txt" | median_of > "$work/component.turn.median"
+awk '{print $4}' "$work/rounds.txt" | median_of > "$work/native.read.median"
+awk '{print $5}' "$work/rounds.txt" | median_of > "$work/component.read.median"
+awk '{print $6}' "$work/rounds.txt" | median_of > "$work/native.rss.median"
+awk '{print $7}' "$work/rounds.txt" | median_of > "$work/component.rss.median"
+
+nt="$(cat "$work/native.turn.median")"; ct="$(cat "$work/component.turn.median")"
+nr="$(cat "$work/native.read.median")"; cr="$(cat "$work/component.read.median")"
+nm="$(cat "$work/native.rss.median")"; cm="$(cat "$work/component.rss.median")"
+ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b+0>0) printf "%.2f", a/b; else print "?" }'; }
+delta() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%+.0f", a-b}'; }
+echo
+if [ "$rounds" -gt 1 ]; then
+  echo "medians across $rounds rounds (each round: turn native ${nt}ms component ${ct}ms; read native ${nr}ms component ${cr}ms)"
+  echo "turn   component/native $(cat "$work/turn.ratios" | paste -sd' ' -)  median $(cat "$work/turn.ratios" | median_ratio)x"
+  echo "read   component/native $(cat "$work/read.ratios" | paste -sd' ' -)  median $(cat "$work/read.ratios" | median_ratio)x"
+else
+  echo "turn   native ${nt}ms  component ${ct}ms   component/native $(ratio "$ct" "$nt")x  ($(delta "$ct" "$nt")ms per turn)"
+  echo "read   native ${nr}ms  component ${cr}ms   component/native $(ratio "$cr" "$nr")x  ($(delta "$cr" "$nr")ms per read)"
+fi
 echo "rss    native ${nm}MiB component ${cm}MiB   $(delta "$cm" "$nm")MiB"

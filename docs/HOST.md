@@ -573,14 +573,24 @@ not allow.
 
 On the component core every node thread, the admission and placement interpreters and every subagent
 turn lease an instance from the `agent-core` pool (`WA_AGENT_CORE_WASM`, else
-`<components dir>/agent-core.wasm`, else the checkout's build), and each request is one guest run.
+`<components dir>/agent-core.wasm`, else the checkout's build). A node thread keeps its lease for its
+life and the guest keeps **one `lua_State`** for the life of the lease (KERNEL.md, "A2.5"): the Lua
+core boots on a node thread's first request, not on every one, and a lease that changes hands is reset
+so the next caller cannot inherit the previous one's state.
 `host.*` is unchanged for the Lua core — same names, same arguments, same answers — because every
 call still crosses the one bridge import and is answered by the instance's own native interpreter.
 Two things do behave differently, and both are the guest's filesystem and console, not the
 capabilities: WASI preopens the process cwd as `.`, so Lua-level `io`/`os` calls on an absolute path
 fail inside the guest (use `host.read_file`/`host.write_file`), and the CLI ticker's frames come from
 the slot's interpreter rather than the CLI's. Cost, parity results and what is still missing:
-[KERNEL.md](KERNEL.md), "A2.4 results".
+[KERNEL.md](KERNEL.md), "A2.4 results" and "A2.5 results".
+
+The pool two knobs an operator can see, both reported by `/health`'s `core` block:
+`WASM_AGENT_CORE_POOL_RESERVE_MB` (linear memory one instance reserves, default 64 MiB; times
+`memories` it is what the pooling allocator takes as *address space*, `core.reservation_bytes`) and
+`WASM_AGENT_CORE_RUN_DEADLINE_MS` (guest-CPU budget of one work item, default 60 s, `0` = none;
+`core.run_deadline_ms`, `core.deadlines`). The budget counts guest instructions: a turn waiting on a
+model is not charged for it, and a Lua that never returns fails that item and recycles its instance.
 
 ## The capability inventory
 

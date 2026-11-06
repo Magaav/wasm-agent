@@ -1,41 +1,46 @@
 //! `core = "component"` — `serve`, its node threads, its control/placement interpreters and the
-//! subagent runtime answering from the agent-core instance pool (docs/KERNEL.md, "A2.4").
+//! subagent runtime answering from the agent-core instance pool (docs/KERNEL.md, "A2.4", "A2.5").
 //!
-//! A2.1–A2.3 put the Lua core inside a wasm component, gave it streams and pooled it. Nothing in the
-//! binary used the pool. This module is the seam that lets the *serving* side of the node use it
-//! without reimplementing anything: the serve loop keeps its threads, its admission, its scheduler and
-//! its sockets, and the one thing it asks of an interpreter — `call_string(name, args...)` — is
-//! answered either by the native `Lua` it always used or by a guest run on a pooled instance.
+//! A2.1–A2.3 put the Lua core inside a wasm component, gave it streams and pooled it. A2.4 made the
+//! serving side of the node use that pool; A2.5 gave the guest a long-lived entry point. The serve loop
+//! keeps its threads, its admission, its scheduler and its sockets, and the one thing it asks of an
+//! interpreter — `call_string(name, args...)` — is answered either by the native `Lua` it always used
+//! or by a work item `call` on a pooled instance.
 //!
 //! # What crosses, and in which direction
 //!
-//! The guest exports `run(entry, args) -> result<_, string>` (wit/kernel/host.wit, world
-//! `core-component`), so a call cannot *return* a value: the export's `ok` payload is unit. The
-//! dispatch script below therefore boots the same two entry modules the binary's interpreter factory
-//! boots (`lua/core/server.lua`, and `lua/core/subagents.lua` for the calls that need it), calls the named global with the same
-//! arguments, and writes its answer — `status\npayload` — through `host.write_file` to a scratch path
-//! the kernel chose. The kernel reads that file, deletes it, and hands the payload back to the caller.
-//! It is one small file per call under `<home>/.wasm-agent/core-bridge/`, outside any watched tree.
+//! The guest exports `call(name, args) -> result<string, string>` (wit/kernel/host.wit, world
+//! `core-component`): call the global `name` with `args` **on the instance's own `lua_State`**, which
+//! the first call boots (`lua/core/server.lua`, plus `lua/core/subagents.lua` the first time an item
+//! needs it) and every later call reuses. So a node thread pays the Lua core's module bodies and
+//! `memory.setup()` once, not once per request, and the core's own `local agent` and in-Lua tables
+//! survive between items exactly as they do in the native interpreter (A2.5).
+//!
+//! The old shape — a dispatch script run per call through `run(entry, args)` that wrote its answer to
+//! `<home>/.wasm-agent/core-bridge/<pid>-<n>.reply` — is gone with it: nothing about a call touches the
+//! filesystem, and a call answers in the same `Result<String, String>` the native `Lua::call_string`
+//! returns (a Lua error keeps its own text).
 //!
 //! The direction of every `host.*` call is unchanged from A2.1: the guest asks the kernel, the kernel
 //! calls the capability's existing C function on the instance's own native interpreter, on the
 //! caller's thread. That last part is why `serve` works here at all: the run's socket sink, its
-//! cancel flag and its run id live in thread-locals of the thread that calls `run_script`, so a
-//! `host.stream` from inside the guest reaches the same SSE client a native run would.
+//! cancel flag and its run id are installed on the node thread for the work item before it calls in
+//! (they travel with the item), so a `host.stream` from inside the guest reaches the same SSE client a
+//! native run would. The guest holds none of that state — a long-lived `lua_State` that carried a run
+//! id would hand one request's context to the next.
 //!
 //! # State
 //!
-//! Each guest run gets a fresh `lua_State` (A2.3: the instance snapshot covers the kernel's immutable
-//! boot answers, never the script's globals). A node thread therefore rebuilds the Lua core per
-//! request instead of keeping it, and conversation state comes from the database exactly as it does
-//! for a fresh `wa run`. What that costs and what it does not preserve is measured and listed in
-//! docs/KERNEL.md ("A2.4") — in short: `local agent` and the in-Lua caches are rebuilt per request,
-//! and the pending `/bind` confirmation table does not survive between requests.
+//! One `lua_State` per lease, for the life of the lease: a node thread leases once and keeps it, the
+//! control and placement interpreters lease once each, a subagent turn leases per turn (as a native
+//! subagent turn builds an interpreter). The pool resets the guest's core when a lease goes back
+//! (`CoreInstance::reset`), so a slot handed to a fresh node thread boots a fresh core instead of
+//! inheriting the previous one's `local agent` or its pending `/bind` confirmation table.
 
-use crate::core_component::{CoreComponentPool, CoreInstance, CorePoolConfig, NativeFactory, PoolStats, Script};
+use crate::core_component::{CoreComponentPool, CoreInstance, CorePoolConfig, NativeFactory, PoolStats};
 use serde_json::Value as Json;
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use wa_host_support::lua::Lua;
@@ -106,9 +111,19 @@ fn config_file_core() -> Option<String> {
 /// node thread busy, every subagent running, admission resolving) still leases instead of waiting.
 ///
 /// `WASM_AGENT_CORE_POOL_MAX` overrides the count and `WASM_AGENT_CORE_POOL_WARM` how many exist
-/// before the first request (default one: the first turn should not pay an instantiation). The
-/// pooling allocator's reservation is raised to match, because a `max_instances` above it is refused
-/// at construction and that must not be an operator's problem.
+/// before the first request (default one: the first turn should not pay an instantiation).
+///
+/// `WASM_AGENT_CORE_POOL_RESERVE_MB` is what one instance reserves in linear memory, and therefore
+/// what the pooling allocator takes from the process (`limits.memories` slots of it, see
+/// [`CorePoolConfig::reservation_bytes`]). 64 MiB by default: a guest that holds 1-3 MiB gets the
+/// headroom for a Lua-heavy turn, and a node sized for 16 node threads (23 instances, 31 memory
+/// slots) reserves ~2 GiB of *address space* instead of A2.4's 2.5 GiB - and the number is a knob
+/// instead of the allocator's 256 MiB default, which grew with neither the instance count nor what a
+/// guest measures.
+///
+/// `WASM_AGENT_CORE_RUN_DEADLINE_MS` is the guest-CPU budget of one work item (default 60 s, `0` =
+/// none). It counts instructions, not wall time: a turn waiting on the model is not charged for it,
+/// and a run whose Lua never returns fails that run and recycles its instance.
 pub fn node_pool_config(slots: usize, subagents: usize) -> CorePoolConfig {
     let wanted = slots.saturating_add(subagents).saturating_add(3).max(1);
     let max_instances = std::env::var("WASM_AGENT_CORE_POOL_MAX")
@@ -121,94 +136,58 @@ pub fn node_pool_config(slots: usize, subagents: usize) -> CorePoolConfig {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1)
         .min(max_instances);
-    let mut limits = wa_kernel_runtime::components::PoolLimits::default();
-    limits.component_instances = limits.component_instances.max(max_instances as u32);
-    CorePoolConfig { limits, max_instances, warm, ..CorePoolConfig::default() }
+    let reserve = std::env::var("WASM_AGENT_CORE_POOL_RESERVE_MB")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|mib| mib << 20)
+        .unwrap_or(crate::core_component::DEFAULT_RESERVE_PER_INSTANCE);
+    let deadline = std::env::var("WASM_AGENT_CORE_RUN_DEADLINE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(crate::core_component::DEFAULT_RUN_DEADLINE);
+    CorePoolConfig::pooled(max_instances, warm, reserve).with_run_deadline(deadline)
 }
 
-/// The dispatch script every bridge call runs inside the guest.
-///
-/// It is deliberately tiny and does nothing the native interpreter does not: load the same two entry
-/// modules the interpreter factory loads, resolve the named global, call it with the arguments the
-/// kernel passed as the guest's own `args` global, and write `status\npayload` to the last argument.
-/// A `pcall` around the call is what turns a Lua error into the `Err` half of `call_string`, exactly
-/// as `Lua::call_string` does natively.
-const DISPATCH: &str = r#"
-local reply = args[#args]
-local function answer(status, text)
-  host.write_file(reply, status .. '\n' .. tostring(text or ''))
-end
-if type(wa_me) ~= 'function' then
-  local ok, problem = pcall(dofile, 'lua/core/server.lua')
-  if not ok then answer('boot', problem) return end
-end
-local name = args[1]
-local target = _G[name]
--- The second entry module is loaded only by a call that needs it (the placement tick and a subagent
--- turn): every run boots a fresh interpreter, so the half of the boot a read does not use is a cost
--- this script does not have to pay. A name neither module defines is still `missing`.
-if type(target) ~= 'function' then
-  local ok, problem = pcall(dofile, 'lua/core/subagents.lua')
-  if not ok then answer('boot', problem) return end
-  target = _G[name]
-end
-if type(target) ~= 'function' then answer('missing', tostring(name)) return end
-local call = {}
-for i = 2, #args - 1 do call[#call + 1] = args[i] end
-local ok, value = pcall(target, table.unpack(call, 1, #call))
-if not ok then answer('error', value) return end
-if value == nil then answer('ok', '') else answer('ok', tostring(value)) end
-"#;
-
-/// The chunk name the guest reports for the dispatch script, so a message from inside it names it.
-const DISPATCH_NAME: &str = "core-bridge-call";
-
-/// One bridge: the pool every component-core interpreter leases from, the scratch directory replies
-/// travel through, and the counters `/health` reports.
+/// One bridge: the pool every component-core interpreter leases from, and the counters `/health`
+/// reports.
 ///
 /// One per process, leaked, like `serve`'s own pool: a lease borrows the pool for its whole life, and
 /// the node's pool lives exactly as long as the node does.
 pub struct CoreBridge {
     pool: CoreComponentPool,
-    scratch: PathBuf,
-    seq: AtomicU64,
     calls: AtomicU64,
+    /// Work items that paid the guest's boot (the first item on an instance): the count that says the
+    /// long-lived core is really long-lived. A per-request boot makes this equal `calls`.
+    boots: AtomicU64,
     failures: AtomicU64,
-    /// Milliseconds spent inside guest runs, summed: the per-turn cost of the core itself, which is
-    /// what a comparison against the native interpreter has to separate from model latency.
+    /// Milliseconds spent inside guest work items, summed: the per-turn cost of the core itself, which
+    /// is what a comparison against the native interpreter has to separate from model latency.
     run_ms: AtomicU64,
     opened_ms: u128,
 }
 
 impl CoreBridge {
     /// Open the bridge: compile `wasm` once on a pooling engine and warm `config.warm` instances.
-    ///
-    /// The reply scratch directory is the node's own (`<home>/.wasm-agent/core-bridge`); a caller
-    /// outside the node (the tests) names one with [`CoreBridge::open_at`] instead, so nothing under
-    /// an operator's home is touched by a test run.
     pub fn open(factory: NativeFactory, wasm: &Path, config: CorePoolConfig) -> wasmtime::Result<&'static CoreBridge> {
-        let scratch = Path::new(&crate::host::resolved_env("HOME").unwrap_or_else(|| ".".into()))
-            .join(".wasm-agent/core-bridge");
-        CoreBridge::open_at(factory, wasm, config, &scratch)
-    }
-
-    /// The same, with the reply scratch directory named explicitly.
-    pub fn open_at(factory: NativeFactory, wasm: &Path, config: CorePoolConfig, scratch: &Path) -> wasmtime::Result<&'static CoreBridge> {
         let started = Instant::now();
         let pool = CoreComponentPool::from_path(factory, wasm, config)?;
-        let scratch = scratch.to_path_buf();
-        std::fs::create_dir_all(&scratch)
-            .map_err(|e| wasmtime::Error::msg(format!("core_bridge_scratch: {}: {e}", scratch.display())))?;
         let bridge = Box::new(CoreBridge {
             pool,
-            scratch,
-            seq: AtomicU64::new(0),
             calls: AtomicU64::new(0),
+            boots: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             run_ms: AtomicU64::new(0),
             opened_ms: started.elapsed().as_millis(),
         });
         Ok(Box::leak(bridge))
+    }
+
+    /// The same as [`CoreBridge::open`], named for the callers that used to need a scratch directory:
+    /// a call writes nothing to disk since A2.5, so a test needs no redirect to keep an operator's
+    /// home untouched.
+    pub fn open_at(factory: NativeFactory, wasm: &Path, config: CorePoolConfig) -> wasmtime::Result<&'static CoreBridge> {
+        CoreBridge::open(factory, wasm, config)
     }
 
     /// Lease one instance for a caller that will keep it (a node thread, the control interpreter, the
@@ -230,6 +209,12 @@ impl CoreBridge {
         self.failures.load(Ordering::Relaxed)
     }
 
+    /// Work items that booted the guest's Lua core (the first item on each instance, and the first on
+    /// each lease after a reset). Fewer than `calls` is the whole point of A2.5.
+    pub fn boots(&self) -> u64 {
+        self.boots.load(Ordering::Relaxed)
+    }
+
     pub fn run_ms(&self) -> u64 {
         self.run_ms.load(Ordering::Relaxed)
     }
@@ -243,9 +228,16 @@ impl CoreBridge {
         self.pool.compiled_from()
     }
 
-    fn reply_path(&self) -> PathBuf {
-        let serial = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.scratch.join(format!("{}-{serial}.reply", std::process::id()))
+    /// What the pool is sized for: instances, what each reserves, and what the pooling allocator
+    /// therefore takes from the process. `/health` reports it, so a node's wasm footprint is a number
+    /// an operator can see instead of an allocator default.
+    pub fn reservation_bytes(&self) -> usize {
+        self.pool.config().reservation_bytes()
+    }
+
+    /// One work item's guest-CPU budget (`0` = none).
+    pub fn run_deadline(&self) -> std::time::Duration {
+        self.pool.config().run_deadline
     }
 }
 
@@ -256,67 +248,44 @@ pub struct ComponentCore {
 }
 
 impl ComponentCore {
-    /// The bridge call: run `name(args...)` inside the guest and answer what the Lua function answered.
+    /// The bridge call: run `name(args...)` as one work item of the guest's long-lived core and answer
+    /// what the Lua function answered.
     ///
     /// The error texts are the ones a caller already handles — a Lua error's own message for a failed
     /// call, and `core_bridge_*` names for the bridge's own failures, which are reported and never
-    /// silently turned into an empty answer.
+    /// silently turned into an empty answer. A run that reached its guest-CPU deadline says so by name
+    /// (`core_bridge_run_deadline`) and has already cost its instance, not the node thread.
     pub fn call_string(&self, name: &str, args: &[&str]) -> Result<String, String> {
         let mut instance = self.instance.borrow_mut();
-        let reply = self.bridge.reply_path();
-        // A stale file from a previous run of this pid would be read as this call's answer.
-        let _ = std::fs::remove_file(&reply);
-        let mut argv: Vec<String> = Vec::with_capacity(args.len() + 2);
-        argv.push(name.to_string());
-        argv.extend(args.iter().map(|arg| arg.to_string()));
-        argv.push(reply.display().to_string());
+        let argv: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
         self.bridge.calls.fetch_add(1, Ordering::Relaxed);
-        let started = Instant::now();
-        let outcome = instance.run_script_outcome(Script::source(DISPATCH_NAME, DISPATCH), &argv);
-        let (report, _error) = match outcome {
-            Ok(value) => value,
+        let report = match instance.call_entry(name, &argv) {
+            Ok(report) => report,
             Err(error) => {
                 self.bridge.failures.fetch_add(1, Ordering::Relaxed);
-                return Err(format!("core_bridge_run_failed: {error:#}"));
+                let reason = if crate::core_component::is_run_deadline(&error) {
+                    format!("core_bridge_run_deadline: {name} was interrupted after {} ms of guest time", self.bridge.run_deadline().as_millis())
+                } else {
+                    format!("core_bridge_run_failed: {error:#}")
+                };
+                // A trap retired the instance (it cannot run another item), so this lease takes a
+                // replacement now: the failure belongs to the item that caused it, not to every later
+                // request on this node thread. A pool with nothing to hand out leaves the lease empty,
+                // and the next call says so by name instead of trapping again.
+                if let Ok(fresh) = self.bridge.pool.acquire() {
+                    *instance = fresh;
+                }
+                return Err(reason);
             }
         };
         self.bridge.run_ms.fetch_add(report.run_ms.round() as u64, Ordering::Relaxed);
-        let _ = started;
-        let text = match std::fs::read(&reply) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.bridge.failures.fetch_add(1, Ordering::Relaxed);
-                return Err(match error.kind() {
-                    std::io::ErrorKind::NotFound => match error_hint(&report) {
-                        Some(message) => format!("core_bridge_call_failed: {message}"),
-                        None => format!("core_bridge_no_reply: {name} wrote no answer"),
-                    },
-                    _ => format!("core_bridge_no_reply: {name}: {error}"),
-                });
-            }
-        };
-        let _ = std::fs::remove_file(&reply);
-        let text = String::from_utf8_lossy(&text).into_owned();
-        let (status, payload) = text.split_once('\n').unwrap_or((text.trim(), ""));
-        match status {
-            "ok" => Ok(payload.to_string()),
-            "error" => {
-                self.bridge.failures.fetch_add(1, Ordering::Relaxed);
-                Err(payload.to_string())
-            }
-            "missing" => {
-                self.bridge.failures.fetch_add(1, Ordering::Relaxed);
-                Err(format!("{payload} is not a function"))
-            }
-            "boot" => {
-                self.bridge.failures.fetch_add(1, Ordering::Relaxed);
-                Err(format!("core_bridge_boot_failed: {payload}"))
-            }
-            other => {
-                self.bridge.failures.fetch_add(1, Ordering::Relaxed);
-                Err(format!("core_bridge_bad_reply: {other}"))
-            }
+        if report.runs_on_instance == 1 {
+            self.bridge.boots.fetch_add(1, Ordering::Relaxed);
         }
+        if report.answer.is_err() {
+            self.bridge.failures.fetch_add(1, Ordering::Relaxed);
+        }
+        report.answer
     }
 
     /// Close a transaction the failed call may have left open on this instance's own connection — the
@@ -328,18 +297,10 @@ impl ComponentCore {
         }
     }
 
-    /// The runs this instance has answered (`0` before its first, `> 1` once the snapshot is warm).
+    /// The work items this instance has answered (`0` before its first).
     pub fn runs(&self) -> u64 {
         self.instance.borrow().runs()
     }
-}
-
-/// The run failed before it could write an answer: the guest's own message is the useful one.
-fn error_hint(report: &crate::core_component::RunReport) -> Option<String> {
-    if report.code == 0 {
-        return None;
-    }
-    Some(format!("the guest run exited with code {}", report.code))
 }
 
 /// The interpreter a node thread, the control interpreter or a subagent calls into. Everything the
@@ -365,7 +326,8 @@ impl Core {
     }
 
     /// Close a transaction a failed call may have left open. A no-op on the component side's guest
-    /// state (it is discarded per run) but not on its instance's connection.
+    /// state (a Lua error unwinds to the interpreter's own stack, as natively) but not on its
+    /// instance's connection.
     pub fn rollback(&self) {
         match self {
             Core::Native(lua) => crate::host::rollback_if_open(lua),
@@ -386,6 +348,7 @@ impl Core {
 mod tests {
     use super::*;
     use crate::core_component::boot_native_state;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     /// The switch: both words, either case, and a value nobody knows refused by name rather than
@@ -425,13 +388,13 @@ mod tests {
     fn the_component_core_answers_a_call_from_inside_the_guest() {
         let _heavy = heavy();
         let Some(wasm) = agent_core_wasm() else { return };
-        let (home, scratch) = scratch_home("core-bridge-test");
+        let home = scratch_home("core-bridge-test");
         let factory = slot_factory(home);
         let config = CorePoolConfig { max_instances: 1, warm: 1, ..CorePoolConfig::default() };
-        let bridge = CoreBridge::open_at(factory, &wasm, config, &scratch).expect("open the bridge");
+        let bridge = CoreBridge::open_at(factory, &wasm, config).expect("open the bridge");
         let core = Core::Component(bridge.lease().expect("lease an instance"));
         assert_eq!(core.mode(), CoreMode::Component);
-        // `wa_me` is defined by lua/core/server.lua, which the dispatch script boots inside the guest.
+        // `wa_me` is defined by lua/core/server.lua, which the guest's first call boots.
         let answer = core.call_string("wa_me", &[""]).expect("wa_me answers inside the guest");
         let value: Json = serde_json::from_str(&answer).expect("the answer is the JSON a native call answers");
         assert!(value.get("user").is_some(), "{answer}");
@@ -442,15 +405,85 @@ mod tests {
         assert_eq!(bridge.stats().created, 1, "one lease, one instance");
     }
 
+    /// The whole point of A2.5: the guest keeps **one** `lua_State` for the life of a lease, so what an
+    /// item sets is still there for the next one - where A2.4 rebuilt the core per request. The probe is
+    /// a module the factory publishes in `EMBEDDED`, so `dofile` runs it inside the guest's own state:
+    /// `1` on a fresh interpreter, `2` on the same one.
+    #[test]
+    fn a_lease_keeps_one_lua_state_across_work_items() {
+        let _heavy = heavy();
+        let Some(wasm) = agent_core_wasm() else { return };
+        let home = scratch_home("core-bridge-loop");
+        let factory = probe_factory(home);
+        let bridge = CoreBridge::open_at(factory, &wasm, CorePoolConfig { max_instances: 1, ..CorePoolConfig::default() })
+            .expect("open the bridge");
+        let core = bridge.lease().expect("lease");
+        assert_eq!(core.call_string("dofile", &[PROBE_MODULE]).expect("first item"), "1");
+        assert_eq!(core.call_string("dofile", &[PROBE_MODULE]).expect("second item"), "2", "the state must persist");
+        assert_eq!(core.call_string("dofile", &[PROBE_MODULE]).expect("third item"), "3");
+        assert_eq!(core.runs(), 3, "three work items on one instance");
+        assert_eq!(bridge.stats().created, 1, "and still one instance");
+    }
+
+    /// A lease that changes hands gets a fresh core: the pool resets the guest's `lua_State` on release,
+    /// so a slot handed to a new node thread cannot inherit the previous one's `local agent`, its
+    /// `package.loaded` or its pending `/bind` table.
+    #[test]
+    fn a_released_lease_hands_out_a_fresh_core() {
+        let _heavy = heavy();
+        let Some(wasm) = agent_core_wasm() else { return };
+        let home = scratch_home("core-bridge-reset");
+        let factory = probe_factory(home);
+        let bridge = CoreBridge::open_at(factory, &wasm, CorePoolConfig { max_instances: 1, ..CorePoolConfig::default() })
+            .expect("open the bridge");
+        {
+            let core = bridge.lease().expect("lease");
+            assert_eq!(core.call_string("dofile", &[PROBE_MODULE]).expect("item"), "1");
+            assert_eq!(core.call_string("dofile", &[PROBE_MODULE]).expect("item"), "2");
+        }
+        let second = bridge.lease().expect("the same slot, a new lease");
+        assert_eq!(second.call_string("dofile", &[PROBE_MODULE]).expect("item"), "1", "a new lease must not inherit the old state");
+        // The run counter is the *instance's*, and the instance was reused: what a new lease gets is a
+        // fresh Lua state on the same slot, which is exactly the difference from a new instance.
+        assert_eq!(second.runs(), 3);
+        assert_eq!(bridge.stats().created, 1, "one slot served both leases");
+    }
+
+    /// A guest that never returns costs one item, not the node thread: the item reaches its guest-CPU
+    /// deadline, fails by name, and its instance is recycled instead of being handed on wedged.
+    #[test]
+    fn a_wedged_guest_hits_its_deadline_and_the_instance_is_recycled() {
+        let _heavy = heavy();
+        let Some(wasm) = agent_core_wasm() else { return };
+        let home = scratch_home("core-bridge-deadline");
+        let factory = probe_factory(home);
+        // The budget counts guest *instructions*, and booting the Lua core inside the guest is a few
+        // hundred milliseconds of them (A2.4 measured ~680 ms per call with the core rebuilt): the
+        // deadline has to be above the boot and well below "never".
+        let config = CorePoolConfig { max_instances: 1, ..CorePoolConfig::default() }
+            .with_run_deadline(std::time::Duration::from_millis(2_000));
+        let bridge = CoreBridge::open_at(factory, &wasm, config).expect("open the bridge");
+        let core = bridge.lease().expect("lease");
+        let started = Instant::now();
+        let error = core.call_string("dofile", &[SPIN_MODULE]).expect_err("a guest that never returns must not answer");
+        assert!(error.starts_with("core_bridge_run_deadline"), "{error}");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(1_500), "the deadline must be honoured, not skipped: {:?}", started.elapsed());
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the deadline is honoured in seconds, not never");
+        assert_eq!(bridge.stats().deadlines, 1, "the pool counts the deadline it enforced");
+        // The trap retired the instance; the same lease is still usable and gets a fresh one.
+        assert_eq!(core.call_string("dofile", &[PROBE_MODULE]).expect("a fresh instance answers"), "1");
+        assert_eq!(bridge.stats().created, 1, "the wedged instance was dropped and replaced");
+    }
+
     /// The guest's own Lua error reaches the caller with its own text: a node thread's error path must
     /// not turn a raise into an empty success.
     #[test]
     fn a_guest_error_keeps_the_script_own_message() {
         let _heavy = heavy();
         let Some(wasm) = agent_core_wasm() else { return };
-        let (home, scratch) = scratch_home("core-bridge-error");
+        let home = scratch_home("core-bridge-error");
         let factory = slot_factory(home);
-        let bridge = CoreBridge::open_at(factory, &wasm, CorePoolConfig { max_instances: 1, ..CorePoolConfig::default() }, &scratch)
+        let bridge = CoreBridge::open_at(factory, &wasm, CorePoolConfig { max_instances: 1, ..CorePoolConfig::default() })
             .expect("open the bridge");
         let core = bridge.lease().expect("lease");
         // `dofile` is a real global in the guest and raises on a module nobody ships: a raise inside the
@@ -462,14 +495,12 @@ mod tests {
         assert_eq!(bridge.failures(), 1);
     }
 
-    /// A scratch home and reply directory under the harness's target dir (never the operator's).
-    fn scratch_home(name: &str) -> (String, PathBuf) {
+    /// A scratch home under the harness's target dir (never the operator's).
+    fn scratch_home(name: &str) -> String {
         let base = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
         let home = format!("{base}/{name}-home");
-        let scratch = PathBuf::from(format!("{base}/{name}-replies"));
         let _ = std::fs::create_dir_all(&home);
-        let _ = std::fs::create_dir_all(&scratch);
-        (home, scratch)
+        home
     }
 
     /// The shipping Lua tree as `EMBEDDED` sees it: every file under `lua/`, keyed the way `dofile`
@@ -483,7 +514,7 @@ mod tests {
                 if path.is_dir() {
                     walk(&path, root, out);
                 } else if path.extension().is_some_and(|ext| ext == "lua" || ext == "sql") {
-                    let key = path.strip_prefix(root).expect("under the root").to_string_lossy().replace('\\', "/");
+                let key = path.strip_prefix(root).unwrap().to_string_lossy().replace(char::from(92u8), "/");
                     let source = std::fs::read_to_string(&path).expect("read a Lua module");
                     out.push((key, source));
                 }
@@ -504,6 +535,27 @@ mod tests {
             let embedded: Vec<(&str, &str)> = embedded.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
             // A file database, not `:memory:`: the pool's shared-cache URI is keyed by the process id,
             // so two pools in one test binary would otherwise share one schema and lock each other.
+            let db = format!("{home}/memory.db");
+            boot_native_state(&home, &db, &[], &embedded).expect("boot the native state for a slot")
+        })
+    }
+
+    /// The probe modules the persistence and deadline tests `dofile` inside the guest: a counter that
+    /// only a *reused* `lua_State` can advance, and a loop that never returns.
+    const PROBE_MODULE: &str = "a25/probe.lua";
+    const SPIN_MODULE: &str = "a25/spin.lua";
+    const PROBE_SOURCE: &str = "A25_PROBE = (A25_PROBE or 0) + 1
+return tostring(A25_PROBE)";
+    const SPIN_SOURCE: &str = "while true do end";
+
+    /// The slot factory plus those two modules in `EMBEDDED`, which is how a module reaches `dofile`
+    /// inside the guest without a file on disk.
+    fn probe_factory(home: String) -> NativeFactory {
+        let mut embedded = lua_tree();
+        embedded.push((PROBE_MODULE.to_string(), PROBE_SOURCE.to_string()));
+        embedded.push((SPIN_MODULE.to_string(), SPIN_SOURCE.to_string()));
+        Arc::new(move || {
+            let embedded: Vec<(&str, &str)> = embedded.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
             let db = format!("{home}/memory.db");
             boot_native_state(&home, &db, &[], &embedded).expect("boot the native state for a slot")
         })
@@ -531,3 +583,5 @@ mod tests {
         None
     }
 }
+
+
