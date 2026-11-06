@@ -102,7 +102,7 @@ the `agent-core` component ([rust/components/agent-core](../rust/components/agen
 `scripts/build-agent-core.sh`, 377 KB). Every `host.*` crosses one import, `wa:kernel/host.call`
 ([wit/kernel/host.wit](../wit/kernel/host.wit), world `core-component`), and the kernel answers it by
 calling the capability's existing C function on a native Lua state booted like every other
-interpreter (`rust/wa-host/src/core_component.rs`), so nothing is reimplemented per guest. The guest
+interpreter (`rust/wa-capabilities/src/core_component.rs`), so nothing is reimplemented per guest. The guest
 keeps the native boot: `host.*` resolves only names in the capability registry, `EMBEDDED` resolves
 through the kernel (installed lua-core tree, else compiled in, assignment still overrides), `dofile`
 is the native bootstrap byte for byte, `print` goes to stdout. The value variant has two members beyond
@@ -138,8 +138,9 @@ absolute path fails in the guest; the core reads files through `host.read_file`)
 
 The runtime is on **wasmtime 50.0.1** (`wasmtime` + `wasmtime-wasi`; the `anyhow` feature is now
 needed because `wasmtime::Error` is no longer `anyhow::Error`). Same binary: `cargo test --release
--p wa-host` passes all 201 tests, and the component / service / agent-core blocks of `scripts/test.sh`
-run for real (24 + 23 + 245 checks, and the svc-echo service end to end).
+-p wa-host` passed all 201 tests, and the component / service / agent-core blocks of `scripts/test.sh`
+run for real (24 + 23 + 245 checks, and the svc-echo service end to end). (Since the crate split those
+tests live in `wa-kernel-runtime` and `wa-capabilities`; `scripts/test.sh` runs them there.)
 
 What the upgrade needed, in the order it bites:
 
@@ -194,7 +195,7 @@ the Lua-facing API**: `lua/core` is untouched, because the guest-side shim keeps
 has it, and a table argument now arrives as a table.
 
 **`http_sse` as a stream.** A guest cannot be re-entered while it is blocked inside a host call, so
-the kernel runs the *unchanged* native `http_sse` (`rust/wa-host/src/host.rs`) on a thread of its own,
+the kernel runs the *unchanged* native `http_sse` (`rust/wa-capabilities/src/host.rs`) on a thread of its own,
 with the guest's line callback replaced by one that hands each line over and blocks for the guest's
 verdict. `wa:kernel/host` grew three functions beside `call` — `open`/`next`/`close`, with
 `next: func(handle, option<verdict>) -> result<option<list<u8>>, string>` — and `glue.c` loops over
@@ -263,7 +264,7 @@ foreground use and a thing to revisit before anything opens streams concurrently
 ### C1 results — the code graph as a component (05/11, wasm_the_first)
 
 The graph is the first capability moved out of `wa` without touching Lua. The 14 `host.graph_*`
-functions keep their names, arguments and answer shapes; `rust/wa-host/src/graph.rs` is now a kernel
+functions keep their names, arguments and answer shapes; `rust/wa-capabilities/src/graph.rs` is now a kernel
 shim that forwards each call to the `graph` component
 ([rust/components/graph](../rust/components/graph), wasm32-wasip2, 8.2 MB — tree-sitter's grammars
 and SQLite are C, so building it needs wasi-sdk) through `components::mcp`, one run per call. `wa`
@@ -341,7 +342,7 @@ What the WASI 0.3 / wasmtime 50 upgrade should change here, in order:
 ### WASI 0.3 step 1 — `wa:kernel@0.2` served (05/11, wasm_the_first)
 
 The proposed shape above is now a package, a runner and two fixtures:
-`wit/kernel-v2/kernel.wit` is `wa:kernel@0.2.0`; `rust/wa-host/src/service_components_v2.rs` serves it;
+`wit/kernel-v2/kernel.wit` is `wa:kernel@0.2.0`; `rust/wa-kernel-runtime/src/service_components_v2.rs` serves it;
 `rust/components/svc-echo` is a 0.2 component and `rust/components/svc-echo-v1` the same fixture on
 0.1 (the compat proof). `wa-whatsapp` is ported and builds for `wasm32-wasip2` against 0.2.
 
@@ -378,7 +379,7 @@ Two things the async path needed that the poll path did not:
   After the grace period the runner drops the guest's future instead (measured: stop returns in
   under a second with the fixture parked in a 300 ms timer).
 
-**Results** (`cargo test -p wa-host`, debug build, 206 tests): the three service fixtures each run
+**Results** (`cargo test -p wa-host` at the time - today `-p wa-kernel-runtime -- service_components_v2::tests` - debug build, 206 tests): the three service fixtures each run
 end to end — wasip1 core module, 0.1 component, 0.2 component — including a granted and a refused
 `net` dial against real local servers, a kv round trip, a websocket echo read over the inbound
 stream, a clean stop, and the restart path. The 0.2 guest's heartbeat is a WASI 0.3 timer.
@@ -393,6 +394,38 @@ bound, not the TCP window; a 0.1 component is compiled twice at start; and `wa-w
 against a phone from this lane (no pairing, no messages — see
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md)).
 
+## The crate split (step 5, first batch) — `wa-host` is the binary
+
+`wa-host` was one 29k-line binary crate: host runtime, capabilities, the Lua bridge, both service
+runners, governance, the queue/bus/state providers, the console, the transport, the CLI. Every change
+rebuilt all of it. The first batch of the carve-out (row 5 of "Order of work") is done, with no logic
+change — moves, `pub(crate)` → `pub` where a crate boundary needed it, and re-exports:
+
+| crate | holds | depends on |
+| --- | --- | --- |
+| `wa-host-support` | vendored Lua 5.4 and its C ABI (`lua`), `paths` (home, private dir, component dir), `json` (the shared answer), `system_resources` | — |
+| `wa-governance` | `node_policy`, `node_telemetry`, `store` (GRANT-POLICY, TELEMETRY, REPLAY) | support |
+| `wa-term` | `terminal_editor`, `selection`, `build_status`, `transcript` | support |
+| `wa-rendezvous` | `node`, `binding_runtime`, `rendezvous`, `relay_client` | support |
+| `wa-kernel-runtime` | `components`, `services`, `service_components`, `service_components_v2`, `service_io`, `queue_host`, `bus_host`, `state_host` (and `service_stt`, declared where it was) | support, governance |
+| `wa-capabilities` | `capabilities`, `host`, `serve`, `subagents`, `operations`, `resources`, `graph`, `quickjs`, `plugins`, `core_component`, `client_bridge`, `http_transport`, `audio`, `file_search`, `ripgrep` | support, governance, term, rendezvous, kernel |
+| `wa-host` (binary `wa`) | `main.rs`, `build.rs`: HOME, the interpreter, CLI dispatch, wiring | all of the above |
+
+Three seams had to be named rather than moved, and each is a wiring change, not a behaviour change:
+`Lua::rollback_if_open` stays with the connection it knows about (`host::rollback_if_open`, driven by
+`Lua::owned()`), `push_json` is the one answer shape the kernel and the capabilities share, and
+`component_dir` is asked for by the graph store and the bound queue, so it lives in `paths`. The
+vendored Lua sources moved to `wa-host-support/vendor/lua` with `lua.rs`, and the code-mode assets are
+provisioned by `wa-capabilities/build.rs`, which is the crate that embeds them.
+
+What the split buys, measured on wasm_the_first (release, warm dependency graph): a change in a leaf
+crate rebuilds that crate and the binary; a change at the bottom (the Lua ABI) still rebuilds
+everything, because everything answers on a Lua state. What it does not buy is a faster rebuild after
+editing `node_policy.rs` or `service_components_v2.rs`: both sit below the 13k-line capability crate, so
+their rebuild still reaches it. The next batch is therefore a *shape* change rather than another move:
+split `wa-capabilities` (`host`, `serve`, `subagents`) so the volatile capability surface stops sitting
+under the kernel, and a policy edit stops paying for it.
+
 ## Order of work
 
 1. This document + `wit/` (v1 draft). ← now
@@ -403,6 +436,7 @@ against a phone from this lane (no pairing, no messages — see
 4. Supervisor features: start-by-imports, revocable registrations, transactional install with
    health-gated switch, profiles.
 5. Carve-out in batches, smallest and most frequently changed first; the Lua core as one component.
+   First batch landed: the crate split above (`wa-host` is the binary).
 6. Watchdog replaces the sentinel for kernel upgrades.
 
 ## Memory as a component (planned, phase 4, after A2.4)

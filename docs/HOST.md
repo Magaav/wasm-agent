@@ -233,7 +233,7 @@ one database rather than a silent per-interpreter split.
 index of the source tree to Lua. **Since stream C (05/11) the graph is the `graph` WASI component**
 (`rust/components/graph`, wasm32-wasip2, built by `scripts/build-components.sh graph`, needs
 wasi-sdk): tree-sitter, SQLite and every query run inside it; `wa` no longer links tree-sitter or
-`wa-graph`. The host side (`rust/wa-host/src/graph.rs`) only resolves root/db, mounts the root
+`wa-graph`. The host side (`rust/wa-capabilities/src/graph.rs`) only resolves root/db, mounts the root
 read-only at `/graph/root` and a private database directory read-write at `/graph/db` (the
 `dirs` grant, docs/COMPONENTS.md), serializes calls per database (a mutex plus a file lock for
 other processes) and schedules background refreshes from edit hints and the OS watcher. Each call
@@ -530,7 +530,7 @@ stream (no finish reason and no `[DONE]`) or a cancelled/failed read leaves the 
 agent's error path closes it as not executed. A changed call id is published with `previous_call_id`
 so the window moves the one row instead of stranding it, and a text-only answer emits no `decision`
 at all. On replay the rows are reconstructed from the durable `tool_calls`. The reader is pinned to
-the expectation fixture `tests/fixtures/decision-events/parity.json` by `rust/wa-host/src/host.rs`.
+the expectation fixture `tests/fixtures/decision-events/parity.json` by `rust/wa-capabilities/src/host.rs`.
 
 - The callback runs while the socket is open, so a live stream reaches the UI as it arrives; nothing
   is buffered. A Lua error raised in `on_line` - a cancelled run, an expired deadline - ends the read
@@ -561,7 +561,7 @@ Node-unavailable proofs and the separate benchmark-only Node reference host.
 ## The capability inventory
 
 What this node can do is **data**, not prose. The live registry is
-`rust/wa-host/src/capabilities.rs`, and the interpreter is booted from it: a `host.*` function
+`rust/wa-capabilities/src/capabilities.rs`, and the interpreter is booted from it: a `host.*` function
 that is not in that list cannot be called, and one that is in it is a row below. Each entry
 carries a name, a one-line description and an effect class (`read-only`, `writes files`,
 `runs a process`, `network`, `device`), stably ordered by name so two nodes can be diffed.
@@ -587,14 +587,14 @@ without downloading it.
 
 The table below is hand-maintained **on purpose**: a test makes it agree with the registry, so a
 capability that is registered but undocumented, documented but absent, or documented with the
-wrong effect class fails `cargo test -p wa-host capabilities` with the exact names. A generated
+wrong effect class fails `cargo test -p wa-capabilities capabilities::tests` with the exact names. A generated
 block would only prove that the generator ran.
 
 Adding a capability is two edits: one entry in the registry, one row here.
 
 <!-- capability-inventory:begin -->
 ; One line per capability: name, then effect class. Hand-maintained; checked against the live registry in
-; rust/wa-host/src/capabilities.rs by the drift test in that module (cargo test -p wa-host capabilities).
+; rust/wa-capabilities/src/capabilities.rs by the drift test in that module (cargo test -p wa-capabilities capabilities::tests).
 ; Lines starting with ";" and blank lines are ignored by the checker.
 audio                device
 beat                 read-only
@@ -689,7 +689,7 @@ write_file           writes files
 ## Component state (`host.state`)
 
 One admin capability, one JSON request: `{action: status|dry-run|export|import|verify, name, path,
-replace, target}`. It answers from `rust/wa-state` through `rust/wa-host/src/state_host.rs`, and it is
+replace, target}`. It answers from `rust/wa-state` through `rust/wa-kernel-runtime/src/state_host.rs`, and it is
 the operator's view of the rule book in [STATE.md](STATE.md): the schema version, the component id
 and semver the namespace belongs to, the build that last migrated it, how many user keys it holds,
 an unfinished migration's journal (`{from, to, name, applied}`), how many snapshots exist, and
@@ -760,6 +760,14 @@ Both calls are confined to one declared root - `WASM_AGENT_AUDIO_ROOT`, or
 shipped binary, and every refusal is a name: the tests pin them.
 
 ## Adding a capability
+
+Where the code for one lives, after the host was split into crates (docs/KERNEL.md, "The crate
+split"): the row goes in `rust/wa-capabilities/src/capabilities.rs` and the function itself in
+`rust/wa-capabilities/src/host.rs`; a capability that answers on the console draws through `wa-term`, one
+that asks the policy or records telemetry through `wa-governance`, one that runs a component through
+`wa-kernel-runtime`, and one that signs or reaches the network identity through `wa-rendezvous`. The
+interpreter, the Lua ABI and the shared JSON answer are `wa-host-support`. Adding a capability therefore
+rebuilds the capability crate and the binary, not the runtime or the policy.
 
 `host.operation('start', args_json)` accepts either a shell `command` or a native
 `program` with an `args` string array. Native program names resolve through PATH;
@@ -849,7 +857,7 @@ a finish reason is an incomplete response, never an executable partial tool call
 Heartbeat helper threads retain their owning worker ID.
 
 1. Implement `pub extern "C" fn name(l: *mut LuaState) -> c_int` in
-   `rust/wa-host/src/host.rs`; return `1` with a value, push `nil` for absent.
+   `rust/wa-capabilities/src/host.rs`; return `1` with a value, push `nil` for absent.
 2. Register it in `main.rs` (`lua.register("name", host::name)`).
 3. Wrap it in a Lua module that tolerates it being missing.
 4. Test it on both platforms — `scripts/test-windows.ps1` exists because the
