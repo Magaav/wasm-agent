@@ -245,7 +245,7 @@ whatsapp_send_status {id}                                 state, attempts, messa
   component that could ask "may I?" could answer "yes".
 
 Files: `rust/wa-whatsapp-outbox` (payload, JID rules, dedupe key, `decide`, status shape — shared with
-the host), `rust/wa-host/src/whatsapp_send.rs` (the two host capabilities), `src/outbox.rs` (the wire
+the host), `rust/wa-capabilities/src/whatsapp_send.rs` (the two host capabilities), `src/outbox.rs` (the wire
 message + retry rule), `src/guest.rs` `outbox_tick`, `wit/wa.wit` (the component's world: the kernel
 service contract plus `wa:queue/worker`), and `scripts/test-whatsapp-send.lua` (tool shape, refusals,
 and the real enqueue on a binary that carries the capability).

@@ -100,7 +100,7 @@ impl Grants {
                 interfaces.push(name.to_string());
             }
         }
-        let mut named = |key: &str| -> Result<Vec<String>, String> {
+        let named = |key: &str| -> Result<Vec<String>, String> {
             // Absent is no names; present-but-not-a-list is a malformed grant, never "no names".
             let Some(value) = object.get(key) else { return Ok(Vec::new()) };
             value

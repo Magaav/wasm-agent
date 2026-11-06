@@ -1906,12 +1906,15 @@ dependencies = [
  "tokio",
  "ureq",
  "wa-governance",
+ "wa-grant-policy",
  "wa-host-support",
  "wa-jobs",
  "wa-kernel-runtime",
  "wa-operation",
+ "wa-queue",
  "wa-rendezvous",
  "wa-term",
+ "wa-whatsapp-outbox",
  "wasmtime",
  "wasmtime-wasi",
  "windows-sys 0.61.2",
@@ -2070,6 +2073,16 @@ dependencies = [
  "libc",
  "serde_json",
  "wa-host-support",
+]
+
+[[package]]
+name = "wa-whatsapp-outbox"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wa-queue",
 ]
 
 [[package]]

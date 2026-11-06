@@ -2,7 +2,7 @@
 //! failures are worth another attempt.
 //!
 //! The queue contract, the payload and the refusals live in `wa-whatsapp-outbox` (shared with the
-//! node, `rust/wa-host/src/whatsapp_send.rs`). What is left is the shape of the WhatsApp message this
+//! node, `rust/wa-capabilities/src/whatsapp_send.rs`). What is left is the shape of the WhatsApp message this
 //! component sends, which is worth its own module because it is the one place a change could silently
 //! drop a quote or a mention: it compiles natively, so `cargo test` pins it without a wasm target and
 //! without a connection.

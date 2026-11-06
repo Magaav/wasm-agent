@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The explicit-send outbox's request shape, JID rules and dedupe key: the same source the node
-# enqueues with (`rust/wa-host/src/whatsapp_send.rs`), so the two ends cannot disagree
+# enqueues with (`rust/wa-capabilities/src/whatsapp_send.rs`), so the two ends cannot disagree
 # (docs/SERVICE-COMPONENTS.md, "Sending an ordinary message").
 wa-whatsapp-outbox = { path = "../../wa-whatsapp-outbox" }
 whatsapp-rust = { version = "=0.7.0", default-features = false }

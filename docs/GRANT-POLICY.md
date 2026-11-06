@@ -237,7 +237,7 @@ where it differs.
    | `credentials.get(name)` (both) | `credentials.read` | `name` |
    | `speech.start(...)` (0.1) / `speech.recognize(...)` (0.2) | `stt.start` | none |
    | `log.write`, `lifecycle.*` (both) | never checked | a log line cannot exceed anything a person sees |
-   | `host.whatsapp_send` (a **host** capability, not a guest import: `rust/wa-host/src/whatsapp_send.rs`) | `whatsapp.send` | `chat:<exact jid>` |
+   | `host.whatsapp_send` (a **host** capability, not a guest import: `rust/wa-capabilities/src/whatsapp_send.rs`) | `whatsapp.send` | `chat:<exact jid>` |
 
    Both runners call the same three functions (`service_components::{gate, target_of,
    authority_target}`), so a policy file cannot mean two different things depending on which
@@ -270,7 +270,7 @@ where it differs.
    charges `whatsapp.send` per outbound frame **only for a rule that names no chats** (`allow` and
    `deny` both empty) — which is exactly how an operator writes "global cap only". A rule that lists
    chats is not guessed at from an opaque frame: the frame is not refused by it. The *explicit* send
-   (`host.whatsapp_send`, `rust/wa-host/src/whatsapp_send.rs`) is the path that names the chat, because
+   (`host.whatsapp_send`, `rust/wa-capabilities/src/whatsapp_send.rs`) is the path that names the chat, because
    the producer knows it before anything is dispatched, and it calls
    `node_policy::check_whatsapp_send(component, Some("chat:<jid>"))` — so for an explicit send the
    per-chat and daily limits are real, and the frame the component later writes is *also* still charged

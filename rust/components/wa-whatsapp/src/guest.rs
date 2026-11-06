@@ -846,7 +846,7 @@ fn send_alerts(enabled: bool) {
 //
 // An ordinary message somebody asked for is a job on the shared durable queue (`wa:queue`), not a
 // side channel: the node validates the request, asks the `whatsapp.send` policy and enqueues
-// (`rust/wa-host/src/whatsapp_send.rs`); this component takes the job, sends it and settles it with
+// (`rust/wa-capabilities/src/whatsapp_send.rs`); this component takes the job, sends it and settles it with
 // the message id - or fails it with a reason. One job at a time: a second concurrent send would not
 // make a chat faster, and one lease per tick is enough for the rate the policy allows.
 //
