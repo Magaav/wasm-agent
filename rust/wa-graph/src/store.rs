@@ -110,6 +110,22 @@ pub struct IndexReport {
     pub unresolved: usize,
 }
 
+/// Pragmas the WASI guest needs and a native build does not.
+///
+/// SQLite spills a temp table or an oversized sort to a temp *file* in `TMPDIR`, `/var/tmp`,
+/// `/usr/tmp`, `/tmp` or the working directory, first one that exists. The component has no
+/// writable temp directory (it sees only its two mounts and a read-only cwd), so an index of a
+/// real tree - `index_manifest` keeps `affected_edges` in a TEMP table - died with
+/// `graph_index_failed: disk I/O error` after parsing 1,533 files (measured 05/11, native: 56 s).
+/// Keeping temp objects in the guest's memory is the one place that cannot fail for lack of a
+/// directory; the host caps the guest at 256 MB, so exceeding it is a loud trap, not a silent
+/// degradation. Native keeps SQLite's default (file-backed temp), where the directory exists.
+fn guest_pragmas(conn:&Connection)->Result<()>{
+    #[cfg(target_os="wasi")] {conn.pragma_update(None,"temp_store","MEMORY")?;}
+    #[cfg(not(target_os="wasi"))] {let _=conn;}
+    Ok(())
+}
+
 fn graph_connection(path:&Path,flags:rusqlite::OpenFlags)->Result<Connection>{
     // Root-isolated digest caches can exceed MAX_PATH even when the source root does not.
     // Keep the exact SQLite flags/locking; never select the no-lock VFS or silently fall back.
@@ -134,6 +150,7 @@ impl Store {
         let conn = graph_connection(path, rusqlite::OpenFlags::default())?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        guest_pragmas(&conn)?;
         let store = Self { conn };
         store.init()?;
         Ok(store)
@@ -147,6 +164,7 @@ impl Store {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        guest_pragmas(&conn)?;
         Ok(Self { conn })
     }
 

@@ -70,7 +70,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
-for wa_lib_part in build-status build-requirements; do
+for wa_lib_part in build-status build-requirements deploy-components; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
@@ -709,6 +709,50 @@ case "$STAGE_CHECK" in "installed lua tree: commit $COMMIT"*) echo "deploy: $STA
 # Only the two proving runs below see the staged tree (WA_LUA_TREE on their command lines); upgrade.sh
 # and the restarted node must not inherit it - after the swap the node reads <install>/lua-core.
 
+# 3e. Pinned components, the thing the core cannot run without (stream C of docs/KERNEL.md). A `wa`
+#     built from this tree serves every `host.graph_*` call from the `graph` component, so a node that
+#     gets this core and no `graph.wasm` answers every graph verb with
+#     `graph_component_unavailable: component_not_installed:graph` while /health stays green. The core
+#     and its components are one install: the bytes are taken from components.lock (never guessed),
+#     verified by sha256 AND size, and the candidate binary then proves the pair answers before either
+#     replaces what is running.
+#
+#     Where the bytes come from: WA_DEPLOY_COMPONENT_SOURCE=<dir> installs what another machine built
+#     (the normal path for a node without a wasm toolchain - the build is not byte-reproducible across
+#     checkout paths, see components.lock); with it unset this tree builds the component, which needs
+#     wasi-sdk because tree-sitter and SQLite are C, and a deploy that builds must say
+#     WA_DEPLOY_COMPONENT_REPIN=1 because the bytes it just built are not the pinned ones.
+if ! command -v wa_component_stage >/dev/null 2>&1; then
+  fail "refused(component_installer_missing): scripts/lib/deploy-components.sh is not beside this deploy, so the graph component cannot be pinned and installed; a core installed without it answers every graph call with component_not_installed:graph. Nothing installed."
+fi
+COMPONENT_DIR="$(wa_components_dir)"
+COMPONENT_STAGE="$INSTALL_DIR/components.next"
+rm -rf "$COMPONENT_STAGE" && mkdir -p "$COMPONENT_STAGE" || fail "cannot stage components in $COMPONENT_STAGE"
+if ! COMPONENT_ERROR="$(wa_component_stage "$ROOT" graph "$COMPONENT_STAGE" 2>&1)"; then
+  fail "refused(component_not_installable): $COMPONENT_ERROR; nothing installed. Either install the pinned bytes (WA_DEPLOY_COMPONENT_SOURCE=<dir> holding graph.wasm and graph.json from the machine that built them) or accept a local build of this tree with WA_DEPLOY_COMPONENT_REPIN=1."
+fi
+[ -z "$COMPONENT_ERROR" ] || note "component: $COMPONENT_ERROR"
+COMPONENT_SHA="$(cat "$COMPONENT_STAGE/graph.wasm.sha256")"
+COMPONENT_SOURCE_SAID="this tree"
+[ -z "${WA_DEPLOY_COMPONENT_SOURCE:-}" ] || COMPONENT_SOURCE_SAID="$WA_DEPLOY_COMPONENT_SOURCE"
+echo "deploy: graph component staged from $COMPONENT_SOURCE_SAID (sha256 $COMPONENT_SHA, $(wc -c < "$COMPONENT_STAGE/graph.wasm" | tr -d '[:space:]') bytes)"
+[ "${WA_DEPLOY_COMPONENTS_DRY_RUN:-0}" != 1 ] || echo "deploy: WA_DEPLOY_COMPONENTS_DRY_RUN=1 - the component will be proved but not installed"
+# The pair has to answer, not merely load: a component built for another engine, or a core whose
+# graph path is broken, fails here with nothing installed.
+COMPONENT_PROOF_HOME="$(mktemp -d)"
+if ! WA_COMPONENTS_DIR="$COMPONENT_STAGE" WASM_AGENT_HOME="$COMPONENT_PROOF_HOME" WASM_AGENT_MANAGED=0 \
+  WA_GRAPH_WATCH=0 WA_SCRIPT="$ROOT/scripts/check-graph-component.lua" \
+  env -u WASM_AGENT_RENDEZVOUS -u WASM_AGENT_RELAY -u WA_GRAPH_ROOT -u WA_GRAPH_DB \
+  "$NEW" --db "$COMPONENT_PROOF_HOME/proof.db" >"$COMPONENT_PROOF_HOME/proof.log" 2>&1; then
+  tail -5 "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null | sed 's/^/  component: /' >&2
+  rm -rf "$COMPONENT_PROOF_HOME"
+  fail "refused(component_proof_failed): the candidate binary did not answer a graph call through the staged component; nothing installed"
+fi
+COMPONENT_PROOF="$(grep -c 'graph component ok' "$COMPONENT_PROOF_HOME/proof.log" 2>/dev/null)"
+rm -rf "$COMPONENT_PROOF_HOME"
+[ "$COMPONENT_PROOF" = "1" ] || fail "refused(component_proof_failed): the graph proof did not print its verdict; nothing installed"
+echo "deploy: the candidate binary answers graph calls through the staged component"
+
 wa_phase proving
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
@@ -804,6 +848,22 @@ restore_lua_tree() {
   rm -rf "$INSTALL_DIR/lua-core"
   [ ! -d "$INSTALL_DIR/lua-core.prev" ] || mv "$INSTALL_DIR/lua-core.prev" "$INSTALL_DIR/lua-core"
 }
+# block swapped in next to the Lua tree swap
+# The component goes in with the same rule as the tree: the previous triple is kept, a failed upgrade
+# puts it back, and a first install is removed again rather than left half-done. WA_COMPONENTS_DIR is
+# the directory the core reads (components::component_dir()) and it is NOT under the install directory,
+# because it holds components that are not this core's (mcp-whatsapp and friends): this deploy replaces
+# one component and leaves the rest alone.
+if ! COMPONENT_INSTALL="$(wa_component_install "$COMPONENT_STAGE" "$COMPONENT_DIR" graph 2>&1)"; then
+  rm -rf "$COMPONENT_STAGE"
+  fail "refused(component_install_failed): $COMPONENT_INSTALL; the Lua tree is installed but the component is not, so this node must not be restarted"
+fi
+[ -z "$COMPONENT_INSTALL" ] || note "component: $COMPONENT_INSTALL"
+rm -rf "$COMPONENT_STAGE"
+restore_components() {
+  wa_component_restore "$COMPONENT_DIR" graph || echo "deploy: could not restore the previous graph component in $COMPONENT_DIR" >&2
+}
+
 # wa-deploy-upgrade-invocation: begin
 # Everything upgrade.sh is told goes on the command's own lines, and the COMMENTS LIVE ABOVE IT on purpose.
 # That is not style. bash drops a simple command's whole `VAR=value \` prefix when a comment line sits
@@ -827,7 +887,10 @@ wa_status_unfollow
 # Reporting must never fail the deploy: with stdout gone, `sed` dies of EPIPE and pipefail would then report
 # its status instead of upgrade.sh's.
 sed "s/^/  upgrade: /" "$INSTALL_DIR/deploy-upgrade.log" 2>/dev/null | tail -20 || true
-[ "$UPGRADE_STATUS" = "0" ] || [ "$UPGRADE_STATUS" = "3" ] || restore_lua_tree
+if [ "$UPGRADE_STATUS" != "0" ] && [ "$UPGRADE_STATUS" != "3" ]; then
+  restore_lua_tree
+  restore_components
+fi
 if [ "$UPGRADE_STATUS" = "3" ]; then
   fail "the node upgraded, but its script or install record failed (exit 3); inspect the live pid and installed.txt"
 fi
@@ -958,6 +1021,11 @@ record_installed() {
   # The Lua tree this install runs (lua-core/), and for a fast-path deploy the commit whose build the
   # binary is: the binary was clean-built by that earlier deploy; this one installed only the tree.
   printf 'lua_tree=%s\nlua_fast_path=%s\n' "$COMMIT" "$LUA_FAST" >> "$record_tmp" || fail "node installed, but the Lua tree line could not be written"
+
+  # Which component bytes this install placed, and where: the core answers every `host.graph_*` call
+  # from them, so "what is running" includes them (a node whose graph component is missing answers
+  # every graph call with component_not_installed:graph and looks healthy otherwise).
+  printf 'components_dir=%s\ncomponent_graph_sha256=%s\n' "${COMPONENT_DIR:-unrecorded}" "${COMPONENT_SHA:-unrecorded}" >> "$record_tmp" || fail "node installed, but the component lines could not be written"
   if [ "$LUA_FAST" = 1 ]; then
     printf 'binary_commit=%s\n' "$INSTALLED_BINARY_COMMIT" >> "$record_tmp" || fail "node installed, but the binary commit line could not be written"
   fi
@@ -1123,7 +1191,10 @@ ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard
 ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-status.sh" "scripts/lib/build-status.sh beside deploy.sh"
 ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/build-requirements.sh" "scripts/lib/build-requirements.sh beside deploy.sh"
 
+ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/deploy-components.sh" "scripts/lib/deploy-components.sh beside deploy.sh"
+ship_file "$ROOT/components.lock" "$INSTALL_DIR/components.lock" "components.lock beside deploy.sh (the pins this install verified)"
 ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
+ship_file "$ROOT/scripts/check-graph-component.lua" "$INSTALL_DIR/scripts/check-graph-component.lua" "the graph component proof the deploy runs"
 ship_file "$ROOT/scripts/check-embedded-runtime.lua" "$INSTALL_DIR/scripts/check-embedded-runtime.lua" "embedded source and native asset readiness checker"
 ship_file "$ROOT/scripts/verify-install.sh" "$INSTALL_DIR/scripts/verify-install.sh" "installation verifier"
 ship_file "$ROOT/scripts/sentinel-install-proof.mjs" "$INSTALL_DIR/scripts/sentinel-install-proof.mjs" "request-bound installation proof"

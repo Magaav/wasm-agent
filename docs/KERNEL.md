@@ -80,7 +80,7 @@ that is a mechanical change (every potentially slow call already has a non-block
 
 | stays in the microkernel | becomes components |
 | --- | --- |
-| runtime, loader, pins (`components`, `service`, `component_mcp`, `plugins`, `invoke`) | `graph_*` (indexer, queries) |
+| runtime, loader, pins (`components`, `service`, `component_mcp`, `plugins`, `invoke`) | `graph_*` (indexer, queries) — **done, stream C**: see "C1 results" below |
 | node identity + transport (`node_identity`, `sign`, `verify`, `relay`, `binding_*`) | code mode (`quickjs` — already wasm) |
 | supervised processes (`exec`, `operation`, `subagent`) — until a process-less design exists | providers and the agent loop (today in the Lua core) |
 | durable state for the kernel itself (`sql_*`, `db_ready`) | MCP servers (Node scripts → components, `mcp-whatsapp` done) |
@@ -182,6 +182,83 @@ recognize: async func(request: recognize-request) -> stream<segment>;
 // kv (put/get/del/del_prefix/scan), log, lifecycle: unchanged, sync — a local store answer is
 // sub-millisecond and a stream would buy nothing.
 ```
+### C1 results — the code graph as a component (05/11, wasm_the_first)
+
+The graph is the first capability moved out of `wa` without touching Lua. The 14 `host.graph_*`
+functions keep their names, arguments and answer shapes; `rust/wa-host/src/graph.rs` is now a kernel
+shim that forwards each call to the `graph` component
+([rust/components/graph](../rust/components/graph), wasm32-wasip2, 8.2 MB — tree-sitter's grammars
+and SQLite are C, so building it needs wasi-sdk) through `components::mcp`, one run per call. `wa`
+no longer links tree-sitter or `wa-graph`: 35.4 MB → 29.0 MB, and a graph change no longer rebuilds
+the kernel.
+
+What stayed in the kernel is what a per-call guest cannot do: choose the root and database, mount
+them (the new `dirs` grant: the root read-only at `/graph/root`, a private database directory
+read-write at `/graph/db`), serialize calls per database (a mutex plus `.<db>.lock`, which other
+processes also take) and schedule refreshes from edit hints and the OS watcher. The component is
+stateless: every call admits content first (capture → compare with the committed manifest → index
+the changes as revision committed+1) and then reads one pinned snapshot, so an answer is never
+older than the bytes on disk when the call began.
+
+Measured on this repository (1,533 files, 57,364 definitions, 167,878 edges); native = `wa` from
+origin/main b56485e2 with wa-graph in-process, component = this tree's `wa` with the `graph`
+component; same tree indexed by both, a fresh database per run, 3 runs each, medians of
+`benchmarks/graph-component/bench.lua`:
+
+| call | native | component | ratio |
+| --- | --- | --- | --- |
+| `index` (cold, 1,533 files) | 50,607 ms | 577,625 ms | 11.4× |
+| `index` (nothing changed) | 306 ms | 3,840 ms | 12.5× |
+| `query` | 433 ms | 5,570 ms | 12.9× |
+| `search` | 652 ms | 4,192 ms | 6.4× |
+| `explain` | 286 ms | 3,589 ms | 12.6× |
+| `caps` | 489 ms | 7,883 ms | 16.1× |
+
+Three defects the previous WIP commit hid, all found by running the tests it lacked:
+
+- The kernel's cross-process lock was `<db>.lock`, and SQLite inside the guest locks through the
+  same name (its dot-file style; the `%s.lock` literal is in the wasm, and a directory appeared at
+  that path during a call). A lock file at that path made SQLite treat every transaction as
+  contended: 22 s of busy timeout, then `graph_index_failed: database is locked`. The kernel's file
+  is now `.<db>.lock`.
+- A component run killed mid-transaction leaves the guest's lock behind, and then every later write
+  answers `database is locked` for the whole busy timeout. Holding the kernel lock proves no graph
+  call on that database is running, so a `<db>.lock` found at that point is stale and is removed.
+- When the `db` option names a path under the indexed root (`test-graph-freshness` does), an index
+  run writes the database, its rollback journal and both lock files inside the watched tree. The
+  watcher counted those writes as edits, so one refresh scheduled the next forever: `active` and
+  `dirty_hint` never settled and `ready` never came back. The database's own files are now excluded
+  by name, and `status.ready` is the component's own byte-for-byte verdict rather than "nothing is
+  queued".
+
+The cost is the finding. A per-call guest pays the whole admission again on every call: capture and
+hash the tree, then compare it with every stored source blob in a 75 MB database, and every one of
+those pages crosses the WASI boundary instead of staying in the host's page cache. That is 11.4× on
+a cold build and 12.5× on a call that changes nothing; a `graph_search` on this repository goes from
+652 ms to 4,192 ms. Correct, exact, and too slow to navigate a repository of this size from a cold
+node: an index run now gets a 900 s budget (`INDEX_BUDGET` in graph.rs) because this tree needs
+577,625 ms once, and a read that would have to build a cold graph keeps the caller's 60 s wait and
+answers "use read/grep" while the background build finishes. On a small tree the same code is
+~12× native too (`rust/` alone: cold 1.7 s native, 19.7 s component), so this is the shape of the
+design, not a constant to tune.
+
+What the WASI 0.3 / wasmtime 50 upgrade should change here, in order:
+
+1. **A long-lived instance, not one run per call.** The graph is a service with state (an open
+   SQLite connection and its page cache); the MCP-over-stdio run is the reason none of it survives.
+   The typed `wa:mcp/server` export, hosted once per database, removes the spawn per call and keeps
+   the cache warm. This is the single change that matters most.
+2. **Native async for the build.** `future<T>`/`stream<T>` let the index run as a background task
+   that yields instead of holding the caller's deadline, so `serve` can build a cold graph without a
+   10-minute request and without the 900 s budget.
+3. **A cheaper admission.** The exactness check reads every stored source blob; storing the manifest
+   hash per file and comparing hashes (the bytes stay for `source`/`sources`) would cut the per-call
+   read in half without weakening "never older than the disk". The kernel's watcher state can then
+   decide when a full capture is needed at all.
+4. **A temp directory in the grant.** SQLite spills temp tables and large sorts to `TMPDIR`, which a
+   guest has none of: an index of this tree died with `graph_index_failed: disk I/O error` after
+   parsing 1,533 files. It runs with `temp_store=MEMORY` today (bounded by the guest's 256 MB), which
+   is a workaround for a missing mount, not a design.
 
 ## Order of work
 

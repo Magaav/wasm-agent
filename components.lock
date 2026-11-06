@@ -1,0 +1,24 @@
+# Pinned WASI components this tree's core runs.
+#
+# `scripts/deploy.sh` installs these beside the core before the node is restarted
+# (scripts/lib/deploy-components.sh), and refuses to install bytes that are not the ones named
+# here: a core whose components are missing answers their capability with
+# `component_*_unavailable`, so the core and its components are one install.
+#
+# The graph is required, not optional: every `host.graph_*` call runs the `graph` component
+# (docs/KERNEL.md, stream C).
+#
+# Format: <name> <sha256> <bytes>. Regenerate the line on the machine that produces the release
+# artifacts, from the reviewed tree:
+#
+#   WASI_SDK=<dir> WA_COMPONENTS_DIR=<artifact-dir> bash scripts/build-components.sh graph
+#   sha256sum <artifact-dir>/graph.wasm      # -> this line (the size too)
+#
+# and commit the changed line with the component change that caused it. A build is not
+# byte-reproducible across checkout paths (the guest embeds three panic-location paths - measured
+# 05/11: two checkouts of the same tree gave 8,185,719 and 8,185,720 bytes), which is why a node
+# installs the pinned artifact instead of rebuilding it: WA_DEPLOY_COMPONENT_SOURCE=<dir> names
+# the directory hold those bytes. A deploy that builds from the tree instead
+# (WA_DEPLOY_COMPONENT_SOURCE unset) is a development deploy, and it must say so with
+# WA_DEPLOY_COMPONENT_REPIN=1 to install what it just built.
+graph 3f3118f4ccb9674423db86693d805c27d6686ed7f66630a83eb4cee7458de262 8216373

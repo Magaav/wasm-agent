@@ -24,6 +24,12 @@ const GUEST_ROOT: &str = "/graph/root";
 const GUEST_DB: &str = "/graph/db";
 const DB_FILE: &str = "graph.db";
 const ROOT_LIMIT: usize = 32;
+/// How long a cold build may take. A first index of this repository (1,533 files, 57k definitions,
+/// 168k edges) takes ~51 s in-process and ~578 s through the component (measured 05/11, docs/KERNEL.md
+/// "C1 results"), so the 120 s cap this replaces refused the graph on exactly the trees it is for.
+/// Read-only calls keep the caller's `wait_ms` (60 s by default): a read that would have to build a
+/// cold graph is told to use read/grep while the background build finishes.
+const INDEX_BUDGET: Duration = Duration::from_secs(900);
 
 struct Config {
     root: PathBuf,
@@ -242,7 +248,7 @@ impl Scheduler {
             // A bounded quiet window coalesces bursts without waiting forever for a busy writer.
             std::thread::sleep(Duration::from_millis(75));
             {let mut state = entry.state.lock().unwrap(); state.queued = false; state.active = true; state.dirty = false;}
-            let outcome = call(&entry, "index", json!({}), Instant::now() + Duration::from_secs(120));
+            let outcome = call(&entry, "index", json!({}), Instant::now() + INDEX_BUDGET);
             let error = outcome.get("error").and_then(Value::as_str).map(str::to_string);
             if let Some(error) = &error {eprintln!("graph_index_failed root={} error={error}", entry.root.display());}
             let mut state = entry.state.lock().unwrap();
@@ -403,7 +409,7 @@ fn run(options: Value, tool: &str, extra: &[(&str, Value)]) -> Value {
     let outcome = (|| -> Result<Value, String> {
         let (root, db) = locations(&options, CONFIG.get())?;
         let entry = scheduler().entry(&root, &db)?;
-        let deadline = if tool == "index" {Instant::now() + Duration::from_secs(120)} else {wait_deadline(&options)};
+        let deadline = if tool == "index" {Instant::now() + INDEX_BUDGET} else {wait_deadline(&options)};
         let mut arguments = if options.is_object() {options.clone()} else {json!({})};
         for (key, value) in extra {arguments[*key] = value.clone();}
         let mut answer = call(&entry, tool, arguments, deadline);

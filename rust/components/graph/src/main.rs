@@ -220,7 +220,9 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
             let db = db_path(args);
             let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
             let shown = shown(args);
-            match admit(root, &db, force, started + Duration::from_secs(120), started, &shown)? {
+            // A cold build of a real tree is minutes (docs/KERNEL.md "C1 results"): the kernel's
+            // own budget for an index run is the authority; this is the guest's capture bound.
+            match admit(root, &db, force, started + Duration::from_secs(600), started, &shown)? {
                 Admit::Failed(status) => Ok(status),
                 Admit::Ready { required, work, reused, skipped } => {
                     let store = Store::open_readonly(&db).map_err(s)?;

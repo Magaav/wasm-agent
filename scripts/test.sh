@@ -420,6 +420,10 @@ WA_COMPONENTS_DIR="$GRAPH_COMPONENTS" bash scripts/build-components.sh graph >&2
   || { echo "graph component build failed (needs wasi-sdk: WASI_SDK=<dir>)" >&2; exit 1; }
 export WA_COMPONENTS_DIR="$GRAPH_COMPONENTS"
 command -v cygpath >/dev/null 2>&1 && export WA_COMPONENTS_DIR="$(cygpath -w "$GRAPH_COMPONENTS")"
+# ...and the install path a deploy takes for it (scripts/lib/deploy-components.sh): the pin, the
+# sha256 and size check, the atomic swap and the rollback. No toolchain, no node: the component itself
+# is proved by the graph tests below and by scripts/check-graph-component.lua during a deploy.
+gate_run bash scripts/test-deploy-components.sh
 gate_phase_begin cli
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the

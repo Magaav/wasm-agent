@@ -235,11 +235,24 @@ index of the source tree to Lua. **Since stream C (05/11) the graph is the `grap
 wasi-sdk): tree-sitter, SQLite and every query run inside it; `wa` no longer links tree-sitter or
 `wa-graph`. The host side (`rust/wa-host/src/graph.rs`) only resolves root/db, mounts the root
 read-only at `/graph/root` and a private database directory read-write at `/graph/db` (the
-`dirs` grant, docs/COMPONENTS.md), serializes calls per database (mutex + a file lock for other
-processes) and schedules background refreshes from edit hints and the OS watcher. Each call
+`dirs` grant, docs/COMPONENTS.md), serializes calls per database (a mutex plus a file lock for
+other processes) and schedules background refreshes from edit hints and the OS watcher. Each call
 admits content itself (capture → compare → index changes as revision committed+1), so hints only
-make answers cheaper, never more correct. A node without the component installed answers every
-graph verb with `graph_component_unavailable: component_not_installed:graph`. The configured
+make answers cheaper, never more correct. The kernel's lock file is `.<db>.lock`, and the dot
+matters: SQLite inside the guest locks through `<db>.lock` beside the database (its dot-file
+style), so a kernel lock at that name made every write answer `database is locked` for the whole
+busy timeout. Two further rules come from the same seam: the database's own files (the database,
+its journal and both locks) are never counted as edits - when `db` names a path inside the indexed
+root every index run writes them into the watched tree - and a `<db>.lock` found while the kernel
+lock is held has no owner (a component run killed mid-transaction leaves one), so it is removed
+instead of blocking every later write. A cold build of a real tree is minutes, not seconds
+(1,533 files ≈ 51 s native, ≈ 578 s through the component: docs/KERNEL.md "C1 results"), so an
+index run gets a 600 s budget while a read keeps the caller's `wait_ms` (60 s by default) and may
+answer "use read/grep" while the background build finishes. A node without the component installed answers every
+graph verb with `graph_component_unavailable: component_not_installed:graph`, which is why a deploy
+installs the component as part of the same install: `components.lock` pins `graph.wasm` by sha256
+and size, `scripts/deploy.sh` stage 3e proves the candidate binary answers through it, and
+`scripts/lib/deploy-components.sh` swaps it in with the previous triple kept for the rollback. The configured
 runtime graph lives beside the ledger, in its own directory (`<home>/.wasm-agent/graph.db.d/graph.db`;
 the pre-component `graph.db` is no longer read and is rebuilt once on first use). Model source actions pass the session
 worktree (or explicit `cwd`) as `root`; Git audit/impact normalize it to the Git
@@ -269,6 +282,12 @@ visible lexical confidence evidence. `graph_source(opts)` accepts one of those
 `path/name/line/kind` selectors and returns an exact, bounded source page from
 the verified snapshot; `next_byte_offset` continues a large definition. It
 cannot select a path absent from the graph snapshot.
+
+`graph_status(opts)` reports `ready` as the component's own verdict: the committed snapshot holds
+every indexed file's current bytes, compared byte for byte. It is not "no refresh is queued" - a
+queued warm-up cannot make an answer stale because every call admits content first, and a status
+that raced the background worker reported a fresh graph as unready. `queued`/`active`/`dirty_hint`
+report the warm-up separately, and `failure` reports a background build that failed.
 
 `graph_overview(opts)` returns bounded architectural orientation: languages,
 modules, entry points, routes, capabilities, dependency hotspots, boundaries,
