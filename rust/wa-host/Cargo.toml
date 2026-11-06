@@ -14,6 +14,8 @@ wa-host-support = { path = "../wa-host-support" }
 wa-governance = { path = "../wa-governance" }
 # The console: terminal, editor, input, panels and the transcript they draw.
 wa-term = { path = "../wa-term" }
+# Node identity and the rendezvous/relay transport (docs/KERNEL.md, carve-out map).
+wa-rendezvous = { path = "../wa-rendezvous" }
 wa-operation = { path = "../wa-operation" }
 wa-jobs = { path = "../wa-jobs" }
 # The grant policy, telemetry and bounded-store libraries this host enforces (docs/GRANT-POLICY.md,

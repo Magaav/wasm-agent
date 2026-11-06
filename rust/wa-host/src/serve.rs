@@ -1834,7 +1834,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
 
     if let Ok(relay_url) = std::env::var("WASM_AGENT_RELAY") {
         if !relay_url.is_empty() {
-            crate::relay_client::spawn(relay_url);
+            wa_rendezvous::relay_client::spawn(relay_url);
         }
     }
 
@@ -2383,7 +2383,7 @@ fn node_thread_loop(
         // Relayed peer work goes through the same admission as a direct request. A peer run must not
         // bypass the scheduler by arriving on node-thread 0's housekeeping path; `/node/chat` is a run and is
         // forced into the background lane, while the other relay routes are control calls and stay here.
-        for job in crate::relay_client::take_jobs() {
+        for job in wa_rendezvous::relay_client::take_jobs() {
             let route = split_path(&job.path).0;
             if !(job.method == "POST" && route == "/node/chat") {
                 begin_work(format!("relay {} {}", job.method, job.path));
@@ -2480,7 +2480,7 @@ fn node_thread_loop(
 /// The conversation a relayed peer run belongs to. A `/node/chat` body may name a `thread`; without one
 /// the peer's node id is the key, so two calls from one peer serialise instead of racing on one
 /// transcript. The peer is already authenticated by its signature before this is called.
-fn relay_conversation(job: &crate::relay_client::RelayJob, verified_node_id: &str) -> String {
+fn relay_conversation(job: &wa_rendezvous::relay_client::RelayJob, verified_node_id: &str) -> String {
     if let Some(thread) = serde_json::from_str::<serde_json::Value>(&job.body)
         .ok()
         .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
@@ -2529,11 +2529,11 @@ fn verify_peer_sync(
 fn process_relay_job(
     lua: &Lua,
     ui: &std::path::Path,
-    job: &crate::relay_client::RelayJob,
+    job: &wa_rendezvous::relay_client::RelayJob,
     verified: Option<&(String, String, String)>,
 ) -> (u16, String) {
     let ui = ui.to_path_buf();
-    let job = crate::relay_client::RelayJob {
+    let job = wa_rendezvous::relay_client::RelayJob {
         id: job.id.clone(),
         method: job.method.clone(),
         path: job.path.clone(),
@@ -2787,7 +2787,7 @@ enum Work {
 /// own cancel flag, so it settles exactly like a local run. `verified` is the peer author verified
 /// before admission, so the run half never re-verifies.
 struct RelayWork {
-    job: crate::relay_client::RelayJob,
+    job: wa_rendezvous::relay_client::RelayJob,
     run_id: u64,
     cancel: Arc<AtomicBool>,
     sockets: crate::subagents::SocketSlot,

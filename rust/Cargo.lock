@@ -1955,6 +1955,7 @@ dependencies = [
  "wa-kv",
  "wa-operation",
  "wa-queue",
+ "wa-rendezvous",
  "wa-state",
  "wa-telemetry",
  "wa-term",
@@ -2005,6 +2006,18 @@ dependencies = [
 [[package]]
 name = "wa-queue"
 version = "0.1.0"
+
+[[package]]
+name = "wa-rendezvous"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rusqlite",
+ "serde_json",
+ "ureq",
+ "wa-host-support",
+ "wa-operation",
+]
 
 [[package]]
 name = "wa-state"

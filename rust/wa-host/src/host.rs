@@ -982,13 +982,13 @@ pub extern "C-unwind" fn subagent(l: *mut LuaState) -> c_int {
 pub extern "C-unwind" fn binding_state(l:*mut LuaState)->c_int {
     let action=arg_string(l,1).unwrap_or_default();
     let args=arg_string(l,2).and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
-    push_json(l,&crate::binding_runtime::state(&action,&args).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
+    push_json(l,&wa_rendezvous::binding_runtime::state(&action,&args).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
 }
 pub extern "C-unwind" fn binding_transport(l:*mut LuaState)->c_int {
     let action=arg_string(l,1).unwrap_or_default();
     // `serve` is the node's own claim at startup (main.rs), never a script's.
     if action=="serve"{push_json(l,&json!({"ok":false,"error":"binding_transport_action_invalid"}));return 1;}
-    push_json(l,&crate::binding_runtime::transport(&action).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
+    push_json(l,&wa_rendezvous::binding_runtime::transport(&action).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
 }
 
 pub extern "C-unwind" fn resource(l: *mut LuaState) -> c_int {
@@ -1219,7 +1219,7 @@ pub extern "C-unwind" fn client_status(l: *mut LuaState) -> c_int {
 
 /// host.node_identity() -> {node_id, public_key}
 pub extern "C-unwind" fn node_identity(l: *mut LuaState) -> c_int {
-    match crate::node::Identity::load() {
+    match wa_rendezvous::node::Identity::load() {
         Ok(identity) => push_json(
             l,
             &json!({"node_id": identity.node_id, "public_key": identity.public_key}),
@@ -1232,7 +1232,7 @@ pub extern "C-unwind" fn node_identity(l: *mut LuaState) -> c_int {
 /// host.sign(text) -> {signature}
 pub extern "C-unwind" fn sign(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
-    match crate::node::Identity::load() {
+    match wa_rendezvous::node::Identity::load() {
         Ok(identity) => push_json(l, &json!({"signature": identity.sign(&text)})),
         Err(error) => push_json(l, &json!({"error": error})),
     }
@@ -1244,7 +1244,7 @@ pub extern "C-unwind" fn verify(l: *mut LuaState) -> c_int {
     let public_key = arg_string(l, 1).unwrap_or_default();
     let text = arg_string(l, 2).unwrap_or_default();
     let signature = arg_string(l, 3).unwrap_or_default();
-    let ok = crate::node::verify(&public_key, &text, &signature);
+    let ok = wa_rendezvous::node::verify(&public_key, &text, &signature);
     unsafe { wa_host_support::lua::lua_pushboolean(l, ok as c_int) };
     1
 }

@@ -10,10 +10,6 @@ mod host;
 mod file_search;
 mod http_transport;
 mod operations;
-mod node;
-mod binding_runtime;
-mod relay_client;
-mod rendezvous;
 mod plugins;
 mod components;
 mod core_component;
@@ -34,6 +30,8 @@ use rusqlite::Connection;
 // The floor of the split: the Lua ABI, the host's paths and the shared JSON answer (docs/KERNEL.md).
 use wa_host_support::lua::Lua;
 use wa_host_support::paths::{private_dir, resolve_home};
+// Node identity and its transport: the CLI dispatches `rendezvous`/`binding` commands through them.
+use wa_rendezvous::{binding_runtime, node, rendezvous};
 use std::ffi::{c_int, c_void};
 use std::path::PathBuf;
 use std::sync::Mutex;
