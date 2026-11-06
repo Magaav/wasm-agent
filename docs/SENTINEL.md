@@ -263,6 +263,44 @@ rewriting the record - so a gate deploy no longer leaves `request restart` perma
 stale record whose `serve.pid` does not name the listener is still refused: a port is not an
 identity, and a recycled pid is not this node.
 
+### The watchdog, and what it takes over
+
+There are two supervisors now, and only one of them may own a pid (docs/KERNEL.md, "Watchdog").
+
+| | sentinel (`wa-sentinel`) | watchdog (`wa-watchdog`) |
+| --- | --- | --- |
+| what it supervises | *declared requests*: `start`, `stop`, `restart`, `update`, `upgrade`, `deploy`, `spell` | the kernel process: start, restart on a crash with backoff, swap its binary on a pin |
+| what it can be talked into | a fixed verb list, never a shell | one command with one argument line and one pin |
+| who it trusts | the operator, the queue, `/health`, the install record | the bytes' sha256, `/health`, and nothing else |
+| where it is today | installed and running on the nodes | built, tested, **not installed**; wired into `upgrade.sh` only behind `WA_WATCHDOG=1` (default off) |
+
+Two supervisors cannot both hold the node's pid. Today the sentinel starts, stops and restarts the node
+itself, so turning the watchdog on means the sentinel's `start`/`stop`/`restart` must address the watchdog
+(or the unit that runs it) instead of the node - that is the remaining half of row 6 in KERNEL.md's order of
+work, and the reason the flag defaults off: with the watchdog supervising AND the sentinel restarting the
+node, there are two owners, and a deploy would stop a kernel the watchdog immediately starts again.
+
+What the flag changes today, and nothing else:
+
+- `scripts/upgrade.sh` runs the pin, the downgrade guard, the code-mode proof and the idle gate exactly as
+  before, then hands the switch to `wa-watchdog swap <binary> --sha256 <pin>` instead of stopping the node and
+  starting it ("the watchdog branch" in KERNEL.md);
+- the script does **not** stop the node in that mode. It must not: a script that stops the kernel first takes
+  the node down for the whole idle wait, and the watchdog - correctly - sees its kernel die and restarts it
+  with backoff while the script is still preparing the swap. `scripts/test-watchdog-upgrade.sh` asserts
+  `restarts: 0` and `last_exit: null` across an upgrade for exactly this;
+- `serve.pid` is written from the watchdog's `<home>/kernel.pid`, so everything that reads it (this file,
+  `deploy.sh`, `verify-deploy.sh`) keeps reading the pid that is actually listening;
+- a swap that is refused or rolled back puts the script's own file backup back and exits 1, and the node is
+  still serving the previous kernel - the watchdog's rollback and the script's file rollback are separate
+  facts and both are reported.
+
+What the sentinel keeps either way: the verbs, the request queue and its evidence, the idle gate, the
+install record, the Windows service/task identity, and the decision that a deploy is over. What it loses when
+the watchdog takes over is only the kill-and-start, which is the one thing a watchdog can do better - it holds
+the pid, it can prove a new binary on a spare port without being the process that is being replaced, and it
+can put the old binary back by itself.
+
 ### `deploy` is not `upgrade`, and the difference matters
 
 `upgrade` installs the node and the UI. It **cannot** install a *sentinel*: `upgrade.sh` copies the node

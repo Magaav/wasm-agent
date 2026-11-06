@@ -426,6 +426,111 @@ their rebuild still reaches it. The next batch is therefore a *shape* change rat
 split `wa-capabilities` (`host`, `serve`, `subagents`) so the volatile capability surface stops sitting
 under the kernel, and a policy edit stops paying for it.
 
+## Watchdog (`rust/wa-watchdog`) — the bottom layer, built
+
+Row 6 of "Order of work" has its first half: a native supervisor that starts the kernel, restarts it on a
+crash with exponential backoff, and replaces the kernel binary only after the new bytes have answered
+`/health`, keeping the old binary on disk so a rollback is a path change and a restart, never a rebuild.
+
+The sentinel of today does the same job for a *node* (docs/SENTINEL.md) with a shell script, `curl`,
+`netstat` and a good deal of hard-won caution. The watchdog is that job as one small program, because the
+layer that must survive what it replaces should not be the layer that changes: the kernel will be replaced
+constantly and the watchdog almost never.
+
+### What it is
+
+One binary, **no dependencies at all** (std only). That is a constraint, not an accident: a supervisor that
+shares a dependency graph with the thing it supervises can be broken by that thing's build (the reason
+`wa-sentinel` carries its own lock file), and carrying nothing is the same property without a second
+workspace. What that costs is one SHA-256 (`src/hash.rs`, checked against the NIST vectors), a loopback
+HTTP/1.1 GET for `/health` (`src/health.rs`, chunked and `Content-Length` both decoded), and a JSON writer
+plus a top-level field reader (`src/json.rs`) - a cost paid once, which also keeps `cargo zigbuild` for
+`aarch64-unknown-linux-gnu` a pure-Rust build (`cargo zigbuild --release --offline --locked -p wa-watchdog
+--target aarch64-unknown-linux-gnu.2.31`, the same flow as `wa-host`, see COMPONENTS.md).
+
+```
+wa-watchdog run    [--config FILE] [--home DIR]        supervise the kernel in the foreground
+wa-watchdog stop   [--home DIR]                        ask the supervisor to stop its kernel and exit
+wa-watchdog status [--json] [--home DIR]               what the supervisor last wrote down (exit 0 = healthy)
+wa-watchdog swap <binary> --sha256 <pin>               verify, stage, prove on a spare port, ask for the switch
+                   [--arg <value>]... [--wait-ms N] [--spare-port N]
+wa-watchdog verify <binary> --sha256 <pin>             the pin check alone
+wa-watchdog init --kernel <path> [--port N]            write a config for a fresh home
+```
+
+State lives in one directory (`--home`, else `WA_WATCHDOG_HOME`, else `<node home>/watchdog`), all of it
+plain files a shell script can read: `watchdog.conf`, `current` (one line: the binary that is running),
+`current.json` (that binary, its pin, and its argument line), `status.json`, `kernel.pid`,
+`supervisor.pid`, `logs/`, `requests/` + `results/` (the swap protocol below) and `bin/<sha12>/` (every
+binary ever swapped in). Writes are atomic - write beside, rename over - for the reason `upgrade.sh`
+renames: a crash between two writes must not leave a record a later reader believes.
+
+### The swap, in the order that matters
+
+1. **verify** - the bytes must hash to the pin. Nothing else happens before it.
+2. **stage** - copy into `bin/<sha12>/<name>` and verify the copy. The binary that is running is never
+   overwritten, so a rollback needs no build.
+3. **prove** - start the staged bytes on a spare port with a **scratch home**, its own `db`, and
+   `WASM_AGENT_RENDEZVOUS`/`WASM_AGENT_RELAY` removed, then wait for `/health`. The running kernel is
+   untouched for all of this. (Sections 1 and 1b of `scripts/upgrade.sh` do the same thing with `curl` and
+   the code-mode check; the reason is identical - a binary that cannot start must be found out while nothing
+   has changed.)
+4. **switch** - a request file appears in `requests/`; the supervisor (the only process that holds the
+   kernel's pid) claims it by renaming it, waits until the service port is *bindable*, stops the old kernel,
+   starts the new binary, and waits for `/health` within `swap_health_window_ms`. Then, and only then, does
+   `current` name the new binary.
+5. **rollback** - a new kernel that does not answer is stopped, the previous binary is put back and proved
+   before the supervisor reports. A kernel that answers and *then* dies inside `stability_ms` is rolled back
+   the same way, with its own `results/<id>.rollback.json` (a result is never rewritten to say something
+   else).
+
+Arguments are stored **as written**, with `{port}`, `{client_port}`, `{service_port}`, `{home}` and `{db}`
+substituted at launch. That is what lets one recorded line start the service instance on the service port and
+the proof instance on a spare port - a list of already-resolved arguments could only name one of them.
+
+### Two states, and what is deliberately not the watchdog's
+
+- **A crash** is an exit, settled by `try_wait` on every pass, so a kernel that died between two passes is
+  never missed. The restart is delayed by `backoff_base_ms`, doubled per attempt to `backoff_max_ms`
+  (500 ms → 60 s by default).
+- **A slow node** is not a crash. `health_miss_limit` defaults to `0`: a busy node answers `ok:false` while
+  a run is stalled, and restarting it for that would interrupt the turn the node exists for. Waiting for
+  idle is `upgrade.sh`'s job, and it still does it.
+- The watchdog does **not** judge idle and does not read the node's state: no `memory.db`, no `serve.pid`, no
+  session, no credential. It knows a pid, a port and a pin.
+- Stopping a kernel is `kill`/`TerminateProcess`, not a graceful SIGTERM: a killed kernel cannot write a
+  goodbye, so `serve.pid` can be stale after a swap. The next start refuses nothing on that basis, and
+  `serve.pid` is rewritten from `kernel.pid` by the caller that asked for the swap.
+
+### Why an upgrade is seamless enough
+
+A process cannot hand its listening socket to another on Windows, so the gap is a restart: the old kernel is
+stopped, the new one is up and answering within a fraction of a second. Everything that makes that survivable
+sits above the kernel, not in it: **sessions live in `memory.db`, written by the kernel that is running**, so
+the thread continues across the swap - a CLI reconnects and re-reads its session, and the window polls the
+node's version every second and reloads itself. A turn in flight is not written; that is why `upgrade.sh`
+waits for idle before it asks, and why the watchdog does not decide that question.
+
+### Wired in behind a flag, default off
+
+`scripts/upgrade.sh` takes the watchdog path only with `WA_WATCHDOG=1` (and `WA_WATCHDOG_BIN`/
+`WA_WATCHDOG_HOME`/`WA_WATCHDOG_WAIT_MS` to say where it lives). With the flag on and no watchdog installed it
+**refuses** (exit 2) rather than falling back to the old restart silently. With it on:
+
+- the pin, the downgrade guard, the code-mode proof and the idle gate all still run;
+- the switch is one `wa-watchdog swap` call, and the script does not stop the node itself - it must not,
+  or the node is down for the whole wait (measured: the watchdog saw its kernel killed by the script and
+  restarted it with backoff while the script was still preparing);
+- `serve.pid` is written from the watchdog's `kernel.pid`, so the install tooling keeps reading the pid that
+  listens, and the listener check after health still means what it meant;
+- a swap that is refused or rolled back restores the script's own file backup (binary and UI) and exits 1.
+
+Tests: `cargo test -p wa-watchdog` (unit + integration, two fake kernels), `scripts/test-watchdog.sh` (the
+crate plus the CLI contract the upgrade script depends on) and `scripts/test-watchdog-upgrade.sh` (a scratch
+install upgraded through the flag, with the default path checked to be untouched). The fake kernel is
+`wa-watchdog selftest-kernel`: it binds one port and answers `/health`, and it can be told to be unwell, to
+hang, to fail to bind, or to die - nothing it does reaches a real node.
+
 ## Order of work
 
 1. This document + `wit/` (v1 draft). ← now
@@ -437,7 +542,10 @@ under the kernel, and a policy edit stops paying for it.
    health-gated switch, profiles.
 5. Carve-out in batches, smallest and most frequently changed first; the Lua core as one component.
    First batch landed: the crate split above (`wa-host` is the binary).
-6. Watchdog replaces the sentinel for kernel upgrades.
+6. Watchdog replaces the sentinel for kernel upgrades. First half landed: `rust/wa-watchdog` plus the
+   `WA_WATCHDOG=1` path in `scripts/upgrade.sh` (see "Watchdog" above). What is left: the sentinel's own
+   start/stop/restart verbs have to address the watchdog rather than the node (two supervisors cannot both
+   own the pid), and the deploy has to ship and start it.
 
 ## Memory as a component (planned, phase 4, after A2.4)
 
