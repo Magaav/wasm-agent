@@ -20,6 +20,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PUBLISH="$ROOT/scripts/publish-node-binaries.sh"
+. "$ROOT/scripts/lib/node-binaries.sh"
 
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
@@ -77,6 +78,8 @@ expect_status 0 "$?" "--check on a clean fixture tree"
 contains "$plan_out" "would build $FIXTURE_SHA" "the plan names the commit"
 contains "$plan_out" "release tag: node-$FIXTURE_SHORT" "the plan names the release tag"
 contains "$plan_out" "node-$FIXTURE_SHORT.manifest" "the plan names the pins file"
+contains "$plan_out" "compiled inputs: $(wa_compiled_inputs_digest "$fixture" "$FIXTURE_SHA")" \
+  "the plan names the compiled-inputs digest a later commit can match"
 contains "$plan_out" "nothing was built" "the dry run says nothing was built"
 [ ! -d "$WORK/never" ] || fail "--check created its output directory"
 ok
@@ -129,6 +132,12 @@ cmp -s "$WORK/bundle-good/wa-$TRIPLE-$SHORT" "$built/wa-$TRIPLE-$SHORT" || fail 
 ok
 [ ! -f "$WORK/gh-called" ] || fail "gh was run: $(cat "$WORK/gh-called")"
 ok
+# The compiled-inputs digest travels in the manifest that ships: a deploy of a later commit whose compiled
+# inputs hash to this value installs THIS release instead of compiling (job relmatch). The incoming fixture
+# manifest had no such row, so this is also the "an older artifact is given one" case.
+contains "$(cat "$WORK/bundle-good/node-$SHORT.manifest")" \
+  "compiled_inputs=$(wa_compiled_inputs_digest "$ROOT" "$HEAD_SHA")" \
+  "the bundled manifest records the commit's compiled-inputs digest"
 
 # --from with a tampered binary: the bytes that claim to be this build are not.
 bad="$WORK/built-tampered"; cp -r "$built" "$bad"
@@ -159,6 +168,15 @@ missing="$WORK/built-missing"; cp -r "$built" "$missing"; rm -f "$missing/wa-sen
 out="$(bash "$PUBLISH" --from "$missing" --out "$WORK/bundle-missing" --target "$TRIPLE" 2>&1)"
 expect_status 2 "$?" "--from a set that is missing an asset"
 contains "$out" "binary_missing:" "the missing asset is named"
+
+# --from with a compiled-inputs row that is not this commit's tree: the digest is a fact about the commit,
+# so a manifest that disagrees would be installed by every docs-only descendant of a commit it is not the
+# build of. Refused by name, before anything is printed for upload.
+wrongdigest="$WORK/built-wrongdigest"; cp -r "$built" "$wrongdigest"
+printf 'compiled_inputs=%s\n' "$(printf '0%.0s' $(seq 64))" >> "$wrongdigest/node-$SHORT.manifest"
+out="$(bash "$PUBLISH" --from "$wrongdigest" --out "$WORK/bundle-wrongdigest" --target "$TRIPLE" 2>&1)"
+expect_status 5 "$?" "--from a manifest whose compiled_inputs is another tree's"
+contains "$out" "compiled_inputs_mismatch:" "the digest refusal is named"
 
 # --from with an ELF machine that does not match the row.
 machine="$WORK/built-machine"; mkdir -p "$machine"

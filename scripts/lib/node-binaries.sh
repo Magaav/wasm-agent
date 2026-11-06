@@ -10,15 +10,25 @@
 # pin has to be per target triple, and that is the only difference:
 #
 #   release tag     node-<first 12 hex of the source commit>
-#   pins            node-<sha12>.manifest - one row per target triple, the release's own identity
+#   pins            node-<sha12>.manifest - one row per target triple, the release's own identity, plus
+#                   `compiled_inputs=<sha256>`: the digest of the paths a binary is compiled from
 #   payload         wa-<triple>-<sha12>, wa-sentinel-<triple>-<sha12>
 #
-# A node asks for the release its own commit names (never "the latest": a deploy installs the commit it
-# holds, and a binary from another commit is not that commit's build), verifies the manifest's
+# A node asks first for the release its own commit names (never "the latest": a deploy installs the commit
+# it holds, and a binary from another commit is not that commit's build), verifies the manifest's
 # source_commit against its own 40-hex HEAD, then verifies sha256 AND size of both binaries against the
 # manifest before anything is cached or staged. A refusal is never a fallback - `node_hash_mismatch`
 # means the bytes that claim to be this commit's are not - and only "nothing is published for this
 # commit and target" (node_release_unavailable) lets a deploy build the tree instead.
+#
+# THE ONE EXCEPTION, and it is not "the latest": a commit that changes no compiled input does not need a
+# binary of its own, so when no release names this commit the node looks for the NEWEST published release
+# whose `compiled_inputs=` digest equals the digest of its own commit (wa_compiled_inputs_digest /
+# wa_node_release_digest_search). A docs-only or Lua-only commit is then installed from an older commit's
+# verified bytes instead of being compiled - the case this exists for is a node that cannot compile at all
+# (openclaw). The digest is the same classification `deploy.sh`'s Lua fast path already uses (see
+# wa_compiled_input for the one definition), and the bytes are still verified against the manifest they
+# came with, so a mismatched release refuses exactly as before.
 #
 # What this lib deliberately does NOT do: decide whether building is affordable (that is deploy.sh, with
 # scripts/check-disk-floor.sh, because only the deploy knows the tree and the install), and publish
@@ -30,13 +40,86 @@
 # <file> -> sha256 on stdout; 7 when no sha tool exists. Same expression as the component lib, on
 # purpose: a deploy that can verify one pin can verify the other.
 wa_node_sha256() {
+  wa_node_sha256_stdin < "$1"
+}
+
+# stdin -> sha256 of those bytes on stdout; 7 when no sha tool exists. The compiled-inputs digest is a
+# hash of a *stream* (a sorted list, not a file on disk), and it must be the same hash on every host.
+wa_node_sha256_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    sha256sum | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
+    shasum -a 256 | awk '{print $1}'
   else
     return 7
   fi
+}
+
+# ---- compiled inputs: which paths a binary is built from (job relmatch) ---------------------------
+#
+# WHY THIS IS ONE FUNCTION. `deploy.sh`'s Lua fast path already answers "does this change need a new
+# binary?" by classifying every changed path, and a published release now answers the same question from
+# the other end: the manifest carries a digest of the COMPILED INPUTS of the commit it was built from, and
+# a deploy accepts that release for any commit whose compiled inputs hash to the same digest. Two
+# spellings of "compiled input" would let the fast path and the digest disagree about the same file, and
+# the disagreement would be invisible until a node installed a binary that is not its commit's build. So
+# the classification lives here, and both halves call it.
+#
+# <path> -> 0 when a change to this path changes the compiled binary (rust/, wit/, Cargo files, code-mode
+# build inputs, config, the lock files ...), 1 when it does not (the Lua tree the binary loads from disk
+# and pins by capability digest, docs, tests, UI, modules, skills, jobs, reviews, fixtures, the vault, and
+# every script except the ones that build the binary). A top-level `<name>.md` is documentation; any other
+# top-level file (Cargo.lock, components.lock, .gitignore) is an input.
+wa_compiled_input() {
+  local path="${1:-}"
+  [ -n "$path" ] || return 1
+  case "$path" in
+    lua/*|docs/*|tests/*|ui/*|modules/*|skills/*|jobs/*|benchmarks/*|review/*|reviews/*|review-evidence/*|fixtures/*|vault/*|scripts/*)
+      # Not compiled - except the scripts that ARE build inputs: the code-mode bundle and its provisioning
+      # decide what a release binary embeds (publish-node-binaries.sh sets WA_CODEMODE_BUILD_ASSETS).
+      case "$path" in
+        scripts/codemode*|scripts/build-*|scripts/provision-codemode*) return 0 ;;
+      esac
+      return 1 ;;
+  esac
+  case "$path" in
+    */*) return 0 ;;
+    *.md) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# The digest's own identity, hashed as the first line: a future change to wa_compiled_input (a path
+# reclassified) MUST invalidate every old manifest's digest rather than silently re-match, and bumping this
+# string is how it does that.
+WA_COMPILED_INPUTS_SCHEMA='wasm-agent-compiled-inputs/1'
+
+# <repo> <commit> -> sha256 over the sorted `<path> <blob sha>` lines of every compiled-input path in that
+# commit's tree, on stdout. 2 when the commit is not in this tree, 7 when no sha tool exists.
+#
+# Sorted and path-first on purpose: two commits with the same compiled inputs produce the same bytes here
+# whatever order git lists them in, and the digest covers a tree (not a diff), so it does not matter which
+# commit a deploy starts from.
+wa_compiled_inputs_digest() {
+  local repo="$1" commit="${2:-}" meta path sha
+  git -C "$repo" rev-parse --verify -q "$commit^{commit}" >/dev/null 2>&1 || {
+    printf 'compiled_inputs_commit_unknown: %s is not a commit in %s\n' "${commit:-?}" "$repo" >&2
+    return 2
+  }
+  {
+    printf '%s\n' "$WA_COMPILED_INPUTS_SCHEMA"
+    # IFS is set ONCE for the loop, not per iteration: `while IFS=$(printf '\t') read` forks a command
+    # substitution on every line, which over this tree's ~2,500 paths took 24s here and hung outright under
+    # fork pressure (measured on wasm_the_first, 06/11). Everything in the loop body is a builtin.
+    git -C "$repo" ls-tree -r --full-tree "$commit" 2>/dev/null \
+      | { IFS=$'\t'; while read -r meta path; do
+            [ -n "$path" ] || continue
+            wa_compiled_input "$path" || continue
+            sha="${meta##* }"
+            printf '%s %s\n' "$path" "$sha"
+          done; } \
+      | LC_ALL=C sort
+  } | wa_node_sha256_stdin
 }
 
 # [uname -s] [uname -m] -> the target triple a release publishes for this machine, or non-zero when this
@@ -158,6 +241,56 @@ wa_node_triple_machine() {
     x86_64-unknown-linux-*) printf '3e\n' ;;
     *) printf '' ;;
   esac
+}
+
+# <tag> -> the base wa_node_fetch_asset should read that tag's assets from. The ordinary channel builds the
+# tag into its own URL (`https://github.com/<repo>/releases/download/<tag>/<asset>`, or `gh release
+# download <tag>`), so the base is passed through untouched. A local stub directory - what the tests and a
+# hand-copied release use - may hold ONE SUBDIRECTORY PER TAG (`<dir>/node-<sha12>/`), which is how several
+# releases are stood up without a network; when that subdirectory exists it is the base for that tag.
+wa_node_tag_base() {
+  local tag="$1" base="${WA_NODE_BINARIES_URL:-}"
+  case "$base" in file://*) base="${base#file://}" ;; esac
+  if [ -n "$base" ] && [ -d "$base/$tag" ]; then printf '%s\n' "$base/$tag"; return 0; fi
+  printf '%s\n' "${WA_NODE_BINARIES_URL:-}"
+}
+
+# <repo> <limit> -> the newest `node-<sha12>` release tags, one per line, newest first, at most <limit>.
+#
+# WHERE THE LIST COMES FROM, in this order, so a test never touches the network and a node with no token
+# still gets an answer:
+#   1. WA_NODE_BINARIES_URL=<dir> with a `releases.txt` in it (one tag per line, newest first) - the stub a
+#      test uses to stand up several releases without GitHub;
+#   2. WA_NODE_BINARIES_URL=<dir> holding `node-<sha12>` subdirectories - newest by modification time;
+#   3. `gh api` on the repository's releases (what the coordinator's gh token can see);
+#   4. the public API, `https://api.github.com/repos/<repo>/releases` - anonymous, rate-limited, enough
+#      for the handful of releases a digest search looks at.
+# Anything that is not `node-<twelve hex>` is not this channel's release and is dropped here, once.
+wa_node_release_list() {
+  local repo="$1" limit="${2:-20}" base="${WA_NODE_BINARIES_URL:-}" dir tags
+  [ -d "$repo" ] && repo="$(wa_node_release_repo "$repo")"
+  case "$base" in file://*) base="${base#file://}" ;; esac
+  if [ -n "$base" ] && [ -d "$base" ]; then
+    if [ -f "$base/releases.txt" ]; then
+      sed -n 's/^[[:space:]]*//;s/[[:space:]]*$//p' "$base/releases.txt" \
+        | grep -E '^node-[0-9a-f]{12}$' | head -n "$limit"
+      return 0
+    fi
+    for dir in $(ls -1dt "$base"/node-* 2>/dev/null); do
+      printf '%s\n' "${dir##*/}"
+    done | grep -E '^node-[0-9a-f]{12}$' | head -n "$limit"
+    return 0
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    tags="$(gh api "repos/$repo/releases?per_page=$limit" --jq '.[].tag_name' 2>/dev/null \
+      | grep -E '^node-[0-9a-f]{12}$' | head -n "$limit")"
+    if [ -n "$tags" ]; then printf '%s\n' "$tags"; return 0; fi
+  fi
+  command -v curl >/dev/null 2>&1 || return 0
+  curl -fsSL -m 60 "https://api.github.com/repos/$repo/releases?per_page=$limit" 2>/dev/null \
+    | tr ',' '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(node-[0-9a-f]\{12\}\)".*/\1/p' \
+    | head -n "$limit"
+  return 0
 }
 
 # <repo> <commit> <triple> -> the three asset names of one target's row, on stdout, one per line.
@@ -356,6 +489,129 @@ wa_node_binary_download() {
   return 0
 }
 
+# <repo> <commit> <triple> <cache_root>
+#
+# The digest fallback (job relmatch). A commit that changes no compiled input does not need a new binary,
+# so a deploy of a docs-only descendant of a published commit must not fall back to compiling (openclaw
+# cannot). This searches the newest `node-<sha12>` releases for the first manifest whose
+# `compiled_inputs=` equals the digest of <commit> and returns that release's verified directory, cached
+# under the RELEASE's source commit - the bytes' own identity, not this tree's.
+#
+# On 0, stdout is three lines: the directory, then `release_tag=` and `release_commit=` - the two facts a
+# deploy must record (`installed.txt`'s binary_release=/binary_source_commit=) and cannot derive from the
+# tree it holds. On 8 nothing published matches (the same answer as "nothing is published for this
+# commit", so the caller's build-or-refuse rule is unchanged); 2/5/6/7 is a refusal about a release whose
+# manifest MATCHED the digest - a broken release - and the caller must stop rather than shop around.
+#
+# A candidate is skipped, not refused, when it has no manifest, no compiled_inputs row (an artifact from a
+# publisher older than this digest), a different digest, or no row for this triple: none of those is a
+# statement about this commit. Once the digest matches, everything the manifest says is a statement about
+# the bytes this deploy would install.
+# <cache_root> <triple> <digest> -> the cached entries whose manifest's `compiled_inputs=` is that digest
+# and which pin that triple, newest first (by the entry's own mtime). This is what lets a repeated deploy of
+# the same docs-only commit answer from the cache even when the release it came from is gone (an offline
+# node, a deleted release): the entry's manifest is that release's identity, and it is re-verified before it
+# is used. A directory without `.complete` is an interrupted fetch and is not an entry.
+wa_node_cached_digest_entries() {
+  local cache_root="$1" triple="$2" want="$3" dir manifest
+  for dir in $(ls -1dt "$cache_root"/*/"$triple" 2>/dev/null); do
+    [ -f "$dir/.complete" ] || continue
+    manifest="$(ls -1 "$dir"/node-*.manifest 2>/dev/null | head -1)"
+    [ -n "$manifest" ] || continue
+    [ "$(wa_node_manifest_value "$manifest" compiled_inputs)" = "$want" ] || continue
+    wa_node_manifest_pin "$manifest" "$triple" >/dev/null 2>&1 || continue
+    printf '%s\n' "$dir"
+  done
+}
+
+wa_node_release_digest_search() {
+  local repo="$1" commit="$2" triple="$3" cache_root="$4"
+  local want tag short tmp entry source digest pin out rc seen file published
+  want="$(wa_compiled_inputs_digest "$repo" "$commit" 2>/dev/null)" || {
+    printf 'node_compiled_inputs_unavailable: %s has no readable compiled-input digest, so no published release can be matched to it\n' "${commit:-?}" >&2
+    return 8
+  }
+  [ -n "$want" ] || { printf 'node_compiled_inputs_unavailable: no sha256 tool for the compiled-input digest\n' >&2; return 8; }
+  seen=0
+  for tag in $(wa_node_release_list "$repo" "${WA_NODE_RELEASE_SEARCH:-20}"); do
+    seen=$((seen + 1))
+    short="${tag#node-}"
+    entry="$cache_root/$short/$triple"
+    # A previous deploy of this release cached its bytes: the manifest inside the entry is that release's
+    # identity, so it answers "does this match" without touching the network, and the entry is re-verified
+    # (the cache is a directory on disk like any other, not a promise).
+    if [ -f "$entry/.complete" ] && [ -f "$entry/node-$short.manifest" ]; then
+      source="$(wa_node_manifest_value "$entry/node-$short.manifest" source_commit)"
+      digest="$(wa_node_manifest_value "$entry/node-$short.manifest" compiled_inputs)"
+      if [ "$digest" = "$want" ] && wa_node_manifest_pin "$entry/node-$short.manifest" "$triple" >/dev/null 2>&1; then
+        out="$(wa_node_verify_dir "$entry" "$source" "$triple" 2>&1)"; rc=$?
+        if [ "$rc" != 0 ]; then printf '%s\n' "$out" >&2; return "$rc"; fi
+        printf '%s\nrelease_tag=%s\nrelease_commit=%s\n' "$entry" "$tag" "$source"
+        return 0
+      fi
+    fi
+    tmp="$cache_root/.candidate.$$.$triple"
+    rm -rf "$tmp"
+    mkdir -p "$tmp" || { printf 'node_cache_unwritable: %s\n' "$cache_root" >&2; return 8; }
+    if ! out="$(wa_node_fetch_asset "$repo" "$tag" "node-$short.manifest" "$tmp" "$(wa_node_tag_base "$tag")" 2>&1)"; then
+      rm -rf "$tmp"
+      continue
+    fi
+    source="$(wa_node_manifest_value "$tmp/node-$short.manifest" source_commit)"
+    digest="$(wa_node_manifest_value "$tmp/node-$short.manifest" compiled_inputs)"
+    if [ -z "$digest" ] || [ "$digest" != "$want" ]; then rm -rf "$tmp"; continue; fi
+    # The digest matches: from here on the manifest's claims are about the bytes this deploy would install.
+    case "$source" in
+      ''|*[!0-9a-f]*) source="" ;; esac
+    if [ "${#source}" != 40 ]; then
+      rm -rf "$tmp"
+      printf 'node_manifest_commit_mismatch: %s names source_commit=%s, which is not a 40-hex commit id\n' \
+        "$tag" "$(wa_node_manifest_value "$tmp/node-$short.manifest" source_commit)" >&2
+      return 2
+    fi
+    if [ "${source:0:12}" != "$short" ]; then
+      rm -rf "$tmp"
+      printf 'node_manifest_commit_mismatch: %s names source_commit=%s, whose sha12 is not the tag\n' "$tag" "$source" >&2
+      return 2
+    fi
+    if ! pin="$(wa_node_manifest_pin "$tmp/node-$short.manifest" "$triple")"; then
+      published="$(awk '!/=/ && NF >= 5 && $1 !~ /^#/ {printf "%s ", $1}' "$tmp/node-$short.manifest")"
+      rm -rf "$tmp"
+      printf 'node_target_unpublished: %s is not in %s (it publishes: %s)\n' "$triple" "$tag" "${published:-nothing}" >&2
+      return 8
+    fi
+    for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
+      if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "$(wa_node_tag_base "$tag")" 2>&1)"; then
+        rm -rf "$tmp"
+        printf 'node_binary_missing: %s pins %s but the release does not carry it (%s)\n' "$tag" "$file" "$out" >&2
+        return 2
+      fi
+    done
+    out="$(wa_node_verify_dir "$tmp" "$source" "$triple" 2>&1)"; rc=$?
+    if [ "$rc" != 0 ]; then rm -rf "$tmp"; printf '%s\n' "$out" >&2; return "$rc"; fi
+    rm -rf "$entry"
+    mkdir -p "$(dirname "$entry")" 2>/dev/null
+    mv "$tmp" "$entry" || { rm -rf "$tmp"; printf 'node_cache_unwritable: %s\n' "$entry" >&2; return 8; }
+    printf '%s %s %s\n' "$short" "$triple" "$(wa_node_sha256 "$entry/wa-$triple-$short")" > "$entry/.complete" \
+      || { printf 'node_cache_unwritable: %s\n' "$entry" >&2; return 8; }
+    printf '%s\nrelease_tag=%s\nrelease_commit=%s\n' "$entry" "$tag" "$source"
+    return 0
+  done
+  # Nothing listed matched - but an earlier deploy of this same commit may already have cached the answer,
+  # and a node that cannot reach the release (or a release that was deleted) must still be able to use it.
+  for entry in $(wa_node_cached_digest_entries "$cache_root" "$triple" "$want"); do
+    short="$(basename "$(dirname "$entry")")"
+    source="$(wa_node_manifest_value "$entry/node-$short.manifest" source_commit)"
+    out="$(wa_node_verify_dir "$entry" "$source" "$triple" 2>&1)"; rc=$?
+    if [ "$rc" != 0 ]; then printf '%s\n' "$out" >&2; return "$rc"; fi
+    printf '%s\nrelease_tag=%s\nrelease_commit=%s\n' "$entry" "node-$short" "$source"
+    return 0
+  done
+  printf 'node_release_unavailable: none of the newest %s published releases was built from the compiled inputs of %s (compiled_inputs=%s) for %s\n' \
+    "$seen" "${commit:0:12}" "$want" "$triple" >&2
+  return 8
+}
+
 # <root> -> 0 when this machine can pay for a build, 1 (with the floor's own numbers on stdout) when it
 # cannot. The fallback question is not "is there a prebuilt" but "is there a prebuilt OR a disk": a node
 # below the floor that also has no prebuilt must refuse by name instead of dying in a compiler.
@@ -380,11 +636,15 @@ wa_node_disk_floor_ok() {
 #      verified against node-<sha12>.manifest when that file is present (its absence is recorded, not
 #      trusted - the deploy's own digest and prove gate still run);
 #   2. this node's cache entry for the commit and triple (a previous deploy's download);
-#   3. the release (gh, else curl), cached.
-# Prints the directory on 0; on 8 prints the reason and the caller may build this tree instead; a
-# refusal (2/5/6/7) is printed too and must stop the deploy.
+#   3. the release (gh, else curl), cached - the EXACT commit's release first, always;
+#   4. when 3 answers "nothing usable is published for this commit and this target", the newest release
+#      whose `compiled_inputs=` digest matches this commit's (wa_node_release_digest_search): a docs-only
+#      or Lua-only descendant of a published commit needs no binary of its own.
+# Prints the directory on 0, and - only when the bytes are an older release's build - the two extra lines
+# `release_tag=` and `release_commit=`; on 8 prints the reason and the caller may build this tree instead;
+# a refusal (2/5/6/7) is printed too and must stop the deploy.
 wa_node_binary_source_resolve() {
-  local repo="$1" commit="$2" triple="$3" install="${4:-}" dir cache_root short
+  local repo="$1" commit="$2" triple="$3" install="${4:-}" dir cache_root short out rc
   short="$(wa_node_release_tag "$commit")" || { printf 'node_commit_invalid: %s is not a 40-hex commit id\n' "$commit"; return 2; }
   short="${short#node-}"
   if [ -n "${WA_DEPLOY_BINARY_SOURCE:-}" ]; then
@@ -411,7 +671,14 @@ wa_node_binary_source_resolve() {
       return 0
     fi
   fi
-  wa_node_binary_download "$repo" "$commit" "$triple" "$cache_root"
+  wa_node_binary_download "$repo" "$commit" "$triple" "$cache_root"; rc=$?
+  [ "$rc" = 8 ] || return "$rc"
+  # rc 8 is the one answer a caller may build after - "nothing usable is published for this commit and
+  # this target" - and it is exactly where the digest fallback belongs: before the deploy pays for a
+  # compiler it must ask whether the commit needs one at all.
+  out="$(wa_node_release_digest_search "$repo" "$commit" "$triple" "$cache_root" 2>&1)"; rc=$?
+  printf '%s\n' "$out"
+  return "$rc"
 }
 
 # <repo> <commit> <triple> <install>
@@ -432,6 +699,7 @@ wa_node_binary_plan() {
   fi
   printf 'binary_source: release %s (%s, %s); would cache in %s and fall back to a build of this tree only if nothing is published\n' \
     "$short" "$triple" "$(wa_node_release_repo "$repo")" "$dir"
+  printf 'binary_fallback: the newest published release whose compiled_inputs digest matches this commit, before any build\n'
 }
 
 # <dir> <commit> <triple> -> the SENTINEL file a verified directory holds, on stdout:
@@ -491,24 +759,42 @@ wa_node_binary_stage() {
 #
 # Resolve (fetch + verify), then stage `wa` and `wa-sentinel` into <stage>. On 0, two lines on stdout: the
 # machine-readable `binary_verified: <triple> <dir> <sha12>` (so the deploy can name the verified directory
-# to its sentinel step without parsing prose) and the `binary_source:` line for the operator's log. On 8,
-# the same source line naming the reason (nothing published for this commit/triple, or this host has no
-# published target at all - a Windows deploy builds, as it always did); on 2/5/6/7 the refusal itself.
+# to its sentinel step without parsing prose) and the `binary_source:` line for the operator's log - plus,
+# when the bytes are an older release's build of the same compiled inputs, `binary_release: <tag> <40-hex
+# source commit>` so the deploy can record both facts. On 8, the same source line naming the reason
+# (nothing published for this commit/triple, or this host has no published target at all - a Windows
+# deploy builds, as it always did); on 2/5/6/7 the refusal itself.
 wa_node_binaries_prepare() {
-  local repo="$1" commit="$2" stage="$3" install="${4:-}" triple out rc dir
+  local repo="$1" commit="$2" stage="$3" install="${4:-}" triple out rc dir line release_tag release_commit stage_commit
   triple="$(wa_node_target_triple)"; rc=$?
   if [ "$rc" != 0 ] || [ -z "$triple" ]; then
     printf 'binary_source: this tree (no prebuilt target for %s/%s; the published targets are Linux aarch64 and x86_64)\n' \
       "$(uname -s 2>/dev/null)" "$(uname -m 2>/dev/null)"
     return 8
   fi
-  out="$(wa_node_binary_source_resolve "$repo" "$commit" "$triple" "$install" 2>&1)"; rc=$?
+  # Stdout ONLY: the resolver's stdout is its answer (the directory, then the release's identity), while
+  # its reasons go to stderr and belong in this deploy's log - not in a value this function parses. Merging
+  # the two here made the first refusal line of the exact-commit attempt look like the directory.
+  out="$(wa_node_binary_source_resolve "$repo" "$commit" "$triple" "$install")"; rc=$?
   if [ "$rc" != 0 ]; then
     printf '%s\n' "$out"
     return "$rc"
   fi
-  dir="$out"
-  out="$(wa_node_binary_stage "$stage" "$dir" "$commit" "$triple" 2>&1)"; rc=$?
+  # The resolver prints the directory first, then - only for a digest match - the release's identity. Read
+  # line by line rather than by field, because the directory is prose-free but may contain spaces.
+  dir=""; release_tag=""; release_commit=""
+  while IFS= read -r line; do
+    case "$line" in
+      release_tag=*) release_tag="${line#release_tag=}" ;;
+      release_commit=*) release_commit="${line#release_commit=}" ;;
+      *) if [ -z "$dir" ]; then dir="$line"; fi ;;
+    esac
+  done <<RESOLVED
+$out
+RESOLVED
+  # The release's own names are what the release carries, so staging is told the commit the bytes belong to.
+  stage_commit="${release_commit:-$commit}"
+  out="$(wa_node_binary_stage "$stage" "$dir" "$stage_commit" "$triple" 2>&1)"; rc=$?
   if [ "$rc" != 0 ]; then
     printf '%s\n' "$out"
     return "$rc"
@@ -517,9 +803,15 @@ wa_node_binaries_prepare() {
   # The machine-readable half of the same answer: the triple, the verified directory and its sha12. The
   # deploy needs the directory itself for the sentinel install step, and reading it out of the prose line
   # below would break on a directory with a space in it - so it is said as its own line, on purpose.
-  printf 'binary_verified: %s %s %s\n' "$triple" "$dir" "$(wa_node_short_sha "$commit")"
+  printf 'binary_verified: %s %s %s\n' "$triple" "$dir" "$(wa_node_short_sha "$stage_commit")"
   if [ -n "${WA_DEPLOY_BINARY_SOURCE:-}" ]; then
     printf 'binary_source: %s %s (WA_DEPLOY_BINARY_SOURCE)\n' "$triple" "$dir"
+  elif [ -n "$release_tag" ]; then
+    # A docs-only (or Lua-only) descendant: this release is the newest published build of the same
+    # compiled inputs, and its source commit is what the record has to name beside the release tag.
+    printf 'binary_release: %s %s\n' "$release_tag" "$release_commit"
+    printf 'binary_source: %s %s (verified against %s, the build of %s; this commit changes no compiled input)\n' \
+      "$triple" "$dir" "$release_tag" "${release_commit:0:12}"
   else
     printf 'binary_source: %s %s (verified against %s)\n' "$triple" "$dir" "$(wa_node_release_tag "$commit")"
   fi

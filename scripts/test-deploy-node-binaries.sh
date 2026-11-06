@@ -34,6 +34,18 @@ ROOT="$(pwd)"
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 checks=0
+# `gh` exists, is first on PATH, and only records that it was asked: the digest fallback reads the release
+# list from a stub directory, and a test that let it reach gh (or the public API) would be asking the real
+# repository about the real release channel. Nothing here ever runs gh against it.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/gh" <<SHIM
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$WORK/gh-called"
+exit 1
+SHIM
+chmod +x "$WORK/bin/gh" 2>/dev/null || true
+PATH="$WORK/bin:$PATH"
+export PATH
 ok() { checks=$((checks + 1)); }
 fail() { echo "node binaries (deploy) FAILED: $*" >&2; exit 1; }
 expect_status() { # <want> <got> <what>
@@ -273,14 +285,14 @@ codemode=embedded
 $X64 $(mksha "$head_release/wa-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-sentinel-$X64-$HEAD_SHORT")
 MANIFEST
 
-run_branch() { # <install dir> [env...] -> the branch's output; exit status is its own
-  local install="$1"; shift
+run_branch_in() { # <tree> <install dir> [env...] -> the branch's output; exit status is its own
+  local tree="$1" install="$2"; shift 2
   {
     echo 'set -uo pipefail'
     # Written into the harness, not sourced here: a `source` executed by this generator would land in the
     # test's own shell and the harness would then find no helper at all.
     echo ". \"$ROOT/scripts/lib/node-binaries.sh\""
-    echo "ROOT=\"$ROOT\""
+    echo "ROOT=\"$tree\""
     echo "INSTALL_DIR=\"$install\""
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
     echo 'note() { echo "note: $*"; }'
@@ -289,8 +301,15 @@ run_branch() { # <install dir> [env...] -> the branch's output; exit status is i
     echo 'echo "PREBUILT=$PREBUILT_BINARIES NEW=${NEW:-} PROVENANCE=${BINARY_PROVENANCE:-} RELEASE=${BINARY_RELEASE:-}"'
     echo 'echo "SENTINEL_SOURCE=${SENTINEL_SOURCE:-}"'
     echo 'echo "BINARY_DIR=${BINARY_DIR:-} BINARY_TRIPLE=${BINARY_TRIPLE:-}"'
+    echo 'echo "BINARY_SOURCE_COMMIT=${BINARY_SOURCE_COMMIT:-}"'
   } > "$WORK/run-branch.sh"
-  ( env WA_NODE_TARGET="$X64" "$@" bash "$WORK/run-branch.sh" 2>&1 )
+  # Run from INSIDE the tree: the branch reads its commit with `git rev-parse HEAD`, so the fixture tree is
+  # the one it must be standing in (a harness that ran from the real checkout resolved the wrong commit).
+  ( cd "$tree" && env WA_NODE_TARGET="$X64" "$@" bash "$WORK/run-branch.sh" 2>&1 )
+}
+run_branch() { # <install dir> [env...] -> the branch run against THIS tree
+  local install="$1"; shift
+  run_branch_in "$ROOT" "$install" "$@"
 }
 
 bi="$WORK/branch-install"; mkdir -p "$bi"
@@ -335,6 +354,204 @@ out="$(run_branch "$WORK/br-windows" WA_NODE_TARGET= WA_NODE_UNAME_S=MINGW64_NT 
 expect_status 0 "$?" "the branch on a host with no published target"
 contains "$out" "has no published node-binary target" "the host is told why it builds"
 contains "$out" "PREBUILT=0" "it builds, with no disk question"
+
+# --- the digest fallback: a commit that changes no compiled input needs no binary of its own ----------
+# job relmatch. The deploy looked for `node-<sha12 of the target commit>` and nothing else, so any later
+# commit (README, docs, Lua-only) had no release and a node that cannot compile (openclaw: 2 cores, 99%
+# disk) had no path at all. A manifest now records `compiled_inputs=`, the digest of the paths a binary is
+# COMPILED from, and a deploy accepts the newest release whose digest matches its own commit's - even
+# though that release's source commit differs. The exact commit's release is still preferred, and a
+# refusal is still never a fallback.
+#
+# The fixture is a real git repository, because the digest is a fact about a commit's TREE (git ls-tree),
+# not about a directory on disk: two different commits must digest the same when nothing compiled changed.
+digrepo="$WORK/digest-repo"
+mkdir -p "$digrepo/rust" "$digrepo/docs" "$digrepo/lua/core" "$digrepo/wit" "$digrepo/scripts"
+# The deploy's own disk-floor check is read from the tree, so the fixture carries the shipped one: the
+# build-or-refuse rule at the end of the fallback is then exercised against real code, not a stub.
+cp "$ROOT/scripts/check-disk-floor.sh" "$digrepo/scripts/"
+( cd "$digrepo" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t ) >/dev/null 2>&1 \
+  || fail "could not build the digest fixture repository"
+commit_in() { # <message> <shell snippet run in the tree> -> the new commit
+  ( cd "$digrepo" && eval "${2:-true}" && git add -A && git commit -qm "$1" && git rev-parse HEAD )
+}
+printf 'first\n' > "$digrepo/rust/Cargo.toml"
+printf 'a readme\n' > "$digrepo/README.md"
+printf 'module\n' > "$digrepo/lua/core/x.lua"
+printf 'interface x {}\n' > "$digrepo/wit/x.wit"
+C_BASE="$(commit_in 'base: the compiled inputs')" || fail "could not commit the digest fixture base"
+C_DOCS="$(commit_in 'docs only' 'printf "doc\n" > docs/a.md')"
+C_DOCS2="$(commit_in 'docs only, again' 'printf "more doc\n" >> docs/a.md')"
+C_LUA="$(commit_in 'lua only' 'printf "more\n" >> lua/core/x.lua')"
+C_RUST="$(commit_in 'a compiled input changed' 'printf "second\n" >> rust/Cargo.toml')"
+[ "${#C_RUST}" = 40 ] || fail "the digest fixture did not produce 40-hex commits"
+ok
+
+DIG_BASE="$(wa_compiled_inputs_digest "$digrepo" "$C_BASE")"
+case "$DIG_BASE" in
+  ????????????????????????????????????????????????????????????????) ok ;;
+  *) fail "the compiled-inputs digest is not 64 hex: $DIG_BASE" ;;
+esac
+[ "$(wa_compiled_inputs_digest "$digrepo" "$C_DOCS")" = "$DIG_BASE" ] || fail "a docs-only commit changed the compiled-inputs digest"
+ok
+[ "$(wa_compiled_inputs_digest "$digrepo" "$C_DOCS2")" = "$DIG_BASE" ] || fail "a second docs-only commit changed the digest"
+ok
+[ "$(wa_compiled_inputs_digest "$digrepo" "$C_LUA")" = "$DIG_BASE" ] || fail "a Lua-only commit changed the digest (the fast path keeps the binary across one)"
+ok
+[ "$(wa_compiled_inputs_digest "$digrepo" "$C_RUST")" != "$DIG_BASE" ] || fail "a rust change did NOT change the digest"
+ok
+expect_status 2 "$(wa_compiled_inputs_digest "$digrepo" "$OTHER" >/dev/null 2>&1; echo $?)" "a commit the tree does not have"
+# The one classification, pinned directly: the fast path and the digest must not be able to disagree.
+for p in rust/Cargo.toml wit/x.wit Cargo.lock components.lock rust/README.md scripts/build-ui.sh scripts/codemode-build.mjs; do
+  wa_compiled_input "$p" || fail "$p is a compiled input and was not classified as one"
+done
+ok
+for p in docs/a.md README.md lua/core/x.lua scripts/deploy.sh ui/index.html tests/x.sh skills/x/SKILL.md; do
+  wa_compiled_input "$p" && fail "$p is not a compiled input and was classified as one"
+done
+ok
+
+# <base> <commit> [digest] -> a stub tag directory `<base>/node-<sha12>/` with the manifest and the payload
+mk_release() { # a `-` digest writes a manifest with no compiled_inputs row (an older publisher's artifact)
+  local base="$1" commit="$2" digest="${3:-}" short="${2:0:12}" dir wa sentinel
+  dir="$base/node-$short"; mkdir -p "$dir"
+  mkelf "$dir/wa-$X64-$short" 3e
+  mkelf "$dir/wa-sentinel-$X64-$short" 3e
+  wa="$dir/wa-$X64-$short"; sentinel="$dir/wa-sentinel-$X64-$short"
+  {
+    printf 'schema=wasm-agent-node-binaries/1\nsource_commit=%s\n' "$commit"
+    [ "$digest" = - ] || printf 'compiled_inputs=%s\n' "$digest"
+    printf 'glibc_floor=2.31\ncodemode=embedded\n'
+    printf '%s %s %s %s %s\n' "$X64" \
+      "$(wa_node_sha256 "$wa")" "$(wc -c < "$wa" | tr -d '[:space:]')" \
+      "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')"
+  } > "$dir/node-$short.manifest"
+}
+absent() { # <text> <needle> <what>
+  printf '%s' "$1" | grep -qF -- "$2" && fail "$3: '$2' unexpectedly in: $1"
+  ok
+}
+
+# 1. A docs-only descendant of a published commit: the release is accepted, and the deploy is told which
+#    release and which source commit the bytes are, because installed.txt has to record both.
+stub_docs="$WORK/digest-docs"; mkdir -p "$stub_docs"
+mk_release "$stub_docs" "$C_BASE" "$DIG_BASE"
+printf 'node-%s\n' "${C_BASE:0:12}" > "$stub_docs/releases.txt"
+i="$(fresh digest-docs)"
+out="$(WA_NODE_BINARIES_URL="$stub_docs" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 0 "$?" "a docs-only commit with only an older commit's release published"
+contains "$out" "$i/node-binaries/${C_BASE:0:12}/$X64" "the bytes are cached under the RELEASE's source commit"
+contains "$out" "release_tag=node-${C_BASE:0:12}" "the release that was used is named"
+contains "$out" "release_commit=$C_BASE" "the release's 40-hex source commit is named"
+[ -f "$i/node-binaries/${C_BASE:0:12}/$X64/.complete" ] || fail "the accepted release left no cache entry"
+ok
+[ ! -d "$i/node-binaries/${C_DOCS:0:12}" ] || fail "the digest fallback cached the bytes under the docs commit, which has no release"
+ok
+absent "$(cat "$WORK/gh-called" 2>/dev/null)" "repos/" "the release list was read from the stub, not from gh"
+
+# The second deploy of the same docs-only commit reads the cached release back out of the cache: no
+# manifest fetch, no payload fetch, and the same answer (the entry's manifest is the release's identity).
+rm -rf "$stub_docs/node-${C_BASE:0:12}" "$stub_docs/releases.txt"
+out="$(WA_NODE_BINARIES_URL="$stub_docs" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 0 "$?" "the same deploy with the release gone and the entry cached"
+contains "$out" "release_commit=$C_BASE" "the cached entry still says which commit the bytes are"
+mk_release "$stub_docs" "$C_BASE" "$DIG_BASE"
+printf 'node-%s\n' "${C_BASE:0:12}" > "$stub_docs/releases.txt"
+
+# 2. The exact commit's release is still PREFERRED: when both exist, the release that names this commit is
+#    the one installed, and nothing claims the bytes are another commit's.
+stub_exact="$WORK/digest-exact"; mkdir -p "$stub_exact"
+mk_release "$stub_exact" "$C_DOCS" "$DIG_BASE"
+mk_release "$stub_exact" "$C_BASE" "$DIG_BASE"
+# The exact path fetches by tag from the base itself (gh/URL put the tag in the path), so the stub also
+# carries this tag's assets flat - the shape every existing case above uses.
+cp -f "$stub_exact/node-${C_DOCS:0:12}/"* "$stub_exact/"
+printf 'node-%s\nnode-%s\n' "${C_BASE:0:12}" "${C_DOCS:0:12}" > "$stub_exact/releases.txt"
+i="$(fresh digest-exact)"
+out="$(WA_NODE_BINARIES_URL="$stub_exact" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 0 "$?" "a commit that has its own release beside an older matching one"
+contains "$out" "$i/node-binaries/${C_DOCS:0:12}/$X64" "the exact commit's release is used"
+absent "$out" "release_tag=" "the exact match is not reported as a digest fallback"
+
+# 3. Newest matching digest wins when the commit has no release of its own: two docs-only descendants of
+#    the same base are published and neither names this commit.
+stub_newest="$WORK/digest-newest"; mkdir -p "$stub_newest"
+mk_release "$stub_newest" "$C_BASE" "$DIG_BASE"
+mk_release "$stub_newest" "$C_DOCS2" "$DIG_BASE"
+printf 'node-%s\nnode-%s\n' "${C_DOCS2:0:12}" "${C_BASE:0:12}" > "$stub_newest/releases.txt"
+i="$(fresh digest-newest)"
+out="$(WA_NODE_BINARIES_URL="$stub_newest" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 0 "$?" "two matching releases, neither naming this commit"
+contains "$out" "release_tag=node-${C_DOCS2:0:12}" "the NEWEST matching release is the one used"
+# ...and the search is bounded: WA_NODE_RELEASE_SEARCH=1 looks at one release only, so a match that sits
+# second in the list is not found and the answer is "nothing published matches" (rc 8, the build path).
+stub_bounded="$WORK/digest-bounded"; mkdir -p "$stub_bounded"
+mk_release "$stub_bounded" "$C_RUST" "$(wa_compiled_inputs_digest "$digrepo" "$C_RUST")"
+mk_release "$stub_bounded" "$C_DOCS2" "$DIG_BASE"
+printf 'node-%s\nnode-%s\n' "${C_RUST:0:12}" "${C_DOCS2:0:12}" > "$stub_bounded/releases.txt"
+i="$(fresh digest-bounded)"
+out="$(WA_NODE_RELEASE_SEARCH=1 WA_NODE_BINARIES_URL="$stub_bounded" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 8 "$?" "a digest match outside the searched window"
+contains "$out" "node_release_unavailable: none of the newest 1" "the bound is said in the refusal"
+[ ! -d "$i/node-binaries/${C_DOCS2:0:12}" ] || fail "the bounded search cached something anyway"
+ok
+
+# 4. A rust change must NOT be served by an older release: the digest differs, so the answer is the same
+#    "nothing published" (rc 8) the deploy had before - and the deploy then builds, or refuses by name when
+#    the disk cannot pay for the build. The refuse/fallback rules are unchanged.
+i="$(fresh digest-rust)"
+out="$(WA_NODE_BINARIES_URL="$stub_newest" wa_node_binary_source_resolve "$digrepo" "$C_RUST" "$X64" "$i" 2>&1)"
+expect_status 8 "$?" "a rust change with only an older commit's release published"
+contains "$out" "compiled_inputs=" "the refusal says what did not match"
+[ ! -d "$i/node-binaries/${C_BASE:0:12}" ] || fail "a rust change installed an older commit's binary"
+ok
+
+# 5. A release from a publisher older than this digest (no compiled_inputs row) is SKIPPED, not guessed at.
+stub_legacy="$WORK/digest-legacy"; mkdir -p "$stub_legacy"
+mk_release "$stub_legacy" "$C_BASE" -
+printf 'node-%s\n' "${C_BASE:0:12}" > "$stub_legacy/releases.txt"
+i="$(fresh digest-legacy)"
+out="$(WA_NODE_BINARIES_URL="$stub_legacy" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 8 "$?" "a manifest with no compiled_inputs row"
+contains "$out" "node_release_unavailable:" "the missing digest is not a refusal about this commit"
+
+# 6. A digest MATCH does not weaken verification: a matching release whose bytes are not its own manifest's
+#    is a refusal (5) and leaves no cache entry - the same rule as the exact path.
+stub_bad="$WORK/digest-bad"; mkdir -p "$stub_bad"
+mk_release "$stub_bad" "$C_BASE" "$DIG_BASE"
+printf 'tampered' >> "$stub_bad/node-${C_BASE:0:12}/wa-$X64-${C_BASE:0:12}"
+printf 'node-%s\n' "${C_BASE:0:12}" > "$stub_bad/releases.txt"
+i="$(fresh digest-bad)"
+out="$(WA_NODE_BINARIES_URL="$stub_bad" wa_node_binary_source_resolve "$digrepo" "$C_DOCS" "$X64" "$i" 2>&1)"
+expect_status 5 "$?" "a digest-matching release whose binary is not the pinned one"
+contains "$out" "node_hash_mismatch:" "the refusal carries the lib's reason"
+[ ! -d "$i/node-binaries/${C_BASE:0:12}" ] || fail "a refused digest match left a cache entry behind"
+ok
+
+# 7. The same two cases through the branch deploy.sh actually runs: a docs-only HEAD installs the older
+#    release and records both commits; a rust HEAD builds (or refuses when it cannot).
+( cd "$digrepo" && git checkout -q "$C_DOCS" ) || fail "could not check the docs-only commit out of the fixture"
+out="$(run_branch_in "$digrepo" "$WORK/br-digest-docs" WA_NODE_BINARIES_URL="$stub_docs")"
+expect_status 0 "$?" "the branch on a docs-only HEAD with an older matching release"
+contains "$out" "PREBUILT=1" "the docs-only HEAD installs a published binary"
+contains "$out" "RELEASE=node-${C_BASE:0:12}" "the branch records the release it used"
+contains "$out" "BINARY_SOURCE_COMMIT=$C_BASE" "the branch records the release's source commit"
+contains "$out" "SENTINEL_SOURCE=$WORK/br-digest-docs/node-binaries/${C_BASE:0:12}/$X64/wa-sentinel-$X64-${C_BASE:0:12}" \
+  "the supervisor comes from the accepted release's entry"
+[ -f "$WORK/br-digest-docs/node-binary.next/wa" ] || fail "the accepted release was not staged"
+ok
+
+( cd "$digrepo" && git checkout -q "$C_RUST" ) || fail "could not check the rust commit out of the fixture"
+out="$(run_branch_in "$digrepo" "$WORK/br-digest-rust" WA_NODE_BINARIES_URL="$stub_newest" WA_NODE_DISK_FLOOR_BYTES=0)"
+expect_status 0 "$?" "the branch on a rust HEAD with only older releases published"
+contains "$out" "building this tree (disk floor ok)" "a rust change falls back to the build"
+contains "$out" "PREBUILT=0" "nothing was installed from a release"
+out="$(run_branch_in "$digrepo" "$WORK/br-digest-nodisk" WA_NODE_BINARIES_URL="$stub_newest" WA_NODE_DISK_FLOOR_BYTES=1099511627776)"
+expect_status 3 "$?" "the same rust HEAD with no disk for the build"
+contains "$out" "refused(no_prebuilt_binary_and_disk_floor)" "the neither-path refusal is unchanged"
+( cd "$digrepo" && git checkout -q "$C_RUST" ) >/dev/null 2>&1 || true
+[ ! -f "$WORK/gh-called" ] || fail "gh was run during the digest fallback: $(cat "$WORK/gh-called")"
+ok
 
 # --- the prebuilt supervisor: the step that failed on openclaw (06/11) -------------------------------
 # The first prebuilt deploy of 75ac2964 installed the node and then refused -
@@ -465,8 +682,8 @@ rec_install="$WORK/rec-install"; mkdir -p "$rec_install/scripts"
 printf '#!/bin/sh\necho node\n' > "$rec_install/wa"
 printf '#!/bin/sh\necho sentinel\n' > "$rec_install/wa-sentinel"
 printf '#!/bin/sh\n' > "$rec_install/scripts/upgrade.sh"
-run_record() { # [commit the record should name] -> the record step's output, run against $rec_install
-  local bcommit="${1:-$HEAD_SHA}"
+run_record() { # [commit the record should name] [source commit of the bytes] -> the record step's output
+  local bcommit="${1:-$HEAD_SHA}" scommit="${2:-}"
   {
     echo 'set -uo pipefail'
     echo "INSTALL_DIR=\"$rec_install\""
@@ -485,6 +702,7 @@ run_record() { # [commit the record should name] -> the record step's output, ru
     echo 'BINARY_PROVENANCE=prebuilt-release'
     echo "BINARY_RELEASE=node-$HEAD_SHORT"
     echo "BINARY_COMMIT=$bcommit"
+    echo "BINARY_SOURCE_COMMIT=$scommit"
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
     cat "$RECORD_BLOCK"
     echo 'record_installed'
@@ -498,6 +716,7 @@ contains "$record" "commit=$HEAD_SHA" "the record names the 40-hex commit"
 contains "$record" "binary_source=prebuilt-release" "the record says the binary came from a release"
 contains "$record" "binary_release=node-$HEAD_SHORT" "the record names the release"
 contains "$record" "binary_commit=$HEAD_SHA" "the record names the commit the bytes were verified against"
+contains "$record" "binary_source_commit=$HEAD_SHA" "the record names the source commit explicitly (job relmatch)"
 contains "$record" "sentinel_sha256=sentinelhash" "the record still names the installed supervisor's hash"
 if printf '%s' "$record" | grep -q '^commit=deadbee$'; then fail "the record named the short id instead of the 40-hex commit"; fi
 ok
@@ -506,6 +725,23 @@ out="$(run_record abc1234)"
 expect_status 3 "$?" "the record step for a prebuilt install with a short commit"
 contains "$out" "not a 40-hex commit id" "the refusal says what a prebuilt record must name"
 contains "$(cat "$rec_install/installed.txt")" "commit=$HEAD_SHA" "the refused write did not replace the good record"
+
+# --- installed.txt for a DIGEST-FALLBACK install (job relmatch) ---------------------------------------
+# A docs-only commit is installed from an older commit's release: the record then has to name BOTH - the
+# commit whose tree was installed (commit=, the Lua tree the node runs) and the commit whose build the
+# bytes are (binary_commit=/binary_source_commit=, which the next fast-path deploy reads back). A record
+# that could not state the second as a full id is refused, like the first.
+out="$(run_record "$HEAD_SHA" "$COMMIT")"
+expect_status 0 "$?" "the record step for a digest-fallback install"
+record="$(cat "$rec_install/installed.txt")"
+contains "$record" "commit=$HEAD_SHA" "the digest-fallback record names the installed tree's commit"
+contains "$record" "binary_commit=$COMMIT" "...and the commit the bytes are a build of"
+contains "$record" "binary_source_commit=$COMMIT" "...under the name the deploy records (binary_source_commit=)"
+contains "$record" "binary_release=node-$HEAD_SHORT" "...beside the release that was used"
+out="$(run_record "$HEAD_SHA" abc1234)"
+expect_status 3 "$?" "the record step with a source commit that is not 40 hex"
+contains "$out" "binary_source_commit=abc1234" "the refusal names the value it would have written"
+contains "$(cat "$rec_install/installed.txt")" "binary_source_commit=$COMMIT" "the refused write did not replace the good record"
 
 
 # --- the wiring in scripts/deploy.sh ------------------------------------------------------------------
@@ -521,6 +757,20 @@ ok
 grep -q 'no_prebuilt_binary_and_disk_floor' "$DEPLOY" || fail "deploy.sh has no refusal for 'no prebuilt and no disk'"
 ok
 grep -q 'binary_source=%s' "$DEPLOY" || fail "deploy.sh does not record where the binary came from in installed.txt"
+ok
+# job relmatch: the digest fallback is wired end to end - the deploy reads the release identity the lib
+# reports, records it (binary_source_commit=), and takes the supervisor from the accepted release's names.
+grep -q 'binary_release:\*)' "$BRANCH" || fail "the prebuilt branch does not read the digest fallback's release identity"
+ok
+grep -q 'BINARY_SOURCE_COMMIT' "$BRANCH" || fail "the prebuilt branch never sets BINARY_SOURCE_COMMIT"
+ok
+grep -q 'binary_source_commit=%s' "$DEPLOY" || fail "deploy.sh does not record binary_source_commit= in installed.txt"
+ok
+grep -q 'wa_node_release_digest_search' "$ROOT/scripts/lib/node-binaries.sh" || fail "the lib has no digest search"
+ok
+grep -q 'wa_compiled_input "$changed_path"' "$DEPLOY" || fail "deploy.sh's fast path does not use the one compiled-input classification"
+ok
+grep -q 'wa_compiled_inputs_digest' "$ROOT/scripts/publish-node-binaries.sh" || fail "the publisher records no compiled-inputs digest"
 ok
 # ...and the resolver beside the INSTALLED copy of this script: `request deploy` runs that copy, so a deploy
 # whose lib was never shipped notes "no node-binaries helper" and builds - which is exactly the node that

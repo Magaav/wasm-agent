@@ -480,6 +480,11 @@ fi
 #     plus the binary's capability digest; the binary refuses a tree whose digest differs from its own).
 #     Anything compiled - rust/, wit/ (host bindings are generated from it), Cargo files, code-mode build
 #     inputs - takes the full build below. WA_DEPLOY_FULL=1 forces the full build.
+#
+#     "Which paths are compiled inputs" is NOT spelled here: scripts/lib/node-binaries.sh's
+#     wa_compiled_input is the one definition, and the same function digests a published release's
+#     compiled inputs (job relmatch), so "this change needs no new binary" and "that release IS this
+#     commit's binary" can never disagree about the same file.
 LUA_FAST=0
 # The commit whose build the installed binary is (a previous fast path keeps it in binary_commit=).
 INSTALLED_BINARY_COMMIT="$(sed -n 's/^binary_commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
@@ -488,7 +493,22 @@ INSTALLED_BIN="$INSTALL_DIR/wa"; [ -f "$INSTALLED_BIN.exe" ] && INSTALLED_BIN="$
 if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_COMMIT" ] && [ -x "$INSTALLED_BIN" ] \
    && git merge-base --is-ancestor "$INSTALLED_COMMIT" HEAD 2>/dev/null; then
   CHANGED="$(git diff --name-only "$INSTALLED_COMMIT" HEAD)"
-  COMPILED="$(printf '%s\n' "$CHANGED" | grep -v -E '^(lua/|docs/|tests/|ui/|modules/|skills/|jobs/|benchmarks/|reviews?/|review-evidence/|fixtures/|vault/|[^/]+\.md$)|^scripts/' ; printf '%s\n' "$CHANGED" | grep -E '^scripts/(codemode|build-|provision-codemode)')"
+  COMPILED="$(printf '%s\n' "$CHANGED" | while IFS= read -r changed_path; do
+    [ -n "$changed_path" ] || continue
+    if command -v wa_compiled_input >/dev/null 2>&1; then
+      wa_compiled_input "$changed_path" && printf '%s\n' "$changed_path"
+    else
+      # No node-binaries lib beside this deploy: fall back to the spelling this section used to carry, so a
+      # missing helper costs the digest fallback and not the fast path.
+      case "$changed_path" in
+        lua/*|docs/*|tests/*|ui/*|modules/*|skills/*|jobs/*|benchmarks/*|review/*|reviews/*|review-evidence/*|fixtures/*|vault/*|scripts/*)
+          case "$changed_path" in scripts/codemode*|scripts/build-*|scripts/provision-codemode*) printf '%s\n' "$changed_path" ;; esac ;;
+        */*) printf '%s\n' "$changed_path" ;;
+        *.md) ;;
+        *) printf '%s\n' "$changed_path" ;;
+      esac
+    fi
+  done)"
   INSTALLED_DIGEST="$("$INSTALLED_BIN" --capability-digest 2>/dev/null | tr -d '[:space:]')"
   if [ -n "$CHANGED" ] && [ -z "$(printf '%s' "$COMPILED" | tr -d '[:space:]')" ] && printf '%s' "$INSTALLED_DIGEST" | grep -qE '^[0-9a-f]{64}$'; then
     LUA_FAST=1
@@ -522,6 +542,11 @@ else
 PREBUILT_BINARIES=0
 BINARY_PROVENANCE="clean-built-by-deploy"
 BINARY_RELEASE=""
+# The commit the installed bytes are a build of, when that is not this tree's commit: a commit that
+# changes no compiled input is installed from the newest published release of the same compiled inputs
+# (scripts/lib/node-binaries.sh, wa_node_release_digest_search), so installed.txt must be able to name
+# both the release and its source commit beside this tree's own commit=. Empty means "this tree's".
+BINARY_SOURCE_COMMIT=""
 # The directory the manifest verified (and its triple), from the `binary_verified:` line below: the
 # sentinel install step reads the prebuilt supervisor back out of it. Empty on the build path.
 BINARY_DIR=""
@@ -547,6 +572,14 @@ else
     [ -n "$binary_line" ] || continue
     case "$binary_line" in
       binary_source:*) echo "deploy: $binary_line" ;;
+      binary_release:*)
+        # `<tag> <40-hex source commit>`: the bytes are a published release's build of a DIFFERENT commit
+        # than this tree's, which the digest fallback accepts because this commit changes no compiled
+        # input. Both facts are recorded; neither is inferred later.
+        BINARY_VERIFIED="${binary_line#binary_release: }"
+        BINARY_RELEASE="${BINARY_VERIFIED%% *}"
+        BINARY_SOURCE_COMMIT="${BINARY_VERIFIED##* }"
+        ;;
       binary_verified:*)
         # `<triple> <dir> <sha12>`, read by field so a directory with a space in it survives: the last
         # space separates the sha12, and what is to the left of it is the directory.
@@ -573,10 +606,12 @@ BINARY_LINES
         BINARY_PROVENANCE="prebuilt-source"
         BINARY_COMMIT="$(git rev-parse HEAD)"
         BINARY_RELEASE="$WA_DEPLOY_BINARY_SOURCE"
+        BINARY_SOURCE_COMMIT=""
       else
         BINARY_PROVENANCE="prebuilt-release"
         BINARY_COMMIT="$(git rev-parse HEAD)"
-        BINARY_RELEASE="$(wa_node_release_tag "$BINARY_COMMIT")"
+        BINARY_RELEASE="${BINARY_RELEASE:-$(wa_node_release_tag "$BINARY_COMMIT")}"
+        BINARY_SOURCE_COMMIT="${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}"
       fi
       # The supervisor comes from the SAME verified directory, and it must still be the bytes the manifest
       # pins. WHY (openclaw, 06/11, the first prebuilt deploy of 75ac2964): the node installed and the
@@ -587,8 +622,12 @@ BINARY_LINES
       # that step takes it from the directory the manifest verified, and re-reads the pin here rather than
       # trusting the fetch: a cache entry is a directory on disk like any other.
       SENTINEL_SOURCE=""
+      # Which commit's names the verified directory carries: the release's own when the bytes came from an
+      # older commit's release (BINARY_SOURCE_COMMIT), this tree's otherwise. A prebuilt directory names its
+      # files after the commit they were verified against, and that is the release's.
+      BINARY_ASSET_COMMIT="${BINARY_SOURCE_COMMIT:-$BINARY_COMMIT}"
       if [ -n "$BINARY_DIR" ] && command -v wa_node_sentinel_file >/dev/null 2>&1; then
-        if ! SENTINEL_SOURCE="$(wa_node_sentinel_file "$BINARY_DIR" "$BINARY_COMMIT" "$BINARY_TRIPLE" 2>&1)"; then
+        if ! SENTINEL_SOURCE="$(wa_node_sentinel_file "$BINARY_DIR" "$BINARY_ASSET_COMMIT" "$BINARY_TRIPLE" 2>&1)"; then
           fail "refused(prebuilt_sentinel_missing): $SENTINEL_SOURCE; nothing installed"
         fi
         # The cache entry is a download, not a staged file: the staging copy this deploy used to install was
@@ -596,11 +635,11 @@ BINARY_LINES
         # not an install, so set the bit here, on the same rule the staging step uses (best effort: a
         # filesystem without exec bits - a Windows mount - has nothing to set).
         chmod +x "$SENTINEL_SOURCE" 2>/dev/null || true
-        if SENTINEL_PIN="$(wa_node_sentinel_pin "$BINARY_DIR" "$BINARY_COMMIT" "$BINARY_TRIPLE" 2>/dev/null)"; then
+        if SENTINEL_PIN="$(wa_node_sentinel_pin "$BINARY_DIR" "$BINARY_ASSET_COMMIT" "$BINARY_TRIPLE" 2>/dev/null)"; then
           SENTINEL_SHA="$(wa_node_sha256 "$SENTINEL_SOURCE")" \
             || fail "refused(prebuilt_sentinel_unverifiable): no sha256sum or shasum here, so $SENTINEL_SOURCE cannot be checked against the manifest; nothing installed"
           [ "$SENTINEL_SHA" = "$SENTINEL_PIN" ] \
-            || fail "refused(prebuilt_sentinel_mismatch): $SENTINEL_SOURCE is $SENTINEL_SHA and the manifest pins $SENTINEL_PIN, so this is not the supervisor that belongs to $BINARY_COMMIT; nothing installed"
+            || fail "refused(prebuilt_sentinel_mismatch): $SENTINEL_SOURCE is $SENTINEL_SHA and the manifest pins $SENTINEL_PIN, so this is not the supervisor that belongs to $BINARY_ASSET_COMMIT; nothing installed"
           echo "deploy: the prebuilt sentinel is the manifest's pinned bytes ($SENTINEL_SHA)"
         else
           note "$BINARY_DIR carries no manifest row for $BINARY_TRIPLE (WA_DEPLOY_BINARY_SOURCE), so the prebuilt sentinel is installed on the node's own proof below and not on a pin"
@@ -611,8 +650,10 @@ BINARY_LINES
       echo "deploy: installing the published binary; the prove gate below runs on it, then upgrade.sh"
       ;;
     8)
-      # Nothing published for this commit/target (or this host has no published target). Building is the
-      # answer only if the disk can pay for a run: the same floor scripts/test.sh refuses below.
+      # Nothing published for this commit/target (or this host has no published target), and - since the
+      # resolver also asks whether the newest release of the same compiled inputs exists - nothing published
+      # matches this commit's compiled inputs either. Building is the answer only if the disk can pay for a
+      # run: the same floor scripts/test.sh refuses below.
       if command -v wa_node_disk_floor_ok >/dev/null 2>&1 && wa_node_disk_floor_ok "$ROOT"; then
         echo "deploy: no published binary for this commit; building this tree (disk floor ok)"
       else
@@ -1204,6 +1245,11 @@ record_installed() {
     prebuilt-*)
       if [ "${#record_commit}" != 40 ] || [ -n "$(printf '%s' "$record_commit" | tr -d '0123456789abcdef')" ]; then
         fail "installed.txt would record commit=$record_commit for a prebuilt install, which is not a 40-hex commit id; the record must name the id the manifest was verified against"
+      fi
+      # ...and the commit the BYTES are a build of, when that is another one (the digest fallback): it is
+      # the id a later fast-path deploy reads back as binary_commit=, so it is held to the same rule.
+      if [ -n "${BINARY_SOURCE_COMMIT:-}" ] && { [ "${#BINARY_SOURCE_COMMIT}" != 40 ] || [ -n "$(printf '%s' "$BINARY_SOURCE_COMMIT" | tr -d '0123456789abcdef')" ]; }; then
+        fail "installed.txt would record binary_source_commit=$BINARY_SOURCE_COMMIT, which is not a 40-hex commit id; the record must name the id the manifest's source_commit was verified against"
       fi ;;
   esac
   # `install_dir=` is the record's own statement of where it was written, and of which directory the machine
@@ -1218,8 +1264,13 @@ record_installed() {
   # hand-placed binary - and WHERE the build ran is a separate fact, because a reader that conflates the
   # two would have to guess, and a node that installs a published binary must be able to say so.
   if [ -n "${BINARY_RELEASE:-}" ]; then
-    printf 'binary_source=%s\nbinary_release=%s\nbinary_commit=%s\n' \
-      "${BINARY_PROVENANCE:-prebuilt-release}" "$BINARY_RELEASE" "${BINARY_COMMIT:-$COMMIT}" >> "$record_tmp" \
+    # binary_commit= keeps its meaning for its existing readers (the Lua fast path reads it back as the
+    # commit whose build the installed binary is): the bytes' own commit. binary_source_commit= is the same
+    # fact under the name a digest-fallback install needs - the release's source commit, which differs from
+    # this tree's commit= exactly when the install reused an older commit's compiled inputs.
+    printf 'binary_source=%s\nbinary_release=%s\nbinary_commit=%s\nbinary_source_commit=%s\n' \
+      "${BINARY_PROVENANCE:-prebuilt-release}" "$BINARY_RELEASE" \
+      "${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}" "${BINARY_SOURCE_COMMIT:-${BINARY_COMMIT:-$COMMIT}}" >> "$record_tmp" \
       || fail "node installed, but the binary source lines could not be written"
   fi
   # Appended as its own line, only when this commit is a release: a command substitution would strip the

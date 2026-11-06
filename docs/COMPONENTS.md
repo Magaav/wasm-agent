@@ -95,10 +95,32 @@ build and is refused.
 release tag   node-<first 12 hex of the source commit>
 pins          node-<sha12>.manifest
                 schema=wasm-agent-node-binaries/1, source_commit=<40 hex>, source_tree=, rustc_version=,
-                zig_version=, glibc_floor=2.31, codemode=embedded|empty, built_utc=
+                zig_version=, glibc_floor=2.31, codemode=embedded|empty, built_utc=,
+                compiled_inputs=<sha256>
                 <triple> <wa sha256> <wa bytes> <wa-sentinel sha256> <wa-sentinel bytes>
 payload       wa-<triple>-<sha12>, wa-sentinel-<triple>-<sha12>
 ```
+
+**`compiled_inputs` - why a docs-only commit needs no release of its own.** The tag names a commit, so
+any later commit had no release at all, and a node whose disk cannot pay for a rebuild (openclaw) had no
+path: a README fix would leave it unable to deploy. But a commit that changes no *compiled* input does
+not need a new binary. The manifest therefore records a digest - sha256 over the sorted `<path> <blob
+sha>` lines of every compiled-input path in that commit's tree, prefixed with
+`wasm-agent-compiled-inputs/1` - and a deploy accepts **the newest published `node-*` release whose
+digest matches its own commit's**, even though that release's `source_commit` differs. The exact
+commit's release is always preferred when it exists; a refusal is still never a fallback; and the
+bytes are verified against the manifest they came with exactly as before.
+
+Which paths are compiled inputs is **one definition**, `wa_compiled_input` in
+`scripts/lib/node-binaries.sh`, used by both halves: `deploy.sh`'s Lua fast path asks it about the paths
+that changed, the digest asks it about every path in a tree. So "this change needs no new binary" and
+"that release IS this commit's build" cannot disagree about the same file. Today it is `rust/`, `wit/`,
+the Cargo and lock files, `config/`, and the scripts that build the binary (`scripts/codemode*`,
+`scripts/build-*`, `scripts/provision-codemode*`); *not* `lua/` (the tree the binary loads from disk and
+pins by capability digest), `docs/`, `tests/`, `ui/`, `modules/`, `skills/`, `jobs/`, `benchmarks/`,
+`reviews/`, `review-evidence/`, `fixtures/`, `vault/`, other `scripts/`, or a top-level `<name>.md`. A
+`.md` *inside* a compiled directory (`rust/README.md`) is still an input. Bumping the digest's schema
+string is how a change to that classification invalidates old manifests instead of silently re-matching.
 
 **Why.** `deploy.sh` ends in `cargo build` of `wa` and `wa-sentinel`. That is fine on a 16-thread
 machine with a warm cache. openclaw (Ubuntu arm64, 2 cores, disk 99% full) needed the wasmtime 50
@@ -155,7 +177,14 @@ every candidate is verified against the manifest (sha256 **and** size, plus the 
 2. this node's cache, `<install>/node-binaries/<sha12>/<triple>` (a previous deploy's download; the
    `.complete` marker is written last, so an interrupted fetch leaves nothing usable);
 3. the release: `gh release download node-<sha12> -R <owner/repo>` when `gh` is present, else the
-   public asset URL. The manifest is fetched first, because it is the release's identity.
+   public asset URL. The manifest is fetched first, because it is the release's identity;
+4. only when 3 answers "nothing usable is published for this commit and this target": the **digest
+   fallback** - the newest `node-*` release (the last `WA_NODE_RELEASE_SEARCH`, default 20, from
+   `gh api` or the public API) whose `compiled_inputs=` equals this commit's digest. Its bytes are
+   cached under *its* source commit, and a later deploy of the same commit answers from that cache even
+   when the release is gone. A manifest with no `compiled_inputs=` row (an artifact published before
+   this existed), a different digest, or no row for this triple is *skipped*, not refused - none of
+   those is a statement about this commit; once the digest matches, everything the manifest says is.
 
 | knob | effect |
 | --- | --- |
@@ -167,22 +196,31 @@ every candidate is verified against the manifest (sha256 **and** size, plus the 
 | `WA_NODE_BINARIES_CACHE=<dir>` | cache location; default `<install>/node-binaries` |
 | `WA_NODE_TARGET=<triple>` | name the triple instead of detecting it |
 | `WA_NODE_DISK_FLOOR_BYTES=<n>` | the floor the fallback-to-build is measured against |
+| `WA_NODE_RELEASE_SEARCH=<n>` | how many of the newest releases the digest fallback looks at; default 20 |
 
 A refusal is never a fallback. `node_hash_mismatch`, `node_size_mismatch`, `node_machine_mismatch`,
 `node_manifest_commit_mismatch`, `node_binary_missing` (a manifest that pins a target the release does
 not carry) and `node_codemode_empty` stop the deploy. Only "nothing is published for this commit and
 this target" (`node_release_unavailable`, `node_target_unpublished`) falls through to the build - and
 only when the disk can pay for one: below the floor the deploy refuses with
-`refused(no_prebuilt_binary_and_disk_floor)` and names both paths (`scripts/check-disk-floor.sh`).
+`refused(no_prebuilt_binary_and_disk_floor)` and names both paths (`scripts/check-disk-floor.sh`). A
+release whose manifest *matches* the digest is a statement about the bytes this deploy would install, so
+from that point on every one of those refusals applies to it unchanged (a tampered, mis-sized,
+wrong-machine or empty-code-mode matching release stops the deploy; it is not skipped in favour of the
+next candidate).
 
 What the deploy still does with a published binary: it stages the Lua tree against it, checks its
 capability digest, proves a graph call through the staged component, proves the embedded runtime, and
 answers `/health` on a scratch port - then `upgrade.sh` installs it and rolls back if the restart fails.
 `installed.txt` keeps `source_provenance=clean-built-by-deploy` (the bytes are a clean build of exactly
 this commit and this deploy verified them) and adds `binary_source=prebuilt-release|
-prebuilt-source`, `binary_release=node-<sha12>` and `binary_commit=<40 hex>`, so "where did this node's
-binary come from" is a record and not a guess. Its `commit=` is the release's **40-hex** commit id (the
-id the manifest's `source_commit` was checked against), not the short id a build records.
+prebuilt-source`, `binary_release=node-<sha12>`, `binary_commit=<40 hex>` and
+`binary_source_commit=<40 hex>`, so "where did this node's binary come from" is a record and not a
+guess. Its `commit=` is the release's **40-hex** commit id (the id the manifest's `source_commit` was
+checked against), not the short id a build records. For a digest-fallback install the two ids differ and
+both are recorded: `commit=` is the commit whose tree was installed (the Lua tree the node runs, always
+the tree the deploy holds) and `binary_commit=`/`binary_source_commit=` is the commit whose build the
+bytes are - the id a later fast-path deploy reads back as the binary's commit.
 
 The supervisor is part of the same install, and a prebuilt deploy installs the prebuilt one. The release
 carries `wa-sentinel-<triple>-<sha12>` beside `wa-<triple>-<sha12>`; the sentinel install step takes it
@@ -207,7 +245,12 @@ prebuilt install must never reach the toolchain check or the build), and two blo
 bytes and hands the sentinel step the verified supervisor) and the sentinel install step itself
 (prebuilt supervisor installed with the staging directory already removed, the build path's own artifact
 installed unchanged, the unpinned operator directory, a swapped cached supervisor refused by name) -
-plus the install record step for a prebuilt install. So a change there cannot pass by never running.
+plus the install record step for a prebuilt install. The digest fallback is proved the same way: a real
+git fixture whose docs-only and Lua-only commits digest the same while a rust change does not, an exact
+release preferred over a matching older one, the newest match winning, the search bound, a rust change
+falling back to the build (and refusing by name below the disk floor), a manifest with no digest skipped,
+a matching-but-tampered release refused, and a docs-only HEAD installed end to end through the block
+read out of `deploy.sh`. So a change there cannot pass by never running.
 
 
 **Does this node run a newer release?** `lua/core/update_banner.lua` answers with the same release

@@ -9,6 +9,11 @@
 #   release tag   node-<first 12 hex of the source commit>
 #   pins          node-<sha12>.manifest - source_commit, the build's identity, one row per triple:
 #                 <triple> <wa sha256> <wa bytes> <wa-sentinel sha256> <wa-sentinel bytes>
+#                 plus compiled_inputs=<sha256>: the digest of the paths this binary is compiled from
+#                 (rust/, wit/, Cargo files, code-mode build inputs; the ONE classification lives in
+#                 scripts/lib/node-binaries.sh's wa_compiled_input). A deploy of a later commit whose
+#                 compiled inputs hash to the same digest installs THIS release instead of compiling -
+#                 a docs-only commit needs no binary of its own.
 #   payload       wa-<triple>-<sha12>, wa-sentinel-<triple>-<sha12>
 #
 # The node asks for the release its OWN commit names, checks the manifest's source_commit against its
@@ -138,6 +143,7 @@ if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
   say "would build $COMMIT for: $MANIFEST_TRIPLES"
   say "with: cargo zigbuild --release --offline --locked -p wa-host --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
   say "code-mode assets: $CODEMODE${ASSETS:+ ($ASSETS)}${ASSETS_WHY:+ - $ASSETS_WHY}"
+  say "compiled inputs: $(wa_compiled_inputs_digest "$ROOT" "$COMMIT" 2>&1) (a later commit with this digest installs this release)"
   say "release tag: $TAG   (repo $REPO_SLUG)${LOCAL:+ [--local: not publishable]}"
   say "would write $OUT/node-$SHORT.manifest and: $(asset_list)"
   say "would print (not run) the gh release command; nothing was built"
@@ -148,13 +154,19 @@ mkdir -p "$OUT" || fail "bundle_unwritable: $OUT"
 
 # ---- the artifact set, from a build here or from --from --------------------------------------------
 emit_manifest() { # <out dir> -> manifest path, after every member is checked
-  local dir="$1" triple manifest tmp
+  local dir="$1" triple manifest tmp digest
   manifest="$dir/node-$SHORT.manifest"
   tmp="$dir/.node-$SHORT.manifest.$$"
+  # The compiled-inputs digest is a fact about the COMMIT, not about this machine's build, so it is read
+  # out of the commit's tree here and refused by name when it cannot be: a release with no digest is a
+  # release a docs-only descendant cannot use, which is the whole reason the row exists.
+  digest="$(wa_compiled_inputs_digest "$ROOT" "$COMMIT")" || fail "compiled_inputs_unavailable: cannot digest the compiled inputs of $COMMIT" 2
+  [ -n "$digest" ] || fail "compiled_inputs_unavailable: no sha256 tool for the compiled-inputs digest" 7
   {
     echo 'schema=wasm-agent-node-binaries/1'
     echo "source_commit=$COMMIT"
     echo "source_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null || echo unknown)"
+    echo "compiled_inputs=$digest"
     echo "rustc_version=$(rustc --version 2>/dev/null | sed 's/^rustc //')"
     echo "zig_version=$(zig version 2>/dev/null || echo unknown)"
     echo "glibc_floor=$GLIBC_FLOOR"
@@ -190,6 +202,24 @@ if [ -n "$FROM" ]; then
   fi
   cp -f "$FROM/node-$SHORT.manifest" "$OUT/.node-$SHORT.manifest.$$" && mv -f "$OUT/.node-$SHORT.manifest.$$" "$OUT/node-$SHORT.manifest" \
     || fail "bundle_unwritable: $OUT" 2
+  # The compiled-inputs row is a fact about $COMMIT, so it is RECOMPUTED here rather than trusted: the
+  # machine that built the artifact had the same commit, so the answer must be the same, and a manifest
+  # that disagrees is refused - a release whose digest is another tree's would be installed by every
+  # docs-only descendant of a commit it is not the build of. An artifact published before this row
+  # existed is given one here; nothing else about it changes.
+  DIGEST="$(wa_compiled_inputs_digest "$ROOT" "$COMMIT")" || fail "compiled_inputs_unavailable: cannot digest the compiled inputs of $COMMIT" 2
+  INCOMING="$(wa_node_manifest_value "$OUT/node-$SHORT.manifest" compiled_inputs)"
+  if [ -n "$INCOMING" ] && [ "$INCOMING" != "$DIGEST" ]; then
+    fail "compiled_inputs_mismatch: $FROM's manifest records compiled_inputs=$INCOMING and $COMMIT's tree is $DIGEST, so that manifest is not this commit's" 5
+  fi
+  awk -v d="$DIGEST" '
+    /^compiled_inputs=/ {next}
+    {print}
+    /^source_tree=/ {print "compiled_inputs=" d; done = 1}
+    END {if (!done) print "compiled_inputs=" d}
+  ' "$OUT/node-$SHORT.manifest" > "$OUT/.node-$SHORT.manifest.$$.tmp" \
+    && mv -f "$OUT/.node-$SHORT.manifest.$$.tmp" "$OUT/node-$SHORT.manifest" \
+    || fail "manifest_unwritable: $OUT/node-$SHORT.manifest" 2
   for triple in $MANIFEST_TRIPLES; do
     for name in "wa-$triple-$SHORT" "wa-sentinel-$triple-$SHORT"; do
       [ -f "$FROM/$name" ] || fail "binary_missing: $FROM/$name" 2
@@ -207,7 +237,7 @@ if [ -n "$FROM" ]; then
       [ "$(wc -c < "$OUT/$name" | tr -d '[:space:]')" = "$want_bytes" ] || fail "artifact_not_pinned: $name is not $want_bytes bytes" 6
     done
   done
-  say "verified $FROM against its own manifest (source_commit $COMMIT)"
+  say "verified $FROM against its own manifest (source_commit $COMMIT, compiled_inputs $DIGEST)"
 else
   # ---- build ---------------------------------------------------------------------------------------
   command -v cargo >/dev/null 2>&1 || fail 'cargo_missing: the build half needs cargo'
