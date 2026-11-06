@@ -32,14 +32,30 @@ function M.cwd() return M.info().cwd or "." end
 -- `os.time` of a broken-down local time is that instant, while `os.time` of the same fields read as
 -- UTC is the instant shifted by the offset, so the difference is the offset. The fallback is written
 -- out because "no offset" must not silently read as "UTC" - that is the defect this answers.
+--
+-- Which is why the reading goes through the host first: the C runtime of a wasm guest is wasi-libc,
+-- which has no zone database at all, so `os.date` there is UTC however the node is configured
+-- (`host.local_tz`, docs/KERNEL.md "the node's own zone"). Native, with no such call, still reads the
+-- runtime directly and answers exactly what it always answered.
 local function offset_text(minutes)
   local sign = minutes < 0 and "-" or "+"
   minutes = math.abs(minutes)
   return string.format("%s%02d:%02d", sign, math.floor(minutes / 60), minutes % 60)
 end
 
-function M.local_clock(epoch)
-  local stamp = math.floor(tonumber(epoch) or os.time())
+-- The C runtime's own answer for `stamp`: the offset, its text, and the zone abbreviation `%Z` names.
+--
+-- It is one function because two callers need it and they must agree. `local_clock` calls it when the
+-- host cannot answer (the native interpreter, whose C runtime is the OS's), and the *kernel* calls it
+-- on that same native interpreter to answer a guest's `host.local_tz` - a guest's C runtime is
+-- wasi-libc, which has no zone database, so `os.date` inside the component core is UTC whatever the
+-- node's zone is (docs/KERNEL.md, "the node's own zone"). Two implementations of "the local offset"
+-- would agree almost always; "almost" is not a property a timestamp quoted to a user can have.
+--
+-- `zone` is nil, not "", when the C runtime does not name its zone (WASI's libc has no zone at all,
+-- and a `strftime` without `%Z` answers nothing): that is an absence to report, never a name to invent.
+function M.runtime_clock(stamp)
+  stamp = math.floor(tonumber(stamp) or os.time())
   local offset = tostring(os.date("%z", stamp) or "")
   local zone = tostring(os.date("%Z", stamp) or "")
   local minutes
@@ -49,15 +65,68 @@ function M.local_clock(epoch)
   else
     local local_t, utc_t = os.date("*t", stamp), os.date("!*t", stamp)
     minutes = math.floor((os.time(local_t) - os.time(utc_t)) / 60 + 0.5)
-    offset = offset_text(minutes)
   end
   return {
     epoch = stamp,
-    local_iso = os.date("%Y-%m-%dT%H:%M:%S", stamp) .. offset_text(minutes),
-    utc_iso = os.date("!%Y-%m-%dT%H:%M:%SZ", stamp),
     utc_offset_minutes = minutes,
     utc_offset = offset_text(minutes),
     zone = zone ~= "" and zone or nil,
+  }
+end
+
+-- The node's zone as the *host* answers it, or nil when this host has no such call.
+--
+-- A native run has no `host.local_tz` (the capability list is the native registry's, and the node's
+-- C runtime already knows the zone), so it keeps reading the runtime directly: nothing about the
+-- native clock changes. The guest gets the offset, the abbreviation *and* the OS's own identifier for
+-- the zone (`zone_id`: `America/Sao_Paulo`, `E. South America Standard Time`) with the word saying
+-- where that came from (`zone_source`), which the native interpreter has no way to read.
+--
+-- Deliberately not wrapped in `pcall`: a host that has the call and cannot answer it must fail loudly,
+-- because silently falling back to the guest's own UTC `os.date` is exactly the +00:00 this answers.
+local function host_clock(stamp)
+  if type(host.local_tz) ~= "function" then return nil end
+  local answer = host.local_tz(stamp)
+  local minutes = type(answer) == "table" and tonumber(answer.utc_offset_minutes) or nil
+  if not minutes then return nil end
+  return {
+    epoch = stamp,
+    utc_offset_minutes = minutes,
+    utc_offset = offset_text(minutes),
+    zone = answer.zone,
+    zone_id = answer.zone_id,
+    zone_source = answer.zone_source,
+  }
+end
+
+function M.local_clock(epoch)
+  local stamp = math.floor(tonumber(epoch) or os.time())
+  local clock = host_clock(stamp)
+  if clock then
+    -- The guest's own `os.date` is UTC, so the local wall clock is the UTC fields of the instant the
+    -- node's offset puts it at. The offset was asked for *this* stamp, so a DST change mid-session is
+    -- a different answer rather than the same stale one.
+    local shifted = stamp + clock.utc_offset_minutes * 60
+    return {
+      epoch = stamp,
+      local_iso = os.date("!%Y-%m-%dT%H:%M:%S", shifted) .. clock.utc_offset,
+      utc_iso = os.date("!%Y-%m-%dT%H:%M:%SZ", stamp),
+      utc_offset_minutes = clock.utc_offset_minutes,
+      utc_offset = clock.utc_offset,
+      zone = clock.zone,
+      zone_id = clock.zone_id,
+      zone_source = clock.zone_source,
+      weekday = os.date("%A", shifted),
+    }
+  end
+  local fields = M.runtime_clock(stamp)
+  return {
+    epoch = stamp,
+    local_iso = os.date("%Y-%m-%dT%H:%M:%S", stamp) .. fields.utc_offset,
+    utc_iso = os.date("!%Y-%m-%dT%H:%M:%SZ", stamp),
+    utc_offset_minutes = fields.utc_offset_minutes,
+    utc_offset = fields.utc_offset,
+    zone = fields.zone,
     weekday = os.date("%A", stamp),
   }
 end
@@ -104,8 +173,11 @@ function M.describe()
     hint = "shell commands run through " .. shell
   end
   local clock = M.local_clock()
+  -- The zone's *name* when the platform has one, else the OS's identifier for the zone (a guest gets
+  -- it from the host, a native run has only the abbreviation), else say it is unknown rather than
+  -- leaving the model to assume UTC.
   return string.format("%s (%s); %s; local time %s (%s)", info.os, info.arch, hint,
-    clock.utc_offset, clock.zone or "zone name unknown")
+    clock.utc_offset, clock.zone or clock.zone_id or "zone name unknown")
 end
 
 function M.shell_name()

@@ -35,6 +35,10 @@ wa-whatsapp-index = { path = "../wa-whatsapp-index" }
 # the transport. The node mounts its listener from `serve::run` behind `WA_MESH=1`, so this crate is
 # the only edge that names it.
 wa-mesh = { path = "../wa-mesh" }
+# The zone the node's OS is in, by the identifier the OS itself uses (`core_component.rs`'s
+# `host.local_tz`): the one part of the node's clock a guest cannot read for itself. A leaf with no
+# dependencies; the offset it reports comes from the C runtime, not from here (docs/KERNEL.md).
+wa-local-tz = { path = "../wa-local-tz" }
 anyhow = "1"
 base64 = "0.23"
 ring = "0.17"

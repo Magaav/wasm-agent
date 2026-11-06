@@ -14,15 +14,28 @@ assert(type(clock.local_iso) == 'string' and
   'local_iso must carry a numeric offset, got ' .. tostring(clock.local_iso))
 assert(type(clock.utc_iso) == 'string' and clock.utc_iso:match('Z$'),
   'utc_iso must be UTC and labelled so')
-assert(clock.local_iso:sub(1, 19) == os.date('%Y-%m-%dT%H:%M:%S', clock.epoch),
-  'local fields disagree with os.date for the same instant')
 
--- %z is the C runtime's own answer; when the platform provides it, it is the authority.
-local z = os.date('%z', clock.epoch)
-if type(z) == 'string' and z:match('^[+-]%d%d%d%d$') then
-  local want = (z:sub(1, 1) == '-' and -1 or 1) * (tonumber(z:sub(2, 3)) * 60 + tonumber(z:sub(4, 5)))
-  assert(clock.utc_offset_minutes == want,
-    string.format('offset %d disagrees with %%z %s', clock.utc_offset_minutes, z))
+-- The local fields are the same instant in the offset the clock reports. Which authority that offset
+-- comes from is the one thing the two cores differ in: a native run reads the C runtime (`%z`, whose
+-- localtime is the OS zone), a guest reads the host (`host.local_tz`) because its own C runtime is
+-- wasi-libc, whose zone is always UTC - measured inside the component: `%z` is `+0000`, `%Z` is
+-- `UTC`, for an instant the node is in `-03:00`. Both branches are asserted, so neither can drift
+-- silently, and the guest's `os.date` is never mistaken for the node's clock.
+assert(clock.local_iso:sub(1, 19) == os.date('!%Y-%m-%dT%H:%M:%S', clock.epoch + clock.utc_offset_minutes * 60),
+  'local fields must be the instant in the reported offset: ' .. clock.local_iso)
+
+if type(host.local_tz) == 'function' then
+  -- The component core: the host's answer for this instant is the offset the clock used.
+  assert(tonumber(host.local_tz(clock.epoch).utc_offset_minutes) == clock.utc_offset_minutes,
+    'the clock must use the offset the host answered')
+else
+  -- The native core: %z is the C runtime's own answer, and here it is the authority.
+  local z = os.date('%z', clock.epoch)
+  if type(z) == 'string' and z:match('^[+-]%d%d%d%d$') then
+    local want = (z:sub(1, 1) == '-' and -1 or 1) * (tonumber(z:sub(2, 3)) * 60 + tonumber(z:sub(4, 5)))
+    assert(clock.utc_offset_minutes == want,
+      string.format('offset %d disagrees with %%z %s', clock.utc_offset_minutes, z))
+  end
 end
 
 -- The environment line the model reads names the zone numerically, so it never has to guess.

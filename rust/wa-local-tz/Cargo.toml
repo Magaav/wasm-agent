@@ -1,0 +1,15 @@
+[package]
+name = "wa-local-tz"
+version = "0.1.0"
+edition = "2021"
+
+# Which time zone this node's OS is in, and where that answer was read from (docs/KERNEL.md, "the
+# node's own zone"). A leaf crate with nothing but `std`: it reads `TZ`, `/etc/localtime`,
+# `/etc/timezone` and the Windows dynamic time zone, and it answers the *identifier* only - the
+# numeric offset and the abbreviation are the C runtime's, read through the host's own interpreter,
+# so a native `wa` run and a guest run report the same instant (lua/core/platform.lua).
+#
+# No dependencies on purpose. The Windows API surface is two structs and one function, declared as
+# raw `extern "system"` bindings in `src/lib.rs`: a dependency there would be a build-script-driven
+# feature list for three definitions.
+[dependencies]

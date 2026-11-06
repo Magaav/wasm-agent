@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_int};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, ResourceLimiter, Store};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -81,6 +81,49 @@ pub const STREAM_HTTP_SSE: &str = "http_sse";
 /// so the marker is what keeps the native argument positions (and therefore every refusal's order
 /// and text) intact.
 const SSE_ARGS: usize = 6;
+
+/// The names the **kernel itself** answers, before the capability registry is consulted.
+///
+/// They are about the node, not about a capability: there is no native `host.*` C function to forward
+/// them to, so unlike every other name in the bridge they cannot come from `capabilities::REGISTRY`.
+/// They cross the same import with the same value shapes, and `__names` lists them so the guest's
+/// `if host.local_tz then` reads the truth for this kernel.
+///
+/// * `local_tz` - the node's own time zone for an instant ([`State::local_tz`]). It is the one thing a
+///   guest cannot work out for itself: wasi-libc has no zone database, so `os.date` in the component
+///   is UTC while the node it serves is not.
+pub const KERNEL_CALLS: &[&str] = &["local_tz"];
+
+/// The chunk name the guest's own errors report for [`LOCAL_TZ_LUA`].
+const LOCAL_TZ_NAME: &str = "local_tz";
+
+/// The host's answer for `local_tz`: the node's zone as the **C runtime** reads it, through the same
+/// `lua/core/platform.lua` function the native core calls (`runtime_clock`).
+///
+/// That identity is the whole design. Two implementations of "the local offset" would agree almost
+/// always, and "almost" is what an agent quoting a log line cannot afford; one function on one C
+/// runtime (`tzset`, `localtime`, DST rules included) makes the native and the guest answer the same
+/// instant the same way by construction. The offset is therefore not in `wa-local-tz`: that crate
+/// answers the zone's *name*, which the C runtime cannot portably name.
+///
+/// The interpreter caches the module in a global of its own (`__wa_runtime_clock`), so run N of a
+/// pooled instance does not re-read the Lua tree to ask the clock. The result is a flat table of
+/// strings: the shape the bridge carries (`Value::StringMap`), and one `status`-style line per field
+/// in the guest's answer.
+const LOCAL_TZ_LUA: &str = r#"
+local runtime = __wa_runtime_clock
+if not runtime then
+  runtime = dofile('lua/core/platform.lua').runtime_clock
+  __wa_runtime_clock = runtime
+end
+local fields = runtime(tonumber(...) or os.time())
+local out = {
+  utc_offset_minutes = tostring(fields.utc_offset_minutes),
+  utc_offset = tostring(fields.utc_offset),
+}
+if fields.zone then out.zone = tostring(fields.zone) end
+return out
+"#;
 
 /// The native interpreter that answers the guest's calls. A raw `lua_State` is not `Send`; this
 /// one is created, used and dropped on the thread that runs the component (wasmtime's sync API
@@ -413,6 +456,77 @@ impl State {
         }
     }
 
+    /// `host.local_tz(epoch?)` - the node's own time zone for that instant, one of [`KERNEL_CALLS`].
+    ///
+    /// Two halves, and the split is the point:
+    ///
+    /// * the **offset** and the **abbreviation** are the C runtime's, read by running
+    ///   `lua/core/platform.lua`'s `runtime_clock` in this instance's *native* interpreter - the same
+    ///   function, the same `tzset` and the same DST rules the native core answers with, so a native
+    ///   run and a guest run cannot disagree about an instant;
+    /// * the **identifier** of the zone (`America/Sao_Paulo`, `E. South America Standard Time`) comes
+    ///   from `wa-local-tz`, because the C runtime has no portable way to name its zone and the guest
+    ///   can read neither `TZ` nor `/etc/localtime`.
+    ///
+    /// Answered per call, never cached: an offset read once and reused is exactly the stale answer a
+    /// DST change produces. The conversation around it is `lua/core/platform.lua`; the guest gets a
+    /// flat table of strings (`utc_offset_minutes`, `utc_offset`, `zone` when the platform names one,
+    /// `zone_id` and `zone_source` when the OS names one, `epoch`), which is what `Value::StringMap`
+    /// is for. A failure is an error and never a silent `+00:00`: that silence was the defect.
+    fn local_tz(&mut self, args: &[Value]) -> Result<Vec<Value>, String> {
+        let epoch = match args.first() {
+            None | Some(Value::Nil) => now_epoch(),
+            Some(Value::Integer(seconds)) => *seconds,
+            Some(Value::Number(seconds)) if seconds.is_finite() => *seconds as i64,
+            Some(Value::Bytes(bytes)) => String::from_utf8_lossy(bytes)
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| "local_tz_invalid_epoch: the epoch must be a whole number of seconds".to_string())?,
+            Some(_) => return Err("local_tz_invalid_epoch: the epoch must be a whole number of seconds".to_string()),
+        };
+        let mut answer = self.runtime_clock(epoch)?;
+        let zone = wa_local_tz::zone_id(crate::host::resolved_env("TZ").as_deref());
+        if let Some(id) = zone.id {
+            answer.push(("zone_id".to_string(), id.into_bytes()));
+        }
+        answer.push(("zone_source".to_string(), zone.source.as_bytes().to_vec()));
+        answer.push(("epoch".to_string(), epoch.to_string().into_bytes()));
+        Ok(vec![Value::StringMap(answer)])
+    }
+
+    /// The C runtime's answer for `epoch`, from the instance's native interpreter ([`LOCAL_TZ_LUA`]).
+    fn runtime_clock(&mut self, epoch: i64) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let l = self.native.0.l;
+        unsafe {
+            let base = lua_gettop(l);
+            let name = wa_host_support::lua::cstr(LOCAL_TZ_NAME);
+            let loaded = wa_host_support::lua::luaL_loadbufferx(
+                l,
+                LOCAL_TZ_LUA.as_ptr() as *const c_char,
+                LOCAL_TZ_LUA.len(),
+                name.as_ptr(),
+                std::ptr::null(),
+            );
+            if loaded != LUA_OK {
+                let message = bytes_at(l, -1).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|| "lua error".to_string());
+                lua_settop(l, base);
+                return Err(format!("local_tz_failed: {message}"));
+            }
+            // The chunk reads its argument as `...`, the way a vararg chunk does.
+            lua_pushinteger(l, epoch);
+            if lua_pcallk(l, 1, 1, 0, 0, std::ptr::null_mut()) != LUA_OK {
+                // A guest asking the clock must learn that the clock failed, with the interpreter's own
+                // words: an empty or UTC-looking answer would be the same silent guess as before.
+                let message = bytes_at(l, -1).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|| "lua error".to_string());
+                lua_settop(l, base);
+                return Err(format!("local_tz_failed: {message}"));
+            }
+            let answer = string_map(l, lua_gettop(l));
+            lua_settop(l, base);
+            answer.ok_or_else(|| "local_tz_failed: the runtime clock did not answer a flat table of strings".to_string())
+        }
+    }
+
     /// The stream form of `name`: start the native capability's reader and keep the channels that
     /// make it pullable. The handle is opaque to the guest and never reused.
     fn open(&mut self, name: String, args: Vec<Value>) -> Result<u64, String> {
@@ -483,7 +597,11 @@ impl wa::kernel::host::Host for State {
         match name.as_str() {
             // The guest's boot: which names `host.*` resolves, the shipping Lua modules, the script.
             "__names" => {
-                let names: Vec<&str> = crate::capabilities::REGISTRY.iter().map(|c| c.name).collect();
+                let mut names: Vec<&str> = crate::capabilities::REGISTRY.iter().map(|c| c.name).collect();
+                // The kernel's own calls cross the same import but have no registry entry (see
+                // `KERNEL_CALLS`); a guest resolves `host.<name>` from this list, so leaving them out
+                // would make `host.local_tz` read as absent in a kernel that answers it.
+                names.extend_from_slice(KERNEL_CALLS);
                 Ok(vec![Value::Bytes(names.join("\n").into_bytes())])
             }
             "__embedded" => Ok(self.embedded(&first())),
@@ -496,6 +614,9 @@ impl wa::kernel::host::Host for State {
                 }
                 std::fs::read(&path).map(|b| vec![Value::Bytes(b)]).map_err(|e| format!("read {path}: {e}"))
             }
+            // The node's own time zone, answered here rather than forwarded to a capability: there is
+            // no native `host.*` function for it, and the guest cannot read the OS's zone config.
+            "local_tz" => self.local_tz(&args),
             _ if INPUT_REFUSED.contains(&name.as_str()) => Err(format!(
                 "unsupported_in_component_v1:{name} (the interactive console reader belongs to the CLI; a \
                  --core-component run has no editor to read into)"
@@ -539,6 +660,13 @@ impl wa::kernel::log::Host for State {
 
 fn ms(since: Instant) -> f64 {
     since.elapsed().as_secs_f64() * 1000.0
+}
+
+/// The instant the host reads when a guest asks the clock without naming one. Only the *instant* comes
+/// from here; its zone is the C runtime's answer, like every other `local_tz` field. A clock before the
+/// epoch is not a state this node can be in, so the fallback is `0` rather than a panic in a turn.
+fn now_epoch() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_secs() as i64).unwrap_or(0)
 }
 
 /// Compiled code for `bytes`, from the cache when this engine has compiled them before.
@@ -1249,6 +1377,7 @@ impl Drop for CoreInstance<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use wa::kernel::host::Host as _;
 
     /// The native interpreter a `--core-component` run boots: the same registry on a plain state,
@@ -1403,6 +1532,21 @@ mod tests {
         HEAVY.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// The modules the clock tests (and the pool, once, for them) need inside a state: the checkout's
+    /// `lua/core/platform.lua` and the JSON module it loads, keyed the way `dofile` asks for them. Read
+    /// from the checkout, not embedded in the binary, so the files the gate runs are the files tested.
+    fn clock_modules() -> Vec<(String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        ["lua/core/platform.lua", "lua/vendor/json.lua"]
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                ((*name).to_string(), source)
+            })
+            .collect()
+    }
+
     /// The pool a test uses: the real component, a native interpreter per instance (the shipping
     /// boot's shape: registry + own connection + `EMBEDDED`), one slot unless a test says otherwise.
     fn pool(max_instances: usize, warm: usize, acquire_timeout: Duration) -> Option<CoreComponentPool> {
@@ -1413,8 +1557,11 @@ mod tests {
         let home = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
         let home = format!("{home}/wa-core-pool-test-home");
         let _ = std::fs::create_dir_all(&home);
+        let clock = clock_modules();
         let factory: NativeFactory = Arc::new(move || {
-            boot_native_state(&home, ":memory:", &[], &[("bench/pool-fixture-module.lua", FIXTURE_MODULE)]).expect("boot the native state")
+            let mut embedded: Vec<(&str, &str)> = vec![("bench/pool-fixture-module.lua", FIXTURE_MODULE)];
+            embedded.extend(clock.iter().map(|(key, source)| (key.as_str(), source.as_str())));
+            boot_native_state(&home, ":memory:", &[], &embedded).expect("boot the native state")
         });
         let config = CorePoolConfig { max_instances, warm, acquire_timeout, ..CorePoolConfig::default() };
         Some(CoreComponentPool::new(factory, &wasm, config).expect("the pool builds"))
@@ -1547,5 +1694,153 @@ mod tests {
         let script = fixture("fresh-state.lua");
         assert_eq!(lease.run_script(Script::source("fresh-state.lua", &script), &[]).expect("run").code, 0);
         assert_eq!(pool.stats().reuses, 1);
+    }
+
+    // ---- the node's own zone -------------------------------------------------------------------
+    //
+    // `host.local_tz` is a kernel call, not a capability: the guest's C runtime is wasi-libc, which
+    // ships no zone database, so the offset has to come from the node. The tests below fix the two
+    // properties that matter - the guest sees the call, and the same instant reads identically on
+    // both cores - and the offset's *value* is the same C runtime function the native core calls, so
+    // there is nothing to compare against a second implementation.
+
+    /// The instant both cores are asked about: 2026-01-15T12:00:00Z, fixed so two runs compare equal.
+    const CLOCK_EPOCH: i64 = 1_768_478_400;
+
+    /// One line of the fields a caller reads, formatted identically on both sides so a diff is the
+    /// answer. `zone` is `none` when the platform does not name it, which is a fact about the machine
+    /// and not something either core may paper over.
+    const CLOCK_TEXT: &str = "local platform = dofile('lua/core/platform.lua') \
+        function clock_text(epoch) local c = platform.local_clock(tonumber(epoch)) \
+        return table.concat({tostring(c.epoch), tostring(c.utc_offset_minutes), tostring(c.utc_offset), \
+        tostring(c.zone or 'none'), tostring(c.weekday), tostring(c.local_iso), tostring(c.utc_iso)}, ' | ') end";
+
+    /// The same line, computed inside the guest, compared with the native core's line, plus the two
+    /// things only the host can tell the guest: the zone's identifier and where it was read from.
+    const CLOCK_GUEST: &str = r#"
+local platform = dofile('lua/core/platform.lua')
+local epoch = tonumber(args[1])
+local c = platform.local_clock(epoch)
+local text = table.concat({tostring(c.epoch), tostring(c.utc_offset_minutes), tostring(c.utc_offset),
+  tostring(c.zone or 'none'), tostring(c.weekday), tostring(c.local_iso), tostring(c.utc_iso)}, ' | ')
+assert(text == args[2], 'the component core must read the same instant as the native one:\n  guest:  ' ..
+  text .. '\n  native: ' .. tostring(args[2]))
+assert(host.local_tz ~= nil, 'this kernel answers host.local_tz, so the guest must see it')
+local tz = host.local_tz(epoch)
+assert(tz.zone_source == args[3], 'the host must say where the zone came from: ' .. tostring(tz.zone_source))
+assert(tostring(tz.zone_id or 'none') == args[4], 'the host zone id: ' .. tostring(tz.zone_id))
+assert(c.zone_id == tz.zone_id and c.zone_source == tz.zone_source, 'the clock must carry the host zone')
+-- Per call, not a boot snapshot: half a year later is a second question with its own answer (the same
+-- answer in a zone without DST, a different one in a zone with it).
+local later = host.local_tz(epoch + 26 * 7 * 24 * 3600)
+assert(tonumber(later.utc_offset_minutes) ~= nil, 'the host must answer a second instant')
+"#;
+
+    /// The kernel's own call is listed for the guest, and a state that cannot answer it says so instead
+    /// of answering UTC.
+    #[test]
+    fn the_node_zone_is_a_kernel_call_and_never_a_silent_utc() {
+        let mut state = state();
+        let names = match state.call("__names".to_string(), Vec::new()) {
+            Ok(values) => match values.into_iter().next() {
+                Some(Value::Bytes(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+                other => panic!("__names must answer bytes, got {other:?}"),
+            },
+            Err(error) => panic!("__names: {error}"),
+        };
+        for name in KERNEL_CALLS {
+            assert!(names.lines().any(|line| line == *name), "{name} must be listed in __names: {names}");
+        }
+        // This fixture's interpreter has no `dofile` and no platform module. The call must fail with the
+        // interpreter's own words: an empty answer or a `+00:00` here would be the defect itself.
+        let error = state.call("local_tz".to_string(), vec![Value::Integer(CLOCK_EPOCH)]).expect_err("no module, no answer");
+        assert!(error.starts_with("local_tz_failed: "), "{error}");
+        // A caller that passes something that is not an instant is refused by name, not coerced to now.
+        let error = state.call("local_tz".to_string(), vec![Value::Boolean(true)]).expect_err("a boolean is not an epoch");
+        assert!(error.starts_with("local_tz_invalid_epoch"), "{error}");
+    }
+
+    /// `local_tz` on a real native interpreter: the fields, the shape the bridge carries, and the OS's
+    /// own identifier beside the C runtime's offset.
+    #[test]
+    fn the_kernel_answers_the_node_zone_with_the_runtime_offset_and_the_os_name() {
+        let _heavy = heavy();
+        let home = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+        let home = format!("{home}/wa-local-tz-test-home");
+        let _ = std::fs::create_dir_all(&home);
+        let modules = clock_modules();
+        let embedded: Vec<(&str, &str)> = modules.iter().map(|(key, source)| (key.as_str(), source.as_str())).collect();
+        let native = match boot_native_state(&home, ":memory:", &[], &embedded) {
+            Ok(lua) => lua,
+            Err(error) => panic!("boot a native interpreter: {error}"),
+        };
+        let mut state = State {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            native: Native(native),
+            calls: 0,
+            streams: HashMap::new(),
+            serial: 0,
+            limits: MemoryLimits::default(),
+            run_started: None,
+            run_first_call_ms: None,
+            script: None,
+        };
+        let values = state.call("local_tz".to_string(), vec![Value::Integer(CLOCK_EPOCH)]).expect("the node zone answers");
+        let map = match values.into_iter().next() {
+            Some(Value::StringMap(map)) => map,
+            other => panic!("local_tz must answer a string map, got {other:?}"),
+        };
+        let field = |name: &str| {
+            map.iter().find(|(key, _)| key == name).map(|(_, value)| String::from_utf8_lossy(value).into_owned())
+        };
+        assert_eq!(field("epoch"), Some(CLOCK_EPOCH.to_string()), "the answer names the instant it describes");
+        let minutes: i64 = field("utc_offset_minutes").expect("the offset in minutes").parse().expect("a whole number");
+        let (sign, hours, mins) = if minutes < 0 { ("-", -minutes / 60, -minutes % 60) } else { ("+", minutes / 60, minutes % 60) };
+        assert_eq!(field("utc_offset"), Some(format!("{sign}{hours:02}:{mins:02}")), "the offset text must be the minutes");
+        // The identifier is the OS's, and it is this machine's: the crate reads it, the kernel answers it.
+        let zone = wa_local_tz::zone_id(crate::host::resolved_env("TZ").as_deref());
+        assert_eq!(field("zone_source"), Some(zone.source.to_string()));
+        assert_eq!(field("zone_id"), zone.id);
+        // The abbreviation, when this platform has one, is the C runtime's - a name and not an offset.
+        if let Some(zone) = field("zone") {
+            assert!(!zone.is_empty(), "an empty zone name is an absence, not a name");
+        }
+    }
+
+    /// One instant, two cores, one answer: the native interpreter reads its own C runtime, the guest
+    /// asks the kernel, and both lines must be equal field for field (docs/KERNEL.md, "the node's own
+    /// zone").
+    #[test]
+    fn the_same_instant_reads_the_same_on_both_cores() {
+        let _heavy = heavy();
+        let Some(pool) = pool(1, 0, Duration::from_secs(5)) else { return };
+        let home = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+        let home = format!("{home}/wa-local-tz-test-home");
+        let _ = std::fs::create_dir_all(&home);
+        let modules = clock_modules();
+        let embedded: Vec<(&str, &str)> = modules.iter().map(|(key, source)| (key.as_str(), source.as_str())).collect();
+        let native = match boot_native_state(&home, ":memory:", &[], &embedded) {
+            Ok(lua) => lua,
+            Err(error) => panic!("boot a native interpreter: {error}"),
+        };
+        native.do_string(CLOCK_TEXT, "clock-text").expect("define the text both sides print");
+        let native_text = native.call_string("clock_text", &[&CLOCK_EPOCH.to_string()]).expect("the native core reads its clock");
+        // The identifier and its source are what the *host* adds; the guest cannot read TZ, /etc/localtime
+        // or the Windows key for itself, which is why the call exists at all.
+        let zone = wa_local_tz::zone_id(crate::host::resolved_env("TZ").as_deref());
+        let args = vec![
+            CLOCK_EPOCH.to_string(),
+            native_text.clone(),
+            zone.source.to_string(),
+            zone.id.clone().unwrap_or_else(|| "none".to_string()),
+        ];
+        let mut lease = pool.acquire().expect("acquire an instance");
+        let (report, error) = lease.run_script_outcome(Script::source("local-tz.lua", CLOCK_GUEST), &args).expect("the guest runs");
+        assert_eq!(error, None, "the guest's own message: {error:?}\nnative: {native_text}");
+        assert_eq!(report.code, 0, "the guest and the native core must read the same instant; native: {native_text}");
+        // The guest had to ask the kernel for the zone to answer at all, so this is the call and not a
+        // fallback to the guest's own (UTC) `os.date`.
+        assert!(report.host_calls > 0, "the guest must have asked the kernel");
     }
 }

@@ -502,6 +502,73 @@ that installs a pinned `agent-core.wasm` needs no flag. (4) Epoch interruption i
 pooling engine (A2.3), so a wedged guest has no per-run deadline; the stall watchdog reports it
 exactly as it reports a wedged native interpreter.
 
+### A2.5 results — the node's own zone in the guest (06/11, pi deepseek)
+
+A2.4 shipped a node that can serve a whole turn from the guest while reading the wrong clock. The
+guest's C runtime is wasi-libc, which ships no zone database: `os.date` inside the component is UTC
+whatever zone the node is in, so `platform.local_clock()` — the `time` tool and the platform line of
+the prompt — answered `+00:00` on a node in `-03:00`. The native core was right, because its C runtime
+is the OS's. Nothing else diverged, which is what made it a quiet bug.
+
+**The inequality, fixed at its root.** The kernel answers a new bridge call, `host.local_tz(epoch?)`
+(`rust/wa-capabilities/src/core_component.rs`, `KERNEL_CALLS`), and it answers it in two halves that
+are deliberately different in kind:
+
+* the **offset** and the **zone abbreviation** are the C runtime's, produced by running
+  `lua/core/platform.lua`'s `runtime_clock` in the instance's *native* interpreter. That is the same
+  function, the same `tzset` and the same DST rules the native core calls, so the two cores agree by
+  construction rather than by two implementations that mostly match;
+* the **identifier** of the zone (`America/Sao_Paulo` on Unix, `E. South America Standard Time` on
+  Windows) comes from `rust/wa-local-tz`, which reads `TZ`, the `/etc/localtime` link, `/etc/timezone`
+  or `GetDynamicTimeZoneInformation`. The C runtime cannot portably name its zone, and a guest can
+  read none of those.
+
+`local_tz` is a kernel call and not a capability: there is no native `host.*` C function to forward it
+to, so it does not come from `capabilities::REGISTRY` — it is listed in `__names` beside the registry so
+a guest's `if host.local_tz then` still reads the truth. It costs one `lua_pcallk` on the instance's
+native interpreter and a resolve of the zone name, per call, never cached: an offset read at boot is
+exactly the stale answer a DST change produces.
+
+**The Lua side.** `platform.local_clock` asks the host first and falls back to the C runtime, so a
+native run takes the branch it always took — same fields, same values, no new behaviour. The host
+branch builds `local_iso` from the UTC fields of the instant the reported offset puts it at (the
+guest's own `os.date` is UTC), takes the weekday from the same shifted instant, and carries the two new
+fields `zone_id`/`zone_source`. `platform.describe()` names the zone by `zone` when the platform has an
+abbreviation and by `zone_id` otherwise, so the prompt line on a Windows node no longer says "zone name
+unknown". A host that has the call and fails is a Lua error, not a silent fall back to the guest's UTC:
+that silence *was* the defect.
+
+**Measured.** `scripts/test-local-tz.lua` (new, in the fast path) prints the fields for a fixed instant
+and `scripts/test-core-parity.sh` diffs the two cores; the same instant read through both, on a Windows
+node whose own zone is `-03:00`:
+
+| `TZ` | native | component |
+| --- | --- | --- |
+| unset | `-180`, `-03:00`, `E. South America Standard Time`, `2026-01-15T09:00:00-03:00` | identical |
+| `America/Sao_Paulo` | same line | identical |
+| `UTC` | `0`, `+00:00`, `UTC`, `2026-01-15T12:00:00+00:00` | identical |
+
+A container with no `TZ` and no zone files reports `+00:00`, `zone_source=none` and no `zone_id`: UTC
+honestly, never a guessed name (`wa-local-tz`'s `a_bare_container_reports_no_name_and_says_so`). The
+Windows CRT parses a POSIX rule and ignores an IANA name in `TZ` (measured: `TZ=Europe/Berlin` leaves
+the machine's offset and abbreviation untouched, `TZ=UTC` takes effect), which is why `TZ` naming a zone
+this platform has no database for answers `zone_source=tz_env_unknown` and no name instead of claiming
+the operator's string.
+
+Tests: `cargo test -p wa-local-tz` (9, all pure: the rule with the filesystem questions injected) and
+`cargo test -p wa-capabilities` (`the_node_zone_is_a_kernel_call_and_never_a_silent_utc`,
+`the_kernel_answers_the_node_zone_with_the_runtime_offset_and_the_os_name`,
+`the_same_instant_reads_the_same_on_both_cores` — the last one reads the instant through the native
+interpreter and through the real guest and compares them field for field, with a mutation check: an
+hour added inside the host branch makes it fail with both lines in the message).
+
+**Not done, and why.** (1) `wa-local-tz` reports the Windows zone *key* on Windows, not an IANA name: a
+mapping is CLDR's `windowsZones` table, and a partial one would be worse than the OS's own identifier.
+(2) The native core gets no `host.local_tz` (it needs no offset help and the registry is the native
+capability list), so `zone_id` is absent from a native `local_clock` — which is why the parity test does
+not print it. (3) `docs/HOST.md`'s "The clock" section describes the native contract and should gain a
+sentence about `zone_id`/`zone_source`; that file belongs to another lane.
+
 ### C1 results — the code graph as a component (05/11, wasm_the_first)
 
 The graph is the first capability moved out of `wa` without touching Lua. The 14 `host.graph_*`
