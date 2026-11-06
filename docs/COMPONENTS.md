@@ -82,6 +82,113 @@ and size checks, the install/rollback, and the distribution paths with a local a
 a local release bundle (dry run, cache hit, `file://`, a tampered bundle, a foreign lock, an
 unreachable release, and the publish script's verification).
 
+### The node binary itself
+
+A component is portable; `wa` is not. So the same idea needs one row per target triple and a release
+per commit, because a deploy installs *the commit it holds* - "the latest binary" is another commit's
+build and is refused.
+
+```
+release tag   node-<first 12 hex of the source commit>
+pins          node-<sha12>.manifest
+                schema=wasm-agent-node-binaries/1, source_commit=<40 hex>, source_tree=, rustc_version=,
+                zig_version=, glibc_floor=2.31, codemode=embedded|empty, built_utc=
+                <triple> <wa sha256> <wa bytes> <wa-sentinel sha256> <wa-sentinel bytes>
+payload       wa-<triple>-<sha12>, wa-sentinel-<triple>-<sha12>
+```
+
+**Why.** `deploy.sh` ends in `cargo build` of `wa` and `wa-sentinel`. That is fine on a 16-thread
+machine with a warm cache. openclaw (Ubuntu arm64, 2 cores, disk 99% full) needed the wasmtime 50
+upgrade, which is a full rebuild of ~600 crates it can neither fit nor afford - so it installs the
+bytes a machine with the toolchain built, and its deploy runs the same prove/install/rollback gate.
+
+**Build machine** (any host with cargo; a Linux binary from Windows or macOS is a cross build):
+
+```
+pip install ziglang                      # or unpack a zig tarball; zig is the C compiler and the linker
+cargo install cargo-zigbuild
+bash scripts/publish-node-binaries.sh    # build both Linux targets, verify, print the gh command
+bash scripts/publish-node-binaries.sh --from <dir>   # verify artifacts a CI built, pin them
+bash scripts/publish-node-binaries.sh --check        # the plan; build nothing
+```
+
+The build is `cargo zigbuild --release --offline --locked -p wa-host --target
+<triple>.2.31` (and the same for `wa-sentinel`). `.2.31` is zig's glibc floor: it links against no
+symbol newer than glibc 2.31, so the binary runs on Ubuntu 20.04 and everything newer - and the script
+reads the floor back out of the bytes (`GLIBC_2.x` symbol versions) and refuses a binary that needs
+more than the manifest claims. Every member is verified before anything is printed for upload: sha256,
+size, ELF machine (`b7` aarch64, `3e` x86_64). The candidate is executed when the host can run it
+(natively, or through `--runner 'wsl -d Ubuntu --'`); when it cannot, the line says `run: SKIPPED`, and
+the deploy proves the binary on the node before installing it.
+
+Measured on wasm_the_first (Windows x86_64, 16 threads, rustc 1.98.1, zig 0.17.1, cargo-zigbuild
+0.24.1), from a warm cargo cache of the crates and no cross artifacts:
+
+| target | wa | wa-sentinel | built in | executable here |
+| --- | --- | --- | --- | --- |
+| `aarch64-unknown-linux-gnu.2.31` | 28,676,528 B | 5,292,696 B | ~7 min | no (no qemu/binfmt) -> SKIPPED |
+| `x86_64-unknown-linux-gnu.2.31` | 33,895,504 B | 5,853,008 B | 4m44s (`CARGO_BUILD_JOBS=6`) | yes, through WSL Ubuntu 22.04 |
+
+Both link with `GLIBC_2.30` as their newest symbol version (floor 2.31 accepted, openclaw's 2.35 fine).
+`ring`, bundled SQLite, `zstd` and the vendored Lua all compile through `zig cc`; nothing needed a
+patch. Two things are Windows-specific and measured: at the default 16 jobs cc-rs dies with
+`Not enough quota is available to process this command. (os error 1816)` (desktop heap, not disk), so
+the script caps `CARGO_BUILD_JOBS=6` on a Windows host; and `strip --strip-all` removed 16 bytes, so
+the binaries are what they are (a release profile keeps no symbols worth stripping).
+
+**A cross build does not embed the code-mode assets by default** - `rust/wa-host/build.rs` exempts a
+cross build from the `WA_CODEMODE_BUILD_ASSETS` rule, because a cross build is not the *build host's*
+artifact. It is the node's, though, and a node without them starts every run with
+`codemode_not_ready`. So `publish-node-binaries.sh` sets `WA_CODEMODE_BUILD_ASSETS` itself when the
+prepared, pinned assets are present, records `codemode=embedded` in the manifest, and refuses by name
+when they are not (`--allow-empty-codemode` is the deliberate development escape). The deploy refuses a
+manifest that records `codemode=empty` unless the operator says `WA_DEPLOY_ALLOW_EMPTY_CODEMODE=1`.
+
+**A node** (`scripts/lib/node-binaries.sh`, `deploy.sh` step 3d) resolves the bytes in this order, and
+every candidate is verified against the manifest (sha256 **and** size, plus the ELF machine):
+
+1. `WA_DEPLOY_BINARY_SOURCE=<dir>` when an operator says so (`wa`, `wa-sentinel`, and a
+   `node-<sha12>.manifest` if one is there - when it is, its pins are enforced);
+2. this node's cache, `<install>/node-binaries/<sha12>/<triple>` (a previous deploy's download; the
+   `.complete` marker is written last, so an interrupted fetch leaves nothing usable);
+3. the release: `gh release download node-<sha12> -R <owner/repo>` when `gh` is present, else the
+   public asset URL. The manifest is fetched first, because it is the release's identity.
+
+| knob | effect |
+| --- | --- |
+| `WA_DEPLOY_BINARY_SOURCE=<dir>` | install binaries another machine built (the supported path for a node with no toolchain at all) |
+| `WA_DEPLOY_BUILD_ONLY=1` | build this tree, never install a published binary |
+| `WA_DEPLOY_ALLOW_EMPTY_CODEMODE=1` | accept a published binary whose manifest records `codemode=empty` |
+| `WA_NODE_RELEASE_REPO=<owner/repo>` | read the release from another repository; default: origin's GitHub slug, else `Magaav/wasm-agent` |
+| `WA_NODE_BINARIES_URL=<dir>` / `file://<dir>` / `https://...` | read the assets from there instead of GitHub (a hand-copied release; what the tests use) |
+| `WA_NODE_BINARIES_CACHE=<dir>` | cache location; default `<install>/node-binaries` |
+| `WA_NODE_TARGET=<triple>` | name the triple instead of detecting it |
+| `WA_NODE_DISK_FLOOR_BYTES=<n>` | the floor the fallback-to-build is measured against |
+
+A refusal is never a fallback. `node_hash_mismatch`, `node_size_mismatch`, `node_machine_mismatch`,
+`node_manifest_commit_mismatch`, `node_binary_missing` (a manifest that pins a target the release does
+not carry) and `node_codemode_empty` stop the deploy. Only "nothing is published for this commit and
+this target" (`node_release_unavailable`, `node_target_unpublished`) falls through to the build - and
+only when the disk can pay for one: below the floor the deploy refuses with
+`refused(no_prebuilt_binary_and_disk_floor)` and names both paths (`scripts/check-disk-floor.sh`).
+
+What the deploy still does with a published binary: it stages the Lua tree against it, checks its
+capability digest, proves a graph call through the staged component, proves the embedded runtime, and
+answers `/health` on a scratch port - then `upgrade.sh` installs it and rolls back if the restart fails.
+`installed.txt` keeps `source_provenance=clean-built-by-deploy` (the bytes are a clean build of exactly
+this commit and this deploy verified them) and adds `binary_source=prebuilt-release|
+prebuilt-source`, `binary_release=node-<sha12>` and `binary_commit=<40 hex>`, so "where did this node's
+binary come from" is a record and not a guess.
+
+`bash scripts/test-deploy-node-binaries.sh` and `bash scripts/test-node-binaries.sh` prove both halves
+with no network, no cargo, no zig, no node and no `gh` (a shim records any call): the plan, the cache,
+the cache hit with the release gone, every refusal, the disk-conditioned fallback, the publisher's
+`--check`/`--from` and every way a manifest can be wrong, the order of the calls inside `deploy.sh` (a
+prebuilt install must never reach the toolchain check or the build), and the deploy's own branch read
+out of `deploy.sh` by markers and executed against the fixtures - so a change there cannot pass by never
+running.
+
+
 ## Capabilities: declared by the manifest, granted by the caller
 
 Nothing is ambient: no filesystem, no network, no inherited environment. The manifest **declares**

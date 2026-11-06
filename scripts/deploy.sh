@@ -70,7 +70,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
-for wa_lib_part in build-status build-requirements deploy-components; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
@@ -507,6 +507,82 @@ if [ "$LUA_FAST" = 1 ]; then
   BUILD_LOGS="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}/build-logs"
   echo "deploy: compiled 0 crate(s) (Lua fast path)"
 else
+# 3d. The binary: a published build of THIS commit and this target, when there is one
+#     (docs/COMPONENTS.md "The node binary itself", scripts/lib/node-binaries.sh). Two outcomes differ:
+#     a refusal - node_hash_mismatch, node_size_mismatch, node_machine_mismatch, node_manifest_commit_mismatch
+#     - means the bytes that claim to be this commit's are not, and the deploy stops with nothing
+#     installed. Only "nothing is published for this commit and this target" reaches the build below, and
+#     only when the disk can pay for one: a node that cannot afford a rebuild is the reason this path
+#     exists (openclaw: 2 cores, 99% disk, and the wasmtime 50 upgrade is a full rebuild of ~600 crates).
+#
+#     The prove gate below is NOT skipped for a published binary. A release is a claim made by a script
+#     on another machine; this deploy still proves the bytes on a scratch port, against the staged Lua
+#     tree and the staged component, and records where they came from.
+# wa-deploy-prebuilt-branch: begin
+PREBUILT_BINARIES=0
+BINARY_PROVENANCE="clean-built-by-deploy"
+BINARY_RELEASE=""
+BINARY_STAGE="$INSTALL_DIR/node-binary.next"
+if [ "${WA_DEPLOY_BUILD_ONLY:-0}" = 1 ]; then
+  echo "deploy: WA_DEPLOY_BUILD_ONLY=1 - this tree builds its own binary; no published one is installed"
+elif ! command -v wa_node_binaries_prepare >/dev/null 2>&1; then
+  note "no node-binaries helper beside this deploy (scripts/lib/node-binaries.sh), so no published binary was tried"
+elif [ -z "$(wa_node_target_triple 2>/dev/null)" ]; then
+  # A host with no published target (Windows, an architecture this channel does not ship) is not a node
+  # that fell back: it builds, exactly as it always did, and the disk floor is not even asked - refusing
+  # it there would be a refusal about a channel that was never meant for it (scripts/test-deploy-
+  # preconditions.sh: a machine without cargo must still be refused as cargo_unavailable, not as this).
+  note "this host ($(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)) has no published node-binary target (Linux aarch64 and x86_64 only); building this tree"
+else
+  rm -rf "$BINARY_STAGE"
+  wa_phase fetching
+  echo "deploy: looking for a published binary for $(git rev-parse --short HEAD) ($(wa_node_target_triple 2>/dev/null || echo 'no published target for this host'))"
+  BINARY_PLAN="$(wa_node_binaries_prepare "$ROOT" "$(git rev-parse HEAD)" "$BINARY_STAGE" "$INSTALL_DIR" 2>&1)"; BINARY_RC=$?
+  while IFS= read -r binary_line; do
+    [ -n "$binary_line" ] || continue
+    case "$binary_line" in
+      binary_source:*) echo "deploy: $binary_line" ;;
+      *) note "binary: $binary_line" ;;
+    esac
+  done <<BINARY_LINES
+$BINARY_PLAN
+BINARY_LINES
+  case "$BINARY_RC" in
+    0)
+      PREBUILT_BINARIES=1
+      NEW="$BINARY_STAGE/wa"
+      NEW_SENTINEL="$BINARY_STAGE/wa-sentinel"
+      # Presence, not the exec bit: a filesystem where `chmod` is a no-op (this checkout's /c mount) would
+      # refuse a good binary, and the prove gate below executes it anyway - a file that cannot run fails there.
+      [ -f "$NEW" ] && [ -f "$NEW_SENTINEL" ] || fail "refused(prebuilt_binary_incomplete): the staged binary is missing $NEW or $NEW_SENTINEL; nothing installed"
+      SENTINEL_NAME="wa-sentinel"
+      if [ -n "${WA_DEPLOY_BINARY_SOURCE:-}" ]; then
+        BINARY_PROVENANCE="prebuilt-source"
+        BINARY_COMMIT="$(git rev-parse HEAD)"
+        BINARY_RELEASE="$WA_DEPLOY_BINARY_SOURCE"
+      else
+        BINARY_PROVENANCE="prebuilt-release"
+        BINARY_COMMIT="$(git rev-parse HEAD)"
+        BINARY_RELEASE="$(wa_node_release_tag "$BINARY_COMMIT")"
+      fi
+      echo "deploy: installing the published binary; the prove gate below runs on it, then upgrade.sh"
+      ;;
+    8)
+      # Nothing published for this commit/target (or this host has no published target). Building is the
+      # answer only if the disk can pay for a run: the same floor scripts/test.sh refuses below.
+      if command -v wa_node_disk_floor_ok >/dev/null 2>&1 && wa_node_disk_floor_ok "$ROOT"; then
+        echo "deploy: no published binary for this commit; building this tree (disk floor ok)"
+      else
+        fail "refused(no_prebuilt_binary_and_disk_floor): no published binary for $(git rev-parse --short HEAD) on $(wa_node_target_triple 2>/dev/null || echo 'this host'), and this machine is below the disk floor a build needs - so neither path can install this commit. Publish it (bash scripts/publish-node-binaries.sh on a machine with cargo, then the printed gh command), pass WA_DEPLOY_BINARY_SOURCE=<dir>, or free space (scripts/reclaim-disk.sh). Nothing installed."
+      fi
+      ;;
+    *)
+      fail "refused(prebuilt_binary_refused): $BINARY_PLAN; nothing installed"
+      ;;
+  esac
+fi
+# wa-deploy-prebuilt-branch: end
+if [ "$PREBUILT_BINARIES" = 0 ]; then
 # 4. Build.
 echo "deploy: building"
 # NO RELEASE PROOF IS CONSULTED HERE, and that is the default. A deploy and a release are two stages,
@@ -683,6 +759,7 @@ case "$NEW_SENTINEL_LOWER" in
   *.exe) SENTINEL_NAME="wa-sentinel.exe" ;;
   *)     SENTINEL_NAME="wa-sentinel" ;;
 esac
+fi
 
 # 5. Prove it answers before it goes near the running node. A build that cannot start must not replace one
 #    that is serving.
@@ -823,8 +900,13 @@ CANDIDATE_HASH="$(sha256sum < "$NEW" 2>/dev/null | awk '{print $1}')"
 [ -n "$CANDIDATE_HASH" ] || fail "cannot hash the proved binary"
 CANDIDATE="$ROOT/rust/target/release/wa-deploy-$CANDIDATE_HASH"
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) CANDIDATE="$CANDIDATE.exe" ;; esac
+# A node that installs a published binary may never have built here, so the directory cargo would have
+# made for its output does not exist yet (openclaw after this change: no target dir at all).
+mkdir -p "$(dirname "$CANDIDATE")" || fail "cannot create the candidate directory $(dirname "$CANDIDATE")"
 cp -f "$NEW" "$CANDIDATE" || fail "cannot preserve the proved candidate"
 chmod +x "$CANDIDATE" 2>/dev/null || true
+# The staged published binary has been copied to the hash-named candidate: the stage is not install state.
+[ "${PREBUILT_BINARIES:-0}" = 1 ] && rm -rf "$BINARY_STAGE"
 
 # 6. Install and restart, through the script that owns that job.
 UPGRADE="$ROOT/scripts/upgrade.sh"
@@ -1032,6 +1114,15 @@ record_installed() {
     "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
     > "$record_tmp" || fail "node installed, but installed.txt could not be written"
+  # `source_provenance=clean-built-by-deploy` keeps its meaning - the bytes are a clean build of exactly
+  # this commit, verified by this deploy (pinned, hashed, proved on a scratch port), never an unverified
+  # hand-placed binary - and WHERE the build ran is a separate fact, because a reader that conflates the
+  # two would have to guess, and a node that installs a published binary must be able to say so.
+  if [ -n "${BINARY_RELEASE:-}" ]; then
+    printf 'binary_source=%s\nbinary_release=%s\nbinary_commit=%s\n' \
+      "${BINARY_PROVENANCE:-prebuilt-release}" "$BINARY_RELEASE" "${BINARY_COMMIT:-$COMMIT}" >> "$record_tmp" \
+      || fail "node installed, but the binary source lines could not be written"
+  fi
   # Appended as its own line, only when this commit is a release: a command substitution would strip the
   # newline and leave `reason=` and `release=` sharing a line, which no reader parses.
   if [ -n "$RELEASE" ]; then

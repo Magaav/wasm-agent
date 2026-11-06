@@ -453,6 +453,13 @@ command -v cygpath >/dev/null 2>&1 && export WA_COMPONENTS_DIR="$(cygpath -w "$G
 # sha256 and size check, the atomic swap and the rollback. No toolchain, no node: the component itself
 # is proved by the graph tests below and by scripts/check-graph-component.lua during a deploy.
 gate_run bash scripts/test-deploy-components.sh
+# The same idea one level up: the node BINARY from a release, so a node that cannot afford a rebuild
+# (openclaw: 2 cores, 99% disk) installs the bytes another machine built (docs/COMPONENTS.md "The node
+# binary itself"). Two halves, both with fixtures and no network, no cargo, no zig and no gh: the deploy
+# side (verify, cache, the refusals, the disk-conditioned fallback, and the order of the calls inside
+# scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
+gate_run bash scripts/test-deploy-node-binaries.sh
+gate_run bash scripts/test-node-binaries.sh
 gate_phase_begin cli
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the
