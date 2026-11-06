@@ -16,6 +16,15 @@
 # old pin refuses the new module, never runs it), and the previous triple is kept in
 # `<dir>/.prev/` for the deploy's rollback.
 #
+# Where the bytes come from, in the order a node that never built wasm should try them: the bytes
+# already installed (a repeat deploy), the bundle this node fetched for the same lock, and finally
+# the release `components-<short sha of components.lock>` (scripts/publish-components.sh builds and
+# uploads it once; wasm is portable, so one artifact serves every node). A download is verified
+# against components.lock BEFORE it is cached or staged, and the cache is keyed by the lock's sha,
+# so a repeated deploy does not refetch and a corrupt cache is never trusted - staging re-hashes
+# everything it copies. WA_DEPLOY_COMPONENT_SOURCE and a local build (WA_DEPLOY_COMPONENT_REPIN=1)
+# stay as the explicit overrides.
+#
 # Sourced by scripts/deploy.sh (and shipped beside it) and exercised by
 # scripts/test-deploy-components.sh.
 
@@ -159,6 +168,256 @@ wa_component_install() {
     return 5
   fi
   echo "component_installed: $dest/$name.wasm ($actual)"
+  return 0
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Distribution: the release bundle for this lock, fetched once and cached by sha
+# ---------------------------------------------------------------------------------------------------
+
+# <repo> -> sha256 of <repo>/components.lock (2 when there is no lock file, 7 without a sha tool).
+# This is the identity of a release: the tag is `components-` plus its first 12 hex characters, so a
+# node can name the exact bundle its pins describe without reading anything but the pins.
+wa_component_lock_sha() {
+  local lock="$1/components.lock"
+  [ -f "$lock" ] || return 2
+  wa_component_sha256 "$lock" || return 7
+}
+
+# <repo> -> the release tag that publishes the components this lock pins.
+wa_component_release_tag() {
+  local sha
+  sha="$(wa_component_lock_sha "$1")" || return $?
+  printf 'components-%s\n' "${sha:0:12}"
+}
+
+# <repo> -> owner/repo the release lives in. WA_COMPONENT_RELEASE_REPO wins (a fork, a mirror); else
+# origin's own GitHub slug; else the source of truth every tree in this fleet is a worktree of
+# (AGENTS.md). The fallback is deliberate: a node's origin is often a local path (a worktree, a
+# sandbox copy) and it is exactly those nodes that need the release.
+wa_component_release_repo() {
+  local repo="$1" url
+  if [ -n "${WA_COMPONENT_RELEASE_REPO:-}" ]; then
+    printf '%s\n' "$WA_COMPONENT_RELEASE_REPO"
+    return 0
+  fi
+  url="$(git -C "$repo" config --get remote.origin.url 2>/dev/null)"
+  case "$url" in
+    *github.com[:/]*)
+      url="${url##*github.com[:/]}"
+      url="${url%.git}"
+      case "$url" in
+        */*) printf '%s\n' "$url"; return 0 ;;
+      esac ;;
+  esac
+  printf '%s\n' "Magaav/wasm-agent"
+}
+
+# <install_dir> -> where fetched bundles are cached. Under the install directory on purpose: it is
+# the one directory a deploy owns and that a node's user can clean, and a cache is install state.
+wa_component_cache_root() {
+  if [ -n "${WA_COMPONENTS_CACHE:-}" ]; then
+    printf '%s\n' "$WA_COMPONENTS_CACHE"
+  else
+    printf '%s\n' "${1:-.}/components-cache"
+  fi
+}
+
+# <repo> <tag> <name> <dest> [base]
+#
+# Fill <dest> with <name>.wasm, <name>.json and components.lock of the release bundle. Returns 0 or 8
+# (not reachable). Nothing here verifies hashes: that is wa_component_download's job, on what landed.
+#   WA_COMPONENT_RELEASE_URL=<dir>|file://<dir>  read that bundle instead of the network (the stub the
+#                                               tests use, and the way a hand-copied bundle is tried)
+#   WA_COMPONENT_RELEASE_URL=https://...        the base URL of the assets
+#   unset                                       `gh release download`, then the public release URL
+wa_component_fetch_assets() {
+  local repo="$1" tag="$2" name="$3" dest="$4" base="${5:-}" asset local_base url_base
+  local assets="$name.wasm $name.json components.lock"
+  local_base=""
+  url_base=""
+  case "$base" in
+    file://*) local_base="${base#file://}" ;;
+    http://*|https://*) url_base="$base" ;;
+    ?*)
+      if [ -d "$base" ]; then local_base="$base"
+      else
+        # A path that is not a directory is not a URL either: say so instead of handing it to curl.
+        echo "component_release_url_unusable: WA_COMPONENT_RELEASE_URL=$base is neither an existing directory nor an http(s) URL" >&2
+        return 8
+      fi ;;
+  esac
+  if [ -n "$local_base" ]; then
+    for asset in $assets; do
+      [ -f "$local_base/$asset" ] || { echo "component_release_incomplete: $local_base/$asset" >&2; return 8; }
+      cp -f "$local_base/$asset" "$dest/$asset" || return 8
+    done
+    return 0
+  fi
+  if [ -n "$url_base" ]; then
+    command -v curl >/dev/null 2>&1 || return 8
+    for asset in $assets; do
+      curl -fsSL -m 60 "$url_base/$asset" -o "$dest/$asset" 2>/dev/null \
+        || { echo "component_release_unreachable: $url_base/$asset" >&2; rm -f "$dest/$asset"; return 8; }
+    done
+    return 0
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    if gh release download "$tag" -R "$repo" -D "$dest" \
+      -p "$name.wasm" -p "$name.json" -p components.lock >/dev/null 2>&1 \
+      && [ -f "$dest/$name.wasm" ] && [ -f "$dest/$name.json" ] && [ -f "$dest/components.lock" ]; then
+      return 0
+    fi
+    # gh without a token on the node, a release that is not there yet: the anonymous URL may still work.
+    echo "component_release_gh_failed: gh could not download $tag from $repo; trying the public asset URL" >&2
+    rm -f "$dest/$name.wasm" "$dest/$name.json" "$dest/components.lock"
+  fi
+  command -v curl >/dev/null 2>&1 || return 8
+  for asset in $assets; do
+    curl -fsSL -m 60 "https://github.com/$repo/releases/download/$tag/$asset" -o "$dest/$asset" 2>/dev/null \
+      || { echo "component_release_unreachable: https://github.com/$repo/releases/download/$tag/$asset" >&2; rm -f "$dest/$asset"; return 8; }
+  done
+  return 0
+}
+
+# <repo> <name> <cache_root>
+#
+# Fetch the release bundle this tree's lock names and cache it under the lock's sha. Prints the cached
+# directory on success. Returns 2 pin_missing, 5 pinned bytes refused (a bundle that does not match
+# components.lock, or a bundle whose own components.lock is another lock), 6 size_mismatch, 7 no sha
+# tool, 8 nothing reached - and 8 is the only one a caller may answer by building the tree instead,
+# because a refusal means the bytes that claim to be pinned are not the pinned ones.
+wa_component_download() {
+  local repo="$1" name="$2" cache_root="$3" pin pin_sha pin_bytes lock_sha tag entry tmp actual size bundle_lock_sha
+  if ! pin="$(wa_component_pin "$repo" "$name")"; then
+    case $? in
+      2) echo "component_pin_missing: no $repo/components.lock" >&2 ;;
+      *) echo "component_pin_missing: $name is not pinned in components.lock" >&2 ;;
+    esac
+    return 2
+  fi
+  pin_sha="${pin%% *}"
+  pin_bytes="${pin##* }"
+  lock_sha="$(wa_component_lock_sha "$repo")" || return 7
+  tag="components-${lock_sha:0:12}"
+  entry="$cache_root/$lock_sha"
+  tmp="$cache_root/.incoming.$$"
+  # A fetch killed mid-copy leaves its own .incoming.<pid>; this deploy only ever removes its own, so
+  # the ones older than a day are swept here. Never a cache entry: those are read through a sha check.
+  for stale in "$cache_root"/.incoming.*; do
+    [ -d "$stale" ] || continue
+    [ "$stale" = "$tmp" ] && continue
+    [ -n "$(find "$stale" -maxdepth 0 -mmin +${WA_COMPONENTS_INCOMING_AGE:-1440} 2>/dev/null)" ] && rm -rf "$stale"
+  done
+  rm -rf "$tmp"
+  mkdir -p "$tmp" || { printf 'component_cache_unwritable: %s\n' "$cache_root"; return 8; }
+  if ! wa_component_fetch_assets "$repo" "$tag" "$name" "$tmp" "${WA_COMPONENT_RELEASE_URL:-}"; then
+    rm -rf "$tmp"
+    printf 'component_release_unavailable: %s is not cached and the %s bundle could not be fetched (WA_COMPONENT_RELEASE_URL=%s)\n' \
+      "$name" "$tag" "${WA_COMPONENT_RELEASE_URL:-unset}"
+    return 8
+  fi
+  # The bundle's own components.lock is the release's identity: a tag names one lock, and a bundle
+  # carrying another lock is not this release even if one of its components happens to match.
+  bundle_lock_sha="$(wa_component_sha256 "$tmp/components.lock")" || { rm -rf "$tmp"; return 7; }
+  if [ "$bundle_lock_sha" != "$lock_sha" ]; then
+    rm -rf "$tmp"
+    printf 'component_release_lock_mismatch: %s bundle components.lock is %s, this tree pins %s (%s)\n' \
+      "$name" "$bundle_lock_sha" "$lock_sha" "$tag"
+    return 5
+  fi
+  actual="$(wa_component_sha256 "$tmp/$name.wasm" 2>/dev/null)" || { rm -rf "$tmp"; return 7; }
+  if [ "$actual" != "$pin_sha" ]; then
+    rm -rf "$tmp"
+    printf 'component_hash_mismatch: %s bundle has %s, components.lock pins %s\n' "$name" "$actual" "$pin_sha"
+    return 5
+  fi
+  if [ "$pin_bytes" != "-" ]; then
+    size="$(wc -c < "$tmp/$name.wasm" | tr -d '[:space:]')"
+    if [ "$size" != "$pin_bytes" ]; then
+      rm -rf "$tmp"
+      printf 'component_size_mismatch: %s bundle has %s bytes, components.lock pins %s\n' "$name" "$size" "$pin_bytes"
+      return 6
+    fi
+  fi
+  # Commit the verified bundle only. The marker goes last, so a fetch interrupted anywhere above
+  # leaves no directory a later deploy would read as a cache hit.
+  rm -rf "$entry"
+  mv "$tmp" "$entry" || { rm -rf "$tmp"; printf 'component_cache_unwritable: %s\n' "$entry"; return 8; }
+  printf '%s %s\n' "$name" "$actual" > "$entry/.complete" || { printf 'component_cache_unwritable: %s\n' "$entry"; return 8; }
+  printf '%s\n' "$entry"
+  return 0
+}
+
+# <repo> <name> <install_dir>
+#
+# Which directory holds the pinned bytes for <name>, asking the cheapest source first:
+#   1. the component directory the core reads (an already-installed, matching component);
+#   2. this node's cache entry for the lock (a previous deploy's download);
+#   3. the release (gh, else curl), cached.
+# Prints the directory on success (0) and the reason on 8 (nothing local and nothing downloadable - the
+# caller may build the tree instead) or on a refusal (5/6: the bytes that claim to be pinned are not).
+wa_component_source_resolve() {
+  local repo="$1" name="$2" install="${3:-}" pin pin_sha lock_sha cache_root dir
+  if ! pin="$(wa_component_pin "$repo" "$name")"; then
+    case $? in
+      2) printf 'component_pin_missing: no %s/components.lock\n' "$repo" ;;
+      *) printf 'component_pin_missing: %s is not pinned in components.lock\n' "$name" ;;
+    esac
+    return 2
+  fi
+  pin_sha="${pin%% *}"
+  dir="$(wa_components_dir)"
+  if [ -f "$dir/$name.wasm" ] && [ -f "$dir/$name.json" ] \
+    && [ "$(wa_component_sha256 "$dir/$name.wasm" 2>/dev/null)" = "$pin_sha" ]; then
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  lock_sha="$(wa_component_lock_sha "$repo")" || { printf 'component_pin_unreadable: no %s/components.lock\n' "$repo"; return 7; }
+  cache_root="$(wa_component_cache_root "$install")"
+  dir="$cache_root/$lock_sha"
+  if [ -f "$dir/.complete" ] && [ -f "$dir/$name.json" ] && [ -f "$dir/$name.wasm" ] \
+    && [ "$(wa_component_sha256 "$dir/$name.wasm" 2>/dev/null)" = "$pin_sha" ]; then
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  wa_component_download "$repo" "$name" "$cache_root"
+}
+
+# <repo> <stage> <install_dir> <name>...
+#
+# The component step of a deploy: resolve where the pinned bytes are (see
+# wa_component_source_resolve), then stage and verify them into <stage> with wa_component_stage. One
+# `component_source:` line per component on stdout. Returns 0, or the refusal of the first component
+# that cannot be staged (with its reason already printed). Installs nothing: staging is a filesystem
+# copy under the install directory, the swap is wa_component_install.
+wa_components_prepare() {
+  local repo="$1" stage="$2" install="$3" name out rc source
+  shift 3
+  for name in "$@"; do
+    if [ -n "${WA_DEPLOY_COMPONENT_SOURCE:-}" ]; then
+      out="$(wa_component_stage "$repo" "$name" "$stage" 2>&1)"; rc=$?
+      [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; return "$rc"; }
+      [ -z "$out" ] || printf '%s\n' "$out"
+      printf 'component_source: %s %s (WA_DEPLOY_COMPONENT_SOURCE)\n' "$name" "$WA_DEPLOY_COMPONENT_SOURCE"
+      continue
+    fi
+    source="$(wa_component_source_resolve "$repo" "$name" "$install")"; rc=$?
+    case "$rc" in
+      0)
+        out="$(WA_DEPLOY_COMPONENT_SOURCE="$source" wa_component_stage "$repo" "$name" "$stage" 2>&1)"; rc=$?
+        [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; return "$rc"; }
+        [ -z "$out" ] || printf '%s\n' "$out"
+        printf 'component_source: %s %s (pinned bytes)\n' "$name" "$source" ;;
+      8)
+        printf 'component_source: %s this tree (no pinned bytes available: %s)\n' "$name" "$source"
+        out="$(wa_component_stage "$repo" "$name" "$stage" 2>&1)"; rc=$?
+        [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; return "$rc"; }
+        [ -z "$out" ] || printf '%s\n' "$out" ;;
+      *)
+        printf '%s\n' "$source"; return "$rc" ;;
+    esac
+  done
   return 0
 }
 

@@ -132,4 +132,155 @@ out="$(wa_component_install "$partial" "$dest" graph 2>&1)"
 expect_status 3 "$?" "an install missing the manifest"
 contains "$out" "component_missing:" "the incomplete stage is named"
 
+# --- distribution: the release bundle this lock names (docs/COMPONENTS.md) ------------------------
+# A node with no wasi-sdk installs the pinned bytes a release carries. No network here: the release is
+# a local directory or a file:// URL handed to WA_COMPONENT_RELEASE_URL, which is the same code path a
+# gh/curl download fills. Nothing in this section runs gh, curl or a build.
+unset WA_DEPLOY_COMPONENT_SOURCE WA_COMPONENT_RELEASE_URL WA_COMPONENT_RELEASE_REPO
+WA_COMPONENTS_DIR="$WORK/installed-empty"; export WA_COMPONENTS_DIR
+cache="$WORK/cache"
+
+lock_sha="$(wa_component_lock_sha "$repo")"
+expect_status 0 "$?" "the lock's sha256 is readable"
+tag="$(wa_component_release_tag "$repo")"
+[ "$tag" = "components-${lock_sha:0:12}" ] || fail "release tag is not components-<12 hex of the lock sha>: $tag"
+ok
+repo_slug="$(wa_component_release_repo "$repo")"
+printf '%s' "$repo_slug" | grep -q '^[^/]*/[^/]*$' || fail "the release repo is not owner/repo: $repo_slug"
+ok
+
+bundle="$WORK/release-bundle"; mkdir -p "$bundle"
+cp "$artifacts/graph.wasm" "$bundle/graph.wasm"
+cp "$artifacts/graph.json" "$bundle/graph.json"
+cp "$repo/components.lock" "$bundle/components.lock"
+
+out="$(WA_COMPONENT_RELEASE_URL="$bundle" WA_COMPONENTS_CACHE="$cache" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 0 "$?" "resolving pinned bytes from the release bundle (local stub)"
+[ "$out" = "$cache/$lock_sha" ] || fail "the fetched bundle was not cached under the lock sha: $out"
+cmp -s "$cache/$lock_sha/graph.wasm" "$artifacts/graph.wasm" || fail "the cached module is not the released one"
+[ -f "$cache/$lock_sha/.complete" ] || fail "the cached bundle carries no complete marker"
+ok
+
+# A repeated deploy does not refetch: the cache answers even when the release is gone.
+out="$(WA_COMPONENT_RELEASE_URL="$WORK/no-such-bundle" WA_COMPONENTS_CACHE="$cache" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 0 "$?" "a repeated resolve reads the cache, not the release"
+[ "$out" = "$cache/$lock_sha" ] || fail "the cache hit did not name the cached bundle: $out"
+
+# The installed component directory is the cheapest correct answer of all.
+inst="$WORK/installed-match"; mkdir -p "$inst"
+cp "$artifacts/graph.wasm" "$inst/graph.wasm"; cp "$artifacts/graph.json" "$inst/graph.json"
+out="$(WA_COMPONENTS_DIR="$inst" WA_COMPONENT_RELEASE_URL="$WORK/no-such-bundle" WA_COMPONENTS_CACHE="$WORK/cache-none" \
+  wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 0 "$?" "an already-installed matching component is used, not refetched"
+[ "$out" = "$inst" ] || fail "the installed component was not chosen: $out"
+
+# file:// is the same stub, spelled as a URL.
+rm -rf "$WORK/cache-file"
+out="$(WA_COMPONENT_RELEASE_URL="file://$bundle" WA_COMPONENTS_CACHE="$WORK/cache-file" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 0 "$?" "resolving through a file:// release URL"
+[ "$out" = "$WORK/cache-file/$lock_sha" ] || fail "the file:// bundle was not cached under the lock sha: $out"
+
+# A fetch killed mid-copy leaves .incoming.<pid>; the next fetch sweeps the old ones and leaves none of
+# its own behind, and a completed fetch is only ever the whole bundle.
+rm -rf "$WORK/cache-sweep"; mkdir -p "$WORK/cache-sweep/.incoming.99999"
+printf 'half-a-module' > "$WORK/cache-sweep/.incoming.99999/graph.wasm"
+touch -t 202001010000 "$WORK/cache-sweep/.incoming.99999"
+out="$(WA_COMPONENT_RELEASE_URL="$bundle" WA_COMPONENTS_CACHE="$WORK/cache-sweep" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 0 "$?" "fetching into a cache that holds a dead fetch's residue"
+[ ! -d "$WORK/cache-sweep/.incoming.99999" ] || fail "a stale .incoming dir was not swept"
+[ -z "$(ls -d "$WORK/cache-sweep"/.incoming.* 2>/dev/null)" ] || fail "a completed fetch left its .incoming dir behind"
+
+# --- dry run: (a) local source, (b) fetched release, both prove the plan and install nothing ------
+dry_dest="$WORK/dry-dest"; mkdir -p "$dry_dest"
+printf 'previous-module' > "$dry_dest/graph.wasm"
+printf 'previous-pin\n' > "$dry_dest/graph.wasm.sha256"
+printf '{"name":"graph"}\n' > "$dry_dest/graph.json"
+out="$(WA_DEPLOY_COMPONENTS_DRY_RUN=1 WA_DEPLOY_COMPONENT_SOURCE="$artifacts" wa_components_prepare "$repo" "$WORK/dry-stage-local" "$WORK/install" graph 2>&1)"
+expect_status 0 "$?" "a dry-run prepare from a local source"
+contains "$out" "component_source: graph $artifacts (WA_DEPLOY_COMPONENT_SOURCE)" "the local source is named"
+out="$(WA_DEPLOY_COMPONENTS_DRY_RUN=1 wa_component_install "$WORK/dry-stage-local" "$dry_dest" graph 2>&1)"
+expect_status 0 "$?" "a dry-run install of the local source"
+contains "$out" "component_would_install: $dry_dest/graph.wasm" "the dry run names what it would install"
+[ "$(cat "$dry_dest/graph.wasm")" = "previous-module" ] || fail "a dry-run install from a local source changed the installed module"
+ok
+
+rm -rf "$WORK/cache-dry"
+out="$(WA_DEPLOY_COMPONENTS_DRY_RUN=1 WA_COMPONENT_RELEASE_URL="$bundle" WA_COMPONENTS_CACHE="$WORK/cache-dry" \
+  wa_components_prepare "$repo" "$WORK/dry-stage-release" "$WORK/install" graph 2>&1)"
+expect_status 0 "$?" "a dry-run prepare through the release bundle"
+contains "$out" "component_source: graph $WORK/cache-dry/$lock_sha (pinned bytes)" "the fetched bundle is named"
+cmp -s "$WORK/dry-stage-release/graph.wasm" "$artifacts/graph.wasm" || fail "the stage built from the release is not the released module"
+out="$(WA_DEPLOY_COMPONENTS_DRY_RUN=1 wa_component_install "$WORK/dry-stage-release" "$dry_dest" graph 2>&1)"
+expect_status 0 "$?" "a dry-run install of the fetched bundle"
+contains "$out" "component_would_install:" "the fetched bundle would be installed"
+[ "$(cat "$dry_dest/graph.wasm")" = "previous-module" ] || fail "a dry-run install of the fetched bundle changed the installed module"
+ok
+
+# --- (c) a release that is not the pinned one is refused, and nothing is cached -------------------
+tampered="$WORK/tampered-bundle"; mkdir -p "$tampered"
+printf 'not-the-pinned-graph' > "$tampered/graph.wasm"
+cp "$artifacts/graph.json" "$tampered/graph.json"; cp "$repo/components.lock" "$tampered/components.lock"
+rm -rf "$WORK/cache-tampered"
+out="$(WA_COMPONENT_RELEASE_URL="$tampered" WA_COMPONENTS_CACHE="$WORK/cache-tampered" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 5 "$?" "a released bundle whose bytes are not the pinned ones"
+contains "$out" "component_hash_mismatch: graph" "the tampered bundle is refused by name"
+contains "$out" "$pin" "the refusal names the pinned hash"
+[ ! -d "$WORK/cache-tampered/$lock_sha" ] || fail "a refused bundle was cached"
+[ -z "$(ls -A "$WORK/cache-tampered" 2>/dev/null)" ] || fail "a refused fetch left staging residue in the cache"
+ok
+out="$(WA_DEPLOY_COMPONENTS_DRY_RUN=1 WA_COMPONENT_RELEASE_URL="$tampered" WA_COMPONENTS_CACHE="$WORK/cache-tampered" \
+  wa_components_prepare "$repo" "$WORK/tampered-stage" "$WORK/install" graph 2>&1)"
+expect_status 5 "$?" "a dry-run prepare refuses tampered release bytes"
+contains "$out" "component_hash_mismatch: graph" "the dry-run refusal is the hash refusal"
+[ ! -f "$WORK/tampered-stage/graph.wasm" ] || fail "a refused prepare staged a module"
+ok
+
+# A bundle carrying another tree's lock is not this release, even if its wasm happens to match.
+wronglock="$WORK/wrong-lock-bundle"; mkdir -p "$wronglock"
+cp "$artifacts/graph.wasm" "$wronglock/graph.wasm"; cp "$artifacts/graph.json" "$wronglock/graph.json"
+printf '# another tree\ngraph %s %s\n' "$pin" "$bytes" > "$wronglock/components.lock"
+out="$(WA_COMPONENT_RELEASE_URL="$wronglock" WA_COMPONENTS_CACHE="$WORK/cache-wronglock" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 5 "$?" "a bundle whose components.lock is another lock"
+contains "$out" "component_release_lock_mismatch: graph" "the foreign lock is refused by name"
+
+# No release reached and no cache: 8, the one status a deploy may answer by building the tree.
+out="$(WA_COMPONENT_RELEASE_URL="$WORK/no-such-bundle" WA_COMPONENTS_CACHE="$WORK/cache-none" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 8 "$?" "an unreachable release with nothing cached"
+contains "$out" "component_release_unavailable: graph" "the missing release is named"
+contains "$out" "component_release_url_unusable:" "a release URL that is neither a directory nor an http(s) URL is named"
+
+# A bundle missing one of the three files is not a bundle: the deploy says which file, then falls through
+# to the build path rather than caching half a release.
+partial_bundle="$WORK/partial-bundle"; mkdir -p "$partial_bundle"
+cp "$artifacts/graph.wasm" "$partial_bundle/graph.wasm"; cp "$repo/components.lock" "$partial_bundle/components.lock"
+out="$(WA_COMPONENT_RELEASE_URL="$partial_bundle" WA_COMPONENTS_CACHE="$WORK/cache-partial" wa_component_source_resolve "$repo" graph "$WORK/install" 2>&1)"
+expect_status 8 "$?" "a release bundle missing its manifest"
+contains "$out" "component_release_incomplete: $partial_bundle/graph.json" "the missing member is named"
+[ -z "$(ls -A "$WORK/cache-partial" 2>/dev/null)" ] || fail "an incomplete bundle was cached"
+
+# --- the build machine's half: scripts/publish-components.sh --------------------------------------
+pub_repo="$WORK/pub-repo"; mkdir -p "$pub_repo"
+cp "$repo/components.lock" "$pub_repo/components.lock"
+out="$(bash scripts/publish-components.sh --check --repo "$pub_repo" 2>&1)"
+expect_status 0 "$?" "--check plans without building"
+contains "$out" "would build from" "the plan names the build"
+contains "$out" "release tag: $tag" "the plan names the release tag"
+[ ! -d "$pub_repo/build" ] || fail "--check created a build directory"
+out="$(bash scripts/publish-components.sh --repo "$pub_repo" --from "$artifacts" --out "$WORK/published" 2>&1)"
+expect_status 0 "$?" "bundling prebuilt artifacts"
+[ -f "$WORK/published/graph.wasm" ] && [ -f "$WORK/published/graph.json" ] && [ -f "$WORK/published/components.lock" ] \
+  || fail "the bundle is not graph.wasm + graph.json + components.lock"
+cmp -s "$WORK/published/graph.wasm" "$artifacts/graph.wasm" || fail "the bundle carries another module"
+cmp -s "$WORK/published/components.lock" "$pub_repo/components.lock" || fail "the bundle carries another lock"
+contains "$out" "gh release create $tag -R " "the exact publish command names the tag and the repo"
+contains "$out" "$WORK/published/graph.wasm" "the publish command uploads the module"
+contains "$out" "gh release upload $tag -R " "the re-publish command names the tag"
+contains "$out" "publish-components ok: $tag" "the bundle is reported as published-ready"
+out="$(bash scripts/publish-components.sh --repo "$pub_repo" --from "$bad" --out "$WORK/published-bad" 2>&1)"
+expect_status 5 "$?" "bundling an artifact that is not the pinned one"
+contains "$out" "artifact_not_pinned: graph" "the mismatch is named"
+contains "$out" "$pin" "the refusal names the pinned hash"
+
+unset WA_COMPONENTS_DIR
+
 echo "deploy components ok: $checks checks"

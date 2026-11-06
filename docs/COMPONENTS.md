@@ -25,6 +25,63 @@ as every other connector (`mcp_*` names are connector tools, callable inside scr
 installs all three atomically (pin last). `host.components()` lists what is installed and whether
 each pin verifies.
 
+## Distributing components: build once, install everywhere
+
+Wasm is portable: the same `.wasm` runs on Linux, Windows, x86_64 and arm64. A component with C
+inside (the graph: tree-sitter + SQLite) needs wasi-sdk, and a build is **not** byte-reproducible
+across checkout paths (three panic-location paths are embedded - measured 05/11: two checkouts of the
+same tree gave 8,185,719 and 8,185,720 bytes). So the build happens once, and every other node installs
+the pinned bytes instead of rebuilding them - including openclaw (arm64) and the laptop sandbox, which
+have no wasi-sdk at all. A deploy on such a node is one command, with no manual step.
+
+**Build machine** (the one with wasi-sdk):
+
+```
+WASI_SDK=<dir> bash scripts/publish-components.sh      # build, verify, bundle, print the gh command
+```
+
+It builds from the names `components.lock` pins, verifies each artifact's sha256 (and size) against
+its pin - refusing a bundle whose bytes are not the pinned ones, printing the `components.lock` line
+that would pin what it measured - and assembles the bundle directory (`graph.wasm`, `graph.json`, and
+the `components.lock` the bundle satisfies; `build/components-release` by default). It never publishes
+anything: it prints the exact `gh release create` command, so publishing stays a reviewed action.
+
+**Release identity is the lock.** The tag is `components-<first 12 hex of sha256(components.lock)>`.
+A node therefore names the exact bundle its pins describe using nothing but its own lock, and a tree
+whose lock changed asks for a different tag - it can never install a release from another lock.
+
+**A node** (scripts/deploy.sh stage 3e) resolves the bytes in this order, and every candidate is
+verified against `components.lock` (sha256 **and** size) before it is used:
+
+1. the component directory the core reads, when it already holds the pinned bytes (repeat deploy);
+2. this node's cache, `<install>/components-cache/<lock sha256>` (a previous deploy's download);
+3. the release: `gh release download components-<short> -R <owner/repo>` when `gh` is available, else
+   `curl -L` of `https://github.com/<owner/repo>/releases/download/components-<short>/<asset>`.
+   What lands is verified first and cached under the lock's sha (the `.complete` marker is written
+   last), so a repeated deploy does not refetch and an interrupted fetch leaves nothing usable;
+4. nothing reachable: this tree builds the component, which needs wasi-sdk, and the deploy must say
+   `WA_DEPLOY_COMPONENT_REPIN=1` (a local build is not the pinned build).
+
+| knob | effect |
+| --- | --- |
+| `WA_DEPLOY_COMPONENT_SOURCE=<dir>` | use these artifacts (built elsewhere) instead of resolving |
+| `WA_DEPLOY_COMPONENT_REPIN=1` | accept a local build whose bytes are not the pinned ones (development) |
+| `WA_COMPONENT_RELEASE_REPO=<owner/repo>` | read the release from another repository (fork, mirror); default: origin's GitHub slug, else `Magaav/wasm-agent` |
+| `WA_COMPONENT_RELEASE_URL=<dir>` / `file://<dir>` | read the bundle from a directory instead of the network (a hand-copied bundle; what the test uses) |
+| `WA_COMPONENT_RELEASE_URL=https://...` | base URL of the assets instead of GitHub's |
+| `WA_COMPONENTS_CACHE=<dir>` | cache location; default `<install>/components-cache` |
+| `WA_DEPLOY_COMPONENTS_DRY_RUN=1` | resolve, fetch and prove everything, install nothing |
+
+A refusal is never a fallback: `component_hash_mismatch`, `component_size_mismatch` and
+`component_release_lock_mismatch` mean the bytes that claim to be pinned are not, and the deploy stops
+with nothing installed. Only `component_release_unavailable` (nothing cached, nothing reachable) falls
+through to the local-build path.
+
+`bash scripts/test-deploy-components.sh` proves this with no network, no wasi-sdk and no node: the pin
+and size checks, the install/rollback, and the distribution paths with a local artifact directory and
+a local release bundle (dry run, cache hit, `file://`, a tampered bundle, a foreign lock, an
+unreachable release, and the publish script's verification).
+
 ## Capabilities: declared by the manifest, granted by the caller
 
 Nothing is ambient: no filesystem, no network, no inherited environment. The manifest **declares**
@@ -71,7 +128,9 @@ probed and enabled again: an upgrade is an explicit approval, as for any MCP ser
 1. `rust/components/<name>/` with its own `Cargo.toml` (`[workspace]` empty: never a member of the
    core workspace), `manifest.json`, `src/main.rs` reading stdin / writing stdout.
 2. `bash scripts/build-components.sh <name>` — builds and installs it.
-3. Register it (`mcp put` with `transport:"component"`), `probe`, `enable`.
+3. `bash scripts/publish-components.sh` on the build machine, then run the `gh release create` line it
+   prints — that is what lets a node without wasi-sdk deploy it.
+4. Register it (`mcp put` with `transport:"component"`), `probe`, `enable`.
 
 Rust's std works on `wasm32-wasip2`, including `std::net::TcpStream` for granted addresses.
 Other languages work if they emit a WASI preview 2 command component.

@@ -252,7 +252,11 @@ answer "use read/grep" while the background build finishes. A node without the c
 graph verb with `graph_component_unavailable: component_not_installed:graph`, which is why a deploy
 installs the component as part of the same install: `components.lock` pins `graph.wasm` by sha256
 and size, `scripts/deploy.sh` stage 3e proves the candidate binary answers through it, and
-`scripts/lib/deploy-components.sh` swaps it in with the previous triple kept for the rollback. The configured
+`scripts/lib/deploy-components.sh` swaps it in with the previous triple kept for the rollback. A node
+without a wasm toolchain needs no manual step: the deploy installs the pinned bytes from the
+`components-<short sha of components.lock>` release (built once by
+`scripts/publish-components.sh`), verifies them against the lock, and caches them under
+`<install>/components-cache/<lock sha>`, so a repeated deploy does not refetch. The configured
 runtime graph lives beside the ledger, in its own directory (`<home>/.wasm-agent/graph.db.d/graph.db`;
 the pre-component `graph.db` is no longer read and is rebuilt once on first use). Model source actions pass the session
 worktree (or explicit `cwd`) as `root`; Git audit/impact normalize it to the Git

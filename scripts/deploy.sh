@@ -717,23 +717,42 @@ case "$STAGE_CHECK" in "installed lua tree: commit $COMMIT"*) echo "deploy: $STA
 #     verified by sha256 AND size, and the candidate binary then proves the pair answers before either
 #     replaces what is running.
 #
-#     Where the bytes come from: WA_DEPLOY_COMPONENT_SOURCE=<dir> installs what another machine built
-#     (the normal path for a node without a wasm toolchain - the build is not byte-reproducible across
-#     checkout paths, see components.lock); with it unset this tree builds the component, which needs
-#     wasi-sdk because tree-sitter and SQLite are C, and a deploy that builds must say
-#     WA_DEPLOY_COMPONENT_REPIN=1 because the bytes it just built are not the pinned ones.
+#     Where the bytes come from (docs/COMPONENTS.md "Distributing components"): the copy this node
+#     already has, the bundle it fetched for the same lock before, or the release
+#     `components-<short sha of components.lock>` that scripts/publish-components.sh uploads once from
+#     the machine that has wasi-sdk - so a node with no wasm toolchain deploys main with no manual step
+#     at all. Every fetched bundle is verified against components.lock before it is cached or staged and
+#     cached under the lock's sha (repeated deploys do not refetch). WA_DEPLOY_COMPONENT_SOURCE=<dir>
+#     installs what another machine built by hand; with no pinned bytes reachable this tree builds the
+#     component, which needs wasi-sdk because tree-sitter and SQLite are C, and a deploy that builds must
+#     say WA_DEPLOY_COMPONENT_REPIN=1 because the bytes it just built are not the pinned ones.
 if ! command -v wa_component_stage >/dev/null 2>&1; then
   fail "refused(component_installer_missing): scripts/lib/deploy-components.sh is not beside this deploy, so the graph component cannot be pinned and installed; a core installed without it answers every graph call with component_not_installed:graph. Nothing installed."
 fi
 COMPONENT_DIR="$(wa_components_dir)"
 COMPONENT_STAGE="$INSTALL_DIR/components.next"
 rm -rf "$COMPONENT_STAGE" && mkdir -p "$COMPONENT_STAGE" || fail "cannot stage components in $COMPONENT_STAGE"
-if ! COMPONENT_ERROR="$(wa_component_stage "$ROOT" graph "$COMPONENT_STAGE" 2>&1)"; then
-  fail "refused(component_not_installable): $COMPONENT_ERROR; nothing installed. Either install the pinned bytes (WA_DEPLOY_COMPONENT_SOURCE=<dir> holding graph.wasm and graph.json from the machine that built them) or accept a local build of this tree with WA_DEPLOY_COMPONENT_REPIN=1."
+if ! COMPONENT_ERROR="$(wa_components_prepare "$ROOT" "$COMPONENT_STAGE" "$INSTALL_DIR" graph 2>&1)"; then
+  fail "refused(component_not_installable): $COMPONENT_ERROR; nothing installed. Either let the deploy fetch the pinned bytes from the release that components.lock names (default; WA_COMPONENT_RELEASE_REPO=<owner/repo> if the release is not in origin's repo), install them from a directory (WA_DEPLOY_COMPONENT_SOURCE=<dir> holding graph.wasm and graph.json from the machine that built them), or accept a local build of this tree with WA_DEPLOY_COMPONENT_REPIN=1."
 fi
-[ -z "$COMPONENT_ERROR" ] || note "component: $COMPONENT_ERROR"
+# One line per component, either `component_source:` (which bytes and why) or a staging note. Read
+# without a pipe, so the resolved source can name what the staged bytes are in the line below.
+while IFS= read -r component_line; do
+  [ -n "$component_line" ] || continue
+  case "$component_line" in
+    component_source:*)
+      echo "deploy: $component_line"
+      case "$component_line" in
+        *" this tree ("*) COMPONENT_SOURCE_SAID="this tree" ;;
+        *) COMPONENT_SOURCE_SAID="${component_line#component_source: }"; COMPONENT_SOURCE_SAID="${COMPONENT_SOURCE_SAID% (*}"; COMPONENT_SOURCE_SAID="${COMPONENT_SOURCE_SAID#* }" ;;
+      esac ;;
+    *) note "component: $component_line" ;;
+  esac
+done <<COMPONENT_LINES
+$COMPONENT_ERROR
+COMPONENT_LINES
 COMPONENT_SHA="$(cat "$COMPONENT_STAGE/graph.wasm.sha256")"
-COMPONENT_SOURCE_SAID="this tree"
+COMPONENT_SOURCE_SAID="${COMPONENT_SOURCE_SAID:-unrecorded}"
 [ -z "${WA_DEPLOY_COMPONENT_SOURCE:-}" ] || COMPONENT_SOURCE_SAID="$WA_DEPLOY_COMPONENT_SOURCE"
 echo "deploy: graph component staged from $COMPONENT_SOURCE_SAID (sha256 $COMPONENT_SHA, $(wc -c < "$COMPONENT_STAGE/graph.wasm" | tr -d '[:space:]') bytes)"
 [ "${WA_DEPLOY_COMPONENTS_DRY_RUN:-0}" != 1 ] || echo "deploy: WA_DEPLOY_COMPONENTS_DRY_RUN=1 - the component will be proved but not installed"

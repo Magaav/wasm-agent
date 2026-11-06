@@ -17,8 +17,18 @@
 # and commit the changed line with the component change that caused it. A build is not
 # byte-reproducible across checkout paths (the guest embeds three panic-location paths - measured
 # 05/11: two checkouts of the same tree gave 8,185,719 and 8,185,720 bytes), which is why a node
-# installs the pinned artifact instead of rebuilding it: WA_DEPLOY_COMPONENT_SOURCE=<dir> names
-# the directory hold those bytes. A deploy that builds from the tree instead
-# (WA_DEPLOY_COMPONENT_SOURCE unset) is a development deploy, and it must say so with
+# installs the pinned artifact instead of rebuilding it.
+#
+# Where that artifact comes from, in the order a deploy tries it (docs/COMPONENTS.md "Distributing
+# components"): the component already installed (when it is these bytes), this node's cache
+# (`<install>/components-cache/<sha256 of this file>`), then the release tagged
+# `components-<first 12 hex of sha256 of this file>` - which scripts/publish-components.sh builds on the
+# machine that has wasi-sdk and prints the `gh release create` command for. Every fetched bundle is
+# verified against the lines below (sha256 AND size) before it is cached or staged, and a bundle whose
+# own components.lock is not this file is refused. WA_COMPONENT_RELEASE_REPO / WA_COMPONENT_RELEASE_URL
+# point a deploy at another repository or a local bundle directory.
+#
+# A deploy that builds from the tree instead (no pinned bytes reachable and
+# WA_DEPLOY_COMPONENT_SOURCE unset) is a development deploy, and it must say so with
 # WA_DEPLOY_COMPONENT_REPIN=1 to install what it just built.
 graph 3f3118f4ccb9674423db86693d805c27d6686ed7f66630a83eb4cee7458de262 8216373
