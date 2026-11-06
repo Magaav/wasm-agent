@@ -34,6 +34,8 @@ local bash_mode = dofile("lua/core/bash_mode.lua")
 local cli_restart = dofile("lua/core/cli_restart.lua")
 -- `/status`: the session, its usage and every provider's limits, as bars.
 local status = dofile("lua/core/status.lua")
+-- `/hooks` and the operator's own `/` commands and footer segments (docs/HOOKS.md, docs/MODS.md).
+local hooks = dofile("lua/core/hooks.lua")
 
 local M = {}
 
@@ -694,10 +696,31 @@ function M.run(argv)
       print((memory.remember(line:sub(11))))
     elseif line:sub(1, 8) == "/recall " then
       each(memory.recall(line:sub(9), 10), memory_line, print)
+    elseif line == "/hooks" or line:sub(1, 7) == "/hooks " then
+      -- What is configured and what happened last (docs/HOOKS.md). A read: no hook runs for it, and
+      -- no payload, prompt or hook output is printed - names, events, timeouts and outcomes only.
+      local arg = line:sub(7):gsub("^%s+", "")
+      if arg == "reload" then
+        hooks.reset()
+        print("  hooks: configuration reread, footer segment cache cleared")
+      elseif arg ~= "" and arg ~= "list" then
+        print("usage: /hooks [reload]")
+      end
+      print(hooks.report({ session_id = agent.session_id, cwd = platform.cwd() }))
     elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
-      -- A slash word that is not a command (a typo like /hlep, or a command missing its argument) used to
-      -- start a full agent run with tools. A path ("/home/x ...") has a second slash and still goes through.
-      print("unknown or incomplete command " .. line:match("^(/[%w_-]+)") .. " - /help lists them")
+      -- A slash word that is not a built-in command: the operator's own command (docs/MODS.md), run
+      -- with the payload on stdin, and printed. Unknown words stay a refusal rather than a model turn:
+      -- a typo like /hlep used to start a full agent run with tools.
+      local name, rest = line:match("^(/[%w_-]+)%s*(.*)$")
+      local ran = hooks.run_command(name, rest, { session_id = agent.session_id, cwd = platform.cwd() })
+      if ran.ok then
+        if ran.output ~= "" then print(ran.output) end
+      else
+        print("unknown or incomplete command " .. name .. " - /help lists them")
+        if ran.error ~= "unknown_hook_command" then
+          print(redact.text("  " .. tostring(ran.error) .. (ran.detail and (": " .. tostring(ran.detail)) or "")))
+        end
+      end
     else
       turn(line)
     end

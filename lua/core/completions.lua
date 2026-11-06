@@ -18,6 +18,7 @@
 -- survives a restart, and it still works when the child is no longer in the runtime at all.
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua')
+local hooks=dofile('lua/core/hooks.lua')
 local users=dofile('lua/core/users.lua')
 local nodes=dofile('lua/core/nodes.lua')
 local workspaces=dofile('lua/core/workspaces.lua')
@@ -217,6 +218,17 @@ local function settle(row,api,boot)
   end
   local result=api.control({action='status',id=row.target_id},{user_id=row.owner,role=user.role,session_id=row.parent_session})
   if not (result.subagent_id and (result.settled or result.state=='unknown')) then return end
+  -- `SubagentStop`: a child's run settled. Fired at the one place a settlement is observed, with
+  -- the state the receipt reports and no prompt text - the parent's own transcript already holds
+  -- anything the hook would need to read, and a hook cannot change a settled child.
+  do
+    local settled=hooks.fire('SubagentStop',{subagent_id=result.subagent_id,state=tostring(result.state or 'unknown'),
+      profile=tostring(result.profile or ''),session_id=result.session_id,error=result.error,
+      settled=result.settled==true},{session_id=row.parent_session,user_id=row.owner,role=user.role})
+    for _,text in ipairs(settled.system_messages) do
+      pcall(host.log,'subagent stop hook: '..tostring(text))
+    end
+  end
   local profile=tostring(result.profile or "")
   local ok,packet=pcall(evaluation_packet,row,result,profile)
   if not ok then

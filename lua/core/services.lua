@@ -9,6 +9,7 @@
 -- whose `started.ok` is false - including a refused migration - stores nothing, so a definition the
 -- node cannot run never becomes an enabled one.
 local json=dofile('lua/vendor/json.lua')
+local hooks=dofile('lua/core/hooks.lua')
 local M={KEY='services.v1'}
 local function fail(error,extra)local r=extra or {};r.ok=false;r.error=error;return r end
 local function decode(raw)local ok,v=pcall(json.decode,tostring(raw or ''));if ok and type(v)=='table' then return v end end
@@ -73,6 +74,14 @@ function M.inventory()
  return {ok=true,revision=store.revision,services=list}
 end
 
+local function component_hook(event,args,extra,ctx)
+ local verdict=hooks.fire(event,{component=tostring(args.name or (type(args.definition)=='table' and args.definition.name) or ''),
+  action=tostring(args.action or extra and extra.action or ''),artifact=tostring(args.source or ''),
+  state=extra and extra.state},{session_id=ctx and ctx.session_id,user_id=ctx and ctx.user_id,role=ctx and ctx.role,cwd=nil})
+ for _,text in ipairs(verdict.system_messages or {}) do pcall(host.log,'component hook: '..tostring(text)) end
+ return verdict
+end
+
 function M.control(args,ctx)
  ctx=ctx or {}
  if ctx.role~='master' and ctx.role~='admin' then return fail('forbidden') end
@@ -101,12 +110,21 @@ function M.control(args,ctx)
   local row=type(args.name)=='string' and load_store().services[args.name]
   if not row then return fail('service_unknown') end
   if not row.enabled then return fail('service_not_enabled') end
+  -- `ComponentInstall` can refuse the swap before a single byte is staged (a pin that names the
+  -- wrong commit, an operator freezing installs). It answers before the host is asked, so a refusal
+  -- leaves the running instance exactly as it was.
+  local install=component_hook('ComponentInstall',args,{action='upgrade'},ctx)
+  if install.blocked then return fail('component_install_refused',{reason=install.reason,refused_by=install.blocked_by}) end
   local request=start_request(row.definition)
   request.action='upgrade'
   request.source=args.source
   if args.ready_ms~=nil then request.ready_ms=args.ready_ms end
   local answer=host_call(request)
-  if answer.ok then answer.definition=row.definition end
+  if answer.ok then
+   answer.definition=row.definition
+   local swap=component_hook('ComponentSwap',args,{action='upgrade',state=answer.state},ctx)
+   answer.hook_context=swap.additional_context
+  end
   return answer
  end
  if type(args.expected_revision)~='number' then return fail('services_store_revision_changed',{revision=load_store().revision}) end
@@ -122,6 +140,8 @@ function M.control(args,ctx)
   local store=load_store();local row=type(args.name)=='string' and store.services[args.name]
   if not row then return fail('service_unknown') end
   if action=='enable' then
+   local install=component_hook('ComponentInstall',args,{action='enable'},ctx)
+   if install.blocked then return fail('component_install_refused',{reason=install.reason,refused_by=install.blocked_by}) end
    local started=host_call(start_request(row.definition))
    -- `started.state` is the install's own report (`fresh` / `up-to-date` / `migrated`); a refusal
    -- there means the instance never started, so the definition is not enabled either.

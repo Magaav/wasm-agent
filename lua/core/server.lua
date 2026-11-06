@@ -476,7 +476,25 @@ function wa_jobs(body, session)
   local ok, args = pcall(json.decode, body or "{}")
   if not ok or type(args) ~= "table" then return json.encode({error="invalid_job_request"}) end
   local action = args.action or "list"
-  if action=='hooks' then return json.encode(dofile('lua/core/hook_events.lua').get()) end
+  -- The footer's mod segments (docs/MODS.md) are a separate action because they RUN the operator's
+  -- own status-line commands: a read of the inventory must stay a read.
+  if action=='hooks_status' then
+    local engine=dofile('lua/core/hooks.lua')
+    local ok,text=pcall(engine.statusline,{session_id=type(args.session_id)=='string' and args.session_id or '',
+      model=type(args.model)=='string' and args.model or nil,
+      context=tonumber(args.context),context_percent=tonumber(args.context_percent)})
+    return json.encode({ok=ok==true and type(text)=='string',text=ok and type(text)=='string' and text or ''})
+  end
+  if action=='hooks' then
+    -- The read-only event inventory (docs/HOOK-EVENTS.md) plus what the *hook engine* has configured
+    -- and last did (docs/HOOKS.md). Both are reads: names, event names, timeouts and outcomes; never
+    -- a payload, a prompt or a hook's full output.
+    local inventory = dofile('lua/core/hook_events.lua').get()
+    local engine = dofile('lua/core/hooks.lua')
+    inventory.active = engine.list({})
+    inventory.report = engine.report({})
+    return json.encode(inventory)
+  end
   -- `controls` is here because the Engine shows a job's declared numbers and has to be able to move
   -- them; the store owns what a control may be and what the edit costs. Nothing here executes a job.
   if action ~= "list" and action ~= "history" and action ~= "enable" and action ~= "disable" and action ~= "controls" then

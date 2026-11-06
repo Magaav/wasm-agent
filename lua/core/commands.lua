@@ -82,6 +82,11 @@ M.commands = {
   { name = "/demote", usage = "/demote <node>", hint = "confirm network guest; preserve local CLI" },
   { name = "/revoke", usage = "/revoke <node>", hint = "confirm exact binding revocation" },
   { name = "/restart", usage = "/restart", hint = "restart wa into this session (also automatic when a new build is installed)" },
+  {
+    name = "/hooks",
+    usage = "/hooks [reload]",
+    hint = "list the active hook points and mods, and the last outcome; `reload` rereads the config files",
+  },
   { name = "/help", usage = "/help", hint = "this help" },
   { name = "/exit", usage = "/exit", alias = { "/quit" }, hint = "quit" },
 }

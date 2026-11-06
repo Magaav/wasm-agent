@@ -21,6 +21,7 @@ local paths = dofile("lua/core/paths.lua")
 local redact = dofile("lua/core/redact.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
+local hooks = dofile("lua/core/hooks.lua")
 
 local M = {}
 
@@ -625,6 +626,16 @@ function M.start(args, ctx)
     return receipt
   end
   receipt.profile = profile.id
+  -- `SubagentStart`: the child is admitted and about to run. A hook cannot change what the child is
+  -- (its profile, tools and budget are already pinned by the admission) - it is told, and its
+  -- `systemMessage` goes to the node log, because the child has no reader of its own.
+  do
+    local started = hooks.fire('SubagentStart', { subagent_id = receipt.subagent_id, profile = profile.id,
+      session_id = receipt.session_id, parent_session_id = ctx.session_id, prompt_len = #prompt },
+      { session_id = receipt.session_id, run_id = ctx.run_id, user_id = ctx.user_id, role = ctx.role,
+        subagent = true, cwd = (memory.session_workspace and memory.session_workspace(receipt.session_id)) or nil })
+    for _, text in ipairs(started.system_messages) do pcall(host.log, 'subagent start hook: ' .. tostring(text)) end
+  end
   -- The mode's floor lifts only on a real admission, and it lifts for this user turn: the
   -- coordinator may act after it has delegated, and a resumed run of the same turn still may.
   dofile('lua/core/orchestration_mode.lua').record_admission(ctx,receipt)

@@ -26,6 +26,7 @@ local json = dofile("lua/vendor/json.lua")
 local platform = dofile("lua/core/platform.lua")
 local paths = dofile("lua/core/paths.lua")
 local release = dofile("lua/core/release.lua")
+local hooks = dofile("lua/core/hooks.lua")
 
 -- The sentinel owns the other side of replacement, so it is also the only actor that can prove the
 -- new node came back before resuming the conversation. Keep this server-owned: a browser may choose
@@ -624,6 +625,20 @@ function M.run(options)
     session_id = session_id,
     prompt = M.CONTINUATION_PROMPT,
   })
+  -- `PreDeploy`: the request is about to be written into the sentinel's drop-box, which is the last
+  -- moment a refusal costs nothing (the backup is taken, nothing is installed). A hook cannot verify
+  -- the install and is not asked to; it can say "not from this machine, not now".
+  local pre_deploy = hooks.fire('PreDeploy', { commit = facts.commit, reason = reason,
+    installed_commit = facts.installed_commit, sentinel = facts.sentinel },
+    { session_id = session_id, cwd = facts.tree })
+  if pre_deploy.blocked then
+    verdict.ok, verdict.queued, verdict.status = false, nil, "hook_refused"
+    verdict.error = "deploy_refused_by_hook"
+    verdict.observed = tostring(pre_deploy.blocked_by) .. ': ' .. tostring(pre_deploy.reason)
+    verdict.message = "a configured hook refused the deploy request, so nothing was queued."
+    verdict.next = "change the hook, or deploy by hand: " .. command
+    return verdict
+  end
   local result = shell(command)
   if not result then
     verdict.ok, verdict.queued, verdict.status = false, nil, "sentinel_unreachable"
@@ -676,6 +691,15 @@ function M.run(options)
                     " through the gate once this node is idle. This is not done yet."
   if session_id ~= "" then
     verdict.next = verdict.next .. " After it settles, the sentinel will wake this session to report the result and continue."
+  end
+  -- `PostDeploy`: the sentinel NAMED a durable request. Queued is not installed, and the hook is
+  -- told so in the payload (`queued=true`, `installed=false`) - a hook that fires a notification off
+  -- this event must not call it a deploy.
+  local post_deploy = hooks.fire('PostDeploy', { request = verdict.request, commit = verdict.commit,
+    queued = true, installed = false, stopped = facts.sentinel_stopped == true },
+    { session_id = session_id, cwd = facts.tree })
+  for _, text in ipairs(post_deploy.system_messages or {}) do
+    verdict.notice = (verdict.notice and (verdict.notice .. ' ') or '') .. tostring(text)
   end
   return verdict
 end

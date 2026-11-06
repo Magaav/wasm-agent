@@ -24,6 +24,8 @@
 -- payload, and a probe stores its own result for the model that asked for it.
 
 local json = dofile("lua/vendor/json.lua")
+-- The hook engine is read lazily through `dep` like every other core module: a wake check must not
+-- pay for loading it, and it must not load it at all when nothing is configured.
 local M = {}
 
 -- The core modules this file calls are cached per interpreter. `dofile` re-executes its file, and a
@@ -515,6 +517,16 @@ function M.publish(topic, payload, opts)
   topic = tostring(topic or "")
   if topic == "" then return { error = "publish_topic_required", effect = "none" } end
   opts = opts or {}
+  -- A bus topic is a hook source (docs/HOOKS.md). The hook is told the topic and the payload it
+  -- already trusts; it cannot veto a publish, because the fact has happened. Best effort: a hook
+  -- layer that breaks must never break the loop it is observing.
+  local hooked = false
+  pcall(function()
+    local hooks = dep('hooks')
+    local verdict = hooks.bus(topic, payload, { session_id = opts.session_id,
+      user_id = opts.user_id, role = opts.role, cwd = opts.cwd })
+    hooked = verdict ~= nil and verdict.ran > 0
+  end)
   local now = clock(opts)
   local rows = query("SELECT * FROM self_wakes WHERE status='pending' AND due_at IS NULL AND on_topics<>'[]'", {})
   local matched = {}
@@ -530,7 +542,7 @@ function M.publish(topic, payload, opts)
       end
     end
   end
-  return { ok = true, topic = topic, matched = #matched, wake_ids = matched }
+  return { ok = true, topic = topic, matched = #matched, wake_ids = matched, hooked = hooked }
 end
 
 -- The read-only tools a probe may call. A probe is a check, not a second effect path: the guest is
@@ -713,6 +725,31 @@ function M.run_wake(args)
     return { error = "self_wake_forbidden" }
   end
   local content, trace = M.turn_content(row, { now = now })
+  -- `SelfWake`: a due wake is claimed and about to spend a turn. The operator may veto it (a quiet
+  -- hours rule, a budget that is spent) and say when to try again; a veto without a reschedule is a
+  -- recorded failure rather than a silent skip, because a wake that never runs and never says so is
+  -- indistinguishable from a loop that has nothing to do.
+  local vetoed
+  do
+    local hooks = dep('hooks')
+    local verdict = hooks.fire('SelfWake', { wake_id = row.id, reason = tostring(row.reason or ''),
+      due_at = tonumber(row.due_at), attempts = tonumber(row.attempts) or 0,
+      event = tostring(row.event_json or '') ~= '' }, { session_id = row.session_id, user_id = row.owner,
+      role = user.role, cwd = nil })
+    for _, text in ipairs(verdict.system_messages or {}) do pcall(host.log, 'self-wake hook: ' .. tostring(text)) end
+    if verdict.blocked then vetoed = verdict end
+  end
+  if vetoed then
+    local seconds = tonumber(vetoed.reschedule_seconds)
+    if seconds and seconds > 0 then
+      local next_at = now + seconds
+      exec([[UPDATE self_wakes SET status='pending', due_at=?, updated_at=?, last_error=? WHERE id=?]],
+        { next_at, now, 'deferred by hook ' .. tostring(vetoed.blocked_by) .. ': ' .. tostring(vetoed.reason), row.id })
+      return { deferred = true, wake_id = row.id, due_at = next_at, reason = tostring(vetoed.reason or '') }
+    end
+    M.finish(row, false, 'vetoed by hook ' .. tostring(vetoed.blocked_by) .. ': ' .. tostring(vetoed.reason), { now = now })
+    return { error = 'self_wake_vetoed', reason = tostring(vetoed.reason or ''), effect = 'none' }
+  end
   local agentlib = dep("agent")
   local bot = agentlib.new(row.session_id, function(event) host.stream(json.encode(event)) end,
     user.role, row.owner, "")

@@ -18,6 +18,10 @@ local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
 local resources = dofile("lua/core/resources.lua")
+-- Hook points around one tool call (docs/HOOKS.md). Declared with the other module dependencies
+-- because both the dispatch wrapper at the bottom of this file and the parallel-bash gate read it.
+local hookslib = dofile("lua/core/hooks.lua")
+local redact = dofile("lua/core/redact.lua")
 local M = {}
 
 local function is_master(role)
@@ -1951,6 +1955,11 @@ local READ_ONLY = {
 function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end
 
 function M.start_parallel_bash(calls, memory, role, ctx)
+  -- A hook layer that must see every call cannot be skipped by the parallel path: while hooks are
+  -- configured, bash calls run one at a time through `dispatch`, where PreToolUse and PostToolUse fire
+  -- (docs/HOOKS.md, "what a hook cannot see"). With no hooks this is one cached lookup and the
+  -- batching behaviour is unchanged.
+  if hookslib.active() then return nil end
   if not is_master(role) or (ctx and ctx.subagent
       and (not ctx.subagent.allowed or not ctx.subagent.allowed.operation))
       or type(calls) ~= "table" or #calls < 2 then return nil end
@@ -2022,11 +2031,67 @@ function M.await_parallel_bash(operation_id, role, ctx)
     error = state.error, timing = state.timing, parallel = true }
 end
 
+-- Hook points around one tool call (docs/HOOKS.md). This wrapper is the one funnel every tool call
+-- passes - the model's, a subagent's, a probe's - so `PreToolUse` cannot be bypassed by calling a
+-- tool a second way. It is inert with no hooks configured: `hooks.active` is a cached lookup and the
+-- two `fire` calls answer an empty verdict without reading a file or starting a process.
+local function hook_ctx(ctx)
+  return { session_id = ctx.session_id, run_id = ctx.run_id or ctx.steering_run_id, node_id = ctx.node_id,
+    user_id = ctx.user_id, role = ctx.role or ctx.subagent and "subagent" or nil, cwd = ctx.cwd,
+    subagent = ctx.subagent }
+end
+
+-- The payload carries the arguments a hook may rewrite and a bounded, redacted view of a result.
+-- Text the node would not put in a transcript does not go to a hook either, and a huge tool result is
+-- clipped rather than copied - a hook that needs the whole file can read it.
+local function hook_result_view(output)
+  local ok, flat = pcall(json.encode, output or {})
+  if not ok or type(flat) ~= "string" then return nil, nil end
+  local encoded = flat
+  if redact.value then
+    local redacted_ok, redacted = pcall(redact.value, output, { tool = "hook" })
+    if redacted_ok and redacted then
+      local encoded_ok, value = pcall(json.encode, redacted)
+      if encoded_ok and type(value) == "string" then encoded = value end
+    end
+  end
+  local bytes = #encoded
+  if bytes > 8000 then
+    return { truncated = true, bytes = bytes, view = encoded:sub(1, 8000) }, bytes
+  end
+  local decoded_ok, decoded = pcall(json.decode, encoded)
+  return decoded_ok and type(decoded) == "table" and decoded or { view = encoded }, bytes
+end
+
 local dispatch = M.dispatch
 function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
   ctx=ctx or {}
   local generation=ctx.resource_effect_generation or 0
-  local ok,result=pcall(dispatch,memory,name,args,role,ctx,cwd_provenance)
+  -- One firing per outermost call: a tool that forwards to itself (`remote`, a batch) would
+  -- otherwise report the same call twice and let a deny be answered after the effect.
+  local outermost = not ctx.hook_nested and hookslib.active()
+  local call_args = args
+  if outermost then
+    local pre = hookslib.fire('PreToolUse', { tool_name = name, tool_input = args or {},
+      tool_call_id = ctx.tool_call_id, cwd = ctx.cwd or platform.cwd() }, hook_ctx(ctx))
+    if pre.blocked then
+      return { error = 'hook_denied', denied_by = pre.blocked_by, permission = pre.permission,
+        reason = pre.reason, effect = 'none', hook_system_messages = pre.system_messages,
+        note = 'A configured hook refused this call: ' .. tostring(pre.reason) }
+    end
+    if next(pre.updated_input or {}) ~= nil then
+      local merged = {}
+      for key, value in pairs(args or {}) do merged[key] = value end
+      for key, value in pairs(pre.updated_input) do merged[key] = value end
+      call_args = merged
+    end
+    ctx.hook_pre = pre
+    ctx.hook_nested = true
+  end
+  local ok,result=pcall(dispatch,memory,name,call_args,role,ctx,cwd_provenance)
+  if outermost then ctx.hook_nested = nil end
+  local pre = ctx.hook_pre
+  ctx.hook_pre = nil
   -- Uncertainty is for unknown *effects*, not for refusals. A result the node marked
   -- `effect:"none"` never reached the client, so it cannot have changed anything, and
   -- branding the run's claims for it would take the client away from the run that had
@@ -2037,6 +2102,28 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
       or (result.code and result.code~=0) or result.state=="running" or result.state=="unknown") then
     local marked=resources.uncertain(ctx)
     if not marked.ok then error("resource_uncertainty_record_failed: "..json.encode(marked)) end
+  end
+  if outermost then
+    local failed = (not ok) or (type(result) ~= "table") or result.error ~= nil or result.ok == false
+      or result.cancelled == true or (result.code and result.code ~= 0) or result.state == "unknown"
+    local payload = { tool_name = name, tool_input = call_args or {}, tool_call_id = ctx.tool_call_id,
+      cwd = ctx.cwd or platform.cwd(), ok = not failed, effect = type(result) == "table" and result.effect or nil }
+    if failed then
+      payload.error = not ok and tostring(result) or (type(result) == "table" and result.error) or "tool_failed"
+    else
+      payload.tool_response, payload.tool_response_bytes = hook_result_view(result)
+    end
+    local post = hookslib.fire(failed and 'PostToolUseFailure' or 'PostToolUse', payload, hook_ctx(ctx))
+    local extra = {}
+    if pre and pre.additional_context then extra[#extra + 1] = pre.additional_context end
+    if post.additional_context then extra[#extra + 1] = post.additional_context end
+    local messages = {}
+    for _, text in ipairs((pre and pre.system_messages) or {}) do messages[#messages + 1] = text end
+    for _, text in ipairs(post.system_messages or {}) do messages[#messages + 1] = text end
+    if type(result) == "table" then
+      if #extra > 0 then result.hook_context = table.concat(extra, "\n") end
+      if #messages > 0 then result.hook_system_messages = messages end
+    end
   end
   if not ok then error(result) end
   return result

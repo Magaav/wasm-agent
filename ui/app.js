@@ -4804,9 +4804,11 @@ function updateChip() {
   composerModel.hidden=false;
   composerModel.title='Model used for the latest request: '+model;
   const wakes=wakeFooterText();
-  setText(chipUsage,wakes);
-  if(wakes){
-    chipUsage.title='Self-wakes this session scheduled: '+wakes.replace(/^⏰ /,'');
+  const mods=hookFooterText();
+  const facts=[wakes,mods].filter(Boolean).join(' \u00b7 ');
+  setText(chipUsage,facts);
+  if(facts){
+    chipUsage.title='Session footer facts: '+facts;
   }else{
     chipUsage.removeAttribute('title');
   }
@@ -5501,6 +5503,33 @@ const ORCHESTRATOR_ALL_BRIEF = "Act as the git orchestrator for this repository.
   "Scope: /merge all explicitly includes every open PR head, including forks. Review each PR and honor required checks and approvals before integration.";
 
 let orchestrationMode=null,orchestrationRead=null;
+// The footer's mod segment (docs/MODS.md): the operator's own status-line command, read from the node
+// through `POST /jobs {action:"hooks_status"}` - the action that exists because reading the footer
+// runs the operator's command and the inventory read must stay a read. Cached for 30s; a node with no
+// mods answers empty and nothing changes in the row. A fetch failure is a footer with one fact fewer,
+// never a visible error.
+let hooksFooterCache = { key: null, at: 0, text: "" }, hooksFooterRead = null;
+function hookFooterText() {
+  const key = (activeNode || "") + "|" + (chatSession || "");
+  if (hooksFooterCache.key === key && Date.now() - hooksFooterCache.at < 30000) return hooksFooterCache.text;
+  if (!hooksFooterRead || hooksFooterRead.key !== key) {
+    const pending = { key, promise: null };
+    pending.promise = (async () => {
+      try {
+        const response = await apiFetch("jobs", { method: "POST",
+          headers: apiHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ action: "hooks_status", session_id: chatSession }) });
+        const payload = await response.json();
+        if (!response.ok || !payload || payload.error) return;
+        hooksFooterCache = { key, at: Date.now(), text: String(payload.text || "") };
+        try { updateChip(); } catch (error) { /* the next render paints it */ }
+      } catch (error) { /* no mods is a footer with one fact fewer */ }
+      finally { if (hooksFooterRead === pending) hooksFooterRead = null; }
+    })();
+    hooksFooterRead = pending;
+  }
+  return hooksFooterCache.key === key ? hooksFooterCache.text : "";
+}
 function wakeFooterText() {
   const facts=wakesFacts;
   if(!facts)return '';
@@ -5647,6 +5676,11 @@ const COMMANDS = [
     name: "/vault",
     hint: "store a key as <name>.key — the agent uses it by name, never sees it",
     run: () => openVault(""),
+  },
+  {
+    name: "/hooks",
+    hint: "list the active hook points and mods, and the last outcome",
+    run: hooksReport,
   },
 ];
 
@@ -5913,6 +5947,45 @@ async function showUpdateBanner() {
 
 // `/efficiency_report`: what the last model call sent and cost, read from the harness ledger.
 //
+// `/hooks`: what hook points and mods are active on this node and what the last hook did. A read of
+// the node's own config (`POST /jobs {action:"hooks"}`, the same route the inventory panel uses), so
+// it spends no model call and changes no thread. Names, event names and outcomes are rendered as
+// text; a hook's payload, a prompt and its output are not printed here.
+let hooksReportRead = null;
+async function hooksReport() {
+  const panel = document.createElement("pre");
+  panel.className = "efficiency-report";
+  panel.textContent = "/hooks — reading the node's hook configuration…";
+  messages.append(panel);
+  pin();
+  const key = (activeNode || "") + "|" + (chatSession || "");
+  const read = hooksReportRead?.key === key
+    ? hooksReportRead.promise
+    : (() => {
+        const pending = { key, promise: null };
+        pending.promise = (async () => {
+          try {
+            const response = await apiFetch("jobs", { method: "POST",
+              headers: apiHeaders({ "Content-Type": "application/json" }),
+              body: JSON.stringify({ action: "hooks" }) });
+            return await response.json();
+          } finally { if (hooksReportRead === pending) hooksReportRead = null; }
+        })();
+        hooksReportRead = pending;
+        return pending.promise;
+      })();
+  try {
+    const payload = await read;
+    if (!payload || payload.error) throw new Error((payload && (payload.detail || payload.error)) || "no answer");
+    panel.textContent = String(payload.report || "(no hooks configured on this node)");
+    panel.dataset.state = "current";
+  } catch (error) {
+    panel.textContent = "/hooks could not be read: " + String(error && error.message || error);
+    panel.dataset.state = "refused";
+  }
+  pin();
+}
+
 // The window has no Lua, so it cannot build the report itself: it asks the node's read route,
 // which runs the same deterministic report the CLI's `/efficiency_report` prints. No model call
 // is spent. The answer is preformatted, so it goes in a <pre> rather than a one-line notice.

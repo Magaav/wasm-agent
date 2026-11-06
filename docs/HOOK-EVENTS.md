@@ -1,5 +1,10 @@
 # Hook/event inventory and beforeFinalAnswer evaluation
 
+> **This file is the inventory.** The hook *engine* - the config files, the Claude Code compatible
+> protocol, the mods surface and the pass/fail rules - is [HOOKS.md](HOOKS.md) and
+> [MODS.md](MODS.md). The catalogue below describes what exists as events and event jobs; `/hooks`
+> shows which hook points are actually configured on this node, and what the last one did.
+
 Engine gains a read-only **hooks / events** topic beside Jobs. This inventory is
 not a new executor, subscription registry, trigger, watcher or approval. Existing
 Jobs remain the only management surface for installed trigger/action definitions.
@@ -117,3 +122,34 @@ replay refuses enforced worktree bindings, so retain the direct CLI without
 weakening the binding until spell replay itself passes. Evaluate timing with
 `scripts/evaluate-before-final.cjs`; it executes real loop logic with fake HTTP,
 not provider inference.
+
+## The engine beside this inventory
+
+The catalogue above is a curated list with claims about boundaries. The engine
+(`lua/core/hooks.lua`) is the executable half: the same boundaries, named as hook
+events an operator can attach a command to. The differences that matter when
+reading both:
+
+* `Stop` is the identified-answer boundary this file calls `onFinalAnswer`: a
+  completed no-tool candidate, before final commit, after cancellation and
+  steering checks. The engine fires it there and its payload is ids and lengths
+  only (`message_id`, `text_len`) - never the answer text. A `decision:"block"`
+  asks the run to continue (bounded), `continue:false` keeps the answer.
+* `PreCompact`/`PostCompact` exist as hooks; the inventory has no row for them
+  because no job reads them. A `PreCompact` refusal is visible and can leave a
+  caller with its own `context_overflow` - that is the operator's choice.
+* `Notification` is produced where the agent already tells the reader something
+  that is not the answer (a wave-closure notice, a failed closure report).
+* `PreDeploy`/`PostDeploy` are `/update`'s request boundary. `PostDeploy` means
+  the sentinel named a durable request (`queued=true`, `installed=false`); it is
+  never an install.
+* `ComponentInstall`/`ComponentSwap` are the service registry's install and
+  switch boundaries (`lua/core/services.lua`).
+* `SelfWake` is the self-loop's turn boundary (`lua/core/selfloop.lua`), and it
+  may veto a wake, with an optional `reschedule_seconds`.
+* Any bus topic is a hook source (`bus:<topic>`, `bus:*`) through
+  `selfloop.publish`. A hook is told the fact and cannot veto it.
+
+`beforeFinalAnswer` is still not implemented, and the engine does not pretend
+otherwise: the reliable boundary remains `Stop`, and it is still before commit
+and after the checks, not before streamed text.

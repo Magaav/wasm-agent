@@ -17,6 +17,26 @@ local context_usage = dofile("lua/core/context_usage.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local json_contract = dofile("lua/core/json_contract.lua")
 local selfloop = dofile("lua/core/selfloop.lua")
+local hooks = dofile("lua/core/hooks.lua")
+
+-- One place that tells a hook what it is being told about. Ids, names, lengths and bounded views
+-- only: a hook never receives the transcript, a credential or a whole tool result unless the node
+-- would have put that text in the transcript anyway. `cwd` is left to the engine's default (the
+-- process working directory, which is the session's workdir for a run) rather than sampling it here.
+local function hook_ctx(self, extra)
+  local ctx = { session_id = self.session_id, run_id = self.run_id, node_id = self.node,
+    user_id = self.user, role = self.role, subagent = self.subagent }
+  for key, value in pairs(extra or {}) do ctx[key] = value end
+  return ctx
+end
+
+-- A hook's `systemMessage` is a line the reader sees, never a decision. It travels as the same
+-- `status` event every other notice uses, so the CLI, the window and a replay all show it.
+local function hook_messages(self, verdict)
+  for _, text in ipairs((verdict and verdict.system_messages) or {}) do
+    self.emit({ type = 'status', text = text })
+  end
+end
 
 -- Tool-argument text that does not parse. Measured on a DeepSeek session: 6 of 114 calls lost
 -- only their last `}`. The one repair is json_contract.close_truncated (append the closers still
@@ -1131,6 +1151,18 @@ function M:compact_now(messages, opts)
   local measurement_reason, budget, trigger = opts.measurement_reason, opts.budget, opts.trigger
   local force = opts.force
 
+  -- `PreCompact`: the operator gets the one chance to stop a prefix rewrite (a summary model change,
+  -- a transcript they are still reading). A refusal is visible and the transcript is left as it is;
+  -- it is not a silent skip, and a caller that needed the room gets its own context_overflow.
+  local pre_compact = hooks.fire('PreCompact', { tokens_before = before, limit = limit, keep = keep,
+    trigger = trigger, reason = measurement_reason, forced = force == true }, hook_ctx(self))
+  hook_messages(self, pre_compact)
+  if pre_compact.blocked then
+    self.emit({ type = 'status', text = 'compaction refused by hook ' .. tostring(pre_compact.blocked_by)
+      .. ': ' .. tostring(pre_compact.reason) })
+    return false
+  end
+
   -- The threshold decision lives in the one wrapper, not in a caller: maybe_compact
   -- measures and hands over `trigger` but never compares it, so without this line
   -- any caller that reaches here summarises no matter how small the context -- an
@@ -1325,6 +1357,15 @@ function M:compact_now(messages, opts)
   end
   self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after,
     messages = cut_index, summary_model = self:summary_model(), created_at = recorded_at })
+  -- `PostCompact`: the rewrite landed. A hook may re-add what it wants the model to keep, because a
+  -- summary is lossy by construction; it cannot undo the compaction.
+  local after_compact = hooks.fire('PostCompact', { tokens_before = before, tokens_after = after,
+    through = cut.seq, trigger = trigger, summary_model = self:summary_model() }, hook_ctx(self))
+  hook_messages(self, after_compact)
+  if after_compact.additional_context then
+    record_turn(self, { role = 'user',
+      content = '[hook context \194\183 PostCompact] ' .. after_compact.additional_context })
+  end
   return true
 end
 
@@ -1509,6 +1550,22 @@ function M:run_body(text, images)
   end)
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
+  -- `UserPromptSubmit`: the reader's text is recorded, but the hook answers before a model sees it.
+  -- It may add context (a date, a repo state, a reminder) or refuse the prompt. A refusal is
+  -- recorded like any other turn - the transcript must not show a question that was never asked.
+  local submitted = hooks.fire('UserPromptSubmit', { prompt = text, prompt_len = #tostring(text or ''),
+    images = images and #images or 0 }, hook_ctx(self))
+  hook_messages(self, submitted)
+  if submitted.blocked then
+    local reason = tostring(submitted.reason or 'refused by a hook')
+    record_turn(self, { id = host.uuid(), role = 'user', content = text, images = images or {}, debug = self.debug })
+    local message_id = host.uuid()
+    record_turn(self, { id = message_id, role = 'assistant', content = reason, debug = self.debug, ok = false })
+    self.emit({ type = 'status', text = 'prompt refused by hook ' .. tostring(submitted.blocked_by) })
+    self.emit({ type = 'reply', text = reason, message_id = message_id })
+    return reason
+  end
+
   record_turn(self, {
     id=self.run_id,role = "user", content = text, images = images or {}, debug = self.debug,
     trace = self.self_wake or nil,
@@ -1527,6 +1584,20 @@ function M:run_body(text, images)
   end
 
   local messages = self:build_context()
+  -- `SessionStart` is fired once per run, at the context boundary: a hook can add the facts a model
+  -- cannot know (the branch, the free disk, the operator's standing instruction) without the caller
+  -- having to put them in every prompt. Its answer is a user-role block ahead of the first request.
+  do
+    local started = hooks.fire('SessionStart', { source = self.self_wake and 'self_wake' or 'run',
+      resume = #messages > 1 }, hook_ctx(self))
+    hook_messages(self, started)
+    if started.additional_context then
+      messages[#messages + 1] = { role = 'user', content = '[hook context \194\183 SessionStart] ' .. started.additional_context }
+    end
+    if submitted.additional_context then
+      messages[#messages + 1] = { role = 'user', content = '[hook context \194\183 UserPromptSubmit] ' .. submitted.additional_context }
+    end
+  end
   local trace = {}
   local reply = ""
   local reply_reasoning, reply_phase, reply_message_id, completed = "", "", nil, false
@@ -2247,20 +2318,48 @@ function M:run_body(text, images)
               and parent and parent.objective~='subagent'
               and not tostring(parent.route_id):lower():find('whatsapp',1,true) then
             self.emit({type='status',text='SELF closure reporting failed; inspect the native trace.'})
+            hooks.fire('Notification', { kind = 'closure_report_failed', text_len = 0 }, hook_ctx(self))
           end
         elseif notice then
           trace[#trace+1]={kind='wave_closure',ok=notice.phase~='held',notice_id=notice.id,
             state=notice.phase,text=notice.text,result=notice.result}
           self.emit({type='status',text=notice.text,wave_notice_id=notice.id})
+          hooks.fire('Notification', { kind = 'wave_closure', text_len = #tostring(notice.text or ''),
+            notice_id = notice.id, state = notice.phase }, hook_ctx(self))
         end
         -- The final assistant message is recorded once, after the loop, with the
         -- message's trace. Recording it here as well would duplicate it in context.
         if steering.pending(self.user,self.session_id,self.steering_run_id) then
           reply='' -- A late continuation invalidates this candidate, not its retained queue receipt.
         else
-          completed=true
-          reply_message_id = assistant_id
-          break
+          -- `Stop`: the candidate is identified. A hook may ask the run to continue (Claude Code's
+          -- Stop semantics); the count is bounded, so a hook that always says "keep going" cannot
+          -- become the runaway loop. `continue:false` keeps the answer and says why the run stopped.
+          local stop = hooks.fire('Stop', { message_id = assistant_id, text_len = #tostring(reply or ''),
+            stop_hook_active = (self.stop_hook_continues or 0) > 0, phase = decision_phase }, hook_ctx(self))
+          hook_messages(self, stop)
+          if stop.stop then
+            self.emit({type='status', text='run stopped by hook: '..tostring(stop.stop_reason)})
+            completed=true
+            reply_message_id = assistant_id
+            break
+          elseif stop.blocked and (self.stop_hook_continues or 0) < hooks.MAX_STOP_CONTINUES then
+            self.stop_hook_continues = (self.stop_hook_continues or 0) + 1
+            messages[#messages+1] = { role='user', content='[Stop hook \194\183 '..tostring(stop.blocked_by)..'] '
+              ..tostring(stop.reason)..'\n\nThis is not a new user request: continue the same task, and finish it.' }
+            self.emit({type='status', text='a hook asked the run to continue: '..tostring(stop.reason)})
+            telemetry.event(self.session_id,self.run_id,'','hook','continue',{hook=tostring(stop.blocked_by),
+              attempt=self.stop_hook_continues})
+            -- The candidate is recorded below and the round loop continues; nothing is un-answered.
+          else
+            if stop.blocked then
+              self.emit({type='status', text='the Stop hook asked to continue again but the bound ('
+                ..hooks.MAX_STOP_CONTINUES..') is reached; the answer stands'})
+            end
+            completed=true
+            reply_message_id = assistant_id
+            break
+          end
         end
       end
     end
@@ -2351,6 +2450,7 @@ function M:run_body(text, images)
               ..'that remain valid.') or nil}
         end
         dispatch_ctx.tool_arguments_json=arguments_text
+        dispatch_ctx.tool_call_id=call.id
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
       host.beat()
@@ -2400,6 +2500,15 @@ function M:run_body(text, images)
         content=json.encode({error='tool_output_storage_failed',original_result=output})
         ok_tool=false
         self.emit({type="status",text="tool output storage failed; full result kept in transcript"})
+      end
+      -- A hook's `systemMessage` is a reader notice (emitted above as status); its
+      -- `additionalContext` is for the model, so it rides with the tool result it is about - the
+      -- model must see it in the same turn, not in a system row a provider may drop.
+      if type(output) == 'table' and projected then
+        for _, text in ipairs(output.hook_system_messages or {}) do self.emit({type='status', text=text}) end
+        if output.hook_context then
+          content = content .. "\n\n[hook context] " .. tostring(output.hook_context)
+        end
       end
       -- What a navigation call answered (action, found, count): a wrong answer must not be
       -- recorded as a plain success. Enums/booleans/counts only.

@@ -552,6 +552,19 @@ function M.wake_text(session_id)
   return ok and type(text) == "string" and text or ""
 end
 
+-- The footer's mod segments (docs/MODS.md): a `mods.statusline` command's own words, cached for a
+-- few seconds because the footer is redrawn far more often than a shell command can answer. Never
+-- fatal: a footer that cannot read a mod is a footer, not a failed run, and an empty answer adds
+-- nothing to the row.
+function M.hook_text(session_id, model, facts)
+  local ok, text = pcall(function()
+    return dofile("lua/core/hooks.lua").statusline({ session_id = session_id, model = model,
+      runs = facts and facts.runs, tokens = facts and facts.tokens,
+      context = facts and facts.context, context_percent = facts and facts.context_percent })
+  end)
+  return ok and type(text) == "string" and text or ""
+end
+
 -- ---- is this a terminal? --------------------------------------------------------
 
 -- Output that is not a terminal (`wa chat | tee log`) never gets the live view: the host says so
@@ -1008,6 +1021,10 @@ function METHODS:live_footer()
     context = self.context, budget = self.budget })
   local wake = M.wake_text(self.session_id)
   if wake ~= "" then self.last_summary = self.last_summary .. " " .. wake end
+  local hook = M.hook_text(self.session_id, self.model, { runs = self.runs, tokens = self.tokens,
+    context = self.context, context_percent = (self.context and self.budget and self.budget > 0)
+      and (100 * self.context / self.budget) or nil })
+  if hook ~= "" then self.last_summary = self.last_summary .. " \194\183 " .. hook end
   self:footer_draw()
 end
 
