@@ -1,0 +1,21 @@
+[package]
+name = "wa-kv"
+version = "0.1.0"
+edition = "2021"
+description = "One host store, three kv traits: the namespaced adapter that lets wa-queue, wa-bus and wa-state share the kernel's per-component kv"
+license = "MIT"
+
+# The adapter's whole job is to be the single place where one store is presented to the three
+# libraries through their own (deliberately incompatible) traits. It therefore depends on exactly
+# those three crates and on nothing else: no wasmtime, no SQLite, no threads of its own.
+[dependencies]
+wa-queue = { path = "../wa-queue" }
+wa-bus = { path = "../wa-bus" }
+# Default features: the snapshot codec (`wa-state`'s `export`/`import`) is used by the host's
+# transactional install, which is the first caller of this adapter. The migration core is what a
+# wasm guest needs; the host is not a guest.
+wa-state = { path = "../wa-state" }
+
+[lib]
+name = "wa_kv"
+path = "src/lib.rs"
