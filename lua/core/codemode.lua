@@ -5,6 +5,9 @@ local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local presentation=dofile('lua/core/codemode_view.lua')
+-- Discovery spellings are parsed in one place: searchTools({names={...}}) and searchTools("select:a,b") are
+-- the same request as tool_search, so the guest cannot drift from the outer facade (07/11).
+local envelope=dofile('lua/core/envelope.lua')
 -- The node's own capability inventory: the same registry the CLI prints and `/health` digests.
 local inventory=dofile('lua/core/capability_inventory.lua')
 local M={}
@@ -111,10 +114,35 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
      local query=params[1];local options=params[2]
      if type(query)=='table' then options=query;query=options.query end
      options=type(options)=='table' and options or {}
-     local listing=query==nil or query=='*' or (type(query)=='string' and not query:find('%S'))
+     -- An exact batch (names=[...] or "select:a,b,c") is the same request as tool_search's: the same
+     -- 1-8 names, the same mutual exclusion, and the same `missing` with nearest permitted names. This
+     -- route returns metadata over the guest's own ceiling; it never loads or admits anything.
+     local wanted,batch_error=envelope.requested_names({query=query,names=options.names})
+     local catalogue={}
+     for _,descriptor in ipairs(descriptors)do catalogue[descriptor.name]=true end
+     for name in pairs(outside)do catalogue[name]=true end
+     local function searchable(name)
+      local def=definitions[name]
+      if def then return {name=def.name,schema=def.schema,execution=execution(def.name),callable=true} end
+      local out=outside[name]
+      if out then return {name=out.name,schema=out.schema,execution=execution(out.name),callable=false,route=out.route} end
+     end
+     local listing=not wanted and (query==nil or query=='*' or (type(query)=='string' and not query:find('%S')))
      local limit=options.limit or (listing and 50 or 8)
      local offset=options.offset or 0
-     if listing then
+     if batch_error then value={error=batch_error};success=false
+     elseif wanted then
+      if options.limit~=nil and (type(options.limit)~='number' or options.limit%1~=0 or options.limit<1 or options.limit>8) then value={error='invalid_tool_search_limit'};success=false
+      else
+       local tools,missing={},{}
+       for _,name in ipairs(wanted)do
+        local entry=searchable(name)
+        if entry then tools[#tools+1]=entry else local echo=envelope.echo_name(name);missing[#missing+1]={name=echo,suggestions=envelope.nearest(echo,catalogue,3)} end
+       end
+       value={tools=tools,matches=#tools,missing=missing,requested=#wanted,
+        invocation='Guest-local metadata only; every entry listed here is callable in this script (callable:false entries run outside, see route). Native current-catalog/profile/type/effect checks apply to each call.'};success=true
+      end
+     elseif listing then
       if type(limit)~='number' or limit%1~=0 or limit<1 or limit>200 or type(offset)~='number' or offset%1~=0 or offset<0 then value={error='invalid_tool_search_limit'};success=false
       else
        -- The whole guest catalogue, names and one-line descriptions only; describeTool(name) gives a schema.

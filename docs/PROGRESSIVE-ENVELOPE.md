@@ -10,8 +10,12 @@ Every other permitted tool is called on demand with `tool_call`; the system prom
 <!-- /generated -->
 
 See `docs/LAYERED-PROMPT.md` for the prompt layers. Invalid `WASM_AGENT_BOOTSTRAP_MODE` values refuse. The role-filtered execution catalogue remains
-complete. `tool_search` loads matching exact definitions into the transcript;
-`tool_call(name, arguments)` routes a loaded definition through the existing
+complete. `tool_search` loads matching exact definitions into the transcript, by
+keyword or as an exact batch: `names=[...]` loads 1-8 known tools in one atomic loadout
+write (`limit` still bounds a keyword search, and an unknown or not-permitted name
+comes back in `missing` with the nearest permitted ones), while `query="select:a,b,c"`
+is the same batch spelled inside one string. `tool_call(name, arguments)` routes a loaded
+definition through the existing
 native dispatcher. There is no JavaScript interpreter or new authority in this
 facade. Scope, profile, workspace, effect reservation and target checks still run.
 Unknown/plugin effects remain conservatively effectful. `tool_call(checked=true)`

@@ -35,6 +35,15 @@ New operator sessions declare 14 tools from the start (`lean`, the default): `ba
 Every other permitted tool is called on demand with `tool_call`; the system prompt lists it with its cue.
 <!-- /generated -->
 
+Discovery takes two forms, and they are exclusive. `tool_search(query=...)` scores keywords;
+`tool_search(names=[...])` loads an exact list of 1-8 tool names, and `query="select:a,b,c"` is the
+same batch spelled inside one string. A batch is one loadout write (a single compare-and-swap on the
+session's loadout row), so it is all loaded or `envelope_loadout_changed` with effect none. Every
+permitted name is pinned and guided exactly like a keyword hit; a name that is unknown or not
+permitted comes back in `missing` with the nearest permitted names, drawn from the caller's own
+catalogue, so a denied name is never disclosed. Inside code mode `searchTools({names=[...]})` is the
+same request: the guest's metadata over its own ceiling, which loads and admits nothing.
+
 <!-- generated:deferred-tools (scripts/sync-prompt-docs.lua) -->
 Built-in tools not declared at bootstrap, as the progressive prompt lists them (the role, profile and mode still decide visibility):
 
@@ -117,7 +126,7 @@ runs on the client too, while `bash` runs on this node.
 | `notes_compact` | `keep_lines?` | Keep the last lines of your notes and archive the rest |
 | `skill` | `limit?` `name?` `offset?` `query?` `snapshot?` | Discover procedures by query or load a full skill by name |
 | `capabilities` | - | List the tools this account may use |
-| `tool_search` | `query` `limit?` | Discover and load a permitted tool definition |
+| `tool_search` | `limit?` `names?` `query?` | Discover and load a permitted tool definition |
 | `tool_call` | `arguments?` `calls?` `checked?` `cursor?` `name?` | Call a permitted tool by name without expanding permanent declarations |
 | `subagent` | `action` `after_seq?` `before_seq?` `byte_limit?` `byte_offset?` `context?` `conversation_id?` `delivery_id?` `id?` `idempotency_key?` `limit?` `message_id?` `message_version?` `model?` `offset?` `parent_run_id?` `profile?` `prompt?` `reasoning?` `run_id?` `session_id?` `text?` `title?` `view?` `wait_ms?` | Start and collect a child agent on a bounded task |
 | `sessions` | `all_owners?` `limit?` `node?` `path?` | List your past sessions |
