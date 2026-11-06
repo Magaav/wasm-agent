@@ -994,6 +994,10 @@ local completions=dofile('lua/core/completions.lua')
 function wa_orchestrator_tick()
   dofile("lua/core/orchestrator.lua").tick(M)
   completions.tick(M)
+  -- The model's own wakes (docs/SELF-LOOP.md): due rows are handed to the same run scheduler, so a
+  -- session no browser is watching still keeps a promise it made to itself. Eligibility and state are
+  -- in Lua; this tick only gives the loop a heartbeat that outlives a single interpreter turn.
+  pcall(dofile('lua/core/selfloop.lua').tick)
   return "ok"
 end
 

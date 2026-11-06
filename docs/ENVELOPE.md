@@ -39,6 +39,13 @@ Every other permitted tool is called on demand with `tool_call`; the system prom
 Built-in tools not declared at bootstrap, as the progressive prompt lists them (the role, profile and mode still decide visibility):
 
 - `memories`: List stored facts, with their ids
+- `wake`: Schedule your own next turn (time, event or repeating)
+- `wake_list`: List your pending self-wakes
+- `wake_cancel`: Cancel a pending self-wake by id
+- `notes_read`: Read the plan/notes document you own for this session
+- `notes_write`: Replace your session notes (previous version archived)
+- `notes_append`: Append to your session notes
+- `notes_compact`: Keep the last lines of your notes and archive the rest
 - `capabilities`: List the tools this account may use
 - `subagent`: Start and collect a child agent on a bounded task
 - `sessions`: List your past sessions
@@ -101,6 +108,13 @@ runs on the client too, while `bash` runs on this node.
 | `remember` | `content` `id?` `scope?` `tags?` | Store a fact the user asked you to keep |
 | `recall` | `query` `limit?` `scope?` | Look up stored facts before answering about the user |
 | `memories` | `limit?` `scope?` | List stored facts, with their ids |
+| `wake` | `reason` `at?` `every_seconds?` `in_seconds?` `on?` `probe?` `prompt?` | Schedule your own next turn (time, event or repeating) |
+| `wake_list` | `all?` | List your pending self-wakes |
+| `wake_cancel` | `id` | Cancel a pending self-wake by id |
+| `notes_read` | `version?` `versions?` | Read the plan/notes document you own for this session |
+| `notes_write` | `text` | Replace your session notes (previous version archived) |
+| `notes_append` | `text` | Append to your session notes |
+| `notes_compact` | `keep_lines?` | Keep the last lines of your notes and archive the rest |
 | `skill` | `limit?` `name?` `offset?` `query?` `snapshot?` | Discover procedures by query or load a full skill by name |
 | `capabilities` | - | List the tools this account may use |
 | `tool_search` | `query` `limit?` | Discover and load a permitted tool definition |
@@ -159,7 +173,7 @@ runs on the client too, while `bash` runs on this node.
 | `web_search` | `query` `limit?` `refresh?` | Search public web sources with retained evidence |
 | `web_read` | `limit?` `offset?` `pending_ref?` `ref?` `refresh?` `url?` | Read a public source or page an immutable cache ref |
 
-A guest's catalogue is `time`, `remember`, `recall`, `memories`, `skill`, `capabilities`, `tool_search`, `tool_call`, `subagent`, `sessions`, `session`, `search_messages`, `resume_session`.
+A guest's catalogue is `time`, `remember`, `recall`, `memories`, `wake`, `wake_list`, `wake_cancel`, `notes_read`, `notes_write`, `notes_append`, `notes_compact`, `skill`, `capabilities`, `tool_search`, `tool_call`, `subagent`, `sessions`, `session`, `search_messages`, `resume_session`.
 <!-- /generated -->
 
 ## What the model does **not** get

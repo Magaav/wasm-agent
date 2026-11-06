@@ -239,6 +239,29 @@ M.shared = {
   schema("memories", "List what is stored, most recent first, with each entry's id. Use it when the user asks what you remember or wants the store tidied: reading the ids is how you find what `forget` should remove.", {
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 200 } }),
+  -- ---- the self-loop (docs/SELF-LOOP.md): controls the model owns, never a required schema ----
+  schema("wake", "Schedule your own next turn in this session: a durable task loop you own, not an automation rule installed by the operator. Give `in_seconds` (or `at`, Unix epoch seconds) for a time wake, or `on` for an event wake: bus topics (dotted; a trailing `.*` matches children), job ids (matched as job.<id>), or \"message\" (a new user message in this session). `every_seconds` re-arms the wake after each turn; `prompt` is the text you are woken with (default \"scheduled wake: <reason>\"). Optional `probe` is a small code-mode script that runs before the wake with read-only tools only: return {changed:false} to skip the model turn and re-arm as asked (a time wake needs every_seconds for that), {changed:true, ...} to be woken with the result; a probe that fails wakes you with its error so you decide. A wake survives a node restart and re-enters this session as a normal turn marked [self-wake], with your notes offered. Write the goal and done-criteria into `notes_write`, re-read them on each wake, prefer event wakes to fast polling, and cancel wakes when the goal is done (wake_list / wake_cancel).", {
+    in_seconds = { type = "number", minimum = 0, description = "Wake after this many seconds." },
+    at = { type = "number", description = "Wake at this Unix epoch time in seconds. Exclusive with in_seconds." },
+    on = { type = "array", minItems = 1, maxItems = 16, items = { type = "string", maxLength = 256 }, description = "Event subscriptions: bus topics, job ids, or \"message\". Exclusive with in_seconds/at/every_seconds." },
+    every_seconds = { type = "number", minimum = 1, description = "Time wakes: re-arm after each turn. Also the recheck cadence when a probe returns changed=false." },
+    reason = { type = "string", maxLength = 500, description = "Why this wake exists; it labels the transcript turn." },
+    prompt = { type = "string", maxLength = 8000, description = "The user-side text of the wake turn. Defaults to scheduled wake: <reason>." },
+    probe = { type = "string", maxLength = 20000, description = "Code-mode script (read-only tools) returning {changed:boolean, ...}. Runs before the wake; only change wakes the model for nothing." },
+  }, { "reason" }),
+  schema("wake_list", "List your pending wakes for this session: when each is next due, its cadence or event subscription, its last error, and whether it is being dispatched. `all=true` includes delivered, failed, cancelled and unknown rows.", {
+    all = { type = "boolean", description = "Include settled history, not only pending wakes." } }),
+  schema("wake_cancel", "Cancel one of your pending wakes by id (from wake_list). A wake already handed to the run scheduler refuses: cancelling there would claim an effect this call cannot observe.", {
+    id = { type = "string", description = "Wake id from wake_list." } }, { "id" }),
+  schema("notes_read", "Read the plan/notes document you own for this session. `version` reads an archived version; `versions=true` lists recent archived versions. A write or compact archives the previous document, so nothing you wrote is lost.", {
+    version = { type = "string", description = "Archived version id to read." },
+    versions = { type = "boolean", description = "List recent archived versions instead of the current text." } }),
+  schema("notes_write", "Replace your session notes with `text` (the previous non-empty document is archived). Use it for the goal, done-criteria, what is verified, open questions and the next action, so a wake can resume without re-deriving the mission.", {
+    text = { type = "string", maxLength = 65536 } }, { "text" }),
+  schema("notes_append", "Append a block to your session notes. Cheaper than rewriting a long plan for one fact; compact when it grows.", {
+    text = { type = "string", maxLength = 65536 } }, { "text" }),
+  schema("notes_compact", "Keep only the last `keep_lines` lines of your notes and archive the full previous document. The model decides what to drop; the archive is retrievable with notes_read {version}.", {
+    keep_lines = { type = "integer", minimum = 1, maximum = 1000, description = "Lines to keep (default 40)." } }),
   schema("skill", "Find procedures by `query`, or load one skill's full instructions by `name` (not both). Load a matching skill before specialized work.", {
     name = { type = "string", description = "Exact skill name to load." },
     query = { type = "string", maxLength = 256, description = "Task keywords; * lists all visible metadata." },
@@ -583,6 +606,8 @@ M.tier_of = {
   capture_inspect='environment',
   mcp='mcp', web_search='mcp', web_read='mcp', services='mcp',
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
+  notes_read = "memory", notes_write = "memory", notes_append = "memory", notes_compact = "memory",
+  wake = "sessions", wake_list = "sessions", wake_cancel = "sessions",
   skill = "skills",
   capabilities = "capabilities", tool_search='capabilities', tool_call='capabilities',
   subagent = "subagents",
@@ -651,6 +676,13 @@ local CUES = {
   remember = "Store a fact the user asked you to keep",
   recall = "Look up stored facts before answering about the user",
   memories = "List stored facts, with their ids",
+  notes_read = "Read the plan/notes document you own for this session",
+  notes_write = "Replace your session notes (previous version archived)",
+  notes_append = "Append to your session notes",
+  notes_compact = "Keep the last lines of your notes and archive the rest",
+  wake = "Schedule your own next turn (time, event or repeating)",
+  wake_list = "List your pending self-wakes",
+  wake_cancel = "Cancel a pending self-wake by id",
   forget = "Delete a stored fact by id",
   skill = "Discover procedures by query or load a full skill by name",
   capabilities = "List the tools this account may use",
@@ -1395,6 +1427,21 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not is_master(role) then return {error="forbidden_for_role:"..role} end
     return tool_output.read(args.sha256,args.offset,args.limit)
   end
+  -- The self-loop controls (docs/SELF-LOOP.md). Notes and wakes are scoped to the calling session by
+  -- selfloop itself (owner and session are re-checked there from ctx, never from the arguments).
+  if name == "wake" or name == "wake_list" or name == "wake_cancel" then
+    local selfloop = dofile("lua/core/selfloop.lua")
+    if name == "wake" then return selfloop.schedule(args, ctx) end
+    if name == "wake_list" then return selfloop.list(args, ctx) end
+    return selfloop.cancel(args, ctx)
+  end
+  if name == "notes_read" or name == "notes_write" or name == "notes_append" or name == "notes_compact" then
+    local selfloop = dofile("lua/core/selfloop.lua")
+    if name == "notes_read" then return selfloop.notes_read(args, ctx) end
+    if name == "notes_write" then return selfloop.notes_write(args, ctx) end
+    if name == "notes_append" then return selfloop.notes_append(args, ctx) end
+    return selfloop.notes_compact(args, ctx)
+  end
 
   -- A guest's memory is its own: it writes and reads only `user:<id>`, never `global` (which a
   -- master's recall and runs read) and never another scope. The model picks `scope`; the role decides.
@@ -1895,6 +1942,7 @@ local READ_ONLY = {
   graph = true, diagnose = true, capabilities = true, tool_search=true, web_search=true,web_read=true,nodes = true,
   recall = true, memories = true, sessions = true, session = true,
   search_messages = true,
+  notes_read = true, wake_list = true,
   spell_list = true, spell_get = true,
   whatsapp_send_status = true,
   whatsapp_search = true, whatsapp_read = true, whatsapp_reactions = true, whatsapp_media = true,

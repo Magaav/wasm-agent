@@ -68,6 +68,11 @@ layers and names (node-thread, subagent, run): `docs/FABRIC.md`.
 - **Memory is on demand.** The only automatic injections are these instruction files, scoped by
   role; guests get `AGENTS.guest.md` and never this file.
 - **Failures are visible**: no silent success, no silent data loss.
+- **A long mission is the model's loop** (`docs/SELF-LOOP.md`): the tools are optional, not a schema.
+  Write the goal and done-criteria with `notes_write`; schedule your own next turn with `wake`, event
+  wakes before fast polling; attach a `probe` so an unchanged world does not spend a turn; re-read the
+  notes on each `[self-wake]`; turn repeated failures into written rules; notify only on events; and
+  cancel the wake when the goal is done.
 - **Raw over compacted**, unless evidence shows the task result does not degrade; a token
   saving alone never justifies making the model less aware.
 - **Know how you are risking.** Name the risk in the patch; prefer a knob plus its measurement

@@ -152,11 +152,15 @@ try { blankSession = localStorage.getItem(NEW_SESSION_KEY) || ""; } catch (error
 // Async reads and streams belong to the conversation that started them. A session switch increments
 // this value so a late response from the old thread cannot repaint the new one.
 let conversationEpoch = 0;
+// The model's own pending wakes for this conversation (docs/SELF-LOOP.md), from the session read's
+// `wakes` block. The composer footer shows the count and the next due; there is no second control.
+let wakesFacts = null;
 
 function rememberSession(id) {
   if (!id || id === chatSession) return false;
   chatSession = id;
   orchestrationMode=null;
+  wakesFacts=null;
   delete messages.dataset.debug;
   conversationEpoch += 1;
   resetConversationFollowState();
@@ -170,6 +174,7 @@ function rememberNode(node) {
   invalidateProviderEntry();
   activeNode = node;
   orchestrationMode=null;
+  wakesFacts=null;
   delete messages.dataset.debug;
   conversationEpoch += 1;
   invalidateHookInventory();
@@ -3926,6 +3931,8 @@ async function restoreSessionOnce(target, epoch, node = activeNode, attempt = nu
       }
     }
     orchestrationMode=full.orchestration || null;
+    wakesFacts=full.wakes || null;
+    try { updateChip(); } catch (error) { /* the next render paints it */ }
     setTranscriptDebug(messages, full.session?.mode);
     const loadedSeq = (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     if (full && Array.isArray(full.messages) && full.messages.length) {
@@ -4796,7 +4803,13 @@ function updateChip() {
   if(composerModel.textContent!==model)composerModel.textContent=model;
   composerModel.hidden=false;
   composerModel.title='Model used for the latest request: '+model;
-  setText(chipUsage,'');
+  const wakes=wakeFooterText();
+  setText(chipUsage,wakes);
+  if(wakes){
+    chipUsage.title='Self-wakes this session scheduled: '+wakes.replace(/^⏰ /,'');
+  }else{
+    chipUsage.removeAttribute('title');
+  }
 }
 function updateChildContextReadouts() {
   const pane=transcript.closest('wa-agent-session');if(!pane?.shell.modelChip)return;
@@ -5488,6 +5501,17 @@ const ORCHESTRATOR_ALL_BRIEF = "Act as the git orchestrator for this repository.
   "Scope: /merge all explicitly includes every open PR head, including forks. Review each PR and honor required checks and approvals before integration.";
 
 let orchestrationMode=null,orchestrationRead=null;
+function wakeFooterText() {
+  const facts=wakesFacts;
+  if(!facts)return '';
+  const total=(Number(facts.pending)||0)+(Number(facts.dispatching)||0);
+  if(total<=0)return '';
+  const next=Number(facts.next_at);
+  const when=Number.isFinite(next)&&next>0
+    ? ' · next '+new Date(next*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+    : '';
+  return '⏰ '+total+(total===1?' wake':' wakes')+when;
+}
 async function readOrchestrationMode() {
   const thread=chatSession,node=activeNode,epoch=conversationEpoch;
   if(!thread)return;

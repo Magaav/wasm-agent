@@ -265,6 +265,13 @@ end
 -- Called only by the native internal work item, never through an HTTP route.
 function wa_completion_run(raw)
   local args=json.decode(raw)
+  -- A wake the model scheduled for itself rides the same scheduler (same background lane, per-session
+  -- serialization and cancel flag) but is not a child settlement: `lua/core/selfloop.lua` owns its
+  -- admission and its transcript turn. Routed here because the run half is the same node-thread.
+  if type(args)=='table' and args.kind=='self_wake' then
+    local ok,result=pcall(dofile('lua/core/selfloop.lua').run_wake,args)
+    return json.encode(ok and result or {error=tostring(result)})
+  end
   local row=query('SELECT * FROM child_completions WHERE child_id=? AND owner=? AND parent_session=?',{args.id,args.owner,args.session_id})[1]
   if not row or (row.state~='accepted' and row.state~='dispatching') then return json.encode({error='completion_not_admitted'}) end
   if args.cancelled then

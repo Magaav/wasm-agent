@@ -543,6 +543,15 @@ function M.footer(run, ctx)
   return table.concat(parts, " \194\183 ")   -- ·
 end
 
+-- The footer's self-wake fact (docs/SELF-LOOP.md): `⏰ 2 wakes · next 14:05`, or "" when this
+-- session has nothing pending. Read from the ledger through `selfloop`, and never fatal: a footer
+-- that cannot count is a footer, not a failed run.
+function M.wake_text(session_id)
+  if not session_id or session_id == "" then return "" end
+  local ok, text = pcall(function() return dofile("lua/core/selfloop.lua").footer_text(session_id) end)
+  return ok and type(text) == "string" and text or ""
+end
+
 -- ---- is this a terminal? --------------------------------------------------------
 
 -- Output that is not a terminal (`wa chat | tee log`) never gets the live view: the host says so
@@ -698,6 +707,9 @@ function M.new(opts)
     title = opts.title or "",
     workspace = opts.workspace or "",
     branch = opts.branch or "",
+    -- The session whose self-wakes the footer counts (docs/SELF-LOOP.md). Nil in a caller with no
+    -- session (a test, a replay view); the footer then simply omits the fact.
+    session_id = opts.session_id or nil,
     budget = opts.budget or 0,
     context = 0,
     frame = 0, phase = "", round = 0, runs = 0, total_rounds = 0, pending = nil,
@@ -994,6 +1006,8 @@ function METHODS:live_footer()
   self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
     prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
     context = self.context, budget = self.budget })
+  local wake = M.wake_text(self.session_id)
+  if wake ~= "" then self.last_summary = self.last_summary .. " " .. wake end
   self:footer_draw()
 end
 
@@ -1253,6 +1267,8 @@ function METHODS:run_finished()
     run.cost = run.cost or (self.totals and self.totals.cost) or 0
   end
   local text = M.footer(run, { context = self.context, budget = self.budget })
+  local wake = M.wake_text(self.session_id)
+  if wake ~= "" then text = text == "" and wake or (text .. "  \194\183  " .. wake) end
   self.last_summary = text
   if self.screen and self.screen.footer and self.turn then
     -- The run's own numbers, left under it in the transcript: the status line, stopped.
@@ -1265,6 +1281,7 @@ function METHODS:run_finished()
     self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
       prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
       context = self.context, budget = self.budget })
+    if wake ~= "" then self.last_summary = self.last_summary .. " " .. wake end
   end
   if text ~= "" and not self.screen then
     -- One line, clipped to the width: a footer that wraps puts its own tail at column

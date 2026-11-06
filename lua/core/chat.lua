@@ -188,6 +188,8 @@ function M.run(argv)
     -- variable that is normally not exported, and a CLI that fell back to 80 wrapped its answers
     -- into a third of a wide window. See `platform.columns`.
     limit = platform.columns(host.getenv("COLUMNS")),
+    -- The session whose wakes the footer counts (docs/SELF-LOOP.md).
+    session_id = session.id,
   })
   -- Commands must use the view's scroll region, not Lua's global print at the
   -- hardware cursor (which now belongs to the native editor). The view writer is
@@ -293,6 +295,12 @@ function M.run(argv)
 
   refresh_status = function() snapshot_status({ color = view.live, cached = true }) end
 
+  -- The model's own wakes (docs/SELF-LOOP.md). A node fires them from its placement tick; an
+  -- interactive CLI has no served scheduler, so it claims a due wake between waits and runs the turn
+  -- in this same session and view. The claim is a compare-and-set, so a CLI beside a node never runs
+  -- the same wake twice. Assigned after `mark_seen` exists; `turn` only calls it when it is set.
+  local wake_if_due
+
   local function turn(line)
     snapshot_status({ color = view.live, max_age = 300 })
     view:run_started()
@@ -304,6 +312,7 @@ function M.run(argv)
       -- token, or a provider without streaming), so the turn is never silent.
       view:answered(reply)
     end
+    if wake_if_due then wake_if_due() end
   end
 
   if prompt ~= "" then view:prompt(); turn(prompt) end
@@ -377,11 +386,34 @@ function M.run(argv)
     if hold then pcall(hold, false) end
   end
 
+  local selfloop = dofile("lua/core/selfloop.lua")
+  local function wake_turn(row)
+    local content, trace = selfloop.turn_content(row)
+    snapshot_status({ color = view.live, max_age = 300 })
+    view:run_started()
+    agent.self_wake = trace
+    local ok, reply = pcall(agent.run, agent, content)
+    agent.self_wake = nil
+    if not ok then view:failed(redact.text(tostring(reply))) else view:answered(reply) end
+    selfloop.finish(row, ok, reply)
+    mark_seen()
+  end
+  wake_if_due = function()
+    local row = selfloop.claim_due(agent.session_id, agent.user or USER)
+    if not row then return false end
+    print(cli_view.paint("  \226\143\176 self-wake: " .. redact.text(tostring(row.reason or "")), "dim", view.live))
+    wake_turn(row)
+    return true
+  end
+
   local function read_line()
     view:prompt()
     while true do
       restart_if_due()
       catch_up()
+      -- A due self-wake is a turn this session promised itself; run it now rather than at the next
+      -- line the reader types. A wake that brings no line redraws the prompt after its own turn.
+      if wake_if_due() then view:prompt() end
       -- Woken every CHECK_SECONDS (not WAIT_MS, half an hour) so an install is noticed at an idle
       -- prompt; the prompt is drawn once, above, so a wake that brings no line redraws nothing.
       local line, eof = input:poll(math.min(cli_input.WAIT_MS, cli_restart.CHECK_SECONDS * 1000))
@@ -469,6 +501,35 @@ function M.run(argv)
       dofile('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,print)
     elseif line == "/session" then
       print(agent.session_id)
+    elseif line == "/wakes" or line == "/wake" or line:sub(1, 6) == "/wake " then
+      -- The model's own schedule (docs/SELF-LOOP.md). The window gets the same facts in its session
+      -- read and composer footer; this is the reader's own list and cancel, beside the session it names.
+      local ctx = { user_id = USER, role = "master", session_id = agent.session_id }
+      local arg = line == "/wakes" and "" or line:sub(6):gsub("^%s+", "")
+      if arg ~= "" then
+        local verb, id = arg:match("^(%S+)%s+(%S+)$")
+        if verb ~= "cancel" or not id then
+          print("usage: /wake cancel <id>")
+        else
+          local result = selfloop.cancel({ id = id }, ctx)
+          print(result.ok and ("  cancelled " .. id) or ("  " .. tostring(result.error or "not cancelled")))
+        end
+      else
+        local listed = selfloop.list({}, ctx)
+        if listed.error then
+          print("  " .. tostring(listed.error))
+        elseif listed.count == 0 then
+          print("  no pending wakes")
+        else
+          for _, wake in ipairs(listed.wakes) do
+            local when = wake.due_at and os.date("%Y-%m-%d %H:%M", math.floor(wake.due_at))
+              or ("on " .. table.concat(wake.on, ", "))
+            print(string.format("  %s  %s  %s%s%s", wake.id, wake.status, when,
+              wake.every_seconds and (" every " .. wake.every_seconds .. "s") or "",
+              wake.last_error ~= "" and ("  ! " .. wake.last_error) or ""))
+          end
+        end
+      end
     elseif line == "/status" then
       -- A panel, like /model: Esc, Left or Enter goes back to the chat. Printed where there is none.
       -- During a run the host shows it by itself (see `status_snapshot` above); this arm is between runs.

@@ -1027,6 +1027,18 @@ function wa_session(session_id, session)
     state = memory.session_state(session_id),
     messages = memory.session_messages(session_id, { limit = 500 }),
     steering = dofile('lua/core/steering.lua').view(session_id),
+    -- The model's own wakes (docs/SELF-LOOP.md): the window shows the count and the next due in the
+    -- composer footer. Owner is the session's own, so a master reading another thread still sees
+    -- that thread's wakes and not their own.
+    wakes = (function()
+      local ok, listed = pcall(dofile('lua/core/selfloop.lua').list, {},
+        { user_id = record.user_id, role = user.role, session_id = session_id })
+      if not ok or type(listed) ~= 'table' or listed.error then
+        return { pending = 0, event_pending = 0, wakes = {}, error = ok and listed.error or 'wakes_unavailable' }
+      end
+      return { pending = listed.pending, event_pending = listed.event_pending,
+        next_at = listed.next_at, wakes = listed.wakes }
+    end)(),
     orchestration = record.objective~='subagent' and users.is_master(effective_role(user)) and
       dofile('lua/core/orchestration_mode.lua').read(session_id) or nil,
   })
