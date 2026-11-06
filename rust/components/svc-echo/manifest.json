@@ -1,8 +1,8 @@
 {
   "name": "svc-echo",
   "kind": "service",
-  "target": "wasm32-wasip1",
-  "description": "Fixture: heartbeat, one granted dial (echo), one refused dial, clean stop, crash mode",
-  "capabilities": {"net": ["127.0.0.1:*"]},
+  "target": "wasm32-wasip2",
+  "description": "Fixture on wa:kernel@0.2 (native async): heartbeat on a WASI 0.3 timer, kv round trip, async http dial (granted/refused), websocket echo over a stream, clean stop, crash mode",
+  "capabilities": {"net": ["127.0.0.1:*"], "storage": true},
   "limits": {"memory_mb": 64}
 }

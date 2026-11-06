@@ -531,15 +531,33 @@ pub fn start(request: &Value) -> Value {
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
     };
     // A component on the wa:kernel contract runs through service_components; a core module
-    // through the wasip1 runner below. The binary's preamble says which.
+    // through the wasip1 runner below. The binary's preamble says which, and for a component its
+    // own imports say which version of the contract it speaks: `wa:kernel/*@0.2.0` is the native
+    // async runner (and the async-capable engine it needs), everything else is 0.1, unchanged.
     enum Compiled {
         Module(Module),
         Component(wasmtime::component::Component),
+        ComponentV2(wasmtime::component::Component),
     }
     let compiled = if crate::service_components::is_component(&installed.bytes) {
-        match wasmtime::component::Component::new(&engine, &installed.bytes) {
-            Ok(c) => Compiled::Component(c),
+        // The contract a component speaks is in its own imports, and a 0.2 component only compiles
+        // on an engine with the async feature: the async engine is therefore the one that reads the
+        // answer, and a 0.1 component is then compiled again on the engine every other component
+        // uses, so nothing about 0.1 behaviour changes.
+        let async_engine = match crate::service_components_v2::engine() {
+            Ok(engine) => engine,
+            Err(error) => return json!({"ok": false, "error": format!("engine_failed:{error}")}),
+        };
+        let probe = match wasmtime::component::Component::new(&async_engine, &installed.bytes) {
+            Ok(component) => component,
             Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+        };
+        match crate::service_components_v2::Contract::of(&probe) {
+            crate::service_components_v2::Contract::V2 => Compiled::ComponentV2(probe),
+            crate::service_components_v2::Contract::V1 => match wasmtime::component::Component::new(&engine, &installed.bytes) {
+                Ok(c) => Compiled::Component(c),
+                Err(error) => return json!({"ok": false, "error": format!("compile_failed:{error}")}),
+            },
         }
     } else {
         match Module::new(&engine, &installed.bytes) {
@@ -561,6 +579,10 @@ pub fn start(request: &Value) -> Value {
                 Compiled::Module(module) => run_once(&installed, &grant, module, &thread_shared),
                 Compiled::Component(component) => match open_log(&installed.name) {
                     Ok(log) => crate::service_components::run_once(&installed, &grant, component, &thread_shared, log),
+                    Err(error) => format!("log_unavailable:{error}"),
+                },
+                Compiled::ComponentV2(component) => match open_log(&installed.name) {
+                    Ok(log) => crate::service_components_v2::run_once(&installed, &grant, component, &thread_shared, log),
                     Err(error) => format!("log_unavailable:{error}"),
                 },
             };
@@ -669,6 +691,93 @@ pub extern "C-unwind" fn service(l: *mut crate::lua::LuaState) -> std::os::raw::
     1
 }
 
+/// Test support shared by the service runner tests: the gate builds the fixtures with
+/// `scripts/build-components.sh` into one directory (`WA_TEST_SERVICE_DIR`), and each test copies
+/// what it needs into a private component directory, because `WA_COMPONENTS_DIR` is process-global
+/// and every one of these tests runs a real service.
+#[cfg(test)]
+pub(crate) mod support {
+    use super::*;
+
+    /// Install the fixtures named in `wanted` into a private components dir and point
+    /// `WA_COMPONENTS_DIR` at it. `None` when the gate did not build them (the caller skips).
+    pub(crate) fn install(suffix: &str, wanted: &[&str]) -> Option<std::path::PathBuf> {
+        let source = std::path::PathBuf::from(std::env::var("WA_TEST_SERVICE_DIR").ok()?);
+        let dir = std::env::temp_dir().join(format!("wa-services-{}-{suffix}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        for name in wanted {
+            let mut copied = 0;
+            for extension in ["wasm", "wasm.sha256", "json"] {
+                let from = source.join(format!("{name}.{extension}"));
+                if from.is_file() && std::fs::copy(&from, dir.join(format!("{name}.{extension}"))).is_ok() {
+                    copied += 1;
+                }
+            }
+            if copied != 3 {
+                return None; // a fixture the gate did not build is a skip, never a pass
+            }
+        }
+        std::env::set_var("WA_COMPONENTS_DIR", &dir);
+        Some(dir)
+    }
+
+    /// A local HTTP server that answers every request with `200` and `body`, so a granted `net`
+    /// dial has a real peer. Returns its port.
+    pub(crate) fn http_echo(body: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 4096];
+                    let _ = stream.read(&mut request);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                });
+            }
+        });
+        port
+    }
+
+    /// A local websocket server that echoes the first binary frame it receives (tungstenite's own
+    /// server handshake, the peer of the client the host speaks). Returns its port.
+    pub(crate) fn ws_echo() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let Ok(mut socket) = tungstenite::accept(stream) else { return };
+                    socket.get_mut().set_read_timeout(Some(Duration::from_secs(10))).ok();
+                    if let Ok(tungstenite::Message::Binary(frame)) = socket.read() {
+                        let _ = socket.send(tungstenite::Message::Binary(frame));
+                    }
+                    let _ = socket.close(None);
+                });
+            }
+        });
+        port
+    }
+
+    /// Wait until the service log contains `needle`, or give up. Returns the whole log either way.
+    pub(crate) fn wait_for_log(name: &str, needle: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        loop {
+            let text = logs(name, 16 << 10)["log"].as_str().unwrap_or("").to_string();
+            if text.contains(needle) || Instant::now() >= deadline {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,20 +796,17 @@ mod tests {
         assert!(!dial_allowed(&[], "web.whatsapp.com:443"));
     }
 
-    /// End to end with a real fixture service when one is built (WA_TEST_SERVICE_WASM): heartbeat,
-    /// a granted dial to a local echo server, a refused dial, stop within the grace, crash restart.
+    /// End to end with the wasip1 core-module fixture (`svc-echo-wasip1`): heartbeat, a granted
+    /// dial to a local echo server, a refused dial, stop within the grace, crash restart. The
+    /// wa:kernel fixtures prove the same runner contract through their own tests
+    /// (`service_components::tests`, `service_components_v2::tests`).
     #[test]
     fn fixture_service_runs_dials_and_stops() {
-        let Ok(wasm) = std::env::var("WA_TEST_SERVICE_WASM") else { return };
         let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("wa-services-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("WA_COMPONENTS_DIR", &dir);
-        let bytes = std::fs::read(&wasm).unwrap();
-        std::fs::write(dir.join("svc-echo.wasm"), &bytes).unwrap();
-        let sha: String = ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect();
-        std::fs::write(dir.join("svc-echo.wasm.sha256"), &sha).unwrap();
-        std::fs::write(dir.join("svc-echo.json"), r#"{"name":"svc-echo","kind":"service","capabilities":{"net":["127.0.0.1:*"]},"limits":{"memory_mb":64}}"#).unwrap();
+        if support::install("wasip1", &["svc-echo-wasip1"]).is_none() {
+            return;
+        }
+        let name = "svc-echo-wasip1";
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -713,31 +819,30 @@ mod tests {
             }
         });
         let config = json!({"dial": format!("127.0.0.1:{port}"), "refused": "127.0.0.2:9"});
-        let started = start(&json!({"name": "svc-echo", "net": [format!("127.0.0.1:{port}")], "config": config}));
+        let started = start(&json!({"name": name, "net": [format!("127.0.0.1:{port}")], "config": config}));
         assert_eq!(started["ok"], true, "{started}");
-        assert_eq!(start(&json!({"name": "svc-echo", "net": [format!("127.0.0.1:{port}")], "config": config}))["already_running"], true);
+        assert_eq!(start(&json!({"name": name, "net": [format!("127.0.0.1:{port}")], "config": config}))["already_running"], true);
         std::thread::sleep(Duration::from_millis(1500));
-        let log = logs("svc-echo", 4096)["log"].as_str().unwrap_or("").to_string();
+        let log = logs(name, 4096)["log"].as_str().unwrap_or("").to_string();
         assert!(log.contains("heartbeat"), "{log}");
         assert!(log.contains("echo ok"), "{log}");
         assert!(log.contains("refused -13"), "{log}");
-        assert_eq!(status(Some("svc-echo"))["state"], "running");
+        assert_eq!(status(Some(name))["state"], "running");
         let t = Instant::now();
-        let stopped = stop("svc-echo");
+        let stopped = stop(name);
         assert_eq!(stopped["was_running"], true);
         assert!(t.elapsed() < STOP_GRACE + Duration::from_secs(2));
-        assert_eq!(status(Some("svc-echo"))["state"], "not_running");
+        assert_eq!(status(Some(name))["state"], "not_running");
         // Crash mode: exits non-zero; the supervisor restarts it.
         let crash = json!({"crash": true});
-        assert_eq!(start(&json!({"name": "svc-echo", "config": crash}))["ok"], true);
+        assert_eq!(start(&json!({"name": name, "config": crash}))["ok"], true);
         std::thread::sleep(Duration::from_millis(2500));
-        let s = status(Some("svc-echo"));
+        let s = status(Some(name));
         assert!(s["restarts"].as_u64().unwrap_or(0) >= 1, "{s}");
         assert!(s["last_exit"].as_str().unwrap_or("").starts_with("exit_3"), "{s}");
-        stop("svc-echo");
+        stop(name);
         // A grant beyond the manifest is refused before anything runs.
-        let wide = start(&json!({"name": "svc-echo", "net": ["10.0.0.1:443"]}));
+        let wide = start(&json!({"name": name, "net": ["10.0.0.1:443"]}));
         assert!(wide["error"].as_str().unwrap_or("").contains("not_declared"), "{wide}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

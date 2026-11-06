@@ -1,0 +1,8 @@
+{
+  "name": "svc-echo-v1",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Fixture on wa:kernel@0.1 (poll contract): heartbeat, kv round trip, one granted http dial, one refused dial (grant), clean stop, crash mode",
+  "capabilities": {"net": ["127.0.0.1:*"], "storage": true},
+  "limits": {"memory_mb": 64}
+}

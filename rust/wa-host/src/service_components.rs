@@ -2,7 +2,7 @@
 //! world, run by the same supervisor as the wasip1 services (services.rs picks by binary header).
 //! The guest imports websocket/http/kv/lifecycle/log/credentials and exports `service.run`.
 use crate::components::{Grant, Installed};
-use crate::service_io::{http_start, url_authority, HttpState, WsConn, AGAIN, CLOSED};
+use crate::service_io::{http_start, url_authority, HttpState, Kv as KvStore, WsConn, AGAIN, CLOSED};
 use crate::services::{dial_allowed, Shared};
 use std::io::Write as _;
 use std::sync::atomic::Ordering;
@@ -12,9 +12,10 @@ use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Store, StoreLimits, StoreLimitsBuilder, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-// The native recognizer behind wa:kernel/speech (declared here, not in main.rs).
+// The native recognizer behind wa:kernel/speech (declared here, not in main.rs). Shared with the
+// 0.2 runner: one recognizer hub per process, whichever contract the service speaks.
 #[path = "service_stt.rs"]
-mod service_stt;
+pub(crate) mod service_stt;
 
 wasmtime::component::bindgen!({
     world: "service-component",
@@ -41,8 +42,7 @@ pub struct State {
     limits: StoreLimits,
     net: Vec<String>,
     shared: Arc<Shared>,
-    kv_path: Option<std::path::PathBuf>,
-    kv: Option<rusqlite::Connection>,
+    kv: KvStore,
     log: Option<std::fs::File>,
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
@@ -55,18 +55,13 @@ impl WasiView for State {
     }
 }
 
-impl State {
-    fn db(&mut self) -> Result<&rusqlite::Connection, KError> {
-        if self.kv.is_none() {
-            let path = self.kv_path.clone().ok_or_else(|| KError::Refused("storage not declared".into()))?;
-            let dir = path.parent().ok_or_else(|| KError::Failed("kv path".into()))?;
-            std::fs::create_dir_all(dir).map_err(|e| KError::Failed(e.to_string()))?;
-            let conn = rusqlite::Connection::open(&path).map_err(|e| KError::Failed(e.to_string()))?;
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS kv(k BLOB PRIMARY KEY, v BLOB NOT NULL);")
-                .map_err(|e| KError::Failed(e.to_string()))?;
-            self.kv = Some(conn);
-        }
-        Ok(self.kv.as_ref().expect("opened"))
+/// The shared store's errors as the kernel's: an undeclared namespace is a refusal (as before),
+/// anything else the store reports is a failure.
+fn kv_error(error: String) -> KError {
+    if error == "storage not declared" {
+        KError::Refused(error)
+    } else {
+        KError::Failed(error)
     }
 }
 
@@ -165,45 +160,20 @@ impl wa::kernel::speech::HostJob for State {
 
 impl wa::kernel::kv::Host for State {
     fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, KError> {
-        let db = self.db()?;
-        match db.query_row("SELECT v FROM kv WHERE k=?1", rusqlite::params![key], |r| r.get(0)) {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(KError::Failed(e.to_string())),
-        }
+        self.kv.get(key).map_err(kv_error)
     }
     fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), KError> {
-        self.db()?
-            .execute("INSERT INTO kv(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v", rusqlite::params![key, value])
-            .map(|_| ())
-            .map_err(|e| KError::Failed(e.to_string()))
+        self.kv.set(key, value).map_err(kv_error)
     }
     fn delete(&mut self, key: Vec<u8>) -> Result<(), KError> {
-        self.db()?.execute("DELETE FROM kv WHERE k=?1", rusqlite::params![key]).map(|_| ()).map_err(|e| KError::Failed(e.to_string()))
+        self.kv.delete(key).map_err(kv_error)
     }
     fn delete_prefix(&mut self, prefix: Vec<u8>) -> Result<u32, KError> {
-        let db = self.db()?;
-        let n = if prefix.is_empty() {
-            db.execute("DELETE FROM kv", [])
-        } else {
-            db.execute("DELETE FROM kv WHERE substr(k,1,?2)=?1", rusqlite::params![prefix, prefix.len() as i64])
-        };
-        n.map(|n| n as u32).map_err(|e| KError::Failed(e.to_string()))
+        self.kv.delete_prefix(prefix).map_err(kv_error)
     }
     fn scan(&mut self, prefix: Vec<u8>, cursor: Option<Vec<u8>>, limit: u32) -> Result<Vec<wa::kernel::kv::Entry>, KError> {
-        let db = self.db()?;
-        let limit = limit.clamp(1, 10_000) as i64;
-        let after = cursor.unwrap_or_default();
-        // Empty prefix = every key; ordering by key with an exclusive cursor gives stable pages.
-        let mut stmt = db
-            .prepare("SELECT k,v FROM kv WHERE (?2 = 0 OR substr(k,1,?2)=?1) AND (?4 = 0 OR k > ?3) ORDER BY k LIMIT ?5")
-            .map_err(|e| KError::Failed(e.to_string()))?;
-        let rows = stmt
-            .query_map(rusqlite::params![prefix, prefix.len() as i64, after, after.len() as i64, limit], |r| {
-                Ok(wa::kernel::kv::Entry { key: r.get(0)?, value: r.get(1)? })
-            })
-            .map_err(|e| KError::Failed(e.to_string()))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| KError::Failed(e.to_string()))
+        let rows = self.kv.scan(prefix, cursor, limit).map_err(kv_error)?;
+        Ok(rows.into_iter().map(|(key, value)| wa::kernel::kv::Entry { key, value }).collect())
     }
 }
 
@@ -271,8 +241,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         limits: StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).instances(64).build(),
         net: grant.net.clone(),
         shared: shared.clone(),
-        kv_path: storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite")),
-        kv: None,
+        kv: KvStore::new(storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite"))),
         log: Some(log_file),
         secrets,
         stt,
@@ -306,12 +275,67 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
     match bindings.wa_kernel_service().call_run(&mut store, &config) {
         Ok(Ok(())) => "exit_0".into(),
         Ok(Err(reason)) => format!("service_error:{reason}").chars().take(300).collect(),
-        Err(_) if shared.stop.load(Ordering::Relaxed) => "stopped".into(),
-        Err(error) => format!("trap:{}", error.root_cause()).chars().take(300).collect(),
+        // `wasi:cli/exit` takes a `result`, not a code, so a component that exits non-zero reports
+        // exit_1 (the wasip1 runner, with proc_exit, can report exit_3). Same shape either way, so
+        // the supervisor's restart path reads one form.
+        Err(error) => match error.downcast_ref::<wasmtime_wasi::I32Exit>() {
+            Some(exit) => format!("exit_{}", exit.0),
+            None if shared.stop.load(Ordering::Relaxed) => "stopped".into(),
+            None => format!("trap:{}", error.root_cause()).chars().take(300).collect(),
+        },
     }
 }
 
 /// Is this binary a component (vs. a core module)? The preamble's layer field says so.
 pub fn is_component(bytes: &[u8]) -> bool {
     bytes.len() >= 8 && &bytes[0..4] == b"\0asm" && bytes[6..8] == [1, 0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::{start, status, stop, support};
+
+    /// End to end with the 0.1 component fixture (`svc-echo-v1`, wa:kernel@0.1): the poll contract
+    /// still runs unchanged beside 0.2 — heartbeat, kv round trip, one granted http exchange, one
+    /// refused, clean stop on `lifecycle.stopping()`, and crash mode (a non-zero exit, which
+    /// `wasi:cli/exit` can only express as exit_1) for the restart path.
+    #[test]
+    fn fixture_v1_component_keeps_running_unchanged() {
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if support::install("v1", &["svc-echo-v1"]).is_none() {
+            return;
+        }
+        let port = support::http_echo("pong");
+        let config = serde_json::json!({
+            "dial": format!("http://127.0.0.1:{port}/note"),
+            "refused": "http://127.0.0.2:9/note",
+        });
+        let net = [format!("127.0.0.1:{port}")];
+        let started = start(&serde_json::json!({"name": "svc-echo-v1", "net": net, "config": config}));
+        assert_eq!(started["ok"], true, "{started}");
+        let log = support::wait_for_log("svc-echo-v1", "dial ok", Duration::from_secs(15));
+        assert!(log.contains("heartbeat start"), "{log}");
+        assert!(log.contains("kv ok"), "the kv round trip ran: {log}");
+        assert!(log.contains("dial ok status=200 bytes=4"), "the granted http exchange completed: {log}");
+        assert!(log.contains("refused -13 (grant)"), "the ungranted address was refused: {log}");
+        assert_eq!(status(Some("svc-echo-v1"))["state"], "running");
+        let stopped = stop("svc-echo-v1");
+        assert_eq!(stopped["was_running"], true);
+        assert!(stopped["last_exit"].as_str().unwrap_or("").starts_with("exit_0"), "{stopped}");
+        let log = crate::services::logs("svc-echo-v1", 16 << 10)["log"].as_str().unwrap_or("").to_string();
+        assert!(log.contains("stopping cleanly"), "{log}");
+        assert_eq!(start(&serde_json::json!({"name": "svc-echo-v1", "config": {"crash": true}}))["ok"], true);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = String::new();
+        while Instant::now() < deadline {
+            last = status(Some("svc-echo-v1"))["last_exit"].as_str().unwrap_or("").to_string();
+            if last.starts_with("exit_1") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(last.starts_with("exit_1"), "{last}");
+        stop("svc-echo-v1");
+    }
 }

@@ -1,0 +1,14 @@
+{
+  "name": "svc-echo-wasip1",
+  "kind": "service",
+  "target": "wasm32-wasip1",
+  "description": "Fixture (wasip1 core module, raw wa_sock/wa_ctl): heartbeat, one granted dial (echo), one refused dial, clean stop, crash mode",
+  "capabilities": {
+    "net": [
+      "127.0.0.1:*"
+    ]
+  },
+  "limits": {
+    "memory_mb": 64
+  }
+}

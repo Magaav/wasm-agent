@@ -40,6 +40,28 @@ pub enum JobState {
 pub struct Job {
     pub state: JobState,
     pub segments: Vec<String>,
+    /// Longest audio duration the worker has reported, milliseconds (0 = not reported yet): the
+    /// audio position of the last segment, which is what a 0.2 segment's `end-ms` names.
+    pub duration_ms: u64,
+    /// Wakes the 0.2 guest task waiting on the segments stream or on the result future.
+    pub notify: std::sync::Arc<crate::service_io::Notify>,
+}
+
+impl Job {
+    /// Record one recognized segment (0.2 streams it, 0.1 polls for it).
+    fn push_segment(&mut self, text: String, duration_ms: Option<u64>) {
+        self.segments.push(text);
+        if let Some(ms) = duration_ms {
+            self.duration_ms = self.duration_ms.max(ms);
+        }
+        self.notify.notify();
+    }
+
+    /// Move the job to its terminal state and wake the waiter.
+    pub fn finish(&mut self, state: JobState) {
+        self.state = state;
+        self.notify.notify();
+    }
 }
 
 pub type JobSlot = Arc<Mutex<Job>>;
@@ -101,7 +123,7 @@ pub fn submit(audio: Vec<u8>, mime: &str, language: &str) -> Result<JobSlot, Str
         "audio/mp4" | "audio/aac" | "audio/m4a" => "m4a",
         _ => "ogg",
     };
-    let slot = Arc::new(Mutex::new(Job { state: JobState::Queued, segments: Vec::new() }));
+    let slot = Arc::new(Mutex::new(Job { state: JobState::Queued, segments: Vec::new(), duration_ms: 0, notify: crate::service_io::Notify::new() }));
     hub().send(Request::Recognize { audio, ext, language: language.to_string(), slot: slot.clone() }).map_err(|_| "stt_hub_down".to_string())?;
     Ok(slot)
 }
@@ -186,7 +208,7 @@ fn run_hub(rx: Receiver<Request>) {
             Request::Recognize { audio, ext, language, slot } => {
                 counter += 1;
                 let outcome = transcribe(&mut warm, &audio, ext, &language, &slot, counter);
-                slot.lock().unwrap().state = outcome;
+                slot.lock().unwrap().finish(outcome);
             }
         }
     }
@@ -229,11 +251,12 @@ fn run_one(warm: &mut Option<Warm>, path: &std::path::Path, language: &str, slot
                     if value["ready"] == serde_json::json!(true) {
                         continue; // the worker's own model-loaded line (prewarm)
                     }
-                    if let Some(text) = value["text"].as_str().filter(|t| !t.is_empty()) {
-                        slot.lock().unwrap().segments.push(text.to_string());
-                    }
+                    let duration_ms = value["duration"].as_f64().filter(|d| *d > 0.0).map(|seconds| (seconds * 1000.0) as u64);
                     if let Some(seconds) = value["duration"].as_f64().filter(|d| *d > 0.0) {
                         deadline = started + BUDGET_BASE + Duration::from_secs_f64(BUDGET_PER_AUDIO * seconds);
+                    }
+                    if let Some(text) = value["text"].as_str().filter(|t| !t.is_empty()) {
+                        slot.lock().unwrap().push_segment(text.to_string(), duration_ms);
                     }
                     continue;
                 }

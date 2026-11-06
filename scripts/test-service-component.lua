@@ -1,6 +1,8 @@
 -- Service components registry (lua/core/services.lua) over the real host runner (services.rs).
--- Needs the svc-echo fixture installed in WA_COMPONENTS_DIR (scripts/build-components.sh svc-echo);
--- without it only the definition and authority checks run.
+-- Needs the fixtures installed in WA_COMPONENTS_DIR (scripts/build-components.sh svc-echo svc-echo-v1):
+-- `svc-echo` speaks wa:kernel@0.2 (native async) and `svc-echo-v1` speaks wa:kernel@0.1, so the same
+-- registry lifecycle is proven for both runners; a fixture that is not installed is reported as a
+-- skip of that fixture, never as a pass.
 local json=dofile('lua/vendor/json.lua')
 assert(json.decode(host.sql_exec('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)','[]')).ok)
 local services=dofile('lua/core/services.lua')
@@ -23,27 +25,37 @@ check(services.control({action='put',definition={name='svc-echo'}},master).error
 local names={};for _,s in ipairs(tools.admin)do names[s['function'].name]=true end
 check(names.services,'services is an admin tool')
 
-local installed=false
-for _,c in ipairs(json.decode(host.components()) or {})do if c.name=='svc-echo' and c.ok then installed=true end end
-if not installed then print('service checks: '..checks..' (svc-echo not installed; runtime checks skipped)');return end
+local installed={}
+local present={}
+for _,c in ipairs(json.decode(host.components()) or {})do if c.ok then present[c.name]=true end end
+for _,name in ipairs({'svc-echo','svc-echo-v1'})do if present[name] then installed[#installed+1]=name end end
+if #installed==0 then print('service checks: '..checks..' (no service fixture installed; runtime checks skipped)');return end
 
-check(control('put',{definition={name='svc-echo',net={'127.0.0.1:9'},config={refused='127.0.0.2:9'}}}).ok,'store disabled definition')
-check(services.inventory().services[1].enabled==false and services.inventory().services[1].live.state=='not_running','put does not start')
-local enabled=control('enable',{name='svc-echo'})
-check(enabled.ok and enabled.enabled and enabled.start.ok,'enable starts it: '..tostring(enabled.error or (enabled.start and enabled.start.error)))
-sleep_ms(1200)
-local live=services.inventory().services[1].live
-check(live.state=='running','running after enable')
-local log=services.control({action='logs',name='svc-echo'},master).log or ''
-check(log:find('heartbeat',1,true)~=nil,'heartbeat in the log')
-check(log:find('refused -13',1,true)~=nil,'an ungranted dial is refused inside the service')
-check(services.autostart().started['svc-echo'].already_running==true,'autostart is idempotent for a running service')
-check(control('put',{definition={name='svc-echo'}}).error:find('service_enabled',1,true)~=nil,'an enabled definition cannot change underneath')
-local restarted=services.control({action='restart',name='svc-echo'},master)
-check(restarted.ok and restarted.started,'restart: '..json.encode(restarted))
-local disabled=control('disable',{name='svc-echo'})
-check(disabled.ok and disabled.stop.was_running,'disable stops it')
-check(services.inventory().services[1].live.state=='not_running','stopped after disable')
-check(services.autostart().started['svc-echo']==nil,'autostart skips a disabled service')
-check(control('remove',{name='svc-echo'}).removed==true and #services.inventory().services==0,'remove')
+-- The same lifecycle for each installed fixture: one is wa:kernel@0.1 (polled) and one is
+-- wa:kernel@0.2 (awaited); a node runs whatever a definition names, and the registry does not care
+-- which contract the module speaks.
+for _,name in ipairs(installed)do
+  local function one(action,extra)local a=extra or {};a.action=action;a.name=name;a.expected_revision=services.inventory().revision;return services.control(a,master)end
+  check(control('put',{definition={name=name,net={'127.0.0.1:9'},config={refused='127.0.0.2:9'}}}).ok,'store disabled definition: '..name)
+  local live=services.inventory().services[1].live
+  check(services.inventory().services[1].enabled==false and live.state=='not_running','put does not start: '..name)
+  local enabled=one('enable')
+  check(enabled.ok and enabled.enabled and enabled.start.ok,'enable starts it: '..name..' '..tostring(enabled.error or (enabled.start and enabled.start.error)))
+  sleep_ms(1500)
+  live=services.inventory().services[1].live
+  check(live.state=='running','running after enable: '..name)
+  local log=services.control({action='logs',name=name},master).log or ''
+  check(log:find('heartbeat',1,true)~=nil,'heartbeat in the log: '..name)
+  check(log:find('refused -13',1,true)~=nil,'an ungranted dial is refused inside the service: '..name)
+  check(log:find('kv ok',1,true)~=nil,'the kv round trip ran inside the service: '..name)
+  check(services.autostart().started[name].already_running==true,'autostart is idempotent for a running service: '..name)
+  check(one('put',{definition={name=name}}).error:find('service_enabled',1,true)~=nil,'an enabled definition cannot change underneath: '..name)
+  local restarted=one('restart')
+  check(restarted.ok and restarted.started,'restart: '..name..' '..json.encode(restarted))
+  local disabled=one('disable')
+  check(disabled.ok and disabled.stop.was_running,'disable stops it: '..name)
+  check(services.inventory().services[1].live.state=='not_running','stopped after disable: '..name)
+  check(services.autostart().started[name]==nil,'autostart skips a disabled service: '..name)
+  check(one('remove').removed==true and #services.inventory().services==0,'remove: '..name)
+end
 print('service checks: '..checks)

@@ -271,19 +271,22 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ho
 # incremental reindex are part of the contract, not a side project.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host graph::tests
-# WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). The
-# end-to-end service test runs the svc-echo fixture when a wasm32-wasip1 toolchain can build it.
+# WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
+# fixtures, one per runner, each with its own end-to-end test in wa-host: `svc-echo-wasip1` (a plain
+# wasip1 core module on the raw wa_sock/wa_ctl imports), `svc-echo-v1` (a wa:kernel@0.1 component,
+# the compat path) and `svc-echo` (a wa:kernel@0.2 component, WASI 0.3 native async). A fixture that
+# did not build turns its test into a skip that says so; it never passes by absence.
 # A component is its own cargo workspace and `build-components.sh` reads the module from
 # `rust/components/<name>/target/<target>/release/` (a redirect would make it install nothing and
 # silently turn this into a skip), so a gate-wide CARGO_TARGET_DIR - which the host build and the
 # `cargo test` lines above deliberately honour - is unset for the component builds only.
 SERVICE_FIXTURE_DIR="$(mktemp -d)"
-if env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts/build-components.sh svc-echo >/dev/null 2>&1; then
-  export WA_TEST_SERVICE_WASM="$SERVICE_FIXTURE_DIR/svc-echo.wasm"
+if env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts/build-components.sh svc-echo svc-echo-v1 svc-echo-wasip1 >/dev/null 2>&1; then
+  export WA_TEST_SERVICE_DIR="$SERVICE_FIXTURE_DIR"
 else
-  echo "note: svc-echo not built (no wasm32-wasip1 toolchain?); service end-to-end test skipped"
+  echo "note: the service fixtures were not built (no wasm32-wasip1/wasip2 toolchain?); the three service end-to-end tests are skipped"
 fi
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host -- components::tests services::tests capabilities::tests service_components::tests service_components_v2::tests
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
@@ -1128,7 +1131,9 @@ MCP_TEST_SOURCE="$WASM_AGENT_LUA_ROOT" WA_NODE="$MCP_NODE" WA_MCP_SCRIPT_DIR="$W
 COMPONENTS_PROOF="$WASM_AGENT_HOME/components-proof"
 # Same reason as above: the component workspaces build into their own `target/`, which is what
 # `build-components.sh` reads.
-env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$COMPONENTS_PROOF" bash scripts/build-components.sh mcp-echo mcp-whatsapp svc-echo >/dev/null 2>&1 \
+# `svc-echo` (wa:kernel@0.2) and `svc-echo-v1` (wa:kernel@0.1) are what the service registry block
+# below drives, so both are installed here beside the MCP components.
+env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$COMPONENTS_PROOF" bash scripts/build-components.sh mcp-echo mcp-whatsapp svc-echo svc-echo-v1 >/dev/null 2>&1 \
   || echo "note: mcp-echo component not built (no wasm32-wasip2 toolchain?); component runtime checks skipped"
 WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" "$BIN" --db "$DB.component" | grep 'component checks:'
 WA_BIN="$BIN" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" gate_run node --test --test-reporter=tap scripts/test-component-whatsapp-parity.mjs

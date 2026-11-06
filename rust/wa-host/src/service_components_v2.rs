@@ -1,0 +1,783 @@
+//! Service components on `wa:kernel@0.2` — the same grants, limits and supervisor as the 0.1
+//! runner in `service_components.rs`, on WASI 0.3: a guest that suspends instead of polling.
+//!
+//! What is the same: the manifest grants (`net` addresses, `storage` namespace, `file_env` secrets,
+//! `stt`), the memory cap from `limits.memory_mb`, stdout/stderr into the service log, the epoch
+//! deadline that stops a stopped-but-unresponsive guest after the grace period, and the shape of
+//! the outcome string (`exit_0`, `stopped`, `exit_3`, `trap:…`) the supervisor reports.
+//!
+//! What differs is where the waiting happens. In 0.1 the guest owned a reactor and called
+//! `recv`/`poll`/`segments` in a loop; here the host hands the guest a `stream`/`future` and the
+//! guest awaits it. The host half is one `StreamProducer` per inbound socket, per response body and
+//! per recognizer, plus one `FutureProducer` for the transcript; each is woken by the same
+//! `service_io` worker that fed the 0.1 poll contract (`Notify`/`Slot`, woken from the pump thread).
+//!
+//! Version detection is the caller's job (`services.rs`): a component whose imports name
+//! `wa:kernel/*@0.2.0` runs here, everything else runs on 0.1 or as a wasip1 core module, unchanged.
+use crate::components::{Grant, Installed};
+use crate::service_io::{http_exchange, url_authority, Kv as KvStore, Slot, SlotFuture, WsConn};
+use crate::services::{dial_allowed, Shared};
+use std::io::Write as _;
+use std::pin::Pin;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use wasmtime::component::{
+    Access, Accessor, Component, Destination, FutureProducer, FutureReader, HasData, Linker, Resource, ResourceTable, StreamProducer, StreamReader,
+    StreamResult,
+};
+use wasmtime::{AsContextMut, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder, UpdateDeadline};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+use crate::service_components::service_stt;
+
+const STOP_GRACE: Duration = Duration::from_secs(5);
+/// How much of a response body one stream item carries. The exchange itself is buffered whole (the
+/// 0.1 contract's `read_to_vec`), so this only decides the chunk size the guest sees.
+const BODY_CHUNK: usize = 64 << 10;
+
+wasmtime::component::bindgen!({
+    world: "service-component",
+    path: "../../wit/kernel-v2",
+    // Every `async func` in the WIT is already lowered with the store (bindgen decides that from
+    // WIT, not from here); these rules add the store to the four *synchronous* calls that hand the
+    // guest a stream or a future, because the transmit handle is created from it.
+    imports: {
+        "wa:kernel/websocket.[method]socket.messages": store | trappable,
+        "wa:kernel/http.[method]response.body": store | trappable,
+        "wa:kernel/speech.[method]recognition.segments": store | trappable,
+        "wa:kernel/speech.[method]recognition.transcript": store | trappable,
+    },
+    exports: { default: async | store },
+    with: {
+        "wa:kernel/websocket.socket": WsSocket,
+        "wa:kernel/http.response": HttpResponse,
+        "wa:kernel/speech.recognition": Recognition,
+    },
+});
+
+use wa::kernel::types::Error as KError;
+
+/// The guest's socket: the 0.1 host-side connection, handed out as a stream instead of a poll.
+pub struct WsSocket(Option<WsConn>);
+
+/// A completed exchange plus the body the guest drains as a stream.
+pub struct HttpResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Option<Vec<u8>>,
+}
+
+/// A queued recognition: the same job slot the 0.1 guest polls, exposed as segments + result.
+pub struct Recognition {
+    slot: service_stt::JobSlot,
+    language: String,
+    started: Instant,
+}
+
+pub struct State {
+    wasi: WasiCtx,
+    table: ResourceTable,
+    limits: StoreLimits,
+    net: Vec<String>,
+    shared: Arc<Shared>,
+    kv: KvStore,
+    log: Option<std::fs::File>,
+    secrets: std::collections::BTreeMap<String, String>,
+    /// Manifest `capabilities.stt == true`.
+    stt: bool,
+}
+
+impl WasiView for State {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+    }
+}
+
+/// The store's data projection is the state itself, so the store-taking imports (`messages`,
+/// `body`, `segments`, `result`, `connect`, `send`, `recognize`) reach it as `&mut State`.
+impl HasData for State {
+    type Data<'a> = &'a mut State;
+}
+
+/// The shared store's errors as the kernel's (identical to the 0.1 runner).
+fn kv_error(error: String) -> KError {
+    if error == "storage not declared" {
+        KError::Refused(error)
+    } else {
+        KError::Failed(error)
+    }
+}
+
+impl wa::kernel::types::Host for State {}
+
+impl wa::kernel::kv::Host for State {}
+
+/// kv is `async` in the 0.2 contract but the answer is local: nothing is awaited, so a call
+/// completes in the same poll it started in (docs/KERNEL.md keeps a local store synchronous in
+/// spirit; the async shape is what the job asked of 0.2).
+impl wa::kernel::kv::HostWithStore<State> for State {
+    async fn get(accessor: &Accessor<State, Self>, key: Vec<u8>) -> Result<Option<Vec<u8>>, KError> {
+        accessor.with(|mut access| access.get().kv.get(key).map_err(kv_error))
+    }
+    async fn set(accessor: &Accessor<State, Self>, key: Vec<u8>, value: Vec<u8>) -> Result<(), KError> {
+        accessor.with(|mut access| access.get().kv.set(key, value).map_err(kv_error))
+    }
+    async fn delete(accessor: &Accessor<State, Self>, key: Vec<u8>) -> Result<(), KError> {
+        accessor.with(|mut access| access.get().kv.delete(key).map_err(kv_error))
+    }
+    async fn delete_prefix(accessor: &Accessor<State, Self>, prefix: Vec<u8>) -> Result<u32, KError> {
+        accessor.with(|mut access| access.get().kv.delete_prefix(prefix).map_err(kv_error))
+    }
+    async fn scan(accessor: &Accessor<State, Self>, prefix: Vec<u8>, cursor: Option<Vec<u8>>, limit: u32) -> Result<Vec<wa::kernel::kv::Entry>, KError> {
+        accessor.with(|mut access| {
+            let rows = access.get().kv.scan(prefix, cursor, limit).map_err(kv_error)?;
+            Ok(rows.into_iter().map(|(key, value)| wa::kernel::kv::Entry { key, value }).collect())
+        })
+    }
+}
+
+impl wa::kernel::lifecycle::Host for State {
+    fn stopping(&mut self) -> bool {
+        self.shared.stop.load(Ordering::Relaxed)
+    }
+    fn report(&mut self, state: wa::kernel::lifecycle::Health, detail: Option<String>) {
+        let text = match state {
+            wa::kernel::lifecycle::Health::Starting => "starting",
+            wa::kernel::lifecycle::Health::Ready => "ready",
+            wa::kernel::lifecycle::Health::Degraded => "degraded",
+        };
+        *self.shared.health.lock().unwrap() = format!("{text}{}", detail.map(|d| format!(": {d}")).unwrap_or_default());
+    }
+}
+
+impl wa::kernel::log::Host for State {
+    fn write(&mut self, level: wa::kernel::log::Level, target: String, message: String) {
+        if let Some(file) = self.log.as_mut() {
+            let _ = writeln!(file, "{:?} {target}: {message}", level);
+        }
+    }
+}
+
+impl wa::kernel::credentials::Host for State {
+    fn get(&mut self, name: String) -> Result<String, KError> {
+        self.secrets.get(&name).cloned().ok_or(KError::Refused(name))
+    }
+}
+
+// ---- websocket: an inbound stream in, one suspendable send out ---------------------------------
+
+impl wa::kernel::websocket::Host for State {}
+impl wa::kernel::websocket::HostSocket for State {
+    fn close(&mut self, socket: Resource<WsSocket>, _code: u16, _reason: String) {
+        if let Ok(s) = self.table.get_mut(&socket) {
+            s.0 = None;
+        }
+    }
+    fn drop(&mut self, socket: Resource<WsSocket>) -> wasmtime::Result<()> {
+        self.table.delete(socket)?;
+        Ok(())
+    }
+}
+
+impl wa::kernel::websocket::HostSocketWithStore<State> for State {
+    /// One frame, answered from the host's outbound queue: this never waits today, so the guest's
+    /// `send().await` completes in one poll. The async shape is what lets it wait later, when the
+    /// queue is full, without changing the guest.
+    async fn send(accessor: &Accessor<State, Self>, socket: Resource<WsSocket>, frame: Vec<u8>) -> Result<(), KError> {
+        accessor.with(|mut access| {
+            match access.get().table.get(&socket).ok().and_then(|s| s.0.as_ref()) {
+                Some(conn) if conn.send(frame) == 0 => Ok(()),
+                _ => Err(KError::Closed),
+            }
+        })
+    }
+
+    /// The handshake is the kernel's, on its own thread: the guest task parks and the store's other
+    /// tasks keep running (0.1 could not offer this without the guest polling for readiness).
+    async fn connect(accessor: &Accessor<State, Self>, url: String, origin: Option<String>) -> Result<Resource<WsSocket>, KError> {
+        let allowed = accessor.with(|mut access| {
+            let state = access.get();
+            url_authority(&url).is_some_and(|addr| dial_allowed(&state.net, &addr))
+        });
+        if !allowed {
+            return Err(KError::Refused(url));
+        }
+        let slot = Slot::new();
+        let done = slot.clone();
+        let spawned = std::thread::Builder::new()
+            .name("wa-service-ws-connect".into())
+            .spawn(move || done.put(WsConn::open(&url, origin.as_deref())));
+        let conn = match spawned {
+            Ok(_) => SlotFuture(slot).await,
+            Err(error) => Err(error.to_string()),
+        };
+        let conn = conn.map_err(KError::Failed)?;
+        accessor.with(|mut access| access.get().table.push(WsSocket(Some(conn))).map_err(|e| KError::Failed(e.to_string())))
+    }
+
+    fn messages(mut access: Access<State, Self>, socket: Resource<WsSocket>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
+        StreamReader::new(access.as_context_mut(), FrameProducer { socket })
+    }
+}
+
+/// Inbound frames as the stream `socket.messages()` returns: each poll moves whatever the pump has
+/// queued and parks the task when it has nothing (the pump's `Notify` wakes it).
+struct FrameProducer {
+    socket: Resource<WsSocket>,
+}
+
+impl StreamProducer<State> for FrameProducer {
+    type Item = Vec<u8>;
+    type Buffer = Option<Vec<u8>>;
+
+    fn poll_produce<'a>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        mut store: StoreContextMut<'a, State>,
+        mut dst: Destination<'a, Self::Item, Self::Buffer>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        let Some(conn) = store.data_mut().table.get_mut(&self.socket).ok().and_then(|s| s.0.as_mut()) else {
+            return Poll::Ready(Ok(StreamResult::Dropped));
+        };
+        match conn.poll_next(cx) {
+            Poll::Ready(Some(frame)) => {
+                dst.set_buffer(Some(frame));
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+            Poll::Ready(None) => Poll::Ready(Ok(StreamResult::Dropped)),
+            Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+// ---- http: one suspendable exchange, a body stream out -----------------------------------------
+
+impl wa::kernel::http::Host for State {}
+impl wa::kernel::http::HostResponse for State {
+    fn status(&mut self, response: Resource<HttpResponse>) -> u16 {
+        self.table.get(&response).map(|r| r.status).unwrap_or(0)
+    }
+    fn headers(&mut self, response: Resource<HttpResponse>) -> Vec<(String, String)> {
+        self.table.get(&response).map(|r| r.headers.clone()).unwrap_or_default()
+    }
+    fn drop(&mut self, response: Resource<HttpResponse>) -> wasmtime::Result<()> {
+        self.table.delete(response)?;
+        Ok(())
+    }
+}
+
+impl wa::kernel::http::HostResponseWithStore<State> for State {
+    fn body(mut access: Access<State, Self>, response: Resource<HttpResponse>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
+        let body = access.data_mut().table.get_mut(&response).ok().and_then(|r| r.body.take()).unwrap_or_default();
+        let chunks: Vec<Vec<u8>> = body.chunks(BODY_CHUNK).map(|chunk| chunk.to_vec()).collect();
+        StreamReader::new(access.as_context_mut(), BodyProducer { chunks: chunks.into_iter() })
+    }
+}
+
+/// A response body, chunk by chunk, from the buffer the exchange filled.
+struct BodyProducer {
+    chunks: std::vec::IntoIter<Vec<u8>>,
+}
+
+impl StreamProducer<State> for BodyProducer {
+    type Item = Vec<u8>;
+    type Buffer = Option<Vec<u8>>;
+
+    fn poll_produce<'a>(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _store: StoreContextMut<'a, State>,
+        mut dst: Destination<'a, Self::Item, Self::Buffer>,
+        _finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        match self.get_mut().chunks.next() {
+            Some(chunk) => {
+                dst.set_buffer(Some(chunk));
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+            None => Poll::Ready(Ok(StreamResult::Dropped)),
+        }
+    }
+}
+
+impl wa::kernel::http::HostWithStore<State> for State {
+    /// `http.send`: the exchange runs on its own thread (as in 0.1) and the guest awaits the result
+    /// instead of polling for it. The grant check is the same `url_authority` + `dial_allowed` pair.
+    async fn send(accessor: &Accessor<State, Self>, request: wa::kernel::http::Request) -> Result<Resource<HttpResponse>, KError> {
+        let allowed = accessor.with(|mut access| {
+            let state = access.get();
+            url_authority(&request.url).is_some_and(|addr| dial_allowed(&state.net, &addr))
+        });
+        if !allowed {
+            return Err(KError::Refused(request.url));
+        }
+        let headers: serde_json::Map<String, serde_json::Value> =
+            request.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
+        let meta = serde_json::json!({"url": request.url, "method": request.method, "headers": headers});
+        let slot = http_exchange(&meta, request.body).map_err(KError::Failed)?;
+        let outcome = SlotFuture(slot).await.map_err(KError::Failed)?;
+        let response = HttpResponse { status: outcome.status, headers: outcome.headers, body: Some(outcome.body) };
+        accessor.with(|mut access| access.get().table.push(response).map_err(|e| KError::Failed(e.to_string())))
+    }
+}
+
+// ---- speech: segments in, the transcript once ---------------------------------------------------
+
+impl wa::kernel::speech::Host for State {}
+impl wa::kernel::speech::HostRecognition for State {
+    fn drop(&mut self, recognition: Resource<Recognition>) -> wasmtime::Result<()> {
+        self.table.delete(recognition)?;
+        Ok(())
+    }
+}
+
+impl wa::kernel::speech::HostWithStore<State> for State {
+    /// Queue `audio` for the node's recognizer (the same hub the 0.1 guest polls) and hand back the
+    /// resource that carries the segment stream and the result future.
+    async fn recognize(accessor: &Accessor<State, Self>, audio: Vec<u8>, mime: String, language: String) -> Result<Resource<Recognition>, KError> {
+        if !accessor.with(|mut access| access.get().stt) {
+            return Err(KError::Refused("stt not declared".into()));
+        }
+        let slot = service_stt::submit(audio, &mime, &language).map_err(KError::Failed)?;
+        accessor.with(|mut access| {
+            access.get().table.push(Recognition { slot, language, started: Instant::now() }).map_err(|e| KError::Failed(e.to_string()))
+        })
+    }
+}
+
+impl wa::kernel::speech::HostRecognitionWithStore<State> for State {
+    fn segments(mut access: Access<State, Self>, recognition: Resource<Recognition>) -> wasmtime::Result<StreamReader<wa::kernel::speech::Segment>> {
+        let (slot, started) = match access.data_mut().table.get(&recognition) {
+            Ok(r) => (r.slot.clone(), r.started),
+            Err(_) => return Err(wasmtime::Error::msg("recognition gone")),
+        };
+        StreamReader::new(access.as_context_mut(), SegmentProducer { slot, cursor: 0, started, offset_ms: 0 })
+    }
+
+    fn transcript(
+        mut access: Access<State, Self>,
+        recognition: Resource<Recognition>,
+    ) -> wasmtime::Result<FutureReader<Result<wa::kernel::speech::Transcript, KError>>> {
+        let (slot, language) = match access.data_mut().table.get(&recognition) {
+            Ok(r) => (r.slot.clone(), r.language.clone()),
+            Err(_) => return Err(wasmtime::Error::msg("recognition gone")),
+        };
+        FutureReader::new(access.as_context_mut(), TranscriptFuture { slot, language })
+    }
+}
+
+/// The recognizer's segments as a stream: each poll emits the segments the worker has appended since
+/// the last one, and parks on the job's `Notify` between them.
+struct SegmentProducer {
+    slot: service_stt::JobSlot,
+    cursor: usize,
+    started: Instant,
+    /// Where the last emitted segment ended, so `start-ms`/`end-ms` are contiguous.
+    offset_ms: u64,
+}
+
+impl SegmentProducer {
+    /// The next segment, whether the job has finished, and the job's wake-up edge — taken under the
+    /// lock so nothing is held while the destination buffer is written.
+    fn next_segment(&mut self) -> (Option<wa::kernel::speech::Segment>, bool, Arc<crate::service_io::Notify>) {
+        let job = self.slot.lock().unwrap();
+        let terminal = matches!(job.state, service_stt::JobState::Done { .. } | service_stt::JobState::Failed(_));
+        let notify = job.notify.clone();
+        let Some(text) = job.segments.get(self.cursor).cloned() else {
+            return (None, terminal, notify);
+        };
+        self.cursor += 1;
+        // The worker reports the audio duration decoded so far, not per-segment audio positions, so
+        // a segment ends where the decode had reached when it was emitted (falling back to the wall
+        // clock when the worker reported no duration) and starts where the previous one ended.
+        let end_ms = if job.duration_ms > 0 { job.duration_ms } else { self.started.elapsed().as_millis() as u64 }.max(self.offset_ms);
+        let segment = wa::kernel::speech::Segment { start_ms: self.offset_ms, end_ms, text };
+        self.offset_ms = end_ms;
+        (Some(segment), terminal, notify)
+    }
+}
+
+impl StreamProducer<State> for SegmentProducer {
+    type Item = wa::kernel::speech::Segment;
+    type Buffer = Option<wa::kernel::speech::Segment>;
+
+    fn poll_produce<'a>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _store: StoreContextMut<'a, State>,
+        mut dst: Destination<'a, Self::Item, Self::Buffer>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        let me = self.get_mut();
+        let (segment, terminal, notify) = me.next_segment();
+        if let Some(segment) = segment {
+            dst.set_buffer(Some(segment));
+            // The last segment of a finished job ends the stream in the same read.
+            return Poll::Ready(Ok(if terminal { StreamResult::Dropped } else { StreamResult::Completed }));
+        }
+        if terminal {
+            return Poll::Ready(Ok(StreamResult::Dropped));
+        }
+        if finish {
+            return Poll::Ready(Ok(StreamResult::Cancelled));
+        }
+        if notify.poll(cx).is_ready() {
+            // Woken by a segment or by the job finishing: answer in this read if there is anything.
+            let (segment, terminal, _) = me.next_segment();
+            if let Some(segment) = segment {
+                dst.set_buffer(Some(segment));
+                return Poll::Ready(Ok(if terminal { StreamResult::Dropped } else { StreamResult::Completed }));
+            }
+            if terminal {
+                return Poll::Ready(Ok(StreamResult::Dropped));
+            }
+        }
+        Poll::Pending
+    }
+}
+
+/// The whole transcript, as the future `recognition.result()` returns.
+struct TranscriptFuture {
+    slot: service_stt::JobSlot,
+    language: String,
+}
+
+impl FutureProducer<State> for TranscriptFuture {
+    type Item = Result<wa::kernel::speech::Transcript, KError>;
+
+    fn poll_produce(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _store: StoreContextMut<State>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<Option<Self::Item>>> {
+        let me = self.get_mut();
+        let job = me.slot.lock().unwrap();
+        let state = job.state.clone();
+        let notify = job.notify.clone();
+        drop(job);
+        let resolved = match state {
+            service_stt::JobState::Queued => None,
+            service_stt::JobState::Done { text, elapsed_ms } => {
+                Some(Ok(wa::kernel::speech::Transcript { text, language: me.language.clone(), elapsed_ms }))
+            }
+            service_stt::JobState::Failed(reason) => Some(Err(KError::Failed(reason))),
+        };
+        if let Some(value) = resolved {
+            return Poll::Ready(Ok(Some(value)));
+        }
+        if finish {
+            return Poll::Ready(Ok(None));
+        }
+        if notify.poll(cx).is_ready() {
+            let job = me.slot.lock().unwrap();
+            let state = job.state.clone();
+            drop(job);
+            match state {
+                service_stt::JobState::Queued => Poll::Pending,
+                service_stt::JobState::Done { text, elapsed_ms } => Poll::Ready(Ok(Some(Ok(wa::kernel::speech::Transcript {
+                    text,
+                    language: me.language.clone(),
+                    elapsed_ms,
+                })))),
+                service_stt::JobState::Failed(reason) => Poll::Ready(Ok(Some(Err(KError::Failed(reason))))),
+            }
+        } else {
+            // A job that was queued and is still queued: park until the hub wakes us again.
+            Poll::Pending
+        }
+    }
+}
+
+/// Two futures, whichever finishes first — enough of `select` for the stop watchdog, without a
+/// dependency for it.
+struct Race<A: std::future::Future, B: std::future::Future>(Pin<Box<A>>, Pin<Box<B>>);
+
+enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+impl<A: std::future::Future, B: std::future::Future> std::future::Future for Race<A, B> {
+    type Output = Either<A::Output, B::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Poll::Ready(value) = self.0.as_mut().poll(cx) {
+            return Poll::Ready(Either::Left(value));
+        }
+        if let Poll::Ready(value) = self.1.as_mut().poll(cx) {
+            return Poll::Ready(Either::Right(value));
+        }
+        Poll::Pending
+    }
+}
+
+/// Resolves once the supervisor asked for a stop and the grace period is over: the runner then drops
+/// the guest, which is the only way to end a 0.2 task that is parked rather than running.
+async fn stop_watchdog(shared: Arc<Shared>) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if shared.stop.load(Ordering::Relaxed) {
+            tokio::time::sleep(STOP_GRACE).await;
+            return;
+        }
+    }
+}
+
+/// One run of `service.run(config)` until it returns, traps, or is stopped. Same grants and limits
+/// as `service_components::run_once`; the difference is the store's async event loop and the
+/// current-thread runtime that gives `wasi:clocks@0.3.0` its timer.
+pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, shared: &Arc<Shared>, log_file: std::fs::File) -> String {
+    let mut builder = WasiCtxBuilder::new();
+    builder.args(&[installed.name.as_str()]);
+    if let Ok(clone) = log_file.try_clone() {
+        builder.stdout(wasmtime_wasi::cli::OutputFile::new(clone));
+    }
+    if let Ok(clone) = log_file.try_clone() {
+        builder.stderr(wasmtime_wasi::cli::OutputFile::new(clone));
+    }
+    for (key, name) in &grant.env {
+        if let Ok(value) = std::env::var(name) {
+            builder.env(key, &value);
+        }
+    }
+    // Secrets are read by the host from their file and handed only through `credentials.get`.
+    let mut secrets = std::collections::BTreeMap::new();
+    for (key, name) in &grant.file_env {
+        let path = if name.starts_with('/') || name.as_bytes().get(1) == Some(&b':') { name.clone() } else { std::env::var(name).unwrap_or_default() };
+        if let Ok(value) = std::fs::read_to_string(&path) {
+            secrets.insert(key.clone(), value.trim().to_string());
+        }
+    }
+    let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(serde_json::Value::as_u64).unwrap_or(512).clamp(16, 4096);
+    let storage = installed.manifest.get("capabilities").and_then(|c| c.get("storage")).and_then(serde_json::Value::as_bool) == Some(true);
+    let stt = installed.manifest.get("capabilities").and_then(|c| c.get("stt")).and_then(serde_json::Value::as_bool) == Some(true);
+    if stt {
+        service_stt::prewarm(); // the model loads before the first note, as in 0.1
+    }
+    let state = State {
+        wasi: builder.build(),
+        table: ResourceTable::new(),
+        limits: StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).instances(64).build(),
+        net: grant.net.clone(),
+        shared: shared.clone(),
+        kv: KvStore::new(storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite"))),
+        log: Some(log_file),
+        secrets,
+        stt,
+    };
+    let engine = component.engine();
+    let mut store = Store::new(engine, state);
+    store.limiter(|s| &mut s.limits);
+    let stop_seen: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let watcher = shared.clone();
+    store.epoch_deadline_callback(move |_| {
+        if watcher.stop.load(Ordering::Relaxed) {
+            let mut seen = stop_seen.lock().unwrap();
+            if seen.get_or_insert_with(Instant::now).elapsed() > STOP_GRACE {
+                return Err(wasmtime::Error::msg("service_stopped"));
+            }
+        }
+        Ok(UpdateDeadline::Continue(10))
+    });
+    store.set_epoch_deadline(10);
+    let mut linker: Linker<State> = Linker::new(engine);
+    if let Err(error) = wasmtime_wasi::p2::add_to_linker_async(&mut linker) {
+        return format!("link_failed:{error}");
+    }
+    // The WASI 0.3 timer a native-async guest awaits; a guest that never waits needs it not at all.
+    if let Err(error) = wasmtime_wasi::p3::clocks::add_to_linker::<State>(&mut linker) {
+        return format!("link_failed:{error}");
+    }
+    for added in [
+        wa::kernel::websocket::add_to_linker::<State, State>(&mut linker, |s| s),
+        wa::kernel::http::add_to_linker::<State, State>(&mut linker, |s| s),
+        wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
+        wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
+        wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
+        wa::kernel::log::add_to_linker::<State, State>(&mut linker, |s| s),
+        wa::kernel::credentials::add_to_linker::<State, State>(&mut linker, |s| s),
+    ] {
+        if let Err(error) = added {
+            return format!("link_failed:{error}");
+        }
+    }
+    let config = grant.config.clone().unwrap_or_else(|| "{}".into());
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+        Ok(runtime) => runtime,
+        Err(error) => return format!("runtime_failed:{error}"),
+    };
+    // The guest's `run` is one suspendable call: `run_concurrent` is what lets the streams, the
+    // futures and the WASI timers it awaits make progress while it is parked. The stop watchdog
+    // races it: the epoch deadline stops a guest that is *running*, but a guest parked in a timer
+    // or a stream read has no wasm to interrupt, so after the grace its future is dropped instead.
+    let outcome = runtime.block_on(async {
+        let bindings = match ServiceComponent::instantiate_async(&mut store, component, &linker).await {
+            Ok(bindings) => bindings,
+            Err(error) => return Err(("instantiate_failed", error)),
+        };
+        let guest = store.run_concurrent(async move |store| bindings.wa_kernel_service().call_run(store, config).await);
+        match Race(Box::pin(guest), Box::pin(stop_watchdog(shared.clone()))).await {
+            Either::Left(Ok(Ok(outcome))) => Ok(outcome),
+            Either::Left(Ok(Err(error))) => Err(("concurrent_failed", error)),
+            Either::Left(Err(error)) => Err(("call_failed", error)),
+            Either::Right(()) => Err(("stopped", wasmtime::Error::msg("stop grace expired"))),
+        }
+    });
+    match outcome {
+        Ok(Ok(())) => "exit_0".into(),
+        Ok(Err(reason)) => format!("service_error:{reason}").chars().take(300).collect(),
+        Err(("stopped", _)) => "stopped".to_string(),
+        Err((kind, error)) => {
+            if let Some(exit) = error.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                return format!("exit_{}", exit.0);
+            }
+            if shared.stop.load(Ordering::Relaxed) {
+                return "stopped".into();
+            }
+            format!("{kind}:{}", error.root_cause()).chars().take(300).collect()
+        }
+    }
+}
+
+/// Which `wa:kernel` contract a component speaks, read from its own imports: the 0.2 package is
+/// imported as `wa:kernel/<interface>@0.2.0`, so the component type answers this without running
+/// anything. A component that imports no `wa:kernel` interface at all is not a service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Contract {
+    V1,
+    V2,
+}
+
+impl Contract {
+    pub fn of(component: &Component) -> Contract {
+        let engine = component.engine();
+        let ty = component.component_type();
+        let names: Vec<&str> = ty.imports(engine).map(|(name, _)| name).collect();
+        if names.iter().any(|name| is_kernel_v2(name)) {
+            Contract::V2
+        } else {
+            Contract::V1
+        }
+    }
+}
+
+/// `wa:kernel/<interface>@0.2.0`, the only spelling a 0.2 import has.
+fn is_kernel_v2(name: &str) -> bool {
+    match name.strip_prefix("wa:kernel/") {
+        Some(rest) => rest.ends_with("@0.2.0"),
+        None => false,
+    }
+}
+
+/// The engine the 0.2 runner needs: the component model plus native async. Deliberately separate
+/// from `components::engine()` so that no existing component (0.1 services, MCP, agent-core)
+/// changes the engine it is compiled and run on.
+pub fn engine() -> wasmtime::Result<wasmtime::Engine> {
+    static ENGINE: std::sync::OnceLock<wasmtime::Engine> = std::sync::OnceLock::new();
+    if let Some(engine) = ENGINE.get() {
+        return Ok(engine.clone());
+    }
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
+    config.epoch_interruption(true);
+    let engine = wasmtime::Engine::new(&config)?;
+    if ENGINE.set(engine.clone()).is_ok() {
+        let ticker = engine.clone();
+        std::thread::Builder::new()
+            .name("wa-component-v2-epoch".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(100));
+                ticker.increment_epoch();
+            })?;
+    }
+    Ok(ENGINE.get().expect("engine initialized").clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The version in the imports is what picks the runner. `wasi:cli/stdout@0.2.0` is a preview-2
+    /// import every wasip2 component carries, so only a `wa:kernel` import may decide.
+    #[test]
+    fn only_a_kernel_v2_import_is_async() {
+        assert!(is_kernel_v2("wa:kernel/websocket@0.2.0"));
+        assert!(is_kernel_v2("wa:kernel/service@0.2.0"));
+        assert!(!is_kernel_v2("wa:kernel/websocket@0.1.0"));
+        assert!(!is_kernel_v2("wasi:cli/stdout@0.2.0"));
+        assert!(!is_kernel_v2("wasi:cli/stdout@0.2.9"));
+        assert!(!is_kernel_v2("wa:kernel"));
+    }
+
+    /// End to end with the 0.2 fixture (`svc-echo`, wa:kernel@0.2): the guest awaits a WASI 0.3
+    /// timer for its heartbeat, awaits its kv calls, awaits one http exchange against a real local
+    /// server (and one refused by the grant), reads a websocket peer over a `stream<list<u8>>` and
+    /// awaits the send, then returns cleanly on `lifecycle.stopping()`.
+    #[test]
+    fn fixture_v2_awaits_streams_and_stops() {
+        use crate::services::{logs, start, status, stop, support};
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if support::install("v2", &["svc-echo"]).is_none() {
+            return;
+        }
+        let http_port = support::http_echo("pong");
+        let ws_port = support::ws_echo();
+        let config = serde_json::json!({
+            "dial": format!("http://127.0.0.1:{http_port}/note"),
+            "refused": "http://127.0.0.2:9/note",
+            "ws": format!("ws://127.0.0.1:{ws_port}/ws"),
+        });
+        // The node grant names the two local ports exactly: `net` entries are matched per address
+        // by the dial check, so a wildcard port in the manifest is not a wildcard in a grant.
+        let net = [format!("127.0.0.1:{http_port}"), format!("127.0.0.1:{ws_port}")];
+        let started = start(&serde_json::json!({"name": "svc-echo", "net": net, "config": config}));
+        assert_eq!(started["ok"], true, "{started}");
+        let log = support::wait_for_log("svc-echo", "echo ok", Duration::from_secs(15));
+        assert!(log.contains("heartbeat start"), "{log}");
+        assert!(log.contains("kv ok"), "the kv round trip ran: {log}");
+        assert!(log.contains("dial ok status=200 bytes=4"), "the granted http exchange completed: {log}");
+        assert!(log.contains("refused -13 (grant)"), "the ungranted address was refused: {log}");
+        assert!(log.contains("echo ok 4 bytes"), "the websocket peer's frame arrived over the stream: {log}");
+        assert_eq!(status(Some("svc-echo"))["state"], "running");
+        assert_eq!(status(Some("svc-echo"))["health"], "ready");
+        // A 0.2 guest is parked in a timer between ticks: the runner must still stop it promptly.
+        let began = Instant::now();
+        let stopped = stop("svc-echo");
+        assert_eq!(stopped["was_running"], true);
+        assert!(began.elapsed() < STOP_GRACE + Duration::from_secs(3), "stop took {:?}", began.elapsed());
+        let log = logs("svc-echo", 16 << 10)["log"].as_str().unwrap_or("").to_string();
+        assert!(log.contains("stopping cleanly"), "{log}");
+        assert_eq!(status(Some("svc-echo"))["state"], "not_running");
+        // Crash mode. `wasi:cli/exit` takes a `result`, not a code, so a component that exits
+        // non-zero is reported as exit_1 (the wasip1 fixture, with proc_exit, says exit_3); what
+        // matters for the supervisor is the same: a non-zero exit is restarted.
+        assert_eq!(start(&serde_json::json!({"name": "svc-echo", "config": {"crash": true}}))["ok"], true);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut restarts = 0;
+        while Instant::now() < deadline {
+            let s = status(Some("svc-echo"));
+            restarts = s["restarts"].as_u64().unwrap_or(0);
+            if restarts >= 1 && s["last_exit"].as_str().unwrap_or("").starts_with("exit_1") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let s = status(Some("svc-echo"));
+        assert!(restarts >= 1, "{s}");
+        assert!(s["last_exit"].as_str().unwrap_or("").starts_with("exit_1"), "{s}");
+        stop("svc-echo");
+    }
+
+    /// The async engine is a real engine: it compiles a component and refuses a non-component.
+    #[test]
+    fn the_async_engine_compiles_a_component() {
+        let engine = engine().expect("engine");
+        assert!(engine.precompile_component(b"\0asm\x0d\0\x01\0not a component").is_err());
+    }
+}

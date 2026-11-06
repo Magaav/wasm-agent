@@ -22,6 +22,7 @@ mod core_component;
 mod services;
 mod service_io;
 mod service_components;
+mod service_components_v2;
 mod quickjs;
 mod subagents;
 mod resources;

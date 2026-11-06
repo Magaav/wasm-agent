@@ -1,0 +1,17 @@
+[package]
+name = "svc-echo-wasip1"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fixture service component (wasm32-wasip1 core module) for the raw wa_sock/wa_ctl service runner
+# (rust/wa-host/src/services.rs). Kept beside the wa:kernel fixtures: a node may still run a
+# plain wasip1 service, and the runner's unit test proves it against this module.
+[workspace]
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

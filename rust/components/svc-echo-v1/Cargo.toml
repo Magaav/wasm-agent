@@ -1,0 +1,21 @@
+[package]
+name = "svc-echo-v1"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The wa:kernel@0.1 fixture, kept for the compatibility test: a 0.1 component must keep running
+# unchanged after 0.2 exists (`services.rs` picks the runner from the component's imports, and
+# `scripts/test-service-component.lua` drives both through the same registry lifecycle).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true
