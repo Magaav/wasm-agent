@@ -138,12 +138,15 @@ ring plus the live histograms. That is the whole point: it does not depend on ho
 
 The crate is a library; the host owns the call sites and the clock. That host side is
 `rust/wa-host/src/node_telemetry.rs`, with the recording points in `components.rs`,
-`service_components.rs` and `services.rs`.
+`service_components.rs`, `service_components_v2.rs` and `services.rs`. Both service runners record
+the same capability names, so a dashboard does not need to know which contract a component speaks.
 
 | point | what | names |
 | --- | --- | --- |
 | every component run (`components::run`: one MCP/request run) | one observation, from `record_component_run` | `op_duration_micros{op="run"}`, `op_total{op="run",status}`, a sampled span |
-| every `wa:kernel` host call (`service_components.rs`, one `HostCallGuard` per call) | latency, outcome and span, attributed to the calling component | `host_call_duration_micros{capability}`, `host_call_total{capability,status}` |
+| every answered `wa:kernel` host function (`service_components.rs` for `@0.1`,
+  `service_components_v2.rs` for `@0.2`, one `HostCallGuard` per call) | latency, outcome and span, attributed to the calling component. A resource accessor (`response.status`, `response.headers`) is a field read on a handle the host already holds, not a call, and is not recorded | `host_call_duration_micros{capability}`, `host_call_total{capability,status}` |
+| a 0.2 stream/future item that stands in for a 0.1 poll (`socket.messages()` frames) | one observation per delivered frame, under the 0.1 capability name | `host_call_duration_micros{capability="websocket.recv"}` |
 | service runs (`services.rs` supervisor) | one observation per run of a supervised service | `op_duration_micros{op="run"}` on that service |
 | service health | a gauge per service: 1 running, 0 stopped | `service_health{service,instance="0"}` |
 | service restarts | one counter per restart, `reason` from a closed set (`exit`, `trap`, `error`, `start`, `stop`, `other`) | `service_restart_total{service,reason}` |

@@ -160,6 +160,7 @@ The exact call sites, so the next change does not have to re-derive them:
 | file | seam | call |
 | --- | --- | --- |
 | `rust/wa-host/src/service_components.rs` | every `impl wa::kernel::*::Host` for `State` — and the `HostCallGuard` added by the policy/telemetry wiring is already the one place each answered call passes through | `ring.push(NewRecord { interface: "wa:kernel/<iface>", function, args, result, duration })` **after** the answer, in `seq` order, never instead of it |
+| `rust/wa-host/src/service_components_v2.rs` | the same seam for `wa:kernel@0.2`; the `HostCallGuard` points are the same ones, including the per-frame `websocket.recv` observation a stream item produces | the same push, once per completed `async fn` (and once per frame), after the answer |
 | `rust/wa-host/src/core_component.rs` | `impl wa::kernel::host::Host::call` — the single untyped bridge every `host.*` from the Lua core crosses | the same push; one function, the cheapest interception point in the tree |
 | `rust/wa-host/src/components.rs` | `run()` — a request component (`wasi:cli` world) imports no `wa:kernel` | `wasi:clocks/*` and `wasi:random/*` answers, which is where its non-determinism is |
 | `rust/wa-host/src/services.rs` | the supervisor's restart branch (already carries `restart_reason`) | `replay::save(ring, &dir, &SaveOptions { trigger: Trigger::Crash, .. }, now)` on `trap`/`error` |
@@ -183,11 +184,11 @@ operator on the node (`wa replay show <file>`).
 
 ## Open questions / next steps
 
-1. **Wiring** is the open work: `service_components.rs` (all `wa::kernel` `Host` impls) and
-   `core_component.rs::host::Host::call`, plus a `wasmtime_wasi` `WasiCtx` that records clocks and
-   random. It needs the WASI 0.3 / wasmtime 50 upgrade to land first, because that changes how host
-   calls (and `future<T>` completions) reach a `Store` — the wrapper should be written once, against
-   the async shape.
+1. **Wiring** is the open work: `service_components.rs` and `service_components_v2.rs` (all
+   `wa::kernel` `Host` impls) and `core_component.rs::host::Host::call`, plus a `wasmtime_wasi`
+   `WasiCtx` that records clocks and random. The WASI 0.3 / wasmtime 50 upgrade has now landed (the
+   0.2 runner is in this tree), so the async shape to write the wrapper once against is here; the
+   `HostCallGuard` seam the policy/telemetry wiring left is where the push goes.
 2. **A virtual clock** for replay (`Recorded` vs `Virtual`) — recorded answers reproduce the run, a
    virtual clock makes it repeatable across machines. Probably both: recorded by default, virtual
    when replaying with `--fast`.

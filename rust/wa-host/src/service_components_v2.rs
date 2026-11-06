@@ -14,7 +14,20 @@
 //!
 //! Version detection is the caller's job (`services.rs`): a component whose imports name
 //! `wa:kernel/*@0.2.0` runs here, everything else runs on 0.1 or as a wasip1 core module, unchanged.
+//!
+//! Governance is the 0.1 runner's, unchanged in order and in reason (`docs/GRANT-POLICY.md`, "How
+//! the host wires it"): the **manifest grant** first (`net`/`storage`/`file_env`/`stt`), then the
+//! **node policy** - and a node with no `policy.json` runs in manifest mode, exactly as 0.1 does.
+//! The checks are the same ones at the same points: `net.dial` on `websocket.connect`,
+//! `net.send`+`whatsapp.send` on an opaque `websocket.send`, `http.request` on `http.send`,
+//! `kv.read`/`kv.write` on the store, `credentials.read`, `stt.start`. Both runners call the same
+//! `service_components::{gate, target_of, authority_target}` so the two contracts cannot drift into
+//! two different policies. Every answered host call records one telemetry observation
+//! (`node_telemetry::HostCallGuard`), attributed to the component by name.
 use crate::components::{Grant, Installed};
+use crate::node_telemetry::HostCallGuard;
+use crate::service_components::{authority_target, gate_verdict, target_of, Verdict};
+use wa_grant_policy::Decision;
 use crate::service_io::{http_exchange, url_authority, Kv as KvStore, Slot, SlotFuture, WsConn};
 use crate::services::{dial_allowed, Shared};
 use std::io::Write as _;
@@ -60,7 +73,14 @@ wasmtime::component::bindgen!({
 use wa::kernel::types::Error as KError;
 
 /// The guest's socket: the 0.1 host-side connection, handed out as a stream instead of a poll.
-pub struct WsSocket(Option<WsConn>);
+///
+/// The authority it was granted for is kept beside the connection because `websocket.send` takes
+/// ciphertext: the address is the only target the policy layer can name for the interim
+/// `whatsapp.send` budget (`docs/GRANT-POLICY.md`, "The honest gap").
+pub struct WsSocket {
+    conn: Option<WsConn>,
+    authority: String,
+}
 
 /// A completed exchange plus the body the guest drains as a stream.
 pub struct HttpResponse {
@@ -87,6 +107,9 @@ pub struct State {
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
     stt: bool,
+    /// The installed name: policy checks and telemetry are attributed to the component, so one
+    /// running instance answers "who called this" without a second registry (as in 0.1).
+    name: String,
 }
 
 impl WasiView for State {
@@ -110,59 +133,149 @@ fn kv_error(error: String) -> KError {
     }
 }
 
+/// The installed name for attribution: a 0.2 host function is an `async fn` over `Accessor`, so it
+/// has no `&self`, and the name comes out of the store's state instead.
+fn who(accessor: &Accessor<State, State>) -> String {
+    accessor.with(|mut access| access.get().name.clone())
+}
+
+/// The 0.1 runner's `gate`, spelled with this bindings module's `KError`: the table itself is
+/// `service_components::gate_verdict`, so both contracts answer a policy question identically.
+fn gate_decision(decision: Decision) -> Result<(), KError> {
+    match gate_verdict(decision) {
+        Verdict::Allow => Ok(()),
+        Verdict::Again => Err(KError::Again),
+        Verdict::Refuse(reason) => Err(KError::Refused(reason)),
+    }
+}
+
+/// Ask the node policy before a host call does anything (`docs/GRANT-POLICY.md`): a node with no
+/// `policy.json` answers in manifest mode (the manifest grant is the only gate), a node with one
+/// enforces it, and an unruled sensitive capability is refused `no_policy`.
+fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
+    gate_decision(crate::node_policy::check(component, capability, target))
+}
+
 impl wa::kernel::types::Host for State {}
 
 impl wa::kernel::kv::Host for State {}
 
 /// kv is `async` in the 0.2 contract but the answer is local: nothing is awaited, so a call
 /// completes in the same poll it started in (docs/KERNEL.md keeps a local store synchronous in
-/// spirit; the async shape is what the job asked of 0.2).
+/// spirit; the async shape is what the job asked of 0.2). The policy gate and the telemetry guard
+/// are the 0.1 runner's, at the same points: a read is `kv.read`, a write is `kv.write`, and the
+/// key is the target (`docs/GRANT-POLICY.md`).
 impl wa::kernel::kv::HostWithStore<State> for State {
     async fn get(accessor: &Accessor<State, Self>, key: Vec<u8>) -> Result<Option<Vec<u8>>, KError> {
-        accessor.with(|mut access| access.get().kv.get(key).map_err(kv_error))
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "kv.get");
+        let target = target_of(&key);
+        let out = (|| {
+            gate(&name, "kv.read", Some(&target))?;
+            accessor.with(|mut access| access.get().kv.get(key).map_err(kv_error))
+        })();
+        call.outcome(&out);
+        out
     }
     async fn set(accessor: &Accessor<State, Self>, key: Vec<u8>, value: Vec<u8>) -> Result<(), KError> {
-        accessor.with(|mut access| access.get().kv.set(key, value).map_err(kv_error))
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "kv.set");
+        let target = target_of(&key);
+        let out = (|| {
+            // A write is a shadow copy of state: sensitive by default, so a node with a policy file
+            // and no rule for it refuses the write with `no_policy` (a node with no policy file
+            // runs in manifest mode, and the manifest grant is the only gate).
+            gate(&name, "kv.write", Some(&target))?;
+            accessor.with(|mut access| access.get().kv.set(key, value).map_err(kv_error))
+        })();
+        call.outcome(&out);
+        out
     }
     async fn delete(accessor: &Accessor<State, Self>, key: Vec<u8>) -> Result<(), KError> {
-        accessor.with(|mut access| access.get().kv.delete(key).map_err(kv_error))
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "kv.delete");
+        let target = target_of(&key);
+        let out = (|| {
+            gate(&name, "kv.write", Some(&target))?;
+            accessor.with(|mut access| access.get().kv.delete(key).map_err(kv_error))
+        })();
+        call.outcome(&out);
+        out
     }
     async fn delete_prefix(accessor: &Accessor<State, Self>, prefix: Vec<u8>) -> Result<u32, KError> {
-        accessor.with(|mut access| access.get().kv.delete_prefix(prefix).map_err(kv_error))
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "kv.delete_prefix");
+        let target = target_of(&prefix);
+        let out = (|| {
+            gate(&name, "kv.write", Some(&target))?;
+            accessor.with(|mut access| access.get().kv.delete_prefix(prefix).map_err(kv_error))
+        })();
+        call.outcome(&out);
+        out
     }
     async fn scan(accessor: &Accessor<State, Self>, prefix: Vec<u8>, cursor: Option<Vec<u8>>, limit: u32) -> Result<Vec<wa::kernel::kv::Entry>, KError> {
-        accessor.with(|mut access| {
-            let rows = access.get().kv.scan(prefix, cursor, limit).map_err(kv_error)?;
-            Ok(rows.into_iter().map(|(key, value)| wa::kernel::kv::Entry { key, value }).collect())
-        })
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "kv.scan");
+        let target = target_of(&prefix);
+        let out = (|| {
+            gate(&name, "kv.read", Some(&target))?;
+            accessor.with(|mut access| {
+                let rows = access.get().kv.scan(prefix, cursor, limit).map_err(kv_error)?;
+                Ok(rows.into_iter().map(|(key, value)| wa::kernel::kv::Entry { key, value }).collect())
+            })
+        })();
+        call.outcome(&out);
+        out
     }
 }
 
+/// Lifecycle: never policy-checked (a component must be able to report that it is ready, and a stop
+/// the operator asked for is already the operator's decision), recorded for latency like every
+/// other call - the same rule as 0.1 (`docs/GRANT-POLICY.md` step 4).
 impl wa::kernel::lifecycle::Host for State {
     fn stopping(&mut self) -> bool {
-        self.shared.stop.load(Ordering::Relaxed)
+        let mut call = HostCallGuard::start(&self.name, "lifecycle.stopping");
+        let stopping = self.shared.stop.load(Ordering::Relaxed);
+        call.succeed();
+        stopping
     }
     fn report(&mut self, state: wa::kernel::lifecycle::Health, detail: Option<String>) {
+        let mut call = HostCallGuard::start(&self.name, "lifecycle.report");
         let text = match state {
             wa::kernel::lifecycle::Health::Starting => "starting",
             wa::kernel::lifecycle::Health::Ready => "ready",
             wa::kernel::lifecycle::Health::Degraded => "degraded",
         };
         *self.shared.health.lock().unwrap() = format!("{text}{}", detail.map(|d| format!(": {d}")).unwrap_or_default());
+        call.succeed();
     }
 }
 
 impl wa::kernel::log::Host for State {
+    /// Never policy-checked: a log line cannot exceed anything a person sees
+    /// (`docs/GRANT-POLICY.md` step 4). The file is the bounded `<component>.service.log`
+    /// `services.rs` opens and rotates at its quota (`store.rs`), so the quota is per component and
+    /// the same one the 0.1 runner writes into.
     fn write(&mut self, level: wa::kernel::log::Level, target: String, message: String) {
+        let mut call = HostCallGuard::start(&self.name, "log.write");
         if let Some(file) = self.log.as_mut() {
             let _ = writeln!(file, "{:?} {target}: {message}", level);
         }
+        call.succeed();
     }
 }
 
 impl wa::kernel::credentials::Host for State {
+    /// A secret is the most sensitive thing a component can ask for, so the policy is asked first
+    /// and the name of the secret is the target (`docs/GRANT-POLICY.md`).
     fn get(&mut self, name: String) -> Result<String, KError> {
-        self.secrets.get(&name).cloned().ok_or(KError::Refused(name))
+        let mut call = HostCallGuard::start(&self.name, "credentials.get");
+        let out = (|| {
+            gate(&self.name, "credentials.read", Some(&name))?;
+            self.secrets.get(&name).cloned().ok_or(KError::Refused(name))
+        })();
+        call.outcome(&out);
+        out
     }
 }
 
@@ -171,9 +284,11 @@ impl wa::kernel::credentials::Host for State {
 impl wa::kernel::websocket::Host for State {}
 impl wa::kernel::websocket::HostSocket for State {
     fn close(&mut self, socket: Resource<WsSocket>, _code: u16, _reason: String) {
+        let mut call = HostCallGuard::start(&self.name, "websocket.close");
         if let Ok(s) = self.table.get_mut(&socket) {
-            s.0 = None;
+            s.conn = None;
         }
+        call.succeed();
     }
     fn drop(&mut self, socket: Resource<WsSocket>) -> wasmtime::Result<()> {
         self.table.delete(socket)?;
@@ -185,36 +300,64 @@ impl wa::kernel::websocket::HostSocketWithStore<State> for State {
     /// One frame, answered from the host's outbound queue: this never waits today, so the guest's
     /// `send().await` completes in one poll. The async shape is what lets it wait later, when the
     /// queue is full, without changing the guest.
+    ///
+    /// The frame is opaque, so what the host can charge is the socket's authority and the global
+    /// message budget, and only for a policy rule that names no chats
+    /// (`node_policy::check_opaque_send`, exactly the 0.1 `websocket.send` path). The per-chat check
+    /// needs `wa:channel/messages`; until it exists this is the honest cap.
     async fn send(accessor: &Accessor<State, Self>, socket: Resource<WsSocket>, frame: Vec<u8>) -> Result<(), KError> {
-        accessor.with(|mut access| {
-            match access.get().table.get(&socket).ok().and_then(|s| s.0.as_ref()) {
-                Some(conn) if conn.send(frame) == 0 => Ok(()),
-                _ => Err(KError::Closed),
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "websocket.send");
+        let out = (|| {
+            let authority = accessor.with(|mut access| {
+                access.get().table.get(&socket).ok().map(|s| s.authority.clone()).ok_or(KError::Closed)
+            })?;
+            match crate::node_policy::check_opaque_send(&name, &authority) {
+                Decision::Allow => {}
+                Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => return Err(KError::Again),
+                other => return Err(KError::Refused(other.reason_str().to_string())),
             }
-        })
+            accessor.with(|mut access| {
+                match access.get().table.get(&socket).ok().and_then(|s| s.conn.as_ref()) {
+                    Some(conn) if conn.send(frame) == 0 => Ok(()),
+                    _ => Err(KError::Closed),
+                }
+            })
+        })();
+        call.outcome(&out);
+        out
     }
 
     /// The handshake is the kernel's, on its own thread: the guest task parks and the store's other
     /// tasks keep running (0.1 could not offer this without the guest polling for readiness).
     async fn connect(accessor: &Accessor<State, Self>, url: String, origin: Option<String>) -> Result<Resource<WsSocket>, KError> {
-        let allowed = accessor.with(|mut access| {
-            let state = access.get();
-            url_authority(&url).is_some_and(|addr| dial_allowed(&state.net, &addr))
-        });
-        if !allowed {
-            return Err(KError::Refused(url));
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "websocket.connect");
+        let out: Result<Resource<WsSocket>, KError> = async {
+            // Grant first, policy second: a rule can only ever narrow what the manifest allows.
+            let authority = accessor.with(|mut access| {
+                let state = access.get();
+                url_authority(&url).filter(|addr| dial_allowed(&state.net, addr))
+            });
+            let authority = authority.ok_or_else(|| KError::Refused(url.clone()))?;
+            gate(&name, "net.dial", Some(&authority_target(&authority)))?;
+            let slot = Slot::new();
+            let done = slot.clone();
+            let spawned = std::thread::Builder::new()
+                .name("wa-service-ws-connect".into())
+                .spawn(move || done.put(WsConn::open(&url, origin.as_deref())));
+            let conn = match spawned {
+                Ok(_) => SlotFuture(slot).await,
+                Err(error) => Err(error.to_string()),
+            };
+            let conn = conn.map_err(KError::Failed)?;
+            accessor.with(|mut access| {
+                access.get().table.push(WsSocket { conn: Some(conn), authority }).map_err(|e| KError::Failed(e.to_string()))
+            })
         }
-        let slot = Slot::new();
-        let done = slot.clone();
-        let spawned = std::thread::Builder::new()
-            .name("wa-service-ws-connect".into())
-            .spawn(move || done.put(WsConn::open(&url, origin.as_deref())));
-        let conn = match spawned {
-            Ok(_) => SlotFuture(slot).await,
-            Err(error) => Err(error.to_string()),
-        };
-        let conn = conn.map_err(KError::Failed)?;
-        accessor.with(|mut access| access.get().table.push(WsSocket(Some(conn))).map_err(|e| KError::Failed(e.to_string())))
+        .await;
+        call.outcome(&out);
+        out
     }
 
     fn messages(mut access: Access<State, Self>, socket: Resource<WsSocket>) -> wasmtime::Result<StreamReader<Vec<u8>>> {
@@ -239,12 +382,17 @@ impl StreamProducer<State> for FrameProducer {
         mut dst: Destination<'a, Self::Item, Self::Buffer>,
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
-        let Some(conn) = store.data_mut().table.get_mut(&self.socket).ok().and_then(|s| s.0.as_mut()) else {
+        let name = store.data_mut().name.clone();
+        let Some(conn) = store.data_mut().table.get_mut(&self.socket).ok().and_then(|s| s.conn.as_mut()) else {
             return Poll::Ready(Ok(StreamResult::Dropped));
         };
         match conn.poll_next(cx) {
             Poll::Ready(Some(frame)) => {
+                // One delivered frame is one `recv` in 0.1 terms, so it is recorded under the same
+                // capability name and a dashboard reads both contracts the same way.
+                let mut call = HostCallGuard::start(&name, "websocket.recv");
                 dst.set_buffer(Some(frame));
+                call.succeed();
                 Poll::Ready(Ok(StreamResult::Completed))
             }
             Poll::Ready(None) => Poll::Ready(Ok(StreamResult::Dropped)),
@@ -306,22 +454,29 @@ impl StreamProducer<State> for BodyProducer {
 
 impl wa::kernel::http::HostWithStore<State> for State {
     /// `http.send`: the exchange runs on its own thread (as in 0.1) and the guest awaits the result
-    /// instead of polling for it. The grant check is the same `url_authority` + `dial_allowed` pair.
+    /// instead of polling for it. The grant check is the same `url_authority` + `dial_allowed` pair,
+    /// and the policy is asked second, exactly as 0.1's `http.start` asks it.
     async fn send(accessor: &Accessor<State, Self>, request: wa::kernel::http::Request) -> Result<Resource<HttpResponse>, KError> {
-        let allowed = accessor.with(|mut access| {
-            let state = access.get();
-            url_authority(&request.url).is_some_and(|addr| dial_allowed(&state.net, &addr))
-        });
-        if !allowed {
-            return Err(KError::Refused(request.url));
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "http.send");
+        let out: Result<Resource<HttpResponse>, KError> = async {
+            let authority = accessor.with(|mut access| {
+                let state = access.get();
+                url_authority(&request.url).filter(|addr| dial_allowed(&state.net, addr))
+            });
+            let authority = authority.ok_or_else(|| KError::Refused(request.url.clone()))?;
+            gate(&name, "http.request", Some(&authority_target(&authority)))?;
+            let headers: serde_json::Map<String, serde_json::Value> =
+                request.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
+            let meta = serde_json::json!({"url": request.url, "method": request.method, "headers": headers});
+            let slot = http_exchange(&meta, request.body).map_err(KError::Failed)?;
+            let outcome = SlotFuture(slot).await.map_err(KError::Failed)?;
+            let response = HttpResponse { status: outcome.status, headers: outcome.headers, body: Some(outcome.body) };
+            accessor.with(|mut access| access.get().table.push(response).map_err(|e| KError::Failed(e.to_string())))
         }
-        let headers: serde_json::Map<String, serde_json::Value> =
-            request.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
-        let meta = serde_json::json!({"url": request.url, "method": request.method, "headers": headers});
-        let slot = http_exchange(&meta, request.body).map_err(KError::Failed)?;
-        let outcome = SlotFuture(slot).await.map_err(KError::Failed)?;
-        let response = HttpResponse { status: outcome.status, headers: outcome.headers, body: Some(outcome.body) };
-        accessor.with(|mut access| access.get().table.push(response).map_err(|e| KError::Failed(e.to_string())))
+        .await;
+        call.outcome(&out);
+        out
     }
 }
 
@@ -339,13 +494,20 @@ impl wa::kernel::speech::HostWithStore<State> for State {
     /// Queue `audio` for the node's recognizer (the same hub the 0.1 guest polls) and hand back the
     /// resource that carries the segment stream and the result future.
     async fn recognize(accessor: &Accessor<State, Self>, audio: Vec<u8>, mime: String, language: String) -> Result<Resource<Recognition>, KError> {
-        if !accessor.with(|mut access| access.get().stt) {
-            return Err(KError::Refused("stt not declared".into()));
-        }
-        let slot = service_stt::submit(audio, &mime, &language).map_err(KError::Failed)?;
-        accessor.with(|mut access| {
-            access.get().table.push(Recognition { slot, language, started: Instant::now() }).map_err(|e| KError::Failed(e.to_string()))
-        })
+        let name = who(accessor);
+        let mut call = HostCallGuard::start(&name, "speech.recognize");
+        let out = (|| {
+            if !accessor.with(|mut access| access.get().stt) {
+                return Err(KError::Refused("stt not declared".into()));
+            }
+            gate(&name, "stt.start", None)?;
+            let slot = service_stt::submit(audio, &mime, &language).map_err(KError::Failed)?;
+            accessor.with(|mut access| {
+                access.get().table.push(Recognition { slot, language, started: Instant::now() }).map_err(|e| KError::Failed(e.to_string()))
+            })
+        })();
+        call.outcome(&out);
+        out
     }
 }
 
@@ -569,6 +731,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         log: Some(log_file),
         secrets,
         stt,
+        name: installed.name.clone(),
     };
     let engine = component.engine();
     let mut store = Store::new(engine, state);
@@ -813,6 +976,7 @@ mod tests {
             log: None,
             secrets: Default::default(),
             stt: false,
+            name: "wa-whatsapp".into(),
         };
         let mut store = Store::new(&engine, state);
         // Compiling and instantiating the real component takes minutes in a debug build; the epoch
@@ -821,6 +985,112 @@ mod tests {
         runtime.block_on(async {
             ServiceComponent::instantiate_async(&mut store, &component, &linker).await.expect("instantiates: every import the component asks for is served");
         });
+    }
+
+    /// The mirror of the 0.1 runner's `a_policy_answer_maps_to_the_guest_error`, against this
+    /// bindings module's own error type: the table is shared (`service_components::gate_verdict`),
+    /// the error it becomes is not. A short rate limit is `again` (the guest already retries that);
+    /// anything else is a refusal carrying the reason word the audit record also carries.
+    #[test]
+    fn a_policy_answer_maps_to_the_v2_guest_error() {
+        use wa_grant_policy::Reason;
+        assert!(gate_decision(Decision::Allow).is_ok());
+        match gate_decision(Decision::Deny(Reason::NoPolicy)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "no_policy"),
+            other => panic!("expected refused(no_policy), got {other:?}"),
+        }
+        match gate_decision(Decision::NeedsApproval(Reason::ApprovalRequired)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "approval_required"),
+            other => panic!("expected refused(approval_required), got {other:?}"),
+        }
+        assert!(matches!(
+            gate_decision(Decision::RateLimited { retry_after_ms: 400, reason: Reason::TargetRateLimited }),
+            Err(KError::Again)
+        ));
+        match gate_decision(Decision::RateLimited { retry_after_ms: 5_000, reason: Reason::CapabilityRateLimited }) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "capability_rate_limited"),
+            other => panic!("expected refused(capability_rate_limited), got {other:?}"),
+        }
+    }
+
+    /// The 0.2 call sites charge the same capabilities, with the same targets, as the 0.1 ones -
+    /// the reason both runners call `service_components::{gate, target_of, authority_target}`.
+    /// This drives a real policy engine (not the process-wide one, which another test may have
+    /// already loaded), so each pair here is one of the checks the runner above performs.
+    #[test]
+    fn the_v2_call_sites_charge_what_the_v1_runner_charges() {
+        let root = std::env::temp_dir().join(format!("wa-v2-governance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("audit")).unwrap();
+        std::fs::write(
+            root.join("policy.json"),
+            r#"{"version":1,"components":{"svc-echo":{"capabilities":{
+                 "net.dial":{"allow":["echo.example:8080"]},
+                 "http.request":{"allow":["echo.example:8080"]},
+                 "kv.read":{"allow":["*"]},
+                 "kv.write":{"allow":["ses/*"]},
+                 "credentials.read":{"allow":["ECHO_TOKEN"]},
+                 "stt.start":{"allow":[]},
+                 "net.send":{"allow":[]},
+                 "whatsapp.send":{"rate":{"per_minute":1,"burst":1}}
+               }}}}"#,
+        )
+        .unwrap();
+        let paths = crate::node_policy::Paths {
+            policy: root.join("policy.json"),
+            state: root.join("state.json"),
+            audit: root.join("audit").join("grant-policy.jsonl"),
+        };
+        let policy = crate::node_policy::NodePolicy::open(paths);
+        assert_eq!(policy.mode(), crate::node_policy::Mode::Policy);
+
+        // websocket.connect: the authority the manifest allows, lowercased before the check - the
+        // client emitted a host name in mixed case, and the rule is written in lower case.
+        let authority = authority_target(&url_authority("wss://ECHO.Example:8080/ws").expect("an authority"));
+        assert_eq!(authority, "echo.example:8080");
+        assert!(gate_decision(policy.check_at("svc-echo", "net.dial", Some(&authority), 1_000)).is_ok());
+        assert!(gate_decision(policy.check_at("svc-echo", "net.dial", Some("127.0.0.1:9"), 1_000)).is_err());
+
+        // http.send: the same target, the same refusal word.
+        assert!(gate_decision(policy.check_at("svc-echo", "http.request", Some(&authority), 1_000)).is_ok());
+        match gate_decision(policy.check_at("svc-echo", "http.request", Some("evil.example:443"), 1_000)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "target_not_allowed"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // kv: a read of any key is allowed, a write only under its prefix; the key is the target.
+        let key = target_of(b"ses/abc");
+        assert!(gate_decision(policy.check_at("svc-echo", "kv.read", Some(&key), 1_000)).is_ok());
+        assert!(gate_decision(policy.check_at("svc-echo", "kv.write", Some(&key), 1_000)).is_ok());
+        match gate_decision(policy.check_at("svc-echo", "kv.write", Some("pk/other"), 1_000)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "target_not_allowed"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // credentials.read names the secret, and stt.start has no target to name.
+        assert!(gate_decision(policy.check_at("svc-echo", "credentials.read", Some("ECHO_TOKEN"), 1_000)).is_ok());
+        assert!(gate_decision(policy.check_at("svc-echo", "credentials.read", Some("OTHER"), 1_000)).is_err());
+        assert!(gate_decision(policy.check_at("svc-echo", "stt.start", None, 1_000)).is_ok());
+
+        // websocket.send is opaque: `net.send` first, then the capability-wide message budget for a
+        // rule that names no chat (`node_policy::check_opaque_send`, the 0.1 send path).
+        assert!(gate_decision(policy.check_opaque_send_at("svc-echo", &authority, 1_000)).is_ok());
+        match gate_decision(policy.check_opaque_send_at("svc-echo", &authority, 1_000)) {
+            Err(KError::Refused(_)) => {}
+            other => panic!("the message budget must run out, got {other:?}"),
+        }
+        // A capability the policy file has no rule for is the case that matters after a deploy: the
+        // 0.2 runner asks the same question and gets the same `no_policy`.
+        match gate_decision(policy.check_at("svc-echo", "exec.run", None, 1_000)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "no_policy"),
+            other => panic!("expected no_policy, got {other:?}"),
+        }
+        // An unlisted component is not silently allowed either.
+        match gate_decision(policy.check_at("unlisted", "net.dial", Some(&authority), 1_000)) {
+            Err(KError::Refused(reason)) => assert_eq!(reason, "no_policy"),
+            other => panic!("expected no_policy, got {other:?}"),
+        }
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// The async engine is a real engine: it compiles a component and refuses a non-component.

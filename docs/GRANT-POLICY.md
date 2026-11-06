@@ -190,8 +190,9 @@ file. The `AuditSink` trait is the seam and needs no change.
 ## How the host wires it
 
 The host side is `rust/wa-host/src/node_policy.rs` (one engine, one pair of sinks, the counters); the
-call sites are `service_components.rs` (the `wa:kernel` imports), `components.rs` (the outbound
-wasi-socket path of request components) and `services.rs` (the supervisor). The numbered list below is
+call sites are `service_components.rs` (the `wa:kernel@0.1` imports), `service_components_v2.rs` (the
+same imports on `wa:kernel@0.2` / WASI 0.3), `components.rs` (the outbound wasi-socket path of request
+components) and `services.rs` (the supervisor). The numbered list below is
 the design, kept because it is the reasoning; the paragraphs after it are what the tree actually does
 where it differs.
 
@@ -214,28 +215,38 @@ where it differs.
    defaults, visible in the log and in `host.policy_status`.
 3. **Clock.** `now_ms` is `SystemTime::now()` read once per call; nothing in the library reads a
    clock, and no lock is held across anything that could block on a guest.
-4. **One check per sensitive host call, after the manifest grant** (`service_components.rs`):
+4. **One check per sensitive host call, after the manifest grant** (`service_components.rs` for the
+   `wa:kernel@0.1` contract, `service_components_v2.rs` for `@0.2`):
 
    | WIT call | capability | target passed to the policy |
    | --- | --- | --- |
-   | `websocket.connect(url, origin)` | `net.dial` | `url` authority |
-   | `websocket.send(data)` | `net.send`, then the interim `whatsapp.send` | the socket's authority |
-   | `http.start(request)` | `http.request` | `url` authority |
-   | `kv.set` / `kv.delete` / `kv.delete_prefix` | `kv.write` | the key (or its prefix) |
-   | `kv.get` / `kv.scan` | `kv.read` | the key (or its prefix) |
-   | `credentials.get(name)` | `credentials.read` | `name` |
-   | `speech.start(...)` | `stt.start` | none |
-   | `log.write`, `lifecycle.*` | never checked | a log line cannot exceed anything a person sees |
+   | `websocket.connect(url, origin)` (0.1 and 0.2) | `net.dial` | `url` authority |
+   | `websocket.send(data)` (0.1) / `socket.send(data)` (0.2) | `net.send`, then the interim `whatsapp.send` | the socket's authority |
+   | `http.start(request)` (0.1) / `http.send(request)` (0.2) | `http.request` | `url` authority |
+   | `kv.set` / `kv.delete` / `kv.delete_prefix` (both) | `kv.write` | the key (or its prefix) |
+   | `kv.get` / `kv.scan` (both) | `kv.read` | the key (or its prefix) |
+   | `credentials.get(name)` (both) | `credentials.read` | `name` |
+   | `speech.start(...)` (0.1) / `speech.recognize(...)` (0.2) | `stt.start` | none |
+   | `log.write`, `lifecycle.*` (both) | never checked | a log line cannot exceed anything a person sees |
+
+   Both runners call the same three functions (`service_components::{gate, target_of,
+   authority_target}`), so a policy file cannot mean two different things depending on which
+   contract a component speaks. Only the mapping of an answer onto the guest's error is per runner,
+   because `bindgen!` generates a distinct `wa:kernel/types.error` per bindings module: the table
+   itself is `service_components::gate_verdict`, and each runner names its own error type for its
+   three cases (`gate_decision` in each file).
 
    An address target (`net.dial`, `http.request`) is lowercased before the check
    (`service_components::authority_target`), because host names are case-insensitive and the manifest
    grant already compares them that way: write address patterns in lowercase. Without it a client's
    `WSS://WEB.WHATSAPP.COM/...` would pass the manifest and fail a rule the same operator wrote.
 
-   Result mapping, in one function (`service_components::gate_decision`): `Allow` → proceed;
+   Result mapping, in one function (`service_components::gate_verdict`): `Allow` → proceed;
    `Deny(no_policy | policy_denied | target_denied | target_not_allowed | audit_unavailable)` →
    `KError::Refused(reason)`; `RateLimited` with `retry_after_ms < 1000` → `KError::Again` (the guest
    already retries that), otherwise `Refused(reason)`; `NeedsApproval` → `Refused("approval_required")`.
+   A 0.2 stream item is not a call, but one delivered `socket.messages()` frame is recorded as
+   `websocket.recv` so both contracts answer the same query.
 5. **The wasi-socket path.** Request components (MCP servers, the `wasi:cli` world) reach the network
    through wasi sockets, not `wa:kernel`. There the manifest grant is already a per-address check, so
    the policy is applied only for a rule the operator actually wrote for that component
@@ -303,16 +314,17 @@ plus the fixtures of this tree:
 
 | component | rules |
 | --- | --- |
-| `wa-whatsapp` | `whatsapp.send` (own chat + alerts, ≤20/min, ≤6/min per chat, alerts exempt from the global cap but ≤1/min, daily cap 200); `net.dial` + `http.request` to the three host families its manifest grants; `kv.write` on the key prefixes its store writes (`dev`, `id/`, `ses/`, `pk/`, `spk/`, `sk/`, `sync/`, `ver/`, `mac/`, `lid/`, `tc/`, `tx/`); `credentials.read` for `WA_WHATSAPP_TOKEN` |
+| `wa-whatsapp` | `whatsapp.send` (own chat + alerts, ≤20/min, ≤6/min per chat, alerts exempt from the global cap but ≤1/min, daily cap 200); `net.dial` + `http.request` to the three host families its manifest grants; `kv.write` on the key prefixes its store writes (`dev`, `id/`, `ses/`, `pk/`, `spk/`, `sk/`, `sync/`, `ver/`, `mac/`, `lid/`, `tc/`, `tx/`, `fence/`); `credentials.read` for `WA_WHATSAPP_TOKEN` |
 | `mcp-whatsapp` | `net.dial` + `http.request` on loopback (its manifest grants nothing else), `credentials.read` for `WA_MCP_WHATSAPP_TOKEN` |
-| `svc-echo` | `net.dial` on loopback (fixture; the wasip1 runner is not policy-checked yet) |
+| `svc-echo`, `svc-echo-v1` | `net.dial` + `http.request` on loopback and their own `kv` namespace (fixtures; the wasip1 module of the same name is not policy-checked yet) |
 | `mcp-echo` | named, no rule needed: it declares no net and no secret |
 | `example-new-component` | a template entry to copy for a new component, with the rules written out |
 
 Two properties of that file are load-bearing. The patterns **mirror the manifests**: a rule can only
 narrow what a manifest already grants, so `net.dial`/`http.request` list exactly the addresses in
 `rust/components/wa-whatsapp/manifest.json` and a widening there needs no policy edit. And `kv.write`
-lists the prefixes the store actually writes (`src/store.rs` documents them, `src/lib.rs` adds `tx/`),
+lists the prefixes the store actually writes (`src/store.rs` documents them, `src/lib.rs` adds `tx/`,
+`src/guest.rs` adds the 0.2 message fence `fence/`),
 not a tidier invented namespace: a default that refused `ses/...` would break the running component on
 the first message. `cargo test -p wa-host node_policy::` drives those exact calls, and its
 `the_shipped_default_policy_keeps_the_components_this_tree_installs_working` test is the one that
@@ -374,9 +386,11 @@ cap needs only the `send` call, not the chat.
   honours them; there is no `services` tool action, CLI verb or panel that grants one, so a rule with
   `require_approval` currently refuses (`approval_required`) until one is added. One use per
   approval, ttl default 15 min; the call is `NodePolicy::approve` from a master-only path.
-* **The wasip1 runner** (`services.rs` `wa_sock.connect`, used by core modules such as `svc-echo`) is
-  not policy-checked: its `connect` sits inside the linker closure another stream owns. It needs the
-  same shape as the wasi-socket check (grant, then `net.dial` per `host:port`).
+* **The wasip1 runner** (`services.rs` `wa_sock.connect`, used by core modules such as
+  `svc-echo-wasip1`) is not policy-checked: its `connect` sits inside the linker closure another
+  stream owns. It needs the same shape as the wasi-socket check (grant, then `net.dial` per
+  `host:port`).  Both `wa:kernel` contracts are checked (`service_components.rs`, and
+  `service_components_v2.rs` for `@0.2`).
 * **Per-chat limits** need `wa:channel/messages` (`wit/kernel` 0.2, another job). Until then
   `node_policy::check_whatsapp_send` has no caller and only the global message cap is real.
 * **The policy file is a single node file.** The profile stack in [KERNEL.md](KERNEL.md) (base → node
@@ -396,12 +410,15 @@ cap needs only the `send` call, not the chat.
 
 ## WASI 0.3 / wasmtime 50 note
 
-Everything here is synchronous and cheap except the audit write (one `write` + `flush`). Today the
+Everything here is synchronous and cheap except the audit write (one `write` + `flush`). The 0.1
 call sites are the synchronous `wa:kernel` host functions, so the write happens in the guest's own
-call. When the kernel calls it from inside an async host call, that file write must not sit on a
-guest's future:
-with WASI 0.3 native async the host should hand records to a dedicated writer (bounded channel,
-drop-oldest counted, `AuditSink` gaining an async or fire-and-forget form) while `Engine` stays a
-plain `Mutex<Engine>` — no `await` is ever held with the guard, and `check`/`enforce` keep their
-signatures. Nothing in the library needs to change shape for that: it has no clock, no I/O of its
-own, and no wasmtime types.
+call. The 0.2 runner (`service_components_v2.rs`) already calls the same `check` from inside an
+`async fn`; it does not await while the engine guard is held either (the guard is taken and dropped
+inside `node_policy::check`), so a policy check never sits on a guest's future. What is still open
+is the audit *write* on the async path: the 0.1 restart path is unchanged and the write is the same
+one-write-one-flush it always was. If that shows up in a measured `host_call_duration_micros` for
+`websocket.send`/`http.send` on the 0.2 runner, the fix is the one described below: with WASI 0.3
+native async the host hands records to a dedicated writer (bounded channel, drop-oldest counted,
+`AuditSink` gaining an async or fire-and-forget form) while `Engine` stays a plain `Mutex<Engine>` —
+no `await` is ever held with the guard, and `check`/`enforce` keep their signatures. Nothing in the
+library needs to change shape for that: it has no clock, no I/O of its own, and no wasmtime types.

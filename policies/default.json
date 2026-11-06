@@ -3,7 +3,7 @@
   "sensitive_capabilities": [],
   "components": {
     "wa-whatsapp": {
-      "note": "Stage 1 of docs/GRANT-POLICY.md: send only to our own chat and the alerts chat, <= 20 messages/min in total, <= 6/min per chat, alerts exempt from the global cap but <= 1/min. net.dial and http.request mirror the addresses in rust/components/wa-whatsapp/manifest.json; each pattern may only ever NARROW that manifest. kv.write lists the key prefixes rust/components/wa-whatsapp/src/store.rs writes (dev, id/, ses/, pk/, spk/, sk/, sync/, ver/, mac/, lid/, tc/) plus the transcript prefix tx/ from src/lib.rs. credentials.read names the secret the component is given. Stage 2 - an allowlisted chat - only widens whatsapp.send.allow.",
+      "note": "Stage 1 of docs/GRANT-POLICY.md: send only to our own chat and the alerts chat, <= 20 messages/min in total, <= 6/min per chat, alerts exempt from the global cap but <= 1/min. net.dial and http.request mirror the addresses in rust/components/wa-whatsapp/manifest.json; each pattern may only ever NARROW that manifest. kv.write lists the key prefixes rust/components/wa-whatsapp/src/store.rs writes (dev, id/, ses/, pk/, spk/, sk/, sync/, ver/, mac/, lid/, tc/), the transcript prefix tx/ from src/lib.rs and the message fence prefix fence/ from src/guest.rs. credentials.read names the secret the component is given. Stage 2 - an allowlisted chat - only widens whatsapp.send.allow.",
       "capabilities": {
         "whatsapp.send": {
           "sensitive": true,
@@ -26,7 +26,7 @@
           "rate": { "per_minute": 60, "burst": 120 }
         },
         "kv.write": {
-          "allow": ["dev", "id/*", "ses/*", "pk/*", "spk/*", "sk/*", "sync/*", "ver/*", "mac/*", "lid/*", "tc/*", "tx/*"],
+          "allow": ["dev", "id/*", "ses/*", "pk/*", "spk/*", "sk/*", "sync/*", "ver/*", "mac/*", "lid/*", "tc/*", "tx/*", "fence/*"],
           "rate": { "per_minute": 240, "burst": 480 }
         },
         "credentials.read": {
@@ -53,9 +53,21 @@
       }
     },
     "svc-echo": {
-      "note": "Fixture (wasip1): one granted dial to the host's own port. Present so the fixtures of this tree are never refused for want of a rule. The wasip1 runner is not policy-checked yet (docs/GRANT-POLICY.md, 'What is not wired yet').",
+      "note": "Fixture: loopback only, and it writes its own kv namespace. Present so the fixtures of this tree are never refused for want of a rule - the same entry covers the wasip1 module (net only), the wa:kernel@0.1 component and the @0.2 component (net + storage). The wasip1 runner is not policy-checked yet (docs/GRANT-POLICY.md, 'What is not wired yet'); both wasm component contracts are.",
       "capabilities": {
-        "net.dial": { "allow": ["127.0.0.1:*", "[::1]:*"], "rate": { "per_minute": 60, "burst": 120 } }
+        "net.dial": { "allow": ["127.0.0.1:*", "[::1]:*"], "rate": { "per_minute": 60, "burst": 120 } },
+        "http.request": { "allow": ["127.0.0.1:*", "[::1]:*"], "rate": { "per_minute": 60, "burst": 120 } },
+        "kv.write": { "allow": ["*"], "rate": { "per_minute": 240, "burst": 480 } },
+        "kv.read": {}
+      }
+    },
+    "svc-echo-v1": {
+      "note": "Fixture on wa:kernel@0.1 (poll contract): the same loopback dial and its own kv namespace as svc-echo, so both component contracts of this tree run under the shipped default without a rule of their own being forgotten.",
+      "capabilities": {
+        "net.dial": { "allow": ["127.0.0.1:*", "[::1]:*"], "rate": { "per_minute": 60, "burst": 120 } },
+        "http.request": { "allow": ["127.0.0.1:*", "[::1]:*"], "rate": { "per_minute": 60, "burst": 120 } },
+        "kv.write": { "allow": ["*"], "rate": { "per_minute": 240, "burst": 480 } },
+        "kv.read": {}
       }
     },
     "mcp-echo": {

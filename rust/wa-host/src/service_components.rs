@@ -93,23 +93,47 @@ impl wa::kernel::types::Host for State {}
 /// limit shorter than a second becomes `again`, because the guest already retries that; everything
 /// else is a refusal the component can report, and the reason word is the stable one the audit
 /// record carries.
-fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
+pub(crate) fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
     gate_decision(crate::node_policy::check(component, capability, target))
+}
+
+/// What a policy answer means for the guest, in the vocabulary both runners share.
+///
+/// `wasmtime::component::bindgen!` generates one `wa:kernel/types.error` enum per bindings module,
+/// so the 0.1 runner's `KError` and the 0.2 runner's are distinct types. The *table* in
+/// `docs/GRANT-POLICY.md` must not exist twice and drift, so it lives here once and each runner
+/// only names its own error type for these three cases.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Allow,
+    /// A rate limit shorter than a second: the guest already retries `again`.
+    Again,
+    /// A refusal carrying the stable reason word the audit record also carries.
+    Refuse(String),
 }
 
 /// The mapping itself, separate so it is testable without a policy file (and so the table in
 /// `docs/GRANT-POLICY.md` has one implementation to drift from).
-fn gate_decision(decision: Decision) -> Result<(), KError> {
+pub(crate) fn gate_verdict(decision: Decision) -> Verdict {
     match decision {
-        Decision::Allow => Ok(()),
-        Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => Err(KError::Again),
-        other => Err(KError::Refused(other.reason_str().to_string())),
+        Decision::Allow => Verdict::Allow,
+        Decision::RateLimited { retry_after_ms, .. } if retry_after_ms < 1_000 => Verdict::Again,
+        other => Verdict::Refuse(other.reason_str().to_string()),
+    }
+}
+
+/// [`gate_verdict`] as the 0.1 guest's error.
+pub(crate) fn gate_decision(decision: Decision) -> Result<(), KError> {
+    match gate_verdict(decision) {
+        Verdict::Allow => Ok(()),
+        Verdict::Again => Err(KError::Again),
+        Verdict::Refuse(reason) => Err(KError::Refused(reason)),
     }
 }
 
 /// A key as a policy/audit target. Invalid UTF-8 is still a target (lossy), so two requests that
 /// name the same bytes share one budget; the audit caps the field at 160 characters.
-fn target_of(bytes: &[u8]) -> String {
+pub(crate) fn target_of(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
@@ -118,7 +142,7 @@ fn target_of(bytes: &[u8]) -> String {
 /// rule written for `web.whatsapp.com:443` must not be defeated - and must not defeat a working
 /// component - because a client emitted `WSS://WEB.WHATSAPP.COM/...`. Patterns are matched case
 /// sensitively by the crate, so this is where the two layers are made to agree.
-fn authority_target(authority: &str) -> String {
+pub(crate) fn authority_target(authority: &str) -> String {
     authority.to_ascii_lowercase()
 }
 

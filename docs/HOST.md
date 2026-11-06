@@ -688,7 +688,9 @@ write_file           writes files
 ## Node governance (`host.policy_status`, `host.telemetry`)
 
 Two read-only capabilities answer "what is this node enforcing, and how is it doing" without a shell
-and without a second store. Both are views over state the host already keeps; neither changes
+and without a second store. What they report is the same for both service runners: the policy checks,
+the per-call telemetry and the bounded stores apply to `wa:kernel@0.1` and `@0.2` alike
+([GRANT-POLICY.md](GRANT-POLICY.md#how-the-host-wires-it)). Both are views over state the host already keeps; neither changes
 anything, and neither may return message text, a chat id, a kv key, a transcript or a replay record.
 
 `host.policy_status()` returns the grant policy's state as JSON: the policy file's path and load

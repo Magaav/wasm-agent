@@ -1160,6 +1160,24 @@ env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$COMPONENTS_PROOF" bash scripts/build
 WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-component.lua" "$BIN" --db "$DB.component" | grep 'component checks:'
 WA_BIN="$BIN" WA_COMPONENTS_DIR="$COMPONENTS_PROOF" gate_run node --test --test-reporter=tap scripts/test-component-whatsapp-parity.mjs
 WA_COMPONENTS_DIR="$COMPONENTS_PROOF" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-service-component.lua" "$BIN" --db "$DB.service" | grep 'service checks:'
+# The same governance at the runner (docs/GRANT-POLICY.md, "How the host wires it"): with a policy
+# file that rules net.dial/http.request and says nothing about kv.write, a running service's write is
+# refused `no_policy` - on wa:kernel@0.1 and on @0.2 - while the manifest grant still refuses an
+# ungranted address first, and the refusal shows up in host.policy_status with no target text. The
+# unit tests prove the decision; this proves the wiring in a real service, which is what a deploy
+# changes. Its own home: the policy layer loads once per process, so a home that already answered a
+# policy question would never see the file this script writes. Its own copy of the two fixtures,
+# because the component directory is where `<name>.service.log` lives and the block above already
+# wrote one - a log this script has to read from its own start, not from someone else's.
+GOVERNANCE_SERVICE_HOME="$WASM_AGENT_HOME/governance-service"
+GOVERNANCE_SERVICE_COMPONENTS="$GOVERNANCE_SERVICE_HOME/components"
+rm -rf "$GOVERNANCE_SERVICE_HOME"; mkdir -p "$GOVERNANCE_SERVICE_COMPONENTS"
+for f in svc-echo svc-echo-v1; do
+  for ext in wasm wasm.sha256 json; do
+    [ -f "$COMPONENTS_PROOF/$f.$ext" ] && cp "$COMPONENTS_PROOF/$f.$ext" "$GOVERNANCE_SERVICE_COMPONENTS/" || true
+  done
+done
+WASM_AGENT_HOME="$GOVERNANCE_SERVICE_HOME" WA_COMPONENTS_DIR="$GOVERNANCE_SERVICE_COMPONENTS" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance-service.lua" "$BIN" --db "$DB.governance-service" | grep 'node governance service checks:'
 # A2.1 (docs/KERNEL.md): the same scripts with the Lua core inside the agent-core component, every
 # host.* crossing wa:kernel/host.call. Guarded: building agent-core needs wasi-sdk (WASI_SDK); without
 # it this says so and the native runs above stand.

@@ -716,8 +716,10 @@ mod tests {
             assert_eq!(policy.check_at("wa-whatsapp", "net.dial", Some(addr), now), Decision::Allow, "net.dial {addr}");
             assert_eq!(policy.check_at("wa-whatsapp", "http.request", Some(addr), now), Decision::Allow, "http.request {addr}");
         }
-        // Every key prefix `rust/components/wa-whatsapp/src/store.rs` and `lib.rs` write.
-        for key in ["dev", "id/5511@s.whatsapp.net", "ses/5511@s.whatsapp.net", "pk/17", "spk/3", "sk/5511@s.whatsapp.net", "sync/abcd", "ver/app", "mac/app/abcd", "lid/12", "tc/12", "tx/5511@s.whatsapp.net/ABC"] {
+        // Every key prefix `rust/components/wa-whatsapp/src/store.rs`, `lib.rs` and `guest.rs` (the
+        // 0.2 message fence) write. A prefix the component writes but this file does not rule is a
+        // capability refused with `no_policy` the moment policy.json is installed.
+        for key in ["dev", "id/5511@s.whatsapp.net", "ses/5511@s.whatsapp.net", "pk/17", "spk/3", "sk/5511@s.whatsapp.net", "sync/abcd", "ver/app", "mac/app/abcd", "lid/12", "tc/12", "tx/5511@s.whatsapp.net/ABC", "fence/ABC"] {
             assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some(key), now), Decision::Allow, "kv.write {key}");
         }
         assert_eq!(policy.check_at("wa-whatsapp", "credentials.read", Some("WA_WHATSAPP_TOKEN"), now), Decision::Allow);
@@ -754,9 +756,15 @@ mod tests {
             Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed)
         );
         assert_eq!(policy.check_at("mcp-whatsapp", "credentials.read", Some("WA_MCP_WHATSAPP_TOKEN"), now), Decision::Allow);
-        // svc-echo (wasip1) and mcp-echo: the named rules exist, and a component named in the file
-        // is never refused for want of a rule.
-        assert_eq!(policy.check_at("svc-echo", "net.dial", Some("127.0.0.1:8799"), now), Decision::Allow);
+        // svc-echo and mcp-echo: the named rules exist, and a component named in the file is never
+        // refused for want of a rule. Both component fixtures (0.1 and 0.2) dial loopback, write
+        // their own kv namespace and read it back; the 0.2 one goes through `http.send`.
+        for fixture in ["svc-echo", "svc-echo-v1"] {
+            assert_eq!(policy.check_at(fixture, "net.dial", Some("127.0.0.1:8799"), now), Decision::Allow, "{fixture} net.dial");
+            assert_eq!(policy.check_at(fixture, "http.request", Some("127.0.0.1:8799"), now), Decision::Allow, "{fixture} http.request");
+            assert_eq!(policy.check_at(fixture, "kv.write", Some("echo/key"), now), Decision::Allow, "{fixture} kv.write");
+            assert_eq!(policy.check_at(fixture, "kv.read", Some("echo/key"), now), Decision::Allow, "{fixture} kv.read");
+        }
         assert_eq!(policy.check_at("mcp-echo", "kv.read", Some("k"), now), Decision::Allow);
         std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
     }
