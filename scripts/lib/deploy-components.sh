@@ -233,6 +233,7 @@ wa_component_cache_root() {
 #   unset                                       `gh release download`, then the public release URL
 wa_component_fetch_assets() {
   local repo="$1" tag="$2" name="$3" dest="$4" base="${5:-}" asset local_base url_base
+  [ -d "$repo" ] && repo="$(wa_component_release_repo "$repo")"
   local assets="$name.wasm $name.json components.lock"
   local_base=""
   url_base=""
