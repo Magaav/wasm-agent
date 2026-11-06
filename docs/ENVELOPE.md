@@ -75,6 +75,8 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `session_many`: Read bounded ranges from several sessions
 - `symbol_source_many`: Retrieve several selected symbol implementations
 - `write_many`: Preflight independent writes, retaining diff and undo evidence
+- `whatsapp_send`: Send one WhatsApp message to an exact chat through the durable outbox
+- `whatsapp_send_status`: Read the state of a queued WhatsApp send, with its message id when sent
 - `mcp`: List and manage MCP connectors; new or edited ones stay disabled until enabled
 - `services`: List and manage long-lived WASI service components: start, stop, logs
 - `capture_inspect`: Inspect retained model-request captures as bounded metadata before reading raw dumps
@@ -139,6 +141,8 @@ runs on the client too, while `bash` runs on this node.
 | `session_many` | `requests` | Read bounded ranges from several sessions |
 | `symbol_source_many` | `requests` | Retrieve several selected symbol implementations |
 | `write_many` | `requests` | Preflight independent writes, retaining diff and undo evidence |
+| `whatsapp_send` | `chat` `text` `mentions?` `reply_to?` | Send one WhatsApp message to an exact chat through the durable outbox |
+| `whatsapp_send_status` | `id` | Read the state of a queued WhatsApp send, with its message id when sent |
 | `mcp` | `action?` `definition?` `expected_revision?` `id?` | List and manage MCP connectors; new or edited ones stay disabled until enabled |
 | `services` | `action?` `bytes?` `definition?` `expected_revision?` `name?` | List and manage long-lived WASI service components: start, stop, logs |
 | `capture_inspect` | `path` `item_index?` `limit?` `offset?` `request_index?` `snapshot?` `view?` | Inspect retained model-request captures as bounded metadata before reading raw dumps |

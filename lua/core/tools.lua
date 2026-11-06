@@ -522,6 +522,13 @@ local function add_batches(list)
 end
 -- Operator batches only: guest surfaces and artifact access do not expand.
 add_batches(M.admin)
+M.admin[#M.admin+1]=schema('whatsapp_send','Send one WhatsApp message yourself, on this account, to one exact chat - any chat, as the old connector did. It is queued on the shared durable queue and sent by the wa-whatsapp component, so the answer is a job id, not a delivery: read the outcome with whatsapp_send_status. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group). The same chat+text+reply_to is one job, so a repeated call does not send twice.',{
+ chat={type='string',maxLength=160,description='Exact chat JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us. A bare phone number is refused.'},
+ text={type='string',maxLength=65536,description='The message body, exactly as it should appear.'},
+ reply_to={type='string',maxLength=128,description='Optional message id to quote. The quoted body is not fetched, so the client shows a reference-only quote.'},
+ mentions={type='array',maxItems=64,items={type='string'},description='Optional mention targets as exact user JIDs (@s.whatsapp.net or @lid); meaningful in a group.'}},{'chat','text'})
+M.admin[#M.admin+1]=schema('whatsapp_send_status','State of a message you asked whatsapp_send to send: queued, done with the message id WhatsApp gave it, or failed with a reason. An id this node never allocated is refused, not guessed.',{
+ id={type='integer',minimum=1,description='The job id whatsapp_send returned.'}},{'id'})
 M.admin[#M.admin+1]=schema('mcp','List/manage explicit MCP connectors. New/edited definitions remain disabled; probe never grants tool/send/job authority.',{
  action={type='string',enum={'list','put','probe','enable','disable'}},id={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes/probes: exact registry revision from list. Stale state refuses.'},definition={type='object',description='Reviewed connector: id/name, transport stdio or http, program/args or url, optional cwd, environment-reference env/headers, timeout_seconds; tools maps exact tool names to locally approved read/write.'}},nil)
 M.admin[#M.admin+1]=schema('services','List/manage long-lived WASI service components (docs/SERVICE-COMPONENTS.md): put a definition (disabled), enable (start now and at boot), disable, restart, remove, status, logs. Grants are references: env/file_env names or a file path, exact net addresses. A component whose manifest declares `state_version` is migrated on a snapshot copy of its kv before it starts, and the start answer reports it under `state` (`fresh`, `up-to-date` or `migrated` with the versions); a refused migration (`state_no_migration_path`, `state_owner_mismatch`) starts nothing and leaves the old state at its old version. Read a namespace, its journal and its snapshots with `host.state` (action status), not by asking the component.',{
@@ -661,6 +668,8 @@ local CUES = {
   integrate = "Land an orchestration worker's tested tip; never deploy",
   mcp = "List and manage MCP connectors; new or edited ones stay disabled until enabled",
   services = "List and manage long-lived WASI service components: start, stop, logs",
+  whatsapp_send = "Send one WhatsApp message to an exact chat through the durable outbox",
+  whatsapp_send_status = "Read the state of a queued WhatsApp send, with its message id when sent",
   capture_inspect = "Inspect retained model-request captures as bounded metadata before reading raw dumps",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
@@ -1286,6 +1295,24 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   if name=='services' then
     return dofile('lua/core/services.lua').control(args,{role=role,subagent=ctx.subagent,session_id=ctx.session_id})
   end
+  if name=='whatsapp_send' or name=='whatsapp_send_status' then
+    -- The explicit WhatsApp send (docs/HOST.md, docs/SERVICE-COMPONENTS.md): the host capability
+    -- validates the JID, asks the `whatsapp.send` policy and enqueues on `wa:queue`; the component
+    -- sends it. A binary without the capability is told apart from a refusal, because "this node
+    -- cannot send" and "this send was refused" are different answers.
+    if type(host[name])~='function' then return {error=name..'_unavailable',effect='none'} end
+    local request
+    if name=='whatsapp_send' then
+      request={chat=args.chat,text=args.text,reply_to=args.reply_to,mentions=args.mentions}
+    else
+      request={id=tonumber(args.id) or args.id}
+    end
+    local ok,answer=pcall(host[name],json.encode(request))
+    if not ok then return {error=name..'_failed',detail=tostring(answer):sub(1,160),effect='none'} end
+    local decoded=json.decode(tostring(answer or ''))
+    if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
+    return decoded
+  end
   if name:sub(1,5)=='peer_' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
     return dofile('lua/core/federation.lua').call(name,args)
@@ -1819,6 +1846,7 @@ local READ_ONLY = {
   recall = true, memories = true, sessions = true, session = true,
   search_messages = true,
   spell_list = true, spell_get = true,
+  whatsapp_send_status = true,
 }
 
 function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end

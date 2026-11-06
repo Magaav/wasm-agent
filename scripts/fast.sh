@@ -90,7 +90,9 @@ else
   crates=""
   # The crates of the host split (docs/KERNEL.md) are listed by their directory, so a change under
   # rust/wa-term/ tests wa-term instead of rebuilding and testing the whole binary.
-  for crate in wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel; do
+  # wa-whatsapp-outbox is the explicit-send payload/JID/dedupe crate shared by the node and the
+  # wa-whatsapp component; it is a workspace member with no host dependency, so it is cheap here.
+  for crate in wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox; do
     if [ "$all_rust" = 1 ] || printf '%s\n' "$changed" | grep -q "^rust/$crate/"; then crates="$crates $crate"; fi
   done
   printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph"
