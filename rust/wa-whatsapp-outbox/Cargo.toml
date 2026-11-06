@@ -1,0 +1,23 @@
+[package]
+name = "wa-whatsapp-outbox"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The explicit-send outbox `whatsapp.outbox`: the shape of one send request, its validation, its
+# dedupe key and its settled result. Shared by the two ends of the queue - the node (which enqueues
+# a request after the `whatsapp.send` policy check) and the wa-whatsapp component (which consumes
+# it and reports `done(message id)` / `fail(reason)`), so the two cannot disagree about what a job
+# means. Pure: no host call, no I/O, and it builds for wasm32-wasip2.
+[dependencies]
+# The dedupe key is `sha256(chat|text|reply_to)`, required by the job brief. `sha2` is pure Rust, so
+# the component keeps building for wasm32-wasip2 (ring would drag a C build into the guest).
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The round-trip test drives the *real* queue the node serves to components (`wa:queue` over
+# `rust/wa-queue`), so "enqueue -> component sends -> done with the message id", dedupe and expiry
+# are measured against the queue's own semantics instead of a model of them.
+wa-queue = { path = "../wa-queue" }
