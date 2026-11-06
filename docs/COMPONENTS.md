@@ -28,11 +28,14 @@ each pin verifies.
 ## Distributing components: build once, install everywhere
 
 Wasm is portable: the same `.wasm` runs on Linux, Windows, x86_64 and arm64. A component with C
-inside (the graph: tree-sitter + SQLite) needs wasi-sdk, and a build is **not** byte-reproducible
-across checkout paths (three panic-location paths are embedded - measured 05/11: two checkouts of the
-same tree gave 8,185,719 and 8,185,720 bytes). So the build happens once, and every other node installs
-the pinned bytes instead of rebuilding them - including openclaw (arm64) and the laptop sandbox, which
-have no wasi-sdk at all. A deploy on such a node is one command, with no manual step.
+inside (the graph: tree-sitter + SQLite) needs wasi-sdk, and until 05/11 a build was **not**
+byte-reproducible across checkout paths (three panic-location paths were embedded - measured: two
+checkouts of the same tree gave 8,185,719 and 8,185,720 bytes). Since then the build remaps the paths
+out (next section), so the toolchain is the only machine-specific input left. A machine with no
+wasi-sdk, or with a different toolchain, still cannot reproduce the pinned bytes from source - so the
+build happens once and every other node installs the pinned bytes instead of rebuilding them,
+including openclaw (arm64) and the laptop sandbox, which have no wasi-sdk at all. A deploy on such a
+node is one command, with no manual step.
 
 **Build machine** (the one with wasi-sdk):
 
@@ -217,6 +220,56 @@ verdict is recomputed from the current install record so the indicator disappear
 without waiting for a request. `git` is consulted only for local ancestry (`merge-base
 --is-ancestor`), which is what tells a tree ahead of the feed (no banner) from one behind a published
 release (banner). Details and knobs: `docs/RELEASE-UPDATE.md`.
+## Reproducible builds: the checkout path is not an input
+
+Same source, same toolchain, same bytes - wherever the tree is checked out. What embedded absolute
+paths, and what removes them:
+
+| what | where it came from | what removes it |
+| --- | --- | --- |
+| panic locations and `file!()` strings of this tree and of a path dependency | Rust embeds the source path of every panic site, and a path dependency's path is **absolute** (measured: `rust/wa-graph`'s `audit.rs`, `extract.rs`, `store.rs`) | `--remap-path-prefix=<checkout>=/wasm-build`, added by `scripts/wa-remap-rustc` |
+| the same for registry crates | Cargo hands rustc `CARGO_HOME`'s absolute path (measured: `rusqlite`, `ring`, `serde_json`) | `--remap-path-prefix=<CARGO_HOME>=/cargo-home`, same wrapper |
+| C sources (tree-sitter, SQLite) | clang embeds `__FILE__`, and tree-sitter's assertions carry it - measured: `tree-sitter-0.24.7/src/language.c` under `CARGO_HOME`, unremapped until this flag was added | `-ffile-prefix-map=<checkout>=/wasm-build -ffile-prefix-map=<CARGO_HOME>=/cargo-home` in `CFLAGS_wasm32_wasip1` / `CFLAGS_wasm32_wasip2` (and `CXXFLAGS_*`); wasi-sdk itself is remapped too, though no SDK path is in today's artifacts |
+| a stamped build time | clang honours `SOURCE_DATE_EPOCH` for `__DATE__`/`__TIME__` | `SOURCE_DATE_EPOCH=0` when the environment sets none |
+
+`scripts/build-components.sh` exports all of it, so every caller gets it: the script itself, the local
+build a deploy falls back to, and `scripts/publish-components.sh` (which calls it). `WA_COMPONENTS_REPRO=0`
+turns the remapping off, which is how a diff-sized demonstration is made.
+
+**Why the Rust half travels in a wrapper and not in `RUSTFLAGS`.** A remap has to name the checkout it
+remaps, and Cargo hashes the whole `RUSTFLAGS` string into `-C metadata`. Two checkouts would then be
+built with two different metadata hashes, which changes symbol mangling, which changes the order of
+functions and constants in the artifact. Measured: with the remap in `RUSTFLAGS` every path was gone
+and the graph still differed by 1 byte (8,216,117 vs 8,216,118; the two rlibs were
+`libwa_graph-9830e40f60165081.rlib` and `libwa_graph-abe6a18e041567c3.rlib`). So the remap travels in
+`scripts/wa-remap-rustc` (and `wa-remap-rustc.cmd` for a native Windows Cargo), which Cargo reaches
+through `RUSTC_WRAPPER` resolved from `PATH`: the value Cargo sees is the bare name, the same string in
+every checkout, and the paths are computed per invocation from the wrapper's own location. It fails
+loudly when it is not inside a checkout, because a remap that matches nothing is silent (that bug was
+measured too).
+
+**What is still part of the identity.** The toolchain (rustc, wasi-sdk) and the crates.io versions
+(`Cargo.lock` travels with each component crate). `-C metadata` is Cargo's and cannot be pinned from
+outside: rustc combines every `-C metadata` it is given, so a fixed one in `RUSTFLAGS` only adds a
+constant to Cargo's part.
+
+**Status, measured (05/11, cargo 1.98.1, wasi-sdk 34):** a pure-Rust component reproduces byte for
+byte from two checkout paths (`svc-echo` 194,439 bytes, sha256 `480d8bed…` in both). A component with a
+**path dependency** does not yet: `graph` came out 8,216,117 bytes at both paths with **no path string
+left in either** and with the same set of strings and the same size - the two files differ only in
+where a handful of string constants and functions sit (18,364 bytes over a 3.4 MB span), because the
+wrapper's own absolute path is still one of Cargo's metadata inputs (`libwa_graph-c65270e439874284.rlib`
+vs `…-b61ccd9ac609b0cd.rlib`). Three things close that last gap, none of them available here: a
+wrapper installed once at a path every checkout shares (so the metadata input is constant), Cargo's
+`trim-paths` (still unstable in 1.98.1: `feature \`trim-paths\` is required`), or dropping the path
+dependency by making `wa-graph` a workspace member of the component that needs it.
+
+**The proof.** `bash scripts/test-repro-components.sh [name...]` extracts the tree into two differently
+named paths (`clone-a` and a deeper, longer `clone-b-deeper-path`), builds the named components in each
+with this same script, greps both artifacts for a leaked path, and compares the sha256 of every
+artifact - including a component with C inside (`graph`). It exits 1 while anything differs and says
+whether the difference is a leaked path or ordering. It is not in `scripts/fast.sh`: it needs wasi-sdk
+and two full component builds (minutes), and a landing does not have to wait for it.
 
 ## Capabilities: declared by the manifest, granted by the caller
 

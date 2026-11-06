@@ -1,0 +1,58 @@
+#!/bin/sh
+# The `rustc` wrapper that makes a component build insensitive to WHERE the tree is checked out
+# (docs/COMPONENTS.md, "Reproducible builds: the checkout path is not an input").
+#
+# Why a wrapper and not RUSTFLAGS. A remap has to name the checkout it is remapping, and Cargo feeds
+# the whole RUSTFLAGS string into `-C metadata`; two checkouts would then be built with two different
+# flag strings, the crate disambiguator would differ, and the artifacts would differ again - in symbol
+# mangling and item order, in the last bytes of the file (measured: 8,216,117 vs 8,216,118 bytes even
+# though every embedded path had already been remapped). So the remap cannot travel in RUSTFLAGS.
+# It travels here instead: `RUSTC_WRAPPER` is resolved through PATH, so the value Cargo sees is the
+# bare name `wa-remap-rustc` - identical in every checkout - and the paths are computed per
+# invocation by this script, from its own location.
+#
+# `scripts/build-components.sh` prepends `scripts/` to PATH and exports
+# `RUSTC_WRAPPER=wa-remap-rustc` (`wa-remap-rustc.cmd` on a native Windows Cargo) for the duration of
+# a component build, so nothing else in the repo is affected.
+#
+# Two spellings of every source path are remapped: `C:/a/b` (mixed, what cygpath -m gives) and
+# `C:\a\b` (what a native tool embeds on Windows - the panic locations of a path dependency carry
+# backslashes). Off Windows the two are the same POSIX path, and a prefix that matches nothing is a
+# no-op, so both are always passed.
+set -eu
+
+# Cargo calls a wrapper as `wrapper <rustc> <args...>` (`--rustc` instead of a path in a build script's
+# own invocation), so the compiler is the first argument, not a source file.
+if [ "${1:-}" = --rustc ]; then
+  # Cargo's own rustc probe asks the wrapper to pick the compiler.
+  shift
+  rustc_bin=rustc
+else
+  rustc_bin=${1:?the wrapper needs the compiler as its first argument}
+  shift
+fi
+
+checkout=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+# Loud, not silent: a wrapper that cannot find the tree would remap nothing and change no path.
+if [ ! -d "$checkout/rust/components" ]; then
+  echo "wa-remap-rustc: not a wasm-agent checkout: $checkout" >&2
+  exit 2
+fi
+
+# Cargo's own rustflags, if any, stay: this wrapper only adds to the command line. A relative
+# `--remap-path-prefix` is accepted by rustc, but the paths Cargo hands it are absolute, so the
+# absolute form is what is passed here.
+set -- --remap-path-prefix="$checkout=/wasm-build" --remap-path-prefix="$cargo_home=/cargo-home" "$@"
+
+if command -v cygpath >/dev/null 2>&1; then
+  mixed=$(cygpath -m "$checkout")
+  mixed_home=$(cygpath -m "$cargo_home")
+  win=$(printf '%s' "$mixed" | sed 's|/|\\|g')
+  win_home=$(printf '%s' "$mixed_home" | sed 's|/|\\|g')
+  if [ "$mixed" != "$checkout" ]; then set -- --remap-path-prefix="$mixed=/wasm-build" "$@"; fi
+  if [ "$mixed_home" != "$cargo_home" ]; then set -- --remap-path-prefix="$mixed_home=/cargo-home" "$@"; fi
+  set -- --remap-path-prefix="$win=/wasm-build" --remap-path-prefix="$win_home=/cargo-home" "$@"
+fi
+
+exec "$rustc_bin" "$@"

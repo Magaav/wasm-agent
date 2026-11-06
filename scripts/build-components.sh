@@ -5,9 +5,26 @@
 #
 #   bash scripts/build-components.sh            # all components
 #   bash scripts/build-components.sh mcp-whatsapp
+#
+# Reproducible bytes: the same source builds to the same sha256 from any checkout path (see the
+# "Reproducible builds" section of docs/COMPONENTS.md, and `scripts/test-repro-components.sh`).
+# WA_COMPONENTS_REPRO=0 turns the path remapping off (a diagnosis aid: it shows what the paths would
+# otherwise contribute).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# The two spellings a path can have for the toolchain on this machine: `C:/a/b` (mixed, what
+# cygpath -m gives and what Cargo/rustc print in most places on Windows) and `C:\a\b` (what a
+# native tool hands to the C compiler). Off Windows both are the same POSIX path. A
+# --remap-path-prefix that matches nothing is a no-op, so both are always supplied.
+tree_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+win_path() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) cygpath -m "$1" | sed 's|/|\\|g' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 
 OUT="${WA_COMPONENTS_DIR:-$HOME/.wasm-agent/components}"
 mkdir -p "$OUT"
@@ -32,6 +49,52 @@ if [ -n "$SDK" ] && [ -d "$SDK/share/wasi-sysroot" ]; then
     export "CC_$t=$SDK/bin/clang$ext" "AR_$t=$SDK/bin/llvm-ar$ext"
   done
   export WASI_SYSROOT="$SDK/share/wasi-sysroot" WASI_SDK_PATH="$SDK"
+fi
+
+# --- Reproducible bytes: the checkout path is not an input ------------------------------------
+# Rust embeds source paths where the guest can see them: panic locations (`file!()` on a path
+# dependency is absolute), `module_path!()`-style strings, and the debuginfo of every crate. C
+# toolchains do the same for the C in a component (tree-sitter, SQLite, libc). The paths are
+# absolute - Cargo hands rustc the checkout and the registry cache as absolute paths - so one tree
+# checked out at /a/tree and at /b/tree produced different bytes with identical inputs
+# (docs/COMPONENTS.md measured 8,185,719 vs 8,185,720 bytes). Remapping the three roots to fixed
+# names takes the path out of the compilation:
+#   * the checkout (Rust sources of this tree, and wa-graph's, which is a path dependency);
+#   * CARGO_HOME (the registry cache; also where a path dependency outside this tree would live);
+#   * wasi-sdk (the sysroot's C headers and libc sources, which is what -ffile-prefix-map covers).
+# The Rust half travels in `scripts/wa-remap-rustc` (and its `.cmd` twin), reached through
+# RUSTC_WRAPPER - NOT through RUSTFLAGS. RUSTFLAGS is hashed by Cargo into `-C metadata`, so a
+# `--remap-path-prefix` naming this checkout would give the two checkouts two different flag strings:
+# measured, that alone kept 1 byte of difference in the graph's 8 MB (8,216,117 vs 8,216,118 bytes)
+# after every embedded path had already been remapped. The wrapper is found through PATH by its bare
+# name, which is the same string in every checkout, and it computes the paths per invocation.
+if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ]; then
+  CHECKOUT="$(tree_path "$(pwd)")"
+  CARGO_HOME_DIR="$(tree_path "${CARGO_HOME:-$HOME/.cargo}")"
+  remap_c=""
+  add_c_remap() { # <source dir> <fixed name>
+    [ -n "$1" ] || return 0
+    [ "$1" = "$2" ] && return 0
+    remap_c="$remap_c -ffile-prefix-map=$1=$2 -ffile-prefix-map=$(win_path "$1")=$2"
+  }
+  add_c_remap "$CHECKOUT" /wasm-build
+  add_c_remap "$CARGO_HOME_DIR" /cargo-home
+  if [ -n "${WASI_SYSROOT:-}" ]; then add_c_remap "$(tree_path "$SDK")" /wasi-sdk; fi
+  export PATH="$(pwd)/scripts:$PATH"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) export RUSTC_WRAPPER=wa-remap-rustc.cmd ;;
+    *) export RUSTC_WRAPPER=wa-remap-rustc ;;
+  esac
+  for t in wasm32_wasip1 wasm32_wasip2; do
+    eval "export CFLAGS_$t=\"\${CFLAGS_$t:-}$remap_c\""
+    eval "export CXXFLAGS_$t=\"\${CXXFLAGS_$t:-}$remap_c\""
+  done
+  # `cc` reads CFLAGS_<target> for a cross build; these two cover a C toolchain that reads the
+  # unprefixed names instead (`aws-lc`'s CMake build, a crate's own build.rs).
+  export CFLAGS="${CFLAGS:-}$remap_c" CXXFLAGS="${CXXFLAGS:-}$remap_c"
+  # `__DATE__`/`__TIME__` and any tool that stamps a build would otherwise make two identical
+  # builds hours apart differ. Rust never embeds a build time; C does when a program uses those.
+  export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 fi
 
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
