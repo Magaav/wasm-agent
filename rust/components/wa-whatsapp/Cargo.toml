@@ -38,6 +38,10 @@ log = { version = "0.4", features = ["std"] }
 # `block_on` is the only executor they need and it comes from the futures crate already used above.
 # Dev-only: `cargo build --target wasm32-wasip2` does not see this feature set.
 futures = { version = "0.3", default-features = false, features = ["std", "async-await", "executor"] }
+# A history sync reaches the component zlib-compressed, so the one test that drives the real wire shape
+# (compressed blob -> `LazyHistorySync::stream()` -> records) needs a compressor. `zlib-rs` is the zlib
+# backend already in this graph through `wacore-binary`, so this adds no new code to the build.
+zlib-rs = "0.6"
 
 [profile.release]
 opt-level = "s"

@@ -767,3 +767,47 @@ fn repair_puts_back_the_age_key_a_crash_can_lose() {
     assert!(block_on(store.get(key_age(ts, CHAT, "T1").as_bytes())).unwrap().is_some());
     assert_eq!(block_on(repair(&store, 10)).unwrap(), 0, "a second pass has nothing to do");
 }
+
+// ---- the age index: what a history budget and an on-demand request read --------------------------
+
+#[test]
+fn the_age_index_says_what_is_backfill_and_where_each_chat_starts() {
+    let store = Memory::new();
+    let base = 1_760_000_000_000;
+    // Two chats, live and backfilled records interleaved, so neither order can be assumed.
+    let mut live = text("L1", base + 3_000, "ao vivo");
+    block_on(put(&store, &live)).unwrap();
+    let mut history = text("H1", base, "do passado");
+    history.source = record::SOURCE_HISTORY.into();
+    block_on(put(&store, &history)).unwrap();
+    let mut older = text("H2", base + 1_000, "mais antigo");
+    older.source = record::SOURCE_HISTORY.into();
+    block_on(put(&store, &older)).unwrap();
+    live = text("L2", base + 4_000, "outro ao vivo");
+    block_on(put(&store, &live)).unwrap();
+
+    let index = block_on(age_index(&store, 10_000)).unwrap();
+    assert_eq!((index.entries, index.history), (4, 2));
+    assert!(!index.capped);
+    assert_eq!(index.chats.len(), 1, "every record is in one chat");
+    let chat = index.chat(CHAT).expect("the chat");
+    assert_eq!(chat.history, 2, "only the backfilled records count against the budget");
+    assert_eq!((chat.oldest_ts, chat.oldest_id.as_str()), (base, "H1"));
+    assert_eq!(chat.newest_ts, base + 4_000);
+    assert!(index.chat(OTHER).is_none(), "a chat with no record is not in the index");
+
+    // The cap bounds the pass: what it saw is a floor, and it says so instead of pretending.
+    let capped = block_on(age_index(&store, 2)).unwrap();
+    assert_eq!((capped.entries, capped.capped), (2, true));
+}
+
+#[test]
+fn holds_answers_whether_a_message_is_already_indexed() {
+    let store = Memory::new();
+    let ts = 1_760_000_000_000;
+    assert!(!block_on(holds(&store, CHAT, "T1")).unwrap());
+    block_on(put(&store, &text("T1", ts, "oi"))).unwrap();
+    assert!(block_on(holds(&store, CHAT, "T1")).unwrap());
+    // The id is scoped to its chat: the same id under another chat is a different message.
+    assert!(!block_on(holds(&store, "5511777776666@s.whatsapp.net", "T1")).unwrap());
+}

@@ -27,6 +27,14 @@ use wacore::proto_helpers::MessageExt;
 /// search surface, so it keeps enough to answer with a snippet and to tokenize a normal message, and
 /// stops there instead of turning one long message into a kv-sized blob.
 pub const MAX_TEXT: usize = 4_096;
+/// The message arrived on the live stream (a notification while connected).
+///
+/// `source` is the one field that says *where* a record came from: a live message and the same message
+/// re-delivered by a history sync are the same record (the id is the key), so the first writer keeps
+/// the row and this field is what tells an operator, and a query, which of the two it was.
+pub const SOURCE_LIVE: &str = "live";
+/// The message came out of a history sync (the past, backfilled from the protocol).
+pub const SOURCE_HISTORY: &str = "history";
 /// Largest media the pipeline ever downloaded (the Go connector's `maxMediaBytes`), so a bigger one is
 /// recorded as `media_too_large` rather than promised as downloadable.
 pub const MAX_MEDIA_BYTES: u64 = 20 * 1024 * 1024;
@@ -118,6 +126,10 @@ pub struct Record {
     pub kind: String,
     /// The body, or the caption of a media message.
     pub text: String,
+    /// `live` or `history`: where this record came from (`SOURCE_LIVE` / `SOURCE_HISTORY`). A record
+    /// written before this field existed reads back as `""`, which is a live message for every
+    /// reader: an absent source must never look like a backfilled one.
+    pub source: String,
     /// The id of the message this one quotes (a reply), or of the message an event acts on.
     pub quoted: String,
     pub mentions: Vec<String>,
@@ -161,6 +173,11 @@ pub struct Envelope {
 }
 
 impl Record {
+    /// True when this record was backfilled from a history sync rather than received live.
+    pub fn from_history(&self) -> bool {
+        self.source == SOURCE_HISTORY
+    }
+
     /// True for the rows that are a change to another message rather than a message of their own.
     pub fn is_event(&self) -> bool {
         matches!(self.kind.as_str(), "reaction" | "edit" | "delete")
@@ -270,6 +287,7 @@ pub fn from_message(envelope: &Envelope, message: &wap::Message) -> Record {
         ts: envelope.ts,
         received: envelope.received,
         push_name: envelope.push_name.clone(),
+        source: SOURCE_LIVE.to_string(),
         ..Record::default()
     };
     let base = message.get_base_message();

@@ -13,7 +13,7 @@
 //! ix/k/<kind>/<inv(ts)>/<id>/<chat>     empty                       (by kind)
 //! ix/w/<token>/<inv(ts)>/<id>/<chat>    empty                       (normalized-token index)
 //! ix/x/<chat>/<id>/<reactor>/<emoji>    reaction, JSON              (folded onto its target)
-//! ix/all/<ts>/<chat>/<id>              empty                       (age order: retention walks it)
+//! ix/all/<ts>/<chat>/<id>              `history` | empty            (age order: retention walks it)
 //! ix/pend/<chat>/<id>                   a mutation for a message not indexed yet
 //! ```
 //!
@@ -187,6 +187,21 @@ fn key_pending(chat: &str, id: &str) -> String {
     format!("{PREFIX}pend/{chat}/{id}")
 }
 
+/// The word a record's age entry carries: `history` for a backfilled record, empty for a live one.
+///
+/// The age index (`ix/all`) was written with an empty value until history sync existed, and nothing
+/// ever read it. Carrying the source there is what makes "how much of the index is backfill" one
+/// bounded scan instead of one record load per message - the count a budget has to know before it
+/// writes. An entry written by an older build (or by [`repair`] on a record that has none) is empty,
+/// which counts as live: an absent source must never be mistaken for a backfilled one.
+fn source_word(record: &Record) -> &'static str {
+    if record.from_history() {
+        "history"
+    } else {
+        ""
+    }
+}
+
 /// One candidate message a narrowing produced: its thread key can be rebuilt from `(chat, ts, id)`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Candidate {
@@ -245,7 +260,7 @@ async fn write<S: Store>(store: &S, record: &Record) -> Result<(), String> {
     let json = serde_json::to_vec(record).map_err(|error| format!("record encode: {error}"))?;
     store.set(key_message(&record.chat, record.ts, &record.id).as_bytes(), &json).await?;
     store.set(key_id(&record.chat, &record.id).as_bytes(), inv(record.ts).as_bytes()).await?;
-    store.set(key_age(record.ts, &record.chat, &record.id).as_bytes(), b"").await?;
+    store.set(key_age(record.ts, &record.chat, &record.id).as_bytes(), source_word(record).as_bytes()).await?;
     store.set(key_sender(&record.sender, record.ts, &record.id, &record.chat).as_bytes(), b"").await?;
     store.set(key_kind(&record.kind, record.ts, &record.id, &record.chat).as_bytes(), b"").await?;
     for token in record.tokens() {
@@ -427,6 +442,111 @@ pub async fn load<S: Store>(store: &S, chat: &str, id: &str) -> Result<Option<Re
     let key = format!("{PREFIX}m/{chat}/{inv}/{id}");
     let Some(bytes) = store.get(key.as_bytes()).await? else { return Ok(None) };
     Ok(serde_json::from_slice(&bytes).ok())
+}
+
+/// Does this `(chat, id)` already have a record? One `get`, not a load: a history sync asks this for
+/// every message the phone sends, and the answer is the whole of the dedupe.
+pub async fn holds<S: Store>(store: &S, chat: &str, id: &str) -> Result<bool, String> {
+    Ok(store.get(key_id(chat, id).as_bytes()).await?.is_some_and(|inv| !inv.is_empty()))
+}
+
+/// One chat as the age index (`ix/all`) sees it: when it starts, when it ends, how much of it is
+/// backfill.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChatAge {
+    pub chat: String,
+    /// The oldest record the index holds for this chat (`oldest_id` at `oldest_ts`).
+    pub oldest_ts: i64,
+    pub oldest_id: String,
+    pub newest_ts: i64,
+    /// How many of this chat's records came from a history sync.
+    pub history: usize,
+}
+
+/// The whole age index in one bounded pass: how many backfilled records the index holds, per chat and
+/// in total, plus each chat's oldest and newest record.
+///
+/// This is what a history budget and an on-demand request both need, and both need it *before* they
+/// write anything: the pass reads `ix/all` (oldest first) and the value stored beside each key says
+/// whether the record was backfilled, so it costs one scan and no record loads. `capped` says the scan
+/// hit its entry budget: the counts are then a floor and the chat list is incomplete.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgeIndex {
+    pub entries: usize,
+    pub history: usize,
+    pub chats: Vec<ChatAge>,
+    pub capped: bool,
+}
+
+impl AgeIndex {
+    pub fn chat(&self, chat: &str) -> Option<&ChatAge> {
+        self.chats.iter().find(|entry| entry.chat == chat)
+    }
+
+}
+
+/// Walk the age index once, bounded by `cap` entries.
+pub async fn age_index<S: Store>(store: &S, cap: usize) -> Result<AgeIndex, String> {
+    let mut index = AgeIndex::default();
+    let mut cursor: Option<Vec<u8>> = None;
+    let prefix = format!("{PREFIX}all/");
+    loop {
+        let page = store.scan(prefix.as_bytes(), cursor.clone(), PAGE).await?;
+        if page.is_empty() {
+            return Ok(finish(index));
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        let short = page.len() < PAGE;
+        for (key, value) in page {
+            let text = String::from_utf8_lossy(&key).into_owned();
+            let rest = text.strip_prefix(&prefix).unwrap_or_default();
+            let parts: Vec<&str> = rest.split('/').collect();
+            let [age_text, chat, id] = parts.as_slice() else { continue };
+            let Some(ts) = from_age(age_text) else { continue };
+            if chat.is_empty() || id.is_empty() {
+                continue;
+            }
+            index.entries += 1;
+            let history = value == b"history";
+            if history {
+                index.history += 1;
+            }
+            match index.chats.iter_mut().find(|entry| entry.chat == *chat) {
+                Some(entry) => {
+                    // The scan is oldest first, so the first sighting is the oldest and the last is
+                    // the newest.
+                    if ts < entry.oldest_ts {
+                        entry.oldest_ts = ts;
+                        entry.oldest_id = (*id).to_string();
+                    }
+                    entry.newest_ts = entry.newest_ts.max(ts);
+                    if history {
+                        entry.history += 1;
+                    }
+                }
+                None => index.chats.push(ChatAge {
+                    chat: (*chat).to_string(),
+                    oldest_ts: ts,
+                    oldest_id: (*id).to_string(),
+                    newest_ts: ts,
+                    history: usize::from(history),
+                }),
+            }
+            if index.entries >= cap {
+                index.capped = true;
+                return Ok(finish(index));
+            }
+        }
+        if short {
+            return Ok(finish(index));
+        }
+    }
+}
+
+/// Newest activity first, then by chat so one index always lists the same way.
+fn finish(mut index: AgeIndex) -> AgeIndex {
+    index.chats.sort_by(|a, b| b.newest_ts.cmp(&a.newest_ts).then_with(|| a.chat.cmp(&b.chat)));
+    index
 }
 
 /// Collect the candidates one prefix offers, newest first, up to `budget`.
@@ -868,6 +988,11 @@ fn hit_json(record: &Record, score: i64) -> serde_json::Value {
     if !record.unsupported.is_empty() {
         hit["unsupported"] = serde_json::Value::String(record.unsupported.clone());
     }
+    // Where the record came from: a backfilled message answers a query exactly like a live one, and
+    // this is the one field that says it came out of a history sync (`docs/WHATSAPP-TRANSCRIPTION.md`).
+    if record.from_history() {
+        hit["source"] = serde_json::Value::String(record::SOURCE_HISTORY.to_string());
+    }
     if !record.transcript.is_empty() {
         hit["transcript"] = serde_json::Value::String(record::one_line(&record.transcript, seam::MAX_TEXT_CHARS));
     }
@@ -1011,7 +1136,7 @@ pub async fn repair<S: Store>(store: &S, budget: usize) -> Result<usize, String>
             let Ok(record) = serde_json::from_slice::<Record>(&value) else { continue };
             let age_key = key_age(record.ts, &record.chat, &record.id);
             if store.get(age_key.as_bytes()).await?.is_none() {
-                store.set(age_key.as_bytes(), b"").await?;
+                store.set(age_key.as_bytes(), source_word(&record).as_bytes()).await?;
                 fixed += 1;
                 if fixed >= budget {
                     break;

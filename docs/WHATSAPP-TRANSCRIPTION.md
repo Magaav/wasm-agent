@@ -134,6 +134,69 @@ them with this connector's `journal.db` read-only and prints ids, states, counts
 side. It never reads a transcript's text out of the journal (`length(...)` only), and its own test
 plants a canary transcript to prove that.
 
+## The past: history sync and `whatsapp_backfill`
+
+The index (`rust/components/wa-whatsapp/src/index.rs`) began as a record of what arrived while the
+node was connected, so after the component swap `whatsapp_search` found only messages received since
+start, while the account had months of history. The past does reach a linked device - WhatsApp
+delivers it as `historySync` blobs on (re)link and answers an explicit per-chat request - so
+`rust/components/wa-whatsapp/src/history.rs` indexes it into the *same* index:
+
+```text
+Event::HistorySync(LazyHistorySync)        one event per blob (chunked: several)
+  -> HistorySyncStream::next_conversation  one chat at a time, bounded memory
+  -> candidates(conversation)              envelope + message, as `on_message` builds them
+  -> record::from_message + source=history the same parser, kinds and tokens as a live message
+  -> index::put                            the same records, keys and query answers
+```
+
+* **The id is the dedupe, and the first writer keeps the row.** A message already indexed - live or
+  backfilled - is counted as a duplicate and not rewritten, so a sync that re-delivers the last week
+  never reorders a thread and never turns a live record into a history one. A backfilled record is
+  otherwise indistinguishable: `read`, `search`, `reactions` and `media` answer with it, and a hit
+  carries `source: "history"` so the two can be told apart.
+* **Bounded, and it says which bound it hit.** One blob can carry tens of thousands of messages, so a
+  drain stops at the first budget - per chat, in total, or per notification - and logs the counts
+  (`history: conversations=… seen=… written=… duplicate=… skipped=… over_budget=… remaining=…
+  stopped=per_chat|total|per_sync|store`). Never a message, never a chat's text.
+* **The storage grant is the wall, not a promise.** A failed write stops the drain with `stopped=store`
+  and its reason instead of retrying into the same wall; what was written stays.
+* **The counters are read, not maintained.** `index::age_index` walks the age keys once (`ix/all`, whose
+  value now says `history` or nothing) to learn how much backfill the index holds, so a budget cannot
+  drift away from what is on disk.
+
+**Configuration** (the service definition's `config`, all optional):
+
+| key | default | meaning |
+| --- | --- | --- |
+| `index_history` | `true` | index history syncs at all; `false` drops a blob and says so once |
+| `index_history_per_chat` | `200` | most backfilled records one chat may hold |
+| `index_history_total` | `2000` | most backfilled records the index may hold |
+| `index_history_per_sync` | `1000` | most records one notification may add (the rest is a later sync) |
+
+**The on-demand request.** `whatsapp_backfill {chat?, count}` is a sixth op on `whatsapp.query`
+(`rust/wa-whatsapp-index`): the component anchors on the oldest message it holds for the chat
+(`oldest_msg_id`/`oldest_msg_from_me`/`oldest_msg_timestamp_ms`), calls the library's
+`fetch_message_history`, and settles an answer that is the *request list* (chat, anchor, count) -
+never a message, because the phone answers through the protocol and the sync above does the indexing.
+With no `chat` it asks for the chats the index already knows, most recently active first, at most
+`wa_whatsapp_index::BACKFILL_MAX_CHATS` (20) of them; `count` is clamped to `BACKFILL_MAX` (500) and
+travels in the request's `limit` field (the request's one count), which the dedupe key covers, so
+asking for 120 messages is a different job from asking for 50. A
+component that is not connected answers `not_connected` (the queue retries); a phone that refuses is
+counted and named in the answer's `note`.
+
+**What it never does.** It does not read the Go connector's `journal.db` (another process, another
+owner: history comes only through the WhatsApp protocol), it does not post history - the
+transcription pipeline's 5-minute freshness rule already refuses anything old, and this lane only
+indexes - and it logs no text.
+
+**Tests.** `src/history/tests.rs` (11 tests, native, no account): a compressed blob driven through
+`LazyHistorySync::stream()` into records a `whatsapp_search` then finds; the dedupe against a live
+message (the live row keeps its own source); the total, per-chat and per-sync budgets; an off budget;
+a failed write stopping the drain with its reason; the anchor an on-demand request names, including a
+chat the index has never seen; and the attribution of a group/DM/own message.
+
 ## Remote workers: the strong node decodes for the small one (queue phase 2)
 
 The 2-core node that owns the journal does not have to be the node that decodes. A node whose config

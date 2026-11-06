@@ -28,7 +28,7 @@ use crate::wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket};
 use crate::wasi::clocks::monotonic_clock;
 use crate::index::{self, Store as IndexStore};
 use crate::record::{self, Record};
-use crate::{alerts, export, exports, outbox, posting, queue, recognize, store, telemetry};
+use crate::{alerts, export, exports, history, outbox, posting, queue, recognize, store, telemetry};
 use wa_whatsapp_index as seam;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -216,6 +216,14 @@ thread_local! {
     /// Every message and event the handler turned into a record, indexed by the pipeline's own loop
     /// (`index.rs`): the handler must not wait on a store write, so it hands the record over.
     static INDEX_INBOX: RefCell<Vec<Record>> = const { RefCell::new(Vec::new()) };
+    /// The history syncs the event handler received and the pipeline has not indexed yet.
+    ///
+    /// The blob stays compressed until the drain reads it (`LazyHistorySync::stream` inflates one
+    /// conversation at a time), so a queued notification costs what the wire sent and not what it
+    /// decodes to. Bounded: a burst of chunks drops the oldest instead of holding an unbounded number
+    /// of multi-megabyte blobs.
+    static HISTORY_INBOX: RefCell<std::collections::VecDeque<whatsapp_rust::types::events::LazyHistorySync>> =
+        RefCell::new(std::collections::VecDeque::new());
 }
 
 fn now_ms() -> i64 {
@@ -1053,6 +1061,8 @@ struct IndexConfig {
     prune_budget: usize,
     /// Most plaintext bytes one `whatsapp_download` will decrypt and hand back.
     download_max: u64,
+    /// The past: how much of a history sync may be indexed, and whether any of it may be.
+    history: history::Budget,
 }
 
 impl IndexConfig {
@@ -1068,6 +1078,13 @@ impl IndexConfig {
                 .as_u64()
                 .unwrap_or(seam::MAX_DOWNLOAD_BYTES)
                 .clamp(1, seam::MAX_DOWNLOAD_BYTES),
+            // The past is on by default for the same reason the index is: a search that only covers
+            // what arrived since start is the bug this lane exists to fix. `index_history: false` is a
+            // decision (a small grant), and it is honoured as one.
+            history: match config["index_history"].as_bool().unwrap_or(true) {
+                true => history::Budget::from_json(config),
+                false => history::Budget::off(),
+            },
         }
     }
 }
@@ -1139,6 +1156,7 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         seam::Op::Reactions => index::reactions(&IndexKv, &request).await,
         seam::Op::Media => index::media(&IndexKv, &request).await,
         seam::Op::Download => download(&request, id, cfg).await,
+        seam::Op::Backfill => backfill(&request).await,
     };
     match answer {
         Ok(answer) => {
@@ -1252,6 +1270,128 @@ async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Resu
     let mut answer = seam::answer(seam::Op::Download, serde_json::to_value(&manifest).unwrap_or_default());
     answer["bytes"] = serde_json::Value::from(manifest.bytes);
     Ok(answer)
+}
+
+// ---- the past: history sync and the on-demand request ----------------------------------------
+//
+// A linked device is not given the account's whole history on connect: WhatsApp sends `historySync`
+// blobs (on link, on re-link, in chunks) and answers an explicit per-chat request. Both reach the
+// index through this lane: the event handler queues the blob (compressed, bounded), the main loop
+// drains it one conversation at a time under `history::Budget`, and `whatsapp_backfill` is the tool
+// that asks the phone for more. Nothing here logs or answers with message text.
+
+/// How many history syncs may wait for the drain. A phone sends a handful of chunks in a burst; a
+/// queue deeper than this is a component that cannot keep up, and dropping the oldest blob is better
+/// than holding four multi-megabyte payloads it will never get to.
+const HISTORY_PENDING: usize = 4;
+
+/// Who we are, for attributing a backfilled message of our own: the PN and the LID the client knows.
+fn own_jids(client: &whatsapp_rust::Client) -> history::SelfJids {
+    history::SelfJids {
+        pn: client.pn().map(|jid| jid.to_string()).unwrap_or_default(),
+        lid: client.lid().map(|jid| jid.to_string()).unwrap_or_default(),
+    }
+}
+
+/// Index one history sync: the whole of the past this node will hold, bounded, one blob per tick.
+async fn history_tick(cfg: &IndexConfig) -> bool {
+    let Some(lazy) = HISTORY_INBOX.with(|inbox| inbox.borrow_mut().pop_front()) else { return false };
+    if cfg.history.is_off() {
+        // `index_history: false` is a decision, not a queue: what arrived is dropped here and said
+        // once, so a node that turned the past off pays nothing and still sees that it came in.
+        say!("history: off; a sync of {} bytes dropped", lazy.decompressed_size());
+        return true;
+    }
+    let me = CLIENT.with(|c| c.borrow().clone()).map(|client| own_jids(&client)).unwrap_or_default();
+    let mut plan = match history::Plan::of(&IndexKv, cfg.history).await {
+        Ok(plan) => plan,
+        Err(reason) => {
+            say!("history: counting the index failed reason={}", one_line(&reason));
+            return true;
+        }
+    };
+    let mut total = history::Progress::default();
+    // One conversation at a time: `HistorySyncStream` inflates and decodes the blob incrementally, so
+    // the memory this holds is the largest single conversation, not the whole sync.
+    let mut stream = lazy.stream();
+    loop {
+        match stream.next_conversation() {
+            Ok(Some(conversation)) => {
+                total.merge(history::drain_conversation(&IndexKv, &conversation, &me, &mut plan, now_ms()).await);
+                if total.stopped.is_some() {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                // The blob is truncated or corrupt: what decoded is indexed, the rest is reported.
+                say!("history: decode stopped after {} conversation(s)", total.conversations);
+                break;
+            }
+        }
+    }
+    say!(
+        "history: sync_type={} chunk={:?} progress={:?} bytes={} skipped_conversations={} counted_to_cap={} {}",
+        lazy.sync_type(),
+        lazy.chunk_order(),
+        lazy.progress(),
+        lazy.decompressed_size(),
+        stream.skipped_conversations(),
+        plan.capped,
+        total.line()
+    );
+    true
+}
+
+/// `whatsapp_backfill`: ask the primary phone for messages older than the index holds.
+///
+/// The answer is what was *asked for* - chat, anchor, count - never a message: the phone answers
+/// through the protocol, the sync lands in [`HISTORY_INBOX`], and the same drain that indexes a
+/// relink indexes it, marked `source: history`. A client that is not connected is an `Err` (the queue
+/// retries a disconnected component); a chat the index has never seen still gets a request, from the
+/// phone's newest messages.
+async fn backfill(request: &seam::Verified) -> Result<serde_json::Value, String> {
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else {
+        // Retryable: a node that is (re)connecting answers the same question once it is up.
+        return Err("not_connected".to_string());
+    };
+    let chat = request.chat.as_ref().map(|chat| chat.jid());
+    let anchors = history::anchors(&IndexKv, chat.as_deref(), request.limit).await?;
+    if anchors.is_empty() {
+        return Ok(seam::answer(
+            seam::Op::Backfill,
+            seam::backfill_answer(
+                Vec::new(),
+                "the index holds no chat yet: a live message or a history sync has to arrive first",
+            ),
+        ));
+    }
+    let mut asked: Vec<seam::BackfillChat> = Vec::new();
+    let mut refused = 0usize;
+    for anchor in &anchors {
+        let Ok(jid) = anchor.chat.parse::<whatsapp_rust::Jid>() else {
+            refused += 1;
+            continue;
+        };
+        // One message to our own phone per chat: the anchor it needs and how far back to go.
+        match client
+            .fetch_message_history(&jid, &anchor.id, anchor.from_me, anchor.ts, anchor.count as i32)
+            .await
+        {
+            Ok(_request_id) => asked.push(anchor.to_seam()),
+            Err(_) => refused += 1,
+        }
+    }
+    say!(
+        "history: asked the primary phone for {} chat(s) x {} message(s), refused={refused}",
+        asked.len(),
+        request.limit
+    );
+    let note = match refused {
+        0 => String::new(),
+        n => format!("{n} chat(s) could not be asked: the primary phone did not accept the request"),
+    };
+    Ok(seam::answer(seam::Op::Backfill, seam::backfill_answer(asked, &note)))
 }
 
 /// The CDN's notion of the blob, from the record's own kind.
@@ -1499,12 +1639,15 @@ async fn serve(config: serde_json::Value) {
         post.held.len()
     );
     say!(
-        "index: {} (retention {} days, prune every {} s by {}, download <= {} KiB)",
+        "index: {} (retention {} days, prune every {} s by {}, download <= {} KiB, history {} per chat / {} total / {} per sync)",
         if index.enabled { "on" } else { "off" },
         index.retention.days,
         index.prune_every.as_secs(),
         index.prune_budget,
-        index.download_max / 1024
+        index.download_max / 1024,
+        index.history.per_chat,
+        index.history.total,
+        index.history.per_sync
     );
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
     let tasks = Tasks::start();
@@ -1548,6 +1691,27 @@ async fn serve(config: serde_json::Value) {
                 }
             })
             .on_logged_out(|_client| async move { say!("LOGGED OUT") })
+            // The past arrives as its own event, not as messages: one `historySync` notification per
+            // chunk, carrying a compressed blob. The handler only queues it - decoding megabytes on
+            // the dispatch path would stall every message behind it - and logs its metadata.
+            .on_event_for(&[EventKind::HistorySync], |event, _client| async move {
+                let Event::HistorySync(lazy) = &*event else { return };
+                let pending = HISTORY_INBOX.with(|inbox| {
+                    let mut inbox = inbox.borrow_mut();
+                    if inbox.len() >= HISTORY_PENDING {
+                        inbox.pop_front();
+                    }
+                    inbox.push_back((**lazy).clone());
+                    inbox.len()
+                });
+                say!(
+                    "history: received sync_type={} chunk={:?} progress={:?} bytes={} pending={pending}",
+                    lazy.sync_type(),
+                    lazy.chunk_order(),
+                    lazy.progress(),
+                    lazy.decompressed_size()
+                );
+            })
             .on_message(|ctx| {
                 let line = format!("message chat={} kind={} media={} id={}", ctx.info.source.chat, ctx.info.r#type, ctx.info.media_type, ctx.info.id);
                 let base = ctx.message.get_base_message();
@@ -1661,6 +1825,9 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // The index first, so a message that just arrived is already findable when the query lane is
         // asked about it: the same tick's order, not a race between two independent loops.
         index_inbox(index.enabled).await;
+        // Then the past: one history sync per tick, bounded by its budget (`history.rs`), so a relink
+        // cannot starve the pipeline it arrived in.
+        history_tick(index).await;
         settle_completions().await;
         if last_tick.elapsed() >= TICK * 2 {
             last_tick = Instant::now();

@@ -25,6 +25,9 @@
 //! `cargo build --target wasm32-wasip2` builds the component.
 pub mod alerts;
 pub mod holds;
+/// The past: the messages a history sync carries and the on-demand request that asks the primary
+/// phone for more, indexed under a budget (`docs/WHATSAPP-TRANSCRIPTION.md`, "The past").
+pub mod history;
 /// The message index: every received message and event, in the component's kv, with the keys and the
 /// token normalization a query reads (`docs/SERVICE-COMPONENTS.md`, "The message index").
 pub mod index;
