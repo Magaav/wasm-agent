@@ -2059,6 +2059,10 @@ name = "wa-queue"
 version = "0.1.0"
 
 [[package]]
+name = "wa-remap-rustc"
+version = "0.1.0"
+
+[[package]]
 name = "wa-rendezvous"
 version = "0.1.0"
 dependencies = [

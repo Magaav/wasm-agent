@@ -242,34 +242,77 @@ built with two different metadata hashes, which changes symbol mangling, which c
 functions and constants in the artifact. Measured: with the remap in `RUSTFLAGS` every path was gone
 and the graph still differed by 1 byte (8,216,117 vs 8,216,118; the two rlibs were
 `libwa_graph-9830e40f60165081.rlib` and `libwa_graph-abe6a18e041567c3.rlib`). So the remap travels in
-`scripts/wa-remap-rustc` (and `wa-remap-rustc.cmd` for a native Windows Cargo), which Cargo reaches
-through `RUSTC_WRAPPER` resolved from `PATH`: the value Cargo sees is the bare name, the same string in
-every checkout, and the paths are computed per invocation from the wrapper's own location. It fails
-loudly when it is not inside a checkout, because a remap that matches nothing is silent (that bug was
-measured too).
+`scripts/wa-remap-rustc`, which Cargo reaches through `RUSTC_WRAPPER` resolved from `PATH`: the value
+Cargo sees is the bare name, the same string in every checkout, and the paths are computed per
+invocation. It fails loudly (exit 2) when it cannot find the tree, because a remap that matches
+nothing is silent - that bug was measured too.
+
+**The wrapper is compiled on Windows, and installed at one path for every checkout.** Two effects, each
+measured:
+
+* A `.cmd` cannot do this job, and no longer does. Cargo cannot start a `.cmd` itself: `CreateProcess`
+  starts `cmd.exe`, which re-parses the arguments, expands `%VAR%` on its own and refuses a command
+  line over 8191 characters ("The command line is too long"). `wa-whatsapp` failed exactly there: its
+  `windows-sys` dependency passes one `--check-cfg cfg(feature, values(...))` argument naming ~250
+  features, which the components in the gate happened to stay under. `rust/wa-remap-rustc` is the
+  compiled twin (no dependencies): Cargo starts it directly, it adds the same flags, waits for the
+  real compiler and forwards its exit code. `scripts/build-components.sh` compiles it on demand.
+* The wrapper is installed once per wrapper source at a path every checkout shares -
+  `${TMPDIR:-/tmp}/wa-remap-rustc/<first 16 hex of the sha256 of the wrapper sources>` (`WA_REMAP_DIR`
+  overrides) - and that directory goes first on `PATH`. `RUSTC_WRAPPER` is the bare name
+  `wa-remap-rustc` everywhere, and `WA_REMAP_CHECKOUT` / `WA_REMAP_CARGO_HOME` tell the installed copy
+  which roots to remap: it lives outside the checkout, so its own path says nothing. On a POSIX host
+  the script itself is installed instead of the binary: the same remap with `exec` and no compile.
 
 **What is still part of the identity.** The toolchain (rustc, wasi-sdk) and the crates.io versions
 (`Cargo.lock` travels with each component crate). `-C metadata` is Cargo's and cannot be pinned from
 outside: rustc combines every `-C metadata` it is given, so a fixed one in `RUSTFLAGS` only adds a
 constant to Cargo's part.
 
-**Status, measured (05/11, cargo 1.98.1, wasi-sdk 34):** a pure-Rust component reproduces byte for
-byte from two checkout paths (`svc-echo` 194,439 bytes, sha256 `480d8bed…` in both). A component with a
-**path dependency** does not yet: `graph` came out 8,216,117 bytes at both paths with **no path string
-left in either** and with the same set of strings and the same size - the two files differ only in
-where a handful of string constants and functions sit (18,364 bytes over a 3.4 MB span), because the
-wrapper's own absolute path is still one of Cargo's metadata inputs (`libwa_graph-c65270e439874284.rlib`
-vs `…-b61ccd9ac609b0cd.rlib`). Three things close that last gap, none of them available here: a
-wrapper installed once at a path every checkout shares (so the metadata input is constant), Cargo's
-`trim-paths` (still unstable in 1.98.1: `feature \`trim-paths\` is required`), or dropping the path
-dependency by making `wa-graph` a workspace member of the component that needs it.
+**Status, measured (06/11, cargo 1.98.1, wasi-sdk 34, two checkout paths):** a component without a path
+dependency reproduces byte for byte - `svc-echo` 194,439 bytes, sha256 `480d8bed…` from both paths, the
+same bytes the `.cmd` produced before this change, so the compiled twin does exactly what the script
+did. A component with a **path dependency** still does not: `graph` 8,216,117 bytes at both paths with
+no path string in either (`764ce5fb…` vs `39be1068…`) and `wa-whatsapp` 8,362,334 vs 8,362,462 bytes
+(`2aa885af…` vs `7e6d1c55…`). The difference is ordering, not content: the code section shifts (7,795,727
+of 8,362,334 bytes differ, from offset 4,164, which is why the size barely moves).
+
+**That gap is Cargo's, not the wrapper's - measured, correcting an earlier guess in this file.** Both
+builds ran the *same installed wrapper*, and what differs between them is Cargo's own metadata:
+`libwa_graph-945e490b3b712fc9.rlib` in one tree, `libwa_graph-8c2a82544f1e05bf.rlib` in the other. Three
+measurements pin it down:
+
+1. One crate at two tree paths, wrapper path identical: identical `-C metadata`, identical artifact.
+2. A component with a path dependency at two tree paths, wrapper path identical: different
+   `-C metadata` for both units. Cargo's source identity for a path package is its **canonical absolute
+   path**, and that hash travels into the dependent's metadata.
+3. `-C metadata` is what moves the bytes: one tree, one path, only `RUSTFLAGS=-C metadata=ALPHA` vs
+   `=BETA`, gave 8,216,117 bytes with sha256 `e1a83838…` vs `0cef95aa…`.
+
+A wrapper cannot take that input over from outside: rustc *combines* every `-C metadata` it is given
+(measured: `-C metadata=aaa`, `=bbb`, and both together are three different artifacts), so adding a
+constant removes nothing, and replacing Cargo's value would mean inventing the crate disambiguator -
+the one thing that keeps two versions of one crate apart - which fails silently as a symbol collision.
+Not done. What would close it, in the order worth trying:
+
+* Make the path dependency a **member of the component's own workspace**: measured, identical
+  `-C metadata` and identical bytes from two tree paths. A package cannot be a member of two
+  workspaces (measured: `package … is a member of the wrong workspace`), so this needs
+  `rust/Cargo.toml` to give up `wa-graph` (and `wa-whatsapp-outbox`, `wa-whatsapp-index`) - a
+  workspace decision, not a build-script one.
+* Build inside a **content-addressed copy** at a fixed path: a copy is not a symlink, so the canonical
+  path is stable for every checkout of the same source. A junction is not enough (measured: Cargo
+  canonicalises it and the metadata stayed the tree's). Costs a copy per build, a shared target dir
+  and disk per source revision.
+* Upstream Cargo: a source identity for path packages that does not embed the checkout path, or
+  `trim-paths` reaching `-C metadata` (still nightly-only here: `feature \`trim-paths\` is required`).
 
 **The proof.** `bash scripts/test-repro-components.sh [name...]` extracts the tree into two differently
 named paths (`clone-a` and a deeper, longer `clone-b-deeper-path`), builds the named components in each
 with this same script, greps both artifacts for a leaked path, and compares the sha256 of every
 artifact - including a component with C inside (`graph`). It exits 1 while anything differs and says
-whether the difference is a leaked path or ordering. It is not in `scripts/fast.sh`: it needs wasi-sdk
-and two full component builds (minutes), and a landing does not have to wait for it.
+whether the difference is a leaked path or Cargo's metadata. It is not in `scripts/fast.sh`: it needs
+wasi-sdk and two full component builds (minutes), and a landing does not have to wait for it.
 
 ## Capabilities: declared by the manifest, granted by the caller
 

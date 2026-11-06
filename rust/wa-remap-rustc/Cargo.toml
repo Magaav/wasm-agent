@@ -1,0 +1,12 @@
+[package]
+name = "wa-remap-rustc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "RUSTC_WRAPPER for component builds: takes the checkout path and CARGO_HOME out of the artifact (the native-Windows twin of scripts/wa-remap-rustc)."
+
+[[bin]]
+name = "wa-remap-rustc"
+path = "src/main.rs"
+
+[dependencies]

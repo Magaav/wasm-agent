@@ -11,9 +11,16 @@
 # bare name `wa-remap-rustc` - identical in every checkout - and the paths are computed per
 # invocation by this script, from its own location.
 #
-# `scripts/build-components.sh` prepends `scripts/` to PATH and exports
-# `RUSTC_WRAPPER=wa-remap-rustc` (`wa-remap-rustc.cmd` on a native Windows Cargo) for the duration of
-# a component build, so nothing else in the repo is affected.
+# `scripts/build-components.sh` copies this script into a fixed, content-addressed directory under the
+# temp dir, puts that directory first on PATH and exports `RUSTC_WRAPPER=wa-remap-rustc` for the
+# duration of a component build, so nothing else in the repo is affected. Outside the checkout on
+# purpose: the resolved wrapper path is then one path for every checkout, not one per tree.
+#
+# Windows note: a native Windows Cargo cannot run this script (a `.cmd` twin would be started through
+# `cmd.exe`, which re-parses the arguments and refuses a command line over 8191 characters - that is
+# exactly what broke `wa-whatsapp`, whose `windows-sys` dependency passes a >6 KB `--check-cfg`
+# argument). `rust/wa-remap-rustc` is the compiled twin that build-components.sh installs there; both
+# read the roots from `WA_REMAP_CHECKOUT` / `WA_REMAP_CARGO_HOME` and do the same three remaps.
 #
 # Two spellings of every source path are remapped: `C:/a/b` (mixed, what cygpath -m gives) and
 # `C:\a\b` (what a native tool embeds on Windows - the panic locations of a path dependency carry
@@ -32,8 +39,14 @@ else
   shift
 fi
 
-checkout=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-cargo_home=${CARGO_HOME:-$HOME/.cargo}
+# The roots come from the environment when build-components.sh installed this script outside the
+# checkout (then `$0` says nothing about the tree), else from this script's own location.
+if [ -n "${WA_REMAP_CHECKOUT:-}" ]; then
+  checkout=$WA_REMAP_CHECKOUT
+else
+  checkout=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+fi
+cargo_home=${WA_REMAP_CARGO_HOME:-${CARGO_HOME:-$HOME/.cargo}}
 # Loud, not silent: a wrapper that cannot find the tree would remap nothing and change no path.
 if [ ! -d "$checkout/rust/components" ]; then
   echo "wa-remap-rustc: not a wasm-agent checkout: $checkout" >&2

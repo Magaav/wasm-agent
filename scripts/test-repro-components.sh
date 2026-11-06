@@ -15,11 +15,13 @@
 # components in each with an unshared CARGO_TARGET_DIR, then check every artifact twice: no checkout or
 # CARGO_HOME path inside it, and the same sha256 from both paths.
 #
-# Today (05/11) the first check passes for every component and the second passes for a pure-Rust one
-# and fails for one with a path dependency (graph), which is a known, measured gap: Cargo hashes the
-# wrapper's absolute path into `-C metadata`, so symbol mangling - and with it the order of the code -
-# differs. docs/COMPONENTS.md, "Reproducible builds: the checkout path is not an input", has the
-# numbers, the diagnosis and what closes it.
+# Today (06/11) the first check passes for every component and the second passes for a component
+# without a path dependency (`svc-echo`) and fails for one with a path dependency (`graph`,
+# `wa-whatsapp`). That is a measured gap in Cargo, not in the wrapper: Cargo's source identity for a
+# path package is its canonical absolute path, that hash travels into the dependent's `-C metadata`,
+# rustc combines `-C metadata` into symbol names, and a wrapper cannot override a value it did not
+# compute. docs/COMPONENTS.md, "Reproducible builds: the checkout path is not an input", has the
+# measurements and the three ways to close it.
 #
 # Exit: 0 identical and path-free; 1 a leaked path or different bytes (both sha256s are printed, with
 # which of the two it was); 2 a tool or a build is missing.
@@ -109,9 +111,10 @@ for name in "${names[@]}"; do
     differ=$((differ + 1))
     printf 'repro: DIFFERENT %s: %s (%s bytes) vs %s (%s bytes)\n' "$name" "$sha_a" "$bytes_a" "$sha_b" "$bytes_b" >&2
     if [ -z "$leak_a$leak_b" ]; then
-      printf 'repro: %s has no leaked path in either build, so the difference is ordering (Cargo hashes the\n' "$name" >&2
-      printf 'repro: wrapper path into -C metadata, which mangles symbols); see docs/COMPONENTS.md,\n' >&2
-      printf 'repro: "Reproducible builds", for what closes it\n' >&2
+      printf 'repro: %s carries no leaked path in either build, so the difference is ordering: Cargo gives\n' "$name" >&2
+      printf 'repro: a path dependency a metadata hash built from its absolute path, and rustc combines\n' >&2
+      printf 'repro: -C metadata into symbol names, so an outside wrapper cannot override it. See\n' >&2
+      printf 'repro: docs/COMPONENTS.md, "Reproducible builds", for the measurement and what closes it\n' >&2
     fi
     code=1
   fi

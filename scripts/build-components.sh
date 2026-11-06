@@ -62,12 +62,53 @@ fi
 #   * the checkout (Rust sources of this tree, and wa-graph's, which is a path dependency);
 #   * CARGO_HOME (the registry cache; also where a path dependency outside this tree would live);
 #   * wasi-sdk (the sysroot's C headers and libc sources, which is what -ffile-prefix-map covers).
-# The Rust half travels in `scripts/wa-remap-rustc` (and its `.cmd` twin), reached through
-# RUSTC_WRAPPER - NOT through RUSTFLAGS. RUSTFLAGS is hashed by Cargo into `-C metadata`, so a
-# `--remap-path-prefix` naming this checkout would give the two checkouts two different flag strings:
-# measured, that alone kept 1 byte of difference in the graph's 8 MB (8,216,117 vs 8,216,118 bytes)
-# after every embedded path had already been remapped. The wrapper is found through PATH by its bare
-# name, which is the same string in every checkout, and it computes the paths per invocation.
+# The Rust half travels in `scripts/wa-remap-rustc` (compiled as `rust/wa-remap-rustc` for a native
+# Windows Cargo), reached through RUSTC_WRAPPER - NOT through RUSTFLAGS. RUSTFLAGS is hashed by Cargo
+# into `-C metadata`, so a `--remap-path-prefix` naming this checkout would give the two checkouts two
+# different flag strings: measured, that alone kept 1 byte of difference in the graph's 8 MB
+# (8,216,117 vs 8,216,118 bytes) after every embedded path had already been remapped. The wrapper is
+# found through PATH by its bare name, which is the same string in every checkout, and it computes the
+# paths per invocation.
+#
+# It is installed outside the checkout (below) so that the resolved wrapper path, like the
+# `RUSTC_WRAPPER` value, is one string for every checkout. That is not what makes a component with a
+# path dependency differ still - that is Cargo's `-C metadata` (docs/COMPONENTS.md, "Reproducible
+# builds", measured) - but a build input that can be one constant should not be a per-checkout path.
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
+sha_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
+
+# Install the wrapper where every checkout of the same wrapper source shares exactly one path, and
+# print that directory. Content-addressed: a changed wrapper is a different path, an unchanged one is
+# the same path in every checkout and after every reboot. `cp` to a temporary name then `mv` so a
+# concurrent build never picks up half a file.
+install_wrapper() {
+  local ext hash dir native
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ext=".exe" ;; *) ext="" ;; esac
+  hash=$({ cat rust/wa-remap-rustc/Cargo.toml rust/wa-remap-rustc/src/main.rs scripts/wa-remap-rustc; } 2>/dev/null | sha_stdin | cut -c1-16)
+  if [ -z "$hash" ]; then echo "error: cannot read the wrapper sources (rust/wa-remap-rustc)" >&2; return 1; fi
+  dir="${WA_REMAP_DIR:-${TMPDIR:-/tmp}/wa-remap-rustc}/$hash"
+  mkdir -p "$dir" || return 1
+  if [ ! -f "$dir/wa-remap-rustc$ext" ]; then
+    if [ -n "$ext" ]; then
+      # The native twin is compiled, not a `.cmd`: cmd.exe re-parses every argument and refuses a
+      # command line over 8191 characters, and `windows-sys` alone passes one `--check-cfg`
+      # argument naming ~250 features - that is what broke the wa-whatsapp build
+      # (rust/wa-remap-rustc/src/main.rs).
+      cargo build --release --manifest-path rust/wa-remap-rustc/Cargo.toml >/dev/null || {
+        echo "error: cannot build the component-build wrapper (rust/wa-remap-rustc)" >&2; return 1; }
+      native="${CARGO_TARGET_DIR:-$PWD/rust/target}/release/wa-remap-rustc.exe"
+      case "$native" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;; *) native="$PWD/$native" ;; esac
+      [ -f "$native" ] || { echo "error: the wrapper build produced no $native" >&2; return 1; }
+      cp "$native" "$dir/.wa-remap-rustc$ext.tmp.$$" && mv "$dir/.wa-remap-rustc$ext.tmp.$$" "$dir/wa-remap-rustc$ext"
+    else
+      # A POSIX host needs no compile: the wrapper is the `exec` in scripts/wa-remap-rustc.
+      cp scripts/wa-remap-rustc "$dir/.wa-remap-rustc.tmp.$$" && chmod 755 "$dir/.wa-remap-rustc.tmp.$$" &&
+        mv "$dir/.wa-remap-rustc.tmp.$$" "$dir/wa-remap-rustc"
+    fi || { echo "error: cannot install the wrapper in $dir" >&2; return 1; }
+  fi
+  printf '%s\n' "$dir"
+}
+
 if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ]; then
   CHECKOUT="$(tree_path "$(pwd)")"
   CARGO_HOME_DIR="$(tree_path "${CARGO_HOME:-$HOME/.cargo}")"
@@ -80,11 +121,11 @@ if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ]; then
   add_c_remap "$CHECKOUT" /wasm-build
   add_c_remap "$CARGO_HOME_DIR" /cargo-home
   if [ -n "${WASI_SYSROOT:-}" ]; then add_c_remap "$(tree_path "$SDK")" /wasi-sdk; fi
-  export PATH="$(pwd)/scripts:$PATH"
-  case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) export RUSTC_WRAPPER=wa-remap-rustc.cmd ;;
-    *) export RUSTC_WRAPPER=wa-remap-rustc ;;
-  esac
+  WRAPPER_DIR="$(install_wrapper)" || exit 2
+  export PATH="$WRAPPER_DIR:$PATH"
+  export RUSTC_WRAPPER=wa-remap-rustc
+  # The wrapper reads its roots from here: it lives outside the checkout, so it cannot derive them.
+  export WA_REMAP_CHECKOUT="$CHECKOUT" WA_REMAP_CARGO_HOME="$CARGO_HOME_DIR"
   for t in wasm32_wasip1 wasm32_wasip2; do
     eval "export CFLAGS_$t=\"\${CFLAGS_$t:-}$remap_c\""
     eval "export CXXFLAGS_$t=\"\${CXXFLAGS_$t:-}$remap_c\""
@@ -96,8 +137,6 @@ if [ "${WA_COMPONENTS_REPRO:-1}" != 0 ]; then
   # builds hours apart differ. Rust never embeds a build time; C does when a program uses those.
   export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 fi
-
-sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'; else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
 
 built=0
 for crate in rust/components/*/; do
