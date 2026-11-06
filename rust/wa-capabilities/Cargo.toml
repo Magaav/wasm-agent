@@ -1,0 +1,37 @@
+[package]
+name = "wa-capabilities"
+version = "0.1.0"
+edition = "2021"
+
+# Everything the agent can do through `host.*` (docs/HOST.md), and the request/session layer those
+# capabilities are served from: the capability registry, the `host.*` implementations, the serve loop,
+# the subagent supervisor, operations, resources, the graph shim, the QuickJS sandbox, the client bridge
+# and the speech/audio edges.
+#
+# It sits at the top of the split, above the kernel, governance, rendezvous, term and support crates, and
+# the binary wires it. That direction is what the split buys: a change to a capability rebuilds this
+# crate and the binary, and does not touch the engine, the policy or the console.
+[dependencies]
+wa-host-support = { path = "../wa-host-support" }
+wa-governance = { path = "../wa-governance" }
+wa-term = { path = "../wa-term" }
+wa-rendezvous = { path = "../wa-rendezvous" }
+wa-kernel-runtime = { path = "../wa-kernel-runtime" }
+wa-operation = { path = "../wa-operation" }
+wa-jobs = { path = "../wa-jobs" }
+anyhow = "1"
+base64 = "0.23"
+ring = "0.17"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+notify = "8"
+ureq = { version = "3", features = ["json"] }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p2", "p3"] }
+tokio = { version = "1", features = ["rt", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }

@@ -125,7 +125,7 @@ impl Lua {
     /// process exits, stalling every other interpreter. The caller invokes this
     /// when a Lua call returned an error, so the failure cannot outlive the request.
     ///
-    /// The rollback itself is the host's (`crate::host::rollback_if_open`): it owns the
+    /// The rollback itself is the host's (`wa_capabilities::host::rollback_if_open`): it owns the
     /// connection, and this crate must not know any crate above it. `owned` is the value the host
     /// attached with [Lua::own]; reading it is all this ABI can do about it.
     pub fn owned(&self) -> Option<&(dyn std::any::Any + Send)> {

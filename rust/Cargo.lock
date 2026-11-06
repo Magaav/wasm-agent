@@ -1893,6 +1893,31 @@ name = "wa-bus"
 version = "0.1.0"
 
 [[package]]
+name = "wa-capabilities"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "libc",
+ "notify",
+ "ring",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+ "ureq",
+ "wa-governance",
+ "wa-host-support",
+ "wa-jobs",
+ "wa-kernel-runtime",
+ "wa-operation",
+ "wa-rendezvous",
+ "wa-term",
+ "wasmtime",
+ "wasmtime-wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "wa-governance"
 version = "0.1.0"
 dependencies = [
@@ -1935,34 +1960,12 @@ dependencies = [
 name = "wa-host"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "base64",
- "cc",
- "libc",
- "notify",
  "ring",
  "rusqlite",
  "serde_json",
- "tokio",
- "tungstenite",
- "ureq",
- "wa-bounded",
- "wa-bus",
- "wa-governance",
- "wa-grant-policy",
+ "wa-capabilities",
  "wa-host-support",
- "wa-jobs",
- "wa-kernel-runtime",
- "wa-kv",
- "wa-operation",
- "wa-queue",
  "wa-rendezvous",
- "wa-state",
- "wa-telemetry",
- "wa-term",
- "wasmtime",
- "wasmtime-wasi",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -2,22 +2,14 @@
 //!
 //! The agent logic lives in Lua (`lua/`); this host only provides capabilities
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
-mod audio;
-mod capabilities;
-mod client_bridge;
-mod graph;
-mod host;
-mod file_search;
-mod http_transport;
-mod operations;
-mod plugins;
-mod core_component;
-mod quickjs;
-mod subagents;
-mod resources;
-mod serve;
-mod ripgrep;
-use host::Host;
+//!
+//! Since the split (docs/KERNEL.md) this binary is only the wiring: it resolves HOME, opens the
+//! interpreter, dispatches the CLI and hands the run to a library crate. The capabilities themselves
+//! live in `wa-capabilities`, the wasm runtime in `wa-kernel-runtime`, the policy in
+//! `wa-governance`, the console in `wa-term`, the transport in `wa-rendezvous` and the Lua ABI,
+//! paths and shared JSON answer in `wa-host-support`.
+use wa_capabilities::{capabilities, client_bridge, core_component, graph, host, plugins, ripgrep, serve, subagents};
+use wa_capabilities::host::Host;
 use rusqlite::Connection;
 // The floor of the split: the Lua ABI, the host's paths and the shared JSON answer (docs/KERNEL.md).
 use wa_host_support::lua::Lua;

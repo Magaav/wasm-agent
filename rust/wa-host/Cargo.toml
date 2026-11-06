@@ -7,57 +7,23 @@ edition = "2021"
 name = "wa"
 path = "src/main.rs"
 
+# The binary is the wiring (docs/KERNEL.md, "three layers"): it resolves HOME, opens the interpreter,
+# dispatches the CLI and hands the run to a library crate. Each dependency below is a layer of the split
+# and is in the list because `main.rs` names it, not because the crate it came from needed it.
 [dependencies]
-# The floor of the split: the Lua 5.4 ABI, the host paths and the JSON answer shared with the kernel.
+# The floor: the Lua 5.4 ABI, the host paths and the JSON answer shared with the kernel.
 wa-host-support = { path = "../wa-host-support" }
-# The node policy, its telemetry registry and the bounded stores both write into (docs/GRANT-POLICY.md).
-wa-governance = { path = "../wa-governance" }
-# The console: terminal, editor, input, panels and the transcript they draw.
-wa-term = { path = "../wa-term" }
-# Node identity and the rendezvous/relay transport (docs/KERNEL.md, carve-out map).
+# Node identity and the rendezvous/relay transport (docs/KERNEL.md, carve-out map): the CLI dispatches
+# `rendezvous` and the binding commands through them.
 wa-rendezvous = { path = "../wa-rendezvous" }
-# The wasm runtime half of the microkernel: engine, pins, the v1/v2 service runners, the queue/bus/state
-# providers (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md).
-wa-kernel-runtime = { path = "../wa-kernel-runtime" }
-wa-operation = { path = "../wa-operation" }
-wa-jobs = { path = "../wa-jobs" }
-# The grant policy, telemetry and bounded-store libraries this host enforces (docs/GRANT-POLICY.md,
-# docs/TELEMETRY.md, docs/REPLAY.md). All three are workspace members with no new dependencies of
-# their own beyond serde/serde_json/sha2/zstd, which the lock already carries.
-wa-grant-policy = { path = "../wa-grant-policy" }
-wa-telemetry = { path = "../wa-telemetry" }
-wa-bounded = { path = "../wa-bounded" }
-# The queue, the bus and the state rule book, served to components by the host modules
-# `queue_host.rs` / `bus_host.rs` / `state_host.rs` (docs/QUEUE.md, docs/BUS.md, docs/STATE.md).
-wa-queue = { path = "../wa-queue" }
-wa-bus = { path = "../wa-bus" }
-wa-state = { path = "../wa-state" }
-# The one adapter that presents the host's per-component kv through those three crates' kv traits,
-# with a namespace per library and per component.
-wa-kv = { path = "../wa-kv" }
-anyhow = "1"
-base64 = "0.23"
+# The capability registry, the `host.*` implementations and the serve/subagent layer over them.
+wa-capabilities = { path = "../wa-capabilities" }
+# The database the interpreter's own connection opens, and the sha256 of the installed Lua tree
+# (`--capability-digest`, `--lua-tree`) that must match this binary's.
 ring = "0.17"
-rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
-# OS file events for the graph scheduler (graph.rs); the graph itself is the `graph` component.
-notify = "8"
-ureq = { version = "3", features = ["json"] }
-# component-model-async: wa:kernel@0.2 components (WASI 0.3) suspend instead of polling, and the
-# host drives them with `store.run_concurrent` (service_components_v2.rs).
-wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow"] }
-# p3: `wasi:clocks@0.3.0`, the suspending timer a 0.2 guest awaits; it is built on tokio's timer,
-# so the 0.2 runner owns a current-thread tokio runtime (rt + time only, no I/O driver).
-wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p2", "p3"] }
-tokio = { version = "1", features = ["rt", "time"] }
-# Host-side websocket for service components (service_io.rs); rustls on the ring provider already in the tree.
-tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [build-dependencies]
-cc = "1"
+# Nothing but `std`: the embedded Lua tree is read from the checkout, and the code-mode assets moved
+# with `quickjs.rs` to `wa-capabilities/build.rs`.
