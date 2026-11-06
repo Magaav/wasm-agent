@@ -14,6 +14,11 @@
 //! `wa-kernel-runtime` because it dispatches into the capability registry and registers the capability
 //! functions on the interpreter it boots; inverting that to keep it in the kernel would have been a
 //! logic change, not a move.
+// The C ABI is a library API now: a capability function answers a Lua call through a raw `*mut LuaState` the
+// interpreter owns for the duration of the call (`pub extern "C-unwind" fn ...(l: *mut LuaState)`). Marking
+// those `unsafe fn` would only move the `unsafe` to every registration site without making them safer,
+// so the lint is allowed once here, with the reason.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod audio;
 pub mod capabilities;
 pub mod client_bridge;

@@ -8,6 +8,11 @@
 //! Moved out of `wa-host` without rewriting logic. The host answers `node_identity`/`sign`/`verify`
 //! through it and the serve loop drains `relay_client`; neither edge points back down, so it is its own
 //! crate (docs/KERNEL.md asks for exactly this seam).
+// The C ABI is a library API now: a identity capability answers a Lua call through a raw `*mut LuaState` the
+// interpreter owns for the duration of the call (`pub extern "C-unwind" fn ...(l: *mut LuaState)`). Marking
+// those `unsafe fn` would only move the `unsafe` to every registration site without making them safer,
+// so the lint is allowed once here, with the reason.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod binding_runtime;
 pub mod node;
 pub mod relay_client;

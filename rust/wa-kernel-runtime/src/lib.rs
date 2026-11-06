@@ -13,6 +13,11 @@
 //!
 //! Moved out of `wa-host` without rewriting logic. This is the crate whose rebuild the split is meant
 //! to contain: it is the only one that monomorphizes wasmtime.
+// The C ABI is a library API now: a kernel entry point answers a Lua call through a raw `*mut LuaState` the
+// interpreter owns for the duration of the call (`pub extern "C-unwind" fn ...(l: *mut LuaState)`). Marking
+// those `unsafe fn` would only move the `unsafe` to every registration site without making them safer,
+// so the lint is allowed once here, with the reason.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod bus_host;
 pub mod components;
 pub mod queue_host;
