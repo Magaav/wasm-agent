@@ -163,6 +163,39 @@ interface service {
     run: async func(config: string) -> result<_, string>;
 }
 
+/// Key/value in the shape the `wasi:keyvalue` proposal has (open/get/set/delete/list-keys,
+/// strings in, bytes out), served over **this component's own `kv` namespace** - the same store
+/// `interface kv` reads and writes, so one key space, one set of policy rules (`kv.read`,
+/// `kv.write`) and one audit trail. Why it exists at all: `wasmtime` 50 ships no
+/// `wasi:keyvalue` crate, and the job asked for the proposal's shape (docs/WASI-INTERFACES.md).
+/// A component that imports `wasi:keyvalue/store@<any>` instead is refused at instantiate time:
+/// that package is not served, and this is.
+interface keyvalue {
+    use types.{error};
+
+    /// The value under `key`, or none when the namespace has no such key.
+    get: async func(key: string) -> result<option<list<u8>>, error>;
+    set: async func(key: string, value: list<u8>) -> result<_, error>;
+    delete: async func(key: string) -> result<_, error>;
+    exists: async func(key: string) -> result<bool, error>;
+    /// Keys starting with `prefix`, ordered, at most `limit` of them (the same page `kv.scan`
+    /// returns; empty `prefix` is the whole namespace).
+    list-keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+}
+
+/// Read-only view of the non-secret configuration the operator granted this component (the
+/// registry definition's `config` object, the data `wa:kernel/service.run` also receives). It is
+/// data, not a capability: the grant is the manifest declaration, and every read is policy-checked
+/// as `config.read` so an operator can refuse one key. `wasi:config/store` is not served.
+interface config {
+    use types.{error};
+
+    /// The JSON text of one granted key (a string value unquoted), or none.
+    get: func(key: string) -> result<option<string>, error>;
+    /// Every granted key as one JSON object, bounded to the grant's size limit.
+    get-all: func() -> result<string, error>;
+}
+
 /// A long-lived service (channels, workers): kernel interfaces in, `service` out.
 ///
 /// WASI 0.3 replaces `wasi:io/poll` with suspending timers, so a service that needs to wake up
@@ -177,5 +210,75 @@ world service-component {
     import log;
     import credentials;
     import wasi:clocks/monotonic-clock@0.3.0;
+    export service;
+}
+
+// ---- fixture worlds ----------------------------------------------------------------------------
+//
+// The worlds the WASI-interface tests are built against (`rust/components/svc-wasi-*`, driven by
+// `service_components_v2::tests`). One world per interface family, so a fixture's *component type*
+// names exactly the imports its test grants - a guest that imported all of them at once could not
+// tell "granted" from "not granted". `import log; import lifecycle; export service;` in each is
+// what makes it runnable by the service runner at all.
+//
+// The WASI packages these worlds name are the real WASI 0.3 files in `deps/` (copied from
+// wasmtime 50.0.1's `src/p3/wit/deps`, which is the version this node links), so the fixtures are
+// built against the same contract the runner serves, not against a paraphrase of it.
+
+/// Fixture: `wasi:cli/environment@0.3.0` (tier B, grant `env`).
+world wasi-probe-env {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:cli/environment@0.3.0;
+    export service;
+}
+
+/// Fixture: `wasi:cli/stdin@0.3.0` (tier B, grant `stdin`).
+world wasi-probe-stdin {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:cli/stdin@0.3.0;
+    export service;
+}
+
+/// Fixture: `wasi:filesystem/{types,preopens}@0.3.0` (tier B, grant `dirs`).
+world wasi-probe-fs {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:clocks/system-clock@0.3.0;
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    export service;
+}
+
+/// Fixture: `wasi:sockets/{types,ip-name-lookup}@0.3.0` (tier B, grant `net`).
+world wasi-probe-net {
+    import log;
+    import lifecycle;
+    import wasi:clocks/types@0.3.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:sockets/types@0.3.0;
+    import wasi:sockets/ip-name-lookup@0.3.0;
+    export service;
+}
+
+/// The two interfaces whose host implementation lives in `wasi_ext_host.rs`, on their own so that
+/// module binds nothing else (the service runner already binds every other interface).
+world keyvalue-config {
+    import keyvalue;
+    import config;
+}
+
+/// Fixture: `wa:kernel/keyvalue` and `wa:kernel/config` (tier B: the WASI keyvalue/config shape,
+/// over the component's kv namespace and its granted config).
+world wasi-probe-kv {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import keyvalue;
+    import config;
     export service;
 }

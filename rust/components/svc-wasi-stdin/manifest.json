@@ -1,0 +1,8 @@
+{
+  "name": "svc-wasi-stdin",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Fixture for the WASI grant policy: reads wasi:cli/stdin@0.3.0 to the end and reports how many bytes the host gave it",
+  "capabilities": {"stdin": true},
+  "limits": {"memory_mb": 32}
+}

@@ -286,14 +286,16 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ca
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
 # fixtures, one per runner, each with its own end-to-end test in wa-kernel-runtime: `svc-echo-wasip1` (a plain
 # wasip1 core module on the raw wa_sock/wa_ctl imports), `svc-echo-v1` (a wa:kernel@0.1 component,
-# the compat path) and `svc-echo` (a wa:kernel@0.2 component, WASI 0.3 native async). A fixture that
-# did not build turns its test into a skip that says so; it never passes by absence.
+# the compat path) and `svc-echo` (a wa:kernel@0.2 component, WASI 0.3 native async). Five more
+# (`svc-wasi-{env,stdin,fs,net,kv}`) are the WASI grant-policy fixtures (docs/WASI-INTERFACES.md):
+# one per tier B interface, each imported alone so its test can tell "granted" from "not granted".
+# A fixture that did not build turns its test into a skip that says so; it never passes by absence.
 # A component is its own cargo workspace and `build-components.sh` reads the module from
 # `rust/components/<name>/target/<target>/release/` (a redirect would make it install nothing and
 # silently turn this into a skip), so a gate-wide CARGO_TARGET_DIR - which the host build and the
 # `cargo test` lines above deliberately honour - is unset for the component builds only.
 SERVICE_FIXTURE_DIR="$(mktemp -d)"
-if env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts/build-components.sh svc-echo svc-echo-v1 svc-echo-wasip1 >/dev/null 2>&1; then
+if env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts/build-components.sh svc-echo svc-echo-v1 svc-echo-wasip1 svc-wasi-env svc-wasi-stdin svc-wasi-fs svc-wasi-net svc-wasi-kv >/dev/null 2>&1; then
   export WA_TEST_SERVICE_DIR="$SERVICE_FIXTURE_DIR"
 else
   echo "note: the service fixtures were not built (no wasm32-wasip1/wasip2 toolchain?); the three service end-to-end tests are skipped"

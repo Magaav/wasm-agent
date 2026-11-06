@@ -629,6 +629,38 @@ check that every import name it emits is served (`WA_TEST_WHATSAPP_WASM` in
 `service_components_v2::tests`). One expressiveness loss: `exit_3` cannot be named — `wasi:cli/exit`
 takes a `result`, so a component that exits non-zero is reported as `exit_1`.
 
+### WASI 0.3 step 2 — every interface, under the grant policy (07/11, pi deepseek on wasm_the_first)
+
+The 0.2 runner used to link WASI wholesale: `wasmtime_wasi::p2::add_to_linker_async` plus the 0.3
+clock. That is one switch for everything, and it cannot express "this component may read its granted
+directory but not the network". It now links **one interface at a time**, from
+`rust/wa-kernel-runtime/src/wasi_grants.rs`, and every tier B interface is decided by the same two
+layers as the `wa:kernel` calls (manifest grant, then `policy.json`):
+
+| tier | interfaces | gate |
+| --- | --- | --- |
+| A | clocks, random, `wasi:cli/{exit,stdout,stderr,terminal-*,types}`, `wasi:io/*` | none: nothing outside the component is reachable |
+| B | filesystem, sockets, `cli/environment`, `cli/stdin`, keyvalue, config | manifest capability + policy rule, with a scope, audited per decision |
+| C | TLS, vault/secrets, logging, node policy, deploy, mesh, machine control, shell | never linked: the component is refused before wasm starts, with the interface named |
+
+[WASI-INTERFACES.md](WASI-INTERFACES.md) is the table (and the code's own table is kept equal to it by
+a test): every interface, its tier, the manifest key and the policy capability. `wa:http` is not
+shipped by `wasmtime` 50 at all, so outgoing HTTP stays `wa:kernel/http`; keyvalue and config are
+served by wa itself as `wa:kernel/{keyvalue,config}`, over the component's own kv namespace and its
+granted config.
+
+Two details worth knowing when reading the runner:
+
+- **A refused import is a refused start**, not a link error. `check_imports` walks the component's
+  `wasi:` imports before instantiation and answers `wasi_import_<reason>:<interface>`, which the
+  supervisor records as `last_exit` and the component's log repeats. `imports.rs` asks the same table
+  whether the kernel *serves* an interface, so a tier C import shows up as `waiting for <interface>`
+  at install time instead of a mysterious failure.
+- **A `std`-built component imports the whole preview-2 cli surface** whether or not it uses it
+  (measured: `wasi:cli/{environment,exit,stderr,stdin,stdout,terminal-*}@0.2.9` in each fixture). So
+  `cli/environment` and `cli/stdin` at `@0.2.x` are linked for every component and carry no
+  capability (empty list, empty pipe); the `@0.3.0` spellings are tier B and need the grant.
+
 **Known limits, next.** A response body is buffered whole and handed out in 64 KiB chunks (a real
 streaming download needs a reader thread, not `read_to_vec`); the send backpressure is the channel
 bound, not the TCP window; a 0.1 component is compiled twice at start; and `wa-whatsapp` was not run

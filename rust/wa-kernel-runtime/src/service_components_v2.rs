@@ -103,11 +103,15 @@ pub struct State {
     limits: StoreLimits,
     net: Vec<String>,
     shared: Arc<Shared>,
-    kv: GuestKv,
+    pub(crate) kv: GuestKv,
     log: Option<std::fs::File>,
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
     stt: bool,
+    /// The non-secret configuration this component was granted (the registry definition's `config`
+    /// object), for `wa:kernel/config` (`wasi_ext_host.rs`). `None` means the interface is not
+    /// linked; a value is data, not a capability - every read is `config.read`.
+    pub(crate) config: Option<String>,
     /// The instance token (`name#generation`): the subject this instance's queue grants and bus
     /// subscriptions are keyed by, so a replacement can revoke them without touching the winner.
     pub(crate) instance: String,
@@ -721,17 +725,41 @@ async fn stop_watchdog(shared: Arc<Shared>) {
 /// as `service_components::run_once`; the difference is the store's async event loop and the
 /// current-thread runtime that gives `wasi:clocks@0.3.0` its timer.
 pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, shared: &Arc<Shared>, log_file: std::fs::File) -> String {
+    // What this component may reach through WASI, after the manifest grant and the node policy
+    // (`docs/WASI-INTERFACES.md`). Every tier B decision is audited here, once per run; the call
+    // sites keep charging their own capabilities (`net.dial`, `kv.read`, `kv.write`, `config.read`).
+    let scope = crate::wasi_grants::Scope::build(installed, grant);
+    let plan = scope.plan();
+    // The component's own imports decide whether that scope is enough. A component that imports an
+    // interface the scope does not grant (or one that is never granted) is refused *before* wasm is
+    // instantiated, with the interface named - an instantiate failure would say "unknown import" and
+    // leave the operator to guess which grant to add.
+    {
+        let engine = component.engine();
+        let imports: Vec<String> = component.component_type().imports(engine).map(|(name, _)| name.to_string()).collect();
+        if let Err(refusal) = crate::wasi_grants::check_imports(&imports, &scope, &plan) {
+            // Visible twice, deliberately: the outcome the supervisor records (`last_exit`) and the
+            // component's own log, which is what an operator reads with `services logs`. A refusal
+            // that only lived in `last_exit` would be a silent start.
+            if let Ok(mut file) = log_file.try_clone() {
+                let _ = writeln!(file, "ERROR wasi: refused to start: {refusal} (docs/WASI-INTERFACES.md)");
+            }
+            return refusal;
+        }
+    }
     let mut builder = WasiCtxBuilder::new();
-    builder.args(&[installed.name.as_str()]);
-    if let Ok(clone) = log_file.try_clone() {
-        builder.stdout(wasmtime_wasi::cli::OutputFile::new(clone));
+    let granted = scope.describe();
+    if let Err(error) = crate::wasi_grants::configure(&mut builder, &scope, log_file.try_clone().ok()) {
+        return error;
     }
     if let Ok(clone) = log_file.try_clone() {
         builder.stderr(wasmtime_wasi::cli::OutputFile::new(clone));
     }
-    for (key, name) in &grant.env {
-        if let Ok(value) = std::env::var(name) {
-            builder.env(key, &value);
+    // The grant decisions in the component's own log: the audit trail has the records, this is what a
+    // person reading `services logs` sees at the top of a run.
+    if let Ok(mut file) = log_file.try_clone() {
+        for text in &granted {
+            let _ = writeln!(file, "INFO wasi: {text}");
         }
     }
     // Secrets are read by the host from their file and handed only through `credentials.get`.
@@ -761,6 +789,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         log: Some(log_file),
         secrets,
         stt,
+        config: scope.config.clone(),
         instance: crate::services::instance_token(shared, &installed.name),
         name: installed.name.clone(),
     };
@@ -788,14 +817,16 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
     });
     store.set_epoch_deadline(1);
     let mut linker: Linker<State> = Linker::new(engine);
-    if let Err(error) = wasmtime_wasi::p2::add_to_linker_async(&mut linker) {
-        return format!("link_failed:{error}");
-    }
-    // The WASI 0.3 timer a native-async guest awaits; a guest that never waits needs it not at all.
-    if let Err(error) = wasmtime_wasi::p3::clocks::add_to_linker::<State>(&mut linker) {
+    // Everything WASI this component may have: tier A always, tier B only what the scope granted
+    // (`docs/WASI-INTERFACES.md`). Nothing tier C is ever added, for any component.
+    if let Err(error) = crate::wasi_grants::link(&mut linker, &plan) {
         return format!("link_failed:{error}");
     }
     for added in [
+        // The WASI keyvalue/config shapes over this component's own kv namespace and its granted
+        // config (`docs/WASI-INTERFACES.md`, tier B). Either one alone links both interfaces; the
+        // import check has already refused whichever the plan does not cover.
+        (plan.keyvalue || plan.config).then_some(()).map_or(Ok(()), |_| crate::wasi_ext_host::link(&mut linker)),
         wa::kernel::websocket::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::http::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
@@ -813,7 +844,14 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         }
     }
     let config = grant.config.clone().unwrap_or_else(|| "{}".into());
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+    let mut rt_builder = tokio::runtime::Builder::new_current_thread();
+    rt_builder.enable_time();
+    if plan.sockets || plan.dns {
+        // `wasi:sockets` (both spellings) is implemented on `tokio::net`, which panics without the IO
+        // driver. Only a run with a socket scope pays for it.
+        rt_builder.enable_io();
+    }
+    let runtime = match rt_builder.build() {
         Ok(runtime) => runtime,
         Err(error) => return format!("runtime_failed:{error}"),
     };
@@ -1023,6 +1061,7 @@ mod tests {
             log: None,
             secrets: Default::default(),
             stt: false,
+            config: None,
             instance: "wa-whatsapp#1".into(),
             name: "wa-whatsapp".into(),
         };
@@ -1139,6 +1178,244 @@ mod tests {
             other => panic!("expected no_policy, got {other:?}"),
         }
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// ---- the WASI grant policy, end to end (`docs/WASI-INTERFACES.md`) -------------------------
+    ///
+    /// One fixture per tier B interface (`rust/components/svc-wasi-*`): each is built against the real
+    /// WASI 0.3 WIT (`wit/kernel-v2/deps`), imports only the interface it tests, and reports what the
+    /// host gave it into its own log. Every interface gets the same cases:
+    ///   * **denied without the grant** - the component's manifest does not declare it, so the run is
+    ///     refused before wasm starts, with the interface and the reason named (`wasi_import_...`);
+    ///   * **allowed with a scoped grant** - the manifest declares it, the grant names the scope, and
+    ///     the guest reports the value it reached;
+    ///   * **a scope escape refused** - another directory (`../`, `/`), another host, another variable.
+    ///
+    /// `support::install` skips (returns `None`) when the gate did not build the fixtures, so these are
+    /// skipped rather than passed on a machine without the component toolchain.
+    mod wasi {
+        use super::*;
+        use crate::services::{start, status, stop};
+        use serde_json::json;
+
+        /// Install the fixtures into a private component directory and, when a case needs a digest
+        /// *without* a capability, rewrite that component's manifest to drop it. The manifest is part of
+        /// the artifact (its declarations are what the grant is checked against), so a test that asks
+        /// "what if it had not declared this" edits it rather than pretending.
+        fn install(wanted: &[&str], drop_capabilities: &[(&str, &str)]) -> Option<std::path::PathBuf> {
+            let dir = crate::services::support::install("wasi", wanted)?;
+            for (name, key) in drop_capabilities {
+                let path = dir.join(format!("{name}.json"));
+                let text = std::fs::read_to_string(&path).ok()?;
+                let mut manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+                if let Some(caps) = manifest.get_mut("capabilities").and_then(|c| c.as_object_mut()) {
+                    caps.remove(*key);
+                }
+                std::fs::write(&path, manifest.to_string()).ok()?;
+            }
+            Some(dir)
+        }
+
+        /// The outcome of a run that was refused, waited for rather than slept for.
+        fn refused(name: &str, prefix: &str, within: Duration) -> String {
+            let deadline = Instant::now() + within;
+            let mut last = String::new();
+            while Instant::now() < deadline {
+                last = status(Some(name))["last_exit"].as_str().unwrap_or("").to_string();
+                if last.starts_with(prefix) {
+                    return last;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            last
+        }
+
+        /// `svc-wasi-env` reports `env names=[…]`: the granted names and nothing else.
+        #[test]
+        fn environment_is_granted_by_name() {
+            let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("WA_PROBE_ALLOWED", "granted-value");
+            std::env::set_var("WA_PROBE_SECRET", "must-not-be-seen");
+
+            // Denied: nothing granted, so no name reaches the component and the interface is not
+            // linked at all.
+            if install(&["svc-wasi-env"], &[]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-env"}))["ok"], true);
+            let outcome = refused("svc-wasi-env", "wasi_import_", Duration::from_secs(10));
+            assert_eq!(outcome, "wasi_import_import_not_granted:wasi:cli/environment@0.3.0", "{outcome}");
+            stop("svc-wasi-env");
+
+            // Allowed, with a scope of one name.
+            if install(&["svc-wasi-env"], &[]).is_none() {
+                return;
+            }
+            let started = start(&json!({"name": "svc-wasi-env", "env": {"WA_PROBE_ALLOWED": "WA_PROBE_ALLOWED"}}));
+            assert_eq!(started["ok"], true, "{started}");
+            let log = crate::services::support::wait_for_log("svc-wasi-env", "env secret_visible", Duration::from_secs(15));
+            assert!(log.contains(r#"env names=["WA_PROBE_ALLOWED"]"#), "only the granted name exists: {log}");
+            assert!(log.contains("env WA_PROBE_ALLOWED=granted-value"), "{log}");
+            assert!(log.contains("env secret_visible=false"), "another variable must not be reachable: {log}");
+            assert!(!log.contains("must-not-be-seen"), "an ungranted value never reaches the log: {log}");
+            stop("svc-wasi-env");
+            // The decisions are in the audit trail: the refusal of the first start (an interface the
+            // grant did not cover) and the allow of this one, both under the WASI capability names.
+            let trail = std::fs::read_to_string(wa_governance::store::audit_file().unwrap_or_default()).unwrap_or_default();
+            assert!(trail.contains("wasi.import"), "the refused import is audited: {trail}");
+            assert!(trail.contains("import_not_granted"), "with its reason: {trail}");
+            assert!(trail.contains("wasi.env"), "and the granted variable is audited: {trail}");
+        }
+
+        /// `wasi:cli/stdin`: granted, the guest reads the empty pipe the host hands it (never the
+        /// node's own stdin); not declared, the import is refused.
+        #[test]
+        fn stdin_needs_its_grant_and_is_never_the_nodes() {
+            let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            if install(&["svc-wasi-stdin"], &[("svc-wasi-stdin", "stdin")]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-stdin"}))["ok"], true);
+            let outcome = refused("svc-wasi-stdin", "wasi_import_", Duration::from_secs(10));
+            assert_eq!(outcome, "wasi_import_import_not_granted:wasi:cli/stdin@0.3.0", "{outcome}");
+            stop("svc-wasi-stdin");
+
+            if install(&["svc-wasi-stdin"], &[]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-stdin"}))["ok"], true);
+            let log = crate::services::support::wait_for_log("svc-wasi-stdin", "stdin read result", Duration::from_secs(15));
+            assert!(log.contains("stdin bytes=0"), "an empty pipe, not the operator's input: {log}");
+            stop("svc-wasi-stdin");
+        }
+
+        /// `wasi:filesystem`: the preopen is the granted directory and nothing else; `../` and an
+        /// absolute path are refused by the preopen's confinement, and a read-only grant cannot be
+        /// written through.
+        #[test]
+        fn filesystem_is_the_granted_preopen_and_nothing_else() {
+            let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let root = std::env::temp_dir().join(format!("wa-wasi-fs-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("data")).unwrap();
+            std::fs::write(root.join("data").join("note.txt"), "hello from the preopen").unwrap();
+            // The file a `../` escape would reach, if the preopen leaked one level up.
+            std::fs::write(root.join("escape.txt"), "outside").unwrap();
+            let dirs = json!([{"host": root.join("data").to_string_lossy(), "guest": "/data"}]);
+
+            // Denied: nothing granted, so there is no preopen and the interface is not linked.
+            if install(&["svc-wasi-fs"], &[]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-fs"}))["ok"], true);
+            let outcome = refused("svc-wasi-fs", "wasi_import_", Duration::from_secs(10));
+            assert_eq!(outcome, "wasi_import_import_not_granted:wasi:filesystem/types@0.3.0", "{outcome}");
+            stop("svc-wasi-fs");
+
+            // Allowed, read-only.
+            if install(&["svc-wasi-fs"], &[]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-fs", "dirs": dirs}))["ok"], true);
+            let log = crate::services::support::wait_for_log("svc-wasi-fs", "fs descriptor-kind", Duration::from_secs(15));
+            assert!(log.contains(r#"fs preopens=["/data"]"#), "exactly the granted preopen: {log}");
+            assert!(log.contains("fs read note.txt=hello from the preopen"), "{log}");
+            assert!(log.contains("fs write refused=ErrorCode::NotPermitted"), "a read-only grant cannot be written through: {log}");
+            assert!(log.contains("fs escape denied=ErrorCode::NotPermitted"), "`../` is refused by the preopen: {log}");
+            assert!(log.contains("fs absolute denied"), "an absolute path is refused: {log}");
+            assert!(!log.contains("outside"), "the file above the preopen was never read: {log}");
+            assert!(!root.join("data").join("written.txt").exists(), "and nothing was created");
+            stop("svc-wasi-fs");
+
+            // A preopen of `/` is refused whatever the manifest says, so nothing is granted and the
+            // import is refused by name instead of the component running with the whole disk.
+            assert_eq!(start(&json!({"name": "svc-wasi-fs", "dirs": [{"host": "/", "guest": "/data"}]}))["ok"], true);
+            let outcome = refused("svc-wasi-fs", "wasi_import_", Duration::from_secs(10));
+            assert_eq!(outcome, "wasi_import_import_not_granted:wasi:filesystem/types@0.3.0", "{outcome}");
+            stop("svc-wasi-fs");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// `wasi:sockets`: an outbound connect to the granted address works, another host is refused
+        /// by the host's address check, and a name lookup has its own `dns` grant.
+        #[test]
+        fn sockets_are_an_address_allowlist() {
+            let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let port = crate::services::support::http_echo("pong");
+            let net = json!([format!("127.0.0.1:{port}")]);
+            let config = json!({"port": port, "other": 9});
+
+            // Denied: neither capability declared, so no socket interface is linked and the start is
+            // refused by name.
+            if install(&["svc-wasi-net"], &[("svc-wasi-net", "net"), ("svc-wasi-net", "dns")]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-net", "config": config}))["ok"], true);
+            let outcome = refused("svc-wasi-net", "wasi_import_", Duration::from_secs(10));
+            assert_eq!(outcome, "wasi_import_import_not_granted:wasi:sockets/types@0.3.0", "{outcome}");
+            stop("svc-wasi-net");
+
+            // The address grant without the `dns` declaration: the component asks for a resolver it
+            // was not given, and the import is refused rather than a lookup failing later.
+            if install(&["svc-wasi-net"], &[("svc-wasi-net", "dns")]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-net", "net": net, "config": config}))["ok"], true);
+            let outcome = refused("svc-wasi-net", "wasi_import_", Duration::from_secs(10));
+            assert_eq!(outcome, "wasi_import_import_not_granted:wasi:sockets/ip-name-lookup@0.3.0", "dns is its own grant: {outcome}");
+            stop("svc-wasi-net");
+
+            // Allowed for one address and for DNS: the granted connect reaches a real local listener,
+            // another host is refused by the address check, and `localhost` resolves.
+            if install(&["svc-wasi-net"], &[]).is_none() {
+                return;
+            }
+            let started = start(&json!({"name": "svc-wasi-net", "net": net, "config": config}));
+            assert_eq!(started["ok"], true, "{started}");
+            let log = crate::services::support::wait_for_log("svc-wasi-net", "net dns", Duration::from_secs(15));
+            assert!(
+                log.contains(&format!("port: {port}, address: (127, 0, 0, 1) }}) ok")),
+                "the granted address connected: {log}"
+            );
+            assert!(log.contains("refused=ErrorCode::AccessDenied"), "another host is refused by the address check: {log}");
+            assert!(log.contains("net dns ok"), "a name lookup is granted by `dns`: {log}");
+            stop("svc-wasi-net");
+        }
+
+        /// `wa:kernel/keyvalue` and `wa:kernel/config`: the WASI shapes over the component's own kv
+        /// namespace and the config it was granted.
+        #[test]
+        fn keyvalue_and_config_are_the_components_own() {
+            let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // Denied: no `storage`, so the keyvalue interface is not linked.
+            if install(&["svc-wasi-kv"], &[("svc-wasi-kv", "storage")]).is_none() {
+                return;
+            }
+            assert_eq!(start(&json!({"name": "svc-wasi-kv", "config": {"present": "yes"}}))["ok"], true);
+            let outcome = refused("svc-wasi-kv", "wasi_import_", Duration::from_secs(10));
+            assert_eq!(outcome, "wasi_import_import_not_granted:wa:kernel/keyvalue@0.2.0", "{outcome}");
+            stop("svc-wasi-kv");
+
+            // Allowed: the round trip, one key space, and the granted config.
+            if install(&["svc-wasi-kv"], &[]).is_none() {
+                return;
+            }
+            let started = start(&json!({"name": "svc-wasi-kv", "config": {"present": "yes", "count": 2}}));
+            assert_eq!(started["ok"], true, "{started}");
+            let log = crate::services::support::wait_for_log("svc-wasi-kv", "config run=", Duration::from_secs(15));
+            assert!(log.contains("kv set ok"), "{log}");
+            assert!(log.contains("kv get=value"), "{log}");
+            assert!(log.contains("kv exists=true"), "{log}");
+            assert!(log.contains(r#"kv keys=["probe/key"]"#), "{log}");
+            assert!(log.contains("kv outside ok"), "no rule for the prefix, so the whole namespace is the component's: {log}");
+            assert!(log.contains("config get=yes"), "{log}");
+            assert!(log.contains(r#"config all={"count":2,"present":"yes"}"#), "{log}");
+            // The key really is in this component's kv namespace: the WASI spelling and
+            // `wa:kernel/kv` are one store, and the store is per component.
+            let store = crate::components::component_dir().join("svc-wasi-kv.state").join("kv.sqlite");
+            assert!(store.is_file(), "the component's kv lives in its own namespace: {}", store.display());
+            stop("svc-wasi-kv");
+        }
     }
 
     /// The async engine is a real engine: it compiles a component and refuses a non-component.

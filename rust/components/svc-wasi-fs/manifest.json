@@ -1,0 +1,8 @@
+{
+  "name": "svc-wasi-fs",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Fixture for the WASI grant policy: reads a preopened directory through wasi:filesystem@0.3.0, writes when the preopen is read-write, and must fail on ../",
+  "capabilities": {"dirs": ["/data"]},
+  "limits": {"memory_mb": 32}
+}

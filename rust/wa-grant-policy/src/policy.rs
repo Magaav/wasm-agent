@@ -57,8 +57,30 @@ use std::path::Path;
 /// list is deliberately short and about *effects outside the component's own sandbox*: a secret
 /// read, an outbound connection, a message that a person will see, a process, a shadow copy of
 /// state inside the component's durable namespace.
-pub const DEFAULT_SENSITIVE: &[&str] =
-    &["credentials.read", "net.dial", "http.request", "whatsapp.send", "exec.run", "kv.write"];
+///
+/// The `wasi.*` names are the interface decisions of the WASI 0.3 runner (`docs/WASI-INTERFACES.md`,
+/// tier B): one is asked per granted scope element at start (`wasi.filesystem` per preopen,
+/// `wasi.env` per variable name, `wasi.sockets` per granted address), and the call-time checks keep
+/// the capability names the `wa:kernel` path already uses (`net.dial`, `net.bind`, `kv.read`,
+/// `kv.write`, `config.read`). They are sensitive for the same reason as the rest of the list: each
+/// one is a decision about reaching outside the component, and an operator who upgrades a node to a
+/// `policy.json` should have to say yes to them rather than inherit them.
+pub const DEFAULT_SENSITIVE: &[&str] = &[
+    "credentials.read",
+    "net.dial",
+    "net.bind",
+    "http.request",
+    "whatsapp.send",
+    "exec.run",
+    "kv.write",
+    "wasi.filesystem",
+    "wasi.env",
+    "wasi.stdin",
+    "wasi.sockets",
+    "wasi.keyvalue",
+    "wasi.config",
+    "wasi.import",
+];
 
 /// Only one schema version exists; a different number is refused, never guessed at.
 pub const SCHEMA_VERSION: u32 = 1;

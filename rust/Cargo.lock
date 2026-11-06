@@ -2033,6 +2033,7 @@ dependencies = [
  "wa-stt-remote",
  "wasmtime",
  "wasmtime-wasi",
+ "wasmtime-wasi-io",
 ]
 
 [[package]]

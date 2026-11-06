@@ -1,0 +1,15 @@
+{
+  "name": "svc-wasi-net",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Fixture for the WASI grant policy: wasi:sockets@0.3.0 connects to the granted host:port, is refused another, and resolves a name only when the dns grant is declared",
+  "capabilities": {
+    "net": [
+      "127.0.0.1:*"
+    ],
+    "dns": true
+  },
+  "limits": {
+    "memory_mb": 32
+  }
+}

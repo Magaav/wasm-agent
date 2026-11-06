@@ -1,0 +1,18 @@
+[package]
+name = "svc-wasi-stdin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fixture for the WASI grant policy (`docs/WASI-INTERFACES.md`, tier B); see src/lib.rs.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true

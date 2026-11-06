@@ -452,6 +452,30 @@ impl NodePolicy {
         self.engine.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Audit one call the **caller** decided to refuse without asking the engine: a manifest grant the
+    /// component never declared, an interface this node never serves, a host path a preopen may not
+    /// name. One audit record with the caller's reason word, counted as a denial, and never a budget
+    /// charge - nothing was allowed, so nothing is spent.
+    ///
+    /// Why this exists: `docs/WASI-INTERFACES.md` puts the *manifest* gate in front of the policy
+    /// layer, so the interesting event ("this component asked for something its artifact never
+    /// declared") never reaches [`NodePolicy::check_at`]. Without this the trail would show only the
+    /// refusals a rule produced, and the outline of a component trying to widen itself would be
+    /// missing. The target is digested exactly as everywhere else.
+    pub fn record_deny_at(&self, component: &str, capability: &str, target: Option<&str>, reason: &str, now: u64) {
+        self.counters.checks.fetch_add(1, Ordering::Relaxed);
+        let decision = Decision::Deny(wa_grant_policy::Reason::NoPolicy);
+        let mut record = AuditRecord::new(now, component, capability, target, &decision, TargetMode::Digest);
+        record.reason = reason.chars().take(64).collect();
+        let written = self.audit.lock().unwrap_or_else(|e| e.into_inner()).write(&record);
+        if let Err(error) = written {
+            // The trail is the evidence; a refusal that cannot be written is still a refusal.
+            self.counters.audit_errors.fetch_add(1, Ordering::Relaxed);
+            self.say(&format!("audit\u{1f}{reason}"), &format!("[policy] audit_error ({reason}): sink {}: {}", error.sink, error.detail), now);
+        }
+        self.count(component, capability, &decision, now);
+    }
+
     /// Check one sensitive call and audit it. The budget is charged only on `Allow`.
     ///
     /// In [`Mode::Manifest`] the answer is `Allow` - the manifest grant, which the caller has already
@@ -736,6 +760,12 @@ pub fn check(component: &str, capability: &str, target: Option<&str>) -> Decisio
     node().check_at(component, capability, target, now_ms())
 }
 
+/// Record a refusal the caller made before the policy engine was asked (a manifest grant that is
+/// absent, an interface this node never serves): one audit record with the caller's reason word.
+pub fn record_deny(component: &str, capability: &str, target: Option<&str>, reason: &str) {
+    node().record_deny_at(component, capability, target, reason, now_ms())
+}
+
 /// `check` that only enforces a rule the policy file actually wrote (wasi-socket path).
 pub fn check_if_ruled(component: &str, capability: &str, target: Option<&str>) -> Decision {
     node().check_if_ruled_at(component, capability, target, now_ms())
@@ -864,6 +894,31 @@ mod tests {
         let status = policy.status();
         assert_eq!(status["decisions"]["manifest_mode"], 0, "no decision here came from manifest mode");
         assert_eq!(status["decisions"]["deny"], 2);
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    /// A refusal the *caller* made before the engine was asked is still evidence: one audit record
+    /// with the caller's reason word, counted as a denial, and never a budget charge. This is the path
+    /// a manifest gate takes (`docs/WASI-INTERFACES.md`: the manifest answers first, the policy second),
+    /// so without it the outline of a component asking for more than it declared would be invisible.
+    #[test]
+    fn a_refusal_the_caller_made_is_recorded_with_its_own_reason() {
+        let paths = temp_paths("caller-deny");
+        let policy = NodePolicy::open(paths.clone());
+        policy.record_deny_at("svc-wasi-fs", "wasi.filesystem", Some("/data"), "filesystem_root", 1_000);
+        policy.record_deny_at("svc-wasi-env", "wasi.import", Some("wasi:tls/certificate@0.1.0"), "interface_never_served", 1_000);
+        let status = policy.status();
+        assert_eq!(status["decisions"]["deny"], 2, "{status}");
+        assert_eq!(status["decisions"]["checks"], 2, "a refusal is a check");
+        assert_eq!(status["decisions"]["allow"], 0);
+        let refusals = status["recent_refusals"].as_array().unwrap();
+        assert_eq!(refusals[0]["capability"], "wasi.filesystem");
+        assert_eq!(refusals[0]["reason"], "no_policy", "the decision word stays the crate's; the caller's reason rides in the record");
+        let trail = std::fs::read_to_string(&paths.audit).unwrap_or_default();
+        assert!(trail.contains("filesystem_root"), "the caller's reason word is on the record: {trail}");
+        assert!(trail.contains("interface_never_served"), "{trail}");
+        assert!(trail.contains("wasi.import"), "{trail}");
+        assert!(!trail.contains("wasi:tls"), "even a refusal digests its target: {trail}");
         std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
     }
 

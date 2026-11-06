@@ -284,6 +284,57 @@ where it differs.
    the last 32 refusals as `{ts_ms, component, capability, reason}` — **never a target**, so the view
    cannot become a second place a chat id leaks into.
 
+### WASI 0.3 interface decisions (`docs/WASI-INTERFACES.md`)
+
+The 0.2 runner does not link WASI wholesale any more: every `wasi:` import of a component is graded by
+[WASI-INTERFACES.md](WASI-INTERFACES.md) and linked only if the tier allows it. That adds a second
+family of decision points, and they are audited exactly like the `wa:kernel` ones:
+
+| decision | when | capability | target |
+| --- | --- | --- | --- |
+| filesystem preopen | once per preopen per run | `wasi.filesystem` | the guest path (`/data`) |
+| environment name | once per granted variable per run | `wasi.env` | the variable name |
+| stdin | once per run, when the manifest declares it | `wasi.stdin` | none |
+| socket address | once per granted address per run | `wasi.sockets` | the address (`127.0.0.1:8080`) |
+| keyvalue | once per run, when `storage` is declared | `wasi.keyvalue` | none |
+| config | once per run, when `config` is declared | `wasi.config` | none |
+| any `wasi:` import the scope does not cover | once per refused start | `wasi.import` | the interface name |
+| outbound connect / datagram | **per call** (`wasmtime`'s socket address check) | `net.dial` | the address |
+| bind / listen | **per call** | `net.bind` | the local address |
+| keyvalue `get`/`exists`/`list-keys` | per call | `kv.read` | the key (or its prefix) |
+| keyvalue `set`/`delete` | per call | `kv.write` | the key |
+| config `get`/`get-all` | per call | `config.read` | the key |
+
+Those eight names (`wasi.filesystem`, `wasi.env`, `wasi.stdin`, `wasi.sockets`, `wasi.keyvalue`,
+`wasi.config`, `wasi.import`, and `net.bind`) are **sensitive by default** (`wa_grant_policy::
+DEFAULT_SENSITIVE`): on a node with a `policy.json`, a component that was granted one of them still
+needs a rule, or the interface is refused with `no_policy`. On a node with no policy file (manifest
+mode) nothing changes: the manifest grant is the only gate and each decision is audited with
+`manifest_mode`. `config.read` is deliberately **not** sensitive: it is the component's own
+non-secret configuration, readable exactly as `wa:kernel/service.run(config)` already gives it.
+
+Which is why a node upgrading to this binary with a `policy.json` should add the rules it means:
+
+```json
+"wa-whatsapp": {"capabilities": {
+  "wasi.env": {"allow": ["WA_MODE"]},
+  "wasi.keyvalue": {},
+  "wasi.config": {},
+  "wasi.stdin": {}
+}}
+```
+
+`{}` means "any target, no rate" — the documented way to keep a capability. A component that reaches
+no WASI interface needs none of these lines.
+
+Two refusals are decided **before** the policy engine is asked: a preopen of `/` or of the node's own
+home/state/component directory, and a hostname written where a socket address is required. They go
+through `node_policy::record_deny`, which writes one audit record with the caller's own reason word
+(`filesystem_root`, `node_home`, `state_root`, `component_dir`, `absolute`/`relative_segments`,
+`address_not_an_ip`, `manifest_not_declared`) and counts the decision as a denial. Without that path
+the trail would show only the refusals a *rule* produced, and a component trying to widen its own
+declaration would leave no trace.
+
 ### Manifest mode: a node with no policy file
 
 Before the policy layer existed, a service component's `kv.write`, `net.dial`, `credentials.read`

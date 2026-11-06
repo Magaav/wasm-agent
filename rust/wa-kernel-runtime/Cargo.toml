@@ -35,8 +35,16 @@ ureq = { version = "3", features = ["json"] }
 # (docs/KERNEL.md, "A2.3"); without the feature `InstanceAllocationStrategy` has no `Pooling` variant.
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow", "pooling-allocator"] }
 # p3: `wasi:clocks@0.3.0`, the suspending timer a 0.2 guest awaits; it is built on tokio's timer,
-# so the 0.2 runner owns a current-thread tokio runtime (rt + time only, no I/O driver).
+# so the 0.2 runner owns a current-thread tokio runtime. `net` (and the IO driver it brings) is only
+# *enabled* for a run that was granted a socket scope (`wasi_grants::Plan::sockets`): a component with
+# no network keeps a timer-only runtime, and `wasmtime-wasi`'s socket implementation needs the IO
+# driver (`tokio::net`) the moment one is granted.
 wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p2", "p3"] }
-tokio = { version = "1", features = ["rt", "time"] }
+# `wasi:io/{error,poll,streams}@0.2.0` are the transport the preview-2 interfaces are built on. The
+# v2 runner links them one by one (docs/WASI-INTERFACES.md, tier A) with the rest of preview-2 so a
+# component that imports only a granted interface does not get the whole preview-2 surface with it;
+# `wasmtime-wasi` re-exports these implementations but keeps its own `add_async_io_to_linker` private.
+wasmtime-wasi-io = { version = "50", default-features = false }
+tokio = { version = "1", features = ["rt", "time", "net"] }
 # Host-side websocket for service components (service_io.rs).
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }

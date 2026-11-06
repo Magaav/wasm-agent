@@ -1,0 +1,8 @@
+{
+  "name": "svc-wasi-env",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Fixture for the WASI grant policy: reads wasi:cli/environment@0.3.0 and reports which variable names it can see",
+  "capabilities": {"env": ["WA_PROBE_ALLOWED"]},
+  "limits": {"memory_mb": 32}
+}

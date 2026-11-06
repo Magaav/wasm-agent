@@ -64,6 +64,11 @@ impl Contract {
 /// WASI 0.3 timer a 0.2 guest awaits (`wasmtime_wasi::p3::clocks`).
 const KERNEL_V1: &[&str] = &["types", "websocket", "http", "speech", "kv", "lifecycle", "log", "credentials"];
 const KERNEL_V2: &[&str] = &["types", "websocket", "http", "speech", "kv", "lifecycle", "log", "credentials"];
+/// Interfaces the 0.2 runner serves that no world *requires*: a component may import them, and the
+/// service world does not list them because a world's imports are obligations (`wit/kernel-v2`).
+/// `keyvalue`/`config` are wa's `wasi:keyvalue`/`wasi:config` shapes (`docs/WASI-INTERFACES.md`,
+/// tier B), so a component built against the proposal's shape can import them and be started.
+const KERNEL_V2_OPTIONAL: &[&str] = &["keyvalue", "config"];
 /// The modules a wasip1 service may import from the host (`services.rs::linker`).
 const WASIP1_HOST_MODULES: &[&str] = &["wasi_snapshot_preview1", "wa_sock", "wa_ws", "wa_http", "wa_kv", "wa_ctl"];
 /// Provider packages the kernel itself serves beside `wa:kernel` (`bus_host`, `queue_host`).
@@ -79,14 +84,23 @@ pub fn kernel_serves(import: &str, contract: Contract) -> bool {
             // fail to link; naming it here keeps that a "waiting" answer instead.
             if import.starts_with("wasi:") {
                 let v3 = import.contains("@0.3.");
-                return !v3 || contract == Contract::V2;
+                if contract != Contract::V2 {
+                    return !v3;
+                }
+                // The 0.2 runner links WASI one interface at a time under the grant policy
+                // (`docs/WASI-INTERFACES.md`), so "the kernel serves this" is exactly "the table has
+                // it at tier A or B and this wasmtime can link it". A tier C interface is *never*
+                // served: saying otherwise would make a component importing `wasi:tls` start and
+                // then fail to link, instead of waiting with the interface named.
+                return crate::wasi_grants::serves(import);
             }
             let (package, rest) = import.split_once('/').unwrap_or((import, ""));
             let (rest, version) = rest.rsplit_once('@').unwrap_or((rest, ""));
             if package == "wa:kernel" {
                 let served = if contract == Contract::V2 { KERNEL_V2 } else { KERNEL_V1 };
                 let expected = if contract == Contract::V2 { "0.2.0" } else { "0.1.0" };
-                return version == expected && served.contains(&rest);
+                let optional = contract == Contract::V2 && KERNEL_V2_OPTIONAL.contains(&rest);
+                return version == expected && (served.contains(&rest) || optional);
             }
             KERNEL_PROVIDER_PACKAGES.iter().any(|(name, v)| *name == package && version == *v)
         }
@@ -204,6 +218,18 @@ mod tests {
         assert!(kernel_serves("wasi:cli/environment@0.2.3", Contract::V2));
         assert!(kernel_serves("wasi:clocks/monotonic-clock@0.3.0", Contract::V2));
         assert!(!kernel_serves("wasi:clocks/monotonic-clock@0.3.0", Contract::V1));
+        // The tier table decides for a 0.2 component: A and B are served (a grant is a separate
+        // question), C is never - so a component importing one waits instead of failing to link.
+        assert!(kernel_serves("wasi:filesystem/preopens@0.3.0", Contract::V2));
+        assert!(kernel_serves("wasi:sockets/types@0.3.0", Contract::V2));
+        assert!(!kernel_serves("wasi:tls/*@0.1.0", Contract::V2));
+        assert!(!kernel_serves("wasi:http/outgoing-handler@0.2.0", Contract::V2), "no wasi:http crate at wasmtime 50");
+        assert!(!kernel_serves("wasi:logging/logging@0.1.0", Contract::V2));
+        assert!(!kernel_serves("wasi:not-a-package/thing@0.1.0", Contract::V2));
+        // wa's own `wasi:keyvalue`/`wasi:config` shapes are served by the 0.2 runner only.
+        assert!(kernel_serves("wa:kernel/keyvalue@0.2.0", Contract::V2));
+        assert!(kernel_serves("wa:kernel/config@0.2.0", Contract::V2));
+        assert!(!kernel_serves("wa:kernel/keyvalue@0.2.0", Contract::V1));
         // The kernel's own providers, and the wasip1 host modules.
         assert!(kernel_serves("wa:bus/publisher@0.1.0", Contract::V2));
         assert!(kernel_serves("wa:queue/worker@0.1.0", Contract::V1));

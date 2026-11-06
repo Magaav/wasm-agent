@@ -1,0 +1,20 @@
+[package]
+name = "svc-wasi-env"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fixture for the WASI grant policy (`docs/WASI-INTERFACES.md`, tier B): the only WASI interface
+# besides clocks/random/log/lifecycle it imports is `wasi:cli/environment@0.3.0`, so the component's
+# import list *is* the question "is the env grant on".
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true
