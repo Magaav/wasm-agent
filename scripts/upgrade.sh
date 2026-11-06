@@ -491,7 +491,33 @@ done
 # (2026-10-28, three times). Supervised, this script swaps the files and asks for the restart.
 SUPERVISED=0
 if [ "$WINDOWS" != "1" ] && sentinel_supervises "$INSTALL_DIR"; then SUPERVISED=1; fi
-[ "$TURN_OWNER" = "cli" ] && [ "$SUPERVISED" = "0" ] && { say "refused: an upgrade from a CLI turn needs a sentinel supervising the node (wa-sentinel start)"; exit 2; }
+
+# --- 2c. WA_WATCHDOG=1: the watchdog owns the kernel's pid, so it owns the switch (docs/KERNEL.md) ----
+# Default OFF. With it on, the restart below stops being this script's job: one command verifies the pin,
+# stages the bytes, proves them on a spare port, switches only after the new kernel answers /health, and puts
+# the previous binary back BY ITSELF if it does not - including when it dies shortly after answering, because
+# the watchdog keeps the old binary until the new one has stayed up. The proofs above (sections 1 and 1b) still
+# run: they are what refuses to touch the node for bytes that cannot start at all.
+#
+# What does NOT change: the idle gate above, the install record below, and `serve.pid` (written from the
+# watchdog's own `kernel.pid`, so the install tooling keeps reading the pid that is actually listening).
+WATCHDOG=0
+WATCHDOG_HOME="${WA_WATCHDOG_HOME:-$HOME_DIR/watchdog}"
+WATCHDOG_BIN=""
+if [ "${WA_WATCHDOG:-0}" = 1 ]; then
+  for candidate in "${WA_WATCHDOG_BIN:-}" "$INSTALL_DIR/wa-watchdog.exe" "$INSTALL_DIR/wa-watchdog"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] && WATCHDOG_BIN="$candidate" && break
+  done
+  # Falling back to the old restart silently is exactly the "I turned it on and nothing changed" failure this
+  # repository refuses everywhere else. A requested mode that is unavailable is a refusal.
+  [ -n "$WATCHDOG_BIN" ] || { say "WA_WATCHDOG=1 but no wa-watchdog is installed ($INSTALL_DIR/wa-watchdog[.exe]); refusing rather than restarting the old way"; exit 2; }
+  WATCHDOG=1
+  [ -n "$NEW_HASH" ] || { say "WA_WATCHDOG=1 but these bytes have no sha256 (no sha256sum/shasum here), and a swap without a pin is refused by the watchdog; install the bytes without the watchdog instead"; exit 2; }
+  say "the watchdog ($(basename "$WATCHDOG_BIN")) owns the switch: verify, stage, prove on a spare port, roll back by itself"
+fi
+# A POSIX path handed to a native Windows process is unusable (AGENTS.md, "Never hand a POSIX path").
+wd_native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+[ "$TURN_OWNER" = "cli" ] && [ "$SUPERVISED" = "0" ] && [ "${WA_WATCHDOG:-0}" != 1 ] && { say "refused: an upgrade from a CLI turn needs a sentinel supervising the node (wa-sentinel start)"; exit 2; }
 SENTINEL_DIR=""
 # Ask the sentinel to restart the node and wait for its record. 0 = it is back.
 sentinel_restart() {
@@ -529,7 +555,7 @@ fi
 # then waits on never frees; starting a second node beside it collides. So the swap comes first and the
 # old process is then ended - systemd starts the new binary. Read from the process's own cgroup.
 MANAGED_UNIT=""
-if [ "$SUPERVISED" = "0" ] && [ "$WINDOWS" != "1" ] && [ -n "$OLD_PID" ] && [ -r "/proc/$OLD_PID/cgroup" ]; then
+if [ "$WATCHDOG" = "0" ] && [ "$SUPERVISED" = "0" ] && [ "$WINDOWS" != "1" ] && [ -n "$OLD_PID" ] && [ -r "/proc/$OLD_PID/cgroup" ]; then
   unit="$(sed -n 's#^0::.*/\([^/]*\.service\)$#\1#p' "/proc/$OLD_PID/cgroup" | head -1)"
   case "$(sed -n 's#^0::/\(user\)\.slice/.*#\1#p' "/proc/$OLD_PID/cgroup")" in user) scope="--user" ;; *) scope="" ;; esac
   if [ -n "$unit" ] && [ "$(systemctl $scope show -p Restart --value "$unit" 2>/dev/null)" = "always" ]; then
@@ -551,7 +577,8 @@ wait_new_listener() {
   return 1
 }
 phase upgrading stopping
-if [ "$SUPERVISED" = "1" ]; then [ -n "$OLD_PID" ] && say "the sentinel will stop the node (pid $OLD_PID) once the files are swapped"
+if [ "$WATCHDOG" = "1" ]; then say "the watchdog stops pid $OLD_PID only after the new kernel has answered /health (and puts it back if it does not)"
+elif [ "$SUPERVISED" = "1" ]; then [ -n "$OLD_PID" ] && say "the sentinel will stop the node (pid $OLD_PID) once the files are swapped"
 elif [ -n "$MANAGED_UNIT" ]; then say "pid $OLD_PID is ended after the swap; $MANAGED_UNIT starts the new binary"
 else [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"; fi
 BACKUP="$INSTALLED.pre-upgrade"
@@ -562,7 +589,11 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
     [ ! -f "$UI_DIR/$asset" ] || cp -f "$UI_DIR/$asset" "$UI_DIR/$asset.pre-upgrade" || exit 1
   done
 fi
-if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ] && [ -z "$MANAGED_UNIT" ]; then
+# Stopping the node is the watchdog's job when it is on: it holds the pid, and it stops the old kernel only
+# after the new one has answered /health. A script that killed the node here first would take the node down
+# for the whole swap and defeat the point (measured: the watchdog correctly saw its kernel die and restarted
+# it with backoff while this script was still preparing the swap).
+if [ -n "$OLD_PID" ] && [ "$SUPERVISED" = "0" ] && [ -z "$MANAGED_UNIT" ] && [ "$WATCHDOG" = "0" ]; then
   if [ "$WINDOWS" = "1" ]; then
     # The tree, not the pid. `Stop-Process -Id` reaches the node, but any handle to its listening socket
     # that the node handed elsewhere keeps :$PORT LISTENING after the process is gone, and the refusal
@@ -674,7 +705,29 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
     cmp -s "$SOURCE_UI/$asset" "$UI_DIR/$asset" || cp -f "$SOURCE_UI/$asset" "$UI_DIR/$asset" || UI_OK=0
   done
 fi
-if [ "$SUPERVISED" = "1" ]; then
+if [ "$WATCHDOG" = "1" ]; then
+  # The switch, with the promise KERNEL.md makes: the new kernel must answer before it is kept, and the old
+  # binary stays on disk (the watchdog stages every binary by pin, so a rollback is a path change).
+  STARTED=0
+  if [ "$UI_OK" = "1" ]; then
+    WATCHDOG_OUT="$HOME_DIR/watchdog-swap.log"
+    if "$WATCHDOG_BIN" swap "$(wd_native "$INSTALLED")" --sha256 "$NEW_HASH" \
+         --home "$(wd_native "$WATCHDOG_HOME")" --wait-ms "${WA_WATCHDOG_WAIT_MS:-180000}" \
+         >>"$WATCHDOG_OUT" 2>&1; then
+      STARTED=1
+      # The pid that is listening, from the only process that knows it. `serve.pid` is the install tooling's
+      # record of that pid, so the listener check below asks the same question it always did.
+      if [ -f "$WATCHDOG_HOME/kernel.pid" ]; then
+        tr -d '[:space:]' < "$WATCHDOG_HOME/kernel.pid" > "$INSTALL_DIR/serve.pid"
+      fi
+    else
+      say "the watchdog refused or rolled back; its own words are the last lines of $WATCHDOG_OUT"
+      tail -4 "$WATCHDOG_OUT" 2>/dev/null | sed 's/^/    /'
+    fi
+  else
+    say "the UI assets could not be placed; not asking the watchdog to switch under a partial install"
+  fi
+elif [ "$SUPERVISED" = "1" ]; then
   STARTED=0
   [ "$UI_OK" = "1" ] && sentinel_restart "upgrade: $(basename "$NEW")" && STARTED=1
 elif [ -n "$MANAGED_UNIT" ]; then
@@ -725,6 +778,21 @@ if [ "$STARTED" = "1" ] && [ "$UI_OK" = "1" ] && wait_health; then
 fi
 
 say "the new binary did not come up - putting the previous one back"
+if [ "$WATCHDOG" = "1" ]; then
+  # Nothing to restart: the watchdog already put the previous kernel back and said so. What is left is the
+  # files this script replaced before asking (the binary and the UI assets), which go back to the backup it
+  # took for exactly this.
+  if [ -f "$BACKUP" ]; then
+    cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
+    for asset in $UI_FILES; do
+      [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
+    done
+    say "restored $INSTALLED and the UI assets from the backup; the watchdog is serving the previous kernel"
+  else
+    say "no backup to roll back to; the watchdog is still serving the previous kernel"
+  fi
+  exit 1
+fi
 if [ -n "$MANAGED_UNIT" ]; then
   if [ -f "$BACKUP" ]; then
     cp -f "$BACKUP" "$INSTALLED.new" && mv -f "$INSTALLED.new" "$INSTALLED"
