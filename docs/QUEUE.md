@@ -161,8 +161,9 @@ A queue provider on the node that owns the journal, workers anywhere on the rela
 
 `rust/wa-stt-remote` — a library with no wasmtime, no threads and no I/O of its own — is the part of
 phase 2 that is not the host's and not the component's. It is built and tested (`cargo test -p
-wa-stt-remote`, 18 tests, and the gate runs it in `scripts/test.sh`); the host route and the node
-side are still open and listed at the end of this section.
+wa-stt-remote`, 18 tests, and the gate runs it in `scripts/test.sh`); the node half it plugs into is
+`rust/wa-kernel-runtime/src/stt_node.rs` (2026-11-06), and what is still open is listed at the end of
+this section.
 
 | piece | what it decided |
 | --- | --- |
@@ -177,21 +178,54 @@ side are still open and listed at the end of this section.
 A note on what "faster" is measured on: the remote reports the recognizer's own elapsed time in its
 `done`, so the producing node compares like with like instead of the whole relay round trip.
 
-Still open in phase 2 (each is a piece this crate does not own):
+### The node half (2026-11-06)
 
-1. **The host route.** Something has to accept a signed `stt-worker/1` envelope on the producing node
-   and act on it as the component's queue — either `/node/call` with the op as the action, or a
-   `/node/queue` route. That is `wa-capabilities/serve.rs` + the queue provider, deliberately not
-   touched here. Until then `sim::Relay` is the only `Transport` and the two-node proof is
-   in-process.
-2. **The node side of the role.** `<config>`/env `stt_worker`, the rendezvous feed behind
-   `RemoteHealth` (online + latency), and a Lua long-poll loop that drives `RemoteWorker` over
-   `nodes.request`. The loop is the part `lua/core` would own; it needs 1.
-3. **The component.** `rust/components/wa-whatsapp`'s `queue.rs`/`recognize.rs` still own their kv
-   queue and their warm recognizer; they would enqueue `SttRequest`s on `stt.requests` and take the
-   local fallback through `LocalWorker`. Its lane split stays the component's decision either way.
-4. **`scripts/fast.sh`** names its Rust crates explicitly; `wa-stt-remote` needs adding to that list
-   (one word) so the day-to-day fast path runs it too. `scripts/test.sh` already does.
+`rust/wa-kernel-runtime/src/stt_node.rs` is the part the library deliberately does not own — the
+queue, the audio store, the clock and the recognizer are the node's:
+
+| piece | what it does |
+| --- | --- |
+| the queue | one `wa_queue::Queue` over `<components>/stt.state/kv.sqlite`, sub-prefix `q/`, and the audio behind fetch handles under `a/` — the same file, so the same durability and the same owner. A new `Queue` per call, as `queue_host` does: the library keeps nothing in memory |
+| the producer's worker | a thread running the library's `LocalWorker::poll_once` (the `Preference` grace, the lease cadence, both freshness checks and the settle are the library's), with a `Recognizer` over the node's warm worker (`service_stt`). It deletes a job's audio when it settles, and a 15 s sweep purges what nobody settled |
+| the relay handler | `stt_node::call` takes one admitted call from `lua/core/server.lua#node_capability` (capability `stt`, host function `host.stt_call`). The outer call is the transport's normal signed call (`call\|<node>\|<ts>\|<sha256(body)>`, verified by `verify_peer`); the library's `Envelope` rides as its arguments, and `Admission` re-checks target, caller, timestamp and `rid` before the queue is touched |
+| the worker role | `stt_node` runs the library's blocking `RemoteWorker::poll_once` on a thread. Its `Transport` does not sign: it *tunnels* each `Envelope` to the node's Lua (`host.stt_pending` / `host.stt_deliver`), where `nodes.lua` signs and sends it. The node key stays in the interpreter, and the decision logic stays in the library |
+| the component's slot | `service_stt::submit` enqueues (a `Submission` with synthesized ids and `sent_at = now`), and every progress entry and terminal state a worker writes is mirrored into the `wa:kernel/speech` slot the component polls — one view for a remote decode and a local one |
+| the operator view | `host.stt_admin` (`configure`, `status`, `job`, `sweep`, `counters`) and the `services` tool action `stt`: the role, the attached workers with their take/done/fail counts and average decode, the remote vs local split, the lease state and the last settled jobs — ids, states and durations only, never a transcript |
+
+The configuration is a request the node's Lua sends on boot: `{action: "configure", me,
+owner_nodes, producer, worker, producer_id, …}` from `lua/core/stt.lua`, which is where the role comes
+from (`WASM_AGENT_STT_ROLE` = `producer` by default, `worker`/`stt_worker`, `both`, `off`; the
+producer's selector in `WASM_AGENT_STT_PRODUCER` or the second line of `~/.wasm-agent/node.stt`;
+lease, heartbeat, grace, freshness and latency lifetime from `WASM_AGENT_STT_*_MS`). A node with no
+role configured keeps the pre-queue path.
+
+Two properties a reader should not have to infer:
+
+- **Presence, not a feed.** A producing node treats a worker as attached for 90 s after its last
+  *admitted* `take` (an empty one counts), so the grace applies only to a node that is polling. A
+  worker that has just joined is admitted on the next tick: a refusal counted as `unknown_caller`
+  makes the producer re-read the rendezvous at once instead of waiting out the 30 s refresh. The
+  first note after a cold start can still be decoded locally — that is the policy's named risk.
+- **The kernel's freshness window starts at the node, not at the message.** `wa:kernel/speech` carries
+  audio, mime and language and nothing else, so `service_stt::submit` dates the job at submission. A
+  caller that knows the chat and the send time (the WhatsApp component would) uses `host.stt_submit`
+  and gets the real window; that is the remaining step 1 below.
+
+Still open in phase 2 (each is a piece this change did not take):
+
+1. **The component's own enqueue.** `rust/components/wa-whatsapp`'s `queue.rs`/`recognize.rs` still
+   own their kv queue and their warm recognizer. They reach `stt.requests` *through*
+   `wa:kernel/speech` today; enqueueing directly with the real chat/message ids and `sent_at` needs
+   those fields on the speech interface (`wit/kernel`), which this change did not touch.
+2. **A managed/enrolled `stt_worker`.** A peer call requires the caller to be a master in the
+   rendezvous' view. An enrolled guest can be one only once the fabric grants it (the capability is
+   already in the enrollment allow-list; the role rule is not).
+3. **A blocking `take`.** The worker polls (`wait_ms = 0`); the producer answers at once. WASI 0.3
+   futures would make a real long poll expressible, and the provider would then need a wake path per
+   queue, which the Kv alone does not give.
+4. **Two-node proof in the gate.** `scripts/test-stt-two-nodes.sh` is in `scripts/test.sh` (and skips
+   with 77 without a node binary or python3); it is not in the minute-scale fast path, which runs
+   `scripts/test-stt-role.lua` instead.
 
 ## How the host serves it
 

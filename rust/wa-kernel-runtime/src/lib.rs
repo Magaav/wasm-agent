@@ -43,6 +43,9 @@ pub mod service_components;
 pub mod service_components_v2;
 pub mod service_io;
 pub mod services;
+// The node half of queue phase 2 for speech: the `stt.requests` queue, the relay handler a remote
+// worker calls, and the `stt_worker` role (docs/QUEUE.md, docs/WHATSAPP-TRANSCRIPTION.md).
+pub mod stt_node;
 pub mod state_host;
 pub mod supervisor;
 #[cfg(test)]

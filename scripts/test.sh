@@ -278,6 +278,10 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kv
 # admission rules, the remote-first preference policy and the two-node simulation (two queues, two
 # clocks and a relay in one process). No wasmtime in it, so it runs here beside the other crates.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-stt-remote
+# The node half of phase 2 (rust/wa-kernel-runtime/src/stt_node.rs): the relay handler a remote
+# worker calls, the audio's lease rule, the component slot that mirrors a job, and the operator view.
+# The library above proves the two-node *logic*; these prove the host's dispatch and admission.
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime stt_node::
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities graph::tests
 # WASI components and service components (docs/COMPONENTS.md, docs/SERVICE-COMPONENTS.md). Three
 # fixtures, one per runner, each with its own end-to-end test in wa-kernel-runtime: `svc-echo-wasip1` (a plain
@@ -1292,6 +1296,19 @@ WA_BIN="$BIN" bash scripts/test-modules-removal.sh
 # behaviour *inside* the interpreter; this is the only check that would notice the route not being
 # registered or loaded at all, which is a 500/404 with every other check green.
 WA_BIN="$BIN" bash scripts/test-modules-route.sh
+# Two real `wa` processes on loopback (a local rendezvous, the producing node, an `stt_worker` node)
+# with a fake recognizer: a note decoded by the other node, a node killed mid-job and the producer's
+# own worker finishing it, a stale note refused and never decoded. It skips (77) when no node binary
+# or python is available, and reports the skip as a skip.
+stt_two_nodes=0
+WA_BIN="$BIN" bash scripts/test-stt-two-nodes.sh || stt_two_nodes=$?
+if [ "$stt_two_nodes" = "77" ]; then
+  echo "SKIP: the two-node speech queue proof (no node binary or no python3)"
+  SKIPPED=$((SKIPPED + 1))
+else
+  # 0 is the verdict the script prints; anything else is a failure of the gate, not a skip.
+  [ "$stt_two_nodes" = "0" ] || exit "$stt_two_nodes"
+fi
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh

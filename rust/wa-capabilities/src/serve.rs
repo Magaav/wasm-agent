@@ -2293,6 +2293,11 @@ fn node_thread_loop(
     let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
     // Retention runs a minute after boot and then daily, on node-thread 0 only, when the node is quiet.
     let mut next_retention = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // The speech queue's tick (`lua/core/stt.lua`): a `stt_worker` node pumps the calls its worker
+    // thread is waiting on, and a producer refreshes the ids it admits. It is one host call when the
+    // role is off and a handful of short ones when a call is pending, so it runs every second rather
+    // than on the quiet-node cadence the sync tick needs (a worker must answer a segment promptly).
+    let mut next_stt = std::time::Instant::now() + std::time::Duration::from_millis(200);
     // A deterministic wedge, for the regression test: the hook stalls node-thread 0 on its first request, which
     // is exactly the shape that was found in the wild. Only node-thread 0, or a node with read node-threads would
     // stall all of them and the test would be measuring itself.
@@ -2550,6 +2555,17 @@ fn node_thread_loop(
         // Housekeeping last, and only when nobody is waiting and the node has been quiet: the sync tick
         // talks to a peer over the network, and on node-thread 0 that means this interpreter stops answering
         // while it does.
+        if index == 0 && std::time::Instant::now() >= next_stt && QUEUED.load(Ordering::Relaxed) == 0 {
+            next_stt = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            if let Err(error) = lua.call_string("wa_stt_tick", &[]) {
+                // Once per failure kind is `stt.lua`'s business; this is the last resort for an
+                // interpreter that has no such global (an older embedded Lua tree).
+                static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !REPORTED.swap(true, Ordering::Relaxed) {
+                    eprintln!("[stt] tick unavailable: {error}");
+                }
+            }
+        }
         let quiet = now_ms().saturating_sub(LAST_SERVED_MS.load(Ordering::Relaxed)) >= 2000;
         if std::time::Instant::now() >= next_sync && QUEUED.load(Ordering::Relaxed) == 0 && quiet {
             next_sync = std::time::Instant::now() + std::time::Duration::from_secs(20);

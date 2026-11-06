@@ -34,6 +34,9 @@ pub mod quickjs;
 pub mod resources;
 pub mod ripgrep;
 pub mod serve;
+// The speech queue's node half, reached from Lua (`stt_node` in `wa-kernel-runtime`): one admitted
+// peer call, the operator view, and the pump the worker role borrows for its transport.
+pub mod stt;
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.

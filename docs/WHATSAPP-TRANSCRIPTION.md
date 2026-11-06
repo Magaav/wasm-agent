@@ -205,11 +205,25 @@ downloads the audio, decodes it with its own warm `faster-whisper`, and streams 
 progress. The producing node's own worker is the fallback, so nothing depends on the strong node
 being there.
 
-What is built (2026-11-06, `rust/wa-stt-remote`, `cargo test -p wa-stt-remote`): the request
-payload, the signed worker envelope and its admission rules, the preference policy, both worker
-loops, and a two-node simulation that proves remote-wins, remote-dies-mid-job → local finishes,
-stale-never-decoded and the counters. `docs/QUEUE.md` ("What phase 2 has") names the pieces and the
-four integration steps still open; the component does not enqueue on `stt.requests` yet.
+What is built. The library (`rust/wa-stt-remote`, `cargo test -p wa-stt-remote`) has the request
+payload, the signed worker envelope and its admission rules, the preference policy and both worker
+loops, with a two-node simulation that proves remote-wins, remote-dies-mid-job -> local finishes and
+stale-never-decoded. The node half (`rust/wa-kernel-runtime/src/stt_node.rs`) puts it on a real node,
+and `scripts/test-stt-two-nodes.sh` proves it with three real processes on loopback: a local
+rendezvous, the producing node and an `stt_worker` node, with a fake recognizer that logs a digest per
+decode. A note is decoded by the other node, a note past its window is refused at enqueue and never
+decoded by either, and a worker killed mid-decode leaves its lease to lapse so the producer's own
+worker finishes the same note (`lease_expiries` on the record, at-least-once).
+
+The role is configuration, not a new trust path: `WASM_AGENT_STT_ROLE` (`producer` by default,
+`worker`/`stt_worker`, `both`, `off`), the producer's selector in `WASM_AGENT_STT_PRODUCER`, and the
+lease/heartbeat/grace/freshness knobs in `WASM_AGENT_STT_*_MS`. `lua/core/stt.lua` hands them to the
+node on boot, and the node's housekeeping loop pumps the worker's signed calls. The operator view is
+the `services` tool's action `stt`: role, attached workers, their recent latency, the local vs remote
+decode counts and the last settled jobs - ids and durations, never text. `docs/QUEUE.md` ("The node
+half") has the full table and what is still open: the component enqueues with the real chat/message
+ids and send time only once the speech interface carries them, so the kernel path dates a job at
+submission.
 
 Rules that do not change on the remote path — and where they are enforced:
 

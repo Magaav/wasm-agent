@@ -2030,6 +2030,7 @@ dependencies = [
  "wa-kv",
  "wa-queue",
  "wa-state",
+ "wa-stt-remote",
  "wasmtime",
  "wasmtime-wasi",
 ]

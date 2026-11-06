@@ -692,6 +692,11 @@ sql_exec             writes files
 sql_query            read-only
 state                writes files
 status_snapshot      device
+stt_admin            writes files
+stt_call             writes files
+stt_deliver          read-only
+stt_pending          read-only
+stt_submit           writes files
 stream               device
 subagent             runs a process
 system_resources     read-only

@@ -26,6 +26,11 @@ local workspaces = dofile("lua/core/workspaces.lua")
 -- itself, in the positional shape serve.rs calls a handler with. Without this line the dispatch entry
 -- answers 500 and every Lua-level test stays green - which is exactly what happened.
 local modules = dofile("lua/core/modules.lua")
+-- Queue phase 2 for speech (docs/QUEUE.md "Phase 2"): the node's producer/worker role and the pump a
+-- `stt_worker` node runs. Loading the file defines `wa_stt_tick`, which serve.rs calls from the
+-- housekeeping loop; a node whose role is not configured pays two host calls per tick and nothing else.
+local sttlib = dofile("lua/core/stt.lua")
+function wa_stt_tick() sttlib.safe_tick() end
 
 memory.setup()
 local agent
@@ -762,6 +767,18 @@ local function node_capability(capability, args, caller)
   if capability == "set_role" then
     if not enrollment.managed() then return { error = "not_managed" } end
     return enrollment.set_role(args.role)
+  elseif capability == "stt" then
+    -- Queue phase 2 on `stt.requests` (docs/QUEUE.md "Phase 2"): the worker node's call on the
+    -- producer's queue. The handler is Rust (`rust/wa-kernel-runtime/src/stt_node.rs`); it re-checks
+    -- the envelope's target, caller, timestamp and rid before it touches the queue, and answers with
+    -- the library's own bodies and fixed refusals. The signature was checked above, over the body
+    -- that carries this envelope, so a caller cannot claim to be a node it is not.
+    if type(host.stt_call) ~= "function" then return { error = "stt_unavailable" } end
+    local ran, raw = pcall(host.stt_call, json.encode(args), tostring(caller.node_id or ""))
+    if not ran then return { error = "stt_call_failed", detail = tostring(raw) } end
+    local decoded, answer = pcall(json.decode, raw or "")
+    if not decoded or type(answer) ~= "table" then return { error = "stt_answer_unreadable" } end
+    return answer
   elseif capability == "federation" then
     -- Connector federation (lua/core/federation.lua): a master peer lists and runs this node's connector
     -- tools here, under this node's own guards. The dispatch is the same one the fallthrough below uses.
@@ -868,7 +885,10 @@ function wa_node_call(payload, from, public_key, ts, signature)
   if enrollment.managed() then
     if not enrollment.target(request) then return answer({ error = "wrong_target" }) end
     local allowed = { status=true, set_role=true, read=true, write=true, edit=true,
-      ls=true, grep=true, bash=true, shell=true, client=true }
+      ls=true, grep=true, bash=true, shell=true, client=true,
+      -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
+      -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
+      stt=true }
     if not allowed[capability] then return answer({ error = "capability_not_granted" }) end
     enrollment.audit(caller, capability, "started")
     local ran, result = pcall(node_capability, capability, request.args, caller)

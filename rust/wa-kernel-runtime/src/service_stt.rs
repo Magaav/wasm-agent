@@ -49,7 +49,7 @@ pub struct Job {
 
 impl Job {
     /// Record one recognized segment (0.2 streams it, 0.1 polls for it).
-    fn push_segment(&mut self, text: String, duration_ms: Option<u64>) {
+    pub(crate) fn push_segment(&mut self, text: String, duration_ms: Option<u64>) {
         self.segments.push(text);
         if let Some(ms) = duration_ms {
             self.duration_ms = self.duration_ms.max(ms);
@@ -118,11 +118,55 @@ fn hub() -> &'static Sender<Request> {
     })
 }
 
+/// A queued job with no work behind it yet: the slot a caller polls.
+pub(crate) fn new_slot() -> JobSlot {
+    Arc::new(Mutex::new(Job { state: JobState::Queued, segments: Vec::new(), duration_ms: 0, notify: crate::service_io::Notify::new() }))
+}
+
+/// Is this node's recognizer provisioned (the interpreter, the worker script and the model cache)?
+/// A worker node that would fail every job it takes asks first (`stt_node`'s remote loop).
+pub(crate) fn provisioned() -> bool {
+    paths().is_ok()
+}
+
 /// Queue one recognition; the returned slot moves from Queued to Done/Failed.
+///
+/// On a node that runs the shared queue (`lua/core/stt.lua` configured a producer, `docs/QUEUE.md`
+/// "Phase 2") the request becomes a job on `stt.requests`: a remote `stt_worker` may take it, and
+/// this node's own warm worker takes it after the policy grace if none does. The slot the caller
+/// polls is filled from the job either way (`stt_node::mirror`). A node without the queue — the
+/// codemode/root interpreter, a test host, a worker-only node — keeps the direct warm-worker path,
+/// which is the behaviour this function had before the queue existed.
 pub fn submit(audio: Vec<u8>, mime: &str, language: &str) -> Result<JobSlot, String> {
     if audio.is_empty() || audio.len() > MAX_AUDIO {
         return Err("audio_too_large".into());
     }
+    if !crate::stt_node::producing() {
+        return decode_direct(audio, mime, language);
+    }
+    let slot = new_slot();
+    let mime = wa_stt_remote::request::Mime::parse(mime).unwrap_or(wa_stt_remote::request::Mime::Ogg);
+    let submission = crate::stt_node::Submission::from_audio(audio.clone(), mime, language);
+    match crate::stt_node::enqueue(submission, Some(slot.clone())) {
+        Ok(_job) => Ok(slot),
+        // A note past its window is never decoded by anyone: the caller turns this into the
+        // own-chat `audio_expired` alert instead of a transcript posted late.
+        Err(crate::stt_node::EnqueueProblem::Stale { .. }) => Err("stale_job".into()),
+        Err(crate::stt_node::EnqueueProblem::Unavailable(reason)) => {
+            // The queue is not usable in this process. Decoding here is the honest fallback: the
+            // note still gets its transcript, and the reason is visible on stderr.
+            eprintln!("[stt] queue unavailable ({reason}); decoding in this process");
+            decode_direct(audio, mime_str(mime), language)
+        }
+    }
+}
+
+fn mime_str(mime: wa_stt_remote::request::Mime) -> &'static str {
+    mime.as_str()
+}
+
+/// Run one recognition on this process's warm worker without the queue (the pre-queue path).
+pub(crate) fn decode_direct(audio: Vec<u8>, mime: &str, language: &str) -> Result<JobSlot, String> {
     paths()?;
     let ext = match mime.split(';').next().unwrap_or("").trim() {
         "audio/mpeg" | "audio/mp3" => "mp3",
@@ -130,7 +174,7 @@ pub fn submit(audio: Vec<u8>, mime: &str, language: &str) -> Result<JobSlot, Str
         "audio/mp4" | "audio/aac" | "audio/m4a" => "m4a",
         _ => "ogg",
     };
-    let slot = Arc::new(Mutex::new(Job { state: JobState::Queued, segments: Vec::new(), duration_ms: 0, notify: crate::service_io::Notify::new() }));
+    let slot = new_slot();
     hub().send(Request::Recognize { audio, ext, language: language.to_string(), slot: slot.clone() }).map_err(|_| "stt_hub_down".to_string())?;
     Ok(slot)
 }

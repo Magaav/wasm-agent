@@ -194,6 +194,14 @@ pub const REGISTRY: &[Capability] = &[
     // ---- node governance (docs/GRANT-POLICY.md, docs/TELEMETRY.md) ----------------------------
     plain!("policy_status", ReadOnly, wa_governance::node_policy::capability, "The grant policy's state as JSON: file and load error, decision counters, recent refusals without target text, and the audit trail's health"),
     plain!("telemetry", ReadOnly, wa_governance::node_telemetry::capability, "This node's telemetry as Prometheus text or JSON: component and host-call latency, service health, sampled spans, rollups and the bounded stores' usage"),
+    // ---- the speech queue (docs/QUEUE.md "Phase 2", docs/WHATSAPP-TRANSCRIPTION.md) -------------
+    // One capability per thing the Lua side does: the producing node answers a peer's call, an
+    // operator submits or reads the queue, and the worker role borrows the two halves of a pump.
+    plain!("stt_call", WritesFiles, crate::stt::call, "One admitted stt.requests call from a peer node (take/audio/beat/seg/done/fail): the producing node's queue, its lease rule and its audio"),
+    plain!("stt_submit", WritesFiles, crate::stt::submit, "Enqueue one note on stt.requests with its chat/message ids and send time; the freshness window starts at the send time"),
+    plain!("stt_admin", WritesFiles, crate::stt::admin, "The speech queue's operator surface: configure the node's producer/worker role, status (attached workers, latency, local vs remote counts), one job's state, a sweep"),
+    plain!("stt_pending", ReadOnly, crate::stt::pending, "The next signed stt.requests call the worker thread wants sent (null when idle), for the node's Lua pump"),
+    plain!("stt_deliver", ReadOnly, crate::stt::deliver, "Deliver one peer answer to the waiting worker thread and return the next pending call"),
     // ---- audio -------------------------------------------------------------------------------
     // The contract is one entry because it is one capability with two calls: `capture` (the ear)
     // and `play` (the mouth). Voice itself is the `voice` WASM plugin; this is only the transport.

@@ -17,6 +17,10 @@ wa-host-support = { path = "../wa-host-support" }
 wa-governance = { path = "../wa-governance" }
 wa-grant-policy = { path = "../wa-grant-policy" }
 wa-queue = { path = "../wa-queue" }
+# Queue phase 2 for speech (docs/QUEUE.md): the request payload, the signed wire bodies, the
+# preference policy and both worker loops. A leaf crate (wa-queue + serde_json) the node half in
+# `stt_node.rs` is wired to; it adds no arrow the queue split did not already have.
+wa-stt-remote = { path = "../wa-stt-remote" }
 wa-bus = { path = "../wa-bus" }
 wa-state = { path = "../wa-state" }
 wa-kv = { path = "../wa-kv" }

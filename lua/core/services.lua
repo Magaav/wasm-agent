@@ -88,6 +88,10 @@ function M.control(args,ctx)
  if ctx.subagent then return fail('services_management_forbidden_for_subagent') end
  local action=args.action
  if action=='list' then return M.inventory() end
+ -- The speech queue's node half (docs/QUEUE.md "Phase 2"): the role this node plays, the workers
+ -- attached to its queue, their recent latency and the local-vs-remote decode counts. Reads the
+ -- node's own runtime; never a transcript.
+ if action=='stt' then return dofile('lua/core/stt.lua').view() end
  -- The effective configuration after base -> node -> user -> patch (docs/KERNEL.md, "Profiles as
  -- layers"), rows by id. Read-only and needed by every operator, so no registry revision.
  if action=='profile_dump' then return host_call({action='profile_dump',name=args.name}) end
