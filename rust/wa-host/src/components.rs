@@ -331,9 +331,9 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
         builder.env(key, value.trim());
     }
     for dir in &grant.dirs {
-        use wasmtime_wasi::{DirPerms, FilePerms};
-        let (dir_perms, file_perms) = if dir.write { (DirPerms::all(), FilePerms::all()) } else { (DirPerms::READ, FilePerms::READ) };
-        builder.preopened_dir(&dir.host, &dir.guest, dir_perms, file_perms).map_err(|_| anyhow!("component_dir_unavailable:{}", dir.guest))?;
+        // wasmtime 50: one FsPerms for the directory and its files.
+        let perms = if dir.write { wasmtime_wasi::FsPerms::ReadWrite } else { wasmtime_wasi::FsPerms::ReadOnly };
+        builder.preopened_dir(&dir.host, &dir.guest, perms).map_err(|_| anyhow!("component_dir_unavailable:{}", dir.guest))?;
     }
     if !grant.net.is_empty() {
         let mut allowed: Vec<SocketAddr> = Vec::new();
