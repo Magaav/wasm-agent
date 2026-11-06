@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Does the deploy's default-policy install keep the operator's file and still install one where there
-# is none? (`docs/GRANT-POLICY.md`, "The shipped default".)
+# Does the deploy's default-policy install keep the operator's file, still install one where there is
+# none, and refresh the one case where nobody's choice is being overwritten? (`docs/GRANT-POLICY.md`,
+# "The shipped default".)
 #
-# The rule this pins: a policy file's PRESENCE is what turns the policy layer on
-# (`wa-governance/src/node_policy.rs`, `Mode`), so the release ships a default that keeps the components of
-# this tree working - and it may only ever create that file. An operator's `policy.json` is never
-# overwritten, refreshed, renamed or touched, and a default is never installed underneath a path that
-# already exists as something else.
+# The rules this pins:
+#
+#   * a policy file's PRESENCE is what turns the policy layer on (`wa-governance/src/node_policy.rs`,
+#     `Mode`), so the release ships a default that keeps the components of this tree working - and on a
+#     node that has no file it creates one;
+#   * an operator's `policy.json` - their caps, an extra chat, a broken file, a directory, a dangling
+#     symlink - is never overwritten, refreshed, renamed or touched;
+#   * the ONE exception: a file byte-identical to a default this tree has shipped
+#     (`policies/shipped/*.json`, kept as release records) is refreshed to the current default. That is
+#     a migration, not an edit: the bytes are the release's own, so the operator wrote nothing that
+#     could be lost - and after the refresh the same file is "already the current default" and stops
+#     being touched.
 #
 # Both halves RUN the code the deploy runs (`scripts/lib/install-default-policy.sh`), against scratch
 # directories; "untouched" is measured by content, mode and mtime, not by reading the branch.
@@ -113,6 +121,66 @@ install_default_policy "$WORK/there-is-no-such-default.json" "$NOTHING/policy.js
 [ $? -eq 2 ] || fail "a missing default did not answer 2 (nothing installed)"
 [ ! -e "$NOTHING/policy.json" ] || fail "a missing default still created a policy file"
 ok "a tree without policies/default.json installs nothing and says so"
+
+
+# --- a policy file that is still the shipped default is refreshed, once ---------------------------------
+# The migration this exists for: `whatsapp.send` went from "our own chat and the alerts chat" to "any
+# chat, under the release caps" (the owner's decision of 06/11). A node that never edited its policy
+# file has the old default's bytes, and only then may a deploy replace them.
+SHIPPED_DIR="$ROOT_DIR/policies/shipped"
+[ -d "$SHIPPED_DIR" ] || fail "no $SHIPPED_DIR: a deploy cannot recognise an unmodified old default"
+OLD_DEFAULT=""
+for candidate in "$SHIPPED_DIR"/*.json; do
+  [ -f "$candidate" ] || continue
+  grep -q '"chat:self"' "$candidate" 2>/dev/null && OLD_DEFAULT="$candidate"
+done
+[ -n "$OLD_DEFAULT" ] || fail "no shipped record of the previous whatsapp.send default in $SHIPPED_DIR"
+cmp -s "$OLD_DEFAULT" "$DEFAULT" && fail "the shipped record $OLD_DEFAULT is the current default; a migration record must be the old text"
+grep -q '"chat:self"' "$DEFAULT" && fail "the current default still sends only to our own chat"
+grep -q '"per_minute": 20' "$DEFAULT" || fail "the current default does not carry the global 20/min cap"
+grep -q '"daily_cap": 500' "$DEFAULT" || fail "the current default does not carry the daily cap of 500"
+
+OLD_NODE="$WORK/old-default/.wasm-agent"
+mkdir -p "$OLD_NODE"
+cp -f "$OLD_DEFAULT" "$OLD_NODE/policy.json"
+touch -t 202001020304.05 "$OLD_NODE/policy.json" 2>/dev/null || true
+install_default_policy "$DEFAULT" "$OLD_NODE/policy.json" > "$WORK/refresh.out" 2>&1
+status=$?
+[ "$status" -eq 0 ] || fail "refreshing an unmodified shipped default answered $status: $(cat "$WORK/refresh.out")"
+grep -q 'refreshed' "$WORK/refresh.out" || fail "an unmodified shipped default was not refreshed: $(cat "$WORK/refresh.out")"
+cmp -s "$DEFAULT" "$OLD_NODE/policy.json" || fail "the refreshed policy is not the current default, byte for byte"
+[ ! -e "$OLD_NODE/policy.json.refresh.$$" ] || fail "the refresh left a staged file beside the policy"
+ok "a policy file that is still an unmodified shipped default is refreshed to the current one"
+
+# The refresh is one-time: the file is now the current default, so a second deploy keeps it.
+after="$(stamp "$OLD_NODE/policy.json")"
+install_default_policy "$DEFAULT" "$OLD_NODE/policy.json" > "$WORK/refresh-again.out" 2>&1
+[ $? -eq 0 ] || fail "the second install over a refreshed policy failed: $(cat "$WORK/refresh-again.out")"
+grep -q 'kept' "$WORK/refresh-again.out" || fail "a second deploy did not keep the refreshed file: $(cat "$WORK/refresh-again.out")"
+[ "$(stamp "$OLD_NODE/policy.json")" = "$after" ] || fail "a second deploy rewrote the refreshed policy file"
+ok "the refresh happens once: the refreshed file is kept from then on"
+
+# One edited byte is the operator's, and the refresh must not touch it - even though it started as the
+# shipped default, which is precisely the file an over-eager "keep the default fresh" would replace.
+EDITED="$WORK/edited/.wasm-agent"
+mkdir -p "$EDITED"
+cp -f "$OLD_DEFAULT" "$EDITED/policy.json"
+# Their own ranking of the global cap, in the one rule the migration changes.
+sed -i.bak 's/"per_minute": 20, "burst": 20/"per_minute": 3, "burst": 3/' "$EDITED/policy.json" 2>/dev/null   || python3 - "$EDITED/policy.json" <<'PYSED'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+open(path, "w", encoding="utf-8").write(text.replace('"per_minute": 20, "burst": 20', '"per_minute": 3, "burst": 3', 1))
+PYSED
+rm -f "$EDITED/policy.json.bak"
+cmp -s "$OLD_DEFAULT" "$EDITED/policy.json" && fail "the edited fixture is still the shipped default (the edit did not apply)"
+edited_before="$(stamp "$EDITED/policy.json")"
+install_default_policy "$DEFAULT" "$EDITED/policy.json" > "$WORK/edited.out" 2>&1
+[ $? -eq 0 ] || fail "an edited policy made the install fail: $(cat "$WORK/edited.out")"
+grep -q 'kept' "$WORK/edited.out" || fail "an edited policy was not kept: $(cat "$WORK/edited.out")"
+[ "$(stamp "$EDITED/policy.json")" = "$edited_before" ] || fail "an edited policy file was rewritten by the refresh"
+grep -q '"per_minute": 3' "$EDITED/policy.json" || fail "the operator's own global cap is gone"
+ok "a policy file that started as the default but was edited is kept, byte for byte"
 
 # --- the deploy calls it, and says why it matters --------------------------------------------
 # Structural, and deliberately so: the deploy cannot be run here (it installs). What must not regress

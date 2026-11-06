@@ -183,7 +183,7 @@ Build and test:
 
 ```
 cd rust/components/wa-whatsapp
-cargo test --lib                                          # 47 tests, native
+cargo test --lib                                          # 52 tests, native (5 of them the outbox wire shape)
 cargo build --release --target wasm32-wasip2               # the component (8 MB)
 WA_TEST_WHATSAPP_WASM=<that .wasm> cargo test -p wa-kernel-runtime the_whatsapp
 ```
@@ -192,6 +192,58 @@ That last line compiles and **instantiates** the real component on the 0.2 runne
 every import it emits (kernel 0.2, `wasi:clocks@0.3.0`, preview-2 WASI) is served — without pairing or
 sending anything. It is opt-in because the gate does not build this component, and it takes minutes in
 a debug build.
+
+**Sending an ordinary message (`whatsapp.outbox`, 06/11).** The owner's decision is that the new bridge
+sends ordinary messages freely, to any chat, like the old connector — and *on the architecture*: a
+requested message is a job on the shared durable queue, not a hidden side path.
+
+```text
+whatsapp_send {chat, text, reply_to?, mentions?}          host.whatsapp_send
+  validate the exact JID + text bounds                    wa-whatsapp-outbox (shared crate)
+  policy check `whatsapp.send`, target `chat:<jid>`       rate limits (20/min, 6/min per chat, 500/day) + audit
+  enqueue `whatsapp.outbox` (fresh 5 min, 3 attempts,
+     dedupe sha256(chat|text|reply_to))                   wa:queue, per-component kv namespace
+  -> {ok, id, state: "queued", deduped}                   (the job id, never a delivery claim)
+
+wa-whatsapp (queue grant: worker on `whatsapp.outbox`)
+  take -> decide (fresh? still valid?) -> client.send_message -> done({message_id}) | fail(reason)
+
+whatsapp_send_status {id}                                 state, attempts, message_id | reason
+```
+
+* **The payload** is JSON (`{chat, text, reply_to?, mentions?}`); it is the only place the message text
+  lives, and it lives in the queue's kv until the job is settled and reaped. Nothing logs it and no
+  answer returns it.
+* **The JID is exact** and validated before the policy is asked: `<digits>@s.whatsapp.net`,
+  `<digits>@lid` or `<digits>@g.us`. A bare number, a device-qualified `user:12@…`, a `@broadcast` /
+  `@newsletter` / `@status` address and a server the library cannot address are refusals with a word
+  (`whatsapp_send_bad_chat`, `whatsapp_send_unsupported_chat`), never a guess.
+* **LID vs PN is not mapped by us.** The library addresses a LID chat directly
+  (`Client::send_message` accepts `@lid`, and it learns its own LID↔PN mappings), so a request is sent
+  to exactly the address it named: inventing the other form of an address is how a message reaches a
+  stranger. An address the library refuses is a refusal, not a fallback.
+* **Quote and mentions.** `reply_to` becomes `contextInfo.stanzaId`; the quoted *body* is not fetched
+  (this component keeps no message history), so the client shows a reference-only quote, and in a group
+  the quoted `participant` is the chat because the original author is unknown. `mentions` become
+  `contextInfo.mentionedJid` as full user JIDs — the shape a group notification needs
+  (`src/outbox.rs`, tested natively).
+* **Freshness.** A request nobody picked up within five minutes is never sent: the queue expires it,
+  and the component's own `decide` refuses it a second time. A message is never sent "late but
+  eventually".
+* **Retries.** A transport failure is retried by the queue (3 attempts); a refusal (`bad_chat`, `stale`,
+  `policy_denied`, …) is not worth retrying, but `wa:queue` has no "permanent failure" call, so it is
+  failed with its code and the queue's own backoff/dead-letter runs. The record is terminal inside the
+  freshness window, and no attempt ever sends.
+* **Governance** is the node's: the `whatsapp.send` rule with the target `chat:<jid>` (rate limits,
+  daily cap, audit — [GRANT-POLICY.md](GRANT-POLICY.md)), plus the opaque-frame cap every frame the
+  guest writes is still charged against. The component cannot ask the policy itself, by design: a
+  component that could ask "may I?" could answer "yes".
+
+Files: `rust/wa-whatsapp-outbox` (payload, JID rules, dedupe key, `decide`, status shape — shared with
+the host), `rust/wa-host/src/whatsapp_send.rs` (the two host capabilities), `src/outbox.rs` (the wire
+message + retry rule), `src/guest.rs` `outbox_tick`, `wit/wa.wit` (the component's world: the kernel
+service contract plus `wa:queue/worker`), and `scripts/test-whatsapp-send.lua` (tool shape, refusals,
+and the real enqueue on a binary that carries the capability).
 
 **Not yet verified, and unchanged by the port:** delivery of `protocol_message` REVOKE/MESSAGE_EDIT to
 `on_message` (the component's only source of mutations), two-decode parallelism (the host recognizer is

@@ -45,19 +45,16 @@ limit.
   "sensitive_capabilities": [],
   "components": {
     "wa-whatsapp": {
-      "note": "stage 1: our own chat plus the alerts chat",
+      "note": "an explicit requested send may go to any chat, under the release caps",
       "capabilities": {
         "whatsapp.send": {
           "sensitive": true,
           "require_approval": false,
-          "allow": ["chat:self", "chat:alerts"],
-          "deny": ["*@broadcast", "*@newsletter"],
+          "allow": ["*"],
+          "deny": ["chat:*@broadcast", "chat:*@newsletter", "chat:*@status"],
           "rate": { "per_minute": 20, "burst": 20 },
           "per_target": { "per_minute": 6, "burst": 6 },
-          "target_rates": [
-            { "pattern": "chat:alerts", "per_minute": 1, "burst": 1, "exempt_from_global": true }
-          ],
-          "daily_cap": 200
+          "daily_cap": 500
         },
         "net.dial": {
           "allow": ["web.whatsapp.com:443", "*.whatsapp.net:443"],
@@ -82,13 +79,25 @@ fails if it stops parsing or stops meaning what the table below says). Its kv pr
 lists the prefixes `wa-whatsapp` actually writes - copy that one for a new node
 ([The shipped default](#the-shipped-default-policiesdefaultjson)).
 
-This is the WhatsApp component's stage 1: **send only to our own chat** (`chat:self`) plus the
-alerts chat, ≤ 20 messages/min in total, ≤ 6/min per chat, alerts exempt from the global cap but
-≤ 1/min. Stage 2 — allowlisted chats — only widens `whatsapp.send.allow`:
+The WhatsApp rule is the owner's decision of 06/11: **an explicit requested send may go to any chat**,
+like the old connector could, under a global 20/min, a per-chat 6/min and a daily 500 cap, with every
+decision audited. What is denied outright is the class of address nobody means to message: a status /
+list broadcast (`chat:*@broadcast`), a channel (`chat:*@newsletter`) and `chat:*@status`.
+
+The target is always the exact JID the producer names (`chat:5511999999999@s.whatsapp.net`,
+`chat:72103978127547@lid`, `chat:120363000000000001@g.us`), because the one caller is
+`host.whatsapp_send`, which knows the chat before dispatch (`docs/HOST.md`). That is why the
+`chat:self` / `chat:alerts` aliases of the first default are gone: they named nothing a caller could
+check. Narrowing is one edit — replace `"*"` with the chats that are allowed:
 
 ```json
-"allow": ["chat:self", "chat:alerts", "120363000000000001@g.us", "5511999999999@s.whatsapp.net"]
+"allow": ["chat:120363000000000001@g.us", "chat:5511999999999@s.whatsapp.net"]
 ```
+
+Transcript posting and the own-chat alert log are not governed by this rule: they are automatic
+behaviour with their own gates (`post_transcripts` + `post_allow` + holds inside the component,
+`alerts` for the log) and they write opaque frames, which the global cap still charges — see
+[The honest gap](#the-honest-gap-per-chat-limits-and-an-opaque-frame).
 
 | field | type | default | meaning |
 | --- | --- | --- | --- |
@@ -228,6 +237,7 @@ where it differs.
    | `credentials.get(name)` (both) | `credentials.read` | `name` |
    | `speech.start(...)` (0.1) / `speech.recognize(...)` (0.2) | `stt.start` | none |
    | `log.write`, `lifecycle.*` (both) | never checked | a log line cannot exceed anything a person sees |
+   | `host.whatsapp_send` (a **host** capability, not a guest import: `rust/wa-host/src/whatsapp_send.rs`) | `whatsapp.send` | `chat:<exact jid>` |
 
    Both runners call the same three functions (`service_components::{gate, target_of,
    authority_target}`), so a policy file cannot mean two different things depending on which
@@ -255,13 +265,16 @@ where it differs.
    the manifest granted, while a rule that names it is enforced per address. One check per address
    means a name that resolves to several addresses is charged several tokens — a known over-count,
    bounded by the rule's own rate.
-6. **The interim `whatsapp.send` cap.** `websocket.send` carries ciphertext, so the authority is the
-   only target the host sees. `node_policy::check_opaque_send` charges `whatsapp.send` per outbound
-   frame **only for a rule that names no chats** (`allow` and `deny` both empty) — which is exactly
-   how an operator writes "global cap only". A rule that lists chats is not guessed at from an opaque
-   frame: the frame is not refused by it, and the per-chat limits become real when
-   `wa:channel/messages` lands and the guest declares the chat through
-   `node_policy::check_whatsapp_send(component, chat)` (the exported hook, no caller yet).
+6. **Two `whatsapp.send` paths, and why they differ.** An *opaque* frame (`websocket.send`) carries
+   ciphertext, so the authority is the only target the host sees: `node_policy::check_opaque_send`
+   charges `whatsapp.send` per outbound frame **only for a rule that names no chats** (`allow` and
+   `deny` both empty) — which is exactly how an operator writes "global cap only". A rule that lists
+   chats is not guessed at from an opaque frame: the frame is not refused by it. The *explicit* send
+   (`host.whatsapp_send`, `rust/wa-host/src/whatsapp_send.rs`) is the path that names the chat, because
+   the producer knows it before anything is dispatched, and it calls
+   `node_policy::check_whatsapp_send(component, Some("chat:<jid>"))` — so for an explicit send the
+   per-chat and daily limits are real, and the frame the component later writes is *also* still charged
+   by the opaque-frame rule. One send, two gates, no path that skips both.
 7. **Audit errors** are drained every minute into the node log with the sink name only (never a
    target) and counted in `host.policy_status`, so a silent stop of the audit trail is visible.
 8. **`host.policy_status()`** (read-only) answers: the policy path and load error, component and rule
@@ -314,7 +327,7 @@ plus the fixtures of this tree:
 
 | component | rules |
 | --- | --- |
-| `wa-whatsapp` | `whatsapp.send` (own chat + alerts, ≤20/min, ≤6/min per chat, alerts exempt from the global cap but ≤1/min, daily cap 200); `net.dial` + `http.request` to the three host families its manifest grants; `kv.write` on the key prefixes its store writes (`dev`, `id/`, `ses/`, `pk/`, `spk/`, `sk/`, `sync/`, `ver/`, `mac/`, `lid/`, `tc/`, `tx/`, `fence/`); `credentials.read` for `WA_WHATSAPP_TOKEN` |
+| `wa-whatsapp` | `whatsapp.send` (any chat, ≤20/min in total, ≤6/min per chat, daily cap 500; `@broadcast`, `@newsletter` and `@status` denied); `net.dial` + `http.request` to the three host families its manifest grants; `kv.write` on the key prefixes its store writes (`dev`, `id/`, `ses/`, `pk/`, `spk/`, `sk/`, `sync/`, `ver/`, `mac/`, `lid/`, `tc/`, `tx/`, `fence/`); `credentials.read` for `WA_WHATSAPP_TOKEN` |
 | `mcp-whatsapp` | `net.dial` + `http.request` on loopback (its manifest grants nothing else), `credentials.read` for `WA_MCP_WHATSAPP_TOKEN` |
 | `svc-echo`, `svc-echo-v1` | `net.dial` + `http.request` on loopback and their own `kv` namespace (fixtures; the wasip1 module of the same name is not policy-checked yet) |
 | `mcp-echo` | named, no rule needed: it declares no net and no secret |
@@ -330,18 +343,44 @@ the first message. `cargo test -p wa-governance node_policy::` drives those exac
 `the_shipped_default_policy_keeps_the_components_this_tree_installs_working` test is the one that
 fails if the file and the components drift apart.
 
-`scripts/deploy.sh` installs it as `<state>/policy.json` **only when there is no policy file**
-(`scripts/lib/install-default-policy.sh`, tested by `scripts/test-install-default-policy.sh`):
+`scripts/deploy.sh` installs it as `<state>/policy.json` (`scripts/lib/install-default-policy.sh`,
+tested by `scripts/test-install-default-policy.sh`), with one narrow exception to "never overwrite":
 
-* an existing file - the operator's, an older default, a broken one, a directory - is **never**
-  touched (content, permission bits and mtime are the test's evidence) and the deploy says `kept`;
-* a default installed once is never refreshed afterwards. Rate limits and allow lists are the
-  operator's, not the release's; a deploy that "kept the default fresh" would quietly re-widen a cap
-  somebody lowered;
+* a node with **no** policy file gets the default (**manifest mode → policy mode**: this is the one
+  deploy action that changes what the running node enforces, so the deploy says so);
+* an existing file is **refreshed only when this release can prove it is the release's own text**:
+  byte-identical to a default the tree has shipped (`policies/shipped/*.json`, kept as release
+  records, plus the current `policies/default.json` itself). Nobody's edit is overwritten by that — the
+  bytes are the release's — and the refreshed file is from then on "already the current default" and is
+  kept;
+* anything else — an edited cap, an extra chat, a half-written or broken file, a directory, a dangling
+  symlink — is **never** touched (content, size, permission bits and mtime are the test's evidence) and
+  the deploy says `kept`;
 * installing it **changes what the node enforces** (manifest mode → policy mode), so the deploy names
   every installed component the file does not mention and says that its sensitive capabilities will be
   refused with `no_policy` until a rule is added. The deploy does not refuse on that - a node with no
   policy file still works - but it never lets it be a surprise.
+
+**A node that already has its own `policy.json`** (the common case: it was installed by an earlier
+release and then edited, or the operator wrote it) does not get the new rule from a deploy, by design.
+The one-line change is the `whatsapp.send` object of `wa-whatsapp`:
+
+```json
+"whatsapp.send": {
+  "sensitive": true,
+  "allow": ["*"],
+  "deny": ["chat:*@broadcast", "chat:*@newsletter", "chat:*@status"],
+  "rate": { "per_minute": 20, "burst": 20 },
+  "per_target": { "per_minute": 6, "burst": 6 },
+  "daily_cap": 500
+}
+```
+
+An operator who wants only some chats keeps a narrower `allow` list
+(`["chat:120363000000000001@g.us"]`) — that is the knob, and a send to any other chat answers
+`whatsapp_send_policy_denied` with `reason: "target_not_allowed"`. If the file has not been edited at
+all (its bytes still match `policies/shipped/2026-11-06-whatsapp-own-chat.json`), the deploy performs
+this edit itself and says `refreshed`.
 
 After the file exists, adding a component is: install it, then add a rule for each capability its
 manifest declares (`example-new-component` in the shipped file is the shape). Until then its
@@ -391,8 +430,10 @@ cap needs only the `send` call, not the chat.
   stream owns. It needs the same shape as the wasi-socket check (grant, then `net.dial` per
   `host:port`).  Both `wa:kernel` contracts are checked (`service_components.rs`, and
   `service_components_v2.rs` for `@0.2`).
-* **Per-chat limits** need `wa:channel/messages` (`wit/kernel` 0.2, another job). Until then
-  `node_policy::check_whatsapp_send` has no caller and only the global message cap is real.
+* **Per-chat limits on *automatic* sends** still need `wa:channel/messages` (`wit/kernel` 0.2, another
+  job): transcript posting and the alert log write opaque frames, so only the global message cap is
+  real for them. For an **explicit** send they are real today, because `host.whatsapp_send` names the
+  chat (`node_policy::check_whatsapp_send`).
 * **The policy file is a single node file.** The profile stack in [KERNEL.md](KERNEL.md) (base → node
   → user → patch) still says a policy should be a layer, not a file an LCM edits in place; nothing
   here decides that.

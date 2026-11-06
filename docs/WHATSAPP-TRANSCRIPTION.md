@@ -2,6 +2,17 @@
 
 Canonical service/setup: [WHATSAPP-CONNECTOR.md](WHATSAPP-CONNECTOR.md).
 
+**Explicit requested sends are a different feature, with a different gate.** This page is the
+automatic pipeline: a voice note arrives, it is transcribed, and (only when `post_transcripts` and
+`post_allow` say so) the transcript is posted. Nothing on this page changed on 06/11. A message the
+model sends because someone asked it to (`whatsapp_send`, chat + text + optional quote and mentions)
+travels the other way: it is a job on the shared queue `whatsapp.outbox`, the node's
+`whatsapp.send` policy admits it per chat, and the component sends it
+([SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md#component-services-on-wakernel02-wasi-03-native-async),
+[GRANT-POLICY.md](GRANT-POLICY.md)). The two never share a gate: `post_allow`/holds govern the
+transcript posts, and `whatsapp.send` governs requested sends - which is why widening requested sends
+to any chat (the owner's decision) did not widen posting by one character.
+
 The linked-device service journals incoming AND synchronized own outgoing audio.
 Ingestion, independent durable compute tasks and held/confirmed outbox parts are
 separate. Incoming audio **and synchronized own outgoing audio** are posted when transcript
