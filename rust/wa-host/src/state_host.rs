@@ -71,11 +71,6 @@ impl HostStore {
         HostStore { kv: Arc::new(Mutex::new(crate::service_io::Kv::new(Some(path.into())))) }
     }
 
-    /// A store that is not backed by a file. Only for a node with no storage, and for tests.
-    pub fn memory() -> HostStore {
-        HostStore { kv: Arc::new(Mutex::new(crate::service_io::Kv::new(None))) }
-    }
-
     fn with<T>(&self, f: impl FnOnce(&mut crate::service_io::Kv) -> Result<T, String>) -> Result<T, String> {
         let mut kv = self.kv.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut kv)
@@ -128,15 +123,6 @@ pub fn sub_namespace(dir: &Path, name: &str, suffix: &str) -> Namespaced<HostSto
     namespace_in(dir, name).child(suffix)
 }
 
-/// The same, under the installed component directory (`WA_COMPONENTS_DIR`).
-pub fn namespace(name: &str) -> Namespaced<HostStore> {
-    namespace_in(&component_dir(), name)
-}
-
-pub fn sub_namespace_default(name: &str, suffix: &str) -> Namespaced<HostStore> {
-    sub_namespace(&component_dir(), name, suffix)
-}
-
 // ---- the registry of migration steps the host can run ---------------------------------------------
 
 fn host_registry() -> &'static Mutex<BTreeMap<String, Arc<Registry>>> {
@@ -170,8 +156,10 @@ fn builtin_steps() -> BTreeMap<String, Arc<Registry>> {
     table
 }
 
-/// Register (or replace) the migration registry for one component id. A test, a sidecar host or a
-/// future in-tree component uses this; the shipped table above is the default.
+/// Register (or replace) the migration registry for one component id. A sidecar host or a future
+/// in-tree component uses this; the shipped table above is the default. It is also how a test proves
+/// that a manifest declaring a version this host *can* migrate is installed rather than refused.
+#[allow(dead_code)] // the injection point for a sidecar host or a test, not yet called by the node
 pub fn register_steps(component: &str, registry: Registry) {
     host_registry()
         .lock()

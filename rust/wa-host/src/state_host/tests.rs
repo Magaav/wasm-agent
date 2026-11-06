@@ -211,6 +211,44 @@ fn the_host_store_is_the_kernel_kv() {
 }
 
 #[test]
+fn a_runtime_registered_registry_and_a_state_id_that_is_not_the_installed_name() {
+    // The sidecar path, in-process: a host may carry the steps for a component id that is not the
+    // name the module is installed as (`state_component`). The install must find them, and the
+    // namespace must be owned by the *state* id, not the file name.
+    let dir = temp_dir("registered");
+    register_steps(
+        "custom-state",
+        wa_state::Registry::new(vec![wa_state::Step::new(1, "note/v2", |batch: &mut wa_state::Batch| {
+            if let Some(value) = batch.get(b"note") {
+                batch.insert(b"note/v2", value.to_vec())?;
+                batch.remove(b"note");
+            }
+            Ok(())
+        })])
+        .unwrap(),
+    );
+    let mut manifest = manifest(Some(2));
+    manifest["state_component"] = json!("custom-state");
+    manifest["version"] = json!("2.3.4");
+
+    // A v1 namespace owned by `custom-state`, written by an older build of it.
+    {
+        let mut kv = namespace_in(&dir, "svc-queue-echo");
+        let info = ComponentInfo::new("custom-state", "1.0.0", &"b".repeat(64)).unwrap();
+        meta::open(&mut kv, &info, 1, 1_000).unwrap();
+        kv.put(b"note", b"old").unwrap();
+    }
+    let outcome = prepare_install_in(&dir, &installed("svc-queue-echo", manifest)).unwrap();
+    assert!(matches!(outcome, StateOutcome::Migrated { from: 1, to: 2, .. }), "{outcome:?}");
+    let mut kv = namespace_in(&dir, "svc-queue-echo");
+    assert_eq!(kv.get(b"note/v2").unwrap().as_deref(), Some(&b"old"[..]));
+    let meta = Meta::read(&mut kv).unwrap().unwrap();
+    assert_eq!(meta.component, "custom-state");
+    assert_eq!(meta.component_version, "2.3.4", "the manifest's semver is what the meta records");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn old_snapshots_are_pruned_but_the_newest_are_kept() {
     let dir = temp_dir("prune");
     for n in 0..6u32 {

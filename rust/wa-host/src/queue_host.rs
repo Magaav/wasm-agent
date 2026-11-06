@@ -58,8 +58,9 @@ use wa::queue::worker::TakeOutcome as GuestTake;
 /// only decides how *visible* an expiry or a timeout is, never whether it happens.
 const SWEEP_EVERY: Duration = Duration::from_secs(15);
 
-/// The alert batch is at most one per minute per queue by the library's own policy; the sweeper only
-/// decides when to ask.
+/// How many alert records `status` reads per component. Counts only; the sweeper drains the rest
+/// through `next_alerts()`.
+#[allow(dead_code)] // read by `status`, which no node surface calls yet (see the note on it)
 const ALERT_SCAN_LIMIT: usize = 64;
 
 /// One component's queue grant, as the manifest writes it.
@@ -230,6 +231,7 @@ impl QueueHost {
 
     /// Counts for `status`: per component, per granted queue, counts only. Never a payload, never a
     /// reason.
+    #[allow(dead_code)] // asserted by the tests; the /health row is a UI change this job does not make
     pub fn status(&self) -> Value {
         let components: Vec<(String, Grants)> = self
             .grants
@@ -261,6 +263,7 @@ impl QueueHost {
         json!({"components": out})
     }
 
+    #[allow(dead_code)] // the directory a test (and a future status tool) reports
     pub fn dir(&self) -> &std::path::Path {
         &self.dir
     }
@@ -301,7 +304,7 @@ pub fn node() -> &'static QueueHost {
         // Retention for the alert topic: a component that starts after an alert happened still sees
         // it (the bus is a fact log, not a mailbox - this is a bounded tail, not a queue).
         let namespace = crate::state_host::sub_namespace(&host.dir, "kernel", "b/");
-        let _ = host_retention(Arc::new(namespace));
+        host_retention(Arc::new(namespace));
         start_sweeper();
         host
     })
@@ -318,16 +321,6 @@ fn start_sweeper() {
         std::thread::sleep(SWEEP_EVERY);
         let _ = node().sweep_all();
     });
-}
-
-/// Record a component's queue grant on the node.
-pub fn register(component: &str, manifest: &Value) -> Result<Grants, String> {
-    node().register(component, manifest)
-}
-
-/// Forget a stopped component.
-pub fn unregister(component: &str) {
-    node().unregister(component)
 }
 
 // ---- WIT mapping -----------------------------------------------------------------------------------

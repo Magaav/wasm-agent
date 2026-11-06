@@ -106,10 +106,6 @@ impl BusHost {
         BusHost { bus: Bus::with_access(Arc::new(NamespaceAcl::new())), grants: Mutex::new(BTreeMap::new()) }
     }
 
-    pub fn bus(&self) -> &Bus {
-        &self.bus
-    }
-
     /// Record (or replace) a component's grants and rebuild the ACL from scratch. Called from
     /// `services::start`, after the manifest grant has been checked against the manifest itself.
     pub fn register(&self, component: &str, manifest: &Value) -> Result<Grants, String> {
@@ -226,6 +222,7 @@ impl BusHost {
     }
 
     /// Subscriptions per owner, for `status`. Counts and patterns only, never a payload.
+    #[allow(dead_code)] // asserted by the tests; wiring it into /health is a UI change this job skips
     pub fn status(&self) -> Value {
         let subscriptions: Vec<Value> = self
             .bus
@@ -354,7 +351,7 @@ fn pump(subscription: Subscription, capacity: usize) -> Arc<Channel> {
     let _ = std::thread::Builder::new().name(format!("wa-bus-{owner}")).spawn(move || {
         // The pump owns the `Subscription`: dropping it here is the unsubscribe, whether the guest
         // dropped the stream, the component stopped, or the bus revoked the owner.
-        let mut subscription = subscription;
+        let subscription = subscription;
         loop {
             for event in subscription.drain(0) {
                 shared.push(event);
