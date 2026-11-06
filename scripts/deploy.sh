@@ -1233,6 +1233,36 @@ if [ -d "$MCP_DATA_SCRIPTS" ]; then
   done
 fi
 
+# Install the shipped default grant policy where the operator has none (`docs/GRANT-POLICY.md`, "The
+# shipped default"). A policy file's PRESENCE is what turns the policy layer on (`node_policy::Mode`),
+# so this file's first appearance is the one thing a deploy does that changes what the running node
+# enforces - which is exactly why it is written only when there is no file at all, never refreshed
+# afterwards, and why the components it does not name are listed here: after the restart their
+# sensitive capabilities are refused with `no_policy` until a rule is added. Installing it is never a
+# refusal of the deploy - a node with no policy file still works, in manifest mode (the manifest
+# grant alone), which is today's behaviour - but a failure to install it is said out loud.
+# The logic lives in scripts/lib/install-default-policy.sh because scripts/test.sh runs it directly.
+POLICY_INSTALLER="$ROOT/scripts/lib/install-default-policy.sh"
+[ -f "$POLICY_INSTALLER" ] || POLICY_INSTALLER="$(dirname "$0")/lib/install-default-policy.sh"
+if [ -f "$POLICY_INSTALLER" ]; then
+  . "$POLICY_INSTALLER"
+  WA_POLICY_DEST="$SENTINEL_CONFIG/policy.json"
+  install_default_policy "$ROOT/policies/default.json" "$WA_POLICY_DEST"
+  case $? in
+    0) ;; # installed, or an operator's file kept - both lines are on stdout above
+    2) note "no policies/default.json in $ROOT: policy.json was not installed; the node runs in manifest mode (the manifest grant is the only gate)" ;;
+    *) note "policy.json could not be installed at $WA_POLICY_DEST; the node runs in manifest mode (the manifest grant is the only gate)" ;;
+  esac
+  if [ -f "$WA_POLICY_DEST" ]; then
+    UNRULED_COMPONENTS="$(policy_unlisted_components "$WA_POLICY_DEST" "$SENTINEL_CONFIG/components" | tr '\n' ' ')"
+    if [ -n "$UNRULED_COMPONENTS" ]; then
+      note "installed component(s) with no rule in $WA_POLICY_DEST: $UNRULED_COMPONENTS - their sensitive capabilities (kv.write, net.dial, http.request, credentials.read, whatsapp.send, exec.run) are refused with no_policy; add a rule for each"
+    fi
+  fi
+else
+  note "scripts/lib/install-default-policy.sh is not in this tree: policy.json was not installed"
+fi
+
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
 # self-update skill, and has never carried these: the scripts that read the inbox, the job files that
 # schedule and trigger them, and the entry point that says "emit" were placed in <install>/scripts by hand.

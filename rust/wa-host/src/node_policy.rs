@@ -7,12 +7,20 @@
 //!
 //! Loaded once, lazily, on the first check or the first `host.policy_status`:
 //!
-//! * `WA_GRANT_POLICY` (else `<state>/policy.json`) — an absent file is an **empty** policy, which
-//!   the crate defines as "permissive for ordinary capabilities, default-deny for sensitive ones"
-//!   (`credentials.read`, `net.dial`, `http.request`, `whatsapp.send`, `exec.run`, `kv.write`).
-//! * a file that does not parse is the same empty policy plus one line on the node's log: the node
-//!   starts, the capabilities the policy governs are refused with `no_policy`, and the error is
-//!   visible in `host.policy_status` instead of being guessed at.
+//! * `WA_GRANT_POLICY` (else `<state>/policy.json`). **The presence of that file is what turns the
+//!   policy layer on**, and that is deliberate: installing a new binary must never take capabilities
+//!   away from a node that runs (`docs/GRANT-POLICY.md`, "Manifest mode").
+//!   * **absent** → [`Mode::Manifest`]: the manifest grant stays the only gate, exactly the behaviour
+//!     before the policy layer existed. Nothing is refused for want of a rule; every check is still
+//!     counted and the default-sensitive ones are audited with the reason `manifest_mode`; one
+//!     warning is written to the node's log at load.
+//!   * **present and parseable** → [`Mode::Policy`]: a rule the operator wrote is enforced, and a
+//!     sensitive capability **with no rule is refused** with `no_policy` (the crate's default).
+//!   * **present and broken** → also [`Mode::Policy`], with an empty policy plus one line on the
+//!     node's log: the node starts, the capabilities the policy governs are refused with
+//!     `no_policy`, and the error is visible in `host.policy_status`. A `policy.json` an operator
+//!     half-wrote must not silently fall back to "no limits" - that is the failure this layer
+//!     exists to prevent. Only a file that is *not there at all* means manifest mode.
 //! * `WA_GRANT_POLICY_STATE` (else `<state>/grant-policy.state.json`) restores the budgets
 //!   (buckets, daily counters, approvals); a missing file is fresh budgets. It is written on the
 //!   tick (every five minutes) so a restart continues the same limits.
@@ -26,9 +34,35 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use wa_grant_policy::{
-    AuditError, AuditRecord, AuditSink, Decision, Engine, FileAudit, MemoryAudit, PolicySet,
+    AuditError, AuditRecord, AuditSink, Decision, Engine, FileAudit, MemoryAudit, PolicySet, TargetMode,
+    DEFAULT_SENSITIVE,
 };
 
+/// Why a decided-in-manifest-mode record says what it says (`docs/GRANT-POLICY.md`, "Manifest mode").
+/// It rides in the audit record's `reason` field, so a reader can tell a call the manifest alone
+/// allowed from one a written rule allowed.
+pub const MANIFEST_REASON: &str = "manifest_mode";
+
+/// Which gate decides a sensitive capability the policy file names no rule for.
+///
+/// The mode is decided once, at load, by whether the policy file is there - see the module docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// No policy file: the manifest grant is the only gate (`docs/GRANT-POLICY.md`, "Manifest
+    /// mode"). Today's behaviour for a node that never wrote a policy.
+    Manifest,
+    /// A policy file is loaded: a sensitive capability with no rule is refused with `no_policy`.
+    Policy,
+}
+
+impl Mode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Mode::Manifest => "manifest",
+            Mode::Policy => "policy",
+        }
+    }
+}
 /// How many of the last refusals the operator view keeps (component, capability, reason only —
 /// never a target, which is the whole point of the digest in the audit record).
 const REFUSAL_RING: usize = 32;
@@ -75,6 +109,9 @@ struct Counters {
     deny: AtomicU64,
     rate_limited: AtomicU64,
     needs_approval: AtomicU64,
+    /// Decisions the manifest alone answered (`Mode::Manifest`), i.e. the checks no policy file
+    /// governed. Counted apart from `allow` so "the policy layer is off" is visible, not inferred.
+    manifest_mode: AtomicU64,
     audit_errors: AtomicU64,
 }
 
@@ -118,6 +155,11 @@ pub struct NodePolicy {
     /// must not produce 10 000 log lines.
     logged: Mutex<HashMap<String, u64>>,
     paths: Paths,
+    /// What turns the policy layer on: a policy file that is present (`Mode::Policy`) or not
+    /// (`Mode::Manifest`). Fixed at load; a reload is a new process.
+    mode: Mode,
+    /// A policy file parsed. `false` also for a file that is present but broken - read `mode` for
+    /// "is the policy layer on at all".
     loaded: bool,
     load_error: Option<String>,
     last_save_ms: AtomicU64,
@@ -126,21 +168,37 @@ pub struct NodePolicy {
 impl NodePolicy {
     /// Load the policy file and restore the budgets. Never fails: a policy that cannot be read is
     /// reported and behaves as an empty one.
+    ///
+    /// **Only a file that is absent selects [`Mode::Manifest`].** A file that is there and does not
+    /// parse, and a file that cannot be read (permissions, I/O), both select [`Mode::Policy`] with an
+    /// empty policy: the answered question is then "default deny for the sensitive capabilities" and
+    /// the error is on the node's log and in `host.policy_status`. A policy file this node cannot
+    /// understand is not evidence that the operator wants no limits.
     pub fn open(paths: Paths) -> NodePolicy {
-        let (policy, loaded, load_error) = match std::fs::read(&paths.policy) {
+        let (policy, mode, loaded, load_error) = match std::fs::read(&paths.policy) {
             Ok(bytes) => match PolicySet::parse(&String::from_utf8_lossy(&bytes)) {
-                Ok(policy) => (policy, true, None),
+                Ok(policy) => (policy, Mode::Policy, true, None),
                 Err(error) => {
                     eprintln!("[policy] {}: {error}", paths.policy.display());
-                    (PolicySet::empty(), false, Some(error.to_string()))
+                    (PolicySet::empty(), Mode::Policy, false, Some(error.to_string()))
                 }
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (PolicySet::empty(), false, None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (PolicySet::empty(), Mode::Manifest, false, None)
+            }
             Err(error) => {
                 eprintln!("[policy] {}: {error}", paths.policy.display());
-                (PolicySet::empty(), false, Some(format!("{}: {error}", paths.policy.display())))
+                (PolicySet::empty(), Mode::Policy, false, Some(format!("{}: {error}", paths.policy.display())))
             }
         };
+        if mode == Mode::Manifest {
+            // One line, at load, not one per call: this is a statement about the node's
+            // configuration, and an operator who wants the limits writes the file.
+            eprintln!(
+                "[policy] {MANIFEST_REASON}: no policy file at {} - the manifest grant is the only gate for sensitive capabilities; decisions are counted and audited as {MANIFEST_REASON} (docs/GRANT-POLICY.md)",
+                paths.policy.display()
+            );
+        }
         let mut engine = Engine::new(policy);
         if let Ok(text) = std::fs::read_to_string(&paths.state) {
             if let Err(error) = engine.restore_json(&text) {
@@ -161,10 +219,17 @@ impl NodePolicy {
             refusals: Mutex::new(VecDeque::new()),
             logged: Mutex::new(HashMap::new()),
             paths,
+            mode,
             loaded,
             load_error,
             last_save_ms: AtomicU64::new(0),
         }
+    }
+
+    /// Which gate decides an unruled sensitive capability on this node (`Mode::Manifest` until a
+    /// policy file is written).
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     fn engine(&self) -> MutexGuard<'_, Engine> {
@@ -172,8 +237,19 @@ impl NodePolicy {
     }
 
     /// Check one sensitive call and audit it. The budget is charged only on `Allow`.
+    ///
+    /// In [`Mode::Manifest`] the answer is `Allow` - the manifest grant, which the caller has already
+    /// applied, is the only gate - and the call is still counted (`decisions.manifest_mode`) and, for
+    /// a capability that is sensitive by default, audited with reason [`MANIFEST_REASON`].
     pub fn check_at(&self, component: &str, capability: &str, target: Option<&str>, now: u64) -> Decision {
         self.counters.checks.fetch_add(1, Ordering::Relaxed);
+        if self.mode == Mode::Manifest {
+            self.record_manifest_at(component, capability, target, now);
+            self.counters.manifest_mode.fetch_add(1, Ordering::Relaxed);
+            let decision = Decision::Allow;
+            self.count(component, capability, &decision, now);
+            return decision;
+        }
         let decision = {
             let mut engine = self.engine();
             let mut audit = self.audit.lock().unwrap_or_else(|e| e.into_inner());
@@ -181,6 +257,28 @@ impl NodePolicy {
         };
         self.count(component, capability, &decision, now);
         decision
+    }
+
+    /// Audit one manifest-mode decision. Sensitive-by-default capabilities are the ones a policy
+    /// file would audit, so the trail keeps the same shape either way; an ordinary capability (a kv
+    /// read, a log line) is counted and not written, which is also what a rule-less policy does.
+    /// A write failure is counted and logged, and **never refuses the call**: in manifest mode the
+    /// manifest grant is the only gate, so a full audit disk must not stop a working component.
+    fn record_manifest_at(&self, component: &str, capability: &str, target: Option<&str>, now: u64) {
+        if !DEFAULT_SENSITIVE.contains(&capability) {
+            return;
+        }
+        let mut record = AuditRecord::new(now, component, capability, target, &Decision::Allow, TargetMode::Digest);
+        record.reason = MANIFEST_REASON.to_string();
+        let written = self.audit.lock().unwrap_or_else(|e| e.into_inner()).write(&record);
+        if let Err(error) = written {
+            self.counters.audit_errors.fetch_add(1, Ordering::Relaxed);
+            self.say(
+                &format!("audit\u{1f}{MANIFEST_REASON}"),
+                &format!("[policy] audit_error ({MANIFEST_REASON}): sink {}: {}", error.sink, error.detail),
+                now,
+            );
+        }
     }
 
     /// Enforce a rule **only when the operator wrote one** for this component/capability. This is
@@ -257,12 +355,18 @@ impl NodePolicy {
             }
         }
         let key = format!("{component}\u{1f}{capability}");
+        self.say(&key, &format!("[policy] {component} {capability} -> {decision}"), now);
+    }
+
+    /// One log line per key per second: a loop that is refused 10 000 times must not produce 10 000
+    /// log lines. The map is bounded so a hostile name space cannot grow it.
+    fn say(&self, key: &str, message: &str, now: u64) {
         let speak = {
             let mut logged = self.logged.lock().unwrap_or_else(|e| e.into_inner());
-            let last = logged.get(&key).copied().unwrap_or(0);
+            let last = logged.get(key).copied().unwrap_or(0);
             if now.saturating_sub(last) >= 1000 || now < last {
-                if logged.len() < 64 || logged.contains_key(&key) {
-                    logged.insert(key, now);
+                if logged.len() < 64 || logged.contains_key(key) {
+                    logged.insert(key.to_string(), now);
                 }
                 true
             } else {
@@ -270,7 +374,7 @@ impl NodePolicy {
             }
         };
         if speak {
-            eprintln!("[policy] {component} {capability} -> {decision}");
+            eprintln!("{message}");
         }
     }
 
@@ -328,6 +432,10 @@ impl NodePolicy {
             .collect();
         json!({
             "loaded": self.loaded,
+            // "manifest" = no policy file: the manifest grant is the only gate for sensitive
+            // capabilities (docs/GRANT-POLICY.md). "policy" = a file is loaded (or was present and
+            // is reported in `error`), so an unruled sensitive capability is `no_policy`.
+            "mode": self.mode().as_str(),
             "policy": {"path": self.paths.policy.to_string_lossy(), "error": self.load_error, "components": components, "rules": rules},
             "state": {
                 "path": self.paths.state.to_string_lossy(),
@@ -354,6 +462,7 @@ impl NodePolicy {
                 "deny": self.counters.deny.load(Ordering::Relaxed),
                 "rate_limited": self.counters.rate_limited.load(Ordering::Relaxed),
                 "needs_approval": self.counters.needs_approval.load(Ordering::Relaxed),
+                "manifest_mode": self.counters.manifest_mode.load(Ordering::Relaxed),
                 "audit_errors": self.counters.audit_errors.load(Ordering::Relaxed),
             },
             "recent_refusals": refusals,
@@ -411,6 +520,7 @@ pub fn status_summary() -> Value {
     let status = node().status();
     json!({
         "loaded": status["loaded"],
+        "mode": status["mode"],
         "policy": status["policy"],
         "decisions": status["decisions"],
         "recent_refusals": status["recent_refusals"],
@@ -433,17 +543,73 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_policy_file_is_default_deny_only_for_sensitive_capabilities() {
+    fn an_absent_policy_file_is_manifest_mode_not_default_deny() {
+        // The upgrade rule (docs/GRANT-POLICY.md, "Manifest mode"): installing a binary that speaks
+        // the policy layer must not take capabilities away from a node that never wrote policy.json.
         let paths = temp_paths("absent");
         let policy = NodePolicy::open(paths.clone());
+        assert_eq!(policy.mode(), Mode::Manifest);
         assert!(!policy.loaded, "an absent file is reported as not loaded");
-        // Sensitive by default: no rule means no.
-        assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some("session/a"), 1_000), Decision::Deny(wa_grant_policy::Reason::NoPolicy));
-        assert_eq!(policy.check_at("wa-whatsapp", "credentials.read", Some("WA_TOKEN"), 1_000), Decision::Deny(wa_grant_policy::Reason::NoPolicy));
-        assert_eq!(policy.check_at("wa-whatsapp", "net.dial", Some("web.whatsapp.com:443"), 1_000), Decision::Deny(wa_grant_policy::Reason::NoPolicy));
+        // Sensitive by default, and no rule anywhere: the manifest grant stays the only gate.
+        assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some("ses/a"), 1_000), Decision::Allow);
+        assert_eq!(policy.check_at("wa-whatsapp", "credentials.read", Some("WA_TOKEN"), 1_000), Decision::Allow);
+        assert_eq!(policy.check_at("wa-whatsapp", "net.dial", Some("web.whatsapp.com:443"), 1_000), Decision::Allow);
+        assert_eq!(policy.check_at("wa-whatsapp", "http.request", Some("mmg.whatsapp.net:443"), 1_000), Decision::Allow);
         // Ordinary capabilities (logging, reading the component's own state) are unaffected.
-        assert_eq!(policy.check_at("wa-whatsapp", "kv.read", Some("session/a"), 1_000), Decision::Allow);
+        assert_eq!(policy.check_at("wa-whatsapp", "kv.read", Some("ses/a"), 1_000), Decision::Allow);
         assert_eq!(policy.check_at("wa-whatsapp", "log.write", None, 1_000), Decision::Allow);
+        // Counted, and counted as manifest mode rather than as an allow a rule produced.
+        let status = policy.status();
+        assert_eq!(status["mode"], "manifest");
+        assert_eq!(status["decisions"]["checks"], 6);
+        assert_eq!(status["decisions"]["manifest_mode"], 6);
+        assert_eq!(status["decisions"]["deny"], 0, "manifest mode refuses nothing for want of a rule");
+        assert!(status["recent_refusals"].as_array().unwrap().is_empty());
+        // Audited as manifest_mode for the sensitive ones, with the target still a digest.
+        let trail = std::fs::read_to_string(&paths.audit).unwrap_or_default();
+        assert_eq!(trail.matches(MANIFEST_REASON).count(), 4, "four of the six are sensitive by default: {trail}");
+        assert!(!trail.contains("ses/a"), "the audit trail never carries the key: {trail}");
+        assert!(trail.contains("sha256:"), "targets are digests: {trail}");
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_loaded_policy_file_makes_an_unruled_sensitive_capability_no_policy() {
+        // The other half of the same rule: the file's presence is what turns default-deny on, and
+        // it applies to the capabilities that have no rule beside the ones that do.
+        let paths = temp_paths("modes");
+        test_policy(
+            &paths,
+            r#"{"version":1,"components":{"wa-whatsapp":{"capabilities":{
+                 "net.dial":{"allow":["web.whatsapp.com:443"]},
+                 "kv.write":{},
+                 "credentials.read":{},
+                 "http.request":{},
+                 "whatsapp.send":{"allow":["chat:self"]}
+               }}}}"#,
+        );
+        let policy = NodePolicy::open(paths.clone());
+        assert_eq!(policy.mode(), Mode::Policy);
+        assert!(policy.loaded);
+        assert_eq!(policy.status()["mode"], "policy");
+        assert_eq!(policy.check_at("wa-whatsapp", "net.dial", Some("web.whatsapp.com:443"), 1_000), Decision::Allow);
+        // A rule with no limits is "any target, no rate": the documented way to keep a capability.
+        assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some("anything/at/all"), 1_000), Decision::Allow);
+        // A component the file does not name at all: every sensitive capability is refused.
+        assert_eq!(
+            policy.check_at("unlisted-component", "net.dial", Some("web.whatsapp.com:443"), 1_000),
+            Decision::Deny(wa_grant_policy::Reason::NoPolicy)
+        );
+        assert_eq!(
+            policy.check_at("unlisted-component", "kv.write", Some("k"), 1_000),
+            Decision::Deny(wa_grant_policy::Reason::NoPolicy)
+        );
+        // An ordinary capability in an unlisted component is still allowed: the policy has nothing
+        // to say about a kv read.
+        assert_eq!(policy.check_at("unlisted-component", "kv.read", Some("k"), 1_000), Decision::Allow);
+        let status = policy.status();
+        assert_eq!(status["decisions"]["manifest_mode"], 0, "no decision here came from manifest mode");
+        assert_eq!(status["decisions"]["deny"], 2);
         std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
     }
 
@@ -515,14 +681,83 @@ mod tests {
     }
 
     #[test]
-    fn an_unparsable_policy_file_is_reported_and_behaves_as_an_empty_one() {
+    fn an_unparsable_policy_file_is_reported_and_refuses_sensitive_capabilities() {
         let paths = temp_paths("bad");
         test_policy(&paths, r#"{"version":1,"components":{"x":{"capabilities":{"kv.write":{"per_minutes":1}}}}}"#);
         let policy = NodePolicy::open(paths.clone());
         assert!(!policy.loaded);
+        // A half-written file is NOT "no file": falling back to manifest mode here would silently
+        // remove the limits an operator was in the middle of writing.
+        assert_eq!(policy.mode(), Mode::Policy);
         let error = policy.status()["policy"]["error"].as_str().unwrap_or_default().to_string();
         assert!(error.contains("not valid JSON"), "{error}");
         assert_eq!(policy.check_at("x", "kv.write", Some("k"), 1_000), Decision::Deny(wa_grant_policy::Reason::NoPolicy));
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    /// The shipped default policy, checked against the calls the components in this tree actually
+    /// make. This is the upgrade test with teeth: the deploy installs `policies/default.json` on the
+    /// first node that has none (`docs/GRANT-POLICY.md`, "The shipped default"), so it must keep
+    /// wa-whatsapp dialling, writing kv, downloading and reading its secret - and it must still
+    /// refuse the chats the operator did not allow.
+    #[test]
+    fn the_shipped_default_policy_keeps_the_components_this_tree_installs_working() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../policies/default.json");
+        PolicySet::parse(&std::fs::read_to_string(&source).expect("policies/default.json is in the tree"))
+            .expect("policies/default.json parses as schema 1");
+        let paths = temp_paths("default");
+        std::fs::copy(&source, &paths.policy).unwrap();
+        let policy = NodePolicy::open(paths.clone());
+        assert_eq!(policy.mode(), Mode::Policy);
+        let now = 1_760_000_000_000u64; // a realistic epoch: the daily counter needs a real UTC day
+
+        // wa-whatsapp: the WhatsApp hosts its manifest grants, both for the socket and for media.
+        for addr in ["web.whatsapp.com:443", "g.whatsapp.net:443", "mmg.whatsapp.net:443", "static.whatsapp.net:443"] {
+            assert_eq!(policy.check_at("wa-whatsapp", "net.dial", Some(addr), now), Decision::Allow, "net.dial {addr}");
+            assert_eq!(policy.check_at("wa-whatsapp", "http.request", Some(addr), now), Decision::Allow, "http.request {addr}");
+        }
+        // Every key prefix `rust/components/wa-whatsapp/src/store.rs` and `lib.rs` write.
+        for key in ["dev", "id/5511@s.whatsapp.net", "ses/5511@s.whatsapp.net", "pk/17", "spk/3", "sk/5511@s.whatsapp.net", "sync/abcd", "ver/app", "mac/app/abcd", "lid/12", "tc/12", "tx/5511@s.whatsapp.net/ABC"] {
+            assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some(key), now), Decision::Allow, "kv.write {key}");
+        }
+        assert_eq!(policy.check_at("wa-whatsapp", "credentials.read", Some("WA_WHATSAPP_TOKEN"), now), Decision::Allow);
+        // Own chat and the alerts chat; a group and a broadcast list are not part of stage 1.
+        assert_eq!(policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:self"), now), Decision::Allow);
+        assert_eq!(
+            policy.check_at("wa-whatsapp", "whatsapp.send", Some("120363000000000001@g.us"), now),
+            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed)
+        );
+        assert_eq!(
+            policy.check_at("wa-whatsapp", "whatsapp.send", Some("status@broadcast"), now),
+            Decision::Deny(wa_grant_policy::Reason::TargetDenied)
+        );
+        // Alerts are exempt from the global 20/min cap but capped at 1/min themselves: the next one
+        // in the same millisecond is refused, and the reason says which bucket.
+        assert_eq!(policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:alerts"), now), Decision::Allow);
+        assert!(matches!(
+            policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:alerts"), now),
+            Decision::RateLimited { reason: wa_grant_policy::Reason::TargetRateLimited, .. }
+        ));
+        // A key this node's store never writes is still refused, and so is a host it never dials.
+        assert_eq!(
+            policy.check_at("wa-whatsapp", "kv.write", Some("someone-elses/key"), now),
+            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed)
+        );
+        assert_eq!(
+            policy.check_at("wa-whatsapp", "net.dial", Some("evil.example:443"), now),
+            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed)
+        );
+        // The MCP fixtures reach the connector over loopback and nothing else.
+        assert_eq!(policy.check_at("mcp-whatsapp", "net.dial", Some("127.0.0.1:3001"), now), Decision::Allow);
+        assert_eq!(
+            policy.check_at("mcp-whatsapp", "net.dial", Some("10.0.0.5:3001"), now),
+            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed)
+        );
+        assert_eq!(policy.check_at("mcp-whatsapp", "credentials.read", Some("WA_MCP_WHATSAPP_TOKEN"), now), Decision::Allow);
+        // svc-echo (wasip1) and mcp-echo: the named rules exist, and a component named in the file
+        // is never refused for want of a rule.
+        assert_eq!(policy.check_at("svc-echo", "net.dial", Some("127.0.0.1:8799"), now), Decision::Allow);
+        assert_eq!(policy.check_at("mcp-echo", "kv.read", Some("k"), now), Decision::Allow);
         std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
     }
 

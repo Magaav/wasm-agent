@@ -5,9 +5,10 @@
 //! Two layers are enforced here, in this order (`docs/GRANT-POLICY.md`, "How the host wires it"):
 //!
 //! 1. the **manifest grant** (`Grant`) - may this component reach this address at all;
-//! 2. the **node policy** (`node_policy.rs`) - how often, to whom, with what record. A sensitive
-//!    capability with no rule is refused (`no_policy`), which is the crate's default and the reason
-//!    a node that runs components which write state wants a policy file.
+//! 2. the **node policy** (`node_policy.rs`) - how often, to whom, with what record. A rule the
+//!    operator wrote is enforced; a sensitive capability with no rule is refused (`no_policy`) when a
+//!    policy file is loaded, while a node with **no** policy file runs in manifest mode, where the
+//!    manifest grant above stays the only gate and the decision is audited as `manifest_mode`.
 //!
 //! Every answered function also records one telemetry observation
 //! (`node_telemetry::HostCallGuard`): the latency of the host call, its outcome, a sampled span.
@@ -112,6 +113,15 @@ fn target_of(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// A URL authority as a policy target. Host names are case-insensitive (and the manifest grant
+/// compares them lowercased, `services::dial_allowed`), so the policy sees the lowercased form: a
+/// rule written for `web.whatsapp.com:443` must not be defeated - and must not defeat a working
+/// component - because a client emitted `WSS://WEB.WHATSAPP.COM/...`. Patterns are matched case
+/// sensitively by the crate, so this is where the two layers are made to agree.
+fn authority_target(authority: &str) -> String {
+    authority.to_ascii_lowercase()
+}
+
 impl wa::kernel::websocket::Host for State {}
 impl wa::kernel::websocket::HostSocket for State {
     fn connect(&mut self, url: String, origin: Option<String>) -> Result<Resource<WsSocket>, KError> {
@@ -121,7 +131,7 @@ impl wa::kernel::websocket::HostSocket for State {
             let authority = url_authority(&url)
                 .filter(|addr| dial_allowed(&self.net, addr))
                 .ok_or_else(|| KError::Refused(url.clone()))?;
-            gate(&self.name, "net.dial", Some(&authority))?;
+            gate(&self.name, "net.dial", Some(&authority_target(&authority)))?;
             let conn = WsConn::open(&url, origin.as_deref()).map_err(KError::Failed)?;
             self.table.push(WsSocket { conn: Some(conn), authority }).map_err(|e| KError::Failed(e.to_string()))
         })();
@@ -185,7 +195,7 @@ impl wa::kernel::http::HostPending for State {
             let authority = url_authority(&req.url)
                 .filter(|addr| dial_allowed(&self.net, addr))
                 .ok_or_else(|| KError::Refused(req.url.clone()))?;
-            gate(&self.name, "http.request", Some(&authority))?;
+            gate(&self.name, "http.request", Some(&authority_target(&authority)))?;
             let headers: serde_json::Map<String, serde_json::Value> = req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
             let meta = serde_json::json!({"url": req.url, "method": req.method, "headers": headers});
             let state = http_start(&meta, req.body).map_err(KError::Failed)?;
@@ -273,7 +283,8 @@ impl wa::kernel::kv::Host for State {
         let target = target_of(&key);
         let out = (|| {
             // The component's own namespace, but a write is a shadow copy of state: sensitive by
-            // default, so a node without a rule for it refuses the write with `no_policy`.
+            // default, so a node with a policy file and no rule for it refuses the write with
+            // `no_policy` (a node with no policy file runs in manifest mode).
             gate(&self.name, "kv.write", Some(&target))?;
             self.kv.set(key, value).map_err(kv_error)
         })();
@@ -522,6 +533,19 @@ mod tests {
             Err(KError::Refused(reason)) => assert_eq!(reason, "capability_rate_limited"),
             other => panic!("expected refused(capability_rate_limited), got {other:?}"),
         }
+    }
+
+    /// An address becomes a policy target in the form the rules are written in: lowercase, because
+    /// host names are case-insensitive and the manifest grant already compares them that way, so an
+    /// uppercase scheme/host in a URL cannot slip past a rule (or be refused by one).
+    #[test]
+    fn an_authority_is_a_policy_target_in_lowercase() {
+        assert_eq!(authority_target("web.whatsapp.com:443"), "web.whatsapp.com:443");
+        assert_eq!(authority_target("WEB.WhatsApp.COM:443"), "web.whatsapp.com:443");
+        assert_eq!(authority_target("[::1]:8799"), "[::1]:8799");
+        // The rule in the shipped default matches it whatever case the client used.
+        let rule = wa_grant_policy::Pattern::new("web.whatsapp.com:443").unwrap();
+        assert!(rule.matches(&authority_target("Web.WhatsApp.com:443")));
     }
 
     /// A kv key becomes a policy target with the same bytes the guest used: no truncation, so two

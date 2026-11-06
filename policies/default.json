@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "sensitive_capabilities": [],
+  "components": {
+    "wa-whatsapp": {
+      "note": "Stage 1 of docs/GRANT-POLICY.md: send only to our own chat and the alerts chat, <= 20 messages/min in total, <= 6/min per chat, alerts exempt from the global cap but <= 1/min. net.dial and http.request mirror the addresses in rust/components/wa-whatsapp/manifest.json; each pattern may only ever NARROW that manifest. kv.write lists the key prefixes rust/components/wa-whatsapp/src/store.rs writes (dev, id/, ses/, pk/, spk/, sk/, sync/, ver/, mac/, lid/, tc/) plus the transcript prefix tx/ from src/lib.rs. credentials.read names the secret the component is given. Stage 2 - an allowlisted chat - only widens whatsapp.send.allow.",
+      "capabilities": {
+        "whatsapp.send": {
+          "sensitive": true,
+          "require_approval": false,
+          "allow": ["chat:self", "chat:alerts"],
+          "deny": ["*@broadcast", "*@newsletter"],
+          "rate": { "per_minute": 20, "burst": 20 },
+          "per_target": { "per_minute": 6, "burst": 6 },
+          "target_rates": [
+            { "pattern": "chat:alerts", "per_minute": 1, "burst": 1, "exempt_from_global": true }
+          ],
+          "daily_cap": 200
+        },
+        "net.dial": {
+          "allow": ["web.whatsapp.com:443", "*.whatsapp.net:443", "*.whatsapp.com:443"],
+          "rate": { "per_minute": 60, "burst": 120 }
+        },
+        "http.request": {
+          "allow": ["web.whatsapp.com:443", "*.whatsapp.net:443", "*.whatsapp.com:443"],
+          "rate": { "per_minute": 60, "burst": 120 }
+        },
+        "kv.write": {
+          "allow": ["dev", "id/*", "ses/*", "pk/*", "spk/*", "sk/*", "sync/*", "ver/*", "mac/*", "lid/*", "tc/*", "tx/*"],
+          "rate": { "per_minute": 240, "burst": 480 }
+        },
+        "credentials.read": {
+          "allow": ["WA_WHATSAPP_TOKEN"],
+          "rate": { "per_minute": 4 }
+        }
+      }
+    },
+    "mcp-whatsapp": {
+      "note": "Read tools over the local connector API. Its manifest grants loopback only, so these rules are loopback only; the token is the one its manifest hands it through file_env.",
+      "capabilities": {
+        "net.dial": {
+          "allow": ["127.0.0.1:*", "[::1]:*"],
+          "rate": { "per_minute": 120, "burst": 240 }
+        },
+        "http.request": {
+          "allow": ["127.0.0.1:*", "[::1]:*"],
+          "rate": { "per_minute": 120, "burst": 240 }
+        },
+        "credentials.read": {
+          "allow": ["WA_MCP_WHATSAPP_TOKEN"],
+          "rate": { "per_minute": 4 }
+        }
+      }
+    },
+    "svc-echo": {
+      "note": "Fixture (wasip1): one granted dial to the host's own port. Present so the fixtures of this tree are never refused for want of a rule. The wasip1 runner is not policy-checked yet (docs/GRANT-POLICY.md, 'What is not wired yet').",
+      "capabilities": {
+        "net.dial": { "allow": ["127.0.0.1:*", "[::1]:*"], "rate": { "per_minute": 60, "burst": 120 } }
+      }
+    },
+    "mcp-echo": {
+      "note": "Fixture: declares no net and no secret, so it needs no rule. It is listed so the file says what the node runs, and so that adding a capability to it is a visible edit here too."
+    },
+    "example-new-component": {
+      "note": "TEMPLATE - not a component this tree installs; a policy rule can only narrow a manifest grant, so an entry for a name nothing installs governs nothing. To admit a new component: copy this entry, rename it to the installed name, and keep only the capabilities its manifest declares. A sensitive capability (credentials.read, net.dial, http.request, whatsapp.send, exec.run, kv.write) with NO rule is refused with no_policy once a policy file exists - that is the point of the file. {} means 'any target, no rate'; a non-empty allow list REFUSES a call that has no target. See docs/GRANT-POLICY.md.",
+      "capabilities": {
+        "net.dial": { "allow": ["api.example.com:443", "*.example.net:443"], "rate": { "per_minute": 30, "burst": 60 } },
+        "http.request": { "allow": ["api.example.com:443"], "rate": { "per_minute": 30 } },
+        "kv.write": { "allow": ["myns/*"], "rate": { "per_minute": 120, "burst": 240 } },
+        "kv.read": {},
+        "credentials.read": { "allow": ["MY_COMPONENT_TOKEN"], "rate": { "per_minute": 4 }, "require_approval": true },
+        "exec.run": { "effect": "deny" }
+      }
+    }
+  }
+}

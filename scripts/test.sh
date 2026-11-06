@@ -297,9 +297,21 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ho
 # The node governance surfaces themselves (docs/GRANT-POLICY.md, docs/TELEMETRY.md): the policy status
 # and the telemetry capability answer from the libraries the host enforces, over the bounded stores
 # both write into. Its own scratch home, so the policy file it writes cannot govern a later check.
+# Both modes, because a policy file's presence is what turns the policy layer on and one process loads
+# it once: manifest mode (no file: the manifest grant stays the only gate) and policy mode (a file,
+# with default-deny for a sensitive capability that has no rule).
+GOVERNANCE_HOME="$(mktemp -d)"
+WASM_AGENT_HOME="$GOVERNANCE_HOME" WA_GOVERNANCE_CASE=manifest WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance.lua" "$BIN" --db "$GOVERNANCE_HOME/db.sqlite" | grep 'node governance ok'
+rm -rf "$GOVERNANCE_HOME"
 GOVERNANCE_HOME="$(mktemp -d)"
 WASM_AGENT_HOME="$GOVERNANCE_HOME" WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-node-governance.lua" "$BIN" --db "$GOVERNANCE_HOME/db.sqlite" | grep 'node governance ok'
 rm -rf "$GOVERNANCE_HOME"
+# The shipped default policy and its install (docs/GRANT-POLICY.md, "The shipped default"): the file
+# parses, an operator's policy.json is never overwritten, a missing one is installed once, and a
+# component the file does not name is named rather than discovered as a refused write later. Hermetic:
+# scratch directories, no cargo, no network. `cargo test -p wa-host node_policy::tests` above is what
+# proves the default keeps the components of this tree working.
+gate_run bash scripts/test-install-default-policy.sh
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host subagents::
 # What an operation says about itself when its bound kills it: the measured phases, and never a

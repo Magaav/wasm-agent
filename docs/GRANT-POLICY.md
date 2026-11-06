@@ -3,7 +3,17 @@
 Status 12/11: library built and tested (`rust/wa-grant-policy`, 40 unit tests + doctest) and **wired
 into `wa-host`** (`node_policy.rs`): the check runs before every sensitive `wa:kernel` host call and
 before every outbound wasi-socket connect, the audit trail is written under a bounded directory, and
-`host.policy_status` answers with the decisions. What is still open is listed at the end: approvals
+`host.policy_status` answers with the decisions.
+
+**A node with no policy file runs in manifest mode** (`Mode::Manifest`): the manifest grant stays the
+only gate, exactly the behaviour before this layer existed, and each decision is counted and audited
+as `manifest_mode`. Default-deny for a sensitive capability applies only when a policy file is
+loaded and names no rule for that component/capability. That is why upgrading a node cannot take
+capabilities away from a component that works today, and it is why the policy layer turns on by
+*finding a file* - see [Manifest mode](#manifest-mode-a-node-with-no-policy-file) and
+[The shipped default](#the-shipped-default-policiesdefaultjson).
+
+What is still open is listed at the end: approvals
 have no operator path, the wasip1 (`wa_sock`) runner is not checked, and the per-chat check needs
 `wa:channel/messages`. This document is the schema, the decision rules, and the wiring. Context:
 [KERNEL.md](KERNEL.md) (capability seams), [COMPONENTS.md](COMPONENTS.md) (manifest grants),
@@ -67,7 +77,10 @@ limit.
 ```
 
 The same file ships as a parsed fixture: `rust/wa-grant-policy/examples/whatsapp-policy.json` (a test
-fails if it stops parsing or stops meaning what the table below says).
+fails if it stops parsing or stops meaning what the table below says). Its kv prefixes (`journal/*`,
+`session/*`) are illustrative; **`policies/default.json`** is the file this release installs and it
+lists the prefixes `wa-whatsapp` actually writes - copy that one for a new node
+([The shipped default](#the-shipped-default-policiesdefaultjson)).
 
 This is the WhatsApp component's stage 1: **send only to our own chat** (`chat:self`) plus the
 alerts chat, ≤ 20 messages/min in total, ≤ 6/min per chat, alerts exempt from the global cap but
@@ -108,9 +121,16 @@ component has no rule for it**. Defaults: `credentials.read`, `net.dial`, `http.
 | answer | audit word | meaning for the host |
 | --- | --- | --- |
 | `Allow` | `allow` | perform the call; the budget was charged in this call |
+| `Allow` (no policy file) | `allow` + reason `manifest_mode` | perform the call: the manifest grant is the only gate; nothing was charged |
 | `Deny(reason)` | `deny` | refuse: `KError::Refused(reason)`, never perform the call |
 | `RateLimited { retry_after_ms, reason }` | `rate_limited` | refuse for now; the exact wait is known |
 | `NeedsApproval(reason)` | `needs_approval` | ask the operator; then `approve(...)` and call again |
+
+In manifest mode the decision is `Allow` (the crate's `DecisionCode` stays `allow`, and the record's
+`reason` is `manifest_mode`), because a manifest-mode call has no budget to charge and no rule to
+break: the manifest grant already answered the only question being asked. The operator view counters
+it apart from `allow` (`decisions.manifest_mode`), so "the policy layer is not on" is visible rather
+than inferred from a zero.
 
 Reasons (`snake_case`, stable): `no_policy`, `policy_denied`, `target_denied`, `target_not_allowed`,
 `approval_required`, `capability_rate_limited`, `target_rate_limited`, `daily_cap_reached`,
@@ -176,11 +196,14 @@ the design, kept because it is the reasoning; the paragraphs after it are what t
 where it differs.
 
 1. **Loaded once per node, lazily on the first check or the first `host.policy_status`.**
-   `WA_GRANT_POLICY`, default `<home>/.wasm-agent/policy.json`. An **absent** file is an empty
-   policy: ordinary capabilities are allowed and the six sensitive ones are refused with `no_policy`
-   exactly as the crate defines. A file that does not parse is the same empty policy plus one line on
-   the node's log and the error in `host.policy_status` — the node starts, the capabilities the
-   policy governs are refused, and nothing is guessed at. Budgets are restored from
+   `WA_GRANT_POLICY`, default `<home>/.wasm-agent/policy.json`. **A file that is absent is
+   [manifest mode](#manifest-mode-a-node-with-no-policy-file)**: the manifest grant is the only gate,
+   decisions are counted and audited as `manifest_mode`, and one warning is written on the node's log
+   at load. A file that is present and parses is policy mode: a sensitive capability with no rule is
+   refused with `no_policy`. A file that does not parse (or cannot be read) is also policy mode, with
+   an empty policy plus one line on the node's log and the error in `host.policy_status` — the node
+   starts, the capabilities the policy governs are refused, and nothing is guessed at: a half-written
+   `policy.json` is not evidence that the operator wants no limits. Budgets are restored from
    `WA_GRANT_POLICY_STATE` (default `<home>/.wasm-agent/grant-policy.state.json`, missing = fresh)
    and written back every five minutes by the telemetry ticker.
 2. **One engine, one sink pair.** `Mutex<Engine>` plus a tee sink: `FileAudit` at
@@ -203,6 +226,11 @@ where it differs.
    | `credentials.get(name)` | `credentials.read` | `name` |
    | `speech.start(...)` | `stt.start` | none |
    | `log.write`, `lifecycle.*` | never checked | a log line cannot exceed anything a person sees |
+
+   An address target (`net.dial`, `http.request`) is lowercased before the check
+   (`service_components::authority_target`), because host names are case-insensitive and the manifest
+   grant already compares them that way: write address patterns in lowercase. Without it a client's
+   `WSS://WEB.WHATSAPP.COM/...` would pass the manifest and fail a rule the same operator wrote.
 
    Result mapping, in one function (`service_components::gate_decision`): `Allow` → proceed;
    `Deny(no_policy | policy_denied | target_denied | target_not_allowed | audit_unavailable)` →
@@ -232,16 +260,81 @@ where it differs.
    the last 32 refusals as `{ts_ms, component, capability, reason}` — **never a target**, so the view
    cannot become a second place a chat id leaks into.
 
-### What changed for a node that had no policy file
+### Manifest mode: a node with no policy file
 
-Before this wiring a service component's `kv.write`, `net.dial`, `credentials.read` and
-`http.request` were governed by the manifest grant alone. Now they are refused with `no_policy` until
-the operator writes a rule — the crate's documented default, and the reason a node that runs
-wa-whatsapp wants a policy file before it starts it. To keep today's behaviour for one capability,
-write a rule with no limits (`"kv.write": {}` means "any target, no rate"); to keep it for every
-component, write the rules the node's components need. There is deliberately **no node-wide switch
-that turns the policy off**, because a switch that silently disables a limit is the failure this
-layer exists to prevent.
+Before the policy layer existed, a service component's `kv.write`, `net.dial`, `credentials.read`
+and `http.request` were governed by the manifest grant alone. The crate's own default - an **absent**
+file means an empty policy, which means default-deny for the six sensitive capabilities - would have
+turned that upgrade into an outage: the first binary that speaks the policy layer would have refused
+the running wa-whatsapp the moment it wrote a Signal session, dialled WhatsApp or downloaded media,
+with nothing but `no_policy` in the log and no file to point at.
+
+So the wiring answers the question the crate does not: **the policy file's presence is what turns
+the policy layer on** (`node_policy::Mode`).
+
+| on disk | mode | an unruled sensitive capability | counted as | audited as |
+| --- | --- | --- | --- | --- |
+| no `policy.json` | `manifest` | **allowed**, by the manifest grant | `decisions.manifest_mode` | reason `manifest_mode` (the six capabilities a policy file would audit) |
+| `policy.json` parses | `policy` | refused `no_policy` | `decisions.deny` | the refusal |
+| `policy.json` broken/unreadable | `policy` | refused `no_policy` (empty policy, error in `policy_status`) | `decisions.deny` | the refusal |
+
+Only *no file at all* selects manifest mode. A file that is there and cannot be understood selects
+policy mode with an empty policy, because a half-written policy is not evidence that the operator
+wants no limits - silently falling back to "manifest alone" would remove every limit the operator
+was in the middle of writing.
+
+Manifest mode is not a switch that turns the policy off: it is what a node that never wrote a policy
+file *is*. The moment the file exists, every sensitive capability it does not name is refused. An
+operator keeps today's behaviour for one capability by writing a rule with no limits (`"kv.write": {}`
+means "any target, no rate"), and keeps it for every component by writing the rules the node's
+components need. There is still **no node-wide switch that turns the policy off**, because a switch
+that silently disables a limit is the failure this layer exists to prevent.
+
+Manifest mode does not fail closed on an audit write error either: the file sink failing is counted
+(`decisions.audit_errors`) and logged, and the call proceeds, because the manifest grant is the only
+gate. Policy mode keeps the crate default, where a sensitive call that cannot be audited is refused
+with `deny(audit_unavailable)`.
+
+### The shipped default (`policies/default.json`)
+
+The release ships a default policy so that the first node to receive the policy layer gets rules it
+can read and edit instead of a bare default-deny. It is **the WhatsApp stage 1** of the table above
+plus the fixtures of this tree:
+
+| component | rules |
+| --- | --- |
+| `wa-whatsapp` | `whatsapp.send` (own chat + alerts, ≤20/min, ≤6/min per chat, alerts exempt from the global cap but ≤1/min, daily cap 200); `net.dial` + `http.request` to the three host families its manifest grants; `kv.write` on the key prefixes its store writes (`dev`, `id/`, `ses/`, `pk/`, `spk/`, `sk/`, `sync/`, `ver/`, `mac/`, `lid/`, `tc/`, `tx/`); `credentials.read` for `WA_WHATSAPP_TOKEN` |
+| `mcp-whatsapp` | `net.dial` + `http.request` on loopback (its manifest grants nothing else), `credentials.read` for `WA_MCP_WHATSAPP_TOKEN` |
+| `svc-echo` | `net.dial` on loopback (fixture; the wasip1 runner is not policy-checked yet) |
+| `mcp-echo` | named, no rule needed: it declares no net and no secret |
+| `example-new-component` | a template entry to copy for a new component, with the rules written out |
+
+Two properties of that file are load-bearing. The patterns **mirror the manifests**: a rule can only
+narrow what a manifest already grants, so `net.dial`/`http.request` list exactly the addresses in
+`rust/components/wa-whatsapp/manifest.json` and a widening there needs no policy edit. And `kv.write`
+lists the prefixes the store actually writes (`src/store.rs` documents them, `src/lib.rs` adds `tx/`),
+not a tidier invented namespace: a default that refused `ses/...` would break the running component on
+the first message. `cargo test -p wa-host node_policy::` drives those exact calls, and its
+`the_shipped_default_policy_keeps_the_components_this_tree_installs_working` test is the one that
+fails if the file and the components drift apart.
+
+`scripts/deploy.sh` installs it as `<state>/policy.json` **only when there is no policy file**
+(`scripts/lib/install-default-policy.sh`, tested by `scripts/test-install-default-policy.sh`):
+
+* an existing file - the operator's, an older default, a broken one, a directory - is **never**
+  touched (content, permission bits and mtime are the test's evidence) and the deploy says `kept`;
+* a default installed once is never refreshed afterwards. Rate limits and allow lists are the
+  operator's, not the release's; a deploy that "kept the default fresh" would quietly re-widen a cap
+  somebody lowered;
+* installing it **changes what the node enforces** (manifest mode → policy mode), so the deploy names
+  every installed component the file does not mention and says that its sensitive capabilities will be
+  refused with `no_policy` until a rule is added. The deploy does not refuse on that - a node with no
+  policy file still works - but it never lets it be a surprise.
+
+After the file exists, adding a component is: install it, then add a rule for each capability its
+manifest declares (`example-new-component` in the shipped file is the shape). Until then its
+`kv.write`, `net.dial`, `http.request`, `credentials.read`, `whatsapp.send` and `exec.run` answer
+`refused(no_policy)`.
 
 ### The honest gap: per-chat limits and an opaque frame
 
