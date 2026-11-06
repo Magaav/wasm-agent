@@ -25,10 +25,14 @@ check(services.control({action='put',definition={name='svc-echo'}},master).error
 local names={};for _,s in ipairs(tools.admin)do names[s['function'].name]=true end
 check(names.services,'services is an admin tool')
 
+-- The component capability is not in every host (the fast path runs with no component directory),
+-- so its absence is a reported skip of the runtime half, never a crash.
 local installed={}
-local present={}
-for _,c in ipairs(json.decode(host.components()) or {})do if c.ok then present[c.name]=true end end
-for _,name in ipairs({'svc-echo','svc-echo-v1'})do if present[name] then installed[#installed+1]=name end end
+if host.components then
+  local present={}
+  for _,c in ipairs(json.decode(host.components()) or {})do if c.ok then present[c.name]=true end end
+  for _,name in ipairs({'svc-echo','svc-echo-v1'})do if present[name] then installed[#installed+1]=name end end
+end
 if #installed==0 then print('service checks: '..checks..' (no service fixture installed; runtime checks skipped)');return end
 
 -- The same lifecycle for each installed fixture: one is wa:kernel@0.1 (polled) and one is
