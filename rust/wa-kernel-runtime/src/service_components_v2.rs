@@ -967,6 +967,10 @@ mod tests {
             wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::log::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::credentials::add_to_linker::<State, State>(&mut linker, |s| s),
+            // The component's outbox is `wa:queue/worker` (`wit/wa.wit`): the host provider has to be
+            // in this linker too, or the real wa-whatsapp stops instantiating the moment it declares
+            // the import - which is exactly what this test exists to catch.
+            crate::queue_host::link_v2(&mut linker),
         ] {
             added.expect("kernel interface links");
         }

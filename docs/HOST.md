@@ -683,6 +683,8 @@ transcript_hold      device
 transcript_write     device
 uuid                 read-only
 verify               read-only
+whatsapp_send        network
+whatsapp_send_status read-only
 write_file           writes files
 <!-- capability-inventory:end -->
 
@@ -758,6 +760,33 @@ Both calls are confined to one declared root - `WASM_AGENT_AUDIO_ROOT`, or
 `..` component that leaves the root is refused (`audio_path_outside_root:<path>`), never treated as
 `nil`. The WAV reader is hand-written (RIFF/WAVE, 16-bit PCM) so this wave adds no dependency to the
 shipped binary, and every refusal is a name: the tests pin them.
+
+## WhatsApp explicit sends (`host.whatsapp_send`, `host.whatsapp_send_status`)
+
+Two capabilities, one path: an explicit message somebody asked for is a **job on the shared queue**,
+not a side channel. `host.whatsapp_send({chat, text, reply_to?, mentions?})` validates the exact JID
+(`<digits>@s.whatsapp.net`, `<digits>@lid`, `<digits>@g.us`), asks the node's `whatsapp.send` policy
+for the target `chat:<jid>`, and enqueues on `wa:queue` under the queue name `whatsapp.outbox` with
+`fresh_for_ms: 300000`, `max_attempts: 3` and `dedupe_key: sha256(chat|text|reply_to)`. It answers
+`{ok, id, state: "queued", deduped}` - an id, never a delivery claim.
+`host.whatsapp_send_status({id})` answers `{ok, id, state, attempts}` plus `message_id` once the
+component settled the job as `done`, or `reason` while it has not.
+
+The `wa-whatsapp` component consumes that queue (its manifest grants the `worker` interface on that
+one namespace) and does the send; the refusals are names on both sides - at the producer
+`whatsapp_send_bad_chat`, `whatsapp_send_unsupported_chat`, `whatsapp_send_empty_text`,
+`whatsapp_send_text_too_long`, `whatsapp_send_bad_reply_to`, `whatsapp_send_too_many_mentions`,
+`whatsapp_send_policy_denied` (with the policy's own `reason`, e.g. `no_policy` or `target_denied`),
+`whatsapp_send_rate_limited` (with `retry_after_ms`), `whatsapp_send_queue_full`; at the component
+`bad_chat`, `stale`, … in the job's `last_error`. Nothing here puts a chat id or message text in an
+answer, a log line or an alert reason: the audit record names the target by digest, and the payload
+lives only in the queue's kv until the job is settled and reaped.
+
+Why the policy check is at the producer: the per-chat and daily budgets are the node's, and a
+component has no policy interface - one that could ask "may I?" could answer "yes". The physical frame
+the component writes still passes the kernel's opaque-send cap, so an explicit send is gated twice.
+[GRANT-POLICY.md](GRANT-POLICY.md#the-shipped-default) has the rule, and
+[SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) has the component side.
 
 ## Adding a capability
 

@@ -491,11 +491,10 @@ pub fn check_opaque_send(component: &str, authority: &str) -> Decision {
     node().check_opaque_send_at(component, authority, now_ms())
 }
 
-/// The explicit `whatsapp.send` hook: the one check that needs the chat id, ready for
-/// `wa:channel/messages` (`docs/GRANT-POLICY.md`). A guest that can name the chat calls it here and
-/// the per-chat limits are real; until that interface exists only the global cap is enforced
-/// (`check_opaque_send`), so this is deliberate API with no caller yet.
-#[allow(dead_code)]
+/// The explicit `whatsapp.send` hook: the one check that needs the chat id. Its caller is the
+/// explicit send (`crate::whatsapp_send`, `docs/HOST.md`), which names the target `chat:<jid>` and so
+/// makes the per-chat and daily limits real; the opaque-frame path (`check_opaque_send`) still
+/// charges the global cap for every frame the component writes.
 pub fn check_whatsapp_send(component: &str, chat: Option<&str>) -> Decision {
     check(component, "whatsapp.send", chat)
 }
@@ -723,21 +722,35 @@ mod tests {
             assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some(key), now), Decision::Allow, "kv.write {key}");
         }
         assert_eq!(policy.check_at("wa-whatsapp", "credentials.read", Some("WA_WHATSAPP_TOKEN"), now), Decision::Allow);
-        // Own chat and the alerts chat; a group and a broadcast list are not part of stage 1.
-        assert_eq!(policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:self"), now), Decision::Allow);
-        assert_eq!(
-            policy.check_at("wa-whatsapp", "whatsapp.send", Some("120363000000000001@g.us"), now),
-            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed)
-        );
-        assert_eq!(
-            policy.check_at("wa-whatsapp", "whatsapp.send", Some("status@broadcast"), now),
-            Decision::Deny(wa_grant_policy::Reason::TargetDenied)
-        );
-        // Alerts are exempt from the global 20/min cap but capped at 1/min themselves: the next one
-        // in the same millisecond is refused, and the reason says which bucket.
-        assert_eq!(policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:alerts"), now), Decision::Allow);
+        // An explicit requested send may go to any chat - the owner's decision of 06/11 that the new
+        // bridge sends ordinary messages freely, like the old connector (`docs/GRANT-POLICY.md`). The
+        // target is always the exact JID the caller named, which is what the producer passes now.
+        for chat in [
+            "chat:5511999999999@s.whatsapp.net",
+            "chat:72103978127547@lid",
+            "chat:120363000000000001@g.us",
+        ] {
+            assert_eq!(policy.check_at("wa-whatsapp", "whatsapp.send", Some(chat), now), Decision::Allow, "{chat}");
+        }
+        // A status/list broadcast and a newsletter are denied outright, and the deny wins over `*`.
+        for chat in ["chat:status@broadcast", "chat:120363000000000001@newsletter"] {
+            assert_eq!(
+                policy.check_at("wa-whatsapp", "whatsapp.send", Some(chat), now),
+                Decision::Deny(wa_grant_policy::Reason::TargetDenied),
+                "{chat}"
+            );
+        }
+        // Six sends a minute to one chat; the seventh is refused by the per-chat bucket, and the
+        // reason says which bucket it was.
+        for i in 0..6 {
+            assert_eq!(
+                policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:5511888888888@lid"), now),
+                Decision::Allow,
+                "send {i}"
+            );
+        }
         assert!(matches!(
-            policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:alerts"), now),
+            policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:5511888888888@lid"), now),
             Decision::RateLimited { reason: wa_grant_policy::Reason::TargetRateLimited, .. }
         ));
         // A key this node's store never writes is still refused, and so is a host it never dials.

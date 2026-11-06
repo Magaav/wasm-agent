@@ -3,7 +3,7 @@
 # is none? (`docs/GRANT-POLICY.md`, "The shipped default".)
 #
 # The rule this pins: a policy file's PRESENCE is what turns the policy layer on
-# (`wa-host/src/node_policy.rs`, `Mode`), so the release ships a default that keeps the components of
+# (`wa-governance/src/node_policy.rs`, `Mode`), so the release ships a default that keeps the components of
 # this tree working - and it may only ever create that file. An operator's `policy.json` is never
 # overwritten, refreshed, renamed or touched, and a default is never installed underneath a path that
 # already exists as something else.

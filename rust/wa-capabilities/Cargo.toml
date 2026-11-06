@@ -19,6 +19,15 @@ wa-rendezvous = { path = "../wa-rendezvous" }
 wa-kernel-runtime = { path = "../wa-kernel-runtime" }
 wa-operation = { path = "../wa-operation" }
 wa-jobs = { path = "../wa-jobs" }
+# The explicit WhatsApp send (`whatsapp_send.rs`) names the `wa:queue` request/job types it enqueues
+# and reads back, and the `wa-grant-policy` decision `node_policy` answers with. Both are leaf crates
+# the kernel and the governance crate already sit on, so this adds no arrow the split did not have.
+wa-queue = { path = "../wa-queue" }
+wa-grant-policy = { path = "../wa-grant-policy" }
+# The send request's shape, JID rules and dedupe key, shared with the component that performs the send
+# (docs/SERVICE-COMPONENTS.md, "Sending an ordinary message"): pure Rust, so the same source still
+# builds for wasm32-wasip2 inside `rust/components/wa-whatsapp`.
+wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
 anyhow = "1"
 base64 = "0.23"
 ring = "0.17"
