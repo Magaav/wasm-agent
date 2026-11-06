@@ -326,7 +326,7 @@ narrow what a manifest already grants, so `net.dial`/`http.request` list exactly
 lists the prefixes the store actually writes (`src/store.rs` documents them, `src/lib.rs` adds `tx/`,
 `src/guest.rs` adds the 0.2 message fence `fence/`),
 not a tidier invented namespace: a default that refused `ses/...` would break the running component on
-the first message. `cargo test -p wa-host node_policy::` drives those exact calls, and its
+the first message. `cargo test -p wa-governance node_policy::` drives those exact calls, and its
 `the_shipped_default_policy_keeps_the_components_this_tree_installs_working` test is the one that
 fails if the file and the components drift apart.
 

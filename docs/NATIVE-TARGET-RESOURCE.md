@@ -112,7 +112,7 @@ case-sensitive directories; no availability/performance improvement is claimed.
 Use Git Bash explicitly on Windows, with native binary/Lua/home paths:
 
 ```sh
-CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo test --offline --manifest-path rust/Cargo.toml -p wa-host resources::tests -- --nocapture
+CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo test --offline --manifest-path rust/Cargo.toml -p wa-capabilities resources::tests -- --nocapture
 CARGO_BUILD_JOBS=2 cargo build --offline --manifest-path rust/Cargo.toml -p wa-host
 node scripts/test-native-target-resource.cjs <native-built-wa-path>
 node scripts/test-resource-claims.cjs <native-built-wa-path>

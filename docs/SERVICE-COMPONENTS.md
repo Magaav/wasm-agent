@@ -185,7 +185,7 @@ Build and test:
 cd rust/components/wa-whatsapp
 cargo test --lib                                          # 47 tests, native
 cargo build --release --target wasm32-wasip2               # the component (8 MB)
-WA_TEST_WHATSAPP_WASM=<that .wasm> cargo test -p wa-host the_whatsapp
+WA_TEST_WHATSAPP_WASM=<that .wasm> cargo test -p wa-kernel-runtime the_whatsapp
 ```
 
 That last line compiles and **instantiates** the real component on the 0.2 runner — the check that

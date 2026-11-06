@@ -272,7 +272,7 @@ and never as an automatic retry.
 
 ## Tests
 
-- `cargo test --manifest-path rust/Cargo.toml -p wa-host subagents::` — durable receipt, idempotency under a
+- `cargo test --manifest-path rust/Cargo.toml -p wa-capabilities subagents::` — durable receipt, idempotency under a
   simultaneous-start barrier, owner scoping, capacity/overflow, cancel-wins-label,
   restart-unknown, corrupt-record quarantine, the strict health shape and
   socket-shutdown wakeup.
