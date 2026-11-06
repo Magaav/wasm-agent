@@ -40,7 +40,7 @@ deploy downloads (owner/repo resolved by `wa_node_release_repo`'s rule, `WA_NODE
 
 | state | when | what is drawn |
 | --- | --- | --- |
-| `behind` | the installed release is in the published window but not first, a prebuilt install's release fell out of it, or local git proves the release commit descends from the installed one | `Update available (<latest sha12>): run wa update or /update` in the CLI footer, once at session start, and as a dismissible toast + topbar badge in the window |
+| `behind` | the installed release is in the published window but not first, a prebuilt install's release fell out of it, or local git proves the release commit descends from the installed one | `Update available (<latest sha12>): run wa update or /update` on the CLI's **session-status-content** line (yellow, directly above the session status bar), once at session start, and as a dismissible toast + topbar badge + standing footer line in the window |
 | `current` | installed == newest release | nothing; an existing badge/toast is cleared on the next load |
 | `ahead` | local git proves the installed commit descends from the release | nothing - a tree ahead of the feed is not told to update |
 | `unknown` | no recorded commit, no feed, or a tree commit the feed does not mention and local ancestry cannot order | nothing (the reason is in the cache and the JSON) |
@@ -63,6 +63,41 @@ Knobs: `WA_UPDATE_CHECK=off`, the existing `WA_OFFLINE=1` / `WA_SKIP_UPDATE_CHEC
 `WA_UPDATE_CHECK_FEED=<url>|off`, `WA_UPDATE_CHECK_FIXTURE=<file>` (no network), `WA_UPDATE_CHECK_CACHE=<file>`
 and `WA_UPDATE_CHECK_TRANSPORT=gh|curl|http` (default: `host.http`, then `gh`, then `curl`) and `WA_UPDATE_CHECK_PER_PAGE=<n>` (the published window, default 5).
 
+## session-status-content: the line the notice lives on (07/11)
+
+One line directly **above** the session status bar is reserved for transient session notices, in
+both surfaces. It exists because the notice used to be drawn *inside* the status bar's own row: on
+the CLI footer it competed with the session numbers and pushed them right, and on the window it had
+no row at all. Now:
+
+- **empty takes no line.** With nothing to show the row returns to the chat (the output region ends
+  on the status row's edge) and the window removes the element - there is never a blank gap.
+- **the sentence is unchanged**, and yellow (`cli_view`'s `warning` role, #ffc107; the stylesheet's
+  `--warn` in the window), one row, clipped with an ellipsis and never wrapped at any width.
+- **a rebuild replaces it.** While `build-status.json` says `building`, the `⟳ building wasm-agent ...`
+  loader is that line (with the progress bar in the Rust renderer) and the notice disappears; a
+  finished build shows `✓ wasm-agent rebuilt ...` for a moment, a failed one shows
+  `✗ wasm-agent build failed ...` for `FAILED_FOR` (60s) and then the notice is back - a failed build
+  leaves the update available, so the notice is never the thing that is lost. `BUILDING_FOR` (120s),
+  `INSTALLED_FOR` (30s) and `FAILED_FOR` are `lua/core/update_banner.lua`'s and
+  `rust/wa-term/src/build_status.rs`'s, and the tests pin them against each other.
+
+The precedence is `update_banner.session_content({notice, build, now})` - one function, so the CLI
+cannot disagree with itself. The renderers are three, and the tests pin all three: the Lua view's
+framed screen (`lua/core/cli_view.lua` `session_draw`, `region_bottom`; plain text in a captured
+transcript), the native editor's row (`wa_term::terminal_editor::Editor::session_row`,
+`session_content` - the editor owns the row whenever it owns the screen, because it also reserves it
+out of the output region), and the window's footer (`ui/app.js` `paintSessionNotice`, above
+`.composer-footer`).
+
+One integration point is still pending and is the host's, not a renderer's: the native editor draws
+the **loader** today (from `build-status.json`) but has no source for the *notice* text, so the CLI
+draws that one itself through the host's `{S}` status-row token. Wiring it exactly is one call from
+`rust/wa-capabilities/src/host.rs` next to `editor_footer` (`editor.session_notice = text` plus the
+`layout_frame` redraw `refresh_build` already does); until then the line is correct, the region is
+reserved by this module rather than by the editor, and the transcript may repaint it until the next
+frame.
+
 ## The installed side: `release=` in `installed.txt`
 
 The comparison is on tags, so the install has to name one. `scripts/deploy.sh` writes
@@ -77,14 +112,16 @@ still writes an interim record with no tag - the deploy owns the final record.
 ## Where it surfaces
 
 - **CLI**, on start: one line, only when actually behind. The commit banner prints
-  `Update available (<latest sha12>): run wa update or /update` and puts the same sentence in the
-  footer row; when the commit feed cannot decide, the tag line above is the fallback -
+  `Update available (<latest sha12>): run wa update or /update` and puts the same sentence on the
+  session-status-content line above the status bar (see above); when the commit feed cannot decide,
+  the tag line above is the fallback -
   `update available: installed v0.1.0-alpha.11 is behind the latest release v0.2.0 - /update installs it`.
   Silent for `current`, `ahead` and `unknown`, and never inside the transcript.
 - **CLI**, `/update`: the deploy verdict, then `release: ...` when behind.
 - **Window**, on load: a dismissible toast and a topbar badge with the node's sentence, drawn once
-  after the first paint from `POST /update {"check": true}` (`banner`). Not a transcript row; the
-  badge stays until the node runs the release, so dismissing the toast never hides the fact.
+  after the first paint from `POST /update {"check": true}` (`banner`) - and the same sentence on the
+  session-status-content line directly above the composer footer, in yellow, for as long as the node
+  is behind (the toast can be dismissed; the line is the standing state). Not a transcript row.
 - **Window**, `/update`: the same sentence in its notice.
 
 `POST /update {"check": true}` is **read-only**: it never synchronizes the tree, never takes a backup
@@ -133,20 +170,30 @@ answered `unknown` forever.
 prerelease identifiers, build metadata ignored), the published body, every verdict, the installed
 record, the cache hit/miss/stale/corrupt cases, offline and a missing fixture.
 
-`scripts/test-update-banner.lua` - 126 checks, no network: the `node-<sha12>` tag parser, the commit
+`scripts/test-update-banner.lua` - 174 checks, no network: the `node-<sha12>` tag parser, the commit
 prefix rules, the identity a build and a prebuilt record produce, the release-list filter (version
 tags, Android bundles and drafts skipped, no note text carried), every compare outcome
 (older/equal/newer/unknown), the exact banner line, the fifteen-minute window (hit at `CACHE_MS - 1`,
 request at `CACHE_MS`), the claim that makes a failed request cost one call not one per tick, offline
 with and without a cache, the banner clearing when the installed record names the release and
 returning when it does not, the bus fact's shape (no message text), the served-node memo, and the
-default paths. `tests/update-banner.js` - 51 checks in the gate's `js:` set: reads the real `ui/app.js`
-functions and runs them against a stub DOM (toast + badge drawn, dismiss keeps the badge, badge acts,
-current clears both), and pins the one sentence across `lua/core/update_banner.lua`, `app.js` and the
-CLI. Run them the way the gate does:
+default paths. The last third is **session-status-content**: the `building`/`installed`/`failed`
+precedence and the notice coming back, the freshness windows pinned against
+`rust/wa-term/src/build_status.rs` and the notice's yellow pinned to `#ffc107` on both sides, the
+build-status file reader (a fixture, a broken file, a missing one) - and the view itself, driven with
+its screen set: no notice takes no row, the notice is drawn yellow on the row above the status bar
+while the bar keeps its own content, a build replaces it on the same row, a failure hands it back,
+and 40 columns is 40 columns with an ellipsis. `tests/update-banner.js` - 68 checks in the gate's
+`js:` set: reads the real `ui/app.js` functions and runs them against a stub DOM (toast + badge
+drawn, dismiss keeps the badge, badge acts, current clears all three), the session-status-content line
+above `.composer-footer` in the stylesheet's yellow, removed when there is nothing to say and
+ellipsised rather than wrapped, and pins the one sentence across `lua/core/update_banner.lua`,
+`app.js` and the CLI. `rust/wa-term`: `cargo test -p wa-term` covers the same layout rule on the
+native editor's side (`session_row`, `session_content`, 55 tests). Run them the way the gate does:
 
 ```sh
 WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=$(mktemp -d) WA_SCRIPT=scripts/test-release.lua wa --db "$WASM_AGENT_HOME/t.db"
 WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=$(mktemp -d) WA_SCRIPT=scripts/test-update-banner.lua wa --db "$WASM_AGENT_HOME/t.db"
 node tests/update-banner.js
+(cd rust && cargo test -p wa-term)
 ```

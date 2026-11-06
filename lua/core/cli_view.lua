@@ -614,23 +614,28 @@ function M.terminal_columns()
   return columns and columns > 0 and math.floor(columns) or nil
 end
 
--- The rows a screen owns, from a height: the output region scrolls, and the two rows below it are
--- the status line and the reader's input row. `nil` when the console is too short to hold one - an
--- output row is not optional - and the caller then draws the way it did before this existed.
+-- The rows a screen owns, from a height: the output region scrolls, and the rows below it are the
+-- session-status-content area (one line directly above the session status bar, empty when there is
+-- nothing to say), the status line and the reader's input row. `nil` when the console is too short
+-- to hold one - an output row is not optional - and the caller then draws the way it did before
+-- this existed.
 -- With the native editor the layout is Claude Code's, bottom up: a footer of hints on the last row,
 -- the input box (bottom border, up to three draft rows, top border) above it, the status line above
 -- the box, and the output region above that. `rust/wa-host/src/host.rs` (`editor_status_row`,
--- `resize_editor`) keeps the same rows while Lua is blocked, so the two must change together.
+-- `resize_editor`) and `rust/wa-term/src/terminal_editor.rs` (`status_row`, `session_row`)
+-- keep the same rows while Lua is blocked, so the three must change together.
+-- `content` is where the session-status-content line goes; `bottom` is the output region's last row
+-- when that line is empty, which it is unless something has a notice to show.
 M.EDITOR_ROWS = 3
 local function screen_rows(rows, editor)
   rows = tonumber(rows)
   if not rows or rows < (editor and 10 or 4) then return nil end
   rows = math.floor(rows)
   if editor then
-    return { top = 1, bottom = rows - 7, status = rows - 6, input_top = rows - 5, input = rows - 1,
-             footer = rows }
+    return { top = 1, bottom = rows - 7, status = rows - 6, content = rows - 7,
+             input_top = rows - 5, input = rows - 1, footer = rows }
   end
-  return { top = 1, bottom = rows - 2, status = rows - 1, input = rows }
+  return { top = 1, bottom = rows - 2, status = rows - 1, content = rows - 2, input = rows }
 end
 M.screen_rows = screen_rows
 
@@ -729,11 +734,20 @@ function M.new(opts)
     -- `shown_cols` is how many columns of the terminal the status line currently holds: the
     -- bound every in-place write is kept inside - see `METHODS:status_draw`. `screen` is the rows
     -- the view owns once it knows the console's height - see `METHODS:screen_on`.
-    shown = nil, shown_cols = 0, screen = nil, logged = "", turn = nil, totals = nil, deltas = 0, warned = nil,
+    shown = nil, shown_cols = 0, screen = nil, logged = "", logged_session = nil, turn = nil, totals = nil, deltas = 0, warned = nil,
     -- `Update available (<sha>): run wa update or /update` while a newer release is published
-    -- (`lua/core/update_banner.lua`). It is a footer fact, never a transcript line, and it is the
-    -- same sentence the window shows.
-    update_note = nil,
+    -- (`lua/core/update_banner.lua`). It is the standing text of the **session-status-content** area:
+    -- ONE line directly above the session status bar, never a transcript line and never a prefix on
+    -- the status bar's own content, and the same sentence the window shows.
+    session_notice = nil,
+    -- What that area says now, resolved: `function() return { text, kind } end`, where `kind` is
+    -- `notice` (the yellow line), `building` (the rebuild loader REPLACES the notice on the same
+    -- line), `installed` or `failed` (the result, briefly). `lua/core/update_banner.lua`
+    -- (`session_content`) owns the precedence; absent, `session_notice` alone is the line. It is a
+    -- function because the build's progress moves while a run is in flight and Lua is not asked.
+    session_status = opts.session_status or nil,
+    -- The row the line was last drawn on, and how wide; nil = nothing drawn (no line, no gap).
+    session_shown = nil, session_shown_cols = 0, region_bottom = nil,
   }
   return setmetatable(view, METHODS)
 end
@@ -743,7 +757,8 @@ end
 -- blocked, and the host fills the token in under its lock - and the number otherwise.
 function METHODS:row(kind)
   if self.editor and self.editor_ready and self.stdout and host and host.panel then return "{" .. kind .. "}" end
-  return tostring(kind == "O" and self.screen.bottom or self.screen.status)
+  if kind == "O" then return tostring(self:region_bottom()) end
+  return tostring(self.screen.status)
 end
 
 -- Whether output goes to the host's transcript (blocks it draws, folds and focuses) rather than
@@ -988,27 +1003,125 @@ function METHODS:status_draw(text)
   self.shown_cols = math.max(self.shown_cols, cols)
 end
 
+-- ---- session-status-content ------------------------------------------------------
+--
+-- ONE line directly above the session status bar, reserved for transient session notices. The update
+-- notice is its standing occupant, so it stops competing with the status bar's own content (the
+-- session numbers used to be pushed to the right of it on the same row) and stops shortening it.
+--
+-- What the line says now is `update_banner.session_content`'s decision, not this module's:
+--
+--   notice     the standing sentence, in the warning yellow - `Update available (<sha>): run wa
+--              update or /update`, the wording the window shows too;
+--   building   the rebuild loader REPLACES the notice on the same line - while a build is in flight
+--              the terminal says what it is doing, and the notice would be a stale instruction - and
+--              a finished build shows its result for a moment;
+--   failed     the failure is visible, and then the notice comes back: a failed build leaves the
+--              update available, so the notice is never the thing that gets lost;
+--   empty      no line at all: the row stays in the output region and there is no blank gap.
+--
+-- The rust twin is `wa_term::terminal_editor::Editor` (`session_row`, `session_content`) plus
+-- `wa_term::build_status::session_line`, which draw the same row when the native editor owns the
+-- screen; the wording and the freshness windows are pinned against each other by the tests.
+function METHODS:session_content()
+  local status = self.session_status
+  if type(status) == "function" then
+    local ok, value = pcall(status)
+    if ok and type(value) == "table" and value.text and tostring(value.text) ~= "" then
+      return { text = tostring(value.text), kind = tostring(value.kind or "notice") }
+    end
+  end
+  if self.session_notice and self.session_notice ~= "" then
+    return { text = self.session_notice, kind = "notice" }
+  end
+  return nil
+end
+
+-- The line as drawn: one row, clipped to the terminal's width (an ellipsis, never a wrap), coloured
+-- by what it is - the notice is the warning yellow. `live` is the switch every other colour here
+-- obeys, so NO_COLOR and a captured transcript get the same text in the same place, uncoloured.
+function METHODS:session_line()
+  local content = self:session_content()
+  if not content then return nil end
+  local role = content.kind == "building" and "borderAccent" or content.kind == "installed" and "success"
+    or content.kind == "failed" and "error" or "warning"
+  return paint(clip(content.text, math.max(1, self.limit)), role, self.live), content.kind
+end
+
+-- The output region's last row: one less while the line is showing, because the line is reserved
+-- rather than drawn over whatever the chat had there. `row("O")` and `screen_on` are the two places
+-- that already answer "where does output end", so they ask this instead of the height.
+function METHODS:region_bottom()
+  if not self.screen then return nil end
+  if self:session_content() then return math.max(1, self.screen.content - 1) end
+  return self.screen.bottom
+end
+
+-- Where the line goes, as a cursor address. With the native editor and a run in flight the row is
+-- named by the host's `{S}` token, filled in under the host's lock, so it cannot land on a row the
+-- editor has just moved (the slash menu moves the status row up). Between runs the host drops `{S}`
+-- writes on purpose - there is no status row then - so the idle row is named outright: it is the row
+-- the status line takes when a run starts. A slash menu open between runs moves that row; the
+-- editor's own next frame repaints its rows, and the row is reserved by this module meanwhile.
+function METHODS:session_address()
+  local screen = self.screen
+  if not screen then return nil end
+  if self.editor and self.editor_ready and self.stdout and host and host.panel then
+    if self.turn or self.pending then return "\27[{S};1H\27[1A" end
+    return "\27[" .. tostring(screen.status) .. ";1H"
+  end
+  return "\27[" .. tostring(screen.content) .. ";1H"
+end
+
+-- Draw it, or clear it when it goes away. Bounded to its own row: it never wraps, never commits a
+-- newline and never touches the reader's input row. A captured transcript (not live) draws nothing
+-- here - `paint` writes the line once, as text, where a reader of the log can see it.
+function METHODS:session_draw()
+  local screen = self.screen
+  if not screen or not self.live then return end
+  local text, kind = self:session_line()
+  local native = self.editor and self.editor_ready and self.stdout
+  -- The native editor's row is drawn by the host from the same facts (`wa-term`'s loader, which has
+  -- the progress bar): this module draws only the notice there, so the loader is never written twice
+  -- on one row. The layout this module owns shrinks its scroll region so output cannot reach the row.
+  if native and text and kind ~= "notice" then text = nil end
+  local bottom = self:region_bottom()
+  if not native and bottom and self.region_row ~= bottom then
+    self:control("\27[1;" .. bottom .. "r")
+    self.region_row = bottom
+  end
+  local address = self:session_address()
+  if not address then return end
+  if text then
+    local cols = visible_columns(text)
+    local pad = self.session_shown_cols > cols and (self.session_shown_cols - cols) or 0
+    self:control(CURSOR_SAVE .. address .. text .. string.rep(" ", pad) .. "\27[K" .. CURSOR_RESTORE)
+    self.session_shown, self.session_shown_cols = text, math.max(self.session_shown_cols, cols)
+    return
+  end
+  if self.session_shown then
+    self:control(CURSOR_SAVE .. address .. "\27[2K" .. CURSOR_RESTORE)
+    self.session_shown, self.session_shown_cols = nil, 0
+  end
+end
+
 -- The hint row under the input box: the last run's numbers, or what to type. Boxed screens only.
--- An available update goes first: it is the one thing on the row that has an action, and clipping the
--- tail of the session numbers costs less than hiding the only notice that a release exists.
+-- Its own content only: the update notice has a line of its own above the status bar now, so the
+-- numbers are never pushed right to make room for it (07/11).
 function METHODS:footer_draw()
   if not (self.live and self.screen and self.screen.footer) then return end
   local hint = (self.last_summary and self.last_summary ~= "") and self.last_summary
     or "/ for commands \194\183 /login to sign in \194\183 ctrl+c twice to quit"
-  local text = hint
-  if self.update_note and self.update_note ~= "" then
-    text = self.update_note
-    if self.last_summary and self.last_summary ~= "" then
-      text = text .. " \194\183 " .. self.last_summary
-    end
-  end
   -- The editor owns that row (the slash menu uses it), so it is handed the text, not drawn on.
   if self.editor and self.stdout and host and host.editor_footer then
-    pcall(host.editor_footer, clip(text, math.max(10, self.limit - 1)), self.model or "")
-    return
+    pcall(host.editor_footer, clip(hint, math.max(10, self.limit - 1)), self.model or "")
+  else
+    self:control(CURSOR_SAVE .. "\27[" .. self.screen.footer .. ";1H\27[2K"
+      .. paint(clip(hint, math.max(10, self.limit - 1)), "dim", self.live) .. CURSOR_RESTORE)
   end
-  self:control(CURSOR_SAVE .. "\27[" .. self.screen.footer .. ";1H\27[2K"
-    .. paint(clip(text, math.max(10, self.limit - 1)), "dim", self.live) .. CURSOR_RESTORE)
+  -- After the footer, never before: the host's footer write redraws the whole bottom of the screen,
+  -- so a line drawn first would be erased by it.
+  self:session_draw()
 end
 
 -- The footer's session numbers, now: refreshed while a run is in flight (on usage and tool events)
@@ -1046,6 +1159,17 @@ end
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
 -- only printed when the *phase* changes - a log line per spinner frame would be noise,
 -- and there is nothing here a reader could not get from the tool lines.
+-- The plain rendering's session-status-content line: written once when it appears or changes, and
+-- not when it clears - a log has no row to blank, and an empty line would be a gap the live view does
+-- not have. Same text, same place above the status bar's own lines, no escape sequences.
+function METHODS:session_log()
+  local content = self:session_content()
+  local key = content and (content.kind .. ":" .. content.text) or nil
+  if key == self.logged_session then return end
+  self.logged_session = key
+  if content then self:write(paint(clip(content.text, math.max(1, self.limit)), "warning", self.live) .. "\n") end
+end
+
 function METHODS:paint(force)
   -- The console draws every event as its own line, so a line rewritten in place has nothing
   -- to say and would fight it for the cursor.
@@ -1062,8 +1186,11 @@ function METHODS:paint(force)
       self.shown = line
     end
     self:animate()
+    -- Last, so the status bar's own frame cannot paint over the line above it.
+    self:session_draw()
     return
   end
+  self:session_log()
   if force or self.phase ~= self.logged then
     self.logged = self.phase
     self:write(line .. "\n")
@@ -1125,9 +1252,14 @@ function METHODS:screen_on()
   self.screen = screen
   -- The region first, then one newline inside it: the region's last row may hold output from
   -- before the screen existed, and every write below assumes the row it writes into is free.
-  self:control("\27[1;" .. screen.bottom .. "r")
-  self:control("\27[" .. screen.bottom .. ";1H\r\n")
+  -- Its last row is `region_bottom`, one less while the session-status-content line is showing.
+  local bottom = self:region_bottom() or screen.bottom
+  self.region_row = bottom
+  self.session_shown, self.session_shown_cols = nil, 0
+  self:control("\27[1;" .. bottom .. "r")
+  self:control("\27[" .. bottom .. ";1H\r\n")
   self:control("\27[" .. screen.status .. ";1H\27[2K")
+  if self:session_content() then self:control("\27[" .. tostring(screen.content) .. ";1H\27[2K") end
   for row = screen.input_top or screen.input, screen.footer or screen.input do
     self:control("\27[" .. row .. ";1H\27[2K")
   end
@@ -1151,6 +1283,7 @@ function METHODS:screen_off()
   self:unanimate()
   local screen = self.screen
   self.screen = nil
+  self.region_row, self.session_shown, self.session_shown_cols = nil, nil, 0
   if not screen then return end
   if self.editor and host.input_editor then pcall(host.input_editor, 0, self.limit, M.EDITOR_ROWS) end
   self:control("\27[" .. screen.status .. ";1H\27[2K")

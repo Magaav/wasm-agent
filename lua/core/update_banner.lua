@@ -572,6 +572,129 @@ function M.check(options)
   return verdict
 end
 
+-- ---- session-status-content -----------------------------------------------------
+--
+-- The CLI's **session-status-content** area: ONE line directly above the session status bar,
+-- reserved for transient session notices (docs/RELEASE-UPDATE.md). This module decides what that
+-- line says, because two facts share it and only one of them is the update notice:
+--
+--   * a sandbox rebuild REPLACES the notice while it is in flight. The deploy writes
+--     `<data>/build-status.json` (the same file `rust/wa-term/src/build_status.rs` reads and draws,
+--     with a progress bar, when the native editor owns the screen), so the two renderers cannot
+--     disagree about whether a build is running. A finished build shows its result for a moment and
+--     hands the line back; a **failed** one shows the failure and then hands the line back too - a
+--     failed build leaves the update available, so the notice is still true and is never lost;
+--   * otherwise the notice is the line, in the CLI view's warning yellow.
+--
+-- Empty is no line at all: the row stays with the chat, so there is never a blank gap above the
+-- status bar. The windows below are the twin of the constants in `build_status.rs` and the tests pin
+-- them against it, the same way `M.LINE` is pinned against the window's sentence.
+M.BUILDING_FOR = 120      -- seconds; `build_status::FRESH`
+M.INSTALLED_FOR = 30      -- `build_status::INSTALLED_FOR`
+M.FAILED_FOR = 60         -- `build_status::FAILED_FOR`
+-- The loader's prefix, the same words `build_status.rs` uses: `⟳ building wasm-agent ...`.
+M.BUILDING_LINE = "\226\159\179 building wasm-agent"
+M.REBUILT_LINE = "\226\156\147 wasm-agent rebuilt%s \226\128\148 restarting into the new build"
+M.FAILED_LINE = "\226\156\151 wasm-agent build failed%s"
+
+-- `125` -> `2m05s`, `45` -> `45s`, `3720` -> `1h02m`: `elapsed` in build_status.rs, to the second.
+local function elapsed(seconds)
+  local s = math.max(0, math.floor(tonumber(seconds) or 0))
+  if s >= 3600 then return string.format("%dh%02dm", math.floor(s / 3600), math.floor(s / 60) % 60) end
+  if s >= 60 then return string.format("%dm%02ds", math.floor(s / 60), s % 60) end
+  return s .. "s"
+end
+
+-- Where the deploy records its progress: `<data>/build-status.json`, overridable so a test (or an
+-- operator) can point it at a fixture and never at this machine's node.
+function M.build_path(options)
+  local o = options or {}
+  local configured = trim(o.path)
+  if configured == "" then configured = trim(getenv("WA_BUILD_STATUS")) end
+  if configured ~= "" then return configured end
+  return slashes(paths.data()) .. "/build-status.json"
+end
+
+-- The build's status, or nil. Re-read at most once a second (the deploy writes it many times a
+-- second while it compiles) - the same rule `build_status::current` applies on the Rust side.
+local build_memo = { at = nil, path = nil, status = nil }
+function M.build_status(options)
+  local o = options or {}
+  local path = o.path or M.build_path(o)
+  local now = math.floor((host.now and host.now() or os.time()) * 1000)
+  if build_memo.path == path and build_memo.at and (now - build_memo.at) < 1000 and not o.refresh then
+    return build_memo.status
+  end
+  local text = read(path)
+  local status = nil
+  if text then
+    local ok, decoded = pcall(json.decode, text)
+    if ok and type(decoded) == "table" then status = decoded end
+  end
+  build_memo.path, build_memo.at, build_memo.status = path, now, status
+  return status
+end
+
+-- Forget the memo: a caller that just wrote the file (a test, the deploy's own tail) asks again now.
+function M.reset_build() build_memo.at, build_memo.path, build_memo.status = nil, nil, nil end
+
+-- The loader's line: what the build says it is doing, and for how long. The bar is the Rust
+-- renderer's; this one is the same sentence without it, because a line that also has to survive
+-- `clip` at 40 columns should not spend 16 of them on a bar.
+function M.building_text(build, now)
+  local phase, crate = trim(build.phase), trim(build.crate)
+  local what = ""
+  if phase == "compiling" then
+    local done, total = tonumber(build.done), tonumber(build.total)
+    local count = ""
+    if total and total > 0 then count = math.min(math.max(done or 0, 0), total) .. "/" .. total .. " " end
+    what = count .. "compiling" .. (crate ~= "" and (" " .. crate) or "")
+  elseif phase ~= "" then
+    what = phase
+  end
+  local started = tonumber(build.started_at)
+  local clock = started and (" \194\183 " .. elapsed((tonumber(now) or 0) - started)) or ""
+  if what == "" then return M.BUILDING_LINE .. clock end
+  return M.BUILDING_LINE .. " \194\183 " .. what .. clock
+end
+
+-- The build's own line, or nil when there is no fresh build to show: `building`, `installed` (a
+-- result, briefly) and `failed` (the failure, briefly - then the notice has the line back).
+function M.build_line(build, now)
+  if type(build) ~= "table" then return nil end
+  local at = tonumber(build.at)
+  if not at or not tonumber(now) then return nil end
+  local age = tonumber(now) - at
+  local state = trim(build.state)
+  if state == "building" and age < M.BUILDING_FOR then
+    return { kind = "building", text = M.building_text(build, now) }
+  end
+  if state == "installed" and age < M.INSTALLED_FOR then
+    local took = trim(build.crate)
+    return { kind = "installed", text = string.format(M.REBUILT_LINE, took ~= "" and (" (" .. took .. ")") or "") }
+  end
+  if state == "failed" and age < M.FAILED_FOR then
+    local phase = trim(build.phase)
+    return { kind = "failed", text = string.format(M.FAILED_LINE, phase ~= "" and (" (" .. phase .. ")") or "") }
+  end
+  return nil
+end
+
+-- What the session-status-content line says now: `{ text, kind }`, or nil when there is no line.
+-- `options`: `notice` (the standing sentence), `build` (a status table; false = never read the
+-- file), `path`, `now` (unix seconds), `refresh`.
+function M.session_content(options)
+  local o = options or {}
+  local now = tonumber(o.now) or (host.now and host.now() or os.time())
+  local build = o.build
+  if build == nil then build = M.build_status(o) end
+  local fact = M.build_line(build, now)
+  if fact then return fact end
+  local notice = trim(o.notice)
+  if notice == "" then return nil end
+  return { kind = "notice", text = notice }
+end
+
 -- Cache only: what the window asks for on load. The served node's housekeeping tick keeps the cache
 -- fresh, so a page load never costs a request (docs/RELEASE-UPDATE.md names the measurement that made
 -- a network call in a request path unacceptable).

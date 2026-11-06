@@ -451,8 +451,14 @@ function M.run(argv)
     local banner = dofile("lua/core/update_banner.lua")
     local seen = banner.check({ refresh = true })
     if seen.line then
-      view.update_note = seen.line
-      view:footer_draw()
+      -- The notice is the standing text of the CLI's session-status-content area: ONE line directly
+      -- above the session status bar, in yellow, so it stops shortening the status bar's own content
+      -- (`lua/core/cli_view.lua`, `docs/RELEASE-UPDATE.md`). What the line says is decided by
+      -- `update_banner.session_content`, because a rebuild in flight REPLACES the notice on the same
+      -- line and hands it back afterwards.
+      view.session_notice = seen.line
+      view.session_status = function() return banner.session_content({ notice = seen.line }) end
+      view:session_draw()
       print(redact.text(seen.line))
     elseif seen.state == "unknown" and seen.reason ~= "checks_disabled" then
       local released = dofile("lua/core/release.lua").check({

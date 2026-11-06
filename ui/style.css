@@ -980,6 +980,18 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .footer-left, .footer-right { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
 .footer-right { justify-content: flex-end; margin-left: auto; flex-wrap:wrap; max-width:100%; }
 
+/* session-status-content: ONE line directly above the status bar (`.composer-footer`) for transient
+   session notices - the update notice is its standing occupant, put there by `paintSessionNotice()`
+   in app.js. Yellow, one row, and an ellipsis rather than a wrap when the window is narrow, which is
+   the same rule the CLI's `clip` applies to the same sentence. Nothing is drawn when there is no
+   notice: the element is removed, so there is never a blank gap above the status bar. */
+.session-status-content {
+  flex: none; margin: 0 0 calc(var(--gap) / 2); padding: 0 var(--pad);
+  color: var(--warn); font-size: 11.5px; line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+body.ui-resting .session-status-content { display: none; }
+
 /* One declarative per-message action row; current hosts use the shared Send/Stop only. */
 .chat-actions { display: flex; flex:none; align-items: center; gap: var(--gap); }
 

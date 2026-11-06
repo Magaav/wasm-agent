@@ -76,14 +76,30 @@ class El {
     this.removed = false;
   }
   append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+  insertBefore(node, reference) {
+    node.parent = this;
+    const at = reference ? this.children.indexOf(reference) : -1;
+    if (at >= 0) this.children.splice(at, 0, node); else this.children.push(node);
+    return node;
+  }
   remove() { this.removed = true; if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); }
   setAttribute(key, value) { this.attributes[key] = String(value); }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   fire(type, event = {}) { for (const fn of this.listeners[type] || []) fn(event); }
+  querySelector(selector) {
+    if (selector === ".composer-footer") return this.children.find((c) => c.className === "composer-footer") || null;
+    return null;
+  }
 }
 
 const body = new El("body");
 const topbar = new El("div");
+// The composer form: `session-status-content` is inserted above its footer (this page's status bar).
+const composerFooter = new El("div");
+composerFooter.className = "composer-footer";
+const composer = new El("form");
+composer.className = "composer";
+composer.append(composerFooter);
 const documentStub = {
   body,
   documentElement: new El("html"),
@@ -91,6 +107,10 @@ const documentStub = {
   getElementById: (id) => (id === "dragbar" ? topbar : null),
   querySelector: (selector) => {
     if (selector === "#dragbar .topbar-actions") return topbar;
+    if (selector === ".composer") return composer;
+    if (selector === "[data-session-status-content]") {
+      return composer.children.find((c) => c.dataset && c.dataset.sessionStatusContent) || null;
+    }
     if (selector === "[data-update-badge]") {
       return topbar.children.find((c) => c.dataset && c.dataset.updateBadge) || null;
     }
@@ -108,11 +128,13 @@ ${extract("updateBannerText")}
 ${extract("dismissUpdateToast")}
 ${extract("paintUpdateBadge")}
 ${extract("paintUpdateToast")}
+${extract("paintSessionNotice")}
 ${extract("applyUpdateBanner")}
 return {
   updateBannerText,
   applyUpdateBanner,
   dismissUpdateToast,
+  paintSessionNotice,
   toastDismissed: () => updateToastDismissed,
 };
 `)(documentStub, () => { updatesAsked += 1; });
@@ -140,6 +162,32 @@ check(toast().className === "update-toast", "the toast has its own class, not a 
 check(toast().attributes.role === "status" && toast().attributes["aria-live"] === "polite",
   "the toast is announced politely rather than stealing focus");
 check(body.children.includes(toast()), "the toast lives on the page body, not in the transcript");
+
+// ---- session-status-content: the notice's own line above the status bar ----------------
+// The composer footer is this page's status bar; the notice gets ONE line directly above it, in the
+// same yellow as the CLI's, and the footer keeps its own controls where they were.
+const noticeRow = () => documentStub.querySelector("[data-session-status-content]");
+check(!!noticeRow(), "a session-status-content line is drawn above the status bar");
+check(noticeRow().className === "session-status-content", "with its own class, not the status bar's");
+check(noticeRow().textContent === drawn, "carrying the node's sentence, unchanged");
+check(noticeRow().attributes.role === "status" && noticeRow().attributes["aria-live"] === "polite",
+  "announced politely rather than stealing focus");
+check(noticeRow().parent === composer, "it lives in the composer, beside the status bar");
+check(composer.children.indexOf(noticeRow()) === composer.children.indexOf(composer.children.find((c) => c.className === "composer-footer")) - 1,
+  "directly above the composer footer: the status bar's own row is untouched");
+check(composer.children.filter((c) => c.className === "composer-footer").length === 1,
+  "the status bar is still one row, not a second copy of it");
+check(/\.session-status-content \{/.test(css), "the line has its own style");
+check(/\.session-status-content \{[^}]*color: var\(--warn\)/.test(css), "it is yellow, the stylesheet's warning colour");
+check(/\.session-status-content \{[^}]*white-space: nowrap/.test(css), "and never wraps");
+check(/\.session-status-content \{[^}]*text-overflow: ellipsis/.test(css),
+  "a narrow window truncates it with an ellipsis (width 40 included)");
+// A node with no `.composer` in the document is not an error: the badge and the toast still draw.
+const bareDocument = { ...documentStub, querySelector: (selector) => (selector === ".composer" || selector === "[data-session-status-content]" ? null : documentStub.querySelector(selector)) };
+const bare = new Function("document", `${extract("paintSessionNotice")} return paintSessionNotice;`)(bareDocument);
+check(bare("Update available") === null, "a page with no composer draws no line rather than failing");
+
+check(noticeRow().textContent === drawn, "the line carries the same sentence as the toast and the badge");
 
 // Dismissing removes the toast and keeps the standing badge; a later draw does not resurrect it.
 const close = toast().children.find((c) => c.className === "update-toast-close");
@@ -183,6 +231,7 @@ check(sandbox.updateBannerText({ release: { state: "current", message: "current"
 sandbox.applyUpdateBanner({ banner: { state: "current" } });
 check(badge() === null, "a current node clears the badge on the next load");
 check(toast() === null, "and any toast is gone");
+check(noticeRow() === null, "and the session-status-content line goes: no empty row above the status bar");
 
 // ---- one sentence, two languages ---------------------------------------
 const format = (lua.match(/M\.LINE = "([^"]+)"/) || [])[1];
@@ -191,9 +240,10 @@ check(format === "Update available (%s): run wa update or /update",
 const fromLua = String(format).replace("%s", "cccccccccccc");
 check(fromLua === drawn, "the Lua and the window produce the same sentence for the same commit");
 const cli = fs.readFileSync("lua/core/chat.lua", "utf8") + fs.readFileSync("lua/core/cli_view.lua", "utf8");
-check(/update_note/.test(cli), "the CLI keeps the sentence for its footer");
+check(/session_notice/.test(cli), "the CLI keeps the sentence for session-status-content");
+check(/function METHODS:session_draw\(\)/.test(cli), "and has one place that draws that line");
 check(/banner\.check\(\{ refresh = true \}\)/.test(cli), "the CLI asks at session start");
-check(!/print\(.*update_note/.test(cli) || /seen\.line/.test(cli), "the CLI prints the node's line once, at start");
+check(!/print\(.*session_notice/.test(cli) || /seen\.line/.test(cli), "the CLI prints the node's line once, at start");
 
 console.log("---");
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILURE(S)");

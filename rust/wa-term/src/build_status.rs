@@ -1,5 +1,6 @@
-//! A sandbox rebuild, shown in `wa chat` as one row above the input box (29/10). The build script
-//! writes `$WASM_AGENT_DATA/build-status.json` (else `~/.wasm-agent`) atomically:
+//! A sandbox rebuild, shown in `wa chat` on the session-status-content row (see
+//! `session_line`). The build script writes `$WASM_AGENT_DATA/build-status.json` (else
+//! `~/.wasm-agent`) atomically:
 //! `{state: building|installed|failed, phase: preflight|provisioning|fetching|compiling|proving|installing|done|...,
 //! done, total, crate, commit, started_at, at}` (on `installed`, `crate` holds the elapsed time).
 //! Drawn by the host, not Lua: Lua is blocked in a run and while idle on input, and the host already
@@ -18,6 +19,9 @@ const BUILDING: &str = "\x1b[38;2;177;185;249m";
 const DONE: &str = "\x1b[38;2;181;189;104m";
 const FAILED: &str = "\x1b[38;2;204;102;102m";
 const RESET: &str = "\x1b[0m";
+/// The standing session notice's colour: the CLI view's `warning` role (`lua/core/cli_view.lua`,
+/// #ffc107), so the update line is the same yellow in both renderers.
+pub const NOTICE: &str = "\x1b[38;2;255;193;7m";
 
 fn path() -> std::path::PathBuf {
     let data = std::env::var("WASM_AGENT_DATA").ok().filter(|d| !d.is_empty())
@@ -31,12 +35,18 @@ fn elapsed(seconds: f64) -> String {
     if s >= 3600 { format!("{}h{:02}m", s / 3600, s / 60 % 60) } else if s >= 60 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{s}s") }
 }
 
-/// The row for `status` at `now` (unix seconds), clipped to `width` cells, or `None` (nothing to show).
-pub fn line(status: &Value, now: f64, width: usize) -> Option<String> {
+/// What the build is, if it is anything that is still worth a row: `building`, `installed` (a
+/// result shown briefly) or `failed` (shown briefly, then the standing notice comes back).
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Build { Building, Installed, Failed }
+
+/// The build facts from `status` at `now`, or `None` when the file is stale/absent/finished - the
+/// same freshness rule `line` has always had, factored out so `session_line` can share it.
+fn facts(status: &Value, now: f64) -> Option<(Build, &'static str, String, String)> {
     let num = |k: &str| status.get(k).and_then(Value::as_f64);
     let text = |k: &str| status.get(k).and_then(Value::as_str).unwrap_or("");
     let age = now - num("at")?;
-    let (colour, full, short) = match text("state") {
+    let (kind, colour, full, short) = match text("state") {
         "building" if age < FRESH => {
             let phase = text("phase");
             let (done, total) = (num("done").unwrap_or(0.0).max(0.0), num("total").unwrap_or(0.0));
@@ -52,25 +62,80 @@ pub fn line(status: &Value, now: f64, width: usize) -> Option<String> {
             };
             let what = what.trim_end();
             let clock = num("started_at").map(|s| format!(" \u{b7} {}", elapsed(now - s))).unwrap_or_default();
-            (BUILDING, format!("\u{27f3} building wasm-agent {bar}{what}{clock}"), format!("\u{27f3} building wasm-agent {what}{clock}"))
+            (Build::Building, BUILDING, format!("\u{27f3} building wasm-agent {bar}{what}{clock}"), format!("\u{27f3} building wasm-agent {what}{clock}"))
         }
         "installed" if age < INSTALLED_FOR => {
             let took = text("crate");
             let took = if took.is_empty() { String::new() } else { format!(" ({took})") };
-            (DONE, format!("\u{2713} wasm-agent rebuilt{took} \u{2014} restarting into the new build"), String::new())
+            (Build::Installed, DONE, format!("\u{2713} wasm-agent rebuilt{took} \u{2014} restarting into the new build"), String::new())
         }
         "failed" if age < FAILED_FOR => {
             let phase = text("phase");
             let why = if phase.is_empty() { String::new() } else { format!(" ({phase})") };
-            (FAILED, format!("\u{2717} wasm-agent build failed{why}"), String::new())
+            (Build::Failed, FAILED, format!("\u{2717} wasm-agent build failed{why}"), String::new())
         }
         _ => return None,
     };
+    Some((kind, colour, full, short))
+}
+
+/// One build row, clipped to `width` cells, or `None` (nothing to show).
+pub fn line(status: &Value, now: f64, width: usize) -> Option<String> {
+    let (_, colour, full, short) = facts(status, now)?;
     if width == 0 { return None; }
     let cells = |t: &str| t.chars().map(crate::terminal_editor::cell_width_of).sum::<usize>();
     // Narrow: the bar goes first, then the words are cut.
     let plain = if cells(&full) > width && !short.is_empty() { short } else { full };
     Some(format!("{colour}{}{RESET}", crate::terminal_editor::clip_cells(&plain, width)))
+}
+
+/// The **session-status-content** row: ONE line directly above the session status bar, reserved for
+/// transient session notices, and empty (no row at all, so the chat keeps it) when there is nothing
+/// to say.
+///
+/// Two writers share the line and the precedence is the point of this function:
+///
+///   * an in-flight (or just-finished) **build replaces the notice** - the loader says what the
+///     terminal is actually doing, and the update notice would be a second, stale instruction while
+///     it does it; a finished build shows its result for `INSTALLED_FOR`, a failed one for
+///     `FAILED_FOR` and then the **notice comes back** (the failed build left the update available,
+///     and the failure is also reported by the command that ran it - see `docs/RELEASE-UPDATE.md`);
+///   * otherwise the standing **notice** is drawn, in the same yellow the CLI view paints it
+///     (`NOTICE` = the `warning` role), so the CLI and the window cannot drift about how it looks.
+///
+/// `notice` is plain text (no escapes); it is clipped to `width` here, so the row can never wrap.
+pub fn session_line(notice: &str, status: Option<&Value>, now: f64, width: usize) -> Option<String> {
+    if width == 0 { return None; }
+    if let Some(status) = status {
+        if let Some(row) = line(status, now, width) { return Some(row); }
+    }
+    let notice = notice.trim();
+    if notice.is_empty() { return None; }
+    if std::env::var_os("NO_COLOR").is_some() {
+        return Some(crate::terminal_editor::clip_cells(notice, width));
+    }
+    Some(format!("{NOTICE}{}{RESET}", crate::terminal_editor::clip_cells(notice, width)))
+}
+
+/// What the session-status-content row says now: which part of a build, the standing notice, or
+/// nothing (no row - the chat keeps its last line). The editor reserves the row only when this is
+/// `Some`, and the two renderers (this one and `lua/core/update_banner.lua`) decide the same thing
+/// from the same facts.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Content { Building, Installed, Failed, Notice }
+
+/// Precedence, as `session_line` renders it: a build outranks the notice, and no row is `None`.
+pub fn content(notice: &str, status: Option<&Value>, now: f64) -> Option<Content> {
+    if let Some(status) = status {
+        if let Some((kind, _, _, _)) = facts(status, now) {
+            return Some(match kind {
+                Build::Building => Content::Building,
+                Build::Installed => Content::Installed,
+                Build::Failed => Content::Failed,
+            });
+        }
+    }
+    if notice.trim().is_empty() { None } else { Some(Content::Notice) }
 }
 
 /// The status file as last read, re-read at most once a second and only when its mtime moved.
@@ -129,5 +194,66 @@ mod tests {
         assert_eq!(mid, "\u{27f3} building wasm-agent 1/4 compiling serde \u{b7} 5s", "no room for the bar");
         let tiny = plain(&line(&s, 5.0, 12).unwrap());
         assert!(tiny.chars().count() == 12 && tiny.ends_with('\u{2026}'), "{tiny}");
+    }
+
+    // ---- session-status-content -------------------------------------------------------------
+    // The row above the session status bar: the notice when there is one, the build loader while a
+    // build is in flight, no row at all when there is neither. These mirror the Lua render tests
+    // (`scripts/test-cli-view.lua`) and the window's (`tests/update-banner.js`).
+    const NOTICE_TEXT: &str = "Update available (cccccccccccc): run wa update or /update";
+
+    #[test]
+    fn no_notice_and_no_build_is_no_row() {
+        assert_eq!(content("", None, 1.0), None);
+        assert_eq!(session_line("", None, 1.0, 80), None, "nothing to say takes no line");
+        assert_eq!(content("   ", None, 1.0), None, "whitespace is nothing");
+    }
+
+    #[test]
+    fn the_notice_is_one_yellow_row() {
+        assert_eq!(content(NOTICE_TEXT, None, 1.0), Some(Content::Notice));
+        let row = session_line(NOTICE_TEXT, None, 1.0, 80).unwrap();
+        assert!(row.starts_with(NOTICE), "the notice carries the warning yellow: {row:?}");
+        assert!(row.ends_with(RESET));
+        assert_eq!(plain(&row), NOTICE_TEXT, "and the sentence itself is untouched");
+        assert!(row.contains("run wa update or /update"));
+    }
+
+    #[test]
+    fn a_build_replaces_the_notice_and_the_notice_comes_back() {
+        let building: Value = serde_json::from_str(r#"{"state":"building","phase":"compiling","done":1,"total":4,"crate":"serde","started_at":0,"at":5}"#).unwrap();
+        assert_eq!(content(NOTICE_TEXT, Some(&building), 5.0), Some(Content::Building));
+        let row = plain(&session_line(NOTICE_TEXT, Some(&building), 5.0, 80).unwrap());
+        assert!(row.starts_with("\u{27f3} building wasm-agent"), "the loader is the line: {row}");
+        assert!(!row.contains("Update available"), "and the notice is gone from it");
+        // Finished: the result briefly, then the notice is back.
+        let done: Value = serde_json::from_str(r#"{"state":"installed","crate":"312s","at":5}"#).unwrap();
+        assert_eq!(content(NOTICE_TEXT, Some(&done), 6.0), Some(Content::Installed));
+        assert_eq!(content(NOTICE_TEXT, Some(&done), 6.0 + INSTALLED_FOR + 1.0), Some(Content::Notice),
+            "the result is shown briefly and then the row is the notice again");
+        assert_eq!(plain(&session_line(NOTICE_TEXT, Some(&done), 6.0 + INSTALLED_FOR + 1.0, 80).unwrap()), NOTICE_TEXT);
+        // Failed: the failure is visible first, and then the notice comes back - a failed build
+        // leaves the update available, so the notice is never lost.
+        let failed: Value = serde_json::from_str(r#"{"state":"failed","phase":"exit 101","at":5}"#).unwrap();
+        assert_eq!(content(NOTICE_TEXT, Some(&failed), 6.0), Some(Content::Failed));
+        assert!(plain(&session_line(NOTICE_TEXT, Some(&failed), 6.0, 80).unwrap()).contains("build failed (exit 101)"));
+        assert_eq!(content(NOTICE_TEXT, Some(&failed), 6.0 + FAILED_FOR + 1.0), Some(Content::Notice));
+        assert_eq!(plain(&session_line(NOTICE_TEXT, Some(&failed), 6.0 + FAILED_FOR + 1.0, 80).unwrap()), NOTICE_TEXT,
+            "after the failure has been shown, the notice is back");
+        // A build that died without saying so is not a row either.
+        let stale: Value = serde_json::from_str(r#"{"state":"building","at":5}"#).unwrap();
+        assert_eq!(content(NOTICE_TEXT, Some(&stale), 5.0 + FRESH + 1.0), Some(Content::Notice));
+    }
+
+    #[test]
+    fn a_narrow_row_truncates_with_an_ellipsis() {
+        let row = session_line(NOTICE_TEXT, None, 1.0, 40).unwrap();
+        let cells = |t: &str| t.chars().map(crate::terminal_editor::cell_width_of).sum::<usize>();
+        assert_eq!(cells(&plain(&row)), 40, "exactly the width asked for: {row:?}");
+        assert!(plain(&row).ends_with('\u{2026}'), "truncated with an ellipsis, never wrapped");
+        assert!(!plain(&row).contains('\n'));
+        assert_eq!(session_line(NOTICE_TEXT, None, 1.0, 0), None, "no columns, no row");
+        // A width wider than the sentence is the sentence.
+        assert_eq!(plain(&session_line(NOTICE_TEXT, None, 1.0, 200).unwrap()), NOTICE_TEXT);
     }
 }

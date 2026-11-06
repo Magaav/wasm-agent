@@ -24,6 +24,11 @@ local function has(text, needle)
   return tostring(text):find(needle, 1, true) ~= nil
 end
 
+-- Equality with the two values in the message: a failure has to say what it saw.
+local function eq(actual, expected, label)
+  ok(actual == expected, label .. " (got " .. tostring(actual) .. ", wanted " .. tostring(expected) .. ")")
+end
+
 -- The visible text of a rendered line, with colour removed. The layout assertions are about
 -- what the reader sees, so they must not break when a role is recoloured - which is exactly
 -- what happened when this view moved from six literal colours to pi's roles. The colour
@@ -875,6 +880,104 @@ do
   local drawn = table.concat(bash_written)
   ok(drawn:find("!git status", 1, true) and drawn:find("clean tree", 1, true), "a bash row is replayed as its command and output")
   ok(not drawn:find("<bash-input>", 1, true), "without its tags")
+end
+
+-- ---- session-status-content: one line above the session status bar -----------------
+-- The update notice used to compete with the session numbers on the status bar's own row; now it
+-- has ONE line directly above it, in yellow, and the bar goes back to its own content. A build in
+-- flight replaces the notice on that same line; an empty area takes no line at all (no blank gap).
+-- The rust twin is `wa-term`'s editor (`session_row`, `session_content`), tested in that crate.
+do
+  ok(view_lib.screen_rows(24).content == 22, "the framed screen has a session-status-content row above the status bar")
+  ok(view_lib.screen_rows(12, true).content == 5,
+    "and so does the boxed one: the line above the status bar, both ways round")
+  local notice = "Update available (cccccccccccc): run wa update or /update"
+  -- A framed 24-row console, set up the way `prompt`/`paint` do it, with everything after the setup
+  -- readable on its own.
+  local function framed(extra)
+    local options = { live = true, limit = 100, rows = function() return 24 end }
+    for key, value in pairs(extra or {}) do options[key] = value end
+    local view, written = capture(options)
+    view:screen_on()
+    return view, written, #written + 1
+  end
+  local function since(written, mark) return table.concat(written, "", mark) end
+
+  -- (a) empty: no line, and the output region keeps the row.
+  local quiet, quiet_written, quiet_mark = framed()
+  eq(quiet:region_bottom(), 22, "(a) the output region keeps its last row")
+  quiet:session_draw()
+  eq(since(quiet_written, quiet_mark), "", "(a) with no notice nothing is drawn: no blank gap")
+
+  -- (b) a notice: its own yellow line above the bar, the bar unchanged.
+  local shown, shown_written, shown_mark = framed()
+  shown.session_notice = notice
+  shown:session_draw()
+  local drawn = since(shown_written, shown_mark)
+  ok(has(drawn, "\27[22;1H"), "(b) the notice is on its own row: directly above the status bar on 23")
+  ok(has(drawn, view_lib.paint(notice, "warning", true)), "(b) in the warning yellow, the same sentence")
+  ok(not has(drawn, "\27[23;1H"), "(b) and never on the status bar's row")
+  eq(shown:region_bottom(), 21, "(b) and the line is reserved out of the output region")
+  eq(visible(shown:session_line()), notice, "(b) the sentence itself is unchanged")
+  -- The status bar keeps its own content: the notice never prefixes it.
+  local footer_text
+  local original_footer = host.editor_footer
+  host.editor_footer = function(text) footer_text = text return true end
+  local bar = view_lib.new({ live = true, stdout = true, limit = 100, out = function() end })
+  bar.screen = view_lib.screen_rows(21, true)
+  bar.editor, bar.editor_ready, bar.model = true, true, "m"
+  bar.last_summary = "3 runs"
+  bar.session_notice = notice
+  bar:footer_draw()
+  eq(footer_text, "3 runs", "(b) the status bar is its own content only, left-aligned as before")
+  if original_footer == nil then host.editor_footer = nil else host.editor_footer = original_footer end
+
+  -- (c) a build in flight replaces the notice on the same line.
+  local loader = "\226\159\179 building wasm-agent \194\183 compiling serde"
+  local built, built_written, built_mark = framed({ session_status = function() return { kind = "building", text = loader } end })
+  built.session_notice = notice
+  built:session_draw()
+  local building_text = since(built_written, built_mark)
+  ok(has(building_text, "building wasm-agent"), "(c) the build loader is the line")
+  ok(not has(building_text, "Update available"), "(c) and the notice is gone from it, replaced")
+  ok(has(building_text, "\27[22;1H"), "(c) on the same row")
+
+  -- (d) a failed build shows the failure, then the notice comes back on that line.
+  local failure = "\226\156\151 wasm-agent build failed (exit 101)"
+  local failing, failing_written, failing_mark = framed({ session_status = function() return { kind = "failed", text = failure } end })
+  failing.session_notice = notice
+  failing:session_draw()
+  ok(has(since(failing_written, failing_mark), "build failed (exit 101)"), "(d) a failed build is visible")
+  local restored, restored_written, restored_mark = framed()
+  restored.session_notice = notice
+  restored:session_draw()
+  ok(has(since(restored_written, restored_mark), view_lib.paint(notice, "warning", true)),
+    "(d) and the notice is back afterwards, in yellow, on the same row")
+
+  -- (e) width 40: exactly 40 columns, an ellipsis, never a wrap.
+  local narrow = view_lib.new({ live = true, limit = 40, out = function() end })
+  narrow.session_notice = notice
+  local narrow_line = narrow:session_line()
+  eq(view_lib.visible_columns(narrow_line), 40, "(e) a 40-column terminal gets exactly 40 columns")
+  ok(has(visible(narrow_line), "\226\128\166"), "(e) truncated with an ellipsis")
+  ok(not has(narrow_line, "\n"), "(e) one row, never wrapped")
+
+  -- With the native editor the row is named by the host's token while a run is in flight (the host
+  -- drops `{S}` writes between runs, where there is no status row), and outright when idle.
+  local native = view_lib.new({ live = true, stdout = true, limit = 100, out = function() end })
+  native.screen = view_lib.screen_rows(21, true)
+  native.editor, native.editor_ready = true, true
+  native.session_notice = notice
+  eq(native:session_address(), "\27[15;1H", "idle with the native editor: the row the status line will take")
+  native.turn = { started = 0, baseline = {} }
+  eq(native:session_address(), "\27[{S};1H\27[1A", "one row above the host's status-row token while a run is in flight")
+
+  -- Captured (non-TTY / NO_COLOR, i.e. not live): the same sentence as plain text, once.
+  local plain, plain_written = capture({ live = false, limit = 100 })
+  plain.session_notice = notice
+  plain:paint()
+  plain:paint()
+  eq(table.concat(plain_written), notice .. "\n", "a captured transcript prints the line once, as plain text")
 end
 
 if failed > 0 then

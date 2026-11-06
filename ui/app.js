@@ -5915,6 +5915,7 @@ function paintUpdateToast(text) {
 // indicator disappears as soon as the node runs the release. Returns the text it drew ("" when none).
 function applyUpdateBanner(payload) {
   const text = updateBannerText(payload);
+  paintSessionNotice(text);
   if (!text) {
     const badge = document.querySelector("[data-update-badge]");
     if (badge) badge.remove();
@@ -5924,6 +5925,45 @@ function applyUpdateBanner(payload) {
   paintUpdateBadge(text);
   paintUpdateToast(text);
   return text;
+}
+
+// ---- session-status-content: the notice's own line above the status bar ---------------------------
+//
+// The composer footer (the account, context and model chips) is this page's status bar, and the same
+// sentence the CLI puts in its session-status-content area goes directly above it here: ONE yellow
+// line, the footer's own controls untouched and left where they were. The CLI's rule is the layout
+// rule (`lua/core/cli_view.lua`, `docs/RELEASE-UPDATE.md`):
+//
+//   * empty is no row at all - the element is removed, so there is never a blank gap above the
+//     status bar when this node is current;
+//   * one line, never wrapped: a narrow window ellipsises it (CSS `text-overflow`), the same
+//     promise the CLI's `clip` keeps for the same sentence;
+//   * the toast stays what it was, the one-off announcement that can be dismissed; this line is the
+//     standing state, and it comes back on the next load until the node runs the release.
+// The document is not required to carry `.composer` (a page or a test with no chat shell): then there
+// is nowhere to put the line and nothing is drawn - the badge and the toast are unaffected.
+function paintSessionNotice(text) {
+  const row = document.querySelector("[data-session-status-content]");
+  if (!text) {
+    if (row) row.remove();
+    return null;
+  }
+  if (row) {
+    if (row.textContent !== text) row.textContent = text;
+    return row;
+  }
+  const form = document.querySelector(".composer");
+  if (!form || typeof document.createElement !== "function") return null;
+  const line = document.createElement("div");
+  line.className = "session-status-content";
+  line.dataset.sessionStatusContent = "notice";
+  line.setAttribute("role", "status");
+  line.setAttribute("aria-live", "polite");
+  line.textContent = text;
+  const footer = form.querySelector(".composer-footer");
+  if (footer && typeof form.insertBefore === "function") form.insertBefore(line, footer);
+  else form.append(line);
+  return line;
 }
 
 // Ask once, after the first paint rather than in front of it - the same shape as Pi's startup version
