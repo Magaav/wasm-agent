@@ -25,6 +25,11 @@
 //! `cargo build --target wasm32-wasip2` builds the component.
 pub mod alerts;
 pub mod holds;
+/// The message index: every received message and event, in the component's kv, with the keys and the
+/// token normalization a query reads (`docs/SERVICE-COMPONENTS.md`, "The message index").
+pub mod index;
+/// One inbound message as the index keeps it: every kind, plus the source mutations as events.
+pub mod record;
 /// The explicit-send outbox's wire shape (quote, mentions, the exact chat) and its retry rule: pure,
 /// so `cargo test` pins it natively while the guest loop that uses it stays wasm-only.
 pub mod outbox;

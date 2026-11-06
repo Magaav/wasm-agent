@@ -685,6 +685,11 @@ uuid                 read-only
 verify               read-only
 whatsapp_send        network
 whatsapp_send_status read-only
+whatsapp_download    writes files
+whatsapp_media       read-only
+whatsapp_reactions   read-only
+whatsapp_read        read-only
+whatsapp_search      read-only
 write_file           writes files
 <!-- capability-inventory:end -->
 
@@ -787,6 +792,45 @@ component has no policy interface - one that could ask "may I?" could answer "ye
 the component writes still passes the kernel's opaque-send cap, so an explicit send is gated twice.
 [GRANT-POLICY.md](GRANT-POLICY.md#the-shipped-default) has the rule, and
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) has the component side.
+
+## WhatsApp message index (`host.whatsapp_search`, `read`, `reactions`, `media`, `download`)
+
+Five read-shaped capabilities over the index the `wa-whatsapp` component keeps of **every** message it
+receives (text, image, video, audio and voice notes, documents, stickers, locations, contact cards,
+polls, and reactions/edits/deletions as events), in the component's own kv namespace. The transport is
+the explicit send's: a question is a **job on the shared queue**, queue name `whatsapp.query`
+(`fresh_for_ms: 120000`, `max_attempts: 2`, `dedupe_key` = the request itself), which the component
+consumes as a `worker` and settles with `done(answer)` - see
+[SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md#the-message-index).
+
+| capability | arguments | answers |
+| --- | --- | --- |
+| `whatsapp_search` | `q?, chat?, kind?, from?, since?, until?, limit` (one of the four narrowings is required) | `hits[{chat, id, ts, sender, kind, text, score, media?}], count, matched, candidates, truncated` |
+| `whatsapp_read` | `chat, before?, limit` | `messages[...]` newest first, `has_more`, `next_before`; reactions folded onto what they answer |
+| `whatsapp_reactions` | `chat, id` | `reactions[{sender, emoji, ts}], count, by_emoji` |
+| `whatsapp_media` | `chat, id` | the media metadata: `mime, filename, size, sha256, duration_s, pages`, plus place/contact/poll |
+| `whatsapp_download` | `chat, id` | the decrypted bytes on disk: `{path, bytes, mime, filename, sha256}` |
+
+*Text* is accent-folded on both sides (`Ação` and `acao` are the same token; `Relatório.pdf` is
+findable as `relatorio`), and a query is an AND over its tokens with the exact phrase ranked first.
+`matched` is how many records the search ranked (it ranks the newest 400 candidates, and
+`candidates` says how many the narrowing offered before that cap). The answer carries snippets
+(bounded at 280 characters) and its total size is bounded below the queue's result cap, so a search that matches too much is a shorter list with `truncated: true`, never
+a failed call. `q` has a `since`/`until` window in Unix milliseconds (epoch seconds are accepted).
+
+`whatsapp_download` is the one with an effect: the component decrypts the media with the keys it kept
+from the message and hands the plaintext back on the job's progress stream (the queue's bounded byte
+channel, 512 KiB by default); this side writes it into `<components>/wa-whatsapp.downloads/` - a
+bounded directory (64 files, 64 MiB, oldest evicted first) - and answers with the path. The media key
+and the direct path never appear in an answer, only in the component's own namespace.
+
+The wait is bounded. If the component has not answered within two seconds the call returns
+`whatsapp_<op>_slow` with the job `id` and `retry: true`; the same call again reads the same job
+(the dedupe key is the request), so a slow answer is never a lost one. A refusal names itself
+(`whatsapp_search_empty_query`, `whatsapp_read_bad_chat`, `whatsapp_download_not_indexed`,
+`whatsapp_download_too_large` with `size` and `max_bytes`, …) and every one of them has `effect:
+"none"`. No capability here logs a message or a chat: the component's lines carry ids, kinds and
+counts.
 
 ## Adding a capability
 

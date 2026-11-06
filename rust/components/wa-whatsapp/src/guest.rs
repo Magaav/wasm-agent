@@ -26,7 +26,10 @@ use crate::holds::{Author, Holds, Mutation, POSTING_ONLY};
 use crate::wa::kernel::types::Error as KError;
 use crate::wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket};
 use crate::wasi::clocks::monotonic_clock;
+use crate::index::{self, Store as IndexStore};
+use crate::record::{self, Record};
 use crate::{alerts, export, exports, outbox, posting, queue, recognize, store, telemetry};
+use wa_whatsapp_index as seam;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{FuturesUnordered, Stream, StreamExt};
@@ -210,6 +213,9 @@ thread_local! {
     static CLIENT: RefCell<Option<Arc<whatsapp_rust::Client>>> = const { RefCell::new(None) };
     /// Audio messages handed over by the (Send) message handler, admitted by the main loop.
     static AUDIO_INBOX: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
+    /// Every message and event the handler turned into a record, indexed by the pipeline's own loop
+    /// (`index.rs`): the handler must not wait on a store write, so it hands the record over.
+    static INDEX_INBOX: RefCell<Vec<Record>> = const { RefCell::new(Vec::new()) };
 }
 
 fn now_ms() -> i64 {
@@ -603,6 +609,13 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
             return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(reason) };
         }
     };
+    // The transcript is what makes a voice note findable: it is attached to its message record in the
+    // index, so `whatsapp_search` finds the note by what was said in it. The text is never logged.
+    match index::attach_text(&IndexKv, &chat, &job.id, &transcript.text, index::Source::Transcript).await {
+        Ok(true) => {}
+        Ok(false) => say!("index: no record for voice note id={} (not indexed)", job.id),
+        Err(reason) => say!("index: attach failed id={} reason={reason}", job.id),
+    }
     let ready = now_ms();
     tracker.finish(ready.max(0) as u64);
     let chars = transcript.text.chars().count();
@@ -863,10 +876,28 @@ const OUTBOX_LEASE_MS: u64 = 60_000;
 /// this component can be asked for - and it keeps a requested message feeling prompt.
 const OUTBOX_EVERY: Duration = Duration::from_secs(1);
 
+// The one line a refused outbox logs. `wa:queue` refuses every call when the manifest does not grant
+// the queue, and saying that once per tick would bury the log in the only symptom there is.
 thread_local! {
-    /// The one line a refused outbox logs. `wa:queue` refuses every call when the manifest does not
-    /// grant the queue, and saying that once per tick would bury the log in the only symptom there is.
     static OUTBOX_NOTE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The query lane's own single line, for the same reason: a refused interface said once, not five
+    /// times a second.
+    static QUERY_NOTE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn query_note(text: String) {
+    let first = QUERY_NOTE.with(|note| {
+        let mut note = note.borrow_mut();
+        if note.as_deref() == Some(text.as_str()) {
+            false
+        } else {
+            *note = Some(text.clone());
+            true
+        }
+    });
+    if first {
+        say!("query: {text}");
+    }
 }
 
 /// Say once why the outbox is not working, then stay quiet until it works again.
@@ -960,6 +991,293 @@ async fn outbox_tick() -> bool {
         },
     }
     true
+}
+
+// ---- the message index (`whatsapp.query`) ------------------------------------------------------
+//
+// Every received message is recorded in this component's own kv (`index.rs`), and a question about
+// them is a job on the shared durable queue: the node enqueues `whatsapp.query`
+// (`rust/wa-capabilities/src/whatsapp_query.rs`), this lane takes it, reads the index and settles
+// `done(answer)`; a request for media decrypts it and settles a manifest, with the bytes on the job's
+// progress stream. Nothing here logs a message: lines carry the job, the op, the kind and a count.
+
+/// This lane's worker identity: one lease, one name (the outbox uses the same name, and a lease belongs
+/// to one identity - the queue refuses a second concurrent lease for the same worker).
+const QUERY_WORKER: &str = "wa-whatsapp";
+/// Lease length for one query: a scan of a local index is fast, and a killed instance's job is
+/// recovered by the next take instead of waiting for a human.
+const QUERY_LEASE_MS: u64 = 30_000;
+/// How often the query lane asks for work. A search is a local read; 200 ms keeps a tool call feeling
+/// immediate while an idle node pays five reads a second.
+const QUERY_EVERY: Duration = Duration::from_millis(200);
+/// Most records indexed per pipeline tick, so a history sync cannot starve the audio queue.
+const INDEX_PER_TICK: usize = 200;
+/// One progress chunk. 32 KiB keeps a 512 KiB download inside sixteen entries, well below the queue's
+/// 1 MiB progress bound.
+const DOWNLOAD_CHUNK: usize = 32 * 1024;
+
+/// The index's kv, as `wa:kernel/kv` sees it: the same four calls and the same page shape the tests
+/// drive through `index::Memory`.
+struct IndexKv;
+
+impl IndexStore for IndexKv {
+    fn get<'a>(&'a self, key: &'a [u8]) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, String>> + 'a {
+        async move { kkv::get(key.to_vec()).await.map_err(|error| format!("{error:?}")) }
+    }
+    fn set<'a>(&'a self, key: &'a [u8], value: &'a [u8]) -> impl std::future::Future<Output = Result<(), String>> + 'a {
+        async move { kkv::set(key.to_vec(), value.to_vec()).await.map_err(|error| format!("{error:?}")) }
+    }
+    fn del<'a>(&'a self, key: &'a [u8]) -> impl std::future::Future<Output = Result<(), String>> + 'a {
+        async move { kkv::delete(key.to_vec()).await.map_err(|error| format!("{error:?}")) }
+    }
+    fn scan<'a>(
+        &'a self,
+        prefix: &'a [u8],
+        cursor: Option<Vec<u8>>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<index::Page, String>> + 'a {
+        async move {
+            let page = kkv::scan(prefix.to_vec(), cursor, limit.clamp(1, 1000) as u32).await.map_err(|error| format!("{error:?}"))?;
+            Ok(page.into_iter().map(|entry| (entry.key, entry.value)).collect())
+        }
+    }
+}
+
+/// What the index is configured to do. Every key is optional in the service definition
+/// (`docs/SERVICE-COMPONENTS.md`), and the defaults are the ones documented there.
+#[derive(Clone, Copy, Debug)]
+struct IndexConfig {
+    enabled: bool,
+    retention: index::Retention,
+    prune_every: Duration,
+    prune_budget: usize,
+    /// Most plaintext bytes one `whatsapp_download` will decrypt and hand back.
+    download_max: u64,
+}
+
+impl IndexConfig {
+    fn from_json(config: &serde_json::Value) -> IndexConfig {
+        IndexConfig {
+            // On unless the definition says otherwise: the owner's requirement is that every message is
+            // indexed, so an absent key is not a reason to stop.
+            enabled: config["index"].as_bool().unwrap_or(true),
+            retention: index::Retention::new(config["index_retention_days"].as_u64().unwrap_or(90) as u32),
+            prune_every: Duration::from_secs(config["index_prune_every_seconds"].as_u64().unwrap_or(300).clamp(30, 86_400)),
+            prune_budget: config["index_prune_budget"].as_u64().unwrap_or(200).clamp(1, 5_000) as usize,
+            download_max: config["index_download_max_bytes"]
+                .as_u64()
+                .unwrap_or(seam::MAX_DOWNLOAD_BYTES)
+                .clamp(1, seam::MAX_DOWNLOAD_BYTES),
+        }
+    }
+}
+
+/// Index what the message handler handed over. Bounded per tick; a failed write is reported, never
+/// treated as done (a silent loss here is a message the agent will never find).
+async fn index_inbox(enabled: bool) -> usize {
+    let batch: Vec<Record> = INDEX_INBOX.with(|inbox| {
+        let mut inbox = inbox.borrow_mut();
+        let take = inbox.len().min(INDEX_PER_TICK);
+        inbox.drain(..take).collect()
+    });
+    if batch.is_empty() {
+        return 0;
+    }
+    if !enabled {
+        // `index: false` is a decision, not a queue: what arrives is dropped here and said once, so a
+        // node that turned the index off pays nothing and still sees that traffic came in.
+        say!("index: off; {} record(s) dropped", batch.len());
+        return 0;
+    }
+    let mut indexed = 0usize;
+    for record in &batch {
+        match index::put(&IndexKv, record).await {
+            Ok(()) => indexed += 1,
+            Err(reason) => say!("index: write failed chat={} id={} reason={reason}", record.chat, record.id),
+        }
+    }
+    say!("index: {indexed}/{} records written", batch.len());
+    indexed
+}
+
+/// One query job: take, decide, answer, settle. Returns true when a job was handled.
+async fn query_tick(cfg: &IndexConfig) -> bool {
+    use crate::wa::queue::worker;
+    if !cfg.enabled {
+        return false;
+    }
+    let taken = match worker::take(seam::QUEUE.to_string(), QUERY_WORKER.to_string(), Some(QUERY_LEASE_MS)).await {
+        Ok(worker::TakeOutcome::Taken(lease)) => {
+            QUERY_NOTE.with(|note| *note.borrow_mut() = None);
+            lease
+        }
+        Ok(worker::TakeOutcome::Empty) => return false,
+        Ok(worker::TakeOutcome::Busy(_)) => return false,
+        Err(error) => {
+            query_note(format!("take refused: {error:?} (is whatsapp.query granted in the manifest?)"));
+            return false;
+        }
+    };
+    let job = taken.job;
+    let id = job.id;
+    let request = match seam::Request::decode(&job.payload).and_then(|request| request.validate()) {
+        Ok(request) => request,
+        Err(refusal) => {
+            // A payload this component cannot read is permanent: it is failed with its own word, never
+            // retried into the same wall.
+            say!("query: refused job={id} code={}", refusal.code);
+            if let Err(error) = worker::fail(seam::QUEUE.to_string(), id, QUERY_WORKER.to_string(), refusal.code.to_string()).await {
+                query_note(format!("fail refused: {error:?}"));
+            }
+            return true;
+        }
+    };
+    let op = request.op;
+    let answer = match op {
+        seam::Op::Search => index::search(&IndexKv, &request).await,
+        seam::Op::Read => index::read(&IndexKv, &request).await,
+        seam::Op::Reactions => index::reactions(&IndexKv, &request).await,
+        seam::Op::Media => index::media(&IndexKv, &request).await,
+        seam::Op::Download => download(&request, id, cfg).await,
+    };
+    match answer {
+        Ok(answer) => {
+            // The answer is already bounded (`wa_whatsapp_index::bound`): the queue refuses an oversized
+            // result rather than truncating it.
+            let bytes = serde_json::to_vec(&answer).unwrap_or_default();
+            let counted = answer.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            say!("query: answered job={id} op={} count={counted} bytes={}", op.as_str(), bytes.len());
+            if let Err(error) = worker::done(seam::QUEUE.to_string(), id, QUERY_WORKER.to_string(), bytes).await {
+                // The answer was computed but not settled: re-answering a query has no effect, so the
+                // lease lapses and the next take does the work again.
+                query_note(format!("done refused for job={id}: {error:?}"));
+            }
+        }
+        Err(reason) => {
+            // A failure here is the store or the network, both worth another attempt; the reason is this
+            // component's own word, never message text.
+            say!("query: failed job={id} op={} reason={}", op.as_str(), one_line(&reason));
+            let stored = format!("{}:{}", if seam::retryable(&reason) { "retry" } else { "permanent" }, one_line(&reason));
+            if let Err(error) = worker::fail(seam::QUEUE.to_string(), id, QUERY_WORKER.to_string(), stored).await {
+                query_note(format!("fail refused: {error:?}"));
+            }
+        }
+    }
+    true
+}
+
+/// `whatsapp_download`: decrypt one message's media and hand it back as the job's progress chunks.
+///
+/// The answer is the manifest ([`seam::Download`]); the bytes never enter the queue's result, which is
+/// bounded at 64 KiB. A reason the caller can act on is *answered* (`ok:false`, with the size when it
+/// matters) so it is read at once; a transport failure is an `Err`, which the queue retries.
+async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Result<serde_json::Value, String> {
+    use crate::wa::queue::worker;
+    let (Some(chat), Some(id)) = (&request.chat, &request.id) else {
+        return Ok(seam::refusal(seam::Op::Download, "chat_and_id_required", "one message: pass chat and id"));
+    };
+    let chat = chat.jid();
+    let id = id.clone();
+    let Some(record) = index::load(&IndexKv, &chat, &id).await? else {
+        return Ok(seam::refusal(seam::Op::Download, "not_indexed", "no message with that id in this chat"));
+    };
+    if record.deleted {
+        return Ok(seam::refusal(seam::Op::Download, "deleted", "the message was revoked; its media is gone"));
+    }
+    let Some(media) = record.media.clone() else {
+        return Ok(seam::refusal(seam::Op::Download, "no_media", "this message carries no media"));
+    };
+    if !media.downloadable || !record.unsupported.is_empty() {
+        return Ok(seam::refusal(
+            seam::Op::Download,
+            "not_downloadable",
+            "this media cannot be fetched (view-once, or the keys were not kept)",
+        ));
+    }
+    let limit = request.max_bytes.min(cfg.download_max);
+    if media.size > limit {
+        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the media is larger than this node will decrypt");
+        answer["size"] = serde_json::Value::from(media.size);
+        answer["max_bytes"] = serde_json::Value::from(limit);
+        return Ok(answer);
+    }
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else {
+        return Err("not_connected".into());
+    };
+    let Some(media_key) = unhex(&media.media_key) else {
+        return Ok(seam::refusal(seam::Op::Download, "not_downloadable", "the media key is not readable"));
+    };
+    let params = whatsapp_rust::download::DownloadParams {
+        direct_path: media.direct_path.clone(),
+        media_key: Some(media_key),
+        file_sha256: unhex(&media.sha256).unwrap_or_default(),
+        file_enc_sha256: unhex(&media.enc_sha256),
+        file_length: media.size,
+        media_type: media_type(&media.kind),
+    };
+    let started = now_ms();
+    let bytes = match client.download_from_params(&params).await {
+        Ok(bytes) => bytes,
+        Err(error) => return Err(format!("download:{}", one_line(&error.to_string()))),
+    };
+    let took = now_ms() - started;
+    if bytes.len() as u64 > limit {
+        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the decrypted media is larger than this node will hand back");
+        answer["size"] = serde_json::Value::from(bytes.len());
+        answer["max_bytes"] = serde_json::Value::from(limit);
+        return Ok(answer);
+    }
+    let chunks = bytes.len().div_ceil(DOWNLOAD_CHUNK).max(1) as u32;
+    // The first entry of each attempt is a header naming the job, so a retried download can be told
+    // apart from the chunks a failed attempt already wrote: the reader takes the *last* header.
+    if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, seam::download_header(job)).await {
+        return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
+    }
+    for chunk in bytes.chunks(DOWNLOAD_CHUNK) {
+        if let Err(error) = worker::progress(seam::QUEUE.to_string(), job, chunk.to_vec()).await {
+            return Err(format!("progress:{}", one_line(&format!("{error:?}"))));
+        }
+    }
+    let manifest = seam::Download {
+        chat: chat.clone(),
+        id: id.clone(),
+        kind: media.kind.clone(),
+        mime: media.mime.clone(),
+        filename: media.filename.clone(),
+        sha256: media.sha256.clone(),
+        bytes: bytes.len() as u64,
+        chunks,
+    };
+    say!("download: ok job={job} kind={} bytes={} chunks={chunks} took_ms={took}", manifest.kind, manifest.bytes);
+    let mut answer = seam::answer(seam::Op::Download, serde_json::to_value(&manifest).unwrap_or_default());
+    answer["bytes"] = serde_json::Value::from(manifest.bytes);
+    Ok(answer)
+}
+
+/// The CDN's notion of the blob, from the record's own kind.
+fn media_type(kind: &str) -> whatsapp_rust::download::MediaType {
+    use whatsapp_rust::download::MediaType;
+    match kind {
+        "image" => MediaType::Image,
+        "video" => MediaType::Video,
+        "audio" | "voice" => MediaType::Audio,
+        "sticker" => MediaType::Sticker,
+        _ => MediaType::Document,
+    }
+}
+
+/// Retention: delete what fell out of the window, in bounded passes (`index::prune`).
+async fn prune_index(cfg: &IndexConfig) {
+    match index::prune(&IndexKv, now_ms(), cfg.retention, cfg.prune_budget).await {
+        Ok(pruned) if pruned.records > 0 => say!(
+            "index: pruned {} record(s) more={} retention_days={}",
+            pruned.records,
+            pruned.more,
+            cfg.retention.days
+        ),
+        Ok(_) => {}
+        Err(reason) => say!("index: prune failed reason={reason}"),
+    }
 }
 
 // ---- Runtime --------------------------------------------------------------------------------
@@ -1161,6 +1479,7 @@ async fn serve(config: serde_json::Value) {
     let pair_phone = config["pair_phone"].as_str().map(str::to_string);
     let language = config["language"].as_str().unwrap_or("pt").to_string();
     let post = posting::PostConfig::from_json(&config);
+    let index = IndexConfig::from_json(&config);
     if let Some(seconds) = config["fresh_seconds"].as_i64() {
         let policy = queue::Policy { fresh_ms: seconds.clamp(60, 86_400) * 1000, ..queue::Policy::default() };
         QUEUE.with(|q| *q.borrow_mut() = queue::AudioQueue::new(policy));
@@ -1178,6 +1497,14 @@ async fn serve(config: serde_json::Value) {
         post.edit_interval_ms / 1000,
         HOLDS.with(|h| h.borrow().held_chats()),
         post.held.len()
+    );
+    say!(
+        "index: {} (retention {} days, prune every {} s by {}, download <= {} KiB)",
+        if index.enabled { "on" } else { "off" },
+        index.retention.days,
+        index.prune_every.as_secs(),
+        index.prune_budget,
+        index.download_max / 1024
     );
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
     let tasks = Tasks::start();
@@ -1259,6 +1586,25 @@ async fn serve(config: serde_json::Value) {
                     }
                 }
                 let skip = chat == "status@broadcast" || chat.ends_with("@newsletter");
+                // The index sees every message of every chat this component follows, whatever its kind:
+                // text, media, a location, a contact card, a poll, and the reactions/edits/revokes that
+                // change another message (index.rs). Status and newsletter traffic is not a chat and is
+                // skipped, as the pipeline already did.
+                if !skip {
+                    let envelope = record::Envelope {
+                        chat: chat.clone(),
+                        id: ctx.info.id.to_string(),
+                        sender: ctx.info.source.sender.to_string(),
+                        sender_alt: ctx.info.source.sender_alt.as_ref().map(|j| j.to_string()).unwrap_or_default(),
+                        own: ctx.info.source.is_from_me,
+                        group: ctx.info.source.is_group,
+                        ts: ctx.info.timestamp.timestamp_millis(),
+                        received: now_ms(),
+                        push_name: ctx.info.push_name.clone(),
+                    };
+                    let entry = record::from_message(&envelope, &ctx.message);
+                    INDEX_INBOX.with(|q| q.borrow_mut().push(entry));
+                }
                 if let (Some(audio), false) = (base.audio_message.as_option(), skip) {
                     AUDIO_INBOX.with(|q| {
                         q.borrow_mut().push(AudioJob {
@@ -1290,7 +1636,7 @@ async fn serve(config: serde_json::Value) {
         say!("bot stopped");
     }));
     futures::pin_mut!(tasks);
-    let main = main_loop(&language, &post);
+    let main = main_loop(&language, &post, &index);
     futures::pin_mut!(main);
     // Whichever finishes ends the service: the driver never does, so in practice the main loop.
     futures::future::select(tasks, main).await;
@@ -1300,9 +1646,11 @@ async fn serve(config: serde_json::Value) {
 /// The pipeline's own loop: admit what the message handler handed over, settle what the tasks
 /// finished, dispatch the next lane, send the alert batch, persist. Every wait in it is an await on
 /// a runtime timer, and a stop is noticed within one tick.
-async fn main_loop(language: &str, post: &posting::PostConfig) {
+async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConfig) {
     let mut last_tick = Instant::now();
     let mut last_outbox = Instant::now();
+    let mut last_query = Instant::now();
+    let mut last_prune = Instant::now();
     loop {
         for mutation in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_mutation(mutation).await;
@@ -1310,6 +1658,9 @@ async fn main_loop(language: &str, post: &posting::PostConfig) {
         for job in AUDIO_INBOX.with(|q| std::mem::take(&mut *q.borrow_mut())) {
             admit(job).await;
         }
+        // The index first, so a message that just arrived is already findable when the query lane is
+        // asked about it: the same tick's order, not a race between two independent loops.
+        index_inbox(index.enabled).await;
         settle_completions().await;
         if last_tick.elapsed() >= TICK * 2 {
             last_tick = Instant::now();
@@ -1323,6 +1674,16 @@ async fn main_loop(language: &str, post: &posting::PostConfig) {
         if last_outbox.elapsed() >= OUTBOX_EVERY {
             last_outbox = Instant::now();
             outbox_tick().await;
+        }
+        // The query lane (`whatsapp.query`), after the pipeline and the outbox for the same reason: a
+        // question never delays a voice note, and an idle lane costs five reads a second.
+        if last_query.elapsed() >= QUERY_EVERY {
+            last_query = Instant::now();
+            while query_tick(index).await {}
+        }
+        if index.enabled && last_prune.elapsed() >= index.prune_every {
+            last_prune = Instant::now();
+            prune_index(index).await;
         }
         if lifecycle::stopping() {
             say!("wa-whatsapp: stopping");

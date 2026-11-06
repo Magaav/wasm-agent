@@ -36,4 +36,5 @@ pub mod serve;
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.
+pub mod whatsapp_query;
 pub mod whatsapp_send;

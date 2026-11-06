@@ -1,0 +1,25 @@
+[package]
+name = "wa-whatsapp-index"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The message index's request/answer wire shape: one query somebody asked for (`whatsapp.query`),
+# its bounds, its dedupe key and the settled answer. Shared by the two ends of that queue - the node
+# (which enqueues the tool's request and reads the answer back) and the wa-whatsapp component (which
+# consumes it and settles `done(answer)`) - so the two cannot disagree about what a query means. The
+# index itself (records, tokens, ranking) lives in the component; this crate is the seam, and it is
+# pure: no host call, no I/O, and it builds for wasm32-wasip2.
+[dependencies]
+# The exact-JID rule is the outbox's: a chat a query names is validated by the same code the send path
+# uses, so "exact JID" means one thing on this node.
+wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The round-trip test drives the real queue the node serves to components (`wa:queue` over
+# `rust/wa-queue`), so "enqueue -> component answers -> done", dedupe and expiry are measured against
+# the queue's own semantics instead of a model of them.
+wa-queue = { path = "../wa-queue" }

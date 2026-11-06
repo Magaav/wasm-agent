@@ -718,7 +718,7 @@ mod tests {
         // Every key prefix `rust/components/wa-whatsapp/src/store.rs`, `lib.rs` and `guest.rs` (the
         // 0.2 message fence) write. A prefix the component writes but this file does not rule is a
         // capability refused with `no_policy` the moment policy.json is installed.
-        for key in ["dev", "id/5511@s.whatsapp.net", "ses/5511@s.whatsapp.net", "pk/17", "spk/3", "sk/5511@s.whatsapp.net", "sync/abcd", "ver/app", "mac/app/abcd", "lid/12", "tc/12", "tx/5511@s.whatsapp.net/ABC", "fence/ABC"] {
+        for key in ["dev", "id/5511@s.whatsapp.net", "ses/5511@s.whatsapp.net", "pk/17", "spk/3", "sk/5511@s.whatsapp.net", "sync/abcd", "ver/app", "mac/app/abcd", "lid/12", "tc/12", "tx/5511@s.whatsapp.net/ABC", "fence/ABC", "ix/m/5511@lid/07ffffffffffffff/ABC", "ix/w/boleto/07ffffffffffffff/ABC/5511@lid"] {
             assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some(key), now), Decision::Allow, "kv.write {key}");
         }
         assert_eq!(policy.check_at("wa-whatsapp", "credentials.read", Some("WA_WHATSAPP_TOKEN"), now), Decision::Allow);

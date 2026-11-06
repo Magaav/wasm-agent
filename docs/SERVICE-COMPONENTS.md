@@ -403,6 +403,124 @@ j_chars, verdict`). Both sides are metadata only: the journal is opened read-onl
 read from `transcript`/`body` is `length(...)`; `scripts/test-whatsapp-compare-transcripts.mjs` plants
 a canary transcript in its fixture and fails if it reaches stdout, stderr or `--json`.
 
+## The message index and `whatsapp.query` (06/11)
+
+The owner's requirement (06/11): **every** message is indexed and queryable by the agent - text,
+image, video, audio/voice, document (with filename, MIME, size, caption), sticker, location, contact
+card, poll, and reactions/edits/deletions as events - and a query answers through the same durable
+queue an explicit send already uses.
+
+The Go connector's `messages` row (`chat, id, sender, body, sent, media_kind, media_text`) indexed
+text and images, tied an OCR/transcript string to the row, and called everything else
+`unsupported_non_audio_message`; its search was SQLite `LIKE` on the raw body. The index below keeps
+every field it kept, adds the rest of the kinds and the mutation events, and is searchable by
+accent-folded token instead of by substring.
+
+**Where it lives.** The component's own kv (`wa:kernel/kv`), below one prefix, so the queue (`q/`),
+the protocol store (`ses/`, `pk/`, …) and the transcription pipeline (`tx/`, `fence/`) each keep their
+own keys (`rust/components/wa-whatsapp/src/index.rs`):
+
+```text
+ix/m/<chat>/<inv(ts)>/<id>            the record, JSON            (thread read: newest first)
+ix/id/<chat>/<id>                     inv(ts)                     (id -> thread key)
+ix/s/<sender>/<inv(ts)>/<id>/<chat>   empty                       (by sender)
+ix/k/<kind>/<inv(ts)>/<id>/<chat>     empty                       (by kind)
+ix/w/<token>/<inv(ts)>/<id>/<chat>    empty                       (normalized-token index)
+ix/x/<chat>/<id>/<reactor>/<emoji>    reaction, JSON              (folded onto its target)
+ix/all/<ts>/<chat>/<id>               empty                       (age order: retention walks it)
+ix/pend/<chat>/<id>                   a mutation for a message not indexed yet
+```
+
+`inv(ts)` is `u64::MAX - ts` in fixed-width hex, so an ascending scan is newest-first and `before` is
+a plain cursor; `ix/all` is the opposite order because retention starts at the oldest. Every record
+carries the media metadata a later download needs (`mime, filename, size, sha256, enc_sha256,
+duration_s, pages, width/height, direct_path, media_key`) and the fields a query answers with
+(`quoted` for a reply, `mentions`, `push_name`, `edited`/`edits`, `deleted`, `unsupported`). The
+media key and the direct path never leave the component: they are how it decrypts later
+(`DownloadParams`), not something an answer returns.
+
+**Decisions.**
+
+* **A token index, folded on both sides.** `Ação` and `acao` are one token, `Relatório.pdf` is
+  findable as `relatorio`, and a sticker is findable by the emoji its sender tagged it with (an emoji
+  is a token; a single letter is not). A query is an AND over its tokens with the exact phrase ranked
+  first, then a filename/transcript bonus, then recency - a small ranking, measured in
+  `src/index/tests.rs` rather than asserted.
+* **Reactions fold, edits and deletions mutate.** A reaction is recorded (actor, emoji, target) and
+  attached to its message: `read` shows it there and it is not a bubble of its own; an empty emoji is
+  a *removal* of that actor's row. An edit replaces its target's text and its tokens (the same message
+  id, `edited: true`, `edits: n`), and a revoke clears the text, the media and every token entry - a
+  search cannot return words the sender took back. Both are indexed as events as well, so
+  `whatsapp_search {kind: "edit"}` answers "what changed".
+* **A mutation that arrives first still wins.** A revoke or edit can land before the message it names
+  (re-delivery, history sync): it is kept under `ix/pend/<chat>/<id>` and applied when the record
+  arrives, so a deleted message is never indexed with its text.
+* **What must not be kept is not kept.** A view-once or ephemeral message is a fact (kind, sender,
+  time, `unsupported: view_once`) with no text and no keys. `status@broadcast` and newsletters are
+  skipped, as the transcription pipeline already skipped them.
+* **Retention is by age, in bounded passes.** `index_retention_days` (default 90) decides the window;
+  a pass walks `ix/all` from the oldest, deletes at most `index_prune_budget` records (default 200)
+  and stops at the first record inside the window, so it costs what it deletes. There is no record
+  count and no counter: a counter that drifts is a counter that deletes live data. The index is bounded
+  by the component's storage grant; a write that fails is logged, never treated as done.
+
+**The query lane.** `wa:queue`, queue name `whatsapp.query` (`rust/wa-whatsapp-index` is the shared
+request/answer shape; the node's five capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):
+
+```text
+tool whatsapp_search | read | reactions | media | download
+  -> validate + bound the request            wa-whatsapp-index
+  -> enqueue `whatsapp.query` (fresh 2 min, 2 attempts, dedupe = the request itself)
+component wa-whatsapp (queue worker on `whatsapp.query`, one lease at a time)
+  -> read its own kv index, settle done(answer) | fail(reason)
+tool answer <- the settled result (bounded below the queue's 64 KiB result cap)
+```
+
+The node waits up to two seconds (`wa_whatsapp_index::WAIT_MS`) and heartbeats the node while it
+waits, so a search answers in the same turn; a slower one answers `whatsapp_<op>_slow` with the job id
+and `retry: true`, and the same call reads the same job (the dedupe key *is* the request). A refusal at
+the producer writes nothing: `whatsapp_search_empty_query`, `whatsapp_read_bad_chat`,
+`whatsapp_search_bad_kind`, `whatsapp_reactions_chat_and_id_required`, …
+
+**Download.** `whatsapp_download` is the one with an effect. The component decrypts with the keys it
+kept and hands the plaintext back on the job's **progress stream**, because a job's result is capped at
+64 KiB and a video is not a kv record: each attempt starts with a header chunk naming the job
+(`wa_whatsapp_index::download_header`), so a retried attempt is told apart from the leftovers of a
+failed one. The node collects the last attempt's chunks, checks the length and the SHA-256 against the
+message's own digest, and writes the file into `<components>/wa-whatsapp.downloads/` - bounded at 64
+files and 64 MiB, oldest evicted first - answering with the path. The default bound is 512 KiB of
+plaintext (`index_download_max_bytes`), which covers a photo, a voice note and a one-page document; a
+bigger one answers `download_too_large` with its `size` instead of pretending.
+
+**Configuration** (the service definition's `config`, all optional):
+
+| key | default | meaning |
+| --- | --- | --- |
+| `index` | `true` | index every received message and answer queries |
+| `index_retention_days` | `90` | how long a record is kept (clamped to 1..3650) |
+| `index_prune_every_seconds` | `300` | how often a retention pass runs (clamped to 30..86400) |
+| `index_prune_budget` | `200` | records one pass may delete |
+| `index_download_max_bytes` | `524288` | most plaintext `whatsapp_download` will decrypt |
+
+**Transcripts and OCR.** The transcription pipeline attaches the transcript to its message record
+(`index::attach_text(…, Source::Transcript)`), so a voice note is found by what was said in it; the
+same call with `Source::Ocr` is the seam for an OCR pass. The text is never logged: the component's
+lines carry the job, the op, the kind and a count.
+
+**Tests.** `cargo test --lib` in `rust/components/wa-whatsapp` (80 tests, 15 of them the index with a
+fake client: every kind, reactions add/change/remove, an edit, a revoke, a revoke that arrives first,
+ranking, filters, limits, retention, repair), `cargo test -p wa-whatsapp-index` (14 + 7: the request
+shape, the bounds and the round trip against the real queue), `cargo test -p wa-capabilities
+whatsapp_query` (8: what a tool call enqueues, what it answers, what it refuses before writing, the
+download's chunk collection and the bounded directory), and `scripts/test-whatsapp-index.lua` (74
+checks: the tool shapes, the cues, master-only, the refusals, the real enqueue). The component builds
+for `wasm32-wasip2` (8.4 MB).
+
+**Not verified here:** a live account. This lane did not pair, connect, receive or send, so whether a
+phone delivers the `reactionMessage`/`protocolMessage`/`pollCreationMessage` shapes above as
+`on_message` receives them is the same unknown the mutation path already carried. Nothing in the index
+touches a socket.
+
 ## Decision 05/11: Rust, not Go
 
 The spike proved whatsmeow-in-Go reaches WhatsApp from wasip1, but the owner chose the lightest

@@ -28,6 +28,9 @@ wa-grant-policy = { path = "../wa-grant-policy" }
 # (docs/SERVICE-COMPONENTS.md, "Sending an ordinary message"): pure Rust, so the same source still
 # builds for wasm32-wasip2 inside `rust/components/wa-whatsapp`.
 wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
+# The query seam (`whatsapp.query`): the request/answer shape, its bounds and the download manifest,
+# shared with the WA component that answers it (docs/SERVICE-COMPONENTS.md).
+wa-whatsapp-index = { path = "../wa-whatsapp-index" }
 anyhow = "1"
 base64 = "0.23"
 ring = "0.17"

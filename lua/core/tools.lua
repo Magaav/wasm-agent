@@ -529,6 +529,28 @@ M.admin[#M.admin+1]=schema('whatsapp_send','Send one WhatsApp message yourself, 
  mentions={type='array',maxItems=64,items={type='string'},description='Optional mention targets as exact user JIDs (@s.whatsapp.net or @lid); meaningful in a group.'}},{'chat','text'})
 M.admin[#M.admin+1]=schema('whatsapp_send_status','State of a message you asked whatsapp_send to send: queued, done with the message id WhatsApp gave it, or failed with a reason. An id this node never allocated is refused, not guessed.',{
  id={type='integer',minimum=1,description='The job id whatsapp_send returned.'}},{'id'})
+M.admin[#M.admin+1]=schema('whatsapp_search','Search every WhatsApp message this node has indexed: text, captions, document filenames and voice-note transcripts, accent-folded, so "acao" finds "Ação" and "relatorio" finds "Relatório.pdf". Messages of every kind are indexed (text, image, video, audio, voice note, document, sticker, location, contact card, poll) and so are edits and deletions. Narrow with at least one of q, chat, kind or from; the filters combine (since/until is a time window in epoch milliseconds, seconds accepted). The best match comes first (an exact phrase beats scattered words, a transcript or filename hit is called out), and the answer is bounded: a search that matched more than it could return says truncated=true and matched=N. Reactions are on the message they answer, not separate hits.',{
+ q={type='string',maxLength=200,description='Words to look for (all of them must match). Accents and case are folded on both sides.'},
+ chat={type='string',maxLength=160,description='Only this chat, as an exact JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us.'},
+ kind={type='string',enum={'text','image','video','audio','voice','document','sticker','location','contact','poll','reaction','edit','delete','other'},description='Only this message kind. voice is a push-to-talk note; audio is a music file.'},
+ from={type='string',maxLength=160,description='Only messages from this sender, as an exact user JID.'},
+ since={type='integer',description='Earliest message time, epoch milliseconds (seconds accepted).'},
+ ['until']={type='integer',description='Latest message time, epoch milliseconds (seconds accepted).'},
+ limit={type='integer',minimum=1,maximum=50,description='Most hits to return (default 20).'}},nil)
+M.admin[#M.admin+1]=schema('whatsapp_read','Read one WhatsApp chat, newest message first, with reactions folded onto the messages they answer and edits/deletions visible on the message they changed. Returns has_more and next_before: pass next_before back as before to read the next older page. A message that was revoked shows deleted=true and no text.',{
+ chat={type='string',maxLength=160,description='The exact chat JID to read.'},
+ before={type='string',maxLength=128,description='Optional: a message id (or epoch) to read older than. Use next_before from the previous answer.'},
+ limit={type='integer',minimum=1,maximum=100,description='Most messages to return (default 30).'}},{'chat'})
+M.admin[#M.admin+1]=schema('whatsapp_reactions','Who reacted to one WhatsApp message, with which emoji. A reaction that was taken back is not listed; by_emoji counts what is left.',{
+ chat={type='string',maxLength=160,description='The exact chat JID of the message.'},
+ id={type='string',maxLength=128,description='The message id.'}},{'chat','id'})
+M.admin[#M.admin+1]=schema('whatsapp_media','The media metadata of one indexed WhatsApp message: kind, mime, filename, size, sha256, duration, page count - or the location, contact card or poll it carries. No bytes and no media key; use whatsapp_download for the file.',{
+ chat={type='string',maxLength=160,description='The exact chat JID of the message.'},
+ id={type='string',maxLength=128,description='The message id.'}},{'chat','id'})
+M.admin[#M.admin+1]=schema('whatsapp_download','Decrypt the media of one indexed WhatsApp message to this node and answer with the file path (mime, filename, bytes and sha256 included). The bytes land in a bounded folder in the node components directory, not in the chat. A video larger than the decrypt bound answers download_too_large with its size instead of pretending; view-once and revoked media is never downloadable. Feed the path to OCR or transcription tools.',{
+ chat={type='string',maxLength=160,description='The exact chat JID of the message.'},
+ id={type='string',maxLength=128,description='The message id.'},
+ max_bytes={type='integer',minimum=1,maximum=524288,description='Most plaintext bytes to fetch (default and maximum 524288).'}},{'chat','id'})
 M.admin[#M.admin+1]=schema('mcp','List/manage explicit MCP connectors. New/edited definitions remain disabled; probe never grants tool/send/job authority.',{
  action={type='string',enum={'list','put','probe','enable','disable'}},id={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes/probes: exact registry revision from list. Stale state refuses.'},definition={type='object',description='Reviewed connector: id/name, transport stdio or http, program/args or url, optional cwd, environment-reference env/headers, timeout_seconds; tools maps exact tool names to locally approved read/write.'}},nil)
 M.admin[#M.admin+1]=schema('services','List/manage long-lived WASI service components (docs/SERVICE-COMPONENTS.md): put a definition (disabled), enable (start now and at boot), disable, restart, remove, status, logs. Grants are references: env/file_env names or a file path, exact net addresses. A component whose manifest declares `state_version` is migrated on a snapshot copy of its kv before it starts, and the start answer reports it under `state` (`fresh`, `up-to-date` or `migrated` with the versions); a refused migration (`state_no_migration_path`, `state_owner_mismatch`) starts nothing and leaves the old state at its old version. Read a namespace, its journal and its snapshots with `host.state` (action status), not by asking the component.',{
@@ -670,6 +692,11 @@ local CUES = {
   services = "List and manage long-lived WASI service components: start, stop, logs",
   whatsapp_send = "Send one WhatsApp message to an exact chat through the durable outbox",
   whatsapp_send_status = "Read the state of a queued WhatsApp send, with its message id when sent",
+  whatsapp_search = "Search every indexed WhatsApp message by text, chat, kind, sender or time window",
+  whatsapp_read = "Read one WhatsApp chat newest first, with reactions folded onto their messages",
+  whatsapp_reactions = "Who reacted to one WhatsApp message, with which emoji",
+  whatsapp_media = "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration",
+  whatsapp_download = "Decrypt one WhatsApp message's media to this node and return the file path",
   capture_inspect = "Inspect retained model-request captures as bounded metadata before reading raw dumps",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
@@ -1313,6 +1340,29 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
     return decoded
   end
+  if name=='whatsapp_search' or name=='whatsapp_read' or name=='whatsapp_reactions'
+     or name=='whatsapp_media' or name=='whatsapp_download' then
+    -- The message index (docs/HOST.md, docs/SERVICE-COMPONENTS.md): a question is a job on
+    -- `whatsapp.query`, answered by the wa-whatsapp component out of its own kv. A binary without the
+    -- capability is told apart from a refusal, and a slow answer comes back with its job id and
+    -- `retry` set, which the same call reads again.
+    if type(host[name])~='function' then return {error=name..'_unavailable',effect='none'} end
+    local request
+    if name=='whatsapp_search' then
+      request={q=args.q,chat=args.chat,kind=args.kind,['from']=args['from'],['since']=args['since'],['until']=args['until'],limit=args.limit}
+    elseif name=='whatsapp_read' then
+      request={chat=args.chat,before=args.before,limit=args.limit}
+    elseif name=='whatsapp_download' then
+      request={chat=args.chat,id=args.id,max_bytes=args.max_bytes}
+    else
+      request={chat=args.chat,id=args.id}
+    end
+    local ok,answer=pcall(host[name],json.encode(request))
+    if not ok then return {error=name..'_failed',detail=tostring(answer):sub(1,160),effect='none'} end
+    local decoded=json.decode(tostring(answer or ''))
+    if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
+    return decoded
+  end
   if name:sub(1,5)=='peer_' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
     return dofile('lua/core/federation.lua').call(name,args)
@@ -1847,6 +1897,7 @@ local READ_ONLY = {
   search_messages = true,
   spell_list = true, spell_get = true,
   whatsapp_send_status = true,
+  whatsapp_search = true, whatsapp_read = true, whatsapp_reactions = true, whatsapp_media = true,
 }
 
 function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end

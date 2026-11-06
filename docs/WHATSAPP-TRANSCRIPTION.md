@@ -13,6 +13,12 @@ travels the other way: it is a job on the shared queue `whatsapp.outbox`, the no
 transcript posts, and `whatsapp.send` governs requested sends - which is why widening requested sends
 to any chat (the owner's decision) did not widen posting by one character.
 
+Where the transcript goes besides the post: it is attached to the voice note's own record in the
+message index (`index::attach_text(…, Source::Transcript)`), so the agent can find the note later by
+what was said in it (`whatsapp_search`) instead of transcribing it again - see
+[SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md#the-message-index-and-whatsappquery-0611). The attached
+text is never logged, and a note the sender later revokes loses it with the rest of the record.
+
 The linked-device service journals incoming AND synchronized own outgoing audio.
 Ingestion, independent durable compute tasks and held/confirmed outbox parts are
 separate. Incoming audio **and synchronized own outgoing audio** are posted when transcript

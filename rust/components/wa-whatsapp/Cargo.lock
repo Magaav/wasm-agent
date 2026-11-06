@@ -1148,11 +1148,22 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "wa-whatsapp-index",
  "wa-whatsapp-outbox",
  "wacore",
  "wacore-appstate",
  "whatsapp-rust",
  "wit-bindgen",
+]
+
+[[package]]
+name = "wa-whatsapp-index"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wa-whatsapp-outbox",
 ]
 
 [[package]]

@@ -17,6 +17,9 @@ crate-type = ["cdylib"]
 # enqueues with (`rust/wa-capabilities/src/whatsapp_send.rs`), so the two ends cannot disagree
 # (docs/SERVICE-COMPONENTS.md, "Sending an ordinary message").
 wa-whatsapp-outbox = { path = "../../wa-whatsapp-outbox" }
+# The query seam (`whatsapp.query`): the request/answer shape and its bounds, shared with the node
+# capability that enqueues a query and reads the answer back (docs/SERVICE-COMPONENTS.md).
+wa-whatsapp-index = { path = "../../wa-whatsapp-index" }
 whatsapp-rust = { version = "=0.7.0", default-features = false }
 wacore = { version = "=0.7.0", default-features = false }
 async-trait = "0.1"
