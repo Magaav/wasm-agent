@@ -349,6 +349,86 @@ registry rather than to this loop. Until then an operator with a live node still
 `disable`/`enable` across a build; the swap semantics this loop proves are the ones such an endpoint
 would use.
 
+## Supervisor: by imports, per instance, transactional, layered (06/11)
+
+`docs/KERNEL.md` ("Supervisor features, step 4") is the design record; this is what an operator sees.
+All of it is the `services` admin tool (master only, never a child agent) plus `host.service`.
+
+| operation | what it does |
+| --- | --- |
+| `list` / `status` / `logs` | unchanged, plus: a definition whose imports nobody serves reports `state: "waiting"` with `waiting_for: ["wa:vision/text-reader@0.1.0"]` and `waiting_reason` (`imports_not_served` / `not_installed`), and a running one reports its `generation`, its `instance` (`name#N`) and how many `registrations` it holds |
+| `enable` / `disable` / `restart` / `remove` | unchanged. Boot now starts enabled definitions **by imports** (`supervise`), not in store order. A `stop` is final: the definition leaves the supervisor's set (it would otherwise be restarted by the next reconcile), and `enable`/`autostart`/`supervise` put it back |
+| `upgrade {name, source}` | the transactional install below. The definition's grants stay the ones it was enabled with - an upgrade replaces bytes, not authority |
+| `profile_dump [name]` | the effective configuration after base → node → user → patch, rows by id |
+
+### `upgrade` — stage, verify, start beside, switch, stop
+
+```text
+services upgrade {name:"wa-whatsapp",
+                  source:{wasm:"/…/wa-whatsapp.wasm",
+                          manifest_path:"/…/wa-whatsapp.json",
+                          pin:"/…/wa-whatsapp.wasm.sha256"},   # or the sha256 itself
+                  ready_ms: 10000}
+```
+
+The order is the contract and every failure before the switch costs nothing:
+
+1. the three files are staged in `<components>/.stage-<name>-<pid>/` (nothing installed yet);
+2. the staged bytes must match the pin - a component without one is refused (`upgrade_pin_required`);
+3. every interface the artifact imports must be served by the kernel or by a *running* provider,
+   otherwise the answer is `imports_not_served:wa:vision/text-reader@0.1.0` and the old instance keeps
+   running (this is the same rule the supervisor uses, read from the artifact's own type);
+4. the grant is checked against the staged manifest, and a missing `config` is filled from the profile
+   stack;
+5. the candidate starts **beside** the old instance (same name, same grants, same state; the manifest's
+   `state_version` migration runs on a snapshot copy first);
+6. health: `lifecycle.report(ready)`/`degraded`, or - for a guest that never reports, which includes
+   every wasip1 module - "still alive after the window", reported as `health: "unreported"` rather than
+   invented;
+7. the files are committed (wasm, manifest, **pin last**) and the instance is switched: the retired
+   generation's bus subscriptions and queue grants are revoked, the new instance's are not touched.
+
+The answer names what happened (`mode: install|upgrade`, `sha256`, `previous`, `health`, `contract`,
+`instance`, `switch.retired`), so a script can tell "installed", "upgraded" and "kept the old one" apart
+without reading a log. `cargo test -p wa-kernel-runtime install` walks the whole path, including two
+refusals that must leave the running instance and the installed files exactly as they were.
+
+### Per-component limits
+
+A manifest declares, the node caps (`docs/KERNEL.md`, "Per-component limits"):
+
+```json
+{"limits": {"memory_mb": 512, "cpu_ms": 5000}}
+```
+
+`min(declared, cap)`, resolved once for all three runners. The cap comes from `WA_COMPONENT_LIMITS`,
+else the `limits` section of `policy.json`, else `<state>/limits.json`, else 512 MB / 5000 ms; a component
+row can lower its own numbers but never raise the node's cap, and the start answer says which side
+decided (`by: "manifest" | "node" | "both"`). Memory is enforced by the store's limiter; CPU is a
+budget of execution time inside one epoch window, after which the guest is trapped (`cpu_limit` → the
+service's `last_exit`, visible in `status`). It is a starvation guard, not an accounting instrument -
+the heuristic and its risk are written down in `wa_governance::component_limits::CpuBudget`.
+
+### The policy file a component's calls pass through
+
+`policy.json` is read at start *and* watched: a change to the file (mtime/sha256, one stat a second) is
+parsed, validated, and swapped into the running engine with its budgets kept, so a rule written by a
+deploy - or by hand - is enforced within a second without a restart. `host.policy_status` reports the
+`reload` block (`policy_sha256`, `applied`, `last`); a broken file applies nothing and is reported, and
+a removed file keeps the loaded policy (a reload must never widen what a node allows). Why this exists
+as well as the deploy ordering fix is the 06/11 bug: a node that started 24 s before the file was
+written kept the old policy for its whole life.
+
+### Tests
+
+| test | proves |
+| --- | --- |
+| `cargo test -p wa-kernel-runtime` | imports/served sets and the WIT drift check, plan order independence and cycles, profiles layers, limits resolution, the registration ledger, and the whole transactional install against a hand-built artifact (no toolchain needed) |
+| `cargo test -p wa-governance` | the policy reload: file appears, tightens, breaks, is removed, and the watcher thread itself |
+| `scripts/test-services-kernel-features.lua` | the same decision layer through the binary: `supervise` wait and `waiting_for`, `profile_dump`, `limits`, `registrations`, the upgrade refusals, the tool schema, and that boot reports a wait instead of a failure |
+| `scripts/test-deploy-policy-order.sh` | the deploy installs `policy.json` before the restart, and the reload it depends on is still in the kernel |
+| `cargo test -p wa-kernel-runtime services` / `scripts/test-service-component.lua` | the existing registry lifecycle over real fixtures, unchanged (they need the built components; the gate builds them) |
+
 ## The warm shadow deploy and the post-then-edit test (p3a)
 
 Two `services` definitions to run the component beside the Go connector. They are documented here

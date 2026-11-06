@@ -160,6 +160,12 @@ impl Grants {
 /// The node's queues and the grants that gate them.
 pub struct QueueHost {
     grants: Mutex<BTreeMap<String, Grants>>,
+    /// One row per *instance* (`registrations::Instance::token`), holding the component whose kv the
+    /// queue lives in plus the grants. A guest call is gated by the instance token, not by the name,
+    /// so revoking one instance's queue rights (`unregister_instance`, run when a replaced instance
+    /// stops) cannot refuse the instance that replaced it - which is exactly what a name-keyed
+    /// `unregister` did during a hot swap.
+    instances: Mutex<BTreeMap<String, (String, Grants)>>,
     /// Where the queue provider's namespaces live. The installed component directory in production;
     /// a test passes its own so it never touches the node's data.
     dir: std::path::PathBuf,
@@ -167,7 +173,7 @@ pub struct QueueHost {
 
 impl QueueHost {
     pub fn new(dir: std::path::PathBuf) -> QueueHost {
-        QueueHost { grants: Mutex::new(BTreeMap::new()), dir }
+        QueueHost { grants: Mutex::new(BTreeMap::new()), instances: Mutex::new(BTreeMap::new()), dir }
     }
 
     /// Record a component's queue grant. The queue itself is created lazily on the first call.
@@ -180,14 +186,53 @@ impl QueueHost {
         Ok(grants)
     }
 
-    /// Forget a component: its grant and the in-process queue handle. The data stays in the kv, which
+    /// Record an instance's queue rights: the same grants as the component's manifest, keyed by the
+    /// instance token its guest calls will carry. Returns the grants so the start answer can say what
+    /// a component may do with the queue.
+    pub fn register_instance(&self, component: &str, token: &str, manifest: &Value) -> Result<Grants, String> {
+        let grants = Grants::from_manifest(manifest)?;
+        self.instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token.to_string(), (component.to_string(), grants.clone()));
+        Ok(grants)
+    }
+
+    /// Revoke one instance's queue rights, and only that instance's. The data stays in the kv, which
+    /// is the point of the library: the jobs are still takeable by the instance that replaced it.
+    pub fn unregister_instance(&self, token: &str) -> bool {
+        self.instances.lock().unwrap_or_else(|e| e.into_inner()).remove(token).is_some()
+    }
+
+    /// The component an instance token belongs to (`None` once revoked).
+    pub fn component_of(&self, token: &str) -> Option<String> {
+        self.instances.lock().unwrap_or_else(|e| e.into_inner()).get(token).map(|(component, _)| component.clone())
+    }
+
+    /// How many instances currently hold queue rights for `component`.
+    pub fn instance_count(&self, component: &str) -> usize {
+        self.instances.lock().unwrap_or_else(|e| e.into_inner()).values().filter(|(name, _)| name == component).count()
+    }
+
+    /// Forget a component: its grant and every instance's rights. The data stays in the kv, which
     /// is the point of the library - a stopped component's jobs are still takeable by the next one.
     pub fn unregister(&self, component: &str) {
         self.grants.lock().unwrap_or_else(|e| e.into_inner()).remove(component);
+        self.instances.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, (name, _)| name != component);
     }
 
-    pub fn grants(&self, component: &str) -> Option<Grants> {
-        self.grants.lock().unwrap_or_else(|e| e.into_inner()).get(component).cloned()
+    /// The grants of a caller: an instance token first (the guest path), then a component name (a
+    /// caller with no instance: the dev loop, a test).
+    pub fn grants(&self, owner: &str) -> Option<Grants> {
+        if let Some((_, grants)) = self.instances.lock().unwrap_or_else(|e| e.into_inner()).get(owner) {
+            return Some(grants.clone());
+        }
+        self.grants.lock().unwrap_or_else(|e| e.into_inner()).get(owner).cloned()
+    }
+
+    /// The component whose kv a caller's queue lives in: the token's component, else the caller name.
+    fn component_of_owner(&self, owner: &str) -> String {
+        self.component_of(owner).unwrap_or_else(|| owner.to_string())
     }
 
     /// The queue of one component, built on demand. `q/` is the library's own sub-namespace inside
@@ -210,10 +255,12 @@ impl QueueHost {
     }
 
     /// Gate one call: the interface must be granted, and (when it names a queue) the queue must be
-    /// inside the granted namespaces.
-    pub fn gate(&self, component: &str, interface: &str, queue: Option<&str>) -> Result<(), QueueFault> {
-        let Some(grants) = self.grants(component) else {
-            return Err(QueueFault::Refused(format!("queue_not_granted:{component}")));
+    /// inside the granted namespaces. `owner` is the caller's instance token (or its name, for a
+    /// caller with no instance): a revoked instance is refused here, which is what "nothing of a
+    /// stopped instance lingers" means for the queue.
+    pub fn gate(&self, owner: &str, interface: &str, queue: Option<&str>) -> Result<(), QueueFault> {
+        let Some(grants) = self.grants(owner) else {
+            return Err(QueueFault::Refused("queue_not_granted".to_string()));
         };
         if !grants.may_use(interface) {
             return Err(QueueFault::Refused(format!("queue_interface_not_granted:{interface}")));
@@ -228,10 +275,10 @@ impl QueueHost {
 
     /// Gate a call that names a *job*: the job's queue must be granted, which is the check the
     /// library cannot make for itself (`docs/QUEUE.md`, item 6).
-    fn gate_job(&self, component: &str, interface: &str, id: JobId) -> Result<Job, QueueFault> {
-        self.gate(component, interface, None)?;
-        let job = self.queue(component).job(id).map_err(fault)?.ok_or(QueueFault::NotFound)?;
-        if !self.grants(component).is_some_and(|g| g.may_queue(&job.queue)) {
+    fn gate_job(&self, owner: &str, interface: &str, id: JobId) -> Result<Job, QueueFault> {
+        self.gate(owner, interface, None)?;
+        let job = self.queue(&self.component_of_owner(owner)).job(id).map_err(fault)?.ok_or(QueueFault::NotFound)?;
+        if !self.grants(owner).is_some_and(|g| g.may_queue(&job.queue)) {
             return Err(QueueFault::Refused(format!("queue_namespace_not_granted:{interface}")));
         }
         Ok(job)
@@ -240,13 +287,14 @@ impl QueueHost {
     /// One maintenance pass over every registered component: expired leases, stale jobs, timeout
     /// alerts, retention. Returns the number of components swept and the alert records drained.
     pub fn sweep_all(&self) -> (usize, usize) {
-        let components: Vec<String> = self
-            .grants
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys()
-            .cloned()
-            .collect();
+        // Per *component*, not per instance: the kv is one namespace and a sweep is idempotent, so
+        // sweeping a component with two live instances (mid-swap) would only do the work twice.
+        let mut components: Vec<String> = self.grants.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+        for (component, _) in self.instances.lock().unwrap_or_else(|e| e.into_inner()).values() {
+            if !components.iter().any(|seen| seen == component) {
+                components.push(component.clone());
+            }
+        }
         let mut swept = 0;
         let mut delivered = 0;
         for component in components {
@@ -502,21 +550,34 @@ impl<State: 'static> wasmtime::component::StreamProducer<State> for ChunksProduc
 
 // ---- the host impls ---------------------------------------------------------------------------------
 
-/// One passage point for the component name, shared by both runners (`service_components` 0.1 and
-/// `service_components_v2` 0.2), so attribution and gating cannot drift between contracts.
+/// One passage point for the two identities a queue call carries, shared by both runners
+/// (`service_components` 0.1 and `service_components_v2` 0.2), so attribution and gating cannot drift
+/// between contracts:
+///
+/// * `component` is the installed name - telemetry labels, the kv namespace a queue lives in, the
+///   component a job is attributed to;
+/// * `instance` is the token the grants are keyed by, so one instance's queue rights are revoked
+///   without touching the instance that replaced it (`services::spawn_instance`).
 pub(crate) trait QueueCaller {
     fn component(&self) -> &str;
+    fn instance(&self) -> &str;
 }
 
 impl QueueCaller for crate::service_components::State {
     fn component(&self) -> &str {
         &self.name
     }
+    fn instance(&self) -> &str {
+        &self.instance
+    }
 }
 
 impl QueueCaller for crate::service_components_v2::State {
     fn component(&self) -> &str {
         &self.name
+    }
+    fn instance(&self) -> &str {
+        &self.instance
     }
 }
 
@@ -537,8 +598,9 @@ macro_rules! queue_impls {
                 job_id: u64,
             ) -> Result<GuestJob, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.get");
-                let out = node().gate_job(&component, "producer", JobId(job_id)).map(job_to_guest);
+                let out = node().gate_job(&owner, "producer", JobId(job_id)).map(job_to_guest);
                 call.outcome(&out);
                 out
             }
@@ -548,10 +610,11 @@ macro_rules! queue_impls {
                 request: GuestRequest,
             ) -> Result<Enqueued, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.enqueue");
                 let queue_name = request.queue.clone();
                 let out = (|| {
-                    node().gate(&component, "producer", Some(&queue_name))?;
+                    node().gate(&owner, "producer", Some(&queue_name))?;
                     let outcome = node().queue(&component).enqueue(request_from_guest(request)).map_err(fault)?;
                     Ok(Enqueued { job: outcome.id.0, deduped: outcome.dedupe_hit })
                 })();
@@ -568,8 +631,9 @@ macro_rules! queue_impls {
                 after: u64,
             ) -> wasmtime::Result<wasmtime::component::StreamReader<Vec<u8>>> {
                 let component = access.data_mut().component().to_string();
+                let owner = access.data_mut().instance().to_string();
                 let chunks: Vec<Vec<u8>> = node()
-                    .gate_job(&component, "producer", JobId(job_id))
+                    .gate_job(&owner, "producer", JobId(job_id))
                     .and_then(|_| node().queue(&component).progress_since(JobId(job_id), after, 256).map_err(fault))
                     .map(|entries| entries.into_iter().map(|entry| entry.bytes).collect())
                     .unwrap_or_default();
@@ -591,9 +655,10 @@ macro_rules! queue_impls {
                 lease_ms: Option<u64>,
             ) -> Result<GuestTake, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.take");
                 let out = (|| {
-                    node().gate(&component, "worker", Some(&queue))?;
+                    node().gate(&owner, "worker", Some(&queue))?;
                     let lease_ms = lease_ms.map(|ms| fresh_ms(ms));
                     match node().queue(&component).take(&queue, &worker, lease_ms).map_err(fault)? {
                         TakeOutcome::Job(job) => {
@@ -616,10 +681,11 @@ macro_rules! queue_impls {
                 extend_ms: Option<u64>,
             ) -> Result<u64, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.heartbeat");
                 let out = (|| {
-                    node().gate(&component, "worker", Some(&queue))?;
-                    let job = node().gate_job(&component, "worker", JobId(job_id))?;
+                    node().gate(&owner, "worker", Some(&queue))?;
+                    let job = node().gate_job(&owner, "worker", JobId(job_id))?;
                     // The grant check above is by namespace; the queue named in the call must match
                     // the job's own queue, or a worker granted two queues could extend across them.
                     if job.queue != queue {
@@ -642,10 +708,11 @@ macro_rules! queue_impls {
                 output: Vec<u8>,
             ) -> Result<GuestJob, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.done");
                 let out = (|| {
-                    node().gate(&component, "worker", Some(&queue))?;
-                    let job = node().gate_job(&component, "worker", JobId(job_id))?;
+                    node().gate(&owner, "worker", Some(&queue))?;
+                    let job = node().gate_job(&owner, "worker", JobId(job_id))?;
                     if job.queue != queue {
                         return Err(QueueFault::Refused("queue_job_mismatch".into()));
                     }
@@ -663,10 +730,11 @@ macro_rules! queue_impls {
                 reason: String,
             ) -> Result<GuestFailOutcome, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.fail");
                 let out = (|| {
-                    node().gate(&component, "worker", Some(&queue))?;
-                    let job = node().gate_job(&component, "worker", JobId(job_id))?;
+                    node().gate(&owner, "worker", Some(&queue))?;
+                    let job = node().gate_job(&owner, "worker", JobId(job_id))?;
                     if job.queue != queue {
                         return Err(QueueFault::Refused("queue_job_mismatch".into()));
                     }
@@ -688,10 +756,11 @@ macro_rules! queue_impls {
                 chunk: Vec<u8>,
             ) -> Result<u64, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.progress");
                 let out = (|| {
-                    node().gate(&component, "worker", Some(&queue))?;
-                    let job = node().gate_job(&component, "worker", JobId(job_id))?;
+                    node().gate(&owner, "worker", Some(&queue))?;
+                    let job = node().gate_job(&owner, "worker", JobId(job_id))?;
                     if job.queue != queue {
                         return Err(QueueFault::Refused("queue_job_mismatch".into()));
                     }
@@ -710,9 +779,10 @@ macro_rules! queue_impls {
                 queue: String,
             ) -> Result<GuestStats, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.stats");
                 let out = (|| {
-                    node().gate(&component, "admin", Some(&queue))?;
+                    node().gate(&owner, "admin", Some(&queue))?;
                     node().queue(&component).stats(&queue).map_err(fault).map(|stats| stats_to_guest(&stats))
                 })();
                 call.outcome(&out);
@@ -721,9 +791,10 @@ macro_rules! queue_impls {
 
             async fn queues(accessor: &wasmtime::component::Accessor<$state, Self>) -> Result<Vec<String>, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.queues");
                 let out = (|| {
-                    node().gate(&component, "admin", None)?;
+                    node().gate(&owner, "admin", None)?;
                     let grants = node().grants(&component).unwrap_or_default();
                     let mut queues = node().queue(&component).queues().map_err(fault)?;
                     queues.retain(|queue| grants.may_queue(queue));
@@ -739,9 +810,10 @@ macro_rules! queue_impls {
                 limit: u32,
             ) -> Result<Vec<GuestJob>, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.dead_letters");
                 let out = (|| {
-                    node().gate(&component, "admin", Some(&queue))?;
+                    node().gate(&owner, "admin", Some(&queue))?;
                     let limit = (limit as usize).clamp(1, 256);
                     node().queue(&component)
                         .dead_letters(&queue, limit)
@@ -758,9 +830,10 @@ macro_rules! queue_impls {
                 refresh_freshness: bool,
             ) -> Result<GuestJob, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.requeue");
                 let out = (|| {
-                    let job = node().gate_job(&component, "admin", JobId(job_id))?;
+                    let job = node().gate_job(&owner, "admin", JobId(job_id))?;
                     let options = wa_queue::RequeueOptions {
                         refresh_fresh: refresh_freshness,
                         ..wa_queue::RequeueOptions::default()
@@ -776,9 +849,10 @@ macro_rules! queue_impls {
                 accessor: &wasmtime::component::Accessor<$state, Self>,
             ) -> Result<Option<GuestAlertBatch>, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.next_alerts");
                 let out = (|| {
-                    node().gate(&component, "admin", None)?;
+                    node().gate(&owner, "admin", None)?;
                     let grants = node().grants(&component).unwrap_or_default();
                     let batch = node().queue(&component).next_alerts().map_err(fault)?;
                     Ok(batch.map(|batch| GuestAlertBatch {
@@ -805,9 +879,10 @@ macro_rules! queue_impls {
 
             async fn sweep(accessor: &wasmtime::component::Accessor<$state, Self>) -> Result<GuestSweep, QueueFault> {
                 let component = accessor.with(|mut access| access.get().component().to_string());
+                let owner = accessor.with(|mut access| access.get().instance().to_string());
                 let mut call = wa_governance::node_telemetry::HostCallGuard::start(&component, "queue.sweep");
                 let out = (|| {
-                    node().gate(&component, "admin", None)?;
+                    node().gate(&owner, "admin", None)?;
                     let outcome = node().queue(&component).sweep().map_err(fault)?;
                     Ok(GuestSweep {
                         leases_recovered: outcome.leases_recovered as u32,

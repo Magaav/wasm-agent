@@ -79,6 +79,9 @@ function M.control(args,ctx)
  if ctx.subagent then return fail('services_management_forbidden_for_subagent') end
  local action=args.action
  if action=='list' then return M.inventory() end
+ -- The effective configuration after base -> node -> user -> patch (docs/KERNEL.md, "Profiles as
+ -- layers"), rows by id. Read-only and needed by every operator, so no registry revision.
+ if action=='profile_dump' then return host_call({action='profile_dump',name=args.name}) end
  if action=='status' or action=='logs' then
   if type(args.name)~='string' then return fail('service_name_required') end
   return host_call({action=action,name=args.name,bytes=args.bytes})
@@ -89,6 +92,22 @@ function M.control(args,ctx)
   if not row then return fail('service_unknown') end
   if not row.enabled then return fail('service_not_enabled') end
   host_call({action='stop',name=args.name});return host_call(start_request(row.definition))
+ end
+ if action=='upgrade' then
+  -- Transactional install/upgrade (docs/KERNEL.md, lesson 5). The *grants* stay the ones the
+  -- definition was enabled with - an upgrade replaces bytes, not authority - and the artifact comes
+  -- from `source`. A candidate that fails any stage leaves the running instance untouched, so this is
+  -- not a registry change either: nothing is stored unless the host answers ok.
+  local row=type(args.name)=='string' and load_store().services[args.name]
+  if not row then return fail('service_unknown') end
+  if not row.enabled then return fail('service_not_enabled') end
+  local request=start_request(row.definition)
+  request.action='upgrade'
+  request.source=args.source
+  if args.ready_ms~=nil then request.ready_ms=args.ready_ms end
+  local answer=host_call(request)
+  if answer.ok then answer.definition=row.definition end
+  return answer
  end
  if type(args.expected_revision)~='number' then return fail('services_store_revision_changed',{revision=load_store().revision}) end
  if action=='put' then
@@ -121,14 +140,29 @@ function M.control(args,ctx)
  return fail('invalid_services_action')
 end
 
--- Boot: start every enabled service. host.service start is idempotent (an already running service
--- with the same pin is left alone), so a second interpreter loading server.lua is harmless.
+-- Boot: start every enabled service **by imports** (docs/KERNEL.md, lesson 3). `host.service supervise`
+-- plans against what each artifact imports, starts providers before consumers whatever order this
+-- store enumerates them in, and answers what still waits - so a channel that needs a provider which is
+-- also enabled comes up without the operator ordering the definitions by hand. A definition whose
+-- component is not installed yet is reported as waiting (with the reason), not as an error, and a
+-- second interpreter loading server.lua is harmless: a running instance with the same pin is left
+-- alone.
 function M.autostart()
  local ready=query("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'",{})
  if #ready==0 then return {ok=true,started={}} end
- local store=load_store();local started={}
- for name,row in pairs(store.services)do if row.enabled then started[name]=host_call(start_request(row.definition)) end end
- return {ok=true,started=started}
+ local store=load_store();local definitions={}
+ for _,row in pairs(store.services)do if row.enabled then definitions[#definitions+1]=row.definition end end
+ if #definitions==0 then return {ok=true,started={}} end
+ table.sort(definitions,function(a,b)return a.name<b.name end)
+ local answer=host_call({action='supervise',definitions=definitions})
+ if answer.error then return answer end
+ -- `started` keeps the shape callers already read: one entry per enabled definition that is up, whether
+ -- this call started it or found it running (`already_running`, the old `host.service start` idempotency
+ -- answer), so a second interpreter loading server.lua sees the same registry.
+ local started={}
+ for name,row in pairs(answer.started or {})do started[name]=row end
+ for _,row in ipairs(answer.already_running or {})do started[row.name]={ok=true,already_running=true,sha256=row.sha256,instance=row.instance} end
+ return {ok=answer.ok~=false,started=started,waiting=answer.waiting or {},refused=answer.refused or {}}
 end
 
 return M

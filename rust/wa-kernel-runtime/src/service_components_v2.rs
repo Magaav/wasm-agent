@@ -108,6 +108,9 @@ pub struct State {
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
     stt: bool,
+    /// The instance token (`name#generation`): the subject this instance's queue grants and bus
+    /// subscriptions are keyed by, so a replacement can revoke them without touching the winner.
+    pub(crate) instance: String,
     /// The installed name: policy checks and telemetry are attributed to the component, so one
     /// running instance answers "who called this" without a second registry (as in 0.1).
     /// `pub(crate)` because the host-side providers (`bus_host`, `queue_host`) use it too.
@@ -739,7 +742,10 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
             secrets.insert(key.clone(), value.trim().to_string());
         }
     }
-    let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(serde_json::Value::as_u64).unwrap_or(512).clamp(16, 4096);
+    // Same resolution as the 0.1 runner and the wasip1 one: declared in the manifest, capped by the
+    // node (`wa_governance::component_limits`).
+    let limits = crate::limits::for_service(installed);
+    let memory_mb = limits.memory_mb;
     let storage = installed.manifest.get("capabilities").and_then(|c| c.get("storage")).and_then(serde_json::Value::as_bool) == Some(true);
     let stt = installed.manifest.get("capabilities").and_then(|c| c.get("stt")).and_then(serde_json::Value::as_bool) == Some(true);
     if stt {
@@ -755,6 +761,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         log: Some(log_file),
         secrets,
         stt,
+        instance: crate::services::instance_token(shared, &installed.name),
         name: installed.name.clone(),
     };
     let engine = component.engine();
@@ -762,16 +769,24 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
     store.limiter(|s| &mut s.limits);
     let stop_seen: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let watcher = shared.clone();
+    // The stop grace and the CPU budget (`limits.cpu_ms` of execution in one window, then
+    // `trap:cpu_limit`). A 0.2 guest that awaits spends most of its life parked, and `CpuBudget` does
+    // not charge a parked window - see its own docs for the heuristic and its named risk.
+    let mut cpu = wa_governance::component_limits::CpuBudget::new(limits.cpu_ms, Instant::now());
     store.epoch_deadline_callback(move |_| {
+        let now = Instant::now();
         if watcher.stop.load(Ordering::Relaxed) {
             let mut seen = stop_seen.lock().unwrap();
-            if seen.get_or_insert_with(Instant::now).elapsed() > STOP_GRACE {
+            if seen.get_or_insert(now).elapsed() > STOP_GRACE {
                 return Err(wasmtime::Error::msg("service_stopped"));
             }
         }
-        Ok(UpdateDeadline::Continue(10))
+        if cpu.sample(now) {
+            return Err(wasmtime::Error::msg("cpu_limit"));
+        }
+        Ok(UpdateDeadline::Continue(1))
     });
-    store.set_epoch_deadline(10);
+    store.set_epoch_deadline(1);
     let mut linker: Linker<State> = Linker::new(engine);
     if let Err(error) = wasmtime_wasi::p2::add_to_linker_async(&mut linker) {
         return format!("link_failed:{error}");
@@ -1008,6 +1023,7 @@ mod tests {
             log: None,
             secrets: Default::default(),
             stt: false,
+            instance: "wa-whatsapp#1".into(),
             name: "wa-whatsapp".into(),
         };
         let mut store = Store::new(&engine, state);

@@ -96,14 +96,65 @@ impl Grants {
 }
 
 /// The node's bus and the grants the ACL is built from.
+///
+/// Two kinds of subject live in the ACL, on purpose:
+///
+/// * a **component** (its installed name) may `publish` inside its granted patterns, and every
+///   published event carries that name as its `source`;
+/// * an **instance** (the token `registrations::Instance` hands out, `name#generation`) may
+///   `subscribe`, because a subscription has to die with the instance that made it and not with the
+///   name (`docs/KERNEL.md`, lesson 2). Before the token, a replacement instance's subscriptions were
+///   revoked by the *old* instance stopping - which is exactly when the new one is alive and using
+///   them.
 pub struct BusHost {
     bus: Bus,
     grants: Mutex<BTreeMap<String, Grants>>,
+    /// Instance token -> the component it belongs to.
+    instances: Mutex<BTreeMap<String, String>>,
+}
+
+impl Default for BusHost {
+    fn default() -> BusHost {
+        BusHost { bus: Bus::with_access(Arc::new(NamespaceAcl::new())), grants: Mutex::new(BTreeMap::new()), instances: Mutex::new(BTreeMap::new()) }
+    }
 }
 
 impl BusHost {
     pub fn new() -> BusHost {
-        BusHost { bus: Bus::with_access(Arc::new(NamespaceAcl::new())), grants: Mutex::new(BTreeMap::new()) }
+        BusHost::default()
+    }
+
+    /// Open an instance's subscribe rights: from now on `token` may subscribe inside the component's
+    /// granted patterns. Called once per started instance, before its first guest call.
+    pub fn attach(&self, component: &str, token: &str) {
+        self.instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token.to_string(), component.to_string());
+        self.rebuild_acl();
+    }
+
+    /// Revoke one instance's subscriptions and its subscribe rights, and nothing else. This is the
+    /// hot-swap revocation: the instance that lost goes, the instance that won keeps its rows.
+    pub fn detach(&self, token: &str) -> usize {
+        let removed = self.instances.lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+        let revoked = self.bus.revoke_owner(token);
+        if removed.is_some() {
+            self.rebuild_acl();
+        }
+        revoked
+    }
+
+    /// The instance tokens this component currently has open (0 or more; more than one only while a
+    /// swap is in flight).
+    pub fn instances(&self, component: &str) -> Vec<String> {
+        self.instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, owner)| owner.as_str() == component)
+            .map(|(token, _)| token.clone())
+            .collect()
     }
 
     /// Record (or replace) a component's grants and rebuild the ACL from scratch. Called from
@@ -128,25 +179,36 @@ impl BusHost {
     /// Forget a component: revoke every subscription it owns **and** its grants. A stopped component
     /// keeps nothing (`docs/BUS.md`, "Revocation").
     pub fn unregister(&self, component: &str) -> usize {
-        let removed = self
-            .grants
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(component);
+        let tokens = self.instances(component);
+        {
+            let mut instances = self.instances.lock().unwrap_or_else(|e| e.into_inner());
+            for token in &tokens {
+                instances.remove(token);
+            }
+            self.grants.lock().unwrap_or_else(|e| e.into_inner()).remove(component);
+        }
         self.rebuild_acl();
-        let revoked = self.bus.revoke_owner(component);
-        let _ = removed;
+        let mut revoked = self.bus.revoke_owner(component);
+        for token in &tokens {
+            revoked += self.bus.revoke_owner(token);
+        }
         revoked
     }
 
     fn rebuild_acl(&self) {
         let mut acl = NamespaceAcl::new();
+        let instances = self.instances.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for (component, grants) in self.grants.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             for pattern in &grants.publish {
                 let _ = acl.grant(component, Action::Publish, pattern);
             }
             for pattern in &grants.subscribe {
+                // The component name keeps its subscribe rights (the dev loop and the tests subscribe
+                // as a name); each open instance adds its own so a revoke can be per instance.
                 let _ = acl.grant(component, Action::Subscribe, pattern);
+                for (token, _) in instances.iter().filter(|(_, owner)| *owner == component) {
+                    let _ = acl.grant(token, Action::Subscribe, pattern);
+                }
             }
         }
         self.bus.set_access(Arc::new(acl));
@@ -188,18 +250,19 @@ impl BusHost {
         }
     }
 
-    /// Subscribe as `component`, inside the granted patterns. `replay` asks for retained events
-    /// first and is refused for a topic with no retention, exactly as the library does.
+    /// Subscribe as `owner` - an instance token, or a component name for a caller that has no
+    /// instance (the dev loop, a test) - inside the granted patterns. `replay` asks for retained
+    /// events first and is refused for a topic with no retention, exactly as the library does.
     pub fn subscribe(
         &self,
-        component: &str,
+        owner: &str,
         pattern: &str,
         options: SubscribeOptions,
         replay: Option<usize>,
     ) -> Result<Subscription, BusFault> {
         let result = match replay {
-            Some(limit) => self.bus.subscribe_replaying(component, pattern, options, limit),
-            None => self.bus.subscribe(component, pattern, options),
+            Some(limit) => self.bus.subscribe_replaying(owner, pattern, options, limit),
+            None => self.bus.subscribe(owner, pattern, options),
         };
         result.map_err(fault)
     }

@@ -1,6 +1,9 @@
 //! The node's rule book and its record: what a capability call is allowed to do, and what it did.
 //!
-//! - `node_policy`: the effective grant policy, its modes and the audit trail (docs/GRANT-POLICY.md).
+//! - `node_policy`: the effective grant policy, its modes, the reload watcher and the audit trail
+//!   (docs/GRANT-POLICY.md).
+//! - `component_limits`: the node's cap on a component's CPU window and memory (docs/KERNEL.md,
+//!   "Per-component limits").
 //! - `node_telemetry`: the per-component call and health counters (docs/TELEMETRY.md).
 //! - `store`: where both of them keep bounded state, and the quota that keeps it bounded (docs/REPLAY.md).
 //!
@@ -12,6 +15,7 @@
 // those `unsafe fn` would only move the `unsafe` to every registration site without making them safer,
 // so the lint is allowed once here, with the reason.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
+pub mod component_limits;
 pub mod node_policy;
 pub mod node_telemetry;
 pub mod store;

@@ -35,6 +35,9 @@ pub struct DevInstance {
     sha256: String,
     shared: Arc<Shared>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The instance's identity, so stopping it revokes *its* registrations and not the name's: a hot
+    /// swap has two instances of the same name alive at once (`registrations`).
+    instance: crate::registrations::Instance,
 }
 
 impl DevInstance {
@@ -68,7 +71,16 @@ impl DevInstance {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // A dev instance is not in the node's registry, so nothing else would revoke it: without this,
+        // a swap left the stopped instance's bus token attached and its ledger rows behind, and the
+        // next plan saw a provider that was not running and a subscriber nobody could see.
+        crate::registrations::node().revoke_generation(&self.name, self.instance.generation);
         self.last_exit()
+    }
+
+    /// The instance token (`name#generation`) this slot holds.
+    pub fn instance(&self) -> &crate::registrations::Instance {
+        &self.instance
     }
 
     /// Wait until the instance reports health, exits, or the deadline passes.
@@ -76,23 +88,35 @@ impl DevInstance {
     /// `Ready` is a report of `ready` or `degraded`: a degrading component still answers, so it is
     /// allowed to take over (the same rule the supervisor applies to traffic).
     pub fn wait_ready(&self, within: Duration) -> Result<String, Wait> {
-        let deadline = Instant::now() + within;
-        loop {
-            if !self.is_alive() {
-                return Err(Wait::Exited(self.last_exit()));
-            }
-            let health = self.health();
-            if health.starts_with("ready") || health.starts_with("degraded") {
-                return Ok(health);
-            }
-            if Instant::now() >= deadline {
-                // A component may legitimately never report - `lifecycle.report` is optional in the
-                // WIT. Then "alive after the wait" is the strongest thing that can be said, and it
-                // is said out loud rather than invented as health.
-                return Err(Wait::Unreported(health));
-            }
-            std::thread::sleep(POLL);
+        wait_ready(&self.shared, self.thread.as_ref(), within)
+    }
+}
+
+/// The health rule, in one place for both callers of a started instance: the dev loop
+/// (`DevInstance::wait_ready`) and the transactional upgrade (`install::upgrade`).
+///
+/// `ready`/`degraded` is health; a thread that is gone is an exit; and an instance that runs for the
+/// whole window without reporting is [`Wait::Unreported`] - `lifecycle.report` is optional in the WIT
+/// and absent in a wasip1 module, so "alive after the wait" is the strongest thing that can be said
+/// and both callers accept it *out loud* rather than inventing health.
+pub(crate) fn wait_ready(
+    shared: &Arc<Shared>,
+    thread: Option<&std::thread::JoinHandle<()>>,
+    within: Duration,
+) -> Result<String, Wait> {
+    let deadline = Instant::now() + within;
+    loop {
+        if thread.is_some_and(|thread| thread.is_finished()) {
+            return Err(Wait::Exited(shared.last_exit.lock().unwrap().clone()));
         }
+        let health = shared.health.lock().unwrap().clone();
+        if health.starts_with("ready") || health.starts_with("degraded") {
+            return Ok(health);
+        }
+        if Instant::now() >= deadline {
+            return Err(Wait::Unreported(health));
+        }
+        std::thread::sleep(POLL);
     }
 }
 
@@ -129,6 +153,7 @@ fn start_installed(installed: Installed, grant: Grant) -> Result<DevInstance, St
         sha256: spawned.sha256,
         shared: spawned.shared,
         thread: spawned.thread,
+        instance: spawned.instance,
     })
 }
 

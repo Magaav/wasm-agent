@@ -532,6 +532,140 @@ bound, not the TCP window; a 0.1 component is compiled twice at start; and `wa-w
 against a phone from this lane (no pairing, no messages — see
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md)).
 
+## Supervisor features, step 4 (implemented 06/11, wasm_the_first)
+
+The four lessons that were design in the list above are now code, with the two runtime gaps that
+mattered in production closed beside them. Everything is in `rust/wa-kernel-runtime` (plus one new
+`wa-governance` module) and every claim below has a test; the file names are the entry points.
+
+### 1. Start by imports (`imports.rs`, `supervisor.rs`)
+
+A definition's position in configuration means nothing. `imports::of_installed` reads the **artifact's
+own type** (compiled once, cached by pin) and returns what it imports and exports; `kernel_serves`
+answers which of those the runner links; everything else has to be exported by a *running* provider.
+`supervisor::plan` simulates the starts, so a provider listed after its consumer is planned first, and
+`supervisor::reconcile` (the `services supervise` action) performs it until nothing more can start.
+
+* **Exact versions.** `wa:kernel/kv@0.1.0` and `@0.2.0` are different interfaces served by different
+  runners. A component that asks for a version nobody serves **waits** and says which one; it is never
+  started against a contract it was not built for. The served list is a constant, and
+  `imports::tests::the_served_interface_lists_match_the_wit_worlds` reads `wit/kernel*/kernel.wit` and
+  fails when the constant and the world disagree - the one way that constant could rot silently.
+* **What "waiting" looks like.** `services status` answers `{"state": "waiting", "waiting_for":
+  ["wa:vision/text-reader@0.1.0"], "waiting_reason": "imports_not_served"}` (`not_installed` when the
+  component is not on the node at all: two very different operator problems). A definition that is
+  waiting is not reported as `not_running`, which says nothing about why.
+* **Boot uses it.** `lua/core/services.lua`'s `autostart` no longer starts enabled definitions in store
+  order; it hands them all to `supervise`, so a channel that needs a provider which is also enabled
+  comes up without the operator ordering anything. `already_running` keeps the old idempotency answer.
+
+### 2. Revocable registrations (`registrations.rs`, `bus_host.rs`, `queue_host.rs`)
+
+Every running instance gets an identity: `{name, generation, token}` where the token is
+`name#generation`. The name is what the ACL, the policy and telemetry attribute a call to; the token is
+what a provider keys its rows by. `registrations::Ledger` records what an instance registered (bus
+subscription, queue grant, and the `Timer`/`Tool`/`Route` seams a provider will use) together with the
+provider's own `cancel` closure, and `revoke_generation` runs exactly those.
+
+The rule that made this necessary: a hot swap starts the replacement **beside** the old instance, so
+both are alive under one name. A name-keyed revoke at "old stops" time revokes the *new* instance's
+rows - the swap would leave the winner with no subscriptions and refused queue calls. Now `wa:bus`
+subscribes as the token (the ACL grants subscribe to the component name *and* each open instance),
+`wa:queue` gates by the token, and `services::replace` revokes one generation. `stop` (the component
+stops for good) still takes everything.
+
+Proof: `install::tests::an_upgrade_switches_only_when_the_candidate_is_good` asserts, after a real
+switch, `count_generation(name, old) == 0`, one bus token (`name#N`) on the node and one queue grant -
+the retired instance's rows are gone and the live instance's are not. `registrations::tests` proves the
+same two properties on the ledger alone, including that a cancel runs (so "revoked" never means only
+"forgotten").
+
+### 3. Transactional install (`install.rs`, `services::replace`)
+
+`services upgrade {name, source: {wasm, manifest|manifest_path, pin}, ready_ms?}`:
+
+```text
+stage (<components>/.stage-<name>-<pid>/, three files)   -> pin verified against the staged bytes
+-> every imported interface is served                    -> else refused, quoting the interface
+-> grant checked against the staged manifest              -> state migration on a snapshot copy
+-> candidate started beside the old instance             -> lifecycle.report(ready), or alive-unreported
+-> staged files committed (wasm, manifest, pin last)      -> services::replace: switch, revoke, stop old
+```
+
+Any failure before the switch stops the candidate, deletes the staging directory, and leaves the
+installed files and the running instance untouched - the test walks a pin mismatch, a non-wasm source
+and an unserved import before the successful upgrade, and asserts each time that the installed pin and
+the running instance did not move. The health rule is `dev::wait_ready`'s, extracted so the dev loop
+and this path cannot disagree: `ready`/`degraded` is health, a vanished thread is an exit, and an
+instance that runs for the whole window without reporting is accepted **and reported as
+`unreported`** (the report is optional in the WIT and absent in a wasip1 module, so inventing health
+would be worse than naming its absence). The files are committed *before* the switch, so a crash
+between the switch and the next start finds a consistent installation (the pin moves last: new bytes
+with an old pin are `component_hash_mismatch`, never an unverified run).
+
+### 4. Profiles as layers (`profiles.rs`)
+
+`base -> node -> user -> patch`, rows addressed by id, merged per key (recursively for nested objects),
+where a `null` removes a key and an absent key inherits. `base` is what the binary knows; the other
+three are `<state>/profiles/{node,user,patch}.json`. `services profile_dump [name]` prints the order,
+the effective rows, which layers existed, and - with a name - the `config` that component would be
+started with (its own row over `default`) and its `limits`. `install::upgrade` fills a missing `config`
+grant from there, so the effective configuration is one stack, not a fourth place to look.
+
+A broken layer is reported and skipped: profiles shape configuration, not authority (grants stay in
+the manifest and the node policy), so a typo must not stop a node - and must not be silent either.
+
+### 5. Per-component limits (`wa-governance/src/component_limits.rs`, `wa-kernel-runtime/src/limits.rs`)
+
+A manifest *declares* `limits: {memory_mb, cpu_ms}`; the node *caps* it (`WA_COMPONENT_LIMITS`, else
+the `limits` section of `policy.json`, else `<state>/limits.json`, else the defaults 512 MB / 5000 ms).
+`min(declared, cap)` is resolved in one place (`limits::for_service`) and all three runners build their
+store from it, so the same manifest cannot yield two different caps depending on which contract it was
+built for. The answer says which side decided (`manifest`, `node` or `both`).
+
+* **memory** through `StoreLimits` (unchanged mechanism, now capped).
+* **CPU** through the epoch callback: `CpuBudget` sums the gaps between epoch firings while the guest
+  keeps the CPU, and traps with `cpu_limit` when `cpu_ms` is spent inside one window. A gap longer than
+  60 ms means the guest was parked (a timer, a stream read, a slow host call) and the window restarts,
+  so an async guest that waits is never killed for waiting.
+  **The default is 5000 ms, and that is a finding, not a guess:** the first default tried here was
+  50 ms and it trapped `svc-echo-v1` in the middle of its `wa_http` poll - a `wa:kernel@0.1` guest is
+  *supposed* to poll (the 0.1 contract is sync calls plus non-blocking polls), so a tight poll loop is
+  normal there, and a budget shorter than a legitimate poll wait turns a contract into a bug.
+  **The risk, named:** a guest preempted by the OS mid-loop looks parked for that gap, so the budget
+  errs towards running longer. It is a starvation guard, not an accounting instrument; on the 0.2
+  runner the parked-guest watchdog (`stop`) is still what ends a guest that never returns. What it does
+  prove is `services::tests::a_guest_that_never_yields_is_trapped_by_its_cpu_budget`: a `loop { br 0 }`
+  guest really is trapped, with `last_exit = trap:cpu_limit`, once its declared 10 ms is spent.
+
+### 6. The policy reload, and the 06/11 deploy bug
+
+Production, 06/11: the node started 14:55:13, the deploy wrote `policy.json` at 14:55:37, and every
+WhatsApp send after that was refused. The node had loaded the policy it had - nothing watched the file.
+
+Two fixes, both tested:
+
+* **the node reloads** (`wa_governance::node_policy`): a watcher thread polls the file's mtime/size/
+  sha256 (`WA_GRANT_POLICY_WATCH_MS`, default 1000, `0` disables), and a change is parsed and
+  validated *first*, then installed with `Engine::set_policy` under the engine's lock - budgets
+  (rate buckets, daily counters) are kept, so a reload cannot reset a limit. A file that appears while
+  the node runs switches the layer on; a broken file applies nothing and is reported; a *removed* file
+  keeps the loaded policy (going back to `manifest` mode would widen what the node allows). `mode` and
+  `loaded` became atomics for this, and `host.policy_status` grew a `reload` block: the sha256 the
+  loaded policy came from, how many changes were applied, the last change that was refused.
+  Tests: `a_policy_file_that_appears_after_start_is_loaded_without_a_restart`,
+  `a_reload_tightens_a_running_node_and_keeps_its_budgets`,
+  `a_broken_or_removed_file_keeps_the_loaded_policy_and_says_why`, and the watcher itself
+  (`the_watcher_applies_a_file_written_while_the_node_runs`).
+* **the deploy orders it** (`scripts/deploy.sh`): the policy install is step 6a, *before* the
+  `upgrade.sh` invocation that restarts the node; what remains after the restart is only the
+  informational "installed components with no rule" listing, which has to read the freshly installed
+  component directory. `scripts/test-deploy-policy-order.sh` reads the script and fails if the install
+  drifts back below the restart, and source-checks that the reload still exists.
+
+The reload is the safety net; the order is the contract, because a node should not be on the wrong
+policy for even one second.
+
 ## The crate split (step 5, first batch) — `wa-host` is the binary
 
 `wa-host` was one 29k-line binary crate: host runtime, capabilities, the Lua bridge, both service
@@ -676,8 +810,9 @@ hang, to fail to bind, or to die - nothing it does reaches a real node.
    generated from the same WIT.
 3. wasi-nn spike: `wa:speech/recognizer` and `wa:vision/text-reader` providers on ONNX, measured
    against native faster-whisper on openclaw.
-4. Supervisor features: start-by-imports, revocable registrations, transactional install with
-   health-gated switch, profiles.
+4. ~~Supervisor features: start-by-imports, revocable registrations, transactional install with
+   health-gated switch, profiles.~~ Landed 06/11 - see "Supervisor features, step 4" below, plus the
+   per-component limits and the policy reload that came with it.
 5. Carve-out in batches, smallest and most frequently changed first; the Lua core as one component.
    First batch landed: the crate split above (`wa-host` is the binary).
 6. Watchdog replaces the sentinel for kernel upgrades. First half landed: `rust/wa-watchdog` plus the

@@ -160,7 +160,11 @@ pub fn pooled_engine(limits: &PoolLimits) -> Result<Engine> {
 }
 
 /// Compiled components by content hash: compiling is the expensive step, a pin change is a new key.
-fn compiled(engine: &Engine, sha: &str, bytes: &[u8]) -> Result<Component> {
+///
+/// `pub(crate)` because `imports.rs` reads an artifact's interface list from the *compiled* component:
+/// reading a type does not need a second compilation, and the disk cache (`<home>/.wasm-agent/cache/
+/// components`) is keyed by exactly the pin this takes.
+pub(crate) fn compiled(engine: &Engine, sha: &str, bytes: &[u8]) -> Result<Component> {
     static CACHE: OnceLock<Mutex<HashMap<String, Component>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(found) = cache.lock().map_err(|_| anyhow!("component_cache_poisoned"))?.get(sha) {

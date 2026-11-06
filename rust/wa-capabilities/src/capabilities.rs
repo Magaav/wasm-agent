@@ -174,7 +174,7 @@ pub const REGISTRY: &[Capability] = &[
     upvalue!("invoke", RunsProcess, crate::host::invoke, "Invoke one registered WASM plugin with JSON arguments"),
     // ---- WASI components ---------------------------------------------------------------------
     plain!("components", ReadOnly, wa_kernel_runtime::components::components, "List installed WASI components: pin state and declared capabilities"),
-    plain!("service", RunsProcess, wa_kernel_runtime::services::service, "Start, stop, inspect or read the log of a supervised long-lived WASI service component, with exactly its granted capabilities"),
+    plain!("service", RunsProcess, wa_kernel_runtime::services::service, "Supervise long-lived WASI service components (docs/SERVICE-COMPONENTS.md): start, stop, status, logs, the transactional upgrade, the effective configuration profile and the start-by-imports reconcile"),
     plain!("component_mcp", RunsProcess, wa_kernel_runtime::components::component_mcp, "One MCP request (probe or call) against a pinned WASI component, with exactly the granted env/file/network capabilities"),
     plain!("state", WritesFiles, wa_kernel_runtime::state_host::capability, "Component state: status, dry run, export, import and verify of a component's versioned kv namespace, its migration journal and its snapshots"),
     // ---- WhatsApp (docs/SERVICE-COMPONENTS.md, docs/GRANT-POLICY.md) ---------------------------

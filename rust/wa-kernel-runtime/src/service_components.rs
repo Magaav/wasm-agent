@@ -69,6 +69,10 @@ pub struct State {
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
     stt: bool,
+    /// The instance token (`name#generation`): the subject this instance's queue grants and bus
+    /// subscriptions are keyed by, so a replacement can revoke them without touching the winner
+    /// (`registrations`). Never the guest's to choose.
+    pub(crate) instance: String,
     /// The installed name: policy checks and telemetry are attributed to the component, so one
     /// running instance answers "who called this" without a second registry. `pub(crate)` because
     /// the host-side providers (`bus_host`, `queue_host`) attribute their calls to it too.
@@ -448,7 +452,11 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
             secrets.insert(key.clone(), value.trim().to_string());
         }
     }
-    let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(serde_json::Value::as_u64).unwrap_or(512).clamp(16, 4096);
+    // Declared in the manifest, capped by the node (`wa_governance::component_limits`): the same
+    // resolution in both runners and in the wasip1 one, so a component cannot be given one memory cap
+    // by one contract and another by the next.
+    let limits = crate::limits::for_service(installed);
+    let memory_mb = limits.memory_mb;
     let storage = installed.manifest.get("capabilities").and_then(|c| c.get("storage")).and_then(serde_json::Value::as_bool) == Some(true);
     let stt = installed.manifest.get("capabilities").and_then(|c| c.get("stt")).and_then(serde_json::Value::as_bool) == Some(true);
     if stt {
@@ -464,22 +472,33 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         log: Some(log_file),
         secrets,
         stt,
+        instance: crate::services::instance_token(shared, &installed.name),
         name: installed.name.clone(),
     };
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
     let stop_seen: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let watcher = shared.clone();
+    // Two deadline rules in one callback: the stop grace (a guest that ignores `stopping()` is trapped
+    // after it) and the CPU budget (`limits.cpu_ms` of execution inside one window, then a trap). Both
+    // are epoch ticks - the ticker is what makes either of them possible.
+    let mut cpu = wa_governance::component_limits::CpuBudget::new(limits.cpu_ms, Instant::now());
     store.epoch_deadline_callback(move |_| {
+        let now = Instant::now();
         if watcher.stop.load(Ordering::Relaxed) {
             let mut seen = stop_seen.lock().unwrap();
-            if seen.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(5) {
+            if seen.get_or_insert(now).elapsed() > Duration::from_secs(5) {
                 return Err(wasmtime::Error::msg("service_stopped"));
             }
         }
-        Ok(UpdateDeadline::Continue(10))
+        if cpu.sample(now) {
+            // The trap's text is the label the supervisor writes to `last_exit`, so it has to be a
+            // word, not a paragraph: `trap:cpu_limit`.
+            return Err(wasmtime::Error::msg("cpu_limit"));
+        }
+        Ok(UpdateDeadline::Continue(1))
     });
-    store.set_epoch_deadline(10);
+    store.set_epoch_deadline(1);
     let mut linker: Linker<State> = Linker::new(engine);
     if let Err(error) = wasmtime_wasi::p2::add_to_linker_sync(&mut linker) {
         return format!("link_failed:{error}");

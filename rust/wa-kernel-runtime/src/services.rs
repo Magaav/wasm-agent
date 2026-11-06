@@ -36,7 +36,6 @@ const MAX_IO: usize = 256 << 10;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const HEALTHY: Duration = Duration::from_secs(600);
-const DEFAULT_MEMORY_MB: u64 = 512;
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -63,6 +62,9 @@ pub fn dial_allowed(granted: &[String], addr: &str) -> bool {
 
 #[derive(Default)]
 pub(crate) struct Shared {
+    /// This instance's identity (`name#generation`): what its registrations are keyed by. Set once, in
+    /// `spawn_instance`, before the thread that could register anything exists.
+    pub(crate) instance: OnceLock<crate::registrations::Instance>,
     pub(crate) stop: AtomicBool,
     /// Last `lifecycle.report` from a component service ("" for wasip1 modules).
     pub(crate) health: Mutex<String>,
@@ -79,6 +81,8 @@ struct Handle {
     shared: Arc<Shared>,
     sha256: String,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The generation of the instance this handle owns: what `replace` revokes when it retires it.
+    generation: u64,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Handle>> {
@@ -453,7 +457,10 @@ fn run_once(installed: &Installed, grant: &Grant, module: &Module, shared: &Arc<
             Err(_) => return format!("file_env_unreadable:{key}"),
         }
     }
-    let memory_mb = installed.manifest.get("limits").and_then(|l| l.get("memory_mb")).and_then(Value::as_u64).unwrap_or(DEFAULT_MEMORY_MB).clamp(16, 4096);
+    // Declared in the manifest, capped by the node: the same resolution the two component runners use
+    // (`crate::limits`), so the same manifest cannot yield two memory caps.
+    let effective_limits = crate::limits::for_service(installed);
+    let memory_mb = effective_limits.memory_mb;
     let limits = StoreLimitsBuilder::new().memory_size((memory_mb as usize) << 20).instances(16).build();
     let storage = installed.manifest.get("capabilities").and_then(|c| c.get("storage")).and_then(Value::as_bool) == Some(true);
     let kv_path = storage.then(|| crate::components::component_dir().join(format!("{}.state", installed.name)).join("kv.sqlite"));
@@ -464,17 +471,24 @@ fn run_once(installed: &Installed, grant: &Grant, module: &Module, shared: &Arc<
     // (wa_ctl.stopping), then the epoch traps it.
     let stop_seen: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let watcher = shared.clone();
+    // The stop grace and the CPU budget (`limits.cpu_ms` of execution in one window, then a trap),
+    // the same two rules the two component runners apply.
+    let mut cpu = wa_governance::component_limits::CpuBudget::new(effective_limits.cpu_ms, Instant::now());
     store.epoch_deadline_callback(move |_| {
+        let now = Instant::now();
         if watcher.stop.load(Ordering::Relaxed) {
             let mut seen = stop_seen.lock().unwrap();
-            let since = *seen.get_or_insert_with(Instant::now);
+            let since = *seen.get_or_insert(now);
             if since.elapsed() > STOP_GRACE {
                 return Err(wasmtime::Error::msg("service_stopped"));
             }
         }
-        Ok(UpdateDeadline::Continue(10))
+        if cpu.sample(now) {
+            return Err(wasmtime::Error::msg("cpu_limit"));
+        }
+        Ok(UpdateDeadline::Continue(1))
     });
-    store.set_epoch_deadline(10);
+    store.set_epoch_deadline(1);
     let linker = match linker(engine) {
         Ok(linker) => linker,
         Err(error) => return format!("link_failed:{error}"),
@@ -534,8 +548,17 @@ pub fn start(request: &Value) -> Value {
     };
     let report = spawned.report.clone();
     let sha256 = spawned.sha256.clone();
-    services.insert(name.clone(), Handle { shared: spawned.shared, sha256: sha256.clone(), thread: spawned.thread });
-    let mut answer = json!({"ok": true, "name": name, "started": true, "sha256": sha256});
+    let instance = spawned.instance.clone();
+    services.insert(
+        name.clone(),
+        Handle { shared: spawned.shared, sha256: sha256.clone(), thread: spawned.thread, generation: instance.generation },
+    );
+    // A provider that just came up can let something that was waiting for it start. The supervisor
+    // owns that decision (`supervisor::kick`), not this function.
+    drop(services);
+    crate::supervisor::note_started(&name);
+    crate::supervisor::kick();
+    let mut answer = json!({"ok": true, "name": name, "started": true, "sha256": sha256, "instance": instance.to_json()});
     for (key, value) in report.as_object().into_iter().flatten() {
         answer[key] = value.clone();
     }
@@ -549,8 +572,17 @@ pub(crate) struct Spawned {
     pub(crate) shared: Arc<Shared>,
     pub(crate) sha256: String,
     pub(crate) thread: Option<std::thread::JoinHandle<()>>,
-    /// What `start` puts in its answer besides the name: `state` and `grants`.
+    /// This instance's identity (`name#generation`): what a swap revokes, and what the start answer and
+    /// `/health` name.
+    pub(crate) instance: crate::registrations::Instance,
+    /// What `start` puts in its answer besides the name: `state`, `grants` and `limits`.
     pub(crate) report: Value,
+}
+
+/// The instance token a runner's guest calls carry (`name#generation`), or the plain name for a store
+/// built without one (a unit test that drives a runner directly).
+pub(crate) fn instance_token(shared: &Arc<Shared>, name: &str) -> String {
+    shared.instance.get().map(|instance| instance.token.clone()).unwrap_or_else(|| name.to_string())
 }
 
 /// Compile and start one instance of an already-verified component.
@@ -619,8 +651,41 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             Err(error) => return Err(json!({"ok": false, "error": format!("compile_failed:{error}")})),
         }
     };
+    // Everything that identifies which instance this is, and the two provider grants keyed by it, are
+    // opened *before* the thread exists: a guest cannot have registered anything yet, so there is no
+    // window in which a call arrives with no instance to attribute it to.
+    let instance = crate::registrations::node().open_instance(&name);
+    let instance_limits = crate::limits::for_service(&installed);
     let shared = Arc::new(Shared::default());
+    shared.instance.set(instance.clone()).ok();
     set(&shared, "starting");
+    // The provider rows this instance owns, and how they are revoked. The ledger runs each cancel when
+    // the instance is revoked (stop or replacement); the bus and the queue do the revocation itself.
+    crate::bus_host::node().attach(&name, &instance.token);
+    if let Err(error) = crate::queue_host::node().register_instance(&name, &instance.token, &installed.manifest) {
+        return Err(json!({"ok": false, "error": error}));
+    }
+    {
+        let ledger = crate::registrations::node();
+        let bus_token = instance.token.clone();
+        let queue_token = instance.token.clone();
+        ledger.register(
+            &instance,
+            crate::registrations::Kind::BusSubscription,
+            &format!("instance {bus_token}"),
+            Some(Box::new(move || {
+                crate::bus_host::node().detach(&bus_token);
+            })),
+        );
+        ledger.register(
+            &instance,
+            crate::registrations::Kind::QueueConsumer,
+            &format!("grants for {queue_token}"),
+            Some(Box::new(move || {
+                crate::queue_host::node().unregister_instance(&queue_token);
+            })),
+        );
+    }
     let thread_shared = shared.clone();
     let sha256 = installed.sha256.clone();
     let thread = std::thread::Builder::new().name(format!("wa-service-{name}")).spawn(move || {
@@ -681,11 +746,19 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             shared,
             sha256,
             thread: Some(thread),
+            instance,
             report: json!({
                 "state": state.to_json(),
                 "grants": {
                     "bus": {"publish": bus_grants.publish, "subscribe": bus_grants.subscribe},
                     "queue": queue_grants.to_json(),
+                },
+                // What this instance actually got, and which side decided: a component given less than
+                // its manifest asked for can see why without comparing numbers by hand.
+                "limits": {
+                    "memory_mb": instance_limits.memory_mb,
+                    "cpu_ms": instance_limits.cpu_ms,
+                    "by": instance_limits.by,
                 },
             }),
         }),
@@ -702,8 +775,20 @@ pub fn stop(name: &str) -> Value {
     // linger - and it is cheap and idempotent.
     let bus_revoked = crate::bus_host::unregister(name);
     crate::queue_host::node().unregister(name);
+    // The ledger's own rows: every generation of this name, so a stop that follows a swap cannot leave
+    // the loser's registrations behind.
+    let registrations_revoked = crate::registrations::node().revoke_owner(name);
+    // A stopped definition is not wanted any more: without this, the next reconcile would start it
+    // again (an operator's `stop` is not a hint). `enable`/`autostart`/`supervise` re-register it.
+    crate::supervisor::forget(name);
     let Some(mut handle) = handle else {
-        return json!({"ok": true, "name": name, "was_running": false, "bus_subscriptions_revoked": bus_revoked});
+        crate::supervisor::note_stopped(name);
+        crate::supervisor::kick();
+        return json!({
+            "ok": true, "name": name, "was_running": false,
+            "bus_subscriptions_revoked": bus_revoked,
+            "registrations_revoked": registrations_revoked,
+        });
     };
     handle.shared.stop.store(true, Ordering::Relaxed);
     if let Some(thread) = handle.thread.take() {
@@ -712,35 +797,117 @@ pub fn stop(name: &str) -> Value {
     // The supervisor sets this itself when it returns; repeating it here covers a stop that raced
     // with a start and never reached the loop's stop branch.
     wa_governance::node_telemetry::record_service_health(name, false);
+    crate::supervisor::note_stopped(name);
+    crate::supervisor::kick();
     json!({
         "ok": true,
         "name": name,
         "was_running": true,
         "last_exit": *handle.shared.last_exit.lock().unwrap(),
         "bus_subscriptions_revoked": bus_revoked,
+        "registrations_revoked": registrations_revoked,
     })
+}
+
+/// Stop an instance that never entered the registry (a candidate an upgrade refused), and revoke
+/// exactly its own registrations. Returns its last run outcome.
+pub(crate) fn stop_spawned(mut spawned: Spawned) -> String {
+    spawned.shared.stop.store(true, Ordering::Relaxed);
+    if let Some(thread) = spawned.thread.take() {
+        let _ = thread.join();
+    }
+    crate::registrations::node().revoke_generation(&spawned.name, spawned.instance.generation);
+    let last = spawned.shared.last_exit.lock().unwrap().clone();
+    last
+}
+
+/// Replace the registry's instance for `name` with one that was started beside it, revoke exactly the
+/// instance that lost, and stop it. The caller (`install::upgrade`, `dev::swap`) has already proved the
+/// candidate healthy; this is the switch.
+///
+/// The revocation is per **generation**, not per name: the old instance's bus subscriptions and queue
+/// grants go (its `cancel`s in the ledger run), the new instance's rows - registered under its own
+/// token before this call - stay. A name-keyed revoke here is exactly the bug this exists to prevent.
+pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
+    let previous = registry().lock().unwrap().insert(
+        name.to_string(),
+        Handle {
+            shared: candidate.shared.clone(),
+            sha256: candidate.sha256.clone(),
+            thread: candidate.thread,
+            generation: candidate.instance.generation,
+        },
+    );
+    let retired = match previous {
+        Some(mut old) => {
+            old.shared.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = old.thread.take() {
+                let _ = thread.join();
+            }
+            let revoked = crate::registrations::node().revoke_generation(name, old.generation);
+            // Belt and braces for a provider whose rows were not in the ledger (a caller that registered
+            // through the provider directly): only the retired generation's token is revoked here.
+            crate::bus_host::node().detach(&format!("{name}#{}", old.generation));
+            crate::queue_host::node().unregister_instance(&format!("{name}#{}", old.generation));
+            json!({
+                "generation": old.generation,
+                "last_exit": *old.shared.last_exit.lock().unwrap(),
+                "registrations_revoked": revoked,
+            })
+        }
+        None => Value::Null,
+    };
+    crate::supervisor::note_started(name);
+    crate::supervisor::kick();
+    json!({"retired": retired, "instance": candidate.instance.to_json(), "sha256": candidate.sha256})
 }
 
 fn describe(name: &str, handle: &Handle) -> Value {
     let s = &handle.shared;
+    let instance = s.instance.get();
     json!({
         "name": name,
         "state": *s.state.lock().unwrap(),
         "sha256": handle.sha256,
+        "generation": handle.generation,
+        "instance": instance.map(|instance| instance.token.clone()),
         "restarts": s.restarts.load(Ordering::Relaxed),
         "sockets": s.sockets.load(Ordering::Relaxed),
         "started_at": s.started_at.load(Ordering::Relaxed),
         "last_exit": *s.last_exit.lock().unwrap(),
         "health": *s.health.lock().unwrap(),
+        // The registrations this instance holds, so "nothing of the old one lingers" is a number
+        // somebody can read after a swap, not a claim in a commit message.
+        "registrations": instance.map(|i| crate::registrations::node().count_generation(name, i.generation)).unwrap_or(0),
     })
 }
 
 pub fn status(name: Option<&str>) -> Value {
     let services = registry().lock().unwrap();
     match name {
-        Some(name) => services.get(name).map(|h| describe(name, h)).unwrap_or_else(|| json!({"name": name, "state": "not_running"})),
+        Some(name) => {
+            let mut answer = services.get(name).map(|h| describe(name, h)).unwrap_or_else(|| json!({"name": name, "state": "not_running"}));
+            // A definition whose imports are not served is not "not running": it is waiting, and the
+            // interface it waits for is the answer to "why".
+            if let Some(waiting) = crate::supervisor::pending(name) {
+                answer["state"] = json!("waiting");
+                answer["waiting_for"] = waiting["waiting_for"].clone();
+                answer["waiting_reason"] = waiting["reason"].clone();
+            }
+            answer
+        }
         None => {
             let mut list: Vec<Value> = services.iter().map(|(n, h)| describe(n, h)).collect();
+            for (name, waiting) in crate::supervisor::pending_entries() {
+                if !list.iter().any(|row| row["name"].as_str() == Some(name.as_str())) {
+                    list.push(json!({
+                        "name": name,
+                        "state": "waiting",
+                        "waiting_for": waiting["waiting_for"].clone(),
+                        "waiting_reason": waiting["reason"].clone(),
+                    }));
+                }
+            }
             list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
             json!(list)
         }
@@ -776,6 +943,18 @@ pub extern "C-unwind" fn service(l: *mut wa_host_support::lua::LuaState) -> std:
                 "logs" => name
                     .map(|n| logs(n, request.get("bytes").and_then(Value::as_u64).unwrap_or(16 << 10)))
                     .unwrap_or_else(|| json!({"ok": false, "error": "service_name_required"})),
+                // The transactional install (`docs/KERNEL.md`, lesson 5): stage, verify, check imports,
+                // migrate, start beside, health, switch, stop. Any failure leaves the old instance
+                // running and its files untouched (`install::upgrade`).
+                "upgrade" => crate::install::upgrade(&request),
+                // Profiles as layers (`docs/KERNEL.md`, lesson 4): the effective configuration after
+                // base -> node -> user -> patch, rows by id.
+                "profile_dump" => crate::profiles::dump(request.get("name").and_then(Value::as_str)),
+                // Start by imports: reconcile a set of definitions against what is running, starting
+                // everything whose imports are served and reporting what each other one waits for.
+                "supervise" => crate::supervisor::reconcile(&request),
+                "registrations" => json!(crate::registrations::node().status()),
+                "limits" => json!({"node": crate::limits::caps().to_json()}),
                 _ => json!({"ok": false, "error": "invalid_service_action"}),
             }
         }
@@ -938,5 +1117,45 @@ mod tests {
         // A grant beyond the manifest is refused before anything runs.
         let wide = start(&json!({"name": name, "net": ["10.0.0.1:443"]}));
         assert!(wide["error"].as_str().unwrap_or("").contains("not_declared"), "{wide}");
+    }
+
+    /// The CPU budget, end to end: a guest whose `_start` is `loop { br 0 }` is trapped once
+    /// `limits.cpu_ms` of execution has been spent in a window. The budget is tiny here (the floor) so
+    /// the test costs milliseconds; the *default* is 5 s precisely because a polling 0.1 guest is
+    /// normal (`wa_governance::component_limits::DEFAULT_CPU_MS`).
+    #[test]
+    fn a_guest_that_never_yields_is_trapped_by_its_cpu_budget() {
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("wa-cpu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("WA_COMPONENTS_DIR", &dir);
+        let name = "spin-svc";
+        let bytes = crate::test_wasm::spin_module();
+        let sha = ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let manifest = json!({"kind": "service", "target": "wasm32-wasip1", "limits": {"cpu_ms": 10}, "capabilities": {}});
+        std::fs::write(dir.join(format!("{name}.wasm")), &bytes).unwrap();
+        std::fs::write(dir.join(format!("{name}.wasm.sha256")), format!("{sha}
+")).unwrap();
+        std::fs::write(dir.join(format!("{name}.json")), manifest.to_string()).unwrap();
+        let started = start(&json!({"name": name}));
+        assert_eq!(started["ok"], true, "{started}");
+        // The trap is recorded as the run's outcome and the supervisor backs off; wait for it rather
+        // than for a fixed sleep, so a slow machine cannot turn this into a flake.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = String::new();
+        while Instant::now() < deadline {
+            last = status(Some(name))["last_exit"].as_str().unwrap_or("").to_string();
+            if last.contains("cpu_limit") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(last.contains("cpu_limit"), "the cpu budget must trap the guest, last_exit={last}");
+        let limits = &started["limits"];
+        assert_eq!(limits["cpu_ms"], 10, "the manifest's budget is what the instance got: {limits}");
+        assert_eq!(limits["by"], "manifest", "and the answer says the manifest decided");
+        stop(name);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

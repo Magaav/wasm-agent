@@ -1008,6 +1008,33 @@ restore_components() {
   wa_component_restore "$COMPONENT_DIR" graph || echo "deploy: could not restore the previous graph component in $COMPONENT_DIR" >&2
 }
 
+# 6a. The grant policy is installed BEFORE the restart, not after it.
+#
+# The production bug of 06/11: a deploy installed `policy.json` 24 s after the node had started, so the
+# running node kept the policy it had loaded at start-up and refused every WhatsApp send with a rule
+# the operator had just written - "node started 14:55:13, file written 14:55:37". The install block
+# lived at the end of this script, after `upgrade.sh` had already restarted the node, and nothing said
+# so. Two fixes, both needed and both tested: this ordering here, and the running node's own reload
+# (`node_policy::reload` watches the file's mtime and sha256 and swaps the policy atomically, so a
+# policy written by any means is enforced within a second without a restart). The second fix is the
+# safety net; the order is the contract, because a node should not have to be running on the wrong
+# policy for even a second. `scripts/test-deploy-policy-order.sh` reads this file and fails when the
+# install drifts back below the restart.
+POLICY_INSTALLER="$ROOT/scripts/lib/install-default-policy.sh"
+[ -f "$POLICY_INSTALLER" ] || POLICY_INSTALLER="$(dirname "$0")/lib/install-default-policy.sh"
+WA_POLICY_DEST="$SENTINEL_CONFIG/policy.json"
+if [ -f "$POLICY_INSTALLER" ]; then
+  . "$POLICY_INSTALLER"
+  install_default_policy "$ROOT/policies/default.json" "$WA_POLICY_DEST"
+  case $? in
+    0) ;; # installed, or an operator's file kept - both lines are on stdout above
+    2) note "no policies/default.json in $ROOT: policy.json was not installed; the node runs in manifest mode (the manifest grant is the only gate)" ;;
+    *) note "policy.json could not be installed at $WA_POLICY_DEST; the node runs in manifest mode (the manifest grant is the only gate)" ;;
+  esac
+else
+  note "scripts/lib/install-default-policy.sh is not in this tree: policy.json was not installed"
+fi
+
 # wa-deploy-upgrade-invocation: begin
 # Everything upgrade.sh is told goes on the command's own lines, and the COMMENTS LIVE ABOVE IT on purpose.
 # That is not style. bash drops a simple command's whole `VAR=value \` prefix when a comment line sits
@@ -1401,34 +1428,17 @@ if [ -d "$MCP_DATA_SCRIPTS" ]; then
   done
 fi
 
-# Install the shipped default grant policy where the operator has none (`docs/GRANT-POLICY.md`, "The
-# shipped default"). A policy file's PRESENCE is what turns the policy layer on (`node_policy::Mode`),
-# so this file's first appearance is the one thing a deploy does that changes what the running node
-# enforces - which is exactly why it is written only when there is no file at all, never refreshed
-# afterwards, and why the components it does not name are listed here: after the restart their
-# sensitive capabilities are refused with `no_policy` until a rule is added. Installing it is never a
-# refusal of the deploy - a node with no policy file still works, in manifest mode (the manifest
-# grant alone), which is today's behaviour - but a failure to install it is said out loud.
-# The logic lives in scripts/lib/install-default-policy.sh because scripts/test.sh runs it directly.
-POLICY_INSTALLER="$ROOT/scripts/lib/install-default-policy.sh"
-[ -f "$POLICY_INSTALLER" ] || POLICY_INSTALLER="$(dirname "$0")/lib/install-default-policy.sh"
-if [ -f "$POLICY_INSTALLER" ]; then
-  . "$POLICY_INSTALLER"
-  WA_POLICY_DEST="$SENTINEL_CONFIG/policy.json"
-  install_default_policy "$ROOT/policies/default.json" "$WA_POLICY_DEST"
-  case $? in
-    0) ;; # installed, or an operator's file kept - both lines are on stdout above
-    2) note "no policies/default.json in $ROOT: policy.json was not installed; the node runs in manifest mode (the manifest grant is the only gate)" ;;
-    *) note "policy.json could not be installed at $WA_POLICY_DEST; the node runs in manifest mode (the manifest grant is the only gate)" ;;
-  esac
-  if [ -f "$WA_POLICY_DEST" ]; then
-    UNRULED_COMPONENTS="$(policy_unlisted_components "$WA_POLICY_DEST" "$SENTINEL_CONFIG/components" | tr '\n' ' ')"
-    if [ -n "$UNRULED_COMPONENTS" ]; then
-      note "installed component(s) with no rule in $WA_POLICY_DEST: $UNRULED_COMPONENTS - their sensitive capabilities (kv.write, net.dial, http.request, credentials.read, whatsapp.send, exec.run) are refused with no_policy; add a rule for each"
-    fi
+# 6b. After the restart: which *installed* components the node's policy file does not name. The file
+# itself was installed before the restart (step 6a), because a policy written after a node started used
+# to leave that node on the old policy for its whole life (the 06/11 bug). This listing has to come
+# after the restart only because it reads the component directory the upgrade just populated; a
+# component it names has its sensitive capabilities (kv.write, net.dial, http.request,
+# credentials.read, whatsapp.send, exec.run) refused with `no_policy` until a rule is added.
+if [ -f "$WA_POLICY_DEST" ]; then
+  UNRULED_COMPONENTS="$(policy_unlisted_components "$WA_POLICY_DEST" "$SENTINEL_CONFIG/components" | tr '\n' ' ')"
+  if [ -n "$UNRULED_COMPONENTS" ]; then
+    note "installed component(s) with no rule in $WA_POLICY_DEST: $UNRULED_COMPONENTS - their sensitive capabilities (kv.write, net.dial, http.request, credentials.read, whatsapp.send, exec.run) are refused with no_policy; add a rule for each"
   fi
-else
-  note "scripts/lib/install-default-policy.sh is not in this tree: policy.json was not installed"
 fi
 
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the

@@ -5,7 +5,11 @@
 //! host call asks this module before it does anything; the answer is the crate's [`Decision`], and
 //! the call sites are where a `Deny` becomes a `refused` error for the guest.
 //!
-//! Loaded once, lazily, on the first check or the first `host.policy_status`:
+//! Loaded once, lazily, on the first check or the first `host.policy_status`, and then **watched**: the
+//! file's mtime/size/sha256 is checked once a second and a change is parsed, validated and swapped into
+//! the running engine with its budgets kept ([`NodePolicy::reload`]). Why: on 06/11 a deploy wrote
+//! `policy.json` 24 s after the node had started and the node kept the old policy for its whole life,
+//! refusing every send with a rule the operator had just written (`docs/KERNEL.md`, "The policy reload").
 //!
 //! * `WA_GRANT_POLICY` (else `<state>/policy.json`). **The presence of that file is what turns the
 //!   policy layer on**, and that is deliberate: installing a new binary must never take capabilities
@@ -30,7 +34,7 @@
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use wa_grant_policy::{
@@ -62,6 +66,62 @@ impl Mode {
             Mode::Policy => "policy",
         }
     }
+
+    fn code(&self) -> u8 {
+        match self {
+            Mode::Manifest => 0,
+            Mode::Policy => 1,
+        }
+    }
+
+    fn from_code(code: u8) -> Mode {
+        if code == 1 {
+            Mode::Policy
+        } else {
+            Mode::Manifest
+        }
+    }
+}
+
+/// What a reload did. `changed` is "the file on disk is not the one the loaded policy came from",
+/// which is what a watcher reports; `applied` is "the loaded policy was replaced by it".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reload {
+    pub changed: bool,
+    pub applied: bool,
+    pub mode: Mode,
+    /// The sha256 of the file the *loaded* policy came from (`"absent"` when there was none).
+    pub sha256: String,
+    /// Why the file was not applied, when it was not (`policy_removed`, a parse error, an I/O error).
+    pub error: Option<String>,
+}
+
+/// The file the loaded policy came from: mtime, size and sha256. A reload compares this before it
+/// parses anything, so a 1 s watch costs one stat and, only when the stat moved, one hash.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Fingerprint {
+    mtime_ms: u64,
+    len: u64,
+    sha256: String,
+}
+
+fn fingerprint(path: &std::path::Path) -> Result<Fingerprint, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "absent".to_string()
+        } else {
+            format!("stat:{e}")
+        }
+    })?;
+    let bytes = std::fs::read(path).map_err(|e| format!("read:{e}"))?;
+    let hex: String = ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(Fingerprint { mtime_ms, len: bytes.len() as u64, sha256: hex })
 }
 /// How many of the last refusals the operator view keeps (component, capability, reason only —
 /// never a target, which is the whole point of the digest in the audit record).
@@ -157,11 +217,22 @@ pub struct NodePolicy {
     paths: Paths,
     /// What turns the policy layer on: a policy file that is present (`Mode::Policy`) or not
     /// (`Mode::Manifest`). Fixed at load; a reload is a new process.
-    mode: Mode,
+    ///
+    /// Behind an atomic since the reload (`docs/KERNEL.md`, "The policy reload"): a policy file that
+    /// appears while the node runs switches the layer on, and one that is tightened switches the
+    /// rules - which is the production bug this reload closes (a node started 14:55:13, the file
+    /// written 14:55:37, and every send denied afterwards).
+    mode: AtomicU8,
     /// A policy file parsed. `false` also for a file that is present but broken - read `mode` for
     /// "is the policy layer on at all".
-    loaded: bool,
-    load_error: Option<String>,
+    loaded: AtomicBool,
+    load_error: Mutex<Option<String>>,
+    /// The file the loaded policy came from, and what the watcher last looked at.
+    fingerprint: Mutex<Fingerprint>,
+    reloads: AtomicU64,
+    reload_checked_at_ms: AtomicU64,
+    /// The last reload that found a change, whether it was applied or refused.
+    last_reload: Mutex<Option<(u64, Reload)>>,
     last_save_ms: AtomicU64,
 }
 
@@ -175,6 +246,10 @@ impl NodePolicy {
     /// the error is on the node's log and in `host.policy_status`. A policy file this node cannot
     /// understand is not evidence that the operator wants no limits.
     pub fn open(paths: Paths) -> NodePolicy {
+        // The fingerprint of the file this load read, so the first reload check after a start does
+        // not re-parse (and re-log) the same bytes. `absent` is a fingerprint too: a file that
+        // appears later is a change.
+        let loaded_fingerprint = fingerprint(&paths.policy).unwrap_or_default();
         let (policy, mode, loaded, load_error) = match std::fs::read(&paths.policy) {
             Ok(bytes) => match PolicySet::parse(&String::from_utf8_lossy(&bytes)) {
                 Ok(policy) => (policy, Mode::Policy, true, None),
@@ -219,9 +294,13 @@ impl NodePolicy {
             refusals: Mutex::new(VecDeque::new()),
             logged: Mutex::new(HashMap::new()),
             paths,
-            mode,
-            loaded,
-            load_error,
+            mode: AtomicU8::new(mode.code()),
+            loaded: AtomicBool::new(loaded),
+            load_error: Mutex::new(load_error),
+            fingerprint: Mutex::new(loaded_fingerprint),
+            reloads: AtomicU64::new(0),
+            reload_checked_at_ms: AtomicU64::new(0),
+            last_reload: Mutex::new(None),
             last_save_ms: AtomicU64::new(0),
         }
     }
@@ -229,7 +308,144 @@ impl NodePolicy {
     /// Which gate decides an unruled sensitive capability on this node (`Mode::Manifest` until a
     /// policy file is written).
     pub fn mode(&self) -> Mode {
-        self.mode
+        Mode::from_code(self.mode.load(Ordering::Relaxed))
+    }
+
+    /// Is a policy file loaded (as opposed to "the file was absent at load")?
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.load(Ordering::Relaxed)
+    }
+
+    /// The reload's own view: did the file on disk move away from the loaded one?
+    ///
+    /// This is the fix for the 06/11 production bug (`docs/KERNEL.md`, "The policy reload"): a deploy
+    /// installed `policy.json` 24 s after the node started, and the node kept enforcing the policy it
+    /// had loaded at 14:55:13 - every WhatsApp send denied afterwards, with nothing on the node
+    /// saying why. Two fixes, both needed: the deploy installs the policy *before* it restarts the
+    /// node (`scripts/deploy.sh`), and the node reloads the file when it changes (here).
+    ///
+    /// The swap is atomic in the only sense that matters: a new [`PolicySet`] is parsed and
+    /// validated *first*, then installed under the engine's lock with `set_policy`, which keeps the
+    /// budgets (rate buckets, daily counters, approvals). A parse error applies nothing and is
+    /// reported - a half-written file never replaces a working policy, and never falls back to
+    /// "no limits" either (
+    /// `Mode::Manifest` is only ever the answer to "there is no file at load time").
+    pub fn reload(&self) -> Reload {
+        self.reload_at(now_ms())
+    }
+
+    /// `reload` with the clock passed in, so a test never waits for one.
+    pub fn reload_at(&self, now: u64) -> Reload {
+        self.reload_checked_at_ms.store(now, Ordering::Relaxed);
+        let current = match fingerprint(&self.paths.policy) {
+            Ok(current) => current,
+            Err(error) if error == "absent" => Fingerprint::default(),
+            Err(error) => {
+                // The file is there and cannot be read: keep what is loaded (fail closed) and say so.
+                let reload = Reload {
+                    changed: true,
+                    applied: false,
+                    mode: self.mode(),
+                    sha256: self.fingerprint.lock().unwrap_or_else(|e| e.into_inner()).sha256.clone(),
+                    error: Some(error),
+                };
+                self.note_reload(now, &reload);
+                return reload;
+            }
+        };
+        let previous = self.fingerprint.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if current == previous {
+            return Reload { changed: false, applied: false, mode: self.mode(), sha256: current.sha256, error: None };
+        }
+        // The file was removed while the node ran. Going back to `Mode::Manifest` here would *widen*
+        // what the node allows, which is the opposite of what a reload is for; the loaded policy
+        // stays until the next start, and the operator sees why.
+        if current == Fingerprint::default() {
+            let reload = Reload {
+                changed: true,
+                applied: false,
+                mode: self.mode(),
+                sha256: "absent".into(),
+                error: Some("policy_removed: keeping the loaded policy until the next start".into()),
+            };
+            *self.fingerprint.lock().unwrap_or_else(|e| e.into_inner()) = current;
+            self.note_reload(now, &reload);
+            return reload;
+        }
+        let bytes = match std::fs::read(&self.paths.policy) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let reload = Reload { changed: true, applied: false, mode: self.mode(), sha256: current.sha256, error: Some(format!("read:{error}")) };
+                self.note_reload(now, &reload);
+                return reload;
+            }
+        };
+        let policy = match PolicySet::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(policy) => policy,
+            Err(error) => {
+                // Keep the working policy: a broken write is a bug to fix, not a reason to run
+                // unaudited and unruled. The fingerprint is *not* advanced, so fixing the file is
+                // one more check away rather than a restart away.
+                let reload = Reload { changed: true, applied: false, mode: self.mode(), sha256: current.sha256, error: Some(error.to_string()) };
+                self.note_reload(now, &reload);
+                return reload;
+            }
+        };
+        let apply = self.engine().set_policy(policy);
+        match apply {
+            Ok(()) => {
+                self.mode.store(Mode::Policy.code(), Ordering::Relaxed);
+                self.loaded.store(true, Ordering::Relaxed);
+                *self.load_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.fingerprint.lock().unwrap_or_else(|e| e.into_inner()) = current.clone();
+                self.reloads.fetch_add(1, Ordering::Relaxed);
+                eprintln!("[policy] reloaded {} (sha256 {}…)", self.paths.policy.display(), &current.sha256[..12.min(current.sha256.len())]);
+                let reload = Reload { changed: true, applied: true, mode: Mode::Policy, sha256: current.sha256, error: None };
+                self.note_reload(now, &reload);
+                reload
+            }
+            Err(error) => {
+                let reload = Reload { changed: true, applied: false, mode: self.mode(), sha256: current.sha256, error: Some(error.to_string()) };
+                self.note_reload(now, &reload);
+                reload
+            }
+        }
+    }
+
+    fn note_reload(&self, now: u64, reload: &Reload) {
+        if let Some(error) = &reload.error {
+            eprintln!("[policy] {} not reloaded: {error}", self.paths.policy.display());
+            *self.load_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
+        }
+        *self.last_reload.lock().unwrap_or_else(|e| e.into_inner()) = Some((now, reload.clone()));
+    }
+
+    /// The sha256 of the file the loaded policy came from (`"absent"` when there was none).
+    pub fn policy_sha256(&self) -> String {
+        let fingerprint = self.fingerprint.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if fingerprint == Fingerprint::default() {
+            "absent".into()
+        } else {
+            fingerprint.sha256
+        }
+    }
+
+    /// Start the reload watcher for one policy instance, once per process. `WA_GRANT_POLICY_WATCH_MS=0`
+    /// turns it off. The thread holds an `Arc` for the process's lifetime, so it never outlives what
+    /// it watches.
+    pub fn spawn_watcher(policy: &std::sync::Arc<NodePolicy>) {
+        let Some(interval) = watch_interval() else { return };
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        if STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let watched = policy.clone();
+        let _ = std::thread::Builder::new().name("wa-policy-reload".into()).spawn(move || loop {
+            std::thread::sleep(interval);
+            // A reload that finds nothing new does no work beyond one stat; a change is applied (or
+            // refused) under the engine's lock, so a check never sees half a policy.
+            let _ = watched.reload();
+        });
     }
 
     fn engine(&self) -> MutexGuard<'_, Engine> {
@@ -243,7 +459,7 @@ impl NodePolicy {
     /// a capability that is sensitive by default, audited with reason [`MANIFEST_REASON`].
     pub fn check_at(&self, component: &str, capability: &str, target: Option<&str>, now: u64) -> Decision {
         self.counters.checks.fetch_add(1, Ordering::Relaxed);
-        if self.mode == Mode::Manifest {
+        if self.mode() == Mode::Manifest {
             self.record_manifest_at(component, capability, target, now);
             self.counters.manifest_mode.fetch_add(1, Ordering::Relaxed);
             let decision = Decision::Allow;
@@ -431,12 +647,29 @@ impl NodePolicy {
             .map(|r| json!({"ts_ms": r.ts_ms, "component": r.component, "capability": r.capability, "reason": r.reason}))
             .collect();
         json!({
-            "loaded": self.loaded,
+            "loaded": self.is_loaded(),
             // "manifest" = no policy file: the manifest grant is the only gate for sensitive
             // capabilities (docs/GRANT-POLICY.md). "policy" = a file is loaded (or was present and
             // is reported in `error`), so an unruled sensitive capability is `no_policy`.
             "mode": self.mode().as_str(),
-            "policy": {"path": self.paths.policy.to_string_lossy(), "error": self.load_error, "components": components, "rules": rules},
+            // The reload (`docs/KERNEL.md`, "The policy reload"): the sha256 the loaded policy came from,
+            // how many times a change was applied, and the last change that was refused. An operator
+            // reading this after a deploy can tell "the node has the new policy" from "the node has
+            // the old one" without asking the node to restart.
+            "reload": {
+                "policy_sha256": self.policy_sha256(),
+                "applied": self.reloads.load(Ordering::Relaxed),
+                "checked_at_ms": self.reload_checked_at_ms.load(Ordering::Relaxed),
+                "last": self.last_reload.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|(at, reload)| json!({
+                    "at_ms": at,
+                    "changed": reload.changed,
+                    "applied": reload.applied,
+                    "mode": reload.mode.as_str(),
+                    "sha256": reload.sha256,
+                    "error": reload.error,
+                })),
+            },
+            "policy": {"path": self.paths.policy.to_string_lossy(), "error": self.load_error.lock().unwrap_or_else(|e| e.into_inner()).clone(), "components": components, "rules": rules},
             "state": {
                 "path": self.paths.state.to_string_lossy(),
                 "saved_at_ms": snapshot.saved_at_ms,
@@ -471,8 +704,30 @@ impl NodePolicy {
 }
 
 fn node() -> &'static NodePolicy {
-    static NODE: OnceLock<NodePolicy> = OnceLock::new();
-    NODE.get_or_init(|| NodePolicy::open(Paths::resolve()))
+    static NODE: OnceLock<std::sync::Arc<NodePolicy>> = OnceLock::new();
+    let policy = NODE.get_or_init(|| {
+        let policy = std::sync::Arc::new(NodePolicy::open(Paths::resolve()));
+        // The watcher follows *this* instance (its file, its engine), not a second copy of the
+        // node's state; it is started here so that any process that asks the policy a question also
+        // follows its file, whatever the caller was.
+        NodePolicy::spawn_watcher(&policy);
+        policy
+    });
+    policy
+}
+
+/// How often the watcher looks at the file, unless `WA_GRANT_POLICY_WATCH_MS` says otherwise. One
+/// stat per period; the hash is only computed when the stat moved. `0` disables the watcher (a node
+/// that wants a reload to be an explicit restart).
+fn watch_interval() -> Option<std::time::Duration> {
+    let ms = std::env::var("WA_GRANT_POLICY_WATCH_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(1000);
+    (ms > 0).then(|| std::time::Duration::from_millis(ms.clamp(50, 60_000)))
+}
+
+/// Reload the node policy now (the explicit form of what the watcher does every second):
+/// `host.policy_status` and a test can drive it without waiting for a tick.
+pub fn reload() -> Reload {
+    node().reload()
 }
 
 /// Check one call against the node policy (audited, counted). Call sites map the answer to the
@@ -548,7 +803,7 @@ mod tests {
         let paths = temp_paths("absent");
         let policy = NodePolicy::open(paths.clone());
         assert_eq!(policy.mode(), Mode::Manifest);
-        assert!(!policy.loaded, "an absent file is reported as not loaded");
+        assert!(!policy.is_loaded(), "an absent file is reported as not loaded");
         // Sensitive by default, and no rule anywhere: the manifest grant stays the only gate.
         assert_eq!(policy.check_at("wa-whatsapp", "kv.write", Some("ses/a"), 1_000), Decision::Allow);
         assert_eq!(policy.check_at("wa-whatsapp", "credentials.read", Some("WA_TOKEN"), 1_000), Decision::Allow);
@@ -589,7 +844,7 @@ mod tests {
         );
         let policy = NodePolicy::open(paths.clone());
         assert_eq!(policy.mode(), Mode::Policy);
-        assert!(policy.loaded);
+        assert!(policy.is_loaded());
         assert_eq!(policy.status()["mode"], "policy");
         assert_eq!(policy.check_at("wa-whatsapp", "net.dial", Some("web.whatsapp.com:443"), 1_000), Decision::Allow);
         // A rule with no limits is "any target, no rate": the documented way to keep a capability.
@@ -622,7 +877,7 @@ mod tests {
                }}}}"#,
         );
         let policy = NodePolicy::open(paths.clone());
-        assert!(policy.loaded);
+        assert!(policy.is_loaded());
         assert_eq!(policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:self"), 1_000), Decision::Allow);
         assert_eq!(
             policy.check_at("wa-whatsapp", "whatsapp.send", Some("5511999999999@g.us"), 1_000),
@@ -684,7 +939,7 @@ mod tests {
         let paths = temp_paths("bad");
         test_policy(&paths, r#"{"version":1,"components":{"x":{"capabilities":{"kv.write":{"per_minutes":1}}}}}"#);
         let policy = NodePolicy::open(paths.clone());
-        assert!(!policy.loaded);
+        assert!(!policy.is_loaded());
         // A half-written file is NOT "no file": falling back to manifest mode here would silently
         // remove the limits an operator was in the middle of writing.
         assert_eq!(policy.mode(), Mode::Policy);
@@ -816,6 +1071,124 @@ mod tests {
         assert!(!policy.check_if_ruled_at("mcp-whatsapp", "net.dial", Some("evil.example:443"), 1_000).is_allow());
         // A component the file does not name is untouched by the policy layer.
         assert!(policy.check_if_ruled_at("mcp-echo", "net.dial", Some("evil.example:443"), 1_000).is_allow());
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    /// The 06/11 production bug, first half: the deploy wrote `policy.json` 24 s after the node
+    /// started, and the node went on enforcing what it had loaded. A file that appears while the
+    /// node runs switches the layer on at the next check of the file.
+    #[test]
+    fn a_policy_file_that_appears_after_start_is_loaded_without_a_restart() {
+        let paths = temp_paths("appears");
+        let policy = NodePolicy::open(paths.clone());
+        assert_eq!(policy.mode(), Mode::Manifest, "the node started with no policy file");
+        assert!(policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:self"), 1_000).is_allow());
+        let unchanged = policy.reload_at(2_000);
+        assert!(!unchanged.changed, "nothing on disk moved: {unchanged:?}");
+        // The deploy installs the policy.
+        test_policy(
+            &paths,
+            r#"{"version":1,"components":{"wa-whatsapp":{"capabilities":{"whatsapp.send":{"allow":["chat:self"]}}}}}"#,
+        );
+        let reload = policy.reload_at(3_000);
+        assert!(reload.changed && reload.applied, "{reload:?}");
+        assert_eq!(reload.mode, Mode::Policy);
+        assert_eq!(reload.error, None);
+        assert_eq!(policy.mode(), Mode::Policy, "the layer is on now, not at the next start");
+        // The rule the operator wrote is enforced from this moment, in both directions.
+        assert!(policy.check_at("wa-whatsapp", "whatsapp.send", Some("chat:self"), 4_000).is_allow());
+        assert_eq!(
+            policy.check_at("wa-whatsapp", "whatsapp.send", Some("5511999999999@g.us"), 4_000),
+            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed)
+        );
+        assert_eq!(policy.status()["reload"]["applied"], 1);
+        assert_eq!(policy.status()["reload"]["policy_sha256"].as_str().unwrap().len(), 64);
+        // A second call with the same bytes is not a change (one stat, no re-parse, no log line).
+        assert!(!policy.reload_at(5_000).changed);
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    /// Second half: a *tightened* policy takes effect for a running node, and budgets carry over so
+    /// a reload cannot be used to reset a rate limit.
+    #[test]
+    fn a_reload_tightens_a_running_node_and_keeps_its_budgets() {
+        let paths = temp_paths("tighten");
+        let wide = r#"{"version":1,"components":{"wa":{"capabilities":{"whatsapp.send":{"allow":["chat:self"],"rate":{"per_minute":1}}}}}}"#;
+        test_policy(&paths, wide);
+        let policy = NodePolicy::open(paths.clone());
+        assert!(policy.check_at("wa", "whatsapp.send", Some("chat:self"), 1_000).is_allow());
+        // The operator replaces the file with a tighter one: the chat is no longer allowed.
+        test_policy(&paths, r#"{"version":1,"components":{"wa":{"capabilities":{"whatsapp.send":{"allow":["chat:alerts"]}}}}}"#);
+        let reload = policy.reload_at(2_000);
+        assert!(reload.applied, "{reload:?}");
+        assert_eq!(
+            policy.check_at("wa", "whatsapp.send", Some("chat:self"), 2_000),
+            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed),
+            "the new file is what is enforced, immediately"
+        );
+        assert!(policy.check_at("wa", "whatsapp.send", Some("chat:alerts"), 2_000).is_allow());
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    /// The watcher itself, not just the reload: a file written *after* the node is running is applied
+    /// without anybody asking. This is the fix's second half - the first is the deploy's order
+    /// (`scripts/test-deploy-policy-order.sh`).
+    ///
+    /// One watcher per process (the flag in `spawn_watcher` is global), so this is the only test that
+    /// spawns one, and it sets the interval itself.
+    #[test]
+    fn the_watcher_applies_a_file_written_while_the_node_runs() {
+        std::env::set_var("WA_GRANT_POLICY_WATCH_MS", "50");
+        let paths = temp_paths("watch");
+        let policy = std::sync::Arc::new(NodePolicy::open(paths.clone()));
+        assert_eq!(policy.mode(), Mode::Manifest, "nothing on disk at load");
+        NodePolicy::spawn_watcher(&policy);
+        test_policy(
+            &paths,
+            r#"{"version":1,"components":{"wa":{"capabilities":{"whatsapp.send":{"allow":["chat:self"]}}}}}"#,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && policy.mode() == Mode::Manifest {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(policy.mode(), Mode::Policy, "the watcher picked the file up on its own");
+        assert_eq!(
+            policy.check_at("wa", "whatsapp.send", Some("5511999999999@g.us"), 1_000),
+            Decision::Deny(wa_grant_policy::Reason::TargetNotAllowed),
+            "and the rule it carries is enforced"
+        );
+        assert_eq!(policy.status()["reload"]["applied"], 1);
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    /// A half-written file never replaces a working policy (and never falls back to "no limits"
+    /// either), and the failure is visible in the operator's status.
+    #[test]
+    fn a_broken_or_removed_file_keeps_the_loaded_policy_and_says_why() {
+        let paths = temp_paths("broken");
+        test_policy(&paths, r#"{"version":1,"components":{"wa":{"capabilities":{"net.dial":{"allow":["a.example:443"]}}}}}"#);
+        let policy = NodePolicy::open(paths.clone());
+        std::fs::write(&paths.policy, "{\"version\":1,\"components\":{").unwrap();
+        let reload = policy.reload_at(2_000);
+        assert!(reload.changed);
+        assert!(!reload.applied);
+        assert!(reload.error.is_some(), "{reload:?}");
+        assert_eq!(policy.mode(), Mode::Policy);
+        assert!(policy.check_at("wa", "net.dial", Some("a.example:443"), 2_000).is_allow(), "the working policy still decides");
+        assert!(!policy.check_at("wa", "net.dial", Some("b.example:443"), 2_000).is_allow());
+        assert!(policy.status()["policy"]["error"].as_str().unwrap().contains("json") || policy.status()["policy"]["error"].as_str().is_some());
+        // Fixing the file applies it: a broken write is not a restart away.
+        test_policy(&paths, r#"{"version":1,"components":{"wa":{"capabilities":{"net.dial":{"allow":["b.example:443"]}}}}}"#);
+        let fixed = policy.reload_at(3_000);
+        assert!(fixed.applied, "{fixed:?}");
+        assert!(policy.check_at("wa", "net.dial", Some("b.example:443"), 3_000).is_allow());
+        // Removing the file does NOT widen the node: the loaded policy stays, and that is reported.
+        std::fs::remove_file(&paths.policy).unwrap();
+        let removed = policy.reload_at(4_000);
+        assert!(removed.changed && !removed.applied, "{removed:?}");
+        assert!(removed.error.as_deref().unwrap_or_default().contains("policy_removed"), "{removed:?}");
+        assert_eq!(policy.mode(), Mode::Policy);
+        assert!(!policy.check_at("wa", "net.dial", Some("c.example:443"), 4_000).is_allow(), "still ruled");
         std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
     }
 }

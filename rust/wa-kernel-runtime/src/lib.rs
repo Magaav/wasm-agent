@@ -4,6 +4,13 @@
 //! - `services`: the supervisor - install, start, stop, health and logs of long-lived services.
 //! - `service_components` / `service_components_v2`: the two runners, WASI 0.2 (polling) and WASI 0.3
 //!   (`wa:kernel@0.2`, native async with `future`/`stream`), served side by side.
+//! - `registrations`: the ledger of everything a component registers, revocable per instance
+//!   (`docs/KERNEL.md`, "Revocable registrations").
+//! - `imports` / `supervisor`: what an artifact imports and whether it is served, and the
+//!   start-by-imports reconcile (`docs/KERNEL.md`, lesson 3).
+//! - `install`: the transactional install/upgrade - stage, verify, start beside, health, switch, stop.
+//! - `profiles` / `limits`: the layered effective configuration (lesson 4) and the per-component CPU
+//!   and memory limits the runners enforce.
 //! - `dev`: the dev-loop hot swap (`wa dev`): a new instance beside the old one, health first, then
 //!   the old one stops. Not a registry - it lives in the caller's slot, beside the supervisor.
 //! - `service_io`: the host side of the socket, http and kv a service imports.
@@ -26,9 +33,17 @@ pub mod bus_host;
 pub mod components;
 pub mod dev;
 pub mod guest_kv;
+pub mod imports;
+pub mod install;
+pub mod limits;
+pub mod profiles;
+pub mod registrations;
 pub mod queue_host;
 pub mod service_components;
 pub mod service_components_v2;
 pub mod service_io;
 pub mod services;
 pub mod state_host;
+pub mod supervisor;
+#[cfg(test)]
+pub(crate) mod test_wasm;
