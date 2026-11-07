@@ -24,7 +24,7 @@
 //! `cargo build --target wasm32-wasip2` builds the component.
 use crate::holds::{Author, Holds, Mutation, POSTING_ONLY};
 use crate::wa::kernel::types::Error as KError;
-use crate::wa::kernel::{http as khttp, kv as kkv, lifecycle, speech, websocket};
+use crate::wa::kernel::{drain, http as khttp, kv as kkv, lifecycle, speech, websocket};
 use crate::wasi::clocks::monotonic_clock;
 use crate::index::{self, Store as IndexStore};
 use crate::record::{self, Record};
@@ -1829,6 +1829,21 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // cannot starve the pipeline it arrived in.
         history_tick(index).await;
         settle_completions().await;
+        // The drain (`wa:kernel/drain@0.2.0`, `wit/wa.wit`): a hot swap is replacing this instance, so
+        // take no new work. Everything is settled here - `outbox_tick` and `query_tick` settle the job
+        // they took in the same iteration they took it, and this line is after them - so there is
+        // nothing half-applied to retry, which is the whole reason the handshake exists. The call is
+        // made once, after the work in hand finished, and the kernel stops the instance as soon as it
+        // reads it.
+        if drain::draining() {
+            say!("drained: no work in flight, ready to stop");
+            persist_state().await;
+            drain::idle();
+            // Returning is safe and is what the last generation of the run does: the runner treats a
+            // run that reported idle as *stopping*, never as a crash to restart (services.rs), so this
+            // instance cannot come back beside the one that replaced it.
+            return;
+        }
         if last_tick.elapsed() >= TICK * 2 {
             last_tick = Instant::now();
             dispatch(language, post);
@@ -1846,7 +1861,10 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // question never delays a voice note, and an idle lane costs five reads a second.
         if last_query.elapsed() >= QUERY_EVERY {
             last_query = Instant::now();
-            while query_tick(index).await {}
+            // One tick drains every queued query, and a backlog can outlive the drain deadline: the
+            // lane stops taking questions the moment a swap asks, so the one it is answering is the
+            // last (a query is read-only, so an untaken one is answered by the next instance).
+            while !drain::draining() && query_tick(index).await {}
         }
         if index.enabled && last_prune.elapsed() >= index.prune_every {
             last_prune = Instant::now();

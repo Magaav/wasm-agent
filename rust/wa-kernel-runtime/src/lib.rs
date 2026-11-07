@@ -32,6 +32,9 @@
 pub mod bus_host;
 pub mod components;
 pub mod dev;
+// The kernel half of a drained hot swap (`wa:kernel/drain`): wait for the work in flight instead of
+// stopping the instance and retrying its job (docs/SERVICE-COMPONENTS.md).
+pub mod drain;
 pub mod guest_kv;
 pub mod imports;
 pub mod install;

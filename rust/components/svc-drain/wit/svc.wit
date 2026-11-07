@@ -1,0 +1,17 @@
+/// The fixture's own world: the kernel service contract, the queue seam it consumes, and the drain.
+///
+/// `include` pulls in `wa:kernel/service-component@0.2.0` unchanged (kv/log/lifecycle and the rest);
+/// `wa:queue/worker` is where the job comes from and `wa:kernel/drain@0.2.0` is the handshake a swap
+/// uses. Note what is *not* here: `wa:queue/producer` and `admin`. This fixture consumes, settles and
+/// never produces, so it cannot enqueue the work it then proves it completed once.
+///
+/// `deps/kernel.wit`, `deps/clocks.wit` and `deps/queue/queue.wit` are snapshots of `wit/kernel-v2/`
+/// and `wit/queue/` (the same arrangement `rust/components/svc-queue-echo` and `wa-whatsapp` use):
+/// wit-bindgen resolves a world's dependencies from `wit/deps/`.
+package wa:fixture@0.1.0;
+
+world svc-drain {
+    include wa:kernel/service-component@0.2.0;
+    import wa:queue/worker@0.1.0;
+    import wa:kernel/drain@0.2.0;
+}

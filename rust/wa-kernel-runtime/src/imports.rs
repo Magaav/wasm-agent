@@ -68,7 +68,10 @@ const KERNEL_V2: &[&str] = &["types", "websocket", "http", "speech", "kv", "life
 /// service world does not list them because a world's imports are obligations (`wit/kernel-v2`).
 /// `keyvalue`/`config` are wa's `wasi:keyvalue`/`wasi:config` shapes (`docs/WASI-INTERFACES.md`,
 /// tier B), so a component built against the proposal's shape can import them and be started.
-const KERNEL_V2_OPTIONAL: &[&str] = &["keyvalue", "config"];
+/// `drain` is the cooperative hot swap (`docs/SERVICE-COMPONENTS.md`, "A swap waits for the work in
+/// flight"): importing it *is* the declaration that this component finishes its job before it
+/// stops, which is what lets a swap tell a drainable instance from one to stop immediately.
+const KERNEL_V2_OPTIONAL: &[&str] = &["keyvalue", "config", "drain"];
 /// The modules a wasip1 service may import from the host (`services.rs::linker`).
 const WASIP1_HOST_MODULES: &[&str] = &["wasi_snapshot_preview1", "wa_sock", "wa_ws", "wa_http", "wa_kv", "wa_ctl"];
 /// Provider packages the kernel itself serves beside `wa:kernel` (`bus_host`, `queue_host`).
@@ -230,6 +233,11 @@ mod tests {
         assert!(kernel_serves("wa:kernel/keyvalue@0.2.0", Contract::V2));
         assert!(kernel_serves("wa:kernel/config@0.2.0", Contract::V2));
         assert!(!kernel_serves("wa:kernel/keyvalue@0.2.0", Contract::V1));
+        // The drain is optional and 0.2-only: a component that does not import it is stopped
+        // immediately, and a 0.1 component waits for a start like any other unserved import.
+        assert!(kernel_serves("wa:kernel/drain@0.2.0", Contract::V2));
+        assert!(!kernel_serves("wa:kernel/drain@0.2.0", Contract::V1));
+        assert!(!kernel_serves("wa:kernel/drain@0.1.0", Contract::V2));
         // The kernel's own providers, and the wasip1 host modules.
         assert!(kernel_serves("wa:bus/publisher@0.1.0", Contract::V2));
         assert!(kernel_serves("wa:queue/worker@0.1.0", Contract::V1));

@@ -73,6 +73,14 @@ wasmtime::component::bindgen!({
 
 use wa::kernel::types::Error as KError;
 
+/// The drain signal, bound on its own: `world service-drain` imports nothing but
+/// `wa:kernel/drain@0.2.0` (`wit/kernel-v2/kernel.wit`), so the runner can link it beside the
+/// service world without the service world requiring it of every guest. A component opts in by
+/// importing the interface; `drains` reads that from the artifact.
+mod drain_signal {
+    wasmtime::component::bindgen!({ world: "service-drain", path: "../../wit/kernel-v2" });
+}
+
 /// The guest's socket: the 0.1 host-side connection, handed out as a stream instead of a poll.
 ///
 /// The authority it was granted for is kept beside the connection because `websocket.send` takes
@@ -291,6 +299,34 @@ impl wa::kernel::log::Host for State {
         let mut call = HostCallGuard::start(&self.name, "log.write");
         if let Some(file) = self.log.as_mut() {
             let _ = writeln!(file, "{:?} {target}: {message}", level);
+        }
+        call.succeed();
+    }
+}
+
+/// The drain signal (`wit/kernel-v2/kernel.wit`, `interface drain`). Never policy-checked, for the
+/// same reason `lifecycle` is not (`docs/GRANT-POLICY.md` step 4): the answer is the kernel's own
+/// state, and "I have nothing in flight" is what a guest says to be stopped sooner, not a capability.
+///
+/// Both are synchronous, so the guest reads `draining()` where it decides what to do next - a swap
+/// sets the flag and waits for `idle`, it never depends on the guest polling in a tight loop: a
+/// guest that only checks between two jobs is exactly the guest a drain is for.
+impl drain_signal::wa::kernel::drain::Host for State {
+    fn draining(&mut self) -> bool {
+        let mut call = HostCallGuard::start(&self.name, "drain.draining");
+        let draining = self.shared.draining.load(Ordering::Relaxed);
+        call.succeed();
+        draining
+    }
+
+    fn idle(&mut self) {
+        let mut call = HostCallGuard::start(&self.name, "drain.idle");
+        // Only a guest the kernel actually asked can put itself in the drained state: an `idle`
+        // report from an instance nobody is swapping would otherwise mark it as already drained, and
+        // the next swap would skip its wait. The signal is monotone (a drained instance is stopped,
+        // never asked to come back), so a late report after the deadline is harmless.
+        if self.shared.draining.load(Ordering::Relaxed) {
+            self.shared.idle.store(true, Ordering::Relaxed);
         }
         call.succeed();
     }
@@ -832,6 +868,10 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
+        // The cooperative hot swap (`wit/kernel-v2/kernel.wit`, `interface drain`): linked for
+        // everyone, imported by the guests that implement it. A guest that never imported it has no
+        // call to make and is stopped exactly as before.
+        drain_signal::wa::kernel::drain::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::log::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::credentials::add_to_linker::<State, State>(&mut linker, |s| s),
         // The host providers (`docs/QUEUE.md`, `docs/BUS.md`): the queue over the component's own
@@ -916,6 +956,40 @@ fn is_kernel_v2(name: &str) -> bool {
         Some(rest) => rest.ends_with("@0.2.0"),
         None => false,
     }
+}
+
+/// Does this component implement the drain (`wa:kernel/drain@0.2.0`)?
+///
+/// Read from the artifact's own imports, never from a manifest field: importing the interface *is*
+/// the promise to finish the job in hand and report idle, and it is the one thing a component cannot
+/// get wrong by accident - a guest built without it has no way to call `idle`. A hot swap uses this
+/// to decide whether waiting is meaningful (`services::replace`, `docs/SERVICE-COMPONENTS.md`): a
+/// component without the hook is stopped immediately and its leases handed back for a retry, which is
+/// exactly what happened before the drain existed.
+pub fn drains(component: &Component) -> bool {
+    let engine = component.engine();
+    component.component_type().imports(engine).any(|(name, _)| name == "wa:kernel/drain@0.2.0")
+}
+
+/// A 0.2 component compiled on the async engine, cached by pin.
+///
+/// `services::spawn_instance` compiles the artifact to read its contract, and a hot swap then starts a
+/// *second* instance of the same bytes beside the first (`services::replace`). Without a cache the
+/// swap pays for a compile the node has already done, which for the real wa-whatsapp (8 MB) is
+/// seconds of an upgrade an operator is watching. Keyed by the pin, so a new artifact is a new entry
+/// and a changed component can never be run from a stale compilation.
+pub fn compiled(engine: &wasmtime::Engine, sha: &str, bytes: &[u8]) -> wasmtime::Result<Component> {
+    static CACHE: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Component>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some(found) = cache.lock().map_err(|_| wasmtime::Error::msg("component_cache_poisoned"))?.get(sha) {
+        return Ok(found.clone());
+    }
+    let component = Component::new(engine, bytes)?;
+    cache
+        .lock()
+        .map_err(|_| wasmtime::Error::msg("component_cache_poisoned"))?
+        .insert(sha.to_string(), component.clone());
+    Ok(component)
 }
 
 /// The engine the 0.2 runner needs: the component model plus native async. Deliberately separate
@@ -1041,6 +1115,7 @@ mod tests {
             wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
+            drain_signal::wa::kernel::drain::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::log::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::credentials::add_to_linker::<State, State>(&mut linker, |s| s),
             // The component's outbox is `wa:queue/worker` (`wit/wa.wit`): the host provider has to be

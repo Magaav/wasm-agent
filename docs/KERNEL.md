@@ -781,6 +781,7 @@ The proposed shape above is now a package, a runner and two fixtures:
 | `speech` | `recognize: async func(...)` → resource `recognition` with `segments() -> stream<segment>` and `transcript() -> future<result<transcript, error>>` (`result` is a WIT keyword, so the future's accessor is `transcript`; each `segment` carries `start-ms`/`end-ms`) |
 | `kv` | `get/set/delete/delete-prefix/scan` are `async` (the host answers without suspending); the names stay 0.1's so a port is a mechanical `await` |
 | `lifecycle`, `log`, `credentials` | unchanged |
+| `drain` (new, optional) | the cooperative hot swap: `draining: func() -> bool` is the kernel's "take no new work", `idle: func()` is the guest's "nothing in flight, stop me". Not in `world service-component` - a world's imports are obligations, so a component *opts in by importing it*, and that import is what a swap reads from the artifact to know whether waiting is meaningful. A component without it is stopped immediately, as before (`docs/SERVICE-COMPONENTS.md`, "A swap waits for the work in flight") |
 | `service` | `run: async func(config: string) -> result<_, string>` |
 | timers | `import wasi:clocks/monotonic-clock@0.3.0` — `wait-for`/`wait-until` are the async timers a guest awaits. Not `wa:kernel`: this is WASI 0.3, served by `wasmtime_wasi::p3::clocks` |
 
@@ -794,6 +795,14 @@ runner or the 0.2 one according to *its own imports* (`wa:kernel/*@0.2.0`), read
 type by an engine with `component-model-async`. A 0.1 component is then compiled again on the engine
 every other component uses, so nothing about 0.1 changes. The 0.2 engine is separate on purpose:
 `components::engine()` is shared with MCP components and agent-core.
+
+**Swap, drained.** `services::replace` asks a 0.2 instance that imports `wa:kernel/drain@0.2.0` to
+finish the job in hand before it stops it (`rust/wa-kernel-runtime/src/drain.rs`). Before this, a
+swap stopped the old instance and handed its in-flight queue leases to the new one, which then ran a
+job whose effect could already be half-applied: safe (the queue's fencing refuses a second settle)
+but a second attempt at work that never failed. The drain removes that for the components that
+implement it, and the deadline path (`WA_SERVICE_DRAIN_MS`, 30 s) keeps the old behaviour for the
+ones that do not - including every 0.1 component and every wasip1 module, which have no hook at all.
 
 Two things the async path needed that the poll path did not:
 

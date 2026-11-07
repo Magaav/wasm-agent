@@ -139,6 +139,31 @@ interface lifecycle {
     report: func(state: health, detail: option<string>);
 }
 
+/// The cooperative half of a hot swap: a component that imports this interface promises to stop
+/// taking new work when the kernel asks, finish the one it is handling, and then say so.
+///
+/// It is a **separate interface on purpose**, and that is the whole reason it is not a function on
+/// [`interface lifecycle`]: a world's imports are obligations (`wit/kernel-v2`), so every component
+/// built against `world service-component` imports `lifecycle` whether or not it implements a
+/// drain. A hot swap has to know *from the artifact* whether waiting is meaningful, and the one
+/// thing a component cannot fake is the list of interfaces it imports: a component that does not
+/// import this one is stopped immediately and its leases are handed back for a retry, exactly as
+/// before (`services::replace`, `docs/SERVICE-COMPONENTS.md`).
+///
+/// The kernel answers a drop of `draining()` with its own state, so the guest reads it where it
+/// decides what to do next (wa-whatsapp reads it once per tick, between two jobs).
+interface drain {
+    /// True once a replacement for this instance is running beside it: take no new job, finish the
+    /// one in hand, settle it, then call `idle`. After the drain deadline (30 s by default,
+    /// `WA_SERVICE_DRAIN_MS`) the kernel stops the instance anyway and hands its untaken leases to
+    /// the replacement, which is today's behaviour.
+    draining: func() -> bool;
+    /// "Nothing is in flight: safe to stop me." Called once, between two jobs, after the guest has
+    /// settled or dropped everything it held. Nothing after it is guaranteed to run: the kernel
+    /// stops the instance as soon as it sees this, and a drained instance is never restarted.
+    idle: func();
+}
+
 /// Structured log lines into the component's log (never to another component's), identical to 0.1.
 interface log {
     enum level {

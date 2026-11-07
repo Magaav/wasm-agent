@@ -18,4 +18,10 @@ package wa:whatsapp@0.1.0;
 world whatsapp-service {
     include wa:kernel/service-component@0.2.0;
     import wa:queue/worker@0.1.0;
+    // The drain (`wit/deps/kernel.wit`, `interface drain`): a hot swap asks this instance to finish
+    // the send or index operation in hand and report idle before it stops it, so an upgrade does not
+    // retry a job whose effect was already half-applied (`docs/SERVICE-COMPONENTS.md`, "A swap waits
+    // for the work in flight"). Importing it is the declaration: the kernel reads the artifact's
+    // imports, so a build without this line is stopped immediately, as before.
+    import wa:kernel/drain@0.2.0;
 }

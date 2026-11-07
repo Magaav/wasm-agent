@@ -99,6 +99,40 @@ fn a_handover_returns_the_lease_without_spending_an_attempt() {
     assert!(f.queue.handover("stt", "").is_err());
 }
 
+/// The read-only twin of `handover`: what a swap asks before it decides to wait for an instance to
+/// finish (`docs/SERVICE-COMPONENTS.md`, "A swap waits for the work in flight"). It must agree with
+/// `handover` job for job - the failure it prevents is a swap that waits 30 s for work that was never
+/// there, or skips the wait while a lease is held.
+#[test]
+fn in_flight_counts_exactly_the_leases_a_handover_would_take_back() {
+    let f = Fixture::new();
+    let mine = f.enqueue("stt", b"mine");
+    let theirs = f.enqueue("stt", b"theirs");
+    assert_eq!(f.queue.in_flight("stt", "comp.1:").expect("count"), 0, "nothing taken yet");
+
+    let my_lease = f.take("stt", "comp.1:w1");
+    assert_eq!(my_lease.id, mine);
+    f.take("stt", "comp.2:w1");
+    assert_eq!(f.queue.in_flight("stt", "comp.1:").expect("count"), 1, "only this prefix's lease");
+    assert_eq!(f.queue.in_flight("stt", "comp.2:").expect("count"), 1);
+    assert_eq!(f.queue.in_flight("stt", "comp.").expect("count"), 2, "a longer prefix sees both");
+
+    // Exactly the leases the count named are the ones handed back, and the count then reads zero.
+    assert_eq!(f.queue.in_flight("stt", "comp.1:").expect("count"), 1);
+    assert_eq!(f.queue.handover("stt", "comp.1:").expect("handover"), 1);
+    assert_eq!(f.queue.in_flight("stt", "comp.1:").expect("count"), 0);
+    assert_eq!(job(&f, mine).state, JobState::Ready);
+    assert_eq!(job(&f, theirs).state, JobState::Leased, "another instance's work is not ours to count");
+
+    // A settled job is not in flight, even while its settlement is the last thing that happened.
+    f.queue.done_by(theirs, "comp.2:w1", b"ok").expect("settle");
+    assert_eq!(f.queue.in_flight("stt", "comp.2:").expect("count"), 0);
+    // The same two refusals as `handover`: a bad name, and an empty prefix (which would name every
+    // worker, including the one taking over).
+    assert!(f.queue.in_flight("stt", "").is_err());
+    assert!(f.queue.in_flight("", "comp.1:").is_err());
+}
+
 #[test]
 fn a_handover_leaves_another_instances_lease_alone_and_expires_stale_work() {
     let f = Fixture::new();

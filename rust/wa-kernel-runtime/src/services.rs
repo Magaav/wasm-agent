@@ -66,6 +66,15 @@ pub(crate) struct Shared {
     /// `spawn_instance`, before the thread that could register anything exists.
     pub(crate) instance: OnceLock<crate::registrations::Instance>,
     pub(crate) stop: AtomicBool,
+    /// A hot swap is replacing this instance: take no new work, finish the one in hand, report `idle`
+    /// (`wa:kernel/drain`, `drain::retire`). Set by `services::replace` and by nothing else - a plain
+    /// `stop` keeps meaning "stop now", so a component that never imported the drain signal is
+    /// stopped exactly as it was before the signal existed.
+    pub(crate) draining: AtomicBool,
+    /// The guest answered `draining` with "nothing in flight" (`wa:kernel/drain.idle`). Once set, the
+    /// instance is stopping and is never restarted: a drained run that returns cleanly would
+    /// otherwise look like a crash to the supervisor's restart loop.
+    pub(crate) idle: AtomicBool,
     /// Last `lifecycle.report` from a component service ("" for wasip1 modules).
     pub(crate) health: Mutex<String>,
     restarts: AtomicU64,
@@ -83,6 +92,9 @@ struct Handle {
     thread: Option<std::thread::JoinHandle<()>>,
     /// The generation of the instance this handle owns: what `replace` revokes when it retires it.
     generation: u64,
+    /// The instance's drain hook (`Spawned::drain_aware`): what `replace` reads to decide whether
+    /// waiting for the work in flight is meaningful.
+    drain_aware: bool,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Handle>> {
@@ -416,6 +428,15 @@ fn log_path(name: &str) -> std::path::PathBuf {
     crate::components::component_dir().join(format!("{name}.service.log"))
 }
 
+/// One line appended to a service's log by the host itself (a drain outcome, not a guest line). The
+/// guest holds the same file for its own stdout, so this only ever appends; a log that cannot be
+/// opened loses the line and nothing else - a swap must not fail because a file did.
+fn append_log(name: &str, line: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path(name)) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn open_log(name: &str) -> Result<std::fs::File> {
     // Bounded store (store.rs): a service log has a per-component quota, applied at start - the one
     // moment the host owns the file. While the service runs the guest holds the handle, so the
@@ -551,7 +572,13 @@ pub fn start(request: &Value) -> Value {
     let instance = spawned.instance.clone();
     services.insert(
         name.clone(),
-        Handle { shared: spawned.shared, sha256: sha256.clone(), thread: spawned.thread, generation: instance.generation },
+        Handle {
+            shared: spawned.shared,
+            sha256: sha256.clone(),
+            thread: spawned.thread,
+            generation: instance.generation,
+            drain_aware: spawned.drain_aware,
+        },
     );
     // A provider that just came up can let something that was waiting for it start. The supervisor
     // owns that decision (`supervisor::kick`), not this function.
@@ -577,6 +604,9 @@ pub(crate) struct Spawned {
     pub(crate) instance: crate::registrations::Instance,
     /// What `start` puts in its answer besides the name: `state`, `grants` and `limits`.
     pub(crate) report: Value,
+    /// Does this artifact implement `wa:kernel/drain@0.2.0` (read from its own imports)? A swap only
+    /// waits for an instance that said it would finish its work (`drain::retire`).
+    pub(crate) drain_aware: bool,
 }
 
 /// The instance token a runner's guest calls carry (`name#generation`), or the plain name for a store
@@ -634,7 +664,9 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             Ok(engine) => engine,
             Err(error) => return Err(json!({"ok": false, "error": format!("engine_failed:{error}")})),
         };
-        let probe = match wasmtime::component::Component::new(&async_engine, &installed.bytes) {
+        // Cached by pin: a hot swap starts the same bytes beside the running instance, and compiling
+        // an 8 MB component twice for one upgrade is time nobody asked to pay (`compiled`).
+        let probe = match crate::service_components_v2::compiled(&async_engine, &installed.sha256, &installed.bytes) {
             Ok(component) => component,
             Err(error) => return Err(json!({"ok": false, "error": format!("compile_failed:{error}")})),
         };
@@ -686,6 +718,14 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             })),
         );
     }
+    // The drain hook, read from the artifact and not from a manifest field: a 0.2 guest that imports
+    // `wa:kernel/drain@0.2.0` finishes the job in hand before it stops (`drain::retire`). Everything
+    // else - the wasip1 modules, the 0.1 components, a 0.2 component that did not opt in - is stopped
+    // immediately, exactly as before.
+    let drain_aware = match &compiled {
+        Compiled::ComponentV2(component) => crate::service_components_v2::drains(component),
+        _ => false,
+    };
     let thread_shared = shared.clone();
     let sha256 = installed.sha256.clone();
     let thread = std::thread::Builder::new().name(format!("wa-service-{name}")).spawn(move || {
@@ -716,7 +756,10 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
                 outcome == "exit_0",
             );
             *thread_shared.last_exit.lock().unwrap() = outcome.clone();
-            if thread_shared.stop.load(Ordering::Relaxed) {
+            // `stop` is the kernel's, `idle` is the guest's: an instance that said it had nothing in
+            // flight and returned is a *drained* instance, on its way out. Restarting it would put two
+            // instances of one component on the same queue, which is the bug a swap exists to avoid.
+            if thread_shared.stop.load(Ordering::Relaxed) || thread_shared.idle.load(Ordering::Relaxed) {
                 set(&thread_shared, "stopped");
                 wa_governance::node_telemetry::record_service_health(&installed.name, false);
                 return;
@@ -730,7 +773,7 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             set(&thread_shared, "backoff");
             let until = Instant::now() + backoff;
             while Instant::now() < until {
-                if thread_shared.stop.load(Ordering::Relaxed) {
+                if thread_shared.stop.load(Ordering::Relaxed) || thread_shared.idle.load(Ordering::Relaxed) {
                     set(&thread_shared, "stopped");
                     wa_governance::node_telemetry::record_service_health(&installed.name, false);
                     return;
@@ -747,6 +790,7 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             sha256,
             thread: Some(thread),
             instance,
+            drain_aware,
             report: json!({
                 "state": state.to_json(),
                 "grants": {
@@ -832,6 +876,14 @@ pub(crate) fn stop_spawned(mut spawned: Spawned) -> String {
 /// The old instance's leases are handed over before they are revoked: a job it was running is neither
 /// failed nor left to lose its lease, so a queue with pending work survives a swap with nothing lost
 /// and nothing duplicated (`wa_queue::Queue::handover`, `QueueHost::handover_instance`).
+///
+/// **The drain comes first** (`drain::retire`, `wit/kernel-v2/kernel.wit`'s `interface drain`). Handing
+/// a lease back is the right shape for a crash, but a swap is not a crash: a job that was half-applied
+/// when the instance stopped is retried by the replacement, and "at-least-once" is the wrong bill for
+/// an upgrade an operator asked for. So a component that implements the drain is *asked* first - it
+/// finishes the `handle` in hand, settles it, reports idle - and only then is it stopped. A component
+/// without the hook, one with nothing in flight, and one that misses the deadline all take the old
+/// path; the swap answer and the component's own log say which case it was (`draining` below).
 pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
     let previous = registry().lock().unwrap().insert(
         name.to_string(),
@@ -840,15 +892,20 @@ pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
             sha256: candidate.sha256.clone(),
             thread: candidate.thread,
             generation: candidate.instance.generation,
+            drain_aware: candidate.drain_aware,
         },
     );
     let retired = match previous {
         Some(mut old) => {
+            let token = format!("{name}#{}", old.generation);
+            // Read the leases *before* the drain: after it they are settled, which is the whole point.
+            let queue = crate::queue_host::node();
+            let token_for_count = token.clone();
+            let draining = crate::drain::retire(&old.shared, old.drain_aware, move || queue.in_flight_instance(&token_for_count), crate::drain::deadline());
             old.shared.stop.store(true, Ordering::Relaxed);
             if let Some(thread) = old.thread.take() {
                 let _ = thread.join();
             }
-            let token = format!("{name}#{}", old.generation);
             // The in-flight jobs of the instance that just stopped go back to `Ready`, due now, before
             // anything is revoked: they were not failed (a swap is not a crash), and the instance that
             // replaced this one is already polling `take`. This runs *after* the join, so nothing of the
@@ -859,6 +916,10 @@ pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
             // through the provider directly): only the retired generation's token is revoked here.
             crate::bus_host::node().detach(&format!("{name}#{}", old.generation));
             crate::queue_host::node().unregister_instance(&format!("{name}#{}", old.generation));
+            // What the swap did, in the retired component's own log: "why was my job retried" is the
+            // question an operator asks after an upgrade, and the answer belongs where the run's own
+            // lines are (`services logs <name>`), not only in whatever asked for the swap.
+            append_log(name, &draining.log_line(handed_over));
             json!({
                 "generation": old.generation,
                 "last_exit": *old.shared.last_exit.lock().unwrap(),
@@ -866,6 +927,8 @@ pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
                 // How many in-flight queue jobs were handed to the new instance instead of waiting for
                 // their lease to lapse. A number somebody can read after a swap, not a claim.
                 "queue_handed_over": handed_over,
+                // Whether the retire waited for the work in hand, and why it stopped waiting.
+                "drain": draining.to_json(),
             })
         }
         None => Value::Null,
@@ -889,6 +952,11 @@ fn describe(name: &str, handle: &Handle) -> Value {
         "started_at": s.started_at.load(Ordering::Relaxed),
         "last_exit": *s.last_exit.lock().unwrap(),
         "health": *s.health.lock().unwrap(),
+        // The drain hook, and whether this instance has been asked to drain: `cooperative` means a
+        // swap waits for the work in hand, `immediate` means it stops the instance as it always did.
+        "drain": if handle.drain_aware { "cooperative" } else { "immediate" },
+        "draining": s.draining.load(Ordering::Relaxed),
+        "idle": s.idle.load(Ordering::Relaxed),
         // The registrations this instance holds, so "nothing of the old one lingers" is a number
         // somebody can read after a swap, not a claim in a commit message.
         "registrations": instance.map(|i| crate::registrations::node().count_generation(name, i.generation)).unwrap_or(0),
@@ -1170,5 +1238,205 @@ mod tests {
         assert_eq!(limits["by"], "manifest", "and the answer says the manifest decided");
         stop(name);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the drained hot swap (docs/SERVICE-COMPONENTS.md, "A swap waits for the work in flight") ---
+    //
+    // The integration tests below drive the real `svc-drain` fixture: a wasm guest on
+    // `wa:kernel@0.2` that consumes one job from `wa:queue/worker`, takes `handle_ms` over it, writes
+    // one marker per job into its own kv, and settles it. The marker is the evidence: a job handled
+    // twice leaves `2`, so "the swap completed it exactly once, with no second send" is a number in
+    // the component's own store. `support::install` returns `None` when the gate did not build the
+    // fixtures, and each test then says it skipped - it never passes by absence.
+
+    /// The queue the fixture is granted (`svc-drain`'s `manifest.json`).
+    const DRAIN_QUEUE: &str = "wa.drain";
+
+    /// A candidate instance for a swap, built the way `install::upgrade` and `dev::swap` build one:
+    /// the installed artifact and the same grant, started beside the registry's instance.
+    fn candidate(name: &str, request: &Value) -> Spawned {
+        let installed = load(name).expect("the fixture is installed");
+        let grant = Grant::from_request(request).expect("grant");
+        grant.check(&installed.manifest).expect("the manifest declares it");
+        spawn_instance(installed, grant).expect("a candidate instance starts")
+    }
+
+    /// The node's queue for a component: the same handle the guest's `worker::take` goes through.
+    fn queue_of(name: &str) -> wa_queue::Queue {
+        crate::queue_host::node().queue(name)
+    }
+
+    /// Enqueue one job the way a node capability does, and return its id.
+    fn enqueue(name: &str, payload: &[u8]) -> wa_queue::JobId {
+        let queue = queue_of(name);
+        let outcome = queue.enqueue(wa_queue::EnqueueRequest::new(DRAIN_QUEUE, payload.to_vec())).expect("enqueue");
+        assert!(!outcome.dedupe_hit, "a fresh job");
+        outcome.id
+    }
+
+    /// The fixture installed under a name of this test's own.
+    ///
+    /// The node's `QueueHost` is one per process and its directory is whichever components directory
+    /// the first caller had, so two tests sharing an installed name would share a queue - and a job
+    /// left leased by a test that failed would be taken by the next one instead of the job it just
+    /// enqueued. The bytes, the manifest and the contract are the fixture's; only the installed name
+    /// differs, which is also what makes the service log and the kv marker this test's own.
+    fn install_as(dir: &std::path::Path, from: &str, to: &str) {
+        for extension in ["wasm", "wasm.sha256", "json"] {
+            std::fs::copy(dir.join(format!("{from}.{extension}")), dir.join(format!("{to}.{extension}")))
+                .unwrap_or_else(|error| panic!("copy {from}.{extension} to {to}: {error}"));
+        }
+    }
+
+    /// How many times the fixture handled `id`, from the component's own kv: the duplicate this whole
+    /// design exists to prevent.
+    fn handles(dir: &std::path::Path, name: &str, id: wa_queue::JobId) -> u32 {
+        use wa_kv::Store as _;
+        let store = crate::state_host::HostStore::at(crate::state_host::kv_path(dir, name));
+        store
+            .get(format!("handled/{}", id.0).as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// A job in the middle of its handle when the swap arrives. The drain finishes it, reports idle,
+    /// and the kernel stops the instance with nothing to hand back: the job is settled **once**, by
+    /// the instance that started it, and the replacement never sees it.
+    #[test]
+    fn a_swap_waits_for_the_job_in_hand_so_it_is_completed_exactly_once() {
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(fixtures) = support::install("drain-once", &["svc-drain"]) else { return };
+        let name = "svc-drain-once";
+        install_as(&fixtures, "svc-drain", name);
+        stop(name);
+        let id = enqueue(name, b"one send");
+        let tag = format!("job={}", id.0);
+        let request = json!({"name": name, "config": {"handle_ms": 2500, "tick_ms": 20}});
+        assert_eq!(start(&request)["ok"], true);
+        assert_eq!(status(Some(name))["drain"], "cooperative", "the fixture imports wa:kernel/drain");
+        let log = support::wait_for_log(name, &format!("handling {tag}"), Duration::from_secs(20));
+        assert!(log.contains(&format!("handling {tag}")), "the job is in hand: {log}");
+
+        // The candidate is started first: what this measures is the swap, not a wasm compile.
+        let next = candidate(name, &request);
+        let began = Instant::now();
+        let swapped = replace(name, next);
+        let waited = began.elapsed();
+        let drained = &swapped["retired"]["drain"];
+        assert_eq!(drained["outcome"], "drained", "{swapped}");
+        assert_eq!(swapped["retired"]["queue_handed_over"], 0, "nothing to hand back: {swapped}");
+        assert!(waited >= Duration::from_millis(300), "the swap waited for the handle to finish: {waited:?}");
+        assert!(waited < Duration::from_secs(5), "and not for the stop grace: {waited:?}");
+
+        // The job: settled once, by the instance that took it, with its attempt budget untouched.
+        let queue = queue_of(name);
+        let job = queue.job(id).expect("load").expect("the job exists");
+        assert_eq!(job.state, wa_queue::JobState::Done, "{job:?}");
+        assert_eq!(job.attempts, 0, "a drained job was not retried");
+        assert_eq!(job.lease_expiries, 0, "and its lease did not lapse");
+        let stats = queue.stats(DRAIN_QUEUE).expect("stats");
+        assert_eq!((stats.ready, stats.leased), (0, 0), "nothing left for the replacement: {stats:?}");
+        assert_eq!(handles(&fixtures, name, id), 1, "the fixture handled this job exactly once");
+
+        // Both halves of the story are in the component's log: the guest's own line and the host's.
+        let log = logs(name, 16 << 10)["log"].as_str().unwrap_or("").to_string();
+        assert!(log.contains("draining: idle, no work in flight"), "the guest said it was idle: {log}");
+        assert!(log.contains("INFO drain: drained in"), "the host line says what the swap did: {log}");
+        assert!(log.contains(&format!("settled {tag}")), "{log}");
+        stop(name);
+    }
+
+    /// The deadline path: a guest that ignores the hook. After `WA_SERVICE_DRAIN_MS` the swap does
+    /// exactly what it did before the drain existed - stop the instance, hand the lease back, let the
+    /// replacement retry - and says so at WARN. The retry is the only settle, so the job still runs
+    /// exactly once: the old instance is killed inside its handle and never settles.
+    #[test]
+    fn a_guest_that_never_reports_idle_falls_back_to_stop_and_retry_and_logs_it() {
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(fixtures) = support::install("drain-deadline", &["svc-drain"]) else { return };
+        let name = "svc-drain-deadline";
+        install_as(&fixtures, "svc-drain", name);
+        stop(name);
+        let id = enqueue(name, b"one send");
+        let tag = format!("job={}", id.0);
+        // The knob, not a constant: 400 ms keeps the test short. It is read by `drain::deadline`, so
+        // the process-wide variable is set here and restored below, under the components-dir lock.
+        let previous = std::env::var("WA_SERVICE_DRAIN_MS").ok();
+        std::env::set_var("WA_SERVICE_DRAIN_MS", "400");
+        let slow = json!({"name": name, "config": {"never_idle": true, "handle_ms": 60_000, "tick_ms": 20}});
+        assert_eq!(start(&slow)["ok"], true);
+        let log = support::wait_for_log(name, &format!("handling {tag}"), Duration::from_secs(20));
+        assert!(log.contains(&format!("handling {tag}")), "the job is in hand: {log}");
+
+        // The candidate is the cooperative mode: it is the one that finishes the handed-over job.
+        let fast = json!({"name": name, "config": {"handle_ms": 100, "tick_ms": 20}});
+        let next = candidate(name, &fast);
+        let began = Instant::now();
+        let swapped = replace(name, next);
+        let waited = began.elapsed();
+        // Restored as soon as the swap it shaped is over: a later assertion must not leave the knob
+        // set for the other tests in this process.
+        match previous {
+            Some(value) => std::env::set_var("WA_SERVICE_DRAIN_MS", value),
+            None => std::env::remove_var("WA_SERVICE_DRAIN_MS"),
+        }
+        let drained = &swapped["retired"]["drain"];
+        assert_eq!(drained["outcome"], "deadline", "{swapped}");
+        assert!(drained["waited_ms"].as_u64().unwrap_or(0) >= 400, "it waited the deadline: {swapped}");
+        assert_eq!(swapped["retired"]["queue_handed_over"], 1, "the lease went back for a retry: {swapped}");
+        // The stop grace is the runner's (`STOP_GRACE`) and a parked guest is dropped at its end.
+        assert!(waited >= Duration::from_secs(2), "the stop path ran, not a drain: {waited:?}");
+
+        let queue = queue_of(name);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut job = queue.job(id).expect("load").expect("the job exists");
+        while Instant::now() < deadline && job.state != wa_queue::JobState::Done {
+            std::thread::sleep(Duration::from_millis(50));
+            job = queue.job(id).expect("load").expect("the job exists");
+        }
+        assert_eq!(job.state, wa_queue::JobState::Done, "the replacement ran it: {job:?}");
+        assert_eq!(job.attempts, 0, "a handover is not a failure, so the retry spent no attempt");
+        assert_eq!(handles(&fixtures, name, id), 1, "the old instance was killed mid-handle: one handle, one settle");
+
+        let log = logs(name, 16 << 10)["log"].as_str().unwrap_or("").to_string();
+        assert!(log.contains("WARN drain: deadline exceeded after"), "the fallback is logged, not silent: {log}");
+        assert!(log.contains("handed 1 lease(s) back"), "{log}");
+        assert!(log.contains(&format!("settled {tag}")), "{log}");
+        stop(name);
+    }
+
+    /// A component without the hook - `svc-echo` does not import `wa:kernel/drain` - is stopped
+    /// immediately and its work handed back, exactly as every swap behaved before the drain existed.
+    /// That is the cost the drain must never charge a component that cannot take part.
+    #[test]
+    fn a_component_without_the_hook_is_stopped_at_once_as_before() {
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if support::install("drain-nohook", &["svc-echo"]).is_none() {
+            return;
+        }
+        let name = "svc-echo";
+        stop(name);
+        let request = json!({"name": name, "config": {"tick_ms": 50}});
+        assert_eq!(start(&request)["ok"], true);
+        let log = support::wait_for_log(name, "heartbeat start", Duration::from_secs(20));
+        assert!(log.contains("heartbeat start"), "{log}");
+        assert_eq!(status(Some(name))["drain"], "immediate", "no drain hook in this artifact");
+
+        let next = candidate(name, &request);
+        let began = Instant::now();
+        let swapped = replace(name, next);
+        let waited = began.elapsed();
+        assert_eq!(swapped["retired"]["drain"]["outcome"], "no_hook", "{swapped}");
+        assert_eq!(swapped["retired"]["drain"]["waited_ms"], 0, "nothing was waited for: {swapped}");
+        assert!(waited < Duration::from_secs(3), "no drain delay on top of the stop: {waited:?}");
+        // The swap itself is unchanged: the new generation is the registry's instance and is running.
+        assert_eq!(status(Some(name))["state"], "running");
+        assert_ne!(status(Some(name))["generation"], swapped["retired"]["generation"]);
+        let log = logs(name, 16 << 10)["log"].as_str().unwrap_or("").to_string();
+        assert!(log.contains("no wa:kernel/drain hook in this artifact"), "{log}");
+        stop(name);
     }
 }

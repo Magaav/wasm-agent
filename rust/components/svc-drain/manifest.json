@@ -1,0 +1,12 @@
+{
+  "name": "svc-drain",
+  "kind": "service",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "Fixture on wa:kernel@0.2 for the drained hot swap: consume one queue job, finish it, then report idle over wa:kernel/drain so a swap completes it exactly once; a mode that ignores the drain (the deadline path) and a crash mode",
+  "capabilities": {
+    "storage": true,
+    "queue": {"interfaces": ["worker"], "namespaces": ["wa.drain"]}
+  },
+  "limits": {"memory_mb": 64}
+}

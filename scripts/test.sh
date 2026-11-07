@@ -289,13 +289,16 @@ gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-ca
 # the compat path) and `svc-echo` (a wa:kernel@0.2 component, WASI 0.3 native async). Five more
 # (`svc-wasi-{env,stdin,fs,net,kv}`) are the WASI grant-policy fixtures (docs/WASI-INTERFACES.md):
 # one per tier B interface, each imported alone so its test can tell "granted" from "not granted".
+# `svc-drain` is the drained-hot-swap fixture (docs/SERVICE-COMPONENTS.md, "A swap waits for the work
+# in flight"): it consumes one queue job, takes its time over it and reports `idle` when a swap asks,
+# which is what proves a swap completes the job exactly once instead of retrying it.
 # A fixture that did not build turns its test into a skip that says so; it never passes by absence.
 # A component is its own cargo workspace and `build-components.sh` reads the module from
 # `rust/components/<name>/target/<target>/release/` (a redirect would make it install nothing and
 # silently turn this into a skip), so a gate-wide CARGO_TARGET_DIR - which the host build and the
 # `cargo test` lines above deliberately honour - is unset for the component builds only.
 SERVICE_FIXTURE_DIR="$(mktemp -d)"
-if env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts/build-components.sh svc-echo svc-echo-v1 svc-echo-wasip1 svc-wasi-env svc-wasi-stdin svc-wasi-fs svc-wasi-net svc-wasi-kv >/dev/null 2>&1; then
+if env -u CARGO_TARGET_DIR WA_COMPONENTS_DIR="$SERVICE_FIXTURE_DIR" bash scripts/build-components.sh svc-echo svc-echo-v1 svc-echo-wasip1 svc-wasi-env svc-wasi-stdin svc-wasi-fs svc-wasi-net svc-wasi-kv svc-drain >/dev/null 2>&1; then
   export WA_TEST_SERVICE_DIR="$SERVICE_FIXTURE_DIR"
 else
   echo "note: the service fixtures were not built (no wasm32-wasip1/wasip2 toolchain?); the three service end-to-end tests are skipped"
@@ -307,7 +310,7 @@ fi
 # Three crates now hold these, so the filters are split: the runner and its providers
 # (wa-kernel-runtime), the policy and its stores (wa-governance), the registry and the capability
 # surface (wa-capabilities). A filter left on the binary would match nothing and pass by absence.
-gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime -- components::tests services::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-kernel-runtime -- components::tests services::tests service_components::tests service_components_v2::tests state_host::tests bus_host::tests queue_host::tests drain::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-governance -- node_policy::tests node_telemetry::tests store::tests
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities -- capabilities::tests
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its

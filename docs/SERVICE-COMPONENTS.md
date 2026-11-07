@@ -349,6 +349,71 @@ registry rather than to this loop. Until then an operator with a live node still
 `disable`/`enable` across a build; the swap semantics this loop proves are the ones such an endpoint
 would use.
 
+## A swap waits for the work in flight (`wa:kernel/drain`, 07/11)
+
+A hot swap used to stop the retired instance first and hand its in-flight queue leases to the new one
+afterwards (`services::replace`). That is the right shape for a *crash* - the job did not fail, so it
+goes back to `Ready` due now, with its attempt budget untouched, and the queue's lease fencing means
+it can never be settled twice. But a swap is not a crash: a job whose effect was already half-applied
+(a message sent, not yet settled; an index write landing) was retried by the replacement, and
+"at-least-once" is the wrong bill for an upgrade an operator asked for.
+
+So a swap now asks first. The contract is its own interface, `wa:kernel/drain@0.2.0`
+(`wit/kernel-v2/kernel.wit`):
+
+```wit
+interface drain {
+    draining: func() -> bool;   // "a replacement is up: take no new work"
+    idle: func();               // "nothing in flight: safe to stop me"
+}
+```
+
+and the swap is:
+
+```
+kernel: draining = true            (drain::retire)
+guest : finishes the handle in hand, settles it, calls idle()
+kernel: stop, join, hand over what is left (normally nothing), log the outcome
+```
+
+**Why its own interface, and not a function on `lifecycle`.** A world's imports are obligations: every
+component built against `world service-component` imports `lifecycle`, so a function added there would
+be imported by components that do not implement anything. A swap has to know *from the artifact*
+whether waiting is meaningful, and the one thing a component cannot fake is the list of interfaces it
+imports. Importing `drain` is the declaration; `service_components_v2::drains` reads it; a component
+without it is stopped immediately, exactly as before. `wa-whatsapp` opts in (`wit/wa.wit`).
+
+**Three cases keep the old behaviour, always logged** in the retired component's own log
+(`services logs <name>`) and in the swap's `drain` answer:
+
+| outcome | when | what happened |
+| --- | --- | --- |
+| `drained` | the guest reported idle inside the deadline | nothing handed back, the job completed once |
+| `nothing_in_flight` | the instance held no queue lease | no wait at all: there was no job to protect |
+| `deadline` | the guest did not report idle within `WA_SERVICE_DRAIN_MS` (30 s default) | stop + hand the leases back for a retry, at WARN |
+| `no_hook` | the artifact does not import `wa:kernel/drain` | stop + hand back, as before (wasip1 modules, 0.1 components, any 0.2 component that did not opt in) |
+
+The wait is a poll of one atomic (5 ms) bounded by the deadline - the guest can report idle at any
+point of its own loop, and the kernel cannot be woken by a host function on another thread. The knob
+exists because "how long is one job" is a property of the component: `WA_SERVICE_DRAIN_MS` raises it
+for a batch importer, and `0` disables waiting entirely.
+
+A run that reported `idle` is treated as **stopping**, never as a crash to restart (`services.rs`):
+without that, a guest that returned cleanly after draining would be restarted beside the instance
+that replaced it, which is the "two instances, one queue" bug a swap exists to prevent.
+
+Tests, with the real `svc-drain` fixture (a 0.2 guest that consumes one job, takes `handle_ms` over
+it, writes one marker per job into its own kv and settles it - so a second handle leaves `2`):
+
+```
+cargo test -p wa-kernel-runtime -- services::tests::a_swap_waits services::tests::a_guest_that_never services::tests::a_component_without
+cargo test -p wa-kernel-runtime -- drain::tests queue_host::tests
+cargo test -p wa-queue -- in_flight
+```
+
+The three integration tests are skipped when the gate did not build the fixtures
+(`WA_TEST_SERVICE_DIR`). `scripts/test.sh` builds `svc-drain` beside the other service fixtures.
+
 ## Supervisor: by imports, per instance, transactional, layered (06/11)
 
 `docs/KERNEL.md` ("Supervisor features, step 4") is the design record; this is what an operator sees.

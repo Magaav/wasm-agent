@@ -234,6 +234,24 @@ impl QueueHost {
         handed
     }
 
+    /// How many queue leases the instance named by `token` holds right now: the read-only twin of
+    /// [`QueueHost::handover_instance`], read *before* a hot swap decides to wait for the instance to
+    /// finish (`services::replace`, `drain::retire`). Only the granted queues are looked at, for the
+    /// same reason `handover_instance` only touches those: a namespace outside the grant cannot be
+    /// holding a lease of its own.
+    pub fn in_flight_instance(&self, token: &str) -> usize {
+        let (Some(component), Some(grants)) = (self.component_of(token), self.grants(token)) else { return 0 };
+        let prefix = format!("{}:", worker_scope(token));
+        let queue = self.queue(&component);
+        queue
+            .queues()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| grants.may_queue(name))
+            .map(|name| queue.in_flight(&name, &prefix).unwrap_or(0))
+            .sum()
+    }
+
     /// The component an instance token belongs to (`None` once revoked).
     pub fn component_of(&self, token: &str) -> Option<String> {
         self.instances.lock().unwrap_or_else(|e| e.into_inner()).get(token).map(|(component, _)| component.clone())

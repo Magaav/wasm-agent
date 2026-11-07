@@ -399,6 +399,42 @@ impl Queue {
         Ok(handed)
     }
 
+    /// How many leases the workers behind `prefix` hold right now: the read-only twin of
+    /// [`Queue::handover`], for a caller that has to *decide* whether to hand anything back.
+    ///
+    /// A hot swap asks this before it asks the instance to drain (`docs/SERVICE-COMPONENTS.md`, "A
+    /// swap waits for the work in flight"): with nothing in flight there is no job to protect, so the
+    /// instance is stopped at once instead of being waited for. Counting and handing over scan the
+    /// same index with the same rule, deliberately - a count that disagreed with `handover` would
+    /// either stall a swap for work that is not there or skip a wait for work that is.
+    ///
+    /// `Expired` jobs are not leases, so they are not counted: `take` and `recover_leases` own them.
+    pub fn in_flight(&self, queue: &str, prefix: &str) -> Result<usize> {
+        if !valid_name(queue, 64) {
+            return Err(QueueError::Invalid(format!("bad queue name {queue:?}")));
+        }
+        if prefix.is_empty() {
+            // The same refusal as `handover`: an empty prefix names every worker, including the
+            // instance that is taking over.
+            return Err(QueueError::Invalid("in_flight needs a worker prefix".into()));
+        }
+        let mut held = 0;
+        for (key, _) in self.kv.scan_prefix(&index_prefix(queue, STATE_LEASED))? {
+            let Some(id) = id_from_index_key(&key) else { continue };
+            match self.load(id)? {
+                Some(job)
+                    if job.queue == queue
+                        && job.state == JobState::Leased
+                        && job.lease_worker.as_deref().is_some_and(|worker| worker.starts_with(prefix)) =>
+                {
+                    held += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(held)
+    }
+
     // ---------------------------------------------------------------- freshness, sweeps, alerts
 
     /// Drop every *unleased* job whose `fresh_until` has passed, without running it. Each drop is
