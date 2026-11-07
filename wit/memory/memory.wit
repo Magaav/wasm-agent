@@ -1,0 +1,160 @@
+/// `wa:memory` — the memory seam: remember, recall, forget, list, search-messages, sessions.
+///
+/// Memory *logic* (recall ranking, full-text search, scope rules, retention policy) is the part
+/// that changes often, so it lives in a component that can be swapped; memory *storage* (the SQLite
+/// file, durability, backups, the journal) stays in the kernel, which hands the component a scoped
+/// `wa:kernel/sql` grant (docs/KERNEL.md, "Memory as a component").
+///
+/// The shapes here are the Lua `lua/core/memory.lua` API's shapes, field for field, because the
+/// router (`WA_MEMORY_COMPONENT=1`) has to be able to answer with either and hand the caller the
+/// same values. Where Lua returns a table of arbitrary columns, the seam declares the columns that
+/// are part of the contract; a caller that wants more than the seam carries keeps using the native
+/// path (and a component granted only `recall` cannot read transcripts at all).
+///
+/// Records carry no secrets and no keys: contents and message text are the database's own values,
+/// and the component never receives the database path.
+package wa:memory@0.1.0;
+
+interface types {
+    /// One distilled fact (`memories`, the `remember`/`recall` store).
+    record memory {
+        id: string,
+        scope: string,
+        content: string,
+        tags: list<string>,
+        source: string,
+        /// Unix seconds, as SQLite stores them (a REAL, so sub-second order survives).
+        created-at: f64,
+        updated-at: f64,
+        /// `bm25()` of this row's match — lower is better — or 0.0 when the row did not come from a
+        /// match (`list`). Kept as the raw value: the ranking that produced the order is the
+        /// component's, and a caller that re-sorts must be able to see what it is re-sorting.
+        rank: f64,
+    }
+
+    /// One message the transcript index matched (`search-messages`).
+    record message-hit {
+        id: string,
+        session-id: string,
+        seq: u64,
+        role: string,
+        content: string,
+        tool-name: string,
+        ok: bool,
+        created-at: f64,
+        /// The owning session's account and title, so a hit is readable without a second call.
+        user-id: string,
+        title: string,
+        rank: f64,
+    }
+
+    /// One thread, as the session list shows it.
+    record session {
+        id: string,
+        user-id: string,
+        node-id: string,
+        route-id: string,
+        objective: string,
+        title: string,
+        parent-session-id: option<string>,
+        started-at: f64,
+        ended-at: option<f64>,
+        updated-at: f64,
+        message-count: u64,
+        /// The derived state (`empty`/`answered`/`failed`/`unfinished`), computed from the last
+        /// message exactly as `lua/core/memory.lua` `classify` does. Present only when the caller
+        /// asked for states; `""` otherwise.
+        state: string,
+        /// The last message's role/ok/phase/tool-calls and time — what the human-readable detail is
+        /// built from. The *text* of that detail is presentation and stays with the caller, which is
+        /// also where redaction lives.
+        last-role: option<string>,
+        last-ok: option<s64>,
+        last-phase: option<string>,
+        last-tool-calls: option<string>,
+        last-at: option<f64>,
+        /// The last message's trace, only when that message is a failed assistant turn (exactly the
+        /// rows `CASE WHEN role='assistant' AND ok=0 THEN trace ELSE '[]' END` selects).
+        last-trace: option<string>,
+    }
+
+    /// What a write decided. The kernel needs it to journal a mutation exactly once, and a caller
+    /// needs to know whether anything changed: a repeat of an identical fact is not a write.
+    record remembered {
+        id: string,
+        scope: string,
+        content: string,
+        tags: list<string>,
+        source: string,
+        created-at: f64,
+        updated-at: f64,
+        content-sha256: string,
+        /// False when the identical fact was already stored: no row changed, so nothing to journal.
+        written: bool,
+    }
+
+    record forgotten {
+        /// False when there was no live row with that id.
+        retired: bool,
+        deleted-at: f64,
+    }
+
+    variant error {
+        /// The grant does not cover this (a scope, a table, a statement shape).
+        refused(string),
+        /// The request is not something the store can represent (empty content, oversized, bad id).
+        invalid(string),
+        /// No row with that id (a replace or a forget of something that is not there).
+        not-found,
+        /// The database failed. Never reported as success.
+        failed(string),
+    }
+}
+
+/// The six operations the core uses, plus the retention decision.
+interface memory {
+    use types.{error, forgotten, memory, message-hit, remembered, session};
+
+    /// Store one fact and return the row's id. Idempotent on `(scope, content)`: storing the same
+    /// text twice returns the existing id. With `id`, the named row is replaced in place (or
+    /// `not-found`), and a `user:` scope may never name another scope's row.
+    remember: func(content: string, scope: option<string>, tags: list<string>, id: option<string>) -> result<remembered, error>;
+
+    /// Rank facts for `text`: all terms first (`AND`), then any term (`OR`) when that finds nothing —
+    /// bm25 with a small bonus for recently updated rows. `exclusive` searches `scope` alone, which
+    /// is a guest's view; without it a `global` row is shared and another account's `user:` rows are
+    /// left out.
+    recall: func(text: string, limit: u32, scope: option<string>, exclusive: bool) -> result<list<memory>, error>;
+
+    /// Retire one fact. Returns whether a live row was retired; the row and its index entry go, and
+    /// the deletion is journalled so every peer forgets it too.
+    forget: func(id: string) -> result<forgotten, error>;
+
+    /// The store, most recently updated first (`memory.memories()` in Lua, the `memories` tool).
+    /// `list` is a WIT keyword, so the name is escaped.
+    %list: func(scope: option<string>, limit: u32) -> result<list<memory>, error>;
+
+    /// Full-text search over the agent's own transcript, best match first.
+    search-messages: func(text: string, user-id: option<string>, limit: u32) -> result<list<message-hit>, error>;
+
+    /// The threads, most recently used first, with the derived state when `states` is set.
+    sessions: func(user-id: option<string>, limit: u32, states: bool) -> result<list<session>, error>;
+
+    /// What compaction/quiet maintenance may retire. The answer is a decision, not a deletion:
+    /// originals are recovery evidence, and this store refuses to retire them without an admission
+    /// (docs/MEMORY.md, "Retention"). `eligible` counts the rows that *would* be eligible when an
+    /// admission exists; `refused` is the refusal the caller must report instead of deleting.
+    retention: func(older-than-seconds: f64) -> result<retention-plan, error>;
+
+    record retention-plan {
+        refused: option<string>,
+        eligible: u64,
+    }
+}
+
+/// A component that answers the memory seam. It imports exactly the SQL it is granted and nothing
+/// else: no filesystem, no network, no clock of its own.
+world memory-component {
+    import wa:kernel/sql@0.1.0;
+    export memory;
+}

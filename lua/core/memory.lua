@@ -30,6 +30,71 @@ local function exec(sql, params)
   return check(decode(host.sql_exec(sql, json.encode(params or {}))))
 end
 
+-- ---------------------------------------------------------------- the memory seam
+--
+-- The store's *logic* - recall ranking, the search passes, scope rules, the retention decision - can be
+-- served by the `memory` component (docs/KERNEL.md, "Memory as a component"; docs/MEMORY.md), with
+-- `memory.db` staying in the kernel behind a scoped `wa:kernel/sql` grant. `WA_MEMORY_COMPONENT=1`
+-- routes this file's six operations there; **without it every function below runs exactly the code it
+-- always ran** and this block does nothing but read one environment value.
+--
+-- A component that is missing, wedged or refused falls back to the native path *with a reason in the
+-- log*: a silent fallback would make a broken component look like a working store. The reason never
+-- carries text from the database - the capability answers with its own error names.
+local seam_component = (function()
+  local ok, value = pcall(host.getenv, "WA_MEMORY_COMPONENT")
+  return ok and tostring(value or "") == "1"
+end)()
+
+local fallback_logged = {}
+
+local function note_fallback(op, reason)
+  -- One line per (operation, reason): a wedged component must be visible, and a log flooded with the
+  -- same line on every recall is not visible.
+  local key = tostring(op) .. "|" .. tostring(reason)
+  if fallback_logged[key] then return end
+  fallback_logged[key] = true
+  pcall(host.log, "memory: " .. tostring(op) .. " served natively: " .. tostring(reason))
+end
+
+-- One component call. Returns the answer's `result`, or nil and the reason it is not there.
+local function seam(op, args)
+  if not seam_component then return nil, "seam_disabled" end
+  if type(host.memory) ~= "function" then return nil, "component_capability_missing" end
+  args.op = op
+  local ok, answer = pcall(host.memory, json.encode(args))
+  if not ok then return nil, "component_call_failed" end
+  -- The capability answers with JSON text (`host.component_mcp` and `host.components` do the same);
+  -- a table is accepted too, so a caller in this tree can stub it.
+  answer = decode(answer)
+  if type(answer) ~= "table" then return nil, "component_no_answer" end
+  if not answer.ok then return nil, tostring(answer.error or "component_failed") end
+  local result = answer.result
+  if result == nil then return nil, "component_empty_answer" end
+  return result
+end
+
+-- The id of this node, for the journal row the kernel writes after a mutation. Resolved once, and
+-- empty when the node has no identity: the kernel then reports `journalled: false` instead of
+-- inventing an origin.
+local seam_origin_cached
+local function seam_origin()
+  if seam_origin_cached == nil then
+    local ok, raw = pcall(host.node_identity)
+    local identity = ok and decode(raw) or nil
+    seam_origin_cached = (type(identity) == "table" and identity.node_id) or ""
+  end
+  return seam_origin_cached
+end
+
+-- Route one operation, or answer nil + the reason the native path has to run.
+local function seam_or_native(op, args)
+  local result, reason = seam(op, args)
+  if result ~= nil then return result end
+  if reason ~= "seam_disabled" then note_fallback(op, reason) end
+  return nil, reason
+end
+
 -- Turn free text into a safe FTS5 AND-of-quoted-terms query.
 -- Terms for an FTS5 MATCH expression, each quoted so that arbitrary user text
 -- cannot be read as FTS syntax, and deduplicated so a repeated word does not
@@ -339,6 +404,24 @@ end
 -- Without `id` this is unchanged: a content-identical fact in the same scope still dedupes to its
 -- existing id.
 function M.remember(content, scope, tags, id)
+  if seam_component then
+    local stored, reason = seam_or_native("remember", {
+      content = tostring(content or ""),
+      scope = scope,
+      tags = tags or {},
+      id = id,
+      origin = seam_origin(),
+    })
+    if stored ~= nil then return stored.id end
+    -- The component's refusals are this function's refusals: an empty or oversized fact raises the
+    -- same error the native path raises, and a replace of a row that is not there returns the same
+    -- `nil, "memory_not_found"`.
+    if reason ~= "seam_disabled" then
+      local invalid = tostring(reason):match("^invalid_memory_request:(.+)$")
+      if invalid then error(invalid) end
+      if tostring(reason):match("^memory_not_found") then return nil, "memory_not_found" end
+    end
+  end
   content = tostring(content or "")
   if content == "" then error("memory_empty") end
   if #content > 8000 then error("memory_too_large") end
@@ -437,6 +520,10 @@ end
 -- `exclusive` searches `scope` alone, without the shared `global` scope: a guest's view.
 function M.recall(text, limit, scope, exclusive)
   limit = limit or 10
+  local rows = seam_or_native("recall", {
+    text = tostring(text or ""), limit = limit, scope = scope, exclusive = exclusive and true or false,
+  })
+  if rows ~= nil then return rows end
   local terms = fts_terms(text)
   if #terms == 0 then return {} end
   local rows = query_memories(table.concat(terms, " AND "), limit, scope, exclusive)
@@ -451,6 +538,8 @@ end
 
 function M.memories(scope, limit)
   limit = limit or 50
+  local rows = seam_or_native("list", { scope = scope, limit = limit })
+  if rows ~= nil then return rows end
   local sql = "SELECT id,scope,content,tags,source,created_at,updated_at FROM memories WHERE deleted_at IS NULL"
   local params = {}
   if scope then sql = sql .. " AND scope=?"; params[#params + 1] = scope end
@@ -462,6 +551,8 @@ function M.memories(scope, limit)
 end
 
 function M.forget(memory_id)
+  local forgotten = seam_or_native("forget", { id = tostring(memory_id or ""), origin = seam_origin() })
+  if type(forgotten) == "table" then return forgotten.retired == true end
   return in_transaction(function()
     local now = host.now()
     local result = exec("UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
@@ -646,6 +737,31 @@ end
 function M.list_sessions(user_id, limit, opts)
   opts = opts or {}
   limit = limit or 30
+  -- The seam carries the thread, its derived state and the last message the state came from; the
+  -- readable sentence is built here, by the same `detail_of`, so both paths word it identically and
+  -- redaction stays in one place. An `opts` this seam does not model (the `path` filter) keeps the
+  -- native query rather than being silently ignored.
+  if not opts.path then
+    local rows = seam_or_native("sessions", { user_id = user_id, limit = limit, states = opts.states and true or false })
+    if rows ~= nil then
+      for _, row in ipairs(rows) do
+        if opts.states then
+          local last = row.last_role and {
+            role = row.last_role, ok = row.last_ok, phase = row.last_phase,
+            tool_calls = row.last_tool_calls, created_at = row.last_at, trace = row.last_trace,
+          } or nil
+          row.state_detail = detail_of(row.state, last, nil)
+        else
+          -- The native query does not derive a state unless it was asked for, and a row without the
+          -- key is not the same answer as a row with `state = ""`.
+          row.state = nil
+        end
+        row.last_role, row.last_ok, row.last_phase = nil, nil, nil
+        row.last_tool_calls, row.last_at, row.last_trace = nil, nil, nil
+      end
+      return rows
+    end
+  end
   local sql = "SELECT s.*, (SELECT COUNT(*) FROM messages t WHERE t.session_id=s.id) AS message_count"
   if opts.states then
     -- The last turn per session, in the same query: one row per thread, no N+1.
@@ -1087,6 +1203,8 @@ end
 
 function M.search_messages(text, user_id, limit)
   limit = limit or 20
+  local rows = seam_or_native("search_messages", { text = tostring(text or ""), user_id = user_id, limit = limit })
+  if rows ~= nil then return rows end
   local match = M.fts_query(text)
   if match == "" then return {} end
   local sql = "SELECT t.*, s.user_id, s.title, bm25(messages_fts) AS rank FROM messages_fts " ..
@@ -1309,7 +1427,11 @@ end
 
 -- Original recovery evidence is preserved; neither quiet nor compaction retires it.
 function M.prune(days)
-  -- Compaction/quiet does not establish that recovery consumers released originals.
+  -- Compaction/quiet does not establish that recovery consumers released originals. The component
+  -- makes that decision when the seam is on (it answers the same refusal, and counts what a sweep
+  -- would take if an admission existed); it never deletes.
+  local plan = seam_or_native("retention", { older_than_seconds = (tonumber(days) or 0) * 86400 })
+  if type(plan) == "table" and plan.refused then return nil, plan.refused end
   return nil, 'retention_evidence_admission_required'
 end
 

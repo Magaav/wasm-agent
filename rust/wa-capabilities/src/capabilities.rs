@@ -178,6 +178,11 @@ pub const REGISTRY: &[Capability] = &[
     plain!("service", RunsProcess, wa_kernel_runtime::services::service, "Supervise long-lived WASI service components (docs/SERVICE-COMPONENTS.md): start, stop, status, logs, the transactional upgrade, the effective configuration profile and the start-by-imports reconcile"),
     plain!("component_mcp", RunsProcess, wa_kernel_runtime::components::component_mcp, "One MCP request (probe or call) against a pinned WASI component, with exactly the granted env/file/network capabilities"),
     plain!("state", WritesFiles, wa_kernel_runtime::state_host::capability, "Component state: status, dry run, export, import and verify of a component's versioned kv namespace, its migration journal and its snapshots"),
+    // The memory seam (docs/MEMORY.md, docs/KERNEL.md "Memory as a component"): the `memory` component
+    // answers recall/remember/forget/list/search_messages/sessions over a scoped `wa:kernel/sql`
+    // grant. `WA_MEMORY_COMPONENT=1` is what routes `lua/core/memory.lua` here; without it the native
+    // path is used, so this capability is inert on a node that never opts in.
+    plain!("memory", WritesFiles, wa_kernel_runtime::memory_host::capability, "One wa:memory call against the installed memory component: remember, recall, forget, list, search_messages, sessions or the retention decision, over a scoped wa:kernel/sql grant"),
     // ---- WhatsApp (docs/SERVICE-COMPONENTS.md, docs/GRANT-POLICY.md) ---------------------------
     // One capability per effect: `whatsapp_send` asks the node's `whatsapp.send` policy and enqueues
     // a job on `wa:queue`; `whatsapp_send_status` reads the job back. Neither carries message text

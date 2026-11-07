@@ -680,6 +680,7 @@ jobs                 writes files
 list_dir             read-only
 log                  device
 mark_db_ready        writes files
+memory               writes files
 mesh_call            network
 monotonic_ms         read-only
 node_identity        read-only

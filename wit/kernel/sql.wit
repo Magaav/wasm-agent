@@ -1,0 +1,64 @@
+package wa:kernel@0.1.0;
+
+/// `wa:kernel/sql` — SQLite for a component, scoped by the manifest grant, never a file handle.
+///
+/// The kernel owns the database file (`memory.db`), its durability, locking and backups; a component
+/// that is granted `sql` gets statements against an allow-list of tables inside it. This is the seam
+/// the memory component stands on (docs/KERNEL.md, "Memory as a component"; docs/MEMORY.md): the
+/// *logic* moves into a component, the file does not.
+///
+/// Manifest shape (`<name>.json`), declaring what the component may touch at all:
+///
+/// ```json
+/// "capabilities": { "sql": { "database": "memory",
+///                            "read": ["memories", "memories_fts", "messages", "sessions"],
+///                            "write": ["memories", "memories_fts"] } }
+/// ```
+///
+/// The grant is enforced in the host, not by inspecting what the guest says it is doing: every
+/// statement runs under a SQLite authorizer, so a read of a table outside `read`, a write outside
+/// `write`, `ATTACH`, `DETACH`, every `PRAGMA`, a DDL statement, `load_extension` and a
+/// multi-statement string are refused by the engine itself — the component cannot talk its way past
+/// it. A table's FTS shadow tables (`memories_fts_data` and friends) belong to the table the grant
+/// names. Each refusal is audited (one line with the action and the table, never a value from the
+/// database) and counted.
+///
+/// Status: served by `rust/wa-kernel-runtime/src/sql_host.rs` for request-shaped components on
+/// `wa:kernel@0.1` (wasm32-wasip2). On `wa:kernel@0.2` the same shapes become `async func` (a slow
+/// statement parks the guest task instead of blocking it) with identical records and identical
+/// enforcement; no 0.2 runner imports this interface yet.
+interface sql {
+    use types.{error};
+
+    /// One bound parameter, or one column of an answer. A column keeps its own SQLite type:
+    /// `integer` is never re-encoded as a string, because a caller comparing numbers would then
+    /// have to guess.
+    variant value {
+        null,
+        integer(s64),
+        real(f64),
+        text(string),
+        blob(list<u8>),
+    }
+
+    record rows {
+        /// Column names, in the statement's order.
+        columns: list<string>,
+        /// Row values, positionally matching `columns`.
+        rows: list<list<value>>,
+        /// Rows changed by a write statement; always 0 for a read.
+        changes: u64,
+    }
+
+    /// One statement that reads. `params` are positional (`?`, `?1`, …); a statement with a
+    /// different number of parameters is refused rather than guessed at.
+    query: func(statement: string, params: list<value>) -> result<rows, error>;
+
+    /// One statement that writes, against the tables the grant allows writing.
+    ///
+    /// The host does not wrap it: all statements of one call share one connection, so a component
+    /// opens its unit of work with `BEGIN IMMEDIATE` and closes it with `COMMIT` (or `ROLLBACK`).
+    /// A call that ends with a transaction still open rolls it back when the connection closes, and
+    /// the caller can see that it happened (`in_transaction`) instead of guessing.
+    exec: func(statement: string, params: list<value>) -> result<rows, error>;
+}

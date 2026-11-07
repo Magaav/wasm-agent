@@ -215,10 +215,16 @@ pub struct Installed {
 }
 
 pub fn load(name: &str) -> Result<Installed> {
+    load_in(&component_dir(), name)
+}
+
+/// [`load`] against an explicit directory. The seam runner takes one so its tests do not have to make
+/// `WA_COMPONENTS_DIR` process-wide (a test that does is a test that races every other one).
+pub fn load_in(dir: &std::path::Path, name: &str) -> Result<Installed> {
     if !valid_name(name) {
         return Err(anyhow!("invalid_component_name"));
     }
-    let dir = component_dir();
+    let dir = dir.to_path_buf();
     let path = dir.join(format!("{name}.wasm"));
     let bytes = std::fs::read(&path).map_err(|_| anyhow!("component_not_installed:{name}"))?;
     let pin = std::fs::read_to_string(dir.join(format!("{name}.wasm.sha256")))

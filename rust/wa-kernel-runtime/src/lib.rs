@@ -36,6 +36,8 @@ pub mod guest_kv;
 pub mod imports;
 pub mod install;
 pub mod limits;
+// The memory seam served to the core: the `memory` component over a scoped `wa:kernel/sql` grant.
+pub mod memory_host;
 pub mod profiles;
 pub mod registrations;
 pub mod queue_host;
@@ -47,6 +49,8 @@ pub mod services;
 // worker calls, and the `stt_worker` role (docs/QUEUE.md, docs/WHATSAPP-TRANSCRIPTION.md).
 pub mod stt_node;
 pub mod state_host;
+// `wa:kernel/sql`: the scoped database grant the memory component stands on (docs/KERNEL.md).
+pub mod sql_host;
 pub mod supervisor;
 // Which WASI interfaces a `wa:kernel@0.2` component gets and with what scope (docs/WASI-INTERFACES.md).
 pub mod wasi_ext_host;

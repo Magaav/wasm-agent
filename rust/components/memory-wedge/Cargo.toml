@@ -1,0 +1,20 @@
+[package]
+name = "memory-wedge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A fixture, not a component a node should run: it exports the memory seam and never answers. Its
+# only job is to make "a wedged component falls back to native with a logged reason" a test that
+# actually wedges instead of one that describes wedging (the same reason `mcp-echo` carries `spin`).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true

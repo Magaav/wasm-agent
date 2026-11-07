@@ -1140,7 +1140,58 @@ hang, to fail to bind, or to die - nothing it does reaches a real node.
    start/stop/restart verbs have to address the watchdog rather than the node (two supervisors cannot both
    own the pid), and the deploy has to ship and start it.
 
-## Memory as a component (planned, phase 4, after A2.4)
+## Memory as a component (seam landed; the 0.3 pass remains)
+
+The split is in place: the memory **logic** is a component that exports `wa:memory`
+(`wit/memory/memory.wit`, `rust/components/memory`), and the memory **storage** is the kernel's — the
+same `memory.db`, its WAL, its transaction, its backups and its journal. The component reaches it
+through `wa:kernel/sql` (`wit/kernel/sql.wit`), scoped by its manifest to named tables.
+
+| part | where | why |
+| --- | --- | --- |
+| memory **logic**: recall ranking (bm25 + the recency bonus), the two recall passes, term extraction, scope rules, transcript search, the derived session state, the retention decision | the `memory` component, exporting `wa:memory` (remember, recall, forget, list, search-messages, sessions, retention) | changes often, hot-swappable, a capability seam others can provide |
+| memory **storage**: the SQLite file, durability, locking, backups, the replication journal | the kernel (`sql_host.rs`, `memory_host.rs`) | something native owns the file; several consumers share it; it must survive any component swap |
+
+- **The grant is enforced by the engine, not by reading the statement.** `sql_host` runs every
+  statement under a SQLite authorizer: a read outside the granted tables, a write outside the writable
+  ones, `ATTACH`/`DETACH`, every write `PRAGMA` (read-only introspection only), DDL, `load_extension`
+  and a second statement in one string are refused by SQLite itself. Refusals are counted and appended
+  to `<components>/memory.sql-audit.log` — the action and the table, never a value from the database.
+  A table's FTS shadow tables belong to the table the grant names.
+- **A component that cannot answer does not answer for the node.** Every call has a deadline (the
+  guest's epoch, so a wedged guest is stopped, not waited for) and every statement has its own; a
+  failure is `ok: false` with a name (`component_unavailable`, `component_wedged`,
+  `sql_policy_refused:…`), and `lua/core/memory.lua` falls back to the native path with one log line.
+- **Identity stays in the kernel.** A journal entry's `origin` is the node's identity, and a component
+  never names itself, so `remember`/`forget` report what they wrote and the kernel appends the entry
+  (`journalled: false` when it could not). The seam's known gap: that row is a second transaction, so
+  a crash between the component's commit and the kernel's journal leaves a memory that has not
+  replicated yet. Closing it is part of the 0.3 pass below.
+- `WA_MEMORY_COMPONENT=1` routes the Lua core through the seam; **the default is the native path,
+  unchanged**. Parity is asserted, not assumed: `scripts/test-memory-component.lua` sends the same
+  inputs through both and compares the answers field for field (including FTS ranking order and the
+  session detail text), in `scripts/fast.sh`.
+
+What the WASI 0.3 pass still owes this seam:
+
+1. **`async func` on the seam.** `wa:memory` and `wa:kernel/sql` are written for `wa:kernel@0.1`
+   (wasm32-wasip2, synchronous). On 0.2 they become `async func` with identical records, so a slow
+   statement parks the guest task instead of blocking the caller's thread; `memory_host` then runs
+   under `store.run_concurrent` like `service_components_v2`. Nothing in the records has to change.
+2. **The journal in the component's transaction.** Either `wa:kernel/sql` gains a way to stamp the
+   calling node as the row's origin (then the component journals inside its own transaction, which is
+   what the native path does), or `wa:memory` returns a unit of work the kernel commits. Until then
+   the entry is a second transaction, reported as such.
+3. **The consumers move.** `agent-core` should import `wa:memory` directly and call it in-wasm (it is
+   the reason the seam exists); the UI and other components call it instead of SQL; then the Lua
+   router is deleted rather than left as a flag.
+4. **Governance wiring.** `sql` refusals are audited per component today; the grant policy
+   (`docs/GRANT-POLICY.md`) should own that budget explicitly (statements and rows per minute), the way
+   `kv.read`/`kv.write` are gated for a service.
+5. **Journal sync on the new plumbing**: entries published as `memory.*` bus events, delivery per peer
+   as queue jobs, semantics unchanged (signed, idempotent, never echoed). Not started; the cursor loop
+   is still the transport.
+
 
 Today the memory logic (`remember`/`recall`, sessions, compaction, the journal sync loop) is Lua in the
 core, and it reaches `memory.db` through the kernel's `sql_*` capabilities (docs/MEMORY.md). The split
@@ -1161,4 +1212,4 @@ follows the three layers:
 - Because the transcript stays the context and the file stays in the kernel, a kernel swap through the
   watchdog loses nothing: the CLI/UI reconnect and the thread continues (seamless update).
 
-Order: after A2.4 (the agent loop already calls from inside wasm), before the seamless-update work.
+See `docs/MEMORY.md`, "The memory seam", for the manifest shape, the flags and the gap in the journal.

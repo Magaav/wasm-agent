@@ -1,0 +1,15 @@
+{
+  "name": "memory-wedge",
+  "kind": "memory",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "Fixture for the memory seam's deadline: exports wa:memory and never answers, so the caller's fallback is exercised against a real wedge",
+  "capabilities": {
+    "sql": {
+      "database": "memory",
+      "read": ["memories", "memories_fts"],
+      "write": ["memories", "memories_fts"]
+    }
+  },
+  "limits": {"memory_mb": 32}
+}

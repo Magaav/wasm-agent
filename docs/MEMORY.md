@@ -385,6 +385,60 @@ Two bugs this surfaced, both fixed:
   (`parent_session_id`, `ended_at`, `session_id`), which is a *sparse* array and
   made the JSON encoder throw, rejecting the whole batch.
 
+## The memory seam (`wa:memory`, `WA_MEMORY_COMPONENT=1`)
+
+The store's *logic* can be served by a component; the file cannot. `memory.db` stays in the kernel
+(durability, locking, backups, the retention rule), and a component gets statements instead of a file
+handle: `wa:kernel/sql`, scoped by the component's manifest to named tables.
+
+| part | where | why |
+| --- | --- | --- |
+| recall ranking, the two recall passes, term extraction, scope rules, transcript search, the derived session state, the retention decision | the `memory` component (`wa:memory`, `rust/components/memory`) | changes often, hot-swappable |
+| the SQLite file, its transaction, the replication journal, the pin | the kernel (`rust/wa-kernel-runtime/src/sql_host.rs`, `memory_host.rs`) | must survive any component swap |
+
+`lua/core/memory.lua` routes `remember`/`recall`/`forget`/`memories`/`search_messages`/
+`list_sessions`/`prune` through `host.memory` when `WA_MEMORY_COMPONENT=1`; **without it every
+function runs the code it always ran**. A component that is missing, wedged, refused or failing falls
+back to that native path with one log line naming the reason (once per operation and reason — a
+wedged component must be visible, and a line on every recall is not visible) and never with a silent
+empty result: "the store is empty" and "the component did not answer" are different facts.
+
+The grant is enforced by SQLite, not by reading the statement: every statement runs under an
+authorizer that answers per table, column, pragma and function. A read outside the granted tables, a
+write outside the writable ones, `ATTACH`/`DETACH`, every write `PRAGMA` (only read-only introspection
+is allowed), DDL, `load_extension` and a second statement in one string are refused by the engine
+itself, and each refusal is counted and appended to `<components>/memory.sql-audit.log` (the action
+and the table, never a value from the database). A table's FTS shadow tables belong to the table the
+grant names, so `memories_fts_data` and friends are reachable exactly when `memories_fts` is.
+
+The manifest is the grant:
+
+```json
+"capabilities": { "sql": { "database": "memory",
+                           "read": ["memories", "memories_fts", "messages", "messages_fts", "sessions"],
+                           "write": ["memories", "memories_fts"] } }
+```
+
+Note what is *not* writable: `journal`. A journal entry's `origin` is the node's identity, and a
+component never names itself (`wa:bus` says the same about a publisher), so the kernel appends that row
+after a call that changed something and reports `journalled: false` if it could not. That is also the
+seam's one known gap: the component's transaction commits before the kernel's journal row, so a crash
+between them leaves a memory that has not replicated yet (it replicates the next time it is written).
+The native path journals inside the same transaction. Closing it needs either a `wa:kernel/sql` that
+can stamp the origin itself, or a unit of work the kernel commits — the WASI 0.3 pass, not a flag.
+
+`WA_MEMORY_COMPONENT_WASM` names a built artifact directly (the same development override
+`WA_AGENT_CORE_WASM` gives the agent core; it bypasses the components directory *and* its pin). A node
+serves the pinned install; the override exists for a checkout that built the component itself and for
+`scripts/test-memory-component.lua`.
+
+Verified by `scripts/test-memory-component.lua` (`scripts/fast.sh`): the same inputs through both
+paths must answer the same values field for field — recall (all-term, any-term, scope, exclusion,
+accents, punctuation, limit, no terms, no match), the ranking order, `list`, `search_messages`, the
+session states *and* their readable detail (including a failed thread's recorded error), forget in
+both directions, and the retention refusal. The grant's refusals and the deadline are tested against
+real wasm in `cargo test -p wa-kernel-runtime` (`sql_host`, `memory_host`).
+
 ## Retention
 
 Original transcripts, replication mutations, telemetry, run admissions/events and resource

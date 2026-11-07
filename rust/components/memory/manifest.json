@@ -1,0 +1,15 @@
+{
+  "name": "memory",
+  "kind": "memory",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "The memory seam (wa:memory): recall ranking, transcript search, scope rules and the retention decision over memory.db, which stays in the kernel behind a scoped wa:kernel/sql grant",
+  "capabilities": {
+    "sql": {
+      "database": "memory",
+      "read": ["memories", "memories_fts", "messages", "messages_fts", "sessions"],
+      "write": ["memories", "memories_fts"]
+    }
+  },
+  "limits": {"memory_mb": 128}
+}

@@ -1,0 +1,31 @@
+[package]
+name = "memory"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The memory seam as a component (docs/KERNEL.md, "Memory as a component"; docs/MEMORY.md): recall
+# ranking, transcript search, scope rules and the retention decision, with `memory.db` left in the
+# kernel behind a scoped `wa:kernel/sql` grant. Request-shaped (built for wasm32-wasip2) and built
+# for the wasm target by scripts/build-components.sh, never by the core build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bindings for `wa:memory` (exported) and `wa:kernel/sql` (imported), from the world in `wit/`.
+wit-bindgen = "0.63"
+# One small dependency, two jobs: the `tags` column is a JSON array of strings, and the journal
+# payload the host writes for a remember/forget is JSON. No serializer is reimplemented here.
+serde_json = "1"
+# content_sha256: the dedupe key `memories_dedupe_idx` is built on, so the component must compute the
+# same hex digest `host.sha256()` does or the two paths would store the same fact twice. Pure Rust,
+# no C, so it builds for wasm32-wasip2 without a sysroot.
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
