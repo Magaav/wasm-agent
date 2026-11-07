@@ -19,5 +19,12 @@ wit-bindgen = "0.63"
 cc = "1"
 
 [profile.release]
-opt-level = 2
+# What the guest's *own* code costs, which is the largest slice of a turn (docs/KERNEL.md, "A2.1":
+# the interpreter work happens inside this module). The default `opt-level = 2` left measured money on
+# the table: `-O3` plus fat LTO across the Rust shim, wit-bindgen's glue and Lua's C, one codegen unit
+# so LTO has the whole program in view. `strip` keeps the shipped file small; debug info is not read by
+# a wasmtime that is not debugging it, and `scripts/bench-core-bridge.sh` measures the change.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 strip = true

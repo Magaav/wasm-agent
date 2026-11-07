@@ -8,8 +8,11 @@ fn main() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| manifest.join("../../wa-host-support/vendor/lua"));
     let sysroot = std::env::var("WASI_SYSROOT").expect("WASI_SYSROOT = <wasi-sdk>/share/wasi-sysroot");
+    // `-O3`, and every Lua translation unit in one call, is what the release profile of `Cargo.toml`
+    // asks of the Rust half: the interpreter is the guest's hot loop, and `-O2` (the cc crate's
+    // default here) cost a measurable slice of one turn (`scripts/bench-core-bridge.sh`).
     let mut build = cc::Build::new();
-    build.include(&lua).warnings(false).opt_level(2)
+    build.include(&lua).warnings(false).opt_level(3)
         .define("l_signalT", "int") // lstate.h would include <signal.h>, which WASI lacks
         .define("l_randomizePivot()", "0") // ltablib.c: no need for clock() in sort pivots
         .define("l_system(cmd)", "((cmd) == NULL ? 0 : -1)") // no processes in WASI: os.execute fails

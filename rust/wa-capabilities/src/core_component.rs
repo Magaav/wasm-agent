@@ -191,6 +191,58 @@ struct State {
     /// answers it instead of reading the file (`--core-component` passes a path and leaves this
     /// `None`, which is the behaviour every existing run has).
     script: Option<(String, Vec<u8>)>,
+    /// What this work item spent in the bridge, when `WA_CORE_CALL_PROFILE=1` (see [`ItemProfile`]).
+    /// `None` on an ordinary node: one `is_some()` per call is the whole cost of the instrumentation.
+    profile: Option<ItemProfile>,
+}
+
+// ---- what one work item spends in the bridge (`WA_CORE_CALL_PROFILE=1`) --------------------------
+//
+// The split this side can observe honestly: time inside `host.*` handlers (the node's own work, the
+// same in both cores) and everything else, which is the guest running Lua plus the crossing itself.
+// Per name, per item: how many calls, how many bytes crossed in each direction, and how much of the
+// wall time a table argument cost to decode on this side (the guest encodes it; the guest's own
+// encode cost shows up in the A/B of a script that only does that, `scripts/bench-core-bridge.sh`).
+// A measurement must be takeable from an ordinary node, so this is off unless the variable is set and
+// adds one `Option` check per crossing when it is off.
+#[derive(Default)]
+struct NameStat {
+    calls: u64,
+    arg_bytes: u64,
+    result_bytes: u64,
+    host_ns: u64,
+}
+
+#[derive(Default)]
+struct ItemProfile {
+    names: HashMap<String, NameStat>,
+    calls: u64,
+    arg_bytes: u64,
+    result_bytes: u64,
+    host_ns: u64,
+    json_ns: u64,
+    arm_ns: u64,
+}
+
+fn profile_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WA_CORE_CALL_PROFILE").map(|v| v == "1").unwrap_or(false))
+}
+
+fn item_profile() -> Option<ItemProfile> {
+    profile_enabled().then(ItemProfile::default)
+}
+
+/// The bytes a value carries across the boundary, as one number: a string's or a table's JSON text
+/// length, eight bytes for a number. This is what "bytes copied" counts.
+fn value_bytes(value: &Value) -> u64 {
+    match value {
+        Value::Bytes(bytes) | Value::Json(bytes) => bytes.len() as u64,
+        Value::Boolean(_) => 1,
+        Value::Integer(_) | Value::Number(_) => 8,
+        Value::StringMap(map) => map.iter().map(|(key, value)| (key.len() + value.len()) as u64).sum(),
+        Value::Nil => 0,
+    }
 }
 
 impl WasiView for State {
@@ -403,9 +455,13 @@ impl State {
             lua_getfield(l, -1, cname.as_ptr());
             // `host` stays at base+1 under the call (lua_remove is a macro, not a symbol, in 5.4).
             for arg in &args {
+                let json_timer = self.profile.as_ref().map(|_| Instant::now());
                 if let Err(reason) = push_arg(l, arg) {
                     lua_settop(l, base);
                     return Err(format!("unsupported_in_component_v1:{name} ({reason})"));
+                }
+                if let (Some(timer), Some(profile)) = (json_timer, self.profile.as_mut()) {
+                    profile.json_ns += timer.elapsed().as_nanos() as u64;
                 }
             }
             if lua_pcallk(l, args.len() as c_int, LUA_MULTRET, 0, 0, std::ptr::null_mut()) != LUA_OK {
@@ -450,9 +506,32 @@ impl State {
             lua_getglobal(l, wa_host_support::lua::cstr("EMBEDDED").as_ptr());
             push_bytes(l, path);
             lua_gettable(l, -2);
-            let value = if lua_type(l, -1) == LUA_TSTRING { bytes_at(l, -1).map(Value::Bytes) } else { None };
+            let value = if lua_type(l, -1) == LUA_TSTRING { bytes_at(l, -1) } else { None };
             lua_settop(l, base);
-            vec![value.unwrap_or(Value::Nil)]
+            match value {
+                // The digest travels with the source, in the same crossing: the guest's boot sets
+                // `LOADED_SOURCES[path]` from it, and asking for it separately was the second half of
+                // a chatty pair (see `__source`). Same bytes, same `host.sha256` answer - including
+                // that capability's UTF-8 rule, hence the lossy conversion here too.
+                Some(bytes) => {
+                    let digest = digest_hex(String::from_utf8_lossy(&bytes).as_bytes());
+                    vec![Value::Bytes(bytes), Value::Bytes(digest.into_bytes())]
+                }
+                None => vec![Value::Nil, Value::Nil],
+            }
+        }
+    }
+
+    /// `__source(path)`: a file's text and its SHA-256, read and hashed here so the guest asks once.
+    ///
+    /// The module boot does exactly this pair natively (`host.read_file` then `host.sha256`), and the
+    /// bytes that cross are the file's, so the digest is the one `host.sha256` gives for the same text
+    /// - including the UTF-8 rule: a file that is not text is `nil`, as `read_file` answers.
+    fn source(&mut self, path: &[u8]) -> Vec<Value> {
+        let path = String::from_utf8_lossy(path).into_owned();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => vec![Value::Bytes(text.clone().into_bytes()), Value::Bytes(digest_hex(text.as_bytes()).into_bytes())],
+            Err(_) => vec![Value::Nil, Value::Nil],
         }
     }
 
@@ -590,11 +669,109 @@ impl wa::kernel::host::Host for State {
     fn call(&mut self, name: String, args: Vec<Value>) -> Result<Vec<Value>, String> {
         self.note_call();
         self.calls += 1;
+        // The instrumentation is one `Option` check per crossing when it is off, and the item's own
+        // profile when it is on (`WA_CORE_CALL_PROFILE=1`).
+        let started = self.profile.is_some().then(Instant::now);
+        let arg_bytes = if started.is_some() { args.iter().map(value_bytes).sum() } else { 0 };
+        let answer = self.call_named(&name, args);
+        if let Some(started) = started {
+            let host_ns = started.elapsed().as_nanos() as u64;
+            let result_bytes = answer.as_ref().map(|values| values.iter().map(value_bytes).sum()).unwrap_or(0);
+            self.record_call(&name, arg_bytes, result_bytes, host_ns);
+        }
+        answer
+    }
+
+    fn open(&mut self, name: String, args: Vec<Value>) -> Result<u64, String> {
+        self.note_call();
+        self.calls += 1;
+        let started = self.profile.is_some().then(Instant::now);
+        let arg_bytes = if started.is_some() { args.iter().map(value_bytes).sum() } else { 0 };
+        let label = format!("open:{name}");
+        let answer = self.open(name, args);
+        if let Some(started) = started {
+            self.record_call(&label, arg_bytes, 0, started.elapsed().as_nanos() as u64);
+        }
+        answer
+    }
+
+    fn next(&mut self, handle: u64, verdict: Option<Verdict>) -> Result<Option<Vec<u8>>, String> {
+        self.note_call();
+        self.calls += 1;
+        let started = self.profile.is_some().then(Instant::now);
+        let answer = self.next(handle, verdict);
+        if let Some(started) = started {
+            let item_bytes = answer.as_ref().ok().and_then(|item| item.as_ref()).map(|item| item.len() as u64).unwrap_or(0);
+            self.record_call("next", 0, item_bytes, started.elapsed().as_nanos() as u64);
+        }
+        answer
+    }
+
+    fn close(&mut self, handle: u64, verdict: Verdict) -> Result<Vec<Value>, String> {
+        self.note_call();
+        self.calls += 1;
+        let started = self.profile.is_some().then(Instant::now);
+        let answer = self.close(handle, verdict);
+        if let Some(started) = started {
+            let result_bytes = answer.as_ref().map(|values| values.iter().map(value_bytes).sum()).unwrap_or(0);
+            self.record_call("close", 0, result_bytes, started.elapsed().as_nanos() as u64);
+        }
+        answer
+    }
+}
+
+impl State {
+    /// One crossing, accounted for when `WA_CORE_CALL_PROFILE=1` is set.
+    fn record_call(&mut self, name: &str, arg_bytes: u64, result_bytes: u64, host_ns: u64) {
+        let Some(profile) = self.profile.as_mut() else { return };
+        profile.calls += 1;
+        profile.arg_bytes += arg_bytes;
+        profile.result_bytes += result_bytes;
+        profile.host_ns += host_ns;
+        let stat = profile.names.entry(name.to_string()).or_default();
+        stat.calls += 1;
+        stat.arg_bytes += arg_bytes;
+        stat.result_bytes += result_bytes;
+        stat.host_ns += host_ns;
+    }
+
+    /// Hand one item's profile to the log and start a fresh one. `guest_ms` is the item's wall time
+    /// minus the time inside the handlers: the guest's Lua plus the crossings themselves.
+    fn print_profile(&mut self, what: &str, run_ms: f64, runs: u64, first_ms: Option<f64>) {
+        let Some(profile) = self.profile.take() else { return };
+        let mut names: Vec<(&String, &NameStat)> = profile.names.iter().collect();
+        names.sort_by(|a, b| b.1.host_ns.cmp(&a.1.host_ns).then(b.1.calls.cmp(&a.1.calls)));
+        let host_ms = profile.host_ns as f64 / 1e6;
+        eprintln!(
+            "core_call_profile: {what} run_ms={run_ms:.2} host_ms={host_ms:.2} guest_ms={:.2} calls={} names={} arg_bytes={} result_bytes={} json_decode_ms={:.2} arm_ms={:.2} runs={runs} first_ms={}",
+            (run_ms - host_ms).max(0.0),
+            profile.calls,
+            names.len(),
+            profile.arg_bytes,
+            profile.result_bytes,
+            profile.json_ns as f64 / 1e6,
+            profile.arm_ns as f64 / 1e6,
+            first_ms.map(|ms| format!("{ms:.2}")).unwrap_or_else(|| "-".to_string()),
+        );
+        for (name, stat) in names {
+            eprintln!(
+                "core_call_profile:   {name} calls={} arg_bytes={} result_bytes={} host_ms={:.2}",
+                stat.calls,
+                stat.arg_bytes,
+                stat.result_bytes,
+                stat.host_ns as f64 / 1e6
+            );
+        }
+        self.profile = item_profile();
+    }
+
+    /// `host.<name>(args...)`, answered (or refused) without the accounting wrapper above.
+    fn call_named(&mut self, name: &str, args: Vec<Value>) -> Result<Vec<Value>, String> {
         let first = || match args.first() {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => Vec::new(),
         };
-        match name.as_str() {
+        match name {
             // The guest's boot: which names `host.*` resolves, the shipping Lua modules, the script.
             "__names" => {
                 let mut names: Vec<&str> = crate::capabilities::REGISTRY.iter().map(|c| c.name).collect();
@@ -605,6 +782,7 @@ impl wa::kernel::host::Host for State {
                 Ok(vec![Value::Bytes(names.join("\n").into_bytes())])
             }
             "__embedded" => Ok(self.embedded(&first())),
+            "__source" => Ok(self.source(&first())),
             "__script" => {
                 let path = String::from_utf8_lossy(&first()).into_owned();
                 if let Some((name, bytes)) = &self.script {
@@ -617,31 +795,13 @@ impl wa::kernel::host::Host for State {
             // The node's own time zone, answered here rather than forwarded to a capability: there is
             // no native `host.*` function for it, and the guest cannot read the OS's zone config.
             "local_tz" => self.local_tz(&args),
-            _ if INPUT_REFUSED.contains(&name.as_str()) => Err(format!(
+            _ if INPUT_REFUSED.contains(&name) => Err(format!(
                 "unsupported_in_component_v1:{name} (the interactive console reader belongs to the CLI; a \
                  --core-component run has no editor to read into)"
             )),
             _ if !crate::capabilities::REGISTRY.iter().any(|c| c.name == name) => Err(format!("unknown_capability:{name}")),
-            _ => self.dispatch(&name, args),
+            _ => self.dispatch(name, args),
         }
-    }
-
-    fn open(&mut self, name: String, args: Vec<Value>) -> Result<u64, String> {
-        self.note_call();
-        self.calls += 1;
-        self.open(name, args)
-    }
-
-    fn next(&mut self, handle: u64, verdict: Option<Verdict>) -> Result<Option<Vec<u8>>, String> {
-        self.note_call();
-        self.calls += 1;
-        self.next(handle, verdict)
-    }
-
-    fn close(&mut self, handle: u64, verdict: Verdict) -> Result<Vec<Value>, String> {
-        self.note_call();
-        self.calls += 1;
-        self.close(handle, verdict)
     }
 }
 
@@ -660,6 +820,13 @@ impl wa::kernel::log::Host for State {
 
 fn ms(since: Instant) -> f64 {
     since.elapsed().as_secs_f64() * 1000.0
+}
+
+/// SHA-256 of `bytes`, as the hex `host.sha256` answers with: the same `ring` digest and the same
+/// lower-case formatting, so a digest taken here and one taken by the capability are comparable and
+/// a module's `LOADED_SOURCES` entry does not depend on which side computed it.
+fn digest_hex(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes).as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The instant the host reads when a guest asks the clock without naming one. Only the *instant* comes
@@ -840,10 +1007,18 @@ pub fn run_cli(native: Lua, args: &[String]) -> i32 {
 fn run(native: Lua, wasm: &str, script: &str, script_args: &[String]) -> wasmtime::Result<i32> {
     let timing = std::env::var("WA_CORE_TIMING").map(|v| v == "1").unwrap_or(false);
     let started = Instant::now();
+    let epoch_checks = std::env::var("WA_CORE_EPOCH").map(|value| value == "1").unwrap_or(false);
     let mut config = Config::new();
     config.wasm_component_model(true);
     // The guest's setjmp/longjmp (Lua errors, pcall) is wasm exception handling.
     config.wasm_exceptions(true);
+    // `WA_CORE_EPOCH=1` compiles this run's guest with the epoch checks the *pooled* engine pays
+    // (`core_pool::epoch_engine`), so what the pool's deadline costs the guest can be measured with
+    // nothing else different between the two numbers (`scripts/bench-core-epoch.sh`). Off by
+    // default: a one-shot run sets no deadline, and a check that can never fire is pure cost.
+    if epoch_checks {
+        config.epoch_interruption(true);
+    }
     let engine = Engine::new(&config)?;
     let bytes = std::fs::read(wasm).map_err(|e| wasmtime::Error::msg(format!("read {wasm}: {e}")))?;
     let (component, source) = load_component(&engine, &bytes)?;
@@ -870,8 +1045,14 @@ fn run(native: Lua, wasm: &str, script: &str, script_args: &[String]) -> wasmtim
         run_started: None,
         run_first_call_ms: None,
         script: None,
+        profile: item_profile(),
     };
     let mut store = Store::new(&engine, state);
+    if epoch_checks {
+        // No deadline in a one-shot run: the "may run forever" the pool arms a store with (a store
+        // whose deadline was never set is interrupted at its first instruction).
+        store.set_epoch_deadline(u64::MAX);
+    }
     let instantiate_started = Instant::now();
     let core = CoreComponent::instantiate(&mut store, &component, &linker)?;
     let instantiated = ms(instantiate_started);
@@ -1149,9 +1330,10 @@ struct Pooled {
 pub struct CoreComponentPool {
     engine: Engine,
     /// Advances this engine's epoch, which is what a store's deadline counts. Never read: it is held
-    /// because dropping it is what stops the ticker thread.
+    /// because dropping it is what stops the ticker thread. `None` on a pool with no deadline, whose
+    /// engine has no epoch interruption and therefore no ticker to run (`build`).
     #[allow(dead_code)]
-    ticker: crate::core_pool::EpochTicker,
+    ticker: Option<crate::core_pool::EpochTicker>,
     component: Component,
     compiled_from: &'static str,
     /// The linker touches no per-instance state, but it is behind a mutex because instantiating is
@@ -1192,8 +1374,22 @@ impl CoreComponentPool {
             )));
         }
         config.warm = config.warm.min(config.max_instances);
-        let (engine, ticker) = crate::core_pool::epoch_engine(&config.limits)
-            .map_err(|e| wasmtime::Error::msg(format!("pool_engine_failed: {e:#}")))?;
+        // The deadline decides the engine, not the other way round (docs/KERNEL.md, "A2.5"):
+        // `epoch_interruption` makes wasmtime compile an epoch check into every function entry and
+        // loop back-edge, and this guest is one loop-heavy interpreter. Measured on a pure-Lua loop,
+        // that tax is ~1.3x the guest's own time (`scripts/bench-core-epoch.sh`), i.e. larger than
+        // running the interpreter in wasm at all. A pool configured with **no** deadline has nothing
+        // to interrupt, so it takes the same pooling engine the kernel builds for callers with no run
+        // budget - the deadline knob is then a cost a caller opts into, not one every turn pays.
+        let (engine, ticker) = if config.run_deadline.is_zero() {
+            let engine = wa_kernel_runtime::components::pooled_engine(&config.limits)
+                .map_err(|e| wasmtime::Error::msg(format!("pool_engine_failed: {e:#}")))?;
+            (engine, None)
+        } else {
+            let (engine, ticker) = crate::core_pool::epoch_engine(&config.limits)
+                .map_err(|e| wasmtime::Error::msg(format!("pool_engine_failed: {e:#}")))?;
+            (engine, Some(ticker))
+        };
         let (component, compiled_from) = load_component(&engine, wasm)?;
         // The pool answers work items through the guest's long-lived entry points (docs/KERNEL.md,
         // "A2.5"). A component built before them exports `run` alone: refuse it here, naming the fix,
@@ -1278,6 +1474,7 @@ impl CoreComponentPool {
             run_started: None,
             run_first_call_ms: None,
             script: None,
+            profile: item_profile(),
         }
     }
 
@@ -1438,7 +1635,14 @@ impl CoreInstance<'_> {
             data.abort_streams();
         }
         slot.runs += 1;
+        let arm_started = slot.store.data().profile.is_some().then(Instant::now);
         pool.arm(&mut slot.store);
+        if let Some(arm_started) = arm_started {
+            let elapsed = arm_started.elapsed().as_nanos() as u64;
+            if let Some(profile) = slot.store.data_mut().profile.as_mut() {
+                profile.arm_ns += elapsed;
+            }
+        }
         let outcome = slot.core.call_call(&mut slot.store, name, args);
         let run_ms = ms(started);
         let data = slot.store.data();
@@ -1450,6 +1654,9 @@ impl CoreInstance<'_> {
             memory_bytes: data.limits.bytes,
             runs_on_instance: slot.runs,
         };
+        let first_ms = slot.store.data().run_first_call_ms;
+        let runs = slot.runs;
+        slot.store.data_mut().print_profile("call", run_ms, runs, first_ms);
         {
             let mut inner = pool.inner.lock().expect("pool lock");
             inner.runs += 1;
@@ -1507,7 +1714,14 @@ impl CoreInstance<'_> {
             data.abort_streams();
         }
         slot.runs += 1;
+        let arm_started = slot.store.data().profile.is_some().then(Instant::now);
         pool.arm(&mut slot.store);
+        if let Some(arm_started) = arm_started {
+            let elapsed = arm_started.elapsed().as_nanos() as u64;
+            if let Some(profile) = slot.store.data_mut().profile.as_mut() {
+                profile.arm_ns += elapsed;
+            }
+        }
         let outcome = slot.core.call_run(&mut slot.store, &name, args);
         let run_ms = ms(started);
         let data = slot.store.data();
@@ -1520,6 +1734,9 @@ impl CoreInstance<'_> {
             memory_bytes: data.limits.bytes,
             runs_on_instance: slot.runs,
         };
+        let first_ms = slot.store.data().run_first_call_ms;
+        let runs = slot.runs;
+        slot.store.data_mut().print_profile("run", run_ms, runs, first_ms);
         {
             let mut inner = pool.inner.lock().expect("pool lock");
             inner.runs += 1;
@@ -1637,6 +1854,7 @@ mod tests {
             run_started: None,
             run_first_call_ms: None,
             script: None,
+            profile: item_profile(),
         }
     }
 
@@ -2024,6 +2242,7 @@ assert(tonumber(later.utc_offset_minutes) ~= nil, 'the host must answer a second
             run_started: None,
             run_first_call_ms: None,
             script: None,
+            profile: item_profile(),
         };
         let values = state.call("local_tz".to_string(), vec![Value::Integer(CLOCK_EPOCH)]).expect("the node zone answers");
         let map = match values.into_iter().next() {

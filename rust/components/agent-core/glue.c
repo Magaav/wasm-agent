@@ -329,7 +329,7 @@ static int host_fn(lua_State *L) {
  * cache lives in the guest instance, so a new instance starts empty and a retired one takes it with
  * it. Nothing here can go stale: the registry cannot change inside a process, and the kernel's
  * `EMBEDDED` is built at boot from the installed tree or the compiled-in copy. */
-typedef struct SnapMod { char *path; size_t plen; char *src; size_t slen; struct SnapMod *next; } SnapMod;
+typedef struct SnapMod { char *path; size_t plen; char *src; size_t slen; char *digest; size_t dlen; struct SnapMod *next; } SnapMod;
 
 static SnapMod *SNAPSHOT_MODULES = NULL;
 static char *SNAPSHOT_NAMES = NULL;
@@ -375,17 +375,21 @@ static int snapshot_embedded(lua_State *L, int idx) {
   }
   int base = lua_gettop(L);
   lua_pushvalue(L, idx);                                  /* argument at base + 1 */
-  int n = forward(L, "__embedded", 10, base + 1, 1);      /* answer at base + 2 */
+  int n = forward(L, "__embedded", 10, base + 1, 1);      /* source at base + 2, digest at base + 3 */
   if (n < 1 || lua_type(L, base + 2) != LUA_TSTRING) { lua_settop(L, base); return 0; }
-  size_t slen = 0;
+  size_t slen = 0, dlen = 0;
   const char *src = lua_tolstring(L, base + 2, &slen);
+  const char *digest = n >= 2 && lua_type(L, base + 3) == LUA_TSTRING ? lua_tolstring(L, base + 3, &dlen) : NULL;
   SnapMod *m = (SnapMod *)calloc(1, sizeof *m);
   char *copy = (char *)malloc(slen + 1);
   char *key = (char *)malloc(plen + 1);
-  if (m && copy && key) {
+  char *hash = digest ? (char *)malloc(dlen + 1) : (char *)malloc(1);
+  if (m && copy && key && hash) {
     memcpy(copy, src, slen); copy[slen] = 0;
     memcpy(key, path, plen); key[plen] = 0;
+    if (digest) { memcpy(hash, digest, dlen); hash[dlen] = 0; }
     m->path = key; m->plen = plen; m->src = copy; m->slen = slen;
+    m->digest = hash; m->dlen = digest ? dlen : 0;
     m->next = SNAPSHOT_MODULES;
     SNAPSHOT_MODULES = m;
     lua_settop(L, base);
@@ -393,9 +397,46 @@ static int snapshot_embedded(lua_State *L, int idx) {
     return 1;
   }
   /* Out of memory is not a cache miss to hide: hand the caller what the kernel said, uncached. */
-  free(m); free(copy); free(key);
+  free(m); free(copy); free(key); free(hash);
   lua_settop(L, base + 2);
   return 1;
+}
+
+/* `__source(path)` - a module's text and its digest, from the kernel, in ONE crossing.
+ *
+ * The boot reads a module and digests it (`LOADED_SOURCES`), and native that is two C calls on the
+ * same bytes. Across the bridge it was two crossings with the whole module text going in each
+ * direction, which is the sort of chatty pair a profile should not have to show twice: the kernel
+ * digests the bytes it just read (`__source` in core_component.rs) and answers both. Same values, half
+ * the crossings, one copy instead of two - and the digest is computed on exactly the bytes
+ * `host.sha256(host.read_file(path))` would have hashed. */
+static int source_fn(lua_State *L) {
+  if (lua_type(L, 1) != LUA_TSTRING) return luaL_error(L, "internal: __source(path) needs a path");
+  return forward(L, "__source", 8, 1, 1);
+}
+
+/* `__module(path)` - a shipping module's text and digest from the instance snapshot (EMBEDDED). The
+ * snapshot caches both, so the second read of a module in this instance crosses nothing at all. */
+static int module_fn(lua_State *L) {
+  size_t plen = 0;
+  const char *path = lua_tolstring(L, 1, &plen);
+  if (!path) return luaL_error(L, "internal: __module(path) needs a path");
+  int base = lua_gettop(L);
+  lua_pushvalue(L, 1);
+  if (!snapshot_embedded(L, base + 1)) { lua_settop(L, base); lua_pushnil(L); lua_pushnil(L); return 2; }
+  /* The snapshot holds malloc'd copies, not Lua strings, so dropping what it pushed loses nothing: the
+   * entry is in the cache now, and both halves are pushed from there. */
+  lua_settop(L, base);
+  for (SnapMod *m = SNAPSHOT_MODULES; m; m = m->next) {
+    if (m->plen == plen && memcmp(m->path, path, plen) == 0) {
+      lua_pushlstring(L, m->src, m->slen);
+      lua_pushlstring(L, m->digest ? m->digest : "", m->dlen);
+      return 2;
+    }
+  }
+  lua_pushnil(L);
+  lua_pushnil(L);
+  return 2;
 }
 
 /* ---- http_sse: the one capability that calls back into Lua ---------------------------------
@@ -526,18 +567,22 @@ static int embedded_index(lua_State *L) {
   return 1;
 }
 
+/* The guest's `dofile`, byte for byte the native one (rust/wa-host/src/main.rs) except that the two
+ * boot questions - a module's text and its digest - are asked in one crossing (`__source`,
+ * `__module`) instead of two (`host.read_file` + `host.sha256`, or `EMBEDDED[path]` +
+ * `host.sha256`). The values are identical: the kernel hashes the same bytes it hands over. */
 static const char *BOOTSTRAP =
   "LOADED_SOURCES = {}; function dofile(path) "
   "local root = host.getenv('WASM_AGENT_LUA_ROOT'); "
   "if root and root ~= '' then "
-  "local text = host.read_file(root .. '/' .. path); "
+  "local text, digest = __source(root .. '/' .. path); "
   "if not text then error('lua_root_unreadable: ' .. root .. '/' .. path) end; "
-  "LOADED_SOURCES[path] = host.sha256(text); "
+  "LOADED_SOURCES[path] = digest; "
   "return assert(load(text, '@' .. root .. '/' .. path))() "
   "end; "
-  "local source = EMBEDDED[path]; "
+  "local source, digest = __module(path); "
   "if not source then error('embedded module missing: ' .. tostring(path)) end; "
-  "LOADED_SOURCES[path] = host.sha256(source); "
+  "LOADED_SOURCES[path] = digest; "
   "return assert(load(source, '@' .. path))() end";
 
 static int fail(lua_State *L, char **err, size_t *errlen) {
@@ -593,6 +638,13 @@ static int install_globals(lua_State *L, int argc, const char **argv, const size
   lua_setmetatable(L, -2);
   lua_setglobal(L, "EMBEDDED");
 
+  /* The boot's two combined asks (see BOOTSTRAP): one crossing each, both kernel calls the host
+   * answers from the bytes it reads. Not on `host`: the guest's `host.*` surface is the registry's,
+   * and a script that lists it must see exactly what a native run sees. */
+  lua_pushcfunction(L, source_fn);
+  lua_setglobal(L, "__source");
+  lua_pushcfunction(L, module_fn);
+  lua_setglobal(L, "__module");
   if (luaL_loadbufferx(L, BOOTSTRAP, strlen(BOOTSTRAP), "bootstrap", NULL) != LUA_OK) return 1;
   if (lua_pcall(L, 0, 0, 0) != LUA_OK) return 1;
   lua_settop(L, base);
