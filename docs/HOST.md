@@ -733,6 +733,11 @@ whatsapp_reactions   read-only
 whatsapp_read        read-only
 whatsapp_search      read-only
 whatsapp_backfill    network
+email_send           network
+email_send_status    read-only
+email_search         read-only
+email_read           read-only
+email_media          read-only
 write_file           writes files
 <!-- capability-inventory:end -->
 
@@ -846,6 +851,25 @@ Both calls are confined to one declared root - `WASM_AGENT_AUDIO_ROOT`, or
 `..` component that leaves the root is refused (`audio_path_outside_root:<path>`), never treated as
 `nil`. The WAV reader is hand-written (RIFF/WAVE, 16-bit PCM) so this wave adds no dependency to the
 shipped binary, and every refusal is a name: the tests pin them.
+
+## Email (`host.email_send`, `host.email_send_status`, `host.email_search`, `host.email_read`, `host.email_media`)
+
+The email connector (`docs/EMAIL-CONNECTOR.md`) exposes the same two shapes as WhatsApp: an effect is a job
+on the shared durable queue and a question is a job on the index queue, answered by the `wa-email` component
+out of its own kv.
+
+`host.email_send({to, cc?, subject, body, in_reply_to?, attachments?})` validates the addresses (exact
+addr-specs: a display name or a bare word is refused with `email_send_bad_to`), checks the `email.send`
+policy for the recipient digest (`email:<n>rcpt:<digest>`, never an address) and enqueues on
+`email.outbox` with the dedupe key `sha256(to|cc|subject|body|in_reply_to)`. It answers
+`{ok, id, state:"queued", queue, deduped, recipients, note}` - a job id, never a delivery.
+`host.email_send_status({id})` answers the job: `queued`, `sending`, `done` with the server's `message_id`,
+or a `reason`. Neither answer ever carries a subject or a body.
+
+`host.email_search({q?, from?, subject?, mailbox?, since?, until?, has_attachment?, limit?})`,
+`host.email_read({mailbox?, uid?, before?, limit?})` and `host.email_media({uid, mailbox?})` enqueue on
+`email.query` and answer with the component's bounded answer (`matched`/`returned`/`truncated`, or a page
+with `has_more`/`next_before`). A question with no narrowing is refused with `email_empty_query`.
 
 ## WhatsApp explicit sends (`host.whatsapp_send`, `host.whatsapp_send_status`)
 

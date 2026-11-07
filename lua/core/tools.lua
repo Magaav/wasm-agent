@@ -579,8 +579,37 @@ M.admin[#M.admin+1]=schema('whatsapp_download','Decrypt the media of one indexed
  id={type='string',maxLength=128,description='The message id.'},
  max_bytes={type='integer',minimum=1,maximum=524288,description='Most plaintext bytes to fetch (default and maximum 524288).'}},{'chat','id'})
 M.admin[#M.admin+1]=schema('whatsapp_backfill','Ask the primary phone for older WhatsApp messages, so the index covers the account history and not only the live stream. Name one exact chat JID to reach back into that conversation, or name none to ask for the chats the index already knows (at most 20, newest first). The messages arrive through the normal protocol and are indexed as history, so a later whatsapp_search finds them. This is a request to the phone, not an answer: the result is the ids and counts that were asked for, plus a note when it stopped early (client offline, chat unknown, phone cannot be asked).',{
+
  chat={type='string',maxLength=160,description='Optional: one exact chat JID to reach back into. Omit to ask for the chats the index already knows.'},
  count={type='integer',minimum=1,maximum=500,description='Messages to ask for per chat (default 50, at most 500).'}},nil)
+-- Email (docs/EMAIL-CONNECTOR.md): the same two shapes as WhatsApp - an effect through the durable
+-- outbox, questions through the query queue - with the connector as the only owner of the mailbox.
+M.admin[#M.admin+1]=schema('email_send','Send one email yourself, through the durable email.outbox queue: the wa-email component submits it over SMTP and the answer here is a job id, not a delivery - read the outcome with email_send_status. Governance applies (the node policy email.send rule: rate limits, daily cap, audit), and a refusal comes back as an error word with nothing sent. Addresses are exact addr-specs (ana@example.com); a display name is refused. Attachments are small (a few KiB) and travel in the job payload as base64; bigger files are not supported yet. The same to+cc+subject+body+in_reply_to is one job, so a repeated call does not send twice.',{
+ to={type='array',minItems=1,maxItems=50,items={type='string',maxLength=254},description='Recipients as exact addr-specs (local@domain). A bare number or a display name is refused.'},
+ cc={type='array',maxItems=50,items={type='string',maxLength=254},description='Optional copies, same rule.'},
+ subject={type='string',maxLength=900,description='One line. A control character is refused (it would be a header injection).'},
+ body={type='string',maxLength=40000,description='The message body, plain text.'},
+ in_reply_to={type='string',maxLength=250,description='Optional Message-ID to answer (a reply thread).'},
+ attachments={type='array',maxItems=3,items={type='object',properties={filename={type='string',maxLength=200},mime={type='string',maxLength=127},bytes={type='string',description='base64 of the file'}},required={'filename','mime','bytes'}},description='Optional small attachments (24 KiB total, base64).'}},{'to','subject','body'})
+M.admin[#M.admin+1]=schema('email_send_status','State of a message you asked email_send to send: queued, done with the message id the mail server gave it, or failed with a reason. An id this node never allocated is refused, not guessed.',{
+ id={type='integer',minimum=1,description='The job id email_send returned.'}},{'id'})
+M.admin[#M.admin+1]=schema('email_search','Search every email this node has indexed: subject, sender and the plain-text body, accent-folded, so "acao" finds "Acao" with an accent and "relatorio" finds "Relatorio". Narrow with at least one of q, from, subject, mailbox, since or until; the filters combine (since/until is a time window, epoch milliseconds, seconds accepted). The best match comes first (an exact phrase beats scattered words, a subject hit beats a body hit) and the answer is bounded: a search that matched more than it could return says truncated=true and matched=N. Attachment text is not searched; the attachment metadata is.',{
+ q={type='string',maxLength=200,description='Words to look for (all of them must match). Accents and case are folded on both sides.'},
+ ['from']={type='string',maxLength=200,description='Only messages whose sender (name or address) contains this.'},
+ subject={type='string',maxLength=200,description='Only messages whose subject contains this.'},
+ mailbox={type='string',maxLength=64,description='Only this mailbox (default: every indexed mailbox).'},
+ ['since']={type='integer',description='Earliest message time, epoch milliseconds (seconds accepted).'},
+ ['until']={type='integer',description='Latest message time, epoch milliseconds (seconds accepted).'},
+ has_attachment={type='boolean',description='Only messages with (true) or without (false) an attachment.'},
+ limit={type='integer',minimum=1,maximum=50,description='Most messages to return (default 20).'}},nil)
+M.admin[#M.admin+1]=schema('email_read','Read one mailbox newest first, or one message by uid. A message carries its envelope, subject, the plain-text body (bounded) and attachment metadata - never the attachment bytes. Returns has_more and next_before: pass next_before back as before to read the next older page.',{
+ mailbox={type='string',maxLength=64,description='The mailbox to read (default INBOX).'},
+ uid={type='integer',minimum=1,description='Optional: read exactly this message instead of a page.'},
+ before={type='integer',minimum=1,description='Optional: read older than this uid. Use next_before from the previous answer.'},
+ limit={type='integer',minimum=1,maximum=50,description='Most messages to return (default 20).'}},nil)
+M.admin[#M.admin+1]=schema('email_media','The attachment metadata of one indexed email: filename, mime, size and sha256 per attachment, plus the media handle a download names. No bytes; the connector keeps small attachments in its own state, bigger ones are metadata only and say downloadable=false.',{
+ uid={type='integer',minimum=1,description='The message uid (as email_read shows it).'},
+ mailbox={type='string',maxLength=64,description='Optional mailbox (default INBOX).'}},{'uid'})
 M.admin[#M.admin+1]=schema('mcp','List/manage explicit MCP connectors. New/edited definitions remain disabled; probe never grants tool/send/job authority.',{
  action={type='string',enum={'list','put','probe','enable','disable'}},id={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes/probes: exact registry revision from list. Stale state refuses.'},definition={type='object',description='Reviewed connector: id/name, transport stdio or http, program/args or url, optional cwd, environment-reference env/headers, timeout_seconds; tools maps exact tool names to locally approved read/write.'}},nil)
 M.admin[#M.admin+1]=schema('services','List/manage long-lived WASI service components (docs/SERVICE-COMPONENTS.md): put a definition (disabled), enable (start now and at boot), disable, restart, remove, status, logs, upgrade (transactional install of a new artifact: stage, verify pin, check imported interfaces are served, migrate state on a snapshot copy, start beside, health, switch, stop - any failure leaves the running instance untouched), profile_dump (the effective configuration after base -> node -> user -> patch, rows by id), stt (the speech queue this node produces or works for: role, attached workers, their recent latency and the local/remote decode counts - ids and durations only, never a transcript; with set_role it becomes the durable role change a running node applies on its next tick, admin/master only and audited). Grants are references: env/file_env names or a file path, exact net addresses. A component whose manifest declares `state_version` is migrated on a snapshot copy of its kv before it starts, and the start answer reports it under `state` (`fresh`, `up-to-date` or `migrated` with the versions); a refused migration (`state_no_migration_path`, `state_owner_mismatch`) starts nothing and leaves the old state at its old version. Read a namespace, its journal and its snapshots with `host.state` (action status), not by asking the component.',{
@@ -737,6 +766,11 @@ local CUES = {
   whatsapp_media = "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration",
   whatsapp_download = "Decrypt one WhatsApp message's media to this node and return the file path",
   whatsapp_backfill = "Ask the phone for older WhatsApp messages so search covers the account's past",
+  email_send = "Send one email through the durable outbox, with the message id readable afterwards",
+  email_send_status = "Read the state of a queued email send, with its message id when delivered",
+  email_search = "Search every indexed email by text, sender, subject, mailbox or time window",
+  email_read = "Read one mailbox newest first, or one message by uid, with its attachments listed",
+  email_media = "The attachment metadata of one email, with the handle a download names",
   capture_inspect = "Inspect retained model-request captures as bounded metadata before reading raw dumps",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
@@ -1407,6 +1441,39 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
     return decoded
   end
+  if name=='email_send' or name=='email_send_status' then
+    -- The explicit email send (docs/EMAIL-CONNECTOR.md): the host capability validates the addresses,
+    -- asks the `email.send` policy and enqueues on `wa:queue`; the wa-email component submits it. A
+    -- binary without the capability is told apart from a refusal.
+    if type(host[name])~='function' then return {error=name..'_unavailable',effect='none'} end
+    local request
+    if name=='email_send' then
+      request={to=args.to,cc=args.cc,subject=args.subject,body=args.body,in_reply_to=args.in_reply_to,attachments=args.attachments}
+    else
+      request={id=tonumber(args.id) or args.id}
+    end
+    local ok,answer=pcall(host[name],json.encode(request))
+    if not ok then return {error=name..'_failed',detail=tostring(answer):sub(1,160),effect='none'} end
+    local decoded=json.decode(tostring(answer or ''))
+    if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
+    return decoded
+  end
+  if name=='email_search' or name=='email_read' or name=='email_media' then
+    -- The mailbox index (docs/EMAIL-CONNECTOR.md): a question is a job on `email.query`, answered by the
+    -- wa-email component out of its own kv.
+    if type(host[name])~='function' then return {error=name..'_unavailable',effect='none'} end
+    local request
+    if name=='email_search' then
+      request={q=args.q,['from']=args['from'],subject=args.subject,mailbox=args.mailbox,['since']=args['since'],['until']=args['until'],has_attachment=args.has_attachment,limit=args.limit}
+    else
+      request={mailbox=args.mailbox,uid=args.uid,before=args.before,limit=args.limit}
+    end
+    local ok,answer=pcall(host[name],json.encode(request))
+    if not ok then return {error=name..'_failed',detail=tostring(answer):sub(1,160),effect='none'} end
+    local decoded=json.decode(tostring(answer or ''))
+    if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
+    return decoded
+  end
   if name:sub(1,5)=='peer_' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
     return dofile('lua/core/federation.lua').call(name,args)
@@ -1958,6 +2025,8 @@ local READ_ONLY = {
   spell_list = true, spell_get = true,
   whatsapp_send_status = true,
   whatsapp_search = true, whatsapp_read = true, whatsapp_reactions = true, whatsapp_media = true,
+  email_send_status = true,
+  email_search = true, email_read = true, email_media = true,
 }
 
 function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end

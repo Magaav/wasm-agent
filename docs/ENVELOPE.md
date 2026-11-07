@@ -105,6 +105,11 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `whatsapp_media`: The media metadata of one WhatsApp message: mime, filename, size, sha256, duration
 - `whatsapp_download`: Decrypt one WhatsApp message's media to this node and return the file path
 - `whatsapp_backfill`: Ask the phone for older WhatsApp messages so search covers the account's past
+- `email_send`: Send one email through the durable outbox, with the message id readable afterwards
+- `email_send_status`: Read the state of a queued email send, with its message id when delivered
+- `email_search`: Search every indexed email by text, sender, subject, mailbox or time window
+- `email_read`: Read one mailbox newest first, or one message by uid, with its attachments listed
+- `email_media`: The attachment metadata of one email, with the handle a download names
 - `mcp`: List and manage MCP connectors; new or edited ones stay disabled until enabled
 - `services`: List and manage long-lived WASI service components: start, stop, logs
 - `capture_inspect`: Inspect retained model-request captures as bounded metadata before reading raw dumps
@@ -184,6 +189,11 @@ runs on the client too, while `bash` runs on this node.
 | `whatsapp_media` | `chat` `id` | The media metadata of one WhatsApp message: mime, filename, size, sha256, duration |
 | `whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media to this node and return the file path |
 | `whatsapp_backfill` | `chat?` `count?` | Ask the phone for older WhatsApp messages so search covers the account's past |
+| `email_send` | `body` `subject` `to` `attachments?` `cc?` `in_reply_to?` | Send one email through the durable outbox, with the message id readable afterwards |
+| `email_send_status` | `id` | Read the state of a queued email send, with its message id when delivered |
+| `email_search` | `from?` `has_attachment?` `limit?` `mailbox?` `q?` `since?` `subject?` `until?` | Search every indexed email by text, sender, subject, mailbox or time window |
+| `email_read` | `before?` `limit?` `mailbox?` `uid?` | Read one mailbox newest first, or one message by uid, with its attachments listed |
+| `email_media` | `uid` `mailbox?` | The attachment metadata of one email, with the handle a download names |
 | `mcp` | `action?` `definition?` `expected_revision?` `id?` | List and manage MCP connectors; new or edited ones stay disabled until enabled |
 | `services` | `action?` `bytes?` `definition?` `expected_revision?` `name?` `producer?` `ready_ms?` `set_role?` `source?` | List and manage long-lived WASI service components: start, stop, logs |
 | `capture_inspect` | `path` `item_index?` `limit?` `offset?` `request_index?` `snapshot?` `view?` | Inspect retained model-request captures as bounded metadata before reading raw dumps |

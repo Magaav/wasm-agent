@@ -28,9 +28,15 @@ wa-grant-policy = { path = "../wa-grant-policy" }
 # (docs/SERVICE-COMPONENTS.md, "Sending an ordinary message"): pure Rust, so the same source still
 # builds for wasm32-wasip2 inside `rust/components/wa-whatsapp`.
 wa-whatsapp-outbox = { path = "../wa-whatsapp-outbox" }
+# The email send's seam (`email_send`): the request shape, its bounds and its audit digest, shared with
+# the `wa-email` component that consumes the job.
+wa-email-outbox = { path = "../wa-email-outbox" }
 # The query seam (`whatsapp.query`): the request/answer shape, its bounds and the download manifest,
 # shared with the WA component that answers it (docs/SERVICE-COMPONENTS.md).
 wa-whatsapp-index = { path = "../wa-whatsapp-index" }
+# The email index's seam (`email_query`): the request, the key layout and the bounded answer, shared with
+# the `wa-email` component that answers from its own kv.
+wa-email-index = { path = "../wa-email-index" }
 # Direct peer-to-peer calls by hierarchy (`host.mesh_call`, docs/MESH.md): the roster, the grants and
 # the transport. The node mounts its listener from `serve::run` behind `WA_MESH=1`, so this crate is
 # the only edge that names it.

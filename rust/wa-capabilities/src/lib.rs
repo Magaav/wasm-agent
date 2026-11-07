@@ -43,3 +43,7 @@ pub mod subagents;
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.
 pub mod whatsapp_query;
 pub mod whatsapp_send;
+/// The email connector's tools: the send on `email.outbox` and the index on `email.query`
+/// (`docs/EMAIL-CONNECTOR.md`).
+pub mod email_query;
+pub mod email_send;

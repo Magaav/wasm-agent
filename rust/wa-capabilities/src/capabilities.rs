@@ -204,6 +204,16 @@ pub const REGISTRY: &[Capability] = &[
     // The one query that asks the phone: it enqueues on the same `whatsapp.query` queue, and the
     // component's answer is the history request it made (ids and counts), never a message.
     plain!("whatsapp_backfill", Network, crate::whatsapp_query::backfill, "Ask the primary phone for WhatsApp messages older than the index holds, so a search can reach the account's past"),
+    // ---- Email (docs/EMAIL-CONNECTOR.md) -------------------------------------------------------
+    // The same two shapes as the WhatsApp tools: an effect (`email_send`) is a job on `email.outbox`
+    // after the node's `email.send` policy check, a question (`email_search`/`email_read`) is a job on
+    // `email.query`, and `email_send_status` reads the send back. Recipients are audited as a digest,
+    // never as an address.
+    plain!("email_send", Network, crate::email_send::capability, "Send one email through the durable email.outbox queue, after the email.send policy check; returns the job id, never the delivery"),
+    plain!("email_send_status", ReadOnly, crate::email_send::status_capability, "State of one queued email send: queued, sending, done with its message id, or failed with a reason"),
+    plain!("email_search", ReadOnly, crate::email_query::search, "Search every indexed email by text (accent-folded), sender, subject, mailbox or time window; returns matching messages with snippets"),
+    plain!("email_read", ReadOnly, crate::email_query::read, "Read one mailbox newest first, or one message by uid: envelope, subject, text and attachments"),
+    plain!("email_media", ReadOnly, crate::email_query::media, "The attachment metadata of one indexed email, with the media handle a download can name"),
     // ---- node governance (docs/GRANT-POLICY.md, docs/TELEMETRY.md) ----------------------------
     plain!("policy_status", ReadOnly, wa_governance::node_policy::capability, "The grant policy's state as JSON: file and load error, decision counters, recent refusals without target text, and the audit trail's health"),
     plain!("telemetry", ReadOnly, wa_governance::node_telemetry::capability, "This node's telemetry as Prometheus text or JSON: component and host-call latency, service health, sampled spans, rollups and the bounded stores' usage"),
