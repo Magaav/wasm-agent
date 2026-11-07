@@ -370,6 +370,93 @@ poll `host::run_cancel_requested()`, which combines the run flag with a child ta
 flag. The UI's Stop sends this request before aborting the stream, so stopping a run stops
 it on the node rather than only in the page.
 
+## Bounds: every queue, buffer, cache and retry loop
+
+One table, because the failure these all share is the same one: something grows while nobody is
+reading it. The columns are the four questions worth asking of any of them - what is the bound,
+what happens at it, can an operator see it, and what does a cancel do to it. `drop-oldest`,
+`refuse` and `close` are the only honest answers; "nothing" is the defect.
+
+| Where | Bound | At the bound | Visible in | On cancel |
+| --- | --- | --- | --- | --- |
+| HTTP listener -> admission dispatcher (`serve.rs`) | `WASM_AGENT_ADMISSION_QUEUE_DEPTH`, default 4 (1..256) | `503 admission_busy` | the answer itself; `/health queue` counts admitted work | the request was never admitted |
+| Identity resolver requests (`serve.rs`) | `sync_channel(4)` | `503 admission_busy` | the answer itself | - |
+| Read/control admission (`serve.rs`) | `WASM_AGENT_READ_QUEUE_DEPTH`, default 16 (1..256) | `503 read_capacity_busy` | `/health read_admission` (`waiting`, `queue_depth`, `timeout_ms`) | - |
+| Node-thread work queue (`serve.rs`) | `WASM_AGENT_QUEUE_DEPTH`, default 256 | `503 node_busy`, the run completed | `/health queued` | the work item carries the run's own flag |
+| Relayed peer runs -> node thread | the same node-thread queue | `503 node_busy` to the peer, run completed | journal + peer answer | the relayed run's own flag |
+| One conversation's run backlog (`scheduler.rs`) | `WASM_AGENT_SESSION_QUEUE_DEPTH`, default 4 | `503 session_queue_full` | `/health run_limits.session_queue_depth` | a queued run cancelled before start settles once and never executes |
+| Background lane (`scheduler.rs`) | `WASM_AGENT_BACKGROUND_MAX`, `WASM_AGENT_BACKGROUND_BACKLOG` default 8 | `503 background_queue_full` | `/health run_limits` | as above |
+| Subagent execution (`subagents.rs`) | `WASM_AGENT_SUBAGENT_CONCURRENCY`, clamp 1..16 (node env: 4) | a queued child waits; `capacity` is a condvar, not a busy loop | `/health subagents`, `subagent_counts` | a child cancelled before it starts settles `cancelled_before_start` |
+| Subagent HTTP await (`subagents.rs`) | `WASM_AGENT_SUBAGENT_AWAIT_MS`, default 10000 | the wait returns the child's state | child record | interrupts the *wait*; the child keeps its own rules |
+| Client bridge commands (`client_bridge.rs`) | `MAX_QUEUED` = 16 | `client_queue_full`, counted | `client{action:'status'}` `.queued` / `.queue_refused` | withdrawn if no client took it (`effect:"none"`), else `effect:"unknown"` with the id |
+| Client bridge results (`client_bridge.rs`) | `KEEP_RESULTS` = 8 | oldest dropped | `.results_kept` | - |
+| Client bridge connections (`client_bridge.rs`) | `MAX_CONNECTIONS` = 32 | `503 too_many_connections` | `.bridge.connections` | - |
+| Client bridge request (`client_bridge.rs`) | `MAX_REQUEST` = 32 MiB | `413 request_too_large` | - | - |
+| Component websocket inbound frames (`service_io.rs`) | `WS_INBOUND_FRAMES` = 256 and `WS_INBOUND_BYTES` = 16 MiB | **close** the socket (a dropped frame corrupts the protocol); counted | `ws_bound_closes()`, `WsConn::over_bound()`, one stderr line | dropping the connection stops the pump |
+| Component websocket outbound frames (`service_io.rs`) | `WS_OUTBOUND_FRAMES` = 64 | `CLOSED` to the guest, socket closed, counted | `ws_bound_closes()` | - |
+| One websocket frame / one service HTTP body (`service_io.rs`) | `MAX_MESSAGE` 32 MiB / `MAX_HTTP_BODY` 96 MiB | the frame closes the socket; the body read is limited | stderr line / error | - |
+| `wa:bus` per-subscription buffer (`wa-bus`) | `SubscribeOptions.capacity`, default 64 | `OverflowPolicy::DropOldest` (or `DropNewest`), counted | `Delivery::dropped`, `Subscription::dropped` | the stream drop unsubscribes and stops the pump |
+| `wa:bus` -> guest stream channel (`bus_host.rs`) | the subscription's capacity | drop oldest, counted by the bus | subscription counters | component stop revokes the subscription and the pump exits |
+| `wa:queue` (`wa-queue`) | `Policy::max_inflight`, per-worker lease | `TakeOutcome::AtLimit {leased}` (`lease_lost`, `empty`) | queue metrics, `/health` | a leased job returns on lease expiry, counted `lease_expired` |
+| STT job leases (`stt_node.rs`, `wa-stt-remote`) | `lease_ms` + heartbeat | the queue recovers a lapsed lease | `lease_recovered`, `stt` health | **not released early**: a cancelled decode keeps its lease until expiry (below) |
+| STT settled receipts (`stt_node.rs`) | `RECENT_KEPT` = 32 | oldest dropped | `/health stt.recent` | - |
+| STT tunnel calls (`stt_node.rs`) | one worker thread, one job at a time | the worker is the only producer of calls | tunnel counters | the worker thread is the node's, not the run's |
+| Operation output (`wa-operation`) | `output_limit`, default 8 MiB (max 64 MiB) | truncated, `output_limit_exceeded`, head+tail kept | `state.output_truncated`, `stdout_path` | the run's cancel cancels the operation and waits up to 1 s for settlement |
+| Operation index / history (`wa-operation`) | SQLite rows, cursor reads (`VIEW_BYTES` pages) | pagination | `next_offset` | - |
+| Telemetry sink buffer (`wa-telemetry-sink`) | `Bounds`: 4096 records, 4 MiB, 64 KiB per record | drop-oldest, a larger record is refused | `telemetry_dropped` | - |
+| Telemetry trace ring / span attrs (`wa-telemetry`) | fixed-size rollup buckets, `max_span_attrs` | oldest bucket / attribute dropped | rollups | - |
+| Governance audit rings (`wa-governance`) | `REFUSAL_RING` 32, `MEMORY_AUDIT_RECORDS` 512 | oldest dropped | policy audit | - |
+| Component CPU/memory (`wa-governance`) | `memory_mb` default 512 (16..4096), `cpu_ms` default 5000 (10..60000) | the epoch is parked, the call refused | component metrics | - |
+| Pending served control (`lua/core/server.lua`) | `CONTROL_MAX` = 64 and a 600 s TTL, swept on **insert** | oldest pending session dropped | `wa_control_pending_count()` | a cancelled run's `/bind` never had one |
+| Provider stream-cut retries (`lua/core/agent.lua`) | `provider.stream_cut_retries`, default 3 (`=0` fails fast) | the run fails as `provider_incomplete_stream` | telemetry span, transcript row | a cancel stops before the next attempt |
+| Telemetry write retries (`lua/core/telemetry.lua`) | `WASM_AGENT_TELEMETRY_WRITE_ATTEMPTS` 2 (1..20), 8 s budget, cooldown | the write is dropped and logged | `telemetry.drops()`, `dropped_writes` on the run report | - |
+| Relay send retries (`lua/core/nodes.lua`) | 3 attempts, 60 s overall deadline | the last refusal is returned | hook events, peer answer | the caller's own budget |
+| Subagent continuation retries (`lua/core/subagents.lua`) | 3 attempts on `session_tail_changed` | the last error is returned | child receipt | - |
+| Backup retries (`lua/core/backup.lua`) | `WA_BACKUP_ATTEMPTS` 3, linear backoff | the refusal is reported, the store is left alone | diagnostics | - |
+| Self-wake registrations (`lua/core/selfloop.lua`) | 16 `wake_on` entries, 16 probe calls, durable `pending` rows | `wake_on_too_many` / `probe_call_limit` | footer, `wake status` | `wake cancel <id>` is a stated transition, never a replay |
+
+What this table deliberately does **not** claim: that every bound is the right one. The numbers are
+the ones the code enforces today, with the knob that moves each. A row whose knob has no measurement
+behind it is a default someone chose; changing it is a separate, measured decision.
+
+### How far a cancel actually reaches
+
+The chain is one flag per run (`AtomicBool` in the scheduler) plus one per child task, and the answer
+at every step is `host::run_cancel_requested()`:
+
+- **into the provider read and the agent loop**: polled between chunks; the cancel path also shuts the
+  registered socket down, which is what wakes a read that has nothing to read. A foreground run whose
+  provider has sent nothing stops on the next chunk or at the read timeout, not the instant the flag
+  is set (recorded below, unchanged).
+- **into a tool call's host work**: `bash`/`operation`, `http`, `http_sse`, `stream_completion`, the
+  QuickJS interrupt and codemode all poll it; an operation is cancelled and the caller stays attached
+  until it settles, so an effect cannot outlive the run that owns it.
+- **into the client bridge**: added with this inventory. A waiting caller now checks the flag every
+  100 ms instead of sleeping the whole budget, and a command no client has taken is **withdrawn** -
+  before, a cancelled run's `client` call stayed queued and a client that reconnected later would
+  execute it for a run that no longer existed.
+- **into streams**: the SSE reader checks per line; the per-run sink is thread-local and is dropped
+  with the call, so a cancelled run cannot write into the next run's socket.
+- **not into a spawned subagent**: by design (`subagents.rs`): an interrupted await says so and names
+  the child, and the child keeps its own cancellation, idempotency and settlement rules. That is a
+  recorded decision, not an oversight - this file states it in "What this does not cover".
+- **not into a leased STT job, and not into a relay/mesh call in flight**: both are independent of the
+  run that asked for them and are bounded by their own deadline or lease instead. The next section
+  names both as gaps rather than pretending the flag reaches them.
+
+### Gaps recorded here, deliberately not fixed
+
+- **A cancelled STT decode keeps its lease** until `lease_ms` expires, so the audio can still be
+  decoded for a run that is gone. Fixing it means a queue-side `release` the `wa-queue` policy does
+  not have yet (`take`/`settle` are worker-side), so it is a change to the queue contract, not to the
+  caller.
+- **A relay or mesh call in flight is not aborted** when the calling run is cancelled: it finishes or
+  times out inside its own budget. It writes nothing into the run (its answer is dropped), so the
+  cost is time, not an effect.
+- **The STT tunnel's `pending`/`waiting` maps have no cap.** They are produced by one worker thread
+  that handles one job at a time, so the number of outstanding signed calls is bounded by that
+  thread's behaviour rather than by a constant; a second worker would need the cap.
+
 ## The per-run output sink
 
 `host.stream` is a host function, so `write_event` cannot take a run id through its
