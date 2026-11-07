@@ -124,11 +124,19 @@ const documentStub = {
 let updatesAsked = 0;
 const sandbox = new Function("document", "updateNode", `
 let updateToastDismissed = false;
+// The row has two producers since the seamless-update change: the banner is the standing text and
+// \`updating…\` replaces it while the node is away being replaced (tests/seamless-reconnect.js tests that
+// half). Both are extracted from the same shipping source, so this still fails when app.js drifts.
+let sessionStandingNotice = "";
+let sessionUpdating = "";
+const UPDATING_TEXT = "updating…";
 ${extract("updateBannerText")}
 ${extract("dismissUpdateToast")}
 ${extract("paintUpdateBadge")}
 ${extract("paintUpdateToast")}
 ${extract("paintSessionNotice")}
+${extract("paintSessionContent")}
+${extract("paintUpdating")}
 ${extract("applyUpdateBanner")}
 return {
   updateBannerText,

@@ -4271,7 +4271,8 @@ function applyUpgradeState(health) {
   if (!upgradeState) {
     bar.hidden = true; bar.removeAttribute('data-phase');
     // The node answered, so a restart/offline claim is stale even if it was set while the bar
-    // was up. Never leave the page saying the node is away while it is answering.
+    // was up. Never leave the page saying the node is away while it is answering - and that is the same
+    // edge that takes the `updating…` line off the session-status-content row (`clearNodeRestartStatus`).
     if (health) clearNodeRestartStatus();
     return;
   }
@@ -4321,6 +4322,10 @@ function watchNode() {
 function clearNodeRestartStatus() {
   document.body.classList.remove("node-offline");
   if (nodeWatch) { clearInterval(nodeWatch); nodeWatch = null; }
+  // The node answers again, so the "updating…" line on the session-status-content row is over and the
+  // standing notice (if any) goes back in its place. This is the one recovery edge - the offline claim,
+  // the install bar and this row are cleared together, so none of them can outlive the answer.
+  paintUpdating(false);
   const status = statusLine && String(statusLine.textContent || "");
   // The install/restart claim is stale once health answers, whether or not a run is live.
   if (status && /restart|offline|not answering|installing/i.test(status)) clearStatus();
@@ -5915,7 +5920,8 @@ function paintUpdateToast(text) {
 // indicator disappears as soon as the node runs the release. Returns the text it drew ("" when none).
 function applyUpdateBanner(payload) {
   const text = updateBannerText(payload);
-  paintSessionNotice(text);
+  sessionStandingNotice = text;
+  paintSessionContent();
   if (!text) {
     const badge = document.querySelector("[data-update-badge]");
     if (badge) badge.remove();
@@ -5942,6 +5948,26 @@ function applyUpdateBanner(payload) {
 //     standing state, and it comes back on the next load until the node runs the release.
 // The document is not required to carry `.composer` (a page or a test with no chat shell): then there
 // is nowhere to put the line and nothing is drawn - the badge and the toast are unaffected.
+//
+// Two producers, one row. The update notice is the standing text; `updating…` REPLACES it while this
+// window's node is away being replaced, because that is the thing happening now and a page that keeps
+// saying "a new release is published" during the install is telling the reader the wrong fact. The CLI
+// draws the same sentence on the same row while it waits to re-exec into a new build
+// (`lua/core/cli_restart.lua`), so both surfaces name the same gap in the same words.
+let sessionStandingNotice = "";
+let sessionUpdating = "";
+function paintSessionContent() {
+  return paintSessionNotice(sessionUpdating || sessionStandingNotice);
+}
+// `"updating…"` while an install is in progress and the node has not answered yet; empty to clear. It
+// never outlives the answer: `applyUpgradeState`/`recoverAfterNodeReturn` clear it on the recovery edge,
+// and a page that kept saying "updating" after the node was back would be a lie nothing could clear.
+const UPDATING_TEXT = "updating…";
+function paintUpdating(on) {
+  sessionUpdating = on ? UPDATING_TEXT : "";
+  document.body.classList.toggle("node-updating", !!on);
+  return paintSessionContent();
+}
 function paintSessionNotice(text) {
   const row = document.querySelector("[data-session-status-content]");
   if (!text) {
@@ -7019,7 +7045,11 @@ async function watch() {
         if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
       }
     }
-  } catch (error) { nodeReachable = false; /* keep polling: the deadline is what keeps this loop alive */ }
+  } catch (error) { nodeReachable = false; /* keep polling: the deadline is what keeps this loop alive */
+    // A node that stops answering while an install is in progress is being replaced: say so on the
+    // session-status-content row ("updating…"), once, and stop saying it on the recovery edge above.
+    if (upgradeState) paintUpdating(true);
+  }
   setTimeout(watch, uiVisible() ? 3000 : 5000);
 }
 

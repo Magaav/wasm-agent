@@ -57,6 +57,23 @@ function M.reason()
   return nil
 end
 
+-- What the CLI's session-status-content area says while this restart is pending: `updating…`, or nil.
+--
+-- ONE line directly above the session status bar (`lua/core/cli_view.lua`'s `session_content`, the same
+-- row the update notice lives on). It is there for the wait the reader can see but not end: the binary
+-- under this process was replaced (or a restart was asked for) and the CLI is waiting for the run in
+-- flight to end before it re-execs. The window shows the same sentence while its node is away being
+-- replaced (`ui/app.js`), so the two surfaces name the same gap in the same words.
+--
+-- `pending` is the reason `M.reason()` gave, or nil; `refused` is true after `M.restart` was declined
+-- (the loop guard), because a CLI that cannot restart must not keep claiming it is updating.
+M.UPDATING = "updating…"
+
+function M.line(pending, refused)
+  if pending == nil or refused then return nil end
+  return { text = M.UPDATING, kind = "notice" }
+end
+
 -- Nothing the reader is doing would be lost by restarting now.
 function M.idle()
   if not host.input_idle then return true end

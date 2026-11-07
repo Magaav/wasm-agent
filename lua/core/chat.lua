@@ -337,6 +337,10 @@ function M.run(argv)
   -- a redraw on a timeout would erase what they have typed so far.
   -- Restart between runs, never over anything the reader is doing; a refusal is said once.
   local restart_checked, restart_refused = 0, nil
+  -- The reason a restart is due but has not happened yet: while it is set, the session-status-content
+  -- line says `updating…` (lua/core/cli_restart.lua), because a reader whose build was replaced should
+  -- see that the CLI is on its way into the new one instead of wondering why the old one keeps answering.
+  local restart_pending = nil
   local function restart(reason)
     local message, torn = cli_restart.restart(agent.session_id, reason, function()
       print("  restarting: " .. reason .. " - session " .. agent.session_id .. " continues")
@@ -344,6 +348,10 @@ function M.run(argv)
       view:screen_off()
     end)
     if torn then io.write(redact.text(message) .. "\n"); os.exit(1) end
+    -- The restart did not happen (refused or failed): the line goes back to what it was, because
+    -- "updating…" would then be a claim about a restart that is not coming.
+    restart_pending = nil
+    view:session_draw()
     print(redact.text(message))
     -- Remembered with its time: the loop guard refuses for its window only, and a refusal kept forever
     -- left a CLI on a replaced binary for hours after the churn that tripped it (28/10).
@@ -356,7 +364,11 @@ function M.run(argv)
     local reason = cli_restart.reason()
     local refused = restart_refused
     local settled = not refused or refused.reason ~= reason or now - refused.at > cli_restart.WINDOW
-    if reason and settled and cli_restart.idle() then restart(reason) end
+    if reason and settled and cli_restart.idle() then
+      restart_pending = reason
+      view:session_draw()
+      restart(reason)
+    end
   end
 
   -- Turns another process adds to this session - a sentinel wake runs on the node, the window may
@@ -447,9 +459,20 @@ function M.run(argv)
   -- sentence the footer and the window show. When it cannot decide (a release-bundle install records
   -- a version tag, not a published binary release), `release.lua`'s tag feed answers exactly as it did
   -- before; only one of them ever prints, so the reader is told one fact in one wording.
+  -- The session-status-content line has two producers and one row, so it is resolved here in one place:
+  -- a pending restart (`updating…`) wins - it is the thing happening right now - and the update notice is
+  -- the standing text underneath it. `update_banner.session_content` still owns the build/failure
+  -- precedence inside the notice's own half, which is why this delegates rather than re-deciding.
+  local banner, seen = nil, nil
+  view.session_status = function()
+    local updating = cli_restart.line(restart_pending)
+    if updating then return updating end
+    if banner then return banner.session_content({ notice = seen and seen.line }) end
+    return nil
+  end
   if not host.getenv("WA_SKIP_UPDATE_CHECK") then
-    local banner = dofile("lua/core/update_banner.lua")
-    local seen = banner.check({ refresh = true })
+    banner = dofile("lua/core/update_banner.lua")
+    seen = banner.check({ refresh = true })
     if seen.line then
       -- The notice is the standing text of the CLI's session-status-content area: ONE line directly
       -- above the session status bar, in yellow, so it stops shortening the status bar's own content
@@ -457,7 +480,6 @@ function M.run(argv)
       -- `update_banner.session_content`, because a rebuild in flight REPLACES the notice on the same
       -- line and hands it back afterwards.
       view.session_notice = seen.line
-      view.session_status = function() return banner.session_content({ notice = seen.line }) end
       view:session_draw()
       print(redact.text(seen.line))
     elseif seen.state == "unknown" and seen.reason ~= "checks_disabled" then

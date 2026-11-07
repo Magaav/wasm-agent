@@ -98,6 +98,36 @@ draws that one itself through the host's `{S}` status-row token. Wiring it exact
 reserved by this module rather than by the editor, and the transcript may repaint it until the next
 frame.
 
+## `updating…`: the row while the update is happening (07/11)
+
+The session-status-content row has a second sentence now, and it is the one the reader needs at the moment
+the update actually happens: **`updating…`**. It is drawn in the same yellow, on the same row, one line above
+the status bar, and it REPLACES the standing notice while it is up - a page (or a terminal) that keeps saying
+"a new release is published" during the install is telling the reader the wrong fact.
+
+- **the CLI** (`lua/core/cli_restart.lua`'s `M.UPDATING`/`M.line`, composed in `lua/core/chat.lua`) says it
+  while a restart is due and has not happened yet: the binary under this process was replaced (or a restart
+  was asked for), the run in flight has to end first, and the reader can see what the wait is for. It is
+  cleared when the restart turns out not to happen (the loop guard's refusal, a failed exec) - a line that
+  claimed `updating…` under a restart that is not coming would be worse than no line. On the successful path
+  the re-exec replaces the process, and the new one starts with an empty row: that is the "then clears".
+- **the window** (`ui/app.js`'s `paintUpdating`) says it while its node does not answer and an install was
+  in progress (`/health`'s `upgrading` record), and clears it on the one recovery edge
+  (`clearNodeRestartStatus`), where the offline claim and the install bar are cleared too - never later,
+  never on a timer of its own.
+- **the precedence** is `pending restart` > `updating…` > the standing notice > the build loader/result.
+  One row, so one resolver on each surface: the CLI composes it in `chat.lua` (delegating the notice's own
+  half to `update_banner.session_content`), the window in `paintSessionContent`.
+- **it is not a claim about the end state.** Nothing says "updated": the sentence describes the gap, and the
+  evidence that it closed is the transcript that comes back on the same row (`restoreSession`) or the CLI
+  drawing the same session again via `wa chat --resume`.
+
+Tests: `scripts/test-seamless.lua` (the sentence, the three states of `M.line`, the view drawing it on row
+19 of a 21-row framed screen in the warning yellow and giving the row back when it clears, and the wiring on
+both surfaces), `tests/seamless-reconnect.js` (the window's row against a stub DOM: `updating…` while the
+node is away during an install, cleared and the standing notice restored when it answers), and
+`docs/SENTINEL.md`'s delegation section for the kernel half of the same update.
+
 ## The installed side: `release=` in `installed.txt`
 
 The comparison is on tags, so the install has to name one. `scripts/deploy.sh` writes
