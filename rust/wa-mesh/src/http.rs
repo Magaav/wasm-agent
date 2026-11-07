@@ -157,7 +157,13 @@ fn content_length(headers: &[(String, String)]) -> Result<Option<usize>, String>
 
 /// Read one request from a connection. `Ok(None)` is a peer that closed before sending a head —
 /// a probe (the listener's own shutdown does this) and not an error worth a line.
-pub fn read_request(stream: &mut TcpStream, max_body: usize) -> Result<Option<Request>, String> {
+///
+/// Generic over `Read` on purpose: the property is the *parse*, and the socket is the caller's
+/// (`server.rs` passes its accepted stream, whose `io_timeout` is what bounds this read). A test that
+/// only wants to know how a malformed head is refused can drive a `Cursor`, so the answer does not
+/// depend on a machine's loopback behaviour (which, on a loaded Windows box, has produced resets and
+/// multi-second connects that had nothing to do with the parser).
+pub fn read_request<R: Read>(stream: &mut R, max_body: usize) -> Result<Option<Request>, String> {
     let mut buffer = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -388,54 +394,29 @@ mod tests {
     #[test]
     fn a_chunked_body_or_an_oversized_one_is_refused_and_not_buffered() {
         testkit::with_deadline("a_chunked_body_or_an_oversized_one_is_refused_and_not_buffered", || {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                // Transfer-Encoding with no Content-Length: refused before a byte of body is read.
-                stream
-                    .write_all(b"POST /mesh/call HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
-                    .unwrap();
-                drain_until_the_client_is_done(&mut stream);
-            });
-            let mut stream = connect(address);
-            assert_eq!(read_request(&mut stream, MAX_BODY).unwrap_err(), "length_required");
-            drop(stream);
-            server.join().unwrap();
+            // No socket: the refusal is the parser's answer, and a loopback connection would add a
+            // machine-dependent wait to a test that is about bytes.
+            //
+            // Transfer-Encoding with no Content-Length is refused before a byte of body is read.
+            let mut chunked = std::io::Cursor::new(
+                b"POST /mesh/call HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n".to_vec(),
+            );
+            assert_eq!(read_request(&mut chunked, MAX_BODY).unwrap_err(), "length_required");
 
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let _ = stream.write_all(
-                    b"POST /mesh/call HTTP/1.1\r\nContent-Length: 999999999\r\n\r\n{}",
-                );
-                drain_until_the_client_is_done(&mut stream);
-            });
-            let mut stream = connect(address);
-            assert_eq!(read_request(&mut stream, MAX_BODY).unwrap_err(), "too_large");
-            drop(stream);
-            server.join().unwrap();
+            // A declared length beyond the bound is refused, and the body is never buffered.
+            let mut oversized = std::io::Cursor::new(
+                b"POST /mesh/call HTTP/1.1\r\nContent-Length: 999999999\r\n\r\n{}".to_vec(),
+            );
+            assert_eq!(read_request(&mut oversized, MAX_BODY).unwrap_err(), "too_large");
+
+            // A peer that stops mid-head is an error, not a wait.
+            let mut truncated = std::io::Cursor::new(b"POST /mesh/call HTT".to_vec());
+            assert_eq!(read_request(&mut truncated, MAX_BODY).unwrap_err(), "truncated_head");
+
+            // A head that never ends is refused once it passes the bound, not buffered.
+            let mut endless = std::io::Cursor::new(vec![b'a'; MAX_HEAD + 4096]);
+            assert_eq!(read_request(&mut endless, MAX_BODY).unwrap_err(), "head_too_large");
         });
-    }
-
-    /// Keep the connection open until the client closes it.
-    ///
-    /// The obvious version - read once with a one-second timeout, then drop - races a loaded machine:
-    /// when the peer has not been scheduled to read the head yet, dropping the socket is a close with
-    /// the answer still queued, and Windows delivers that as a reset (`os error 10054`) that can reach
-    /// the client before it has read anything. Waiting for the client's own end removes the race
-    /// without removing the deadline: `SOCKET_DEADLINE` bounds the wait and the test's own deadline
-    /// bounds the test.
-    fn drain_until_the_client_is_done(stream: &mut TcpStream) {
-        let _ = stream.set_read_timeout(Some(testkit::SOCKET_DEADLINE));
-        let mut sink = [0u8; 64];
-        loop {
-            match stream.read(&mut sink) {
-                Ok(0) | Err(_) => return,
-                Ok(_) => continue,
-            }
-        }
     }
 
     /// A client socket with a connect budget and bounded reads, never a bare `connect`.
