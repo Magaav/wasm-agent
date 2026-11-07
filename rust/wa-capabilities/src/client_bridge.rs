@@ -51,12 +51,22 @@ const MAX_REQUEST: usize = 32 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 32;
 /// Late results worth keeping, so a caller that gave up can still collect.
 const KEEP_RESULTS: usize = 8;
+/// Commands waiting for the client. A client that stops polling used to let this grow for the life of
+/// the process: one entry per caller that timed out, none of them ever removed by anyone. It is
+/// bounded, and reaching the bound is a named refusal rather than a longer backlog.
+const MAX_QUEUED: usize = 16;
+/// How long a waiting caller sleeps before it looks at the run's cancel flag again. The flag is the
+/// same one every other host call polls between chunks; this is the slice that makes a five-minute
+/// client budget interruptible.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 struct Inner {
     queue: VecDeque<Value>,
     /// `(id, at, value)` for results delivered, oldest first.
     results: VecDeque<(String, u64, Value)>,
     next_id: u64,
+    /// Commands refused because the queue was at its bound (counted, never silently dropped).
+    queue_refused: u64,
     last_poll: Option<Instant>,
     /// What the client volunteers on every poll: no round trip needed to ask.
     client_state: Option<(Value, Instant)>,
@@ -88,6 +98,7 @@ impl Bridge {
                 queue: VecDeque::new(),
                 results: VecDeque::new(),
                 next_id: 0,
+                queue_refused: 0,
                 last_poll: None,
                 client_state: None,
                 waited: None,
@@ -104,24 +115,25 @@ impl Bridge {
     /// Called from Lua: enqueue a command and block until the result arrives.
     /// `timeout_ms` is the caller's patience, and it travels with the command.
     pub fn call(&self, action: &str, args: Value, timeout_ms: u64) -> Value {
+        self.call_while(action, args, timeout_ms, crate::host::run_cancel_requested)
+    }
+
+    /// `call`, plus the cancellation it honours. The run's own flag arrives as a function so the
+    /// withdrawal path below can be exercised without a run.
+    fn call_while(&self, action: &str, args: Value, timeout_ms: u64, cancelled: impl Fn() -> bool) -> Value {
         let budget = timeout_ms.clamp(1_000, CALL_TIMEOUT_MAX_MS);
-        let id = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.next_id += 1;
-            // The counter keeps ids ordered in logs; the random tail makes a result unforgeable by
-            // anyone who did not receive the command (a sequential id could be guessed and answered).
-            format!("{}-{}", inner.next_id, random_tag())
+        let Some(id) = self.enqueue(action, args, budget) else {
+            return json!({
+                "error": "client_queue_full",
+                "queued": MAX_QUEUED,
+                "observed": format!(
+                    "{MAX_QUEUED} commands are already waiting and no client has taken them; \
+                     this one was refused instead of queued behind them"
+                ),
+                "next": "ask the client what it is doing with client {action:'status'} (it reports \
+                         connected and queued); a client that is polling drains the queue by itself",
+            });
         };
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.queue.push_back(json!({
-                "id": id,
-                "action": action,
-                "args": args,
-                "budget_ms": budget,
-            }));
-        }
-        self.signal.notify_all();
 
         let started = Instant::now();
         let deadline = started + Duration::from_millis(budget);
@@ -144,9 +156,39 @@ impl Bridge {
                                      (it is kept even if the client has gone), or raise timeout_ms"),
                 });
             }
-            let (guard, _) = self.signal.wait_timeout(inner, deadline - now).unwrap();
+            // A cancelled run or child stops waiting, like every other bounded host call. The wait
+            // is sliced so the flag is observed in about 100 ms instead of at the end of a budget
+            // that can be five minutes long.
+            if cancelled() {
+                return withdraw(&mut inner, &id);
+            }
+            let slice = (deadline - now).min(CANCEL_POLL);
+            let (guard, _) = self.signal.wait_timeout(inner, slice).unwrap();
             inner = guard;
         }
+    }
+
+    /// Queue one command for the client. `None` is the bound: the caller is refused by name rather
+    /// than added to a backlog nothing is draining.
+    fn enqueue(&self, action: &str, args: Value, budget: u64) -> Option<String> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.queue.len() >= MAX_QUEUED {
+            inner.queue_refused += 1;
+            return None;
+        }
+        inner.next_id += 1;
+        // The counter keeps ids ordered in logs; the random tail makes a result unforgeable by
+        // anyone who did not receive the command (a sequential id could be guessed and answered).
+        let id = format!("{}-{}", inner.next_id, random_tag());
+        inner.queue.push_back(json!({
+            "id": id,
+            "action": action,
+            "args": args,
+            "budget_ms": budget,
+        }));
+        drop(inner);
+        self.signal.notify_all();
+        Some(id)
     }
 
     fn take_command(&self) -> Option<Value> {
@@ -187,6 +229,7 @@ impl Bridge {
             "connected": connected,
             "last_seen_secs": elapsed.map(|age| age.as_secs()),
             "queued": inner.queue.len(),
+            "queue_refused": inner.queue_refused,
             "bridge": {
                 "port": port(),
                 "health": health,
@@ -244,6 +287,44 @@ impl Bridge {
 
 fn take_result(inner: &mut Inner, id: &str) -> Option<Value> {
     inner.results.iter().find(|(kept, _, _)| kept == id).map(|(_, _, value)| value.clone())
+}
+
+/// What a caller that stopped waiting because its run was cancelled is told, and what happens to the
+/// command it had queued. A command no client had taken is **withdrawn**: the effect never happened,
+/// and leaving it in the queue would dispatch it for a run that no longer exists. One a client had
+/// already taken is not ours to withdraw - it may be finishing - so the caller is told the effect is
+/// unknown and keeps the id to collect with `client {action:'result', id}`.
+fn withdraw(inner: &mut Inner, id: &str) -> Value {
+    let queued = inner.queue.iter().position(|command| command["id"].as_str() == Some(id));
+    let taken = inner.waited.as_ref().is_some_and(|(waited, _, _)| waited == id);
+    match (queued, taken) {
+        (Some(index), _) => {
+            inner.queue.remove(index);
+            json!({
+                "error": "run_cancelled",
+                "id": id,
+                "effect": "none",
+                "observed": "the run was cancelled before any client took this command, so it was \
+                             withdrawn and nothing was dispatched",
+                "next": "nothing to recover; the cancellation is the answer",
+            })
+        }
+        (None, true) => json!({
+            "error": "run_cancelled",
+            "id": id,
+            "effect": "unknown",
+            "observed": "the run was cancelled while a client held this command; it may be finishing \
+                         and this node cannot know how far it got",
+            "next": format!("collect the outcome with client {{action:'result', id:'{id}'}} before \
+                             deciding anything; do not replay it"),
+        }),
+        (None, false) => json!({
+            "error": "run_cancelled",
+            "id": id,
+            "effect": "none",
+            "observed": "the run was cancelled and the command is no longer queued or held",
+        }),
+    }
 }
 
 // ---- globals: so /health can report the bridge without owning it --------------
@@ -456,4 +537,83 @@ fn random_tag() -> String {
 /// this file cannot drift apart.
 pub fn default_timeout_ms() -> u64 {
     CALL_TIMEOUT_DEFAULT_MS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client that stops polling used to let this queue grow for the life of the process: one
+    /// entry per caller that timed out, and nothing ever removed them. The bound refuses, counts,
+    /// and frees the slot as soon as a client takes a command.
+    #[test]
+    fn the_command_queue_refuses_at_its_bound() {
+        let bridge = Bridge::new();
+        for i in 0..MAX_QUEUED {
+            assert!(bridge.enqueue("status", json!({ "i": i }), 1_000).is_some(), "command {i} fits the bound");
+        }
+        assert!(bridge.enqueue("status", json!({ "over": true }), 1_000).is_none(), "the bound refuses");
+        let status = bridge.status();
+        assert_eq!(status["queued"], json!(MAX_QUEUED));
+        assert_eq!(status["queue_refused"], json!(1), "a refusal is counted, never a silent drop");
+
+        // Refusing did not consume a slot: the queue still holds the oldest commands, in order.
+        let first = bridge.take_command().expect("a client takes the oldest");
+        assert_eq!(first["args"]["i"], json!(0));
+        assert!(bridge.enqueue("status", json!({}), 1_000).is_some(), "a slot a client took frees one");
+    }
+
+    /// What a caller sees at the bound: an answer at once, named, with the one way out - not a
+    /// budget spent waiting behind commands nothing is draining.
+    #[test]
+    fn a_full_queue_answers_client_queue_full_without_waiting() {
+        let bridge = Bridge::new();
+        for _ in 0..MAX_QUEUED {
+            bridge.enqueue("status", json!({}), 1_000).unwrap();
+        }
+        let started = Instant::now();
+        let answer = bridge.call("status", json!({}), CALL_TIMEOUT_DEFAULT_MS);
+        assert_eq!(answer["error"], json!("client_queue_full"));
+        assert_eq!(answer["queued"], json!(MAX_QUEUED));
+        assert!(started.elapsed() < Duration::from_millis(500), "a full queue is answered at once");
+        assert_eq!(bridge.status()["queued"], json!(MAX_QUEUED), "the refusal added nothing");
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    /// A cancelled run must not leave work queued for a client to dispatch later. No client holds
+    /// this command, so the effect never happened and the answer says so - at once, not after the
+    /// five-minute budget.
+    #[test]
+    fn a_cancelled_call_withdraws_a_command_no_client_took() {
+        let bridge = Bridge::new();
+        let started = Instant::now();
+        let answer = bridge.call_while("status", json!({}), CALL_TIMEOUT_DEFAULT_MS, || true);
+        assert_eq!(answer["error"], json!("run_cancelled"));
+        assert_eq!(answer["effect"], json!("none"), "nothing was dispatched, so this is not an unknown effect");
+        assert!(started.elapsed() < Duration::from_secs(1), "the cancel is observed in its first slice");
+        assert_eq!(bridge.status()["queued"], json!(0), "the withdrawn command is not left for a later client");
+        assert!(bridge.take_command().is_none(), "a client polling after the cancel finds nothing");
+    }
+
+    /// A command a client had already taken is not ours to withdraw: the caller is told the effect is
+    /// unknown and keeps the id, which is how it collects a late result.
+    #[test]
+    fn a_cancelled_call_whose_command_a_client_took_reports_unknown() {
+        let bridge = Bridge::new();
+        assert!(bridge.enqueue("status", json!({}), 1_000).is_some());
+        let taken = bridge.take_command().expect("the client takes it");
+        let id = taken["id"].as_str().unwrap().to_string();
+        let mut inner = bridge.inner.lock().unwrap();
+        let answer = withdraw(&mut inner, &id);
+        assert_eq!(answer["error"], json!("run_cancelled"));
+        assert_eq!(answer["effect"], json!("unknown"));
+        assert_eq!(inner.waited.as_ref().map(|(waited, _, _)| waited.clone()), Some(id.clone()), "the client still holds it");
+        drop(inner);
+        bridge.deliver(id.clone(), json!({"screenshot": "late"}));
+        assert_eq!(bridge.result(&id)["result"]["screenshot"], json!("late"), "the id still collects the outcome");
+    }
 }
