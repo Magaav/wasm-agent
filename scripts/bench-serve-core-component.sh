@@ -10,6 +10,12 @@
 #
 # Prints one block per mode and a comparison. The stub model answers immediately, so a turn's number is
 # the node's own cost (interpreter + tools + transcript + streaming), not the model's.
+#
+# `AGENT_CORE_B=<other agent_core.wasm>` adds a third column, measured in the same round as the first
+# two: A and B are the same node, the same stub model and the same turns minutes apart, so a change to
+# the guest alone is measured without a machine that drifted in between. b = AGENT_CORE_B.
+# `B_ENV="NAME=VALUE ..."` is set in b's node only, so one node setting (a deadline, a pool size) can be
+# measured the same way without running the two nodes in different minutes.
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
@@ -23,8 +29,11 @@ done
 [ -n "$bin" ] || { echo "bench: no wa binary (set WA_BIN)" >&2; exit 2; }
 core="${AGENT_CORE:-$ROOT/rust/components/agent-core/target/wasm32-wasip2/release/agent_core.wasm}"
 [ -f "$core" ] || { echo "bench: no agent-core at $core (run bash scripts/build-agent-core.sh)" >&2; exit 2; }
+core_b="${AGENT_CORE_B:-}"
+[ -z "$core_b" ] || [ -f "$core_b" ] || { echo "bench: AGENT_CORE_B=$core_b does not exist" >&2; exit 2; }
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 bin="$(native "$bin")"; core="$(native "$core")"; root_native="$(native "$ROOT")"
+[ -z "$core_b" ] || core_b="$(native "$core_b")"
 work="$(mktemp -d "${TMPDIR:-/tmp}/wa-core-bench-XXXXXX")"
 pids=()
 cleanup() {
@@ -61,8 +70,8 @@ rss_mb() {
   fi
 }
 
-measure() { # measure <mode> <port>
-  local mode=$1 port=$2 home="$work/$1"
+measure() { # measure <mode> <port> [core]
+  local mode=$1 port=$2 wasm=${3:-$core} home="$work/$1"
   mkdir -p "$home/.wasm-agent"
   (
     while IFS= read -r variable; do
@@ -70,12 +79,19 @@ measure() { # measure <mode> <port>
     done < <(compgen -e)
     export WASM_AGENT_HOME="$(native "$home")" WASM_AGENT_LUA_ROOT="$root_native"
     export WASM_AGENT_LLM_BASE_URL="http://127.0.0.1:$mock_port" WASM_AGENT_LLM_API_KEY=test-only WASM_AGENT_LLM_MODEL=stub-model
-    export WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY=
-    exec "$bin" --db "$(native "$home/t.db")" serve --port "$port" --client-port "$((port + 1))" --ui "$root_native/ui" --core "$mode"
+    export WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_CORE=""
+    export WA_AGENT_CORE_WASM="$wasm"
+    # `b` is the same node as `component` with another guest (and, when `B_ENV` names some, other node
+    # settings); the mode flag it passes is `component`.
+    local flag="$mode"; [ "$flag" = b ] && flag=component
+    if [ "$mode" = b ] && [ -n "${B_ENV:-}" ]; then
+      for pair in $B_ENV; do export "$pair"; done
+    fi
+    exec "$bin" --db "$(native "$home/t.db")" serve --port "$port" --client-port "$((port + 1))" --ui "$root_native/ui" --core "$flag"
   ) > "$home/serve.log" 2>&1 &
   local pid=$!; pids+=("$pid")
   local code=""
-  for _ in $(seq 1 160); do
+  for _ in $(seq 1 320); do
     code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$port/health" 2>/dev/null)"
     [ "$code" = 200 ] && break
     sleep 0.25
@@ -105,9 +121,10 @@ measure() { # measure <mode> <port>
   # Let the node go quiet, then take the memory number and the pool's own counters.
   sleep 4
   local health; health="$(curl -s -m 10 "http://127.0.0.1:$port/health" 2>/dev/null)"
-  local served; served="$(printf '%s' "$health" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let h={};try{h=JSON.parse(s)}catch(e){}process.stdout.write(String((h.core||{}).mode||""))})' 2>/dev/null)"
-  if [ "$served" != "$mode" ]; then
-    echo "bench[$mode]: the node on port $port answered core.mode='$served' (not '$mode'); this round is not a measurement" >&2
+  local served expected; served="$(printf '%s' "$health" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let h={};try{h=JSON.parse(s)}catch(e){}process.stdout.write(String((h.core||{}).mode||""))})' 2>/dev/null)"
+  expected="$([ "$mode" = b ] && printf component || printf '%s' "$mode")"
+  if [ "$served" != "$expected" ]; then
+    echo "bench[$mode]: the node on port $port answered core.mode='$served' (not '$expected'); this round is not a measurement" >&2
     tail -3 "$home/serve.log" >&2
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     return 1
@@ -147,8 +164,8 @@ for round in $(seq 1 "$rounds"); do
   [ "$rounds" -gt 1 ] && echo "bench: round $round"
   measure native "$base" || exit 1
   measure component "$((base + 10))" || exit 1
-  printf '%s %s %s %s %s %s %s
-' "$round"     "$(cat "$work/native.turn.txt")" "$(cat "$work/component.turn.txt")"     "$(cat "$work/native.read.txt")" "$(cat "$work/component.read.txt")"     "$(cat "$work/native.rss.txt")" "$(cat "$work/component.rss.txt")" >> "$work/rounds.txt"
+  if [ -n "$core_b" ]; then measure b "$((base + 20))" "$core_b" || exit 1; fi
+  printf "%s %s %s %s %s %s %s %s %s %s\n" "$round" "$(cat "$work/native.turn.txt")" "$(cat "$work/component.turn.txt")" "$(cat "$work/native.read.txt")" "$(cat "$work/component.read.txt")" "$(cat "$work/native.rss.txt")" "$(cat "$work/component.rss.txt")" "$([ -f "$work/b.turn.txt" ] && cat "$work/b.turn.txt" || echo 0)" "$([ -f "$work/b.read.txt" ] && cat "$work/b.read.txt" || echo 0)" "$([ -f "$work/b.rss.txt" ] && cat "$work/b.rss.txt" || echo 0)" >> "$work/rounds.txt"
 done
 
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b+0>0) printf "%.2f", a/b; else print "?" }'; }
@@ -157,8 +174,13 @@ least() { awk -v column="$2" 'NR==1 || $column+0 < best+0 {best=$column; line=$0
 
 if [ "$rounds" -gt 1 ]; then
   echo
-  echo "per round: turn native/component, read native/component, rss native/component (ms, ms, MiB)"
-  awk '{print "  round", $1, "  turn", $2, "/", $3, "  read", $4, "/", $5, "  rss", $6, "/", $7}' "$work/rounds.txt"
+  if [ -n "$core_b" ]; then
+    echo "per round: turn native/component/b, read native/component/b, rss native/component/b (ms, ms, MiB)"
+    awk '{print "  round", $1, "  turn", $2, "/", $3, "/", $8, "  read", $4, "/", $5, "/", $9, "  rss", $6, "/", $7, "/", $10}' "$work/rounds.txt"
+  else
+    echo "per round: turn native/component, read native/component, rss native/component (ms, ms, MiB)"
+    awk '{print "  round", $1, "  turn", $2, "/", $3, "  read", $4, "/", $5, "  rss", $6, "/", $7}' "$work/rounds.txt"
+  fi
 fi
 # The ratio per round, then the median across rounds: the two modes run one after the other on a host
 # that is often an operator's desktop, so a pair from a quiet minute and a pair from a busy one are two
@@ -174,6 +196,14 @@ awk '{print $4}' "$work/rounds.txt" | median_of > "$work/native.read.median"
 awk '{print $5}' "$work/rounds.txt" | median_of > "$work/component.read.median"
 awk '{print $6}' "$work/rounds.txt" | median_of > "$work/native.rss.median"
 awk '{print $7}' "$work/rounds.txt" | median_of > "$work/component.rss.median"
+if [ -n "$core_b" ]; then
+  # The A/B pair is the two *component* numbers; native is the physical reference both are compared to.
+  awk '{print sprintf("%.2f", ($8+0)/(($3+0)>0?$3:1))}' "$work/rounds.txt" > "$work/b.turn.ratios"
+  awk '{print sprintf("%.2f", ($9+0)/(($5+0)>0?$5:1))}' "$work/rounds.txt" > "$work/b.read.ratios"
+  awk '{print $8}' "$work/rounds.txt" | median_of > "$work/b.turn.median"
+  awk '{print $9}' "$work/rounds.txt" | median_of > "$work/b.read.median"
+  awk '{print $10}' "$work/rounds.txt" | median_of > "$work/b.rss.median"
+fi
 
 nt="$(cat "$work/native.turn.median")"; ct="$(cat "$work/component.turn.median")"
 nr="$(cat "$work/native.read.median")"; cr="$(cat "$work/component.read.median")"
@@ -190,3 +220,9 @@ else
   echo "read   native ${nr}ms  component ${cr}ms   component/native $(ratio "$cr" "$nr")x  ($(delta "$cr" "$nr")ms per read)"
 fi
 echo "rss    native ${nm}MiB component ${cm}MiB   $(delta "$cm" "$nm")MiB"
+if [ -n "$core_b" ]; then
+  bt="$(cat "$work/b.turn.median")"; br="$(cat "$work/b.read.median")"; bm="$(cat "$work/b.rss.median")"
+  echo "a/b    turn $(cat "$work/b.turn.ratios" | paste -sd' ' -)  median $(cat "$work/b.turn.ratios" | median_ratio)x  (b ${bt}ms vs a ${ct}ms)"
+  echo "a/b    read $(cat "$work/b.read.ratios" | paste -sd' ' -)  median $(cat "$work/b.read.ratios" | median_ratio)x  (b ${br}ms vs a ${cr}ms)"
+  echo "a/b    rss  b ${bm}MiB vs a ${cm}MiB   $(delta "$bm" "$cm")MiB"
+fi

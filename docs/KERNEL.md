@@ -861,6 +861,53 @@ bound, not the TCP window; a 0.1 component is compiled twice at start; and `wa-w
 against a phone from this lane (no pairing, no messages — see
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md)).
 
+### A2.6 results — what a turn's crossings and the pool's deadline cost (07/11, pi deepseek on wasm_the_first)
+
+A2.4 measured the component core at 1.42x native for a turn and 1.28x for a read on this host, and left
+the split unexplained. This pass profiles one serving node and cuts what the profile pointed at. The
+measurement harnesses are in the tree, so the numbers below can be taken again on any node:
+
+| script | what it measures |
+| --- | --- |
+| `scripts/bench-core-profile.sh` | one serve turn's crossings, per `host.*` name, with bytes and handler time (`WA_CORE_CALL_PROFILE=1` in `core_component.rs`) |
+| `scripts/bench-core-bridge.sh` | the interpreter factor and one crossing's cost, native vs component, on identical fixtures |
+| `scripts/bench-core-epoch.sh` | what `Config::epoch_interruption` costs the guest, with nothing else different |
+
+**The profile (20 turns, 12 + 2 work items per turn).** A turn is one big `call` item of ~1080
+crossings plus a handful of small ones. Before this pass, the biggest item of a turn was: `read_file`
+250 crossings / 2.37 MB out, `sha256` 248 crossings / 2.58 MB in (the module boot: read the text, then
+send the same text back to be hashed), `getenv` 335, `sql_exec` 42, `sql_query` 50, `stream` 15,
+`http_stream` 1 (the 26 KB model request, the only JSON-table argument on the hot path), one
+`system_resources`. Table arguments are rare (JSON decode 0.3-3.8 ms per turn) and a crossing's own
+machinery is ~0.9 us, so **the crossings were not the cost: the copied bytes and the engine's
+compile-time configuration were**.
+
+**What was changed, each measured on its own** (medians; this host was shared with other builds, so
+every number below is quoted beside its A/B pair rather than across runs):
+
+| change | measured effect |
+| --- | --- |
+| guest built `-O3` + fat LTO + one codegen unit (`rust/components/agent-core/Cargo.toml`, `build.rs`: Lua's C at `-O3`) | pure-Lua loop 0.95x (5% faster); wasm 394 KB -> 393 KB |
+| the boot asks for text and digest in one typed crossing (`__source` / `__module` in `glue.c`, answered by `core_component.rs`) | per turn: crossings 1082 -> 877, bytes *into* the guest 2.68 MB -> 0.32 MB; the `dofile` fixture's per-op cost over native 24-41 us -> 21-27 us; the guest's RSS 200 -> 181 MiB |
+| pool engine chosen by the deadline: `run_deadline == ZERO` now takes `pooled_engine` (no epoch checks, no ticker) instead of `epoch_engine` | pure-Lua loop 1.28x -> 0.99x of the one-shot engine (that is, the epoch checks were the whole of it); serving node, deadline off vs default: turn 0.92x, read 0.81x |
+
+`wasm-opt` was not available offline on this host, so the binaryen step is **not** in the numbers above;
+`cargo build` with `-O3`/LTO is. Cranelift's `opt_level` was confirmed to be `Speed` already (wasmtime's
+default, set nowhere in this tree), so no change was made there.
+
+**The finding worth carrying forward.** `epoch_interruption(true)` is what gives a work item its
+deadline, and wasmtime pays for it by compiling a check into every function entry and loop back-edge.
+On a pure-Lua loop that check costs **1.28-1.38x the guest's own time** — more than running the
+interpreter in wasm costs at all (1.1-1.3x native on the same fixtures). `serve` configures the pool
+with `DEFAULT_RUN_DEADLINE` (60 s), so every turn pays it for a protection that fires on a wedged guest.
+It is now a knob a caller opts into: `WASM_AGENT_CORE_RUN_DEADLINE_MS=0` means no deadline and
+therefore no epoch checks. The default is unchanged — losing the deadline is a policy decision, not a
+benchmark result.
+
+**Not done, and why.** Typed WIT records for the three most frequent calls: those three (`getenv`,
+`__source`/`read_file`, `sha256`) already cross as `bytes`/integers, so a record would replace nothing.
+The JSON that remains on the hot path is `http_stream`'s model request, once per turn.
+
 ## Supervisor features, step 4 (implemented 06/11, wasm_the_first)
 
 The four lessons that were design in the list above are now code, with the two runtime gaps that
