@@ -385,6 +385,28 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_group_id_is_a_target_and_not_a_bad_chat() {
+        // The live finding (07/11): `whatsapp_search` returned a hit for an older group named
+        // `9999999999999-9999999999@g.us` and passing that same value to a send was refused as
+        // `bad_chat`. Everything this producer does with a chat before the queue is checked here: the
+        // exact-JID rule and the policy target (an audit keeps only its digest).
+        let chat = "9999999999999-9999999999@g.us";
+        let request = OutboxRequest { chat: chat.into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
+        let verified = request.validate().expect("a legacy group id is a chat");
+        assert_eq!(verified.chat.jid(), chat, "the id travels exactly as the hit spelled it");
+        assert!(verified.chat.is_group());
+        assert_eq!(target_of(&verified.chat.jid()), format!("chat:{chat}"));
+        // And the worker's own decision on the payload that request becomes: send to that id.
+        match outbox::decide(&request.encode(), 0, None) {
+            Decision::Send(verified) => assert_eq!(verified.chat.jid(), chat),
+            Decision::Refuse(refusal) => panic!("a legacy group id must be sendable: {}", refusal.code),
+        }
+        // A hyphen is still a group's: the same user part on a person's server stays a bad chat.
+        let bad = OutboxRequest { chat: "9999999999999-9999999999@s.whatsapp.net".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
+        assert_eq!(bad.validate().unwrap_err().error(), "whatsapp_send_bad_chat");
+    }
+
+    #[test]
     fn a_refusal_never_echoes_the_text() {
         // A tool answer is copied into a transcript, and a transcript is not where the queue's
         // payload lives. Every refusal this module can reach before the queue is checked here; the

@@ -221,9 +221,35 @@ fn a_policy_refusal_at_dispatch_is_reported_not_retried() {
 fn a_chat_that_needs_no_mapping_is_sent_to_directly() {
     // The component sends to the LID it was given (the library accepts a LID chat directly) and
     // never invents a phone number for it: a wrong mapping is a message to a stranger.
-    for jid in ["72103978127547@lid", "5511999999999@s.whatsapp.net", "120363000000000001@g.us"] {
+    for jid in [
+        "72103978127547@lid",
+        "5511999999999@s.whatsapp.net",
+        "120363000000000001@g.us",
+        // The legacy group id a `whatsapp_search` hit can return (07/11): `whatsapp_send` and every
+        // `whatsapp_read`/`media`/`reactions`/`download` that names it must accept it, or a hit the
+        // index just produced is a chat the agent cannot use.
+        "9999999999999-9999999999@g.us",
+    ] {
         let chat = Chat::parse(jid).expect(jid);
         assert_eq!(chat.jid(), jid);
     }
     assert!(Chat::parse("72103978127547@lid").unwrap().server == wa_whatsapp_outbox::Server::Lid);
+}
+
+#[test]
+fn a_send_to_a_legacy_group_id_reaches_the_client_with_the_id_it_named() {
+    // The whole path for the shape the live finding named: an exact legacy group JID goes through the
+    // queue and the client is handed back that same string, hyphen and all - never a rewritten id.
+    let (_kv, clock, queue) = queue_pair();
+    let chat = "9999999999999-9999999999@g.us";
+    let id = produce(&queue, &request(chat, "oi"));
+    let mut sent = Vec::new();
+    let (worked, message_id) = work_one(&queue, clock.now_ms(), |verified| {
+        assert!(verified.chat.is_group());
+        sent.push(verified.chat.jid());
+        Ok("3EB0FAKE0002".to_string())
+    });
+    assert_eq!((worked, message_id.as_deref()), (Some(id), Some("3EB0FAKE0002")));
+    assert_eq!(sent, vec![chat.to_string()]);
+    assert_eq!(queue.job(wa_queue::JobId(id)).unwrap().expect("job").state, JobState::Done);
 }

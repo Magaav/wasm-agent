@@ -114,12 +114,24 @@ mod tests {
     fn the_chat_the_request_names_is_the_chat_the_client_is_given() {
         // No mapping, in either direction: a LID is sent to as a LID (the library addresses it), and a
         // phone number is never substituted for it.
-        for jid in ["72103978127547@lid", "5511999999999@s.whatsapp.net", "120363000000000001@g.us"] {
+        //
+        // The last one is the legacy group id a `whatsapp_search` hit can return (07/11): the send path
+        // hands the client `request.chat.jid()` and the library parses it (`guest::send_outbox`), so a
+        // value the seam accepts but the library refuses would be a `bad_chat` one layer deeper.
+        for jid in [
+            "72103978127547@lid",
+            "5511999999999@s.whatsapp.net",
+            "120363000000000001@g.us",
+            "9999999999999-9999999999@g.us",
+        ] {
             let chat = Chat::parse(jid).expect(jid);
             assert_eq!(chat.jid(), jid);
             let parsed: whatsapp_rust::Jid = chat.jid().parse().expect("the library parses it");
             assert_eq!(parsed.to_string(), jid);
         }
+        // And the hyphen is still a group's: the same user part on a person's server is refused by the
+        // seam, so the library never sees it.
+        assert_eq!(Chat::parse("9999999999999-9999999999@s.whatsapp.net").unwrap_err().code, "bad_chat");
     }
 
     #[test]

@@ -151,6 +151,33 @@ fn a_backfill_takes_count_as_its_limit_and_needs_no_chat() {
 }
 
 #[test]
+fn a_legacy_group_id_from_a_search_hit_is_a_chat_every_question_accepts() {
+    // The live finding (07/11), at the producer: a search hit names an older group by
+    // `9999999999999-9999999999@g.us`, and passing that value to read/media/reactions/download was
+    // refused as `bad_chat`. Each question is asked here and must reach the queue naming it exactly.
+    let chat = "9999999999999-9999999999@g.us";
+    let (_host, queue) = queue("legacy-group");
+    for (op, args) in [
+        (seam::Op::Read, serde_json::json!({"chat": chat, "limit": 5})),
+        (seam::Op::Reactions, serde_json::json!({"chat": chat, "id": "3EB01"})),
+        (seam::Op::Media, serde_json::json!({"chat": chat, "id": "3EB01"})),
+        (seam::Op::Download, serde_json::json!({"chat": chat, "id": "3EB01"})),
+        (seam::Op::Search, serde_json::json!({"chat": chat})),
+        (seam::Op::Search, serde_json::json!({"from": chat, "q": "oi"})),
+        (seam::Op::Backfill, serde_json::json!({"chat": chat, "count": 10})),
+    ] {
+        let slow = ask_in(&queue, op, &args, 1);
+        assert_eq!(slow["error"], format!("{}_slow", op.tool()), "{} {args}", op.tool());
+        let id = slow["id"].as_u64().expect("the job id");
+        let job = queue.job(wa_queue::JobId(id)).unwrap().unwrap();
+        assert_eq!(job.queue, seam::QUEUE);
+        let verified = seam::Request::decode(&job.payload).unwrap().validate().unwrap();
+        let named = verified.chat.as_ref().or(verified.from.as_ref()).map(|chat| chat.jid());
+        assert_eq!(named.as_deref(), Some(chat), "{} {args}", op.tool());
+    }
+}
+
+#[test]
 fn a_bad_argument_is_refused_before_the_queue() {
     let (_host, queue) = queue("refusal");
     for (op, args, code) in [

@@ -12,7 +12,9 @@
 //! * [`Chat`] - the exact JID a request may name (phone number, LID, group) and why anything else is
 //!   refused. The specification is "exact JID", so a bare number, a `@broadcast`/`@newsletter`
 //!   address, a device-specific `user:12@…` or a server this library cannot send to is a refusal
-//!   with a stable code, never a guess.
+//!   with a stable code, never a guess. A group may also carry the legacy `<digits>-<digits>@g.us`
+//!   id (creator phone, hyphen, creation epoch): it is what an older group is really called, so it
+//!   is a chat a caller can name, not a malformed number.
 //! * [`Request`] - `{chat, text, reply_to?, mentions?}` as it travels in the job payload, plus the
 //!   dedupe key the job brief fixes: `sha256(chat|text|reply_to)`.
 //! * [`decide`] - what the worker does with a taken job: send these bytes, or refuse (this also
@@ -80,12 +82,14 @@ pub struct Chat {
 }
 
 impl Chat {
-    /// Parse an exact JID: `<digits>@s.whatsapp.net`, `<digits>@lid` or `<digits>@g.us`.
+    /// Parse an exact JID: `<digits>@s.whatsapp.net`, `<digits>@lid`, `<digits>@g.us`, or - for a
+    /// group only - the legacy `<digits>-<digits>@g.us` id (creator phone, hyphen, creation epoch).
     ///
     /// Refusals are per-shape and carry a stable code ([`Refusal::code`]) so the tool answer, the log
     /// line and the test can name the same thing: `bad_chat` for a bare number / empty / control
-    /// characters / a device suffix (`user:12@…`), `unsupported_chat` for a server this component
-    /// cannot send to.
+    /// characters / a device suffix (`user:12@…`) / any user part that is not a digit run (a letter,
+    /// two hyphens, an empty half, a hyphen on a person JID), `unsupported_chat` for a server this
+    /// component cannot send to.
     pub fn parse(text: &str) -> Result<Chat, Refusal> {
         let text = text.trim();
         if text.is_empty() {
@@ -112,10 +116,17 @@ impl Chat {
                 "chat JID names a device (user:device@…); a chat is device-less",
             ));
         }
-        if !user.chars().all(|c| c.is_ascii_digit()) {
-            return Err(Refusal::new("bad_chat", "chat JID user part is not numeric"));
+        // The user part's shape depends on the server: the hyphen belongs to a group id and nowhere
+        // else. Reading the server first is what lets `999…-999…@g.us` be a chat and
+        // `999…-999…@s.whatsapp.net` stay a refusal - a phone number has no hyphen in it.
+        let known = Server::parse(server);
+        if !user_shape_ok(user, known) {
+            return Err(Refusal::new(
+                "bad_chat",
+                "chat JID user part is not numeric (a legacy group id is <digits>-<digits> in a group only)",
+            ));
         }
-        let Some(server) = Server::parse(server) else {
+        let Some(server) = known else {
             return Err(Refusal::new(
                 "unsupported_chat",
                 "chat server is not sendable (accepted: s.whatsapp.net, lid, g.us)",
@@ -131,6 +142,31 @@ impl Chat {
 
     pub fn is_group(&self) -> bool {
         self.server == Server::Group
+    }
+}
+
+/// Is one non-empty run of ASCII digits?
+fn digit_run(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Is this user part a chat on the server it names?
+///
+/// A person (phone number or LID) is one digit run. A group is a digit run too - the modern
+/// `120363…` id - or the legacy `<creator phone>-<creation epoch>` form: **exactly one** hyphen
+/// between **two** digit runs, both non-empty. Nothing else is a user part: `1-2-3`, `-1`, `1-`,
+/// `1--2`, `12a-3` and a hyphen on a person JID are all refused, and an unknown server never buys
+/// the legacy form.
+fn user_shape_ok(user: &str, server: Option<Server>) -> bool {
+    if digit_run(user) {
+        return true;
+    }
+    if server != Some(Server::Group) {
+        return false;
+    }
+    match user.split_once('-') {
+        Some((creator, epoch)) => digit_run(creator) && digit_run(epoch),
+        None => false,
     }
 }
 
@@ -373,6 +409,55 @@ mod tests {
         assert_eq!(Chat::parse("5511999999999@c.us").unwrap().jid(), "5511999999999@s.whatsapp.net");
         // Surrounding whitespace is never part of a JID.
         assert_eq!(Chat::parse(" 5511999999999@lid ").unwrap().user, "5511999999999");
+    }
+
+    #[test]
+    fn a_legacy_group_id_is_a_chat_and_the_hyphen_belongs_to_a_group_only() {
+        // The live shape (07/11): a group that predates the `120363…` ids is named by its creator's
+        // phone number, a hyphen and the creation epoch. It is the chat's real name, so it is a chat.
+        let legacy = "9999999999999-9999999999@g.us";
+        let chat = Chat::parse(legacy).expect(legacy);
+        assert_eq!((chat.user.as_str(), chat.server), ("9999999999999-9999999999", Server::Group));
+        assert!(chat.is_group());
+        // Round trip: what `jid()` hands the client is what the caller (and the index hit) said.
+        assert_eq!(chat.jid(), legacy);
+        // A one-digit creator or epoch is still a digit run: the rule is shape, not length.
+        assert_eq!(Chat::parse("1-2@g.us").unwrap().jid(), "1-2@g.us");
+        // And a send to it validates, which is the whole point of the finding.
+        assert_eq!(req(legacy, "oi").validate().unwrap().chat.jid(), legacy);
+        // A legacy group is still a group for the mention rule: it cannot be mentioned.
+        let mut mentions = req("120363000000000001@g.us", "oi");
+        mentions.mentions = vec![legacy.into()];
+        assert_eq!(mentions.validate().unwrap_err().code, "bad_mention");
+    }
+
+    #[test]
+    fn the_legacy_hyphen_is_refused_everywhere_it_is_not_a_group_id() {
+        for text in [
+            // A person has no hyphen: the legacy form is a group id, not a number with punctuation.
+            "9999999999999-9999999999@s.whatsapp.net",
+            "9999999999999-9999999999@lid",
+            "9999999999999-9999999999@c.us",
+            // Exactly one hyphen between exactly two non-empty digit runs - nothing else.
+            "9999999999999-9999999999-9999999999@g.us",
+            "9999999999999--9999999999@g.us",
+            "-9999999999@g.us",
+            "9999999999999-@g.us",
+            "9999999999999-999a999999@g.us",
+            "a999999999999-9999999999@g.us",
+            "9999999999999 - 9999999999@g.us",
+            "9999999999999:12-9999999999@g.us",
+            // An unsendable server never buys the legacy user shape.
+            "9999999999999-9999999999@broadcast",
+        ] {
+            let refusal = Chat::parse(text).expect_err(text);
+            assert_eq!(refusal.code, "bad_chat", "{text:?}");
+            assert_eq!(refusal.error(), "whatsapp_send_bad_chat", "{text:?}");
+            assert_eq!(req(text, "oi").validate().unwrap_err().code, "bad_chat", "{text:?}");
+        }
+        // A legacy group whose user part is too long for the field is still refused as too long.
+        let too_long = format!("{}-{}@g.us", "9".repeat(32), "9".repeat(10));
+        assert_eq!(Chat::parse(&too_long).unwrap_err().code, "bad_chat");
     }
 
     #[test]
