@@ -1911,6 +1911,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "ureq",
+ "wa-email-index",
+ "wa-email-outbox",
  "wa-governance",
  "wa-grant-policy",
  "wa-host-support",
