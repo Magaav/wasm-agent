@@ -2636,6 +2636,221 @@ fn verify_peer_sync(
     ))
 }
 
+/// `WA_MESH=1`, or the operator's own `mesh.enabled` statement in `policy.json`: a peer call that
+/// carries a mesh envelope is admitted by the signed fleet roster and its grants, on **whichever
+/// carrier** it arrived by. The relay is transport only, so a relayed mesh call and a direct one get
+/// the same decision from the same function (`wa_mesh::admission`) and the same audit line.
+///
+/// Returns `None` when this is not a mesh call, or when this node has no *verified* roster: then the
+/// caller's own `/node/call` admission runs exactly as it does today, which is the whole point — a
+/// node that has not been bootstrapped keeps the operator pins of its binding.
+fn mesh_peer_call(lua: &Core, node_headers: &[(String, String)], body: &str) -> Option<Reply> {
+    if !wa_mesh::host_call::enabled() {
+        return None;
+    }
+    if !wa_mesh::admission::is_mesh(node_headers) {
+        return None;
+    }
+    let carrier = match wa_mesh::admission::carrier(node_headers) {
+        wa_mesh::admission::Transport::Relay => "relay",
+        wa_mesh::admission::Transport::Direct => "direct",
+    };
+    let pairs: Vec<serde_json::Value> = node_headers
+        .iter()
+        .map(|(name, value)| serde_json::json!([name, value]))
+        .collect();
+    let request = serde_json::json!({
+        "admit": { "headers": pairs, "body": body, "transport": carrier }
+    });
+    let decision = wa_mesh::host_call::dispatch(&request);
+    let string = |field: &str| {
+        decision
+            .get(field)
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let inner_headers = || -> Vec<(String, String)> {
+        decision
+            .get("inner_headers")
+            .and_then(|value| value.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let pair = entry.as_array()?;
+                        Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if decision.get("ok").and_then(|value| value.as_bool()) == Some(true) {
+        // The roster decided. The caller's own `/node/call` request is what runs, with the roster's
+        // admission in force, so `binding.authorize` consults that decision instead of the pins.
+        let headers = inner_headers();
+        let inner_body = string("inner_body");
+        mesh_admit_in_lua(lua, &decision);
+        let answer = match lua.call_string(
+            "wa_node_call",
+            &[
+                &inner_body,
+                &header_of(&headers, "x-wa-node"),
+                &header_of(&headers, "x-wa-pub"),
+                &header_of(&headers, "x-wa-ts"),
+                &header_of(&headers, "x-wa-sig"),
+            ],
+        ) {
+            Ok(answer) => answer,
+            Err(error) => {
+                lua.rollback();
+                error_body(&error)
+            }
+        };
+        mesh_clear_in_lua(lua);
+        if carrier == "relay" {
+            // The relay drops response headers, so a relayed answer carries its signature inside the
+            // body — the same signed message the direct path puts in `x-wa-sig`.
+            let caller = string("caller_node_id");
+            let reply = serde_json::json!({
+                "schema": 1u32,
+                "request_id": string("request_id"),
+                "from_node_id": caller,
+                "ok": true,
+                "status": 200u16,
+                "body": answer,
+                "verb": string("verb"),
+            })
+            .to_string();
+            let sealed = wa_mesh::host_call::dispatch(&serde_json::json!({
+                "seal": { "reply": reply, "caller": caller, "transport": "relay" }
+            }));
+            let sealed_body = sealed.get("body").and_then(|value| value.as_str()).unwrap_or_default();
+            return Some((200, "application/json", sealed_body.as_bytes().to_vec()));
+        }
+        return Some((200, "application/json", answer.into_bytes()));
+    }
+    match decision.get("error").and_then(|value| value.as_str()) {
+        Some("mesh_refused") => {
+            let payload = decision
+                .get("answer")
+                .and_then(|value| value.as_str())
+                .unwrap_or("{\"error\":\"mesh_denied\"}")
+                .to_string();
+            let status = decision.get("status").and_then(|value| value.as_u64()).unwrap_or(200) as u16;
+            Some((status, "application/json", payload.into_bytes()))
+        }
+        // No verified roster on this node: today's pins decide, with the caller's own request.
+        Some("mesh_legacy") => {
+            let headers = inner_headers();
+            let answer = match lua.call_string(
+                "wa_node_call",
+                &[
+                    &string("inner_body"),
+                    &header_of(&headers, "x-wa-node"),
+                    &header_of(&headers, "x-wa-pub"),
+                    &header_of(&headers, "x-wa-ts"),
+                    &header_of(&headers, "x-wa-sig"),
+                ],
+            ) {
+                Ok(answer) => answer,
+                Err(error) => {
+                    lua.rollback();
+                    error_body(&error)
+                }
+            };
+            Some((200, "application/json", answer.into_bytes()))
+        }
+        _ => None,
+    }
+}
+
+fn error_body(error: &str) -> String {
+    format!("{{\"error\":{}}}", json_escape(error))
+}
+
+/// Tell the interpreter which decision is executing, so the node's own admission (`binding.lua`)
+/// consults the roster instead of the operator pins. `binding.lua` may not be loaded yet on this
+/// interpreter; it is loaded on demand, once.
+fn mesh_admit_in_lua(lua: &Core, decision: &serde_json::Value) {
+    let admission = serde_json::json!({
+        "node_id": decision.get("caller_node_id").cloned().unwrap_or_default(),
+        "public_key": decision.get("caller_public_key").cloned().unwrap_or_default(),
+        "capability": decision.get("capability").cloned().unwrap_or_default(),
+        "request_id": decision.get("request_id").cloned().unwrap_or_default(),
+        "name": decision.get("caller_name").cloned().unwrap_or_default(),
+        "level": decision.get("caller_level").cloned().unwrap_or_default(),
+    })
+    .to_string();
+    if lua.call_string("wa_mesh_admit", &[&admission]).is_ok() {
+        return;
+    }
+    lua.rollback();
+    if lua.call_string("dofile", &["lua/core/binding.lua"]).is_err() {
+        lua.rollback();
+        eprintln!("[mesh] the roster decided, but binding.lua could not be loaded to carry the admission");
+        return;
+    }
+    if lua.call_string("wa_mesh_admit", &[&admission]).is_err() {
+        lua.rollback();
+        eprintln!("[mesh] the roster decided, but the admission could not be handed to binding.lua");
+    }
+}
+
+fn mesh_clear_in_lua(lua: &Core) {
+    if lua.call_string("wa_mesh_clear", &[&""]).is_err() {
+        lua.rollback();
+    }
+}
+
+/// The mesh listener's local hop: run a call the roster already admitted. The ticket is the proof, and
+/// it is single-use; a request without one is not answered at all.
+fn mesh_admitted(lua: &Core, node_headers: &[(String, String)], body: &str) -> Reply {
+    let ticket_id = header_of(node_headers, "x-wa-mesh-ticket");
+    let ticket = match wa_mesh::admission::tickets::take(&ticket_id) {
+        Some(ticket) => ticket,
+        None => return (403, "application/json", b"{\"error\":\"not_mesh_ticket\"}".to_vec()),
+    };
+    // The body must be the request the ticket was minted for.
+    let named = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("capability").and_then(|capability| capability.as_str()).map(str::to_string));
+    if named.as_deref() != Some(ticket.capability.as_str()) {
+        return (403, "application/json", b"{\"error\":\"not_mesh_ticket\"}".to_vec());
+    }
+    let admission = serde_json::json!({
+        "node_id": ticket.caller_node_id,
+        "public_key": ticket.caller_public_key,
+        "capability": ticket.capability,
+        "request_id": ticket.request_id,
+        "name": "",
+        "level": serde_json::Value::Null,
+    })
+    .to_string();
+    if lua.call_string("wa_mesh_admit", &[&admission]).is_err() {
+        lua.rollback();
+        let _ = lua.call_string("dofile", &["lua/core/binding.lua"]);
+        if lua.call_string("wa_mesh_admit", &[&admission]).is_err() {
+            lua.rollback();
+            return (503, "application/json", b"{\"error\":\"mesh_admission_unavailable\"}".to_vec());
+        }
+    }
+    let ts = header_of(node_headers, "x-wa-ts");
+    let signature = header_of(node_headers, "x-wa-sig");
+    let answer = match lua.call_string(
+        "wa_node_call",
+        &[body, &ticket.caller_node_id, &ticket.caller_public_key, &ts, &signature],
+    ) {
+        Ok(answer) => answer,
+        Err(error) => {
+            lua.rollback();
+            error_body(&error)
+        }
+    };
+    mesh_clear_in_lua(lua);
+    (200, "application/json", answer.into_bytes())
+}
+
 /// Process a request that arrived over the relay. Streaming routes are captured
 /// rather than written to a socket, so the peer gets the events and can replay
 /// them locally.
@@ -3194,12 +3409,25 @@ fn dispatch(
         "/sync/tick" if method == "POST" => (200, "application/json", call("wa_sync_tick", &[]).into_bytes()),
         "/sync" => (200, "application/json", call("wa_sync_status", &[]).into_bytes()),
         "/node/call" if method == "POST" => {
-            let from = header_of(node_headers, "x-wa-node");
-            let public_key = header_of(node_headers, "x-wa-pub");
-            let ts = header_of(node_headers, "x-wa-ts");
-            let signature = header_of(node_headers, "x-wa-sig");
-            (200, "application/json", call("wa_node_call", &[body, &from, &public_key, &ts, &signature]).into_bytes())
+            // `WA_MESH=1`, or this node's own `mesh.enabled`: a call that carries a mesh envelope is
+            // decided by the signed fleet roster and its grants, on every carrier. The relay is
+            // transport, so a relayed mesh call lands here and gets the same decision as a direct one.
+            // Without a verified roster this returns `None` and today's operator-pin admission runs
+            // unchanged — which is what keeps an existing operator working until it is bootstrapped.
+            if let Some(reply) = mesh_peer_call(lua, node_headers, body) {
+                reply
+            } else {
+                let from = header_of(node_headers, "x-wa-node");
+                let public_key = header_of(node_headers, "x-wa-pub");
+                let ts = header_of(node_headers, "x-wa-ts");
+                let signature = header_of(node_headers, "x-wa-sig");
+                (200, "application/json", call("wa_node_call", &[body, &from, &public_key, &ts, &signature]).into_bytes())
+            }
         }
+        // The mesh listener's local hop: a call the roster already admitted, with a one-shot ticket
+        // minted by that listener in this process. Never reachable from the network: a ticket cannot
+        // be guessed, is single-use, and expires in seconds (`wa_mesh::admission::tickets`).
+        "/node/admitted" if method == "POST" => mesh_admitted(lua, node_headers, body),
         "/model-configuration-preview" => (200, "application/json", call("wa_model_configuration_preview", &[session]).into_bytes()),
         "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()), // legacy alias
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),

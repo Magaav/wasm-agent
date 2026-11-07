@@ -71,6 +71,14 @@ pub struct MeshPolicy {
     /// is resolved against the config directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roster: Option<String>,
+    /// The operator's own statement that this node decides peer calls by the roster.
+    ///
+    /// `WA_MESH=1` is the process switch; this is the one a *running* node can be given, which is what
+    /// `wa fleet push-roster` writes (`rust/wa-mesh/src/fleet.rs`). It only ever takes effect together
+    /// with a `roster_key` that verifies a roster: an `enabled` node whose roster does not verify falls
+    /// back to today's admission, never to anything weaker.
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub grants: Vec<Grant>,
 }
@@ -81,6 +89,7 @@ impl Default for MeshPolicy {
             version: MESH_SCHEMA_VERSION,
             roster_key: String::new(),
             roster: None,
+            enabled: false,
             grants: Vec::new(),
         }
     }
@@ -113,6 +122,17 @@ impl MeshPolicy {
         let text = std::fs::read_to_string(path)
             .map_err(|error| PolicyError(format!("{}: {error}", path.display())))?;
         MeshPolicy::from_policy_text(&text)
+    }
+
+    /// The roster file this policy points at: `mesh.roster`, resolved against the config directory
+    /// when it is relative, else `None` and the caller's default applies.
+    pub fn roster_path(&self, config: &Path) -> Option<std::path::PathBuf> {
+        let configured = self.roster.as_deref()?.trim();
+        if configured.is_empty() {
+            return None;
+        }
+        let path = std::path::PathBuf::from(configured);
+        Some(if path.is_absolute() { path } else { config.join(path) })
     }
 
     pub fn validate(&self) -> Result<(), PolicyError> {
@@ -195,6 +215,8 @@ mod tests {
         assert!(!policy.has_grants());
         assert!(policy.roster_key.is_empty());
         assert_eq!(policy.version, MESH_SCHEMA_VERSION);
+        // Absent means off: a node that never had a roster pushed to it decides as it did before.
+        assert!(!policy.enabled);
     }
 
     #[test]
@@ -256,5 +278,24 @@ mod tests {
         assert!(policy.grant_for(&oracle, &laptop, "read_many").is_some());
         assert!(policy.grant_for(&oracle, &laptop, "control").is_none());
         assert!(policy.grant_for(&laptop, &laptop, "read").is_none());
+    }
+
+    #[test]
+    fn the_operator_can_enable_the_roster_in_the_policy_a_running_node_reads() {
+        let policy = MeshPolicy::from_policy_text(&format!(
+            r#"{{"version":1,"mesh":{{"version":1,"enabled":true,"roster_key":"{}","roster":"mesh-roster.json"}}}}"#,
+            "a".repeat(64)
+        ))
+        .unwrap();
+        assert!(policy.enabled);
+        assert_eq!(
+            policy.roster_path(Path::new("/home/x/.wasm-agent")).unwrap(),
+            std::path::PathBuf::from("/home/x/.wasm-agent/mesh-roster.json")
+        );
+        // A typo in `enabled` is a load error, not a silent off.
+        assert!(MeshPolicy::from_policy_text(
+            r#"{"version":1,"mesh":{"version":1,"enabled":"yes"}}"#
+        )
+        .is_err());
     }
 }

@@ -70,6 +70,61 @@ local function cas(old,new)
   local v=decode(host.binding_state('cas',json.encode({expected=old,state=new})))
   if not v or not v.ok then return nil,v and v.error or 'binding_state_write_failed' end;return v.state
 end
+
+-- ---- the fleet roster as this node's admission (docs/MESH.md §§5-6) ---------------------------
+--
+-- A node whose own `policy.json` carries a verified fleet roster (`mesh.roster_key` + the signed
+-- roster, with `mesh.enabled` or `WA_MESH=1`) decides a peer call by the roster's hierarchy and its
+-- grants, not by the operator pins its binding froze at bind time. The decision is the host's
+-- (`rust/wa-mesh/src/admission.rs`), because the same function admits a relayed call, a direct one
+-- and the node's own listener; what arrives here is that decision, for exactly one call.
+--
+-- The handshake is one-shot and lives in the interpreter's global table, because `dofile` re-executes
+-- a module in this tree: the host sets the admission immediately before it calls `wa_node_call`, the
+-- admission is read by `M.authorize`, stays *in force* while that one call executes (so the author
+-- attribution sees the same caller), and the host clears it when the call returns. It is not a
+-- permission: it records that this node's own signed roster already said yes to this caller for this
+-- capability. The minute bound is the backstop if a holder ever forgot to clear it.
+local MESH_ADMISSION='_WA_MESH_ADMISSION'
+
+local function mesh_pending()
+  local a=rawget(_G,MESH_ADMISSION)
+  if type(a)~='table' then return nil end
+  if not tonumber(a.at) or host.now()-(tonumber(a.at) or 0)>60 then rawset(_G,MESH_ADMISSION,nil);return nil end
+  return a
+end
+
+-- The pending admission when it names this caller and this key, marked in force for the call.
+local function mesh_take(id,key)
+  local a=mesh_pending();if not a then return nil end
+  if id~=nil and (a.node_id~=id or a.public_key~=key) then return nil end
+  a.in_force=true
+  return a
+end
+
+-- Set by the host, immediately before it runs one roster-authorized call (`serve.rs`, `M.tick`).
+function wa_mesh_admit(payload)
+  local ok,value=pcall(json.decode,payload or '')
+  if not ok or type(value)~='table' or type(value.node_id)~='string' or #value.node_id~=32
+      or type(value.public_key)~='string' or #value.public_key~=64 then
+    return json.encode({ok=false,error='mesh_admission_invalid'})
+  end
+  rawset(_G,MESH_ADMISSION,{node_id=value.node_id,public_key=value.public_key,
+    capability=tostring(value.capability or ''),request_id=tostring(value.request_id or ''),
+    name=tostring(value.name or ''),level=tonumber(value.level),at=host.now(),in_force=false})
+  return json.encode({ok=true})
+end
+
+function wa_mesh_clear()
+  rawset(_G,MESH_ADMISSION,nil)
+  return json.encode({ok=true})
+end
+
+-- Is a roster admission in force right now? (Read by a caller that wants to say *why* it admitted.)
+function M.mesh_in_force()
+  local a=mesh_pending()
+  return (a and a.in_force==true) and a or nil
+end
 local function failure(step,detail) return {ok=false,error=step,detail=detail} end
 local function url(service)
   if type(service)~='string' or #service>2048 or service:find('[%s?#]') then return nil,'binding_service_invalid' end
@@ -218,11 +273,35 @@ function M.status()
   return {ok=true,state=v.binding.state,active=active,registered=registered,attached=registered and own.relay_attached==true or false,lookup_error=lookup_error,local_role_preserved=true,phase=s.phase,attachment_note=note,pairing_expires_at=s.request.pairing_expires_at,network_role=s.network_role,node_id=s.request.node_id,code=s.request.code,expires_at=s.expires_at,lifetime=lifetime_of(s),consent=M.lifetime_label(s),transport=transport}
 end
 function M.profile(include_inactive)
-  local s,err=M.saved();if not s then return nil,err or 'not_bound' end
-  if not include_inactive and (not s.active or not s.consent or s.phase~='accepted' or s.expires_at<=host.now()) then return nil,'binding_inactive_or_expired' end
+  local s,err=M.saved()
+  local mesh=mesh_take(nil,nil)
+  if not s then
+    -- A roster-authorized call does not need this node's binding at all: the roster is the authority.
+    if mesh and mesh.in_force then
+      return {schema=1,operators={{node_id=mesh.node_id,public_key=mesh.public_key,mesh='roster'}},mesh_admission=true}
+    end
+    return nil,err or 'not_bound'
+  end
+  local active=s.active and s.consent and s.phase=='accepted' and s.expires_at>host.now()
+  if not include_inactive and not active and not (mesh and mesh.in_force) then return nil,'binding_inactive_or_expired' end
+  if mesh and mesh.in_force then
+    -- The caller the roster admitted, added to the operator list for the length of this one call:
+    -- `enrollment.author` attributes the work to whoever the roster said asked for it.
+    local copy={};for k,v in pairs(s) do copy[k]=v end
+    local operators={};for _,p in ipairs(s.operators or {}) do operators[#operators+1]=p end
+    operators[#operators+1]={node_id=mesh.node_id,public_key=mesh.public_key,mesh='roster'}
+    copy.operators=operators;copy.mesh_admission=true
+    return copy
+  end
   return s
 end
 function M.authorize(id,key)
+  -- The roster first: when the fleet said yes, the pins of a binding made before the fleet existed
+  -- are not the authority any more. This is the one place a relayed call is admitted.
+  local mesh=mesh_take(id,key)
+  if mesh then
+    return {node_id=id,public_key=key,role='master',name=(mesh.name~='' and mesh.name or id),level=mesh.level,mesh='roster',capability=mesh.capability}
+  end
   local s=M.profile();if not s then return nil end
   local pinned=false;for _,p in ipairs(s.operators) do if p.node_id==id and p.public_key==key then pinned=true end end
   if not pinned then return nil end
@@ -291,6 +370,138 @@ function M.set_role(role)
   local next={};for k,x in pairs(s) do next[k]=x end;next.network_role=role
   local result,why=cas(s,next);return result and {ok=true,role=role,node_id=s.request.node_id,local_role_preserved=true} or failure(why)
 end
+-- ---- the two calls a bound node answers differently from a turn -------------------------------
+--
+-- `/node/call` arrives here only when this node's transport is the relay (a bound node long-polls its
+-- service; `rust/wa-rendezvous/src/relay_client.rs` is the other owner). Two kinds of call mean
+-- something other than "run a capability as this node's peer":
+--
+--   * a **mesh envelope** (`x-wa-mesh: 1`), when this node has a verified roster: the roster's
+--     hierarchy and its grants decide, not the operator pins its binding froze at bind time. The
+--     relay is transport only, so this is the same decision a direct mesh call gets;
+--   * `capability == "roster"`: `wa fleet push-roster`, the call that installs the roster in the
+--     first place. It is deliberately not a mesh call: the pins must authorize the one call that
+--     brings the roster into being.
+
+-- The reply envelope `server.lua` sends, byte for byte: signed over the caller's own signature and
+-- the answer, so the relay (or anything on a plain-HTTP hop) cannot hand the caller a different result.
+local function signed_reply(signature, ts, out)
+  local i=identity()
+  local signed=decode(host.sign('reply|'..i.node_id..'|'..tostring(ts)..'|'..host.sha256(tostring(signature or '')..'\n'..out)))
+  return json.encode({reply=out,reply_sig=(signed and signed.signature) or ''})
+end
+
+local function lowered(headers)
+  local out={}
+  for k,value in pairs(headers or {}) do if type(k)=='string' then out[k:lower()]=tostring(value) end end
+  return out
+end
+
+local function inner_lowered(pairs_list)
+  local out={}
+  for _,pair in ipairs(pairs_list or {}) do
+    if type(pair)=='table' then out[tostring(pair[1]):lower()]=tostring(pair[2]) end
+  end
+  return out
+end
+
+-- Ask the host to seal a reply for a relayed answer: the relay drops response headers, so the
+-- signature travels inside the body. Identical signed message as the direct path.
+local function seal_relayed_reply(reply, caller)
+  if type(host.mesh_call)~='function' then return nil end
+  local ok,raw=pcall(host.mesh_call,json.encode({seal={reply=reply,caller=tostring(caller or ''),transport='relay'}}))
+  if not ok or type(raw)~='string' then return nil end
+  local v=decode(raw)
+  if not v or v.ok~=true then return nil end
+  return tostring(v.body or '')
+end
+
+-- A relayed call that carries a mesh envelope, decided by this node's own roster. Returns the body to
+-- send back to the relay, or nil when this is not a mesh call at all (today's path then applies).
+local function mesh_relayed_call(headers, body)
+  if tostring(headers['x-wa-mesh'] or '')~='1' then return nil end
+  if type(host.mesh_call)~='function' then return nil end
+  headers['x-wa-mesh-carrier']='relay'
+  local pairs_list={}
+  for name,value in pairs(headers) do pairs_list[#pairs_list+1]={name,tostring(value)} end
+  local ok,raw=pcall(host.mesh_call,json.encode({admit={headers=pairs_list,body=tostring(body or ''),transport='relay'}}))
+  if not ok or type(raw)~='string' then return nil end
+  local decoded=decode(raw)
+  if not decoded then return nil end
+  if decoded.ok then
+    local inner=inner_lowered(decoded.inner_headers)
+    -- The roster said yes: run the caller's own `/node/call` request with that decision in force.
+    wa_mesh_admit(json.encode({node_id=decoded.caller_node_id,public_key=decoded.caller_public_key,
+      name=decoded.caller_name,level=decoded.caller_level,capability=decoded.capability,request_id=decoded.request_id}))
+    local ran,answer=pcall(wa_node_call,decoded.inner_body or '',inner['x-wa-node'] or '',
+      inner['x-wa-pub'] or '',inner['x-wa-ts'] or '',inner['x-wa-sig'] or '')
+    wa_mesh_clear()
+    local out=ran and tostring(answer) or json.encode({error='internal_error'})
+    local i=identity()
+    local reply=json.encode({schema=1,request_id=tostring(decoded.request_id or ''),from_node_id=i.node_id,
+      ok=true,status=200,body=out,verb=tostring(decoded.verb or '')})
+    return seal_relayed_reply(reply, decoded.caller_node_id) or out
+  end
+  if decoded.error=='mesh_legacy' then
+    -- No verified roster on this node yet: today's pins decide, with the caller's own request.
+    local inner=inner_lowered(decoded.inner_headers)
+    return wa_node_call(decoded.inner_body or tostring(body or ''),inner['x-wa-node'] or '',
+      inner['x-wa-pub'] or '',inner['x-wa-ts'] or '',inner['x-wa-sig'] or '')
+  end
+  if decoded.error=='mesh_refused' then
+    -- Already the answer to send: a signed refusal for a relayed call, an allow-listed code otherwise.
+    return tostring(decoded.answer or '{"error":"mesh_denied"}')
+  end
+  return nil
+end
+
+-- `wa fleet push-roster`, answered over the relay by a node this node ALREADY accepts under today's
+-- binding. Everything is checked before a single file is written; the fleet private key never travels.
+local function roster_call(body, headers)
+  local ok,request=pcall(json.decode,body or '')
+  if not ok or type(request)~='table' then return json.encode({error='bad_request'}) end
+  local from=headers['x-wa-node'] or ''
+  local public_key=headers['x-wa-pub'] or ''
+  local stamp=math.floor(tonumber(headers['x-wa-ts']) or 0)
+  local signature=headers['x-wa-sig'] or ''
+  local function finish(value) return signed_reply(signature, stamp, json.encode(value)) end
+  if from=='' then return json.encode({error='bad_request'}) end
+  -- The caller's own signature over its body, exactly as every peer call proves it.
+  if not host.verify(public_key,'call|'..from..'|'..stamp..'|'..host.sha256(tostring(body or '')),signature) then
+    return json.encode({error='bad_signature'})
+  end
+  if math.abs(host.now()-stamp)>120 then return json.encode({error='stale_request'}) end
+  local me=identity()
+  if request.to_node_id~=me.node_id then return json.encode({error='wrong_target'}) end
+  -- "ALREADY an accepted operator of this node": the same admission every peer call gets while this
+  -- node has no roster, which reaches the registry so a revoked or expired binding refuses here too.
+  if not M.authorize(from,public_key) then return json.encode({error='unknown_caller'}) end
+  local seen=dofile('lua/core/enrollment.lua').seen_before(table.concat({from,'roster',tostring(stamp),tostring(signature)},'|'))
+  if seen then return json.encode({error='replayed_request'}) end
+  local args=type(request.args)=='table' and request.args or {}
+  if tostring(args.action or '')~='push' then return json.encode({error='roster_action_required'}) end
+  if type(args.roster)~='string' or args.roster=='' or type(args.roster_key)~='string' or args.roster_key=='' then
+    return finish({ok=false,error='roster_request_invalid'})
+  end
+  if type(host.mesh_call)~='function' then return finish({ok=false,error='mesh_disabled'}) end
+  -- Verify before writing: the roster against the key being pinned.
+  local ok_verify,verified=pcall(host.mesh_call,json.encode({verify_roster={text=args.roster,key=args.roster_key}}))
+  local v=ok_verify and decode(verified) or nil
+  if not v then return finish({ok=false,error='mesh_unavailable',detail='verify_roster'}) end
+  if v.ok~=true then
+    -- The host's own word: `roster_unverified:<why>` when the document does not verify, and the host's
+    -- error code when the check could not run at all. Never one masked as the other.
+    return finish({ok=false,error=tostring(v.error or 'roster_unverified'),detail=tostring(v.detail or '')})
+  end
+  local ok_install,installed=pcall(host.mesh_call,json.encode({install_roster={
+    config=paths.config(),roster=args.roster,roster_key=args.roster_key,
+    caller_node_id=from,caller_public_key=public_key,target_node_id=me.node_id,
+    replace_key_signature=args.replace_key_signature}}))
+  local result=ok_install and decode(installed) or nil
+  if not result then return finish({ok=false,error='roster_install_unavailable'}) end
+  return finish(result)
+end
+
 -- Runs only on the leased outbound runtime, never on the model or a scheduled job.
 function M.tick()
   local s,problem=M.saved();if not s then return failure(problem or 'not_bound') end
@@ -332,8 +543,16 @@ function M.tick()
   if response.request then
     local r=response.request;local body,status='{"error":"binding_route_not_granted"}',403
     if r.method=='POST' and r.path=='/node/call' then
-      local h={};for k,value in pairs(r.headers or {}) do if type(k)=='string' then h[k:lower()]=value end end
-      body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '');status=200
+      local h=lowered(r.headers)
+      status=200
+      -- A mesh envelope is admitted by this node's roster (when it has a verified one); a `roster`
+      -- call installs that roster and is admitted by today's operator pins. Everything else is a
+      -- peer capability call, exactly as before.
+      local mesh=mesh_relayed_call(h,r.body or '')
+      local asked=decode(r.body or '')
+      if mesh then body=mesh
+      elseif asked and asked.capability=='roster' then body=roster_call(r.body or '',h)
+      else body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '') end
     end
     local sent,e=http(s.service,'POST','/relay/respond','relay-respond',{node_id=s.request.node_id,id=r.id,status=status,body=body})
     if not sent then return failure('binding_response_submission_unknown',e) end

@@ -117,6 +117,32 @@ current local CLI merely because registration defaults to guest. Guest chat/sync
 forwarding remain disabled on the bound surface; no transcript replication or
 remote provider configuration is granted by binding.
 
+## The operator pins, the roster, and which one decides
+
+A binding freezes the **operator list** (`operators` in the accepted request) that the registry
+vouches for, and `binding.authorize` admits a peer only when it is in that list *and* the registry
+still says the binding is accepted. That is the whole of today's peer admission, and it is what makes
+a bound node refuse a node the operator did not name at bind time — including, until lately, the
+operator's own level-0 machine at a node that was bound from somewhere else (`nextcloud` pins
+`[openclaw, wasm_the_first]`, so `work` is refused there).
+
+A node whose own `policy.json` carries a **verified fleet roster** (`mesh.roster_key` + the signed
+roster, with `WA_MESH=1` or `mesh.enabled`) stops using the pins for that decision: the roster's
+hierarchy and its grants decide, on the direct path and on the relay path alike, and the target audits
+it. The pins are not deleted or rewritten — a node that has no verified roster keeps exactly the
+behaviour it had, and `binding.status` still reports the pins it bound with.
+
+Two properties this ordering is built to keep:
+
+- **No roster, no change.** Without a roster that verifies against the pinned key, admission is the
+  pins, byte for byte. That is why an un-bootstrapped node can be handed a mesh envelope and still
+  answer `unknown_caller`.
+- **The binder still owns the door.** Installing a roster is `wa fleet push-roster <node>`
+  ([MESH.md](MESH.md) §7), and the target accepts that install only from a node that is *already* one
+  of its pinned operators, under the binding it accepted. The fleet cannot be pushed onto a node by a
+  stranger, and a node that pins a different fleet key refuses the push rather than being re-anchored
+  silently.
+
 ## Caller-side refusal reporting
 
 A peer refuses an unauthenticated call (`unknown_caller`, `forbidden_role`, `bad_signature`,

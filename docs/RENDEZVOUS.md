@@ -204,6 +204,16 @@ Design points that matter:
 - **Buffered streaming.** `/node/chat` is captured as an SSE body and replayed
   by the caller, so a relayed turn looks the same in the UI as a direct one.
 
+- **The relay is transport only, and it now carries a mesh call too.** Most nodes have no public
+  address, so the direct path of [MESH.md](MESH.md) cannot reach them. A node that belongs to a fleet
+  (a verified roster, `docs/MESH.md` §5.1) sends its **mesh envelope** to `POST /relay/send` with
+  `path: "/node/call"` and the `x-wa-mesh*` headers; the relay forwards bytes it cannot read and the
+  **target** decides with its own roster — the same signature, body hash, `to_node_id`, freshness and
+  replay window as a direct mesh call, and the same audit line with `transport=relay`. The relay's
+  own rules (`bindings::permits`, role `master`) only say who may use the transport at all; they are
+  not, and never were, the fleet's rule about who may command whom. A relayed answer carries the
+  target's signature inside its body, because the relay returns a status and a body and no headers.
+
 Verified with a node that advertises **no endpoints at all** (NAT simulation):
 `bash`/`read` calls, a full chat turn (`relayed-chat-ok`) and a journal sync all
 succeeded through `https://rendezvous.colmeio.com`, with the queue draining to

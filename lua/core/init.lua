@@ -276,6 +276,12 @@ elseif command == "network" then
   local result = args[2] == "forget" and nodes.network_forget(args[3]) or nodes.network_role(args[3], args[4])
   print(json.encode(result))
   if result.error then os.exit(1) end
+elseif command == "fleet" then
+  -- The fleet bootstrap (docs/MESH.md section 7): install this fleet's roster on a node that already
+  -- accepts this one as an operator, then verify it with a mesh call. The body lives in its own module
+  -- so the CLI stays a dispatch table; the fleet key never travels.
+  local result = dofile("lua/core/fleet.lua").run(args[2], table.concat(args, ' ', 3))
+  if result.error or result.ok == false then os.exit(1) end
 elseif command == "access" then
   local access = dofile("lua/core/enrollment.lua")
   print(json.encode(args[2] == "log" and access.events() or access.status()))
@@ -303,6 +309,7 @@ elseif command == "help" then
   print('    promote <node> | demote <node> | revoke <node>  confirmed network controls')
   print("    network role <node-id> master|guest  administrator-controlled network role")
   print("    network forget <node-id>  administrator: remove a stale registration from the rendezvous")
+  print("    fleet push-roster <node> [--replace-key <hex>]  install this fleet's roster on a node that already accepts this one, then verify it with a mesh call")
   print("    access [log]  managed-access status or recent local audit events (no model)")
   print("    update [--check] | --update  update this node (tree: Sentinel deploy; release: verified bundle)")
 else

@@ -1,28 +1,34 @@
 //! The direct transport, listener side: `/mesh/health` and `/mesh/call`.
 //!
-//! The listener does the same three checks the caller made — who is this, may they, and is this
-//! really for me — and it does them against *its own* roster and `policy.json`, never against the
-//! caller's claim. Only then does it hand the call to the [`Handler`], which is the node's business:
-//! this crate knows how to authorize a call, not how to run a capability.
+//! The listener does the same checks the caller made — and the same checks the relay-delivered route
+//! makes — because both go through [`crate::admission`]: who is this, may they, and is this really for
+//! me, against *this* node's roster and `policy.json`, never against the caller's claim. Only then does
+//! it hand the call to the [`Handler`], which is the node's business: this crate knows how to authorize
+//! a call, not how to run a capability.
 //!
 //! Refusals before authentication are unsigned (they cannot be signed: a reply signature binds an
 //! answer to a verified request) and carry one allow-listed code. Once the caller is authenticated,
 //! every answer is signed, including a denial — a denial from the target is a decision, and the
 //! caller should be able to tell it apart from something the network said.
-use crate::audit::{Event, Sink};
-use crate::hierarchy::{authorize, Verb};
+//!
+//! The roster and the policy are read per call from the configured [`Source`], so a roster installed
+//! by `wa fleet push-roster` is in force on the next call and not on the next restart. The snapshot
+//! constructor (`ServerConfig::new`) still takes one roster and one policy, which is what every test
+//! and the first deployment use.
+use crate::admission::{self, Admission, Admitter, Inbound};
+use crate::audit::Sink;
+use crate::hierarchy::Verb;
 use crate::http;
-use crate::identity::{verify, Identity};
+use crate::identity::Identity;
 use crate::policy::MeshPolicy;
 use crate::roster::{Roster, RosterNode};
-use crate::wire::{self, MeshCall, MeshReply};
+use crate::wire::{self, MeshReply};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// What a capability call looks like once it is authenticated and authorized.
 #[derive(Debug, Clone)]
@@ -62,8 +68,7 @@ pub struct ServerConfig {
     /// `host:port`; `127.0.0.1:0` binds an ephemeral port (the tests use it).
     pub bind: String,
     pub identity: Identity,
-    pub roster: Roster,
-    pub policy: MeshPolicy,
+    pub source: Arc<dyn admission::Source>,
     pub handler: Arc<dyn Handler>,
     pub audit: Arc<dyn Sink>,
     pub max_body: usize,
@@ -72,12 +77,23 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    /// A listener over one roster and one policy — the snapshot every test uses.
     pub fn new(bind: impl Into<String>, identity: Identity, roster: Roster, policy: MeshPolicy, handler: Arc<dyn Handler>, audit: Arc<dyn Sink>) -> ServerConfig {
+        ServerConfig::with_source(
+            bind,
+            identity,
+            Arc::new(admission::FixedSource { roster, policy }),
+            handler,
+            audit,
+        )
+    }
+
+    /// The same listener over a source asked per call (the node's own files, so a pushed roster lands).
+    pub fn with_source(bind: impl Into<String>, identity: Identity, source: Arc<dyn admission::Source>, handler: Arc<dyn Handler>, audit: Arc<dyn Sink>) -> ServerConfig {
         ServerConfig {
             bind: bind.into(),
             identity,
-            roster,
-            policy,
+            source,
             handler,
             audit,
             max_body: http::MAX_BODY,
@@ -88,13 +104,8 @@ impl ServerConfig {
 }
 
 struct State {
-    identity: Identity,
-    roster: Roster,
-    policy: MeshPolicy,
+    admitter: Admitter,
     handler: Arc<dyn Handler>,
-    audit: Arc<dyn Sink>,
-    roster_status: Result<(), String>,
-    seen: Mutex<HashMap<String, u64>>,
     max_body: usize,
     io_timeout: Duration,
     connections: AtomicUsize,
@@ -112,18 +123,9 @@ impl Server {
         let listener = TcpListener::bind(config.bind.as_str())
             .map_err(|error| format!("bind {} failed: {error}", config.bind))?;
         let addr = listener.local_addr().map_err(|error| error.to_string())?;
-        let roster_status = config
-            .roster
-            .verify(&config.policy.roster_key, wire::now_seconds())
-            .map_err(|error| error.0);
         let state = Arc::new(State {
-            identity: config.identity,
-            roster: config.roster,
-            policy: config.policy,
+            admitter: Admitter::new(config.source, config.identity, config.audit),
             handler: config.handler,
-            audit: config.audit,
-            roster_status,
-            seen: Mutex::new(HashMap::new()),
             max_body: config.max_body,
             io_timeout: config.io_timeout,
             connections: AtomicUsize::new(0),
@@ -211,172 +213,80 @@ fn route(state: &Arc<State>, request: &http::Request) -> (u16, Vec<(String, Stri
 }
 
 fn health(state: &Arc<State>) -> Value {
-    let me = state.roster.node(&state.identity.node_id);
+    let identity = state.admitter.identity();
+    let (in_force, status) = state.admitter.status();
+    let snapshot = state.admitter.snapshot();
+    let (roster, policy) = match &snapshot {
+        Ok((roster, policy)) => (Some(roster.clone()), Some(policy.clone())),
+        Err(_) => (None, None),
+    };
+    let me = roster
+        .as_ref()
+        .and_then(|roster| roster.node(&identity.node_id))
+        .cloned();
     json!({
         "mesh": wire::SCHEMA,
-        "node_id": state.identity.node_id,
-        "public_key": state.identity.public_key,
-        "name": me.map(|node| node.name.clone()).unwrap_or_default(),
-        "level": me.map(|node| node.level),
-        "fleet": state.roster.fleet,
-        "roster_fingerprint": state.roster.fingerprint(),
-        "roster_verified": state.roster_status.is_ok(),
-        "roster_status": match &state.roster_status { Ok(()) => "verified".to_string(), Err(error) => error.clone() },
-        "grants": state.policy.grants.len(),
+        "node_id": identity.node_id,
+        "public_key": identity.public_key,
+        "name": me.as_ref().map(|node| node.name.clone()).unwrap_or_default(),
+        "level": me.as_ref().map(|node| node.level),
+        "fleet": roster.as_ref().map(|roster| roster.fleet.clone()).unwrap_or_default(),
+        "roster_fingerprint": roster.as_ref().map(|roster| roster.fingerprint()).unwrap_or_default(),
+        "roster_verified": status == "verified",
+        "roster_status": status,
+        "in_force": in_force,
+        "grants": policy.as_ref().map(|policy| policy.grants.len()).unwrap_or(0),
         "unsigned": "this answer names a node, it does not authenticate one",
     })
 }
 
-fn unsigned(status: u16, code: &str) -> (u16, Vec<(String, String)>, String) {
-    (status, Vec::new(), json!({"error": code}).to_string())
-}
-
 fn call(state: &Arc<State>, request: &http::Request) -> (u16, Vec<(String, String)>, String) {
-    let now_s = wire::now_seconds();
-    let started = Instant::now();
-    if let Err(reason) = &state.roster_status {
-        return (503, Vec::new(), json!({"error": "roster_unverified", "reason": reason}).to_string());
+    // A listener with no verified roster refuses every call rather than trusting the caller's copy of
+    // it — the same answer this node gave before the relay could carry a mesh call.
+    // The listener exists only because somebody mounted it (`WA_MESH=1` + a port, or the tests), so it
+    // does not re-ask whether the *process* is enabled — only whether the roster it holds verifies.
+    let (_, status) = state.admitter.status();
+    if status != "verified" {
+        return (503, Vec::new(), json!({"error": "roster_unverified", "reason": status}).to_string());
     }
-    if request.header("x-wa-mesh") != Some("1") {
-        return unsigned(400, "not_mesh");
+    if !admission::is_mesh(&request.headers) {
+        return (400, Vec::new(), json!({"error": "not_mesh"}).to_string());
     }
-    let body = request.body_text();
-    let call = match MeshCall::parse(&body) {
-        Ok(call) => call,
-        Err(_) => return unsigned(400, "bad_request"),
-    };
-    let header_node = request.header("x-wa-node").unwrap_or_default();
-    let header_key = request.header("x-wa-pub").unwrap_or_default();
-    if header_node != call.from_node_id {
-        return unsigned(400, "bad_request");
-    }
-    let Some(caller) = state.roster.node(&call.from_node_id).cloned() else {
-        return unsigned(403, "unknown_caller");
-    };
-    if header_key != caller.public_key {
-        return unsigned(401, "bad_signature");
-    }
-    let ts = match request.header("x-wa-ts").and_then(|value| value.parse::<u64>().ok()) {
-        Some(ts) => ts,
-        None => return unsigned(400, "bad_request"),
-    };
-    let signature = request.header("x-wa-sig").unwrap_or_default();
-    if !verify(
-        &caller.public_key,
-        &MeshCall::call_message(&call.from_node_id, ts, &body),
-        signature,
-    ) {
-        return unsigned(401, "bad_signature");
-    }
-    if !wire::is_fresh(ts, now_s) {
-        return unsigned(408, "stale_request");
-    }
-    if is_replayed(state, &caller.node_id, ts, signature, now_s) {
-        return unsigned(409, "replayed_request");
-    }
-    if call.to_node_id != state.identity.node_id {
-        return unsigned(403, "wrong_target");
-    }
-    let Some(target) = state.roster.node(&state.identity.node_id).cloned() else {
-        return unsigned(503, "handler_unavailable");
-    };
-    let verb = Verb::from_capability(&call.capability);
-    let verdict = authorize(&state.policy, &caller, &target, verb, now_s);
-    let refuse = |code: &str, reason: &str, detail: &str| -> (u16, Vec<(String, String)>, String) {
-        let reply = MeshReply {
-            schema: wire::SCHEMA,
-            request_id: call.request_id.clone(),
-            from_node_id: target.node_id.clone(),
-            ok: false,
-            status: None,
-            body: None,
-            error: Some(code.to_string()),
-            reason: Some(reason.to_string()),
-            detail: Some(detail.to_string()),
-            verb: Some(verb.as_str().to_string()),
-        };
-        signed_reply(&state.identity, &target.node_id, &caller.node_id, &reply)
-    };
-    if !verdict.is_allow() {
-        Event::new("recv", &caller.node_id, &target.node_id)
-            .levels(Some(caller.level), Some(target.level))
-            .verb(verb.as_str())
-            .verdict("deny", verdict.reason)
-            .outcome(false, Some(403), started.elapsed().as_millis() as u64, 1)
-            .emit(state.audit.as_ref());
-        return refuse("mesh_denied", verdict.reason, &verdict.detail);
-    }
-    let inner = crate::client::Inner { body: call.inner_body.clone(), headers: call.inner_headers.clone() };
-    let request = Call {
-        from: caller.clone(),
-        to: target.clone(),
-        verb,
-        capability: call.capability.clone(),
-        args: call.args.clone(),
-        request_id: call.request_id.clone(),
-        inner,
-    };
-    let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.handler.handle(&request)
-    }));
-    let reply = match handled {
-        Ok(reply) => reply,
-        Err(_) => {
-            Event::new("recv", &caller.node_id, &target.node_id)
-                .levels(Some(caller.level), Some(target.level))
-                .verb(verb.as_str())
-                .verdict("deny", "handler_failed")
-                .outcome(false, Some(500), started.elapsed().as_millis() as u64, 1)
-                .emit(state.audit.as_ref());
-            return unsigned(500, "internal_error");
+    match state.admitter.decide(&Inbound::direct(request.headers.clone(), request.body_text())) {
+        Admission::Allow(allowed) => {
+            let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.handler.handle(&allowed.call)
+            }));
+            let reply = match handled {
+                Ok(reply) => reply,
+                Err(_) => {
+                    allowed.failed("handler_failed");
+                    return (500, Vec::new(), json!({"error": "internal_error"}).to_string());
+                }
+            };
+            allowed.finish(&reply);
+            let mesh_reply = MeshReply {
+                schema: wire::SCHEMA,
+                request_id: allowed.call.request_id.clone(),
+                from_node_id: allowed.call.to.node_id.clone(),
+                ok: true,
+                status: Some(reply.status),
+                body: Some(reply.body),
+                error: None,
+                reason: None,
+                detail: None,
+                verb: Some(allowed.verb.as_str().to_string()),
+            };
+            admission::seal_reply(
+                state.admitter.identity(),
+                &allowed.call.to.node_id,
+                &allowed.call.from.node_id,
+                &mesh_reply,
+            )
         }
-    };
-    Event::new("recv", &caller.node_id, &target.node_id)
-        .levels(Some(caller.level), Some(target.level))
-        .verb(verb.as_str())
-        .verdict("allow", verdict.reason)
-        .outcome(reply.status == 200, Some(reply.status), started.elapsed().as_millis() as u64, 1)
-        .emit(state.audit.as_ref());
-    let mesh_reply = MeshReply {
-        schema: wire::SCHEMA,
-        request_id: call.request_id,
-        from_node_id: target.node_id.clone(),
-        ok: true,
-        status: Some(reply.status),
-        body: Some(reply.body),
-        error: None,
-        reason: None,
-        detail: None,
-        verb: Some(verb.as_str().to_string()),
-    };
-    signed_reply(&state.identity, &target.node_id, &caller.node_id, &mesh_reply)
-}
-
-fn signed_reply(
-    identity: &Identity,
-    target_node_id: &str,
-    caller_node_id: &str,
-    reply: &MeshReply,
-) -> (u16, Vec<(String, String)>, String) {
-    let body = reply.encode();
-    let ts = wire::now_seconds();
-    let signature = identity.sign(&MeshReply::reply_message(target_node_id, caller_node_id, ts, &body));
-    (
-        200,
-        vec![("x-wa-ts".to_string(), ts.to_string()), ("x-wa-sig".to_string(), signature)],
-        body,
-    )
-}
-
-/// Record a request only after every other check passed, so a forgery cannot burn a real request's
-/// id. The window is twice the freshness window, so a request cannot be replayed at its own edge.
-fn is_replayed(state: &Arc<State>, from: &str, ts: u64, signature: &str, now_s: u64) -> bool {
-    let key = format!("{from}|{ts}|{signature}");
-    let Ok(mut seen) = state.seen.lock() else { return true };
-    seen.retain(|_, at| now_s.saturating_sub(*at) < wire::REPLAY_WINDOW_SECONDS);
-    if seen.contains_key(&key) {
-        return true;
+        Admission::Refuse { status, headers, body } => (status, headers, body),
+        Admission::Legacy { why, .. } => {
+            (503, Vec::new(), json!({"error": "roster_unverified", "reason": why}).to_string())
+        }
     }
-    seen.insert(key, now_s);
-    false
 }

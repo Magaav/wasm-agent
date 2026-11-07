@@ -1,8 +1,9 @@
 # Mesh: direct node-to-node calls by hierarchy
 
 Peers call each other **directly**. The rendezvous is a directory, not a wire: it tells a node where
-another node is, and after that the call goes node to node. The relay stays as the fallback for a
-peer that cannot be reached directly, exactly as it is today.
+another node is, and after that the call goes node to node. Most nodes have no public address, though,
+so the **relay stays** — and it carries the *same signed mesh call*, so the roster decides on that
+path too. The relay is transport: it moves bytes it cannot read and decides nothing.
 
 Hierarchy decides who may call whom:
 
@@ -13,8 +14,10 @@ Level 0 is the top of the fleet. The laptop node is level 0 and controls `wasm_t
 with no grant at all; `wasm_the_first` may not control the laptop unless the operator writes a grant
 that says so.
 
-Status: library built and tested (`rust/wa-mesh`, see [What is implemented](#what-is-implemented)),
-wired behind `WA_MESH=1`. Code: `rust/wa-mesh/src/*.rs`. Related: [FABRIC.md](FABRIC.md) (layers and
+Status: built and tested (`rust/wa-mesh`, see [What is implemented](#what-is-implemented)): on the
+direct path **and** on the relay path the target decides with the same signed roster, and a node that
+has no roster yet keeps today's operator pins until an operator installs one
+([§7](#7-bootstrapping-an-existing-operator-wa-fleet-push-roster)). Code: `rust/wa-mesh/src/*.rs`. Related: [FABRIC.md](FABRIC.md) (layers and
 transport direction), [RENDEZVOUS.md](RENDEZVOUS.md) (the directory and the relay),
 [GRANT-POLICY.md](GRANT-POLICY.md) (the file whose `mesh` section holds the grants), [BINDING.md](BINDING.md)
 (what a guest is).
@@ -162,10 +165,14 @@ For one call, in order:
 3. **Hole punch — not implemented.** The seam exists and nothing more: there is no STUN, no ICE, no
    datagram probe. A NAT-to-NAT pair that cannot be reached directly takes step 4 today. It is a step
    in the design so a caller's report names where it stopped, not a capability claim.
-4. **The relay, as today.** `host.mesh_call` answers `mesh_unreachable` (never a denial) and the
-   caller's existing path — direct endpoint, then relay — takes over. A refusal is **not** a reason
-   to fall back: a hierarchy or grant denial would otherwise be laundered through the relay, which
-   enforces the old rules and would allow it.
+4. **The relay, with the same signed call.** With no address (or no address that answered) the mesh
+   sends the **same envelope** to the relay (`POST /relay/send`), which hands it to the target. The
+   target decides with its own roster exactly as on the direct path
+   ([§5.1](#51-the-relay-is-transport-not-a-second-authority)), and the answer comes back signed. A
+   refusal is **never** a reason to try another carrier: a hierarchy or grant denial would otherwise
+   be laundered through a path that used to have weaker rules. Only when the mesh has no relay to
+   reach either (`mesh_relay_failed`) does the caller stop; nothing is sent twice, because a second
+   carrier could run a capability twice.
 
 Each attempt is bounded (connect 3 s, whole call 60 s by default, `timeout_seconds` in the call),
 audited as one line, and the address that worked is remembered so the next call starts there.
@@ -237,6 +244,45 @@ content-type: application/json
   executes anything, and a target without its own roster refuses every call rather than trusting the
   caller's copy.
 
+### 5.1 The relay is transport, not a second authority
+
+A relayed mesh call is the *same bytes* as a direct one:
+
+```
+POST /node/call                       (the relay's own route allow-list)
+x-wa-mesh: 1
+x-wa-mesh-carrier: relay              (the relay drops response headers: the answer is sealed in the body)
+x-wa-node / x-wa-pub / x-wa-ts / x-wa-sig   (the mesh-call-v1 signature)
+{...the envelope of §5, with the caller's own /node/call request inside...}
+```
+
+The target runs the *same* function over it (`rust/wa-mesh/src/admission.rs`): the mesh signature,
+the body hash, `to_node_id`, the freshness window and the replay window are checked before anything
+else, then the hierarchy and the grants decide, and the audit line says `transport=relay`. There is no
+second set of rules for the relay, and the relay cannot read the envelope's meaning:
+
+* it cannot redirect a call (`to_node_id` is inside the signed body, and the target refuses
+  `wrong_target`),
+* it cannot alter a call (`bad_signature`: the hash of the body is inside the signature),
+* it cannot answer for the target (the reply is signed by the target's roster key; on the relay the
+  signature travels *inside* the body as a `RelayAnswer`, because the relay hands back a status and a
+  body and no headers — the signed message is the direct path's, unchanged),
+* it cannot replay a call (the target's replay window is per process and shared by every path, so the
+  same bytes spent on the direct listener are refused when they arrive by relay and vice versa).
+
+**What the target's status is, before and after the bootstrap.** A node without a *verified* roster
+cannot be decided by one, so the envelope is handed back to today's admission: the caller's own
+`/node/call` request runs under the operator-pin check of its binding (`binding.lua`
+`binding.authorize`), which is byte-for-byte the rule that was there before, and an operator who is
+not in those pins is refused `unknown_caller`. That is the state of every node that was bound before
+the mesh existed, and it is why §7 exists.
+
+**Why a running node can be enabled without a restart.** `WA_MESH=1` is a process switch and the
+environment of a live process cannot be changed, so the operator's own `policy.json` carries the same
+statement: `"mesh": {"enabled": true, …}` ([`MeshPolicy::enabled`]). A node is deciding by the roster
+when the flag **or** that field is set, *and* the pinned key verifies the roster file. If the roster
+does not verify, the node falls back to the pins — never to something weaker.
+
 ## 6. Audit lines
 
 Every attempt writes one line, on stderr and (when the host supplies a sink) to
@@ -253,7 +299,57 @@ mesh recv from=8c11f0a2 to=local verb=read decision=allow reason=grant_allowed o
 (`unreachable`, `bad_signature`, `stale_request`, `replayed_request`, `wrong_target`,
 `roster_unverified`, `handler_unavailable`). A denial is audited even when it costs no network call.
 
-## 7. What is implemented
+## 7. Bootstrapping an existing operator: `wa fleet push-roster`
+
+A node that was bound before the mesh existed pins the operator list it was bound with, and no mesh
+call can change that from the outside. The fleet is therefore installed **on** it, by a node it
+already accepts:
+
+```
+wa fleet push-roster nextcloud
+wa fleet push-roster nextcloud --replace-key <hex>     # re-anchor a node that pins another key
+```
+
+The caller must already be one of the target's operators *under today's binding* — the push is an
+ordinary `/node/call` with `capability: "roster"`, over the transport the target already serves (the
+relay), admitted by `binding.authorize` and nothing else. The reasoning is the point: the roster
+cannot authorize the call that brings the roster into being.
+
+What travels: the signed roster, the fleet **public** key, and the caller's own signature. The fleet
+private key never leaves the operator's node — there is no code path that reads, accepts or forwards
+one.
+
+What lands on the target, in this order, each step reversible from the previous one:
+
+| step | file | what |
+| --- | --- | --- |
+| 1 | `policy.prev.json` | the previous `policy.json`, byte for byte |
+| 2 | `policy.json` | a `mesh` section **merged** in (`roster_key`, `enabled: true`, `roster`); every other key and every existing rule untouched — the additions-only shape the deploy's policy merge uses for a node with no recorded base |
+| 3 | `mesh-roster.json` | the signed roster, written atomically |
+| 4 | `env` | `WA_MESH=1` appended when the file says nothing about it, so the next start keeps the feature on |
+
+The target then answers with what it wrote, and the caller **verifies by a mesh call**: a `status`
+read the target must now decide with the roster (`transport` and `decision` in the answer). A push
+that installed the files but failed that call reports `verified: false` — a failure, not a success
+with a footnote.
+
+Refusals, each before a single file is written:
+
+| code | when |
+| --- | --- |
+| `unknown_caller` | the caller is not one of the target's pinned operators, or its binding is not accepted |
+| `bad_signature`, `stale_request`, `replayed_request`, `wrong_target` | the call itself is not a fresh, correctly signed call for this node |
+| `roster_unverified:*` | the roster does not verify against the key being pinned (checked on the *caller* too, so an unverified roster is never even sent) |
+| `roster_missing_target` | the roster does not contain the node it is being installed on |
+| `roster_pins_different_key` | the target already pins a **different** fleet key: no silent re-anchoring |
+| `roster_replace_key_unverified` | `--replace-key` was given but the signature is not the pinned key's over `mesh-anchor-v1|<new key>|<roster fingerprint>` |
+| `policy_unreadable` | `policy.json` is not a JSON object, or its `mesh` is not: nothing is overwritten |
+
+The re-anchoring signature can only be produced by whoever holds the fleet key the target pins *now*,
+which is what makes `--replace-key` an operator's act and not a peer's. Producing it is deliberately
+outside this command (it needs the old private key); the message it must sign is the one above.
+
+## 8. What is implemented
 
 | piece | where | state |
 | --- | --- | --- |
@@ -265,28 +361,41 @@ mesh recv from=8c11f0a2 to=local verb=read decision=allow reason=grant_allowed o
 | direct transport server (`/mesh/health`, `/mesh/call`) | `server.rs` | done, tested |
 | audit lines | `audit.rs` | done, tested |
 | `wa call` tries mesh first, falls back on transport failure only | `lua/core/nodes.lua` (`M.mesh_attempt`), `host.mesh_call` | behind `WA_MESH=1` |
+| **the relay carries the same signed call** (`/node/call` + envelope, sealed answer) | `relay.rs`, `client.rs` | done, tested |
+| **one admission for every path** (signature, body hash, `to_node_id`, replay window, hierarchy, grants, audit) | `admission.rs` | done, tested |
+| the target decides on the relay path too | `serve.rs` (`/node/call`), `lua/core/binding.lua` (`M.tick`) | done, tested |
+| a roster-authorized caller reaches the capability without the operator pins | `serve.rs` (`/node/admitted` + one-shot ticket), `binding.lua` (`wa_mesh_admit`) | done, tested |
+| **existing operators bootstrap it** (`wa fleet push-roster`, host call) | `fleet.rs`, `lua/core/fleet.lua`, `binding.lua` (`roster` capability) | done, tested |
 | listener mounted by the node | `rust/wa-capabilities/src/serve.rs` | behind `WA_MESH=1` + `WASM_AGENT_MESH_PORT` |
-| execution of a capability on the target | forwards to the node's own `/node/call` | **partial** — see §8 |
 | hole punching / STUN / QUIC | — | not started |
 
 The wire and the caller's JSON contract (`host.mesh_call`) are documented in
 [HOST.md](HOST.md#direct-peer-calls-by-hierarchy-hostmesh_call), because that is where an operator
-looks for a capability and where the drift test keeps it honest. Tests: `cargo test -p wa-mesh`
-(37 tests: the unit tests per module plus the three-node end-to-end file), or
-`bash scripts/test-mesh.sh` for the same run, `cargo clippy -p wa-mesh`
-clean.
+looks for a capability and where the drift test keeps it honest. `host.mesh_call` also answers the
+four modes this change adds — `{admit: …}` (decide an inbound envelope), `{seal: …}` (sign the answer
+for a carrier that drops headers), `{verify_roster: …}` and `{install_roster: …}` (the bootstrap).
+They are modes of the capability that already existed, so the catalogue does not grow for a feature
+only a fleet member ever uses.
 
-**The flag.** `WA_MESH=1` (the same value also read as `WASM_AGENT_MESH`) turns the whole feature on:
-`host.mesh_call` stops answering `mesh_disabled`, `wa call` tries the mesh path first, and the node
-mounts its listener when `WASM_AGENT_MESH_PORT` names a port (it never picks one by itself, so a flag
-alone cannot open a port nobody meant to open; without the port the node logs one line and does not
-listen). `WASM_AGENT_MESH_BIND` decides the address (`127.0.0.1` by default, `0.0.0.0` inside a
+Tests: `cargo test -p wa-mesh` (50 tests: the unit tests per module, the three-node end-to-end file,
+and `tests_relay.rs` — four nodes A/B/T/R where T pins `[B]` like `nextcloud`: refused before the
+push, installed by `B`, allowed after it, denied upward, tampered body refused, replay refused, a
+different fleet key refused), `bash scripts/test-mesh.sh` for the same run plus clippy, and
+`scripts/test-mesh-admission.lua` for the Lua admission and the push through the real `binding.lua`.
+
+**The flag.** `WA_MESH=1` (the same value also read as `WASM_AGENT_MESH`), **or** the operator's own
+`"mesh": {"enabled": true}` in `policy.json` — the field §7's push writes, because a running node
+cannot change its environment. Either one turns the feature on: `host.mesh_call` stops answering
+`mesh_disabled`, `wa call` tries the mesh path first, a relayed mesh envelope is decided by the roster,
+and the node mounts its listener when `WASM_AGENT_MESH_PORT` names a port (it never picks one by
+itself, so a flag alone cannot open a port nobody meant to open; without the port the node logs one
+line and does not listen). `WASM_AGENT_MESH_BIND` decides the address (`127.0.0.1` by default, `0.0.0.0` inside a
 container whose port is published to the host's loopback). With the flag unset, `wa call` runs exactly
 the code it runs today — two `host.getenv` reads on the first call (cached for the process) and
 nothing else, and `host.mesh_call` answers
 `mesh_disabled` without touching the network or the disk.
 
-A minimal deployment, once `policy.json` can carry the section (§8.2) and the roster is signed:
+A minimal deployment (the roster installed by `wa fleet push-roster`, §7, or by hand):
 
 ```bash
 export WA_MESH=1
@@ -296,17 +405,15 @@ export WASM_AGENT_MESH_ROSTER=$HOME/.wasm-agent/mesh-roster.json
 wa serve --port 8799
 ```
 
-## 8. What is open
+## 9. What is open
 
-1. **The target executes through today's trust basis.** The mounted listener authorizes the caller
-   against the roster and hierarchy, then forwards the call, with the caller's own inner request and
-   headers, to the node's loopback `/node/call`. That path verifies the caller the way it does today:
-   a *fresh* rendezvous lookup. So with the rendezvous down a real node still refuses
-   `unknown_caller` at the last step, even though discovery and the mesh verdict needed no directory.
-   Making the roster the execution trust basis is a change in `lua/core/server.lua`'s
-   `verify_peer`/`verify_caller` (a mesh-verified caller basis carried only on the loopback hop), which
-   this change deliberately does not make — it is a security boundary, and the crate tests prove the
-   mesh verdict without it.
+1. **The managed capability list still narrows a roster-authorized call.** `wa_node_call` keeps its
+   fixed list for a managed node (`status`, `read`, `write`, `edit`, `ls`, `grep`, `bash`, `shell`,
+   `client`, `set_role`) before it dispatches a capability, and that list is in
+   `lua/core/server.lua`, which this change does not touch. So the roster decides *whether* a caller
+   may call and *what authority* the call needs, and the managed list can still refuse a capability
+   outside it (`capability_not_granted`). It is a narrowing, never a widening: nothing the roster
+   denies becomes allowed. Moving that list into the mesh's verb vocabulary is the next step.
 2. **`policy.json` cannot carry `mesh` for the grant policy yet.** `PolicySet` refuses unknown fields;
    one line in `rust/wa-grant-policy/src/policy.rs` (skip a top-level `mesh`) is the fix, plus its
    test. Until then a node that needs mesh grants must not also rely on the grant policy loading.

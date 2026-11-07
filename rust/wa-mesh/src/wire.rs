@@ -115,6 +115,30 @@ pub struct MeshReply {
 }
 
 impl MeshReply {
+    /// A refusal after the caller was authenticated: signed, with the reason word that matches the
+    /// hierarchy's own vocabulary, so a caller can tell a decision from something the network said.
+    pub fn refusal(
+        request_id: &str,
+        from_node_id: &str,
+        code: &str,
+        reason: &str,
+        detail: &str,
+        verb: &str,
+    ) -> MeshReply {
+        MeshReply {
+            schema: SCHEMA,
+            request_id: request_id.to_string(),
+            from_node_id: from_node_id.to_string(),
+            ok: false,
+            status: None,
+            body: None,
+            error: Some(code.to_string()),
+            reason: Some(reason.to_string()),
+            detail: Some(detail.to_string()),
+            verb: Some(verb.to_string()),
+        }
+    }
+
     pub fn encode(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }

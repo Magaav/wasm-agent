@@ -34,6 +34,9 @@ pub struct ClientConfig {
     pub connect_timeout: Duration,
     pub io_timeout: Duration,
     pub max_body: usize,
+    /// The relay to try when no address answers, if this node names one. The relay carries the same
+    /// signed envelope: it is transport, never a second authority.
+    pub relay: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -42,6 +45,7 @@ impl Default for ClientConfig {
             connect_timeout: Duration::from_secs(3),
             io_timeout: Duration::from_secs(60),
             max_body: http::MAX_BODY,
+            relay: None,
         }
     }
 }
@@ -62,13 +66,15 @@ impl Attempt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// The target ran the call and answered with a signed reply.
+    /// The target ran the call and answered with a signed reply. `transport` is `direct` or `relay`: the
+    /// verdict and the bytes are the same either way, because the same function decided them.
     Ok {
         node: RosterNode,
         verdict: Verdict,
         verb: Verb,
         address: String,
         class: &'static str,
+        transport: &'static str,
         status: u16,
         body: String,
     },
@@ -76,8 +82,12 @@ pub enum Outcome {
     Denied { node: RosterNode, verdict: Verdict, verb: Verb },
     /// The target refused, or answered something the caller cannot believe.
     Refused { node: RosterNode, code: String, verified: bool, status: u16, detail: String },
-    /// Nobody answered. This is the only outcome that permits the caller's fallback path.
+    /// Nobody answered, and this node names no relay: the only outcome that permits a caller's own
+    /// fallback path.
     Unreachable { node: RosterNode, attempts: Vec<Attempt>, reason: String },
+    /// Nobody answered, including the relay the mesh itself tried. Nothing else may be retried: the
+    /// relay has already carried this call once, and a second carrier would run a capability twice.
+    RelayFailed { node: RosterNode, attempts: Vec<Attempt>, reason: String },
     /// No such node in the roster.
     Unknown { selector: String },
     /// The mesh cannot decide at all (no roster, no key, caller not in the roster). Fail closed: a
@@ -90,9 +100,9 @@ impl Outcome {
     /// tests and `docs/MESH.md` cannot disagree.
     pub fn to_json(&self) -> Value {
         match self {
-            Outcome::Ok { node, verdict, verb, address, class, status, body } => json!({
+            Outcome::Ok { node, verdict, verb, address, class, transport, status, body } => json!({
                 "ok": true,
-                "transport": "mesh",
+                "transport": transport,
                 "node": node.name,
                 "node_id": node.node_id,
                 "level": node.level,
@@ -136,6 +146,16 @@ impl Outcome {
                 "node_id": node.node_id,
                 "attempts": attempts.iter().map(Attempt::to_json).collect::<Vec<_>>(),
                 "fallback": "relay",
+            }),
+            Outcome::RelayFailed { node, attempts, reason } => json!({
+                "ok": false,
+                "error": "mesh_relay_failed",
+                "reason": reason,
+                "detail": "the mesh already carried this call through the relay; it was not sent a second time",
+                "node": node.name,
+                "node_id": node.node_id,
+                "attempts": attempts.iter().map(Attempt::to_json).collect::<Vec<_>>(),
+                "fallback": null,
             }),
             Outcome::Unknown { selector } => json!({
                 "ok": false, "error": "mesh_unknown_node", "node": selector, "fallback": null,
@@ -188,15 +208,9 @@ impl<'a> Client<'a> {
             return Outcome::Denied { node: target, verdict, verb };
         }
 
+        // No address is not a reason to give up: a node with no public address is the case the relay
+        // exists for, and the relay carries the same signed envelope (see the end of this function).
         let addresses = self.cache.addresses(&target);
-        if addresses.is_empty() {
-            return Outcome::Unreachable {
-                node: target,
-                attempts: Vec::new(),
-                reason: "no_address".into(),
-            };
-        }
-
         let mut attempts: Vec<Attempt> = Vec::new();
         let mut attempt_index = 0u32;
         for address in addresses {
@@ -281,6 +295,7 @@ impl<'a> Client<'a> {
                                         verb,
                                         address,
                                         class,
+                                        transport: "direct",
                                         status: inner_status,
                                         body: reply.body.unwrap_or_default(),
                                     };
@@ -339,8 +354,185 @@ impl<'a> Client<'a> {
         let reason = attempts
             .last()
             .map(|attempt| attempt.error.clone())
-            .unwrap_or_else(|| "unreachable".into());
+            .unwrap_or_else(|| "no_address".into());
         self.cache.record_failure(&target.node_id, &reason);
+        // Nobody answered on any address. The relay is the last carrier the mesh has: it is tried with
+        // the same signed envelope, and its answer is believed on the same terms as a direct one. Only
+        // a transport failure reaches here — a denial above returned already, and is never retried.
+        if let Some(relay) = self.config.relay.clone() {
+            return match self.relay_attempt(&relay, &caller, &target, capability, &verb, &verdict, &args, inner, attempts) {
+                Ok(outcome) => outcome,
+                Err((attempt, reason)) => Outcome::RelayFailed {
+                    node: target,
+                    attempts: vec![attempt],
+                    reason,
+                },
+            };
+        }
         Outcome::Unreachable { node: target, attempts, reason }
+    }
+
+    /// One carrier left: the relay. The envelope is signed here exactly as for a direct address, so the
+    /// target's roster decision is the same decision, and its reply is verified with the roster key.
+    #[allow(clippy::too_many_arguments)]
+    fn relay_attempt(
+        &mut self,
+        relay: &str,
+        caller: &RosterNode,
+        target: &RosterNode,
+        capability: &str,
+        verb: &Verb,
+        verdict: &Verdict,
+        args: &Value,
+        inner: Inner,
+        mut attempts: Vec<Attempt>,
+    ) -> Result<Outcome, (Attempt, String)> {
+        let started = Instant::now();
+        let now_ms = wire::now_millis();
+        let request_id = next_request_id(now_ms);
+        let call = MeshCall {
+            schema: wire::SCHEMA,
+            request_id: request_id.clone(),
+            from_node_id: caller.node_id.clone(),
+            to_node_id: target.node_id.clone(),
+            capability: capability.to_string(),
+            args: args.clone(),
+            inner_body: inner.body.clone(),
+            inner_headers: inner.headers.clone(),
+        };
+        let body = call.encode();
+        let ts = wire::now_seconds();
+        let signature = self.identity.sign(&MeshCall::call_message(&caller.node_id, ts, &body));
+        let headers = vec![
+            ("x-wa-mesh".to_string(), "1".to_string()),
+            // The relay drops response headers, so the target is told to seal its answer in the body.
+            (crate::admission::CARRIER_HEADER.to_string(), "relay".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+            ("x-wa-node".to_string(), caller.node_id.clone()),
+            ("x-wa-pub".to_string(), self.identity.public_key.clone()),
+            ("x-wa-ts".to_string(), ts.to_string()),
+            ("x-wa-sig".to_string(), signature),
+        ];
+        let client = crate::relay::RelayClient {
+            url: relay.to_string(),
+            identity: self.identity,
+            connect_timeout: self.config.connect_timeout,
+            io_timeout: self.config.io_timeout,
+        };
+        let outcome = client.send(&target.node_id, "/node/call", &headers, &body, &request_id);
+        let elapsed = started.elapsed().as_millis() as u64;
+        let attempt = Attempt {
+            address: relay.to_string(),
+            class: "relay",
+            status: None,
+            error: String::new(),
+        };
+        let _ = &mut attempts;
+        match outcome {
+            crate::relay::RelayOutcome::Answered { status: _, body: text, .. } => {
+                let now_s = wire::now_seconds();
+                match crate::relay::RelayAnswer::open(
+                    &text,
+                    &target.node_id,
+                    &target.public_key,
+                    &caller.node_id,
+                    now_s,
+                ) {
+                    Ok(reply) if reply.request_id == request_id => {
+                        if reply.ok {
+                            let inner_status = reply.status.unwrap_or(200);
+                            self.cache.record_success(&target.node_id, relay, now_ms);
+                            Event::new("call", &caller.node_id, &target.node_id)
+                                .levels(Some(caller.level), Some(target.level))
+                                .verb(verb.as_str())
+                                .verdict("allow", verdict.reason)
+                                .transport("relay", "relay")
+                                .outcome(true, Some(inner_status), elapsed, 1)
+                                .emit(self.audit);
+                            return Ok(Outcome::Ok {
+                                node: target.clone(),
+                                verdict: verdict.clone(),
+                                verb: *verb,
+                                address: relay.to_string(),
+                                class: "relay",
+                                transport: "relay",
+                                status: inner_status,
+                                body: reply.body.unwrap_or_default(),
+                            });
+                        }
+                        let code = reply.error.unwrap_or_else(|| "mesh_refused".into());
+                        let detail = reply.detail.or(reply.reason).unwrap_or_default();
+                        Event::new("call", &caller.node_id, &target.node_id)
+                            .levels(Some(caller.level), Some(target.level))
+                            .verb(verb.as_str())
+                            .verdict("deny", &code)
+                            .transport("relay", "relay")
+                            .outcome(false, None, elapsed, 1)
+                            .emit(self.audit);
+                        Ok(Outcome::Refused {
+                            node: target.clone(),
+                            code,
+                            verified: true,
+                            status: 200,
+                            detail,
+                        })
+                    }
+                    Ok(_) | Err(_) => {
+                        // A refusal the target could not sign (it never authenticated us) is a
+                        // diagnosis, never a result: only its allow-listed code is kept.
+                        let code = wire::pre_auth_code(&text).unwrap_or("unverified_reply");
+                        Event::new("call", &caller.node_id, &target.node_id)
+                            .levels(Some(caller.level), Some(target.level))
+                            .verb(verb.as_str())
+                            .verdict("deny", code)
+                            .transport("relay", "relay")
+                            .outcome(false, None, elapsed, 1)
+                            .emit(self.audit);
+                        Ok(Outcome::Refused {
+                            node: target.clone(),
+                            code: code.to_string(),
+                            verified: false,
+                            status: 200,
+                            detail: String::new(),
+                        })
+                    }
+                }
+            }
+            crate::relay::RelayOutcome::Refused { status, code, .. } => {
+                // The relay's own rules refused to carry it. That is not the fleet's verdict, so it is
+                // reported as the relay's, unverified, and never retried on another path.
+                Event::new("call", &caller.node_id, &target.node_id)
+                    .levels(Some(caller.level), Some(target.level))
+                    .verb(verb.as_str())
+                    .verdict("deny", &format!("relay:{code}"))
+                    .transport("relay", "relay")
+                    .outcome(false, Some(status), elapsed, 1)
+                    .emit(self.audit);
+                Ok(Outcome::Refused {
+                    node: target.clone(),
+                    code: format!("relay_{code}"),
+                    verified: false,
+                    status,
+                    detail: String::new(),
+                })
+            }
+            crate::relay::RelayOutcome::Unavailable { reason, .. } => {
+                Event::new("call", &caller.node_id, &target.node_id)
+                    .levels(Some(caller.level), Some(target.level))
+                    .verb(verb.as_str())
+                    .verdict("deny", &format!("unreachable:{reason}"))
+                    .transport("relay", "relay")
+                    .outcome(false, None, elapsed, 1)
+                    .emit(self.audit);
+                let failed = Attempt {
+                    address: attempt.address.clone(),
+                    class: attempt.class,
+                    status: attempt.status,
+                    error: reason.clone(),
+                };
+                attempts.push(failed.clone());
+                Err((failed, reason))
+            }
+        }
     }
 }
