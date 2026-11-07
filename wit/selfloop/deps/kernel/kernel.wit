@@ -12,10 +12,12 @@ interface types {
         failed(string),
     }
 }
-
 interface sql {
     use types.{error};
 
+    /// One bound parameter, or one column of an answer. A column keeps its own SQLite type:
+    /// `integer` is never re-encoded as a string, because a caller comparing numbers would then
+    /// have to guess.
     variant value {
         null,
         integer(s64),
@@ -25,11 +27,56 @@ interface sql {
     }
 
     record rows {
+        /// Column names, in the statement's order.
         columns: list<string>,
+        /// Row values, positionally matching `columns`.
         rows: list<list<value>>,
+        /// Rows changed by a write statement; always 0 for a read.
         changes: u64,
     }
 
+    /// One replication entry a unit of work owes.
+    ///
+    /// The kernel writes the row, not the component: a journal entry's `origin` is the node's
+    /// identity, and a component never names itself (`wa:bus` says the same about a publisher). The
+    /// entry travels as data — the entity, the log's own verb and the JSON a peer applies — so the
+    /// component never needs `journal` in its write grant.
+    record journal-entry {
+        /// The row the mutation is about (a `memories.id` today).
+        entity-id: string,
+        /// The journal's vocabulary: `upsert` or `delete` (what `lua/core/memory.lua` writes).
+        op: string,
+        /// The JSON object a peer applies, the same shape the native path journals.
+        payload: string,
+    }
+
+    /// One statement that reads. `params` are positional (`?`, `?1`, …); a statement with a
+    /// different number of parameters is refused rather than guessed at.
     query: func(statement: string, params: list<value>) -> result<rows, error>;
+
+    /// One statement that writes, against the tables the grant allows writing.
+    ///
+    /// The host does not wrap it, and it does not commit anything: a statement that is not inside a
+    /// unit of work is its own transaction, as SQLite makes it. A mutation that has to be one unit
+    /// with its replication entry is written inside [`begin-unit`]/[`commit-unit`].
     exec: func(statement: string, params: list<value>) -> result<rows, error>;
+
+    /// Open a unit of work the **kernel** closes: `BEGIN IMMEDIATE` on this call's connection.
+    ///
+    /// This is the shape a mutation uses. The component writes its rows, then calls
+    /// [`commit-unit`], and the kernel appends the journal row and commits in the *same* SQLite
+    /// transaction — so a crash can leave both the change and its replication entry, or neither,
+    /// but never the change without the entry. A unit that is still open when the call ends (a
+    /// trap, the caller's deadline) is rolled back by SQLite when the connection closes.
+    begin-unit: func() -> result<_, error>;
+
+    /// Append `entry` to the journal and commit the unit, in that order and in one transaction.
+    ///
+    /// A journal row that cannot be written (no origin configured, an unknown verb, a payload that
+    /// is not a JSON object, an oversized one) is a `refused` error and the unit is rolled back: a
+    /// mutation the kernel cannot journal is not stored, instead of being stored unreplicated.
+    commit-unit: func(entry: option<journal-entry>) -> result<_, error>;
+
+    /// Abandon the unit: nothing it wrote is visible to anyone.
+    rollback-unit: func() -> result<_, error>;
 }
