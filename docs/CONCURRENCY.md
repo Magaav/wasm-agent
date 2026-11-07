@@ -392,8 +392,8 @@ what happens at it, can an operator see it, and what does a cancel do to it. `dr
 | Client bridge results (`client_bridge.rs`) | `KEEP_RESULTS` = 8 | oldest dropped | `.results_kept` | - |
 | Client bridge connections (`client_bridge.rs`) | `MAX_CONNECTIONS` = 32 | `503 too_many_connections` | `.bridge.connections` | - |
 | Client bridge request (`client_bridge.rs`) | `MAX_REQUEST` = 32 MiB | `413 request_too_large` | - | - |
-| Component websocket inbound frames (`service_io.rs`) | `WS_INBOUND_FRAMES` = 256 and `WS_INBOUND_BYTES` = 16 MiB | **close** the socket (a dropped frame corrupts the protocol); counted | `ws_bound_closes()`, `WsConn::over_bound()`, one stderr line | dropping the connection stops the pump |
-| Component websocket outbound frames (`service_io.rs`) | `WS_OUTBOUND_FRAMES` = 64 | `CLOSED` to the guest, socket closed, counted | `ws_bound_closes()` | - |
+| Component websocket inbound frames (`service_io.rs`) | `WS_INBOUND_FRAMES` = 256 and `WS_INBOUND_BYTES` = 16 MiB | **close** the socket (a dropped frame corrupts the protocol); counted | `/health component_io.ws_bound_closes`, `WsConn::over_bound()`, one stderr line | dropping the connection stops the pump |
+| Component websocket outbound frames (`service_io.rs`) | `WS_OUTBOUND_FRAMES` = 64 | `CLOSED` to the guest, socket closed, counted | `/health component_io.ws_bound_closes` | - |
 | One websocket frame / one service HTTP body (`service_io.rs`) | `MAX_MESSAGE` 32 MiB / `MAX_HTTP_BODY` 96 MiB | the frame closes the socket; the body read is limited | stderr line / error | - |
 | `wa:bus` per-subscription buffer (`wa-bus`) | `SubscribeOptions.capacity`, default 64 | `OverflowPolicy::DropOldest` (or `DropNewest`), counted | `Delivery::dropped`, `Subscription::dropped` | the stream drop unsubscribes and stops the pump |
 | `wa:bus` -> guest stream channel (`bus_host.rs`) | the subscription's capacity | drop oldest, counted by the bus | subscription counters | component stop revokes the subscription and the pump exits |

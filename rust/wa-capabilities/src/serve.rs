@@ -1228,6 +1228,13 @@ fn health_body() -> Vec<u8> {
         // against its deadline (`bash · 42s of 300s`) without waiting for the tool event to carry it.
         // Same number `host.exec_timeout()` reports, from the one place the host enforces it.
         "exec_timeout_seconds": crate::host::exec_timeout_seconds(),
+        // What a component's own I/O had to refuse: a websocket connection this process closed because
+        // a frame queue reached its bound (`service_kernel`'s `WS_INBOUND_*`/`WS_OUTBOUND_FRAMES`) is
+        // the one buffer a peer's burst can fill, and a close is invisible to `/health` unless it is
+        // counted here. It is a fact about the process, like `queue`, not about this run.
+        "component_io": {
+            "ws_bound_closes": wa_kernel_runtime::service_io::ws_bound_closes(),
+        },
         "operations": operations,
         "operation_overdue": operation_overdue,
         "current": current,
