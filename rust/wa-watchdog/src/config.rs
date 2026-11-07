@@ -102,10 +102,15 @@ impl Config {
                 .ok_or_else(|| format!("line {}: expected `key = value`, found {line:?}", number + 1))?;
             let key = key.trim().to_string();
             let value = value.trim().to_string();
-            if seen.iter().any(|existing| existing == &key) {
-                return Err(format!("line {}: `{key}` is set twice; the first value would be silently replaced", number + 1));
+            // Every key is set once - except `env`, which is a *list* (`render` writes one line per
+            // variable) and is therefore the only key that may repeat. Refusing the rest means a typo
+            // cannot be silently overridden by a later line.
+            if key != "env" {
+                if seen.iter().any(|existing| existing == &key) {
+                    return Err(format!("line {}: `{key}` is set twice; the first value would be silently replaced", number + 1));
+                }
+                seen.push(key.clone());
             }
-            seen.push(key.clone());
             let number_of = |value: &str| -> Result<u64, String> {
                 value
                     .parse::<u64>()
@@ -352,6 +357,37 @@ mod tests {
         assert!(error.contains("whole number"), "{error}");
         let error = Config::parse("backoff_factor = 0\n").unwrap_err();
         assert!(error.contains("at least 1"), "{error}");
+    }
+
+    /// `env` is the one list-valued key (`render` writes one line per variable), so the duplicate-key
+    /// refusal - which exists so a second line cannot silently override the first - must not apply to it.
+    /// Found by a real config: `wa-watchdog init` plus six `env = ...` lines, refused with "`env` is set
+    /// twice", which made every hand-written supervisor config with an environment unusable.
+    #[test]
+    fn env_may_repeat_and_every_other_key_may_not() {
+        let text = "kernel = /k
+port = 9100
+env = A=1
+env = B=two words
+env = C=
+";
+        let config = Config::parse(text).expect("a config with three env lines");
+        assert_eq!(
+            config.env,
+            vec![
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "two words".to_string()),
+                ("C".to_string(), String::new()),
+            ]
+        );
+        // Round-tripping keeps every line: render -> parse is the same list.
+        let again = Config::parse(&config.render()).expect("render/parse agreement with env");
+        assert_eq!(again.env, config.env);
+        // A scalar key is still refused, and the refusal names it.
+        let twice = Config::parse("port = 9100
+port = 9101
+").unwrap_err();
+        assert!(twice.contains("`port` is set twice"), "{twice}");
     }
 
     #[test]

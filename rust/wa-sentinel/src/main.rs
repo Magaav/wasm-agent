@@ -71,6 +71,11 @@ fn service_lifecycle(name: &str, verb: &str) -> Result<()> {
     #[cfg(not(windows))] {let _=(name,verb);bail!("Windows service lifecycle is unavailable on this platform");}
 }
 
+// The watchdog, when one owns the node's pid (`WA_WATCHDOG=1`): the verbs that stop and start the kernel
+// are delegated instead of done twice by two supervisors (docs/SENTINEL.md, "The watchdog, and what it
+// takes over"). The decision is a pure function over the switch and what the supervisor recorded.
+mod watchdog;
+
 mod deploy_protocol;
 mod deploy_bootstrap;
 mod sentinel_return;
@@ -1346,6 +1351,27 @@ pub(crate) fn verb_restart(reason: &str) -> Result<String> {
     if !safe_to_start_maintenance() {
         bail!("node busy or its state cannot be proven: graceful restart deferred; request recover to interrupt a failed node");
     }
+    // One owner. With `WA_WATCHDOG=1` the watchdog holds the pid, so a restart is a swap of the installed
+    // bytes through its handoff: stopped, started on the same ports, proved on `/health`, rolled back if it
+    // never answers (`wa_watchdog::restart`). The idle gate above ran first either way.
+    match watchdog::plan(watchdog::Verb::Restart, watchdog::enabled(), &watchdog::ownership(&watchdog::home_dir(), pid_alive)) {
+        watchdog::Plan::NotDelegated => {}
+        watchdog::Plan::Delegate { dir } => {
+            say("the watchdog owns this node: asking it for a swapped-in restart");
+            let answer = watchdog::restart(&binary, &dir, watchdog::wait_ms())?;
+            audit("restart", &format!("watchdog swap of {}", binary.display()), reason);
+            return Ok(answer);
+        }
+        // No supervisor running: starting it *is* the restart, and it is still health-gated (the same
+        // bytes it has recorded come up, and the sentinel's own /health check is the proof).
+        watchdog::Plan::StartSupervisor { dir } => {
+            say("no watchdog is running: starting it, and it starts the node");
+            let answer = watchdog::start_supervisor(&dir, node_is_up, Duration::from_secs(start_wait_secs()))?;
+            audit("restart", &format!("watchdog start of {}", binary.display()), reason);
+            return Ok(answer);
+        }
+        watchdog::Plan::Refuse { detail } => bail!("{detail}"),
+    }
     if node_is_up() {
         stop_node_verified(reason, true)?;
     } else {
@@ -1704,7 +1730,7 @@ fn runtime_tree() -> Option<PathBuf> {
 /// Verbs that change what the node is running. One at a time: two of these interleaved would fight over
 /// the same binary and the same pid file.
 fn is_management_verb(verb: &str) -> bool {
-    matches!(verb, "restart" | "recover" | "spell" | "deploy")
+    matches!(verb, "restart" | "recover" | "spell" | "deploy" | "stop")
 }
 
 /// Verbs that stop or replace the node, which therefore must not start while a turn is running: the run
@@ -1713,7 +1739,7 @@ fn is_management_verb(verb: &str) -> bool {
 /// child deadline turns that deadlock into a kill. Kept as a named predicate so the next verb that
 /// stops the node has somewhere to be right, and `tests` below fail if it is forgotten.
 fn waits_for_idle(verb: &str) -> bool {
-    matches!(verb, "restart" | "spell" | "deploy")
+    matches!(verb, "restart" | "spell" | "deploy" | "stop")
 }
 
 fn approved_script(script: &str) -> Result<PathBuf> {
@@ -1751,12 +1777,61 @@ fn verb_run(script: &str, reason: &str) -> Result<String> {
     if state["ok"]==true {Ok(format!("operation {id} completed"))} else {bail!("operation {id} failed code={} error={}; inspect retained stdout/stderr",state["code"],state["error"])}
 }
 
+/// The node down on purpose. It is a management verb like `restart` (two of them interleaved would fight
+/// over the same pid) and it waits for idle (a stop that interrupts the turn which asked for it is the
+/// deadlock `waits_for_idle` exists to prevent).
+///
+/// With a watchdog owning the node this is the supervisor's stop: it stops the kernel it holds and exits, so
+/// nothing here can be raced by it, and a later `start`/`restart` brings the supervisor back
+/// (`watchdog::start_supervisor`). Without a watchdog it is the sentinel's own stop by pid and identity,
+/// unchanged.
+fn verb_stop(reason: &str) -> Result<String> {
+    queue::step("stopping", "stopping the node");
+    match watchdog::plan(watchdog::Verb::Stop, watchdog::enabled(), &watchdog::ownership(&watchdog::home_dir(), pid_alive)) {
+        watchdog::Plan::NotDelegated => {
+            if !node_is_up() {
+                return Ok("the node was not running".into());
+            }
+            stop_node_verified(reason, true)?;
+            audit("stop", "the node", reason);
+            Ok("the node is stopped".into())
+        }
+        watchdog::Plan::Delegate { dir } => {
+            let answer = watchdog::stop(&dir, pid_alive)?;
+            audit("stop", "the watchdog's kernel", reason);
+            Ok(answer)
+        }
+        // A stop cannot be carried out without taking a pid this mode says the watchdog owns.
+        watchdog::Plan::StartSupervisor { .. } => bail!("no watchdog is running to stop this node through"),
+        watchdog::Plan::Refuse { detail } => bail!("{detail}"),
+    }
+}
+
 fn verb_recover(reason:&str)->Result<String> {
     queue::step("recovering", "interrupting and restarting the node");
     let binary=installed_binary();if !binary.is_file() {bail!("installed binary missing")}
     // Recovery asks the OS, never the interpreter and never image names. It is an explicit
     // interruption, so it does not wait for idle - but it still proves the listener is ours, and
     // does not require the identity probe a wedged node may be unable to answer.
+    //
+    // Under a watchdog the interruption is the supervisor's: a swap of the installed bytes kills the wedged
+    // kernel, starts the same bytes on the same ports and proves them - which is exactly a recovery, with a
+    // rollback the sentinel could not do without holding the pid itself. No idle gate, as above.
+    match watchdog::plan(watchdog::Verb::Restart, watchdog::enabled(), &watchdog::ownership(&watchdog::home_dir(), pid_alive)) {
+        watchdog::Plan::NotDelegated => {}
+        watchdog::Plan::Delegate { dir } => {
+            say("the watchdog owns this node: asking it to replace the running kernel");
+            let answer = watchdog::restart(&binary, &dir, watchdog::wait_ms())?;
+            audit("recover", "watchdog swap of the installed bytes", reason);
+            return Ok(format!("node recovered through the watchdog ({answer}); interrupted effects must be reconciled"));
+        }
+        watchdog::Plan::StartSupervisor { dir } => {
+            let answer = watchdog::start_supervisor(&dir, node_is_up, Duration::from_secs(start_wait_secs()))?;
+            audit("recover", "watchdog start of the installed bytes", reason);
+            return Ok(format!("node recovered through the watchdog ({answer}); interrupted effects must be reconciled"));
+        }
+        watchdog::Plan::Refuse { detail } => bail!("{detail}"),
+    }
     if pid_on_port(node_port()).is_some() {stop_node_verified(reason,false)?;}
     start_and_verify(&binary,reason).map_err(|error|anyhow::anyhow!("recovery started the node but health was not confirmed: {error}"))?;
     Ok("node recovered; interrupted effects must be reconciled".into())
@@ -1777,6 +1852,7 @@ fn perform(request: &Value) -> Result<String> {
     match verb {
         "restart" => verb_restart(reason),
         "recover" => verb_recover(reason),
+        "stop" => verb_stop(reason),
         "wake" => {
             let session = request.get("session").and_then(Value::as_str).unwrap_or("");
             let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
@@ -1925,7 +2001,18 @@ fn spawn_autostart() {
         } else if let Some(holder) = pid_on_port(node_port()) {
             Err(anyhow::anyhow!("port {} is held by pid {holder}, which does not answer /health; not starting a second node", node_port()))
         } else {
-            start_and_verify(&binary, "autostart: the node was down")
+            match watchdog::plan(watchdog::Verb::Start, watchdog::enabled(), &watchdog::ownership(&watchdog::home_dir(), pid_alive)) {
+                // With the flag off nothing changes: the sentinel starts the node itself.
+                watchdog::Plan::NotDelegated => start_and_verify(&binary, "autostart: the node was down"),
+                // Under a watchdog the supervisor starts the kernel, so the sentinel starts the supervisor
+                // and still waits for `/health`: "start" keeps meaning "the node answers".
+                watchdog::Plan::Delegate { dir } | watchdog::Plan::StartSupervisor { dir } => watchdog::start_supervisor(
+                    &dir,
+                    node_is_up,
+                    Duration::from_secs(start_wait_secs()),
+                ).map(|_| ()),
+                watchdog::Plan::Refuse { detail } => Err(anyhow::anyhow!("{detail}")),
+            }
         };
         if let Err(error) = result {
             let failures = AUTOSTART_FAILURES.fetch_add(1, Ordering::AcqRel) + 1;
@@ -2254,7 +2341,7 @@ fn deploy_requests_in(dir: &Path) -> Result<Vec<PathBuf>> {
 /// The verbs `request` accepts - the same set `perform` knows how to carry out. It lives here, next to the
 /// parser, because `request` is what must refuse a verb it does not recognise: a request file whose only
 /// possible outcome is `unknown verb` is durable state created by a question.
-const REQUEST_VERBS: [&str; 6] = ["restart", "recover", "wake", "deploy", "run", "spell"];
+const REQUEST_VERBS: [&str; 7] = ["restart", "recover", "wake", "deploy", "run", "spell", "stop"];
 
 fn print_request_help() {
     println!("wa-sentinel request <verb> [options]");
@@ -3457,7 +3544,7 @@ mod self_update_tests {
     /// that asked for it to end.
     #[test]
     fn verbs_that_replace_the_node_wait_for_idle_and_are_serialised() {
-        for verb in ["restart", "spell", "deploy"] {
+        for verb in ["restart", "spell", "deploy", "stop"] {
             assert!(waits_for_idle(verb), "{verb} must wait for idle");
             assert!(is_management_verb(verb), "{verb} must not run beside another maintenance verb");
         }

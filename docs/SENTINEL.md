@@ -272,13 +272,47 @@ There are two supervisors now, and only one of them may own a pid (docs/KERNEL.m
 | what it supervises | *declared requests*: `start`, `stop`, `restart`, `update`, `upgrade`, `deploy`, `spell` | the kernel process: start, restart on a crash with backoff, swap its binary on a pin |
 | what it can be talked into | a fixed verb list, never a shell | one command with one argument line and one pin |
 | who it trusts | the operator, the queue, `/health`, the install record | the bytes' sha256, `/health`, and nothing else |
-| where it is today | installed and running on the nodes | built, tested, **not installed**; wired into `upgrade.sh` only behind `WA_WATCHDOG=1` (default off) |
+| where it is today | installed and running on the nodes | built and tested; wired into `upgrade.sh` behind `WA_WATCHDOG=1` (default off) and now addressable by the sentinel's own verbs (below) |
 
-Two supervisors cannot both hold the node's pid. Today the sentinel starts, stops and restarts the node
-itself, so turning the watchdog on means the sentinel's `start`/`stop`/`restart` must address the watchdog
-(or the unit that runs it) instead of the node - that is the remaining half of row 6 in KERNEL.md's order of
-work, and the reason the flag defaults off: with the watchdog supervising AND the sentinel restarting the
-node, there are two owners, and a deploy would stop a kernel the watchdog immediately starts again.
+Two supervisors cannot both hold the node's pid. The sentinel's `start`, `stop` and `restart`/`recover` now
+**address the watchdog** when `WA_WATCHDOG=1` says the watchdog owns the pid - that is the remaining half of
+row 6 in KERNEL.md's order of work. The flag still defaults off, because a node whose watchdog nobody started
+must keep behaving exactly as it did: with the flag off not one line of the old path changes.
+
+### The verbs address the watchdog (`rust/wa-sentinel/src/watchdog.rs`)
+
+One pure decision (`plan(verb, enabled, ownership)`) over the switch and what the supervisor wrote down
+(`<watchdog home>/supervisor.pid` alive, `status.json`'s `state`), and three thin actions:
+
+| verb | `WA_WATCHDOG` off | `WA_WATCHDOG=1`, supervisor alive | `WA_WATCHDOG=1`, none running |
+| --- | --- | --- | --- |
+| `restart` | stop by pid, start, wait for `/health` (unchanged) | `wa-watchdog swap <installed binary> --sha256 <its own digest>`: the supervisor stops the old kernel, starts the new one on the same ports, proves `/health`, rolls back if it never answers | start the supervisor (`wa-watchdog run`); it starts the recorded kernel and the verb still waits for `/health` |
+| `recover` | interrupt by pid, start (unchanged) | the same swap - an interrupting restart of the same bytes is exactly what recovery is, and the rollback comes free | the same start |
+| `stop` | stop by pid and identity | `wa-watchdog stop`: the supervisor stops the kernel it holds and exits, and the verb waits for that pid to be gone | **refused**: nothing owns the pid to stop it through |
+| autostart `start` | start the node (unchanged) | start the supervisor | start the supervisor |
+
+Why a stop is refused in the last column rather than done anyway: a stop is the one verb that cannot be
+carried out *through* a supervisor that is not there, and the fallback would be the two-owners bug with the
+sentinel as the second owner. The refusal names the remedy (`wa-watchdog run`, or unset `WA_WATCHDOG`).
+
+Two more properties worth naming:
+
+- **the pin is computed, never passed in.** A delegated restart hashes the installed bytes itself
+  (`sha256_file`) and the watchdog verifies that pin before it stages anything, so a restart cannot switch to
+  bytes nobody pinned - the same rule `upgrade.sh` applies to a download.
+- **a rollback is a failure.** The verdict comes from the supervisor's own record (`status.json`'s
+  `last_swap`), and `ok:false`/`rolled_back:true` is reported as a failed restart that names what is still
+  serving - never as success with a footnote. `0` (settled), `1` (refused or rolled back) and `3` (queued:
+  the request is on disk and will be answered on a later pass) are the watchdog CLI's own contract.
+
+The sentinel keeps everything below that decision: the verbs, the request queue and its evidence, the idle
+gate, the install record, the Windows service/task identity, the decision that a deploy is over, and the
+`serve.pid` it reads (the watchdog writes it from its own `kernel.pid`). It loses only the kill-and-start.
+
+Tests: `cargo test --offline` in `rust/wa-sentinel` (`watchdog::tests`: the switch, all three verb
+outcomes over a live/absent supervisor, ownership from the files, the swap command line, the pin, the
+`last_swap` reader), plus `scripts/test-seamless.lua` which pins that the verbs are wired and that `stop`
+waits for idle like every other verb that replaces the node.
 
 What the flag changes today, and nothing else:
 
