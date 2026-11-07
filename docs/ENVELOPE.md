@@ -185,7 +185,7 @@ runs on the client too, while `bash` runs on this node.
 | `whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media to this node and return the file path |
 | `whatsapp_backfill` | `chat?` `count?` | Ask the phone for older WhatsApp messages so search covers the account's past |
 | `mcp` | `action?` `definition?` `expected_revision?` `id?` | List and manage MCP connectors; new or edited ones stay disabled until enabled |
-| `services` | `action?` `bytes?` `definition?` `expected_revision?` `name?` `ready_ms?` `source?` | List and manage long-lived WASI service components: start, stop, logs |
+| `services` | `action?` `bytes?` `definition?` `expected_revision?` `name?` `producer?` `ready_ms?` `set_role?` `source?` | List and manage long-lived WASI service components: start, stop, logs |
 | `capture_inspect` | `path` `item_index?` `limit?` `offset?` `request_index?` `snapshot?` `view?` | Inspect retained model-request captures as bounded metadata before reading raw dumps |
 | `web_search` | `query` `limit?` `refresh?` | Search public web sources with retained evidence |
 | `web_read` | `limit?` `offset?` `pending_ref?` `ref?` `refresh?` `url?` | Read a public source or page an immutable cache ref |

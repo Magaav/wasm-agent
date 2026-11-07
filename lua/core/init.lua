@@ -235,6 +235,16 @@ elseif command == "nodes" then
     local nodes = dofile("lua/core/nodes.lua")
     print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
   end
+elseif command == "stt" then
+  -- The speech queue's node role, changed while the node runs (docs/WHATSAPP-TRANSCRIPTION.md,
+  -- "Changing the role live"). `wa stt status` answers with what this node is doing *now* and which
+  -- layer said so; `wa stt role ...` persists the setting, and the serving node adopts it on its next
+  -- tick (this process only stores it: starting speech threads in a one-shot command would let it
+  -- take a job it dies holding). The words, the precedence and the write are the module's
+  -- (`lua/core/stt.lua`); this is the dispatch only.
+  local result = dofile("lua/core/stt.lua").cli({ table.unpack(args, 2) })
+  print(json.encode(result))
+  if result and result.ok == false then os.exit(1) end
 elseif command == "paths" then
   -- What an operator runs first when the agent says "no model configured": where
   -- this node keeps its files, and which file the host actually reads for the
@@ -302,6 +312,7 @@ elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
+  print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    paths  where this node keeps its files, and the config file it would read")

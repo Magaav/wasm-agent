@@ -20,6 +20,10 @@ local real_getenv = host.getenv
 local env = {}
 host.getenv = function(key)
   if env[key] ~= nil then return env[key] end
+  -- A speech knob in the launching shell must not decide what this test measures: the role tests set
+  -- every one of these deliberately, and an inherited `WASM_AGENT_STT_ROLE` would silently outrank
+  -- the node setting that is under test here.
+  if tostring(key):match('^WASM_AGENT_STT_') then return nil end
   return real_getenv(key)
 end
 -- No `node.stt` file: the role comes from the environment in this test, and `host.read_file` must not
@@ -186,6 +190,139 @@ local tool = services.control({ action = 'stt' }, { role = 'master' })
 check(type(tool) == 'table' and tool.ok ~= false, 'services action stt answers: ' .. tostring(tool and tool.error))
 check(tool.role == 'worker', 'the tool view carries the speech role of this node')
 check(tool.knobs ~= nil and tool.knobs.lease_ms == 4000, 'the tool view carries the knobs in force')
+
+-- ---- the persisted setting: precedence, the live change, the audit -------------------------------
+-- A tiny `meta` table: the node's own setting lives there (`stt.role` / `stt.producer`), and the audit
+-- trail is the same `access_events` row an enrollment writes. Everything else falls through to the
+-- real database this scratch process was given.
+local meta, audits = {}, {}
+local real_query, real_exec = host.sql_query, host.sql_exec
+host.sql_query = function(sql, params)
+  local values = json.decode(params or '[]')
+  if type(sql) == 'string' and sql:find('FROM meta') then
+    local value = meta[values[1]]
+    return json.encode(value and { { key = values[1], value = value } } or {})
+  end
+  return real_query(sql, params)
+end
+host.sql_exec = function(sql, params)
+  local values = json.decode(params or '[]')
+  if type(sql) ~= 'string' then return real_exec(sql, params) end
+  if sql:find('INSERT INTO meta') then
+    meta[values[1]] = values[2]
+    return json.encode({ changes = 1 })
+  end
+  if sql:find('INSERT INTO access_events') then
+    audits[#audits + 1] = { caller = values[3], capability = values[4], state = values[5] }
+    return json.encode({ changes = 1 })
+  end
+  return json.encode({ changes = 1 }) -- CREATE TABLE IF NOT EXISTS ...
+end
+
+local function last_configure()
+  local found
+  for _, recorded in ipairs(admin_requests) do
+    if recorded.action == 'configure' then found = recorded end
+  end
+  return found
+end
+
+env.WASM_AGENT_STT_ROLE = nil
+env.WASM_AGENT_STT_PRODUCER = nil
+check(stt.role() == 'producer' and stt.source() == 'default', 'no environment and no setting is the producer default')
+check(stt.set_role({ role = 'bogus' }).error == 'invalid_stt_role', 'an unreadable role is refused, not stored')
+check(meta['stt.role'] == nil, 'a refused role writes nothing')
+
+local changed = stt.set_role({ role = 'worker', producer = 'bb22', by = 'test' })
+check(changed.ok == true, 'setting the role is answered: ' .. tostring(changed.error))
+check(meta['stt.role'] == 'worker' and meta['stt.producer'] == 'bb22', 'the role and the producer are persisted')
+check(changed.role == 'worker' and changed.source == 'setting', 'the setting is what this node now does')
+check(stt.work() and not stt.produce(), 'the node is a worker, not a producer')
+check(last_configure().worker == true and last_configure().producer == false, 'the change was applied on the spot, not on the next tick')
+check(last_configure().producer_name == 'bb22', 'the producer named in the setting travels to the node')
+check(#audits == 1 and audits[1].capability == 'stt.set_role', 'the change is in the access audit')
+check(tostring(audits[1].state):find('worker', 1, true) ~= nil, 'the audit row names the role it set')
+
+-- A role written by *another* process (`wa stt role` on a running node, or a peer's `wa call`) is only
+-- visible through the ledger, which is why the tick re-reads it once a second. This is the live switch.
+meta['stt.role'] = 'off'
+meta['stt.producer'] = nil
+host.sleep(1100)
+pending = { id = 43, envelope = envelope }
+delivered = {}
+remote_calls = {}
+stt.tick()
+check(stt.role() == 'off', 'a setting written behind this interpreter is read on the next tick')
+check(#delivered == 1, 'the call already in flight is answered after the switch to off (no lost lease)')
+check(last_configure().worker == false and last_configure().producer == false, 'the node is configured off, so the worker thread stops polling')
+local settled_calls = #remote_calls
+stt.tick()
+check(#remote_calls == settled_calls, 'a node that is off asks for no further work')
+
+-- The same switch the other way, and no configure storm while nothing changes.
+meta['stt.role'] = 'worker'
+host.sleep(1100)
+local before = #admin_requests
+stt.tick()
+check(stt.work() and last_configure().worker == true, 'becoming a worker again starts polling on the next tick')
+before = #admin_requests
+stt.tick()
+local reconfigured = 0
+for index = before + 1, #admin_requests do
+  if admin_requests[index].action == 'configure' then reconfigured = reconfigured + 1 end
+end
+check(reconfigured == 0, 'an unchanged role is not re-configured on every tick')
+
+-- The environment still wins: stored, reported as overridden, and applied only when it goes away.
+env.WASM_AGENT_STT_ROLE = 'producer'
+local overridden = stt.set_role({ role = 'worker', by = 'test' })
+check(overridden.ok and overridden.role == 'producer' and overridden.source == 'env', 'the environment still wins over the setting')
+check(overridden.overridden_by == 'env', 'the answer says the stored setting is not in force')
+check(meta['stt.role'] == 'worker', 'the setting is still stored for when the environment is gone')
+env.WASM_AGENT_STT_ROLE = nil
+check(stt.role() == 'worker' and stt.source() == 'setting', 'without the environment the stored setting takes over')
+
+-- The legacy file is still read, and the setting is still above it.
+local file_text = 'off\n'
+host.read_file = function(path)
+  if type(path) == 'string' and path:find('node%.stt$') then return file_text end
+  return real_read_file(path)
+end
+meta['stt.role'] = nil
+meta['stt.producer'] = nil
+host.sleep(1100)
+check(stt.role() == 'off' and stt.source() == 'file', 'the legacy node.stt file is read when nothing is stored')
+file_text = 'both\nstt-producer\n'
+host.sleep(1100)
+check(stt.role() == 'both' and stt.producer_selector() == 'stt-producer', 'the file still names a role and a producer')
+meta['stt.role'] = 'producer'
+host.sleep(1100)
+check(stt.role() == 'producer' and stt.source() == 'setting', 'the setting beats the legacy file')
+
+-- ---- the remote and CLI surface: a guest is refused, a master is applied and audited --------------
+stt.set_role({ role = 'worker', by = 'test' }) -- back to a known state, through the audited path
+audits = {}
+local denied = services.control({ action = 'stt', set_role = 'off' }, { role = 'guest', user_id = 'u-guest' })
+check(denied.ok == false and denied.error == 'forbidden', 'a guest cannot change this node\'s speech role')
+check(meta['stt.role'] == 'worker', 'the refused call wrote nothing')
+check(#audits == 0, 'a refused call is not recorded as a change')
+local allowed = services.control({ action = 'stt', set_role = 'producer' }, { role = 'master', user_id = 'u-owner' })
+check(allowed.ok == true and allowed.role == 'producer', 'a master can: ' .. tostring(allowed.error))
+check(meta['stt.role'] == 'producer', 'the remote change is persisted')
+check(#audits == 1 and audits[1].caller == 'remote:master:u-owner', 'the audit names the caller')
+check(services.control({ action = 'stt', producer = 'bb22' }, { role = 'master' }).error == 'set_role_required',
+  'naming a producer without a role is a refusal, not a silent no-op')
+
+-- `wa stt ...` is the same two words, from a shell.
+local cli = stt.cli({ 'role', 'worker', '--producer', 'bb22' })
+check(cli.ok == true and cli.role == 'worker' and cli.producer == 'bb22', 'wa stt role worker --producer bb22')
+check(stt.cli({ 'role' }).error == 'invalid_stt_role', 'wa stt role with no word is refused')
+check(stt.cli({ 'role', 'worker', '--nonsense' }).error == 'usage', 'an unknown flag is refused, not ignored')
+local status = stt.cli({ 'status' })
+check(status.role == 'worker' and status.role_source == 'setting', 'wa stt status names the role and its source')
+check(status.setting ~= nil and status.setting.role == 'worker', 'wa stt status shows the stored setting, even when overridden')
+check(stt.cli({}).role ~= nil, 'wa stt with no words is wa stt status')
+
 
 -- ---- a failing tick is recorded, not thrown ------------------------------------------------------
 env.WASM_AGENT_STT_ROLE = 'worker'

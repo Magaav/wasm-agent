@@ -218,7 +218,9 @@ worker finishes the same note (`lease_expiries` on the record, at-least-once).
 The role is configuration, not a new trust path: `WASM_AGENT_STT_ROLE` (`producer` by default,
 `worker`/`stt_worker`, `both`, `off`), the producer's selector in `WASM_AGENT_STT_PRODUCER`, and the
 lease/heartbeat/grace/freshness knobs in `WASM_AGENT_STT_*_MS`. `lua/core/stt.lua` hands them to the
-node on boot, and the node's housekeeping loop pumps the worker's signed calls. The operator view is
+node on boot, and the node's housekeeping loop pumps the worker's signed calls. The environment is no
+longer the only way to set the role: it is also a stored node setting that a running node adopts on
+its next tick ("Changing the role live", below). The operator view is
 the `services` tool's action `stt`: role, attached workers, their recent latency, the local vs remote
 decode counts and the last settled jobs - ids and durations, never text. `docs/QUEUE.md` ("The node
 half") has the full table and what is still open: the component enqueues with the real chat/message
@@ -252,6 +254,55 @@ Knobs: `fallback_after_ms` (default 3000) and the latency estimate's lifetime (d
 `producer::SttPolicy`. A remote that has never decoded anything gets one chance inside the grace,
 which is the named risk of the default: a cold strong node is preferred for up to 3 s on the first
 note before the local worker takes it.
+
+### Changing the role live (no restart)
+
+The role used to be environment-only, so changing it on a node meant restarting the node - on the
+box that owns the journal, the riskiest thing an operator can do to fix a small problem. The role is
+now a **stored setting** the running node reads again on every housekeeping tick (once a second).
+
+```
+wa stt status                                     what this node is doing now, and which layer said so
+wa stt role worker --producer openclaw            become the worker node's worker, from now on
+wa stt role producer | both | off [--producer <node>]
+wa call <node> services '{"action":"stt","set_role":"worker","producer":"openclaw"}'
+```
+
+Precedence, highest first: `WASM_AGENT_STT_ROLE` (the environment is the operator's emergency and
+test override and always wins) > the stored setting (`stt.role` / `stt.producer` in the ledger's
+`meta` table, written by the two commands above) > the legacy `~/.wasm-agent/node.stt` file (first
+line role, second line producer) > `producer`. `wa stt status` prints `role`, `role_source`
+(`env`/`setting`/`file`/`default`), `producer_selector`, `producer_source` and the stored `setting`,
+so "I set worker, why is it still producing?" is answered by one field instead of a restart. An
+unreadable word is skipped rather than obeyed: a typo can never turn a node `off`.
+
+What "live" means, exactly:
+
+- **Becoming a worker** starts long-polling the producer on the next tick (the node's worker thread
+  is already there; the role is what it checks before each take).
+- **Becoming `producer`/`off`** stops *polling*: no new take is issued. A job the thread had already
+  taken is finished and settled, because a settle nobody answers is a lease that lapses and a note
+  the producer's own worker decodes a second time. The Lua pump therefore keeps answering the
+  worker thread's calls after the switch - that is the "no lost lease" part, and it is why a switch
+  is safe mid-decode.
+- **The stored setting is the only thing that survives a restart**; the environment is not read
+  again for a different answer. `wa stt role` from a shell writes the setting and does *not* start
+  the speech threads in that short-lived process - the serving node applies it on its next tick,
+  which is what keeps a one-shot command from taking a job it would die holding.
+- **Who may change it.** Locally: the operator. Remotely: the `services` tool's action `stt` with
+  `set_role`, which `lua/core/services.lua` admits only for a caller this node treats as its
+  master/admin (`verify_peer` refuses everyone else with `forbidden_role`). Every applied change is
+  written to the node's audit trail (`access_events`, `wa access log`) as `stt.set_role` with the
+  caller and the role; a refused call writes nothing. Nothing in that row is message text.
+
+The test that proves it is `scripts/test-stt-live-role.sh`: three real nodes on loopback (producer,
+worker, and a third one that is a rendezvous admin but not in the producer's
+`WASM_AGENT_TRUSTED_MASTERS`), the worker switched off/on three times - alternately with `wa stt
+role` and with a master's remote `wa call` - with a note decoded in each half, plus one switch in the
+middle of a long decode. Every note is decoded exactly once (the fake recognizer logs a digest per
+decode), every job settles `done` with `lease_expiries = 0`, the queue ends
+`done=9 dead=0 expired=0 ready=0`, the environment still outranks the setting, and the non-admin
+caller is refused with no audit row.
 
 ## Receive → transcript path (2026-10-27)
 

@@ -91,7 +91,21 @@ function M.control(args,ctx)
  -- The speech queue's node half (docs/QUEUE.md "Phase 2"): the role this node plays, the workers
  -- attached to its queue, their recent latency and the local-vs-remote decode counts. Reads the
  -- node's own runtime; never a transcript.
- if action=='stt' then return dofile('lua/core/stt.lua').view() end
+ if action=='stt' then
+  -- The role is the one part of this that is not a read. `set_role` is decided here, not in the
+  -- caller's own node: the gate at the top of this function already refused a caller that is not the
+  -- owner's master/admin, so a guest that reaches this line has been refused before any state was
+  -- touched - and `stt.set_role` writes the change to `access_events`, naming the caller.
+  local stt=dofile('lua/core/stt.lua')
+  if args.set_role==nil then
+   if args.producer~=nil then return fail('set_role_required') end
+   return stt.view()
+  end
+  local answer=stt.set_role({role=args.set_role,producer=args.producer,
+   by='remote:'..tostring(ctx.role or '?')..':'..tostring(ctx.user_id or '?')})
+  if answer.ok==false then return fail(answer.error,answer) end
+  return answer
+ end
  -- The effective configuration after base -> node -> user -> patch (docs/KERNEL.md, "Profiles as
  -- layers"), rows by id. Read-only and needed by every operator, so no registry revision.
  if action=='profile_dump' then return host_call({action='profile_dump',name=args.name}) end
