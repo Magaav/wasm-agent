@@ -1,0 +1,46 @@
+[package]
+name = "wa-email"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The email connector service component (wasm32-wasip2, wa:kernel@0.2 / WASI 0.3): IMAP in, SMTP out,
+# on the kernel's sockets with the TLS done by the host, the index in the component's own kv and the
+# send path on the shared durable queue (docs/EMAIL-CONNECTOR.md). Same shape as `wa-whatsapp`.
+[workspace]
+
+[lib]
+# `cdylib` is the component the node installs; `rlib` is what the integration tests (`tests/idle_cost.rs`)
+# link against, so the idle-cost measurement drives the same code the component ships.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The outbound seam: one send request, its validation, its rate limit, the audit digest of its
+# recipients and its settled result - shared with the node capability that enqueues it
+# (`rust/wa-capabilities/src/email_send.rs`), so the two ends cannot disagree.
+wa-email-outbox = { path = "../../wa-email-outbox" }
+# The inbound seam: the typed record, its kv key layout, the query and the bounded answer - shared
+# with the node capability that asks (`rust/wa-capabilities/src/email_query.rs`).
+wa-email-index = { path = "../../wa-email-index" }
+# The component model bindings, same version `wa-whatsapp` uses (wasmtime 50's guest toolchain).
+wit-bindgen = "0.63"
+# `StreamExt::next()` on the kernel's async values (`kv.scan` is a call, `bus` streams are streams).
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+# The MIME decoder: base64 for `Content-Transfer-Encoding: base64` and RFC 2047 header words. Pure
+# Rust, already in the graph through `wa-email-outbox`, so it adds no new code to the build.
+base64 = "0.22"
+# The Message-ID seed (`compose`) and the attachment digest the reader records (`mime`): the same
+# pure-Rust digest the seam crates use, so one `sha2` version signs a message and names its media.
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The native tests drive the same sans-I/O clients and the same connector loop the guest drives, to a
+# conclusion against in-process fake servers; `block_on` is the only executor they need. Dev-only:
+# `cargo build --target wasm32-wasip2` does not see this feature set.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await", "executor"] }
+
+[profile.release]
+opt-level = "s"
+strip = true

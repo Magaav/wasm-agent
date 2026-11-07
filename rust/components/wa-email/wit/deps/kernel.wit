@@ -1,0 +1,284 @@
+/// wa:kernel@0.2 — the 0.1 contract expressed for WASI 0.3 (native async).
+///
+/// Same grants, same manifest, same supervisor as `wa:kernel@0.1` (wit/kernel/kernel.wit); what
+/// changes is *where the waiting happens*. In 0.1 every potentially slow call was a
+/// start/poll pair and the guest owned a reactor that polled it. Here the runtime parks the
+/// guest task instead: `async func` is a call that may suspend, `stream<T>` is a value that
+/// arrives item by item, and `future<T>` is one that resolves once. Everything local (kv, log,
+/// lifecycle, credentials) stays synchronous in shape, because a local answer needs no wait —
+/// where the job asked for an async kv, the answer is immediate and the guest simply awaits it.
+///
+/// A 0.1 and a 0.2 component can run side by side: `rust/wa-host/src/service_components.rs`
+/// serves the first, `service_components_v2.rs` the second, and `services.rs` picks the runner
+/// from the component's own imports (docs/KERNEL.md, docs/SERVICE-COMPONENTS.md).
+package wa:kernel@0.2.0;
+
+/// Kernel-side failures, shared by every interface (identical to 0.1).
+interface types {
+    variant error {
+        /// The grant does not cover this address / namespace / secret.
+        refused(string),
+        /// The operation is not possible right now; the caller may retry (never blocks).
+        again,
+        /// The resource is closed or gone.
+        closed,
+        /// Anything else, with a reason for the log.
+        failed(string),
+    }
+}
+
+/// Outbound websockets, TLS in the kernel. The pump disappears: `messages` is the inbound
+/// stream the guest reads with `next().await`, and `send` suspends the guest when the host
+/// cannot take the frame yet, so no guest-side polling loop and no dropped frames.
+interface websocket {
+    use types.{error};
+
+    resource socket {
+        /// Open `url` (wss:// or ws://) if its host:port is granted. `origin` is sent as the
+        /// Origin header when present. Suspends while the TCP+TLS handshake runs.
+        connect: static async func(url: string, origin: option<string>) -> result<socket, error>;
+        /// Inbound frames, in order, until the peer closes (then the stream ends).
+        messages: func() -> stream<list<u8>>;
+        /// Send one binary message as soon as the host can take it; suspends the guest while the
+        /// host's outbound queue is full, which is what 0.1's non-blocking `send` could not do
+        /// (0.1 had to drop or retry).
+        send: async func(frame: list<u8>) -> result<_, error>;
+        /// Close; the inbound stream ends and further sends return `closed`.
+        close: func(code: u16, reason: string);
+    }
+}
+
+/// Outbound HTTP done by the kernel (TLS in the kernel). One suspendable call instead of
+/// `start`/`poll`, and the response body is a stream so a large media file is copied chunk by
+/// chunk instead of buffered twice. A completed exchange is `ok` whatever the status
+/// (4xx/5xx are responses, not errors).
+interface http {
+    use types.{error};
+
+    record request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+    resource response {
+        status: func() -> u16;
+        /// The response headers, in the order the peer sent them.
+        headers: func() -> list<tuple<string, string>>;
+        /// The body, chunk by chunk, until the exchange's body is exhausted.
+        body: func() -> stream<list<u8>>;
+    }
+    /// Run one exchange; suspends until the response head arrived, if the URL's host:port is
+    /// granted.
+    send: async func(request: request) -> result<response, error>;
+}
+
+/// Speech-to-text done by the kernel with its native recognizer (the faster-whisper worker the
+/// node provisions), granted by the manifest capability `stt: true`. The two halves 0.1 polled
+/// are two async values: `segments` grows while the recognizer is still listening, `result`
+/// resolves once with the whole transcript.
+interface speech {
+    use types.{error};
+
+    record segment {
+        /// Offset of the first word in the audio, milliseconds (0 when the recognizer did not
+        /// report audio positions, which the current worker does not).
+        start-ms: u64,
+        /// Offset just after the last word, milliseconds, so `end-ms - start-ms` is its length.
+        end-ms: u64,
+        text: string,
+    }
+    record transcript {
+        text: string,
+        /// Language hint that was used ("pt", "en", "auto").
+        language: string,
+        /// Wall time the recognizer spent, milliseconds.
+        elapsed-ms: u64,
+    }
+    resource recognition {
+        /// Every segment, in order, as the recognizer produces it.
+        segments: func() -> stream<segment>;
+        /// The whole transcript once ready; `failed(reason)` on error (`no_speech_detected`,
+        /// `audio_too_large`, `worker_stalled`, …). Named `transcript` because `result` is a WIT
+        /// keyword.
+        transcript: func() -> future<result<transcript, error>>;
+    }
+    /// Queue `audio` (an encoded file: ogg/opus, mp3, wav…) for recognition.
+    recognize: async func(audio: list<u8>, mime: string, language: string) -> result<recognition, error>;
+}
+
+/// A durable key-value store private to this component (one namespace per component; the kernel
+/// decides where it lives). The names are 0.1's; only the calls are async, and the host answers
+/// without suspending, so a port is a mechanical `await`.
+interface kv {
+    use types.{error};
+
+    get: async func(key: list<u8>) -> result<option<list<u8>>, error>;
+    set: async func(key: list<u8>, value: list<u8>) -> result<_, error>;
+    delete: async func(key: list<u8>) -> result<_, error>;
+    delete-prefix: async func(prefix: list<u8>) -> result<u32, error>;
+
+    record entry {
+        key: list<u8>,
+        value: list<u8>,
+    }
+    /// One page of entries whose key starts with `prefix`, ordered by key, after `cursor`
+    /// (exclusive; none = from the start). An empty page means the end.
+    scan: async func(prefix: list<u8>, cursor: option<list<u8>>, limit: u32) -> result<list<entry>, error>;
+}
+
+/// Lifecycle signals from the supervisor (identical to 0.1).
+interface lifecycle {
+    /// True once the supervisor asked this instance to stop (upgrade, disable, shutdown).
+    stopping: func() -> bool;
+    enum health {
+        starting,
+        ready,
+        degraded,
+    }
+    report: func(state: health, detail: option<string>);
+}
+
+/// Structured log lines into the component's log (never to another component's), identical to 0.1.
+interface log {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+    write: func(level: level, target: string, message: string);
+}
+
+/// Secrets granted to this component by name (identical to 0.1). Values never appear in logs.
+interface credentials {
+    use types.{error};
+    get: func(name: string) -> result<string, error>;
+}
+
+/// What a long-lived service component exports: one suspendable `run` that the supervisor
+/// awaits. Returning is a clean stop; the host traps it after the grace period when it does not.
+interface service {
+    run: async func(config: string) -> result<_, string>;
+}
+
+/// Key/value in the shape the `wasi:keyvalue` proposal has (open/get/set/delete/list-keys,
+/// strings in, bytes out), served over **this component's own `kv` namespace** - the same store
+/// `interface kv` reads and writes, so one key space, one set of policy rules (`kv.read`,
+/// `kv.write`) and one audit trail. Why it exists at all: `wasmtime` 50 ships no
+/// `wasi:keyvalue` crate, and the job asked for the proposal's shape (docs/WASI-INTERFACES.md).
+/// A component that imports `wasi:keyvalue/store@<any>` instead is refused at instantiate time:
+/// that package is not served, and this is.
+interface keyvalue {
+    use types.{error};
+
+    /// The value under `key`, or none when the namespace has no such key.
+    get: async func(key: string) -> result<option<list<u8>>, error>;
+    set: async func(key: string, value: list<u8>) -> result<_, error>;
+    delete: async func(key: string) -> result<_, error>;
+    exists: async func(key: string) -> result<bool, error>;
+    /// Keys starting with `prefix`, ordered, at most `limit` of them (the same page `kv.scan`
+    /// returns; empty `prefix` is the whole namespace).
+    list-keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+}
+
+/// Read-only view of the non-secret configuration the operator granted this component (the
+/// registry definition's `config` object, the data `wa:kernel/service.run` also receives). It is
+/// data, not a capability: the grant is the manifest declaration, and every read is policy-checked
+/// as `config.read` so an operator can refuse one key. `wasi:config/store` is not served.
+interface config {
+    use types.{error};
+
+    /// The JSON text of one granted key (a string value unquoted), or none.
+    get: func(key: string) -> result<option<string>, error>;
+    /// Every granted key as one JSON object, bounded to the grant's size limit.
+    get-all: func() -> result<string, error>;
+}
+
+/// A long-lived service (channels, workers): kernel interfaces in, `service` out.
+///
+/// WASI 0.3 replaces `wasi:io/poll` with suspending timers, so a service that needs to wake up
+/// on a clock imports `wasi:clocks/monotonic-clock@0.3.0` and awaits `wait-for`.
+world service-component {
+    import types;
+    import websocket;
+    import http;
+    import speech;
+    import kv;
+    import lifecycle;
+    import log;
+    import credentials;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    export service;
+}
+
+// ---- fixture worlds ----------------------------------------------------------------------------
+//
+// The worlds the WASI-interface tests are built against (`rust/components/svc-wasi-*`, driven by
+// `service_components_v2::tests`). One world per interface family, so a fixture's *component type*
+// names exactly the imports its test grants - a guest that imported all of them at once could not
+// tell "granted" from "not granted". `import log; import lifecycle; export service;` in each is
+// what makes it runnable by the service runner at all.
+//
+// The WASI packages these worlds name are the real WASI 0.3 files in `deps/` (copied from
+// wasmtime 50.0.1's `src/p3/wit/deps`, which is the version this node links), so the fixtures are
+// built against the same contract the runner serves, not against a paraphrase of it.
+
+/// Fixture: `wasi:cli/environment@0.3.0` (tier B, grant `env`).
+world wasi-probe-env {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:cli/environment@0.3.0;
+    export service;
+}
+
+/// Fixture: `wasi:cli/stdin@0.3.0` (tier B, grant `stdin`).
+world wasi-probe-stdin {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:cli/stdin@0.3.0;
+    export service;
+}
+
+/// Fixture: `wasi:filesystem/{types,preopens}@0.3.0` (tier B, grant `dirs`).
+world wasi-probe-fs {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:clocks/system-clock@0.3.0;
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    export service;
+}
+
+/// Fixture: `wasi:sockets/{types,ip-name-lookup}@0.3.0` (tier B, grant `net`).
+world wasi-probe-net {
+    import log;
+    import lifecycle;
+    import wasi:clocks/types@0.3.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:sockets/types@0.3.0;
+    import wasi:sockets/ip-name-lookup@0.3.0;
+    export service;
+}
+
+/// The two interfaces whose host implementation lives in `wasi_ext_host.rs`, on their own so that
+/// module binds nothing else (the service runner already binds every other interface).
+world keyvalue-config {
+    import keyvalue;
+    import config;
+}
+
+/// Fixture: `wa:kernel/keyvalue` and `wa:kernel/config` (tier B: the WASI keyvalue/config shape,
+/// over the component's kv namespace and its granted config).
+world wasi-probe-kv {
+    import log;
+    import lifecycle;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import keyvalue;
+    import config;
+    export service;
+}

@@ -1,0 +1,250 @@
+/// `wa:queue` v0.1.0 — a durable queue as a capability seam, served by the host.
+///
+/// Status 2026-11-06: served by `wa-host/src/queue_host.rs` over `rust/wa-queue` (the library whose
+/// semantics are written down here) from the component's own kv namespace. WASI 0.3 native async:
+/// every call that can wait is an `async func` (so the guest task suspends and the runtime keeps
+/// running other tasks), and progress is a `stream<list<u8>>`. The `future<T>` spelling of the draft
+/// was one way to say that; `async func` is the one this toolchain lowers with the store and the one
+/// `wa:kernel@0.2` already uses, so the two contracts look the same to a guest.
+///
+/// Shape: three interfaces — a producer, a worker and an admin — plus the shared `types`. A consumer
+/// imports only what it needs, so a component that enqueues work never holds a settle capability,
+/// and a worker never holds the producer's dedupe key space. Grants are per interface (manifest
+/// capability `queue`: `{"interfaces": ["producer","worker"], "namespaces": ["wa.stt"]}`), and every
+/// call that names a queue is checked against the granted namespaces: a worker granted `wa.stt`
+/// cannot settle a job of `wa.post` even though both live in one namespace.
+///
+/// Nothing here carries message text or secrets beyond the opaque payload the caller supplies: a
+/// payload is bytes, and an alert reason is a caller-supplied one-line reason (the provider
+/// sanitizes and truncates it) — never a payload.
+package wa:queue@0.1.0;
+
+interface types {
+    /// What a producer, worker or admin can be told. `again` means "nothing right now, ask later";
+    /// it is never an error the caller has to retry blindly.
+    variant error {
+        /// The grant does not cover this queue (or this worker identity).
+        refused(string),
+        /// The request is not a job this queue can represent (name, bounds, freshness window).
+        invalid(string),
+        /// No job with that id in a namespace this caller may see.
+        not-found,
+        /// The caller no longer holds the lease: it expired, or another worker has the job.
+        lease-lost,
+        /// A settle or result exceeds the queue's configured bound.
+        too-large(string),
+        /// The queue is at its readiness cap; the producer must back off.
+        full(tuple<string, u32, u32>),
+        /// Nothing to do at this instant.
+        again,
+        /// The queue's own storage failed. Never reported as success.
+        failed(string),
+    }
+
+    enum state {
+        ready,
+        leased,
+        done,
+        dead,
+        expired,
+    }
+
+    /// A job as the queue stores it. `payload` is opaque to the queue.
+    record job {
+        id: u64,
+        queue: string,
+        payload: list<u8>,
+        /// Higher runs first; FIFO inside one priority.
+        priority: u32,
+        state: state,
+        attempts: u32,
+        max-attempts: u32,
+        created-at-ms: u64,
+        /// Unix ms; an earlier take is not allowed (retry backoff or an explicit delay).
+        not-before-ms: u64,
+        /// Unix ms; after this the job is dropped without running ("never post old").
+        fresh-until-ms: option<u64>,
+        /// Unix ms; after this an unfinished job produces a timeout alert.
+        deadline-ms: option<u64>,
+        dedupe-key: option<string>,
+        /// Last failure reason, single line, sanitized. Never a payload.
+        last-error: option<string>,
+    }
+
+    /// One enqueue. Everything but `queue` and `payload` has a provider-side default.
+    record request {
+        queue: string,
+        payload: list<u8>,
+        priority: u32,
+        /// Unix ms; `none` = as soon as possible.
+        not-before-ms: option<u64>,
+        /// Freshness window from now; `none` = the provider default, which may be no bound.
+        fresh-for-ms: option<u64>,
+        max-attempts: option<u32>,
+        /// Producer idempotency key, unique inside the queue.
+        dedupe-key: option<string>,
+        /// Timeout window from now; `none` = the provider default, which may be no bound.
+        deadline-in-ms: option<u64>,
+    }
+
+    record enqueued {
+        job: u64,
+        /// True when `dedupe-key` already named a live job and nothing was added.
+        deduped: bool,
+    }
+
+    record lease {
+        job: job,
+        /// Unix ms; extend with `worker.heartbeat` before it passes.
+        lease-until-ms: u64,
+    }
+
+    record fail-outcome {
+        /// Set when the job went back to `ready` after a backoff.
+        retry-at-ms: option<u64>,
+        dead: bool,
+        attempts: u32,
+    }
+
+    enum alert-kind {
+        expired,
+        timed-out,
+        dead,
+    }
+
+    record alert {
+        job: u64,
+        queue: string,
+        kind: alert-kind,
+        /// One line, bounded, sanitized by the provider. Never a payload.
+        reason: string,
+        at-ms: u64,
+    }
+
+    record alert-batch {
+        items: list<alert>,
+        /// Ready alerts that did not fit in this batch (kept for the next one, never discarded).
+        overflow: u32,
+    }
+
+    record stats {
+        ready: u32,
+        /// Ready but still inside a backoff window.
+        retrying: u32,
+        leased: u32,
+        done: u32,
+        dead: u32,
+        expired: u32,
+        oldest-ready-age-ms: u64,
+        progress-bytes: u64,
+    }
+
+    record sweep {
+        leases-recovered: u32,
+        expired: u32,
+        timed-out: u32,
+        reaped: u32,
+    }
+}
+
+/// Who puts work in. The whole producer surface: enqueue, and read the progress a worker streams
+/// back. It cannot settle, dead-letter or requeue.
+interface producer {
+    use types.{enqueued, error, job, request};
+
+    /// Enqueue one job. The call answers once the job (and its dedupe claim) is durable.
+    enqueue: async func(request: request) -> result<enqueued, error>;
+
+    /// Progress chunks of `job` after `after` (exclusive — 0 starts at the first), as the worker
+    /// appends them. The stream ends when the job settles or the consumer drops it.
+    progress: func(job-id: u64, after: u64) -> stream<list<u8>>;
+
+    /// The job as stored, or `not-found`.
+    get: async func(job-id: u64) -> result<job, error>;
+}
+
+/// Who does the work. Every call names the worker, because a lease belongs to one identity: two
+/// processes holding the same id are exactly the double-settle this interface refuses.
+interface worker {
+    use types.{error, fail-outcome, job, lease};
+
+    /// Lease the next due job. `empty` is a normal answer; `full` in `error` is backpressure, not a
+    /// failure. `busy` reports a reached concurrency limit — a different reason to try later.
+    variant take-outcome {
+        taken(lease),
+        busy(u32),
+        empty,
+    }
+    take: async func(queue: string, worker: string, lease-ms: option<u64>) -> result<take-outcome, error>;
+
+    /// Extend a lease; returns the new `lease-until` in Unix ms. `lease-lost` if it lapsed. Every
+    /// call names its queue as well as its job, so a grant narrower than a namespace can be checked
+    /// instead of trusted.
+    heartbeat: async func(queue: string, job-id: u64, worker: string, extend-ms: option<u64>) -> result<u64, error>;
+
+    /// Settle a leased job with its result. `too-large` leaves the lease in place, so the worker can
+    /// store the result elsewhere and settle with a handle instead.
+    done: async func(queue: string, job-id: u64, worker: string, output: list<u8>) -> result<job, error>;
+
+    /// Record a failure: retry with exponential backoff, or dead-letter once `max-attempts` is spent.
+    fail: async func(queue: string, job-id: u64, worker: string, reason: string) -> result<fail-outcome, error>;
+
+    /// Append one progress chunk (streamed segments). Returns its sequence number.
+    progress: async func(queue: string, job-id: u64, chunk: list<u8>) -> result<u64, error>;
+}
+
+/// Who watches and repairs. Never a worker: an admin may requeue a dead letter, it may not claim one.
+interface admin {
+    use types.{alert-batch, error, job, stats as queue-stats, sweep as sweep-report};
+
+    stats: async func(queue: string) -> result<queue-stats, error>;
+    queues: async func() -> result<list<string>, error>;
+
+    /// Dead-lettered jobs of `queue`, oldest failure first.
+    dead-letters: async func(queue: string, limit: u32) -> result<list<job>, error>;
+
+    /// Revive a dead letter. `refresh-freshness` is explicit: the "never run old work" rule is not
+    /// something an admin call may bypass by accident.
+    requeue: async func(job-id: u64, refresh-freshness: bool) -> result<job, error>;
+
+    /// The next alert batch, or `none` when the rate limit forbids sending yet. Items are marked
+    /// sent; the provider never silently discards a ready alert.
+    next-alerts: async func() -> result<option<alert-batch>, error>;
+
+    /// One maintenance pass: expired leases, stale jobs, timeout alerts, retention. Idempotent.
+    sweep: async func() -> result<sweep-report, error>;
+}
+
+/// A component that only enqueues (a channel, a trigger, the agent loop).
+world producer-consumer {
+    import producer;
+}
+
+/// A component that only works (an STT/OCR worker, a remote node in phase 2).
+world worker-consumer {
+    import worker;
+}
+
+/// Operator surface: stats, dead letters, alerts.
+world admin-consumer {
+    import admin;
+}
+
+/// Everything the queue offers, imported by one component: what the host binds (`queue_host.rs`)
+/// and what a component that both produces and works imports. A component that needs less imports
+/// one of the three worlds above - the provider refuses every interface the grant does not name,
+/// so importing more than the grant allows is a refusal, not a capability.
+world consumer {
+    import producer;
+    import worker;
+    import admin;
+}
+
+/// What a queue-provider component exports (in practice served by the kernel over `wa:kernel/kv`,
+/// see `docs/QUEUE.md`). A provider is a service component: it runs until `lifecycle.stopping()`.
+/// Not used by the host provider, kept as the shape a component-side provider would export.
+world queue-provider {
+    export producer;
+    export worker;
+    export admin;
+}

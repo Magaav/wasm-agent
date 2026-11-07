@@ -1,0 +1,20 @@
+{
+  "name": "wa-email",
+  "kind": "service",
+  "target": "wasm32-wasip2",
+  "description": "Email connector: IMAP polling in (indexed in the component's kv, attachments as media, `email.received` on the bus) and SMTP out through the `email.outbox` queue, TLS in the kernel, credentials only from the vault",
+  "capabilities": {
+    "net": [],
+    "storage": true,
+    "queue": {
+      "consume": ["email.outbox", "email.query"]
+    },
+    "bus": {
+      "publish": ["email.received"]
+    },
+    "config": true
+  },
+  "limits": {
+    "memory_mb": 128
+  }
+}

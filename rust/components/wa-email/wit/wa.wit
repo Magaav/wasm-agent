@@ -1,0 +1,50 @@
+/// The `wa-email` component's own world: the kernel service contract, the bus fact it publishes, the
+/// queue it works, and the one interface this connector needs that the kernel does not serve yet: a
+/// host-side TLS byte stream.
+///
+/// `include` pulls in `wa:kernel/service-component@0.2.0` unchanged (websocket/http/speech/kv/
+/// lifecycle/log/credentials in, `service.run` out). IMAP and SMTP are line protocols over a TLS
+/// session, so they cannot ride `websocket` (frames) or `http` (one exchange). `wa:email/transport`
+/// below is that seam: **the host dials, terminates TLS and moves bytes; the guest speaks IMAP and
+/// SMTP inside the stream**, exactly as `wa-whatsapp` speaks the WhatsApp protocol inside a kernel
+/// websocket frame. Serving it is the one thing `wa-host` has to add for this component to start
+/// (`REPORT.md`, "What integration into wa-host needs"); the grant is the manifest's `net` list, so a
+/// connector can only reach the host:port its definition names.
+///
+/// `deps/kernel.wit`, `deps/clocks.wit`, `deps/queue/queue.wit` and `deps/bus/bus.wit` are snapshots of
+/// the published contracts (`wit/kernel-v2/`, `wit/queue/`, `wit/bus/`), the same arrangement
+/// `wa-whatsapp` and `svc-queue-echo` use; `scripts/test-email-connector.lua` compares them byte for
+/// byte and fails when they drift.
+package wa:email@0.1.0;
+
+/// A TLS byte stream to one granted `host:port`. The guest never sees the TLS session, the
+/// certificate chain or the key: the kernel owns them, like it owns the whatsapp websocket's.
+interface transport {
+    use wa:kernel/types@0.2.0.{error};
+
+    resource connection {
+        /// Open a TLS stream (or plaintext, only for a loopback test host) to `host:port` if the
+        /// component's `net` grant names it. Suspends while the TCP+TLS handshake runs; a host outside
+        /// the grant is `refused`, and that refusal is the only answer that names the host.
+        connect: static async func(host: string, port: u16, tls: bool) -> result<connection, error>;
+        /// Up to `max` bytes as soon as the peer sent some. An **empty list is end of stream** (the
+        /// peer closed), never "nothing yet": a guest that cannot tell those apart would spin.
+        read: async func(max: u32) -> result<list<u8>, error>;
+        /// Write every byte; suspends while the kernel's outbound buffer is full.
+        write: async func(data: list<u8>) -> result<_, error>;
+        /// Close; further reads answer `closed`.
+        close: func();
+    }
+}
+
+/// A long-lived email connector: kernel interfaces in, `service` out.
+world email-service {
+    include wa:kernel/service-component@0.2.0;
+    /// The kernel's service world imports the monotonic clock (for waiting). A queue job's freshness
+    /// window and a message's arrival time are wall time, so the wall clock is imported too: standard
+    /// WASI, no grant of its own.
+    import wasi:clocks/system-clock@0.3.0;
+    import transport;
+    import wa:bus/publisher@0.1.0;
+    import wa:queue/worker@0.1.0;
+}
