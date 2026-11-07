@@ -314,6 +314,15 @@ outcomes over a live/absent supervisor, ownership from the files, the swap comma
 `last_swap` reader), plus `scripts/test-seamless.lua` which pins that the verbs are wired and that `stop`
 waits for idle like every other verb that replaces the node.
 
+The end-to-end half is `scripts/test-kernel-swap.sh`: the *real* kernel (`wa serve` from this checkout)
+started by `wa-watchdog run`, a client polling it every 100 ms, and the swap asked for the way
+`upgrade.sh` asks for it. It measures what "seamless" means instead of asserting it - a successful swap
+cost the client ~1.2 s of outage on this machine, and the session reads back through the post-swap node's
+own `/session` route; a candidate that cannot start is refused with the kernel untouched and no outage at
+all; and a candidate that proves on the spare port and fails the service port is rolled back, with the
+client back on the previous kernel. It is not in the fast path (it needs built binaries and starts real
+processes) - run it by hand after touching the supervisor, the swap protocol or the serve handoff.
+
 What the flag changes today, and nothing else:
 
 - `scripts/upgrade.sh` runs the pin, the downgrade guard, the code-mode proof and the idle gate exactly as
