@@ -1,0 +1,15 @@
+{
+  "name": "memory-crash",
+  "kind": "memory",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "Fixture for the memory seam's crash test: writes a fact inside a unit of work, then wedges before committing (or asks for a journal entry the kernel must refuse), so 'both or neither' is tested against a guest that really is killed mid-call",
+  "capabilities": {
+    "sql": {
+      "database": "memory",
+      "read": ["memories", "memories_fts"],
+      "write": ["memories", "memories_fts"]
+    }
+  },
+  "limits": {"memory_mb": 32}
+}

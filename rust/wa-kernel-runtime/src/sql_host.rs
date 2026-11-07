@@ -2,8 +2,14 @@
 //!
 //! The memory seam keeps `memory.db` in the kernel (docs/KERNEL.md, "Memory as a component") and
 //! gives the component statements instead of a file handle. This module is the whole of that grant:
-//! a scope (which tables may be read, which may be written), one SQLite connection per seam call,
-//! and a **SQLite authorizer** that decides every action the engine asks permission for.
+//! a scope (which tables may be read, which may be written), one SQLite connection per seam call, a
+//! **SQLite authorizer** that decides every action the engine asks permission for, and the **unit of
+//! work** the kernel closes.
+//!
+//! A mutation is one transaction: the component writes its rows inside `begin_unit`, and
+//! `commit_unit` appends the replication journal row (whose `origin` is the node's identity, which a
+//! component never names) and commits. The journal row and the mutation therefore land together or
+//! not at all — the gap a second transaction would leave between them is gone.
 //!
 //! Why an authorizer and not a statement parser: a guard that reads the text of a statement is a
 //! guard that can be talked past — a subquery, a view, a CTE or a `;`-separated second statement all
@@ -34,9 +40,16 @@ const MAX_STATEMENT: usize = 16 << 10;
 /// hold a whole table in memory, which is the thing a scoped grant exists to prevent.
 pub const MAX_ROWS: usize = 10_000;
 /// How long one seam call may spend inside SQLite before its progress handler interrupts it. The
-/// guest's own epoch deadline is the outer bound; this one keeps a wedged query from holding the
+/// guest's own epoch deadline is the outer bound (the caller sets this *above* it, see
+/// `memory_host::STATEMENT_MARGIN_MS`, so the guest is stopped first and this is the backstop for a
+/// connection whose guest is already gone); this one keeps a wedged query from holding the
 /// connection (and the write lock) after the guest was stopped.
 pub const STATEMENT_DEADLINE: Duration = Duration::from_secs(10);
+/// The largest journal payload one unit of work may carry. A memory's journal entry is a few
+/// hundred bytes of JSON; a payload near this is not an entry a caller meant to write.
+pub const MAX_JOURNAL_PAYLOAD: usize = 64 << 10;
+/// The longest entity id a journal entry may name.
+const MAX_JOURNAL_ENTITY: usize = 256;
 /// The audit file is rotated at this size, keeping one previous generation: a refusal storm must not
 /// fill a disk, and the newest lines are the ones an operator needs.
 const AUDIT_MAX_BYTES: u64 = 256 << 10;
@@ -95,6 +108,29 @@ impl std::error::Error for SqlFailure {}
 pub struct SqlAudit {
     pub statements: AtomicU64,
     pub denials: AtomicU64,
+    /// Journal rows the kernel wrote inside a component's unit of work. The kernel's own statement,
+    /// counted apart from the guest's so an operator can tell who wrote what.
+    pub journal_entries: AtomicU64,
+}
+
+/// What a unit of work owes the replication log, and who owes it.
+///
+/// The `kind` is the log's own word for the entity family (`memory` today) and the `origin` is the
+/// node's identity; both come from the kernel that opened the scope, never from the guest, which is
+/// why `journal` never has to be in a component's write grant.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JournalTarget {
+    pub kind: String,
+    pub origin: String,
+}
+
+/// One entry a unit of work asks the kernel to append: the entity, the log's verb and the JSON a peer
+/// applies. Validated by [`SqlScope::commit_unit`] before it reaches a row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JournalEntry {
+    pub entity_id: String,
+    pub op: String,
+    pub payload: String,
 }
 
 /// Where a component's SQL may reach. One of these per installed component, built from its manifest.
@@ -105,6 +141,8 @@ pub struct SqlScope {
     read: Vec<String>,
     write: Vec<String>,
     max_rows: usize,
+    statement_deadline: Duration,
+    journal: Option<JournalTarget>,
     audit_path: Option<PathBuf>,
     audit: Arc<SqlAudit>,
 }
@@ -118,6 +156,8 @@ impl SqlScope {
             read: Vec::new(),
             write: Vec::new(),
             max_rows: MAX_ROWS,
+            statement_deadline: STATEMENT_DEADLINE,
+            journal: None,
             audit_path: None,
             audit: Arc::new(SqlAudit::default()),
         }
@@ -172,6 +212,21 @@ impl SqlScope {
         self
     }
 
+    /// The transaction guard's deadline. A caller sets it just above its own call deadline, so the
+    /// guest is stopped first and a statement can never outlive the call that started it.
+    pub fn with_statement_deadline(mut self, deadline: Duration) -> SqlScope {
+        self.statement_deadline = deadline;
+        self
+    }
+
+    /// What a unit of work closed here appends to the replication log, and whose identity it carries.
+    /// Without this, `commit_unit` still commits — but an entry is refused rather than dropped: a
+    /// mutation that cannot be journalled is reported, never stored silently.
+    pub fn with_journal(mut self, kind: impl Into<String>, origin: impl Into<String>) -> SqlScope {
+        self.journal = Some(JournalTarget { kind: kind.into(), origin: origin.into() });
+        self
+    }
+
     /// Where refusals are appended. `None` (the default) keeps the counters and says nothing to
     /// disk; a production scope always has one.
     pub fn with_audit_file(mut self, path: impl Into<PathBuf>) -> SqlScope {
@@ -187,9 +242,9 @@ impl SqlScope {
         (&self.read, &self.write)
     }
 
-    /// One connection for one seam call: the component's `BEGIN IMMEDIATE` … `COMMIT` has to span
-    /// several statements, so all of them run here, and the connection (and any transaction left
-    /// open on it) is closed when the call ends.
+    /// One connection for one seam call: the component's unit of work (`begin-unit` … `commit-unit`)
+    /// has to span several statements, so all of them run here, and the connection (and any
+    /// transaction left open on it) is closed when the call ends.
     pub fn session(&self) -> Result<SqlSession, SqlFailure> {
         let connection = Connection::open_with_flags(
             &self.db,
@@ -207,7 +262,7 @@ impl SqlScope {
             audit: self.audit.clone(),
             audit_path: self.audit_path.clone(),
         };
-        let deadline = Instant::now() + STATEMENT_DEADLINE;
+        let deadline = Instant::now() + self.statement_deadline;
         // The authorizer decides every action the engine asks about; the progress handler stops a
         // statement that has run too long even when every action in it was allowed.
         {
@@ -215,8 +270,7 @@ impl SqlScope {
             connection.authorizer(Some(move |context: AuthContext<'_>| guard.verdict(context)));
         }
         connection.progress_handler(1_000, Some(move || Instant::now() > deadline));
-        Ok(SqlSession { connection, guard, max_rows: self.max_rows })
-    }
+        Ok(SqlSession { connection, guard, max_rows: self.max_rows, journal: self.journal.clone() })    }
 }
 
 /// `no PRAGMA writes`: a pragma is allowed only when its name is on one of these two lists.
@@ -244,6 +298,21 @@ fn pragma_allowed(name: &str, has_value: bool) -> bool {
         PLAIN_PRAGMAS.contains(&name.as_str())
     }
 }
+
+/// The functions a statement may not call: everything SQLite and FTS5 provide is fine, but these
+/// reach outside the database (a file, a shared library, a tokenizer's internals), and a loader is
+/// not a memory operation. Compared lower-cased, because SQLite's own name is case-insensitive.
+const BANNED_FUNCTIONS: &[&str] = &[
+    "load_extension",
+    "readfile",
+    "writefile",
+    "edit",
+    "fts3_tokenizer",
+    "zipfile",
+    "eval",
+    "readblob",
+    "writeblob",
+];
 
 /// `base` and the `base_*` shadow tables SQLite addresses by name for it.
 fn covers(grant: &[String], table: &str) -> bool {
@@ -274,12 +343,19 @@ impl Guard {
         covers(&self.write, table)
     }
 
+    /// SQLite asks this for every table, column, function and pragma a statement touches, so the allow
+    /// path is on the hot path of every statement and must not allocate or format anything: before
+    /// this split, an allowed read built its audit text (`format!("table={table_name}")`) for nothing.
+    ///
+    /// The split is a cleanup, not a measured win: the seam's p99 is SQLite's (a common-word search
+    /// spends ~220 ms of its ~230 ms inside the engine — measured on the bench store), so no timing
+    /// change is claimed for it. Only a refusal pays for words.
     fn verdict(&self, context: AuthContext<'_>) -> Authorization {
-        let (allowed, action, target) = self.decide(&context.action);
-        if allowed {
+        if self.permitted(&context.action) {
             return Authorization::Allow;
         }
         self.audit.denials.fetch_add(1, Ordering::Relaxed);
+        let (action, target) = self.describe(&context.action);
         if std::env::var("WA_SQL_DEBUG").is_ok() {
             eprintln!("DENY {action} {target} {context:?}");
         }
@@ -287,77 +363,103 @@ impl Guard {
         Authorization::Deny
     }
 
-    /// The whole policy, in one place: (allowed, action name, target for the audit line).
-    fn decide(&self, action: &AuthAction<'_>) -> (bool, &'static str, String) {
-        let covers_read = |table: &str| self.readable(table);
-        let covers_write = |table: &str| self.writable(table);
+    /// The whole policy, in one place, as a yes or a no. `permitted` and `describe` must answer about
+    /// the same action: every arm of `permitted` is the allowed half of the corresponding arm of
+    /// `describe`, and the tests drive both sides (an allowed statement never reaches `describe`).
+    fn permitted(&self, action: &AuthAction<'_>) -> bool {
         match action {
             // Reads, and a statement that only selects.
-            AuthAction::Select | AuthAction::Recursive => (true, "select", String::new()),
-            AuthAction::Read { table_name, .. } => (covers_read(table_name), "read", format!("table={table_name}")),
+            AuthAction::Select | AuthAction::Recursive => true,
+            AuthAction::Read { table_name, .. } => self.readable(table_name),
             // Writes the grant names.
-            AuthAction::Insert { table_name } => (covers_write(table_name), "insert", format!("table={table_name}")),
-            AuthAction::Update { table_name, .. } => (covers_write(table_name), "update", format!("table={table_name}")),
-            AuthAction::Delete { table_name } => (covers_write(table_name), "delete", format!("table={table_name}")),
+            AuthAction::Insert { table_name } => self.writable(table_name),
+            AuthAction::Update { table_name, .. } => self.writable(table_name),
+            AuthAction::Delete { table_name } => self.writable(table_name),
             // Transactions are how one memory write stays one unit. Savepoints are the same shape
             // one level down and are what rusqlite's own nested statements use.
-            AuthAction::Transaction { .. } | AuthAction::Savepoint { .. } => (true, "transaction", String::new()),
+            AuthAction::Transaction { .. } | AuthAction::Savepoint { .. } => true,
             // Functions: everything SQLite and FTS5 provide is fine; the ones that reach outside the
             // database are not, and a loader is not a memory operation.
-            AuthAction::Function { function_name } => {
-                let banned = [
-                    "load_extension",
-                    "readfile",
-                    "writefile",
-                    "edit",
-                    "fts3_tokenizer",
-                    "zipfile",
-                    "eval",
-                    "readblob",
-                    "writeblob",
-                ];
-                (
-                    !banned.contains(&function_name.to_ascii_lowercase().as_str()),
-                    "function",
-                    format!("name={function_name}"),
-                )
-            }
-            // Everything below is outside the grant by construction, and named so the log says why.
-            AuthAction::Pragma { pragma_name, pragma_value } => (
-                pragma_allowed(pragma_name, pragma_value.is_some()),
-                "pragma",
-                format!("name={pragma_name}"),
-            ),
-            AuthAction::Attach { .. } => (false, "attach", String::new()),
-            AuthAction::Detach { .. } => (false, "detach", String::new()),
-            AuthAction::CreateTable { table_name } => (false, "create-table", format!("table={table_name}")),
-            AuthAction::CreateTempTable { table_name } => (false, "create-temp-table", format!("table={table_name}")),
-            AuthAction::CreateIndex { table_name, .. } => (false, "create-index", format!("table={table_name}")),
-            AuthAction::CreateTempIndex { table_name, .. } => (false, "create-temp-index", format!("table={table_name}")),
-            AuthAction::CreateTrigger { table_name, .. } => (false, "create-trigger", format!("table={table_name}")),
-            AuthAction::CreateTempTrigger { table_name, .. } => (false, "create-temp-trigger", format!("table={table_name}")),
-            AuthAction::CreateView { .. } => (false, "create-view", String::new()),
-            AuthAction::CreateTempView { .. } => (false, "create-temp-view", String::new()),
+            AuthAction::Function { function_name } => !BANNED_FUNCTIONS
+                .contains(&function_name.to_ascii_lowercase().as_str()),
+            // A read-only pragma is allowed; every write one, and every action below, is not.
+            AuthAction::Pragma { pragma_name, pragma_value } => pragma_allowed(pragma_name, pragma_value.is_some()),
+            other => Self::always_refused(other),
+        }
+    }
+
+    /// The actions that are outside the grant by construction, whichever component asks.
+    fn always_refused(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Attach { .. }
+                | AuthAction::Detach { .. }
+                | AuthAction::CreateTable { .. }
+                | AuthAction::CreateTempTable { .. }
+                | AuthAction::CreateIndex { .. }
+                | AuthAction::CreateTempIndex { .. }
+                | AuthAction::CreateTrigger { .. }
+                | AuthAction::CreateTempTrigger { .. }
+                | AuthAction::CreateView { .. }
+                | AuthAction::CreateTempView { .. }
+                | AuthAction::CreateVtable { .. }
+                | AuthAction::DropTable { .. }
+                | AuthAction::DropTempTable { .. }
+                | AuthAction::DropIndex { .. }
+                | AuthAction::DropTempIndex { .. }
+                | AuthAction::DropTrigger { .. }
+                | AuthAction::DropTempTrigger { .. }
+                | AuthAction::DropView { .. }
+                | AuthAction::DropTempView { .. }
+                | AuthAction::DropVtable { .. }
+                | AuthAction::AlterTable { .. }
+                | AuthAction::Reindex { .. }
+                | AuthAction::Analyze { .. }
+        )
+    }
+
+    /// What a refusal is called in the audit line: the action's name and what it named. Only a denial
+    /// pays for this, which is why it may allocate.
+    fn describe(&self, action: &AuthAction<'_>) -> (&'static str, String) {
+        match action {
+            AuthAction::Select | AuthAction::Recursive => ("select", String::new()),
+            AuthAction::Read { table_name, .. } => ("read", format!("table={table_name}")),
+            AuthAction::Insert { table_name } => ("insert", format!("table={table_name}")),
+            AuthAction::Update { table_name, .. } => ("update", format!("table={table_name}")),
+            AuthAction::Delete { table_name } => ("delete", format!("table={table_name}")),
+            AuthAction::Transaction { .. } | AuthAction::Savepoint { .. } => ("transaction", String::new()),
+            AuthAction::Function { function_name } => ("function", format!("name={function_name}")),
+            AuthAction::Pragma { pragma_name, .. } => ("pragma", format!("name={pragma_name}")),
+            AuthAction::Attach { .. } => ("attach", String::new()),
+            AuthAction::Detach { .. } => ("detach", String::new()),
+            AuthAction::CreateTable { table_name } => ("create-table", format!("table={table_name}")),
+            AuthAction::CreateTempTable { table_name } => ("create-temp-table", format!("table={table_name}")),
+            AuthAction::CreateIndex { table_name, .. } => ("create-index", format!("table={table_name}")),
+            AuthAction::CreateTempIndex { table_name, .. } => ("create-temp-index", format!("table={table_name}")),
+            AuthAction::CreateTrigger { table_name, .. } => ("create-trigger", format!("table={table_name}")),
+            AuthAction::CreateTempTrigger { table_name, .. } => ("create-temp-trigger", format!("table={table_name}")),
+            AuthAction::CreateView { .. } => ("create-view", String::new()),
+            AuthAction::CreateTempView { .. } => ("create-temp-view", String::new()),
             AuthAction::CreateVtable { table_name, module_name } => {
-                (false, "create-vtable", format!("table={table_name} module={module_name}"))
+                ("create-vtable", format!("table={table_name} module={module_name}"))
             }
-            AuthAction::DropTable { table_name } => (false, "drop-table", format!("table={table_name}")),
-            AuthAction::DropTempTable { table_name } => (false, "drop-temp-table", format!("table={table_name}")),
-            AuthAction::DropIndex { table_name, .. } => (false, "drop-index", format!("table={table_name}")),
-            AuthAction::DropTempIndex { table_name, .. } => (false, "drop-temp-index", format!("table={table_name}")),
-            AuthAction::DropTrigger { table_name, .. } => (false, "drop-trigger", format!("table={table_name}")),
-            AuthAction::DropTempTrigger { table_name, .. } => (false, "drop-temp-trigger", format!("table={table_name}")),
-            AuthAction::DropView { .. } => (false, "drop-view", String::new()),
-            AuthAction::DropTempView { .. } => (false, "drop-temp-view", String::new()),
+            AuthAction::DropTable { table_name } => ("drop-table", format!("table={table_name}")),
+            AuthAction::DropTempTable { table_name } => ("drop-temp-table", format!("table={table_name}")),
+            AuthAction::DropIndex { table_name, .. } => ("drop-index", format!("table={table_name}")),
+            AuthAction::DropTempIndex { table_name, .. } => ("drop-temp-index", format!("table={table_name}")),
+            AuthAction::DropTrigger { table_name, .. } => ("drop-trigger", format!("table={table_name}")),
+            AuthAction::DropTempTrigger { table_name, .. } => ("drop-temp-trigger", format!("table={table_name}")),
+            AuthAction::DropView { .. } => ("drop-view", String::new()),
+            AuthAction::DropTempView { .. } => ("drop-temp-view", String::new()),
             AuthAction::DropVtable { table_name, module_name } => {
-                (false, "drop-vtable", format!("table={table_name} module={module_name}"))
+                ("drop-vtable", format!("table={table_name} module={module_name}"))
             }
-            AuthAction::AlterTable { table_name, .. } => (false, "alter-table", format!("table={table_name}")),
-            AuthAction::Reindex { index_name } => (false, "reindex", format!("index={index_name}")),
-            AuthAction::Analyze { table_name } => (false, "analyze", format!("table={table_name}")),
+            AuthAction::AlterTable { table_name, .. } => ("alter-table", format!("table={table_name}")),
+            AuthAction::Reindex { index_name } => ("reindex", format!("index={index_name}")),
+            AuthAction::Analyze { table_name } => ("analyze", format!("table={table_name}")),
             // An action this build does not know is not an action it can vouch for. `AuthAction` is
             // `#[non_exhaustive]`, so a future SQLite action lands in the same arm as an unknown one.
-            other => (false, "unknown", format!("{other:?}")),
+            other => ("unknown", format!("{other:?}")),
         }
     }
 
@@ -389,6 +491,7 @@ pub struct SqlSession {
     connection: Connection,
     guard: Guard,
     max_rows: usize,
+    journal: Option<JournalTarget>,
 }
 
 impl SqlSession {
@@ -450,6 +553,105 @@ impl SqlSession {
     /// component that tried to leave one behind (it is rolled back when the session drops).
     pub fn in_transaction(&self) -> bool {
         !self.connection.is_autocommit()
+    }
+
+    /// `BEGIN IMMEDIATE`: the write lock is taken now, so a caller's duplicate check inside the unit
+    /// cannot be passed by two interpreters at once, and a unit that is never committed is rolled
+    /// back when the call ends.
+    ///
+    /// The transaction is the kernel's, but the statements inside it are the guest's, so the
+    /// authorizer stays armed: an open transaction is not a way around the grant.
+    pub fn begin_unit(&mut self) -> Result<(), SqlFailure> {
+        if self.in_transaction() {
+            return Err(SqlFailure::Refused("sql_unit_already_open".into()));
+        }
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| classify(self.guard.name.as_str(), &error))
+    }
+
+    /// Append the unit's journal entry (when it owes one) and commit, in one transaction. A journal
+    /// row that cannot be written rolls the unit back: the caller gets an error and the store is
+    /// exactly as it was, instead of holding a mutation that has not replicated.
+    pub fn commit_unit(&mut self, entry: Option<JournalEntry>) -> Result<(), SqlFailure> {
+        if !self.in_transaction() {
+            return Err(SqlFailure::Refused("sql_unit_not_open".into()));
+        }
+        if let Some(entry) = entry {
+            let Some(target) = self.journal.clone() else {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                return Err(SqlFailure::Refused("sql_journal_unavailable".into()));
+            };
+            if let Err(failure) = self.append_journal(&target, &entry) {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                return Err(failure);
+            }
+        }
+        self.connection
+            .execute_batch("COMMIT")
+            .map_err(|error| classify(self.guard.name.as_str(), &error))
+    }
+
+    /// Abandon the unit. A rollback with nothing open is a no-op, so a component that fails before
+    /// it wrote anything does not have to guess whether to call this.
+    pub fn rollback_unit(&mut self) -> Result<(), SqlFailure> {
+        if !self.in_transaction() {
+            return Ok(());
+        }
+        self.connection
+            .execute_batch("ROLLBACK")
+            .map_err(|error| classify(self.guard.name.as_str(), &error))
+    }
+
+    /// The kernel's own statement, on the kernel's own table, inside the guest's transaction.
+    ///
+    /// `journal` is deliberately absent from every manifest's write grant — the row's `origin` is the
+    /// node's identity, which a component must not be able to name. So this statement is prepared
+    /// with the authorizer removed and the guard restored immediately: the guest never gets this
+    /// path, and a guest statement that names `journal` is still refused by the guard.
+    fn append_journal(&mut self, target: &JournalTarget, entry: &JournalEntry) -> Result<(), SqlFailure> {
+        validate_journal(target, entry)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.connection.authorizer::<fn(AuthContext<'_>) -> Authorization>(None);
+        let written = self.connection.execute(
+            "INSERT INTO journal(kind,entity_id,op,origin,payload,created_at) VALUES(?,?,?,?,?,?)",
+            rusqlite::params![target.kind, entry.entity_id, entry.op, target.origin, entry.payload, now],
+        );
+        let guard = self.guard.clone();
+        self.connection.authorizer(Some(move |context: AuthContext<'_>| guard.verdict(context)));
+        written.map_err(|error| SqlFailure::Failed(format!("journal: {error}")))?;
+        self.guard.audit.journal_entries.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Whether an entry may reach the log at all. Every refusal here is one the caller can act on, and
+/// none of them leaves a half-written mutation: `commit_unit` rolls the unit back when this fails.
+fn validate_journal(target: &JournalTarget, entry: &JournalEntry) -> Result<(), SqlFailure> {
+    let kind_ok = !target.kind.is_empty()
+        && target.kind.len() <= 32
+        && target.kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !kind_ok {
+        return Err(SqlFailure::Refused("sql_journal_kind_invalid".into()));
+    }
+    if entry.entity_id.is_empty() || entry.entity_id.len() > MAX_JOURNAL_ENTITY {
+        return Err(SqlFailure::Refused("sql_journal_entity_invalid".into()));
+    }
+    // The log's vocabulary, not a free-form verb: a reader splits entries by `op`.
+    if entry.op != "upsert" && entry.op != "delete" {
+        return Err(SqlFailure::Refused(format!("sql_journal_op_unknown:{}", entry.op)));
+    }
+    if entry.payload.len() > MAX_JOURNAL_PAYLOAD {
+        return Err(SqlFailure::Refused("sql_journal_payload_too_large".into()));
+    }
+    // A payload a peer cannot apply is not an entry: it is refused here, where the unit can still
+    // be rolled back, instead of reaching a log whose reader would have to skip it.
+    match serde_json::from_str::<Json>(&entry.payload) {
+        Ok(Json::Object(_)) => Ok(()),
+        _ => Err(SqlFailure::Refused("sql_journal_payload_invalid".into())),
     }
 }
 
@@ -891,5 +1093,161 @@ mod tests {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
         }
+    }
+
+    // ------------------------------------------------------------------------------- unit of work
+
+    /// The grant the memory component runs under, plus the journal target the kernel configures.
+    fn journal_scope(db: &Path, origin: &str) -> SqlScope {
+        memory_scope(db).with_journal("memory", origin)
+    }
+
+    /// The two writes a `remember` is: the row and its search entry.
+    fn write_a_fact(session: &mut SqlSession, id: &str, content: &str) {
+        session
+            .exec(
+                "INSERT INTO memories(id,scope,content,tags,source,created_at,updated_at,content_sha256) \
+                 VALUES(?,?,?,'[]','user',2.0,2.0,?)",
+                &[
+                    Scalar::Text(id.to_string()),
+                    Scalar::Text("global".into()),
+                    Scalar::Text(content.into()),
+                    Scalar::Text(format!("sha-{id}")),
+                ],
+            )
+            .expect("insert");
+        session
+            .exec(
+                "INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
+                &[Scalar::Text(content.into()), Scalar::Text(String::new()), Scalar::Text(id.to_string())],
+            )
+            .expect("index");
+    }
+
+    fn entry(op: &str, payload: &str) -> JournalEntry {
+        JournalEntry { entity_id: "m2".into(), op: op.into(), payload: payload.into() }
+    }
+
+    fn counts(db: &Path) -> (i64, i64) {
+        let check = Connection::open(db).expect("open");
+        let memories: i64 = check.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0)).expect("count");
+        let journal: i64 = check.query_row("SELECT COUNT(*) FROM journal", [], |row| row.get(0)).expect("count");
+        (memories, journal)
+    }
+
+    #[test]
+    fn a_unit_of_work_appends_its_journal_row_and_commits_both() {
+        let (_dir, db) = scratch();
+        let scope = journal_scope(&db, "node-a");
+        let audit = scope.audit();
+        let mut session = scope.session().expect("session");
+        session.begin_unit().expect("begin");
+        write_a_fact(&mut session, "m2", "the release key is in the vault");
+        // While the unit is open nobody else sees either half: this is what makes the journal row
+        // part of the component's transaction instead of a second one.
+        assert_eq!(counts(&db), (1, 0), "an open unit is invisible to the store's own readers");
+        session
+            .commit_unit(Some(entry(
+                "upsert",
+                r#"{"id":"m2","scope":"global","content":"the release key is in the vault"}"#,
+            )))
+            .expect("commit");
+        assert!(!session.in_transaction());
+        assert_eq!(counts(&db), (2, 1), "the fact and its replication entry landed together");
+        let check = Connection::open(&db).expect("open");
+        let (kind, entity, op, origin, payload): (String, String, String, String, String) = check
+            .query_row("SELECT kind,entity_id,op,origin,payload FROM journal", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .expect("the journal row");
+        assert_eq!((kind.as_str(), entity.as_str(), op.as_str(), origin.as_str()), ("memory", "m2", "upsert", "node-a"));
+        assert!(payload.contains("release key"), "the payload is the entry's own JSON: {payload}");
+        assert_eq!(audit.journal_entries.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_unit_that_is_dropped_leaves_neither_the_fact_nor_the_entry() {
+        let (_dir, db) = scratch();
+        {
+            let mut session = journal_scope(&db, "node-a").session().expect("session");
+            session.begin_unit().expect("begin");
+            write_a_fact(&mut session, "m2", "never committed");
+            // The guest is killed here (`memory-crash` wedges mid-call; the epoch stops it): the
+            // session is dropped with the transaction open and SQLite rolls it back.
+        }
+        assert_eq!(counts(&db), (1, 0));
+    }
+
+    #[test]
+    fn a_journal_the_kernel_refuses_rolls_the_unit_back() {
+        let (_dir, db) = scratch();
+        for (label, bad) in [
+            ("an unknown verb", entry("merge", r#"{"id":"m2"}"#)),
+            ("a payload that is not JSON", entry("upsert", "{")),
+            ("a payload that is not an object", entry("upsert", "[1,2,3]")),
+            ("an empty entity", JournalEntry { entity_id: String::new(), ..entry("upsert", "{}") }),
+        ] {
+            let mut session = journal_scope(&db, "node-a").session().expect("session");
+            session.begin_unit().expect("begin");
+            write_a_fact(&mut session, "m2", "must not survive a refused journal");
+            let error = session.commit_unit(Some(bad)).expect_err(label);
+            assert!(matches!(error, SqlFailure::Refused(_)), "{label}: {error:?}");
+            assert!(!session.in_transaction(), "{label}: the refusal did not leave a transaction");
+            // Either both or neither: a fact the kernel could not journal is not stored.
+            assert_eq!(counts(&db), (1, 0), "{label}: the write was rolled back with the entry");
+        }
+    }
+
+    #[test]
+    fn a_unit_with_no_journal_target_commits_nothing_but_still_commits_when_it_owes_nothing() {
+        let (_dir, db) = scratch();
+        let mut session = memory_scope(&db).session().expect("session");
+        session.begin_unit().expect("begin");
+        write_a_fact(&mut session, "m2", "a read-shaped unit owes no entry");
+        session.commit_unit(None).expect("commit with no entry");
+        assert_eq!(counts(&db), (2, 0));
+        let mut session = memory_scope(&db).session().expect("session");
+        session.begin_unit().expect("begin");
+        write_a_fact(&mut session, "m3", "this one does");
+        let error = session.commit_unit(Some(entry("upsert", "{}"))).expect_err("no origin is configured");
+        assert_eq!(error, SqlFailure::Refused("sql_journal_unavailable".into()));
+        assert_eq!(counts(&db), (2, 0), "the unjournalled fact is not stored");
+    }
+
+    #[test]
+    fn a_journal_kind_the_log_cannot_carry_is_refused() {
+        let (_dir, db) = scratch();
+        let mut session = memory_scope(&db)
+            .with_journal("not a word", "node-a")
+            .session()
+            .expect("session");
+        session.begin_unit().expect("begin");
+        let error = session.commit_unit(Some(entry("upsert", "{}"))).expect_err("bad kind");
+        assert_eq!(error, SqlFailure::Refused("sql_journal_kind_invalid".into()));
+        assert_eq!(counts(&db), (1, 0));
+    }
+
+    #[test]
+    fn begin_and_commit_take_turns_and_a_guest_still_cannot_write_the_journal() {
+        let (_dir, db) = scratch();
+        let mut session = journal_scope(&db, "node-a").session().expect("session");
+        let error = session.commit_unit(None).expect_err("no unit is open");
+        assert_eq!(error, SqlFailure::Refused("sql_unit_not_open".into()));
+        session.begin_unit().expect("begin");
+        let error = session.begin_unit().expect_err("a unit is already open");
+        assert_eq!(error, SqlFailure::Refused("sql_unit_already_open".into()));
+        // `journal` is not in the guest's write grant, with or without a unit of work.
+        let error = session
+            .exec(
+                "INSERT INTO journal(kind,entity_id,op,origin,payload,created_at) VALUES('memory','m2','upsert','mine','{}',1)",
+                &[],
+            )
+            .expect_err("a guest may not name the origin");
+        assert!(matches!(error, SqlFailure::Refused(_)), "{error:?}");
+        // A rollback with nothing written is a no-op, and the unit is gone either way.
+        session.rollback_unit().expect("rollback");
+        assert!(!session.in_transaction());
+        session.rollback_unit().expect("rollback again is harmless");
+        assert_eq!(counts(&db), (1, 0));
     }
 }

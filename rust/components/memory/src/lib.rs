@@ -11,9 +11,12 @@
 //! field for field. A deliberate difference would be reported as a failure, so the comments name the
 //! native rule each block copies rather than inventing a better one.
 //!
-//! What is *not* here, on purpose: the replication journal. A journal entry has to carry the node's
-//! own identity as its origin, and a component never names itself — so the kernel writes that row
-//! after a call that changed something (see `rust/wa-kernel-runtime/src/memory_host.rs`).
+//! What is *not* here, on purpose: the replication journal itself. A journal entry has to carry the
+//! node's own identity as its origin, and a component never names itself — so the component writes its
+//! rows inside the kernel's unit of work (`begin-unit`) and asks the kernel to `commit-unit` with the
+//! entry it owes. The kernel appends that row and commits in the same transaction, which is why a
+//! crash here can leave the fact and its entry together or neither, never the fact alone
+//! (`rust/wa-kernel-runtime/src/sql_host.rs`, `memory_host.rs`).
 // The world lives in the repo's wit/ tree, next to the kernel package it imports, so there is one
 // copy of the contract rather than a vendored one per component (the pattern `svc-wasi-kv` uses).
 wit_bindgen::generate!({ path: "../../../wit/memory", world: "memory-component", generate_all });
@@ -162,6 +165,36 @@ fn guest_scope(scope: &str) -> bool {
     scope.len() >= 5 && &scope[..5] == "user:"
 }
 
+/// The entry a `remember` owes the replication log: the same object `lua/core/memory.lua` journals
+/// (`M.journal("memory", id, {id, scope, content, tags, source, created_at, updated_at,
+/// content_sha256})`), so a peer applies the same thing whichever path wrote the fact.
+fn remember_entry(remembered: &Remembered) -> sql::JournalEntry {
+    sql::JournalEntry {
+        entity_id: remembered.id.clone(),
+        op: "upsert".into(),
+        payload: serde_json::json!({
+            "id": remembered.id,
+            "scope": remembered.scope,
+            "content": remembered.content,
+            "tags": remembered.tags,
+            "source": remembered.source,
+            "created_at": remembered.created_at,
+            "updated_at": remembered.updated_at,
+            "content_sha256": remembered.content_sha256,
+        })
+        .to_string(),
+    }
+}
+
+/// The entry a `forget` owes: a `delete` with the row's tombstone, as the native path writes it.
+fn forget_entry(id: &str, deleted_at: f64) -> sql::JournalEntry {
+    sql::JournalEntry {
+        entity_id: id.to_string(),
+        op: "delete".into(),
+        payload: serde_json::json!({"id": id, "deleted_at": deleted_at, "updated_at": deleted_at}).to_string(),
+    }
+}
+
 /// The scope clause the native `query_memories` applies, and its parameters.
 fn scope_clause(scope: Option<&str>, exclusive: bool) -> (&'static str, Vec<String>) {
     match scope {
@@ -220,19 +253,24 @@ impl Guest for MemoryComponent {
         }
         let scope = scope.unwrap_or_else(|| "global".to_string());
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into());
-        // One unit: the row and its search entry. BEGIN IMMEDIATE takes the write lock before the
-        // duplicate check, so a crash cannot leave a fact recall could never find.
-        exec("BEGIN IMMEDIATE", &[])?;
+        // One unit: the row, its search entry and its journal entry. BEGIN IMMEDIATE takes the write
+        // lock before the duplicate check, so a crash cannot leave a fact recall could never find, and
+        // the kernel's commit appends the journal row in this same transaction — so a crash cannot
+        // leave a fact that never replicates either.
+        sql::begin_unit().map_err(fault)?;
         let outcome = remember_in_transaction(&content, &scope, &tags, &tags_json, id);
         match outcome {
             Ok(remembered) => {
-                exec("COMMIT", &[])?;
+                // A repeat of an identical fact wrote nothing, so it owes no entry (the native path
+                // journals nothing there either).
+                let entry = remembered.written.then(|| remember_entry(&remembered));
+                sql::commit_unit(entry.as_ref()).map_err(fault)?;
                 Ok(remembered)
             }
             Err(error) => {
                 // The refusal must not leave a transaction behind: the connection is dropped at the
                 // end of the call, but a peer statement in the same call would see it.
-                let _ = exec("ROLLBACK", &[]);
+                let _ = sql::rollback_unit();
                 Err(error)
             }
         }
@@ -258,24 +296,25 @@ impl Guest for MemoryComponent {
 
     fn forget(id: String) -> Result<Forgotten, MError> {
         let stamp = now();
-        exec("BEGIN IMMEDIATE", &[])?;
+        sql::begin_unit().map_err(fault)?;
         let outcome = (|| -> Result<Forgotten, MError> {
             let changed = exec(
                 "UPDATE memories SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
                 &[Value::Real(stamp), Value::Real(stamp), Value::Text(id.clone())],
             )?;
             if changed.changes > 0 {
-                exec("DELETE FROM memories_fts WHERE memory_id=?", &[Value::Text(id)])?;
+                exec("DELETE FROM memories_fts WHERE memory_id=?", &[Value::Text(id.clone())])?;
             }
             Ok(Forgotten { retired: changed.changes > 0, deleted_at: stamp })
         })();
         match outcome {
             Ok(forgotten) => {
-                exec("COMMIT", &[])?;
+                let entry = forgotten.retired.then(|| forget_entry(&id, forgotten.deleted_at));
+                sql::commit_unit(entry.as_ref()).map_err(fault)?;
                 Ok(forgotten)
             }
             Err(error) => {
-                let _ = exec("ROLLBACK", &[]);
+                let _ = sql::rollback_unit();
                 Err(error)
             }
         }

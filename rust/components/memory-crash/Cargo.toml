@@ -1,0 +1,22 @@
+[package]
+name = "memory-crash"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A fixture, not a component a node should run: it exports the memory seam and writes a fact, then
+# either wedges (so the caller's epoch deadline kills it mid-call) or asks the kernel to journal an
+# entry the kernel must refuse. Its job is the crash test in
+# `rust/wa-kernel-runtime/src/memory_host/tests.rs`: a mutation and its replication entry land
+# together or not at all. Never installed as `memory` on a node.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+strip = true

@@ -1,0 +1,23 @@
+[package]
+name = "wa-memory-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The bench behind `memory_host`'s deadlines (docs/MEMORY.md, "The memory seam"): what each memory
+# operation costs *through the component* on a realistic store — 10 000 facts, 50 000 messages, FTS —
+# so the deadlines are 10 × a measured p99 with a documented floor instead of one guessed number.
+#
+# It is a caller with no `wa` binary behind it, like `wa-core-pool-bench`: it seeds a scratch store,
+# drives `wa_kernel_runtime::memory_host::call_with` (one component instantiation and one scoped
+# connection per call, exactly what a node pays) and prints the percentiles. Not part of the shipping
+# binary; `scripts/bench-memory-component.sh` builds the component and runs it.
+[dependencies]
+wa-kernel-runtime = { path = "../wa-kernel-runtime" }
+serde_json = "1"
+# The store itself: seeding is SQL, and the bench must write the same schema a node runs.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[[bin]]
+name = "wa-memory-bench"
+path = "src/main.rs"

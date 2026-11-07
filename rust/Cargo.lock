@@ -2079,6 +2079,15 @@ name = "wa-local-tz"
 version = "0.1.0"
 
 [[package]]
+name = "wa-memory-bench"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "wa-kernel-runtime",
+]
+
+[[package]]
 name = "wa-mesh"
 version = "0.1.0"
 dependencies = [

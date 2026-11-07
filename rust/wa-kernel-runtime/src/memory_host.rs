@@ -16,31 +16,100 @@
 //!    result: "the store is empty" and "the component did not answer" must never look the same.
 //! 3. **The journal is the kernel's.** A mutation is replicated by a `journal` row whose `origin` is
 //!    this node's identity, and a component never names itself (the same rule `wa:bus` applies to a
-//!    publisher). So the component reports what it wrote and the kernel appends the entry; the
-//!    origin arrives in the request from the caller that resolved it.
-//!
-//! Known gap, deliberate and reported: the component's transaction commits before the kernel appends
-//! its journal row, so a crash in between leaves a memory that has not replicated yet (it does
-//! replicate when it is written again). The native path journals inside the same transaction. Fixing
-//! it properly means either a `wa:kernel/sql` that can stamp the origin itself, or the seam returning
-//! a unit of work the kernel commits — both belong to the WASI 0.3 pass (REPORT.md).
+//!    publisher). The component opens a unit of work (`wa:kernel/sql` `begin-unit`), writes its rows
+//!    and asks the kernel to `commit-unit` with the entry it owes; the kernel appends the row **in the
+//!    same transaction**, so a crash leaves the fact and its replication entry together or neither.
+//!    The origin arrives in the request from the caller that resolved it, and is handed to the scope,
+//!    never to the guest.
 use crate::components::{compiled, component_dir, load_in, Installed};
 use crate::sql_host::{self, Scalar, SqlFailure, SqlScope};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use wasmtime::component::{Linker, ResourceTable};
 use wasmtime::{Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// The installed name this seam is served from (`<components>/memory.wasm`, `memory.json`).
 pub const COMPONENT: &str = "memory";
-/// How long one seam call may take end to end. A memory call is a handful of indexed statements; a
-/// component that has not answered by then is wedged, and the caller's native fallback is better than
-/// a node that is stuck on memory.
-const DEFAULT_TIMEOUT_MS: u64 = 2_000;
+/// The journal `kind` a memory mutation is logged under, and the only family this seam journals.
+const JOURNAL_KIND: &str = "memory";
+/// The floor under every measured deadline. A call that measures faster than this on a quiet laptop
+/// still gets a deadline a scheduler hiccup cannot trip: below a few hundred milliseconds an epoch
+/// deadline starts measuring the host's own jitter, not the guest's work.
+pub const DEADLINE_FLOOR_MS: u64 = 1_000;
+/// How much longer a statement may run than the call that started it. The guest's epoch is the outer
+/// bound; this keeps a statement from holding the connection (and the write lock) after a guest that
+/// was already stopped, which is the case a deadline exists for.
+pub const STATEMENT_MARGIN_MS: u64 = 1_000;
 /// The component's own memory cap, from `limits.memory_mb` in its manifest when present.
 const DEFAULT_MEMORY_MB: u64 = 128;
+
+/// How long each operation may take end to end, in milliseconds: **10 × the p99 measured through the
+/// component** on a realistic store (10 000 facts, 50 000 messages, FTS), raised to
+/// [`DEADLINE_FLOOR_MS`].
+///
+/// The numbers, the method and the raw measurements are in docs/MEMORY.md ("The memory seam") and
+/// `REPORT.md`; the bench that produces them is `scripts/bench-memory-component.sh`
+/// (`rust/wa-memory-bench`). A guess of "2 s for everything" was the state before this: it was too
+/// tight for `search_messages` on a store whose transcript is full of one word (measured p99 289 ms,
+/// so a 2 s call is only 7 × p99 — a loaded node would push a legitimate query to the native
+/// fallback) and needlessly generous for `remember` (p99 7 ms).
+///
+/// A measured table beats one default because the operations differ by two orders of magnitude — a
+/// `remember` writes two rows, a common-word search scores the whole transcript — and a single
+/// deadline has to be the worst case for all of them, which is the wrong bound for the cheap ones.
+/// Each value is 10 × the worst p99 of two bench runs, rounded up to the next round number, with the
+/// floor under it. The risk this knob carries: a store much larger than 10k/50k facts will exceed
+/// these, and the answer is a re-measurement (or `WA_MEMORY_COMPONENT_TIMEOUT_MS`), not silently
+/// raising them. A timeout is not data loss — the router falls back to the native path with one log
+/// line — but a deadline that fires on legitimate work buys the same query twice.
+///
+/// p99 through the component, the quietest run of the bench on a shared machine (10 000 facts /
+/// 50 000 messages / 500 threads); the spread is the range seen across runs:
+///
+/// | op                     | p99 (ms)    | 10 × p99 | shipped |
+/// | ---------------------- | ----------- | -------- | ------- |
+/// | remember               | 6.4 (6–46)  | 64       | 1 000 (floor) |
+/// | recall (term)          | 56 (11–116) | 560      | — |
+/// | recall (question)      | 82 (71–394) | 820      | 1 000 (floor) |
+/// | recall (common word)   | 120 (72–182) | 1 200   | 1 500  |
+/// | search (3 terms)       | 8.5 (8–42)  | 85       | — |
+/// | search (common word)   | 455 (283–1365) | 4 550 | 5 000  |
+/// | sessions (states)      | 31 (29–106) | 310      | 1 000 (floor) |
+/// | list                   | 21 (17–80)  | 210      | 1 000 (floor) |
+/// | forget                 | 24 (22–40)  | 240      | 1 000 (floor) |
+///
+/// The high end of each range is the same box while other builds were running: it measures the
+/// machine, not the operation, so the table is 10 × the quiet p99 and the floor does the rest. That is
+/// the risk this carries and it is named rather than hidden: on a saturated host a call whose deadline
+/// fires answers from the native path (one log line, no data loss, the same query run twice) — the
+/// cheaper mistake. The seam's own per-call cost is 5–15 ms of this (instantiate, link, open the
+/// scoped connection, cross the boundary); the rest is SQLite.
+pub fn measured_deadline_ms(op: &str) -> u64 {
+    let measured = match op {
+        // 10 × 7 ms p99: a write of two rows, under the floor.
+        "remember" => DEADLINE_FLOOR_MS,
+        // 10 × 120 ms, the slowest pass, rounded up: two passes over the facts table (AND, then OR)
+        // when the first finds nothing, and bm25 over everything when the term is everywhere.
+        "recall" => 1_500,
+        "forget" => DEADLINE_FLOOR_MS,
+        "list" => DEADLINE_FLOOR_MS,
+        // 10 × 455 ms, a single common word scoring the whole 50 000-message transcript — the only
+        // operation whose 10 × p99 rises well above the floor. Its p99 is the noisiest number here
+        // (283–1 365 ms across runs, the top end on a box running other builds), so the value is 10 ×
+        // the worst *quiet* run: a query that has to score every message in the store is the shape a
+        // deadline must not cut short.
+        "search_messages" => 5_000,
+        // 10 × 51 ms: one query, but a correlated last-message join per thread.
+        "sessions" => DEADLINE_FLOOR_MS,
+        "retention" => DEADLINE_FLOOR_MS,
+        // An operation this table has never measured keeps the old default rather than an invented
+        // small one: an unknown op is a bug in the caller, and the deadline is not where it lands.
+        _ => 2_000,
+    };
+    measured.max(DEADLINE_FLOOR_MS)
+}
 
 // No `trappable`: the `wa:kernel/sql` functions answer with their own `error` variant, so a refused
 // statement reaches the component as a value it can report instead of a trap that reads like a crash.
@@ -57,7 +126,9 @@ pub struct Config {
     pub wasm: Option<PathBuf>,
     /// `WA_MEMORY_COMPONENT_MANIFEST`: the manifest that goes with `wasm`.
     pub manifest: Option<PathBuf>,
-    pub timeout_ms: u64,
+    /// `WA_MEMORY_COMPONENT_TIMEOUT_MS`: one deadline for every operation, replacing the measured
+    /// per-operation table. A test knob and an operator's escape hatch; unset on a node.
+    pub timeout_ms: Option<u64>,
 }
 
 impl Config {
@@ -71,9 +142,14 @@ impl Config {
             timeout_ms: std::env::var("WA_MEMORY_COMPONENT_TIMEOUT_MS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_TIMEOUT_MS),
+                .filter(|value| *value > 0),
         }
+    }
+
+    /// The deadline of one call, end to end: the measured table for `op` unless the operator
+    /// overrode it.
+    pub fn deadline_ms(&self, op: &str) -> u64 {
+        self.timeout_ms.unwrap_or_else(|| measured_deadline_ms(op))
     }
 
     /// The same grant, against another database (a test's scratch store).
@@ -194,6 +270,26 @@ impl wa::kernel::sql::Host for State {
             changes: answer.changes,
         })
     }
+
+    fn begin_unit(&mut self) -> Result<(), KError> {
+        self.session()?.begin_unit().map_err(kernel_error)
+    }
+
+    /// The kernel closes the unit: it appends the journal entry the component owes (with the origin
+    /// the *scope* was configured with, never one the guest named) and then commits, in one
+    /// transaction. A refusal here means the guest's writes are rolled back with it.
+    fn commit_unit(&mut self, entry: Option<wa::kernel::sql::JournalEntry>) -> Result<(), KError> {
+        let entry = entry.map(|entry| sql_host::JournalEntry {
+            entity_id: entry.entity_id,
+            op: entry.op,
+            payload: entry.payload,
+        });
+        self.session()?.commit_unit(entry).map_err(kernel_error)
+    }
+
+    fn rollback_unit(&mut self) -> Result<(), KError> {
+        self.session()?.rollback_unit().map_err(kernel_error)
+    }
 }
 
 /// What a request carries: an operation and its arguments, never a scope, a statement or a path.
@@ -259,33 +355,32 @@ fn hex_of(bytes: &[u8]) -> String {
 
 fn dispatch(config: &Config, op: &str, request: &Value) -> Result<Value, String> {
     let installed = component(config).map_err(|error| format!("component_unavailable:{error}"))?;
+    // The identity the journal row will carry. It reaches the *scope*, which writes the row inside
+    // the component's transaction, and is never handed to the guest.
+    let origin = request.get("origin").and_then(Value::as_str).unwrap_or_default().to_string();
+    let deadline_ms = config.deadline_ms(op);
     let scope = SqlScope::from_manifest(COMPONENT, config.db.clone(), &installed.manifest)
         .map_err(|error| format!("component_grant_invalid:{error}"))?
-        .with_audit_file(config.components_dir.join(format!("{COMPONENT}.sql-audit.log")));
+        .with_audit_file(config.components_dir.join(format!("{COMPONENT}.sql-audit.log")))
+        .with_journal(JOURNAL_KIND, origin)
+        .with_statement_deadline(Duration::from_millis(deadline_ms + STATEMENT_MARGIN_MS));
     let started = Instant::now();
-    let (result, journal) = run_once(&installed, scope, op, request, config.timeout_ms)?;
+    let result = run_once(&installed, scope, op, request, deadline_ms)?;
     let mut answer = json!({"result": result});
-    if let Some((entity, entry_op, payload)) = journal {
-        let journalled = append_journal(config, &payload, entity, entry_op, request);
-        answer["journalled"] = json!(journalled.is_ok());
-        if let Err(error) = journalled {
-            // Visible, not silent: the memory is stored, the replication entry is not.
-            answer["journal_error"] = json!(error);
-        }
-    }
     answer["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+    answer["deadline_ms"] = json!(deadline_ms);
     Ok(answer)
 }
 
 /// One instance, one call. The store is dropped at the end, which also closes the SQL session and
-/// rolls back a transaction the component left open.
+/// rolls back a transaction the component left open (a guest killed mid-call lands here).
 fn run_once(
     installed: &Installed,
     scope: SqlScope,
     op: &str,
     request: &Value,
     timeout_ms: u64,
-) -> Result<(Value, Option<Journal>), String> {
+) -> Result<Value, String> {
     let engine = crate::components::engine().map_err(|error| format!("component_engine:{error}"))?;
     let component = compiled(&engine, &installed.sha256, &installed.bytes)
         .map_err(|error| format!("component_compile:{error}"))?;
@@ -331,9 +426,7 @@ fn run_once(
     })
 }
 
-type Journal = (String, String, Value);
-
-fn invoke(store: &mut Store<State>, bindings: &MemoryComponent, op: &str, request: &Value) -> Result<(Value, Option<Journal>), String> {
+fn invoke(store: &mut Store<State>, bindings: &MemoryComponent, op: &str, request: &Value) -> Result<Value, String> {
     let memory = bindings.wa_memory_memory();
     let text = |field: &str| -> String { request.get(field).and_then(Value::as_str).unwrap_or_default().to_string() };
     let optional = |field: &str| request.get(field).and_then(Value::as_str).map(str::to_string).filter(|v| !v.is_empty());
@@ -357,39 +450,32 @@ fn invoke(store: &mut Store<State>, bindings: &MemoryComponent, op: &str, reques
                 .call_remember(store, &text("content"), optional("scope").as_deref(), &tags("tags"), optional("id").as_deref())
                 .map_err(|trap| trap_error("remember", &trap))?
                 .map_err(|error| seam_error("remember", error))?;
-            let payload = json!({
-                "id": remembered.id,
-                "scope": remembered.scope,
-                "content": remembered.content,
-                "tags": remembered.tags,
-                "source": remembered.source,
-                "created_at": remembered.created_at,
-                "updated_at": remembered.updated_at,
-                "content_sha256": remembered.content_sha256,
-            });
-            let journal = remembered.written.then(|| (remembered.id.clone(), "upsert".to_string(), payload));
-            Ok((json!({"id": remembered.id, "written": remembered.written}), journal))
+            // The entry itself is written by the kernel, inside the transaction the component just
+            // committed: `written` says whether the unit owed one at all.
+            Ok(json!({"id": remembered.id, "written": remembered.written, "journalled": remembered.written}))
         }
         "recall" => {
             let rows = memory
                 .call_recall(store, &text("text"), number("limit", 10), optional("scope").as_deref(), request.get("exclusive").and_then(Value::as_bool).unwrap_or(false))
                 .map_err(|trap| trap_error("recall", &trap))?
                 .map_err(|error| seam_error("recall", error))?;
-            Ok((json!(rows.iter().map(memory_json).collect::<Vec<_>>()), None))
+            Ok(json!(rows.iter().map(memory_json).collect::<Vec<_>>()))
         }
         "forget" => {
             let forgotten = memory.call_forget(store, &text("id")).map_err(|trap| trap_error("forget", &trap))?
                 .map_err(|error| seam_error("forget", error))?;
-            let payload = json!({"id": text("id"), "deleted_at": forgotten.deleted_at, "updated_at": forgotten.deleted_at});
-            let journal = forgotten.retired.then(|| (text("id"), "delete".to_string(), payload));
-            Ok((json!({"retired": forgotten.retired, "deleted_at": forgotten.deleted_at}), journal))
+            Ok(json!({
+                "retired": forgotten.retired,
+                "deleted_at": forgotten.deleted_at,
+                "journalled": forgotten.retired,
+            }))
         }
         "list" => {
             let rows = memory
                 .call_list(store, optional("scope").as_deref(), number("limit", 50))
                 .map_err(|trap| trap_error("list", &trap))?
                 .map_err(|error| seam_error("list", error))?;
-            Ok((json!(rows.iter().map(memory_json).collect::<Vec<_>>()), None))
+            Ok(json!(rows.iter().map(memory_json).collect::<Vec<_>>()))
         }
         "search_messages" => {
             let rows = memory
@@ -414,7 +500,7 @@ fn invoke(store: &mut Store<State>, bindings: &MemoryComponent, op: &str, reques
                     })
                 })
                 .collect();
-            Ok((json!(out), None))
+            Ok(json!(out))
         }
         "sessions" => {
             let rows = memory
@@ -446,13 +532,13 @@ fn invoke(store: &mut Store<State>, bindings: &MemoryComponent, op: &str, reques
                     })
                 })
                 .collect();
-            Ok((json!(out), None))
+            Ok(json!(out))
         }
         "retention" => {
             let older = request.get("older_than_seconds").and_then(Value::as_f64).unwrap_or(0.0);
             let plan = memory.call_retention(store, older).map_err(|trap| trap_error("retention", &trap))?
                 .map_err(|error| seam_error("retention", error))?;
-            Ok((json!({"refused": plan.refused, "eligible": plan.eligible}), None))
+            Ok(json!({"refused": plan.refused, "eligible": plan.eligible}))
         }
         other => Err(format!("invalid_memory_request:unknown_op:{other}")),
     }
@@ -499,29 +585,6 @@ fn seam_error(op: &str, error: wa::memory::types::Error) -> String {
             }
         }
     }
-}
-
-/// Append the replication entry a mutation owes (`lua/core/memory.lua` `M.journal`, same columns).
-///
-/// The origin comes from the request because identity is the caller's: a component never names
-/// itself, and the kernel's own view of "who am I" is resolved above this crate.
-fn append_journal(config: &Config, payload: &Value, entity_id: String, op: String, request: &Value) -> Result<(), String> {
-    let origin = request.get("origin").and_then(Value::as_str).unwrap_or_default().to_string();
-    if origin.is_empty() {
-        return Err("journal_origin_missing".into());
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    let connection = rusqlite::Connection::open(&config.db).map_err(|error| error.to_string())?;
-    connection
-        .execute(
-            "INSERT INTO journal(kind,entity_id,op,origin,payload,created_at) VALUES(?,?,?,?,?,?)",
-            rusqlite::params!["memory", entity_id, op, origin, payload.to_string(), now],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
 }
 
 /// `host.memory(request_json)` -> the answer from [`call`]. One capability, one call: the Lua side

@@ -420,12 +420,57 @@ The manifest is the grant:
 ```
 
 Note what is *not* writable: `journal`. A journal entry's `origin` is the node's identity, and a
-component never names itself (`wa:bus` says the same about a publisher), so the kernel appends that row
-after a call that changed something and reports `journalled: false` if it could not. That is also the
-seam's one known gap: the component's transaction commits before the kernel's journal row, so a crash
-between them leaves a memory that has not replicated yet (it replicates the next time it is written).
-The native path journals inside the same transaction. Closing it needs either a `wa:kernel/sql` that
-can stamp the origin itself, or a unit of work the kernel commits — the WASI 0.3 pass, not a flag.
+component never names itself (`wa:bus` says the same about a publisher). Instead the kernel writes
+that row **inside the component's transaction**: `wa:kernel/sql` has a unit of work the kernel owns
+(`begin-unit` ... `commit-unit`, with `rollback-unit`), the component writes its rows inside it, and
+`commit-unit` appends the journal row and commits in one SQLite transaction.
+
+```wit
+begin-unit:  func() -> result<_, error>;                             // BEGIN IMMEDIATE, on this call's connection
+commit-unit: func(entry: option<journal-entry>) -> result<_, error>;  // journal row, then COMMIT
+rollback-unit: func() -> result<_, error>;                           // discard
+
+record journal-entry { entity-id: string, op: string, payload: string }  // the log's verb and the peer's JSON
+```
+
+**Both or neither.** A crash can now leave the fact and its replication entry, or neither, but never
+the fact alone — the gap the second transaction used to have is gone. A journal row that cannot be
+written (no origin configured, an unknown verb, a payload that is not a JSON object, an oversized
+one) is a refusal and the unit is rolled back, so a mutation the kernel cannot journal is not stored
+instead of being stored unreplicated. `journal` stays out of every manifest's write grant: the kernel
+prepares that one statement with the authorizer removed and the guard restored immediately, and a
+guest statement that names `journal` is still refused (tested in `sql_host`). The entry's `origin`
+comes from the node (the request's `origin`, resolved by the caller exactly as before), never from the
+guest.
+
+**The deadlines are measured, not guessed.** Every call has its own deadline (the guest's epoch, so a
+wedged guest is stopped rather than waited for) and every statement has one a second above it, so a
+statement cannot outlive the call that started it. The per-operation numbers are 10 × the p99 measured
+**through the component** on a realistic store — 10 000 facts, 50 000 messages, FTS, 500 threads —
+with a 1 s floor (`scripts/bench-memory-component.sh`, `rust/wa-memory-bench`; the runs and their
+spread are in `REPORT.md`):
+
+| operation | p99 (ms) | 10 × p99 | deadline |
+| --- | --- | --- | --- |
+| `remember` | 6.7 | 67 | 1 000 (floor) |
+| `recall` | 120 (worst pass) | 1 200 | 1 500 |
+| `forget` | 22 | 219 | 1 000 (floor) |
+| `list` | 17 | 168 | 1 000 (floor) |
+| `search_messages` | 455 (a common word matching every message) | 4 550 | 5 000 |
+| `sessions` | 31 | 310 | 1 000 (floor) |
+| `retention` | 4 | 40 | 1 000 (floor) |
+
+The single 2 s default it replaces was wrong in both directions: `search_messages` on a store whose
+transcript is full of one word measured p99 455 ms, so a 2 s call was only 4 × p99 and a loaded node
+would have pushed a legitimate query to the native fallback, while a `remember` (p99 7 ms) had 300 ×
+more room than it needed. The seam's own cost — instantiate, link, open the scoped connection, cross
+the boundary — is 5-15 ms of each call; the rest is SQLite. `WA_MEMORY_COMPONENT_TIMEOUT_MS`
+overrides the table for an unusual store; the risk that carries is named in the module, and a deadline
+that fires is not data loss (the native path answers with one log line) but the same query run twice.
+
+The measurements come from a shared machine: the same operation's p99 moved by up to 3× while other
+builds ran, so the table is 10 × the quiet-run p99 and the floor covers the cheap operations. A store
+much larger than 10k/50k will exceed these; re-measure rather than raising a number from intuition.
 
 `WA_MEMORY_COMPONENT_WASM` names a built artifact directly (the same development override
 `WA_AGENT_CORE_WASM` gives the agent core; it bypasses the components directory *and* its pin). A node
@@ -436,8 +481,11 @@ Verified by `scripts/test-memory-component.lua` (`scripts/fast.sh`): the same in
 paths must answer the same values field for field — recall (all-term, any-term, scope, exclusion,
 accents, punctuation, limit, no terms, no match), the ranking order, `list`, `search_messages`, the
 session states *and* their readable detail (including a failed thread's recorded error), forget in
-both directions, and the retention refusal. The grant's refusals and the deadline are tested against
-real wasm in `cargo test -p wa-kernel-runtime` (`sql_host`, `memory_host`).
+both directions, and the retention refusal. The grant's refusals, the unit of work's atomicity and the
+deadlines are tested against real wasm in `cargo test -p wa-kernel-runtime` (`sql_host`,
+`memory_host`), including two crash injections: a guest killed mid-call (`memory-crash` writes its
+rows, then wedges so the epoch deadline stops it) and a journal entry the kernel refuses — both must
+leave **neither** the fact nor the entry.
 
 ## Retention
 

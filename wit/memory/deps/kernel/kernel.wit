@@ -30,6 +30,16 @@ interface sql {
         changes: u64,
     }
 
+    record journal-entry {
+        entity-id: string,
+        op: string,
+        payload: string,
+    }
+
     query: func(statement: string, params: list<value>) -> result<rows, error>;
     exec: func(statement: string, params: list<value>) -> result<rows, error>;
+
+    begin-unit: func() -> result<_, error>;
+    commit-unit: func(entry: option<journal-entry>) -> result<_, error>;
+    rollback-unit: func() -> result<_, error>;
 }
