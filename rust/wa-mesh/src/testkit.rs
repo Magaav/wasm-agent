@@ -152,9 +152,10 @@ pub const SOCKET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(
 ///
 /// Two seconds was enough on an idle machine and not enough on a busy one: a loopback handshake was
 /// measured taking over two seconds while `cargo test --workspace` compiled wasmtime on all cores, and
-/// the test failed with `connect_failed:connection timed out` instead of testing anything. The socket
-/// op still has a deadline — a generous one — and the per-test deadline above is the real backstop.
-pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// the test failed with `connect_failed:connection timed out` instead of testing anything. With a whole
+/// workspace release build running, fifteen seconds was not enough either. The socket op still has a
+/// deadline — a generous one — and the per-test deadline above is the real backstop.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The hard per-test deadline. Every end-to-end test here runs under it.
 ///
