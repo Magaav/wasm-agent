@@ -1,5 +1,6 @@
-//! `host.whatsapp_search`, `whatsapp_read`, `whatsapp_reactions`, `whatsapp_media` and
-//! `whatsapp_download`: the agent's way into the message index the `wa-whatsapp` component keeps.
+//! `host.whatsapp_search`, `whatsapp_read`, `whatsapp_reactions`, `whatsapp_media`,
+//! `whatsapp_download` and `whatsapp_backfill`: the agent's way into the message index the
+//! `wa-whatsapp` component keeps.
 //!
 //! The architecture is the explicit send's (`rust/wa-capabilities/src/whatsapp_send.rs`,
 //! `docs/SERVICE-COMPONENTS.md`): a question is a **job on the shared durable queue**, not a host call
@@ -53,7 +54,7 @@ fn queue() -> wa_queue::Queue {
     wa_kernel_runtime::queue_host::node().queue(COMPONENT)
 }
 
-// ---- the five capabilities ---------------------------------------------------------------------
+// ---- the six capabilities ---------------------------------------------------------------------
 
 /// `host.whatsapp_search({q, chat?, kind?, from?, since?, until?, limit})`.
 pub extern "C-unwind" fn search(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
@@ -86,6 +87,18 @@ pub extern "C-unwind" fn download(l: *mut wa_host_support::lua::LuaState) -> std
     1
 }
 
+/// `host.whatsapp_backfill({chat?, count?})` - ask the primary phone for messages older than the
+/// index holds.
+///
+/// The one query with an outward effect: the phone is asked, and the records that arrive land in the
+/// index like any live message (marked `source: history`). It is still the same shape as the others -
+/// validate, enqueue on `whatsapp.query`, wait - so nothing about the transport is special; the answer
+/// is the request list the component made (`chats`, `count`) and a `note` when it stopped early, never
+/// a message.
+pub extern "C-unwind" fn backfill(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer(l, seam::Op::Backfill)
+}
+
 // ---- one query ---------------------------------------------------------------------------------
 
 /// The common shape of the four text answers: validate, enqueue, wait, read the settled result.
@@ -100,9 +113,18 @@ fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw:
 }
 
 /// Build the request from the tool's arguments, in the one shape the component reads back.
+///
+/// The count is one field on the wire and two names in the catalogue: `limit` for the ops that page an
+/// answer, `count` for `whatsapp_backfill` (which asks the phone how many messages per chat, it does
+/// not page anything). Either name is accepted for either op, so a caller that says `count` to a
+/// search or `limit` to a backfill is understood instead of silently getting the default.
 fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusal> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
     let number = |key: &str| args.get(key).and_then(Value::as_i64);
+    let limit = match op {
+        seam::Op::Backfill => args.get("count").and_then(Value::as_u64).or_else(|| args.get("limit").and_then(Value::as_u64)),
+        _ => args.get("limit").and_then(Value::as_u64).or_else(|| args.get("count").and_then(Value::as_u64)),
+    };
     let request = seam::Request {
         op: op.as_str().to_string(),
         q: text("q"),
@@ -113,7 +135,7 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
         since: number("since"),
         until: number("until"),
         before: text("before"),
-        limit: args.get("limit").and_then(Value::as_u64).map(|value| value.min(u32::MAX as u64) as u32),
+        limit: limit.map(|value| value.min(u32::MAX as u64) as u32),
         max_bytes: args.get("max_bytes").and_then(Value::as_u64),
     };
     request.validate()

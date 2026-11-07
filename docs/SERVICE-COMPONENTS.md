@@ -545,10 +545,10 @@ media key and the direct path never leave the component: they are how it decrypt
   by the component's storage grant; a write that fails is logged, never treated as done.
 
 **The query lane.** `wa:queue`, queue name `whatsapp.query` (`rust/wa-whatsapp-index` is the shared
-request/answer shape; the node's five capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):
+request/answer shape; the node's six capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):
 
 ```text
-tool whatsapp_search | read | reactions | media | download
+tool whatsapp_search | read | reactions | media | download | backfill
   -> validate + bound the request            wa-whatsapp-index
   -> enqueue `whatsapp.query` (fresh 2 min, 2 attempts, dedupe = the request itself)
 component wa-whatsapp (queue worker on `whatsapp.query`, one lease at a time)
@@ -561,6 +561,27 @@ waits, so a search answers in the same turn; a slower one answers `whatsapp_<op>
 and `retry: true`, and the same call reads the same job (the dedupe key *is* the request). A refusal at
 the producer writes nothing: `whatsapp_search_empty_query`, `whatsapp_read_bad_chat`,
 `whatsapp_search_bad_kind`, `whatsapp_reactions_chat_and_id_required`, …
+
+**Backfill.** `whatsapp_backfill` is the one query that reaches out: `{chat?, count?}` asks the
+primary phone for messages **older** than the index holds, so a search covers the account's past and
+not only what arrived while the node was running. Naming no chat asks the chats the index already
+knows, newest first, at most `BACKFILL_MAX_CHATS` (20) of them - one request per chat is a message to
+the phone. `count` is the messages per chat: default `BACKFILL_DEFAULT` (50), clamped to
+`BACKFILL_MAX` (500), and it is the same `limit` field on the wire, so the seam keeps one count. Each
+chat is asked from the oldest message the index holds for it (`history::anchors`), or from the phone's
+newest messages when the index holds none.
+
+The answer is what was **asked for** - `chats[{chat, count, oldest_id, oldest_ts}], count` and a
+`note` when some chats could not be asked - never a message: the delivery arrives through the normal
+protocol and the same drain that indexes a relink indexes it, marked `source: history`, so it is
+findable by the next `whatsapp_search`. Because it asks the phone, the capability is registered as
+`network` (not `read-only`) and the tool is not on the steering fence's read-only list; a client that
+is not connected is a failed job (`not_connected`), which the queue retries, and an index that holds
+no chat at all answers `count: 0` with the note that a live message has to arrive first.
+
+| tool | arguments | answers |
+| --- | --- | --- |
+| `whatsapp_backfill` | `chat?, count?` | `chats[{chat, count, oldest_id, oldest_ts}], count, note?` |
 
 **Download.** `whatsapp_download` is the one with an effect. The component decrypts with the keys it
 kept and hands the plaintext back on the job's **progress stream**, because a job's result is capped at
@@ -591,9 +612,10 @@ lines carry the job, the op, the kind and a count.
 fake client: every kind, reactions add/change/remove, an edit, a revoke, a revoke that arrives first,
 ranking, filters, limits, retention, repair), `cargo test -p wa-whatsapp-index` (14 + 7: the request
 shape, the bounds and the round trip against the real queue), `cargo test -p wa-capabilities
-whatsapp_query` (8: what a tool call enqueues, what it answers, what it refuses before writing, the
-download's chunk collection and the bounded directory), and `scripts/test-whatsapp-index.lua` (74
-checks: the tool shapes, the cues, master-only, the refusals, the real enqueue). The component builds
+whatsapp_query` (9: what a tool call enqueues, what it answers, what it refuses before writing, the
+backfill's count and request list, the download's chunk collection and the bounded directory), and
+`scripts/test-whatsapp-index.lua` (89 checks: the tool shapes, the cues, master-only, the refusals,
+the real enqueue). The component builds
 for `wasm32-wasip2` (8.4 MB).
 
 **Not verified here:** a live account. This lane did not pair, connect, receive or send, so whether a

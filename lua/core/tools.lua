@@ -578,6 +578,9 @@ M.admin[#M.admin+1]=schema('whatsapp_download','Decrypt the media of one indexed
  chat={type='string',maxLength=160,description='The exact chat JID of the message.'},
  id={type='string',maxLength=128,description='The message id.'},
  max_bytes={type='integer',minimum=1,maximum=524288,description='Most plaintext bytes to fetch (default and maximum 524288).'}},{'chat','id'})
+M.admin[#M.admin+1]=schema('whatsapp_backfill','Ask the primary phone for older WhatsApp messages, so the index covers the account history and not only the live stream. Name one exact chat JID to reach back into that conversation, or name none to ask for the chats the index already knows (at most 20, newest first). The messages arrive through the normal protocol and are indexed as history, so a later whatsapp_search finds them. This is a request to the phone, not an answer: the result is the ids and counts that were asked for, plus a note when it stopped early (client offline, chat unknown, phone cannot be asked).',{
+ chat={type='string',maxLength=160,description='Optional: one exact chat JID to reach back into. Omit to ask for the chats the index already knows.'},
+ count={type='integer',minimum=1,maximum=500,description='Messages to ask for per chat (default 50, at most 500).'}},nil)
 M.admin[#M.admin+1]=schema('mcp','List/manage explicit MCP connectors. New/edited definitions remain disabled; probe never grants tool/send/job authority.',{
  action={type='string',enum={'list','put','probe','enable','disable'}},id={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes/probes: exact registry revision from list. Stale state refuses.'},definition={type='object',description='Reviewed connector: id/name, transport stdio or http, program/args or url, optional cwd, environment-reference env/headers, timeout_seconds; tools maps exact tool names to locally approved read/write.'}},nil)
 M.admin[#M.admin+1]=schema('services','List/manage long-lived WASI service components (docs/SERVICE-COMPONENTS.md): put a definition (disabled), enable (start now and at boot), disable, restart, remove, status, logs, upgrade (transactional install of a new artifact: stage, verify pin, check imported interfaces are served, migrate state on a snapshot copy, start beside, health, switch, stop - any failure leaves the running instance untouched), profile_dump (the effective configuration after base -> node -> user -> patch, rows by id), stt (the speech queue this node produces or works for: role, attached workers, their recent latency and the local/remote decode counts - ids and durations only, never a transcript). Grants are references: env/file_env names or a file path, exact net addresses. A component whose manifest declares `state_version` is migrated on a snapshot copy of its kv before it starts, and the start answer reports it under `state` (`fresh`, `up-to-date` or `migrated` with the versions); a refused migration (`state_no_migration_path`, `state_owner_mismatch`) starts nothing and leaves the old state at its old version. Read a namespace, its journal and its snapshots with `host.state` (action status), not by asking the component.',{
@@ -733,6 +736,7 @@ local CUES = {
   whatsapp_reactions = "Who reacted to one WhatsApp message, with which emoji",
   whatsapp_media = "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration",
   whatsapp_download = "Decrypt one WhatsApp message's media to this node and return the file path",
+  whatsapp_backfill = "Ask the phone for older WhatsApp messages so search covers the account's past",
   capture_inspect = "Inspect retained model-request captures as bounded metadata before reading raw dumps",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
@@ -1377,7 +1381,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return decoded
   end
   if name=='whatsapp_search' or name=='whatsapp_read' or name=='whatsapp_reactions'
-     or name=='whatsapp_media' or name=='whatsapp_download' then
+     or name=='whatsapp_media' or name=='whatsapp_download' or name=='whatsapp_backfill' then
     -- The message index (docs/HOST.md, docs/SERVICE-COMPONENTS.md): a question is a job on
     -- `whatsapp.query`, answered by the wa-whatsapp component out of its own kv. A binary without the
     -- capability is told apart from a refusal, and a slow answer comes back with its job id and
@@ -1390,6 +1394,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       request={chat=args.chat,before=args.before,limit=args.limit}
     elseif name=='whatsapp_download' then
       request={chat=args.chat,id=args.id,max_bytes=args.max_bytes}
+    elseif name=='whatsapp_backfill' then
+      -- The tool calls the per-chat count `count`; the wire carries one count field (`limit`), so the
+      -- host capability maps the name and the seam keeps one shape.
+      request={chat=args.chat,count=args.count}
     else
       request={chat=args.chat,id=args.id}
     end

@@ -98,6 +98,59 @@ fn a_dead_job_answers_with_its_reason_and_not_with_a_success() {
 }
 
 #[test]
+fn a_backfill_takes_count_as_its_limit_and_needs_no_chat() {
+    let (_host, queue) = queue("backfill");
+    // No chat, an explicit count: one job, and the count travels as the wire's one count field.
+    let args = serde_json::json!({"count": 120});
+    let slow = ask_in(&queue, seam::Op::Backfill, &args, 1);
+    assert_eq!(slow["error"], "whatsapp_backfill_slow");
+    assert_eq!(slow["retry"], true);
+    let id = slow["id"].as_u64().expect("the job id");
+    let job = queue.job(wa_queue::JobId(id)).unwrap().unwrap();
+    assert_eq!(job.queue, seam::QUEUE);
+    let verified = seam::Request::decode(&job.payload).unwrap().validate().unwrap();
+    assert_eq!((verified.op, verified.chat.is_none(), verified.limit), (seam::Op::Backfill, true, 120));
+
+    // `limit` is understood as the same count, and neither is required: the default is the seam's.
+    let default = request_of(seam::Op::Backfill, &serde_json::json!({})).unwrap();
+    assert_eq!(default.limit, seam::BACKFILL_DEFAULT);
+    let alias = request_of(seam::Op::Backfill, &serde_json::json!({"limit": 7})).unwrap();
+    assert_eq!(alias.limit, 7);
+    // The bound is the component's, not the caller's.
+    let huge = request_of(seam::Op::Backfill, &serde_json::json!({"count": 1_000_000})).unwrap();
+    assert_eq!(huge.limit, seam::BACKFILL_MAX);
+
+    // A chat that is not an exact JID is refused before the queue, like every other query.
+    let bare = ask_in(&queue, seam::Op::Backfill, &serde_json::json!({"chat": "5511999999999"}), 50);
+    assert_eq!(bare["error"], "whatsapp_backfill_bad_chat");
+    assert_eq!(bare["effect"], "none");
+
+    // The component's answer is the request list, never a message.
+    let wa_queue::TakeOutcome::Job(taken) = queue.take(seam::QUEUE, "wa-whatsapp", None).unwrap() else {
+        panic!("the job must be takeable");
+    };
+    let body = seam::backfill_answer(
+        vec![seam::BackfillChat {
+            chat: "5511999999999@lid".into(),
+            count: 120,
+            oldest_id: "3EB01".into(),
+            oldest_ts: 1_760_000_000_000,
+        }],
+        "one chat could not be asked",
+    );
+    let answer = seam::answer(seam::Op::Backfill, body);
+    queue.done_by(taken.id, "wa-whatsapp", &serde_json::to_vec(&answer).unwrap()).unwrap();
+    let answer = ask_in(&queue, seam::Op::Backfill, &args, 2_000);
+    assert_eq!(answer["ok"], true);
+    assert_eq!(answer["op"], "backfill");
+    assert_eq!(answer["count"], 1);
+    assert_eq!(answer["chats"][0]["chat"], "5511999999999@lid");
+    assert_eq!(answer["chats"][0]["count"], 120);
+    assert_eq!(answer["note"], "one chat could not be asked");
+    assert!(answer.get("messages").is_none(), "a backfill answer never carries a message");
+}
+
+#[test]
 fn a_bad_argument_is_refused_before_the_queue() {
     let (_host, queue) = queue("refusal");
     for (op, args, code) in [

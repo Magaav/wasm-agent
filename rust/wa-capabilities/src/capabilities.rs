@@ -191,6 +191,9 @@ pub const REGISTRY: &[Capability] = &[
     plain!("whatsapp_reactions", ReadOnly, crate::whatsapp_query::reactions, "Who reacted to one WhatsApp message, with which emoji"),
     plain!("whatsapp_media", ReadOnly, crate::whatsapp_query::media, "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration, pages"),
     plain!("whatsapp_download", WritesFiles, crate::whatsapp_query::download, "Decrypt one WhatsApp message's media into this node's bounded download folder and return the path"),
+    // The one query that asks the phone: it enqueues on the same `whatsapp.query` queue, and the
+    // component's answer is the history request it made (ids and counts), never a message.
+    plain!("whatsapp_backfill", Network, crate::whatsapp_query::backfill, "Ask the primary phone for WhatsApp messages older than the index holds, so a search can reach the account's past"),
     // ---- node governance (docs/GRANT-POLICY.md, docs/TELEMETRY.md) ----------------------------
     plain!("policy_status", ReadOnly, wa_governance::node_policy::capability, "The grant policy's state as JSON: file and load error, decision counters, recent refusals without target text, and the audit trail's health"),
     plain!("telemetry", ReadOnly, wa_governance::node_telemetry::capability, "This node's telemetry as Prometheus text or JSON: component and host-call latency, service health, sampled spans, rollups and the bounded stores' usage"),

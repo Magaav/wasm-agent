@@ -730,6 +730,7 @@ whatsapp_media       read-only
 whatsapp_reactions   read-only
 whatsapp_read        read-only
 whatsapp_search      read-only
+whatsapp_backfill    network
 write_file           writes files
 <!-- capability-inventory:end -->
 

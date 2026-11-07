@@ -3,8 +3,9 @@
 --
 -- What it pins (`docs/HOST.md`, `docs/SERVICE-COMPONENTS.md` "The message index"):
 --
---   * the five tools exist as master tools with the shapes the docs promise, each with a discovery
---     cue, and every one of them but `whatsapp_download` is a read;
+--   * the six tools exist as master tools with the shapes the docs promise, each with a discovery
+--     cue, and every one of them but `whatsapp_download` and `whatsapp_backfill` is a read (both ask
+--     the component to do something, so neither may pass the steering fence as read-only);
 --   * a guest may not query the operator's message index;
 --   * a refusal is a word, not a silent success - a search with no narrowing, a bare phone number, an
 --     unknown kind - and a refusal never writes a job;
@@ -58,11 +59,12 @@ ok(component.capabilities["whatsapp.send"] ~= nil, "the send rule is untouched")
 -- ---- the tool shape -------------------------------------------------------------------------------
 local schemas = {}
 for _, item in ipairs(tools.catalog("master")) do schemas[item["function"].name] = item["function"] end
-for _, name in ipairs({ "whatsapp_search", "whatsapp_read", "whatsapp_reactions", "whatsapp_media", "whatsapp_download" }) do
+for _, name in ipairs({ "whatsapp_search", "whatsapp_read", "whatsapp_reactions", "whatsapp_media", "whatsapp_download", "whatsapp_backfill" }) do
   ok(schemas[name] ~= nil, name .. " is a catalogued master tool")
   ok(tools.snippet(name) ~= nil, name .. " has a discovery cue")
   ok(schemas[name].parameters.type == "object", name .. " takes an object")
-  ok(tools.has_effect(name) == (name == "whatsapp_download"), name .. " is a read unless it is the download")
+  ok(tools.has_effect(name) == (name == "whatsapp_download" or name == "whatsapp_backfill"),
+    name .. " is a read unless it downloads or asks the phone")
 end
 
 local search = schemas.whatsapp_search.parameters
@@ -93,15 +95,27 @@ ok(schemas.whatsapp_media.description:find("media key", 1, true) ~= nil,
 ok(schemas.whatsapp_download.description:find("bounded", 1, true) ~= nil, "the download tool says it is bounded")
 ok(schemas.whatsapp_read.description:find("next_before", 1, true) ~= nil, "the read tool documents its cursor")
 
+-- backfill: the one query that asks the phone. `chat` and `count` are both optional (the index knows
+-- which chats to ask for), the count is bounded at the component's own maximum, and nothing about the
+-- shape lets a caller skip the request bound.
+local backfill = schemas.whatsapp_backfill.parameters
+ok(backfill.properties.chat ~= nil and backfill.properties.count ~= nil, "backfill takes chat and count")
+ok(backfill.required == nil or #backfill.required == 0, "backfill needs no argument: no chat means the known chats")
+ok(backfill.properties.count.minimum == 1 and backfill.properties.count.maximum == 500,
+  "backfill asks for 1 to 500 messages per chat")
+ok(backfill.properties.chat.maxLength == 160, "backfill's chat is an exact JID, bounded like every other chat")
+ok(schemas.whatsapp_backfill.description:find("history", 1, true) ~= nil,
+  "the backfill tool says the messages land in the index")
+
 -- Master-only: the index is the operator's own conversations.
-for _, name in ipairs({ "whatsapp_search", "whatsapp_read", "whatsapp_reactions", "whatsapp_media", "whatsapp_download" }) do
+for _, name in ipairs({ "whatsapp_search", "whatsapp_read", "whatsapp_reactions", "whatsapp_media", "whatsapp_download", "whatsapp_backfill" }) do
   local refused = call(name, { q = "x", chat = "5511999999999@lid", id = "3EB0" }, "guest")
   ok(refused.error == "forbidden_for_role:guest", "a guest may not call " .. name)
 end
 
 -- ---- the capability, when this binary has it ------------------------------------------------------
 if type(host.whatsapp_search) ~= "function" then
-  for _, name in ipairs({ "whatsapp_search", "whatsapp_read", "whatsapp_reactions", "whatsapp_media", "whatsapp_download" }) do
+  for _, name in ipairs({ "whatsapp_search", "whatsapp_read", "whatsapp_reactions", "whatsapp_media", "whatsapp_download", "whatsapp_backfill" }) do
     ok(call(name, { q = "x", chat = "5511999999999@lid", id = "3EB0" }).error == name .. "_unavailable",
       "a binary without the capability answers unavailable, not a silent success: " .. name)
   end
@@ -118,6 +132,23 @@ else
   ok(kind.error == "whatsapp_search_bad_kind", "an unknown kind is refused")
   local no_id = call("whatsapp_reactions", { chat = "5511999999999@lid" })
   ok(no_id.error == "whatsapp_reactions_chat_and_id_required", "one message needs chat and id")
+  local bare_backfill = call("whatsapp_backfill", { chat = "5511999999999", count = 10 })
+  ok(bare_backfill.error == "whatsapp_backfill_bad_chat", "a backfill's chat is an exact JID too")
+
+  -- A backfill with no chat is a valid request: it asks for the chats the index already knows. Nothing
+  -- consumes the job here, so the answer is the honest "still running" and not an invented count.
+  local fill = call("whatsapp_backfill", { count = 25 })
+  if fill.ok == true then
+    ok(type(fill.chats) == "table" and type(fill.count) == "number", "the backfill answered with its request list")
+    ok(fill.messages == nil, "a backfill answer never carries a message")
+  else
+    ok(fill.error == "whatsapp_backfill_slow", "an unanswered backfill says so: " .. json.encode(fill))
+    ok(type(fill.id) == "number" and fill.id > 0, "the slow backfill carries the job id")
+    local again = call("whatsapp_backfill", { count = 25 })
+    ok(again.id == fill.id, "the same backfill question is the same job")
+    local other = call("whatsapp_backfill", { count = 26 })
+    ok(other.id ~= fill.id, "a different count is a different request, so it is a different job")
+  end
 
   -- The real enqueue, into this run's private home. Nothing consumes it here (the component is not
   -- running), so the answer is the honest "still running, here is the id" - and the same call again

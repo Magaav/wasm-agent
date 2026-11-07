@@ -104,6 +104,7 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `whatsapp_reactions`: Who reacted to one WhatsApp message, with which emoji
 - `whatsapp_media`: The media metadata of one WhatsApp message: mime, filename, size, sha256, duration
 - `whatsapp_download`: Decrypt one WhatsApp message's media to this node and return the file path
+- `whatsapp_backfill`: Ask the phone for older WhatsApp messages so search covers the account's past
 - `mcp`: List and manage MCP connectors; new or edited ones stay disabled until enabled
 - `services`: List and manage long-lived WASI service components: start, stop, logs
 - `capture_inspect`: Inspect retained model-request captures as bounded metadata before reading raw dumps
@@ -182,6 +183,7 @@ runs on the client too, while `bash` runs on this node.
 | `whatsapp_reactions` | `chat` `id` | Who reacted to one WhatsApp message, with which emoji |
 | `whatsapp_media` | `chat` `id` | The media metadata of one WhatsApp message: mime, filename, size, sha256, duration |
 | `whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media to this node and return the file path |
+| `whatsapp_backfill` | `chat?` `count?` | Ask the phone for older WhatsApp messages so search covers the account's past |
 | `mcp` | `action?` `definition?` `expected_revision?` `id?` | List and manage MCP connectors; new or edited ones stay disabled until enabled |
 | `services` | `action?` `bytes?` `definition?` `expected_revision?` `name?` `ready_ms?` `source?` | List and manage long-lived WASI service components: start, stop, logs |
 | `capture_inspect` | `path` `item_index?` `limit?` `offset?` `request_index?` `snapshot?` `view?` | Inspect retained model-request captures as bounded metadata before reading raw dumps |
