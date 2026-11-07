@@ -1,0 +1,16 @@
+[package]
+name = "wa-email-index"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The email index's seam: a typed mail record, the kv key layout the component writes it under, the
+# query a tool asks for (`email.query`), the bounded answer it comes back with, and the `email.received`
+# bus event. Shared by the two ends - the node (which enqueues a query and reads the answer) and the
+# `wa-email` component (which consumes it against its own kv) - so the two cannot disagree about what
+# a query means. Everything here is pure: no host call, no I/O, and it builds for wasm32-wasip2.
+[dependencies]
+# The record digests (message-id pointer, attachment sha256) and the dedupe key are `sha256(...)`.
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

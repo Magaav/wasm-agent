@@ -1,0 +1,28 @@
+[package]
+name = "wa-email-outbox"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The email send path's seam: one outgoing message as it travels on the shared durable queue
+# (`email.outbox`), its validation, its dedupe key, the rate limit that decides whether the worker
+# may still send it, the audit digest of its recipients and the shape of its settled result. Shared by
+# the two ends - the node (which enqueues after the `email.send` policy check) and the `wa-email`
+# component (which consumes it and reports `done(message id)` / `fail(reason)`) - so the two cannot
+# disagree about what a job means. Pure: no host call, no I/O, and it builds for wasm32-wasip2.
+[dependencies]
+# The dedupe key and the audit digest are `sha256(...)`. `sha2` is pure Rust, so the component keeps
+# building for wasm32-wasip2 (ring would drag a C build into the guest). Same crate the WhatsApp
+# outbox already uses.
+sha2 = "0.10"
+# Attachment bytes travel as base64 inside the job payload (the queue payload is bounded), so the
+# encoder/decoder is here rather than in the guest. Pure Rust, no C, builds for wasm32-wasip2.
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The round-trip test drives the *real* queue the node serves to components (`wa:queue` over
+# `rust/wa-queue`), so "enqueue -> component sends -> done with the message id", dedupe and expiry are
+# measured against the queue's own semantics instead of a model of them.
+wa-queue = { path = "../wa-queue" }
