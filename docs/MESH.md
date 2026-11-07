@@ -367,6 +367,8 @@ outside this command (it needs the old private key); the message it must sign is
 | a roster-authorized caller reaches the capability without the operator pins | `serve.rs` (`/node/admitted` + one-shot ticket), `binding.lua` (`wa_mesh_admit`) | done, tested |
 | **existing operators bootstrap it** (`wa fleet push-roster`, host call) | `fleet.rs`, `lua/core/fleet.lua`, `binding.lua` (`roster` capability) | done, tested |
 | listener mounted by the node | `rust/wa-capabilities/src/serve.rs` | behind `WA_MESH=1` + `WASM_AGENT_MESH_PORT` |
+| execution of a capability on the target | forwards to the node's own `/node/call` | **partial** — see §8 |
+| admission by the mesh's verb, for a call the mount attested | `lua/core/server.lua` (`mesh_verb`, `mesh_admitted`, `wa_node_call`) | done and tested (`scripts/test-mesh-admission.lua`, 19 checks); the mount does not sign an attestation yet — §8.1 |
 | hole punching / STUN / QUIC | — | not started |
 
 The wire and the caller's JSON contract (`host.mesh_call`) are documented in
@@ -376,6 +378,10 @@ four modes this change adds — `{admit: …}` (decide an inbound envelope), `{s
 for a carrier that drops headers), `{verify_roster: …}` and `{install_roster: …}` (the bootstrap).
 They are modes of the capability that already existed, so the catalogue does not grow for a feature
 only a fleet member ever uses.
+looks for a capability and where the drift test keeps it honest. Tests: `cargo test -p wa-mesh`
+(38 tests: the unit tests per module plus the three-node end-to-end file, every end-to-end body under
+a hard 120-second deadline), or `bash scripts/test-mesh.sh` for the same run, `cargo clippy -p wa-mesh`
+clean.
 
 Tests: `cargo test -p wa-mesh` (50 tests: the unit tests per module, the three-node end-to-end file,
 and `tests_relay.rs` — four nodes A/B/T/R where T pins `[B]` like `nextcloud`: refused before the
@@ -414,6 +420,27 @@ wa serve --port 8799
    may call and *what authority* the call needs, and the managed list can still refuse a capability
    outside it (`capability_not_granted`). It is a narrowing, never a widening: nothing the roster
    denies becomes allowed. Moving that list into the mesh's verb vocabulary is the next step.
+1. **The target executes through today's trust basis.** The mounted listener authorizes the caller
+   against the roster and hierarchy, then forwards the call, with the caller's own inner request and
+   headers, to the node's loopback `/node/call`. That path verifies the caller the way it does today:
+   a *fresh* rendezvous lookup. So with the rendezvous down a real node still refuses
+   `unknown_caller` at the last step, even though discovery and the mesh verdict needed no directory.
+   Making the roster the execution trust basis is a change in `lua/core/server.lua`'s
+   `verify_peer`/`verify_caller` (a mesh-verified caller basis carried only on the loopback hop), which
+   this change deliberately does not make — it is a security boundary, and the crate tests prove the
+   mesh verdict without it.
+
+   The *admission* half of that seam is now in `wa_node_call`. A managed node (an enrolled guest)
+   admits an inbound peer call by a list of capability names; a call the mesh's mount authorized is
+   admitted by the **verb** the roster and the operator's grants decided on (`read`, `control` or
+   `call`), and only with an attestation signed by the node's own key and bound to the caller, the
+   verb, the capability and the caller's request signature. A missing, stale, forged, tampered or
+   differently-bound attestation falls back to the legacy name list, which is unchanged. What remains
+   is one line in `rust/wa-capabilities/src/serve.rs` (pass a sixth argument to `wa_node_call`) and
+   the mount signing `mesh-allow|<caller>|<verb>|<capability>|<caller signature>` after `authorize()`
+   allows; until then no caller can reach the attested branch at all, which is the fail-closed
+   direction. `scripts/test-mesh-admission.lua` measures the rule on its own (a stubbed enrollment,
+   the real `wa_node_call`).
 2. **`policy.json` cannot carry `mesh` for the grant policy yet.** `PolicySet` refuses unknown fields;
    one line in `rust/wa-grant-policy/src/policy.rs` (skip a top-level `mesh`) is the fix, plus its
    test. Until then a node that needs mesh grants must not also rely on the grant policy loading.

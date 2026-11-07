@@ -868,7 +868,62 @@ local function signed_reply(signature, ts, out)
   return json.encode({ reply = out, reply_sig = reply_sig or "" })
 end
 
-function wa_node_call(payload, from, public_key, ts, signature)
+-- The mesh's admission of a managed peer call (docs/MESH.md, sections 2 and 7).
+--
+-- A managed guest admits an inbound peer call by a list of capability *names* (`allowed`, in
+-- `wa_node_call` below), because a name list is all it ever had. A call the mesh's own mount already
+-- authorized is a different kind of call: a verified fleet roster and a verified roster+grant decision
+-- exist for it, and the mesh grades that decision by one of three verbs (`read`, `control`, `call`) -
+-- so it is admitted by the verb that was decided on, not by the legacy list.
+--
+-- The proof is an attestation signed with *this* node's key: `rust/wa-mesh`'s mount holds the same
+-- identity and signs only after `authorize()` returned allow (`docs/MESH.md` section 8.1 names this
+-- seam). That is what keeps the widening to a roster decision:
+--   * a remote caller cannot mint one - it holds its own key, and `from` has to be *this* node;
+--   * a local process cannot mint one without the node key, which is the identity every other peer
+--     check already rests on;
+--   * it is bound to one caller, one verb, one capability name and the caller's own request signature,
+--     so it cannot be replayed onto a different request or a different capability;
+--   * it expires with the same 120-second window every peer request uses.
+-- Without one - which is every call today: `serve.rs` and the relay's `binding.lua` both call
+-- `wa_node_call` with five arguments - the legacy list is the whole rule, unchanged.
+local MESH_VERBS = {
+  read = { read = true, read_many = true, ls = true, grep = true, sessions = true, session = true,
+    search_messages = true, recall = true, status = true, health = true },
+  control = { bash = true, write = true, edit = true, shell = true, chat = true, client = true,
+    set_role = true, set_model = true, set_provider = true, subagent = true, spell_save = true,
+    spell_run = true, access = true },
+}
+
+-- The verb the mesh grades a capability with. Anything unlisted is `call`, which the mesh's own rules
+-- treat as needing the strongest grant, so a capability nobody classified is never admitted by a
+-- weaker attestation (docs/MESH.md section 2, `Verb::from_capability`).
+local function mesh_verb(capability)
+  if MESH_VERBS.read[capability] then return "read" end
+  if MESH_VERBS.control[capability] then return "control" end
+  return "call"
+end
+
+-- Does `attestation` prove that the mesh admitted this exact call? Answers the verb it proved, or nil
+-- and one word for the log.
+local function mesh_admitted(attestation, caller, capability, signature)
+  if type(attestation) ~= "table" then return nil, "no_attestation" end
+  local verb = mesh_verb(capability)
+  if attestation.caller ~= (caller.node_id or "") then return nil, "attestation_caller_mismatch" end
+  if attestation.capability ~= capability then return nil, "attestation_capability_mismatch" end
+  if attestation.verb ~= verb then return nil, "attestation_verb_mismatch" end
+  local stamp = math.floor(tonumber(attestation.ts) or 0)
+  if stamp == 0 or math.abs(host.now() - stamp) > 120 then return nil, "attestation_stale" end
+  local identity = nodeslib.identity() or {}
+  if not identity.public_key or identity.public_key == "" then return nil, "no_identity" end
+  local material = table.concat({ caller.node_id, verb, capability, tostring(signature or "") }, "|")
+  if not signature_matches(identity.public_key, "mesh-allow", identity.node_id, stamp, material, attestation.signature) then
+    return nil, "attestation_bad_signature"
+  end
+  return verb
+end
+
+function wa_node_call(payload, from, public_key, ts, signature, mesh)
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
   local capability = request.capability or ""
@@ -889,7 +944,21 @@ function wa_node_call(payload, from, public_key, ts, signature)
       -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
       -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
       stt=true }
-    if not allowed[capability] then return answer({ error = "capability_not_granted" }) end
+    -- Two admissions, one gate. A call the mesh's own mount authorized is admitted by the verb the
+    -- roster and the grants decided on; every other call is admitted by the legacy list and nothing
+    -- more. Neither one can be borrowed for the other: an absent or bad attestation falls through to
+    -- the list, and an attested `read` verb does not admit a `control` capability.
+    local verb, why = mesh_admitted(mesh, caller, capability, signature)
+    if not verb and not allowed[capability] then
+      if why ~= "no_attestation" then
+        emit({ type = "log", message = "mesh admission refused: " .. why })
+      end
+      return answer({ error = "capability_not_granted" })
+    end
+    if verb and not allowed[capability] then
+      -- The one line that says the mesh widened the managed list, and for what.
+      emit({ type = "log", message = "mesh admission: " .. capability .. " admitted by the " .. verb .. " verb" })
+    end
     enrollment.audit(caller, capability, "started")
     local ran, result = pcall(node_capability, capability, request.args, caller)
     enrollment.audit(caller, capability, ran and not result.error and "completed" or "failed")
