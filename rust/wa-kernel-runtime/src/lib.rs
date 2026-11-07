@@ -45,6 +45,9 @@ pub mod profiles;
 pub mod registrations;
 pub mod queue_host;
 pub mod service_components;
+// The self-loop seam served to the core: the `selfloop` component over its own scoped
+// `wa:kernel/sql` grant (docs/CORE-SPLIT.md).
+pub mod selfloop_host;
 pub mod service_components_v2;
 pub mod service_io;
 pub mod services;

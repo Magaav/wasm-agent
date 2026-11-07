@@ -1,0 +1,403 @@
+/// `wa:selfloop` — the model's own controls for a long mission (docs/SELF-LOOP.md): notes, wakes and
+/// probes, as the state machine over three tables in `memory.db`.
+///
+/// The seam is the *scheduling state machine*, not the mission: the wake/notes/probe rules, their
+/// validation, their refusals, the claim/settle compare-and-set and the rendered wake turn live here,
+/// while everything that needs living state of the node stays in the loop — running the probe script
+/// in the QuickJS sandbox (it calls the read-only tool catalogue), the run scheduler a due wake is
+/// handed to, the `SelfWake`/bus hooks that may veto a turn, and the agent turn itself. Those are
+/// `lua/core/selfloop.lua`'s `run_probe`, `dispatch_default`, `run_wake` and `publish`'s hook call.
+///
+/// **Nothing here is a JSON document.** Every argument and every answer is a record: a wake is a
+/// `wake`, a refusal is a case of `error` (the same cases the Lua API names, so a caller can keep
+/// switching on names), a probe result is `probe-result`. Two values are rendered text on purpose and
+/// are documented where they appear: `probe-result.detail` (the model-facing rendering of what the
+/// probe returned, shown to the model on its next turn) and `error`'s `table` case is *not* a string
+/// at all. Trace records travel as a typed `trace-entry`, not as the JSON the transcript stores.
+///
+/// Durable state stays the kernel's: the component never opens `memory.db`, never runs DDL (its
+/// `wa:kernel/sql` grant is read/write on named tables only) and never sees the path. The schema is
+/// created by `lua/core/selfloop.lua` `setup()`, which the node keeps calling, and a pending row
+/// survives a restart because it is a row — not because a component remembers anything.
+package wa:selfloop@0.1.0;
+
+interface types {
+    /// One row of `self_wakes`, as the model reads it (`M.list`, `M.schedule`'s answer).
+    record wake {
+        id: string,
+        /// `pending`, `dispatching`, `delivered`, `failed`, `cancelled` or `unknown` — the state
+        /// machine's own states, never a second vocabulary.
+        status: string,
+        reason: string,
+        /// The model's prompt, bounded to 400 bytes exactly as the native view bounds it.
+        prompt: string,
+        /// The whole prompt's length, so a caller can tell a sliced view from a short one.
+        prompt-bytes: u64,
+        due-at: option<f64>,
+        every-seconds: option<f64>,
+        /// The subscriptions an event wake waits on. A job id (no dot), a bus topic pattern, or
+        /// `message` for a new user message in this session.
+        on: list<string>,
+        /// Whether a probe script is configured (the script itself is the node's, not the seam's).
+        probe: bool,
+        has-event: bool,
+        fired-at: f64,
+        created-at: f64,
+        updated-at: f64,
+        attempts: u64,
+        /// Bounded, non-secret: the last dispatch or hook failure, as `slug` renders it.
+        last-error: string,
+        /// Whole seconds until `due-at`, at the `now` the request carried. Absent for an event wake.
+        in-seconds: option<u64>,
+    }
+
+    /// The pending-wake facts a footer or a window reads, in one answer.
+    record wake-summary {
+        pending: u64,
+        /// Pending event wakes (no clock, waiting for their topic).
+        event-pending: u64,
+        dispatching: u64,
+        /// `pending + dispatching`: what a footer counts as "wakes".
+        total: u64,
+        next-at: option<f64>,
+        next-in-seconds: option<u64>,
+        now: f64,
+    }
+
+    /// One wake plus the page facts `M.list` returns beside it.
+    record wake-page {
+        wakes: list<wake>,
+        count: u64,
+        summary: wake-summary,
+    }
+
+    /// A new wake, as `M.schedule` receives it. `in-seconds`/`at`/`every-seconds` are the clock's
+    /// half of the request, `on` the event's half; exactly one half must be present.
+    record schedule-request {
+        owner: string,
+        session-id: string,
+        reason: string,
+        prompt: string,
+        in-seconds: option<f64>,
+        at: option<f64>,
+        every-seconds: option<f64>,
+        /// The subscriptions an event wake waits on, or absent for a time wake. A job id (no dot), a
+        /// bus topic pattern, or `message` for a new user message in this session. Absent and empty
+        /// are different answers: an empty list is a refused subscription. Only time wakes carry
+        /// `in-seconds`/`at`/`every-seconds`; only event wakes carry this.
+        on: option<list<string>>,
+        /// The probe *script*. It is data the model wrote; it is run by the node, not by this seam,
+        /// and it is never logged.
+        probe: string,
+        now: f64,
+    }
+
+    /// Who a call is for. The component checks ownership against the `sessions` row itself, so a
+    /// caller cannot widen it by passing another session's id.
+    record caller {
+        owner: string,
+        session-id: string,
+    }
+
+    /// One due row, as `plan` hands it to the node: enough to run the probe and dispatch the turn,
+    /// and nothing else (no notes, no prompt — the node asks for those only when it runs a turn).
+    record due-wake {
+        id: string,
+        owner: string,
+        session-id: string,
+        reason: string,
+        probe: string,
+        every-seconds: option<f64>,
+        attempts: u64,
+    }
+
+    /// What `plan` found: the stale dispatches it reconciled to `unknown`, and the due rows, oldest
+    /// first, bounded by the same 8 the native loop takes.
+    record tick-plan {
+        reconciled: u64,
+        due: list<due-wake>,
+    }
+
+    /// What a probe reported. `changed` is the contract the model's script answers with; `detail` is
+    /// that answer rendered as text for the model's next turn (the only JSON-shaped value the seam
+    /// carries, and it is opaque to the component: it stores it and shows it).
+    record probe-result {
+        changed: bool,
+        detail: string,
+    }
+
+    /// What the node decided about a due row after the probe: a skipped row is re-armed exactly as
+    /// the model asked and costs no turn.
+    variant probe-decision {
+        /// Nothing changed: the row was re-armed at its cadence (or parked, when it has none).
+        skipped,
+        /// The model must see this: the probe's result (or its failure) is stored on the row.
+        wake,
+    }
+
+    /// What the node's dispatch said about a claim. The three cases are the native loop's three:
+    /// accepted, not started (put it back and retry later) and an ambiguous outcome that must never
+    /// be replayed.
+    variant dispatch-outcome {
+        accepted,
+        not-started(string),
+        unknown(string),
+    }
+
+    /// What settling a claim decided: `every-seconds` re-arms the same row, otherwise it is
+    /// `delivered` or `failed`.
+    record finish-report {
+        status: string,
+        due-at: option<f64>,
+    }
+
+    /// One line of the stored turn trace. `lua/core/selfloop.lua` writes the same shape, and the
+    /// transcript's `trace` column stores it as a list.
+    record trace-entry {
+        kind: string,
+        version: u32,
+        id: string,
+        reason: string,
+        at: f64,
+        probe: bool,
+        event: bool,
+    }
+
+    /// What a wake turn says: the user-side text and the trace that marks it.
+    record wake-turn {
+        content: string,
+        trace: trace-entry,
+    }
+
+    /// The facts a wake turn is rendered from. They are the stored row's fields, passed by the caller
+    /// that already read them, so rendering a turn needs no second read of the row and a test can pin
+    /// the shape with a row it made up. `event-rendering` and `probe-rendering` are the *rendered*
+    /// values (`""` when there is none): the identity line and the probe's answer as the model sees
+    /// them, which is the one place text (rather than a record) travels to the model.
+    record turn-request {
+        id: string,
+        session-id: string,
+        reason: string,
+        prompt: string,
+        event-rendering: string,
+        probe-rendering: string,
+        now: f64,
+    }
+
+    /// One stored notes version's facts (`notes_read {versions}`).
+    record notes-version {
+        version: string,
+        bytes: u64,
+        reason: string,
+        created-at: f64,
+    }
+
+    /// The notes document of one session.
+    record notes {
+        text: string,
+        bytes: u64,
+        lines: u64,
+        updated-at: option<f64>,
+        empty: bool,
+    }
+
+    /// A stored version's whole document.
+    record notes-archive {
+        version: string,
+        reason: string,
+        text: string,
+        bytes: u64,
+        created-at: f64,
+    }
+
+    /// What writing or appending decided. `archived` names the version the write replaced, when it
+    /// replaced one.
+    record notes-write-report {
+        bytes: u64,
+        archived: option<string>,
+        replaced: bool,
+    }
+
+    /// What compaction decided: `unchanged` means the document was already at or under `keep-lines`,
+    /// and then nothing was written and nothing was archived.
+    record notes-compact-report {
+        unchanged: bool,
+        kept-lines: u64,
+        archived: option<string>,
+        archived-lines: u64,
+        before-bytes: u64,
+        bytes: u64,
+    }
+
+    /// One fact a producer published. `id` is the event's identity and `session` its session, and
+    /// those two are all the seam reads: a payload's text is never stored here
+    /// (docs/SELF-LOOP.md). `session` is used only to match a `message` subscription, which names
+    /// one session.
+    record event-fact {
+        topic: string,
+        id: option<string>,
+        session: option<string>,
+        now: f64,
+    }
+
+    /// What a publish matched. The node's hook verdict is added by the caller, which owns the hook
+    /// engine; the seam only says which wakes became due.
+    record publish-report {
+        topic: string,
+        matched: list<string>,
+    }
+
+    /// The two facts a refused `at` carries.
+    record past-time {
+        now: f64,
+        at: f64,
+    }
+
+    /// The two facts a refused oversized document carries. `current-bytes` is absent for a whole
+    /// document write, which replaces rather than grows.
+    record too-large {
+        limit: u64,
+        current-bytes: option<u64>,
+    }
+
+    /// The notes answer, which is three shapes in one (the document, the version list, one version):
+    /// the native call answers with the field the request asked for, and so does this.
+    variant notes-read-answer {
+        document(notes),
+        versions(list<notes-version>),
+        archive(notes-archive),
+    }
+
+    /// Every refusal `lua/core/selfloop.lua` names, one case each, so a caller keeps switching on
+    /// the same names it always did. The payloads are the extra fields the native answers carry
+    /// (`minimum`, `now`/`at`, `limit`, the topic, the status); nothing here is a message.
+    variant error {
+        /// The call has no session to act for.
+        requires-session,
+        /// No `sessions` row with that id.
+        unknown-session,
+        /// The session belongs to another owner.
+        forbidden-session,
+        /// A subagent session: a child that wakes itself would outlive the run its parent waits on.
+        not-for-subagent,
+        reason-required,
+        reason-too-long,
+        prompt-too-long,
+        probe-too-long,
+        /// A time wake and an event wake are two different promises; one call makes one.
+        time-and-event-exclusive,
+        /// Neither a time nor an event.
+        needs-wake-target,
+        in-seconds-and-at-exclusive,
+        in-seconds-not-a-number,
+        at-not-a-number,
+        /// A time already gone, reported with both values so the model can correct it.
+        at-in-the-past(past-time),
+        /// Below the documented floor (`WA_SELF_WAKE_MIN_SECONDS`, default 5).
+        every-seconds-too-small(f64),
+        /// An event wake that also carried a clock.
+        event-takes-no-time-arguments,
+        on-requires-topics,
+        on-too-many,
+        on-entry-must-be-a-string,
+        on-entry-too-long-or-empty,
+        /// The same subscription twice (a list is a set).
+        on-duplicate(string),
+        /// A probe with no cadence could only run once.
+        probe-needs-cadence,
+        wake-id-required,
+        /// A publish with no topic.
+        publish-topic-required,
+        unknown-wake,
+        /// Handed to the scheduler: cancelling here would claim an effect this call cannot observe.
+        /// The row travels with the refusal, so the caller can report what is in flight.
+        wake-already-dispatching(wake),
+        wake-not-pending(string),
+        /// A claimed wake that is not `dispatching`: nothing to cancel before execution.
+        not-dispatching(string),
+        notes-text-required,
+        /// Past the 64 KiB document bound. `current-bytes` is the document an append would have
+        /// grown, so the model can decide what to drop.
+        notes-too-large(too-large),
+        keep-lines-invalid,
+        unknown-notes-version,
+        /// The store itself failed (a table the grant does not cover, a broken statement).
+        store-failed(string),
+    }
+}
+
+interface selfloop {
+    use types.{caller, dispatch-outcome, due-wake, error, event-fact, finish-report, notes,
+        notes-archive, notes-compact-report, notes-read-answer, notes-version, notes-write-report,
+        probe-decision, probe-result, publish-report, schedule-request, tick-plan, turn-request, wake, wake-summary,
+        wake-page, wake-turn};
+
+    /// Schedule the model's own next turn: at a time (`in-seconds`, or `at`), or on an event
+    /// (`on`). A repeating wake re-arms the same row after each turn, so its cadence survives the
+    /// turn that used it.
+    schedule: func(request: schedule-request) -> result<wake, error>;
+
+    /// The wakes this session has, pending first, oldest due first, at most 100.
+    %list: func(who: caller, all: bool, now: f64) -> result<wake-page, error>;
+
+    /// Cancel one pending wake. A `dispatching` row is refused: the run is already handed over.
+    cancel: func(who: caller, id: string, now: f64) -> result<string, error>;
+
+    /// The pending facts for a session, in one read (the footer's and the window's).
+    summary: func(session-id: string, now: f64) -> result<wake-summary, error>;
+
+    /// The notes, the archived versions, or one archived version by id.
+    notes-read: func(who: caller, version: option<string>, versions: bool, now: f64) -> result<notes-read-answer, error>;
+
+    /// One document. Replacing one archives the version it replaced.
+    notes-write: func(who: caller, text: string, now: f64) -> result<notes-write-report, error>;
+
+    /// Add text to the document (a newline between), refusing rather than truncating past 64 KiB.
+    notes-append: func(who: caller, text: string, now: f64) -> result<notes-write-report, error>;
+
+    /// Keep the last `keep-lines` lines and archive the whole previous document.
+    notes-compact: func(who: caller, keep-lines: u32, now: f64) -> result<notes-compact-report, error>;
+
+    /// A producer published a fact: matching pending event wakes become due. Stores the topic and
+    /// the event's identity, never its payload.
+    publish: func(event: event-fact) -> result<publish-report, error>;
+
+    /// What this tick found: stale dispatches reconciled to `unknown`, and the due rows. The node
+    /// then runs each row's probe (if any), claims it, and dispatches it.
+    plan: func(now: f64, stale-seconds: f64) -> result<tick-plan, error>;
+
+    /// Record what a row's probe said, and whether that skips the turn. A skipped row is re-armed
+    /// here, exactly as the model asked.
+    probe: func(id: string, observed: option<probe-result>, failure: option<string>, now: f64) -> result<probe-decision, error>;
+
+    /// Claim one due row (a compare-and-set: a second process finds nothing). The claimed row is
+    /// what the node dispatches.
+    claim: func(id: string, boot: string, now: f64) -> result<option<wake>, error>;
+
+    /// Record what the scheduler said about a claim, using the attempts the row was planned with
+    /// (the retry delay is a function of them).
+    settle-dispatch: func(id: string, outcome: dispatch-outcome, attempts: u64, now: f64) -> result<string, error>;
+
+    /// Settle a claimed wake after its turn: a repeating wake re-arms, a one-shot one is
+    /// `delivered` or `failed`.
+    finish: func(id: string, ok: bool, detail: string, now: f64) -> result<finish-report, error>;
+
+    /// The text and trace of a wake's turn: read-only and pure (the only thing it reads is the
+    /// session's notes), so a test can pin the shape without a provider.
+    turn: func(row: turn-request) -> result<wake-turn, error>;
+
+    /// Cancel one claimed wake before its turn ran (the run is admitted but not started).
+    cancel-claimed: func(id: string, now: f64) -> result<bool, error>;
+
+    /// The claim the interactive CLI makes at its own idle prompt: the earliest due row of one
+    /// session, claimed, or nothing.
+    claim-due: func(session-id: string, owner: string, boot: string, now: f64) -> result<option<wake>, error>;
+}
+
+/// A component that answers the self-loop seam. It imports exactly the SQL its manifest grants:
+/// the three `self_*` tables (read and write) and `sessions` (read, for the authority checks). No
+/// filesystem, no clock of its own, no model, no tools.
+world selfloop-component {
+    import wa:kernel/sql@0.1.0;
+    export selfloop;
+}

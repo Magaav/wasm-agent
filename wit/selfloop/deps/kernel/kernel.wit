@@ -1,0 +1,35 @@
+// The `wa:kernel` package as this seam's components see it: only what the memory seam needs, and
+// nothing else. A WIT package resolves its imports from `deps/`, so this file is the grant *as a
+// component compiles against it*; `rust/wa-kernel-runtime/src/sql_host.rs` owns the enforcement, and
+// its `vendored_kernel_copy_matches_the_kernel` test fails when the two copies drift apart.
+package wa:kernel@0.1.0;
+
+interface types {
+    variant error {
+        refused(string),
+        again,
+        closed,
+        failed(string),
+    }
+}
+
+interface sql {
+    use types.{error};
+
+    variant value {
+        null,
+        integer(s64),
+        real(f64),
+        text(string),
+        blob(list<u8>),
+    }
+
+    record rows {
+        columns: list<string>,
+        rows: list<list<value>>,
+        changes: u64,
+    }
+
+    query: func(statement: string, params: list<value>) -> result<rows, error>;
+    exec: func(statement: string, params: list<value>) -> result<rows, error>;
+}

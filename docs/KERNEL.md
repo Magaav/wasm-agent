@@ -1201,6 +1201,47 @@ What the WASI 0.3 pass still owes this seam:
    as queue jobs, semantics unchanged (signed, idempotent, never echoed). Not started; the cursor loop
    is still the transport.
 
+## The self-loop as a component (seam landed; the rest of the split is `docs/CORE-SPLIT.md`)
+
+The model's own long-mission controls — wakes, notes, probes (`docs/SELF-LOOP.md`) — are the second
+piece of `lua/core` to leave the interpreter, and the first one taken out of the *agent* rather than
+out of the store. The state machine is a component that exports `wa:selfloop`
+(`wit/selfloop/selfloop.wit`, `rust/components/selfloop`); its three tables stay in `memory.db`, which
+stays the kernel's.
+
+| part | where | why |
+| --- | --- | --- |
+| the **state machine**: validation and the named refusals, the schedule/list/cancel rules, the notes document, append and compaction with its archive, the event subscriptions and what a publish matches, the claim/settle compare-and-set, the stale-dispatch reconciliation, and the rendered wake turn | the `selfloop` component, exporting `wa:selfloop` | it is a state machine over rows: swapping it loses nothing, and a restart re-reads the rows |
+| the **node's half**: running a probe in the QuickJS sandbox (it calls the read-only tool catalogue), the run scheduler a due wake is handed to, the `SelfWake`/bus hooks, and the agent turn itself | `lua/core/selfloop.lua` (`run_probe`, `dispatch_default`, `run_wake`, `publish`'s hook call) and the capabilities it already had | these need the living turn and the node's threads; a component must own neither |
+
+- **The seam is typed, and one value is text on purpose.** Every argument and answer is a record
+  (`wake`, `schedule-request`, `tick-plan`, `probe-result`, `trace-entry`, …), and every refusal is a
+  case of `error`, so the router still switches on the names it always did (`wake_reason_required`,
+  `wake_already_dispatching`, `notes_too_large`, …). The one text field is a *rendering*:
+  `probe-result.detail` is the probe's answer as the model will read it on its next turn, stored
+  verbatim because the native path stores it verbatim.
+- **The tick keeps its shape.** The component answers `plan` (what is due, what was reconciled), and
+  the node runs each row's probe, then `claim`s it, then `settle-dispatch`es the scheduler's verdict,
+  then `finish`es the turn. So the component never dispatches, never runs a probe, and never decides
+  that a turn happened; it decides what the row is.
+- **No DDL.** The component's `wa:kernel/sql` grant is read/write on `self_wakes`, `self_notes` and
+  `self_notes_archive` plus read on `sessions` (the authority checks). `setup()` in
+  `lua/core/selfloop.lua` still creates the tables: a grant has no `CREATE TABLE`, and a store without
+  them is a visible `store_failed`, not a component that silently invents a schema.
+- **A refusal is an answer, not a failure.** The capability answers `ok:true` with the refusal table,
+  so a refused wake never reads as a broken component; only "the component could not answer" returns
+  `ok:false`, and `lua/core/selfloop.lua` then runs the native path with one log line per (operation,
+  reason). `WA_SELFLOOP_COMPONENT=1` is the switch; **the default is the native path, unchanged**.
+- **Parity and cost are measured.** `scripts/test-selfloop-component.lua` runs the same calls through
+  both paths and compares them field for field (54 comparisons, ids normalised), including the tick's
+  three counters, a wake surviving a new interpreter, and an unchanged probe spending no turn;
+  `scripts/bench-selfloop.sh` reports ms, host-call crossings, SQL statements and process RSS per
+  scenario (table in `docs/CORE-SPLIT.md`, "Cost").
+- What the 0.3 pass owes this seam: `async func` with identical records, the same as `wa:memory`; a
+  pooled instance instead of per-call instantiation if a second caller makes the tick's 1.6 ms matter;
+  and the schema moving to a kernel-owned migration so the component can stop relying on `setup()`.
+
+
 
 Today the memory logic (`remember`/`recall`, sessions, compaction, the journal sync loop) is Lua in the
 core, and it reaches `memory.db` through the kernel's `sql_*` capabilities (docs/MEMORY.md). The split

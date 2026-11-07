@@ -1,0 +1,15 @@
+{
+  "name": "selfloop",
+  "kind": "selfloop",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "The self-loop seam (wa:selfloop): the wake/notes/probe state machine over self_wakes, self_notes and self_notes_archive in memory.db, which stays in the kernel behind a scoped wa:kernel/sql grant",
+  "capabilities": {
+    "sql": {
+      "database": "memory",
+      "read": ["self_wakes", "self_notes", "self_notes_archive", "sessions"],
+      "write": ["self_wakes", "self_notes", "self_notes_archive"]
+    }
+  },
+  "limits": {"memory_mb": 64}
+}

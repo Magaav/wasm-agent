@@ -142,7 +142,106 @@ local function slice(text, limit)
   return text:sub(1, limit)
 end
 
+-- ---------------------------------------------------------------- the self-loop seam
+--
+-- The wake/notes/probe *state machine* - its validation, its refusals, the claim/settle
+-- compare-and-set and the rendered wake turn - can be served by the `selfloop` component
+-- (docs/CORE-SPLIT.md; docs/KERNEL.md, "The self-loop as a component"), with `memory.db` staying in
+-- the kernel behind a scoped `wa:kernel/sql` grant. `WA_SELFLOOP_COMPONENT=1` routes this file's
+-- operations there; **without it every function below runs exactly the code it always ran**.
+--
+-- What stays here on both paths, because it needs the node's living state and not a row: running a
+-- probe in the QuickJS sandbox (`M.run_probe`), the run scheduler a due wake is handed to, the
+-- `SelfWake`/bus hooks, and the agent turn itself (`M.run_wake`).
+--
+-- A component that is missing, wedged or refused falls back to the native path *with a reason in the
+-- log*: a silent fallback would make a broken component look like a working loop. A **refusal** is
+-- not a failure: the component's named refusals come back as answers and reach the model unchanged,
+-- or every refused wake would read as a broken node.
+--
+-- The JSON below is this tree's transport for every capability (`host.memory` does the same); it
+-- stops at the host, which turns it into the typed records of `wit/selfloop/selfloop.wit` before the
+-- component sees anything.
+local seam_component = (function()
+  local ok, value = pcall(host.getenv, "WA_SELFLOOP_COMPONENT")
+  return ok and tostring(value or "") == "1"
+end)()
+
+local fallback_logged = {}
+
+local function note_fallback(op, reason)
+  -- One line per (operation, reason): a wedged component must be visible, and a log flooded with the
+  -- same line on every tick is not visible.
+  local key = tostring(op) .. "|" .. tostring(reason)
+  if fallback_logged[key] then return end
+  fallback_logged[key] = true
+  pcall(host.log, "selfloop: " .. tostring(op) .. " served natively: " .. tostring(reason))
+end
+
+-- One component call. Returns the seam's answer (which may be a refusal), or nil and the reason there
+-- is none.
+local function seam(op, args)
+  if not seam_component then return nil, "seam_disabled" end
+  if type(host.selfloop) ~= "function" then return nil, "component_capability_missing" end
+  args.op = op
+  local ok, answer = pcall(host.selfloop, json.encode(args))
+  if not ok then return nil, "component_call_failed" end
+  if type(answer) == "string" then
+    local decoded_ok, decoded = pcall(json.decode, answer)
+    answer = decoded_ok and decoded or nil
+  end
+  if type(answer) ~= "table" then return nil, "component_no_answer" end
+  if not answer.ok then return nil, tostring(answer.error or "component_failed") end
+  -- A refusal is a decision the component made, not a reason to run the native path.
+  if answer.refused ~= nil then return answer.refused end
+  if answer.result == nil then return nil, "component_empty_answer" end
+  return answer.result
+end
+
+-- Route one operation, or answer nil when the native path has to run.
+local function routed(op, args)
+  local answer, reason = seam(op, args)
+  if answer ~= nil then return answer end
+  if reason ~= "seam_disabled" then note_fallback(op, reason) end
+  return nil
+end
+
+-- The clock `schedule` uses: the module's test hook when a test installed one, else the host clock.
+-- It is the same rule on both paths, which is what makes them comparable.
+local function schedule_clock()
+  if test_now then return tonumber(test_now()) end
+  return tonumber(host.now())
+end
+
+-- The boot a claim is made under, resolved once per call.
+local function boot_id(opts)
+  if opts and opts.boot then return tostring(opts.boot) end
+  local ok, info = pcall(host.runtime_info)
+  local decoded = ok and (type(info) == "string" and json.decode(info) or info) or nil
+  return type(decoded) == "table" and tostring(decoded.boot_id or "") or ""
+end
+
+-- A wake request is only handed to the component when every field already has the shape the typed
+-- seam takes. A malformed argument (a string where a number belongs, an `on` that is not a list) is
+-- the native path's to refuse, with the refusal name the model has always seen.
+local function plain_shape(args)
+  for _, key in ipairs({ "in_seconds", "at", "every_seconds" }) do
+    local value = args[key]
+    if value ~= nil and type(value) ~= "number" then return false end
+  end
+  if args.on ~= nil then
+    if type(args.on) ~= "table" then return false end
+    -- A subscription entry that is not a string has its own refusal
+    -- (`wake_on_entry_must_be_a_string`); JSON cannot carry it, so the native path answers it.
+    for _, entry in ipairs(args.on) do
+      if type(entry) ~= "string" then return false end
+    end
+  end
+  return true
+end
+
 -- ---- shape of a row -------------------------------------------------------------------
+
 
 -- A bounded, non-secret reason string for a stored error.
 local function slug(value)
@@ -236,6 +335,21 @@ end
 function M.schedule(args, ctx)
   M.setup()
   args = args or {}
+  if plain_shape(args) then
+    local seam_answer = routed("schedule", {
+      owner = tostring((ctx or {}).user_id or args.owner or "master"),
+      session_id = tostring((ctx or {}).session_id or args.session_id or ""),
+      reason = tostring(args.reason or ""),
+      prompt = tostring(args.prompt or ""),
+      probe = tostring(args.probe or ""),
+      in_seconds = args.in_seconds,
+      at = args.at,
+      every_seconds = args.every_seconds,
+      on = args.on,
+      now = schedule_clock(),
+    })
+    if seam_answer then return seam_answer end
+  end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   if tostring(session.objective or "") == "subagent" or session.parent_session_id ~= nil then
@@ -315,6 +429,8 @@ function M.summary(session_id, opts)
   M.setup()
   session_id = tostring(session_id or "")
   if session_id == "" then return { pending = 0, event_pending = 0 } end
+  local seam_answer = routed("summary", { session_id = session_id, now = clock(opts) })
+  if seam_answer then return seam_answer end
   local now = clock(opts)
   local rows = query([[SELECT
       SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
@@ -347,6 +463,13 @@ end
 function M.list(args, ctx)
   M.setup()
   args = args or {}
+  local seam_answer = routed("list", {
+    owner = tostring((ctx or {}).user_id or args.owner or "master"),
+    session_id = tostring((ctx or {}).session_id or args.session_id or ""),
+    all = args.all and true or false,
+    now = clock(args),
+  })
+  if seam_answer then return seam_answer end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   local now = clock(args)
@@ -366,6 +489,13 @@ function M.cancel(args, ctx)
   args = args or {}
   local id = trim(args.id)
   if id == "" then return { error = "wake_id_required", effect = "none" } end
+  local seam_answer = routed("cancel", {
+    owner = tostring((ctx or {}).user_id or args.owner or "master"),
+    session_id = tostring((ctx or {}).session_id or args.session_id or ""),
+    id = id,
+    now = clock(args),
+  })
+  if seam_answer then return seam_answer end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   local row = query("SELECT * FROM self_wakes WHERE id=? AND owner=? AND session_id=?", { id, owner, session.id })[1]
@@ -420,6 +550,14 @@ end
 function M.notes_read(args, ctx)
   M.setup()
   args = args or {}
+  local seam_answer = routed("notes_read", {
+    owner = tostring((ctx or {}).user_id or args.owner or "master"),
+    session_id = tostring((ctx or {}).session_id or args.session_id or ""),
+    version = args.version ~= nil and tostring(args.version) or nil,
+    versions = args.versions and true or false,
+    now = clock(args),
+  })
+  if seam_answer then return seam_answer end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   local now = clock(args)
@@ -447,6 +585,15 @@ end
 function M.notes_write(args, ctx)
   M.setup()
   args = args or {}
+  if type(args.text) == "string" then
+    local seam_answer = routed("notes_write", {
+      owner = tostring((ctx or {}).user_id or args.owner or "master"),
+      session_id = tostring((ctx or {}).session_id or args.session_id or ""),
+      text = args.text,
+      now = clock(args),
+    })
+    if seam_answer then return seam_answer end
+  end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   if type(args.text) ~= "string" then return { error = "notes_text_required", effect = "none" } end
@@ -462,6 +609,20 @@ end
 function M.notes_append(args, ctx)
   M.setup()
   args = args or {}
+  if type(args.text) == "string" and args.text ~= "" then
+    local seam_answer = routed("notes_append", {
+      owner = tostring((ctx or {}).user_id or args.owner or "master"),
+      session_id = tostring((ctx or {}).session_id or args.session_id or ""),
+      text = args.text,
+      now = clock(args),
+    })
+    -- The native answer is three fields: the document's size, and the input's own length, which the
+    -- caller already knows. A whole-document write's `archived`/`replaced` are not part of an append.
+    if seam_answer then
+      if seam_answer.error then return seam_answer end
+      return { ok = true, bytes = seam_answer.bytes, appended = #args.text }
+    end
+  end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   if type(args.text) ~= "string" or args.text == "" then return { error = "notes_text_required", effect = "none" } end
@@ -482,6 +643,16 @@ end
 function M.notes_compact(args, ctx)
   M.setup()
   args = args or {}
+  local route_keep = tonumber(args.keep_lines) or 40
+  if route_keep % 1 == 0 and route_keep >= 1 and route_keep <= 1000 then
+    local seam_answer = routed("notes_compact", {
+      owner = tostring((ctx or {}).user_id or args.owner or "master"),
+      session_id = tostring((ctx or {}).session_id or args.session_id or ""),
+      keep_lines = route_keep,
+      now = clock(args),
+    })
+    if seam_answer then return seam_answer end
+  end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   local keep = tonumber(args.keep_lines) or 40
@@ -528,6 +699,16 @@ function M.publish(topic, payload, opts)
     hooked = verdict ~= nil and verdict.ran > 0
   end)
   local now = clock(opts)
+  local seam_answer = routed("publish", {
+    topic = topic,
+    id = type(payload) == "table" and payload.id or nil,
+    session = type(payload) == "table" and payload.session_id or nil,
+    now = now,
+  })
+  if seam_answer then
+    seam_answer.hooked = hooked
+    return seam_answer
+  end
   local rows = query("SELECT * FROM self_wakes WHERE status='pending' AND due_at IS NULL AND on_topics<>'[]'", {})
   local matched = {}
   for _, row in ipairs(rows) do
@@ -667,6 +848,13 @@ end
 function M.claim_due(session_id, owner, opts)
   M.setup()
   session_id = tostring(session_id or "")
+  local seam_answer = routed("claim_due", {
+    session_id = session_id,
+    owner = tostring(owner or "master"),
+    boot = boot_id(opts),
+    now = clock(opts),
+  })
+  if seam_answer then return seam_answer.claimed end
   local now = clock(opts)
   local row = query([[SELECT * FROM self_wakes WHERE session_id=? AND owner=? AND status='pending'
     AND due_at IS NOT NULL AND due_at<=? ORDER BY due_at LIMIT 1]], { session_id, tostring(owner or "master"), now })[1]
@@ -688,6 +876,13 @@ end
 -- the failure in the session it failed in.
 function M.finish(row, ok, detail, opts)
   M.setup()
+  local seam_answer = routed("finish", {
+    id = tostring(row.id),
+    ok = (ok and true) or false,
+    detail = detail ~= nil and tostring(detail) or "",
+    now = clock(opts),
+  })
+  if seam_answer then return seam_answer end
   local now = clock(opts)
   local every = tonumber(row.every_seconds)
   local status = ok and "delivered" or "failed"
@@ -714,6 +909,8 @@ function M.run_wake(args)
   end
   local now = clock({})
   if args.cancelled then
+    local seam_answer = routed("cancel_claimed", { id = row.id, now = now })
+    if seam_answer then return { cancelled = seam_answer.cancelled } end
     exec("UPDATE self_wakes SET status='cancelled', last_error='cancelled before execution', updated_at=? WHERE id=?", { now, row.id })
     return { cancelled = true }
   end
@@ -770,6 +967,65 @@ function M.tick(opts)
   opts = opts or {}
   local now = clock(opts)
   local out = { dispatched = 0, skipped = 0, deferred = 0, unknown = 0, reconciled = 0 }
+  -- The state machine's half (which rows are due, what a probe decided, who won the claim, what the
+  -- scheduler said) is the component's; the node's half (running the probe, dispatching the turn) is
+  -- this loop's, on both paths.
+  if seam_component then
+    local plan = routed("plan", { now = now, stale_seconds = tonumber(opts.stale_seconds) or M.stale_seconds() })
+    if plan then
+      out.reconciled = tonumber(plan.reconciled) or 0
+      local probe_fn = opts.probe or M.run_probe
+      for _, row in ipairs(plan.due or {}) do
+        local skip = false
+        if tostring(row.probe or "") ~= "" then
+          local role = (dep("users").find(row.owner) or {}).role or "master"
+          local value, why
+          local called, a, b = pcall(probe_fn, row.probe, row, { role = role, probe_timeout_ms = opts.probe_timeout_ms })
+          if called then value, why = a, b else value, why = nil, "probe_start_failed: " .. slug(a) end
+          local args
+          if why then
+            -- The failure travels as it is: the model decides what to do about a broken probe.
+            args = { id = row.id, failure = tostring(why), now = now }
+          else
+            args = { id = row.id, now = now,
+              result = { changed = (value and value.changed) and true or false, detail = json.encode(value) } }
+          end
+          local decision = routed("probe", args)
+          if decision == "skipped" then
+            -- Nothing changed: the wake was re-armed exactly as the model asked, no turn spent.
+            out.skipped = out.skipped + 1
+            skip = true
+          end
+        end
+        if not skip then
+          local claimed = routed("claim", { id = row.id, boot = boot_id(opts), now = now })
+          if claimed and claimed.claimed then
+            row.status = "dispatching"
+            local dispatch = opts.dispatch or M.dispatch_default
+            local called, receipt = pcall(dispatch, row, { now = now })
+            if not called then receipt = { error = tostring(receipt) } end
+            if type(receipt) ~= "table" then receipt = { error = "wake_dispatch_no_receipt" } end
+            local outcome, detail
+            if receipt.accepted then
+              outcome, detail = "accepted", ""
+            elseif receipt.not_started then
+              outcome, detail = "not_started", receipt.error or "not started"
+            else
+              outcome, detail = "unknown", receipt.error or "dispatch outcome unknown"
+            end
+            routed("settle_dispatch", {
+              id = row.id, outcome = outcome, error = tostring(detail),
+              attempts = tonumber(row.attempts) or 0, now = now,
+            })
+            if outcome == "accepted" then out.dispatched = out.dispatched + 1
+            elseif outcome == "not_started" then out.deferred = out.deferred + 1
+            else out.unknown = out.unknown + 1 end
+          end
+        end
+      end
+      return out
+    end
+  end
   local stale = tonumber(opts.stale_seconds) or M.stale_seconds()
   local old = exec([[UPDATE self_wakes SET status='unknown', last_error='dispatch interrupted; not replayed',
     updated_at=? WHERE status='dispatching' AND updated_at<?]], { now, now - stale })
@@ -852,6 +1108,18 @@ end
 -- pure, so a test can pin the shape without a provider.
 function M.turn_content(row, opts)
   local now = clock(opts)
+  if seam_component and row and row.id then
+    local seam_answer = routed("turn", {
+      id = tostring(row.id),
+      session_id = tostring(row.session_id or ""),
+      reason = tostring(row.reason or ""),
+      prompt = tostring(row.prompt or ""),
+      event_rendering = tostring(row.event_json or ""),
+      probe_rendering = tostring(row.probe_result or ""),
+      now = now,
+    })
+    if seam_answer then return seam_answer.content, { seam_answer.trace } end
+  end
   local prompt = tostring(row.prompt or "")
   if prompt == "" then prompt = "scheduled wake: " .. tostring(row.reason or "") end
   local blocks = {}

@@ -1,0 +1,29 @@
+[package]
+name = "selfloop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The self-loop seam as a component (docs/CORE-SPLIT.md, docs/KERNEL.md "The self-loop as a
+# component"): the wake/notes/probe state machine over its three tables in `memory.db`, which stays
+# in the kernel behind a scoped `wa:kernel/sql` grant. Request-shaped (built for wasm32-wasip2) and
+# built for the wasm target by scripts/build-components.sh, never by the core build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bindings for `wa:selfloop` (exported) and `wa:kernel/sql` (imported), from the world in `wit/`.
+wit-bindgen = "0.63"
+# One small dependency, two jobs, both about the *stored columns* the native path already writes:
+# `on_topics` is a JSON array of strings, and a failed probe is stored as `{"error":...}` exactly as
+# `lua/core/selfloop.lua` stores it. Nothing on the seam itself is JSON: every argument and answer
+# is a record in wit/selfloop/selfloop.wit.
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

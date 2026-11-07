@@ -183,6 +183,11 @@ pub const REGISTRY: &[Capability] = &[
     // grant. `WA_MEMORY_COMPONENT=1` is what routes `lua/core/memory.lua` here; without it the native
     // path is used, so this capability is inert on a node that never opts in.
     plain!("memory", WritesFiles, wa_kernel_runtime::memory_host::capability, "One wa:memory call against the installed memory component: remember, recall, forget, list, search_messages, sessions or the retention decision, over a scoped wa:kernel/sql grant"),
+    // The self-loop seam (docs/CORE-SPLIT.md, docs/KERNEL.md "The self-loop as a component"): the
+    // `selfloop` component answers the wake/notes/probe state machine over its own scoped
+    // `wa:kernel/sql` grant. `WA_SELFLOOP_COMPONENT=1` is what routes `lua/core/selfloop.lua` here;
+    // without it the native path runs, so this capability is inert on a node that never opts in.
+    plain!("selfloop", WritesFiles, wa_kernel_runtime::selfloop_host::capability, "One wa:selfloop call against the installed selfloop component: the wake/notes/probe state machine (schedule, list, cancel, summary, notes, publish, plan, claim, settle, finish, turn) over a scoped wa:kernel/sql grant"),
     // ---- WhatsApp (docs/SERVICE-COMPONENTS.md, docs/GRANT-POLICY.md) ---------------------------
     // One capability per effect: `whatsapp_send` asks the node's `whatsapp.send` policy and enqueues
     // a job on `wa:queue`; `whatsapp_send_status` reads the job back. Neither carries message text
