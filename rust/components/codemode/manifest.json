@@ -1,0 +1,9 @@
+{
+  "name": "codemode",
+  "kind": "tool",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "The code-mode seam (wa:codemode): the fence, the guest's tool table, searchTools/describeTool, the admit/deliver order and the script's final report, over the QuickJS sandbox the kernel hosts (wa:kernel/quickjs). It reaches no store, no file and no socket of its own.",
+  "capabilities": {},
+  "limits": {"memory_mb": 64}
+}

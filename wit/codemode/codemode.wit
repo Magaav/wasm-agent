@@ -1,0 +1,204 @@
+/// `wa:codemode` — code mode's guest protocol as a component (docs/CODEMODE.md, docs/CORE-SPLIT.md).
+///
+/// Code mode is one JavaScript script that calls the node's tools (`await tools.<name>(args)`), collects
+/// only what it needs and returns it. The parts of that are *policy and protocol* live here: which tool
+/// may be called from inside the script (the fence: delegation, session shaping and the outer facades
+/// stay out), how a name is spelled inside the guest, what `searchTools`/`describeTool` answer, the
+/// order the queued calls are admitted and delivered in, duplicate and stall detection, the attempt
+/// bookkeeping the loop raises by name, and the script's final report (output items, return value,
+/// store writes, the calls the script finished without admitting).
+///
+/// What stays in the loop, because it needs the living turn:
+///
+/// * **the sandbox**: the QuickJS guest itself is a checksum-pinned wasm module the *kernel* runs
+///   (`wa:kernel/quickjs`, the `host.quickjs` capability); a component cannot host wasmtime, so this
+///   one imports the sandbox rather than containing it. Exactly one seam is the sandbox's own protocol.
+/// * **the tool dispatcher**: a call this component hands out is dispatched by the Lua core, with the
+///   current role/profile/catalog/workspace/effect checks, the strict JSON contract against the live
+///   schema, the retained originals and the telemetry span. The component never runs a tool.
+/// * **the model-facing presentation** (`showCall`) and the node's capability registry
+///   (`capabilities()`/`describe()`): they read the retained evidence and the live registry, so they
+///   come back as a `host-global` step and the loop answers them.
+/// * **the store's durability**: writes are returned as records and the loop commits them to the
+///   session's `meta` row, which is the core's.
+///
+/// **Nothing here is a JSON document**, with three exceptions, each JSON by nature and each named so:
+/// `tool-facts.schema-json` is the model's own parameter schema (opaque to the seam), `args-json` /
+/// `payload-json` / `outcome.value` are the user's own JavaScript values, and `output-item.text` is a
+/// rendering. A refusal is a case of `refusal`, not a string the caller has to parse.
+package wa:codemode@0.1.0;
+
+interface types {
+    /// The node's pre-flight view of one permitted tool: the same summary `tools.lua`'s
+    /// `discovery_execution` gives the model (workspace policy, not an execution guarantee). It is
+    /// pinned at `open`: a script sees the status its run started with.
+    record execution {
+        status: string,
+        scope: string,
+        workspace-binding: string,
+        reason: option<string>,
+        detail: option<string>,
+        next: option<string>,
+        available: option<bool>,
+        required: option<bool>,
+    }
+
+    /// One entry of the catalogue the run was admitted with. The spelling the guest sees
+    /// (`tools.<js-name>`) is derived here, not supplied: the mapping and its collision rule are part of
+    /// what this seam owns. The fence is decided from `name` and `execution.status`.
+    record tool-facts {
+        name: string,
+        description: string,
+        schema-json: string,
+        execution: execution,
+    }
+
+    /// A tool the script may *see* and not *call*: the fence, or a target the node has blocked. `route`
+    /// is the model-facing sentence discovery returns (`… runs outside code mode`), so a refusal never
+    /// reads as "does not exist".
+    record outside-tool {
+        name: string,
+        schema-json: string,
+        execution: execution,
+        route: string,
+    }
+
+    record store-entry {
+        key: string,
+        value: option<string>,
+    }
+
+    record open-request {
+        /// The host's own session id: the component keys its loop state by it, and every later call
+        /// names it. The host also uses it to keep this instance alive.
+        session: string,
+        /// `host.sha256` of the run's session/user/role/workspace/profile: the sandbox's owner scope.
+        owner: string,
+        code: string,
+        /// The script's own deadline, handed to the sandbox; the node's default is 30 000 ms.
+        timeout-ms: option<u64>,
+        catalogue: list<tool-facts>,
+        store: list<store-entry>,
+        wasm-path: option<string>,
+        prelude-path: option<string>,
+        module-cache: option<string>,
+    }
+
+    record output-item {
+        text: string,
+        console: bool,
+    }
+
+    /// The fence's answer for one call. The loop turns it into the `{error:…}` value the model already
+    /// knows (`codemode_target_not_available[: <name> runs outside code mode]`), because that value is
+    /// the dispatcher's vocabulary and lives next to it.
+    record target-refusal {
+        name: string,
+        /// The sentence that says where the tool does run; absent when the name is not in the catalogue.
+        route: option<string>,
+    }
+
+    variant refusal {
+        target-not-available(target-refusal),
+    }
+
+    /// A guest call the loop must act on. `refusal` is present when the seam already decided the call
+    /// cannot run: the loop delivers `refusal`'s rendering to the guest as a failed call, records an
+    /// attempt with `admitted: false`, and dispatches nothing.
+    record call-step {
+        id: u64,
+        target: string,
+        name: string,
+        args-json: option<string>,
+        refusal: option<refusal>,
+    }
+
+    /// A guest global whose answer is the node's (the retained evidence behind `showCall`, the live
+    /// capability registry behind `capabilities`/`describe`, and `describeTool("showCall")`).
+    record global-step {
+        id: u64,
+        name: string,
+        args-json: option<string>,
+    }
+
+    /// A call the script never had admitted, and why: `script_finished_before_admission`, or
+    /// `sandbox_failed_before_admission` when the guest never started.
+    record unexecuted-call {
+        id: u64,
+        name: string,
+        reason: string,
+    }
+
+    record outcome {
+        ok: bool,
+        value: option<string>,
+        error: option<string>,
+        /// The store entries the script wrote (`value: none` deletes a key).
+        writes: list<store-entry>,
+    }
+
+    variant step {
+        call(call-step),
+        host-global(global-step),
+        finished(outcome),
+        /// A named protocol failure the loop raises verbatim: `codemode_duplicate_call`,
+        /// `codemode_stalled`, `codemode_protocol_unknown_event`, `codemode_store_protocol_invalid`, or
+        /// the sandbox's own detail when its deadline or the run's cancellation stops admission.
+        aborted(string),
+    }
+
+    record opened {
+        /// Absent only when the sandbox refused to start; then `sandbox-failure` says why.
+        session: option<string>,
+        items: list<output-item>,
+        backend: option<string>,
+        sandbox-failure: option<string>,
+        unexecuted: list<unexecuted-call>,
+        /// `codemode_identifier_collision` when two tools spell the same guest name.
+        aborted: option<string>,
+    }
+
+    /// The loop's answer to one step: the tool's own answer (JSON by nature) and whether the guest
+    /// should see it as a success. For a `host-global` step `ok` is false and `payload-json` carries the
+    /// `{error:…}` value the model already knows, exactly as an ordinary refused call would.
+    record reply {
+        call-id: u64,
+        ok: bool,
+        payload-json: string,
+    }
+
+    record progress {
+        items: list<output-item>,
+        step: step,
+    }
+
+    record report {
+        items: list<output-item>,
+        unexecuted: list<unexecuted-call>,
+        /// The script's own verdict (`ok: false` is a script that threw, not a broken component).
+        outcome: option<outcome>,
+        aborted: option<string>,
+        /// The sandbox could not be closed: `codemode_close_failed` in the loop's vocabulary, detail here.
+        close-failure: option<string>,
+        /// How many times this script crossed into the sandbox: the seam's own cost number.
+        sandbox-calls: u64,
+    }
+}
+
+interface codemode {
+    use types.{open-request, opened, progress, reply, report};
+
+    /// Start the guest and drain its first events. A script that returns immediately produces its items
+    /// here and its `finished` step at the first `advance`.
+    open: func(request: open-request) -> opened;
+    /// Deliver the previous step's answer (if any), then admit and hand out the next one. Answering the
+    /// guest's own `searchTools`/`describeTool` happens inside this call and costs no step.
+    advance: func(session: string, reply: option<reply>) -> progress;
+    /// Close the sandbox and report what the script did. Called once, whatever the loop's outcome.
+    finish: func(session: string) -> report;
+}
+
+world codemode-component {
+    import wa:kernel/quickjs@0.1.0;
+    export codemode;
+}

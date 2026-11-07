@@ -35,12 +35,89 @@ end
 -- checks an ordinary call gets - `operation start/cancel/await` and `resource reconcile` are how a script
 -- supervises what it started (31/10). Kept as a named seam so a later fence has somewhere to live.
 local function action_refusal(name,args) return nil end
-function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
- local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
- if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
- if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
- local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
- local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+-- ---------------------------------------------------------------- the code-mode seam
+---
+--- The guest's *protocol* - the fence, the tool table, `searchTools`/`describeTool`, the admit/deliver
+--- order, the named refusals and the script's report - can be served by the `codemode` component
+--- (docs/CORE-SPLIT.md, docs/CODEMODE.md), which imports `wa:kernel/quickjs` for the sandbox the kernel
+--- hosts. `WA_CODEMODE_COMPONENT=1` routes a script there; **without it every line below runs exactly
+--- the code it always ran**.
+---
+--- What stays here on both paths, because it needs the living turn: `codemode_policy.admit`, the tool
+--- dispatcher with the current profile/catalog/workspace/effect checks and the strict JSON contract
+--- against the live schema, the definition recheck, the retained originals and their evidence
+--- references, the telemetry spans, the presentation (`showCall`) and the session store in `meta`.
+---
+--- A component that is missing or refuses *before a step is handed out* falls back to the native path
+--- with one log line per reason. Once a script is live, a broken component is **reported**, never
+--- replayed: the calls already dispatched had effects, and docs/CODEMODE.md's rule is that a failed
+--- effectful script is never run again.
+local seam_component = (function()
+  local ok, value = pcall(host.getenv, "WA_CODEMODE_COMPONENT")
+  return ok and tostring(value or "") == "1"
+end)()
+
+local fallback_logged = {}
+
+local function note_fallback(op, reason)
+  local key = tostring(op) .. "|" .. tostring(reason)
+  if fallback_logged[key] then return end
+  fallback_logged[key] = true
+  pcall(host.log, "codemode: " .. tostring(op) .. " served natively: " .. tostring(reason))
+end
+
+-- One component call. The capability speaks JSON like every other `host.*`; the component boundary
+-- itself is typed (`wit/codemode`).
+local function seam(request)
+  if not seam_component then return nil, "seam_disabled" end
+  if type(host.codemode) ~= "function" then return nil, "component_capability_missing" end
+  local ok, answer = pcall(host.codemode, json.encode(request))
+  if not ok then return nil, "component_call_failed" end
+  if type(answer) == "string" then
+    local decoded_ok, decoded = pcall(json.decode, answer)
+    answer = decoded_ok and decoded or nil
+  end
+  if type(answer) ~= "table" then return nil, "component_no_answer" end
+  if not answer.ok then return nil, tostring(answer.error or "component_failed") end
+  return answer
+end
+
+-- The fence's refusal, rendered the way the dispatcher already words a target that runs elsewhere.
+local function refusal_value(refusal)
+  if type(refusal) ~= "table" or refusal.kind ~= "target_not_available" then
+    return { error = "codemode_target_not_available", effect = "none" }
+  end
+  if refusal.route then
+    return { error = "codemode_target_not_available: " .. tostring(refusal.name) .. " runs outside code mode",
+      route = refusal.route, effect = "none" }
+  end
+  return { error = "codemode_target_not_available" }
+end
+
+-- The guest's argument list for a global: no arguments is `[]`, and an argument list that is not JSON
+-- is refused by the strict contract exactly as the native loop refuses it.
+local function global_params(raw)
+  local text = raw
+  if text == nil or text == "" or text == "undefined" then text = "[]" end
+  local ast, err = contract.parse(text)
+  if not ast then error(err) end
+  return json.decode(text)
+end
+
+-- The node's own globals, answered here because they read the living registry and the retained
+-- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
+-- `describeTool("showCall")` are the presentation's.
+local function host_global(name, params, calls, selected)
+  if name == 'showCall' then return presentation.select(calls, selected, params) end
+  if name == 'describeTool' then return presentation.help, true end
+  local value, success = inventory.global(name, params)
+  if value == nil then return { error = 'codemode_global_not_available' }, false end
+  return value, success
+end
+
+-- The native path: byte for byte the loop this file has always run. `workspace` and `scope` are the
+-- run's, computed once by `M.run` so both paths agree on them.
+local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
  local descriptors,definitions,outside={},{},{}
  for _,schema in ipairs(catalog)do
   local f=schema['function'];local status=execution(f.name)
@@ -241,5 +318,156 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  result.ok=false;result.presentation_partial=true;result.presentation_error=tostring(view)
  result.shown=nil
  return result
+end
+-- ---------------------------------------------------------------- the component path
+--
+-- One script, driven step by step. `open` starts the guest, each `advance` delivers the previous
+-- answer and hands back one step, `finish` closes the guest and reports what the script did. The steps
+-- are the component's decisions; the answers are this loop's, with the same checks the native path
+-- makes. Nothing here changes what a script may do: the fence comes back as a `refusal` record, the
+-- dispatch is `dispatch`, and the arguments are validated against the schema the node holds now.
+local function component_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
+ local session=host.uuid()
+ -- The catalogue as typed records: the node's own pre-flight status per tool is pinned here (the
+ -- component decides the fence from it), and the schema hash is kept for the per-call recheck.
+ local entries,hashes,selected={},{},{}
+ for _,schema in ipairs(catalog)do
+  local f=schema['function']
+  entries[#entries+1]={name=f.name,description=tostring(f.description or ''),
+   schema_json=json.encode(schema),execution=execution(f.name)}
+  hashes[f.name]=host.sha256(json.encode(schema))
+ end
+ local store_key='codemode-store.v1:'..scope
+ local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
+ local cache
+ do local ok,value=pcall(function()return dofile('lua/core/paths.lua').cache()end);if ok and type(value)=='string' then cache=value..'/codemode' end end
+ local opened,open_reason=seam({op='open',session=session,owner=scope,code=args.code,
+  timeout_ms=args.timeout_ms or 30000,catalogue=entries,store=store,
+  wasm_path=policy.wasm_path,prelude_path=policy.prelude_path,module_cache=cache})
+ -- Nothing has run yet: the native path is still a valid answer, and the router logs the reason.
+ if not opened then return nil,open_reason end
+ if opened.aborted then return {error=tostring(opened.aborted)} end
+ if opened.sandbox_failure then
+  -- The guest never started. This is the answer the native path gives too: the sandbox's own detail,
+  -- the output it managed before it stopped, and the calls it never admitted.
+  return {ok=false,error=tostring(opened.sandbox_failure),effect='none',
+   items=opened.items or {},unexecuted=opened.unexecuted or {}}
+ end
+ -- Live from here on: a failure is reported, never replayed.
+ local items,calls,attempts={},{},{}
+ local function failed(message)
+  -- A live script whose component stopped answering: the calls already dispatched may have had
+  -- effects, so this is `unknown` and it is never replayed (docs/CODEMODE.md).
+  return {ok=false,error=tostring(message),effect='unknown',replay_allowed=false,
+   items=items,calls=calls,attempts=attempts,unexecuted={}}
+ end
+ for _,item in ipairs(opened.items or {})do items[#items+1]=item end
+ local reply,loop_error,outcome
+ local guard_policy=dofile('lua/core/codemode_policy.lua')
+ while not loop_error do
+  -- The same two checks the native loop makes before it admits the next call: the run's authority is
+  -- rechecked, and a cancelled run stops before another effect.
+  local _,context_error=guard_policy.admit(memory,role,ctx)
+  if context_error then loop_error=context_error
+  elseif host.run_cancelled and json.decode(host.run_cancelled()).cancelled then loop_error='run_cancelled'
+  else
+   local progress,reason=seam({op='advance',session=session,reply=reply})
+   reply=nil
+   if not progress then loop_error=reason
+   else
+    for _,item in ipairs(progress.items or {})do items[#items+1]=item end
+    local step=progress.step or {}
+    if step.kind=='aborted' then loop_error=tostring(step.reason)
+    elseif step.kind=='finished' then outcome=step.outcome;break
+    elseif step.kind=='host_global' or step.kind=='call' then
+     local value,success,admitted
+     local argument_text=step.args_json
+     if step.kind=='host_global' then
+      local called,params=pcall(global_params,argument_text)
+      if not called then error(params) end
+      value,success=host_global(step.name,params,calls,selected)
+     elseif step.refusal then
+      value,success=refusal_value(step.refusal),false
+     else
+      local current
+      for _,schema in ipairs(current_catalog())do if schema['function'].name==step.name then current=schema;break end end
+      if not current or host.sha256(json.encode(current))~=hashes[step.name] then
+       value,success={error='tool_definition_changed'},false
+      else
+       local _,err=contract.validate(current['function'].parameters,argument_text or '{}')
+       if err then value,success={error=err},false
+       else
+        local params=json.decode(argument_text or '{}')
+        local fenced=action_refusal(step.name,params)
+        if fenced then value,success=fenced,false
+        else
+         local span=telemetry.start(ctx,'tool',{name=step.name,nested=true,codemode_call=step.id,arguments_hash=host.sha256(argument_text or '{}')})
+         local called,result=pcall(dispatch,step.name,params,argument_text)
+         admitted=true
+         if called then value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
+         else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
+         local encoded=json.encode(value);local reference=output.store(encoded)
+         calls[#calls+1]={id=step.id,name=step.name,ok=success,evidence=reference}
+         telemetry.finish(span,{ok=success,name=step.name,nested=true,codemode_call=step.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
+        end
+       end
+      end
+     end
+     attempts[#attempts+1]={id=step.id,name=step.name,target=step.target or 'tool',admitted=admitted or false,
+      ok=success,arguments=output.store(argument_text or '{}'),result=output.store(json.encode(value))}
+     reply={call_id=step.id,ok=success and true or false,payload_json=json.encode(value)}
+    else loop_error='codemode_protocol_unknown_step'
+    end
+   end
+  end
+ end
+ local report,finish_reason=seam({op='finish',session=session})
+ if not report then return failed(finish_reason or 'component_finish_failed') end
+ if report.close_failure then
+  return {ok=false,error='codemode_close_failed',detail=report.close_failure,items=items,calls=calls,attempts=attempts}
+ end
+ loop_error=loop_error or report.aborted
+ for _,item in ipairs(report.items or {})do items[#items+1]=item end
+ outcome=outcome or report.outcome
+ -- The session store is the core's: the component hands over the entries, this writes the row.
+ if not loop_error and outcome and outcome.ok==true then
+  for _,entry in ipairs(outcome.writes or {})do
+   if type(entry)=='table' and type(entry[1])=='string' then
+    if entry[2]==nil then store[entry[1]]=nil else store[entry[1]]=tostring(entry[2]) end
+   else loop_error='codemode_store_protocol_invalid' end
+  end
+  if not loop_error then memory.meta_set(store_key,json.encode(store)) end
+ end
+ local result={ok=(not loop_error) and outcome and outcome.ok==true or false,
+  error=loop_error or (outcome and not outcome.ok and outcome.error) or nil,
+  items=items,value=outcome and outcome.value,calls=calls,attempts=attempts,
+  unexecuted=report.unexecuted or {},backend=opened.backend or 'rust-wasip2-wa:codemode',
+  sandbox_calls=report.sandbox_calls,
+  context_policy='only script output is model-facing; complete nested originals are retained by hash'}
+ local presented,view=pcall(presentation.finish,result,selected)
+ if presented then return view end
+ result.ok=false;result.presentation_partial=true;result.presentation_error=tostring(view)
+ result.shown=nil
+ return result
+end
+
+-- The router: the run's authority, its scope and its workspace are decided once, then one of the two
+-- loops runs. A component that cannot answer *before the first step* falls back; after that it is a
+-- failure with `effect: unknown`, because the calls it already handed out may have had effects.
+function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
+ local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
+ if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
+ if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
+ local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
+ local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+ if seam_component then
+  local called,result,reason=pcall(component_run,policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
+  -- A table is the component's answer (including its refusals and its sandbox failures). `nil, reason`
+  -- means it could not answer *before a step was handed out*: only then is the native path run.
+  if called and type(result)=='table' then return result end
+  if not called then note_fallback('run',tostring(result))
+  else note_fallback('run',tostring(reason or 'component_no_answer')) end
+ end
+ return native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
 end
 return M

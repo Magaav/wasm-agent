@@ -1,0 +1,179 @@
+-- The code-mode seam's parity suite (docs/CORE-SPLIT.md, docs/CODEMODE.md): the same scripts through
+-- the native loop in `lua/core/codemode.lua` and through the `codemode` component, compared field for
+-- field — the script's value, its output items, the calls and attempts the loop recorded, the fence's
+-- discovery, a 200 KB answer, and the refusals a script can actually reach.
+--
+-- Self-contained: the runner's own `--db` and a scratch WASM_AGENT_HOME, no node, no network, no model.
+-- The component half needs a built `codemode.wasm` reachable by this process
+-- (`WA_CODEMODE_COMPONENT_WASM`, the development override) and the pinned code-mode assets, because
+-- *both* paths run the real QuickJS guest: this suite compares the loops, not a stub.
+-- `scripts/test-codemode-component.sh` builds the component and sets the variable. When either is
+-- missing the comparisons are SKIPPED — printed as such and reported in REPORT.md — and a skip is
+-- never counted as a pass.
+local json = dofile('lua/vendor/json.lua')
+
+local checks, comparisons, skipped = 0, 0, 0
+local function check(value, label)
+  checks = checks + 1
+  if not value then error('CODEMODE SEAM CHECK FAILED: ' .. label) end
+end
+local function skip(what, why)
+  skipped = skipped + 1
+  print('SKIP codemode seam: ' .. what .. ' (' .. why .. ')')
+end
+local function decode(value)
+  if type(value) ~= 'string' then return value end
+  local ok, decoded = pcall(json.decode, value)
+  return ok and decoded or value
+end
+local function text(value)
+  if type(value) == 'string' then return value end
+  local ok, encoded = pcall(json.encode, value)
+  return ok and encoded or tostring(value)
+end
+
+-- The two interpreters. The switch is read once, when the module loads, exactly as a node reads it, so
+-- the test flips the *host's* answer while each instance loads rather than reaching into the module.
+local memory = dofile('lua/core/memory.lua')
+memory.setup()
+local policy = dofile('lua/core/codemode_policy.lua')
+local real_getenv, real_codemode, real_log = host.getenv, host.codemode, host.log
+local logged = {}
+
+local function instance(seam)
+  host.getenv = function(name)
+    if name == 'WA_CODEMODE_COMPONENT' then return seam and '1' or nil end
+    return real_getenv(name)
+  end
+  host.log = function(line) logged[#logged + 1] = tostring(line) end
+  local module = dofile('lua/core/codemode.lua')
+  host.getenv, host.log = real_getenv, real_log
+  return module
+end
+
+local session = memory.start_session('local', 'chat', { id = 'codemode-seam', user_id = 'master', node_id = 'seam', title = 'code mode seam' })
+local ctx = { session_id = session, user_id = 'master' }
+
+-- The catalogue: two callable tools, one the fence refuses, one the node itself blocks. `execution` is
+-- the node's pre-flight summary, so these records are the ones a real run would have.
+local function schema(name, description)
+  return { type = 'function', ['function'] = { name = name, description = description,
+    parameters = { type = 'object', properties = { text = { type = 'string' }, limit = { type = 'integer' } } } } }
+end
+local catalog = {
+  schema('sessions', 'List sessions'),
+  schema('read', 'Read a file'),
+  schema('subagent', 'Delegate'),
+  schema('tool_call', 'Outer facade'),
+  schema('operation', 'Operations'),
+}
+local function current_catalog() return catalog end
+local dispatched = {}
+local function dispatch(name, params, fragment)
+  dispatched[#dispatched + 1] = { name = name, args = fragment }
+  if name == 'read' then return { ok = true, text = string.rep('x', 200 * 1024) } end
+  return { ok = true, name = name, limit = (type(params) == 'table' and params.limit) or nil }
+end
+local function execution(name)
+  if name == 'operation' then
+    return { status = 'blocked', scope = 'workspace_policy_only', workspace_binding = 'supported',
+      reason = 'session_workspace_unavailable', detail = 'no allocated binding' }
+  end
+  return { status = 'not_blocked', scope = 'workspace_policy_only', workspace_binding = 'not_applicable' }
+end
+
+-- Is the guest reachable at all? Both paths need the pinned assets; `ready` answers without starting a
+-- script, and the native policy pin asks the same question.
+local readiness = decode(host.quickjs('ready', json.encode({})))
+if type(readiness) ~= 'table' or not readiness.ok then
+  skip('parity', 'the pinned code-mode assets are not available to this binary: ' .. text(readiness))
+  print(string.format('codemode seam: %d checks, %d parity comparisons, %d skipped', checks, comparisons, skipped))
+  return
+end
+
+local native = instance(false)
+local component = instance(true)
+
+-- A component that cannot answer falls back to the native path (with a log line). A parity comparison
+-- between the native path and a silent fallback would pass while proving nothing, so the component
+-- instance is proved live before any comparison runs: one script whose answer only the seam can give.
+policy.pin(memory, 'master', ctx)
+check(policy.enforced(ctx), 'code mode is pinned for this run')
+local probe = component.run(memory, { code = 'return 1' }, 'master', ctx, catalog, current_catalog, dispatch, execution)
+policy.pin(memory, 'master', ctx)
+if not (type(probe) == 'table' and probe.ok == true and probe.backend) then
+  skip('parity', 'the component answered no script: ' .. text(probe))
+  print(string.format('codemode seam: %d checks, %d parity comparisons, %d skipped', checks, comparisons, skipped))
+  return
+end
+check(probe.sandbox_calls and probe.sandbox_calls > 0, 'the component reports the sandbox crossings it cost')
+check(#logged == 0, 'the component path did not fall back: ' .. table.concat(logged, '; '))
+
+-- The comparison: everything the model and the journal can see, minus the one field each path owns
+-- (`backend` is the same on both; `sandbox_calls` is the component's own cost number).
+local function fields(result)
+  local calls = {}
+  for _, call in ipairs(result.calls or {}) do
+    calls[#calls + 1] = { id = call.id, name = call.name, ok = call.ok, evidence = call.evidence and call.evidence.sha256 }
+  end
+  local attempts = {}
+  for _, attempt in ipairs(result.attempts or {}) do
+    attempts[#attempts + 1] = { id = attempt.id, name = attempt.name, target = attempt.target,
+      admitted = attempt.admitted, ok = attempt.ok,
+      arguments = attempt.arguments and attempt.arguments.sha256,
+      result = attempt.result and attempt.result.sha256 }
+  end
+  local unexecuted = {}
+  for _, call in ipairs(result.unexecuted or {}) do
+    unexecuted[#unexecuted + 1] = { id = call.id, name = call.name, reason = call.reason }
+  end
+  return { ok = result.ok, error = result.error, value = result.value,
+    items = result.items or {}, calls = calls, attempts = attempts, unexecuted = unexecuted }
+end
+
+local scripts = {
+  { label = 'trivial script', code = 'return 1' },
+  { label = 'one tool call', code = 'const r = await tools.sessions({limit:2}); return r;' },
+  { label = 'ten parallel calls', code = 'const rs = await Promise.all([1,2,3,4,5,6,7,8,9,10].map(i=>tools.sessions({limit:i}))); return rs.length;' },
+  { label = 'the fence is not in the guest tool table', code = 'return JSON.stringify({subagent:typeof tools.subagent,codemode:typeof tools.codemode,tool_call:typeof tools.tool_call,sessions:typeof tools.sessions});' },
+  { label = 'discovery lists what cannot be called', code = 'const all = await searchTools("*",{limit:200}); return JSON.stringify(all.tools.filter(t=>t.callable===false).map(t=>t.name));' },
+  { label = 'discovery gives an outside tool its route', code = 'const all = await searchTools("*",{limit:200}); const s=all.tools.find(t=>t.name==="subagent"); return JSON.stringify({callable:s.callable,route:s.route,schema:typeof s.schema});' },
+  { label = 'describeTool gives a schema', code = 'const d = await describeTool("operation"); return JSON.stringify({callable:d.callable,route:typeof d.route,parameters:typeof d.parameters});' },
+  { label = 'a keyword search', code = 'const one = await searchTools("sessions"); return one.matches;' },
+  { label = 'a batch with a miss', code = 'const b = await searchTools({names:["sessions","nope_tool"]}); return JSON.stringify({m:b.matches,missing:b.missing.map(x=>x.name)});' },
+  { label = 'a 200 KB result', code = 'const big = await tools.read({path:"big"}); return big.text.length;' },
+  { label = 'a script that throws', code = 'throw new Error("boom");' },
+  { label = 'showCall help', code = 'const help = await describeTool("showCall"); return typeof help;' },
+  { label = 'the node capability registry', code = 'const caps = await capabilities(); return typeof caps;' },
+  { label = 'an unknown global is refused', code = 'const nope = await describeTool("no_such_tool"); return nope===null;' },
+  { label = 'a fenced tool called from a script', code = 'return await tools.subagent({task:"x"});' },
+}
+
+for _, script in ipairs(scripts) do
+  dispatched = {}
+  policy.pin(memory, 'master', ctx)
+  local first = native.run(memory, { code = script.code }, 'master', ctx, catalog, current_catalog, dispatch, execution)
+  local native_calls = #dispatched
+  dispatched = {}
+  policy.pin(memory, 'master', ctx)
+  local second = component.run(memory, { code = script.code }, 'master', ctx, catalog, current_catalog, dispatch, execution)
+  local component_calls = #dispatched
+  comparisons = comparisons + 1
+  local left, right = fields(first), fields(second)
+  check(text(left) == text(right), script.label .. ': native ' .. text(left) .. ' vs component ' .. text(right))
+  check(native_calls == component_calls, script.label .. ': the same number of tools was dispatched on both paths')
+end
+
+-- Refusals unchanged, read the way the model reads them: the discovery view still marks the fenced
+-- names `callable:false` with their route, and the guest's own tool table still does not contain them.
+local listing = component.run(memory, { code = 'const all = await searchTools("select:subagent,tool_call,sessions"); return JSON.stringify(all.tools.map(t=>({n:t.name,c:t.callable})));' },
+  'master', ctx, catalog, current_catalog, dispatch, execution)
+local rows = decode(decode(listing.value))
+local seen = {}
+for _, row in ipairs(type(rows) == 'table' and rows or {}) do seen[row.n] = row.c end
+check(seen.subagent == false, 'subagent stays refused inside code mode: ' .. text(listing.value))
+check(seen.tool_call == false, 'the outer facade stays refused inside code mode: ' .. text(listing.value))
+check(seen.sessions == true, 'a read tool stays callable inside code mode: ' .. text(listing.value))
+check(#(dispatched or {}) >= 1, 'the parity suite dispatched tools through the real dispatcher')
+
+print(string.format('codemode seam: %d checks, %d parity comparisons, %d skipped', checks, comparisons, skipped))

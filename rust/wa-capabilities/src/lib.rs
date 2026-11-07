@@ -22,6 +22,10 @@
 pub mod audio;
 pub mod capabilities;
 pub mod client_bridge;
+// The code-mode seam (`docs/CORE-SPLIT.md`'s second extraction): the `codemode` component over the
+// QuickJS sandbox the kernel hosts. Lives here, not in `wa-kernel-runtime`, for the same reason
+// `core_component` does — it needs the capability crate's own `quickjs` half on one side of the seam.
+pub mod codemode_seam;
 pub mod core_bridge;
 pub mod core_component;
 pub mod core_pool;

@@ -1,0 +1,90 @@
+// The `wa:kernel` package as this seam's component sees it: the QuickJS sandbox, and nothing else.
+//
+// A WIT package resolves its imports from `deps/`, so this file is the sandbox *as a component
+// compiles against it*. The kernel owns the implementation (`rust/wa-capabilities/src/quickjs.rs`, the
+// `host.quickjs` capability): the checksum-pinned guest, the fuel and epoch bounds, the owner check,
+// the output bounds and the tool-callback protocol. Nothing about tool policy is here — the component
+// decides which calls are admissible and the loop dispatches them.
+//
+// The four calls are the sandbox's whole surface, exactly the four actions `host.quickjs` already
+// serves; a component is simply not allowed to hold the session itself (a session is a wasmtime store,
+// and a guest cannot host one).
+package wa:kernel@0.1.0;
+
+interface quickjs {
+    record spec {
+        /// `host.sha256` of the run's context: still hex, still 64 characters, still the sandbox's
+        /// ownership check (a second interpreter cannot drive another run's guest).
+        owner: string,
+        code: string,
+        timeout-ms: option<u64>,
+        /// The guest's own ABI documents: the tool descriptors the prelude builds `tools` from, the
+        /// globals it exposes, and the `store`/`load` map. JSON because the prelude is JavaScript and
+        /// these are the values it receives — the guest's ABI, not this seam's.
+        tools-json: string,
+        globals-json: string,
+        store-json: string,
+        wasm-path: option<string>,
+        prelude-path: option<string>,
+        module-cache: option<string>,
+    }
+
+    record call-event {
+        id: u64,
+        /// `tool` or `global`: which callback the prelude used.
+        target: string,
+        name: string,
+        /// The argument list the guest passed, as the guest saw it; `none` for no arguments.
+        args-json: option<string>,
+    }
+
+    record output-event {
+        text: string,
+        console: bool,
+    }
+
+    record done-event {
+        ok: bool,
+        value: option<string>,
+        /// The guest's `store` writes, as the prelude emits them (an array of `[key, value]` pairs).
+        writes: option<string>,
+    }
+
+    variant event {
+        call(call-event),
+        output(output-event),
+        done(done-event),
+    }
+
+    /// One start: the events the guest produced (a failed script can still have printed), its session
+    /// id when it started, and — when it did not — the sandbox's own rendering of why. The events are
+    /// kept in the failure case on purpose: a script that printed and then failed must not lose its
+    /// output, which is exactly what the native path keeps in `items`.
+    record started {
+        id: option<string>,
+        events: list<event>,
+        backend: string,
+        failure: option<string>,
+    }
+
+    /// The sandbox's own failure rendering — the string the native path already puts in the result's
+    /// `error` field (`codemode_sandbox: …`). `refused` is a bound or an ownership refusal, `failed`
+    /// anything else; both are passed through verbatim, never re-worded.
+    variant failure {
+        refused(string),
+        failed(string),
+    }
+
+    /// One delivery: the events the guest produced while settling the call, and — when settling failed
+    /// — the sandbox's rendering of why. The events survive the failure on purpose: the native path
+    /// drains them before it looks at `ok`, so output a failing script already printed is kept.
+    record delivered {
+        events: list<event>,
+        failure: option<string>,
+    }
+
+    start: func(spec: spec) -> started;
+    admit: func(id: string, owner: string) -> result<_, failure>;
+    deliver: func(id: string, owner: string, call-id: u64, ok: bool, payload-json: string) -> delivered;
+    close: func(id: string, owner: string) -> result<_, failure>;
+}

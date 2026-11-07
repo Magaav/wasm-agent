@@ -66,3 +66,107 @@ The collector removes Node from the child PATH and confirms `ENOENT`, retains co
 The default proof executes an actual agent with a deterministic mock provider, checks runtime guidance/declarations, performs real native read/edit/read in a private workspace and retains every nested original. Source and standalone embedded runs are separate; the old source at `72a7d8f1` must fail the same positive declaration expectation. This is not live autonomous-model quality evidence.
 
 This human-directed default is not justified by the prior Node reference live A/B screen: 6/6 accepted, 52→27 calls, 149.991→86.151 seconds, but uncached input +13.2%, one pair per task and Node reference only. It proves neither general quality/dollars nor native benefit. No universal speed/token savings are claimed. Named risks include added VM startup/asset provisioning, unmeasured native autonomous behavior, script filtering/aggregation hiding acceptance criteria or late caveats, and unknown completed effects after failure. Complete retained originals do not make filtered model awareness lossless. Global 50KiB/8MiB projection budgets are unchanged. Bash/write retain OS authority and native workspace policy: the VM is not an OS security boundary. Never retry an entire failed effectful script to recover; reconcile unknown effects explicitly. See [PROGRESSIVE-ENVELOPE.md](PROGRESSIVE-ENVELOPE.md), [SUBAGENTS.md](SUBAGENTS.md), [ORCHESTRATION-MODE.md](ORCHESTRATION-MODE.md) and [CODEMODE-WORTH-SCREEN.md](CODEMODE-WORTH-SCREEN.md).
+
+## Code mode as a component (07/11)
+
+The guest's *protocol* is a component behind `wa:codemode` (`wit/codemode/codemode.wit`,
+`rust/components/codemode`), reached from this checkout with `WA_CODEMODE_COMPONENT=1`; the native loop
+above stays the default and is byte for byte the code it always ran. `docs/CORE-SPLIT.md` sets the seam
+rules and the reason code mode is the second extraction.
+
+**What the component owns.** The fence (the `forbidden` set and the three `route_of` sentences), the
+guest's identifier mapping (`tools.<js-name>`) and its collision refusal, the guest's tool table, the
+two guest globals that are code mode's own (`searchTools`, `describeTool`), the admit/deliver order
+(the native loop's: deliver, drain, check `done`, admit, take the next call), duplicate and stall
+detection, the named loop failures, and the script's report (output items, return value, `store` writes,
+the calls the script finished without admitting).
+
+**What stays in the loop, because it needs the living turn.** The sandbox itself — a component cannot
+host wasmtime, so `wa:kernel/quickjs` is an *import* the kernel serves from the existing
+checksum-pinned QuickJS capability (same asset pins, same fuel/epoch bounds, same owner check, same
+callback protocol; `rust/wa-capabilities/src/quickjs.rs` gained one word, `pub(crate)`, and no
+behaviour) — plus `codemode_policy.admit`, the tool dispatcher with the current
+profile/catalog/workspace/effect checks, the strict JSON contract against the live schema, the
+definition recheck (`tool_definition_changed`), the retained originals and their evidence references,
+the telemetry spans, the presentation (`showCall`, `capabilities()`, `describe()`, and
+`describeTool("showCall")`, which read the node's registry and retained evidence and come back as a
+`host-global` step) and the session `store` row in `meta`.
+
+**Three calls, one script.** `open` starts the guest and drains its first events; `advance` delivers the
+loop's answer and hands back one step (`call`, `host-global`, `finished`, or `aborted`); `finish` closes
+the sandbox and reports what the script did. A guest global the component answers costs the loop *no*
+step: `searchTools("*")` is answered and delivered inside `advance`.
+
+**A live script is never replayed.** A component that is missing or cannot answer *before the first
+step* falls back to the native path with one log line per (operation, reason). After that a failure is
+reported with `effect: "unknown"` and `replay_allowed: false`: calls already handed out may have had
+effects, which is the same rule a failed `pcall` in the native loop already states.
+
+**Nothing on the seam is a JSON document.** Every argument and answer is a record or a variant from
+`wit/codemode`; a refusal is a `refusal` case, not a string to parse. Three values are JSON because
+they *are* JSON: `tool-facts.schema-json` (the model's own parameter schema, opaque to the seam),
+`args-json`/`payload-json`/`outcome.value` (the user's own JavaScript values) and `output-item.text` (a
+rendering). The guest ABI documents inside `wa:kernel/quickjs` are the prelude's, unchanged.
+
+### Cost (measured)
+
+`bash scripts/bench-codemode.sh` on this machine (Windows, release build, median and p95 of 30
+in-process runs per scenario, one process per path, `wa` = this checkout's build):
+
+| path | scenario | median ms | p95 ms | Lua→host crossings | sandbox crossings | peak RSS |
+| --- | --- | --- | --- | --- | --- | --- |
+| native | (a) `return 1` | 1.45 | 2.09 | 2 | 2 | 19,688 KB |
+| component | (a) `return 1` | 3.56 | 5.65 | 3 | 2 | 28,908 KB |
+| native | (b) one tool call | 5.49 | 6.77 | 4 | 4 | 19,688 KB |
+| component | (b) one tool call | 5.29 | 6.85 | 4 | 4 | 28,908 KB |
+| native | (c) 10 parallel calls | 41.01 | 45.56 | 22 | 22 | 19,688 KB |
+| component | (c) 10 parallel calls | 19.16 | 26.73 | 13 | 22 | 28,908 KB |
+| native | (d) 200 KB result | 51.77 | 118.74 | 4 | 4 | 19,688 KB |
+| component | (d) 200 KB result | 72.52 | 208.08 | 4 | 4 | 28,908 KB |
+| native | (e) cold start | 1.79 | — | 2 | 2 | 19,688 KB |
+| component | (e) cold start | 255.06 | — | 3 | 2 | 28,908 KB |
+
+**The guest VM is not in these numbers**, and that is the honest limit of this table: `quickjs.wasm` and
+`prelude.js` are provisioned, not vendored, and this checkout has not been provisioned, so neither path
+can run a script at all (`host.quickjs('ready')` refuses, visibly). Both paths are therefore driven by
+the same scripted protocol peer — the native path by patching `host.quickjs` inside the bench, the
+component path by the named `WA_CODEMODE_SANDBOX_STUB=1` host backend. The peer is identical work on
+both sides, so the difference the table shows is the seam. With the assets provisioned the same script
+measures the real guest.
+
+Read it as: where the cost is *crossings*, the component wins — ten parallel calls are 22 Lua→host
+round trips natively (each with a JSON encode, a decode and a pending-call set in Lua) and 13 through the
+component, which is why (c) is about half, and (b) is a wash because one call is four crossings either
+way. Where the cost is *copies*, it loses: (d)'s 200 KB answer crosses the component boundary twice on
+top of what the native path pays, and a script is one instance, so (a) pays instantiation for a script
+that does nothing. The cold start is the real cost to plan for: 255 ms is Cranelift compiling the
+component in the first process that touches it; the compiled module is cached beside the component
+(`codemode-<sha16>-<engine>.cwasm`, owner-only, keyed by the engine's compatibility hash) and the next
+process opens a script in 4.6 ms. RSS is +9.2 MB per process for the component path: an engine, an
+instance and its memory.
+
+Caveats. (1) An earlier run of this same bench on a busier machine reported the native rows 2–3×
+higher (e.g. (c) 115 ms against today's 41 ms): the numbers are machine-dependent, so compare the two
+paths from *one* run, not across runs. (2) The p95/median gap on (d) is the 200 KB copy meeting the
+allocator, on both paths. (3) Nothing here measures a *model* turn: a script costs one tool round either
+way. (4) `in-process` means the sandbox *session* is real but its guest is the peer; the VM's own 2.6 s
+first compile and ~1–5 ms per guest call are the same on both paths and are measured by the existing
+code-mode proof, not here.
+
+### Parity and proof
+
+```
+bash scripts/test-codemode-component.sh                 # build the component, run both paths
+cargo test -p wa-capabilities codemode_seam             # 11 tests against the built component
+cargo test -p codemode                                  # the component's own rules (12 unit tests)
+bash scripts/bench-codemode.sh                          # the table above
+```
+
+`scripts/test-codemode-component.sh` runs `scripts/test-codemode-boundary.lua` — unchanged — on the
+native path and again routed through the component, then runs `scripts/test-codemode-component.lua`,
+which compares the two loops field for field (value, output items, calls, attempts, unexecuted) over 15
+scripts: the trivial one, one call, ten parallel calls, the fence, discovery, a batch with a miss, a
+keyword search, a 200 KB result, a script that throws, `showCall`, the capability registry, an unknown
+global and a fenced call. All of it needs the pinned assets, because both paths run the real guest; in
+an unprovisioned checkout the wrapper reports SKIPPED with the reason and exits 0 — a skip is never a
+pass. The Rust tests above cover the same seam without a guest (see the note in their header).

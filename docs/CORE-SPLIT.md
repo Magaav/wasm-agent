@@ -1,9 +1,11 @@
 # The core split: what stays in the turn loop, what becomes a component
 
-Status (07/11): the map below is the decision, and the first extraction is **landed** — the self-loop
-is a component behind `wa:selfloop` (`wit/selfloop/selfloop.wit`, `rust/components/selfloop`), routed
-by `WA_SELFLOOP_COMPONENT=1`, with the native path unchanged and parity asserted
-(`scripts/test-selfloop-component.lua`). The other three are specified here, not built.
+Status (07/11): the map below is the decision, and the first two extractions are **landed** — the
+self-loop (behind `wa:selfloop`, `wit/selfloop/selfloop.wit`, `rust/components/selfloop`) and code mode
+(behind `wa:codemode`, `wit/codemode/codemode.wit`, `rust/components/codemode`, importing
+`wa:kernel/quickjs` for the sandbox the kernel hosts), both routed by their own `WA_*_COMPONENT=1`, both
+with the native path unchanged and parity asserted (`scripts/test-selfloop-component.lua`,
+`scripts/test-codemode-component.lua`). Hooks and mesh are specified here, not built.
 
 ## The rule
 
@@ -40,7 +42,7 @@ calls**: `getenv` 92 (31%), `read_file` 47 (16%), `sha256` 30 (10%), `sql_exec` 
 | --- | --- | --- | --- |
 | `agent.lua`, `provider.lua`, `prompt_sections.lua`, `prompt_cache.lua`, `tools.lua`, `tool_output.lua`, `envelope.lua`, `json_contract.lua`, `session_view.lua` | **stays** (the hot loop) | session state, prompt assembly, the provider call, tool dispatch: one object, one lifetime; the gateway replaces the provider later | 295 host calls, ~everything above |
 | `selfloop.lua` (wakes, notes, probes) | **component, landed** (`wa:selfloop`) | a state machine over three tables; the node's tick and a restart both re-read rows; the probe *runner* and the agent turn stay in the loop | 2 host calls per tick native, 1 per seam op; ~1 op per wake |
-| `codemode.lua`, `codemode_policy.lua`, `codemode_view.lua` | **component next** (`wa:codemode`) | pure policy (which tool, which effect class, which sandbox limits) over a grant table; the QuickJS *sandbox* stays in the kernel as a capability | 1–3 calls on the tool rounds that use code mode; 0 on the rest |
+| `codemode.lua`, `codemode_policy.lua`, `codemode_view.lua` | **component, landed** (`wa:codemode`) | the guest's protocol — the fence, its tool table, `searchTools`/`describeTool`, the admit/deliver order and the script's report — as a state machine over one script; the QuickJS *sandbox* stays in the kernel as a capability (`wa:kernel/quickjs`), and admission, dispatch, the definition recheck, evidence, presentation and the session store stay in the loop | 1 call per step (2 for a trivial script, 13 for ten parallel calls) on the rounds that use code mode; 0 on the rest |
 | `hooks.lua`, `hook_events.lua` (hooks/mods) | **component third** (`wa:hooks`) | event→layers→verdict is a pure function of configuration; the plugin bodies stay capabilities | 1 call per hookable event; 0–2 per turn, more on bus events |
 | `nodes.lua`, `federation.lua`, `routed_calls.lua`, `mesh`/fleet parts of `orchestrator.lua` | **component fourth** (`wa:mesh`) | roster, grants and routing decisions over the roster table; the transports stay capabilities | per peer call; 0 in a single-node turn |
 | `memory.lua` (recall, search, sessions, retention) | **component, landed** (`wa:memory`, see `docs/MEMORY.md`) | ranking and scope rules; `memory.db` stays the kernel's | 1–3 calls per turn |
@@ -120,9 +122,13 @@ world mesh-component { import wa:kernel/sql@0.1.0; export mesh; }
 1. **self-loop** — the smallest state machine with real rules (scheduling, claims, refusals, notes),
    no model call inside its own half, and a natural split between "the state machine" (a component)
    and "run the probe / dispatch the turn" (the node). Landed: it proves the shape.
-2. **code mode** — policy over a small table, on tool rounds only, with a well-defined boundary (the
-   sandbox is already a capability). It is the cheapest next win and it removes the last policy code
-   from the tool path.
+2. **code mode** — **landed** (`wa:codemode`). The boundary turned out to be the guest *protocol*, not
+   the policy table: a component cannot host wasmtime, so the sandbox is imported (`wa:kernel/quickjs`)
+   and what moved is the fence, the guest's tool table and discovery, the admit/deliver order and the
+   report. Its cost, and the honest limits of measuring it without the provisioned guest, are in
+   `docs/CODEMODE.md` "Code mode as a component". It also answers one open question by measurement:
+   code mode is *not* the self-loop's shape — one instance per script is right, and a script that pays
+   instantiation for `return 1` is 3.6 ms against the native 1.5 ms.
 3. **hooks/mods** — pure, event-driven, and the node fires from many threads; a component makes the
    rule set swappable per event rather than per process.
 4. **mesh/fleet** — the widest and the least urgent: a single-node turn never touches it, and its
@@ -167,8 +173,12 @@ turn: the gateway rewrite owns that, and these numbers do not predict it.
 ## Open questions
 
 1. **Instantiate per call, or pool?** The self-loop is called once per tick, so per-call instantiation
-   is affordable and keeps the seam stateless. Code mode is called several times per tool round; it
-   should lease from the existing `A2.3` pool instead, which changes the host side but not the WIT.
+   is affordable and keeps the seam stateless. Code mode answered this by measurement
+   (`docs/CODEMODE.md`, "Cost"): a script is **one instance held for the script**, not one per step and
+   not a pooled lease — a step is the same instance continuing its own loop state, and a script that
+   pays instantiation for `return 1` costs 3.6 ms against the native 1.5 ms. The cold start (238 ms,
+   Cranelift) is once per artifact and engine, amortised by the compiled-module cache beside the
+   component, and the next process opens a script in 4.6 ms.
 2. **`async func` on WASI 0.3.** All of these seams are `wa:kernel@0.1` (synchronous). The records do
    not change; the functions become `async`, so a slow statement parks the guest instead of the caller
    (see `docs/KERNEL.md`, "Memory as a component", for the same open item).

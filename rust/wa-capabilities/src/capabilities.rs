@@ -159,6 +159,12 @@ pub const REGISTRY: &[Capability] = &[
     plain!("resource", WritesFiles, crate::host::resource, "Supervised host resources: leases, receipts and their settlement"),
     // ---- the codemode sandbox ----------------------------------------------------------------
     plain!("quickjs", RunsProcess, crate::quickjs::capability, "The checksum-pinned QuickJS sandbox in wasmtime: fuel-metered, deadline-bounded, owner-checked, 4 sessions; effects only through nested tool calls"),
+    // The code-mode seam (docs/CORE-SPLIT.md, "code mode"): the `codemode` component owns the guest's
+    // protocol — the fence, its tool table, searchTools/describeTool, the admit/deliver order and the
+    // script's report — and imports `wa:kernel/quickjs` for the sandbox it is not allowed to contain.
+    // `WA_CODEMODE_COMPONENT=1` is what routes `lua/core/codemode.lua` here; without it the native path
+    // runs, so this capability is inert on a node that never opts in.
+    plain!("codemode", RunsProcess, crate::codemode_seam::capability, "One wa:codemode step against the installed codemode component: open a script, advance it past one tool call, or finish it and read what it did"),
     // ---- identity, signing and the network binding -------------------------------------------
     plain!("sign", ReadOnly, crate::host::sign, "Sign a message with this node's identity key"),
     plain!("verify", ReadOnly, crate::host::verify, "Verify a signature against a node's public key"),

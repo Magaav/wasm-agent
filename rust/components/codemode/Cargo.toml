@@ -1,0 +1,30 @@
+[package]
+name = "codemode"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Code mode's guest protocol as a component (docs/CODEMODE.md, docs/CORE-SPLIT.md "what a seam must look
+# like"): the fence, the guest's tool table and `searchTools`/`describeTool`, the admit/deliver order,
+# the attempt-vocabulary refusals and the script's final report. It imports `wa:kernel/quickjs` — the
+# QuickJS sandbox is a capability the kernel hosts, not something a component can contain — and exports
+# `wa:codemode`. Built for wasm32-wasip2 by scripts/build-components.sh, never by the core build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bindings for `wa:codemode` (exported) and `wa:kernel/quickjs` (imported), from `wit/codemode`.
+wit-bindgen = "0.63"
+# Three jobs, all about the guest's own JavaScript values: the tool descriptors and `store` the prelude
+# receives, the arguments a guest call carries, and the answers `searchTools`/`describeTool` return —
+# those are JS values by nature, and the model's parameter schema is the node's own JSON Schema. Nothing
+# that the seam itself decides travels as JSON: a refusal is a case of `refusal`, a step is a `step`.
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

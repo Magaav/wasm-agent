@@ -640,6 +640,7 @@ capability_inventory read-only
 cli_reexec           runs a process
 client               device
 client_status        read-only
+codemode             runs a process
 component_mcp        runs a process
 components           read-only
 db_ready             read-only
