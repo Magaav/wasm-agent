@@ -166,15 +166,28 @@ impl TestRendezvous {
     fn start(payload: Value) -> TestRendezvous {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("rendezvous bind");
         let address = listener.local_addr().expect("rendezvous address");
+        listener.set_nonblocking(true).expect("non-blocking rendezvous listener");
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
+        // Non-blocking accept and a polled stop flag, never a blocking `accept` woken by a throwaway
+        // connect: a shutdown that depends on one more successful socket op can hang with no CPU
+        // (see `testkit::ACCEPT_POLL`).
         let join = std::thread::spawn(move || {
-            for incoming in listener.incoming() {
-                if thread_stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                let Ok(mut stream) = incoming else { continue };
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            while !thread_stop.load(Ordering::SeqCst) {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(testkit::ACCEPT_POLL);
+                        continue;
+                    }
+                    Err(_) => {
+                        std::thread::sleep(testkit::ACCEPT_POLL);
+                        continue;
+                    }
+                };
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(testkit::SOCKET_DEADLINE));
+                let _ = stream.set_write_timeout(Some(testkit::SOCKET_DEADLINE));
                 match http::read_request(&mut stream, http::MAX_BODY) {
                     Ok(Some(request)) if request.path.starts_with("/nodes") => {
                         let body = payload.to_string();
@@ -196,8 +209,8 @@ impl TestRendezvous {
             "/nodes",
             &[],
             b"",
-            Duration::from_secs(2),
-            Duration::from_secs(5),
+            testkit::CONNECT_TIMEOUT,
+            testkit::SOCKET_DEADLINE,
             http::MAX_BODY,
         )
         .expect("the rendezvous answers");
@@ -209,8 +222,8 @@ impl TestRendezvous {
 impl Drop for TestRendezvous {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = std::net::TcpStream::connect_timeout(&self.address, Duration::from_millis(250));
         if let Some(join) = self.join.take() {
+            // The thread polls `stop`; this join is bounded by one poll interval, never by a socket.
             let _ = join.join();
         }
     }
@@ -223,13 +236,30 @@ fn client<'a>(
     cache: &'a mut PeerCache,
     audit: &'a MemorySink,
 ) -> Client<'a> {
+    client_with_connect(identity, roster, policy, cache, audit, testkit::CONNECT_TIMEOUT)
+}
+
+/// The same client with an explicit connect budget: the one test that wants a peer to be unreachable
+/// asks for a short one so it can observe the failure without waiting out a generous timeout.
+fn client_with_connect<'a>(
+    identity: &'a Identity,
+    roster: &'a Roster,
+    policy: &'a MeshPolicy,
+    cache: &'a mut PeerCache,
+    audit: &'a MemorySink,
+    connect_timeout: Duration,
+) -> Client<'a> {
     Client {
         identity,
         roster,
         policy,
         cache,
         audit,
-        config: ClientConfig { io_timeout: Duration::from_secs(15), ..ClientConfig::default() },
+        config: ClientConfig {
+            connect_timeout,
+            io_timeout: testkit::SOCKET_DEADLINE,
+            ..ClientConfig::default()
+        },
     }
 }
 
@@ -271,8 +301,8 @@ fn post(address: SocketAddr, body: &str, headers: &[(String, String)]) -> http::
         "/mesh/call",
         headers,
         body.as_bytes(),
-        Duration::from_secs(2),
-        Duration::from_secs(10),
+        testkit::CONNECT_TIMEOUT,
+        testkit::SOCKET_DEADLINE,
         http::MAX_BODY,
     )
     .expect("the target answers")
@@ -285,8 +315,8 @@ fn get(address: SocketAddr, path: &str) -> http::Response {
         path,
         &[],
         b"",
-        Duration::from_secs(2),
-        Duration::from_secs(5),
+        testkit::CONNECT_TIMEOUT,
+        testkit::SOCKET_DEADLINE,
         http::MAX_BODY,
     )
     .expect("the node answers")
@@ -298,354 +328,415 @@ fn health(address: SocketAddr) -> Value {
 
 #[test]
 fn three_nodes_call_each_other_after_the_rendezvous_dies() {
-    let fleet = fleet();
-    let rendezvous = TestRendezvous::start(fleet.discovery());
+    testkit::with_deadline("three_nodes_call_each_other_after_the_rendezvous_dies", move || {
+        let fleet = fleet();
+        let rendezvous = TestRendezvous::start(fleet.discovery());
 
-    // Bootstrap: the node asks the rendezvous where its peers are, exactly as `nodes.peers()` does.
-    let payload = rendezvous.nodes();
-    let directory = testkit::temp_dir("cache");
-    let cache_path = directory.join("mesh").join("peers.json");
-    let mut cache = PeerCache::empty();
-    cache.merge_roster(&fleet.roster, wire::now_millis());
-    cache.merge_rendezvous(&payload, wire::now_millis());
-    cache.save(&cache_path, wire::now_millis()).expect("cache saved");
+        // Bootstrap: the node asks the rendezvous where its peers are, exactly as `nodes.peers()` does.
+        let payload = rendezvous.nodes();
+        let directory = testkit::temp_dir("cache");
+        let cache_path = directory.join("mesh").join("peers.json");
+        let mut cache = PeerCache::empty();
+        cache.merge_roster(&fleet.roster, wire::now_millis());
+        cache.merge_rendezvous(&payload, wire::now_millis());
+        cache.save(&cache_path, wire::now_millis()).expect("cache saved");
 
-    // Kill the rendezvous. From here on nothing may depend on it.
-    drop(rendezvous);
+        // Kill the rendezvous. From here on nothing may depend on it.
+        drop(rendezvous);
 
-    // A fresh cache object read from disk: the call path has the peer list, not a live one.
-    let mut cache = PeerCache::from_file(&cache_path).expect("cache reloaded");
-    cache.merge_roster(&fleet.roster, wire::now_millis());
-    let audit = MemorySink::new();
-    let no_grants = &fleet.policy;
+        // A fresh cache object read from disk: the call path has the peer list, not a live one.
+        let mut cache = PeerCache::from_file(&cache_path).expect("cache reloaded");
+        cache.merge_roster(&fleet.roster, wire::now_millis());
+        let audit = MemorySink::new();
+        let no_grants = &fleet.policy;
 
-    // Level 0 -> level 1: allowed by the hierarchy, no grant involved.
-    let mut laptop = client(&fleet.laptop.identity, &fleet.roster, no_grants, &mut cache, &audit);
-    match laptop.call("oracle", "bash", json!({"command": "git log -1"}), Inner::default()) {
-        Outcome::Ok { node, status, body, address, .. } => {
-            assert_eq!(node.name, "oracle");
-            assert_eq!(status, 200);
-            assert!(address.starts_with("127.0.0.1:"), "the direct address was used: {address}");
-            let answer: Value = serde_json::from_str(&body).expect("echo body");
-            assert_eq!(answer["echo"], "bash");
-            assert_eq!(answer["from"], "laptop");
-            assert_eq!(answer["to"], "oracle");
+        // Level 0 -> level 1: allowed by the hierarchy, no grant involved.
+        let mut laptop = client(&fleet.laptop.identity, &fleet.roster, no_grants, &mut cache, &audit);
+        match laptop.call("oracle", "bash", json!({"command": "git log -1"}), Inner::default()) {
+            Outcome::Ok { node, status, body, address, .. } => {
+                assert_eq!(node.name, "oracle");
+                assert_eq!(status, 200);
+                assert!(address.starts_with("127.0.0.1:"), "the direct address was used: {address}");
+                let answer: Value = serde_json::from_str(&body).expect("echo body");
+                assert_eq!(answer["echo"], "bash");
+                assert_eq!(answer["from"], "laptop");
+                assert_eq!(answer["to"], "oracle");
+            }
+            other => panic!("laptop -> oracle must work with the rendezvous gone: {other:?}"),
         }
-        other => panic!("laptop -> oracle must work with the rendezvous gone: {other:?}"),
-    }
 
-    // Level 1 -> level 1: the same level is allowed, whatever the verb.
-    let mut oracle = client(&fleet.oracle.identity, &fleet.roster, no_grants, &mut cache, &audit);
-    match oracle.call("phone", "read", json!({"path": "README.md"}), Inner::default()) {
-        Outcome::Ok { node, .. } => assert_eq!(node.name, "phone"),
-        other => panic!("a same-level call must be allowed: {other:?}"),
-    }
-
-    // Level 1 -> level 0: denied without a grant, and the answer says which rule refused it.
-    let mut oracle = client(&fleet.oracle.identity, &fleet.roster, no_grants, &mut cache, &audit);
-    match oracle.call("laptop", "bash", json!({"command": "rm -rf /"}), Inner::default()) {
-        Outcome::Denied { node, verdict, verb } => {
-            assert_eq!(node.name, "laptop");
-            assert_eq!(verdict.reason, "hierarchy_denied");
-            assert!(!verdict.is_allow());
-            assert_eq!(verb, Verb::Control);
+        // Level 1 -> level 1: the same level is allowed, whatever the verb.
+        let mut oracle = client(&fleet.oracle.identity, &fleet.roster, no_grants, &mut cache, &audit);
+        match oracle.call("phone", "read", json!({"path": "README.md"}), Inner::default()) {
+            Outcome::Ok { node, .. } => assert_eq!(node.name, "phone"),
+            other => panic!("a same-level call must be allowed: {other:?}"),
         }
-        other => panic!("an upward call must be denied without a grant: {other:?}"),
-    }
 
-    // A grant is the operator's statement, written in the `mesh` section of a node's own policy.json.
-    // The *target* holds the copy that executes: with the grant only on the caller's side, the laptop
-    // still refuses: that is the second half of "both ends decide".
-    let granted = MeshPolicy::from_policy_text(&format!(
-        r#"{{"version":1,"mesh":{{"version":1,"roster_key":"{}","grants":[
-             {{"caller":"{}","target":"{}","verb":"control","effect":"allow",
-               "note":"the oracle may drive the laptop"}}]}}}}"#,
-        fleet.fleet_key.public_key, fleet.oracle.node.node_id, fleet.laptop.node.node_id
-    ))
-    .expect("grant policy");
-    let mut oracle = client(&fleet.oracle.identity, &fleet.roster, &granted, &mut cache, &audit);
-    match oracle.call("laptop", "bash", json!({"command": "uptime"}), Inner::default()) {
-        Outcome::Refused { code, verified, .. } => {
-            assert_eq!(code, "mesh_denied");
-            assert!(verified, "the target's denial is a signed answer");
+        // Level 1 -> level 0: denied without a grant, and the answer says which rule refused it.
+        let mut oracle = client(&fleet.oracle.identity, &fleet.roster, no_grants, &mut cache, &audit);
+        match oracle.call("laptop", "bash", json!({"command": "rm -rf /"}), Inner::default()) {
+            Outcome::Denied { node, verdict, verb } => {
+                assert_eq!(node.name, "laptop");
+                assert_eq!(verdict.reason, "hierarchy_denied");
+                assert!(!verdict.is_allow());
+                assert_eq!(verb, Verb::Control);
+            }
+            other => panic!("an upward call must be denied without a grant: {other:?}"),
         }
-        other => panic!("the laptop has no grant in its own policy, so it must refuse: {other:?}"),
-    }
 
-    // The audit trail recorded the decisions, and recorded none of the arguments.
-    let lines = audit.lines();
-    assert!(lines.iter().any(|line| line.contains("decision=allow reason=hierarchy_allowed")));
-    assert!(lines.iter().any(|line| line.contains("decision=deny reason=hierarchy_denied")));
-    assert!(!lines.iter().any(|line| line.contains("grant_allowed")), "nothing was granted yet");
-    assert!(
-        !lines.iter().any(|line| line.contains("git log") || line.contains("rm -rf") || line.contains("uptime")),
-        "audit lines must not carry the call's arguments: {lines:?}"
-    );
+        // A grant is the operator's statement, written in the `mesh` section of a node's own policy.json.
+        // The *target* holds the copy that executes: with the grant only on the caller's side, the laptop
+        // still refuses: that is the second half of "both ends decide".
+        let granted = MeshPolicy::from_policy_text(&format!(
+            r#"{{"version":1,"mesh":{{"version":1,"roster_key":"{}","grants":[
+                 {{"caller":"{}","target":"{}","verb":"control","effect":"allow",
+                   "note":"the oracle may drive the laptop"}}]}}}}"#,
+            fleet.fleet_key.public_key, fleet.oracle.node.node_id, fleet.laptop.node.node_id
+        ))
+        .expect("grant policy");
+        let mut oracle = client(&fleet.oracle.identity, &fleet.roster, &granted, &mut cache, &audit);
+        match oracle.call("laptop", "bash", json!({"command": "uptime"}), Inner::default()) {
+            Outcome::Refused { code, verified, .. } => {
+                assert_eq!(code, "mesh_denied");
+                assert!(verified, "the target's denial is a signed answer");
+            }
+            other => panic!("the laptop has no grant in its own policy, so it must refuse: {other:?}"),
+        }
+
+        // The audit trail recorded the decisions, and recorded none of the arguments.
+        let lines = audit.lines();
+        assert!(lines.iter().any(|line| line.contains("decision=allow reason=hierarchy_allowed")));
+        assert!(lines.iter().any(|line| line.contains("decision=deny reason=hierarchy_denied")));
+        assert!(!lines.iter().any(|line| line.contains("grant_allowed")), "nothing was granted yet");
+        assert!(
+            !lines.iter().any(|line| line.contains("git log") || line.contains("rm -rf") || line.contains("uptime")),
+            "audit lines must not carry the call's arguments: {lines:?}"
+        );
+    });
 }
 
 #[test]
 fn the_target_refuses_an_upward_call_even_when_the_caller_authorizes_itself() {
-    // A caller that authorized itself — or a stolen key — still meets the target's roster. This is
-    // the whole reason both ends run the same rule.
-    let fleet = fleet();
-    let (body, headers) = signed_call(&fleet.oracle, &fleet.laptop.node, "bash", wire::now_seconds(), "self-authorized");
-    let response = post(fleet.laptop_server.local_addr(), &body, &headers);
-    assert_eq!(
-        response.status, 200,
-        "an authenticated refusal is a signed answer, not a transport error"
-    );
-    let reply_signature = response.header("x-wa-sig").expect("signed reply").to_string();
-    let reply_ts: u64 = response.header("x-wa-ts").expect("reply ts").parse().expect("reply ts");
-    let reply_text = response.body_text();
-    assert!(
-        crate::identity::verify(
-            &fleet.laptop.node.public_key,
-            &MeshReply::reply_message(&fleet.laptop.node.node_id, &fleet.oracle.node.node_id, reply_ts, &reply_text),
-            &reply_signature,
-        ),
-        "the denial must be signed by the target"
-    );
-    let reply = MeshReply::parse(&reply_text).expect("reply body");
-    assert!(!reply.ok);
-    assert_eq!(reply.error.as_deref(), Some("mesh_denied"));
-    assert_eq!(reply.reason.as_deref(), Some("hierarchy_denied"));
+    testkit::with_deadline("the_target_refuses_an_upward_call_even_when_the_caller_authorizes_itself", move || {
+        // A caller that authorized itself — or a stolen key — still meets the target's roster. This is
+        // the whole reason both ends run the same rule.
+        let fleet = fleet();
+        let (body, headers) = signed_call(&fleet.oracle, &fleet.laptop.node, "bash", wire::now_seconds(), "self-authorized");
+        let response = post(fleet.laptop_server.local_addr(), &body, &headers);
+        assert_eq!(
+            response.status, 200,
+            "an authenticated refusal is a signed answer, not a transport error"
+        );
+        let reply_signature = response.header("x-wa-sig").expect("signed reply").to_string();
+        let reply_ts: u64 = response.header("x-wa-ts").expect("reply ts").parse().expect("reply ts");
+        let reply_text = response.body_text();
+        assert!(
+            crate::identity::verify(
+                &fleet.laptop.node.public_key,
+                &MeshReply::reply_message(&fleet.laptop.node.node_id, &fleet.oracle.node.node_id, reply_ts, &reply_text),
+                &reply_signature,
+            ),
+            "the denial must be signed by the target"
+        );
+        let reply = MeshReply::parse(&reply_text).expect("reply body");
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_deref(), Some("mesh_denied"));
+        assert_eq!(reply.reason.as_deref(), Some("hierarchy_denied"));
+    });
 }
 
 #[test]
 fn a_replayed_call_a_stale_call_and_a_redirected_call_are_all_refused() {
-    let fleet = fleet();
-    let target = fleet.oracle_server.local_addr();
+    testkit::with_deadline("a_replayed_call_a_stale_call_and_a_redirected_call_are_all_refused", move || {
+        let fleet = fleet();
+        let target = fleet.oracle_server.local_addr();
 
-    // A good call, then the very same bytes again: the second one is a replay.
-    let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds(), "once");
-    let first = post(target, &body, &headers);
-    assert_eq!(first.status, 200);
-    let second = post(target, &body, &headers);
-    assert_eq!(second.status, 409);
-    assert_eq!(wire::pre_auth_code(&second.body_text()), Some("replayed_request"));
+        // A good call, then the very same bytes again: the second one is a replay.
+        let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds(), "once");
+        let first = post(target, &body, &headers);
+        assert_eq!(first.status, 200);
+        let second = post(target, &body, &headers);
+        assert_eq!(second.status, 409);
+        assert_eq!(wire::pre_auth_code(&second.body_text()), Some("replayed_request"));
 
-    // A body altered after signing: `read` becomes `bash`.
-    let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds(), "altered");
-    let altered = body.replace("\"capability\":\"read\"", "\"capability\":\"bash\"");
-    assert_ne!(altered, body);
-    let refused = post(target, &altered, &headers);
-    assert_eq!(refused.status, 401);
-    assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("bad_signature"));
+        // A body altered after signing: `read` becomes `bash`.
+        let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds(), "altered");
+        let altered = body.replace("\"capability\":\"read\"", "\"capability\":\"bash\"");
+        assert_ne!(altered, body);
+        let refused = post(target, &altered, &headers);
+        assert_eq!(refused.status, 401);
+        assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("bad_signature"));
 
-    // A call signed for one node and delivered to another.
-    let (body, headers) = signed_call(&fleet.laptop, &fleet.phone.node, "read", wire::now_seconds(), "redirected");
-    let refused = post(target, &body, &headers);
-    assert_eq!(refused.status, 403);
-    assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("wrong_target"));
+        // A call signed for one node and delivered to another.
+        let (body, headers) = signed_call(&fleet.laptop, &fleet.phone.node, "read", wire::now_seconds(), "redirected");
+        let refused = post(target, &body, &headers);
+        assert_eq!(refused.status, 403);
+        assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("wrong_target"));
 
-    // A call from an hour ago.
-    let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds() - 3_600, "stale");
-    let refused = post(target, &body, &headers);
-    assert_eq!(refused.status, 408);
-    assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("stale_request"));
+        // A call from an hour ago.
+        let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds() - 3_600, "stale");
+        let refused = post(target, &body, &headers);
+        assert_eq!(refused.status, 408);
+        assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("stale_request"));
 
-    // A caller the roster does not know at all.
-    let outsider = Member::new("outsider", 1, &[]);
-    let (body, headers) = signed_call(&outsider, &fleet.oracle.node, "read", wire::now_seconds(), "outsider");
-    let refused = post(target, &body, &headers);
-    assert_eq!(refused.status, 403);
-    assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("unknown_caller"));
+        // A caller the roster does not know at all.
+        let outsider = Member::new("outsider", 1, &[]);
+        let (body, headers) = signed_call(&outsider, &fleet.oracle.node, "read", wire::now_seconds(), "outsider");
+        let refused = post(target, &body, &headers);
+        assert_eq!(refused.status, 403);
+        assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("unknown_caller"));
+    });
 }
 
 #[test]
 fn a_tampered_roster_is_refused_and_a_node_holding_one_serves_nothing() {
-    let fleet = fleet();
-    let tampered = testkit::tampered(fleet.roster.clone(), &fleet.fleet_key);
-    let error = tampered
-        .verify(&fleet.fleet_key.public_key, wire::now_seconds())
-        .expect_err("a roster edited after signing must not verify");
-    assert_eq!(error.0, "roster_unverified:bad_signature");
+    testkit::with_deadline("a_tampered_roster_is_refused_and_a_node_holding_one_serves_nothing", move || {
+        let fleet = fleet();
+        let tampered = testkit::tampered(fleet.roster.clone(), &fleet.fleet_key);
+        let error = tampered
+            .verify(&fleet.fleet_key.public_key, wire::now_seconds())
+            .expect_err("a roster edited after signing must not verify");
+        assert_eq!(error.0, "roster_unverified:bad_signature");
 
-    // A node that loads that roster refuses every call instead of trusting it.
-    let stranger = Member::new("tampered-node", 1, &[]);
-    let policy = MeshPolicy::from_policy_text(&format!(
-        r#"{{"version":1,"mesh":{{"version":1,"roster_key":"{}"}}}}"#,
-        fleet.fleet_key.public_key
-    ))
-    .unwrap();
-    let server = start(&stranger, &tampered, &policy);
-    let status = health(server.local_addr());
-    assert_eq!(status["roster_verified"], false);
-    assert!(status["roster_status"].as_str().unwrap().starts_with("roster_unverified"));
+        // A node that loads that roster refuses every call instead of trusting it.
+        let stranger = Member::new("tampered-node", 1, &[]);
+        let policy = MeshPolicy::from_policy_text(&format!(
+            r#"{{"version":1,"mesh":{{"version":1,"roster_key":"{}"}}}}"#,
+            fleet.fleet_key.public_key
+        ))
+        .unwrap();
+        let server = start(&stranger, &tampered, &policy);
+        let status = health(server.local_addr());
+        assert_eq!(status["roster_verified"], false);
+        assert!(status["roster_status"].as_str().unwrap().starts_with("roster_unverified"));
 
-    let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds(), "into-tampered");
-    let refused = post(server.local_addr(), &body, &headers);
-    assert_eq!(refused.status, 503);
-    assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("roster_unverified"));
+        let (body, headers) = signed_call(&fleet.laptop, &fleet.oracle.node, "read", wire::now_seconds(), "into-tampered");
+        let refused = post(server.local_addr(), &body, &headers);
+        assert_eq!(refused.status, 503);
+        assert_eq!(wire::pre_auth_code(&refused.body_text()), Some("roster_unverified"));
+    });
 }
 
 #[test]
 fn a_denial_never_offers_a_fallback_and_an_unreachable_peer_does() {
-    let fleet = fleet();
-    let mut cache = fleet.cache();
-    let audit = MemorySink::new();
-    let no_grants = &fleet.policy;
+    testkit::with_deadline("a_denial_never_offers_a_fallback_and_an_unreachable_peer_does", move || {
+        let fleet = fleet();
+        let mut cache = fleet.cache();
+        let audit = MemorySink::new();
+        let no_grants = &fleet.policy;
 
-    // Denied: an answer, and it must not invite the relay to take over.
-    let mut oracle = client(&fleet.oracle.identity, &fleet.roster, no_grants, &mut cache, &audit);
-    let denied = oracle
-        .call("laptop", "write", json!({"path": "x", "content": "y"}), Inner::default())
-        .to_json();
-    assert_eq!(denied["error"], "mesh_denied");
-    assert!(denied["fallback"].is_null(), "a denial must not carry a fallback: {denied}");
+        // Denied: an answer, and it must not invite the relay to take over.
+        let mut oracle = client(&fleet.oracle.identity, &fleet.roster, no_grants, &mut cache, &audit);
+        let denied = oracle
+            .call("laptop", "write", json!({"path": "x", "content": "y"}), Inner::default())
+            .to_json();
+        assert_eq!(denied["error"], "mesh_denied");
+        assert!(denied["fallback"].is_null(), "a denial must not carry a fallback: {denied}");
 
-    // Unreachable: nobody decided, so the caller's existing path may run.
-    let mut cache = PeerCache::empty();
-    cache.merge_roster(&fleet.roster, wire::now_millis());
-    cache.merge_rendezvous(
-        &json!({"nodes": [{"node_id": fleet.phone.node.node_id, "name": "phone",
-                            "public_key": fleet.phone.node.public_key,
-                            "endpoints": ["127.0.0.1:1"]}]}),
-        wire::now_millis(),
-    );
-    let mut laptop = client(&fleet.laptop.identity, &fleet.roster, no_grants, &mut cache, &audit);
-    let unreachable = laptop.call("phone", "read", json!({}), Inner::default()).to_json();
-    assert_eq!(unreachable["error"], "mesh_unreachable");
-    assert_eq!(unreachable["fallback"], "relay");
-    assert!(!unreachable["attempts"].as_array().unwrap().is_empty());
+        // Unreachable: nobody decided, so the caller's existing path may run.
+        let mut cache = PeerCache::empty();
+        cache.merge_roster(&fleet.roster, wire::now_millis());
+        cache.merge_rendezvous(
+            &json!({"nodes": [{"node_id": fleet.phone.node.node_id, "name": "phone",
+                                "public_key": fleet.phone.node.public_key,
+                                "endpoints": ["127.0.0.1:1"]}]}),
+            wire::now_millis(),
+        );
+        // A short connect budget: this peer is meant to stay unreachable, so the test should observe
+        // the failure quickly instead of waiting out the generous budget the live calls use.
+        let mut laptop = client_with_connect(
+            &fleet.laptop.identity,
+            &fleet.roster,
+            no_grants,
+            &mut cache,
+            &audit,
+            Duration::from_secs(2),
+        );
+        let unreachable = laptop.call("phone", "read", json!({}), Inner::default()).to_json();
+        assert_eq!(unreachable["error"], "mesh_unreachable");
+        assert_eq!(unreachable["fallback"], "relay");
+        assert!(!unreachable["attempts"].as_array().unwrap().is_empty());
+    });
 }
 
 #[test]
 fn the_health_endpoint_names_the_node_without_authenticating_anything() {
-    let fleet = fleet();
-    let status = health(fleet.oracle_server.local_addr());
-    assert_eq!(status["node_id"], fleet.oracle.node.node_id);
-    assert_eq!(status["name"], "oracle");
-    assert_eq!(status["level"], 1);
-    assert_eq!(status["roster_verified"], true);
-    assert!(status["unsigned"].as_str().unwrap().contains("does not authenticate"));
-    // An unknown route is a code, not an HTML page.
-    let missing = get(fleet.oracle_server.local_addr(), "/nope");
-    assert_eq!(missing.status, 404);
-    assert_eq!(wire::pre_auth_code(&missing.body_text()), Some("not_found"));
+    testkit::with_deadline("the_health_endpoint_names_the_node_without_authenticating_anything", move || {
+        let fleet = fleet();
+        let status = health(fleet.oracle_server.local_addr());
+        assert_eq!(status["node_id"], fleet.oracle.node.node_id);
+        assert_eq!(status["name"], "oracle");
+        assert_eq!(status["level"], 1);
+        assert_eq!(status["roster_verified"], true);
+        assert!(status["unsigned"].as_str().unwrap().contains("does not authenticate"));
+        // An unknown route is a code, not an HTML page.
+        let missing = get(fleet.oracle_server.local_addr(), "/nope");
+        assert_eq!(missing.status, 404);
+        assert_eq!(wire::pre_auth_code(&missing.body_text()), Some("not_found"));
+    });
 }
 
 #[test]
 fn the_callers_own_request_reaches_the_target_untouched() {
-    // `Inner` is the caller's own `/node/call` body and headers: the node forwards *that* to execute
-    // the capability, so it must arrive byte for byte and inside the mesh signature.
-    let fleet = fleet();
-    let mut cache = fleet.cache();
-    let audit = MemorySink::new();
-    let no_grants = &fleet.policy;
-    let inner = Inner {
-        body: "{\"to_node_id\":\"x\",\"capability\":\"read\",\"args\":{\"path\":\"README.md\"}}".into(),
-        headers: vec![
-            ("X-WA-Node".into(), fleet.laptop.node.node_id.clone()),
-            ("X-WA-Sig".into(), "abcdef".into()),
-        ],
-    };
-    let mut caller = client(&fleet.laptop.identity, &fleet.roster, no_grants, &mut cache, &audit);
-    match caller.call("phone", "read", json!({"path": "README.md"}), inner.clone()) {
-        Outcome::Ok { body, .. } => {
-            let answer: Value = serde_json::from_str(&body).expect("echo body");
-            assert_eq!(answer["inner_body"], inner.body);
-            assert_eq!(answer["inner_headers"][0], format!("X-WA-Node: {}", fleet.laptop.node.node_id));
-            assert_eq!(answer["inner_headers"][1], "X-WA-Sig: abcdef");
-            assert_eq!(answer["verb"], "read");
+    testkit::with_deadline("the_callers_own_request_reaches_the_target_untouched", move || {
+        // `Inner` is the caller's own `/node/call` body and headers: the node forwards *that* to execute
+        // the capability, so it must arrive byte for byte and inside the mesh signature.
+        let fleet = fleet();
+        let mut cache = fleet.cache();
+        let audit = MemorySink::new();
+        let no_grants = &fleet.policy;
+        let inner = Inner {
+            body: "{\"to_node_id\":\"x\",\"capability\":\"read\",\"args\":{\"path\":\"README.md\"}}".into(),
+            headers: vec![
+                ("X-WA-Node".into(), fleet.laptop.node.node_id.clone()),
+                ("X-WA-Sig".into(), "abcdef".into()),
+            ],
+        };
+        let mut caller = client(&fleet.laptop.identity, &fleet.roster, no_grants, &mut cache, &audit);
+        match caller.call("phone", "read", json!({"path": "README.md"}), inner.clone()) {
+            Outcome::Ok { body, .. } => {
+                let answer: Value = serde_json::from_str(&body).expect("echo body");
+                assert_eq!(answer["inner_body"], inner.body);
+                assert_eq!(answer["inner_headers"][0], format!("X-WA-Node: {}", fleet.laptop.node.node_id));
+                assert_eq!(answer["inner_headers"][1], "X-WA-Sig: abcdef");
+                assert_eq!(answer["verb"], "read");
+            }
+            other => panic!("the call must reach the target: {other:?}"),
         }
-        other => panic!("the call must reach the target: {other:?}"),
-    }
+    });
 }
 
 #[test]
 fn an_upward_call_works_when_both_ends_carry_the_operator_grant() {
-    // The same fleet, with the grant in `policy.json` on both ends, which is what an operator writes:
-    // the caller's copy stops a call it knows is not allowed, the target's copy is the one that
-    // executes, and a fleet whose two copies disagree refuses (see the test above).
-    let fleet = fleet_with_grants(true);
-    let mut cache = fleet.cache();
-    let audit = MemorySink::new();
-    let policy = &fleet.policy;
+    testkit::with_deadline("an_upward_call_works_when_both_ends_carry_the_operator_grant", move || {
+        // The same fleet, with the grant in `policy.json` on both ends, which is what an operator writes:
+        // the caller's copy stops a call it knows is not allowed, the target's copy is the one that
+        // executes, and a fleet whose two copies disagree refuses (see the test above).
+        let fleet = fleet_with_grants(true);
+        let mut cache = fleet.cache();
+        let audit = MemorySink::new();
+        let policy = &fleet.policy;
 
-    let mut oracle = client(&fleet.oracle.identity, &fleet.roster, policy, &mut cache, &audit);
-    match oracle.call("laptop", "bash", json!({"command": "uptime"}), Inner::default()) {
-        Outcome::Ok { verdict, node, .. } => {
-            assert_eq!(node.name, "laptop");
-            assert_eq!(verdict.reason, "grant_allowed");
+        let mut oracle = client(&fleet.oracle.identity, &fleet.roster, policy, &mut cache, &audit);
+        match oracle.call("laptop", "bash", json!({"command": "uptime"}), Inner::default()) {
+            Outcome::Ok { verdict, node, .. } => {
+                assert_eq!(node.name, "laptop");
+                assert_eq!(verdict.reason, "grant_allowed");
+            }
+            other => panic!("a granted upward call must work: {other:?}"),
         }
-        other => panic!("a granted upward call must work: {other:?}"),
-    }
 
-    // The same grant does not cover a verb it does not name, in either direction.
-    let mut oracle = client(&fleet.oracle.identity, &fleet.roster, policy, &mut cache, &audit);
-    let read_denied = oracle
-        .call("laptop", "read", json!({"path": "README.md"}), Inner::default())
-        .to_json();
-    assert_eq!(read_denied["error"], "mesh_denied");
-    assert_eq!(read_denied["reason"], "hierarchy_denied");
+        // The same grant does not cover a verb it does not name, in either direction.
+        let mut oracle = client(&fleet.oracle.identity, &fleet.roster, policy, &mut cache, &audit);
+        let read_denied = oracle
+            .call("laptop", "read", json!({"path": "README.md"}), Inner::default())
+            .to_json();
+        assert_eq!(read_denied["error"], "mesh_denied");
+        assert_eq!(read_denied["reason"], "hierarchy_denied");
 
-    // And the level-0 laptop still needs no grant at all.
-    let mut laptop = client(&fleet.laptop.identity, &fleet.roster, policy, &mut cache, &audit);
-    assert!(matches!(
-        laptop.call("oracle", "bash", json!({"command": "uptime"}), Inner::default()),
-        Outcome::Ok { .. }
-    ));
+        // And the level-0 laptop still needs no grant at all.
+        let mut laptop = client(&fleet.laptop.identity, &fleet.roster, policy, &mut cache, &audit);
+        assert!(matches!(
+            laptop.call("oracle", "bash", json!({"command": "uptime"}), Inner::default()),
+            Outcome::Ok { .. }
+        ));
+    });
 }
 
 #[test]
 fn the_mount_starts_only_when_the_flag_and_a_port_are_both_given() {
-    // The one thing `serve.rs` calls: a port in the environment, or no listener at all. This is the
-    // only place the real file paths (home, policy.json, roster, cache, audit) are exercised, so the
-    // wiring the node does is tested without starting a node.
-    let _lock = testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let home = testkit::temp_dir("mount-home");
-    let config = home.join(".wasm-agent");
-    std::fs::create_dir_all(&config).expect("config dir");
+    testkit::with_deadline("the_mount_starts_only_when_the_flag_and_a_port_are_both_given", move || {
+        // The one thing `serve.rs` calls: a port in the environment, or no listener at all. This is the
+        // only place the real file paths (home, policy.json, roster, cache, audit) are exercised, so the
+        // wiring the node does is tested without starting a node.
+        let _lock = testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = testkit::temp_dir("mount-home");
+        let config = home.join(".wasm-agent");
+        std::fs::create_dir_all(&config).expect("config dir");
 
-    // The node's own key, in the place the mount looks for it: <home>/.wasm-agent/node.key.
-    let node_identity = Identity::load(&config.join("node.key")).expect("node identity");
-    let fleet_key = testkit::fleet_key();
-    let node = RosterNode {
-        node_id: node_identity.node_id.clone(),
-        public_key: node_identity.public_key.clone(),
-        name: "mounted".into(),
-        level: 0,
-        addresses: Vec::new(),
-        revoked_at: 0,
-    };
-    let roster = testkit::roster_of(&fleet_key, vec![node.clone()]);
-    std::fs::write(config.join("mesh-roster.json"), serde_json::to_string_pretty(&roster).unwrap())
-        .expect("roster file");
-    std::fs::write(
-        config.join("policy.json"),
-        format!(
-            r#"{{"version":1,"components":{{}},"mesh":{{"version":1,"roster_key":"{}"}}}}"#,
-            fleet_key.public_key
-        ),
-    )
-    .expect("policy file");
+        // The node's own key, in the place the mount looks for it: <home>/.wasm-agent/node.key.
+        let node_identity = Identity::load(&config.join("node.key")).expect("node identity");
+        let fleet_key = testkit::fleet_key();
+        let node = RosterNode {
+            node_id: node_identity.node_id.clone(),
+            public_key: node_identity.public_key.clone(),
+            name: "mounted".into(),
+            level: 0,
+            addresses: Vec::new(),
+            revoked_at: 0,
+        };
+        let roster = testkit::roster_of(&fleet_key, vec![node.clone()]);
+        std::fs::write(config.join("mesh-roster.json"), serde_json::to_string_pretty(&roster).unwrap())
+            .expect("roster file");
+        std::fs::write(
+            config.join("policy.json"),
+            format!(
+                r#"{{"version":1,"components":{{}},"mesh":{{"version":1,"roster_key":"{}"}}}}"#,
+                fleet_key.public_key
+            ),
+        )
+        .expect("policy file");
 
-    let port = testkit::free_port();
-    let _env = testkit::EnvGuard::set(&[
-        ("WASM_AGENT_HOME", Some(home.to_str().unwrap())),
-        ("WASM_AGENT_NODE_KEY", None),
-        ("WA_MESH", Some("1")),
-        ("WASM_AGENT_MESH", None),
-        ("WASM_AGENT_MESH_PORT", Some(&port.to_string())),
-        ("WASM_AGENT_MESH_BIND", None),
-        ("WASM_AGENT_MESH_ROSTER", None),
-        ("WASM_AGENT_MESH_CACHE", None),
-        ("WA_GRANT_POLICY", None),
-    ]);
-    let server = crate::host_call::spawn_from_env(port).expect("the mount starts with the flag and a port");
-    assert_eq!(server.local_addr().port(), port);
-    let status = health(server.local_addr());
-    assert_eq!(status["node_id"], node.node_id);
-    assert_eq!(status["name"], "mounted");
-    assert_eq!(status["roster_verified"], true);
-    drop(server);
+        let port = testkit::free_port();
+        let _env = testkit::EnvGuard::set(&[
+            ("WASM_AGENT_HOME", Some(home.to_str().unwrap())),
+            ("WASM_AGENT_NODE_KEY", None),
+            ("WA_MESH", Some("1")),
+            ("WASM_AGENT_MESH", None),
+            ("WASM_AGENT_MESH_PORT", Some(&port.to_string())),
+            ("WASM_AGENT_MESH_BIND", None),
+            ("WASM_AGENT_MESH_ROSTER", None),
+            ("WASM_AGENT_MESH_CACHE", None),
+            ("WA_GRANT_POLICY", None),
+        ]);
+        let server = crate::host_call::spawn_from_env(port).expect("the mount starts with the flag and a port");
+        assert_eq!(server.local_addr().port(), port);
+        let status = health(server.local_addr());
+        assert_eq!(status["node_id"], node.node_id);
+        assert_eq!(status["name"], "mounted");
+        assert_eq!(status["roster_verified"], true);
+        drop(server);
 
-    // The flag without a port opens nothing, and says so on stderr rather than picking one.
-    let _no_port = testkit::EnvGuard::set(&[("WASM_AGENT_MESH_PORT", None)]);
-    assert!(crate::host_call::spawn_from_env(port).is_none());
+        // The flag without a port opens nothing, and says so on stderr rather than picking one.
+        let _no_port = testkit::EnvGuard::set(&[("WASM_AGENT_MESH_PORT", None)]);
+        assert!(crate::host_call::spawn_from_env(port).is_none());
 
-    // No flag at all: the mount is silent and touches no file.
-    let _off = testkit::EnvGuard::set(&[("WA_MESH", None), ("WASM_AGENT_MESH", None), ("WASM_AGENT_MESH_PORT", Some(&port.to_string()))]);
-    assert!(crate::host_call::spawn_from_env(port).is_none());
+        // No flag at all: the mount is silent and touches no file.
+        let _off = testkit::EnvGuard::set(&[("WA_MESH", None), ("WASM_AGENT_MESH", None), ("WASM_AGENT_MESH_PORT", Some(&port.to_string()))]);
+        assert!(crate::host_call::spawn_from_env(port).is_none());
+    });
+}
+
+#[test]
+fn a_hung_body_fails_by_name_instead_of_blocking_the_binary() {
+    // The guard that keeps this suite from hanging, tested on itself: a body that never returns is
+    // reported as a failure naming the test, not waited on forever. The thread it leaves behind is
+    // asleep, so libtest's exit does not wait for it.
+    let hung = std::panic::catch_unwind(|| {
+        testkit::with_deadline_for("pretend-hang", Duration::from_millis(150), || {
+            std::thread::sleep(Duration::from_secs(5));
+        })
+    })
+    .expect_err("an overrunning body must fail the test");
+    let message = hung
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| hung.downcast_ref::<&str>().map(|text| (*text).to_string()))
+        .unwrap_or_default();
+    assert!(message.contains("pretend-hang"), "{message}");
+    assert!(message.contains("did not finish"), "{message}");
+
+    // A body that panics keeps its own message and does not look like a timeout.
+    let failed = std::panic::catch_unwind(|| {
+        testkit::with_deadline_for("pretend-panic", Duration::from_secs(5), || {
+            panic!("the body's own assertion");
+        })
+    })
+    .expect_err("a panicking body must fail the test");
+    let message = failed
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| failed.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert_eq!(message, "the body's own assertion");
 }

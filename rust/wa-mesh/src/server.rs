@@ -118,6 +118,18 @@ pub struct Server {
     join: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How long the accept loop sleeps between checks of the stop flag.
+///
+/// `TcpListener` has no accept timeout and the standard library exposes no way to wait on a socket
+/// *or* a flag, so the loop used to block in `accept()` and `Drop` woke it with a throwaway
+/// connection. That wake is a socket op without a usable deadline: when the throwaway connect did
+/// not complete (a loopback handshake can time out on a loaded machine, and the result was ignored)
+/// the loop stayed in `accept()` and `Drop` blocked in `join()` **forever, at zero CPU** — which is
+/// how one end-to-end test hung for twenty minutes under `cargo test --workspace`. Polling makes the
+/// stop flag the only thing that ends the loop, so `drop` is bounded by one poll interval and no
+/// socket op on the shutdown path can stall.
+const ACCEPT_POLL: Duration = Duration::from_millis(5);
+
 impl Server {
     pub fn start(config: ServerConfig) -> Result<Server, String> {
         let listener = TcpListener::bind(config.bind.as_str())
@@ -149,19 +161,36 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(join) = self.join.take() {
-            // The accept loop is blocked in `accept`; one throwaway connection is what wakes it.
-            let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(250));
+            // The accept loop polls `stop` every `ACCEPT_POLL` (see there): no wake connection, so a
+            // failed connect on a loaded machine cannot turn this join into a permanent block.
             let _ = join.join();
         }
     }
 }
 
 fn accept_loop(listener: TcpListener, state: Arc<State>, stop: Arc<AtomicBool>) {
-    for incoming in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            break;
+    if listener.set_nonblocking(true).is_err() {
+        return;
+    }
+    while !stop.load(Ordering::SeqCst) {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(ACCEPT_POLL);
+                continue;
+            }
+            // A listener error that is not `WouldBlock` (a peer that vanished, a momentary resource
+            // shortage) is not a reason to stop listening; sleep so a persistent one cannot spin.
+            Err(_) => {
+                std::thread::sleep(ACCEPT_POLL);
+                continue;
+            }
+        };
+        // The bound listener is non-blocking; an accepted stream must not inherit that, or a peer's
+        // short read would look like end-of-file instead of waiting `io_timeout` for the rest.
+        if stream.set_nonblocking(false).is_err() {
+            continue;
         }
-        let Ok(stream) = incoming else { continue };
         if state.connections.fetch_add(1, Ordering::SeqCst) >= state.max_connections {
             state.connections.fetch_sub(1, Ordering::SeqCst);
             let mut stream = stream;

@@ -346,71 +346,104 @@ pub fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit;
     use std::net::TcpListener;
+
+    // Every socket op here has a deadline and every test runs under the suite's hard per-test
+    // deadline: these two tests traffic in loopback connects that a loaded machine can stall, and a
+    // `TcpStream::connect` with no budget plus a blocking `accept` in a joined thread is exactly the
+    // shape that hung the end-to-end suite (`testkit::with_deadline`).
 
     #[test]
     fn a_request_round_trips_over_a_real_socket() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream, MAX_BODY).unwrap().unwrap();
-            assert_eq!(request.method, "POST");
-            assert_eq!(request.path, "/mesh/call");
-            assert_eq!(request.header("x-wa-node"), Some("abc"));
-            write_response(&mut stream, 200, &[], request.body_text().as_bytes()).unwrap();
+        testkit::with_deadline("a_request_round_trips_over_a_real_socket", || {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.set_read_timeout(Some(testkit::SOCKET_DEADLINE));
+                let request = read_request(&mut stream, MAX_BODY).unwrap().unwrap();
+                assert_eq!(request.method, "POST");
+                assert_eq!(request.path, "/mesh/call");
+                assert_eq!(request.header("x-wa-node"), Some("abc"));
+                write_response(&mut stream, 200, &[], request.body_text().as_bytes()).unwrap();
+            });
+            let response = request(
+                &address.to_string(),
+                "POST",
+                "/mesh/call",
+                &[("x-wa-node".into(), "abc".into())],
+                b"{\"schema\":1}",
+                testkit::CONNECT_TIMEOUT,
+                testkit::SOCKET_DEADLINE,
+                MAX_BODY,
+            )
+            .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body_text(), "{\"schema\":1}");
+            server.join().unwrap();
         });
-        let response = request(
-            &address.to_string(),
-            "POST",
-            "/mesh/call",
-            &[("x-wa-node".into(), "abc".into())],
-            b"{\"schema\":1}",
-            Duration::from_secs(2),
-            Duration::from_secs(5),
-            MAX_BODY,
-        )
-        .unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body_text(), "{\"schema\":1}");
-        server.join().unwrap();
     }
 
     #[test]
     fn a_chunked_body_or_an_oversized_one_is_refused_and_not_buffered() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            // Transfer-Encoding with no Content-Length: refused before a byte of body is read.
-            stream
-                .write_all(b"POST /mesh/call HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
-                .unwrap();
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-            let mut sink = [0u8; 64];
-            let _ = stream.read(&mut sink);
-        });
-        let mut stream = TcpStream::connect(address).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        assert_eq!(read_request(&mut stream, MAX_BODY).unwrap_err(), "length_required");
-        drop(stream);
-        server.join().unwrap();
+        testkit::with_deadline("a_chunked_body_or_an_oversized_one_is_refused_and_not_buffered", || {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                // Transfer-Encoding with no Content-Length: refused before a byte of body is read.
+                stream
+                    .write_all(b"POST /mesh/call HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+                    .unwrap();
+                drain_until_the_client_is_done(&mut stream);
+            });
+            let mut stream = connect(address);
+            assert_eq!(read_request(&mut stream, MAX_BODY).unwrap_err(), "length_required");
+            drop(stream);
+            server.join().unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.write_all(
-                b"POST /mesh/call HTTP/1.1\r\nContent-Length: 999999999\r\n\r\n{}",
-            );
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-            let mut sink = [0u8; 64];
-            let _ = stream.read(&mut sink);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.write_all(
+                    b"POST /mesh/call HTTP/1.1\r\nContent-Length: 999999999\r\n\r\n{}",
+                );
+                drain_until_the_client_is_done(&mut stream);
+            });
+            let mut stream = connect(address);
+            assert_eq!(read_request(&mut stream, MAX_BODY).unwrap_err(), "too_large");
+            drop(stream);
+            server.join().unwrap();
         });
-        let mut stream = TcpStream::connect(address).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        assert_eq!(read_request(&mut stream, MAX_BODY).unwrap_err(), "too_large");
-        drop(stream);
-        server.join().unwrap();
+    }
+
+    /// Keep the connection open until the client closes it.
+    ///
+    /// The obvious version - read once with a one-second timeout, then drop - races a loaded machine:
+    /// when the peer has not been scheduled to read the head yet, dropping the socket is a close with
+    /// the answer still queued, and Windows delivers that as a reset (`os error 10054`) that can reach
+    /// the client before it has read anything. Waiting for the client's own end removes the race
+    /// without removing the deadline: `SOCKET_DEADLINE` bounds the wait and the test's own deadline
+    /// bounds the test.
+    fn drain_until_the_client_is_done(stream: &mut TcpStream) {
+        let _ = stream.set_read_timeout(Some(testkit::SOCKET_DEADLINE));
+        let mut sink = [0u8; 64];
+        loop {
+            match stream.read(&mut sink) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => continue,
+            }
+        }
+    }
+
+    /// A client socket with a connect budget and bounded reads, never a bare `connect`.
+    fn connect(address: std::net::SocketAddr) -> TcpStream {
+        let stream = TcpStream::connect_timeout(&address, testkit::CONNECT_TIMEOUT)
+            .expect("the listener answers");
+        stream.set_read_timeout(Some(testkit::SOCKET_DEADLINE)).unwrap();
+        stream.set_write_timeout(Some(testkit::SOCKET_DEADLINE)).unwrap();
+        stream
     }
 }
