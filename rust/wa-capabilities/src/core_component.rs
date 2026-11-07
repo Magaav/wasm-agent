@@ -191,6 +191,12 @@ struct State {
     /// answers it instead of reading the file (`--core-component` passes a path and leaves this
     /// `None`, which is the behaviour every existing run has).
     script: Option<(String, Vec<u8>)>,
+    /// Module digests by path, revalidated by `(len, mtime)` so a boot that already holds a compiled
+    /// chunk pays one `metadata` call instead of reading and hashing the module (`__digest`, A2.7).
+    /// The embedded tree has no file behind it and cannot change inside a process, so its half is
+    /// keyed by path alone.
+    digests: HashMap<String, (u64, i64, String)>,
+    embedded_digests: HashMap<String, String>,
     /// What this work item spent in the bridge, when `WA_CORE_CALL_PROFILE=1` (see [`ItemProfile`]).
     /// `None` on an ordinary node: one `is_some()` per call is the whole cost of the instrumentation.
     profile: Option<ItemProfile>,
@@ -535,6 +541,57 @@ impl State {
         }
     }
 
+    /// `__digest(path)`: the SHA-256 of the text `__source` would hand over, **without the text**.
+    ///
+    /// A boot that already holds this module's compiled chunk (`glue.c`'s module cache, A2.7) has to
+    /// find out whether the chunk still describes the file before it uses it, and the answer is 64
+    /// bytes where the module's text is thousands: the copy was what a boot paid for, not the hash.
+    /// The digest is of the same bytes `__source` answers, so a cached chunk keyed by it is stale
+    /// exactly when `__source`'s own digest would have changed.
+    ///
+    /// Revalidated by `(len, mtime)`: a module re-read only when the file changed is one `metadata`
+    /// call per module per boot, and a file whose bytes changed under an identical `(len, mtime)` is
+    /// not a case a filesystem this node runs on produces.
+    fn digest(&mut self, path: &[u8]) -> Vec<Value> {
+        let path = String::from_utf8_lossy(path).into_owned();
+        if let Some((len, mtime, digest)) = self.digests.get(&path) {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.len() == *len && mtime_nanos(&meta) == *mtime {
+                    return vec![Value::Bytes(digest.clone().into_bytes())];
+                }
+            }
+        }
+        // Not cached, or the file moved under it: read and hash the bytes `__source` would answer.
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let digest = digest_hex(text.as_bytes());
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    self.digests.insert(path, (meta.len(), mtime_nanos(&meta), digest.clone()));
+                }
+                vec![Value::Bytes(digest.into_bytes())]
+            }
+            Err(_) => vec![Value::Nil],
+        }
+    }
+
+    /// `__edigest(path)`: the same question for the shipping modules, answered from `EMBEDDED`.
+    /// The tree is a boot constant of the process, so the digest is cached by path and never
+    /// revalidated; the bytes are hashed the way `__embedded` hands them over (lossy UTF-8), which is
+    /// what keeps a guest's chunk key equal to the digest the core reports.
+    fn embedded_digest(&mut self, path: &[u8]) -> Vec<Value> {
+        if let Some(digest) = self.embedded_digests.get(&String::from_utf8_lossy(path).into_owned()) {
+            return vec![Value::Bytes(digest.clone().into_bytes())];
+        }
+        match self.embedded(path).into_iter().next() {
+            Some(Value::Bytes(bytes)) => {
+                let digest = digest_hex(String::from_utf8_lossy(&bytes).as_bytes());
+                self.embedded_digests.insert(String::from_utf8_lossy(path).into_owned(), digest.clone());
+                vec![Value::Bytes(digest.into_bytes())]
+            }
+            _ => vec![Value::Nil],
+        }
+    }
+
     /// `host.local_tz(epoch?)` - the node's own time zone for that instant, one of [`KERNEL_CALLS`].
     ///
     /// Two halves, and the split is the point:
@@ -737,13 +794,13 @@ impl State {
 
     /// Hand one item's profile to the log and start a fresh one. `guest_ms` is the item's wall time
     /// minus the time inside the handlers: the guest's Lua plus the crossings themselves.
-    fn print_profile(&mut self, what: &str, run_ms: f64, runs: u64, first_ms: Option<f64>) {
+    fn print_profile(&mut self, what: &str, run_ms: f64, runs: u64, booted: bool, first_ms: Option<f64>) {
         let Some(profile) = self.profile.take() else { return };
         let mut names: Vec<(&String, &NameStat)> = profile.names.iter().collect();
         names.sort_by(|a, b| b.1.host_ns.cmp(&a.1.host_ns).then(b.1.calls.cmp(&a.1.calls)));
         let host_ms = profile.host_ns as f64 / 1e6;
         eprintln!(
-            "core_call_profile: {what} run_ms={run_ms:.2} host_ms={host_ms:.2} guest_ms={:.2} calls={} names={} arg_bytes={} result_bytes={} json_decode_ms={:.2} arm_ms={:.2} runs={runs} first_ms={}",
+            "core_call_profile: {what} run_ms={run_ms:.2} host_ms={host_ms:.2} guest_ms={:.2} calls={} names={} arg_bytes={} result_bytes={} json_decode_ms={:.2} arm_ms={:.2} runs={runs} boot={booted} first_ms={}",
             (run_ms - host_ms).max(0.0),
             profile.calls,
             names.len(),
@@ -783,6 +840,9 @@ impl State {
             }
             "__embedded" => Ok(self.embedded(&first())),
             "__source" => Ok(self.source(&first())),
+            // The module cache's cheap question (A2.7): `__source`/`__embedded` minus the text.
+            "__digest" => Ok(self.digest(&first())),
+            "__edigest" => Ok(self.embedded_digest(&first())),
             "__script" => {
                 let path = String::from_utf8_lossy(&first()).into_owned();
                 if let Some((name, bytes)) = &self.script {
@@ -820,6 +880,16 @@ impl wa::kernel::log::Host for State {
 
 fn ms(since: Instant) -> f64 {
     since.elapsed().as_secs_f64() * 1000.0
+}
+
+/// A file's modification time in nanoseconds since the epoch, or `0` when the platform cannot say
+/// (which makes [`State::digest`] re-hash that file instead of trusting the cache).
+fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_nanos() as i64)
+        .unwrap_or(0)
 }
 
 /// SHA-256 of `bytes`, as the hex `host.sha256` answers with: the same `ring` digest and the same
@@ -1045,6 +1115,8 @@ fn run(native: Lua, wasm: &str, script: &str, script_args: &[String]) -> wasmtim
         run_started: None,
         run_first_call_ms: None,
         script: None,
+        digests: HashMap::new(),
+        embedded_digests: HashMap::new(),
         profile: item_profile(),
     };
     let mut store = Store::new(&engine, state);
@@ -1059,6 +1131,14 @@ fn run(native: Lua, wasm: &str, script: &str, script_args: &[String]) -> wasmtim
     let run_started = Instant::now();
     let outcome = core.call_run(&mut store, script, script_args);
     let ran = ms(run_started);
+    // One profile block per run when `WA_CORE_CALL_PROFILE=1`, in the shape a pooled item prints
+    // (docs/KERNEL.md, "A2.6"). A one-shot run is the only way to see a *single* boot's crossings and
+    // bytes from the CLI - and what `scripts/test-core-module-cache.sh` reads to prove the module
+    // cache answered a load from the chunk instead of the text.
+    {
+        let first_ms = store.data().run_first_call_ms;
+        store.data_mut().print_profile("run", ran, 1, true, first_ms);
+    }
     if timing {
         eprintln!(
             "core_component_timing: load={loaded:.1}ms ({source}) instantiate={instantiated:.2}ms run={ran:.1}ms host_calls={} streams_open={}",
@@ -1267,6 +1347,10 @@ pub struct RunReport {
     /// Runs this instance has answered including this one: `1` is a fresh instance, `> 1` means the
     /// guest's boot was answered from the instance's snapshot.
     pub runs_on_instance: u64,
+    /// This item booted the guest's Lua core (the first item after a lease was reset), i.e. it paid
+    /// the module boot. A per-request boot makes this true for every item; a per-node-thread boot
+    /// makes it true once per lease.
+    pub booted: bool,
 }
 
 /// One work item's answer against an instance's **long-lived** core, and what it cost
@@ -1282,6 +1366,8 @@ pub struct CallReport {
     pub memory_bytes: usize,
     /// Items this instance has answered including this one.
     pub runs_on_instance: u64,
+    /// This item booted the guest's Lua core, i.e. it paid the module boot (see [`RunReport::booted`]).
+    pub booted: bool,
 }
 
 impl CallReport {
@@ -1307,6 +1393,11 @@ struct Slot {
     store: Store<State>,
     core: CoreComponent,
     runs: u64,
+    /// Has the guest's Lua core been booted since this instance last went back to the pool? A lease
+    /// change resets the guest's `lua_State`, so the next item on the slot boots again - the number
+    /// `/health` reports as `core.boots` counts *that*, and it is what says whether a node pays the
+    /// module boot per request or per node thread (A2.7).
+    booted: bool,
 }
 
 #[derive(Default)]
@@ -1446,7 +1537,7 @@ impl CoreComponentPool {
             CoreComponent::instantiate(&mut store, &self.component, &linker)?
         };
         let _ = started;
-        Ok(Slot { store, core, runs: 0 })
+        Ok(Slot { store, core, runs: 0, booted: false })
     }
 
     /// Give the store its budget for the work item about to run. The deadline is relative to the
@@ -1474,6 +1565,8 @@ impl CoreComponentPool {
             run_started: None,
             run_first_call_ms: None,
             script: None,
+            digests: HashMap::new(),
+            embedded_digests: HashMap::new(),
             profile: item_profile(),
         }
     }
@@ -1635,6 +1728,8 @@ impl CoreInstance<'_> {
             data.abort_streams();
         }
         slot.runs += 1;
+        let booted = !slot.booted;
+        slot.booted = true;
         let arm_started = slot.store.data().profile.is_some().then(Instant::now);
         pool.arm(&mut slot.store);
         if let Some(arm_started) = arm_started {
@@ -1653,10 +1748,11 @@ impl CoreInstance<'_> {
             streams_open: data.streams.len(),
             memory_bytes: data.limits.bytes,
             runs_on_instance: slot.runs,
+            booted,
         };
         let first_ms = slot.store.data().run_first_call_ms;
         let runs = slot.runs;
-        slot.store.data_mut().print_profile("call", run_ms, runs, first_ms);
+        slot.store.data_mut().print_profile("call", run_ms, runs, booted, first_ms);
         {
             let mut inner = pool.inner.lock().expect("pool lock");
             inner.runs += 1;
@@ -1685,6 +1781,9 @@ impl CoreInstance<'_> {
     /// pending `/bind` table, its `package.loaded` - must not reach whoever acquires the slot next.
     pub fn reset(&mut self) -> wasmtime::Result<()> {
         let Some(slot) = self.slot.as_mut() else { return Ok(()) };
+        // The next item on this slot boots a fresh `lua_State`, which is a boot again even though the
+        // instance is the same one (the compiled-module cache is what makes it cheap, not free).
+        slot.booted = false;
         slot.core.call_reset(&mut slot.store)
     }
 
@@ -1714,6 +1813,8 @@ impl CoreInstance<'_> {
             data.abort_streams();
         }
         slot.runs += 1;
+        let booted = !slot.booted;
+        slot.booted = true;
         let arm_started = slot.store.data().profile.is_some().then(Instant::now);
         pool.arm(&mut slot.store);
         if let Some(arm_started) = arm_started {
@@ -1733,10 +1834,11 @@ impl CoreInstance<'_> {
             run_ms,
             memory_bytes: data.limits.bytes,
             runs_on_instance: slot.runs,
+            booted,
         };
         let first_ms = slot.store.data().run_first_call_ms;
         let runs = slot.runs;
-        slot.store.data_mut().print_profile("run", run_ms, runs, first_ms);
+        slot.store.data_mut().print_profile("run", run_ms, runs, booted, first_ms);
         {
             let mut inner = pool.inner.lock().expect("pool lock");
             inner.runs += 1;
@@ -1807,6 +1909,7 @@ impl CoreInstance<'_> {
         // "A2.5"): whoever acquires this slot next gets a fresh `lua_State`, exactly as a newly spawned
         // node thread gets a fresh interpreter natively. A reset that fails leaves a Lua state nobody
         // can vouch for, so the slot is retired instead.
+        slot.booted = false;
         let reset = slot.core.call_reset(&mut slot.store);
         let mut rejected = None;
         {
@@ -1854,6 +1957,8 @@ mod tests {
             run_started: None,
             run_first_call_ms: None,
             script: None,
+            digests: HashMap::new(),
+            embedded_digests: HashMap::new(),
             profile: item_profile(),
         }
     }
@@ -2242,6 +2347,8 @@ assert(tonumber(later.utc_offset_minutes) ~= nil, 'the host must answer a second
             run_started: None,
             run_first_call_ms: None,
             script: None,
+            digests: HashMap::new(),
+            embedded_digests: HashMap::new(),
             profile: item_profile(),
         };
         let values = state.call("local_tz".to_string(), vec![Value::Integer(CLOCK_EPOCH)]).expect("the node zone answers");
@@ -2300,5 +2407,42 @@ assert(tonumber(later.utc_offset_minutes) ~= nil, 'the host must answer a second
         // The guest had to ask the kernel for the zone to answer at all, so this is the call and not a
         // fallback to the guest's own (UTC) `os.date`.
         assert!(report.host_calls > 0, "the guest must have asked the kernel");
+    }
+
+    /// `__digest` is a check on the file, not a memory of it: the same bytes answer the same digest
+    /// (through the cache the table exists for), and a file rewritten under the same path answers a
+    /// different one - which is what stops a boot from using a chunk compiled from the old text
+    /// (`glue.c`'s module cache, docs/KERNEL.md "A2.7").
+    #[test]
+    fn the_module_digest_follows_the_file_it_describes() {
+        fn answer(state: &mut State, path: &[u8]) -> Option<String> {
+            match state.digest(path).as_slice() {
+                [Value::Bytes(digest)] => Some(String::from_utf8_lossy(digest).into_owned()),
+                _ => None,
+            }
+        }
+        let mut state = state();
+        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+        let dir = format!("{dir}/wa-core-digest-test-{}", std::process::id());
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = format!("{dir}/probe.lua");
+        std::fs::write(&path, "return 'v1'
+").expect("write the module");
+        let first = answer(&mut state, path.as_bytes()).expect("a module that exists has a digest");
+        assert_eq!(first, digest_hex(b"return 'v1'
+"), "the digest is of the bytes `__source` answers");
+        assert_eq!(answer(&mut state, path.as_bytes()), Some(first.clone()), "the same bytes answer the same digest");
+        // Rewritten, and longer: `(len, mtime)` is what revalidates the entry, so a different length is
+        // a different file whatever the clock's resolution does.
+        std::fs::write(&path, "return 'v2, longer'
+").expect("rewrite the module");
+        let second = answer(&mut state, path.as_bytes()).expect("the rewritten module has a digest");
+        assert_eq!(second, digest_hex(b"return 'v2, longer'
+"));
+        assert_ne!(first, second, "a changed module must not answer the digest of the text it replaced");
+        // A path the kernel cannot read is an absence, not an error: the guest falls back to `__source`,
+        // which answers nil for the same reason, so `dofile` reports the words it always did.
+        assert_eq!(answer(&mut state, b"/wa-no-such-dir/probe.lua"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

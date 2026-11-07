@@ -279,7 +279,10 @@ impl ComponentCore {
             }
         };
         self.bridge.run_ms.fetch_add(report.run_ms.round() as u64, Ordering::Relaxed);
-        if report.runs_on_instance == 1 {
+        // A boot is the item that found the guest's `lua_State` gone (a fresh instance, or a lease
+        // that was reset when it went back to the pool). Counting `runs_on_instance == 1` instead
+        // counted instances, which hid a boot per turn behind one instance serving many leases (A2.7).
+        if report.booted {
             self.bridge.boots.fetch_add(1, Ordering::Relaxed);
         }
         if report.answer.is_err() {

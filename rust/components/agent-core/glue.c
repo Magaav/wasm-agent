@@ -6,12 +6,16 @@
  * - `EMBEDDED` resolves missing keys through the kernel too (`__embedded`): the kernel answers from
  *   the same table its native interpreter has (installed lua-core tree, else compiled in), and
  *   assignment still overrides, as tests rely on.
- * - `dofile` is the native bootstrap string, byte for byte.
+ * - `dofile` is the native bootstrap: the same two answers (`LOADED_SOURCES[path]` and the module's
+ *   chunk), resolved through `__load`, which answers them from the compiled-module cache when this
+ *   instance already compiled those bytes (A2.7, below).
  * - the two answers above are the immutable part of a boot, so they are cached for the life of the
  *   **instance** (`snapshot_*`, A2.3): a pooled instance answers many runs, and run 2 of a script
  *   must not pay again for what run 1 asked the kernel. Every run still gets a fresh `lua_State`, so
  *   globals, `package.loaded` and the stack are exactly as fresh as a one-shot `--core-component`
- *   run promises; only the kernel's own constants survive.
+ *   run promises; only the kernel's own constants survive — the registry's names, the shipping
+ *   modules' sources, and each module's compiled chunk, which is the cache that makes a turn's ~205
+ *   module loads cost one 64-byte digest each instead of a copy and a compile.
  * - stdout is flushed before every host call, so guest prints and host output keep their order.
  * - a **table** argument crosses as JSON (`slot_from`, `json_value`), so a capability receives a
  *   table rather than a refusal; a function argument still cannot cross, except the one place a
@@ -402,6 +406,101 @@ static int snapshot_embedded(lua_State *L, int idx) {
   return 1;
 }
 
+/* ---- the compiled-module cache (A2.7) --------------------------------------------------------
+ *
+ * A turn loads ~205 modules - `lua/core/server.lua` and everything a turn reaches through `dofile`,
+ * which is the core's module system - and until now every one of those loads crossed as the module's
+ * whole text and was then *compiled*: a turn moved 2.4 MB into the guest and paid the interpreter for
+ * code it had already compiled 200 times. That is true of a boot and of a lazy load inside a live
+ * state alike, which is why the cache sits at `dofile` rather than at instance creation.
+ *
+ * This is the module cache the job calls the pre-initialized boot: the compiled chunk of every module,
+ * kept in the instance (it survives `wa_core_reset`, which drops the `lua_State` and not the cache),
+ * keyed by the module's path **and its digest**. A boot asks the kernel one `__digest` (64 bytes) per
+ * module - `__source`'s answer without the text - and loads the chunk when the digest is the one it
+ * compiled. A changed file (a new `WASM_AGENT_LUA_ROOT`, a `/update`, a test that edits a module) has
+ * a different digest, so its chunk is not used for it: the guest falls back to `__source`/`__embedded`
+ * and compiles that text again, exactly as before. The digest is the kernel's, not a memory of the
+ * file's mtime, and `LOADED_SOURCES` still carries it - so what the core reports about its own sources
+ * is unchanged.
+ *
+ * Why not a Wizer-style pre-initialized image: the guest's boot calls `wa:kernel/host` (getenv,
+ * `__names`, the module reads) and Wizer runs a guest to snapshot it, so it would need a real kernel
+ * connected at build time, and this tree has no `wizer` offline. The chunk cache needs nothing but the
+ * interpreter it already has. */
+typedef struct ModChunk {
+  char *key; size_t klen;
+  char *digest; size_t dlen;
+  char *chunk; size_t clen;
+  struct ModChunk *next;
+} ModChunk;
+
+static ModChunk *MODULE_CHUNKS = NULL;
+/* The `WASM_AGENT_LUA_ROOT` this boot resolves modules through, read once per boot: `dofile` used to
+ * ask `host.getenv` per module (~200 crossings a boot) for a value nothing in the guest can change. */
+static char *MODULE_ROOT = NULL;
+static size_t MODULE_ROOT_LEN = 0;
+
+static ModChunk *module_find(const char *key, size_t klen, const char *digest, size_t dlen) {
+  for (ModChunk *m = MODULE_CHUNKS; m; m = m->next) {
+    if (m->klen == klen && m->dlen == dlen && memcmp(m->key, key, klen) == 0 && memcmp(m->digest, digest, dlen) == 0)
+      return m;
+  }
+  return NULL;
+}
+
+static void module_forget(ModChunk *entry) {
+  for (ModChunk **link = &MODULE_CHUNKS; *link; link = &(*link)->next) {
+    if (*link == entry) { *link = entry->next; break; }
+  }
+  free(entry->key); free(entry->digest); free(entry->chunk); free(entry);
+}
+
+/* Keep `chunk` as the compiled form of `key` at `digest`, replacing whatever this module had before:
+ * one entry per module, so a tree that changes N times holds N versions of only the modules that
+ * changed, never an unbounded pile of them. Out of memory is a miss, not a failure: the caller already
+ * has the function it compiled. */
+static void module_store(const char *key, size_t klen, const char *digest, size_t dlen,
+                         const char *chunk, size_t clen) {
+  if (!digest || dlen == 0 || !chunk || clen == 0) return;
+  for (ModChunk *m = MODULE_CHUNKS; m; m = m->next) {
+    if (m->klen == klen && memcmp(m->key, key, klen) == 0) {
+      if (m->dlen == dlen && memcmp(m->digest, digest, dlen) == 0) {
+        free(m->chunk);
+        m->chunk = (char *)malloc(clen);
+        if (!m->chunk) { m->clen = 0; return; }
+        memcpy(m->chunk, chunk, clen);
+        m->clen = clen;
+        return;
+      }
+      module_forget(m);
+      break;
+    }
+  }
+  ModChunk *entry = (ModChunk *)calloc(1, sizeof *entry);
+  if (!entry) return;
+  entry->key = (char *)malloc(klen + 1);
+  entry->digest = (char *)malloc(dlen + 1);
+  entry->chunk = (char *)malloc(clen);
+  if (!entry->key || !entry->digest || !entry->chunk) {
+    free(entry->key); free(entry->digest); free(entry->chunk); free(entry);
+    return;
+  }
+  memcpy(entry->key, key, klen); entry->key[klen] = 0; entry->klen = klen;
+  memcpy(entry->digest, digest, dlen); entry->digest[dlen] = 0; entry->dlen = dlen;
+  memcpy(entry->chunk, chunk, clen); entry->clen = clen;
+  entry->next = MODULE_CHUNKS;
+  MODULE_CHUNKS = entry;
+}
+
+/* `lua_dump`'s sink: the bytecode of one chunk, in the same `Buf` the table encoder uses. */
+static int dump_writer(lua_State *L, const void *bytes, size_t size, void *data) {
+  (void)L;
+  Buf *out = (Buf *)data;
+  buf_put(out, (const char *)bytes, size);
+  return out->failed ? 1 : 0;
+}
+
 /* `__source(path)` - a module's text and its digest, from the kernel, in ONE crossing.
  *
  * The boot reads a module and digests it (`LOADED_SOURCES`), and native that is two C calls on the
@@ -567,23 +666,108 @@ static int embedded_index(lua_State *L) {
   return 1;
 }
 
-/* The guest's `dofile`, byte for byte the native one (rust/wa-host/src/main.rs) except that the two
- * boot questions - a module's text and its digest - are asked in one crossing (`__source`,
- * `__module`) instead of two (`host.read_file` + `host.sha256`, or `EMBEDDED[path]` +
- * `host.sha256`). The values are identical: the kernel hashes the same bytes it hands over. */
+/* `__load(path)` - a module as the function its `dofile` calls, from the compiled-module cache when
+ * this instance already compiled these bytes.
+ *
+ * Answers `(function, digest)`; `(nil, nil)` for a module the kernel does not have, which the caller
+ * turns into the same words as before (`lua_root_unreadable: ...` / `embedded module missing: ...`);
+ * and raises the compile error `assert(load(text))` would have raised, so a broken module keeps its
+ * own message. The chunk name is the one the source path used (`@<path>`), so a runtime error inside a
+ * module still names the file and line it came from: the chunk is dumped with its debug information,
+ * and line numbers are part of it. */
+static int load_fn(lua_State *L) {
+  size_t plen = 0;
+  const char *path = lua_type(L, 1) == LUA_TSTRING ? lua_tolstring(L, 1, &plen) : NULL;
+  if (!path) return luaL_error(L, "internal: __load(path) needs a path");
+  int rooted = MODULE_ROOT && MODULE_ROOT_LEN > 0;
+  size_t klen = plen + (rooted ? MODULE_ROOT_LEN + 1 : 0);
+  char *key = (char *)malloc(klen + 2);
+  if (!key) return luaL_error(L, "out of memory loading %s", path);
+  if (rooted) {
+    memcpy(key, MODULE_ROOT, MODULE_ROOT_LEN);
+    key[MODULE_ROOT_LEN] = '/';
+    memcpy(key + MODULE_ROOT_LEN + 1, path, plen);
+  } else {
+    memcpy(key, path, plen);
+  }
+  key[klen] = 0;
+  key[klen + 1] = 0;
+  char *chunkname = (char *)malloc(klen + 2);   /* '@' + key, as `load(text, '@' .. path)` */
+  if (!chunkname) { free(key); return luaL_error(L, "out of memory loading %s", path); }
+  chunkname[0] = '@';
+  memcpy(chunkname + 1, key, klen + 1);
+
+  /* 1. has this module changed? One crossing, 64 bytes, no text. */
+  int base = lua_gettop(L);
+  lua_pushlstring(L, key, klen);
+  int n = rooted ? forward(L, "__digest", 8, base + 1, 1) : forward(L, "__edigest", 9, base + 1, 1);
+  char *known = NULL;
+  size_t knownlen = 0;
+  if (n >= 1 && lua_type(L, base + 2) == LUA_TSTRING) {
+    const char *digest = lua_tolstring(L, base + 2, &knownlen);
+    known = (char *)malloc(knownlen + 1);
+    if (known) { memcpy(known, digest, knownlen); known[knownlen] = 0; } else { knownlen = 0; }
+  }
+  lua_settop(L, base);
+
+  /* 2. the chunk compiled for exactly these bytes, if this instance has it */
+  if (known) {
+    ModChunk *hit = module_find(key, klen, known, knownlen);
+    if (hit) {
+      if (luaL_loadbufferx(L, hit->chunk, hit->clen, chunkname, "b") == LUA_OK) {
+        lua_pushlstring(L, known, knownlen);
+        free(key); free(chunkname); free(known);
+        return 2;                                 /* the function, then its digest */
+      }
+      /* A chunk that will not load is a miss, never the caller's error: drop it and compile the text. */
+      lua_pop(L, 1);
+      module_forget(hit);
+    }
+  }
+
+  /* 3. the text, as every boot before this one asked for it */
+  lua_pushlstring(L, key, klen);
+  n = rooted ? forward(L, "__source", 8, base + 1, 1) : forward(L, "__embedded", 10, base + 1, 1);
+  if (n < 1 || lua_type(L, base + 2) != LUA_TSTRING) {
+    lua_settop(L, base);
+    free(key); free(chunkname); free(known);
+    lua_pushnil(L);
+    lua_pushnil(L);
+    return 2;
+  }
+  size_t slen = 0;
+  const char *text = lua_tolstring(L, base + 2, &slen);
+  const char *digest = n >= 2 && lua_type(L, base + 3) == LUA_TSTRING ? lua_tolstring(L, base + 3, &knownlen) : NULL;
+  if (luaL_loadbufferx(L, text, slen, chunkname, "bt") != LUA_OK) {
+    free(key); free(chunkname); free(known);
+    return lua_error(L);                          /* assert(load(text)) raised the same text */
+  }
+  /* 4. keep what was just compiled, keyed by the digest of the text it came from */
+  {
+    Buf dumped = { 0, 0, 0, 0 };
+    lua_pushvalue(L, -1);
+    lua_dump(L, dump_writer, &dumped, 0);
+    if (!dumped.failed) module_store(key, klen, digest, digest ? knownlen : 0, dumped.p, dumped.len);
+    free(dumped.p);
+  }
+  lua_pushlstring(L, digest ? digest : "", digest ? knownlen : 0);
+  free(key); free(chunkname); free(known);
+  return 2;                                       /* the function, then its digest */
+}
+
+/* The guest's `dofile`, the native one (rust/wa-host/src/main.rs) with its two boot questions - the
+ * module's text and its digest - answered from the compiled-module cache when it can be, and in one
+ * crossing (`__source`, `__module`, the kernel hashing the bytes it read) when it cannot. The values
+ * are identical: the kernel hashes the same bytes it hands over, and `LOADED_SOURCES` carries that
+ * digest, as native. */
 static const char *BOOTSTRAP =
   "LOADED_SOURCES = {}; function dofile(path) "
-  "local root = host.getenv('WASM_AGENT_LUA_ROOT'); "
-  "if root and root ~= '' then "
-  "local text, digest = __source(root .. '/' .. path); "
-  "if not text then error('lua_root_unreadable: ' .. root .. '/' .. path) end; "
+  "local chunk, digest = __load(path); "
+  "if not chunk then "
+  "if __root and __root ~= '' then error('lua_root_unreadable: ' .. __root .. '/' .. path) end; "
+  "error('embedded module missing: ' .. tostring(path)) end; "
   "LOADED_SOURCES[path] = digest; "
-  "return assert(load(text, '@' .. root .. '/' .. path))() "
-  "end; "
-  "local source, digest = __module(path); "
-  "if not source then error('embedded module missing: ' .. tostring(path)) end; "
-  "LOADED_SOURCES[path] = digest; "
-  "return assert(load(source, '@' .. path))() end";
+  "return chunk() end";
 
 static int fail(lua_State *L, char **err, size_t *errlen) {
   size_t len = 0;
@@ -645,6 +829,29 @@ static int install_globals(lua_State *L, int argc, const char **argv, const size
   lua_setglobal(L, "__source");
   lua_pushcfunction(L, module_fn);
   lua_setglobal(L, "__module");
+  lua_pushcfunction(L, load_fn);
+  lua_setglobal(L, "__load");
+
+  /* The module root this boot resolves modules through, read once (`load_fn`), and published as
+   * `__root` so `dofile`'s own error text keeps naming it. Reading it here is the same crossing at the
+   * same point in the boot: it is a global this file installs, like `__source`, not a `host.*` name, so
+   * `host` still lists exactly what the registry has. */
+  free(MODULE_ROOT);
+  MODULE_ROOT = NULL;
+  MODULE_ROOT_LEN = 0;
+  {
+    int mark = lua_gettop(L);
+    lua_pushliteral(L, "WASM_AGENT_LUA_ROOT");
+    if (forward(L, "getenv", 6, mark + 1, 1) >= 1 && lua_type(L, mark + 2) == LUA_TSTRING) {
+      size_t len = 0;
+      const char *root = lua_tolstring(L, mark + 2, &len);
+      MODULE_ROOT = (char *)malloc(len + 1);
+      if (MODULE_ROOT) { memcpy(MODULE_ROOT, root, len); MODULE_ROOT[len] = 0; MODULE_ROOT_LEN = len; }
+    }
+    lua_settop(L, mark);
+  }
+  lua_pushlstring(L, MODULE_ROOT ? MODULE_ROOT : "", MODULE_ROOT_LEN);
+  lua_setglobal(L, "__root");
   if (luaL_loadbufferx(L, BOOTSTRAP, strlen(BOOTSTRAP), "bootstrap", NULL) != LUA_OK) return 1;
   if (lua_pcall(L, 0, 0, 0) != LUA_OK) return 1;
   lua_settop(L, base);

@@ -908,6 +908,116 @@ benchmark result.
 `__source`/`read_file`, `sha256`) already cross as `bytes`/integers, so a record would replace nothing.
 The JSON that remains on the hot path is `http_stream`'s model request, once per turn.
 
+### A2.7 results — the compiled-module cache: a turn stops paying to compile what it already compiled (07/11, pi deepseek)
+
+A2.6 cut the boot's crossings and the bytes *into* the guest (2.68 MB → 0.32 MB per turn), but the
+profile's biggest item was still `__source`: **205 module loads per turn, 2.37 MB of module text copied
+into the guest, and a Lua compile for every one of them.** The turn's item was 877 crossings, 327 KB in,
+2.42 MB out, 236 ms of guest time. The modules are not re-booted by a new `lua_State` (a node thread
+keeps its lease; `/health` counts 4-5 boots over ~60 calls) — they are *re-`dofile`d* every turn, because
+`dofile` is the core's module system (`server.lua`'s own body, plus every lazily-loaded module a turn
+touches, all go through it). Each of those loads read the file, copied the text into the guest and
+compiled it again.
+
+**The change: a compiled-chunk cache in the guest, keyed by the module's digest.** `glue.c` keeps the
+bytecode of every module it has compiled (it survives `wa_core_reset`, which drops the `lua_State`, not
+the cache). A load now asks the kernel one new question — `__digest(path)` (a file) or `__edigest(path)`
+(the shipping `EMBEDDED` tree) — which answers the SHA-256 of exactly the bytes `__source` would hand
+over, in 64 bytes instead of thousands. Same digest as last time: `luaL_loadbufferx` the chunk. Different
+digest (a new `WASM_AGENT_LUA_ROOT`, a `/update`, an edited module): forget that chunk, take the text as
+before, compile it, dump it with `lua_dump` (debug information kept, so a module's error still names the
+file and line) and keep it. The chunk name is the same `@<path>`, `LOADED_SOURCES[path]` is the same
+digest, and a module that cannot be read answers `nil`, so `dofile`'s errors are the ones it always had.
+The digest is the kernel's answer about the file *now*, revalidated by `(len, mtime)` so a boot pays one
+`metadata` call per module instead of a read and a hash — the cache is a check on the file, never a
+memory of it. Both halves live in one place each: `glue.c` (`__load`, `module_store`/`module_find`) and
+`core_component.rs` (`__digest`, `__edigest`, and the two digest maps in `State`).
+
+**Why not a Wizer-style pre-initialized image.** The guest's boot calls `wa:kernel/host` (`getenv`,
+`__names`, the module reads), and Wizer works by running the guest to snapshot it: it would need a live
+kernel connected at build time, and no `wizer` is vendored offline in this tree. A bytecode cache needs
+nothing but the interpreter the guest already contains, and it survives the reset that a pre-initialized
+*instance* would not (the pool re-instantiates nothing; it resets a `lua_State`). It is also the only one
+of the two that helps the case measured here: the 205 loads happen inside a *live* state, so a snapshot
+of a freshly booted state would not have removed any of them.
+
+**Also cut, in the same pass.** `dofile` used to call `host.getenv('WASM_AGENT_LUA_ROOT')` per module
+(~205 crossings a turn): the root is read once per boot now (`install_globals`, published as `__root` for
+`dofile`'s own error text). Nothing in the guest can change it (`host` has no `setenv`), and native's
+`dofile` still reads it per call, so the two agree on everything a script can observe.
+
+**`core.boots` was under-counting, and now means what it says.** `core_bridge` incremented `boots` when
+`runs_on_instance == 1`, i.e. once per *instance*, which is why A2.5 read `boots=4` and concluded "one
+boot per instance" while every turn was in fact re-loading the module tree. A `Slot` now carries a
+`booted` flag that `reset`/`return_to_pool` clears and the next item reports (`RunReport::booted`,
+`CallReport::booted`), so `boots` counts the items that really booted a `lua_State`. Measured on the smoke
+run: **5 of 59 calls** booted the guest — the module *loads* per turn were never boots, and the counter
+could not have shown that before.
+
+**The profile, 20 turns + 20 reads, before → after** (this host, `scripts/bench-core-profile.sh`; the
+per-item rows are averages over the marked items, the turn rows are one turn's own item):
+
+| per turn's main item | before | after |
+| --- | --- | --- |
+| crossings | 877 | 672 |
+| bytes into the guest | 2.42 MB | 55 KB |
+| bytes out of the guest (arguments) | 327 KB | 323 KB |
+| guest + crossing time | 236 ms (of 428 ms) | 33 ms (of 182 ms) |
+| `__source` | 205 calls / 2.37 MB | none on a cache hit |
+| `__digest` | — | 205 calls / 13 KB back |
+
+Per-item averages over the 85-92 marked items move with it: `result_bytes` **632-638 KiB → 32.9 KiB**
+(a 19x cut), `guest_ms` **62.8-66.2 → 30.7 ms**, `run_ms` 115.9 → 80.7 ms on an equally quiet pair of
+runs. The turns' remaining bytes are the core's own data, not the bridge's: `sha256` 225 KB/turn (the
+prompt-layer hashes `agent.lua` takes), `sql_exec` 46 KB, and the 26 KB model request in `http_stream`,
+which is already `bytes` on both sides.
+
+**A serving node, one node per core, medians of 10 turns** (`scripts/bench-serve-core-component.sh`, the
+old guest as `a` and the new one as `b` inside the same round, so a change to the guest alone is measured
+without a machine that drifted in between; two runs of two quiet rounds each):
+
+| round | turn native / a / b | read native / a / b | b/native (turn) | a/b (turn) |
+| --- | --- | --- | --- | --- |
+| 1 | 237.5 / 458.5 / 302.5 ms | 8.0 / 11.0 / 10.0 ms | 1.27x | 0.66x |
+| 2 | 219.5 / 481.5 / 202.5 ms | 8.0 / 10.5 / 11.5 ms | 0.92x | 0.42x |
+| 1 | 237.5 / 456.0 / 298.0 ms | 8.5 / 12.5 / 13.5 ms | 1.25x | 0.65x |
+| 2 | 220.5 / 462.0 / 200.5 ms | 8.0 / 11.0 / 10.0 ms | 0.91x | 0.43x |
+
+The median of the quiet rounds is **1.1x native for a turn** (target ≤ 1.3x; A2.4/A2.5 measured 1.42x,
+and the same guest unfixed measures 1.92-2.10x on this host), reads 10-13 ms on both cores, RSS +70 MiB
+for the pool (unchanged: the cache holds ~2.4 MB of bytecode per instance, inside the reserve). The last
+round of a longer run is a host outlier (turn 1.6-1.7 s, read 1.3-2.7 s) and it lands on whichever mode
+runs last, so it is quoted as noise rather than as a result. The epoch tax is still there and is still the
+biggest single knob left: the same guest with `WASM_AGENT_CORE_RUN_DEADLINE_MS=0` measures 0.88x of itself
+(A2.6's number, re-measured here), and the default stays 60 s.
+
+**Parity.** `scripts/test-core-parity.sh` (131 self-contained Lua tests, native vs the one-shot
+component): **114 identical, 14 failing identically on both cores, 3 differing** — `test-cli-view` and
+`test-completion-packet` (both already differing at A2.5) and `test-backup-live`, whose output contains
+the backup directory's own `YYYYMMDDTHHMMSSZ` timestamp: two *native* runs a second apart differ the same
+way, so it is a normalizer gap in the harness, not a difference between the cores. A2.5's
+`test-cli-ticker` difference did not appear this run. `scripts/test-serve-core-component.sh` passes on
+both cores (three turns, one hook, one subagent, one self-wake, identical answers).
+
+**Tests.** `scripts/test-core-module-cache.sh` (new; no node, no network) proves both halves with one
+probe: three loads of one module, with the file rewritten between the second and the third, must answer
+`v1`, `v2`, `v2` on both cores and — from `WA_CORE_CALL_PROFILE` — cross `__source` **2** times and
+`__digest` **3**, i.e. the third load was answered from the chunk and the second was not.
+`cargo test -p wa-capabilities`: 207 pass, including the new
+`core_component::tests::the_module_digest_follows_the_file_it_describes` (the same bytes answer the same
+digest; a rewritten file answers a different one; a missing file is `nil`). The one-shot
+`wa --core-component` path now prints one `core_call_profile` block per run when `WA_CORE_CALL_PROFILE=1`,
+which is what lets a CLI run show a single boot's crossings.
+
+**Not done here.** (1) The 205 `__digest` crossings are 205 `metadata` calls per turn (~15 ms of handler
+time on Windows): cheaper than the read-and-hash they replaced (27 ms) but not free — one manifest call
+per boot would cut the crossings, not the stats, and a real fix is a directory watch, not a cache. (2) The
+remaining per-turn copies are the core's own (`sha256` 225 KB, `sql_exec` 46 KB, the 26 KB model
+request): none of them is a bridge re-encoding, and each needs a `lua/core` change, which this pass did
+not make. (3) The cache is per instance and dies with it: four instances hold four copies of the bytecode
+(~2.4 MB each), which is inside the 64 MiB reserve but is not shared. (4) Nothing here is WASI 0.3: the
+cache is in the guest's C, so it moves to `future<T>`/`stream<T>` unchanged.
+
 ## Supervisor features, step 4 (implemented 06/11, wasm_the_first)
 
 The four lessons that were design in the list above are now code, with the two runtime gaps that

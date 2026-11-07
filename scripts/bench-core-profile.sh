@@ -87,7 +87,7 @@ kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 tail -n "+$((mark + 1))" "$work/serve.log" | grep -E '^core_call_profile:' > "$work/blocks"
 [ -s "$work/blocks" ] || { echo "profile: no core_call_profile lines (is WA_CORE_CALL_PROFILE reaching the node?)" >&2; exit 1; }
 
-echo "profile: $TURNS turns + $TURNS reads, component core, $(cat "$work/health.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let h={};try{h=JSON.parse(s)}catch(e){};const c=h.core||{};process.stdout.write("instances="+(c.instances??"?")+" leased="+(c.leased??"?")+" runs="+(c.runs??"?")+" guest_run_ms="+(c.guest_run_ms??"?"))})')"
+echo "profile: $TURNS turns + $TURNS reads, component core, $(cat "$work/health.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let h={};try{h=JSON.parse(s)}catch(e){};const c=h.core||{};process.stdout.write("instances="+(c.instances??"?")+" leased="+(c.leased??"?")+" runs="+(c.runs??"?")+" calls="+(c.calls??"?")+" boots="+(c.boots??"?")+" guest_run_ms="+(c.guest_run_ms??"?"))})')"
 node - "$work/blocks" <<'JS'
 const fs = require("fs");
 const lines = fs.readFileSync(process.argv[2], "utf8").split("\n").filter(Boolean);
