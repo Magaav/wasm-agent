@@ -6,9 +6,31 @@
 -- journal), snapshots each with `VACUUM INTO` through this connection (an attached store is vacuumed
 -- by name, so the WAL is included and no store is copied mid-write), checks each copy with
 -- `PRAGMA integrity_check`, and preserves every recoverable snapshot.
+--
+-- Retry instead of refuse (07/11). Three `wa update`s on two nodes refused with
+-- `backup_failed: .../graph.db.d/graph.db: database disk image is malformed`, while the same file
+-- passed `PRAGMA quick_check` immediately afterwards and the second `wa update` succeeded: the graph
+-- component was writing the store and the copy read a state the writer was in the middle of. Two
+-- failures matter here and they are different questions:
+--
+--   * the store is being written  -> retry, with a busy timeout and backoff, and do not refuse;
+--   * the store is really damaged -> refuse the update, with SQLite's own verdict.
+--
+-- The source `quick_check` below is what tells them apart: it is asked before every retry, and a
+-- verdict that is not contention (or contention that repeats on a second, independent read) is
+-- damage. A copy is never reported without passing `integrity_check`, so a torn copy cannot pass as a
+-- recovery source either. Knobs: `WA_BACKUP_ATTEMPTS`, `WA_BACKUP_BACKOFF_MS`,
+-- `WA_BACKUP_BUSY_TIMEOUT_MS`.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local M = {}
+
+-- A store that a live writer holds needs SQLite to wait, not to answer "busy" on the first try.
+local BUSY_TIMEOUT_MS = tonumber(host.getenv("WA_BACKUP_BUSY_TIMEOUT_MS") or "") or 15000
+local ATTEMPTS = tonumber(host.getenv("WA_BACKUP_ATTEMPTS") or "") or 3
+local BACKOFF_MS = tonumber(host.getenv("WA_BACKUP_BACKOFF_MS") or "") or 250
+local SOURCE_ALIAS = "wa_backup_source"
+local CHECK_ALIAS = "wa_backup_check"
 
 
 local function sql(statement, params)
@@ -80,32 +102,158 @@ function M.stores()
   return found
 end
 
+-- The two ways a store answers "I cannot be read right now". They are classified, never guessed from
+-- the caller: contention is retried, damage is refused.
+local function busy(answer)
+  local text = tostring(answer):lower()
+  return text:find("busy", 1, true) ~= nil or text:find("locked", 1, true) ~= nil
+end
+
+-- `database disk image is malformed` is what a read of a store another writer holds looked like on
+-- 07/11, and it is also what a damaged b-tree says. It is retried, because the source `quick_check`
+-- is the authority on which of the two it is; it is never trusted as a verdict on its own.
+local function torn(answer)
+  local text = tostring(answer):lower()
+  return text:find("malformed", 1, true) ~= nil or text:find("not a database", 1, true) ~= nil
+    or text:find("corrupt", 1, true) ~= nil
+end
+
+local function retryable(answer)
+  return busy(answer) or torn(answer)
+end
+
+-- The first row of an `integrity_check`/`quick_check`: "ok", or the first problem SQLite names.
+local function verdict_of(rows)
+  local first = type(rows) == "table" and rows[1] or nil
+  if type(first) ~= "table" then return "unknown" end
+  if first.quick_check ~= nil then return tostring(first.quick_check) end
+  if first.integrity_check ~= nil then return tostring(first.integrity_check) end
+  return tostring(first[1])
+end
+
+-- One `PRAGMA quick_check`/`integrity_check` of a store, through this interpreter's own connection --
+-- the only SQLite handle Lua has. `main` needs no attachment; every other store is attached for the
+-- check and detached again, because a store left bound cannot be attached twice on the next attempt.
+local function check_store(path, pragma, is_main)
+  if is_main then return verdict_of(query("PRAGMA " .. pragma)) end
+  sql("ATTACH DATABASE ? AS " .. CHECK_ALIAS, { path })
+  local ok, rows = pcall(query, "PRAGMA " .. CHECK_ALIAS .. "." .. pragma)
+  pcall(sql, "DETACH DATABASE " .. CHECK_ALIAS)
+  if not ok then error(tostring(rows), 0) end
+  return verdict_of(rows)
+end
+
+-- One read of the source: "verdict" (nothing stopped the read, `value` is SQLite's answer) or
+-- "error" (`value` is why the read could not run).
+local function source_read(path, is_main)
+  local ok, value = pcall(check_store, path, "quick_check", is_main)
+  if ok then return "verdict", tostring(value) end
+  return "error", tostring(value)
+end
+
+-- Is the SOURCE damaged? Two independent reads have to agree, because one failed read is exactly what
+-- a store with a writer in it looks like. Returns the verdict that says it is damaged, or nil when the
+-- store is sound or too busy to tell (a busy store is retried by the caller, never called corrupt).
+local function damaged(path, is_main)
+  local kind, value = source_read(path, is_main)
+  if kind == "verdict" and value == "ok" then return nil end
+  if kind == "error" and busy(value) then return nil end
+  host.sleep(BACKOFF_MS)
+  local again_kind, again = source_read(path, is_main)
+  if again_kind == "verdict" and again == "ok" then return nil end
+  if torn(value) or torn(again) then return torn(value) and value or again end
+  if again_kind == "error" and busy(again) then
+    -- The second read could not run at all; the first one's answer stands, and a busy answer is not
+    -- evidence of damage.
+    if kind == "verdict" then return value ~= "ok" and value or nil end
+    return nil
+  end
+  return kind == "verdict" and value or again
+end
+
+-- One copy of one store into `copy`. `VACUUM INTO` is the read: it goes through SQLite, so a
+-- committed page in the WAL is included and the file is never copied byte for byte. Measured 07/11: a
+-- `VACUUM INTO` that fails leaves an empty destination file, which the next attempt accepts, and a
+-- destination that holds a non-empty invalid file is refused with "file is not a database" -- a
+-- visible failure, never a false success.
+local function copy_store(source, copy, is_main)
+  if is_main then
+    sql("VACUUM INTO ?", { copy })
+    return
+  end
+  -- An attempt that failed mid-ATTACH can leave the alias bound, and a second ATTACH of the same
+  -- alias is an error rather than a retry.
+  pcall(sql, "DETACH DATABASE " .. SOURCE_ALIAS)
+  sql("ATTACH DATABASE ? AS " .. SOURCE_ALIAS, { source })
+  local ok, failure = pcall(sql, "VACUUM " .. SOURCE_ALIAS .. " INTO ?", { copy })
+  pcall(sql, "DETACH DATABASE " .. SOURCE_ALIAS)
+  if not ok then error(tostring(failure), 0) end
+end
+
+-- Snapshot one store: copy, check the copy, and retry contention with backoff. Raises
+-- `backup_failed: <source>: <reason>` when the store is damaged or stays unreadable.
+local function snapshot(source, copy, is_main)
+  local problem, attempts = "no attempt was made", 0
+  for attempt = 1, ATTEMPTS do
+    attempts = attempt
+    local retry = false
+    local copied, failure = pcall(copy_store, source, copy, is_main)
+    if copied then
+      local checked, check = pcall(check_store, copy, "integrity_check", false)
+      if checked and check == "ok" then
+        return { source = source, copy = copy, check = "ok", attempts = attempt }
+      end
+      failure = "the copy did not pass integrity_check: " .. tostring(checked and check or check)
+      -- The copy was written but is not sound. That is what a read torn by a writer leaves behind, so
+      -- it is retried; the source `quick_check` below is what says whether it was the writer's doing.
+      retry = true
+    else
+      -- A store that is not contention and not a torn image (no space, no permission, a bad path) is
+      -- not going to get better by asking again.
+      retry = retryable(failure)
+    end
+    problem = tostring(failure)
+    if not retry then error("backup_failed: " .. source .. ": " .. problem, 0) end
+    local broken = damaged(source, is_main)
+    if broken then error("backup_failed: " .. source .. ": " .. broken, 0) end
+    if attempt < ATTEMPTS then host.sleep(BACKOFF_MS * attempt) end
+  end
+  error("backup_failed: " .. source .. ": " .. problem .. " (after " .. attempts
+    .. " attempts; the source still passes quick_check, so it is being written)", 0)
+end
+
 -- Snapshot every store into <config>/backups/<stamp>/ and check each copy. Returns
--- {ok, dir, stores = {{source, copy, check}}} or raises with the first failure.
+-- {ok, dir, stores = {{source, copy, check, attempts}}} or raises with the first failure.
+--
+-- The busy timeout is set for the duration of the snapshot and put back afterwards: it is what makes a
+-- store a writer holds a wait instead of an error, and it is not this module's business whether some
+-- other caller wanted the interpreter's default.
+local function with_busy_timeout(work)
+  local previous = 0
+  local ok, rows = pcall(query, "PRAGMA busy_timeout")
+  if ok and type(rows) == "table" and type(rows[1]) == "table" then
+    previous = tonumber(rows[1].timeout or rows[1].busy_timeout or rows[1][1]) or 0
+  end
+  sql("PRAGMA busy_timeout = " .. BUSY_TIMEOUT_MS)
+  local returned = table.pack(pcall(work))
+  pcall(sql, "PRAGMA busy_timeout = " .. tostring(previous))
+  if not returned[1] then error(returned[2], 0) end
+  return table.unpack(returned, 2, returned.n)
+end
+
 function M.run(label)
   local stamp = os.date("!%Y%m%dT%H%M%SZ") .. '-' .. host.uuid() .. (label and label ~= "" and ("-" .. label:gsub("[^%w_-]", "")) or "")
   local dir = paths.config() .. "/backups/" .. stamp
   assert(host.write_file(dir .. "/.keep", ""),'backup_directory_write_failed')
-  local results, main = {}, main_db()
-  for index, source in ipairs(M.stores()) do
-    local copy = dir .. "/" .. source:gsub("^.*[/\\\\]", ""):gsub("^(.*)$", function(name) return index .. "-" .. name end)
-    if source == main then
-      sql("VACUUM INTO ?", { copy })
-    else
-      sql("ATTACH DATABASE ? AS wa_backup_source", { source })
-      local ok, problem = pcall(sql, "VACUUM wa_backup_source INTO ?", { copy })
-      sql("DETACH DATABASE wa_backup_source")
-      if not ok then error("backup_failed: " .. source .. ": " .. tostring(problem), 0) end
+  return with_busy_timeout(function()
+    local results, main = {}, main_db()
+    for index, source in ipairs(M.stores()) do
+      local copy = dir .. "/" .. source:gsub("^.*[/\\\\]", ""):gsub("^(.*)$", function(name) return index .. "-" .. name end)
+      results[#results + 1] = snapshot(source, copy, source == main)
     end
-    sql("ATTACH DATABASE ? AS wa_backup_check", { copy })
-    local rows = query("PRAGMA wa_backup_check.integrity_check")
-    sql("DETACH DATABASE wa_backup_check")
-    local verdict = rows[1] and (rows[1].integrity_check or rows[1][1]) or "unknown"
-    if verdict ~= "ok" then error("backup_corrupt: " .. copy .. ": " .. tostring(verdict), 0) end
-    results[#results + 1] = { source = source, copy = copy, check = verdict }
-  end
-  M.prune()
-  return { ok = true, dir = dir, stores = results }
+    M.prune()
+    return { ok = true, dir = dir, stores = results }
+  end)
 end
 
 -- A newer snapshot does not prove an older recovery source obsolete. Keep all

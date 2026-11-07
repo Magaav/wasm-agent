@@ -158,6 +158,45 @@ still writes an interim record with no tag - the deploy owns the final record.
 and never writes a sentinel request. A window reload cannot install anything. `fresh: true` bypasses
 the tag cache; the commit banner in the same answer is always cache-only.
 
+## The pre-update backup, and a store that is being written
+
+`/update` takes a checked snapshot of every SQLite store before it queues a deploy, because the new
+binary migrates the schema and an older one refuses a migrated database. On 07/11 that backup refused
+three updates on two nodes with
+
+```
+backup_failed: .../graph.db.d/graph.db: database disk image is malformed
+```
+
+while the same file passed `PRAGMA quick_check` immediately afterwards and the second `wa update`
+succeeded. The store was being written by the graph component while the copy was read, and the torn
+read was treated as corruption. The backup now separates the two questions (`lua/core/backup.lua`):
+
+- **A store that is being written is retried, not refused.** Every store is read through SQLite
+  itself (`VACUUM INTO` through the interpreter's connection - never a byte copy, so committed WAL
+  pages are included) under a busy timeout of 15 s, and a read that comes back `busy`, `locked` or
+  `database disk image is malformed` is retried up to 3 times with 250 ms and 500 ms of backoff.
+- **A store that is damaged still refuses.** Before every retry the *source* is asked
+  `PRAGMA quick_check`, twice: two readings that call the image broken mean damage, and the update is
+  refused immediately with SQLite's own verdict - exactly the message above, from a store that is
+  really malformed.
+- **Every copy is checked before it is reported.** The copy must pass `PRAGMA integrity_check`; a copy
+  that fails is never counted as a snapshot, so a torn copy cannot become the recovery source it was
+  meant to replace.
+
+The whole snapshot is still per store, not one simultaneous multi-store point in time, and a refused
+backup deploys nothing (`backup_failed` in the verdict, `nothing was queued`).
+
+Knobs, all optional: `WA_BACKUP_BUSY_TIMEOUT_MS` (15000), `WA_BACKUP_ATTEMPTS` (3),
+`WA_BACKUP_BACKOFF_MS` (250). `rust/wa-snapshot` is the same rule as a library, using SQLite's online
+backup API step by step, for the host path once a store is copied outside the Lua interpreter; its
+fifty-snapshot writer test (`cargo test -p wa-snapshot`) is where real concurrency is exercised, since
+one Lua interpreter has one SQLite connection and cannot lock a store against itself.
+
+Tests: `scripts/test-backup-live.lua` (real stores, a WAL store whose rows exist only in the `-wal`, a
+damaged store refused, the retry/backoff/damage classification driven through a stub host) and
+`scripts/test-backup-locks.lua` (lock files are never copied).
+
 ## Caching, and the one risk
 
 A check is cached for ten minutes in `<config>/release-cache.json`, so a reload is not a request. The
