@@ -1,0 +1,29 @@
+[package]
+name = "wa-telemetry-sink"
+version = "0.1.0"
+edition = "2021"
+description = "Telemetry sink: typed records off the hot path, bounded drop-oldest buffer, rotating JSONL and an optional OTLP/HTTP edge. No dependencies, no threads, no JSON inside."
+
+# Two halves on purpose (`docs/OBSERVABILITY.md`, "The sink"):
+#
+# * `default = ["host"]` builds the exporter edges: the rotating JSONL writer (`std::fs`) and the
+#   OTLP/HTTP POST (`std::net`). They are what the node runs.
+# * a component (`rust/components/telemetry-sink`, wasm32-wasip2) depends on this crate with
+#   `default-features = false` and gets only the records, the redaction rules and the bus codec:
+#   same encoding on both sides of the bus, and the guest cannot open a file or a socket by accident.
+[features]
+default = ["host"]
+host = []
+
+[dependencies]
+# None, deliberately. The JSON the export edge writes is hand-written and deterministic (a
+# serializer would be a second JSON dialect next to `wa-telemetry`'s), OTLP/HTTP JSON is built with
+# the same writer, the framing is a hand-written little-endian layout like `wa-telemetry/src/snapshot.rs`,
+# and the HTTP edge is a plain `TcpStream` POST. TLS and multi-hop redirects are the host's business,
+# not this crate's: it posts to the one endpoint it was configured with or refuses.
+
+[dev-dependencies]
+# Dev only: "the JSONL file is readable" is proven by parsing every line with a real JSON parser, and
+# the same parser checks every OTLP body the exporter builds. Already in the workspace lock (wa-host,
+# wa-jobs), so it is no new download and cannot become a second JSON dialect in the tree.
+serde_json = "1"
