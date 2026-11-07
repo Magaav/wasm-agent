@@ -828,6 +828,10 @@ pub(crate) fn stop_spawned(mut spawned: Spawned) -> String {
 /// The revocation is per **generation**, not per name: the old instance's bus subscriptions and queue
 /// grants go (its `cancel`s in the ledger run), the new instance's rows - registered under its own
 /// token before this call - stay. A name-keyed revoke here is exactly the bug this exists to prevent.
+///
+/// The old instance's leases are handed over before they are revoked: a job it was running is neither
+/// failed nor left to lose its lease, so a queue with pending work survives a swap with nothing lost
+/// and nothing duplicated (`wa_queue::Queue::handover`, `QueueHost::handover_instance`).
 pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
     let previous = registry().lock().unwrap().insert(
         name.to_string(),
@@ -844,6 +848,12 @@ pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
             if let Some(thread) = old.thread.take() {
                 let _ = thread.join();
             }
+            let token = format!("{name}#{}", old.generation);
+            // The in-flight jobs of the instance that just stopped go back to `Ready`, due now, before
+            // anything is revoked: they were not failed (a swap is not a crash), and the instance that
+            // replaced this one is already polling `take`. This runs *after* the join, so nothing of the
+            // old instance can still be running the work that is being handed over.
+            let handed_over = crate::queue_host::node().handover_instance(&token);
             let revoked = crate::registrations::node().revoke_generation(name, old.generation);
             // Belt and braces for a provider whose rows were not in the ledger (a caller that registered
             // through the provider directly): only the retired generation's token is revoked here.
@@ -853,6 +863,9 @@ pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
                 "generation": old.generation,
                 "last_exit": *old.shared.last_exit.lock().unwrap(),
                 "registrations_revoked": revoked,
+                // How many in-flight queue jobs were handed to the new instance instead of waiting for
+                // their lease to lapse. A number somebody can read after a swap, not a claim.
+                "queue_handed_over": handed_over,
             })
         }
         None => Value::Null,

@@ -337,6 +337,68 @@ impl Queue {
         })
     }
 
+    /// Hand back every lease held by a worker whose id starts with `prefix`, without spending an
+    /// attempt and without a retry delay.
+    ///
+    /// This is the *swap* case, not the crash case: the workers behind the prefix belong to an
+    /// instance that is being replaced **on purpose** (a component hot-swap, a kernel swap), so their
+    /// jobs did not fail - the instance that replaced them takes them on its next `take`, at once.
+    /// Everything a lease could tell us about a crash is wrong here: [`Queue::take`]'s own recovery
+    /// charges a `lease_expiries` per loss and backs the retry off, so a routine swap would burn the
+    /// budget of jobs that never failed.
+    ///
+    /// The lease is *gone*, which is the fencing that matters: the retired worker's late
+    /// [`Queue::done_by`] or [`Queue::fail_by`] is refused with `LeaseLost`, so a job handed over is
+    /// never settled twice. Freshness is still honoured - a job whose `fresh_until` passed while it was
+    /// leased is expired here rather than handed to the new instance, the same rule `take` applies.
+    ///
+    /// Returns how many leases were handed back. A prefix that matches nothing is `Ok(0)`, never an
+    /// error: "the instance had nothing in flight" is the normal case.
+    pub fn handover(&self, queue: &str, prefix: &str) -> Result<usize> {
+        if !valid_name(queue, 64) {
+            return Err(QueueError::Invalid(format!("bad queue name {queue:?}")));
+        }
+        if prefix.is_empty() {
+            // An empty prefix would match every worker on the queue, including the instance that is
+            // taking over. Refused rather than treated as "all".
+            return Err(QueueError::Invalid("handover needs a worker prefix".into()));
+        }
+        let now = self.now();
+        let mut handed = 0;
+        for (key, _) in self.kv.scan_prefix(&index_prefix(queue, STATE_LEASED))? {
+            let Some(id) = id_from_index_key(&key) else {
+                self.kv.del(&key)?;
+                continue;
+            };
+            let Some(mut job) = self.load(id)? else {
+                self.kv.del(&key)?;
+                continue;
+            };
+            if job.queue != queue || job.state != JobState::Leased {
+                self.kv.del(&key)?;
+                continue;
+            }
+            if !job.lease_worker.as_deref().is_some_and(|worker| worker.starts_with(prefix)) {
+                continue;
+            }
+            self.kv.del(&key)?;
+            job.lease_worker = None;
+            job.lease_until = None;
+            job.updated_at = now;
+            if job.fresh_until.is_some_and(|fresh| fresh <= now) {
+                self.expire_at(&mut job, now, "fresh_until passed while leased")?;
+            } else {
+                job.state = JobState::Ready;
+                // Due now: a handover is not a failure, so there is nothing to back off from.
+                job.not_before = now;
+                self.save(&job)?;
+                self.put_index(&job)?;
+            }
+            handed += 1;
+        }
+        Ok(handed)
+    }
+
     // ---------------------------------------------------------------- freshness, sweeps, alerts
 
     /// Drop every *unleased* job whose `fresh_until` has passed, without running it. Each drop is

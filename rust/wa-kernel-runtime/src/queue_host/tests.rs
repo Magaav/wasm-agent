@@ -161,6 +161,64 @@ fn fast_forward(host: &QueueHost, component: &str) {
     let _ = component;
 }
 
+/// A swap, at the queue's own level: the retired instance's in-flight job is handed back to `Ready`
+/// and taken by the instance that replaced it, exactly once, and the retired worker can no longer
+/// settle it. This is the queue half of `services::replace` - a queue with pending work survives a
+/// component swap with nothing lost and nothing duplicated.
+#[test]
+fn a_swap_hands_the_retired_instances_leases_to_the_instance_that_replaced_it() {
+    let dir = temp_dir("handover");
+    let host = QueueHost::new(dir.clone());
+    let capabilities = manifest(&["producer", "worker"], &["wa.stt"]);
+    host.register("svc", &capabilities).unwrap();
+    let queue = host.queue("svc");
+    let ids: Vec<u64> = (1..=3)
+        .map(|n| queue.enqueue(wa_queue::EnqueueRequest::new("wa.stt", format!("job-{n}").into_bytes())).unwrap().id.0)
+        .collect();
+    // Two instances of the same component: the one being replaced, and the one started beside it.
+    host.register_instance("svc", "svc#1", &capabilities).unwrap();
+    host.register_instance("svc", "svc#2", &capabilities).unwrap();
+
+    // The retired instance has one job out when the switch happens; its worker id is what the guest
+    // path records, so the lease names the instance (`svc.1:w1`).
+    let taken = queue.take("wa.stt", &scoped_worker("svc#1", "w1"), None).unwrap();
+    assert!(matches!(taken, TakeOutcome::Job(_)), "{taken:?}");
+
+    // The new instance's own leases are not this swap's business (it holds none yet: 0, not an error).
+    assert_eq!(host.handover_instance("svc#2"), 0);
+    assert_eq!(host.handover_instance("svc#1"), 1, "the one job in flight goes back");
+    let handed = queue.job(wa_queue::JobId(ids[0])).unwrap().unwrap();
+    assert_eq!(handed.state, wa_queue::JobState::Ready);
+    assert_eq!(handed.attempts, 0, "a swap is not a failure: no attempt spent");
+    assert_eq!(handed.lease_expiries, 0, "and no lease loss recorded");
+
+    // The instance that replaced it takes all three, oldest first, once each.
+    let mut took = Vec::new();
+    for _ in 0..3 {
+        match queue.take("wa.stt", &scoped_worker("svc#2", "w1"), None).unwrap() {
+            TakeOutcome::Job(job) => took.push(job.id.0),
+            other => panic!("only {took:?} were takeable: {other:?}"),
+        }
+    }
+    assert_eq!(took, ids, "nothing lost, nothing duplicated, order kept");
+    assert!(matches!(queue.take("wa.stt", &scoped_worker("svc#2", "w1"), None).unwrap(), TakeOutcome::Empty));
+
+    // The retired worker's late completion is refused: it no longer holds anything.
+    let late = queue.done_by(wa_queue::JobId(ids[0]), &scoped_worker("svc#1", "w1"), b"late");
+    assert!(late.is_err(), "a handed-over job cannot be settled by the instance that lost it");
+    for id in &ids {
+        assert_eq!(queue.done_by(wa_queue::JobId(*id), &scoped_worker("svc#2", "w1"), b"ok").unwrap().state, wa_queue::JobState::Done);
+    }
+    let stats = queue.stats("wa.stt").unwrap();
+    assert_eq!((stats.ready, stats.leased, stats.done), (0, 0, 3), "{stats:?}");
+
+    // A token nobody registered has nothing to hand over, and revoking it afterwards changes nothing.
+    assert_eq!(host.handover_instance("svc#9"), 0);
+    assert!(host.unregister_instance("svc#1"));
+    assert_eq!(queue.stats("wa.stt").unwrap().done, 3, "the data outlives the instance's rights");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_stale_lease_is_recovered_by_the_next_take() {
     // The property the sweeper cannot be trusted with: `take` itself expires a lease, so a node

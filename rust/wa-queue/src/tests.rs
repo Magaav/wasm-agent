@@ -61,6 +61,64 @@ fn job(f: &Fixture, id: JobId) -> Job {
 // ------------------------------------------------------------------ basics
 
 #[test]
+fn a_handover_returns_the_lease_without_spending_an_attempt() {
+    let f = Fixture::new();
+    let first = f.enqueue("stt", b"one");
+    let second = f.enqueue("stt", b"two");
+    let third = f.enqueue("stt", b"three");
+    let leased = f.take("stt", "comp.1:w1");
+    assert_eq!(leased.id, first);
+
+    // The retired instance's lease goes back, immediately, with its attempt budget untouched.
+    assert_eq!(f.queue.handover("stt", "comp.1:").expect("handover"), 1);
+    let back = job(&f, first);
+    assert_eq!(back.state, JobState::Ready);
+    assert_eq!(back.lease_worker, None);
+    assert_eq!(back.lease_until, None);
+    assert_eq!(back.not_before, f.now(), "a handover is due now, not after a retry delay");
+    assert_eq!(back.attempts, 0, "the job did not fail");
+    assert_eq!(back.lease_expiries, 0, "nor did it lose its lease");
+    assert_eq!(back.last_error, None);
+
+    // The old worker cannot settle what it no longer holds - that is the fence.
+    assert_eq!(f.queue.done_by(first, "comp.1:w1", b"late").unwrap_err(), QueueError::LeaseLost);
+    assert_eq!(f.queue.fail_by(first, "comp.1:w1", "late").unwrap_err(), QueueError::LeaseLost);
+
+    // The instance that replaced it takes all three, once each, oldest first.
+    let taken: Vec<JobId> = (0..3).map(|_| f.take("stt", "comp.2:w1").id).collect();
+    assert_eq!(taken, vec![first, second, third]);
+    assert!(matches!(f.queue.take("stt", "comp.2:w1", None).expect("take"), TakeOutcome::Empty));
+    for id in [first, second, third] {
+        assert_eq!(f.queue.done_by(id, "comp.2:w1", b"ok").expect("settle").state, JobState::Done);
+    }
+    let stats = f.queue.stats("stt").expect("stats");
+    assert_eq!((stats.ready, stats.leased, stats.done), (0, 0, 3), "none lost, none duplicated: {stats:?}");
+
+    // A prefix that matches nothing is not an error, and an empty one is (it would match everyone).
+    assert_eq!(f.queue.handover("stt", "comp.9:").expect("nothing in flight"), 0);
+    assert!(f.queue.handover("stt", "").is_err());
+}
+
+#[test]
+fn a_handover_leaves_another_instances_lease_alone_and_expires_stale_work() {
+    let f = Fixture::new();
+    let mine = f.enqueue("stt", b"mine");
+    f.queue
+        .enqueue(EnqueueRequest::new("stt", b"stale".to_vec()).fresh_for(1_000))
+        .expect("enqueue");
+    let held = f.take("stt", "comp.2:w1");
+    assert_eq!(held.id, mine);
+    let stale = f.take("stt", "comp.1:w1");
+    assert_ne!(stale.id, mine, "the live instance's job is the one taken first");
+    f.clock.advance(2_000);
+
+    // Only the prefix's own lease moves; the live instance keeps the one it holds.
+    assert_eq!(f.queue.handover("stt", "comp.1:").expect("handover"), 1);
+    assert_eq!(job(&f, mine).state, JobState::Leased, "another instance's lease is not this swap's");
+    assert_eq!(job(&f, stale.id).state, JobState::Expired, "stale work is never handed to the next instance");
+}
+
+#[test]
 fn enqueue_take_done_roundtrip_keeps_bytes_exact() {
     let f = Fixture::new();
     let payload: Vec<u8> = (0u8..=255).collect();

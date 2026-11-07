@@ -22,8 +22,9 @@
 //!    a channel component or an operator tool delivers them through its own capability. Nothing here
 //!    formats a message or sends it.
 //! 5. **Nothing to flush on stop.** All state is already in the kv; `unregister` drops the
-//!    in-process handle and the grants. A job leased by a stopped worker stays leased and is
-//!    recovered by the lease rule on the next `take`/`sweep`, exactly as a crashed worker's would be.
+//!    in-process handle and the grants. A job leased by a stopped worker is handed back by
+//!    `handover_instance` when the stop is a hot swap (`services::replace`), and recovered by the lease
+//!    rule on the next `take`/`sweep` when it is a crash - exactly as a crashed worker's would be.
 //!
 //! Deliberately not here: a blocking `take` (the library has no wake path per queue, and
 //! `docs/QUEUE.md` lists it as an open question), and a live tail of `progress` — the stream serves
@@ -202,6 +203,35 @@ impl QueueHost {
     /// is the point of the library: the jobs are still takeable by the instance that replaced it.
     pub fn unregister_instance(&self, token: &str) -> bool {
         self.instances.lock().unwrap_or_else(|e| e.into_inner()).remove(token).is_some()
+    }
+
+    /// Hand back every lease the instance named by `token` still holds, so the instance that replaced
+    /// it takes those jobs at once instead of waiting for the lease to lapse.
+    ///
+    /// This is the other half of a hot swap (`services::replace`): the retired instance is stopped and
+    /// joined **before** this is called, so nothing of it is running any more, and its jobs were
+    /// neither failed nor lost - they go back to `Ready`, due now, with their attempt budget untouched
+    /// (`wa_queue::Queue::handover`). The lease is gone, so a late settle by the retired worker is
+    /// refused (`LeaseLost`) and a job handed over can never be completed twice.
+    ///
+    /// Only the queues the instance was *granted* are touched: a namespace outside its grant cannot be
+    /// holding a lease of its own, and looking at it would be the grant bypass this module exists to
+    /// prevent. Returns how many leases were handed over (`0` when it had nothing in flight, which is
+    /// the normal case).
+    pub fn handover_instance(&self, token: &str) -> usize {
+        // Read the component and the grants *before* `unregister_instance` forgets the token.
+        let (Some(component), Some(grants)) = (self.component_of(token), self.grants(token)) else { return 0 };
+        let prefix = format!("{}:", worker_scope(token));
+        let queue = self.queue(&component);
+        let names = queue.queues().unwrap_or_default();
+        let mut handed = 0;
+        for name in names {
+            if !grants.may_queue(&name) {
+                continue;
+            }
+            handed += queue.handover(&name, &prefix).unwrap_or(0);
+        }
+        handed
     }
 
     /// The component an instance token belongs to (`None` once revoked).
@@ -563,6 +593,35 @@ pub(crate) trait QueueCaller {
     fn instance(&self) -> &str;
 }
 
+/// The prefix a lease carries so it can name the **instance** that holds it, not just the worker.
+///
+/// A guest's `worker` argument (`w1`, `stt-poster`) is unique only inside one instance: every
+/// generation of the same component uses the same strings. A hot swap (`services::replace`) has to
+/// hand the retired instance's in-flight jobs to the one that replaced it, and it cannot do that by
+/// worker name alone - so the lease records `<scope>:<worker>`, and the scope is the instance token
+/// (`<name>#<generation>`, `registrations::Ledger::open_instance`).
+///
+/// The queue's ident rule (`wa_queue`'s `valid_name`: alphanumerics, `-`, `_`, `.`, `:`) does not
+/// allow `#`, so the token's one `#` becomes `.`. That mapping is injective for real tokens - a
+/// component name is lowercase alphanumerics and `-` (`components::valid_name`) and a generation is
+/// an integer - which is what lets `handover_instance` match a prefix without ever matching another
+/// instance's lease. `:` joins the two halves because it is in the rule as well, so a lease owner is
+/// readable in `stats`/`list` without a second syntax.
+pub(crate) fn worker_scope(instance: &str) -> String {
+    instance
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | ':' => ch,
+            _ => '.',
+        })
+        .collect()
+}
+
+/// The worker id one guest call becomes inside the queue: `<instance scope>:<guest's worker>`.
+pub(crate) fn scoped_worker(instance: &str, worker: &str) -> String {
+    format!("{}:{}", worker_scope(instance), worker)
+}
+
 impl QueueCaller for crate::service_components::State {
     fn component(&self) -> &str {
         &self.name
@@ -660,6 +719,7 @@ macro_rules! queue_impls {
                 let out = (|| {
                     node().gate(&owner, "worker", Some(&queue))?;
                     let lease_ms = lease_ms.map(|ms| fresh_ms(ms));
+                    let worker = scoped_worker(&owner, &worker);
                     match node().queue(&component).take(&queue, &worker, lease_ms).map_err(fault)? {
                         TakeOutcome::Job(job) => {
                             let lease_until = job.lease_until.unwrap_or(job.updated_at).max(0) as u64;
@@ -692,7 +752,7 @@ macro_rules! queue_impls {
                         return Err(QueueFault::Refused("queue_job_mismatch".into()));
                     }
                     node().queue(&component)
-                        .heartbeat(JobId(job_id), &worker, extend_ms.map(fresh_ms))
+                        .heartbeat(JobId(job_id), &scoped_worker(&owner, &worker), extend_ms.map(fresh_ms))
                         .map_err(fault)
                         .map(|until| until.max(0) as u64)
                 })();
@@ -716,7 +776,7 @@ macro_rules! queue_impls {
                     if job.queue != queue {
                         return Err(QueueFault::Refused("queue_job_mismatch".into()));
                     }
-                    node().queue(&component).done_by(JobId(job_id), &worker, &output).map_err(fault).map(job_to_guest)
+                    node().queue(&component).done_by(JobId(job_id), &scoped_worker(&owner, &worker), &output).map_err(fault).map(job_to_guest)
                 })();
                 call.outcome(&out);
                 out
@@ -738,7 +798,7 @@ macro_rules! queue_impls {
                     if job.queue != queue {
                         return Err(QueueFault::Refused("queue_job_mismatch".into()));
                     }
-                    let outcome = node().queue(&component).fail_by(JobId(job_id), &worker, &reason).map_err(fault)?;
+                    let outcome = node().queue(&component).fail_by(JobId(job_id), &scoped_worker(&owner, &worker), &reason).map_err(fault)?;
                     Ok(GuestFailOutcome {
                         retry_at_ms: outcome.not_before.map(|ms| ms.max(0) as u64),
                         dead: outcome.dead,
