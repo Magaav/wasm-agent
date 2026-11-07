@@ -199,6 +199,44 @@ impl wa::kernel::sql::Host for State {
             changes: answer.changes,
         })
     }
+
+    /// memtx's unit of work, offered to every `wa:kernel/sql` guest. The self-loop opens no unit
+    /// today; the methods exist so the vendored interface stays equal to the kernel's, and they
+    /// delegate to the same session (with the same refusal bookkeeping) as `query`/`exec`.
+    fn begin_unit(&mut self) -> Result<(), KError> {
+        match self.session()?.begin_unit() {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                self.refused = Some(failure.to_string());
+                Err(kernel_error(failure))
+            }
+        }
+    }
+
+    fn commit_unit(&mut self, entry: Option<wa::kernel::sql::JournalEntry>) -> Result<(), KError> {
+        let entry = entry.map(|entry| crate::sql_host::JournalEntry {
+            entity_id: entry.entity_id,
+            op: entry.op,
+            payload: entry.payload,
+        });
+        match self.session()?.commit_unit(entry) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                self.refused = Some(failure.to_string());
+                Err(kernel_error(failure))
+            }
+        }
+    }
+
+    fn rollback_unit(&mut self) -> Result<(), KError> {
+        match self.session()?.rollback_unit() {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                self.refused = Some(failure.to_string());
+                Err(kernel_error(failure))
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------- the answer shape
