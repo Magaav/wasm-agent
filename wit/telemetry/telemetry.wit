@@ -1,0 +1,189 @@
+/// wa:telemetry v1 — DRAFT. Typed telemetry records in, a node-owned export edge out.
+///
+/// The bus carries facts (`wa:bus`). A telemetry sink is a *subscriber*: it hears what happened,
+/// batches it, and hands the batch to the node, which owns the buffer, the file and the network. This
+/// interface is the second half: the guest's side of "export off the hot path".
+///
+/// Two rules the shape enforces:
+///
+/// 1. **No text.** A record is ids, counts, closed-set enums and a `digest` — there is no field for a
+///    message, a transcript, a prompt or a file path. A producer that has text has to digest it before
+///    it gets here (`wa_telemetry_sink::Attr::from_text` does exactly that), and a credential-shaped
+///    value is `redacted`, with no digest, because a digest of a secret is an oracle.
+/// 2. **No JSON.** These are typed records. The node writes JSONL and OTLP/HTTP JSON at *its* edge,
+///    where the file is read by a human and the request is read by a collector — not on the bus.
+///
+/// The bus payload a producer publishes on a telemetry topic is the `wa-telemetry-sink` frame
+/// (`WTS1` + records, hand-written little-endian, `rust/wa-telemetry-sink/src/codec.rs`). The sink
+/// component decodes it and submits the typed batch here.
+///
+/// Status 2026-11-13: draft. The component (`rust/components/telemetry-sink`) and the host-side sink
+/// (`rust/wa-telemetry-sink`) exist and are tested; the *provider* that serves `interface sink` from
+/// `wa-kernel-runtime` is the remaining wiring step (see `docs/OBSERVABILITY.md`, "The sink").
+package wa:telemetry@0.1.0;
+
+interface types {
+    /// Closed set, same four the in-node trace ring already uses.
+    enum status {
+        ok,
+        error,
+        expired,
+        cancelled,
+    }
+
+    /// Closed set; the number maps onto OTLP's fixed severity scale at the export edge.
+    enum severity {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+        critical,
+    }
+
+    enum metric-kind {
+        counter,
+        gauge,
+    }
+
+    /// The unit a value is in. Closed, for the same reason a label is closed.
+    enum unit {
+        count,
+        microseconds,
+        milliseconds,
+        bytes,
+        ratio,
+    }
+
+    /// A text value the sink was handed and must not export as text: its length and a fingerprint.
+    /// Correlation, not content — the sink never exports a digest and its input together.
+    record digest {
+        len: u32,
+        hash: u64,
+    }
+
+    variant attr-value {
+        /// A name from a closed set: a component, an op, a status word, a schema.
+        id(string),
+        count(u64),
+        digest(digest),
+        /// Secret-shaped: dropped, and nothing of it kept.
+        redacted,
+    }
+
+    record attr {
+        key: string,
+        value: attr-value,
+    }
+
+    record span {
+        component: string,
+        op: string,
+        start-ms: u64,
+        duration-us: u64,
+        status: status,
+        /// 32 hex characters, or none when the run had no trace.
+        trace: option<string>,
+        attrs: list<attr>,
+    }
+
+    record metric {
+        component: string,
+        name: string,
+        kind: metric-kind,
+        unit: unit,
+        value: u64,
+        labels: list<attr>,
+    }
+
+    record event {
+        topic: string,
+        source: string,
+        schema: string,
+        schema-version: u32,
+        ts-ms: u64,
+        /// How many facts this record stands for; a batch is a count, never repeated rows.
+        count: u64,
+        severity: severity,
+        trace: option<string>,
+        attrs: list<attr>,
+    }
+
+    /// One outbound telemetry item. The bus payload for it is a frame, not JSON. (Not `record`:
+    /// that is a WIT keyword, and a type called `record` cannot be declared.)
+    variant item {
+        span(span),
+        metric(metric),
+        event(event),
+    }
+
+    record batch {
+        records: list<item>,
+    }
+
+    /// What the node's buffer did with the batch. `dropped` counts the oldest records the bounded
+    /// buffer evicted to make room, so a guest can see back-pressure instead of guessing.
+    record submit-report {
+        accepted: u32,
+        dropped: u32,
+    }
+
+    /// The sink's own numbers, including the headline `telemetry-dropped`.
+    record stats {
+        accepted: u64,
+        telemetry-dropped: u64,
+        exported: u64,
+        exported-batches: u64,
+        jsonl-rows: u64,
+        jsonl-bytes: u64,
+        jsonl-rotations: u64,
+        otlp-sent: u64,
+        otlp-failed: u64,
+        otlp-dropped: u64,
+        otlp-recovered: u64,
+        queued: u32,
+        queued-bytes: u64,
+    }
+
+    variant error {
+        /// The batch is malformed or larger than the provider's cap; nothing was buffered.
+        refused(string),
+        /// The sink could not take it now (shutting down). The guest may retry after a yield.
+        again,
+        /// The sink is gone (component stopping, or the provider was revoked).
+        closed,
+        failed(string),
+    }
+}
+
+/// Handing records to the node's sink.
+interface sink {
+    use types.{batch, error, stats, submit-report};
+
+    /// Buffer `batch`. Resolves once the records are in the node's bounded buffer (or have been
+    /// dropped and counted by its overflow policy). It never waits for a file write, a rotation or a
+    /// collector: that work belongs to the node's exporter side.
+    submit: async func(batch: batch) -> result<submit-report, error>;
+
+    /// The sink's counters. Cheap; safe to call from a health tick. Named `counters` because a
+    /// function and a type cannot share a name in WIT.
+    counters: func() -> stats;
+
+    /// Ask the node to flush now (an operator or a test), instead of waiting for its tick. Returns
+    /// the counters after the flush.
+    flush: async func() -> result<stats, error>;
+}
+
+/// The sink component's own world: a service that only hears facts and only talks to the sink.
+///
+/// Its manifest grants `bus.subscribe = ["*"]` and publishes nothing: a telemetry sink that could
+/// publish would be a way to forge the record it is supposed to keep.
+world telemetry-sink {
+    import types;
+    import sink;
+    import wa:bus/types@0.1.0;
+    import wa:bus/subscriber@0.1.0;
+    import wa:kernel/log@0.2.0;
+    import wa:kernel/lifecycle@0.2.0;
+    export wa:kernel/service@0.2.0;
+}

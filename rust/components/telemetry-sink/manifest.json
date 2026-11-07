@@ -1,0 +1,11 @@
+{
+  "name": "telemetry-sink",
+  "kind": "service",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "Telemetry sink (wa:telemetry): subscribes to the bus, batches typed spans/metrics/events and hands them to the node's bounded sink, which writes rotating JSONL (default) and optionally exports OTLP/HTTP to one granted endpoint. No JSON on the bus, no message text in a record, no publishing (docs/OBSERVABILITY.md, 'The sink')",
+  "capabilities": {
+    "bus": {"publish": [], "subscribe": ["*"]}
+  },
+  "limits": {"memory_mb": 64}
+}

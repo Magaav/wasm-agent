@@ -262,6 +262,61 @@ conclusions, not the report's. `scripts/test-efficiency-report.lua` proves the
 arithmetic, the prefix-break naming and the unmeasured-stays-unmeasured rule
 without a model.
 
+## The sink: telemetry out, off the hot path
+
+Everything above is collected **in the node**. The sink is the **outbound** side: spans, metrics and
+events leave the process as typed records, batched, without the code being measured ever waiting for
+a file or a collector.
+
+```text
+producer ──record──▶ bounded ring (drop-oldest, telemetry_dropped)
+                            │ pump()  ← the node's tick, or an exporter task
+                            ├──▶ rotating JSONL (default, human-readable)
+                            └──▶ OTLP/HTTP JSON to one granted collector (optional)
+```
+
+Two crates/artefacts, three rules:
+
+| piece | what it is |
+| --- | --- |
+| `rust/wa-telemetry-sink` | the host-side library: records, bus codec, bounded buffer, JSONL writer, OTLP/HTTP exporter, counters. No dependencies, no thread of its own. |
+| `rust/components/telemetry-sink` | the component (`wa:kernel@0.2`, WASI 0.3): subscribes to `wa:bus`, decodes the typed frame a producer published, hands the batch to the node through `wa:telemetry/sink` (`wit/telemetry/telemetry.wit`). |
+
+1. **Back-pressure instead of blocking.** The buffer is bounded in records *and* in encoded bytes
+   (default 4096 records / 4 MiB); overflow drops the oldest record and counts it. `telemetry_dropped`
+   is the one number to read: it covers a full buffer and a record larger than the per-record cap.
+   Every other number (`telemetry_sink_otlp_failed_total`, `..._jsonl_failed_total`, …) says why.
+   `Sink::record` is one mutex, one length check and a push; it never touches a file or a socket.
+2. **No message text, on the bus or in the file.** A record is ids, counts, closed-set enums and a
+   `digest`; there is no field for a message. Anything a producer hands in as text is reduced to
+   `{len, digest}` by `Attr::from_text`, and a value that looks like a credential is dropped with
+   `redacted` and no digest at all. The rules are `lua/core/redact.lua`'s (value patterns, `NAME=value`,
+   `Bearer`), ported to `wa-telemetry-sink::redact` so one idea of a secret covers both boundaries. The
+   frame decoder refuses an id that is not a name, so a hostile producer cannot smuggle text through an
+   id either; a decode failure is a counter, and the payload bytes are never logged.
+3. **JSON only at the edge.** The bus payload is a hand-written little-endian frame (`WTS1`, versioned,
+   bounded, trailing bytes refused) and the WIT boundary is typed. JSONL is one object per line with an
+   ISO-8601 UTC stamp (the file a human opens), and OTLP is JSON in the collector's shape
+   (`resourceSpans`/`resourceMetrics`/`resourceLogs`). Local file first: it is bounded by
+   `max_bytes × max_files` and is the complete record. The OTLP edge is best effort — a batch a dead
+   collector refuses is counted (`otlp_failed`, `otlp_dropped`) and not retried into memory; the next
+   success increments `otlp_recovered`.
+
+The grant is mechanical, not remembered: the OTLP endpoint is parsed once (`http://host:port[/base]`,
+no userinfo, no query, `https://` refused here because TLS belongs to the host), every request URL is
+built by the exporter from that host, and `check_url` refuses a destination that is not it. A `3xx` is a
+failure, never a new destination.
+
+JSONL lines are read by an operator first, then a tool: `{"ts":"2026-11-13T09:12:44.120Z","kind":"span",
+"component":"wa-whatsapp","op":"transcribe","status":"error","duration_us":84000,…,"attrs":{…}}`.
+No secrets, no paths, no transcript. Rotation is size-based; the directory never exceeds
+`max_bytes × max_files` and the oldest file is removed, not compacted.
+
+**Not wired yet** (see `REPORT.md` in the job tree and the open question below): the provider that
+serves `wa:telemetry/sink` from `wa-kernel-runtime`, the tick that calls `Sink::pump`, the recording point
+that publishes a producer's frame onto the bus, and the operator knob for the endpoint directory. The
+library and the component are tested; a node cannot run the component until the provider exists.
+
 ## Verification
 
 `scripts/test-observability.lua` runs through the actual Lua agent/provider with
@@ -273,6 +328,13 @@ a delayed localhost provider for its routing checks, not a live model.
 reasoning settings across a real process replacement, plus the binary/UI
 recovery backups in a scratch installation. It retains its temporary evidence
 directory and never touches the live installation.
+
+`scripts/test-telemetry-sink.sh` is the sink's proof and it is localhost-only: 50 unit tests plus the
+burst, exporter-down, JSONL-readability and optimization tests (the exporter tests bind `127.0.0.1`
+and a stopped port, nothing else), the two release-mode measurements printed with their numbers, and
+the component build for `wasm32-wasip2` with its manifest grants checked (`subscribe = ["*"]`,
+`publish = []` — a sink that could publish would be a way to forge the record it keeps). It never
+starts a node, never deploys and never pushes.
 
 ## Deployment and recovery
 

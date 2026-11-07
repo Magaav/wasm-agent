@@ -1,0 +1,8 @@
+/// The sink component's own package. Its world is not restated here: `wa:telemetry/telemetry-sink`
+/// (in `deps/telemetry.wit`, the same file as `wit/telemetry/telemetry.wit` in the tree) *is* the
+/// contract, so a change there is a change on both sides instead of a second copy that drifts.
+package wa:telemetry-sink-component@0.1.0;
+
+world component {
+    include wa:telemetry/telemetry-sink@0.1.0;
+}

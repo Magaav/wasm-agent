@@ -1,0 +1,35 @@
+[package]
+name = "telemetry-sink"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The telemetry sink as a component (`docs/OBSERVABILITY.md`, "The sink"; `wit/telemetry/telemetry.wit`).
+# It is the *hearing* half of the sink: it subscribes to `wa:bus`, decodes the `WTS1` frame a producer
+# published, and hands the records to the node through `wa:telemetry/sink`. The node owns the bounded
+# buffer, the rotating JSONL file and the OTLP POST; the guest owns none of them, which is why this
+# crate's build has no filesystem and no socket in it.
+#
+# Built for wasm32-wasip2 on `wa:kernel@0.2` (WASI 0.3, native async) by scripts/build-components.sh,
+# never by the core build. Separate `[workspace]` like every other component: a component changes
+# without rebuilding `wa`, and `wa` builds without compiling a component.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bindings for the component's world: `wa:bus/subscriber` (imported), `wa:telemetry/sink` (imported)
+# and `wa:kernel/service` (exported). Same version every other 0.2 component in the tree uses.
+wit-bindgen = "0.63"
+# The records, the redaction boundary and the `WTS1` codec, shared with the host-side sink so the two
+# sides of the bus cannot drift into two encodings. `default-features = false` keeps the file writer
+# and the HTTP edge out of the guest: a component that cannot name a path cannot leak one.
+wa-telemetry-sink = { path = "../../wa-telemetry-sink", default-features = false }
+# The service config is JSON on the kernel's side (`service.run(config)`), so parsing it needs a parser;
+# it is the only place this crate touches JSON, and the config holds counts, not payloads.
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true
