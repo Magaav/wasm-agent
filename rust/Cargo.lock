@@ -2094,6 +2094,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wa-snapshot"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
 name = "wa-state"
 version = "0.1.0"
 dependencies = [
