@@ -19,7 +19,9 @@
 //! same websocket pump feeds a stream through `poll_next`, and an exchange's completion, a
 //! recognizer's progress and a socket's inbound frame all wake the guest task through `Notify` (
 //! the host half of `StreamProducer`/`FutureProducer`, which may be woken from any thread).
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -129,18 +131,123 @@ pub fn url_authority(url: &str) -> Option<String> {
     })
 }
 
-enum WsEvent {
-    Data(Vec<u8>),
-    Closed,
+// ---- websocket frame queues: the one place a peer's burst piles up --------------------------------
+//
+// A socket has two frame queues between the guest and the network, and both used to be unbounded
+// `mpsc` channels: a guest that stopped reading while a chatty peer (WhatsApp, a relay) kept sending,
+// or a guest that sent faster than a stalled network drained, grew the node's memory for as long as
+// the connection lived. Neither side has to cooperate for that. Both queues are bounded here.
+//
+// What happens at the bound is a **close**, not a drop: a websocket stream that silently loses a
+// frame is a corrupted protocol rather than a bounded one, so the connection ends where the guest can
+// see it (`-32`) and the node counts it (`ws_bound_closes`). The frames are counted, not logged with
+// their bytes.
+
+/// Inbound frames held for a guest that is behind, and the bytes across them. Both, because one
+/// frame may be `MAX_MESSAGE` (32 MiB): a frame count alone would not bound memory.
+pub const WS_INBOUND_FRAMES: usize = 256;
+pub const WS_INBOUND_BYTES: usize = 16 << 20;
+/// Outbound frames a guest may have written that the socket has not taken yet.
+pub const WS_OUTBOUND_FRAMES: usize = 64;
+
+/// Connections this process closed because one of their frame queues reached its bound.
+static WS_BOUND_CLOSES: AtomicU64 = AtomicU64::new(0);
+
+/// How many websocket connections this process closed at a frame-queue bound. A close is visible to
+/// the guest on its own; this is how a reader tells "the peer went away" from "the node refused to
+/// hold more".
+pub fn ws_bound_closes() -> u64 {
+    WS_BOUND_CLOSES.load(Ordering::Relaxed)
+}
+
+fn count_bound_close(direction: &str, frames: usize, bytes: usize) {
+    WS_BOUND_CLOSES.fetch_add(1, Ordering::Relaxed);
+    eprintln!("[service] wa_ws {direction} queue over its bound ({frames} frames, {bytes} bytes); closing");
+}
+
+/// The frames the pump has queued for the guest, bounded by [`WS_INBOUND_FRAMES`] and
+/// [`WS_INBOUND_BYTES`], plus the one closed flag both runners read.
+struct Inbound {
+    state: Mutex<InboundState>,
+    /// Wakes a 0.2 guest task waiting on `poll_next` when a frame is queued or the stream ends.
+    notify: Arc<Notify>,
+}
+
+struct InboundState {
+    frames: VecDeque<Vec<u8>>,
+    bytes: usize,
+    closed: bool,
+    /// Set when this node ended the connection because a queue reached its bound (as opposed to the
+    /// peer ending it), so a guest or a test can tell the two apart.
+    overflowed: bool,
+}
+
+impl Inbound {
+    fn new(notify: Arc<Notify>) -> Arc<Inbound> {
+        Arc::new(Inbound {
+            state: Mutex::new(InboundState { frames: VecDeque::new(), bytes: 0, closed: false, overflowed: false }),
+            notify,
+        })
+    }
+
+    /// Queue one frame. `Err((frames, bytes))` is the bound: the caller closes the connection instead
+    /// of dropping the frame, and reports what was held when it did.
+    fn push(&self, data: Vec<u8>) -> Result<(), (usize, usize)> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed {
+            return Err((state.frames.len(), state.bytes));
+        }
+        if state.frames.len() + 1 > WS_INBOUND_FRAMES || state.bytes + data.len() > WS_INBOUND_BYTES {
+            return Err((state.frames.len(), state.bytes));
+        }
+        state.bytes += data.len();
+        state.frames.push_back(data);
+        drop(state);
+        self.notify.notify();
+        Ok(())
+    }
+
+    /// The stream ended - peer close, a read error, or this node's own bound. Always succeeds, even at
+    /// the bound, because the closed flag is not a queue entry.
+    fn close(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.notify.notify();
+    }
+
+    fn take(&self) -> Option<Vec<u8>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let frame = state.frames.pop_front()?;
+        state.bytes -= frame.len();
+        Some(frame)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed
+    }
+
+    fn mark_overflow(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).overflowed = true;
+    }
+
+    fn is_overflowed(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).overflowed
+    }
+
+    fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.notify.poll(cx)
+    }
 }
 
 pub struct WsConn {
-    out: Sender<Option<Vec<u8>>>,
-    inbound: Receiver<WsEvent>,
+    /// Frames the guest sent that the socket has not taken yet, bounded: `send` closes rather than
+    /// growing this for a socket that cannot keep up.
+    out: SyncSender<Vec<u8>>,
+    /// Set when this side ends the connection (drop, or an outbound overflow); the pump closes the
+    /// socket and exits instead of draining what is left.
+    stop: Arc<AtomicBool>,
+    inbound: Arc<Inbound>,
     pending: Option<Vec<u8>>,
     closed: bool,
-    /// Wakes a 0.2 guest task waiting on `poll_next` when the pump moves a frame.
-    notify: Arc<Notify>,
 }
 
 impl WsConn {
@@ -157,25 +264,25 @@ impl WsConn {
             tungstenite::stream::MaybeTlsStream::Rustls(s) => s.get_mut().set_read_timeout(timeout).map_err(|e| e.to_string())?,
             _ => return Err("unsupported stream".into()),
         }
-        let (out_tx, out_rx) = mpsc::channel::<Option<Vec<u8>>>();
-        let (in_tx, in_rx) = mpsc::channel::<WsEvent>();
-        let notify = Notify::new();
-        let wake = notify.clone();
+        let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u8>>(WS_OUTBOUND_FRAMES);
+        let inbound = Inbound::new(Notify::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (pump_inbound, pump_stop) = (inbound.clone(), stop.clone());
         std::thread::Builder::new()
             .name("wa-service-ws".into())
-            .spawn(move || pump(socket, out_rx, in_tx, wake))
+            .spawn(move || pump(socket, out_rx, pump_inbound, pump_stop))
             .map_err(|e| e.to_string())?;
-        Ok(WsConn { out: out_tx, inbound: in_rx, pending: None, closed: false, notify })
+        Ok(WsConn { out: out_tx, stop, inbound, pending: None, closed: false })
     }
 
     fn fill(&mut self) {
         if self.pending.is_some() || self.closed {
             return;
         }
-        match self.inbound.try_recv() {
-            Ok(WsEvent::Data(data)) => self.pending = Some(data),
-            Ok(WsEvent::Closed) | Err(TryRecvError::Disconnected) => self.closed = true,
-            Err(TryRecvError::Empty) => {}
+        match self.inbound.take() {
+            Some(data) => self.pending = Some(data),
+            None if self.inbound.is_closed() || self.stop.load(Ordering::Relaxed) => self.closed = true,
+            None => {}
         }
     }
 
@@ -192,58 +299,79 @@ impl WsConn {
         self.pending.take()
     }
 
+    /// Did this node end the connection because a frame queue reached its bound? The guest sees the
+    /// same thing either way (`CLOSED`); this is what tells the two apart for a reader diagnosing it.
+    pub fn over_bound(&self) -> bool {
+        self.inbound.is_overflowed()
+    }
+
     /// The next inbound frame (`Some`), or `None` once the peer closed, for a 0.2 guest stream:
     /// `Poll::Pending` registers the caller so the pump's `notify` re-polls it. The race between
     /// "no frame yet" and "register" cannot lose a frame: the pump queues before it notifies.
     pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Vec<u8>>> {
-        match self.inbound.try_recv() {
-            Ok(WsEvent::Data(data)) => Poll::Ready(Some(data)),
-            Ok(WsEvent::Closed) | Err(TryRecvError::Disconnected) => {
-                self.closed = true;
-                Poll::Ready(None)
-            }
-            Err(TryRecvError::Empty) => {
-                if self.notify.poll(cx).is_ready() {
-                    return self.poll_next(cx);
-                }
-                Poll::Pending
-            }
+        if let Some(data) = self.inbound.take() {
+            return Poll::Ready(Some(data));
         }
+        if self.inbound.is_closed() || self.stop.load(Ordering::Relaxed) {
+            self.closed = true;
+            return Poll::Ready(None);
+        }
+        if self.inbound.poll(cx).is_ready() {
+            return self.poll_next(cx);
+        }
+        Poll::Pending
     }
 
+    /// Send one frame. `0` means it is queued; [`CLOSED`] means the stream ended - the peer, this
+    /// side's drop, or the outbound queue reaching its bound.
     pub fn send(&self, data: Vec<u8>) -> i32 {
-        if self.closed || self.out.send(Some(data)).is_err() {
-            CLOSED
-        } else {
-            0
+        if self.closed || self.stop.load(Ordering::Relaxed) || self.inbound.is_closed() {
+            return CLOSED;
+        }
+        match self.out.try_send(data) {
+            Ok(()) => 0,
+            Err(TrySendError::Full(_)) => {
+                self.inbound.mark_overflow();
+                count_bound_close("outbound", WS_OUTBOUND_FRAMES, 0);
+                self.stop.store(true, Ordering::Relaxed);
+                CLOSED
+            }
+            Err(TrySendError::Disconnected(_)) => CLOSED,
         }
     }
 }
 
 impl Drop for WsConn {
     fn drop(&mut self) {
-        let _ = self.out.send(None);
+        self.stop.store(true, Ordering::Relaxed);
+        self.inbound.close();
     }
 }
 
 type Socket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
 
-fn pump(mut socket: Socket, out: Receiver<Option<Vec<u8>>>, inbound: Sender<WsEvent>, notify: Arc<Notify>) {
+fn pump(mut socket: Socket, out: Receiver<Vec<u8>>, inbound: Arc<Inbound>, stop: Arc<AtomicBool>) {
     use tungstenite::{Error, Message};
     loop {
+        if stop.load(Ordering::Relaxed) {
+            let _ = socket.close(None);
+            let _ = socket.flush();
+            inbound.close();
+            return;
+        }
         loop {
             match out.try_recv() {
-                Ok(Some(data)) => {
+                Ok(data) => {
                     if let Err(error) = socket.send(Message::Binary(data.into())) {
                         eprintln!("[service] wa_ws send error: {error}");
-                        let _ = inbound.send(WsEvent::Closed);
-                        notify.notify();
+                        inbound.close();
                         return;
                     }
                 }
-                Ok(None) | Err(TryRecvError::Disconnected) => {
+                Err(TryRecvError::Disconnected) => {
                     let _ = socket.close(None);
                     let _ = socket.flush();
+                    inbound.close();
                     return;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -251,21 +379,23 @@ fn pump(mut socket: Socket, out: Receiver<Option<Vec<u8>>>, inbound: Sender<WsEv
         }
         match socket.read() {
             Ok(Message::Binary(data)) if data.len() <= MAX_MESSAGE => {
-                if inbound.send(WsEvent::Data(data.to_vec())).is_err() {
+                if let Err((frames, bytes)) = inbound.push(data.to_vec()) {
+                    inbound.mark_overflow();
+                    count_bound_close("inbound", frames, bytes);
+                    let _ = socket.close(None);
+                    let _ = socket.flush();
+                    inbound.close();
                     return;
                 }
-                notify.notify();
             }
             Ok(Message::Close(frame)) => {
                 eprintln!("[service] wa_ws closed by peer: {frame:?}");
-                let _ = inbound.send(WsEvent::Closed);
-                notify.notify();
+                inbound.close();
                 return;
             }
             Ok(Message::Binary(data)) => {
                 eprintln!("[service] wa_ws message over limit ({} bytes); closing", data.len());
-                let _ = inbound.send(WsEvent::Closed);
-                notify.notify();
+                inbound.close();
                 return;
             }
             Ok(_) => {} // ping/pong/text: tungstenite answers pings on the next flush
@@ -274,8 +404,7 @@ fn pump(mut socket: Socket, out: Receiver<Option<Vec<u8>>>, inbound: Sender<WsEv
             }
             Err(error) => {
                 eprintln!("[service] wa_ws read error: {error}");
-                let _ = inbound.send(WsEvent::Closed);
-                notify.notify();
+                inbound.close();
                 return;
             }
         }
@@ -464,5 +593,112 @@ mod tests {
         assert_eq!(url_authority("http://127.0.0.1:8080/x").as_deref(), Some("127.0.0.1:8080"));
         assert_eq!(url_authority("ftp://x/"), None);
         assert_eq!(url_authority("https://user@host/"), None);
+    }
+
+    /// The inbound queue's bound, both ways it can be reached: a peer sending more frames than it
+    /// holds, and a peer sending few frames that are large. The third assertion is the documented
+    /// behaviour at the bound - the push is refused (the caller closes) - and the fourth is that a
+    /// refusal is not a loss: what was held before the bound is still readable, in order.
+    #[test]
+    fn the_inbound_queue_stops_at_its_frame_and_byte_bounds() {
+        let inbound = Inbound::new(Notify::new());
+        for i in 0..WS_INBOUND_FRAMES {
+            assert!(inbound.push(vec![i as u8]).is_ok(), "frame {i} fits the bound");
+        }
+        let (frames, bytes) = inbound.push(vec![0]).unwrap_err();
+        assert_eq!((frames, bytes), (WS_INBOUND_FRAMES, WS_INBOUND_FRAMES), "the refusal names what it held");
+        assert!(!inbound.is_closed(), "a refused push does not close the stream by itself");
+        for i in 0..WS_INBOUND_FRAMES {
+            assert_eq!(inbound.take(), Some(vec![i as u8]), "every frame held before the bound is still there, in order");
+        }
+        assert_eq!(inbound.take(), None);
+
+        // The byte bound, reached with one frame per push.
+        let inbound = Inbound::new(Notify::new());
+        let big = vec![0u8; WS_INBOUND_BYTES / 2];
+        assert!(inbound.push(big.clone()).is_ok());
+        assert!(inbound.push(big.clone()).is_ok());
+        let (frames, bytes) = inbound.push(vec![0]).unwrap_err();
+        assert_eq!((frames, bytes), (2, WS_INBOUND_BYTES), "a frame count alone would not bound memory");
+
+        // Closing is not a queue entry: it succeeds even with the queue full, and it is what the
+        // guest's stream ends on.
+        inbound.close();
+        assert!(inbound.is_closed());
+        assert!(inbound.take().is_some(), "close keeps the frames already held");
+    }
+
+    /// End to end over a real loopback socket: a peer that keeps sending while the guest does not
+    /// read is closed at the bound, the guest sees `CLOSED` after the frames that were held, and the
+    /// process counts it. Before this the queue grew for as long as the connection lived.
+    #[test]
+    fn a_guest_that_stops_reading_ends_the_socket_at_the_bound() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut socket = tungstenite::accept(stream).expect("handshake");
+            let frame = vec![7u8; 4096];
+            for _ in 0..(WS_INBOUND_FRAMES + 16) {
+                match socket.send(tungstenite::Message::Binary(frame.clone().into())) {
+                    Ok(()) => {},
+                    // The node closed the socket at the bound: exactly what the bound is for.
+                    Err(_) => break,
+                }
+            }
+            let _ = socket.flush();
+        });
+
+        let before = ws_bound_closes();
+        let mut conn = WsConn::open(&format!("ws://127.0.0.1:{port}/"), None).expect("connect");
+        // The guest is not reading: give the pump time to fill the queue and hit the bound.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !conn.over_bound() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(conn.over_bound(), "the connection was closed at the bound, not left to grow");
+        assert!(ws_bound_closes() > before, "and the close is counted for the process");
+
+        // The frames held before the close are all there, and then the stream ends.
+        let mut held = 0usize;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match conn.next() {
+                n if n > 0 => {
+                    held += 1;
+                    assert!(conn.take().is_some());
+                },
+                CLOSED => break,
+                _ if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                _ => panic!("the stream never ended after the bound"),
+            }
+        }
+        assert!(held <= WS_INBOUND_FRAMES, "at most the bound was held ({held})");
+        server.join().unwrap();
+    }
+
+    /// The outbound bound: a guest writing faster than the socket drains is refused at the bound
+    /// instead of growing a queue. The pump is not reading here (the connection is never reversed),
+    /// so the socket buffer plus `WS_OUTBOUND_FRAMES` is the whole budget.
+    #[test]
+    fn the_outbound_queue_is_bounded_and_refuses_at_the_bound() {
+        let (out, rx) = mpsc::sync_channel::<Vec<u8>>(WS_OUTBOUND_FRAMES);
+        let stop = Arc::new(AtomicBool::new(false));
+        let inbound = Inbound::new(Notify::new());
+        let mut conn = WsConn { out, stop: stop.clone(), inbound, pending: None, closed: false };
+        let mut refused = 0usize;
+        for _ in 0..(WS_OUTBOUND_FRAMES + 8) {
+            if conn.send(vec![0u8; 16]) == CLOSED {
+                refused += 1;
+            }
+        }
+        assert!(refused > 0, "a full outbound queue refuses instead of queuing without bound");
+        assert!(stop.load(Ordering::Relaxed), "and it ends the connection, so the guest sees why");
+        assert_eq!(conn.send(vec![0u8; 16]), CLOSED);
+        assert_eq!(conn.next(), CLOSED, "the guest reads the close, not a silent drop");
+        let drained: Vec<Vec<u8>> = rx.try_iter().collect();
+        assert_eq!(drained.len(), WS_OUTBOUND_FRAMES, "exactly the bound was accepted");
     }
 }
