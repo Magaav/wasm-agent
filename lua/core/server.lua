@@ -216,12 +216,45 @@ end
 -- door (binding_cli), same words (BIND / PERMANENT / ACCEPT / ACCEPT-PERMANENT / PROMOTE / DEMOTE / REVOKE).
 local control_pending = {}
 local CONTROL_TTL = 600
+-- One pending confirmation per session. Pruning used to happen only when *that* session came back, so
+-- a session that asked once and never returned left its entry here for the life of the interpreter:
+-- a cache that only grew. Every insert now sweeps the expired entries and, as the last resort for a
+-- burst of sessions inside one TTL, the oldest one. Both are counted nowhere but here, which is why
+-- the size is readable (`wa_control_pending_count`).
+local CONTROL_MAX = 64
 local CONTROL_WORD = { BIND = true, PERMANENT = true, ACCEPT = true, ["ACCEPT-PERMANENT"] = true,
   PROMOTE = true, DEMOTE = true, REVOKE = true }
 local CONTROL_FOR = { binding_consent_required = "BIND", binding_permanent_consent_required = "PERMANENT",
   binding_accept_confirmation_required = "ACCEPT",
   binding_accept_permanent_confirmation_required = "ACCEPT-PERMANENT",
   binding_revoke_confirmation_required = "REVOKE" }
+-- Drop the sessions whose pending confirmation outlived the TTL, then the oldest one if the table is
+-- still over its cap. `keep` is the session being inserted: its entry is never the one swept.
+local function control_sweep(keep, now)
+  local live, oldest_key, oldest_at = 0, nil, nil
+  for key, value in pairs(control_pending) do
+    if key ~= keep and now - (value.at or 0) > CONTROL_TTL then
+      control_pending[key] = nil
+    else
+      live = live + 1
+      if key ~= keep and (not oldest_at or (value.at or 0) < oldest_at) then
+        oldest_key, oldest_at = key, value.at or 0
+      end
+    end
+  end
+  if live > CONTROL_MAX and oldest_key ~= nil then
+    control_pending[oldest_key] = nil
+    live = live - 1
+  end
+  return live
+end
+-- How many sessions are waiting to say the word. Bounded by `control_sweep`, and exposed so the bound
+-- is observable rather than assumed (scripts/test-control-pending-bound.lua).
+function wa_control_pending_count()
+  local count = 0
+  for _ in pairs(control_pending) do count = count + 1 end
+  return count
+end
 local function run_control(command, arg, session, word)
   local lines = {}
   local asked = word and function() return word end or function() return "" end
@@ -230,7 +263,11 @@ local function run_control(command, arg, session, word)
   local code = type(result) == "table" and result.error or nil
   local need = code and (CONTROL_FOR[code] or (code == "binding_role_confirmation_required"
     and (command == "promote" and "PROMOTE" or "DEMOTE")))
-  if need then control_pending[session] = { command = command, arg = arg, word = need, at = host.now() } end
+  if need then
+    local entry = { command = command, arg = arg, word = need, at = host.now() }
+    control_pending[session] = entry
+    control_sweep(session, entry.at)
+  end
   return table.concat(lines, "\n")
 end
 -- Returns the control's own text for a message that is one, and nil for ordinary conversation.
