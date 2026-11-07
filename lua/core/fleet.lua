@@ -10,11 +10,25 @@
 -- own `policy.json` with a backup, write the roster, enable the flag for the next start), and then
 -- proves it with a mesh call that <node> decides by the roster.
 --
--- What never travels: the fleet private key. The request carries a signature made with *this* node's
--- key, a signed roster and a public key. Nothing here can sign as the fleet.
+-- The merged `mesh` section is the whole statement a *running* node needs, because it cannot be
+-- restarted to be given one: `enabled`, the roster, and the listener's port — taken from the roster's
+-- own address for <node> (the only "where this node answers" a relayed push carries), so the node's
+-- live mount opens the listener on its next poll (rust/wa-mesh/src/host_call.rs). A target the roster
+-- gives no address keeps its own `mesh.port`, and the answer says it is not listening.
 --
+-- The roster itself is made with the operator's tools, which never travel and never need a node:
+--
+--   wa fleet keygen --out ~/fleet/ohana.key          create the fleet key, print its public key
+--   wa fleet sign roster.json --key ~/fleet/ohana.key --expires-days 90
+--   wa fleet show roster.signed.json                 verify it and print the levels
 --   wa fleet push-roster nextcloud
 --   wa fleet push-roster nextcloud --replace-key <hex>    re-anchor a node that pins another key
+--
+-- `keygen`, `sign` and `show` are dispatched by the Rust host (wa_mesh::fleetkey) before this module
+-- is reached; `push-roster` is here because it needs this node's identity, policy and relay.
+--
+-- What never travels: the fleet private key. The request carries a signature made with *this* node's
+-- key, a signed roster and a public key. Nothing here can sign as the fleet.
 --
 -- `--replace-key <hex>` is the *old* fleet key's signature over
 -- `mesh-anchor-v1|<new key>|<roster fingerprint>`, which only the operator who holds that key can
@@ -133,6 +147,11 @@ local function verify(peer, capability)
 end
 
 function M.usage()
+  print('wa fleet keygen --out <path>          create the fleet key (ed25519, mode 0600), print its public key')
+  print('wa fleet sign <roster.json> --key <path> [--expires-days N] [--out <path>]')
+  print('    sign the roster and write <name>.signed.json; refuses unknown fields and duplicate ids')
+  print('wa fleet show <roster.json> [--key <hex|path>]')
+  print('    verify a roster and print its levels (this node\'s policy.json key by default)')
   print('wa fleet push-roster <node> [--replace-key <hex>]')
   print('    install the signed fleet roster on <node>, from a node it already accepts as an')
   print('    operator, then verify it with a mesh call (docs/MESH.md §7). The fleet private key')
@@ -197,6 +216,9 @@ function M.run(sub, rest)
       fleet = pushed.fleet, fingerprint = pushed.fingerprint, nodes = pushed.nodes,
       roster_key = pushed.roster_key, previous_key = pushed.previous_key,
       backup = pushed.backup, roster_path = pushed.roster_path, env = pushed.env,
+      -- The listener the *running* target now mounts (or why it does not): a port means the next
+      -- poll of its mount opens the socket, with no restart.
+      port = pushed.port, bind = pushed.bind, listener = pushed.listener,
     },
     verification = checked,
     privacy = 'the fleet private key never left this node',

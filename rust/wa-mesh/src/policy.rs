@@ -79,6 +79,17 @@ pub struct MeshPolicy {
     /// back to today's admission, never to anything weaker.
     #[serde(default)]
     pub enabled: bool,
+    /// The port this node's mesh listener answers on, when the environment does not name one.
+    ///
+    /// Enabling the mesh on a live node cannot change a live process's environment, so a node that is
+    /// turned on by its own policy needs the rest of the statement there too
+    /// ([`crate::host_call::Settings`]: environment first, then these, then off). `None` means "no
+    /// port was written", never "pick one": a flag alone must not open a port nobody meant to open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// The address the listener binds (default `127.0.0.1`; `0.0.0.0` for a LAN-visible fleet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<String>,
     #[serde(default)]
     pub grants: Vec<Grant>,
 }
@@ -90,6 +101,8 @@ impl Default for MeshPolicy {
             roster_key: String::new(),
             roster: None,
             enabled: false,
+            port: None,
+            bind: None,
             grants: Vec::new(),
         }
     }
@@ -146,6 +159,18 @@ impl MeshPolicy {
             && (self.roster_key.len() != 64 || self.roster_key.chars().any(|c| !c.is_ascii_hexdigit()))
         {
             return bad("roster_key must be 64 hex characters (an ed25519 public key)");
+        }
+        if self.port == Some(0) {
+            return bad("port must be 1..=65535 (0 would let the system pick one)");
+        }
+        if let Some(bind) = &self.bind {
+            let bind = bind.trim();
+            if bind.is_empty() || bind.len() > 253 {
+                return bad("bind must be a host or address, 1..=253 bytes");
+            }
+            if bind.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return bad("bind must not contain whitespace or control characters");
+            }
         }
         for (index, grant) in self.grants.iter().enumerate() {
             for (field, pattern) in [

@@ -16,6 +16,7 @@
 //! | `{node, capability, dry_run: true}` | the verdict only, no network | an operator, and a test |
 //! | `{admit: {headers, body, transport}}` | the roster's decision on an *inbound* envelope | the node's own admission (Lua), so pins are not the authority when a roster is |
 //! | `{seal: {reply, caller}}` | the signed answer to send back | the same, for a relayed answer |
+//! | `{attest: {caller, verb, capability, signature}}` | the node-signed proof a managed node admits by verb | the mount, and `scripts/test-mesh-attest.lua` |
 //! | `{verify_roster: {text, key}}` | whether a roster verifies against a key | `wa fleet push-roster` (never behind the flag) |
 //! | `{roster_plan: {…}}` | what a push would change | `wa fleet push-roster --dry-run` |
 //! | `{install_roster: {…}}` | what a push changed | the target of `wa fleet push-roster` |
@@ -33,6 +34,7 @@
 //! | listener port | `WASM_AGENT_MESH_PORT` | none: a flag alone never opens a port |
 //! | listener address | `WASM_AGENT_MESH_BIND` | `127.0.0.1` |
 use crate::admission::{self, Admission, Admitter, Inbound};
+use crate::attest;
 use crate::audit::{FileSink, Sink, StderrSink, Tee};
 use crate::cache::PeerCache;
 use crate::client::{Client, ClientConfig, Inner};
@@ -47,7 +49,8 @@ use crate::wire;
 use serde_json::{json, Value};
 use std::ffi::c_int;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use wa_host_support::json::push_json;
 use wa_host_support::lua::{arg_string, LuaState};
@@ -74,6 +77,355 @@ fn policy_enabled() -> bool {
     MeshPolicy::from_policy_file(&Paths::resolve().policy)
         .map(|policy| policy.enabled)
         .unwrap_or(false)
+}
+
+/// Is the mesh in force on this node *right now*, for a path that is not the mount (the relay hop)?
+///
+/// The process flag, or the operator's `mesh.enabled` — read per call, because a roster pushed to a
+/// running node cannot restart it ([`crate::admission::in_force`]). A policy that cannot be read is a
+/// `false` here: the relay hop then runs today's admission, never a guess.
+pub fn enabled_at_runtime() -> bool {
+    enabled() || policy_enabled()
+}
+
+/// The address the listener binds when nothing says otherwise: loopback, so a flag alone never opens
+/// a port to the LAN.
+pub const DEFAULT_BIND: &str = "127.0.0.1";
+/// How often the supervisor re-reads this node's settings when the environment does not say.
+pub const SUPERVISOR_POLL: Duration = Duration::from_millis(1000);
+pub const SUPERVISOR_POLL_ENV: &str = "WASM_AGENT_MESH_POLL_MS";
+
+/// What this node's files and process environment say the mesh should be doing now.
+///
+/// The order is the one the rest of the node uses — **environment first, then the persisted setting,
+/// then the default** (`off`, and no port) — and each answer carries where it came from, because the
+/// supervisor logs one line when the state changes and an operator has to be able to tell a flag from
+/// a pushed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    pub enabled: bool,
+    pub port: Option<u16>,
+    pub bind: String,
+    pub enabled_from: &'static str,
+    pub port_from: &'static str,
+    pub bind_from: &'static str,
+}
+
+impl Settings {
+    pub fn resolve(policy: &MeshPolicy) -> Settings {
+        let (enabled, enabled_from) = if admission::flag_on() {
+            (true, "environment WA_MESH")
+        } else if policy.enabled {
+            (true, "policy.json mesh.enabled")
+        } else {
+            (false, "default off")
+        };
+        let (port, port_from) = match env("WASM_AGENT_MESH_PORT")
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+        {
+            Some(port) => (Some(port), "environment WASM_AGENT_MESH_PORT"),
+            None => match policy.port {
+                Some(port) => (Some(port), "policy.json mesh.port"),
+                None => (None, "unset"),
+            },
+        };
+        let (bind, bind_from) = match env("WASM_AGENT_MESH_BIND") {
+            Some(bind) => (bind, "environment WASM_AGENT_MESH_BIND"),
+            None => match policy.bind.as_deref().map(str::trim).filter(|bind| !bind.is_empty()) {
+                Some(bind) => (bind.to_string(), "policy.json mesh.bind"),
+                None => (DEFAULT_BIND.to_string(), "default"),
+            },
+        };
+        Settings { enabled, port, bind, enabled_from, port_from, bind_from }
+    }
+
+    /// The `host:port` the listener would bind, when this node is on and a port was named.
+    pub fn bind_address(&self) -> Option<String> {
+        self.port.map(|port| format!("{}:{port}", self.bind))
+    }
+}
+
+/// What the mount is doing, for `/health`, an operator, and the tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MountStatus {
+    pub enabled: bool,
+    pub port: Option<u16>,
+    pub bind: String,
+    pub listening: bool,
+    pub addr: String,
+    pub roster: String,
+    pub roster_verified: bool,
+    /// The last thing the supervisor did or could not do: `mounted`, `unmounted`, or the reason.
+    pub reason: String,
+    /// How many times the mount changed state (a mount, an unmount, a rebind).
+    pub changes: u32,
+    pub mounts: u32,
+    pub unmounts: u32,
+    pub poll_ms: u64,
+}
+
+impl MountStatus {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "enabled": self.enabled,
+            "port": self.port,
+            "bind": self.bind,
+            "listening": self.listening,
+            "addr": self.addr,
+            "roster": self.roster,
+            "roster_verified": self.roster_verified,
+            "reason": self.reason,
+            "changes": self.changes,
+            "mounts": self.mounts,
+            "unmounts": self.unmounts,
+            "poll_ms": self.poll_ms,
+        })
+    }
+}
+
+struct Mounted {
+    server: Server,
+    bind: String,
+    port: u16,
+}
+
+/// The live mount of the mesh listener: one thread re-reading this node's settings.
+///
+/// `WA_MESH=1` is a process switch and a live process cannot change its environment, so enabling the
+/// mesh on a running node has to be a file the node re-reads. This thread is that re-read: it resolves
+/// [`Settings`] (environment, then `policy.json`'s `mesh` section, then off), and **mounts the
+/// listener** when the node turns the mesh on with a port, **moves it** when the port or bind changes,
+/// and **unmounts it** — closing the socket and freeing the port — when the node turns it off. No
+/// restart, and no restart-shaped gap: the roster is read per call by the listener's own source, so a
+/// node that comes up this way decides by the roster on its very next call.
+///
+/// Everything the thread owns (`Server`) is dropped by dropping the [`Supervisor`], which joins it: the
+/// node's shutdown path stays the one thing that ends a listener.
+pub struct Supervisor {
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+    status: Arc<Mutex<MountStatus>>,
+    poll: Duration,
+}
+
+impl Supervisor {
+    /// The mount's state, as of the last poll.
+    pub fn status(&self) -> MountStatus {
+        self.status.lock().map(|status| status.clone()).unwrap_or_default()
+    }
+
+    pub fn poll(&self) -> Duration {
+        self.poll
+    }
+}
+
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn poll_interval() -> Duration {
+    env(SUPERVISOR_POLL_ENV)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|ms| Duration::from_millis(ms.clamp(20, 60_000)))
+        .unwrap_or(SUPERVISOR_POLL)
+}
+
+/// Start the live mount for a node whose own HTTP port is `node_port`.
+///
+/// Always started (the poll is cheap and a node that is off must still notice being turned on); the
+/// listener is opened only when the settings say so. `node_port` is where an admitted call is handed
+/// to this process's own `/node/admitted`.
+pub fn spawn_supervisor(node_port: u16) -> Supervisor {
+    let stop = Arc::new(AtomicBool::new(false));
+    let poll = poll_interval();
+    let status = Arc::new(Mutex::new(MountStatus {
+        bind: DEFAULT_BIND.to_string(),
+        poll_ms: poll.as_millis() as u64,
+        ..MountStatus::default()
+    }));
+    let thread_stop = stop.clone();
+    let thread_status = status.clone();
+    let join = std::thread::Builder::new()
+        .name("wa-mesh-mount".into())
+        .spawn(move || supervise(node_port, poll, thread_stop, thread_status))
+        .map_err(|error| eprintln!("[mesh] the mount supervisor could not start: {error}"))
+        .ok();
+    Supervisor { stop, join, status, poll }
+}
+
+fn publish(status: &Arc<Mutex<MountStatus>>, next: MountStatus) {
+    if let Ok(mut held) = status.lock() {
+        *held = next;
+    }
+}
+
+/// The settings file's timestamp, so a node that is not being reconfigured costs one `stat` a second
+/// rather than a JSON parse. `None` when the file does not exist (then it is re-read: cheap, and the
+/// node may be about to be given one).
+fn policy_stamp(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
+}
+
+fn supervise(node_port: u16, poll: Duration, stop: Arc<AtomicBool>, status: Arc<Mutex<MountStatus>>) {
+    let mut mounted: Option<Mounted> = None;
+    let mut last_problem = String::new();
+    let mut cached: Option<(std::time::SystemTime, Option<MeshPolicy>)> = None;
+    while !stop.load(Ordering::SeqCst) {
+        let paths = Paths::resolve();
+        // A policy that cannot be read is not "off": the node cannot be sure what it says, and taking
+        // a listener down (or bringing one up) on a partial read would be the silent surprise this
+        // whole file exists to avoid. The last state stands, and the reason is on stderr once.
+        let stamp = policy_stamp(&paths.policy);
+        let policy = match (&cached, stamp) {
+            // Unchanged since the last read: the answer cannot have changed either.
+            (Some((cached_stamp, policy)), Some(stamp)) if *cached_stamp == stamp => policy.clone(),
+            _ => {
+                let loaded = match MeshPolicy::from_policy_file(&paths.policy) {
+                    Ok(policy) => Some(policy),
+                    Err(error) => {
+                        if last_problem != error.0 {
+                            eprintln!("[mesh] policy unreadable, leaving the mount as it is: {}", error.0);
+                            last_problem = error.0;
+                        }
+                        None
+                    }
+                };
+                if let Some(stamp) = stamp {
+                    cached = Some((stamp, loaded.clone()));
+                }
+                loaded
+            }
+        };
+        if let Some(policy) = policy {
+            let settings = Settings::resolve(&policy);
+            let paths = paths.with_policy(&policy);
+            let desired = if settings.enabled { settings.port } else { None };
+            let same = match (&mounted, desired) {
+                (Some(mounted), Some(port)) => mounted.port == port && mounted.bind == settings.bind,
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                // Unmount first: a port change must not leave the old socket bound while the new one
+                // is attempted, or a failed rebind would look like "still listening" with the wrong
+                // settings.
+                if let Some(closed) = mounted.take() {
+                    let addr = closed.server.local_addr().to_string();
+                    drop(closed);
+                    let mut next = status.lock().map(|held| held.clone()).unwrap_or_default();
+                    next.enabled = settings.enabled;
+                    next.port = settings.port;
+                    next.bind = settings.bind.clone();
+                    next.listening = false;
+                    next.addr.clear();
+                    next.unmounts = next.unmounts.saturating_add(1);
+                    next.changes = next.changes.saturating_add(1);
+                    next.reason = if desired.is_none() {
+                        if settings.enabled {
+                            "unmounted: mesh.enabled is on but no port is configured".to_string()
+                        } else {
+                            "unmounted: policy.json mesh.enabled is off".to_string()
+                        }
+                    } else {
+                        format!("moved: {} is no longer the configured address", addr)
+                    };
+                    eprintln!("[mesh] {} ({addr} closed)", next.reason);
+                    publish(&status, next);
+                }
+                if let Some(port) = desired {
+                    match start_listener(&paths, &policy, &settings, port, node_port) {
+                        Ok((server, roster_verified, roster)) => {
+                            let addr = server.local_addr().to_string();
+                            let mut next = status.lock().map(|held| held.clone()).unwrap_or_default();
+                            next.enabled = true;
+                            next.port = Some(port);
+                            next.bind = settings.bind.clone();
+                            next.listening = true;
+                            next.addr = addr.clone();
+                            next.roster = roster.clone();
+                            next.roster_verified = roster_verified;
+                            next.mounts = next.mounts.saturating_add(1);
+                            next.changes = next.changes.saturating_add(1);
+                            next.reason = "mounted".to_string();
+                            eprintln!(
+                                "[mesh] listening on {addr} (roster {roster}{})",
+                                if roster_verified { ", verified" } else { ", NOT verified: today's pins decide" }
+                            );
+                            publish(&status, next);
+                            last_problem.clear();
+                            mounted = Some(Mounted { server, bind: settings.bind.clone(), port });
+                        }
+                        Err(error) => {
+                            let mut next = status.lock().map(|held| held.clone()).unwrap_or_default();
+                            next.enabled = true;
+                            next.port = Some(port);
+                            next.bind = settings.bind.clone();
+                            next.listening = false;
+                            next.reason = format!("not mounted: {error}");
+                            if last_problem != error {
+                                eprintln!("[mesh] listener not started on {}:{port}: {error}", settings.bind);
+                                last_problem = error;
+                            }
+                            publish(&status, next);
+                        }
+                    }
+                }
+            } else {
+                // Nothing to change. Keep the reported settings current anyway (a node that was never
+                // mounted still answers for `/health` with what it *would* do).
+                if let Ok(mut held) = status.lock() {
+                    held.enabled = settings.enabled;
+                    held.port = settings.port;
+                    held.bind = settings.bind.clone();
+                }
+            }
+        }
+        std::thread::sleep(poll);
+    }
+    // The node is going away: closing the socket is the supervisor's last act, in its own thread, so
+    // a dropped `Server` never blocks the caller that asked the node to stop.
+    drop(mounted);
+}
+
+fn start_listener(
+    paths: &Paths,
+    policy: &MeshPolicy,
+    settings: &Settings,
+    port: u16,
+    node_port: u16,
+) -> Result<(Server, bool, String), String> {
+    let identity = Identity::load(&paths.key)?;
+    let handler_identity = Identity::load(&paths.key)?;
+    let roster_file = paths
+        .roster
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let roster_verified = Roster::from_file(&paths.roster)
+        .and_then(|roster| roster.verify(&policy.roster_key, wire::now_seconds()))
+        .is_ok();
+    let handler = Arc::new(
+        LoopbackHandler::new(node_port, Duration::from_secs(120)).with_identity(handler_identity),
+    );
+    let source: Arc<dyn admission::Source> = Arc::new(admission::NodeFiles {
+        policy: paths.policy.clone(),
+        roster: paths.roster.clone(),
+        config: paths.config.clone(),
+    });
+    let bind = format!("{}:{port}", settings.bind);
+    let server = Server::start(ServerConfig::with_source(bind, identity, source, handler, audit_sink(paths)))?;
+    Ok((server, roster_verified, roster_file))
+}
+
+/// The mount's state as JSON: what `/health` and `wa fleet push-roster`'s verification can report.
+pub fn mount_status_json(supervisor: &Supervisor) -> Value {
+    supervisor.status().to_json()
 }
 
 /// Where this node keeps the mesh's files. One resolution, so the host capability and the mount
@@ -171,6 +523,9 @@ pub fn dispatch(request: &Value) -> Value {
     }
     if let Some(seal) = request.get("seal") {
         return seal_reply(seal);
+    }
+    if let Some(attest) = request.get("attest") {
+        return attest_call(attest);
     }
     let started = wire::now_millis();
     let paths = Paths::resolve();
@@ -310,22 +665,36 @@ fn admit_inbound(request: &Value) -> Value {
     let relayed = request.get("transport").and_then(Value::as_str) == Some("relay");
     let inbound = if relayed { Inbound::relayed(headers, body) } else { Inbound::direct(headers, body) };
     match admitter.decide(&inbound) {
-        Admission::Allow(allowed) => json!({
-            "ok": true,
-            "transport": allowed.transport.label(),
-            "caller_node_id": allowed.call.from.node_id,
-            "caller_public_key": allowed.call.from.public_key,
-            "caller_name": allowed.call.from.name,
-            "caller_level": allowed.call.from.level,
-            "target_level": allowed.call.to.level,
-            "capability": allowed.call.capability,
-            "request_id": allowed.call.request_id,
-            "verb": allowed.verb.as_str(),
-            "decision": allowed.verdict.decision(),
-            "reason": allowed.verdict.reason,
-            "inner_body": allowed.call.inner.body,
-            "inner_headers": pairs_json(&allowed.call.inner.headers),
-        }),
+        Admission::Allow(allowed) => {
+            // The mount holds this node's identity and signs *only here*, after `authorize()` said
+            // allow: the proof a managed node's `wa_node_call` admits this call by its verb
+            // ([`crate::attest`], docs/MESH.md §9). Nothing else in this crate signs an attestation.
+            let attestation = attest::sign(
+                admitter.identity(),
+                &allowed.call.from.node_id,
+                allowed.verb.as_str(),
+                &allowed.call.capability,
+                &attest::caller_signature(&allowed.call.inner.headers),
+                wire::now_seconds(),
+            );
+            json!({
+                "ok": true,
+                "transport": allowed.transport.label(),
+                "caller_node_id": allowed.call.from.node_id,
+                "caller_public_key": allowed.call.from.public_key,
+                "caller_name": allowed.call.from.name,
+                "caller_level": allowed.call.from.level,
+                "target_level": allowed.call.to.level,
+                "capability": allowed.call.capability,
+                "request_id": allowed.call.request_id,
+                "verb": allowed.verb.as_str(),
+                "decision": allowed.verdict.decision(),
+                "reason": allowed.verdict.reason,
+                "attestation": attestation,
+                "inner_body": allowed.call.inner.body,
+                "inner_headers": pairs_json(&allowed.call.inner.headers),
+            })
+        }
         Admission::Refuse { status, headers, body } => json!({
             "ok": false,
             "error": "mesh_refused",
@@ -394,6 +763,28 @@ fn verify_roster(request: &Value) -> Value {
     }
 }
 
+/// `{attest: {caller, verb, capability, signature}}`: the node-signed attestation a managed node's
+/// `wa_node_call` admits a roster-authorized call by (`docs/MESH.md` §9, [`crate::attest`]).
+///
+/// It signs one message and nothing else, with this node's own key: a Lua caller could already sign
+/// arbitrary text with `host.sign`, and a remote caller cannot reach this at all. The mount calls the
+/// same function directly, only after `authorize()` returned allow.
+fn attest_call(request: &Value) -> Value {
+    let field = |name: &str| request.get(name).and_then(Value::as_str).unwrap_or_default().to_string();
+    let (caller, verb, capability) = (field("caller"), field("verb"), field("capability"));
+    if caller.is_empty() || capability.is_empty() || !matches!(verb.as_str(), "read" | "control" | "call") {
+        return json!({
+            "ok": false,
+            "error": "mesh_bad_request",
+            "detail": "caller, capability and one of read/control/call are required",
+        });
+    }
+    match attest::from_files(&Paths::resolve(), &caller, &verb, &capability, &field("signature")) {
+        Ok(attestation) => json!({"ok": true, "attestation": attestation}),
+        Err(error) => unavailable("identity_unavailable", error),
+    }
+}
+
 fn push_request(request: &Value) -> crate::fleet::PushRequest {
     let field = |name: &str| request.get(name).and_then(Value::as_str).unwrap_or_default().to_string();
     crate::fleet::PushRequest {
@@ -407,6 +798,11 @@ fn push_request(request: &Value) -> crate::fleet::PushRequest {
             .get("replace_key_signature")
             .and_then(Value::as_str)
             .map(str::to_string),
+        port: request
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok()),
+        bind: request.get("bind").and_then(Value::as_str).map(str::to_string),
     }
 }
 
@@ -497,22 +893,52 @@ pub extern "C-unwind" fn mesh_call(l: *mut LuaState) -> c_int {
 pub struct LoopbackHandler {
     pub base: String,
     pub timeout: Duration,
+    /// This node's identity, used to sign the attestation `wa_node_call` admits by verb. `None` only
+    /// in a test that is not exercising that seam (then the ticket carries no attestation, and the
+    /// node falls back to its legacy capability list).
+    pub identity: Option<Identity>,
 }
 
 impl LoopbackHandler {
     pub fn new(node_port: u16, timeout: Duration) -> LoopbackHandler {
-        LoopbackHandler { base: format!("127.0.0.1:{node_port}"), timeout }
+        LoopbackHandler { base: format!("127.0.0.1:{node_port}"), timeout, identity: None }
+    }
+
+    /// The mount's identity: the same key file the listener authenticates with, loaded a second time
+    /// because one `Identity` cannot be in two places.
+    pub fn with_identity(mut self, identity: Identity) -> Self {
+        self.identity = Some(identity);
+        self
     }
 }
 
 impl Handler for LoopbackHandler {
     fn handle(&self, call: &Call) -> Reply {
-        // Minted from a call that was just admitted: caller, key, capability and request id.
+        // Signed here, after the listener's `authorize()` allowed *this* call: the ticket carries the
+        // decision, and the attestation makes the node's own admission widen to the verb it proves.
+        let attestation = self
+            .identity
+            .as_ref()
+            .map(|identity| {
+                attest::sign(
+                    identity,
+                    &call.from.node_id,
+                    call.verb.as_str(),
+                    &call.capability,
+                    &attest::caller_signature(&call.inner.headers),
+                    wire::now_seconds(),
+                )
+                .to_string()
+            })
+            .unwrap_or_default();
+        // Minted from a call that was just admitted: caller, key, capability, verb, request id.
         let ticket = admission::tickets::mint_for(
             &call.from.node_id,
             &call.from.public_key,
             &call.capability,
+            call.verb.as_str(),
             &call.request_id,
+            &attestation,
         );
         let mut headers = call.inner.headers.clone();
         headers.push(("x-wa-mesh-ticket".to_string(), ticket.id.clone()));
@@ -534,63 +960,6 @@ impl Handler for LoopbackHandler {
         }
     }
 }
-
-/// Start the listener for a node whose HTTP port is `node_port`, or `None` when the node has neither
-/// the flag nor the operator's `mesh.enabled` statement in its policy. Called from `serve.rs`: the only
-/// thing this change adds to the serve path.
-pub fn spawn_from_env(node_port: u16) -> Option<Server> {
-    if !enabled() {
-        return None;
-    }
-    let Some(port) = env("WASM_AGENT_MESH_PORT").and_then(|value| value.parse::<u16>().ok()) else {
-        eprintln!("[mesh] WA_MESH=1 but WASM_AGENT_MESH_PORT is unset: not listening");
-        return None;
-    };
-    let bind = format!("{}:{port}", env("WASM_AGENT_MESH_BIND").unwrap_or_else(|| "127.0.0.1".into()));
-    let policy = match MeshPolicy::from_policy_file(&Paths::resolve().policy) {
-        Ok(policy) => policy,
-        Err(error) => {
-            eprintln!("[mesh] policy unreadable, not listening: {}", error.0);
-            return None;
-        }
-    };
-    let paths = Paths::resolve().with_policy(&policy);
-    let identity = match Identity::load(&paths.key) {
-        Ok(identity) => identity,
-        Err(error) => {
-            eprintln!("[mesh] identity unavailable, not listening: {error}");
-            return None;
-        }
-    };
-    let audit = audit_sink(&paths);
-    let handler = Arc::new(LoopbackHandler::new(node_port, Duration::from_secs(120)));
-    // The node's own files, asked per call: a roster installed while this node is running is in force
-    // on the next call, which is what makes `wa fleet push-roster` verifiable by a mesh call.
-    let source: Arc<dyn admission::Source> = Arc::new(admission::NodeFiles {
-        policy: paths.policy.clone(),
-        roster: paths.roster.clone(),
-        config: paths.config.clone(),
-    });
-    match Server::start(ServerConfig::with_source(bind, identity, source, handler, audit)) {
-        Ok(server) => {
-            eprintln!(
-                "[mesh] listening on {} (roster {})",
-                server.local_addr(),
-                paths
-                    .roster
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            );
-            Some(server)
-        }
-        Err(error) => {
-            eprintln!("[mesh] listener not started: {error}");
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +1041,27 @@ mod tests {
         assert_eq!(answer["verb"], "read");
         assert_eq!(answer["reason"], "hierarchy_allowed");
         assert_eq!(answer["inner_body"], inner.body, "the caller's own request is what runs");
+        // The mount signs the attestation a managed node's admission admits by verb, and it names
+        // exactly this call: caller, verb, capability and the caller's own request signature.
+        let attestation = answer.get("attestation").expect("an allowed call carries an attestation");
+        assert_eq!(attestation["caller"], caller.node.node_id);
+        assert_eq!(attestation["verb"], "read");
+        assert_eq!(attestation["capability"], "read");
+        let ts = attestation["ts"].as_u64().unwrap();
+        let message = crate::attest::message(
+            &target.node.node_id,
+            &caller.node.node_id,
+            "read",
+            "read",
+            &crate::attest::caller_signature(&inner.headers),
+            ts,
+        );
+        assert!(crate::identity::verify(
+            &target.node.public_key,
+            &message,
+            attestation["signature"].as_str().unwrap()
+        ));
+        assert!(message.starts_with(&format!("mesh-allow|{}|", target.node.node_id)));
         // The same signed bytes again: a replay, refused on any path.
         let replay = dispatch(&json!({"admit": {"headers": pairs, "body": body, "transport": "relay"}}));
         assert_eq!(replay["error"], "mesh_refused", "{replay}");
@@ -717,6 +1107,10 @@ mod tests {
         assert_eq!(answer["error"], "mesh_legacy", "{answer}");
         assert_eq!(answer["inner_body"], "{\"capability\":\"read\"}",
             "today's path gets the caller's own request");
+        assert!(
+            answer.get("attestation").is_none(),
+            "a call the roster did not decide carries no attestation: nothing widens"
+        );
     }
 
     #[test]
@@ -724,11 +1118,187 @@ mod tests {
         // The flag lives in the process environment, so this test excludes the one other test that
         // sets it (see `testkit::ENV_LOCK`) instead of hoping the order is kind.
         let _lock = crate::testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = crate::testkit::EnvGuard::set(&[("WA_MESH", None), ("WASM_AGENT_MESH", None)]);
+        let home = crate::testkit::temp_dir("mount-off-home");
+        let _env = crate::testkit::EnvGuard::set(&[
+            ("WA_MESH", None),
+            ("WASM_AGENT_MESH", None),
+            ("WASM_AGENT_HOME", Some(home.to_str().unwrap())),
+            ("WASM_AGENT_MESH_PORT", None),
+            ("WASM_AGENT_MESH_POLL_MS", Some("20")),
+        ]);
         assert!(!enabled());
         let answer = dispatch(&json!({"node": "anyone", "capability": "read"}));
         assert_eq!(answer["error"], "mesh_disabled");
         assert_eq!(answer["fallback"], serde_json::Value::Null);
-        assert!(spawn_from_env(8899).is_none(), "the mount must be silent and bind nothing");
+        // A node with no policy section never binds: the supervisor has nothing to mount.
+        let supervisor = spawn_supervisor(8899);
+        std::thread::sleep(Duration::from_millis(120));
+        let status = supervisor.status();
+        assert!(!status.listening, "the mount must bind nothing: {status:?}");
+        assert_eq!(status.changes, 0, "nothing changed, so nothing was mounted or closed");
+    }
+
+    #[test]
+    fn the_settings_are_environment_then_policy_then_off() {
+        let _lock = crate::testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::testkit::EnvGuard::set(&[
+            ("WA_MESH", None),
+            ("WASM_AGENT_MESH", None),
+            ("WASM_AGENT_MESH_PORT", None),
+            ("WASM_AGENT_MESH_BIND", None),
+        ]);
+        // Nothing written: off, no port, loopback.
+        let settings = Settings::resolve(&MeshPolicy::empty());
+        assert!(!settings.enabled);
+        assert_eq!(settings.port, None);
+        assert_eq!(settings.bind, DEFAULT_BIND);
+        assert_eq!(settings.bind_address(), None);
+        assert_eq!(settings.enabled_from, "default off");
+
+        let policy = MeshPolicy::from_policy_text(
+            r#"{"version":1,"mesh":{"version":1,"enabled":true,"port":8891,"bind":"0.0.0.0"}}"#,
+        )
+        .unwrap();
+        let settings = Settings::resolve(&policy);
+        assert!(settings.enabled);
+        assert_eq!(settings.port, Some(8891));
+        assert_eq!(settings.bind, "0.0.0.0");
+        assert_eq!(settings.bind_address().as_deref(), Some("0.0.0.0:8891"));
+        assert_eq!(settings.port_from, "policy.json mesh.port");
+
+        // The environment wins over the persisted setting, in both directions.
+        let _env = crate::testkit::EnvGuard::set(&[
+            ("WASM_AGENT_MESH_PORT", Some("8892")),
+            ("WASM_AGENT_MESH_BIND", Some("127.0.0.1")),
+            ("WA_MESH", Some("1")),
+        ]);
+        let settings = Settings::resolve(&MeshPolicy::empty());
+        assert_eq!(settings.port, Some(8892));
+        assert_eq!(settings.bind, "127.0.0.1");
+        assert!(settings.enabled);
+        assert_eq!(settings.enabled_from, "environment WA_MESH");
+    }
+
+    /// Wait for `done`, or fail with the last status. The supervisor polls on its own thread, so a
+    /// state change is *observed* rather than asserted immediately.
+    fn wait_for(name: &str, supervisor: &Supervisor, done: impl Fn(&MountStatus) -> bool) -> MountStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = supervisor.status();
+            if done(&status) {
+                return status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{name}: gave up waiting for the mount; last status {status:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// One `/mesh/health` attempt. The budget is generous for the same reason `testkit`'s is: a
+    /// loopback handshake was measured taking seconds while the machine compiled wasmtime on every
+    /// core, and a test that called that "not listening" failed a correct mount.
+    fn health(port: u16) -> Option<u16> {
+        crate::http::request(
+            &format!("127.0.0.1:{port}"),
+            "GET",
+            "/mesh/health",
+            &[],
+            b"",
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            64 * 1024,
+        )
+        .ok()
+        .map(|response| response.status)
+    }
+
+    /// Ask `/mesh/health` until it answers or `budget` runs out. A listener that has just bound is
+    /// allowed a moment to be reachable; one that is *closed* refuses at once, so the same helper
+    /// measures both states.
+    fn health_within(port: u16, budget: Duration) -> Option<u16> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            if let Some(status) = health(port) {
+                return Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// The live mount: three enable/disable cycles on a node whose files change under it.
+    ///
+    /// Nothing here restarts anything. The supervisor is started once (as `serve.rs` starts it), the
+    /// node's `policy.json` is rewritten the way `wa fleet push-roster` writes it, and the listener
+    /// appears and disappears with it — answering `/mesh/health` and then releasing the port so it can
+    /// be bound again. A restart-shaped gap or a leaked socket fails this test.
+    #[test]
+    fn the_mount_turns_on_and_off_while_the_node_runs() {
+        crate::testkit::with_deadline("the_mount_turns_on_and_off_while_the_node_runs", || {
+            let _lock = crate::testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = crate::testkit::temp_dir("mount-live-home");
+            let fleet = crate::testkit::fleet_key();
+            let node = crate::testkit::Member::new("target", 1, &[]);
+            let roster = crate::testkit::roster_of(&fleet, vec![node.node.clone()]);
+            write_node_files(&home, &fleet, &node, &roster, false);
+            let config = home.join(".wasm-agent");
+            let _env = crate::testkit::EnvGuard::set(&[
+                ("WASM_AGENT_HOME", Some(home.to_str().unwrap())),
+                ("WASM_AGENT_NODE_KEY", None),
+                ("WA_MESH", None),
+                ("WASM_AGENT_MESH", None),
+                ("WASM_AGENT_MESH_PORT", None),
+                ("WASM_AGENT_MESH_BIND", None),
+                ("WASM_AGENT_MESH_POLL_MS", Some("20")),
+            ]);
+            let supervisor = spawn_supervisor(1);
+            // Off to begin with: the policy has no `enabled` and no port.
+            let status = wait_for("start off", &supervisor, |status| !status.listening);
+            assert!(!status.enabled);
+
+            for cycle in 1..=3u32 {
+                let port = crate::testkit::free_port();
+                std::fs::write(
+                    config.join("policy.json"),
+                    json!({"version": 1, "components": {}, "mesh": {
+                        "version": 1, "roster_key": fleet.public_key, "enabled": true,
+                        "port": port, "bind": "127.0.0.1"}})
+                    .to_string(),
+                )
+                .unwrap();
+                let status = wait_for("enable", &supervisor, |status| status.listening);
+                assert_eq!(status.port, Some(port), "cycle {cycle}");
+                assert!(status.roster_verified, "cycle {cycle}");
+                assert_eq!(health_within(port, Duration::from_secs(10)), Some(200), "cycle {cycle}: the listener answers");
+
+                std::fs::write(
+                    config.join("policy.json"),
+                    json!({"version": 1, "components": {}, "mesh": {
+                        "version": 1, "roster_key": fleet.public_key, "enabled": false,
+                        "port": port, "bind": "127.0.0.1"}})
+                    .to_string(),
+                )
+                .unwrap();
+                let status = wait_for("disable", &supervisor, |status| !status.listening);
+                assert!(!status.enabled, "cycle {cycle}");
+                assert_eq!(status.unmounts, cycle, "cycle {cycle}: one unmount per disable");
+                // The port is free again: nothing is left bound behind a disabled mount. Binding it is
+                // the check, rather than an HTTP probe — a closed loopback port can *time out* on
+                // Windows instead of refusing, and a bind answers the question directly.
+                let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+                    .unwrap_or_else(|error| panic!("cycle {cycle}: port {port} is still stuck: {error}"));
+                drop(listener);
+            }
+            let status = supervisor.status();
+            assert_eq!(status.mounts, 3);
+            assert_eq!(status.unmounts, 3);
+            assert_eq!(status.changes, 6);
+            drop(supervisor);
+            let _ = std::fs::remove_dir_all(&home);
+        });
     }
 }

@@ -18,6 +18,10 @@ wa-host-support = { path = "../wa-host-support" }
 wa-rendezvous = { path = "../wa-rendezvous" }
 # The capability registry, the `host.*` implementations and the serve/subagent layer over them.
 wa-capabilities = { path = "../wa-capabilities" }
+# `wa fleet keygen|sign|show`: the operator's roster tools (docs/MESH.md §1). They live in the mesh crate
+# because that is where the roster's canonical bytes and its strict reader are; the binary only
+# dispatches them. `wa fleet push-roster` stays in Lua (lua/core/fleet.lua).
+wa-mesh = { path = "../wa-mesh" }
 # `wa dev`: the dev-loop hot swap is `wa-kernel-runtime`'s (the same spawn a supervised start runs),
 # so the node does not grow a second way to start a component.
 wa-kernel-runtime = { path = "../wa-kernel-runtime" }

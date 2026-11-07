@@ -2020,6 +2020,7 @@ dependencies = [
  "wa-capabilities",
  "wa-host-support",
  "wa-kernel-runtime",
+ "wa-mesh",
  "wa-rendezvous",
 ]
 

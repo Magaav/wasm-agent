@@ -487,6 +487,8 @@ fn the_roster_decides_on_the_relay_path_too_and_an_existing_operator_bootstraps_
         caller_public_key: fleet.b.node.public_key.clone(),
         target_node_id: fleet.t.node.node_id.clone(),
         replace_key_signature: None,
+        port: None,
+        bind: None,
     };
     let installed = push.install();
     assert_eq!(installed["ok"], true, "{installed}");
@@ -573,6 +575,8 @@ fn the_roster_decides_on_the_relay_path_too_and_an_existing_operator_bootstraps_
         caller_public_key: fleet.b.node.public_key.clone(),
         target_node_id: fleet.r.node.node_id.clone(),
         replace_key_signature: None,
+        port: None,
+        bind: None,
     };
     assert_eq!(wrong.install()["error"], "roster_pins_different_key");
     // The old key's signature re-anchors it; nothing else does.

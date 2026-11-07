@@ -608,6 +608,17 @@ fn main() {
         return;
     }
 
+    if command == "fleet" {
+        // `keygen`, `sign` and `show` are the operator's tools over the roster (docs/MESH.md §1) and
+        // live in `wa-mesh` beside the canonical bytes they sign. `push-roster` is not one of them:
+        // it needs the node's identity, its policy and its relay, so it falls through to the Lua CLI
+        // (`lua/core/fleet.lua`), which dispatches exactly as before.
+        if let Some(code) = wa_mesh::fleetkey::run(&lua_args) {
+            host::restore_input();
+            std::process::exit(code);
+        }
+    }
+
     if command == "node" {
         match node::Identity::load() {
             Ok(identity) => {

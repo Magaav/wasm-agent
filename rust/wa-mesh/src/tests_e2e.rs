@@ -646,9 +646,9 @@ fn an_upward_call_works_when_both_ends_carry_the_operator_grant() {
 #[test]
 fn the_mount_starts_only_when_the_flag_and_a_port_are_both_given() {
     testkit::with_deadline("the_mount_starts_only_when_the_flag_and_a_port_are_both_given", move || {
-        // The one thing `serve.rs` calls: a port in the environment, or no listener at all. This is the
-        // only place the real file paths (home, policy.json, roster, cache, audit) are exercised, so the
-        // wiring the node does is tested without starting a node.
+        // The one thing `serve.rs` calls: the live mount, which reads the flag and the port every poll.
+        // This is the only place the real file paths (home, policy.json, roster, cache, audit) are
+        // exercised, so the wiring the node does is tested without starting a node.
         let _lock = testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = testkit::temp_dir("mount-home");
         let config = home.join(".wasm-agent");
@@ -688,23 +688,53 @@ fn the_mount_starts_only_when_the_flag_and_a_port_are_both_given() {
             ("WASM_AGENT_MESH_ROSTER", None),
             ("WASM_AGENT_MESH_CACHE", None),
             ("WA_GRANT_POLICY", None),
+            ("WASM_AGENT_MESH_POLL_MS", Some("20")),
         ]);
-        let server = crate::host_call::spawn_from_env(port).expect("the mount starts with the flag and a port");
-        assert_eq!(server.local_addr().port(), port);
-        let status = health(server.local_addr());
+        let mount = crate::host_call::spawn_supervisor(port);
+        let listening = wait_for_mount(&mount, |status| status.listening);
+        assert_eq!(listening.port, Some(port));
+        assert!(listening.roster_verified, "{listening:?}");
+        let status = health((std::net::Ipv4Addr::LOCALHOST, port).into());
         assert_eq!(status["node_id"], node.node_id);
         assert_eq!(status["name"], "mounted");
         assert_eq!(status["roster_verified"], true);
-        drop(server);
+        drop(mount);
 
         // The flag without a port opens nothing, and says so on stderr rather than picking one.
         let _no_port = testkit::EnvGuard::set(&[("WASM_AGENT_MESH_PORT", None)]);
-        assert!(crate::host_call::spawn_from_env(port).is_none());
+        let mount = crate::host_call::spawn_supervisor(port);
+        let status = wait_for_mount(&mount, |status| !status.listening);
+        assert!(status.changes == 0, "a flag with no port mounts nothing: {status:?}");
+        drop(mount);
 
         // No flag at all: the mount is silent and touches no file.
-        let _off = testkit::EnvGuard::set(&[("WA_MESH", None), ("WASM_AGENT_MESH", None), ("WASM_AGENT_MESH_PORT", Some(&port.to_string()))]);
-        assert!(crate::host_call::spawn_from_env(port).is_none());
+        let _off = testkit::EnvGuard::set(&[
+            ("WA_MESH", None),
+            ("WASM_AGENT_MESH", None),
+            ("WASM_AGENT_MESH_PORT", Some(&port.to_string())),
+        ]);
+        let mount = crate::host_call::spawn_supervisor(port);
+        let status = wait_for_mount(&mount, |status| !status.listening);
+        assert!(!status.enabled, "the port alone never turns the mesh on: {status:?}");
+        assert_eq!(status.changes, 0, "{status:?}");
+        let _ = std::fs::remove_dir_all(&home);
     });
+}
+
+/// Wait for the mount to reach a state, or fail naming what it was still doing.
+fn wait_for_mount(
+    mount: &crate::host_call::Supervisor,
+    done: impl Fn(&crate::host_call::MountStatus) -> bool,
+) -> crate::host_call::MountStatus {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = mount.status();
+        if done(&status) {
+            return status;
+        }
+        assert!(std::time::Instant::now() < deadline, "the mount never settled: {status:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

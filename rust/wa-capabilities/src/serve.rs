@@ -1945,10 +1945,13 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
         }
     }
 
-    // `WA_MESH=1`: the direct peer listener behind the hierarchy (docs/MESH.md). One call, here and
-    // nowhere else, so a node without the flag never opens a second port and cannot start behaving
-    // differently by accident. The handle owns the listener for as long as this process serves.
-    let _mesh_listener = wa_mesh::host_call::spawn_from_env(port);
+    // The mesh (docs/MESH.md): the live mount behind the hierarchy. One call, here and nowhere else, so
+    // a node that is not in a fleet never opens a second port and cannot start behaving differently by
+    // accident. The supervisor re-reads this node's settings (`WA_MESH`/`WASM_AGENT_MESH_PORT` in the
+    // environment, then `policy.json`'s `mesh` section) and mounts, moves or unmounts the listener
+    // without a restart — which is what makes a pushed roster take effect on a running node. The handle
+    // owns the listener for as long as this process serves.
+    let _mesh_mount = wa_mesh::host_call::spawn_supervisor(port);
 
     // Each node-thread owns an interpreter and reads its own queue, so requests still run one at a time *per
     // interpreter* - what changed is that a running run no longer stops the node answering anything at all.
@@ -2660,7 +2663,9 @@ fn verify_peer_sync(
 /// caller's own `/node/call` admission runs exactly as it does today, which is the whole point — a
 /// node that has not been bootstrapped keeps the operator pins of its binding.
 fn mesh_peer_call(lua: &Core, node_headers: &[(String, String)], body: &str) -> Option<Reply> {
-    if !wa_mesh::host_call::enabled() {
+    // The process flag *or* the operator's own `mesh.enabled` in `policy.json`: a node that was turned
+    // on by a pushed roster decides by that roster on its next call, without a restart.
+    if !wa_mesh::host_call::enabled_at_runtime() {
         return None;
     }
     if !wa_mesh::admission::is_mesh(node_headers) {
@@ -2705,6 +2710,15 @@ fn mesh_peer_call(lua: &Core, node_headers: &[(String, String)], body: &str) -> 
         // admission in force, so `binding.authorize` consults that decision instead of the pins.
         let headers = inner_headers();
         let inner_body = string("inner_body");
+        // The sixth argument: the attestation the mount signed after `authorize()` allowed *this*
+        // call. It is what lets a managed node admit the call by the mesh's verb instead of by its
+        // legacy capability list (`lua/core/server.lua`, `wa_node_call`; docs/MESH.md §9). Without
+        // one — a node with no verified roster, or a caller that is not a fleet member — nothing
+        // widens.
+        let attestation = decision
+            .get("attestation")
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         mesh_admit_in_lua(lua, &decision);
         let answer = match lua.call_string(
             "wa_node_call",
@@ -2714,6 +2728,7 @@ fn mesh_peer_call(lua: &Core, node_headers: &[(String, String)], body: &str) -> 
                 &header_of(&headers, "x-wa-pub"),
                 &header_of(&headers, "x-wa-ts"),
                 &header_of(&headers, "x-wa-sig"),
+                &attestation,
             ],
         ) {
             Ok(answer) => answer,
@@ -2852,9 +2867,11 @@ fn mesh_admitted(lua: &Core, node_headers: &[(String, String)], body: &str) -> R
     }
     let ts = header_of(node_headers, "x-wa-ts");
     let signature = header_of(node_headers, "x-wa-sig");
+    // The direct listener minted this ticket from a call it admitted; it also signed the attestation
+    // that carries that decision to the node's own admission (docs/MESH.md §9).
     let answer = match lua.call_string(
         "wa_node_call",
-        &[body, &ticket.caller_node_id, &ticket.caller_public_key, &ts, &signature],
+        &[body, &ticket.caller_node_id, &ticket.caller_public_key, &ts, &signature, &ticket.attestation],
     ) {
         Ok(answer) => answer,
         Err(error) => {

@@ -85,6 +85,25 @@ impl Identity {
         Identity::from_pkcs8_hex(&hex(&pkcs8))
     }
 
+    /// Load a key the caller named. Unlike [`Identity::load`], a missing file is an error and never a
+    /// fresh identity: `wa fleet sign` must fail when the operator's fleet key is not where they said
+    /// it was, because silently minting one would sign a roster with a key nobody pinned.
+    pub fn open(path: &Path) -> Result<Identity, String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return Err("node_key_empty".to_string());
+                }
+                Identity::from_pkcs8_hex(text)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err("node_key_missing".to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     pub fn from_pkcs8_hex(text: &str) -> Result<Identity, String> {
         let pkcs8 = unhex(text).ok_or_else(|| "bad_node_key".to_string())?;
         let key = Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|error| error.to_string())?;
@@ -96,6 +115,21 @@ impl Identity {
     pub fn sign(&self, message: &str) -> String {
         hex(self.key.sign(message.as_bytes()).as_ref())
     }
+}
+
+/// A fresh key pair as pkcs8 hex, with the identity that answers to it. Nothing is written here:
+/// `wa fleet keygen` owns the one place a private key may go (one explicit path, nothing else).
+///
+/// The fleet key is the same ed25519 machinery as the node identity on purpose — there is no second
+/// kind of key to protect, rotate or lose (docs/MESH.md §1, "Who signs").
+#[allow(clippy::type_complexity)]
+pub fn generate() -> Result<(String, Identity), String> {
+    let rng = SystemRandom::new();
+    let document = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|error| error.to_string())?;
+    let bytes = document.as_ref().to_vec();
+    let text = hex(&bytes);
+    let identity = Identity::from_pkcs8_hex(&text)?;
+    Ok((text, identity))
 }
 
 /// The node id a public key answers to: the first 32 hex characters of `sha256(public_key)`.

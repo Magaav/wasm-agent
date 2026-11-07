@@ -457,7 +457,13 @@ pub mod tickets {
         pub caller_node_id: String,
         pub caller_public_key: String,
         pub capability: String,
+        /// The verb the roster and the grants decided on, so the local hop does not have to guess it
+        /// (and cannot widen it: the attestation it carries is bound to this verb).
+        pub verb: String,
         pub request_id: String,
+        /// The node-signed attestation `wa_node_call` admits this call by, in its JSON form. Empty
+        /// means "no attestation": the local admission then falls back to the legacy capability list.
+        pub attestation: String,
         /// Unix milliseconds after which the ticket is refused even if it was never spent.
         pub expires_at_ms: u64,
     }
@@ -484,16 +490,22 @@ pub mod tickets {
             &allowed.call.from.node_id,
             &allowed.call.from.public_key,
             &allowed.call.capability,
+            allowed.verb.as_str(),
             &allowed.call.request_id,
+            "",
         )
     }
 
-    /// The same, for a caller that holds the four facts and not the whole admission.
+    /// The same, for a caller that holds the facts and not the whole admission. `attestation` is the
+    /// node-signed proof `wa_node_call` admits by verb ([`crate::attest`]); an empty one is a ticket
+    /// that admits nothing new.
     pub fn mint_for(
         caller_node_id: &str,
         caller_public_key: &str,
         capability: &str,
+        verb: &str,
         request_id: &str,
+        attestation: &str,
     ) -> Ticket {
         let now_ms = wire::now_millis();
         let ticket = Ticket {
@@ -501,7 +513,9 @@ pub mod tickets {
             caller_node_id: caller_node_id.to_string(),
             caller_public_key: caller_public_key.to_string(),
             capability: capability.to_string(),
+            verb: verb.to_string(),
             request_id: request_id.to_string(),
+            attestation: attestation.to_string(),
             expires_at_ms: now_ms.saturating_add(TICKET_TTL.as_millis() as u64),
         };
         if let Ok(mut registry) = registry().lock() {

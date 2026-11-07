@@ -9,6 +9,10 @@
 //! Reading order, which is also the order a call takes:
 //!
 //! * [`roster`] — the signed fleet document: who is in the fleet, at what level, reachable where;
+//! * [`fleetkey`] — the operator's side of it: `wa fleet keygen`, `sign`, `show` (nothing in a node's
+//!   call path ever signs a roster);
+//! * [`attest`] — the one sentence a node signs after it admitted a call, which is how a *managed*
+//!   node's admission widens to the mesh's verb (`docs/MESH.md` §9);
 //! * [`policy`] — the `"mesh"` section of `policy.json`: the fleet key and the grants;
 //! * [`hierarchy`] — `authorize(caller, target, verb)`, the whole access rule in one function;
 //! * [`cache`] — the peer cache that keeps calls working when the rendezvous is down;
@@ -40,10 +44,12 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod admission;
+pub mod attest;
 pub mod audit;
 pub mod cache;
 pub mod client;
 pub mod fleet;
+pub mod fleetkey;
 pub mod hierarchy;
 pub mod host_call;
 pub mod http;
@@ -62,6 +68,7 @@ mod tests_e2e;
 mod tests_relay;
 
 pub use admission::{Admission, Admitter, Inbound, Transport};
+pub use attest::ATTEST_DOMAIN;
 pub use audit::{Event, FileSink, MemorySink, Sink, StderrSink, Tee};
 pub use cache::PeerCache;
 pub use client::{Attempt, Client, ClientConfig, Inner, Outcome};

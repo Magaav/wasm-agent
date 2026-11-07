@@ -71,6 +71,14 @@ pub struct PushRequest {
     /// `mesh-anchor-v1|<new_key>|<roster fingerprint>`.
     #[serde(default)]
     pub replace_key_signature: Option<String>,
+    /// The port the target's mesh listener should answer on. When a caller cannot say (the relayed
+    /// push carries no room for it), the port comes from the roster's own address for the target: the
+    /// roster already says where that node answers, and a running node cannot be restarted to be told.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The address the target's listener should bind. Left as the target has it when absent.
+    #[serde(default)]
+    pub bind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -137,9 +145,28 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The port the roster says this node answers on: its first address's port, if it has one. A roster
+/// address is `host:port` ([`crate::roster::check_address`] guarantees it), and the *target's* own
+/// entry is the only statement about where the target listens that a push carries.
+pub fn listener_port(roster: &Roster, target_node_id: &str) -> Option<u16> {
+    let node = roster.node(target_node_id)?;
+    node.addresses.iter().find_map(|address| {
+        address
+            .trim()
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+    })
+}
+
 /// Merge the mesh section in: every other key and every other field of `mesh` is kept as it is.
 /// Returns the merged document and the key it replaced, if any.
-fn merge_policy(mut policy: Value, roster_key: &str) -> Result<(Value, Option<String>), String> {
+fn merge_policy(
+    mut policy: Value,
+    roster_key: &str,
+    port: Option<u16>,
+    bind: Option<&str>,
+) -> Result<(Value, Option<String>), String> {
     let previous = pinned_key(&policy);
     let object = policy
         .as_object_mut()
@@ -152,6 +179,16 @@ fn merge_policy(mut policy: Value, roster_key: &str) -> Result<(Value, Option<St
     section.insert("roster_key".into(), json!(roster_key));
     section.insert("enabled".into(), json!(true));
     section.insert("roster".into(), json!(ROSTER_FILE));
+    // The port is what lets a *running* node mount its listener without a restart: `enabled` alone is
+    // roster admission on the relay path (docs/MESH.md §8, "the flag"). Never guessed and never
+    // removed: a target that has no address in the roster (or no port in it) keeps whatever its own
+    // policy says, including "no listener".
+    if let Some(port) = port {
+        section.insert("port".into(), json!(port));
+    }
+    if let Some(bind) = bind.map(str::trim).filter(|bind| !bind.is_empty()) {
+        section.insert("bind".into(), json!(bind));
+    }
     Ok((policy, previous))
 }
 
@@ -229,7 +266,9 @@ impl PushRequest {
                 }
             }
         }
-        let (merged, _) = match merge_policy(policy, &key) {
+        let port = self.port.or_else(|| listener_port(&roster, &self.target_node_id));
+        let bind = self.bind.clone();
+        let (merged, _) = match merge_policy(policy, &key, port, bind.as_deref()) {
             Ok(merged) => merged,
             Err(error) => return refuse("policy_unreadable", error),
         };
@@ -269,6 +308,13 @@ impl PushRequest {
             "backup": backup.to_string_lossy(),
             "roster_path": roster_path.to_string_lossy(),
             "enabled": true,
+            "port": port,
+            "bind": bind,
+            "listener": if port.is_some() {
+                "mounts on the node's next poll: no restart"
+            } else {
+                "no port: the roster gives this node no address, so it enables roster admission without listening"
+            },
             "env": env,
             "roster_entries": roster
                 .nodes
@@ -303,6 +349,7 @@ pub fn plan(config: &Path, roster: &Roster, roster_key: &str) -> Value {
         "fingerprint": roster.fingerprint(),
         "pinned_key": pinned_key(&policy),
         "requested_key": roster_key.trim().to_ascii_lowercase(),
+        "ports": roster.nodes.iter().filter_map(|node| listener_port(roster, &node.node_id).map(|port| json!([node.name, port]))).collect::<Vec<_>>(),
         "roster_path": config.join(ROSTER_FILE).to_string_lossy(),
         "backup": config.join(POLICY_BACKUP).to_string_lossy(),
         "env": config.join(ENV_FILE).to_string_lossy(),
@@ -346,6 +393,8 @@ mod tests {
             caller_public_key: "aa".into(),
             target_node_id: target.node.node_id.clone(),
             replace_key_signature: None,
+            port: None,
+            bind: None,
         }
     }
 
@@ -462,5 +511,63 @@ mod tests {
         let second = std::fs::read_to_string(dir.join(POLICY_FILE)).unwrap();
         assert_eq!(first, second);
         assert!(dir.join(POLICY_BACKUP).exists());
+    }
+
+    /// The push is what makes the mesh live on a *running* node, so the `mesh` section it writes has
+    /// to be the whole statement: on, the roster, and the port. The port comes from the roster's own
+    /// address for the target — the only "where this node answers" a relayed push carries — and a
+    /// target the roster gives no address keeps whatever its policy says (never a guessed port).
+    #[test]
+    fn a_push_persists_the_port_the_roster_gives_the_target() {
+        let key = fleet_key();
+        let node = Member::new("nextcloud", 1, &["192.168.1.10:8891", "nextcloud.example.net:8892"]);
+        let roster = Draft {
+            fleet: "ohana".into(),
+            issued_at: crate::wire::now_seconds().saturating_sub(60),
+            expires_at: 0,
+            nodes: vec![node.node.clone()],
+        }
+        .sign(&key);
+        assert_eq!(listener_port(&roster, &node.node.node_id), Some(8891), "the first address wins");
+        let dir = temp_dir("push-port");
+        let answer = request(&dir, &key, &roster, &node).install();
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["port"], 8891);
+        let merged: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(POLICY_FILE)).unwrap()).unwrap();
+        assert_eq!(merged["mesh"]["port"], 8891);
+        assert_eq!(merged["mesh"]["enabled"], true);
+        // A typed port on the request (a caller that can send one) wins over the derived one.
+        let dir = temp_dir("push-port-explicit");
+        let mut req = request(&dir, &key, &roster, &node);
+        req.port = Some(8893);
+        assert_eq!(req.install()["port"], 8893);
+        let merged: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(POLICY_FILE)).unwrap()).unwrap();
+        assert_eq!(merged["mesh"]["port"], 8893);
+
+        // No address for the target: roster admission is enabled, no listener is promised, and the
+        // port a target already had is not removed.
+        let quiet = Member::new("quiet", 1, &[]);
+        let quiet_roster = Draft {
+            fleet: "ohana".into(),
+            issued_at: crate::wire::now_seconds().saturating_sub(60),
+            expires_at: 0,
+            nodes: vec![quiet.node.clone()],
+        }
+        .sign(&key);
+        assert_eq!(listener_port(&quiet_roster, &quiet.node.node_id), None);
+        let dir = temp_dir("push-no-port");
+        std::fs::write(
+            dir.join(POLICY_FILE),
+            json!({"version":1,"mesh":{"version":1,"port":8894}}).to_string(),
+        )
+        .unwrap();
+        let answer = request(&dir, &key, &quiet_roster, &quiet).install();
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["port"], Value::Null);
+        let merged: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(POLICY_FILE)).unwrap()).unwrap();
+        assert_eq!(merged["mesh"]["port"], 8894, "an existing port is not removed");
     }
 }
