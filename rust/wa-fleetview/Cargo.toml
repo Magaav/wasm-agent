@@ -1,0 +1,28 @@
+[package]
+name = "wa-fleetview"
+version = "0.1.0"
+edition = "2021"
+
+# The fleet view as a record contract (docs/FLEET-OPS.md, "One call: the whole fabric").
+#
+# `fleetview` is a read-only capability: one call answers every node's liveness and last_seen, version
+# and source commit, health, disk, components and the features they carry, running operations and jobs,
+# and recent incidents from telemetry and the lessons store. It is a leaf crate with one dependency
+# (serde_json) for three reasons:
+#
+#   1. the **field contract** lives in one place. The host capability that will serve it
+#      (`rust/wa-capabilities`, next to `host.operation`) is not wired yet; the Lua tool
+#      (`lua/core/fleetview.lua`) and this crate must agree on the names, and a test asserts this
+#      crate's serialized record against the same list the Lua page reports;
+#   2. the rule that makes the view trustworthy - **unknown is named, never faked** - is assembly
+#      logic, not I/O, so it is provable without a node, a network or a clock;
+#   3. `cargo test -p wa-fleetview` is seconds, so the 3-node fabric test runs on every landing.
+#
+# What is deliberately absent: any I/O, any network, any way to change a node. Reading is the capability;
+# the assembly below cannot act, which is what makes "read-only" a property of the code rather than a
+# promise in a manifest.
+
+[dependencies]
+# The view is a JSON answer (the host capability's wire shape, exactly like every other `host.*`). No
+# other dependency: this crate must stay buildable for any target the host supports.
+serde_json = "1"

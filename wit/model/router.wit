@@ -1,0 +1,89 @@
+/// `wa:model-router` — routing policies as modules (docs/MODEL-GATEWAY.md, "Router modules").
+///
+/// The gateway (`wa:model`) owns the call: the provider adapters, the label gate, the fallback chain,
+/// the breaker, the budget and the accounting. It does **not** own the opinion of *which* model a class
+/// of work should use. That opinion is a policy, it changes for reasons that have nothing to do with a
+/// release (a fleet-ops turn wants the strong model and the fleetops skill; a bulk rename does not), and
+/// it must be replaceable while the node runs. So it is a module:
+///
+/// * a router module exports `decide` and answers an ordered candidate list plus the skills the caller
+///   should load for this request;
+/// * modules are installed, upgraded and switched like any other component (a node holds several, one
+///   is current, `switch` is atomic and a call in flight keeps the module it started with);
+/// * the **default** module reproduces today's routing exactly - the `models.routes` section of
+///   `policy.json`, class → ordered `provider/model`, `default` as the fallback class - so enabling the
+///   seam changes nothing until a policy module is installed.
+///
+/// Two boundaries the module cannot cross, by construction:
+///
+/// * **The label is not the module's to waive.** A module may *narrow* (its rule names the labels it
+///   applies to), never widen: the gateway's own data-label gate runs on every candidate after the
+///   router, so a module that names a provider which does not allow the request's label changes
+///   nothing. A refusal stays a refusal.
+/// * **The prefix is not the module's to touch.** A decision is a list of model refs and skill names;
+///   messages, tools and the cache breakpoint never appear in this interface.
+package wa:model-router@0.1.0;
+
+interface types {
+    /// One candidate the gateway may call, in the order the policy prefers.
+    record model-ref {
+        provider: string,
+        model: string,
+    }
+
+    /// What the caller is doing. `default` is the ordinary turn; a policy module may also declare its
+    /// own class names (`fleet-ops`), which the gateway passes through untouched.
+    record request {
+        /// The class name, exactly as the caller spelled it (`plan`, `code`, `cheap`, `vision`,
+        /// `default`, `fleet-ops`, ...).
+        class: string,
+        /// The data label of everything this request will carry (`public`, `internal`, `client`),
+        /// spelled the same way `wa:model` spells it.
+        label: string,
+        /// An explicit model the caller named; the module must not silently replace it.
+        explicit: option<model-ref>,
+        /// The host's session id, for a module that routes by conversation (never a message text).
+        session: string,
+    }
+
+    /// The ordered candidates and where they came from.
+    record decision {
+        /// The module's own name (`default`, `fleet-ops`, ...).
+        module: string,
+        /// Why this list (`route:plan`, `explicit`, `rule:fleet-ops`), for `wa models explain`.
+        source: string,
+        /// Ordered candidates. Empty means "no route": the gateway refuses with `no-route`.
+        candidates: list<model-ref>,
+        /// Skill names the caller should load for this request (`fleetops`). Hints only: the gateway
+        /// does not load skills and a skill is still the model's to load.
+        skills: list<string>,
+        /// Set when the module declined to decide, so the gateway falls back to the default module.
+        fallback: option<string>,
+    }
+
+    /// What a module says about itself, for `wa models` and `/services`.
+    record info {
+        name: string,
+        version: u32,
+        description: string,
+        /// The classes this module has an opinion about; `*` means every class.
+        classes: list<string>,
+        /// The labels its rules apply to, if it narrows them (absent = every label it receives).
+        labels: option<list<string>>,
+    }
+}
+
+interface router {
+    use types.{decision, info, request};
+
+    /// Decide one request. Must be a function of the request and the module's own table: no clock, no
+    /// session state, no network, so `explain` and `chat` cannot disagree.
+    decide: func(request: request) -> decision;
+
+    /// What this module is, for the operator's list.
+    info: func() -> info;
+}
+
+world router-module {
+    export router;
+}

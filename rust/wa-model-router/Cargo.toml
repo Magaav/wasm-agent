@@ -1,0 +1,25 @@
+[package]
+name = "wa-model-router"
+version = "0.1.0"
+edition = "2021"
+
+# Routing policies as modules (docs/MODEL-GATEWAY.md, "Router modules"; `wit/model/router.wit`).
+#
+# The gateway owns the call; this crate owns *which model a class of work prefers*, as a replaceable
+# module. Three reasons it is its own crate rather than more code inside `wa-model-gateway`:
+#
+#   1. the default module must be provably the same routing the gateway has today, and a test asserts
+#      that against `wa_model_gateway::plan_chat` - a comparison is only meaningful when the two sides
+#      are separable;
+#   2. a policy module is installed, upgraded and switched like a component, so the registry that holds
+#      the current module is state with a generation, not a config value;
+#   3. it depends on `wa-model-gateway` (the types: `Policy`, `TaskClass`, `Label`, `ModelRef`) and
+#      nothing else, so `cargo test -p wa-model-router` is seconds.
+#
+# A policy module declared as a table is JSON here on purpose: it is the operator's/component's own
+# declaration, exactly like the `models` section, and it is parsed strictly so a typo in a policy is a
+# named error rather than a silently weaker route.
+
+[dependencies]
+wa-model-gateway = { path = "../wa-model-gateway" }
+serde_json = "1"
