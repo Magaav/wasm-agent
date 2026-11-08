@@ -39,12 +39,16 @@ sh("mkdir -p '" .. config .. "'")
 
 local hooks = dofile('lua/core/hooks.lua')
 
--- ---- 1. nothing configured: inert ---------------------------------------------------------------
+-- ---- 1. nothing configured: the shipped guard is the only thing in the path ----------------------
 hooks.reset()
-ok(hooks.active() == false, 'no config file means no hooks are active')
+ok(hooks.configured() == false, 'no config file means no configured hooks')
+ok(hooks.active() == true,
+  'the shipped default guard is active with no config at all (docs/HOOK-EVENTS.md)')
 local inert = hooks.fire('PreToolUse', { tool_name = 'bash', tool_input = { command = 'echo x' } }, { session_id = 's' })
 ok(inert.ran == 0 and inert.blocked == false and inert.status == 'no_hooks',
-  'a fire with no configuration runs nothing and blocks nothing')
+  'a fire with no configured hook runs no hook and blocks nothing')
+ok(inert.guard and inert.guard.origin == 'shipped' and inert.guard.status == 'allow',
+  'the shipped guard saw the call and refused nothing')
 ok(inert.updated_input and next(inert.updated_input) == nil, 'and answers no input rewrite')
 ok(host.read_file(config .. '/hooks.json') == nil, 'the scratch home had no hooks.json to begin with')
 
@@ -275,8 +279,12 @@ hooks.fire('PreToolUse', { tool_name = 'bash' }, { session_id = 's' })
 local listed = hooks.list({})
 ok(listed.version == hooks.VERSION, 'the read surface carries a version')
 ok(#listed.events == 1 and listed.events[1].event == 'PreToolUse', 'it lists one active event')
-ok(listed.events[1].entries[1].name == 'leaky' and listed.events[1].entries[1].kind == 'command',
-  'with the hook\'s name and kind')
+local shipped_row = listed.events[1].entries[1]
+local leaky_row = listed.events[1].entries[2]
+ok(shipped_row and shipped_row.name == 'guard-destructive' and shipped_row.origin == 'shipped',
+  'the shipped guard is listed first, with its origin')
+ok(leaky_row and leaky_row.name == 'leaky' and leaky_row.kind == 'command',
+  'with the configured hook\'s name and kind')
 ok(listed.recent[1] and listed.recent[1].status == 'ok' or listed.recent[1].status == 'error',
   'and the last outcome')
 local leaked = false

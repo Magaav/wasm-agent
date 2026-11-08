@@ -125,6 +125,40 @@ weakening the binding until spell replay itself passes. Evaluate timing with
 `scripts/evaluate-before-final.cjs`; it executes real loop logic with fake HTTP,
 not provider inference.
 
+## Shipped default guard
+
+One hook ships enabled, with no configuration file at all: `guard-destructive`, a `PreToolUse` refusal of the
+**two commands that detached this fleet** (`docs/FLEET-OPS.md`, `skills/fleetops/incidents.json`).
+
+| it refuses | the message |
+| --- | --- |
+| an edit of `WASM_AGENT_NETWORK_ADMINS`, or of the rendezvous drop-in (`wa-rendezvous.service.d` / `managed.conf`), by a shell edit or by the write/edit tools | `this detaches nodes that pin the admin set; use mesh (\`wa fleet push-roster\`)` |
+| a restart / stop / start / reload of `wa-rendezvous` through any service manager | the same sentence |
+
+It is a refusal of **specific known-destructive actions**, not a limit on work: no counting, no nudging,
+no grading. `cat`/`grep` of the same files, `systemctl status wa-rendezvous`, `journalctl -u wa-rendezvous`
+and `wa fleet push-roster <node>` are all allowed - a guard that blocks diagnosis is a guard that gets
+removed.
+
+How it fits the engine:
+
+* it runs **before** any configured entry and before the `wa:hooks` component seam, in both paths, so a
+  node cannot lose it by not having a `hooks.json` (it is `lua/core/hooks_defaults.lua`;
+  `hooks.active()` is true because of it, while `hooks.configured()` still answers the older question);
+* a denial is a normal verdict: `blocked`, `blocked_by="guard-destructive"`, the reason above, one outcome
+  row with `origin: "shipped"`, and `guard.status: "deny"`. A tool call that receives it answers
+  `hook_denied` with `effect: "none"` and no operation id, so "refused" can never be a call that ran;
+* it is **visible**: `/hooks` lists it as a `PreToolUse` entry with `origin: shipped` and prints
+  `shipped guard guard-destructive on (shipped)`;
+* it is **overridable**, and only in two visible ways: an operator hook named `guard-destructive` in the
+  node's or the project's `hooks.json` replaces it (the engine's precedence, not a second rule), or
+  `WASM_AGENT_DEFAULT_GUARD=off` (or `WASM_AGENT_HOOKS=off`) turns it off. `/hooks` shows the state and the
+  override sentence.
+
+It is not a policy engine and does not try to be: it knows two targets. Everything else that might be
+wrong is the habits' job (`lua/core/habits.lua`: know the blast radius, cheapest check first, roll back
+fast) and the fleetops skill's job.
+
 ## The engine beside this inventory
 
 The catalogue above is a curated list with claims about boundaries. The engine

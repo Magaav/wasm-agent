@@ -29,6 +29,10 @@ local json = dofile('lua/vendor/json.lua')
 local redact = dofile('lua/core/redact.lua')
 local paths = dofile('lua/core/paths.lua')
 local platform = dofile('lua/core/platform.lua')
+-- The shipped default guard (docs/HOOK-EVENTS.md, "Shipped default guard"): a PreToolUse refusal of the
+-- two known-destructive fleet actions. It is evaluated before anything configured, in both the native
+-- and the component path, so a node cannot lose it by not having a hooks.json - and `/hooks` shows it.
+local defaults = dofile('lua/core/hooks_defaults.lua')
 
 local M = {}
 
@@ -658,12 +662,41 @@ function M.entries(event, opts)
   return list
 end
 
-function M.active(opts)
+-- Is anything *configured* (a command hook, a Claude Code source or a plugin hook)? This is the older
+-- `M.active` question, kept separate because two callers need the two answers differently: the tool
+-- path must fire whenever the shipped guard is in force, while the parallel-bash path only loses its
+-- batching to hooks the operator configured.
+function M.configured(opts)
   local view = M.config(opts)
   if view.disabled then return false end
   for _ in pairs(view.hooks) do return true end
   if #plugin_hooks > 0 then return true end
   return false
+end
+
+-- Does the shipped guard refuse this exact call? Pure, records nothing: the parallel-bash path asks it
+-- before it decides whether a batch may run, and the refusal itself is made (and recorded) by the
+-- serial `M.fire` the caller falls back to.
+function M.guard_refuses(tool_name, tool_input, opts)
+  local view = M.config(opts)
+  if not defaults.enabled(view, opts) then return false end
+  return defaults.judge(tool_name, tool_input) ~= nil
+end
+
+function M.active(opts)
+  local view = M.config(opts)
+  if view.disabled then return false end
+  -- The shipped guard is a hook that runs with no configuration at all, so a node that never wrote a
+  -- hooks.json is not "inert" in the tool path any more: the guard is the one thing that runs.
+  if defaults.enabled(view, opts) then return true end
+  for _ in pairs(view.hooks) do return true end
+  if #plugin_hooks > 0 then return true end
+  return false
+end
+
+-- Is the shipped guard in force? `/hooks` and the tests read it here; `M.fire` applies it.
+function M.guard(opts)
+  return defaults.describe(M.config(opts), opts)
 end
 
 -- ---- running one hook ---------------------------------------------------------------------------
@@ -1034,6 +1067,33 @@ local function seam_statusline(view, opts)
   return tostring(text)
 end
 
+-- The shipped guard, applied before any configured hook and before the component seam, so it is the
+-- same rule in both paths (docs/HOOK-EVENTS.md). A refusal is a verdict of the same shape the rest of
+-- this file produces, recorded in `outcomes` like a hook's, and it ends the event: nothing configured
+-- runs after it, because a deny is final everywhere else too.
+local function apply_guard(payload, opts, match_opts)
+  local view = M.config(match_opts)
+  local answer, basis = defaults.pre_tool_use(payload, opts, { view = view })
+  local verdict = blank('PreToolUse')
+  verdict.guard = { name = defaults.GUARD.name, origin = 'shipped', basis = basis,
+    status = answer and 'deny' or (basis == 'allow' and 'allow' or basis) }
+  if not answer then return verdict end
+  local entry = { name = defaults.GUARD.name, event = 'PreToolUse', kind = 'lua', origin = 'shipped' }
+  local row = outcome(entry, 'ok', { json = answer })
+  verdict.status = 'blocked'
+  verdict.ran = 1
+  verdict.outcomes[#verdict.outcomes + 1] = record(entry, row)
+  interpret(entry, row, verdict, payload)
+  verdict.blocked = true
+  verdict.blocked_by = verdict.blocked_by or defaults.GUARD.name
+  verdict.reason = verdict.reason or defaults.REASON
+  if entry and type(host.log) == 'function' then
+    pcall(host.log, 'guard-destructive refused ' .. tostring(type(payload) == 'table' and payload.tool_name or '?')
+      .. ': ' .. tostring(answer.detail and answer.detail.rule or 'destructive'))
+  end
+  return verdict
+end
+
 -- Fire one event. Never raises: a hook layer that can fail a run is a hook layer the operator turns
 -- off. The verdict is a table (see `blank`), and only `blocked`/`stop` change the caller's path.
 function M.fire(event, payload, opts)
@@ -1044,11 +1104,23 @@ function M.fire(event, payload, opts)
   if not match_opts.tool and type(payload) == 'table' then
     match_opts.tool = payload.tool_name or payload.profile or payload.component
   end
+  local guard
+  if event == 'PreToolUse' then
+    local ok, verdict = pcall(apply_guard, payload, opts, match_opts)
+    if ok and verdict then
+      if verdict.blocked then return verdict end
+      guard = verdict.guard
+    end
+  end
   if seam_component() then
     local sealed = seam_fire(event, payload, opts, match_opts)
-    if sealed then return sealed end
+    if sealed then
+      if guard then sealed.guard = guard end
+      return sealed
+    end
   end
   local verdict = blank(event)
+  if guard then verdict.guard = guard end
   local ok, problem = pcall(function()
     local entries = M.entries(event, match_opts)
     if #entries == 0 then return end
@@ -1189,8 +1261,13 @@ function M.list(opts)
   opts = opts or {}
   local view = M.config(opts)
   local events = {}
+  local shipped = M.guard(opts)
   for _, event in ipairs(M.EVENTS) do
     local entries = {}
+    if shipped.event == event.name and shipped.enabled then
+      entries[#entries + 1] = { name = shipped.name, kind = shipped.kind, origin = 'shipped',
+        detail = shipped.reason }
+    end
     for _, entry in ipairs(view.hooks[event.name] or {}) do
       entries[#entries + 1] = { name = entry.name, kind = 'command', matcher = entry.matcher,
         timeout_ms = entry.timeout_ms, origin = entry.origin }
@@ -1227,6 +1304,7 @@ function M.list(opts)
     errors = view.errors,
     events = events,
     event_count = #events,
+    guard = shipped,
     bus = bus,
     statusline = #view.mods.statusline,
     commands = commands,
@@ -1245,6 +1323,10 @@ function M.report(opts)
     return table.concat(lines, '\n')
   end
   if #view.sources == 0 then lines[#lines + 1] = 'hooks: none configured' end
+  if view.guard then
+    lines[#lines + 1] = string.format('  shipped guard %-18s %s (%s)', view.guard.name,
+      view.guard.enabled and 'on' or 'off', view.guard.basis)
+  end
   for _, source_row in ipairs(view.sources) do
     lines[#lines + 1] = string.format('  source %-14s %s', source_row.name, source_row.path)
   end
