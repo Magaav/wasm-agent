@@ -150,7 +150,7 @@ local function tool_ref(name, declared, available)
   if available[name] and declared.tool_call then return 'tool_call(name="' .. name .. '")' end
 end
 
-local GENERIC_ORDER = { "identity", "work", "style", "language", "time", "memory" }
+local GENERIC_ORDER = { "identity", "work", "habits", "style", "language", "time", "memory" }
 local STACK_ORDER = { "safety", "tools", "guidelines", "skills" }
 local LAYER_ORDER = { "generic", "stack", "workflow", "project", "session" }
 -- The prompt's shape, exported for scripts/sync-prompt-docs.lua: the docs render it, never restate it.
@@ -195,6 +195,10 @@ local function generic_sections(role, declared, available)
     .. "and say what you ran and what you could not."
   s.work = s.work .. "\n- When a step fails the same way twice, or the work is blocked, say what is blocking it "
     .. "and ask, instead of repeating the call."
+  -- The operating habits (docs/FLEET-OPS.md, `lua/core/habits.lua`): one block in the cache-stable
+  -- prefix, the same bytes for every role and every turn. Advice, never a budget: nothing here
+  -- counts turns or pushes the model to stop.
+  s.habits = "How to work, on any machine:\n" .. dofile("lua/core/habits.lua").text()
   s.style = "Keep replies short and never invent facts."
   s.language = "Reply in the language of the user's latest message unless they ask for another, "
     .. "even though these instructions are in English."
