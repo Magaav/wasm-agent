@@ -12,6 +12,7 @@
 //!
 //! The syscall numbers are per architecture because `libc` does not export `SYS_add_key` for every
 //! target this repo builds. Only x86_64 and aarch64 are wired; anything else falls back.
+use ring::rand::SecureRandom;
 use super::{Error, Result};
 use std::ffi::CString;
 use zeroize::Zeroizing;
