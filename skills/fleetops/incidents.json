@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "note": "The incidents the fleetops skill grew from. Read by lua/core/lessons.lua once, by id, into the node's own lessons store; never injected into a session. Symptom, cause, fix, rule - a lesson without a rule is an anecdote.",
+  "incidents": [
+    {
+      "id": "les-rendezvous-admin-set-20261106",
+      "at": 1793988000000,
+      "symptom": "Two nodes (nextcloud, mail) went offline for 18.5 hours after fleet control 'did not work' from the laptop agent. The rendezvous itself was up and answering.",
+      "cause": "The agent added itself to WASM_AGENT_NETWORK_ADMINS in the wa-rendezvous drop-in (/etc/systemd/system/wa-rendezvous.service.d/managed.conf) and restarted wa-rendezvous to gain control. Peers pin the admin set they were bound with, so they were detached from the directory by the change, not by an outage.",
+      "fix": "Restore the admin set and the service file, restart nothing else, let the pinned peers re-register. Then give the node control through the mesh instead: wa fleet push-roster <node>.",
+      "rule": "Never edit WASM_AGENT_NETWORK_ADMINS or a wa-rendezvous drop-in to gain control, and never restart wa-rendezvous to apply it. Peers pin the set; use mesh (wa fleet push-roster).",
+      "tags": ["rendezvous", "pinning", "admins", "offline", "admin-list"]
+    },
+    {
+      "id": "les-rendezvous-admin-set-20261108",
+      "at": 1794128400000,
+      "symptom": "The same class of outage again: nodes detached from the rendezvous for about an hour, in the middle of a working fleet.",
+      "cause": "The same 'fix' was reached for twice: the control plane was treated as a local setting to edit rather than a shared directory every node pins. The diagnosis step (read last_seen and the operator route) was skipped, so the change was debugging by mutation.",
+      "fix": "Read the fleet first (fleetview/nodes: online, last_seen, operator_of_peer), then the rendezvous journal. Push the roster if the goal is control; change nothing in the directory.",
+      "rule": "Diagnose before touching shared control plane: fleetview/nodes and the rendezvous journal first, then mesh push-roster. A second occurrence of an incident means the rule was not written down - write it.",
+      "tags": ["rendezvous", "diagnosis", "fleetview", "last_seen", "operators"]
+    },
+    {
+      "id": "les-rebuild-2core-container-20261109",
+      "at": 1794232800000,
+      "symptom": "A Rust rebuild ran for about 40 minutes in a 2-core container, blocking the task, and was still not finished when the agent gave up on it.",
+      "cause": "The capacity of the box was never checked before choosing to build there: the build was started assuming a workstation-class machine, and a 2-core container was asked for a full workspace release build.",
+      "fix": "Check the cheapest facts first (cores, memory, disk, existing target dir) and choose: an incremental test build of the one crate, or hand the build to a machine that has the capacity. Long builds belong in a managed operation.",
+      "rule": "Cheapest check first: read cores/memory/disk before starting a heavy build, build only the crate you touched, and never treat a slow box as a broken build.",
+      "tags": ["rust", "build", "capacity", "cargo", "slow"]
+    },
+    {
+      "id": "les-backgrounded-cargo-20261110",
+      "at": 1794308400000,
+      "symptom": "A cargo build was backgrounded inside one bash call; the call returned, the build's fate was unknown, and the work had to be rediscovered.",
+      "cause": "A long-running child was detached instead of supervised. The command's exit status described the shell, not the build, so 'it ran' and 'it worked' were confused.",
+      "fix": "Run long work as a managed operation (or a supervised job) whose state can be read back, and verify the artifact (binary path, version, test output), not the launch.",
+      "rule": "Long work goes into an operation that outlives the call; verify the effect, not the command. Never background a build inside a single call and walk away.",
+      "tags": ["operation", "background", "verification", "cargo", "supervision"]
+    }
+  ]
+}

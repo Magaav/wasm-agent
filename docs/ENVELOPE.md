@@ -62,6 +62,8 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `notes_append`: Append to your session notes
 - `notes_compact`: Keep the last lines of your notes and archive the rest
 - `capabilities`: List the tools this account may use
+- `lessons`: Recall or add what this fleet learned the hard way (symptom, cause, fix, rule)
+- `fleetview`: One read-only view of the whole fleet: liveness, version, health, disk, components, work, incidents
 - `subagent`: Start and collect a child agent on a bounded task
 - `sessions`: List your past sessions
 - `session`: Read a session, paging earlier evidence
@@ -138,6 +140,8 @@ runs on the client too, while `bash` runs on this node.
 | `notes_compact` | `keep_lines?` | Keep the last lines of your notes and archive the rest |
 | `skill` | `limit?` `name?` `offset?` `query?` `snapshot?` | Discover procedures by query or load a full skill by name |
 | `capabilities` | - | List the tools this account may use |
+| `lessons` | `action` `cause?` `fix?` `id?` `limit?` `query?` `rule?` `source?` `symptom?` `tags?` | Recall or add what this fleet learned the hard way (symptom, cause, fix, rule) |
+| `fleetview` | `lessons?` | One read-only view of the whole fleet: liveness, version, health, disk, components, work, incidents |
 | `tool_search` | `limit?` `names?` `query?` | Discover and load a permitted tool definition |
 | `tool_call` | `arguments?` `calls?` `checked?` `cursor?` `name?` | Call a permitted tool by name without expanding permanent declarations |
 | `subagent` | `action` `after_seq?` `before_seq?` `byte_limit?` `byte_offset?` `context?` `conversation_id?` `delivery_id?` `id?` `idempotency_key?` `limit?` `message_id?` `message_version?` `model?` `offset?` `parent_run_id?` `profile?` `prompt?` `reasoning?` `run_id?` `session_id?` `text?` `title?` `view?` `wait_ms?` | Start and collect a child agent on a bounded task |
@@ -200,7 +204,7 @@ runs on the client too, while `bash` runs on this node.
 | `web_search` | `query` `limit?` `refresh?` | Search public web sources with retained evidence |
 | `web_read` | `limit?` `offset?` `pending_ref?` `ref?` `refresh?` `url?` | Read a public source or page an immutable cache ref |
 
-A guest's catalogue is `time`, `remember`, `recall`, `memories`, `wake`, `wake_list`, `wake_cancel`, `notes_read`, `notes_write`, `notes_append`, `notes_compact`, `skill`, `capabilities`, `tool_search`, `tool_call`, `subagent`, `sessions`, `session`, `search_messages`, `resume_session`.
+A guest's catalogue is `time`, `remember`, `recall`, `memories`, `wake`, `wake_list`, `wake_cancel`, `notes_read`, `notes_write`, `notes_append`, `notes_compact`, `skill`, `capabilities`, `lessons`, `fleetview`, `tool_search`, `tool_call`, `subagent`, `sessions`, `session`, `search_messages`, `resume_session`.
 <!-- /generated -->
 
 ## What the model does **not** get

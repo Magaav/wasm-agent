@@ -273,6 +273,21 @@ M.shared = {
     offset = { type = "integer", minimum = 0 },
     snapshot = { type = "string", description = "Carry the returned snapshot when continuing a metadata page." } }),
   schema("capabilities", "List permitted tools and their current workspace execution limits; permission is not executability.", {}),
+  -- Fleet knowledge and the fleet's own view (docs/FLEET-OPS.md). Both are looked up on purpose:
+  -- nothing from `lessons` is injected into a session, and `fleetview` changes nothing.
+  schema("lessons", "Recall or add what this fleet learned the hard way (symptom, cause, fix, rule). Look it up on purpose with action=recall before touching fleet control - the fleetops skill says when - and add one with action=add when a failure would otherwise repeat. Nothing here is injected automatically: an empty recall means these words are not in the store, not that no lesson exists.", {
+    action = { type = "string", enum = { "recall", "list", "add", "stats" }, description = "recall: search by words; list: newest first; add: store one lesson; stats: counts only." },
+    query = { type = "string", maxLength = 512, description = "recall: what happened, in your words (e.g. 'rendezvous admin list')." },
+    limit = { type = "integer", minimum = 1, maximum = 20 },
+    id = { type = "string", maxLength = 120, description = "add: exact id of an existing lesson to correct; omit to derive it from symptom+rule." },
+    symptom = { type = "string", maxLength = 2000, description = "add: what was observed, with no message text or secret." },
+    cause = { type = "string", maxLength = 2000, description = "add: why it happened, or 'unknown'." },
+    fix = { type = "string", maxLength = 2000, description = "add: what actually repaired it, or 'unknown'." },
+    rule = { type = "string", maxLength = 2000, description = "add: the rule a later session should follow. Required." },
+    tags = { type = "array", items = { type = "string", maxLength = 60 } },
+    source = { type = "string", maxLength = 200, description = "add: where the lesson came from (a node name, an incident id)." } }, { "action" }),
+  schema("fleetview", "One read-only call for the whole fabric: every node's online/last_seen, version/commit, health, disk, components and the features they carry, running operations and jobs, and recent incidents from telemetry and lessons. Unknown facts are named in each node's `missing` and left absent - never a zero - so read `missing` before concluding a node is healthy. Changes nothing.", {
+    lessons = { type = "boolean", description = "Attach matching lessons to the nodes they name (default true)." } }),
   schema('tool_search','Find tools by keyword, or load an exact list: `query` for keywords, or `names` to load several known tools at once with names=[...] (1-8 exact tool names; query="select:a,b,c" is the same request). Each permitted name is loaded and pinned like a keyword hit; a name that is unknown or not permitted comes back in `missing` with the nearest permitted names instead. A tool you already know needs no search: call it with tool_call.',{query={type='string',maxLength=256,description='Keywords. Or "select:a,b,c" - the batch spelling of names.'},names={type='array',minItems=1,maxItems=8,items={type='string',maxLength=256},description='Exact tool names to load in one atomic batch (limit does not truncate it); exclusive with query.'},limit={type='integer',minimum=1,maximum=8}},{}),
   schema('tool_call','Call any permitted tool by `name` with `arguments`. checked=true validates the arguments against its schema first. `calls` runs 1-8 known independent pure reads in one call (serially); `cursor` pages a large batch result.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}),
   schema("subagent", "Start and supervise a child agent on a bounded task, with its own context, transcript and a restricted tool profile (`profiles` lists approved ones; a profile only narrows your tools). `start` returns a receipt, not a result: collect with `await` (one bounded wait) or `status`/`result`, stop with `cancel`. Reuse the exact recorded subagent/dispatch or native attempt ID for `status`: one direct lookup, not `list` rediscovery. Never guess or strip a `child:` session name into an ID; if the ID is missing, use `lookup_session` with its `conversation_id`. A placed task in state `unknown` may or may not have arrived: only `reconcile` may retry or cancel it. `session` reads the child's conversation; `message` queues its next turn. `message`, `steer` and `steer_session` require a non-empty `idempotency_key`; reuse it only for the same request.", {
@@ -660,6 +675,7 @@ M.tier_of = {
   client = "client",
   spell_save = "spells", spell_run = "spells", spell_list = "spells",
   spell_get = "spells", spell_forget = "spells", spell_export = "spells", spell_compose = "spells",
+  lessons = "memory", fleetview = "nodes",
   nodes = "nodes", remote = "nodes",
 }
 
@@ -781,6 +797,8 @@ local CUES = {
   spell_export = "Export a spell for the sentinel to run",
   remote = "Run a capability on another node",
   nodes = "List this node and its peers",
+  fleetview = "One read-only view of the whole fleet: liveness, version, health, disk, components, work, incidents",
+  lessons = "Recall or add what this fleet learned the hard way (symptom, cause, fix, rule)",
   tool_result = "Read an exact byte range of a truncated tool result",
 }
 
@@ -1934,6 +1952,33 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, "") }
     end
     return { error = "unknown_action", action = action }
+  elseif name == "fleetview" then
+    -- One read-only call for the whole fabric (docs/FLEET-OPS.md). It has no write path at all: the
+    -- module it calls cannot act, so no argument can make this tool change anything.
+    local fleetview = dofile('lua/core/fleetview.lua')
+    local lessons
+    if args.lessons ~= false then
+      local ok, recalled = pcall(function() return dofile('lua/core/lessons.lua').ensure() end)
+      if ok and type(recalled) == 'table' then lessons = recalled end
+    end
+    local view = fleetview.view({ lessons = lessons })
+    return view
+  elseif name == "lessons" then
+    local store = dofile('lua/core/lessons.lua')
+    local action = tostring(args.action or 'recall')
+    if action == 'add' then
+      local added = store.add({ id = args.id, symptom = args.symptom, cause = args.cause, fix = args.fix,
+        rule = args.rule, tags = args.tags, source = args.source })
+      if not added.ok then return { error = added.error, effect = 'none' } end
+      return added
+    elseif action == 'list' then
+      return { lessons = store.list(args.limit), stats = store.stats(), note = store.NOTE }
+    elseif action == 'stats' then
+      return { ok = true, stats = store.stats() }
+    end
+    local recalled = store.recall(args.query, args.limit)
+    if recalled.error then return { error = recalled.error, effect = 'none', note = recalled.note } end
+    return recalled
   elseif name == "nodes" then
     local list = {}
     for _, node in ipairs(nodeslib.list()) do
@@ -2026,6 +2071,7 @@ local READ_ONLY = {
   read = true, read_many = true, capture_inspect=true, grep = true, grep_many=true, session_many=true,
   search_messages_many=true,symbol_source_many=true, ls = true, tool_result = true, skill = true,
   graph = true, diagnose = true, capabilities = true, tool_search=true, web_search=true,web_read=true,nodes = true,
+  fleetview = true,
   recall = true, memories = true, sessions = true, session = true,
   search_messages = true,
   notes_read = true, wake_list = true,
@@ -2041,9 +2087,19 @@ function M.has_effect(name) if type(name)~='string' then return true end;if name
 function M.start_parallel_bash(calls, memory, role, ctx)
   -- A hook layer that must see every call cannot be skipped by the parallel path: while hooks are
   -- configured, bash calls run one at a time through `dispatch`, where PreToolUse and PostToolUse fire
-  -- (docs/HOOKS.md, "what a hook cannot see"). With no hooks this is one cached lookup and the
-  -- batching behaviour is unchanged.
-  if hookslib.active() then return nil end
+  -- (docs/HOOKS.md, "what a hook cannot see"). With no configured hooks this is one cached lookup and
+  -- the batching behaviour is unchanged. The shipped guard is the exception in the other direction: it
+  -- is not a reason to give up batching (each command still reaches it in `dispatch`), but a batch that
+  -- contains a command it refuses is not launched as a batch - the serial path refuses it with the
+  -- usual verdict.
+  if hookslib.configured() then return nil end
+  for _, call in ipairs(type(calls) == 'table' and calls or {}) do
+    local fn = type(call) == 'table' and call['function'] or nil
+    if type(fn) == 'table' then
+      local ok, call_args = pcall(json.decode, fn.arguments or '')
+      if ok and type(call_args) == 'table' and hookslib.guard_refuses(fn.name, call_args) then return nil end
+    end
+  end
   if not is_master(role) or (ctx and ctx.subagent
       and (not ctx.subagent.allowed or not ctx.subagent.allowed.operation))
       or type(calls) ~= "table" or #calls < 2 then return nil end
