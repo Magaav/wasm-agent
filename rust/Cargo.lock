@@ -2242,6 +2242,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wa-fleetview"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "wa-governance"
 version = "0.1.0"
 dependencies = [
@@ -2409,6 +2416,14 @@ name = "wa-model-gateway"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "wa-model-router"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wa-model-gateway",
 ]
 
 [[package]]
