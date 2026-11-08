@@ -2238,6 +2238,7 @@ dependencies = [
  "ring",
  "serde_json",
  "tempfile",
+ "wa-grant-policy",
  "wa-host-support",
 ]
 
@@ -2257,6 +2258,7 @@ dependencies = [
  "wa-bounded",
  "wa-grant-policy",
  "wa-host-support",
+ "wa-mesh-core",
  "wa-telemetry",
 ]
 
