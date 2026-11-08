@@ -16,11 +16,11 @@
 //! `wa:kernel/*@0.2.0` runs here, everything else runs on 0.1 or as a wasip1 core module, unchanged.
 //!
 //! Governance is the 0.1 runner's, unchanged in order and in reason (`docs/GRANT-POLICY.md`, "How
-//! the host wires it"): the **manifest grant** first (`net`/`storage`/`file_env`/`stt`), then the
+//! the host wires it"): the **manifest grant** first (`net`/`storage`/`file_env`/`stt`/`ocr`), then the
 //! **node policy** - and a node with no `policy.json` runs in manifest mode, exactly as 0.1 does.
 //! The checks are the same ones at the same points: `net.dial` on `websocket.connect`,
 //! `net.send`+`whatsapp.send` on an opaque `websocket.send`, `http.request` on `http.send`,
-//! `kv.read`/`kv.write` on the store, `credentials.read`, `stt.start`. Both runners call the same
+//! `kv.read`/`kv.write` on the store, `credentials.read`, `stt.start`, `ocr.read`. Both runners call the same
 //! `service_components::{gate, target_of, authority_target}` so the two contracts cannot drift into
 //! two different policies. Every answered host call records one telemetry observation
 //! (`node_telemetry::HostCallGuard`), attributed to the component by name.
@@ -116,6 +116,10 @@ pub struct State {
     secrets: std::collections::BTreeMap<String, String>,
     /// Manifest `capabilities.stt == true`.
     stt: bool,
+    /// Manifest `capabilities.ocr == true`: the image reader (`wa:kernel/vision`,
+    /// `docs/WHATSAPP-OCR.md`). A component that did not declare it is refused at the call, exactly
+    /// as an undeclared `stt` is.
+    pub(crate) ocr: bool,
     /// The non-secret configuration this component was granted (the registry definition's `config`
     /// object), for `wa:kernel/config` (`wasi_ext_host.rs`). `None` means the interface is not
     /// linked; a value is data, not a capability - every read is `config.read`.
@@ -153,7 +157,7 @@ fn kv_error(error: String) -> KError {
 
 /// The installed name for attribution: a 0.2 host function is an `async fn` over `Accessor`, so it
 /// has no `&self`, and the name comes out of the store's state instead.
-fn who(accessor: &Accessor<State, State>) -> String {
+pub(crate) fn who(accessor: &Accessor<State, State>) -> String {
     accessor.with(|mut access| access.get().name.clone())
 }
 
@@ -170,7 +174,7 @@ fn gate_decision(decision: Decision) -> Result<(), KError> {
 /// Ask the node policy before a host call does anything (`docs/GRANT-POLICY.md`): a node with no
 /// `policy.json` answers in manifest mode (the manifest grant is the only gate), a node with one
 /// enforces it, and an unruled sensitive capability is refused `no_policy`.
-fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
+pub(crate) fn gate(component: &str, capability: &str, target: Option<&str>) -> Result<(), KError> {
     gate_decision(wa_governance::node_policy::check(component, capability, target))
 }
 
@@ -819,6 +823,12 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
     if stt {
         service_stt::prewarm(); // the model loads before the first note, as in 0.1
     }
+    let ocr = installed.manifest.get("capabilities").and_then(|c| c.get("ocr")).and_then(serde_json::Value::as_bool) == Some(true);
+    if ocr {
+        // The same lifecycle as the recognizer: a component that declared the grant starts the
+        // reader's engine now, so the first screenshot does not pay the load.
+        crate::service_ocr::prewarm();
+    }
     let state = State {
         wasi: builder.build(),
         table: ResourceTable::new(),
@@ -829,6 +839,7 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         log: Some(log_file),
         secrets,
         stt,
+        ocr,
         config: scope.config.clone(),
         instance: crate::services::instance_token(shared, &installed.name),
         name: installed.name.clone(),
@@ -870,6 +881,9 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
         wa::kernel::websocket::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::http::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
+        // The OCR reader (`wa:kernel/vision`): served to whoever imports it, never required of a
+        // guest (`docs/WHATSAPP-OCR.md`).
+        crate::vision_host::link(&mut linker),
         wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
         wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
         // The cooperative hot swap (`wit/kernel-v2/kernel.wit`, `interface drain`): linked for
@@ -1117,6 +1131,7 @@ mod tests {
             wa::kernel::websocket::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::http::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::speech::add_to_linker::<State, State>(&mut linker, |s| s),
+            crate::vision_host::link(&mut linker),
             wa::kernel::kv::add_to_linker::<State, State>(&mut linker, |s| s),
             wa::kernel::lifecycle::add_to_linker::<State, State>(&mut linker, |s| s),
             drain_signal::wa::kernel::drain::add_to_linker::<State, State>(&mut linker, |s| s),
@@ -1140,6 +1155,7 @@ mod tests {
             log: None,
             secrets: Default::default(),
             stt: false,
+            ocr: false,
             config: None,
             instance: "wa-whatsapp#1".into(),
             name: "wa-whatsapp".into(),

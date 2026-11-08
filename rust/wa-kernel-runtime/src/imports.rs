@@ -71,7 +71,9 @@ const KERNEL_V2: &[&str] = &["types", "websocket", "http", "speech", "kv", "life
 /// `drain` is the cooperative hot swap (`docs/SERVICE-COMPONENTS.md`, "A swap waits for the work in
 /// flight"): importing it *is* the declaration that this component finishes its job before it
 /// stops, which is what lets a swap tell a drainable instance from one to stop immediately.
-const KERNEL_V2_OPTIONAL: &[&str] = &["keyvalue", "config", "drain"];
+/// `vision` is the kernel's OCR reader (`docs/WHATSAPP-OCR.md`): the same rule - only a component
+/// that reads images imports it, so the others are not built against a worker they never start.
+const KERNEL_V2_OPTIONAL: &[&str] = &["keyvalue", "config", "drain", "vision"];
 /// The modules a wasip1 service may import from the host (`services.rs::linker`).
 const WASIP1_HOST_MODULES: &[&str] = &["wasi_snapshot_preview1", "wa_sock", "wa_ws", "wa_http", "wa_kv", "wa_ctl"];
 /// Provider packages the kernel itself serves beside `wa:kernel` (`bus_host`, `queue_host`).
@@ -263,6 +265,28 @@ mod tests {
         assert!(interfaces.waiting_for(&set(&["wa:vision/text-reader@0.1.0"])).is_empty());
         // A provider is what a consumer can import; WASI and the entry point are not offers.
         assert_eq!(interfaces.provides(), BTreeSet::new());
+    }
+
+    /// `wa:kernel/vision@0.2.0` - the kernel's OCR reader - is served but required by no world: a
+    /// component that reads images opts in and starts, one that does not is unaffected
+    /// (`docs/WHATSAPP-OCR.md`). Added after the live finding that the component imported no
+    /// vision interface at all, so a cutover would have silently dropped image OCR.
+    #[test]
+    fn the_vision_reader_is_served_without_being_an_obligation_of_every_service() {
+        assert!(kernel_serves("wa:kernel/vision@0.2.0", Contract::V2));
+        // Not a blanket yes: another version, and the 0.1 contract, still wait.
+        assert!(!kernel_serves("wa:kernel/vision@0.1.0", Contract::V2));
+        assert!(!kernel_serves("wa:kernel/vision@0.2.0", Contract::V1));
+        // Optional, not required: adding it to the world would oblige every 0.2 guest to import it.
+        assert!(!KERNEL_V2.contains(&"vision"), "vision is optional, not required");
+        let text = std::fs::read_to_string("../../wit/kernel-v2/kernel.wit").expect("the published contract");
+        assert!(text.contains("interface vision"), "the interface is published in wit/kernel-v2");
+        let interfaces = Interfaces {
+            contract: Contract::V2,
+            imports: set(&["wa:kernel/kv@0.2.0", "wa:kernel/vision@0.2.0"]),
+            exports: set(&["wa:kernel/service@0.2.0"]),
+        };
+        assert!(interfaces.waiting_for(&BTreeSet::new()).is_empty(), "a guest that imports vision waits for nothing");
     }
 
     /// The constant above against the contract it describes: a new interface in `wit/kernel` that

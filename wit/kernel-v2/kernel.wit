@@ -107,6 +107,39 @@ interface speech {
     recognize: async func(audio: list<u8>, mime: string, language: string) -> result<recognition, error>;
 }
 
+/// OCR done by the kernel with its native text reader (the RapidOCR worker the node provisions,
+/// `scripts/whatsapp-ocr-local.py --worker`), granted by the manifest capability `ocr: true`.
+///
+/// One suspendable call and no resource: unlike a recognition there is nothing to stream - a reader
+/// answers once with the text or with the reason it could not. The call shape is the seams
+/// `wa:seams/text-reader.read(image, mime)` (`wit/seams/seams.wit`); what changes is who answers:
+/// the kernel's own warm worker today, a wasi-nn provider component later, with the guest's call
+/// site unchanged.
+///
+/// It is **not** an import of `world service-component`: a world's imports are obligations, and a
+/// component that never reads an image should not be built against a worker it will never start.
+/// A guest opts in by importing `wa:kernel/vision@0.2.0`, as it opts into the drain; the kernel
+/// serves it to whoever asks (`rust/wa-kernel-runtime/src/imports.rs`, KERNEL_V2_OPTIONAL).
+interface vision {
+    use types.{error};
+
+    record reading {
+        /// The text the reader found, lines in reading order. Never a log line.
+        text: string,
+        /// The media type that was read, echoed so the caller can keep it beside the text.
+        mime: string,
+        /// Wall time the reader spent, milliseconds.
+        elapsed-ms: u64,
+    }
+    /// Read the text in `image` (an encoded file: jpeg, png, webp…).
+    ///
+    /// `refused("ocr not declared")` when the manifest does not grant `ocr`; `again` when the
+    /// worker's queue is full (retry later, it never blocks); `failed(reason)` for the reader's own
+    /// answer (`no_text_detected`, `image_too_large`, `unsupported_media`, `ocr_text_too_long`,
+    /// `worker_stalled`, `worker_timeout`, `worker_eof`, `local_compute_unavailable`, …).
+    read: async func(image: list<u8>, mime: string) -> result<reading, error>;
+}
+
 /// A durable key-value store private to this component (one namespace per component; the kernel
 /// decides where it lives). The names are 0.1's; only the calls are async, and the host answers
 /// without suspending, so a port is a mechanical `await`.
@@ -276,6 +309,14 @@ world service-component {
 /// it - a guest opts in by importing it).
 world service-drain {
     import drain;
+}
+
+/// The OCR reader alone, for the runner that binds it beside `service-component`: the service world
+/// does not require `vision` (a world's imports are obligations), so a guest opts in by importing
+/// `wa:kernel/vision@0.2.0` and the kernel links the interface from here
+/// (`rust/wa-kernel-runtime/src/vision_host.rs`).
+world service-vision {
+    import vision;
 }
 
 // ---- fixture worlds ----------------------------------------------------------------------------

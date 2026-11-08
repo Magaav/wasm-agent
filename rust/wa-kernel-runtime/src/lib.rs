@@ -53,6 +53,9 @@ pub mod service_components;
 pub mod selfloop_host;
 pub mod service_components_v2;
 pub mod service_io;
+// `wa:kernel/vision`: the kernel's own OCR reader - one warm RapidOCR worker, a bounded queue and a
+// deadline, the same lifecycle as the recognizer (docs/WHATSAPP-OCR.md).
+pub mod service_ocr;
 pub mod services;
 // The node half of queue phase 2 for speech: the `stt.requests` queue, the relay handler a remote
 // worker calls, and the `stt_worker` role (docs/QUEUE.md, docs/WHATSAPP-TRANSCRIPTION.md).
@@ -61,6 +64,9 @@ pub mod state_host;
 // `wa:kernel/sql`: the scoped database grant the memory component stands on (docs/KERNEL.md).
 pub mod sql_host;
 pub mod supervisor;
+// `wa:kernel/vision`: the OCR reader bound from `world service-vision`, served to a 0.2 guest that
+// opts in by importing it (docs/WHATSAPP-OCR.md).
+pub mod vision_host;
 // Which WASI interfaces a `wa:kernel@0.2` component gets and with what scope (docs/WASI-INTERFACES.md).
 pub mod wasi_ext_host;
 pub mod vault_host;

@@ -107,6 +107,39 @@ interface speech {
     recognize: async func(audio: list<u8>, mime: string, language: string) -> result<recognition, error>;
 }
 
+/// OCR done by the kernel with its native text reader (the RapidOCR worker the node provisions,
+/// `scripts/whatsapp-ocr-local.py --worker`), granted by the manifest capability `ocr: true`.
+///
+/// One suspendable call and no resource: unlike a recognition there is nothing to stream - a reader
+/// answers once with the text or with the reason it could not. The call shape is the seams
+/// `wa:seams/text-reader.read(image, mime)` (`wit/seams/seams.wit`); what changes is who answers:
+/// the kernel's own warm worker today, a wasi-nn provider component later, with the guest's call
+/// site unchanged.
+///
+/// It is **not** an import of `world service-component`: a world's imports are obligations, and a
+/// component that never reads an image should not be built against a worker it will never start.
+/// A guest opts in by importing `wa:kernel/vision@0.2.0`, as it opts into the drain; the kernel
+/// serves it to whoever asks (`rust/wa-kernel-runtime/src/imports.rs`, KERNEL_V2_OPTIONAL).
+interface vision {
+    use types.{error};
+
+    record reading {
+        /// The text the reader found, lines in reading order. Never a log line.
+        text: string,
+        /// The media type that was read, echoed so the caller can keep it beside the text.
+        mime: string,
+        /// Wall time the reader spent, milliseconds.
+        elapsed-ms: u64,
+    }
+    /// Read the text in `image` (an encoded file: jpeg, png, webp…).
+    ///
+    /// `refused("ocr not declared")` when the manifest does not grant `ocr`; `again` when the
+    /// worker's queue is full (retry later, it never blocks); `failed(reason)` for the reader's own
+    /// answer (`no_text_detected`, `image_too_large`, `unsupported_media`, `ocr_text_too_long`,
+    /// `worker_stalled`, `worker_timeout`, `worker_eof`, `local_compute_unavailable`, …).
+    read: async func(image: list<u8>, mime: string) -> result<reading, error>;
+}
+
 /// A durable key-value store private to this component (one namespace per component; the kernel
 /// decides where it lives). The names are 0.1's; only the calls are async, and the host answers
 /// without suspending, so a port is a mechanical `await`.
@@ -127,7 +160,40 @@ interface kv {
     scan: async func(prefix: list<u8>, cursor: option<list<u8>>, limit: u32) -> result<list<entry>, error>;
 }
 
+/// `wa:kernel/keystore` - the key that never leaves the kernel (`docs/VAULT.md`).
+///
+/// Three functions, and none of them takes a key: `seal` and `open` take the context that becomes the
+/// associated data (the vault's `name|version`) and answer an opaque blob, and `status` says whether a
+/// root key exists and how it is protected. The namespace is not a parameter: the kernel binds this
+/// interface to the importing component's own namespace before it links it, so two components sealing
+/// the same context do not share a key, and there is no argument that widens the binding.
+///
+/// A component never sees key material, which is what makes "the root key never leaves the kernel"
+/// true at the interface and not only in the prose.
+interface keystore {
+    use types.{error};
+
+    record root-status {
+        /// Whether a root key exists in this keystore (it is created on first use, not here).
+        root: bool,
+        /// `dpapi`, `keyring` or `passphrase`: which protection wraps it. Not a secret.
+        protection: string,
+    }
+
+    /// Seal `plaintext` under this component's namespace with `context` as associated data.
+    seal: func(context: string, plaintext: list<u8>) -> result<list<u8>, error>;
+    /// Open a blob this namespace sealed. A blob from another namespace, another context or another
+    /// keystore is `refused`.
+    open: func(context: string, sealed: list<u8>) -> result<list<u8>, error>;
+    status: func() -> root-status;
+}
+
 /// Lifecycle signals from the supervisor (identical to 0.1).
+///
+/// `stopping` means "stop now": the kernel waits a grace period and then ends the instance, whether
+/// or not it has finished what it was doing. A *drained* stop - "finish the work in hand, take no
+/// more, then say you are idle" - is the separate [`interface drain`] below, and a component that
+/// does not choose to import it is stopped exactly as before.
 interface lifecycle {
     /// True once the supervisor asked this instance to stop (upgrade, disable, shutdown).
     stopping: func() -> bool;
@@ -137,6 +203,31 @@ interface lifecycle {
         degraded,
     }
     report: func(state: health, detail: option<string>);
+}
+
+/// The cooperative half of a hot swap: a component that imports this interface promises to stop
+/// taking new work when the kernel asks, finish the one it is handling, and then say so.
+///
+/// It is a **separate interface on purpose**, and that is the whole reason it is not a function on
+/// [`interface lifecycle`]: a world's imports are obligations (`wit/kernel-v2`), so every component
+/// built against `world service-component` imports `lifecycle` whether or not it implements a
+/// drain. A hot swap has to know *from the artifact* whether waiting is meaningful, and the one
+/// thing a component cannot fake is the list of interfaces it imports: a component that does not
+/// import this one is stopped immediately and its leases are handed back for a retry, exactly as
+/// before (`services::replace`, `docs/SERVICE-COMPONENTS.md`).
+///
+/// The kernel answers a drop of `draining()` with its own state, so the guest reads it where it
+/// decides what to do next (wa-whatsapp reads it once per tick, between two jobs).
+interface drain {
+    /// True once a replacement for this instance is running beside it: take no new job, finish the
+    /// one in hand, settle it, then call `idle`. After the drain deadline (30 s by default,
+    /// `WA_SERVICE_DRAIN_MS`) the kernel stops the instance anyway and hands its untaken leases to
+    /// the replacement, which is today's behaviour.
+    draining: func() -> bool;
+    /// "Nothing is in flight: safe to stop me." Called once, between two jobs, after the guest has
+    /// settled or dropped everything it held. Nothing after it is guaranteed to run: the kernel
+    /// stops the instance as soon as it sees this, and a drained instance is never restarted.
+    idle: func();
 }
 
 /// Structured log lines into the component's log (never to another component's), identical to 0.1.
@@ -211,6 +302,21 @@ world service-component {
     import credentials;
     import wasi:clocks/monotonic-clock@0.3.0;
     export service;
+}
+
+/// The drain signal alone, for the two bindings that serve it (`service_components_v2.rs` binds it
+/// beside `service-component`: the runner links the interface, the service world does not require
+/// it - a guest opts in by importing it).
+world service-drain {
+    import drain;
+}
+
+/// The OCR reader alone, for the runner that binds it beside `service-component`: the service world
+/// does not require `vision` (a world's imports are obligations), so a guest opts in by importing
+/// `wa:kernel/vision@0.2.0` and the kernel links the interface from here
+/// (`rust/wa-kernel-runtime/src/vision_host.rs`).
+world service-vision {
+    import vision;
 }
 
 // ---- fixture worlds ----------------------------------------------------------------------------
