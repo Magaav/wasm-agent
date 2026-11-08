@@ -1,0 +1,36 @@
+[package]
+name = "wa-keystore"
+version = "0.1.0"
+edition = "2021"
+description = "wa:kernel/keystore: the OS-protected key the vault's root data key is wrapped with, and the keyless seal/open a component gets instead of a key"
+
+# docs/VAULT.md, "The kernel keystore": the root data key is created here, wrapped by the OS
+# (Windows DPAPI user scope, the Linux kernel keyring, or a 0600 file sealed with an Argon2id key
+# derived from an operator passphrase) and never handed to a component. A component that needs to
+# seal a value calls `seal`, which is why no `list<u8>` in this crate is ever a key.
+#
+# Dependencies, and why each one is here:
+# - `chacha20poly1305`: XChaCha20-Poly1305 is what seal/open uses (`docs/VAULT.md`), 24-byte random
+#   nonce per blob, so a nonce cannot repeat under one subkey.
+# - `ring`: HKDF-SHA256 for the per-namespace subkey (a component never gets two namespaces' keys)
+#   and the OS CSPRNG for the root key and the nonces.
+# - `argon2`: Argon2id for the passphrase-sealed fallback file, the only protection left where
+#   neither DPAPI nor a kernel keyring exists.
+# - `zeroize`: the root key and the derived subkeys are wiped when dropped; a secret that outlives
+#   its use in freed memory is a leak with a delay.
+# - `windows-sys` (Windows only): `CryptProtectData`/`CryptUnprotectData`, user scope.
+# - `libc` (Unix only): the `add_key`/`keyctl` syscalls of the Linux kernel keyring.
+[dependencies]
+chacha20poly1305 = "0.10"
+ring = "0.17"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

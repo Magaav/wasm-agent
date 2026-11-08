@@ -1,0 +1,33 @@
+[package]
+name = "wa-vault"
+version = "0.1.0"
+edition = "2021"
+description = "The vault as a component: per-entry XChaCha20-Poly1305 secrets, by-reference use, ed25519 signing, rotation and a hash-chained audit"
+
+# docs/VAULT.md, "The vault component". The engine here is what the component body runs and what the
+# node's `wa vault` CLI calls: the same code, so a test of the engine is a test of the component's
+# behaviour and the CLI cannot become a second, weaker reader of the same file.
+#
+# Dependencies, and why each one is here:
+# - `wa-keystore`: seal/open is a kernel call, never a key in this crate's memory. The engine only
+#   ever holds a plaintext value for the length of one operation.
+# - `chacha20poly1305`: the engine's own sealer for a vault that is opened without the kernel (the
+#   CLI over a temp home, and the tests): same cipher, same AAD, same nonce discipline.
+# - `ring`: ed25519 for `kind: ed25519` entries (`sign`) and for the signature the CLI prints. The
+#   seed is opened for one call and dropped; there is no `export` operation in the API at all.
+# - `sha2`: the audit chain (`prev_hash`/`hash`) is SHA-256 over a canonical record: it has to be a
+#   one-way function an operator can recompute with `sha256sum`, not a private format.
+# - `serde`/`serde_json`: the vault document on disk. It holds ciphertext and metadata only; the
+#   WIT seam (`wit/vault/vault.wit`) is typed records, so no JSON crosses into a component.
+# - `zeroize`: opened values, ed25519 seeds and the root data key are wiped when the operation ends.
+[dependencies]
+wa-keystore = { path = "../wa-keystore" }
+chacha20poly1305 = "0.10"
+ring = "0.17"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

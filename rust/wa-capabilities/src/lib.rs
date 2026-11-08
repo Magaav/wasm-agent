@@ -39,6 +39,9 @@ pub mod quickjs;
 pub mod resources;
 pub mod ripgrep;
 pub mod serve;
+/// `wa vault ...` (`docs/VAULT.md`): the command table entry that belongs to this crate, kept ready for
+/// the one line `rust/wa-host/src/main.rs` has to add.
+pub mod vault_cli;
 // The speech queue's node half, reached from Lua (`stt_node` in `wa-kernel-runtime`): one admitted
 // peer call, the operator view, and the pump the worker role borrows for its transport.
 pub mod stt;

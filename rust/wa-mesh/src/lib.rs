@@ -52,6 +52,7 @@ pub mod cache;
 pub mod client;
 pub mod endpoint;
 pub mod fleet;
+pub mod fleetchange;
 pub mod fleetkey;
 pub mod gate;
 pub mod hierarchy;
@@ -68,6 +69,8 @@ pub mod wire;
 pub mod testkit;
 #[cfg(test)]
 mod tests_e2e;
+#[cfg(test)]
+mod tests_fleetchange;
 #[cfg(test)]
 mod tests_relay;
 

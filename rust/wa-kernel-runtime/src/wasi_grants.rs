@@ -169,6 +169,8 @@ pub const TABLE: &[Spec] = &[
     // ---- tier B: the keyvalue and config shapes --------------------------------------------
     spec("wa:kernel/keyvalue", &["0.2.0"], Tier::Granted, "storage", "wasi.keyvalue", true, "wa's `wasi:keyvalue` shape over this component's own kv namespace"),
     spec("wa:kernel/config", &["0.2.0"], Tier::Granted, "config", "wasi.config", true, "wa's `wasi:config` shape over the non-secret config this component was granted"),
+    // ---- tier B: the keystore (`docs/VAULT.md`) ----------------------------------------------
+    spec("wa:kernel/keystore", &["0.2.0"], Tier::Granted, "keystore", "wasi.keystore", false, "seal/open under the kernel's root key, bound to the importing component's own namespace; the host function lands with the WASI 0.3 component runner (`docs/VAULT.md`, \"What integration needs\")"),
     // ---- tier B in the document, not linkable on wasmtime 50 --------------------------------
     spec("wasi:http/types", &["0.2.0", "0.3.0"], Tier::Granted, "http", "http.request", false, "no wasi:http crate ships with wasmtime 50; outgoing HTTP is `wa:kernel/http`, gated per host:port"),
     spec("wasi:http/outgoing-handler", &["0.2.0", "0.3.0"], Tier::Granted, "http", "http.request", false, "as wasi:http/types: use `wa:kernel/http`"),
@@ -178,6 +180,10 @@ pub const TABLE: &[Spec] = &[
     // ---- tier C ----------------------------------------------------------------------------
     spec("wasi:tls/*", &[], Tier::Never, "-", "", false, "TLS terminates in the kernel; a component never holds a key or makes a trust decision"),
     spec("wasi:vault/*", &[], Tier::Never, "-", "", false, "credential values reach a component only through `wa:kernel/credentials.get`, one named secret per grant"),
+    // ---- tier C: the vault component's own exports (`wit/vault/vault.wit`) -------------------
+    spec("wa:vault/vault", &[], Tier::Never, "-", "", false, "the vault component's own interface: only the kernel links it, so a guest importing it is refused"),
+    spec("wa:vault/reveal", &[], Tier::Never, "-", "", false, "the reveal door: a component that imports it is refused at link time, whatever its manifest grants"),
+    spec("wa:vault/audit", &[], Tier::Never, "-", "", false, "the audit chain is read by the kernel and the operator, never by a guest"),
     spec("wasi:secrets/*", &[], Tier::Never, "-", "", false, "as wasi:vault"),
     spec("wasi:logging/logging", &["0.1.0"], Tier::Never, "-", "", false, "`wa:kernel/log` is the one log a component may write, into its own bounded file"),
     spec("wa:host/policy", &[], Tier::Never, "-", "", false, "node policy is the operator's: `host.policy_*` is not reachable from a component"),

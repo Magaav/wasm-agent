@@ -806,6 +806,10 @@ pub fn run_once(installed: &Installed, grant: &Grant, component: &Component, sha
             secrets.insert(key.clone(), value.trim().to_string());
         }
     }
+    // docs/VAULT.md: the same granted names, now backed by the vault. The vault answers first (a key the
+    // operator migrated or rotated wins over a stale file); a name it does not have keeps the file's
+    // value, so a node with no vault behaves exactly as before. The overlay reports names, never values.
+    crate::vault_host::overlay_run_secrets(&installed.name, grant.file_env.keys().cloned(), &mut secrets);
     // Same resolution as the 0.1 runner and the wasip1 one: declared in the manifest, capped by the
     // node (`wa_governance::component_limits`).
     let limits = crate::limits::for_service(installed);

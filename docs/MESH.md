@@ -58,6 +58,8 @@ What each field means, and what is checked:
 | `nodes[].level` | where it sits in the hierarchy; 0 is the top | `0..=9`, else `level_out_of_range` |
 | `nodes[].addresses` | `host:port` the mesh listener answers on, in preference order | `host:port` shape, ≤ 253 bytes each, at most 8 per node |
 | `nodes[].revoked_at` | unix seconds the operator removed the node; `0` = valid | a revoked node is refused as caller *and* as target |
+| `revision` | a **monotonic** revision of the roster (`0` = a legacy document) | a node refuses a lower revision (`roster_rolled_back`) and a same-revision fork (`roster_fork`) |
+| `prev_hash` | the chain hash of the roster this one replaces (`0` revision rosters have none) | empty, or one sha256 in hex; a `prev_hash` without a `revision` is a load error |
 | `signature` | ed25519 over the canonical bytes below | must verify against the operator's `mesh.roster_key` |
 
 Unknown fields are a load error (a typo must not silently drop a level or an address), and so is a
@@ -70,6 +72,20 @@ mesh-roster-v1|<fleet>|<issued_at>|<expires_at>|{"nodes":[{…}]}
 where `{"nodes":…}` is `serde_json`'s output for the nodes array, whose field order is the struct's
 (`node_id`, `public_key`, `name`, `level`, `addresses`, `revoked_at`). The domain string is in the
 signed bytes so a roster signature can never be replayed as a call signature.
+
+From `revision >= 1` the canonical bytes are the v1 bytes with a different domain string and the two new
+fields inside the signature:
+
+```
+mesh-roster-v2|<fleet>|<issued_at>|<expires_at>|<revision>|<prev_hash>|{"nodes":[{…}]}
+```
+
+`revision: 0` writes the v1 bytes above, byte for byte, which is what keeps every roster already pinned on
+a node verifying after an upgrade. `prev_hash` is `sha256("mesh-roster-chain-v1|" + canonical + "|" +
+signature)`: the signature is in it, so two documents with the same nodes signed by two keys (a fork) have
+different chain hashes. `Roster::refuse_if_not_newer` is the whole rule a node applies to a roster it is
+handed - a lower revision is `roster_rolled_back`, the same revision with different bytes is
+`roster_fork`, and an identical copy is not a change.
 
 **Who signs.** One key per fleet, held by the operator, not by a node: a compromised node must not be
 able to promote itself to level 0. The key *is* the trust anchor, so it is pinned by its public key in
@@ -105,6 +121,30 @@ not verify — a tampered roster is a failure, not a footnote.
 
 The canonical bytes these commands sign are the ones below; the producer and every consumer share
 `rust/wa-mesh/src/roster.rs`, so a signature made here is the signature a node checks.
+
+**Where the fleet key lives now: the vault.** The fleet key may also be an entry in the operator's vault
+(`docs/VAULT.md`): `wa vault import-ed25519 fleet --from <fleet.key> --shred` (the seed is sealed, and the
+file is destroyed after the entry verified), then every command below takes `--key vault:fleet`
+(`--vault-dir`, else `$WASM_AGENT_VAULT_DIR`). The seed is opened inside the vault for one signature, the
+signature is an audited vault operation, and no command ever prints it. `rust/wa-mesh/src/fleetchange.rs`
+is that path; a key file (`--key <path>`) works exactly as before, so a fleet mid-migration needs nothing
+new.
+
+**A change is a new revision: `wa fleet revoke`, `rotate`, `anchor`.**
+
+```bash
+wa fleet revoke wasm_the_first --roster mesh-roster.signed.json --key vault:fleet
+#   sets revoked_at, revision+1, prev_hash = the previous chain hash, re-signs, writes *.signed.json
+wa fleet rotate --roster mesh-roster.signed.json --key vault:fleet-next
+#   re-signs the fleet under the NEW key as the next revision; prints the anchor command
+wa fleet anchor mesh-roster.signed.json --key vault:fleet --new <new public key>
+#   signs mesh-anchor-v1|<new key>|<fingerprint> with the key a node pins NOW (--replace-key)
+```
+
+Neither `revoke` nor `rotate` touches a node: installing the result is `wa fleet push-roster <node>` per
+node (`§7`), which is the act that is reviewable and verifiable. The old key is retired with
+`wa vault delete <old>` **after** every node confirms the new one - the destroy is the last step, not the
+first.
 
 **How levels are assigned.** By hand, in the roster, by the operator. There is no self-declaration
 anywhere in this design: a node cannot register its own level at the rendezvous, and the rendezvous is

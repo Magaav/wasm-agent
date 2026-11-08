@@ -80,6 +80,7 @@ refused with `wasi_import_interface_unavailable` (for a `wasi:` package this nod
 | `wasi:cli/stdin` | B | `stdin` | `wasi.stdin` | yes | an empty pipe, never the node's own stdin - and the 0.2.x spelling is linked for every component (std imports it) as an empty pipe |
 | `wa:kernel/keyvalue` | B | `storage` | `wasi.keyvalue` | yes | wa's `wasi:keyvalue` shape over this component's own kv namespace |
 | `wa:kernel/config` | B | `config` | `wasi.config` | yes | wa's `wasi:config` shape over the non-secret config this component was granted |
+| `wa:kernel/keystore` | B | `keystore` | `wasi.keystore` | no | seal/open under the kernel's root key, bound to the importing component's own namespace; the host function lands with the WASI 0.3 component runner (`docs/VAULT.md`, "What integration needs") |
 | `wasi:http/types` | B | `http` | `http.request` | no | no wasi:http crate ships with wasmtime 50; outgoing HTTP is `wa:kernel/http`, gated per host:port |
 | `wasi:http/outgoing-handler` | B | `http` | `http.request` | no | as wasi:http/types: use `wa:kernel/http` |
 | `wasi:keyvalue/store` | B | `storage` | `wasi.keyvalue` | no | the proposal itself is not shipped by wasmtime 50; `wa:kernel/keyvalue` is the served shape |
@@ -87,6 +88,9 @@ refused with `wasi_import_interface_unavailable` (for a `wasi:` package this nod
 | `wasi:nn/inference` | B | `nn` | `nn.run` | no | wasmtime-wasi-nn has no 50 release: not linkable, so a component importing it waits |
 | `wasi:tls/*` | C | - | - | no | TLS terminates in the kernel; a component never holds a key or makes a trust decision |
 | `wasi:vault/*` | C | - | - | no | credential values reach a component only through `wa:kernel/credentials.get`, one named secret per grant |
+| `wa:vault/vault` | C | - | - | no | the vault component's own interface: only the kernel links it, so a guest importing it is refused |
+| `wa:vault/reveal` | C | - | - | no | the reveal door: a component that imports it is refused at link time, whatever its manifest grants |
+| `wa:vault/audit` | C | - | - | no | the audit chain is read by the kernel and the operator, never by a guest |
 | `wasi:secrets/*` | C | - | - | no | as wasi:vault |
 | `wasi:logging/logging` | C | - | - | no | `wa:kernel/log` is the one log a component may write, into its own bounded file |
 | `wa:host/policy` | C | - | - | no | node policy is the operator's: `host.policy_*` is not reachable from a component |
@@ -178,6 +182,25 @@ Reason words (`docs/GRANT-POLICY.md` keeps the vocabulary): `manifest_not_declar
 `invalid_address`, `filesystem_root`, `node_home`, `state_root`, `component_dir`, `not_absolute`,
 `relative_segments`, `import_not_granted`, `interface_never_served`, `interface_unavailable`,
 `interface_unknown`, plus the policy's own (`no_policy`, `target_not_allowed`, `policy_denied`, …).
+
+## The vault, in this table
+
+Three rows carry the vault (`docs/VAULT.md`), and the split between them is the design:
+
+* **`wa:kernel/keystore` is tier B.** A component that declares `"keystore": true` may seal and open
+  blobs under a namespace the *host* binds (never a guest argument) with the kernel's root key. It has no
+  way to name a key, read one or wrap one: `seal`/`open` take a context and bytes. It is `served: no`
+  today - the host function lands with the WASI 0.3 component runner - so a component importing it is
+  refused with `wasi_import_interface_unavailable` until then, the same documented gap `wasi:nn/inference`
+  has.
+* **`wa:vault/vault` and `wa:vault/reveal` are tier C.** They are the vault component's own exports; only
+  the kernel links them. A component that imports either is refused **before it runs**, with the interface
+  named, whatever its manifest declares - which is the link-time half of "no component reads secret
+  values". The runtime half is the `vault.reveal` grant, and the two are independent: the grant cannot make
+  the import linkable, and the tier does not reveal anything by itself.
+* **No component ever gets a key.** `wasi:vault/*`, `wasi:secrets/*` and `wasi:tls/*` stay tier C (TLS
+  terminates in the kernel), so the only forms of "a secret" a guest can hold are the value of one
+  `credentials.get` the node granted, and a `use-by-reference` handle the kernel resolves instead of it.
 
 ## What is deliberately not here
 

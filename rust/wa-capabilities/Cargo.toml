@@ -41,6 +41,9 @@ wa-email-index = { path = "../wa-email-index" }
 # the transport. The node mounts its listener from `serve::run` behind `WA_MESH=1`, so this crate is
 # the only edge that names it.
 wa-mesh = { path = "../wa-mesh" }
+# `wa vault ...` (`vault_cli.rs`): the vault's own engine and CLI parser, so the node's command and the
+# test binary are one implementation. The keystore behind it is the same one `wa-kernel-runtime` opens.
+wa-vault = { path = "../wa-vault" }
 # The zone the node's OS is in, by the identifier the OS itself uses (`core_component.rs`'s
 # `host.local_tz`): the one part of the node's clock a guest cannot read for itself. A leaf with no
 # dependencies; the offset it reports comes from the C runtime, not from here (docs/KERNEL.md).

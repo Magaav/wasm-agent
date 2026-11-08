@@ -21,7 +21,7 @@
 //!   reading back what was signed never destroy the draft.
 use crate::identity::{self, Identity};
 use crate::policy::MeshPolicy;
-use crate::roster::Roster;
+use crate::roster::{Roster, RosterSigner};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -169,6 +169,10 @@ pub struct Signed {
     pub nodes: usize,
     pub signature: String,
     pub replaced_signature: bool,
+    /// The roster's monotonic revision (`docs/MESH.md` §1). `0` is a legacy document.
+    pub revision: u32,
+    /// The chain hash this document names as its predecessor.
+    pub prev_hash: String,
 }
 
 /// The path a signed roster is written to: `<stem>.signed.json` beside the template.
@@ -189,6 +193,26 @@ pub fn sign(
     expires_days: Option<u64>,
     now_s: u64,
 ) -> Result<Signed, String> {
+    let mut key = Identity::open(key_path)
+        .map_err(|error| format!("fleet_key_unusable: {}: {error}", key_path.display()))?;
+    sign_with_signer(roster_path, &mut key, out, expires_days, now_s, None)
+}
+
+/// Sign with any signer: the operator's node key, or the fleet key the vault holds
+/// (`wa fleet sign <roster.json> --key vault:<name>`, docs/MESH.md §1, docs/VAULT.md).
+///
+/// `revision` overrides the document's revision. With no override, re-signing a document that already
+/// carries a signature advances it by one and chains it (`prev_hash` = the predecessor's chain hash), so
+/// a change to a live fleet is a *new revision* rather than a same-numbered fork; a fresh template, and
+/// a legacy (`revision: 0`) roster, keep their own revision exactly as before.
+pub fn sign_with_signer(
+    roster_path: &Path,
+    signer: &mut dyn RosterSigner,
+    out: Option<&Path>,
+    expires_days: Option<u64>,
+    now_s: u64,
+    revision: Option<u32>,
+) -> Result<Signed, String> {
     if let Some(days) = expires_days {
         if days == 0 || days > MAX_EXPIRY_DAYS {
             return Err(format!("expires_days_out_of_range:1..={MAX_EXPIRY_DAYS}"));
@@ -199,14 +223,23 @@ pub fn sign(
     // Strict on purpose (docs/MESH.md §1): unknown fields, a duplicate node id and a node id that is
     // not the hash of its key are load errors, and signing is not the place to relax that.
     let mut roster = Roster::parse(&text).map_err(|error| format!("roster_invalid: {}", error.0))?;
-    let key = Identity::open(key_path)
-        .map_err(|error| format!("fleet_key_unusable: {}: {error}", key_path.display()))?;
     let replaced_signature = !roster.signature.trim().is_empty();
+    // The predecessor's chain hash has to be taken BEFORE `revision`/`issued_at` change: it is the hash
+    // of the document as it stands, its signature included.
+    let predecessor = if replaced_signature { roster.chain_hash() } else { roster.prev_hash.clone() };
     roster.issued_at = now_s;
     if let Some(days) = expires_days {
         roster.expires_at = now_s.saturating_add(days.saturating_mul(86_400));
     }
-    roster.sign(&key);
+    match revision {
+        Some(value) => roster.revision = value,
+        None if replaced_signature && roster.revision >= 1 => {
+            roster.revision = roster.revision.saturating_add(1);
+            roster.prev_hash = predecessor;
+        }
+        None => {}
+    }
+    roster.sign_with(signer).map_err(|error| format!("roster_invalid: {}", error.0))?;
     let target = out.map(lexical).unwrap_or_else(|| signed_path(roster_path));
     let mut document = serde_json::to_string_pretty(&roster).map_err(|error| error.to_string())?;
     document.push('\n');
@@ -214,7 +247,7 @@ pub fn sign(
     let fingerprint = roster.fingerprint();
     Ok(Signed {
         path: target,
-        public_key: key.public_key,
+        public_key: signer.public_key(),
         fleet: roster.fleet.clone(),
         fingerprint,
         issued_at: roster.issued_at,
@@ -222,10 +255,12 @@ pub fn sign(
         nodes: roster.nodes.len(),
         signature: roster.signature,
         replaced_signature,
+        revision: roster.revision,
+        prev_hash: roster.prev_hash,
     })
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             wa_host_support::paths::private_dir(parent);
@@ -374,6 +409,37 @@ fn usage() {
     println!("    policy.json mesh.roster_key. Exits 1 when the roster does not verify.");
     println!("wa fleet push-roster <node> [--replace-key <hex>] [--port N] [--bind ADDR]");
     println!("    install this fleet's roster on a node that already accepts this one (lua/core/fleet.lua).");
+    println!("wa fleet revoke <node|node_id> --roster <signed.json> --key <path|vault:name> [--at <unix>] [--out <path>]");
+    println!("    set the node's revoked_at, advance the roster revision, chain it (prev_hash) and re-sign.");
+    println!("wa fleet rotate --roster <signed.json> --key <new: path|vault:name> [--out <path>]");
+    println!("    re-sign the fleet under a NEW key as the next revision, and print the anchor command.");
+    println!("wa fleet anchor <signed.json> --key <old: path|vault:name> --new <new public key>");
+    println!("    sign mesh-anchor-v1|<new key>|<fingerprint> with the key a node pins now (--replace-key).");
+    println!("  --key vault:<name> uses the fleet key held in the vault (--vault-dir, else $WASM_AGENT_VAULT_DIR).");
+}
+
+/// `--key vault:<name>` -> the vault-backed signer. `Err(None)` (the inner `Option`) means "not a vault
+/// key": the caller falls through to the key-file path unchanged, so `wa fleet sign --key <path>` keeps
+/// its exact behaviour.
+type VaultSignerLookup = Result<Box<dyn RosterSigner>, Option<String>>;
+
+fn vault_signer(key: &str, vault_dir: Option<&str>, policy: Option<&str>) -> VaultSignerLookup {
+    if !key.starts_with(crate::fleetchange::VAULT_PREFIX) {
+        return Err(None);
+    }
+    match crate::fleetchange::signer_for(key, vault_dir.map(Path::new), policy.map(Path::new)) {
+        Ok(signer) => Ok(signer),
+        Err(error) => Err(Some(error)),
+    }
+}
+
+/// The signer for `revoke`/`rotate`/`anchor`: a vault key or a key file, always the same two doors.
+fn change_signer(key: &str, args: &[String]) -> Result<Box<dyn RosterSigner>, String> {
+    crate::fleetchange::signer_for(
+        key,
+        flag_value(args, "--vault-dir").as_deref().map(Path::new),
+        flag_value(args, "--policy").as_deref().map(Path::new),
+    )
 }
 
 fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -390,7 +456,7 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
 /// caller falls through to the Lua CLI, which owns `push-roster`).
 pub fn run(args: &[String]) -> Option<i32> {
     let sub = args.get(1).map(String::as_str).unwrap_or("");
-    if !matches!(sub, "keygen" | "sign" | "show") {
+    if !matches!(sub, "keygen" | "sign" | "show" | "revoke" | "rotate" | "anchor") {
         return None;
     }
     if args.iter().skip(2).any(|argument| argument == "--help" || argument == "-h") {
@@ -438,13 +504,40 @@ pub fn run(args: &[String]) -> Option<i32> {
                 None => None,
             };
             let out = flag_value(args, "--out");
-            let answer = match sign(
-                Path::new(template),
-                Path::new(&key),
-                out.as_deref().map(Path::new),
-                expires,
-                now_s,
-            ) {
+            let vault_dir = flag_value(args, "--vault-dir");
+            let policy = flag_value(args, "--policy");
+            let revision = match flag_value(args, "--revision") {
+                Some(text) => match text.parse::<u32>() {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        eprintln!("--revision takes a number");
+                        return Some(2);
+                    }
+                },
+                None => None,
+            };
+            let answer = match vault_signer(&key, vault_dir.as_deref(), policy.as_deref()) {
+                // `--key vault:<name>`: the fleet key lives in the vault (docs/VAULT.md). It is opened
+                // for this one signature, and the signature is audited there.
+                Ok(mut signer) => sign_with_signer(
+                    Path::new(template),
+                    signer.as_mut(),
+                    out.as_deref().map(Path::new),
+                    expires,
+                    now_s,
+                    revision,
+                ),
+                // Anything else is a key file, exactly as before: `vault_signer` answers `Err(None)`.
+                Err(None) => sign(
+                    Path::new(template),
+                    Path::new(&key),
+                    out.as_deref().map(Path::new),
+                    expires,
+                    now_s,
+                ),
+                Err(Some(error)) => Err(error),
+            };
+            let answer = match answer {
                 Ok(signed) => json!({
                     "ok": true,
                     "path": signed.path.to_string_lossy(),
@@ -455,9 +548,88 @@ pub fn run(args: &[String]) -> Option<i32> {
                     "nodes": signed.nodes,
                     "signature": signed.signature,
                     "replaced_signature": signed.replaced_signature,
+                    "revision": signed.revision,
+                    "prev_hash": signed.prev_hash,
                     "public_key": signed.public_key,
                     "template": template,
                 }),
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            println!("{answer}");
+            Some(if answer["ok"] == true { 0 } else { 1 })
+        }
+        "revoke" => {
+            let Some(selector) = args.get(2).filter(|argument| !argument.starts_with("--")) else {
+                eprintln!("revoke needs a node: wa fleet revoke <node|node_id> --roster <signed.json> --key <path|vault:name>");
+                return Some(2);
+            };
+            let (Some(roster), Some(key)) = (flag_value(args, "--roster"), flag_value(args, "--key")) else {
+                eprintln!("revoke needs --roster <signed.json> and --key <path|vault:name>");
+                return Some(2);
+            };
+            let answer = match change_signer(&key, args) {
+                Ok(mut signer) => {
+                    let out = flag_value(args, "--out");
+                    let at = flag_value(args, "--at")
+                        .and_then(|text| text.parse::<u64>().ok())
+                        .unwrap_or(now_s);
+                    match crate::fleetchange::revoke(
+                        Path::new(&roster),
+                        &selector,
+                        signer.as_mut(),
+                        out.as_deref().map(Path::new),
+                        at,
+                    ) {
+                        Ok(changed) => crate::fleetchange::json_changed(&changed),
+                        Err(error) => json!({"ok": false, "error": error}),
+                    }
+                }
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            println!("{answer}");
+            Some(if answer["ok"] == true { 0 } else { 1 })
+        }
+        "rotate" => {
+            let (Some(roster), Some(key)) = (flag_value(args, "--roster"), flag_value(args, "--key")) else {
+                eprintln!("rotate needs --roster <signed.json> and --key <the NEW key: path|vault:name>");
+                return Some(2);
+            };
+            let answer = match change_signer(&key, args) {
+                Ok(mut signer) => {
+                    let out = flag_value(args, "--out");
+                    match crate::fleetchange::rotate(
+                        Path::new(&roster),
+                        signer.as_mut(),
+                        out.as_deref().map(Path::new),
+                        now_s,
+                    ) {
+                        Ok(rotated) => crate::fleetchange::json_rotated(&rotated),
+                        Err(error) => json!({"ok": false, "error": error}),
+                    }
+                }
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            println!("{answer}");
+            Some(if answer["ok"] == true { 0 } else { 1 })
+        }
+        "anchor" => {
+            let Some(roster) = args.get(2).filter(|argument| !argument.starts_with("--")) else {
+                eprintln!("anchor needs the signed roster: wa fleet anchor <signed.json> --key <old key> --new <hex>");
+                return Some(2);
+            };
+            let (Some(key), Some(new_key)) = (flag_value(args, "--key"), flag_value(args, "--new")) else {
+                eprintln!("anchor needs --key <the key a node pins NOW> and --new <the new fleet public key>");
+                return Some(2);
+            };
+            let answer = match change_signer(&key, args) {
+                Ok(mut signer) => match crate::fleetchange::anchor(Path::new(roster), signer.as_mut(), &new_key) {
+                    Ok(signature) => json!({
+                        "ok": true,
+                        "signature": signature,
+                        "next": "wa fleet push-roster <node> --replace-key <signature>",
+                    }),
+                    Err(error) => json!({"ok": false, "error": error}),
+                },
                 Err(error) => json!({"ok": false, "error": error}),
             };
             println!("{answer}");

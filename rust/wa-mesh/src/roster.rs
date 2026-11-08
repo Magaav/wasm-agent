@@ -17,6 +17,9 @@ use std::path::Path;
 pub const ROSTER_SCHEMA: u32 = 1;
 /// The domain string that is part of every signed roster.
 pub const ROSTER_DOMAIN: &str = "mesh-roster-v1";
+/// The domain string of a roster with `revision >= 1` (`Roster::canonical`). A different domain, not the
+/// same one with more fields in it: a v1 signature can never be replayed as a v2 one.
+pub const ROSTER_DOMAIN_V2: &str = "mesh-roster-v2";
 /// The largest level a roster may use. 0 is the top of the fleet; the ladder is small by design so
 /// that a number cannot quietly mean something the operator did not intend.
 pub const MAX_LEVEL: u8 = 9;
@@ -110,8 +113,43 @@ pub struct Roster {
     #[serde(default)]
     pub expires_at: u64,
     pub nodes: Vec<RosterNode>,
+    /// A **monotonic** revision of the fleet roster (`docs/MESH.md` §1): every `revoke`, `rotate` and
+    /// re-sign advances it, and a node that holds revision *n* refuses any roster that says less.
+    ///
+    /// `0` is the legacy value and means "this document predates revisions": it parses, verifies and
+    /// behaves exactly as it did before this field existed, because a fleet that cannot be re-signed by
+    /// its operator is a fleet locked out by an upgrade. A roster with `revision >= 1` is signed over the
+    /// v2 canonical bytes, which are the v1 bytes with the domain string and the two new fields in front,
+    /// so a revision cannot be rolled back by deleting a JSON field.
+    #[serde(default)]
+    pub revision: u32,
+    /// The chain hash of the roster this one replaces (`Roster::chain_hash`), empty for the first
+    /// revision of a fleet. It is what makes a fork visible: `revoke`, `rotate` and the node's own roster
+    /// reader can name the document a change was built on.
+    #[serde(default)]
+    pub prev_hash: String,
     #[serde(default)]
     pub signature: String,
+}
+
+/// Who signs a roster.
+///
+/// Two implementations, and they are the two places an operator's fleet key may live: a node key file
+/// (`Identity`) and the vault (`wa fleet sign --key vault:<name>`, where the seed is opened for one
+/// signature and never exported). A node's own call path never signs a roster.
+pub trait RosterSigner {
+    fn public_key(&self) -> String;
+    fn sign_message(&mut self, message: &str) -> Result<String, String>;
+}
+
+impl RosterSigner for Identity {
+    fn public_key(&self) -> String {
+        self.public_key.clone()
+    }
+
+    fn sign_message(&mut self, message: &str) -> Result<String, String> {
+        Ok(self.sign(message))
+    }
 }
 
 impl Roster {
@@ -142,6 +180,14 @@ impl Roster {
         }
         if self.fleet.chars().any(|c| c.is_control()) || self.fleet.len() > 64 {
             return bad("fleet must be short text without control characters");
+        }
+        // A chain hash is either absent (the first revision) or exactly one sha256 in hex, and only a
+        // revisioned roster can have a predecessor.
+        if !self.prev_hash.is_empty() {
+            check_hex("prev_hash", &self.prev_hash, 64)?;
+            if self.revision == 0 {
+                return bad("prev_hash requires a revision (a legacy roster has no predecessor)");
+            }
         }
         let mut seen = std::collections::BTreeSet::new();
         for node in &self.nodes {
@@ -176,21 +222,73 @@ impl Roster {
         Ok(())
     }
 
-    /// The exact bytes the operator signs. Field order is the struct's, so the same roster always
-    /// produces the same bytes and a signature cannot be made to verify against a reordering.
+    /// The exact bytes the operator signs.
+    ///
+    /// Two formats, and which one is used is the `revision`: field order is the struct's, so the same
+    /// roster always produces the same bytes and a signature cannot be made to verify against a
+    /// reordering. `revision == 0` is the legacy v1 document (`docs/MESH.md` §1), byte for byte what it
+    /// was, so every roster already pinned on a node keeps verifying. From revision 1 the domain string
+    /// and the revision/prev_hash pair are inside the signature, which is what makes a rollback more than
+    /// deleting a JSON field.
     pub fn canonical(&self) -> String {
         let nodes = serde_json::to_string(&self.nodes)
             .unwrap_or_else(|_| "[]".to_string());
+        if self.revision == 0 {
+            return format!(
+                "{ROSTER_DOMAIN}|{}|{}|{}|{{\"nodes\":{nodes}}}",
+                self.fleet, self.issued_at, self.expires_at
+            );
+        }
         format!(
-            "{ROSTER_DOMAIN}|{}|{}|{}|{{\"nodes\":{nodes}}}",
-            self.fleet, self.issued_at, self.expires_at
+            "{ROSTER_DOMAIN_V2}|{}|{}|{}|{}|{}|{{\"nodes\":{nodes}}}",
+            self.fleet, self.issued_at, self.expires_at, self.revision, self.prev_hash
         )
+    }
+
+    /// The hash a successor roster names in its `prev_hash`: sha256 over the canonical bytes *and* the
+    /// signature, so two rosters with the same nodes but different signatures (a fork signed by two keys)
+    /// have different chain hashes. Not truncated like `fingerprint`: this one is compared, not read by a
+    /// person.
+    pub fn chain_hash(&self) -> String {
+        sha256_hex(&format!("mesh-roster-chain-v1|{}|{}", self.canonical(), self.signature))
+    }
+
+    /// The roster's own anti-rollback rule: refuse a document that is older than `current`, and refuse a
+    /// *fork* at the same revision.
+    ///
+    /// This is what a node applies when it is handed a roster (a push, a relayed document, a file on
+    /// disk). A lower revision is `roster_rolled_back`; the same revision with different bytes is
+    /// `roster_fork`. An untouched copy of what the node already holds is `Ok`: reinstalling the same
+    /// signed document is not a change.
+    pub fn refuse_if_not_newer(&self, current: &Roster) -> Result<(), RosterError> {
+        if self.revision < current.revision {
+            return bad(format!(
+                "roster_rolled_back:{}<{}",
+                self.revision, current.revision
+            ));
+        }
+        if self.revision == current.revision && self.signature != current.signature {
+            return bad(format!("roster_fork:{}", self.revision));
+        }
+        Ok(())
     }
 
     /// Sign in place with the fleet key. The caller is the operator's tool, not a node's own view of
     /// itself: nothing in the running node calls this.
     pub fn sign(&mut self, fleet_key: &Identity) {
         self.signature = fleet_key.sign(&self.canonical());
+    }
+
+    /// Sign in place with any signer: the operator's node key, or the fleet key held in the open vault
+    /// (`wa fleet sign --key vault:<name>`, docs/MESH.md §1). `fleetkey` is the only caller.
+    pub fn sign_with(&mut self, signer: &mut dyn RosterSigner) -> Result<(), RosterError> {
+        match signer.sign_message(&self.canonical()) {
+            Ok(signature) => {
+                self.signature = signature;
+                Ok(())
+            }
+            Err(reason) => bad(reason),
+        }
     }
 
     /// Verify against the operator's fleet public key, then the time window, then the node ids.
@@ -289,13 +387,23 @@ pub struct Draft {
 }
 
 impl Draft {
+    /// A draft signs as a **legacy** document (`revision: 0`) unless the caller says otherwise, which is
+    /// what keeps `wa fleet sign` over a fresh template byte-identical to what it wrote before revisions
+    /// existed. A revisioned roster is produced by re-signing a signed one (`fleetkey::sign_with_signer`)
+    /// or by `wa fleet revoke`/`rotate`.
     pub fn sign(self, fleet_key: &Identity) -> Roster {
+        self.sign_revision(fleet_key, 0, String::new())
+    }
+
+    pub fn sign_revision(mut self, fleet_key: &Identity, revision: u32, prev_hash: String) -> Roster {
         let mut roster = Roster {
             version: ROSTER_SCHEMA,
-            fleet: self.fleet,
+            fleet: std::mem::take(&mut self.fleet),
             issued_at: self.issued_at,
             expires_at: self.expires_at,
-            nodes: self.nodes,
+            nodes: std::mem::take(&mut self.nodes),
+            revision,
+            prev_hash,
             signature: String::new(),
         };
         roster.sign(fleet_key);

@@ -245,3 +245,137 @@ CLI/device/scope/generation/cancel/unknown and existing auth/recovery contracts 
 Chromium, checks password/cancel/single-flight/no-persistence/error and a causal negative.
 Then run `scripts/test-ui.ps1` once after focused UI passes and inspect screenshots.
 No paid provider call, actual account login, live migration or release gate is implied.
+
+## The vault as a component: `wa vault` and the kernel keystore
+
+The rest of this document is the *provider* vault (`wa-vault`, a separate service behind fixed proxy
+routes). This section is the other half of the same idea, built for "everything as a component" on WASI
+0.3: a **vault component** that holds the operator's secrets, signs with the fleet's ed25519 key, rotates,
+revokes and keeps a hash-chained audit - and a **kernel keystore** that is the only thing holding a key.
+
+### Two capabilities, and neither of them is a key
+
+| where | code | what it may do |
+| --- | --- | --- |
+| the kernel, in-process | `rust/wa-keystore` (`wa:kernel/keystore`) | create/wrap/unwrap the root data key; `seal`/`open` a blob under a **namespace** the host binds and a `context` that becomes the associated data |
+| the vault engine | `rust/wa-vault` | entries, rotation, audit, ed25519 signing - it never sees the root key, only `seal`/`open` |
+| the operator's terminal | `wa vault ...`, `rust/wa-vault/src/cli.rs` | the same engine, over 0600 files in the vault directory |
+
+The root key is 32 bytes, created once per vault directory and stored **wrapped** by the strongest
+protection the host has, in this order: Windows **DPAPI** (user scope, `CryptProtectData`, no passphrase,
+no prompt), the **Linux kernel keyring** (`add_key`/`keyctl` in the user keyring; the file then holds an
+XChaCha20-Poly1305 blob only that key opens), or - where neither is available, e.g. a restricted container
+or an unsupported architecture - a 0600 file sealed with a key derived by **Argon2id** from an operator
+passphrase (`WASM_AGENT_VAULT_PASSPHRASE`). Which one is in use is reported, never assumed: `wa vault
+status` prints `protection: dpapi|keyring|passphrase`, and an unknown `WASM_AGENT_VAULT_KEYSTORE` value is a
+refusal rather than a silent downgrade. **TPM 2.0 is not wired**: no `tpm2`/`tss-esapi` crate builds
+offline on this toolchain, and a TPM path that fell back to DPAPI without saying so would be worse than the
+gap. It is a later row, not a claim.
+
+A component is given `seal(context, plaintext)` and `open(context, sealed)` and nothing else: no key
+material crosses the seam in either direction, and the namespace is not an argument (the kernel binds it
+before the interface is linked). That is what makes "the root key never leaves the kernel" true at the
+interface rather than only in the prose.
+
+### Entries
+
+An entry is `name -> value`, `value` sealed with **XChaCha20-Poly1305**, a random 24-byte nonce per version
+and AAD `vault-entry-v1|<kind>|<name>|<version>`. Metadata - `kind: secret|ed25519`, `version`, `created`,
+`rotated_at`, `owner` (`kernel` or `operator:<name>`), `allowed` (actor ids that may sign) - is what `list`
+answers; a value is not in it, and `list` has no field a value could ride in.
+
+| operation | who may call it | what it answers |
+| --- | --- | --- |
+| `set` / `rotate` / `delete` / `import-ed25519` | the kernel, the operator | metadata |
+| `list` / `show` | anyone allowed to talk to the vault | names and metadata |
+| `use_by_ref` | **the kernel only**, no grant exists | the value, for one credential header |
+| `reveal` | a component **only** with a `vault.reveal` grant naming it and the entry; kernel and operator are the vault's owners | the value |
+| `sign` | a `kind: ed25519` entry, for the owner, the kernel, or an actor in `allowed` | a 64-byte signature |
+| `public-key` | anyone | the public half (public data) |
+
+`sign` is the only operation that opens an ed25519 seed, and it opens it for the length of one signature.
+There is no `export`: an entry of kind `ed25519` cannot be turned back into a file through this vault.
+
+**Rotation** writes a new live version (a new nonce, a new version in the AAD) and keeps the previous one
+readable until `rotated_at + window` (default 7 days, `VaultOptions::rotation_window_s`). After the window
+`purge_expired` **destroys** the old material rather than hiding it - at open, and on the next rotate - and
+records a `destroy` line in the audit. A client pinned to the old generation keeps working through the
+change; the operator can prove what happened afterwards.
+
+### The audit chain
+
+Every operation appends one line, and every line is a link:
+
+```text
+vault-audit-v1|<prev_hash>|<seq>|<ts>|<actor>|<op>|<name>|<version>|<result>
+```
+
+`hash` is SHA-256 of exactly those bytes, `prev_hash` is the previous line's hash, and the document keeps
+`audit_head` (the last hash) so a **truncated** log is caught as well as an edited one. `seq` is 1-based
+and must increase by one, so a deleted line is caught on the next line. The fields are names; `result` is
+`ok` or `refused:<reason>`; the one `ok:` payload is the **public** key an `import-ed25519` produced.
+`wa vault audit verify` recomputes the whole chain from the file and exits non-zero with the reason
+(`audit_hash_mismatch:2`, `audit_seq_out_of_order:2`, `audit_head_mismatch`).
+
+### `vault.reveal`, and the link-time half
+
+```json
+{ "vault": { "reveal": [ { "component": "wa-email", "entry": "smtp-password" } ] } }
+```
+
+Only the `vault` section is read here, and it is parsed strictly: `{"vault": {"reval": [...]}}` is an error
+instead of a policy that silently grants nothing. `entry: "*"` is allowed; `component: "*"` is not
+special-cased - write the component's name.
+
+The policy is the *runtime* half. The link-time half is the tier table (`docs/WASI-INTERFACES.md`):
+`wa:vault/reveal` is tier **C**, so a component that imports it is refused before it runs, whatever its
+manifest says and whatever the policy grants. The reveal *interface* therefore names its own door in the
+artifact's imports.
+
+### Commands
+
+```text
+wa vault status | list | show <name> | set <name> [--kind secret|ed25519] [--from <path>|--stdin]
+wa vault rotate <name> [--from <path>|--stdin] | delete <name> | reveal <name>
+wa vault public-key <name> | sign <name> [--from <path>|--stdin]
+wa vault import-ed25519 <name> --from <path> [--shred]
+wa vault import-provider-keys --from <keys-dir>
+wa vault audit verify | audit tail [--lines N]
+```
+
+Two rules: a **value is never an argument** (only `--from`/`--stdin`, because a shell history, a process
+listing and a terminal scrollback are all places a secret is copied to for free), and **only `reveal`
+prints a value**. `--dir` (or `WASM_AGENT_VAULT_DIR`) is required: the command refuses to guess a vault
+directory, so it can never reach a node's real vault from the wrong place. `--shred` overwrites the source
+with zeros and removes it *after* the entry verified, and the command says plainly that on an SSD or a
+copy-on-write filesystem the original blocks may still hold the bytes.
+
+### Migration, and the fleet key
+
+`wa vault import-provider-keys --from <keys-dir>` (and the node's first start) reads `*.key` files and puts
+each one in the vault: a name that is already there **with the same value** is `kept` (that is what makes a
+second start a no-op), a name that is there **with a different value** is `refused` and never overwritten,
+and the source file is never touched. The node overlays the vault's answer for the granted `file_env` names
+on top of the file's (`wa_kernel_runtime::vault_host::overlay_run_secrets`), so a migrated or rotated key
+wins over a stale copy and a node with no vault behaves exactly as before.
+
+The **fleet key** can live in the vault: `wa vault import-ed25519 fleet --from <fleet.key> --shred`, then
+`wa fleet sign|revoke|rotate|anchor ... --key vault:fleet` (`docs/MESH.md` §1) signs with the seed that never
+leaves the vault. Rotating the fleet key is `wa fleet rotate`; the old key is destroyed with
+`wa vault delete` **after** every node confirms the new one.
+
+### What integration needs (the WASI 0.3 / wasmtime 50 upgrade)
+
+* `wa:kernel/keystore` is tier B with `"keystore": true` in the manifest and is **not linkable yet**
+  (`served: no` in the table): the host function lands with the 0.3 component runner, together with the
+  vault component's own world (`world vault-component`, which needs `wit/vault/vault.wit` reachable from
+  `wit/kernel-v2` - a copy in `deps/` or a deps directory, and a doc-table row of its own).
+* The engine must be `wasm32-wasip2`-clean before a component body can run it. `ring` is not, so `sign`
+  needs `ed25519-dalek` (pure Rust) inside the guest, or - better - `sign` moves behind
+  `wa:kernel/keystore` so the seed never enters a component at all. `rust/wa-vault` is host-side today on
+  purpose; `REPORT.md` records this as the open decision.
+* `wa vault` is dispatched by `rust/wa-capabilities::vault_cli::run`; the one line to add to
+  `rust/wa-host/src/main.rs` is in that module's header, and `rust/wa-vault/src/bin/wa-vault.rs` is the
+  same code path until it lands.
+* `wa fleet revoke|rotate|anchor` do **not** push: `wa fleet push-roster` stays the per-node act
+  (`docs/MESH.md` §7), so a change is reviewable before it reaches a node.

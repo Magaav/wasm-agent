@@ -21,5 +21,10 @@ description = "Direct node-to-node calls by hierarchy: signed fleet roster, gran
 wa-host-support = { path = "../wa-host-support" }
 wa-grant-policy = { path = "../wa-grant-policy" }
 ring = "0.17"
+# The fleet key may live in the vault (`wa fleet sign --key vault:<name>`, docs/VAULT.md): the seed is
+# opened inside the vault engine for one signature and never exported. `wa-vault` also brings the
+# keystore that wraps its root key, so `wa-vault`/`wa-keystore` are the only new arrows here.
+wa-vault = { path = "../wa-vault" }
+wa-keystore = { path = "../wa-keystore" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

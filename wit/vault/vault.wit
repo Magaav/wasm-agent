@@ -1,0 +1,108 @@
+/// `wa:vault@0.1.0` — the vault component's own interfaces.
+///
+/// Typed records, no JSON: nothing in this package carries a document, a blob of metadata or a value
+/// as an opaque string, so a caller cannot be handed more than the shape says. The only two operations
+/// that can answer a value are `vault.use-by-ref` and `vault.reveal`, and `reveal` lives in its own
+/// interface because that is what the kernel's link-time refusal needs: a component that imports
+/// `wa:vault/reveal` is refused before it runs (`docs/WASI-INTERFACES.md`, tier C), whatever its
+/// manifest says. The kernel is the only linker of either.
+///
+/// The vault component imports `wa:kernel/keystore` (`wit/kernel-v2`) and keeps its document in its own
+/// kv namespace; it has no net, no filesystem and no clock of its own beyond the monotonic clock.
+package wa:vault@0.1.0;
+
+/// The shapes shared by both interfaces.
+interface types {
+    /// What an entry holds. An `ed25519` entry signs; its seed is never exported (there is no
+    /// operation in this package that could return it).
+    enum kind {
+        secret,
+        ed25519,
+    }
+
+    /// Everything about an entry that is not a secret: what `list` and `show` answer.
+    record meta {
+        name: string,
+        kind: kind,
+        /// The live version; every rotation increments it and a version is never reused.
+        version: u32,
+        /// Unix seconds.
+        created: s64,
+        rotated-at: s64,
+        /// `kernel` or `operator:<name>`: who created the entry.
+        owner: string,
+        /// Actor ids allowed to `sign` this entry (`component:<name>`), empty for owner and kernel only.
+        allowed: list<string>,
+    }
+
+    /// Why an operation refused. The `string` payloads are reason words (plus an entry name where it
+    /// helps), never a value: an error reaches a component log.
+    variant error {
+        unknown-entry,
+        kind-mismatch,
+        /// The caller is not the kernel (for `use-by-ref`) or not an owner (for `set`/`rotate`/`delete`).
+        not-allowed,
+        /// `reveal` without a `vault.reveal` grant naming this component and this entry.
+        reveal-not-granted,
+        /// The name, the seed length or the value is not acceptable (see the message for which).
+        invalid(string),
+        /// The document or the keystore refused; the operation did not happen.
+        refused(string),
+    }
+
+    /// One audit line as an operator reads it. No field of it can hold a value.
+    record audit-line {
+        seq: u64,
+        ts: s64,
+        actor: string,
+        op: string,
+        name: string,
+        version: u32,
+        result: string,
+        prev-hash: string,
+        hash: string,
+    }
+}
+
+/// The interface the kernel calls. Nothing here can create or open a key: the entries are sealed with
+/// the kernel's `wa:kernel/keystore` under this component's namespace.
+interface vault {
+    use types.{error, kind, meta};
+
+    /// Create or replace an entry. `allowed` names the actors that may `sign` it; the empty list means
+    /// the owner and the kernel only.
+    set: func(name: string, kind: kind, value: list<u8>, allowed: list<string>) -> result<meta, error>;
+    /// The value, for the kernel's own credential-header injection. A component calling this is
+    /// `not-allowed`: there is no grant that opens this door.
+    use-by-ref: func(name: string) -> result<list<u8>, error>;
+    /// An ed25519 signature over `message`. The seed is opened for this call and dropped.
+    sign: func(name: string, message: list<u8>) -> result<list<u8>, error>;
+    /// The public half of an ed25519 entry (public data).
+    public-key: func(name: string) -> result<list<u8>, error>;
+    /// Names and metadata only.
+    list: func() -> list<meta>;
+    /// A new live version. `value` absent re-seals the current value under a new version and nonce; the
+    /// previous version stays readable for the rotation window and is then destroyed.
+    rotate: func(name: string, value: option<list<u8>>) -> result<meta, error>;
+    delete: func(name: string) -> result<_, error>;
+}
+
+/// The reveal door. Its own interface so that importing it is a link-time refusal for every component
+/// (tier C), and so that the one grant that can open it (`vault.reveal` in `policy.json`) is named in
+/// the artifact's imports as well as in the policy.
+interface reveal {
+    use types.{error};
+    /// Answer the value to the actor the kernel authenticated. Refused without a grant naming exactly
+    /// that actor and entry.
+    reveal: func(name: string, actor: string) -> result<list<u8>, error>;
+}
+
+/// The audit chain, read-only.
+interface audit {
+    use types.{audit-line, error};
+    /// Recompute the chain from the stored lines; the number of verified lines, or the reason the chain
+    /// does not verify (an edited line, a deleted line, a truncated tail).
+    verify: func() -> result<u64, error>;
+    /// The last `lines` records, oldest first. No value can appear in one.
+    tail: func(lines: u32) -> list<audit-line>;
+}

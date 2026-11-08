@@ -13,6 +13,11 @@ edition = "2021"
 # capability crate and the binary. Nothing here imports the capability crate: `push_json` is the only
 # answer shape it shares with it, and that lives in `wa-host-support`.
 [dependencies]
+# The vault (`docs/VAULT.md`): the kernel is the only caller of `use_by_ref`/`reveal`, and the fleet's
+# signing key may live there (`rust/wa-mesh/src/fleetchange.rs`). `wa-keystore` wraps its root key.
+wa-vault = { path = "../wa-vault" }
+wa-keystore = { path = "../wa-keystore" }
+zeroize = "1"
 wa-host-support = { path = "../wa-host-support" }
 wa-governance = { path = "../wa-governance" }
 wa-grant-policy = { path = "../wa-grant-policy" }

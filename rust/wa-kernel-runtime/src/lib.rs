@@ -60,6 +60,7 @@ pub mod sql_host;
 pub mod supervisor;
 // Which WASI interfaces a `wa:kernel@0.2` component gets and with what scope (docs/WASI-INTERFACES.md).
 pub mod wasi_ext_host;
+pub mod vault_host;
 pub mod wasi_grants;
 #[cfg(test)]
 pub(crate) mod test_wasm;

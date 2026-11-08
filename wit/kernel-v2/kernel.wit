@@ -127,6 +127,34 @@ interface kv {
     scan: async func(prefix: list<u8>, cursor: option<list<u8>>, limit: u32) -> result<list<entry>, error>;
 }
 
+/// `wa:kernel/keystore` - the key that never leaves the kernel (`docs/VAULT.md`).
+///
+/// Three functions, and none of them takes a key: `seal` and `open` take the context that becomes the
+/// associated data (the vault's `name|version`) and answer an opaque blob, and `status` says whether a
+/// root key exists and how it is protected. The namespace is not a parameter: the kernel binds this
+/// interface to the importing component's own namespace before it links it, so two components sealing
+/// the same context do not share a key, and there is no argument that widens the binding.
+///
+/// A component never sees key material, which is what makes "the root key never leaves the kernel"
+/// true at the interface and not only in the prose.
+interface keystore {
+    use types.{error};
+
+    record root-status {
+        /// Whether a root key exists in this keystore (it is created on first use, not here).
+        root: bool,
+        /// `dpapi`, `keyring` or `passphrase`: which protection wraps it. Not a secret.
+        protection: string,
+    }
+
+    /// Seal `plaintext` under this component's namespace with `context` as associated data.
+    seal: func(context: string, plaintext: list<u8>) -> result<list<u8>, error>;
+    /// Open a blob this namespace sealed. A blob from another namespace, another context or another
+    /// keystore is `refused`.
+    open: func(context: string, sealed: list<u8>) -> result<list<u8>, error>;
+    status: func() -> root-status;
+}
+
 /// Lifecycle signals from the supervisor (identical to 0.1).
 ///
 /// `stopping` means "stop now": the kernel waits a grace period and then ends the instance, whether
