@@ -2244,22 +2244,29 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
     if not marked.ok then error("resource_uncertainty_record_failed: "..json.encode(marked)) end
   end
   if outermost then
+    -- The post-event payload costs a JSON encode of the whole result, so it is built only for the
+    -- events that have somewhere to go: configured hooks, or the shipped guard's own verdict. With no
+    -- configured hooks the guard is the entire post-processing and this path stays as cheap as it was.
+    local configured = hookslib.configured()
     local failed = (not ok) or (type(result) ~= "table") or result.error ~= nil or result.ok == false
       or result.cancelled == true or (result.code and result.code ~= 0) or result.state == "unknown"
-    local payload = { tool_name = name, tool_input = call_args or {}, tool_call_id = ctx.tool_call_id,
-      cwd = ctx.cwd or platform.cwd(), ok = not failed, effect = type(result) == "table" and result.effect or nil }
-    if failed then
-      payload.error = not ok and tostring(result) or (type(result) == "table" and result.error) or "tool_failed"
-    else
-      payload.tool_response, payload.tool_response_bytes = hook_result_view(result)
+    local post
+    if configured then
+      local payload = { tool_name = name, tool_input = call_args or {}, tool_call_id = ctx.tool_call_id,
+        cwd = ctx.cwd or platform.cwd(), ok = not failed, effect = type(result) == "table" and result.effect or nil }
+      if failed then
+        payload.error = not ok and tostring(result) or (type(result) == "table" and result.error) or "tool_failed"
+      else
+        payload.tool_response, payload.tool_response_bytes = hook_result_view(result)
+      end
+      post = hookslib.fire(failed and 'PostToolUseFailure' or 'PostToolUse', payload, hook_ctx(ctx))
     end
-    local post = hookslib.fire(failed and 'PostToolUseFailure' or 'PostToolUse', payload, hook_ctx(ctx))
     local extra = {}
     if pre and pre.additional_context then extra[#extra + 1] = pre.additional_context end
-    if post.additional_context then extra[#extra + 1] = post.additional_context end
+    if post and post.additional_context then extra[#extra + 1] = post.additional_context end
     local messages = {}
     for _, text in ipairs((pre and pre.system_messages) or {}) do messages[#messages + 1] = text end
-    for _, text in ipairs(post.system_messages or {}) do messages[#messages + 1] = text end
+    for _, text in ipairs((post and post.system_messages) or {}) do messages[#messages + 1] = text end
     if type(result) == "table" then
       if #extra > 0 then result.hook_context = table.concat(extra, "\n") end
       if #messages > 0 then result.hook_system_messages = messages end

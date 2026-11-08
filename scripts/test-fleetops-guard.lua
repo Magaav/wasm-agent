@@ -49,11 +49,15 @@ local refused = {
   { 'the drop-in written through the write tool', 'write',
     nil, '/etc/systemd/system/wa-rendezvous.service.d/managed.conf' },
   { 'an operation that restarts the rendezvous', 'operation', 'systemctl restart wa-rendezvous' },
+  { 'a batched write to the drop-in', 'write_many', nil, nil,
+    { files = { { path = '/tmp/other.conf', content = 'ok' },
+                { path = '/etc/systemd/system/wa-rendezvous.service.d/managed.conf', content = 'x' } } } },
 }
 for _, case in ipairs(refused) do
   local input = {}
   if case[3] then input.command = case[3] end
   if case[4] then input.path = case[4] end
+  if case[5] then for key, value in pairs(case[5]) do input[key] = value end end
   local judgement = guard.judge(case[2], input)
   ok(judgement ~= nil, 'refuses ' .. case[1])
   ok(judgement and judgement.rule ~= nil, 'and names the rule for ' .. case[1])

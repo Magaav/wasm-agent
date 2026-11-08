@@ -118,10 +118,29 @@ function M.judge(tool_name, tool_input)
   local path = text_of(input.path or input.file or input.file_path or input.target or '')
   local lowered_command = command:lower()
   local lowered_path = path:lower()
+  -- The batched tools (`write_many`, `edit_many`) carry their targets in a list; a drop-in path inside
+  -- one of those is the same act and must not slip past because the top-level path was empty.
+  local extra_paths = {}
+  for _, key in ipairs({ 'files', 'edits', 'items', 'writes', 'targets' }) do
+    local list = input[key]
+    if type(list) == 'table' then
+      for _, entry in ipairs(list) do
+        if type(entry) == 'table' then
+          local target = entry.path or entry.file or entry.file_path or entry.filename
+          if type(target) == 'string' and target ~= '' then extra_paths[#extra_paths + 1] = target:lower() end
+        end
+      end
+    end
+  end
 
   -- 1. An edit of the rendezvous drop-in, whichever tool does it. A *write* to that path is refused
   --    even when its content looks harmless, because the file only exists to change the directory.
   local edit_verb = matches_any(lowered_command, EDIT_VERBS)
+  for _, target in ipairs(extra_paths) do
+    if target:find(M.TARGETS.rendezvous_dropin) or target:find(M.TARGETS.rendezvous_dropin_file) then
+      return { rule = 'edit_rendezvous_dropin', tool = tool, target = 'wa-rendezvous.service.d', batch = true }
+    end
+  end
   if (lowered_path:find(M.TARGETS.rendezvous_dropin) or lowered_path:find(M.TARGETS.rendezvous_dropin_file)) then
     if tool ~= 'read' and tool ~= 'grep' and tool ~= 'ls' and tool ~= 'glob' then
       return { rule = 'edit_rendezvous_dropin', tool = tool, target = 'wa-rendezvous.service.d' }
