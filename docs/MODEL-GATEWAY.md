@@ -1,4 +1,4 @@
-# The model gateway as a component (`wa:model`), off by default
+# The model gateway as a component (`wa:model`)
 
 Status 07/11: the seam's **logic is landed and tested** (`rust/wa-model-gateway`, 79 native tests), the
 **component is built** (`rust/components/model-gateway`, `wasm32-wasip2`, `wa:kernel@0.2`), the **loop side
@@ -265,8 +265,16 @@ same way it installs the `models` section. Until that lands, the crate is tested
    `routes`/`explain`.
 4. **Sources call `note`**: `wa-whatsapp`/`wa-email` inbound handlers call
    `model_gateway.note(session, {kind="channel", own_chat=…})`, and the tool dispatcher calls it with
-   `{kind="tool_result", inherited=…}`. Until then, sessions default to `client` (fail closed) — the
-   gateway is off by default, so nothing is affected.
+   `{kind="tool_result", inherited=…}`. Until then, sessions default to `client` (fail closed): a
+   `client`-labelled request is refused on every provider that does not name itself for client data,
+   which is every provider at its default (`label_not_allowed: … configure a provider allowed for client
+   data`). That is the deliberate cost of failing closed, and it is why wiring the sources is the first
+   item on the list above.
+
+Since 08/11 the `gateway` *feature* is on by default (`docs/FEATURES.md`); what is still behind a flag is
+the seam itself (`lua/core/model_gateway.lua` reads `WA_MODEL_GATEWAY` once at load), because
+`host.model_gateway` is not wired yet. `wa features` reports exactly that: `enabled: true, active:
+native, reason: component_missing` on a node without the component, `active_component` with it.
 5. **A real streaming loop** in the library (`Transport::send` → `async`) so the component's events reach
    the caller during the call instead of after it (see the component's module docs).
 6. `components.lock` gains the pinned `model-gateway` artifact when the first node ships it.
