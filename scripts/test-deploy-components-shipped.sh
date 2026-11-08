@@ -38,7 +38,7 @@ absent() { if printf '%s' "$1" | grep -qF -- "$2"; then fail "$3: '$2' should no
 
 # The production components this release ships. Named here as the EXPECTATION, so the lock growing a
 # test fixture or losing a component is a failure of this test rather than a silent change.
-SHIPPED="agent-core codemode graph hooks memory model-gateway selfloop telemetry-sink wa-email"
+SHIPPED="agent-core codemode graph hooks memory mesh model-gateway selfloop telemetry-sink wa-email"
 
 # ---------------------------------------------------------------------------------------------------
 # A. components.lock is the shipped set

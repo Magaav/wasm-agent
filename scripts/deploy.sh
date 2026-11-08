@@ -901,7 +901,7 @@ COMPONENT_STAGE="$INSTALL_DIR/components.next"
 # components.lock is installed by the next deploy without editing this stage.
 COMPONENT_NAMES="$(wa_components_shipped "$ROOT")" || fail "refused(component_lock_unreadable): components.lock is not readable beside this deploy; the shipped components cannot be pinned, so nothing installed."
 [ -n "$COMPONENT_NAMES" ] || fail "refused(component_lock_empty): components.lock pins no component; nothing installed."
-case " $COMPONENT_NAMES " in *" graph "*) ;; *) fail "refused(component_lock_incomplete): components.lock does not pin graph, which every host.graph_* call runs; nothing installed." ;; esac
+case " $(echo $COMPONENT_NAMES) " in *" graph "*) ;; *) fail "refused(component_lock_incomplete): components.lock does not pin graph, which every host.graph_* call runs; nothing installed." ;; esac
 COMPONENT_COUNT="$(printf '%s\n' "$COMPONENT_NAMES" | wc -l | tr -d '[:space:]')"
 rm -rf "$COMPONENT_STAGE" && mkdir -p "$COMPONENT_STAGE" || fail "cannot stage components in $COMPONENT_STAGE"
 if ! COMPONENT_ERROR="$(wa_components_prepare "$ROOT" "$COMPONENT_STAGE" "$INSTALL_DIR" $COMPONENT_NAMES 2>&1)"; then
