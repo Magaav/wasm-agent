@@ -733,6 +733,11 @@ pub fn status_text(list: &[Status], policy: &Path) -> String {
     view.refresh_at(now_ms(), true);
     match &view.features().error {
         Some(error) => text.push_str(&format!("policy error: {error}\n")),
+        // An absent file is not an error and must not read like a decision: since 08/11 the default is
+        // *on*, so "no file" means the node runs its shipped features, and the table above says so.
+        None if !policy.exists() => {
+            text.push_str("policy: absent (no file: every feature keeps its default, which is on)\n")
+        }
         None => text.push_str("policy: features section read\n"),
     }
     text

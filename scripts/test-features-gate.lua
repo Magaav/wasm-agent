@@ -36,20 +36,42 @@ if type(host.features) ~= 'function' then
 end
 
 local state = paths.config()
-local components = state .. '/components'
 local policy_path = state .. '/policy.json'
 local function mkdir(path) host.exec("mkdir -p '" .. path .. "'", '', 20) end
-mkdir(components)
+mkdir(state)
+
+-- WHERE THE RESOLVER LOOKS, not where this test would like it to. `wa-features` (through
+-- `wa-host-support::paths::component_dir`) reads `WA_COMPONENTS_DIR`, else the *process* HOME's
+-- `.wasm-agent/components` - a node publishes its home to the guest as HOME, but the resolver reads the
+-- environment the binary was started with. A test therefore takes that directory from `WA_COMPONENTS_DIR`
+-- and writes into it ONLY when the caller put it inside this test's own home: it must never write into a
+-- node's real component directory, and must never pass on what happens to be installed there.
+local home = host.getenv('WASM_AGENT_HOME') or ''
+local components = host.getenv('WA_COMPONENTS_DIR')
+local function inside_home(path)
+  if type(path) ~= 'string' or path == '' or home == '' then return false end
+  local normal = path:gsub('\\', '/'):gsub('/$', '')
+  local prefix = home:gsub('\\', '/'):gsub('/$', '')
+  return normal:sub(1, #prefix) == prefix
+end
+if not inside_home(components) then components = nil end
 
 -- A component whose pin matches its bytes: the resolver only asks "is it installed and is it these
 -- bytes", so a stub module is the honest stand-in (the call itself is stubbed below).
 local function install(name)
+  if not components then return false end
+  mkdir(components)
   local bytes = 'stub component ' .. name
   host.write_file(components .. '/' .. name .. '.wasm', bytes)
   host.write_file(components .. '/' .. name .. '.wasm.sha256', (host.sha256(bytes) or '') .. '\n')
   host.write_file(components .. '/' .. name .. '.json', '{"name":"' .. name .. '","kind":"test"}')
+  return true
 end
-install('memory')
+if not install('memory') then
+  -- No component directory of our own: there is no honest way to prove "installed and verified", so say
+  -- that instead of asserting against a directory this test does not own.
+  skip('the installed-component half', 'WA_COMPONENTS_DIR is not inside this test\'s home (never a node\'s component directory)')
+end
 
 local function write_policy(features_list)
   local document = { version = 1, sensitive_capabilities = {}, features = features_list, components = {} }

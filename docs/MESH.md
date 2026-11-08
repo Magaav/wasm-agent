@@ -513,13 +513,29 @@ the live mount on a real `wa serve`.
 answer, in `rust/wa-mesh/src/gate.rs`, and every gate asks it — `host.mesh_call`'s call path, the relay
 hop (`mesh_peer_call` in `/node/call`), the mount's settings, and the CLI's remote-call path in
 `lua/core/nodes.lua`, which asks `host.mesh_call({"gate": true})` before it decides whether to try the
-mesh first. The order is **environment, then the operator's file, then off**:
+mesh first. The order is **environment, then the operator's file, then the default** — and since 08/11
+the default is *on when a roster verifies against the pinned key*, the legacy path otherwise:
 
 | # | statement | answer |
 | --- | --- | --- |
 | 1 | `WA_MESH`, else `WASM_AGENT_MESH` (`1`/`true`/`on`/`yes`, or `0`/`false`/`off`/`no`) | that, `from: "environment WA_MESH"` |
-| 2 | `policy.json`'s `mesh.enabled` | that, `from: "policy.json mesh.enabled"` |
-| 3 | neither | off, `from: "default off"` |
+| 2 | `policy.json`'s `mesh.enabled` (`true` or `false`) | that, `from: "policy.json mesh.enabled"` |
+| 3 | neither, and a roster verifies against the pinned `mesh.roster_key` | **on**, `from: "default: roster verified"` |
+| 4 | neither, and no roster verifies (no key, no file, bad signature, expired) | off — the legacy path, `from: "default off"` |
+
+**On by default, off without a roster.** Victor, 08/11: "every new feature on by default, each with a
+live per-feature off switch". A node whose `policy.json` pins a fleet key *and* whose roster verifies
+against it is a node an operator deliberately put in a fleet, so it decides by the roster without a
+second statement. Everything else keeps the old answer, and the ways to get there are all ordinary:
+no `mesh.roster_key`, no roster file (`<config>/mesh-roster.json` or `mesh.roster`), a roster signed by
+another fleet, an expired one — all of them are the legacy path. The switch is live: `"mesh.enabled":
+false` (or `WA_MESH=0`) turns a running node off on the next call, and `"mesh.enabled": true` turns one
+on; `wa features` and `host.features()` print the answer with its source (`mesh: on (default: roster
+verified)`), so an operator never has to guess which of the four rows they got.
+
+The verification is not re-run per call for free: the gate caches the answer by the policy file's
+mtime/size and the roster's mtime/size, and re-verifies at most once a minute, because a roster has an
+expiry and a cached "verified" must not keep an expired fleet alive (`gate::roster_verified`).
 
 An **explicit `WA_MESH=0` wins over a policy that says `enabled: true`**: an operator who writes it into
 a node's env file means off, and the file must not overrule the person who started the process. An

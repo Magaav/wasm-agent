@@ -177,7 +177,7 @@ struct Sections {
     errors: BTreeMap<String, String>,
 }
 
-fn sections_of(policy: &PolicySet, owners: &[wa_grant_policy::SectionOwner]) -> Sections {
+fn sections_of(policy: &PolicySet) -> Sections {
     let mut carried: Vec<String> = policy.sections.keys().cloned().collect();
     carried.sort();
     Sections { carried, errors: policy.section_errors.clone() }
@@ -292,7 +292,7 @@ impl NodePolicy {
         let (policy, mode, loaded, load_error) = match std::fs::read(&paths.policy) {
             Ok(bytes) => match PolicySet::parse_owned(&String::from_utf8_lossy(&bytes), &owners) {
                 Ok(policy) => {
-                    sections = sections_of(&policy, &owners);
+                    sections = sections_of(&policy);
                     (policy, Mode::Policy, true, None)
                 }
                 Err(error) => {
@@ -443,10 +443,9 @@ impl NodePolicy {
                 *self.load_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 // The sections are re-read with the rules: a `mesh` section fixed by the operator is a
                 // section that stops being reported on the next tick, exactly like a rule.
-                let owners = section_owners();
                 let sections = {
                     let engine = self.engine();
-                    sections_of(engine.policy(), &owners)
+                    sections_of(engine.policy())
                 };
                 let changed_error = {
                     let mut held = self.sections.lock().unwrap_or_else(|e| e.into_inner());

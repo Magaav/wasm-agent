@@ -35,9 +35,11 @@ that address. Enforcement order is grant (`component_capability_not_declared:*`)
 
 ## Schema (version 1)
 
-One JSON file per node. Unknown fields, an unknown `version`, an empty pattern, a zero rate and a
-zero cap are **load errors** — a typo (`per_minutes`, `require_aprovall`) must not silently disable a
-limit.
+One JSON file per node. Unknown fields **inside a rule**, an unknown `version`, an empty pattern, a zero
+rate and a zero cap are **load errors** — a typo (`per_minutes`, `require_aprovall`) must not silently
+disable a limit. The *top level* is not strict, on purpose: `features`, `mesh`, `vault`, `models` and
+whatever the next section is called are carried for the crate that owns them (see "Sections this crate
+does not read").
 
 ```json
 {
@@ -122,6 +124,38 @@ There is no escape for a literal `*`; targets are ids and addresses, so that cas
 Sensitivity — a sensitive capability is audited on every call and **denied with `no_policy` when the
 component has no rule for it**. Defaults: `credentials.read`, `net.dial`, `http.request`,
 `whatsapp.send`, `exec.run`, `kv.write`. Everything else (log, lifecycle, kv reads) needs no rule.
+
+## Sections this crate does not read
+
+`policy.json` carries more than capability rules: `features` (`docs/FEATURES.md`), `mesh`
+(`docs/MESH.md`), `vault`, `models` (`docs/MODEL-GATEWAY.md`), and one day something else. Only this
+crate's own sections are interpreted here, and the strictness rule follows the blast radius:
+
+| what is in the file | what happens |
+| --- | --- |
+| `version`, `sensitive_capabilities`, `components` | validated field by field; a typo is a load error |
+| a section this crate knows by name (`features`) | carried as JSON, read by the crate that owns it |
+| any other top-level section (`mesh`, `vault`, `models`, a future one) | **carried** (`PolicySet::sections`), read by nobody here, and it changes no rule |
+| a carried section whose owner is registered in this process | validated by that owner (`wa-mesh-core` owns `mesh`); an unusable one is recorded in `PolicySet::section_errors`, logged, and reported in `host.policy_status` under `policy.sections.errors` — the rules beside it stay in force |
+
+**Why.** On 08/11, 03:51–04:10, a node on openclaw had a `mesh` section hand-added to its `policy.json`,
+and every component rule answered `deny(no_policy)` — `wa-whatsapp`'s `net.dial` refused with its rule
+right there in the file. Before this, *any* unknown top-level member was a load error, so the whole file
+did not load; a file that does not load is `Mode::Policy` with an **empty** policy, i.e. default deny
+everywhere. A section that a *different* crate reads must never be able to refuse a rule this crate
+enforces.
+
+Two properties, both tested (`cargo test -p wa-grant-policy`, `-p wa-governance`, `-p wa-mesh-core`):
+
+* a valid `mesh` section (or any unknown future section) leaves every rule readable and enforced;
+* an **invalid** section fails loudly — `host.policy_status` carries the error by name and the node logs
+  one line — and never silently: the rules are neither dropped nor guessed at. `mesh.enabled: "yes"` is
+  refused by the mesh's own validator; `"mesh": "on"` is `not_an_object`.
+
+A top-level typo (`"componets": {...}`) is therefore carried rather than refused, and that is the one
+cost of the design: it shows up in `policy.sections.carried` in `host.policy_status`, and the rules it
+should have carried are absent — so it fails closed *and* visibly, which is the direction a half-written
+file has to fail in.
 
 ## Decisions
 

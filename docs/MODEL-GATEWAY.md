@@ -55,7 +55,34 @@ is **never a candidate**: the router drops it with a typed reason, the call is s
 provider, or it is refused `label_not_allowed` with the reason naming what the provider does allow. The
 default policy is what the job asked for and what `policies/default.json` will carry: DeepSeek/opencode-go
 are `public|internal` only; Anthropic (and a local endpoint, if the operator declares it) may carry
-`client`. A provider with **no** `allowed_labels` allows `public` only — a misconfig fails closed.
+`client`.
+
+A provider that names **no** `allowed_labels` inherits today's provider: it allows `public` and
+`internal` (the operator's own text and the operator's own material — what a turn carried before the
+gateway existed, so the default changes no behaviour for either), and it never allows `client`. A
+`client`-labelled request that can only be served by such a provider (DeepSeek, opencode-go) is refused
+with the sentence that says what to do about it:
+
+```
+label_not_allowed: deepseek/deepseek-v4.1-flash is labelled client and deepseek allows public,internal
+  - configure a provider allowed for client data
+```
+
+**Allowing a provider to carry client data is one line**, and it is always a decision an operator writes
+down rather than a default:
+
+```json
+"providers": [
+  { "id": "anthropic", "kind": "anthropic", "base_url": "https://api.anthropic.com",
+    "credential": {"secret": "ANTHROPIC_API_KEY", "header": "x-api-key", "scheme": "raw"},
+    "allowed_labels": ["public", "internal", "client"] }
+],
+"routes": {"plan": ["anthropic/claude-sonnet-4-5", "deepseek/deepseek-v4.1-flash"]}
+```
+
+The class that may see client data routes to that provider first; every other class keeps its own route.
+Naming `client` on a provider that cannot be reached from the request's class changes nothing — a label
+can only be *added* to a provider, never inherited by one.
 
 The test that matters is an assertion on the bytes the mock provider received: a `client`-labelled request
 produces **no request at all** to a provider that does not allow it
@@ -137,7 +164,8 @@ candidate and the decision.
 
 ```
 class plan label client
-  ✗ deepseek/deepseek-v4.1-flash (openai, allows public,internal) — route#1: label_not_allowed: … is client and deepseek allows public,internal
+  ✗ deepseek/deepseek-v4.1-flash (openai, allows public,internal) — route#1: label_not_allowed: … is client and
+    deepseek allows public,internal - configure a provider allowed for client data
   ✓ anthropic/claude-sonnet-4-5 (anthropic, allows public,internal,client) — route#2
 would call anthropic/claude-sonnet-4-5
 ```
