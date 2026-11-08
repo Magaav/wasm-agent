@@ -1139,7 +1139,7 @@ fn the_target_executes_on_the_mounts_attestation_not_on_its_operators_pins() {
         "the attestation binds the caller's own request signature"
     );
     let ts = wire::now_seconds();
-    let attestation = crate::attest::sign(
+    let attestation = crate::attestation::sign(
         &Identity::load(&cloud_dir.config.join("node.key")).expect("cloud identity"),
         &work.node.node_id,
         allowed.verb.as_str(),
