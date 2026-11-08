@@ -2154,6 +2154,7 @@ dependencies = [
  "ureq",
  "wa-email-index",
  "wa-email-outbox",
+ "wa-features",
  "wa-governance",
  "wa-grant-policy",
  "wa-host-support",
@@ -2231,6 +2232,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wa-features"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde_json",
+ "tempfile",
+ "wa-host-support",
+]
+
+[[package]]
 name = "wa-governance"
 version = "0.1.0"
 dependencies = [
@@ -2277,6 +2288,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "wa-capabilities",
+ "wa-features",
  "wa-host-support",
  "wa-kernel-runtime",
  "wa-mesh",
@@ -2314,6 +2326,7 @@ dependencies = [
  "ureq",
  "wa-bus",
  "wa-fabric",
+ "wa-features",
  "wa-governance",
  "wa-grant-policy",
  "wa-host-support",
