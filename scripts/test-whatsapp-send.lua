@@ -47,6 +47,14 @@ local world = host.read_file("rust/components/wa-whatsapp/wit/wa.wit") or ""
 ok(world:find("include wa:kernel/service-component@0.2.0;", 1, true) ~= nil, "the world includes the kernel service contract")
 ok(world:find("import wa:queue/worker@0.1.0;", 1, true) ~= nil, "the world imports the outbox's worker interface")
 ok(world:find("wa:queue/producer", 1, true) == nil, "the component never produces on its own outbox")
+-- The image reader (`docs/WHATSAPP-OCR.md`): the cutover finding was that the component imported no
+-- vision interface at all, so turning the native connector off silently dropped image OCR. The
+-- import, the published interface and the manifest grant are one fact, so all three are pinned.
+ok(world:find("import wa:kernel/vision@0.2.0;", 1, true) ~= nil, "the world imports the kernel's OCR reader")
+local kernel_contract = host.read_file("wit/kernel-v2/kernel.wit") or ""
+ok(kernel_contract:find("interface vision", 1, true) ~= nil, "the reader is a published interface")
+ok(kernel_contract:find("read: async func(image: list<u8>, mime: string)", 1, true) ~= nil,
+  "the reader takes the image bytes and its media type, like the seams text-reader")
 
 -- The component's manifest grants that one namespace and nothing else: the host reads `consume` as the
 -- worker interface (`queue_host::Grants::from_manifest`), and a component granted more than it needs is
@@ -58,6 +66,7 @@ ok(grant.consume ~= nil or grant.interfaces ~= nil, "the queue grant names the i
 ok(grant.produce == nil and json.encode(grant):find("admin", 1, true) == nil,
   "the component neither produces on its own outbox nor administers it")
 ok((manifest.capabilities or {}).stt == true, "the transcription grant is untouched")
+ok((manifest.capabilities or {}).ocr == true, "the OCR grant the vision call is checked against is declared")
 
 -- ---- the tool shape -----------------------------------------------------------------------------
 local schemas = {}
