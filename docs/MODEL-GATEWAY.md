@@ -170,6 +170,60 @@ thing to profile before this seam is enabled on a node — the suspects are the 
 `absorb`/`Event` and the Windows allocator, not the routing. Reporting the range rather than one number is
 deliberate: on this machine the same code produced both ends of it.
 
+## Router modules
+
+The gateway owns the call; it does not own the opinion of *which* model a class of work prefers. That
+opinion is a **policy module** (`wit/model/router.wit`, package `wa:model-router@0.1.0`, logic in
+`rust/wa-model-router`):
+
+```wit
+interface router {
+    decide: func(request: request) -> decision;   // ordered candidates + skills, nothing else
+    info: func() -> info;                         // name, version, classes, labels
+}
+record request  { class: string, label: string, explicit: option<model-ref>, session: string }
+record decision { module: string, source: string, candidates: list<model-ref>,
+                  skills: list<string>, fallback: option<string> }
+```
+
+* **The default module is today's routing.** `DefaultRouter` answers an explicit model, else
+  `models.routes[class]`, else `models.routes.default`, else nothing - and a test compares it candidate by
+  candidate, for every class and label, against `wa_model_gateway::plan_chat`, including the `source`
+  string (`route:plan`, `route:default`, `none`, `explicit`). Enabling the seam changes nothing until a
+  policy module is installed.
+* **A policy module is a table** (what a component ships), parsed strictly so a typo is a named error
+  (`module.rules[0].models[0]: "nomodel" is not a provider/model reference`):
+
+```json
+{"name": "fleet-ops", "version": 1,
+ "description": "Fleet operations go to the strong model and load the fleetops skill.",
+ "rules": [{"name": "fleet-ops", "classes": ["fleet-ops", "plan"],
+            "labels": ["public", "internal", "client"],
+            "models": ["anthropic/claude-sonnet-4-5", "deepseek/deepseek-v4.1-flash"],
+            "skills": ["fleetops"]}]}
+```
+
+  `classes` may name a class the gateway's enum has no case for (`fleet-ops`): the loop passes the name it
+  has, and a class the policy does not know arrives as `default`. `skills` is a **hint** for the caller
+  (the fleetops skill in `skills/fleetops`), never a load performed by the gateway.
+* **Installed, upgraded and switched like a service component.** `RouterRegistry` holds the installed
+  modules, one is current, `install` adds or upgrades (a new generation; a downgrade is refused), and
+  `switch_to` changes the current module. `decide` clones the current module first, so **a swap changes
+  the next call and a call in flight keeps the module it started with** - by construction, not by timing.
+  A module that has no rule for a request declines (`fallback`), and the gateway answers with the default
+  module and says so in `source` (`route (fallback: fleet-ops: no rule for class cheap label internal)`),
+  because a silent second default is a policy nobody can audit.
+* **Two boundaries the module cannot cross.** A module may *narrow* the labels its rules apply to, never
+  widen them: the gateway's own label gate runs on every candidate after the router, so a rule that names
+  a public-only provider for a `client` turn changes nothing (and a test asserts exactly that). And a
+  decision carries model refs and skill names only - messages, tools and the cache breakpoint never
+  appear in the interface.
+
+The component side is a thin guest over this crate's `RouterModule`: `rust/components/model-gateway` gains
+the module in its world (a `wa:model-router` import), and `configure` installs a module declaration the
+same way it installs the `models` section. Until that lands, the crate is tested natively
+(`cargo test -p wa-model-router`, 8 tests) and the node's routing is unchanged.
+
 ## What integration needs (after the WASI 0.3 / wasmtime 50 runner lands)
 
 1. **`host.model_gateway`** in `rust/wa-capabilities` (the `host.*` registration next to `host.selfloop`),
@@ -188,3 +242,10 @@ deliberate: on this machine the same code produced both ends of it.
 5. **A real streaming loop** in the library (`Transport::send` → `async`) so the component's events reach
    the caller during the call instead of after it (see the component's module docs).
 6. `components.lock` gains the pinned `model-gateway` artifact when the first node ships it.
+7. **Router modules**: the gateway component imports `wa:model-router/decide`, `configure` installs a
+   module declaration beside the `models` section (generation included), and `lua/core/model_gateway.lua`
+   passes the class **name** it has (`fleet-ops` included) so a policy can name a class the enum lacks.
+   Until then `rust/wa-model-router` is the tested library and the native path routes exactly as today.
+8. **`host.fleetview`** (docs/FLEET-OPS.md) in `rust/wa-capabilities`, calling `wa-fleetview`'s `assemble`
+   after the peer read it needs; `lua/core/fleetview.lua` is the live collector until then, and both keep
+   the same `FIELDS` contract.
