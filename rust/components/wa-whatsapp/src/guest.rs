@@ -173,6 +173,11 @@ impl queue::Persist for AudioJob {
     }
 
     fn load(v: &serde_json::Value) -> Option<Self> {
+        // Not `chat::jid` on purpose: this chat came off the wire (an already-received message), it is
+        // never a caller's request, and it is only used to fetch that message's own media and to quote
+        // it. The exact-JID rule is the *query/send* contract; applying it here would drop a queued
+        // transcription of a chat the client can address but a caller may not name (a hosted LID), and a
+        // restart must not lose work this component already accepted.
         let chat: whatsapp_rust::Jid = v["chat"].as_str()?.parse().ok()?;
         let sender: whatsapp_rust::Jid = v["sender"].as_str().and_then(|s| s.parse().ok()).unwrap_or_else(|| chat.clone());
         let message = wap::Message::decode_from_slice(&unhex(v["message"].as_str()?)?).ok()?;
@@ -932,7 +937,9 @@ fn outbox_note(text: String) {
 /// fetched (this component keeps no message history), so a reply is a reference-only quote; in a group
 /// WhatsApp names the quoted author and we do not know it, so the chat is named instead.
 async fn send_outbox(client: &whatsapp_rust::Client, request: &wa_whatsapp_outbox::Verified) -> Result<String, String> {
-    let chat: whatsapp_rust::Jid = request.chat.jid().parse().map_err(|_| "bad_chat".to_string())?;
+    // The one conversion (crate::chat::jid): the seam validated the chat already, and this is where it
+    // becomes the library's typed JID - the same rule, so `bad_chat` cannot mean two different things.
+    let chat = crate::chat::jid(&request.chat.jid())?;
     client
         .send_message(chat, outbox::build_message(request))
         .await
@@ -1189,36 +1196,16 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
 /// The answer is the manifest ([`seam::Download`]); the bytes never enter the queue's result, which is
 /// bounded at 64 KiB. A reason the caller can act on is *answered* (`ok:false`, with the size when it
 /// matters) so it is read at once; a transport failure is an `Err`, which the queue retries.
+///
+/// Everything that can be decided from the index (the chat the one rule accepts, the record, its media,
+/// the plaintext bound) is `index::download_plan` - the same code a native test drives. This function
+/// is only the client half.
 async fn download(request: &seam::Verified, job: u64, cfg: &IndexConfig) -> Result<serde_json::Value, String> {
     use crate::wa::queue::worker;
-    let (Some(chat), Some(id)) = (&request.chat, &request.id) else {
-        return Ok(seam::refusal(seam::Op::Download, "chat_and_id_required", "one message: pass chat and id"));
+    let (chat, id, media, limit) = match index::download_plan(&IndexKv, request, cfg.download_max).await? {
+        index::DownloadPlan::Refused(answer) => return Ok(answer),
+        index::DownloadPlan::Fetch(target) => (target.chat, target.id, target.media, target.limit),
     };
-    let chat = chat.jid();
-    let id = id.clone();
-    let Some(record) = index::load(&IndexKv, &chat, &id).await? else {
-        return Ok(seam::refusal(seam::Op::Download, "not_indexed", "no message with that id in this chat"));
-    };
-    if record.deleted {
-        return Ok(seam::refusal(seam::Op::Download, "deleted", "the message was revoked; its media is gone"));
-    }
-    let Some(media) = record.media.clone() else {
-        return Ok(seam::refusal(seam::Op::Download, "no_media", "this message carries no media"));
-    };
-    if !media.downloadable || !record.unsupported.is_empty() {
-        return Ok(seam::refusal(
-            seam::Op::Download,
-            "not_downloadable",
-            "this media cannot be fetched (view-once, or the keys were not kept)",
-        ));
-    }
-    let limit = request.max_bytes.min(cfg.download_max);
-    if media.size > limit {
-        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the media is larger than this node will decrypt");
-        answer["size"] = serde_json::Value::from(media.size);
-        answer["max_bytes"] = serde_json::Value::from(limit);
-        return Ok(answer);
-    }
     let Some(client) = CLIENT.with(|c| c.borrow().clone()) else {
         return Err("not_connected".into());
     };
@@ -1369,7 +1356,10 @@ async fn backfill(request: &seam::Verified) -> Result<serde_json::Value, String>
     let mut asked: Vec<seam::BackfillChat> = Vec::new();
     let mut refused = 0usize;
     for anchor in &anchors {
-        let Ok(jid) = anchor.chat.parse::<whatsapp_rust::Jid>() else {
+        // The anchor's chat comes out of the index (or is the chat the caller named). It becomes the
+        // library's typed JID through the one rule, so a chat the index holds under a spelling the
+        // query lane accepts is a chat the phone is asked about, and one it refuses is counted.
+        let Ok(jid) = crate::chat::jid(&anchor.chat) else {
             refused += 1;
             continue;
         };

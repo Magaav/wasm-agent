@@ -276,9 +276,15 @@ impl Record {
 
 /// Turn one inbound message into the record the index keeps. `message` is the message as it arrived:
 /// wrappers (device-sent, ephemeral, view-once, document-with-caption, edited) are peeled here.
+///
+/// The chat is stored in the spelling the one rule accepts ([`crate::chat::storable`]): the index keys
+/// and every answer that names a chat therefore use a value `whatsapp_read`/`_media`/`_download`/
+/// `_backfill` accept, so a search hit is always a pointer to a chat a query can use (the 07/11
+/// finding: a hit named a legacy group id the read path refused). A chat the rule does not know is
+/// kept verbatim - a received message is never dropped because its address is odd.
 pub fn from_message(envelope: &Envelope, message: &wap::Message) -> Record {
     let mut record = Record {
-        chat: envelope.chat.clone(),
+        chat: crate::chat::storable(&envelope.chat),
         id: envelope.id.clone(),
         sender: envelope.sender.clone(),
         sender_alt: envelope.sender_alt.clone(),
@@ -768,6 +774,24 @@ mod tests {
 
     fn envelope(id: &str) -> Envelope {
         Envelope { chat: "5511999999999@lid".into(), id: id.into(), sender: "5511888888888@s.whatsapp.net".into(), ts: 1_760_000_000_000, received: 1_760_000_000_100, ..Envelope::default() }
+    }
+
+    #[test]
+    fn a_message_is_indexed_under_the_spelling_a_query_accepts() {
+        // The chat an answer names is the chat a query can ask about (`chat::storable`, the one rule):
+        // a legacy group id and a modern one are kept exactly, the phone server's legacy spelling is
+        // normalized, and a shape the rule does not know is kept as it arrived instead of dropped.
+        let text_message = wap::Message { conversation: Some("oi".into()), ..Default::default() };
+        for (arrived, stored) in [
+            ("9999999999999-9999999999999@g.us", "9999999999999-9999999999999@g.us"),
+            ("120363000000000001@g.us", "120363000000000001@g.us"),
+            ("5511999999999@c.us", "5511999999999@s.whatsapp.net"),
+            ("5511999999999:12@s.whatsapp.net", "5511999999999:12@s.whatsapp.net"),
+        ] {
+            let env = Envelope { chat: arrived.into(), group: arrived.ends_with("@g.us"), ..envelope("S1") };
+            let record = from_message(&env, &text_message);
+            assert_eq!(record.chat, stored, "{arrived}");
+        }
     }
 
     #[test]

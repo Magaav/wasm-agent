@@ -6,6 +6,8 @@
 //! same `kv` contract without a store. That is what lets every message kind, the mutation events and
 //! the retention window be measured in `cargo test`, on a machine that never paired.
 use super::*;
+use crate::chat;
+use crate::history;
 use crate::record::{self, Envelope, Record};
 use futures::executor::block_on;
 use wa_whatsapp_index as seam;
@@ -810,4 +812,141 @@ fn holds_answers_whether_a_message_is_already_indexed() {
     assert!(block_on(holds(&store, CHAT, "T1")).unwrap());
     // The id is scoped to its chat: the same id under another chat is a different message.
     assert!(!block_on(holds(&store, "5511777776666@s.whatsapp.net", "T1")).unwrap());
+}
+
+// ---- a legacy group id, end to end through the index -------------------------------------------
+//
+// The live finding (07/11): `whatsapp_search` returned a hit whose `chat` was an older group's real
+// id, `<creator phone>-<creation epoch>@g.us`, and handing that same value back to
+// `whatsapp_read`/`whatsapp_media`/`whatsapp_download` was refused as `bad_chat`. The fix lives in the
+// seam's one rule (`wa_whatsapp_outbox::Chat::parse`); these tests are the component's half: a fixture
+// index holds a message in a legacy group, and every question is asked with the chat value the search
+// hit itself printed - never with a value the test rewrote.
+
+const LEGACY: &str = "9999999999999-9999999999999@g.us";
+
+fn legacy_image(id: &str, ts: i64, caption: &str) -> Record {
+    let mut group = envelope(id, ts);
+    group.chat = LEGACY.into();
+    group.group = true;
+    record::from_message(
+        &group,
+        &wap::Message {
+            image_message: MessageField::some(wap::message::ImageMessage {
+                mimetype: Some("image/jpeg".into()),
+                caption: Some(caption.into()),
+                file_length: Some(48_213),
+                file_sha256: Some(vec![0xab; 32]),
+                file_enc_sha256: Some(vec![0xcd; 32]),
+                media_key: Some(vec![0x11; 32]),
+                direct_path: Some("/v/t62.7118-24/legacy".into()),
+                width: Some(1080),
+                height: Some(1920),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn a_legacy_group_chat_a_search_hit_names_is_a_chat_every_question_accepts() {
+    let store = Memory::new();
+    let ts = 1_760_000_000_000;
+    let record = legacy_image("LEG1", ts, "boleto do mes");
+    assert_eq!(record.chat, LEGACY, "the index keeps the chat the hit will name");
+    block_on(put(&store, &record)).unwrap();
+
+    // 1. The search hit names exactly that chat and that id.
+    let answer = block_on(search(&store, &search_request("boleto"))).unwrap();
+    let hit = answer["hits"][0].clone();
+    assert_eq!(hit["chat"], LEGACY);
+    let chat = hit["chat"].as_str().expect("the hit names a chat").to_string();
+    let id = hit["id"].as_str().expect("the hit names an id").to_string();
+
+    // 2. `whatsapp_read`: the hit's chat validates (the seam rule) and the thread holds the message.
+    let ask = verified(seam::Request { op: "read".into(), chat: Some(chat.clone()), ..Default::default() });
+    assert_eq!(ask.chat.as_ref().map(|chat| chat.jid()), Some(LEGACY.to_string()));
+    let answer = block_on(read(&store, &ask)).unwrap();
+    assert_eq!(answer["ok"], true);
+    assert_eq!(answer["chat"], LEGACY);
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["messages"][0]["id"], id);
+
+    // 3. `whatsapp_reactions`: accepted, and the message has no reactions yet.
+    let ask = verified(seam::Request { op: "reactions".into(), chat: Some(chat.clone()), id: Some(id.clone()), ..Default::default() });
+    let answer = block_on(reactions(&store, &ask)).unwrap();
+    assert_eq!(answer["ok"], true);
+    assert_eq!(answer["chat"], LEGACY);
+    assert_eq!(answer["count"], 0);
+
+    // 4. `whatsapp_media`: accepted, and it is the media of that message.
+    let ask = verified(seam::Request { op: "media".into(), chat: Some(chat.clone()), id: Some(id.clone()), ..Default::default() });
+    let answer = block_on(media(&store, &ask)).unwrap();
+    assert_eq!(answer["ok"], true);
+    assert_eq!(answer["chat"], LEGACY);
+    assert_eq!(answer["kind"], "image");
+    assert_eq!(answer["downloadable"], true);
+
+    // 5. `whatsapp_download`: the query half the guest runs before it asks for a client
+    //    (`index::download_plan`) accepts the chat the hit printed, finds that message and its
+    //    downloadable media - and applies the caller's bound. A refusal here is the live
+    //    `whatsapp_download_failed bad_chat`.
+    let ask = verified(seam::Request { op: "download".into(), chat: Some(chat.clone()), id: Some(id.clone()), ..Default::default() });
+    let plan = block_on(download_plan(&store, &ask, seam::MAX_DOWNLOAD_BYTES)).unwrap();
+    let target = match plan {
+        DownloadPlan::Fetch(target) => target,
+        DownloadPlan::Refused(answer) => panic!("the hit's chat refused the download: {answer}"),
+    };
+    assert_eq!((target.chat.as_str(), target.id.as_str()), (LEGACY, id.as_str()));
+    assert!(target.media.downloadable);
+    assert_eq!(target.media.kind, "image");
+    // The same request with a bound smaller than the media is answered, not fetched.
+    let small = verified(seam::Request {
+        op: "download".into(),
+        chat: Some(chat.clone()),
+        id: Some(id.clone()),
+        max_bytes: Some(1_024),
+        ..Default::default()
+    });
+    match block_on(download_plan(&store, &small, seam::MAX_DOWNLOAD_BYTES)).unwrap() {
+        DownloadPlan::Refused(answer) => {
+            assert_eq!(answer["ok"], false);
+            assert_eq!(answer["error"], "whatsapp_download_download_too_large");
+        }
+        DownloadPlan::Fetch(_) => panic!("a 48 KiB image must not fit in 1 KiB"),
+    }
+    assert_eq!(
+        chat::jid(&chat).expect("the one conversion the download step uses").to_string(),
+        LEGACY
+    );
+
+    // 6. `whatsapp_backfill`: the anchor the index offers names the same chat, and the conversion that
+    //    hands it to the phone (`chat::jid`) accepts it - the live path counted a refused anchor.
+    let anchors = block_on(history::anchors(&store, Some(&chat), 50)).unwrap();
+    assert_eq!(anchors.len(), 1);
+    assert_eq!(anchors[0].chat, LEGACY);
+    assert_eq!(anchors[0].id, id);
+    assert_eq!(chat::jid(&anchors[0].chat).expect("the phone can be asked about it").to_string(), LEGACY);
+    // A chat the index holds nothing for is still asked about by the exact value the caller named.
+    let cold = block_on(history::anchors(&store, Some(LEGACY), 50)).unwrap();
+    assert_eq!(cold[0].chat, LEGACY);
+
+    // 7. The refusals did not move: a bare number, a hyphen on a person's server, two hyphens, an empty
+    //    half and an unsendable server are still refused, with the same word the seam uses.
+    for (bad, code) in [
+        ("5511999999999", "bad_chat"),
+        ("9999999999999-9999999999999@s.whatsapp.net", "bad_chat"),
+        ("1-2-3@g.us", "bad_chat"),
+        ("-1@g.us", "bad_chat"),
+        ("1-@g.us", "bad_chat"),
+        ("120363000000000001@newsletter", "unsupported_chat"),
+    ] {
+        let request = seam::Request { op: "read".into(), chat: Some(bad.into()), ..Default::default() };
+        assert_eq!(request.validate().unwrap_err().code, code, "{bad}");
+        assert_eq!(chat::jid(bad).unwrap_err(), code, "{bad}");
+    }
+    // Nothing was written for a refused request, and the thread is still the one message.
+    let answer = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some(LEGACY.into()), ..Default::default() }))).unwrap();
+    assert_eq!(answer["count"], 1, "{answer}");
 }

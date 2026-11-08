@@ -24,6 +24,9 @@
 //! only for that target, so `cargo test` runs the decisions natively while
 //! `cargo build --target wasm32-wasip2` builds the component.
 pub mod alerts;
+/// The one place a chat string becomes a typed chat (the seam's exact-JID rule) and the one place a
+/// chat is converted to the protocol library's `Jid`, so no two paths can accept different chats.
+pub mod chat;
 pub mod holds;
 /// The past: the messages a history sync carries and the on-demand request that asks the primary
 /// phone for more, indexed under a budget (`docs/WHATSAPP-TRANSCRIPTION.md`, "The past").

@@ -790,6 +790,65 @@ pub async fn media<S: Store>(store: &S, request: &seam::Verified) -> Result<serd
     Ok(seam::answer(seam::Op::Media, answer))
 }
 
+/// What one `whatsapp_download` needs from the index before a byte is fetched: which chat and message,
+/// their media, and the plaintext bound this node will decrypt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DownloadTarget {
+    pub chat: String,
+    pub id: String,
+    pub media: record::Media,
+    /// The effective bound: the caller's `max_bytes`, capped by the node's own configuration.
+    pub limit: u64,
+}
+
+/// The index half of `whatsapp_download`.
+pub enum DownloadPlan {
+    /// Fetch this: the record, its media and the bound.
+    Fetch(Box<DownloadTarget>),
+    /// Answered: a reason the caller can act on (never indexed, no media, revoked, too large).
+    Refused(serde_json::Value),
+}
+
+/// The query half of `whatsapp_download`: everything that can be decided from the index, in the order
+/// the caller reads it. The guest owns the other half (client, decryption, progress chunks), so a chat
+/// this refuses is a refusal before any network work - and this half is pure, which is what lets a
+/// test ask it the same question the node asks without a WhatsApp connection. A refusal is
+/// `Ok(Refused(answer))`; only a store failure is `Err(reason)`, and the queue retries those.
+pub async fn download_plan<S: Store>(store: &S, request: &seam::Verified, node_max: u64) -> Result<DownloadPlan, String> {
+    let (Some(chat), Some(id)) = (&request.chat, &request.id) else {
+        return Ok(DownloadPlan::Refused(seam::refusal(seam::Op::Download, "chat_and_id_required", "one message: pass chat and id")));
+    };
+    // The chat the request names, in the canonical spelling the writer stored it under: `Chat::jid` is
+    // the same normalisation `chat::storable` applies on the write side (`c.us` -> `s.whatsapp.net`),
+    // so a chat a caller names and a chat the index keys agree by construction.
+    let chat = chat.jid();
+    let id = id.clone();
+    let Some(record) = load(store, &chat, &id).await? else {
+        return Ok(DownloadPlan::Refused(seam::refusal(seam::Op::Download, "not_indexed", "no message with that id in this chat")));
+    };
+    if record.deleted {
+        return Ok(DownloadPlan::Refused(seam::refusal(seam::Op::Download, "deleted", "the message was revoked; its media is gone")));
+    }
+    let Some(media) = record.media.clone() else {
+        return Ok(DownloadPlan::Refused(seam::refusal(seam::Op::Download, "no_media", "this message carries no media")));
+    };
+    if !media.downloadable || !record.unsupported.is_empty() {
+        return Ok(DownloadPlan::Refused(seam::refusal(
+            seam::Op::Download,
+            "not_downloadable",
+            "this media cannot be fetched (view-once, or the keys were not kept)",
+        )));
+    }
+    let limit = request.max_bytes.min(node_max);
+    if media.size > limit {
+        let mut answer = seam::refusal(seam::Op::Download, "download_too_large", "the media is larger than this node will decrypt");
+        answer["size"] = serde_json::Value::from(media.size);
+        answer["max_bytes"] = serde_json::Value::from(limit);
+        return Ok(DownloadPlan::Refused(answer));
+    }
+    Ok(DownloadPlan::Fetch(Box::new(DownloadTarget { chat, id, media, limit })))
+}
+
 /// The reactions folded onto one message, bounded and newest first.
 async fn fold_reactions<S: Store>(store: &S, chat: &str, target: &str) -> Result<Vec<serde_json::Value>, String> {
     let rows = fold_reactions_rows(store, chat, target).await?;
