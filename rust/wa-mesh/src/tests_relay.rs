@@ -52,6 +52,9 @@ const CALL: &str = "call";
 
 struct TestRelay {
     address: SocketAddr,
+    /// The path the service is reached at, the way an operator's URL names a relay behind a proxy
+    /// (`https://host/fleet`). Empty for the plain root, which is what most of these tests use.
+    prefix: String,
     stop: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -61,11 +64,18 @@ impl TestRelay {
     /// HTTP port and only `status` and `body` come back — headers are dropped, exactly as the real
     /// relay does.
     fn start(routes: HashMap<String, SocketAddr>) -> TestRelay {
+        TestRelay::start_at(routes, "")
+    }
+
+    /// The same relay, mounted at `prefix` — how a service behind a reverse proxy is addressed.
+    fn start_at(routes: HashMap<String, SocketAddr>, prefix: &str) -> TestRelay {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("relay bind");
         let address = listener.local_addr().expect("relay address");
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let routes = Arc::new(Mutex::new(routes));
+        let prefix = prefix.trim_end_matches('/').to_string();
+        let thread_prefix = prefix.clone();
         let join = std::thread::spawn(move || {
             for incoming in listener.incoming() {
                 if thread_stop.load(Ordering::SeqCst) {
@@ -74,21 +84,29 @@ impl TestRelay {
                 let Ok(mut stream) = incoming else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let routes = routes.clone();
+                let prefix = thread_prefix.clone();
                 std::thread::spawn(move || {
                     let request = match http::read_request(&mut stream, http::MAX_BODY) {
                         Ok(Some(request)) => request,
                         _ => return,
                     };
-                    let (status, body) = relay_route(&routes, &request);
+                    let (status, body) = relay_route(&routes, &prefix, &request);
                     let _ = http::write_response(&mut stream, status, &[], body.as_bytes());
                 });
             }
         });
-        TestRelay { address, stop, join: Some(join) }
+        TestRelay { address, prefix, stop, join: Some(join) }
     }
 
+    /// The address the plan's transport dials: a bare `host:port` when the relay is at the root (the
+    /// shape the mesh always used), a **service URL** — scheme, host, path, no explicit port in the live
+    /// fleet — when the test is exercising the URL shapes the operator actually writes.
     fn url(&self) -> String {
-        self.address.to_string()
+        if self.prefix.is_empty() {
+            self.address.to_string()
+        } else {
+            format!("http://{}{}", self.address, self.prefix)
+        }
     }
 }
 
@@ -102,8 +120,14 @@ impl Drop for TestRelay {
     }
 }
 
-fn relay_route(routes: &Arc<Mutex<HashMap<String, SocketAddr>>>, request: &http::Request) -> (u16, String) {
-    match (request.method.as_str(), request.path.as_str()) {
+fn relay_route(
+    routes: &Arc<Mutex<HashMap<String, SocketAddr>>>,
+    prefix: &str,
+    request: &http::Request,
+) -> (u16, String) {
+    // A relay mounted at a prefix is reached at `<prefix>/relay/send`; anything else is not a route.
+    let path = request.path.strip_prefix(prefix).unwrap_or_default().to_string();
+    match (request.method.as_str(), path.as_str()) {
         ("POST", "/relay/send") => {
             let envelope: Value = match serde_json::from_str(&request.body_text()) {
                 Ok(value) => value,
@@ -756,3 +780,181 @@ fn the_relay_answer_carries_the_targets_signature_so_a_forged_relay_cannot_answe
     )
     .is_err());
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The two live blockers of 07/11, end to end on loopback.
+// ---------------------------------------------------------------------------------------------------
+
+/// The caller's home: a node key, the operator's own `policy.json`, and the signed roster beside it.
+/// Nothing else — in particular no `WA_MESH` anywhere: the whole statement is the file.
+fn caller_home(member: &Member, roster: &Roster, fleet_key: &str, enabled: bool) -> PathBuf {
+    let home = temp_dir(&format!("home-{}", member.node.name));
+    let config = home.join(".wasm-agent");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::copy(&member.key_path, config.join("node.key")).expect("node key");
+    std::fs::write(
+        config.join("policy.json"),
+        json!({
+            "version": 1,
+            "components": {},
+            "mesh": {"version": 1, "roster_key": fleet_key, "enabled": enabled,
+                     "roster": "mesh-roster.json"},
+        })
+        .to_string(),
+    )
+    .expect("policy");
+    std::fs::write(
+        config.join("mesh-roster.json"),
+        serde_json::to_string_pretty(roster).expect("roster json"),
+    )
+    .expect("roster");
+    home
+}
+
+/// `host.mesh_call`'s request for one peer call, built the way `lua/core/nodes.lua` builds it: the
+/// caller's own `/node/call` request and headers travel inside the envelope.
+fn dispatch_request(caller: &Member, to: &RosterNode, capability: &str) -> Value {
+    let inner = inner_request(caller, to, capability);
+    json!({
+        "node": to.node_id,
+        "capability": capability,
+        "args": {"path": "README.md"},
+        "inner_body": inner.body,
+        "inner_headers": inner
+            .headers
+            .iter()
+            .map(|(name, value)| json!([name, value]))
+            .collect::<Vec<Value>>(),
+        "timeout_seconds": 15,
+    })
+}
+
+/// The 07/11 rollout, in one test: a caller whose **`policy.json` alone** enables the mesh (nothing in
+/// its environment), a relay reached at a **service URL with a scheme and a path and no explicit port**
+/// in the URL's shape, and a target **bound with operator pins that do not include the caller**.
+///
+/// In order: the caller's gate answers *on, from the policy*; the call reaches the target through the
+/// relay and is refused by the target's pins (`unknown_caller`, unsigned — the pre-bootstrap state);
+/// `b` pushes the roster (it is a pinned operator, nothing else could); the **same** call, from the
+/// same caller, is now admitted by the roster through the relay; and a caller whose policy says nothing
+/// is unchanged — `mesh_disabled`, the legacy path exactly as before.
+#[test]
+fn a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url() {
+    testkit::with_deadline(
+        "a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url",
+        || {
+            let _lock = testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let fleet = fleet();
+            let roster_json = serde_json::to_string_pretty(&fleet.roster).expect("roster json");
+
+            // T is the node that was bound before the mesh existed, pinning `b` and nobody else.
+            let t_dir = NodeDir::new(&fleet.t, json!({"version": 1, "components": {}}), None);
+            let t = TestNode::start(&fleet.t, t_dir.config.clone(), t_dir.pins(&fleet.b));
+            let mut routes = HashMap::new();
+            routes.insert(fleet.t.node.node_id.clone(), t.address);
+            // The relay as an operator's URL names it: a service at a path, not at the root. The scheme
+            // and the path are what `crate::endpoint` has to carry; the port is explicit here because a
+            // test may not bind 80 (`crate::endpoint`'s own tests cover the default-port mapping).
+            let relay = TestRelay::start_at(routes, "/fleet");
+
+            // The caller: a level-0 node whose own policy is the whole statement.
+            let home = caller_home(&fleet.a, &fleet.roster, &fleet.fleet_key.public_key, true);
+            let config = home.join(".wasm-agent");
+            let _env = testkit::EnvGuard::set(&[
+                ("WASM_AGENT_HOME", Some(home.to_str().expect("utf8 home"))),
+                ("WASM_AGENT_NODE_KEY", None),
+                ("WA_GRANT_POLICY", None),
+                ("WASM_AGENT_MESH_ROSTER", None),
+                ("WASM_AGENT_MESH_CACHE", None),
+                ("WASM_AGENT_MESH_PORT", None),
+                ("WASM_AGENT_RELAY", Some(relay.url().as_str())),
+                ("WA_MESH", None),
+                ("WASM_AGENT_MESH", None),
+            ]);
+            crate::gate::reset_cache();
+
+            // --- 1. the gate: on, and the policy is why (no flag anywhere on this node) -----------
+            let gate = crate::host_call::dispatch(&json!({"gate": true}));
+            assert_eq!(gate["ok"], true, "{gate}");
+            assert_eq!(gate["enabled"], true, "policy.json alone enables the caller: {gate}");
+            assert_eq!(gate["from"], "policy.json mesh.enabled", "{gate}");
+            assert!(gate["problem"].is_null());
+
+            // --- 2. before the push: the relay carries it, the target's pins refuse it -------------
+            let request = dispatch_request(&fleet.a, &fleet.t.node, "read");
+            let refused = crate::host_call::dispatch(&request);
+            assert_eq!(refused["ok"], false, "{refused}");
+            assert_eq!(refused["error"], "mesh_refused", "{refused}");
+            assert_eq!(
+                refused["code"], "unknown_caller",
+                "a node bound before the mesh decides by its pins until it is bootstrapped: {refused}"
+            );
+            assert_eq!(refused["verified"], false, "an unsigned refusal is a diagnosis: {refused}");
+
+            // --- 3. b push-roster t (b is one of t's pinned operators) ------------------------------
+            let installed = PushRequest {
+                config: t_dir.config.to_string_lossy().to_string(),
+                roster: roster_json.clone(),
+                roster_key: fleet.fleet_key.public_key.clone(),
+                caller_node_id: fleet.b.node.node_id.clone(),
+                caller_public_key: fleet.b.node.public_key.clone(),
+                target_node_id: fleet.t.node.node_id.clone(),
+                replace_key_signature: None,
+                port: None,
+                bind: None,
+            }
+            .install();
+            assert_eq!(installed["ok"], true, "{installed}");
+
+            // --- 4. the same call, same caller, same URL: the roster admits it through the relay -----
+            let allowed = crate::host_call::dispatch(&request);
+            assert_eq!(allowed["ok"], true, "a policy-enabled caller is admitted by the roster: {allowed}");
+            assert_eq!(allowed["transport"], "relay", "t has no address: the relay carried it: {allowed}");
+            assert_eq!(allowed["reason"], "hierarchy_allowed", "{allowed}");
+            assert_eq!(allowed["verified"], true, "{allowed}");
+            let body: Value = serde_json::from_str(allowed["body"].as_str().expect("a body")).expect("json body");
+            assert_eq!(body["mesh"], true, "the roster decided on the target, not the pins: {body}");
+            assert_eq!(body["from"], "a");
+            assert_eq!(body["verb"], "read");
+
+            // --- 5. a caller whose policy says nothing is unchanged --------------------------------
+            //  The same home, turned back off in the operator's own file: the gate says off and the
+            //  capability answers `mesh_disabled`, exactly as it did before the mesh existed. The legacy
+            //  path itself is untouched too: a plain `/node/call` is refused by t's pins, unsigned.
+            std::fs::write(
+                config.join("policy.json"),
+                json!({"version": 1, "components": {}}).to_string(),
+            )
+            .expect("policy off");
+            crate::gate::reset_cache();
+            let off = crate::host_call::dispatch(&json!({"gate": true}));
+            assert_eq!(off["enabled"], false, "{off}");
+            assert_eq!(off["from"], "default off", "{off}");
+            assert_eq!(
+                crate::host_call::dispatch(&request)["error"],
+                "mesh_disabled",
+                "with nothing written, the mesh is off and nothing is dialled"
+            );
+            let inner = inner_request(&fleet.a, &fleet.t.node, "read");
+            let legacy = http::request(
+                &t.address.to_string(),
+                "POST",
+                "/node/call",
+                &inner.headers,
+                inner.body.as_bytes(),
+                testkit::CONNECT_TIMEOUT,
+                testkit::SOCKET_DEADLINE,
+                http::MAX_BODY,
+            )
+            .expect("t answers its own route");
+            let legacy_body: Value = serde_json::from_str(&legacy.body_text()).expect("legacy body");
+            assert_eq!(
+                legacy_body["error"], "unknown_caller",
+                "the legacy path is exactly what it was: t's pins do not know a: {legacy_body}"
+            );
+
+            crate::gate::reset_cache();
+        },
+    );
+}
+

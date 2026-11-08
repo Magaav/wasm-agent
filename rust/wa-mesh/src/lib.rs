@@ -19,12 +19,14 @@
 //! * [`wire`] — the two envelopes and the exact bytes that are signed;
 //! * [`client`] — the attempt order, and the difference between "denied" and "unreachable";
 //! * [`relay`] — the relay as transport only: the same signed call, carried where it cannot be dialled;
+//!   [`endpoint`] is the one place a service URL becomes the `host:port` it dials;
 //! * [`server`] — authentication, authorization, replay protection and the signed reply;
 //! * [`admission`] — the one decision, shared by the direct listener, the relay hop and the node's own
 //!   admission in Lua, so the roster decides on every path;
 //! * [`fleet`] — `wa fleet push-roster`: install the roster on a node that already accepts the caller;
 //! * [`audit`] — one line per attempt, with no message text in it;
-//! * [`host_call`] — the node wiring behind `WA_MESH=1` (`host.mesh_call`, the mount, the handler).
+//! * [`host_call`] — the node wiring behind `WA_MESH=1` (`host.mesh_call`, the mount, the handler);
+//!   [`gate`] is the one answer to "is the mesh on here now" that every one of those gates asks.
 //!
 //! Three properties this crate is built to keep:
 //!
@@ -48,8 +50,10 @@ pub mod attest;
 pub mod audit;
 pub mod cache;
 pub mod client;
+pub mod endpoint;
 pub mod fleet;
 pub mod fleetkey;
+pub mod gate;
 pub mod hierarchy;
 pub mod host_call;
 pub mod http;
@@ -72,6 +76,7 @@ pub use attest::ATTEST_DOMAIN;
 pub use audit::{Event, FileSink, MemorySink, Sink, StderrSink, Tee};
 pub use cache::PeerCache;
 pub use client::{Attempt, Client, ClientConfig, Inner, Outcome};
+pub use endpoint::Endpoint;
 pub use hierarchy::{authorize, Verb, Verdict};
 pub use identity::Identity;
 pub use policy::{Effect, Grant, MeshPolicy};

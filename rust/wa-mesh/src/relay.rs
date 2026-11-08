@@ -14,6 +14,13 @@
 //!
 //! Relay requests are signed the way the rendezvous requires (`relay-send|<node_id>|<ts>`); the
 //! `body` of the relay POST is the envelope, which the relay never looks inside.
+//!
+//! The relay's address is a *service URL* the operator wrote down (`WASM_AGENT_RELAY`, or a binding's
+//! `state.service`): `https://rendezvous.example.com`, with a scheme, no explicit port and often a
+//! path prefix. [`crate::endpoint`] is the one place that becomes a `host:port` to dial and a path to
+//! send — a URL that named no port used to reach `to_socket_addrs` whole and come back
+//! `resolve_failed:invalid port value`, which is how the 07/11 rollout failed with a relay that was
+//! up and reachable.
 use crate::identity::Identity;
 use crate::wire::{self, MeshReply};
 use serde::{Deserialize, Serialize};
@@ -123,6 +130,15 @@ impl<'a> RelayClient<'a> {
         body: &str,
         request_id: &str,
     ) -> RelayOutcome {
+        let endpoint = match crate::endpoint::parse_base(&self.url) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return RelayOutcome::Unavailable {
+                    reason: format!("relay_url_invalid:{error}"),
+                    rid: request_id.to_string(),
+                }
+            }
+        };
         let ts = wire::now_seconds().to_string();
         let signature = self
             .identity
@@ -141,9 +157,9 @@ impl<'a> RelayClient<'a> {
         })
         .to_string();
         let response = crate::http::request(
-            &self.url,
+            &endpoint.address,
             "POST",
-            "/relay/send",
+            &endpoint.path("/relay/send"),
             &[
                 ("content-type".to_string(), "application/json".to_string()),
                 ("x-wa-node".to_string(), self.identity.node_id.clone()),
@@ -221,6 +237,7 @@ pub fn configured(config: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit;
     use crate::testkit::{fleet_key, Member};
     use crate::wire::MeshReply;
 
@@ -236,6 +253,76 @@ mod tests {
             reason: None,
             detail: None,
             verb: Some("read".into()),
+        }
+    }
+
+    #[test]
+    fn a_service_url_with_a_scheme_and_a_path_prefix_carries_the_send() {
+        // The live shape, minus TLS: `http://127.0.0.1:<port>/fleet` — a scheme (so the parser has to
+        // resolve it), a base path (a relay behind a proxy is not at the root), and a port the test can
+        // bind. The default-port half of the same parser is unit-tested in `crate::endpoint`.
+        testkit::with_deadline("a_service_url_with_a_scheme_and_a_path_prefix_carries_the_send", || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("relay bind");
+            let port = listener.local_addr().expect("relay address").port();
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let thread_seen = seen.clone();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("one request");
+                let _ = stream.set_read_timeout(Some(testkit::SOCKET_DEADLINE));
+                let request = crate::http::read_request(&mut stream, crate::http::MAX_BODY)
+                    .expect("a readable request")
+                    .expect("a request");
+                if let Ok(mut held) = thread_seen.lock() {
+                    *held = format!("{} {}", request.method, request.path);
+                }
+                let body = json!({"ok": true, "status": 200, "body": "{}"}).to_string();
+                let _ = crate::http::write_response(&mut stream, 200, &[], body.as_bytes());
+            });
+            let identity = Member::new("relay-sender", 1, &[]).reload();
+            let client = RelayClient {
+                url: format!("http://127.0.0.1:{port}/fleet/"),
+                identity: &identity,
+                connect_timeout: testkit::CONNECT_TIMEOUT,
+                io_timeout: testkit::SOCKET_DEADLINE,
+            };
+            let outcome = client.send("target", "/node/call", &[], "{}", "rid-1");
+            server.join().expect("the test relay thread");
+            match outcome {
+                RelayOutcome::Answered { status, rid, .. } => {
+                    assert_eq!(status, 200);
+                    assert_eq!(rid, "rid-1");
+                }
+                other => panic!("a scheme URL with a path prefix must reach the relay: {other:?}"),
+            }
+            let seen = seen.lock().map(|held| held.clone()).unwrap_or_default();
+            assert_eq!(seen, "POST /fleet/relay/send", "the URL's own path is kept, with no double slash");
+        });
+    }
+
+    #[test]
+    fn an_address_that_is_not_a_service_url_is_reported_not_dialled() {
+        // Nothing on the path may turn a URL the parser refuses into a socket op: the answer names the
+        // reason (`relay_url_invalid:url_query_unsupported`), the caller audits it as unreachable, and
+        // the message carries no URL text (a query string is where a token would be).
+        let identity = Member::new("relay-bad-url", 1, &[]).reload();
+        for (url, code) in [
+            ("https://relay.example.com/relay?token=abc".to_string(), "url_query_unsupported"),
+            ("ftp://relay.example.com".to_string(), "url_scheme_unsupported:ftp"),
+            (String::new(), "url_empty"),
+        ] {
+            let client = RelayClient {
+                url,
+                identity: &identity,
+                connect_timeout: testkit::CONNECT_TIMEOUT,
+                io_timeout: testkit::SOCKET_DEADLINE,
+            };
+            match client.send("target", "/node/call", &[], "{}", "rid-2") {
+                RelayOutcome::Unavailable { reason, .. } => {
+                    assert_eq!(reason, format!("relay_url_invalid:{code}"));
+                    assert!(!reason.contains("abc"), "no URL text in a reason: {reason}");
+                }
+                other => panic!("a refused URL must not be dialled: {other:?}"),
+            }
         }
     }
 

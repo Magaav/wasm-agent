@@ -210,9 +210,10 @@ pub fn flag_on() -> bool {
 }
 
 /// Is the mesh in force on this node? The flag, or the operator's own statement in `policy.json`
-/// (`mesh.enabled`), which is what a roster pushed to a running node writes.
+/// (`mesh.enabled`), which is what a roster pushed to a running node writes — the same rule, and the
+/// same precedence, as every other gate ([`crate::gate`]).
 pub fn in_force(policy: &MeshPolicy) -> bool {
-    flag_on() || policy.enabled
+    crate::gate::decide(crate::gate::env_answer(), Some(policy)).enabled
 }
 
 /// The one place a mesh envelope is decided, for the direct listener, the relay hop and the Lua

@@ -395,16 +395,29 @@ local function normalize_headers(headers)
   return out
 end
 
--- The mesh is the operator's flag, not a default (docs/MESH.md). Cached: the environment does not
--- change under a running node, and the check is on the call path.
-local mesh_flag = nil
-
+-- Is the mesh on for this node *now*? The host answers, through `host.mesh_call`'s `{gate: true}`
+-- mode, with the one resolver every other gate in the node uses: `WA_MESH`/`WASM_AGENT_MESH`, then this
+-- node's own `policy.json` `mesh.enabled`, then off (docs/MESH.md, "The gate: one resolver, for every
+-- path"). Asked per call and deliberately **not** cached here: the environment cannot change under a
+-- running node, but a roster pushed to one writes `mesh.enabled` into that file, and the very next call
+-- must follow it — which is exactly the call that used to go down the legacy path and be refused
+-- (`remote_refused: not a pinned operator`) on a node whose policy said the mesh was on. The host keeps
+-- the question cheap: it re-reads the file only when its mtime or size changed.
+--
+-- A host that cannot answer the gate question at all (a binary from before that mode existed) keeps the
+-- answer it used to give — the process flag — rather than silently never trying the mesh.
 function M.mesh_enabled()
-  if mesh_flag == nil then
-    mesh_flag = tostring(host.getenv("WA_MESH") or "") == "1"
-      or tostring(host.getenv("WASM_AGENT_MESH") or "") == "1"
+  if type(host.mesh_call) == "function" then
+    local ok, raw = pcall(host.mesh_call, json.encode({ gate = true }))
+    if ok and type(raw) == "string" then
+      local decoded_ok, answer = pcall(json.decode, raw)
+      if decoded_ok and type(answer) == "table" and type(answer.enabled) == "boolean" then
+        return answer.enabled
+      end
+    end
   end
-  return mesh_flag
+  return tostring(host.getenv("WA_MESH") or "") == "1"
+    or tostring(host.getenv("WASM_AGENT_MESH") or "") == "1"
 end
 
 -- The headers as the pairs the crate's envelope carries, in a stable order so the bytes are the same

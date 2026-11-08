@@ -25,6 +25,11 @@
 #         mount (`host.mesh_call`'s `{attest: …}`, `wa_mesh::attest::sign`) and verified by the real
 #         `wa_node_call`: a roster-authorized `bash`/`sessions` call is admitted by its verb.
 #     Skipped, never silently passed, when there is no `wa` binary to run them.
+#   * `scripts/test-mesh-gate.lua` — the client's own gate, run **without** `WA_MESH`: the real
+#     `lua/core/nodes.lua` asks `host.mesh_call`'s `{gate: true}` on every call, so a node whose only
+#     statement is `policy.json`'s `mesh.enabled` takes the mesh path (the 07/11 `wa call` failure), a
+#     mesh denial is an answer rather than a reason to fall back, and with the gate off nothing is sent
+#     to the mesh at all.
 #   * `scripts/test-mesh-live.sh` is separate on purpose (it starts a `wa serve`, in a scratch home,
 #     on a fresh port, and kills it by its own pid): `bash scripts/test-mesh-live.sh` measures the
 #     operator's keygen/sign/show round trip and three live enable/disable cycles on a running node.
@@ -66,4 +71,12 @@ for test in test-mesh-admission.lua test-mesh-verb-admission.lua test-mesh-attes
   WASM_AGENT_LUA_ROOT="$(native "$ROOT")" WASM_AGENT_HOME="$(native "$home")"     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_MESH=1     WA_SCRIPT="$(native "$ROOT/scripts/$test")" timeout 120 "$bin" --db "$(native "$home/t.db")"     || status=1
   rm -rf "$home"
 done
+# The client's own gate. It runs **without** `WA_MESH`: the point of it is that a node whose only
+# statement is its own `policy.json` (`"mesh": {"enabled": true}`, what `wa fleet push-roster` writes)
+# takes the mesh path, and that the gate is asked again on every call instead of being cached in the
+# interpreter. `WA_MESH=` is empty on purpose — an empty value is not a statement (docs/MESH.md).
+echo "== scripts/test-mesh-gate.lua (no WA_MESH)"
+home=$(mktemp -d "${TMPDIR:-/tmp}/wa-mesh-lua-XXXXXX")
+WASM_AGENT_LUA_ROOT="$(native "$ROOT")" WASM_AGENT_HOME="$(native "$home")"   WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_MESH= WASM_AGENT_MESH=   WA_SCRIPT="$(native "$ROOT/scripts/test-mesh-gate.lua")" timeout 120 "$bin" --db "$(native "$home/t.db")"   || status=1
+rm -rf "$home"
 exit $status

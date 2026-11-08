@@ -1,17 +1,24 @@
 //! Wiring the crate into a node: the listener mount and `host.mesh_call`.
 //!
-//! Everything here is behind `WA_MESH=1` (`WASM_AGENT_MESH=1` is read too), or behind the operator's own
-//! `mesh.enabled` statement in `policy.json` — which is what `wa fleet push-roster` writes, so a roster
-//! installed on a *running* node takes effect on the next call. With neither, the node never binds the
-//! listener and `host.mesh_call` answers `mesh_disabled` **without touching the network or the disk** —
-//! which is what makes "with the flag unset, behaviour is byte-for-byte unchanged" a property of the
-//! code rather than a promise in a document.
+//! Whether the mesh is on for this node is answered in exactly one place, [`crate::gate`]: the process
+//! flag (`WA_MESH=1`/`WASM_AGENT_MESH=1`), else the operator's own `mesh.enabled` in `policy.json`,
+//! else off — read per ask and cached by mtime, because a roster pushed to a *running* node cannot
+//! restart it. With neither, the node never binds the listener and `host.mesh_call` answers
+//! `mesh_disabled` after one `stat` of `policy.json` and no network at all — which is what makes "with
+//! the flag unset and no mesh section, behaviour is byte-for-byte unchanged" a property of the code
+//! rather than a promise in a document.
+//!
+//! Every gate in the node asks [`crate::gate`]: this capability ([`dispatch`], [`dry_run`]), the relay
+//! hop and therefore `mesh_peer_call` in `wa-capabilities` ([`enabled_at_runtime`]), the mount
+//! ([`Settings`]), and `lua/core/nodes.lua`'s remote-call gate, which asks with
+//! `host.mesh_call({"gate": true})` before it decides whether to try the mesh first.
 //!
 //! Request modes of `host.mesh_call` (one capability, so the catalogue does not grow for a feature
 //! only a fleet member ever uses):
 //!
 //! | request | answer | who uses it |
 //! | --- | --- | --- |
+//! | `{gate: true}` | `{ok, enabled, from, problem}` — the gate, nothing else | `nodes.lua`'s remote gate |
 //! | `{node, capability, args, inner_body, inner_headers, peers?}` | the call, or its refusal | `wa call`, `nodes.remote_call` |
 //! | `{node, capability, dry_run: true}` | the verdict only, no network | an operator, and a test |
 //! | `{admit: {headers, body, transport}}` | the roster's decision on an *inbound* envelope | the node's own admission (Lua), so pins are not the authority when a roster is |
@@ -61,7 +68,8 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }
 
-/// Is the feature on for this process? `WA_MESH=1`, or `WASM_AGENT_MESH=1`.
+/// Is the feature on for this *process*? `WA_MESH=1`, or `WASM_AGENT_MESH=1` — the environment's own
+/// statement, and nothing else. The gate a call path asks is [`enabled_at_runtime`].
 pub fn enabled() -> bool {
     admission::flag_on()
 }
@@ -71,21 +79,14 @@ pub fn enabled_here(policy: &MeshPolicy) -> bool {
     admission::in_force(policy)
 }
 
-/// Does this node's own policy enable the mesh? Read only when the process flag is off, and only to
-/// answer that question: nothing is written, and no network is touched.
-fn policy_enabled() -> bool {
-    MeshPolicy::from_policy_file(&Paths::resolve().policy)
-        .map(|policy| policy.enabled)
-        .unwrap_or(false)
-}
-
-/// Is the mesh in force on this node *right now*, for a path that is not the mount (the relay hop)?
+/// The gate for every path that is not the mount (the caller, the relay hop, the Lua remote gate):
+/// environment, then this node's own `policy.json` `mesh.enabled`, then off ([`crate::gate`]).
 ///
-/// The process flag, or the operator's `mesh.enabled` — read per call, because a roster pushed to a
-/// running node cannot restart it ([`crate::admission::in_force`]). A policy that cannot be read is a
-/// `false` here: the relay hop then runs today's admission, never a guess.
+/// Read per call, cached by the policy file's mtime and size, because a roster pushed to a running
+/// node cannot restart it. A policy that cannot be read is `false` here: the relay hop then runs
+/// today's admission, never a guess.
 pub fn enabled_at_runtime() -> bool {
-    enabled() || policy_enabled()
+    crate::gate::cached(&Paths::resolve().policy).enabled
 }
 
 /// The address the listener binds when nothing says otherwise: loopback, so a flag alone never opens
@@ -113,13 +114,10 @@ pub struct Settings {
 
 impl Settings {
     pub fn resolve(policy: &MeshPolicy) -> Settings {
-        let (enabled, enabled_from) = if admission::flag_on() {
-            (true, "environment WA_MESH")
-        } else if policy.enabled {
-            (true, "policy.json mesh.enabled")
-        } else {
-            (false, "default off")
-        };
+        // The same rule every other gate uses, so the mount and a call can never disagree about
+        // whether this node is on: environment, then the operator's file, then off.
+        let switch = crate::gate::decide(crate::gate::env_answer(), Some(policy));
+        let (enabled, enabled_from) = (switch.enabled, switch.label());
         let (port, port_from) = match env("WASM_AGENT_MESH_PORT")
             .and_then(|value| value.parse::<u16>().ok())
             .filter(|port| *port != 0)
@@ -490,6 +488,19 @@ fn disabled() -> Value {
     json!({"ok": false, "error": "mesh_disabled", "fallback": null})
 }
 
+/// The gate's own answer: is the mesh on for this node now, and where does that come from. It is asked
+/// by `lua/core/nodes.lua` before a peer call, so the CLI's remote path uses the *same* resolver as
+/// `host.mesh_call` itself instead of reading `WA_MESH` on its own (the 07/11 rollout: a node whose
+/// `policy.json` said `mesh.enabled: true` still took the legacy path).
+fn gate_json(switch: &crate::gate::Switch) -> Value {
+    json!({
+        "ok": true,
+        "enabled": switch.enabled,
+        "from": switch.label(),
+        "problem": switch.problem,
+    })
+}
+
 /// `host.mesh_call(request_json) -> json`
 ///
 /// The request is `{node, capability, args, inner_body, inner_headers, peers?, timeout_seconds?}`:
@@ -511,11 +522,18 @@ pub fn dispatch(request: &Value) -> Value {
     if let Some(install) = request.get("install_roster") {
         return install_roster(install);
     }
+    // The gate itself, before anything that needs it: a caller asks this to learn whether to try the
+    // mesh at all, and it must be answerable while the mesh is off (that is the answer).
+    let paths = Paths::resolve();
+    let switch = crate::gate::cached(&paths.policy);
+    if request.get("gate").is_some() {
+        return gate_json(&switch);
+    }
     // Everything else — calling, admitting an inbound envelope, sealing an answer — is the feature
     // itself: the process flag, or the operator's own statement in `policy.json` (`mesh.enabled`),
     // which is what a roster pushed to a *running* node writes. The environment of a live process
     // cannot change, and a bootstrap that needed a restart could not verify itself.
-    if !enabled() && !policy_enabled() {
+    if !switch.enabled {
         return disabled();
     }
     if let Some(inbound) = request.get("admit") {
@@ -528,7 +546,6 @@ pub fn dispatch(request: &Value) -> Value {
         return attest_call(attest);
     }
     let started = wire::now_millis();
-    let paths = Paths::resolve();
     let policy = match MeshPolicy::from_policy_file(&paths.policy) {
         Ok(policy) => policy,
         Err(error) => return unavailable("policy_unreadable", error.0),
@@ -826,10 +843,10 @@ fn install_roster(request: &Value) -> Value {
 /// this and nothing else. It exists so an operator can see the hierarchy's answer before a call, and
 /// so a test can ask the same function the client asks.
 pub fn dry_run(request: &Value) -> Value {
-    if !enabled() {
+    let paths = Paths::resolve();
+    if !crate::gate::cached(&paths.policy).enabled {
         return disabled();
     }
-    let paths = Paths::resolve();
     let policy = match MeshPolicy::from_policy_file(&paths.policy) {
         Ok(policy) => policy,
         Err(error) => return unavailable("policy_unreadable", error.0),
@@ -1136,6 +1153,63 @@ mod tests {
         let status = supervisor.status();
         assert!(!status.listening, "the mount must bind nothing: {status:?}");
         assert_eq!(status.changes, 0, "nothing changed, so nothing was mounted or closed");
+    }
+
+    /// One resolver, asked by every gate: the caller path (`dispatch`), the mount (`Settings`), and —
+    /// through `{gate: true}` — `lua/core/nodes.lua`'s remote gate. The environment wins in both
+    /// directions; the operator's own file is the answer when it says nothing; and a policy-enabled
+    /// node's caller path is never `mesh_disabled` (the 07/11 shape).
+    #[test]
+    fn every_gate_answers_from_the_same_resolver() {
+        let _lock = crate::testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = crate::testkit::temp_dir("gate-home");
+        let fleet = crate::testkit::fleet_key();
+        let node = crate::testkit::Member::new("gate-node", 1, &[]);
+        let roster = crate::testkit::roster_of(&fleet, vec![node.node.clone()]);
+        write_node_files(&home, &fleet, &node, &roster, true);
+        let policy_path = home.join(".wasm-agent").join("policy.json");
+        let _env = crate::testkit::EnvGuard::set(&[
+            ("WASM_AGENT_HOME", Some(home.to_str().unwrap())),
+            ("WASM_AGENT_NODE_KEY", None),
+            ("WA_MESH", None),
+            ("WASM_AGENT_MESH", None),
+            ("WASM_AGENT_MESH_ROSTER", None),
+            ("WASM_AGENT_MESH_CACHE", None),
+            ("WA_GRANT_POLICY", None),
+            ("WASM_AGENT_RELAY", None),
+        ]);
+        crate::gate::reset_cache();
+        assert!(!enabled(), "the process flag says nothing");
+
+        // The policy alone: the gate is on and says where that came from.
+        let answer = dispatch(&json!({"gate": true}));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["enabled"], true, "{answer}");
+        assert_eq!(answer["from"], "policy.json mesh.enabled", "{answer}");
+        // The mount's settings answer the same thing about the same file.
+        let policy = MeshPolicy::from_policy_file(&policy_path).expect("policy");
+        let settings = Settings::resolve(&policy);
+        assert!(settings.enabled);
+        assert_eq!(settings.enabled_from, "policy.json mesh.enabled");
+        // And the caller path is past the gate: it answers the roster's verdict, not `mesh_disabled`.
+        let call = dispatch(&json!({"node": "nobody", "capability": "read"}));
+        assert_ne!(call["error"], "mesh_disabled", "a policy-enabled caller tries the mesh: {call}");
+        assert_eq!(call["error"], "mesh_unknown_node", "{call}");
+
+        // An explicit `WA_MESH=0` is the operator's own off, and it overrules the file on every gate.
+        let _env = crate::testkit::EnvGuard::set(&[("WA_MESH", Some("0"))]);
+        crate::gate::reset_cache();
+        let off = dispatch(&json!({"gate": true}));
+        assert_eq!(off["enabled"], false, "{off}");
+        assert_eq!(off["from"], "environment WA_MESH", "{off}");
+        assert_eq!(
+            dispatch(&json!({"node": "nobody", "capability": "read"}))["error"],
+            "mesh_disabled"
+        );
+        assert!(!Settings::resolve(&policy).enabled);
+        assert_eq!(Settings::resolve(&policy).enabled_from, "environment WA_MESH");
+        crate::gate::reset_cache();
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

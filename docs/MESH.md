@@ -293,6 +293,30 @@ the body hash, `to_node_id`, the freshness window and the replay window are chec
 else, then the hierarchy and the grants decide, and the audit line says `transport=relay`. There is no
 second set of rules for the relay, and the relay cannot read the envelope's meaning:
 
+**Where the relay is, and what its URL may look like.** The relay's address is whatever the operator
+wrote down — `WASM_AGENT_RELAY`, or the `state.service` of an accepted binding — and that is a *service
+URL*, not a `host:port`. `rust/wa-mesh/src/endpoint.rs` is the one place it becomes a socket operation:
+
+| the operator writes | the mesh dials | the request path |
+| --- | --- | --- |
+| `https://rendezvous.example.com` | `rendezvous.example.com:443` | `/relay/send` |
+| `http://relay.example.net` | `relay.example.net:80` | `/relay/send` |
+| `https://gateway.example.com/fleet` | `gateway.example.com:443` | `/fleet/relay/send` |
+| `https://[2001:db8::1]` | `[2001:db8::1]:443` | `/relay/send` |
+| `127.0.0.1:8890` (a bare `host:port`) | `127.0.0.1:8890` | `/relay/send` |
+
+A URL that names no port uses its scheme's default (`https` → 443, `http` → 80); a path prefix is kept
+and prefixed onto the route; an IPv6 literal stays bracketed. A URL the parser cannot carry is refused
+by name and audited as unreachable rather than dialled — a query string is where a token lives, and a
+silently-dropped query is a credential that stopped being sent with no line to say so. The 07/11
+rollout failed in exactly this seam (`resolve_failed:invalid port value`: `https://host` was handed to
+`to_socket_addrs` whole). **There is no TLS client**: the scheme is read for its default port and its
+shape and nothing else, so `https://…` is dialled on 443 with the mesh's plain-HTTP dialect. That is
+right for a relay reached through a loopback tunnel and wrong for a public TLS endpoint, which will
+fail the handshake and say so — §9 item 4.
+
+Nothing else about a relayed call changes:
+
 * it cannot redirect a call (`to_node_id` is inside the signed body, and the target refuses
   `wrong_target`),
 * it cannot alter a call (`bad_signature`: the hash of the body is inside the signature),
@@ -398,6 +422,8 @@ outside this command (it needs the old private key); the message it must sign is
 | --- | --- | --- |
 | roster parse/verify, levels, revocation | `rust/wa-mesh/src/roster.rs` | done, tested |
 | **the operator makes the fleet key and signs the roster** (`wa fleet keygen`, `sign`, `show`) | `fleetkey.rs`, `rust/wa-host` (`wa fleet`) | done, tested (round trip, a tampered roster refused, keygen's path refusals) |
+| **every gate asks one resolver** (environment, then `policy.json` `mesh.enabled`, then off; read per call, cached by mtime) | `gate.rs`, `host_call.rs` (`{gate: true}`, `enabled_at_runtime`, `Settings`), `lua/core/nodes.lua` (`M.mesh_enabled`) | done, tested (`every_gate_answers_from_the_same_resolver`, `scripts/test-mesh-gate.lua`) |
+| **a service URL is resolved to `host:port`** (scheme-default ports, a path prefix, IPv6 literals, bare `host:port`) | `endpoint.rs`, `relay.rs` | done, tested (each URL shape, and a send over a real socket at `http://127.0.0.1:<port>/fleet`) |
 | `authorize(caller, target, verb)` | `hierarchy.rs` | done, tested |
 | grants from `policy.json` `"mesh"` | `policy.rs` | done, tested |
 | the persisted settings: `mesh.enabled`, `mesh.port`, `mesh.bind`, `mesh.roster` | `policy.rs`, `host_call.rs` (`Settings`) | done, tested (environment, then setting, then off) |
@@ -405,7 +431,7 @@ outside this command (it needs the old private key); the message it must sign is
 | direct transport client (attempt order, mutual auth, replay-safe) | `client.rs` | done, tested |
 | direct transport server (`/mesh/health`, `/mesh/call`) | `server.rs` | done, tested |
 | audit lines | `audit.rs` | done, tested |
-| `wa call` tries mesh first, falls back on transport failure only | `lua/core/nodes.lua` (`M.mesh_attempt`), `host.mesh_call` | behind `WA_MESH=1` (the caller's process switch; see "The flag") |
+| `wa call` tries mesh first, falls back on transport failure only | `lua/core/nodes.lua` (`M.mesh_attempt`), `host.mesh_call` | done, tested (`scripts/test-mesh-gate.lua`); every gate asks one resolver — see "The gate" |
 | **the relay carries the same signed call** (`/node/call` + envelope, sealed answer) | `relay.rs`, `client.rs` | done, tested |
 | **one admission for every path** (signature, body hash, `to_node_id`, replay window, hierarchy, grants, audit) | `admission.rs` | done, tested |
 | the target decides on the relay path too | `serve.rs` (`/node/call`), `lua/core/binding.lua` (`M.tick`) | done, tested |
@@ -428,26 +454,52 @@ fleet member ever uses.
 Tests: `cargo test -p wa-mesh` (the unit tests per module, the three-node end-to-end file, and
 `tests_relay.rs` — four nodes A/B/T/R where T pins `[B]` like `nextcloud`: refused before the push,
 installed by `B`, allowed after it, denied upward, tampered body refused, replay refused, a different
-fleet key refused), `bash scripts/test-mesh.sh` for the same run plus clippy and the three Lua
-admission tests, and `bash scripts/test-mesh-live.sh` for the keygen/sign/show round trip and the live
-mount on a real `wa serve`.
+fleet key refused; plus the 07/11 pair as one test,
+`a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url`: a caller whose only
+statement is its own `policy.json`, a relay reached at a URL with a scheme and a path, T's pins
+excluding that caller — refused before the push, admitted by the roster after it, and a caller whose
+policy says nothing still `mesh_disabled` with the legacy route unchanged), `bash scripts/test-mesh.sh`
+for the same run plus clippy and the four Lua tests (three admission, one gate —
+`scripts/test-mesh-gate.lua` runs *without* `WA_MESH`, because the point of it is that the policy
+alone turns the mesh on), and `bash scripts/test-mesh-live.sh` for the keygen/sign/show round trip and
+the live mount on a real `wa serve`.
 
-**The flag, and the persisted setting.** `WA_MESH=1` (the same value also read as `WASM_AGENT_MESH`)
-is the process switch; the operator's own `"mesh": {"enabled": true, "port": 8891}` in `policy.json` is
-the one a *running* node can be given, which is what §7's push writes. The order is **environment,
-then the setting, then off**, for each of them: `WA_MESH`, `WASM_AGENT_MESH_PORT`,
-`WASM_AGENT_MESH_BIND`, `WASM_AGENT_MESH_ROSTER` override `mesh.enabled`, `mesh.port`, `mesh.bind` and
-`mesh.roster`. A port is never picked by the node itself, so a flag alone cannot open a port nobody
-meant to open; a node that is on with no port decides peer calls by the roster (the relay hop and
-`host.mesh_call`) and says so in one line instead of listening.
+**The gate: one resolver, for every path.** "Is the mesh on for this node right now" has exactly one
+answer, in `rust/wa-mesh/src/gate.rs`, and every gate asks it — `host.mesh_call`'s call path, the relay
+hop (`mesh_peer_call` in `/node/call`), the mount's settings, and the CLI's remote-call path in
+`lua/core/nodes.lua`, which asks `host.mesh_call({"gate": true})` before it decides whether to try the
+mesh first. The order is **environment, then the operator's file, then off**:
+
+| # | statement | answer |
+| --- | --- | --- |
+| 1 | `WA_MESH`, else `WASM_AGENT_MESH` (`1`/`true`/`on`/`yes`, or `0`/`false`/`off`/`no`) | that, `from: "environment WA_MESH"` |
+| 2 | `policy.json`'s `mesh.enabled` | that, `from: "policy.json mesh.enabled"` |
+| 3 | neither | off, `from: "default off"` |
+
+An **explicit `WA_MESH=0` wins over a policy that says `enabled: true`**: an operator who writes it into
+a node's env file means off, and the file must not overrule the person who started the process. An
+unset or empty variable is not a statement. `WASM_AGENT_MESH_PORT`, `WASM_AGENT_MESH_BIND` and
+`WASM_AGENT_MESH_ROSTER` override `mesh.port`, `mesh.bind` and `mesh.roster` the same way.
+
+Why one resolver, and why per call. `WA_MESH=1` is a process switch and a live process's environment
+cannot change, so the operator's own `"mesh": {"enabled": true, …}` in `policy.json` is the statement a
+*running* node can be given — which is what §7's push writes. On 07/11 the gates disagreed: the host
+had learned to read the file, and `wa call` had not, so `wa call nextcloud bash …` on a laptop node
+whose policy said `enabled: true` went down the legacy path and was refused `not a pinned operator`.
+The answer is therefore read **per call** and cached only by the policy file's mtime and size, so an
+edited or pushed policy is in force on the next call and not on the next restart (`gate::cached`).
+Nothing is cached in the Lua interpreter: `nodes.lua` asks the host each time, which is one cheap host
+call.
+
+A port is never picked by the node itself, so a flag alone cannot open a port nobody meant to open; a
+node that is on with no port decides peer calls by the roster (the relay hop and `host.mesh_call`) and
+says so in one line instead of listening.
 
 The mount re-reads that section about once a second (`WASM_AGENT_MESH_POLL_MS` overrides the
 interval). Enabling mounts the listener, changing the port or bind moves it, disabling unmounts it and
 frees the port; a policy that cannot be read leaves the mount as it is and puts the reason on stderr
-once — a partial read must not silently open or close a port. `wa call` still reads the *process*
-flag for whether to try the mesh first (`lua/core/nodes.lua` is another stream's file); a node whose
-environment cannot change can use `host.mesh_call` — which the setting alone enables — and the next
-change there is to consult `mesh.enabled` in that Lua gate too.
+once — a partial read must not silently open or close a port. A gate that cannot read the policy
+answers **off** (with the reason), never a guess.
 
 A minimal deployment (the roster installed by `wa fleet push-roster`, §7, or by hand):
 
