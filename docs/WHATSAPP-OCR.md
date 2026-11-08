@@ -168,17 +168,47 @@ warm worker, exactly as a voice note is transcribed by the kernel's recognizer.
 (`ocr::MAX_IMAGE_BYTES`, refused before the download *and* before the reader);
 12 000 output characters and the 0.5 confidence floor are the worker's own
 (`scripts/whatsapp-ocr-local.py`), so the component must not add a second opinion;
-2-minute worker deadline; no image bytes, no text and no media key in any log line -
-the lane logs `chat`, `id`, `chars`, `bytes`, `download_ms` and a reason word only.
-A failure is classified once: `no_text_detected`, `image_too_large`,
-`unsupported_media`, `ocr_text_too_long` and an unprovisioned reader are
-**permanent** (never retried, never re-downloaded); a stalled/timed-out worker, a
-full queue (`busy`) and a disconnected client are retried, an image at most twice.
+2-minute worker deadline; no image bytes, no text and no media key in any log line.
+
+**A log line names nobody.** Every identity in a component log line is a digest:
+`chat=sha256:<32 hex>` and `id=sha256:<32 hex>`, the same `sha256:` + first-16-bytes
+convention the node audit trail uses (`wa-grant-policy`'s `TargetMode::Digest`, mirrored in
+`rust/components/wa-whatsapp/src/privacy.rs`). The lane logs a state word, counts and reasons -
+`ocr ready chat=sha256:… id=sha256:… chars=120 bytes=48213 download_ms=880`,
+`ocr skipped … reason=no_text_detected`, `ocr refused … reason=offline_model_unavailable`,
+`ocr retry … reason=worker_stalled` - and never a JID, a sender or a message id. The same rule
+covers the `wa-transcript` telemetry lines (their `chat`/`id` fields are marks too) and every other
+line this component prints; a test reads this crate's own log-bearing sources and fails on a line
+that spells `chat=`/`sender=`/`id=` with an interpolation. The digest is still a join key: the same
+chat is the same mark on every line and in every run, and
+`scripts/compare-transcripts.mjs` digests the journal's ids to join a marked log against it.
+
+**A reason is a word.** Reasons are filtered to one token, truncated at 48 characters and any run of
+eight or more digits is redacted (`ocr::word`), so an I/O error carrying a path or a number can
+borrow neither a space nor an identity from the line it lands in.
+
+**One attempt, one mark.** Every attempt is recorded under `ix/ocr/<chat>/<id>` (`index::OcrMark`,
+JSON; a bare word written by an older build still reads as a terminal answer):
+
+| the answer | the mark | what the next pass does |
+| --- | --- | --- |
+| `no_text_detected`, `image_too_large`, `unsupported_media`, the reader is not provisioned | `{"state":"terminal","reason":…}` | skips it, forever, without a download |
+| a stalled/timed-out worker, `busy`, a download that failed | `{"state":"retry","reason":…,"attempts":n,"next_ms":…}` | reads it again only after the backoff |
+| the retries ran out (`ocr::MAX_ATTEMPTS`, 5) | `{"state":"terminal","reason":"retry_exhausted:<word>"}` | skips it, forever |
+| attached | the mark is cleared | n/a |
+| the record is not an image, revoked, or has no media keys | nothing | re-filtered for free from the record |
+
+The backoff doubles from 60 s (`ocr::RETRY_BASE_MS`, one backlog pass) and is capped at 30 minutes
+(`ocr::RETRY_CAP_MS`); the attempt count lives in the mark, so it survives a restart of the
+component. This is the fix for the 08/11 loop: `no_text_detected` comes back from the reader as an
+error word, nothing remembered it, and the backlog pass re-downloaded and re-read the same eight
+screenshots every minute (kernel OCR jobs 1..80+ on the same eight images).
 
 **The backlog.** Images indexed without OCR text - the lane was off, the node
 restarted mid-download, or a history sync wrote the record - are read by a bounded
-background pass: `index::ocr_backlog(budget)` scans `ix/k/image` and
-`ix/k/document` (newest first, one bounded read), and the lane refills its inbox
+background pass: `index::ocr_backlog(budget, now_ms)` scans `ix/k/image` and
+`ix/k/document` (newest first, one bounded read) and leaves out any image a mark blocks at `now_ms`
+(terminal, or a retry whose backoff has not passed); the lane refills its inbox
 from it when the inbox is empty, one image per tick, under the same media limits.
 Nothing is re-downloaded that the limits would refuse, and an image whose size the
 record already reports as over the bound is refused from the record without a
@@ -202,18 +232,24 @@ in `rust/components/wa-whatsapp`):
 | claim | test |
 | --- | --- |
 | the same worker text is attached verbatim, accents and newlines intact, and a photo becomes searchable | `ocr::tests::the_reader_text_is_attached_verbatim_and_bounded_by_the_record_limit`, `…::an_image_is_ocred_attached_and_found_by_its_text` |
+| a picture with no text is read **once**, its mark carries the reason, and every later pass calls no worker | `ocr::tests::a_picture_with_nothing_to_read_is_read_once_and_the_next_pass_skips_it` |
+| a transient failure is retried after a doubling backoff, never during it, and stops at the cap | `ocr::tests::a_transient_failure_is_retried_with_an_exponential_backoff_and_stops_at_the_cap` |
+| a retry that succeeds attaches the text and clears the mark | `ocr::tests::a_retry_that_succeeds_attaches_the_text_and_clears_the_mark` |
+| no line the lane prints carries a chat, a phone number or a message id; a reason with a JID in it becomes a token | `ocr::tests::no_line_the_lane_prints_carries_a_chat_or_a_message_id`, `…::a_reason_word_is_bounded_and_never_carries_a_space` |
+| no component log line spells a chat or an id itself (source scan), and the telemetry fields are marks | `privacy::tests::no_component_log_line_spells_a_chat_or_an_id_itself`, `telemetry::tests::the_shape_is_the_one_the_comparison_script_parses` |
 | an oversized image is refused cleanly before the reader runs | `ocr::tests::an_oversized_image_is_refused_cleanly_and_the_reader_is_never_started`, `service_ocr::tests::an_oversized_image_is_refused_cleanly_before_any_worker_starts` |
 | a crashed worker is restarted and the job retried once | `service_ocr::tests::a_crashed_worker_is_restarted_and_the_job_retried_once`, `…::a_worker_that_stays_dead_fails_after_one_retry_instead_of_looping` |
 | a wedged worker is dropped, the queue is bounded | `service_ocr::tests::a_stalled_worker_is_dropped_and_counts_as_a_failure`, `…::the_queue_is_bounded_so_a_burst_cannot_park_the_kernel` |
 | a second image never reloads the engine | `service_ocr::tests::a_second_image_does_not_reload_the_engine` |
 | only images and image documents are read; a PDF, a revoked or an already-read record is skipped | `ocr::tests::only_images_and_image_documents_are_read`, `…::a_revoked_or_already_read_image_is_skipped` |
-| the backlog lists unread images only and stops at its budget | `ocr::tests::the_backlog_lists_images_without_ocr_text_and_stops_at_its_budget` |
+| the backlog lists unread images only, stops at its budget, and leaves out an image a mark blocks | `ocr::tests::the_backlog_lists_images_without_ocr_text_and_stops_at_its_budget` |
 
 `scripts/test-waocr-parity.py` is the parity harness for a host that has the OCR
 venv: it drives `scripts/whatsapp-ocr-local.py --worker` twice on the same fixture
 (the same script the kernel runs) and reports `SKIP` with the reason when
 `rapidocr_onnxruntime`, the model pair or the fixture is absent - it never claims a
-parity run it did not do.
+parity run it did not do. `node --test scripts/test-whatsapp-compare-transcripts.mjs`
+pins the shadow comparison against a log whose ids are marks.
 
 ## Limits
 

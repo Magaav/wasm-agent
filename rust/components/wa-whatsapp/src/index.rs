@@ -15,6 +15,7 @@
 //! ix/x/<chat>/<id>/<reactor>/<emoji>    reaction, JSON              (folded onto its target)
 //! ix/all/<ts>/<chat>/<id>              `history` | empty            (age order: retention walks it)
 //! ix/pend/<chat>/<id>                   a mutation for a message not indexed yet
+//! ix/ocr/<chat>/<id>                    the OCR lane's mark, JSON      (a terminal reason or a retry)
 //! ```
 //!
 //! `inv(ts)` is `u64::MAX - ts` as fixed-width hex, so an ascending scan yields the newest message
@@ -187,9 +188,9 @@ fn key_pending(chat: &str, id: &str) -> String {
     format!("{PREFIX}pend/{chat}/{id}")
 }
 
-/// One image that answered a word making another read pointless (`no_text_detected`, too large): the
-/// word only. Without it the OCR lane's backlog pass would re-download the same screenshot every
-/// pass to learn the same thing (`docs/WHATSAPP-OCR.md`).
+/// One image the OCR lane already answered: [`OcrMark`] as JSON. Without it the lane's backlog pass
+/// would re-download the same screenshot every pass to learn the same thing
+/// (`docs/WHATSAPP-OCR.md`).
 fn key_ocr_seen(chat: &str, id: &str) -> String {
     format!("{PREFIX}ocr/{chat}/{id}")
 }
@@ -438,15 +439,75 @@ pub enum Source {
     Ocr,
 }
 
+/// What a previous OCR attempt left under `ix/ocr/<chat>/<id>`: the reason another read is pointless,
+/// or a scheduled retry. The reason is always a word (a bounded token, see `ocr::word`), never text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OcrMark {
+    /// A property of the image, or of this node: another attempt cannot change the answer
+    /// (`no_text_detected`, `image_too_large`, the reader is not provisioned), or the retries ran out.
+    Terminal { reason: String },
+    /// A failure another attempt could change, not before `next_ms` (ms since the epoch). `attempts`
+    /// is how many attempts have failed so far, so the cap survives a restart of the component.
+    Retry { reason: String, attempts: u32, next_ms: i64 },
+}
+
+impl OcrMark {
+    /// The word the marker carries, for a log line or a test.
+    pub fn reason(&self) -> &str {
+        match self {
+            OcrMark::Terminal { reason } | OcrMark::Retry { reason, .. } => reason,
+        }
+    }
+
+    /// Must a pass at `now_ms` skip this image? A terminal mark is forever; a retry is skipped until
+    /// its backoff has passed.
+    pub fn blocks(&self, now_ms: i64) -> bool {
+        match self {
+            OcrMark::Terminal { .. } => true,
+            OcrMark::Retry { next_ms, .. } => *next_ms > now_ms,
+        }
+    }
+}
+
+/// Remember what one OCR attempt answered, so a later pass does not download the same image to learn
+/// it again. Written as JSON; a marker written by an older build (the bare word) still reads as
+/// [`OcrMark::Terminal`].
+pub async fn mark_ocr<S: Store>(store: &S, chat: &str, id: &str, mark: &OcrMark) -> Result<(), String> {
+    let value = serde_json::to_vec(mark).map_err(|error| format!("ocr mark encode: {error}"))?;
+    store.set(key_ocr_seen(chat, id).as_bytes(), &value).await
+}
+
+/// The mark on this image, if the lane already answered it. One `get`.
+pub async fn ocr_mark<S: Store>(store: &S, chat: &str, id: &str) -> Result<Option<OcrMark>, String> {
+    let Some(bytes) = store.get(key_ocr_seen(chat, id).as_bytes()).await? else { return Ok(None) };
+    if bytes.first() == Some(&b'{') {
+        return Ok(serde_json::from_slice(&bytes).ok());
+    }
+    // A bare word (an older build's marker): a terminal answer, read the same way.
+    let word = String::from_utf8_lossy(&bytes).trim().to_string();
+    Ok(if word.is_empty() { None } else { Some(OcrMark::Terminal { reason: word }) })
+}
+
+/// Forget the mark: the image was read after all (a retry that succeeded), so nothing about it is
+/// remembered any more.
+pub async fn clear_ocr_mark<S: Store>(store: &S, chat: &str, id: &str) -> Result<(), String> {
+    store.del(key_ocr_seen(chat, id).as_bytes()).await
+}
+
 /// Remember that this image will not be read again, and why (`no_text_detected`, `image_too_large`).
 /// The word is a reason, never text. A later pass sees it and does not re-download the image.
 pub async fn mark_unreadable<S: Store>(store: &S, chat: &str, id: &str, word: &str) -> Result<(), String> {
-    store.set(key_ocr_seen(chat, id).as_bytes(), word.as_bytes()).await
+    mark_ocr(store, chat, id, &OcrMark::Terminal { reason: word.to_string() }).await
 }
 
-/// Why this image is not worth reading again, if a previous pass decided it is not. One `get`.
+/// Why this image is not worth reading again, if a previous pass decided it is not. One `get`. A
+/// pending retry is not an answer: it returns `None`, so the lane may read it when the backoff passes.
 pub async fn unreadable<S: Store>(store: &S, chat: &str, id: &str) -> Result<Option<String>, String> {
-    Ok(store.get(key_ocr_seen(chat, id).as_bytes()).await?.map(|word| String::from_utf8_lossy(&word).into_owned()).filter(|word| !word.is_empty()))
+    Ok(match ocr_mark(store, chat, id).await? {
+        Some(OcrMark::Terminal { reason }) => Some(reason),
+        _ => None,
+    })
 }
 
 /// The images a later OCR pass may still read: `(chat, id)` pairs, newest first, at most `budget`.
@@ -458,7 +519,11 @@ pub async fn unreadable<S: Store>(store: &S, chat: &str, id: &str) -> Result<Opt
 /// returned, not the record: the caller decides what is worth reading (`ocr::wanted`) and downloads
 /// under the same media limits the query lane already enforces, so this function duplicates no
 /// policy - it only knows which kinds can carry an image.
-pub async fn ocr_backlog<S: Store>(store: &S, budget: usize) -> Result<Vec<(String, String)>, String> {
+///
+/// An image the lane already answered is not in the backlog: `now_ms` decides whether a scheduled
+/// retry is due ([`OcrMark::blocks`]). That is the whole fix for the pass that used to re-download the
+/// same eight unreadable screenshots every minute.
+pub async fn ocr_backlog<S: Store>(store: &S, budget: usize, now_ms: i64) -> Result<Vec<(String, String)>, String> {
     let mut out: Vec<(String, String)> = Vec::new();
     // The scan reads more candidates than it answers with: a candidate it skips (already read, no
     // media keys) must not starve the pass, and four pages' worth is still a bounded read.
@@ -475,7 +540,7 @@ pub async fn ocr_backlog<S: Store>(store: &S, budget: usize) -> Result<Vec<(Stri
             if record.deleted || !record.ocr.is_empty() {
                 continue;
             }
-            if store.get(key_ocr_seen(&record.chat, &candidate.id).as_bytes()).await?.is_some() {
+            if ocr_mark(store, &record.chat, &candidate.id).await?.is_some_and(|mark| mark.blocks(now_ms)) {
                 continue;
             }
             let Some(media) = record.media.as_ref().filter(|media| media.downloadable) else { continue };

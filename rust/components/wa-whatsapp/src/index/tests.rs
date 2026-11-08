@@ -803,6 +803,56 @@ fn the_age_index_says_what_is_backfill_and_where_each_chat_starts() {
     assert_eq!((capped.entries, capped.capped), (2, true));
 }
 
+// ---- the OCR lane's mark ------------------------------------------------------------------------
+//
+// The loop this guards (08/11) was in the component: a terminal answer was not remembered, so the
+// backlog pass re-downloaded the same images every minute. The `ocr::` tests drive the loop; these
+// pin the marker itself, including the shape an older build wrote.
+
+#[test]
+fn the_ocr_mark_says_why_and_when_and_reads_an_older_build_s_marker() {
+    let store = Memory::new();
+    let ts = 1_760_000_000_000;
+    block_on(put(&store, &image("M1", ts, ""))).unwrap();
+    assert_eq!(block_on(ocr_mark(&store, CHAT, "M1")).unwrap(), None);
+
+    // A terminal mark blocks every pass and keeps its word; `unreadable` still answers what it always
+    // did, so the lane's "already answered" path needs no second convention.
+    block_on(mark_unreadable(&store, CHAT, "M1", "no_text_detected")).unwrap();
+    let mark = block_on(ocr_mark(&store, CHAT, "M1")).unwrap().unwrap();
+    assert_eq!(mark, OcrMark::Terminal { reason: "no_text_detected".into() });
+    assert!(mark.blocks(0) && mark.blocks(i64::MAX));
+    assert_eq!(block_on(unreadable(&store, CHAT, "M1")).unwrap().as_deref(), Some("no_text_detected"));
+    assert!(!block_on(ocr_backlog(&store, 8, 0)).unwrap().iter().any(|(_, id)| id == "M1"));
+
+    // A retry is not an "unreadable" answer: it blocks only until its own moment, then the image is
+    // in the backlog again.
+    let retry = OcrMark::Retry { reason: "worker_stalled".into(), attempts: 2, next_ms: 120_000 };
+    block_on(mark_ocr(&store, CHAT, "M1", &retry)).unwrap();
+    assert_eq!(block_on(ocr_mark(&store, CHAT, "M1")).unwrap(), Some(retry.clone()));
+    assert_eq!(block_on(unreadable(&store, CHAT, "M1")).unwrap(), None);
+    assert!(!block_on(ocr_backlog(&store, 8, 119_999)).unwrap().iter().any(|(_, id)| id == "M1"));
+    assert!(block_on(ocr_backlog(&store, 8, 120_000)).unwrap().iter().any(|(_, id)| id == "M1"));
+
+    // Clearing the mark (a retry that succeeded) puts the image back in the normal state.
+    block_on(clear_ocr_mark(&store, CHAT, "M1")).unwrap();
+    assert_eq!(block_on(ocr_mark(&store, CHAT, "M1")).unwrap(), None);
+
+    // A marker written by an older build is the bare word: it reads as a terminal answer.
+    store_set(&store, &format!("{PREFIX}ocr/{CHAT}/M1"), "image_too_large");
+    assert_eq!(block_on(ocr_mark(&store, CHAT, "M1")).unwrap(), Some(OcrMark::Terminal { reason: "image_too_large".into() }));
+    assert_eq!(block_on(unreadable(&store, CHAT, "M1")).unwrap().as_deref(), Some("image_too_large"));
+    // A mark of an empty value is no mark at all, not a terminal answer with no reason.
+    store_set(&store, &format!("{PREFIX}ocr/{CHAT}/M1"), "");
+    assert_eq!(block_on(ocr_mark(&store, CHAT, "M1")).unwrap(), None);
+}
+
+/// Write a raw value under a key, the way an older build did (the test stands in for that build).
+fn store_set(store: &Memory, key: &str, value: &str) {
+    use crate::index::Store as _;
+    block_on(store.set(key.as_bytes(), value.as_bytes())).unwrap();
+}
+
 #[test]
 fn holds_answers_whether_a_message_is_already_indexed() {
     let store = Memory::new();

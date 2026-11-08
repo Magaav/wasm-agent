@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { parseComponentLog } from './compare-transcripts.mjs';
+import { identity, parseComponentLog } from './compare-transcripts.mjs';
 
 const SCRIPT = path.resolve('scripts/compare-transcripts.mjs');
 const CANARY = 'texto-secreto-do-transcrito-nao-pode-sair';
@@ -62,12 +62,13 @@ function run(args) {
 test('the component log is parsed into one record per chat, id and kind', () => {
   const { logPath } = fixture();
   const notes = parseComponentLog(fs.readFileSync(logPath, 'utf8'));
-  const a = notes.get(`${CHAT}\u0000AUDIO-A`);
+  // The join identity is the digest of each id, whatever spelling the log used.
+  const a = notes.get(`${identity(CHAT)}\u0000${identity('AUDIO-A')}`);
   assert.ok(a, 'the ready note is found');
   assert.deepEqual(a.kinds, ['ready', 'shadow'], 'the disposition is a second kind, not an overwrite');
   assert.equal(a.fields.chars, String(CANARY.length));
   assert.equal(a.fields.first_segment_ms, '1500');
-  const b = notes.get(`${OWN}\u0000AUDIO-B`);
+  const b = notes.get(`${identity(OWN)}\u0000${identity('AUDIO-B')}`);
   assert.deepEqual(b.kinds, ['failed']);
   assert.equal(b.fields.reason, 'no_speech_detected');
 });
@@ -115,6 +116,31 @@ test('a note the other side did not see is reported, not hidden', () => {
   assert.equal(report.rows.length, 3);
   const b = report.rows.find((row) => row.id === 'AUDIO-B');
   assert.equal(b.verdict, 'component chars unknown', 'a failed recognition has no chars to compare');
+});
+
+test('a log whose ids are marks (the component\'s privacy rule) still joins the journal', () => {
+  // This build writes `chat=sha256:…` / `id=sha256:…` (`privacy.rs`), and the journal has the JIDs: the
+  // table must still join, or a shadow run would silently report "journal missing" for every audio.
+  const { dir, dbPath } = fixture();
+  const logPath = path.join(dir, 'wa-whatsapp.marked.log');
+  fs.writeFileSync(
+    logPath,
+    [
+      `[   12.40s] wa-transcript v=1 kind=ready chat=${identity(CHAT)} id=${identity('AUDIO-A')} state=transcribed download_ms=250 first_segment_ms=1500 chars=${CANARY.length} segments=3`,
+      `[   21.00s] wa-transcript v=1 kind=failed chat=${identity(OWN)} id=${identity('AUDIO-B')} stage=recognize reason=no_speech_detected`,
+    ].join('\n'),
+  );
+  const out = run(['--log', logPath, '--journal', dbPath, '--json']);
+  assert.equal(out.status, 0, out.stderr);
+  const report = JSON.parse(out.stdout);
+  const a = report.rows.find((row) => row.chat === identity(CHAT) && row.id === identity('AUDIO-A'));
+  assert.ok(a, 'the marked note joined its journal row');
+  assert.equal(a.verdict, 'chars equal');
+  assert.equal(a.journal_chars, CANARY.length);
+  assert.ok(a.chat.startsWith('sha256:') && a.id.startsWith('sha256:'), 'the component side stays marks, never a JID');
+  for (const text of [out.stdout, out.stderr]) {
+    assert.ok(!text.includes(CANARY) && !text.includes(CANARY_TWO), 'no transcript text');
+  }
 });
 
 test('bad usage is 2, an unreadable journal is 1', () => {

@@ -11,7 +11,8 @@
 //! (`Runtime::spawn`), and it is a plain set of futures joined with the main loop.
 //!
 //! Milestone 1: pair (by code when `pair_phone` is configured, else QR), connect, receive. The log
-//! carries the pairing code, connection state and message metadata (chat, kind, id) - never content.
+//! carries the pairing code, connection state, counts and a state word - never content, and never an
+//! identity: a chat and a message id are `sha256:` marks (`privacy.rs`), never the JID or the id.
 //! Store: store.rs - in-memory reads with write-through of durable state to the host (wa_kv);
 //! a restart reconnects without pairing again.
 //!
@@ -44,6 +45,8 @@ pub mod ocr;
 /// so `cargo test` pins it natively while the guest loop that uses it stays wasm-only.
 pub mod outbox;
 pub mod posting;
+/// What a log line may say about who: `sha256:` marks instead of JIDs (`docs/WHATSAPP-OCR.md`).
+pub mod privacy;
 pub mod queue;
 pub mod recognize;
 pub mod telemetry;

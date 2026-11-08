@@ -32,6 +32,10 @@ wit-bindgen = "0.63"
 serde = { version = "1", features = ["derive"] }
 wacore-appstate = { version = "=0.7.0", default-features = false }
 log = { version = "0.4", features = ["std"] }
+# The log/telemetry digest (`privacy::mark`): `sha256:` + the first 16 bytes, the audit trail's own
+# convention. Already in this graph through `wacore`'s dependencies at 0.10.9, so this is a direct edge
+# to a crate that is already built for the component target - no new code, no new download.
+sha2 = "0.10"
 
 [dev-dependencies]
 # The native tests drive the same futures the guest awaits (`recognize::steps`) to a conclusion;

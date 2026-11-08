@@ -16,11 +16,19 @@
 //! no field for message or transcript text, at all: `chars` is a count, and every other value is
 //! an ID, a state, a reason code or a duration.
 //!
+//! `chat` and `id` are **digests** (`sha256:` + 32 hex, `crate::privacy`), not the JID and the message
+//! id: this is a log line, and a log line outlives the run and travels into issue reports. The digest
+//! is still the join key the comparison needs - the same chat is the same mark on every line and in
+//! every run - so `scripts/compare-transcripts.mjs` joins the component side against the journal by
+//! digesting the journal's ids the same way.
+//!
 //! Fields (in the order [`Note`] emits them): `v`, `kind`, `chat`, `id`, then whatever the call
 //! site adds - `state`, `stage`, `reason`, `download_ms`, `first_segment_ms`, `total_ms`,
 //! `recognize_ms`, `since_sent_ms`, `chars`, `segments`, `parts`, `edits`, `first_text_ms`,
 //! `streamed`, `posted`. A timing that was not measured is `-`, never absent, so a column of the
 //! comparison table is never shifted.
+
+use crate::privacy;
 
 /// The line's prefix and version. A parser keys on this; a change to the shape bumps `v`.
 pub const PREFIX: &str = "wa-transcript";
@@ -44,7 +52,8 @@ impl Note {
         Note { kind, chat: String::new(), id: String::new(), fields: Vec::new() }
     }
 
-    /// The chat and the message ID: the key the two sides are joined on. IDs only, never content.
+    /// The chat and the message ID: the join key the comparison table uses, as digests - the same chat
+    /// is the same mark in every run, and no JID is written down.
     pub fn about(mut self, chat: &str, id: &str) -> Note {
         self.chat = chat.to_string();
         self.id = id.to_string();
@@ -75,9 +84,15 @@ impl Note {
         self.field(key, if value { "true" } else { "false" })
     }
 
-    /// The log line. Always one line: values are tokenized, so no newline can survive.
+    /// The log line. Always one line: values are tokenized, so no newline can survive, and the two
+    /// identities are digests (`privacy::mark`), so the line cannot name a chat or a message.
     pub fn line(&self) -> String {
-        let mut line = format!("{PREFIX} v={VERSION} kind={} chat={} id={}", token(self.kind), token(&self.chat), token(&self.id));
+        let mut line = format!(
+            "{PREFIX} v={VERSION} kind={} {} {}",
+            token(self.kind),
+            privacy::chat(&self.chat),
+            privacy::id(&self.id)
+        );
         for (key, value) in &self.fields {
             line.push(' ');
             line.push_str(key);
@@ -134,14 +149,29 @@ mod tests {
             .count("chars", 214)
             .count("segments", 9)
             .line();
+        let chat = privacy::mark("1203630@g.us");
+        let id = privacy::mark("3EB0A1");
         assert_eq!(
             line,
-            "wa-transcript v=1 kind=ready chat=1203630@g.us id=3EB0A1 state=transcribed download_ms=412 first_segment_ms=1503 total_ms=6120 chars=214 segments=9"
+            format!("wa-transcript v=1 kind=ready chat={chat} id={id} state=transcribed download_ms=412 first_segment_ms=1503 total_ms=6120 chars=214 segments=9")
         );
         let fields = parse(&line);
         assert_eq!(fields["v"], "1");
         assert_eq!(fields["kind"], "ready");
         assert_eq!(fields["chars"], "214");
+        assert_eq!(fields["chat"], chat, "the chat is a digest, not the JID");
+        assert_eq!(fields["id"], id);
+        // Nothing a log line may not carry: no JID, no phone number, no message id.
+        assert!(!line.contains('@'));
+        assert!(!line.contains("1203630"));
+        assert!(!line.contains("3EB0A1"));
+    }
+
+    #[test]
+    fn an_absent_identity_is_a_dash_and_not_an_empty_field() {
+        let fields = parse(&Note::new("shadow").line());
+        assert_eq!(fields["chat"], "-");
+        assert_eq!(fields["id"], "-");
     }
 
     #[test]

@@ -9,23 +9,80 @@
 //!
 //! * **20 MiB per image**, refused before the download and again before the reader - the worker's own
 //!   `image_too_large` bound. A bigger photo costs a line in the log, not 40 MiB of RAM.
-//! * **No text in any log line.** Callers log the job, the chat, the id and *counts*; the text goes to
+//! * **No text in any log line, and no identity either.** Callers log counts, a state word and the
+//!   chat/id as `sha256:<32 hex>` digests ([`line`], `crate::privacy`); the text goes to
 //!   [`index::attach_text`] and nowhere else. The reader's own refusals (`no_text_detected`, …) are
 //!   words, not content.
-//! * **A permanent answer stays permanent.** A screenshot with no words, a media type that is not an
-//!   image, and an unprovisioned worker are all answers: retrying them re-downloads a photo to learn
-//!   the same thing. A stalled or restarted worker is not (the kernel already retries it once).
+//! * **A permanent answer stays permanent, and it is remembered.** A screenshot with no words, a media
+//!   type that is not an image, and an unprovisioned worker are all answers: retrying them
+//!   re-downloads a photo to learn the same thing. [`settle`] writes the word under
+//!   `ix/ocr/<chat>/<id>`, so the backlog pass (`index::ocr_backlog`) skips the image from then on. A
+//!   stalled or restarted worker is different: it is retried with an exponential backoff, and only
+//!   [`MAX_ATTEMPTS`] times.
 //!
 //! Everything here is pure or store-only (no host call and no wasm target requirement), so a native
 //! test drives the identical code with a fake reader and `index::Memory`; the guest supplies the
 //! reader (`vision::read`) and the bytes (`client.download_from_params`) as arguments.
 
 use crate::index::{self, Store};
+use crate::privacy;
 use crate::record::{self, Record};
 
 /// Largest image this component will OCR, the old bridge's bound (`record::MAX_MEDIA_BYTES` is the
 /// same number: what the pipeline may download at all is what it may read).
 pub const MAX_IMAGE_BYTES: u64 = record::MAX_MEDIA_BYTES;
+
+/// How long the lane waits after the first transient failure, and the ceiling the doubling stops at.
+/// The backlog refill (`index_ocr_every_seconds`, 60 s by default) is what re-queues a retry, so the
+/// base wait is one pass: an image whose worker was restarting is tried on the next pass, not on every
+/// tick in between.
+pub const RETRY_BASE_MS: i64 = 60_000;
+pub const RETRY_CAP_MS: i64 = 30 * 60_000;
+/// Attempts one image gets, the first included. After [`MAX_ATTEMPTS`] the mark says
+/// `retry_exhausted:<word>` and nothing downloads the image again: the cap is what stops a worker that
+/// never recovers from becoming an image that is re-read forever.
+pub const MAX_ATTEMPTS: u32 = 5;
+/// Longest reason word kept in the marker and in a log line.
+pub const MAX_REASON: usize = 48;
+
+/// The wait before attempt `attempts + 1`: doubling from [`RETRY_BASE_MS`], capped at [`RETRY_CAP_MS`].
+pub fn backoff_ms(attempts: u32) -> i64 {
+    let shift = attempts.saturating_sub(1).min(16);
+    RETRY_BASE_MS.saturating_mul(1i64 << shift).min(RETRY_CAP_MS)
+}
+
+/// The reason a marker and a log line keep: one bounded token, never text. A worker's reason can be a
+/// sentence (an I/O error with a path in it), so everything outside the token alphabet is dropped, a
+/// run of eight or more digits (a phone number, a token) is redacted, and a long reason is cut. Empty
+/// becomes `unknown`, so a field is never blank.
+pub fn word(reason: &str) -> String {
+    let fated: String = reason
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        .collect();
+    let mut out = String::with_capacity(fated.len().min(MAX_REASON));
+    let mut digits = 0usize;
+    for ch in fated.chars() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+            if digits <= 7 {
+                out.push(ch);
+            } else if digits == 8 {
+                // An identifier, not a word: keep the shape, drop the value.
+                let keep = out.len().saturating_sub(7);
+                out.truncate(keep);
+                out.push('n');
+            }
+            continue;
+        }
+        digits = 0;
+        out.push(ch);
+    }
+    if out.is_empty() {
+        return "unknown".to_string();
+    }
+    out.chars().take(MAX_REASON).collect()
+}
 
 /// Why one indexed record was not read. Every word here is metadata: none of them can carry text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +106,9 @@ pub enum Skip {
     /// An earlier pass decided this image has nothing legible in it (or is too large) and the index
     /// remembers the word, so it is not downloaded again (`index::mark_unreadable`).
     Unreadable,
+    /// An earlier attempt failed in a way another attempt could change, and the backoff has not
+    /// passed yet (`index::OcrMark::Retry`, `settle`).
+    RetryScheduled,
 }
 
 impl Skip {
@@ -64,6 +124,7 @@ impl Skip {
             Skip::NoText => "no_text_detected",
             Skip::NotFound => "not_found",
             Skip::Unreadable => "unreadable",
+            Skip::RetryScheduled => "retry_scheduled",
         }
     }
 }
@@ -202,7 +263,10 @@ where
     }
     let bytes_len = bytes.len() as u64;
     if bytes_len == 0 {
-        return Outcome::Refused("empty_image".into());
+        // Nothing arrived where an image was promised: a truncated download or a cache answering
+        // empty. Another attempt can differ, so it is a retry (bounded by `MAX_ATTEMPTS`), not a mark
+        // that would retire the image forever.
+        return Outcome::Retry("empty_image".into());
     }
     // The record's advertised size and the bytes that arrived are two different claims: both are
     // checked, because a lying `file_length` must not become a 40 MiB worker input either.
@@ -226,6 +290,84 @@ where
         // dropped rather than indexed against nothing.
         Ok(false) => Outcome::Skipped(Skip::NotFound),
         Err(reason) => Outcome::Retry(format!("index:{}", reason.chars().take(120).collect::<String>())),
+    }
+}
+
+/// Is a mark on this image a reason not to read it at `now_ms`? `Some(skip)` when the lane must pass
+/// it over, `None` when it may read (no mark, or a retry whose backoff has passed).
+pub fn skip_of(mark: &index::OcrMark, now_ms: i64) -> Option<Skip> {
+    if !mark.blocks(now_ms) {
+        return None;
+    }
+    Some(match mark {
+        index::OcrMark::Terminal { .. } => Skip::Unreadable,
+        index::OcrMark::Retry { .. } => Skip::RetryScheduled,
+    })
+}
+
+/// What the lane does with one attempt's outcome: remember it in the index and say when the next
+/// attempt is due.
+///
+/// This is the whole loop's decision, kept here (and not in the guest) so a native test can drive it:
+/// `run` -> `settle` -> `index::ocr_backlog` is a pass, and a bug that re-downloads the same image
+/// every pass shows up as a worker call count in `cargo test`.
+///
+/// * attached: nothing to remember, and a stale retry mark is cleared;
+/// * a terminal answer (`no_text_detected`, `image_too_large`, the reader refused the media) or the
+///   reader's permanent refusal: a [`index::OcrMark::Terminal`] with the word, forever;
+/// * a transient failure (a stalled/crashed worker, a full queue, a download that timed out): a
+///   [`index::OcrMark::Retry`] with the attempt count and `now + backoff`, or - once [`MAX_ATTEMPTS`]
+///   attempts have failed - a terminal `retry_exhausted:<word>`;
+/// * a record-level skip (not an image, revoked, no media keys): nothing, because the next pass
+///   re-filters it for free and a mark would be state for a decision the record already carries.
+///
+/// Returns `Some(next_ms)` when another attempt was scheduled, `None` when the image is settled. A
+/// store failure is returned, never swallowed: a mark that was not written is the loop coming back.
+pub async fn settle<S: Store>(store: &S, chat: &str, id: &str, outcome: &Outcome, now_ms: i64) -> Result<Option<i64>, String> {
+    let attempts = match index::ocr_mark(store, chat, id).await? {
+        Some(index::OcrMark::Retry { attempts, .. }) => attempts,
+        _ => 0,
+    };
+    let mark = match outcome {
+        Outcome::Attached { .. } => {
+            index::clear_ocr_mark(store, chat, id).await?;
+            return Ok(None);
+        }
+        Outcome::Skipped(skip) => match skip {
+            // The image itself answered: a screenshot with no words, a photograph over the bound.
+            Skip::NoText | Skip::TooLarge => index::OcrMark::Terminal { reason: skip.word().to_string() },
+            // Already remembered, or a property of the record (`deleted`, `no_media`, …) the next pass
+            // re-filters without a download.
+            _ => return Ok(None),
+        },
+        // `run` only produces `Refused` for an answer it classified as permanent.
+        Outcome::Refused(reason) => index::OcrMark::Terminal { reason: word(reason) },
+        Outcome::Retry(reason) => {
+            let attempts = attempts.saturating_add(1);
+            if attempts >= MAX_ATTEMPTS {
+                index::OcrMark::Terminal { reason: word(&format!("retry_exhausted:{}", word(reason))) }
+            } else {
+                let next_ms = now_ms.saturating_add(backoff_ms(attempts));
+                index::mark_ocr(store, chat, id, &index::OcrMark::Retry { reason: word(reason), attempts, next_ms }).await?;
+                return Ok(Some(next_ms));
+            }
+        }
+    };
+    index::mark_ocr(store, chat, id, &mark).await?;
+    Ok(None)
+}
+
+/// The one line the lane prints for one attempt: a state word, counts, and the chat/id as digests.
+/// Built here rather than at the call site for two reasons: a native test scans every line the lane can
+/// print (`tests::no_line_the_lane_prints_carries_a_chat_or_a_message_id`), and a reason can never
+/// become a paragraph, because [`word`] bounds it.
+pub fn line(outcome: &Outcome, chat: &str, id: &str, download_ms: i64) -> String {
+    let at = privacy::at(chat, id);
+    match outcome {
+        Outcome::Attached { chars, bytes } => format!("ocr ready {at} chars={chars} bytes={bytes} download_ms={download_ms}"),
+        Outcome::Skipped(skip) => format!("ocr skipped {at} reason={}", skip.word()),
+        Outcome::Refused(reason) => format!("ocr refused {at} reason={}", word(reason)),
+        Outcome::Retry(reason) => format!("ocr retry {at} reason={}", word(reason)),
     }
 }
 
@@ -477,7 +619,7 @@ mod tests {
         block_on(index::put(&store, &document("B4", "application/pdf", 1_000))).unwrap();
         block_on(index::put(&store, &document("B5", "image/png", 1_000))).unwrap();
 
-        let backlog = block_on(index::ocr_backlog(&store, 10)).expect("the index answers");
+        let backlog = block_on(index::ocr_backlog(&store, 10, 0)).expect("the index answers");
         let ids: Vec<&str> = backlog.iter().map(|(_, id)| id.as_str()).collect();
         assert!(ids.contains(&"B2") && ids.contains(&"B3"), "{ids:?}");
         assert!(ids.contains(&"B5"), "the scan sent as a document is in the backlog: {ids:?}");
@@ -485,11 +627,189 @@ mod tests {
         assert!(!ids.contains(&"B4"), "a PDF is not an image: {ids:?}");
         // A "no text" answer is remembered, so the pass does not re-download the same screenshot.
         block_on(index::mark_unreadable(&store, CHAT, "B2", "no_text_detected")).unwrap();
-        let backlog = block_on(index::ocr_backlog(&store, 10)).unwrap();
+        let backlog = block_on(index::ocr_backlog(&store, 10, 0)).unwrap();
         assert!(!backlog.iter().any(|(_, id)| id == "B2"), "an image already answered `no text` is not queued again");
         assert_eq!(block_on(index::unreadable(&store, CHAT, "B2")).unwrap().as_deref(), Some("no_text_detected"));
         assert_eq!(block_on(index::unreadable(&store, CHAT, "B3")).unwrap(), None);
         // And the budget is a budget: one record per pass is what keeps the pass bounded.
-        assert_eq!(block_on(index::ocr_backlog(&store, 1)).unwrap().len(), 1);
+        assert_eq!(block_on(index::ocr_backlog(&store, 1, 0)).unwrap().len(), 1);
+    }
+
+    /// One attempt's answer, as the fake worker gives it.
+    type Answer = Result<String, String>;
+
+    /// One pass of the lane, exactly as the guest runs it: the backlog (`index::ocr_backlog`), the
+    /// real `run` and the real `settle` for each image it lists. `calls` counts worker calls, so "was
+    /// the worker bothered again?" is an assertion and not a guess. Returns how many images the pass
+    /// attempted.
+    fn pass(store: &index::Memory, now_ms: i64, answer: &Answer, calls: &Cell<u32>) -> usize {
+        let mut tried = 0;
+        for (chat, id) in block_on(index::ocr_backlog(store, 8, now_ms)).expect("the index answers") {
+            let Some(record) = block_on(index::load(store, &chat, &id)).unwrap() else { continue };
+            let outcome = block_on(run(store, &record, vec![0xff, 0xd8, 0xff], |_bytes, _mime| {
+                calls.set(calls.get() + 1);
+                std::future::ready(answer.clone())
+            }));
+            block_on(settle(store, &chat, &id, &outcome, now_ms)).expect("the mark is written");
+            tried += 1;
+        }
+        tried
+    }
+
+    #[test]
+    fn a_picture_with_nothing_to_read_is_read_once_and_the_next_pass_skips_it() {
+        // The live bug (08/11): `no_text_detected` is the reader's answer, and it is an error word, so
+        // it came back as a refusal that nothing remembered - the backlog re-downloaded and re-read
+        // the same eight screenshots every minute. A fixture image with no text is read once, the
+        // marker carries the reason, and every later pass leaves the worker alone.
+        let store = index::Memory::new();
+        for id in ["N1", "N2", "N3"] {
+            block_on(index::put(&store, &image(id, "image/jpeg", 1_000))).unwrap();
+        }
+        let calls = Cell::new(0);
+        let no_text: Answer = Err("no_text_detected".into());
+        assert_eq!(pass(&store, 0, &no_text, &calls), 3, "the first pass reads every unread image");
+        assert_eq!(calls.get(), 3, "one worker call per image, no more");
+
+        // The reason is in the marker, as a word.
+        assert_eq!(block_on(index::unreadable(&store, CHAT, "N1")).unwrap().as_deref(), Some("no_text_detected"));
+        let mark = block_on(index::ocr_mark(&store, CHAT, "N1")).unwrap().expect("a mark");
+        assert_eq!(mark, index::OcrMark::Terminal { reason: "no_text_detected".into() });
+        assert!(mark.blocks(0) && mark.blocks(i64::MAX), "a terminal mark blocks every later pass");
+
+        // Every later pass - a minute, an hour, a restart - finds nothing to do and calls no worker.
+        for now in [60_000, 120_000, 3_600_000, i64::MAX] {
+            assert_eq!(pass(&store, now, &no_text, &calls), 0, "nothing is queued at t={now}");
+        }
+        assert_eq!(calls.get(), 3, "the worker was not bothered again: {calls:?}");
+
+        // An oversized image and an empty reading are answered the same way (`Skipped`), not retried.
+        let store = index::Memory::new();
+        block_on(index::put(&store, &image("BIG", "image/jpeg", MAX_IMAGE_BYTES + 1))).unwrap();
+        block_on(index::put(&store, &image("EMPTY", "image/jpeg", 10))).unwrap();
+        let calls = Cell::new(0);
+        assert_eq!(pass(&store, 0, &Ok("   \n ".into()), &calls), 2, "the oversized image is settled from its record, the empty reading is fetched");
+        assert_eq!(calls.get(), 1, "only the readable-size image cost a worker call");
+        assert_eq!(block_on(index::unreadable(&store, CHAT, "BIG")).unwrap().as_deref(), Some("image_too_large"));
+        assert_eq!(pass(&store, 600_000, &Ok("texto".into()), &calls), 0, "both are settled at t=600 s");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(block_on(index::unreadable(&store, CHAT, "EMPTY")).unwrap().as_deref(), Some("no_text_detected"));
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_with_an_exponential_backoff_and_stops_at_the_cap() {
+        let store = index::Memory::new();
+        block_on(index::put(&store, &image("T1", "image/jpeg", 1_000))).unwrap();
+        let calls = Cell::new(0);
+        let stalled: Answer = Err("worker_stalled".into());
+
+        // Attempt 1 at t=0: a retry is scheduled one base wait later, and not before.
+        assert_eq!(pass(&store, 0, &stalled, &calls), 1);
+        assert_eq!(block_on(index::unreadable(&store, CHAT, "T1")).unwrap(), None, "a pending retry is not a terminal answer");
+        assert_eq!(
+            block_on(index::ocr_mark(&store, CHAT, "T1")).unwrap(),
+            Some(index::OcrMark::Retry { reason: "worker_stalled".into(), attempts: 1, next_ms: RETRY_BASE_MS })
+        );
+        assert_eq!(pass(&store, RETRY_BASE_MS - 1, &stalled, &calls), 0, "the backoff has not passed");
+        assert_eq!(calls.get(), 1, "no worker was called during the backoff");
+
+        // Attempt 2 at t=60 s: the wait doubles. Then 3 and 4, still inside the cap.
+        assert_eq!(pass(&store, RETRY_BASE_MS, &stalled, &calls), 1);
+        assert_eq!(calls.get(), 2);
+        let second = RETRY_BASE_MS + backoff_ms(2);
+        assert_eq!(backoff_ms(2), 2 * RETRY_BASE_MS, "the wait doubles");
+        assert_eq!(pass(&store, second, &stalled, &calls), 1);
+        assert_eq!(pass(&store, second + backoff_ms(3), &stalled, &calls), 1);
+        assert_eq!(calls.get(), 4);
+        let mark = block_on(index::ocr_mark(&store, CHAT, "T1")).unwrap().unwrap();
+        assert_eq!(mark.reason(), "worker_stalled");
+        assert!(matches!(mark, index::OcrMark::Retry { attempts: 4, .. }), "{mark:?}");
+
+        // Attempt 5 is the last one: the cap turns the failure into a terminal mark.
+        let last = second + backoff_ms(3) + backoff_ms(4);
+        assert_eq!(pass(&store, last, &stalled, &calls), 1);
+        assert_eq!(calls.get(), MAX_ATTEMPTS);
+        assert_eq!(
+            block_on(index::ocr_mark(&store, CHAT, "T1")).unwrap(),
+            Some(index::OcrMark::Terminal { reason: "retry_exhausted:worker_stalled".into() })
+        );
+        // And then never again, at any time.
+        for now in [last + 1, last + 86_400_000, i64::MAX] {
+            assert_eq!(pass(&store, now, &stalled, &calls), 0, "no attempt after the cap (t={now})");
+        }
+        assert_eq!(calls.get(), MAX_ATTEMPTS, "exactly the cap of worker calls");
+
+        // The backoff is capped as well: an attempt count beyond the cap cannot overflow or wait
+        // longer than RETRY_CAP_MS.
+        assert_eq!(backoff_ms(1), RETRY_BASE_MS);
+        assert_eq!(backoff_ms(3), 4 * RETRY_BASE_MS);
+        assert_eq!(backoff_ms(20), RETRY_CAP_MS);
+        assert_eq!(backoff_ms(u32::MAX), RETRY_CAP_MS);
+    }
+
+    #[test]
+    fn a_retry_that_succeeds_attaches_the_text_and_clears_the_mark() {
+        let store = index::Memory::new();
+        block_on(index::put(&store, &image("T2", "image/jpeg", 1_000))).unwrap();
+        let calls = Cell::new(0);
+        assert_eq!(pass(&store, 0, &Err("busy".into()), &calls), 1);
+        assert!(block_on(index::ocr_mark(&store, CHAT, "T2")).unwrap().is_some());
+        assert_eq!(pass(&store, RETRY_BASE_MS, &Ok("MERCADO 12,90".into()), &calls), 1);
+        assert_eq!(calls.get(), 2);
+        let stored = block_on(index::load(&store, CHAT, "T2")).unwrap().unwrap();
+        assert_eq!(stored.ocr, "MERCADO 12,90");
+        assert_eq!(block_on(index::ocr_mark(&store, CHAT, "T2")).unwrap(), None, "the retry mark is gone once the image is read");
+        assert_eq!(pass(&store, 10 * RETRY_BASE_MS, &Ok("x".into()), &calls), 0, "an image with text is not read again");
+    }
+
+    #[test]
+    fn no_line_the_lane_prints_carries_a_chat_or_a_message_id() {
+        let store = index::Memory::new();
+        let record = image("3EB0A1B2C3D4E5F6", "image/jpeg", 1_000);
+        block_on(index::put(&store, &record)).unwrap();
+        let calls = Cell::new(0);
+        let attached = block_on(run(&store, &record, vec![1, 2, 3], counted("MERCADO", &calls)));
+        // The reader's real refusal on a fresh image, so the `refused` line is the one `run` produces.
+        let store2 = index::Memory::new();
+        let other = image("3EB0A1B2C3D4E5F7", "image/jpeg", 1_000);
+        block_on(index::put(&store2, &other)).unwrap();
+        let refused: fn(Vec<u8>, String) -> std::future::Ready<Result<String, String>> =
+            |_b, _m| std::future::ready(Err("no_text_detected".to_string()));
+        let mut outcomes = vec![
+            attached,
+            Outcome::Skipped(Skip::TooLarge),
+            Outcome::Skipped(Skip::NoText),
+            block_on(run(&store2, &other, vec![1], refused)),
+            Outcome::Retry("worker_stalled".into()),
+        ];
+        // A reason that tried to smuggle a JID and a newline into the line is a token too.
+        outcomes.push(Outcome::Retry("download:5511999999999@s.whatsapp.net\nsecond line".into()));
+        for outcome in &outcomes {
+            let line = line(outcome, CHAT, "3EB0A1B2C3D4E5F6", 42);
+            // `ocr <state> …`: the state word is the first thing an operator greps for.
+            let state = line.split(' ').nth(1).expect("a state word");
+            assert!(matches!(state, "ready" | "skipped" | "refused" | "retry"), "{line}");
+            assert!(line.starts_with(&format!("ocr {state} chat=sha256:")), "the line names the fields second: {line}");
+            assert!(line.contains(&format!("chat={}", crate::privacy::mark(CHAT))), "the chat is a mark: {line}");
+            assert!(line.contains("id=sha256:"), "the id is a mark: {line}");
+            assert!(!line.contains('@'), "no JID: {line}");
+            assert!(!line.contains("5511999999999"), "no phone number: {line}");
+            assert!(!line.contains("3EB0A1B2C3D4E5F6"), "no message id: {line}");
+            assert!(!line.contains('\n') && line.split(' ').all(|field| !field.is_empty()), "one line of fields: {line}");
+        }
+    }
+
+    #[test]
+    fn a_reason_word_is_bounded_and_never_carries_a_space() {
+        assert_eq!(word("no_text_detected"), "no_text_detected");
+        assert_eq!(word("download:temporarily unavailable"), "download:temporarilyunavailable");
+        assert_eq!(word("a\nb\tc"), "abc");
+        assert_eq!(word(""), "unknown");
+        assert_eq!(word("x").len(), 1);
+        assert_eq!(word(&"y".repeat(500)).len(), MAX_REASON);
+        // A path or a phone number cannot survive as a field: no space, no '@', no '+', bounded.
+        let word_of = word("/home/ubuntu/ocr/5511999999999@s.whatsapp.net");
+        assert!(!word_of.contains('@') && !word_of.contains('/') && word_of.len() <= MAX_REASON, "{word_of}");
+        assert!(!word_of.contains("5511999999999"), "a long digit run is redacted: {word_of}");
     }
 }

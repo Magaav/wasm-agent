@@ -13,7 +13,8 @@
 //! `AbortHandle`), and it is a plain `FuturesUnordered` joined with the main loop.
 //!
 //! Milestone 1: pair (by code when `pair_phone` is configured, else QR), connect, receive. The log
-//! carries the pairing code, connection state and message metadata (chat, kind, id) - never content.
+//! carries the pairing code, connection state, counts and a state word - never content, and never an
+//! identity: a chat and a message id are `sha256:` marks (`privacy.rs`), never the JID or the id.
 //! Store: store.rs - in-memory reads with write-through of durable state to the host (wa_kernel/kv);
 //! a restart reconnects without pairing again.
 //!
@@ -29,7 +30,7 @@ use crate::wa::kernel::{drain, http as khttp, kv as kkv, lifecycle, speech, visi
 use crate::wasi::clocks::monotonic_clock;
 use crate::index::{self, Store as IndexStore};
 use crate::record::{self, Record};
-use crate::{alerts, export, exports, history, ocr, outbox, posting, queue, recognize, store, telemetry};
+use crate::{alerts, export, exports, history, ocr, outbox, posting, privacy, queue, recognize, store, telemetry};
 use wa_whatsapp_index as seam;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -305,7 +306,8 @@ async fn apply_mutation(mutation: Mutation) {
     let verdict = HOLDS.with(|h| h.borrow_mut().apply(&mutation, known.as_ref()));
     STATE_DIRTY.with(|d| d.set(true));
     say!(
-        "mutation chat={chat} kind={} verified={} proof={} fence_here={} fence_anywhere={} hold={}",
+        "mutation {} kind={} verified={} proof={} fence_here={} fence_anywhere={} hold={}",
+        privacy::chat(&chat),
         mutation.kind,
         verdict.verified,
         verdict.proof,
@@ -354,10 +356,10 @@ async fn reprove(chat: &str) {
     }
     let report = HOLDS.with(|h| h.borrow_mut().reprove(chat, |id| known.get(id).cloned()));
     if report.reproved > 0 {
-        say!("hold reproved chat={chat} fenced={}", report.fenced);
+        say!("hold reproved {} fenced={}", privacy::chat(chat), report.fenced);
         STATE_DIRTY.with(|d| d.set(true));
     } else if let Some(skipped) = report.skipped {
-        say!("hold kept chat={chat} reason={skipped}");
+        say!("hold kept {} reason={skipped}", privacy::chat(chat));
     }
 }
 
@@ -406,7 +408,7 @@ async fn restore_state() {
     let (report, notices) = QUEUE.with(|q| q.borrow_mut().restore(&snapshot));
     for notice in &notices {
         let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
-        say!("transcript interrupted chat={chat} id={id} reason={}", notice.reason);
+        say!("transcript interrupted {} reason={}", privacy::at(chat, id), notice.reason);
         note(telemetry::Note::new(note_kind(notice.kind)).about(chat, id).field("stage", "restart").field("reason", &notice.reason));
         record(chat, id, serde_json::json!({"state": notice.kind, "reason": notice.reason})).await;
         alert(chat, "", notice.kind, &notice.reason, notice.sent_ms);
@@ -462,7 +464,7 @@ async fn admit(job: AudioJob) {
     };
     let live = job.sent_ms >= now - QUEUE.with(|q| q.borrow().policy().fresh_ms);
     if let Some(reason) = unsupported {
-        say!("transcript unsupported chat={chat} id={} reason={reason}", job.id);
+        say!("transcript unsupported {} reason={reason}", privacy::at(&chat, &job.id));
         record(&chat, &job.id, serde_json::json!({"state": "unsupported", "reason": reason})).await;
         note(telemetry::Note::new("unsupported").about(&chat, &job.id).field("stage", "admit").field("reason", reason));
         if live && job.sent_ms > 0 {
@@ -471,7 +473,7 @@ async fn admit(job: AudioJob) {
         return;
     }
     if fenced(&chat, &job.id).await {
-        say!("transcript blocked chat={chat} id={} reason=source_fence", job.id);
+        say!("transcript blocked {} reason=source_fence", privacy::at(&chat, &job.id));
         record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": "source_fence"})).await;
         note(telemetry::Note::new("blocked").about(&chat, &job.id).field("stage", "admit").field("reason", "source_fence"));
         if live {
@@ -483,7 +485,7 @@ async fn admit(job: AudioJob) {
         // An untargeted mutation or an owner clear: nothing narrower than the chat is provable, so
         // this audio is not even transcribed (Go: blocked_source / source_mutation_or_chat_hold).
         let reason = HOLDS.with(|h| h.borrow().reason(&chat).unwrap_or("chat_hold").to_string());
-        say!("transcript blocked chat={chat} id={} reason={reason}", job.id);
+        say!("transcript blocked {} reason={reason}", privacy::at(&chat, &job.id));
         record(&chat, &job.id, serde_json::json!({"state": "blocked", "reason": reason})).await;
         note(telemetry::Note::new("blocked").about(&chat, &job.id).field("stage", "admit").field("reason", &reason));
         if live {
@@ -535,7 +537,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     let bytes = match client.download(&job.audio).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            say!("transcript download failed chat={chat} id={} reason={error}", job.id);
+            say!("transcript download failed {} reason={error}", privacy::at(&chat, &job.id));
             note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "download").field("reason", &error.to_string()));
             return Outcome::Retry("download".into());
         }
@@ -604,14 +606,14 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
                         posted.first_ms = Some(now_ms());
                         pacer.mark(now, false);
                     }
-                    Err(error) => say!("transcript partial post failed chat={chat} id={} reason={error}", job.id),
+                    Err(error) => say!("transcript partial post failed {} reason={error}", privacy::at(&chat, &job.id)),
                 },
                 Some(first) => {
                     match edit(&client, &job.chat, first, body, &context).await {
                         Ok(()) => posted.edits += 1,
                         Err(error) => {
                             posted.edit_errors += 1;
-                            say!("transcript edit failed chat={chat} id={} edit={} reason={error}", job.id, posted.edits + 1);
+                            say!("transcript edit failed {} edit={} reason={error}", privacy::at(&chat, &job.id), posted.edits + 1);
                         }
                     }
                     pacer.mark(now, false);
@@ -623,7 +625,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         Ok(t) => t,
         Err(error) => {
             let reason = reason_of(&error);
-            say!("transcript failed chat={chat} id={} reason={reason}", job.id);
+            say!("transcript failed {} reason={reason}", privacy::at(&chat, &job.id));
             note(telemetry::Note::new("failed").about(&chat, &job.id).field("stage", "recognize").field("reason", &reason));
             return if permanent(&reason) { Outcome::Permanent(reason) } else { Outcome::Retry(reason) };
         }
@@ -632,15 +634,15 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     // index, so `whatsapp_search` finds the note by what was said in it. The text is never logged.
     match index::attach_text(&IndexKv, &chat, &job.id, &transcript.text, index::Source::Transcript).await {
         Ok(true) => {}
-        Ok(false) => say!("index: no record for voice note id={} (not indexed)", job.id),
-        Err(reason) => say!("index: attach failed id={} reason={reason}", job.id),
+        Ok(false) => say!("index: no record for voice note {} (not indexed)", privacy::id(&job.id)),
+        Err(reason) => say!("index: attach failed {} reason={reason}", privacy::id(&job.id)),
     }
     let ready = now_ms();
     tracker.finish(ready.max(0) as u64);
     let chars = transcript.text.chars().count();
     say!(
-        "transcript ready chat={chat} id={} ms={} chars={chars} latency_ms={} download_ms={} wait_ms={} seconds={seconds} segments={}",
-        job.id,
+        "transcript ready {} ms={} chars={chars} latency_ms={} download_ms={} wait_ms={} seconds={seconds} segments={}",
+        privacy::at(&chat, &job.id),
         transcript.elapsed_ms,
         ready - job.sent_ms,
         downloaded - picked,
@@ -685,7 +687,7 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
         v["posted"] = false.into();
         v["reason"] = "source_fence_during_decode".into();
         record(&chat, &job.id, v).await;
-        say!("transcript not posted chat={chat} id={} reason=source_fence_during_decode", job.id);
+        say!("transcript not posted {} reason=source_fence_during_decode", privacy::at(&chat, &job.id));
         note(telemetry::Note::new("blocked").about(&chat, &job.id).field("reason", "source_fence_during_decode"));
         return Outcome::Done;
     }
@@ -725,8 +727,8 @@ async fn process(job: &AudioJob, language: &str, cfg: &posting::PostConfig) -> O
     let done = now_ms();
     let first_ms = posted.first_ms.unwrap_or(done);
     say!(
-        "transcript posted chat={chat} id={} parts={}/{} edits={} edit_errors={} first_text_ms={} total_ms={} streamed={streaming}",
-        job.id,
+        "transcript posted {} parts={}/{} edits={} edit_errors={} first_text_ms={} total_ms={} streamed={streaming}",
+        privacy::at(&chat, &job.id),
         ids.len(),
         parts.len(),
         posted.edits,
@@ -779,7 +781,7 @@ fn dispatch(language: &str, cfg: &posting::PostConfig) {
             }
         });
         let Some(item) = item else { continue };
-        say!("lane {lane:?} takes id={} seconds={}", item.payload.id, item.seconds);
+        say!("lane {lane:?} takes {} seconds={}", privacy::id(&item.payload.id), item.seconds);
         let language = language.to_string();
         let cfg = cfg.clone();
         spawn_task(Box::pin(async move {
@@ -793,7 +795,7 @@ fn dispatch(language: &str, cfg: &posting::PostConfig) {
 fn settle_notice(notice: &queue::Notice, title: Option<&str>) {
     let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
     let kind = if notice.kind == "failed" && permanent(&notice.reason) { "unsupported" } else { notice.kind };
-    say!("transcript {} chat={chat} id={id} reason={}", if kind == "audio_expired" { "expired" } else { kind }, notice.reason);
+    say!("transcript {} {} reason={}", if kind == "audio_expired" { "expired" } else { kind }, privacy::at(chat, id), notice.reason);
     note(telemetry::Note::new(note_kind(kind)).about(chat, id).field("stage", "queue").field("reason", &notice.reason));
     let (chat, id) = (chat.to_string(), id.to_string());
     let (kind, reason, sent_ms, title) = (kind.to_string(), notice.reason.clone(), notice.sent_ms, title.unwrap_or("").to_string());
@@ -838,7 +840,7 @@ async fn settle_completions() {
             (Some(notice), title) => {
                 let (chat, id) = notice.key.split_once('\u{0}').unwrap_or((notice.key.as_str(), ""));
                 let kind = if notice.kind == "failed" && permanent(&notice.reason) { "unsupported" } else { notice.kind };
-                say!("transcript {} chat={chat} id={id} reason={}", if kind == "audio_expired" { "expired" } else { kind }, notice.reason);
+                say!("transcript {} {} reason={}", if kind == "audio_expired" { "expired" } else { kind }, privacy::at(chat, id), notice.reason);
                 note(telemetry::Note::new(note_kind(kind)).about(chat, id).field("stage", "queue").field("reason", &notice.reason));
                 Some((chat.to_string(), id.to_string(), kind.to_string(), notice.reason.clone(), notice.sent_ms, title.to_string()))
             }
@@ -990,12 +992,12 @@ async fn outbox_tick() -> bool {
         }
         wa_whatsapp_outbox::Decision::Send(request) => match send_outbox(&client, &request).await {
             Ok(message_id) => {
-                say!("outbox: sent job={id} message={message_id} chat={} mentions={}", request.chat.jid(), request.mentions.len());
+                say!("outbox: sent job={id} message={} {} mentions={}", privacy::mark(&message_id), privacy::chat(&request.chat.jid()), request.mentions.len());
                 let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone() }.encode();
                 if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
                     // The message is out; a settle that failed is a queue problem, and retrying the
                     // send would be a second message. Report it, let the lease lapse.
-                    outbox_note(format!("done refused for job={id} message={message_id}: {error:?}"));
+                    outbox_note(format!("done refused for job={id} message={}: {error:?}", privacy::mark(&message_id)));
                 }
             }
             Err(reason) => {
@@ -1037,10 +1039,6 @@ const INDEX_PER_TICK: usize = 200;
 /// oldest id is dropped, and the backlog pass (`index::ocr_backlog`) still finds it later - a dropped
 /// id costs a scan, never an image that is silently never read.
 const OCR_PENDING: usize = 64;
-/// How many attempts one image gets before the lane stops retrying it: the first read plus one retry
-/// after a transient failure (a restarting worker, a download that timed out). What comes back after
-/// that is logged as the reason and left to the backlog pass.
-const OCR_ATTEMPTS: u8 = 2;
 /// One progress chunk. 32 KiB keeps a 512 KiB download inside sixteen entries, well below the queue's
 /// 1 MiB progress bound.
 const DOWNLOAD_CHUNK: usize = 32 * 1024;
@@ -1121,17 +1119,18 @@ impl IndexConfig {
     }
 }
 
-/// One image the OCR lane still owes an answer: the record it will attach to, and how many times the
-/// lane has tried. The bytes are not kept.
+/// One image the OCR lane still owes an answer: the record it will attach to. The bytes are not kept,
+/// and neither is an attempt count: how many attempts have failed is in the index's mark
+/// (`index::OcrMark::Retry`), so it survives a restart of the component and is read by the same code a
+/// native test drives (`ocr::settle`).
 struct OcrJob {
     chat: String,
     id: String,
-    attempts: u8,
 }
 
 impl OcrJob {
     fn of(record: &Record) -> OcrJob {
-        OcrJob { chat: record.chat.clone(), id: record.id.clone(), attempts: 0 }
+        OcrJob { chat: record.chat.clone(), id: record.id.clone() }
     }
 }
 
@@ -1167,7 +1166,7 @@ async fn index_inbox(enabled: bool) -> usize {
     for record in &batch {
         match index::put(&IndexKv, record).await {
             Ok(()) => indexed += 1,
-            Err(reason) => say!("index: write failed chat={} id={} reason={reason}", record.chat, record.id),
+            Err(reason) => say!("index: write failed {} reason={reason}", privacy::at(&record.chat, &record.id)),
         }
         // After the write, never before: the OCR lane attaches the text to this record, and a text
         // attached to a record that does not exist yet is a message the agent will never find.
@@ -1190,9 +1189,10 @@ async fn index_inbox(enabled: bool) -> usize {
 // never the text.
 
 /// Read one image and attach what it says to its record. Everything that can be decided from the
-/// index (is it still an image worth reading, is it still there) is `ocr::` - the same code a native
-/// test drives; this function is the two host calls around it.
-async fn ocr_one(job: OcrJob) -> ocr::Outcome {
+/// index (is it still an image worth reading, is it still there, did an earlier attempt already answer
+/// it) is `ocr::` - the same code a native test drives; this function is the two host calls around it.
+async fn ocr_one(job: &OcrJob) -> ocr::Outcome {
+    let now = now_ms();
     let record = match index::load(&IndexKv, &job.chat, &job.id).await {
         Ok(Some(record)) => record,
         Ok(None) => return ocr::Outcome::Skipped(ocr::Skip::NotFound),
@@ -1201,10 +1201,15 @@ async fn ocr_one(job: OcrJob) -> ocr::Outcome {
     if let Err(skip) = ocr::wanted(&record) {
         return ocr::Outcome::Skipped(skip);
     }
-    // An earlier pass already learned this image has no legible text (or is too large): the word is
-    // in the index, so the image is not downloaded again to learn it a second time.
-    match index::unreadable(&IndexKv, &job.chat, &job.id).await {
-        Ok(Some(_word)) => return ocr::Outcome::Skipped(ocr::Skip::Unreadable),
+    // An earlier attempt already answered this image: terminal (nothing legible, too large, or the
+    // retries ran out) is skipped for good, and a scheduled retry is skipped until its backoff has
+    // passed. Either way the image is not downloaded again to learn the same thing.
+    match index::ocr_mark(&IndexKv, &job.chat, &job.id).await {
+        Ok(Some(mark)) => {
+            if let Some(skip) = ocr::skip_of(&mark, now) {
+                return ocr::Outcome::Skipped(skip);
+            }
+        }
         Ok(None) => {}
         Err(reason) => return ocr::Outcome::Retry(format!("index:{reason}")),
     }
@@ -1240,14 +1245,14 @@ async fn ocr_one(job: OcrJob) -> ocr::Outcome {
     .await;
     match &outcome {
         ocr::Outcome::Attached { chars, bytes } => {
-            say!("ocr ready chat={} id={} chars={chars} bytes={bytes} download_ms={downloaded}", job.chat, job.id);
+            say!("{}", ocr::line(&outcome, &job.chat, &job.id, downloaded));
             note(telemetry::Note::new("ready").about(&job.chat, &job.id).field("stage", "ocr").count("chars", *chars).count("bytes", *bytes));
         }
-        ocr::Outcome::Skipped(skip) => say!("ocr skipped chat={} id={} reason={}", job.chat, job.id, skip.word()),
+        ocr::Outcome::Skipped(_) => say!("{}", ocr::line(&outcome, &job.chat, &job.id, downloaded)),
         other => {
-            let reason = other.reason().unwrap_or("unknown");
-            say!("ocr {} chat={} id={} reason={}", other.word(), job.chat, job.id, one_line(reason));
-            note(telemetry::Note::new(if other.retry() { "retry" } else { "failed" }).about(&job.chat, &job.id).field("stage", "ocr").field("reason", reason));
+            say!("{}", ocr::line(&outcome, &job.chat, &job.id, downloaded));
+            let reason = other.reason().map(ocr::word).unwrap_or_else(|| "unknown".to_string());
+            note(telemetry::Note::new(if other.retry() { "retry" } else { "failed" }).about(&job.chat, &job.id).field("stage", "ocr").field("reason", &reason));
         }
     }
     outcome
@@ -1269,22 +1274,18 @@ async fn ocr_tick(cfg: &IndexConfig) -> bool {
         return false;
     }
     let Some(job) = OCR_INBOX.with(|q| q.borrow_mut().pop_front()) else { return false };
-    let attempts = job.attempts;
-    let chat = job.chat.clone();
-    let id = job.id.clone();
-    let outcome = ocr_one(OcrJob { chat, id, attempts }).await;
-    // A permanent "there is nothing to read here" is remembered in the index, so the backlog pass
-    // does not download this image again every pass. Only the two words that are a property of the
-    // image itself: a record that lost its media keys or was revoked is re-filtered cheaply.
-    if let ocr::Outcome::Skipped(skip @ (ocr::Skip::NoText | ocr::Skip::TooLarge)) = &outcome {
-        if let Err(reason) = index::mark_unreadable(&IndexKv, &job.chat, &job.id, skip.word()).await {
-            say!("ocr: could not remember id={} reason={}", job.id, one_line(&reason));
+    let now = now_ms();
+    let outcome = ocr_one(&job).await;
+    // Every attempt is remembered in the index (`ocr::settle`): a terminal answer (no text, too large,
+    // a permanent refusal) is never downloaded again, a transient one is retried with an exponential
+    // backoff through the backlog pass, and [`ocr::MAX_ATTEMPTS`] ends the retries. Without this the
+    // same eight unreadable screenshots came back on every pass, forever.
+    match ocr::settle(&IndexKv, &job.chat, &job.id, &outcome, now).await {
+        Ok(Some(next_ms)) => {
+            say!("ocr: retry scheduled {} in_ms={}", privacy::at(&job.chat, &job.id), next_ms.saturating_sub(now));
         }
-    }
-    // A transient failure gets one more attempt; a permanent answer is never queued again, and a
-    // third attempt would re-download the same bytes to learn the same thing.
-    if outcome.retry() && attempts + 1 < OCR_ATTEMPTS {
-        OCR_INBOX.with(|q| q.borrow_mut().push_back(OcrJob { chat: job.chat, id: job.id, attempts: attempts + 1 }));
+        Ok(None) => {}
+        Err(reason) => say!("ocr: could not remember {} reason={}", privacy::at(&job.chat, &job.id), ocr::word(&reason)),
     }
     true
 }
@@ -1292,7 +1293,8 @@ async fn ocr_tick(cfg: &IndexConfig) -> bool {
 /// Refill the OCR inbox from the index when it is empty: images that were indexed without text (the
 /// lane was off, the node restarted mid-download, or a history sync wrote them) are still read, one
 /// bounded scan per pass and never a re-download the media limits would refuse
-/// (`index::ocr_backlog`).
+/// (`index::ocr_backlog`). The pass also carries the retries: an image whose backoff has passed is in
+/// the backlog again, one whose backoff has not is not.
 async fn ocr_refill(cfg: &IndexConfig) {
     if !cfg.ocr {
         return;
@@ -1301,7 +1303,7 @@ async fn ocr_refill(cfg: &IndexConfig) {
     if pending > 0 {
         return;
     }
-    let backlog = match index::ocr_backlog(&IndexKv, cfg.ocr_budget).await {
+    let backlog = match index::ocr_backlog(&IndexKv, cfg.ocr_budget, now_ms()).await {
         Ok(backlog) => backlog,
         Err(reason) => {
             say!("ocr: backlog scan failed reason={}", one_line(&reason));
@@ -1310,11 +1312,11 @@ async fn ocr_refill(cfg: &IndexConfig) {
     };
     let mut queued = 0usize;
     for (chat, id) in backlog {
-        OCR_INBOX.with(|q| q.borrow_mut().push_back(OcrJob { chat, id, attempts: 0 }));
+        OCR_INBOX.with(|q| q.borrow_mut().push_back(OcrJob { chat, id }));
         queued += 1;
     }
     if queued > 0 {
-        say!("ocr: {queued} image(s) still to read (backlog)");
+        say!("ocr: {queued} image(s) to read (backlog)");
     }
 }
 
@@ -1897,7 +1899,7 @@ async fn serve(config: serde_json::Value) {
                 );
             })
             .on_message(|ctx| {
-                let line = format!("message chat={} kind={} media={} id={}", ctx.info.source.chat, ctx.info.r#type, ctx.info.media_type, ctx.info.id);
+                let line = format!("message {} kind={} media={}", privacy::at(&ctx.info.source.chat.to_string(), &ctx.info.id), ctx.info.r#type, ctx.info.media_type);
                 let base = ctx.message.get_base_message();
                 let chat = ctx.info.source.chat.to_string();
                 // Revokes and edits are the only source mutations we can see: each names the message

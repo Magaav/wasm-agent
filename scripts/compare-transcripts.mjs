@@ -23,12 +23,28 @@
 // 1 when either input could not be read.
 
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const PREFIX = 'wa-transcript ';
+
+// ── the join identity ────────────────────────────────────────────────────────────────────────────
+// A component log line carries the chat and the message id as a digest (`sha256:` + the first 16 bytes,
+// hex - `rust/components/wa-whatsapp/src/privacy.rs`), because a log line may not name a JID. The
+// journal has the JID. Both sides are compared on the digest, so the table still joins: a value that is
+// already a mark is used as it is, and a raw one (the journal's, or an older log's) is digested to
+// match it. The table prints what each side said; only the join key is normalized.
+const MARK = 'sha256:';
+
+/// The comparison key for one identity. Stable across runs, so a shadow run's rows group as before.
+export function identity(value) {
+  const text = value === undefined || value === null || value === '' ? '-' : String(value);
+  if (text.startsWith(MARK)) return text;
+  return MARK + createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 32);
+}
 const USAGE = `usage: node scripts/compare-transcripts.mjs --log <component.log> --journal <journal.db> [--limit N] [--json]
 
   --log       the wa-whatsapp component's service log (its \`wa-transcript\` lines are the component side)
@@ -76,7 +92,8 @@ export function parseComponentLog(text) {
       fields[pair.slice(0, eq)] = pair.slice(eq + 1);
     }
     if (fields.v !== '1' || !fields.kind) continue;
-    const key = `${fields.chat || '-'}\u0000${fields.id || '-'}`;
+    // The join key is the digest of both identities, whatever spelling each side used.
+    const key = `${identity(fields.chat)}\u0000${identity(fields.id)}`;
     const note = notes.get(key) || { chat: fields.chat || '-', id: fields.id || '-', kinds: [], fields: {} };
     if (!note.kinds.includes(fields.kind)) note.kinds.push(fields.kind);
     // Later lines for the same kind win (a retry reports again); ready/posted/failed are separate
@@ -159,7 +176,7 @@ const LAST_KIND_ORDER = ['posted', 'failed', 'expired', 'blocked', 'held', 'shad
 
 function compare(notes, journal) {
   const index = new Map();
-  for (const row of journal) index.set(`${row.chat}\u0000${row.id}`, row);
+  for (const row of journal) index.set(`${identity(row.chat)}\u0000${identity(row.id)}`, row);
   const keys = new Set([...notes.keys(), ...index.keys()]);
   const rows = [];
   for (const key of keys) {
