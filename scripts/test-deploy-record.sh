@@ -119,6 +119,7 @@ run_record() { # calls [path-prefix] -> the record step's output; the prefix sha
     echo "UPGRADE_HASH=\"$UPGRADE_HASH\""
     echo 'REASON="land the three reviewed deliveries"'
     echo 'RELEASE=""'   # deploy.sh sets it before step 8 (a7bbcda9): empty, as for a commit that is no release tag
+    echo 'LUA_FAST=0'     # deploy.sh sets it before step 8; the record reads it (a fast-path deploy is 1)
     echo "WA_SERVICE_DIR=\"$INSTALL\""
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
     cat "$WORK/record.sh"

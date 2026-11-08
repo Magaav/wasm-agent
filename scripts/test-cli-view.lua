@@ -648,12 +648,74 @@ ok(opened:sub(-4) == "wa> ", "leaving the cursor there")
 local function since(written, from)
   return table.concat(written, "", from)
 end
+
+-- ---- reading a captured screen stream --------------------------------------------
+-- A live screen layout writes frames: the synchronized-output pair (`view_lib.SYNC_START` … `_END`)
+-- around the writes that belong together. That is what a reader sees painted at once, so it is also
+-- the unit these checks are about: what a row held at the end of every frame. A frame that writes
+-- nothing emits neither sequence, so a capture has no empty pair to step over.
+local function frame_bodies(text)
+  local bodies, pos, unterminated = {}, 1, 0
+  while true do
+    local open = text:find(view_lib.SYNC_START, pos, true)
+    if not open then return bodies, unterminated end
+    local body_start = open + #view_lib.SYNC_START
+    local close = text:find(view_lib.SYNC_END, body_start, true)
+    if not close then return bodies, unterminated + 1 end
+    bodies[#bodies + 1] = text:sub(body_start, close - 1)
+    pos = close + #view_lib.SYNC_END
+  end
+end
+-- Every write this view makes to a row is the whole line (`status_draw`: address, text, pad, erase
+-- to the end of the row), so the last one addressed to the row in a frame is what a reader sees there.
+-- An address followed by `\27[2K` is the erase the blink was made of: the row holds nothing after it.
+local function row_text(body, row)
+  local address = "\27[" .. row .. ";1H"
+  local at, held = body:find(address, 1, true), nil
+  while at do
+    local rest = body:sub(at + #address)
+    if rest:sub(1, 4) == "\27[2K" then
+      held = ""
+    else
+      local stop = rest:find("\27[u", 1, true) or (#rest + 1)
+      held = (rest:sub(1, stop - 1):gsub("\27%[[%d;]*[A-Za-z]", ""))
+    end
+    at = body:find(address, at + #address, true)
+  end
+  return held
+end
+local function row_writes(body, row)
+  local address, count, at = "\27[" .. row .. ";1H", 0, 1
+  while true do
+    local found = body:find(address, at, true)
+    if not found then return count end
+    count = count + 1
+    at = found + #address
+  end
+end
+-- `\27[2K` is the erase that made the blink: it blanks the whole row, and the line is drawn again a
+-- frame later. Counted per row, so an erase on another row (the session-status-content line) is not
+-- mistaken for one here.
+local function count_erases(text, row)
+  local needle, count, at = "\27[" .. row .. ";1H\27[2K", 0, 1
+  while true do
+    local found = text:find(needle, at, true)
+    if not found then return count end
+    count = count + 1
+    at = found + #needle
+  end
+end
 local mark = #screen_out + 1
 screen_view:line("hello")
 local line_out = since(screen_out, mark)
 ok(has(line_out, "\27[10;1Hhello"), "an output line is written inside the region")
-ok(line_out:sub(1, 9) == "\27[?25l\27[s" and line_out:sub(-9) == "\27[u\27[?25h",
-  "with the reader's cursor saved and restored around it")
+-- One frame around it: the synchronized-output pair on the outside, the reader's cursor saved and
+-- restored inside it (see "no blink" below for why the write is framed at all).
+ok(line_out:sub(1, #view_lib.SYNC_START) == view_lib.SYNC_START
+  and has(line_out, "\27[?25l\27[s\27[10;1Hhello")
+  and has(line_out, "\27[u\27[?25h")
+  and line_out:sub(-#view_lib.SYNC_END) == view_lib.SYNC_END,
+  "in one frame, with the reader's cursor saved and restored inside it")
 
 -- The status line has a row of its own, and the ticker is told which: that is what lets it draw
 -- there while the terminal's cursor stays on the input row.
@@ -779,11 +841,145 @@ ok(view_lib.rows(function() return "24" end) == 24,
 ok(view_lib.screen_rows(24).input == 24 and view_lib.screen_rows(24).status == 23
   and view_lib.screen_rows(24).bottom == 22, "a 24-row console gives the screen its three zones")
 local boxed = view_lib.screen_rows(12, true)
-ok(boxed.bottom == 5 and boxed.status == 6 and boxed.input_top == 7 and boxed.input == 11 and boxed.footer == 12,
-  "a live editor: output, status above the box, the box (two borders, three rows), and a footer")
+ok(boxed.bottom == 5 and boxed.status == 5 and boxed.input_top == 6 and boxed.input == 11
+  and boxed.footer == 12 and boxed.session == 11 and boxed.region == 4,
+  "a live editor, bottom up: footer, the session-status-content line, the box (two borders, three rows),"
+    .. " the run-status line above it, and the output")
 ok(view_lib.screen_rows(9, true) == nil, "a short console cannot host the boxed editor")
 ok(view_lib.screen_rows(3) == nil, "a 3-row console gives it none")
 ok(view_lib.screen_rows(nil) == nil, "an unknown height gives it none")
+
+-- ---- no blink: the status row is never erased for a transcript write -----------------
+--
+-- Reported by Victor (08/11): in `wa chat` the run-status line disappeared and came back on every
+-- tool call. `METHODS:clear` erased the status row (`\27[2K`) before any transcript write and the
+-- line was drawn again a moment later - two frames, so a reader saw a blink. A screen gives the
+-- status line a row of its own, and a transcript write goes into the output region above it, so the
+-- erase was never necessary there. What is pinned here is the boxed layout over a whole run: no
+-- erase on that row, the line on it at the end of every frame, at most one write per frame, and it
+-- is taken back once - in place - when the run ends. The inline layout, which shares the reader's
+-- row, is pinned as unchanged: no frames at all, and the same bounded blanking it had before.
+do
+  local boxed_view, boxed_written = capture({ live = true, limit = 100, rows = function() return 30 end })
+  -- The host's editor is the process's real one; the rows it takes are asserted above. Here it only
+  -- has to answer, so the layout can be entered the way `prompt` enters it.
+  local real_input_editor = host.input_editor
+  host.input_editor = function() return true end
+  boxed_view.editor = true -- the boxed screen: footer on the last row, status above the box
+  boxed_view:prompt("wa> ")
+  local status_row = boxed_view.screen.status
+  local content_row = boxed_view.screen.content
+  local steps = "\240\159\145\163" -- `👣`, the boxed status line's step count: on it the whole run
+
+  local mark = #boxed_written + 1
+  boxed_view:run_started()
+  for step = 1, 10 do
+    boxed_view:event({ type = "round", n = step })
+    boxed_view:event({ type = "tool", name = "read", arguments = { path = "lua/core/agent.lua" } })
+    boxed_view:event({ type = "tool_result", name = "read", result = { content = "a\nb\n" } })
+  end
+  boxed_view:event({ type = "usage", total = { prompt = 12000, completion = 800 }, prompt = 12000 })
+  local run = since(boxed_written, mark)
+
+  local bodies, unterminated = frame_bodies(run)
+  eq(count_erases(run, status_row), 0, "a turn of ten tool calls erases the status row no times")
+  eq(unterminated, 0, "every frame of the run is closed")
+  ok(#bodies >= 20, "the run is drawn as frames, one per event or more: " .. #bodies)
+  local updated = 0
+  for _, body in ipairs(bodies) do updated = updated + row_writes(body, status_row) end
+  ok(updated > 0, "and the line is updated in place, on its own row: " .. updated .. " writes")
+
+  -- What the row holds after each frame, starting from screen setup (which blanked it).
+  local held, missing, twice = "", 0, 0
+  local first_missing
+  for index, body in ipairs(bodies) do
+    local drawn = row_text(body, status_row)
+    if drawn then held = (drawn:gsub("%s+$", "")) end
+    if not has(held, steps) then
+      missing = missing + 1
+      first_missing = first_missing or (index .. ": " .. held)
+    end
+    if row_writes(body, status_row) > 1 then twice = twice + 1 end
+  end
+  eq(missing, 0, "the status text is on its row at the end of every frame of the run")
+  if first_missing then print("  first frame without the status line: " .. first_missing) end
+  eq(twice, 0, "and no frame writes that row twice: an erase plus a redraw is the blink")
+
+  -- The end of a run is the one moment the line really goes away: taken back once, in place.
+  local end_mark = #boxed_written + 1
+  boxed_view:answered("done: ten reads.")
+  local ending = since(boxed_written, end_mark)
+  eq(count_erases(ending, status_row), 0, "the end of a run erases no row either")
+  eq(row_writes(ending, status_row), 1, "the status row is taken back exactly once, where the run ends")
+  eq((row_text(ending, status_row) or ""):gsub("%s", ""), "", "and what it then holds is nothing")
+  eq(boxed_view.shown_cols, 0, "so the next frame pads from column zero")
+
+  -- The session-status-content line keeps its own row, above the status line, and is erased there.
+  local notice = "Update available (cccccccccccc): run wa update or /update"
+  boxed_view.session_notice = notice
+  local notice_mark = #boxed_written + 1
+  boxed_view:event({ type = "round", n = 11 })
+  local noticed = since(boxed_written, notice_mark)
+  ok(has(noticed, "\27[" .. content_row .. ";1H"), "the notice is drawn on the sscontent row, not the status row")
+  eq(count_erases(noticed, status_row), 0, "and the status row is still not erased")
+  ok(has(noticed, "\27[1;" .. (content_row - 1) .. "r"), "the output region still shrinks to leave it that row")
+  local clear_mark = #boxed_written + 1
+  boxed_view.session_notice = nil
+  boxed_view:session_draw()
+  local cleared_notice = since(boxed_written, clear_mark)
+  ok(has(cleared_notice, "\27[" .. content_row .. ";1H\27[2K"),
+    "a notice that goes away takes its own row with it: sscontent is unaffected")
+  eq(count_erases(cleared_notice, status_row), 0, "and the status row is untouched by it")
+  boxed_view:screen_off()
+  host.input_editor = real_input_editor
+
+  -- The inline layout, unchanged: no frames (its status line shares the reader's row), the same
+  -- bounded blanking, and the same absence of any erase to the end of that row.
+  local inline_view, inline_written = capture({ live = true, limit = 100 })
+  inline_view:prompt("wa> ")
+  local inline_mark = #inline_written + 1
+  inline_view:run_started()
+  for step = 1, 10 do
+    inline_view:event({ type = "round", n = step })
+    inline_view:event({ type = "tool", name = "bash", arguments = { command = "true" } })
+    inline_view:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "ok\n" } })
+  end
+  local inline = since(inline_written, inline_mark)
+  ok(inline_view.screen == nil, "the inline layout is still the inline layout: no screen, no rows")
+  ok(not has(inline, view_lib.SYNC_START) and not has(inline, view_lib.SYNC_END),
+    "and it is written exactly as before: no synchronized-output sequences at all")
+  ok(not has(inline, "\27[2K"), "it still never erases to the end of the reader's row")
+  ok(inline:find("\r +\r") ~= nil, "and still blanks exactly its own columns, as it always did")
+  ok(has(inline, "\27[?25l\27[s\r"), "the status line is rewritten in place on that row, unprefixed")
+
+  -- `WASM_AGENT_CLI_SYNC=off` turns the frames off for a terminal whose mode-2026 support is worse
+  -- than the tearing it prevents. It is the frames only: no blink comes back with the knob, because
+  -- the erase is gone independently of them.
+  local unframed_view, unframed_written = capture({ live = true, limit = 100, rows = function() return 30 end,
+    getenv = function(name) return name == "WASM_AGENT_CLI_SYNC" and "off" or nil end })
+  local real_editor_again = host.input_editor
+  host.input_editor = function() return true end
+  unframed_view.editor = true
+  unframed_view:prompt("wa> ")
+  local unframed_mark = #unframed_written + 1
+  unframed_view:run_started()
+  for step = 1, 10 do
+    unframed_view:event({ type = "round", n = step })
+    unframed_view:event({ type = "tool", name = "read", arguments = { path = "lua/core/agent.lua" } })
+    unframed_view:event({ type = "tool_result", name = "read", result = { content = "a\nb\n" } })
+  end
+  local unframed = since(unframed_written, unframed_mark)
+  ok(not has(unframed, view_lib.SYNC_START) and not has(unframed, view_lib.SYNC_END),
+    "WASM_AGENT_CLI_SYNC=off writes no frames at all")
+  eq(count_erases(unframed, unframed_view.screen.status), 0,
+    "and the status row is still never erased: no blink with the knob either")
+  local unframed_row = frame_bodies(unframed)
+  eq(#unframed_row, 0, "(no frames to find)")
+  ok(has(row_text(unframed, unframed_view.screen.status) or "", steps),
+    "while the line is still drawn in place on its own row")
+  unframed_view:screen_off()
+  host.input_editor = real_editor_again
+end
 
 -- ---- routed calls: `tool_call` and `remote` --------------------------------------
 -- The generic wrapper used to read `tool_call name=remote`: a call happened, nothing about what it
@@ -882,15 +1078,28 @@ do
   ok(not drawn:find("<bash-input>", 1, true), "without its tags")
 end
 
--- ---- session-status-content: one line above the session status bar -----------------
--- The update notice used to compete with the session numbers on the status bar's own row; now it
--- has ONE line directly above it, in yellow, and the bar goes back to its own content. A build in
--- flight replaces the notice on that same line; an empty area takes no line at all (no blank gap).
--- The rust twin is `wa-term`'s editor (`session_row`, `session_content`), tested in that crate.
+-- ---- session-status-content: between the text area and the session status bar ---------
+-- The update notice used to compete with the session numbers on the status bar's own row; then it had
+-- ONE line directly above the bar. Victor's 08/11 position spec puts it BELOW the CLI's text area and
+-- ABOVE the session status bar (the window's order: textarea, notice, footer), never on the row above
+-- the run-status line. A build in flight replaces the notice on that same line; an empty area takes no
+-- line at all (no blank gap). The rust twin is `wa-term`'s editor (`session_row`, `session_content`),
+-- tested in that crate.
 do
-  ok(view_lib.screen_rows(24).content == 22, "the framed screen has a session-status-content row above the status bar")
-  ok(view_lib.screen_rows(12, true).content == 5,
-    "and so does the boxed one: the line above the status bar, both ways round")
+  ok(view_lib.screen_rows(24).content == 22,
+    "the framed screen keeps its session-status-content row on the output's last row: it has no box")
+  ok(view_lib.screen_rows(12, true).session == 11 and view_lib.screen_rows(12, true).status == 5,
+    "the boxed one draws it on the row under the box (11) and never on the run-status row (5)")
+  -- The order Victor's spec asks for, spelled out on the row table: the text area (the box, from its top
+  -- border down), then the notice line, then the session status bar on the last row. The run's own
+  -- status line is above all three and is not where the notice goes.
+  local box = view_lib.screen_rows(12, true)
+  ok(box.session == box.footer - 1, "the notice line is the row directly above the session status bar")
+  ok(box.session > box.status, "and below the run-status line, which stays above the box")
+  ok(box.session >= box.input, "never above the text area: with no line to show, the box's own bottom"
+    .. " border has that row")
+  ok(box.status < box.input_top, "the run-status line stays above the box, where it was")
+  ok(box.region < box.input_top, "so the output region ends above the whole bottom furniture")
   local notice = "Update available (cccccccccccc): run wa update or /update"
   -- A framed 24-row console, set up the way `prompt`/`paint` do it, with everything after the setup
   -- readable on its own.
@@ -907,7 +1116,8 @@ do
   local quiet, quiet_written, quiet_mark = framed()
   eq(quiet:region_bottom(), 22, "(a) the output region keeps its last row")
   quiet:session_draw()
-  eq(since(quiet_written, quiet_mark), "", "(a) with no notice nothing is drawn: no blank gap")
+  eq(since(quiet_written, quiet_mark), "",
+    "(a) with no notice nothing is drawn: no blank gap, and no empty frame to paint")
 
   -- (b) a notice: its own yellow line above the bar, the bar unchanged.
   local shown, shown_written, shown_mark = framed()
@@ -962,15 +1172,16 @@ do
   ok(has(visible(narrow_line), "\226\128\166"), "(e) truncated with an ellipsis")
   ok(not has(narrow_line, "\n"), "(e) one row, never wrapped")
 
-  -- With the native editor the row is named by the host's token while a run is in flight (the host
-  -- drops `{S}` writes between runs, where there is no status row), and outright when idle.
+  -- The boxed layout names the row itself: it is the row directly under the box, above the footer,
+  -- and it does not move with the slash menu, the draft or the run's status line.
   local native = view_lib.new({ live = true, stdout = true, limit = 100, out = function() end })
   native.screen = view_lib.screen_rows(21, true)
   native.editor, native.editor_ready = true, true
   native.session_notice = notice
-  eq(native:session_address(), "\27[15;1H", "idle with the native editor: the row the status line will take")
+  eq(native:session_address(), "\27[20;1H", "idle with the native editor: the row under the box, above the bar")
   native.turn = { started = 0, baseline = {} }
-  eq(native:session_address(), "\27[{S};1H\27[1A", "one row above the host's status-row token while a run is in flight")
+  eq(native:session_address(), "\27[20;1H",
+    "and the same row while a run is in flight: the run-status line is above the box, not here")
 
   -- Captured (non-TTY / NO_COLOR, i.e. not live): the same sentence as plain text, once.
   local plain, plain_written = capture({ live = false, limit = 100 })

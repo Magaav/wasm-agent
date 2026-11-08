@@ -79,29 +79,62 @@ function M.details(node)
   return lines
 end
 
-function M.run(io)
-  local list = nodes.list()
+function M.run(io, opts)
+  -- One builder for both surfaces: the panel this loop draws and the stack the client draws while a
+  -- run is in flight (M.views -> lua/core/local_views.lua) are the same spec, so a label that changes
+  -- here changes there and nowhere else has to be remembered.
+  local set = M.views(opts)
+  local list = set.nodes
   if not io.panel then
     io.print(cluster_line())
     for _, node in ipairs(list) do io.print(label(node) .. "  " .. hint(node)) end
     return true
   end
-  local selected = 1
+  local index = 1
+  local focus = 1
   while true do
-    local options = {}
-    for n, node in ipairs(list) do options[n] = { label = label(node), hint = hint(node) } end
-    local peers = #list - 1
+    local view = set.views[index]
+    -- Back lands on the node that was open, as it always has.
+    if index == 1 then view.selected = focus end
     local answer = io.panel({
-      title = "Nodes",
-      lines = { cluster_line(), peers == 1 and "1 peer" or (peers .. " peers") },
-      options = options, selected = selected,
+      title = view.title, lines = view.lines, options = view.options, selected = view.selected,
     })
-    if answer.action ~= "select" or not list[answer.index] then return true end
-    selected = answer.index
-    local node = list[selected]
-    local back = io.panel({ title = label(node), lines = M.details(node), options = { { label = "Back", hint = "" } } })
-    if back.action ~= "select" and back.action ~= "cancel" then return true end
+    if type(answer) ~= "table" then return true end
+    if answer.action == "cancel" then
+      if index == 1 then return true end
+      index = 1
+    elseif answer.action ~= "select" then
+      return true
+    else
+      local chosen = view.options[answer.index]
+      if not chosen then return true end
+      if chosen.pop then index = 1
+      elseif chosen.view then focus = answer.index; index = chosen.view
+      else return true end
+    end
   end
+end
+
+-- The whole view as data: the root list and one page per node, as panel specs plus the links between
+-- them (`options[i].view`, and the `Back` option's `pop`). This is what `lua/core/local_views.lua`
+-- publishes for `host.local_view`, and what `M.run` draws, so the two cannot disagree.
+--
+-- `opts.cached` builds it from the roster this process already has, with no network read: the only
+-- version safe to take while a run is in flight.
+function M.views(opts)
+  opts = opts or {}
+  local list = nodes.list({ cached = opts.cached })
+  local views = { {
+    title = "Nodes",
+    lines = { cluster_line(), (#list - 1) == 1 and "1 peer" or ((#list - 1) .. " peers") },
+    options = {},
+    selected = 1,
+  } }
+  for n, node in ipairs(list) do
+    views[1].options[n] = { label = label(node), hint = hint(node), view = n + 1 }
+    views[n + 1] = { title = label(node), lines = M.details(node), options = { { label = "Back", hint = "", pop = true } } }
+  end
+  return { command = "/nodes", captured_at = host.now(), views = views, nodes = list }
 end
 
 return M

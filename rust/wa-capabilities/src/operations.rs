@@ -160,6 +160,21 @@ fn launch_context(mut spec: Spec, context: &Value) -> Spec {
     spec.require_cwd = context["required"] == true;
     spec
 }
+/// One tick of a long call's row (`docs/TOOL-PROGRESS.md`): the tail of the operation's two output
+/// streams, parsed and published for the session-status-content row.
+///
+/// It runs on every pass of a wait loop, which is safe because `crate::tool_progress` bounds itself -
+/// at most four writes a second and a grow-only byte cursor - and it reads the output *file*, which
+/// `wa-operation` already wrote without the node's secrets. Nothing here is on the result path: the
+/// state this loop returns is untouched by it.
+fn progress_tick(state: &Value, tool: &str) {
+    let Some(id) = state["operation_id"].as_str() else { return };
+    let Some(stdout) = state["stdout_path"].as_str() else { return };
+    let stderr = state["stderr_path"].as_str().unwrap_or("");
+    let elapsed = state["elapsed_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
+    crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr);
+}
+
 pub fn foreground(
     program: &str,
     flag: &str,
@@ -179,11 +194,16 @@ pub fn foreground(
             true,
         ), context))
         .map_err(|e| e.to_string())?;
+    // The name the reader knows this call by: the `bash` tool's own name, sent with the launch
+    // (`lua/core/tools.lua`), so the row says `⟳ bash` and not `⟳ worker:7`.
+    let tool = context["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("bash").to_string();
     loop {
         let mut state = manager()
             .wait(&id, Duration::from_millis(100))
             .map_err(|e| e.to_string())?;
+        progress_tick(&state, &tool);
         if state["settled"] == true {
+            crate::tool_progress::finish(&id);
             if state["error"] == "deadline_exceeded" {
                 let stderr = state["stderr"].as_str().unwrap_or("");
                 state["stderr"] = json!(format!("{stderr}\n{}", deadline_note(seconds, &state)));
@@ -211,9 +231,11 @@ pub fn foreground(
                 state["staged_script"] = json!(path.to_string_lossy());
                 state["staged_script_note"] = json!("the command was too long for the Windows command line and ran from this staged file; $0 is the file path, and the file is kept while the operation runs");
             }
+            crate::tool_progress::finish(&id);
             return Ok(command_result(manager(), &id, state));
         }
         if state["overdue"] == true {
+            crate::tool_progress::finish(&id);
             let _ = manager().cancel(&id);
             return Ok(
                 json!({"operation_id":id,"ok":false,"code":-1,"error":"operation_supervisor_overdue","cleanup":"unknown","output_complete":false}),
@@ -223,6 +245,7 @@ pub fn foreground(
         // until the operation actually settles: returning while it still runs would
         // let the effect outlive the execution that owns it.
         if crate::host::run_cancel_requested() {
+            crate::tool_progress::finish(&id);
             let _ = manager().cancel(&id);
             let cleanup = std::time::Instant::now() + Duration::from_millis(1000);
             while std::time::Instant::now() < cleanup {
@@ -319,11 +342,14 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             if wait_for != "command" && wait_for != "settled" {
                 return Err("invalid_wait_for:expected_command_or_settled".into());
             }
+            let tool = args["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("operation");
             loop {
                 let state = manager()
                     .wait(id, Duration::from_millis(250))
                     .map_err(|e| e.to_string())?;
+                progress_tick(&state, tool);
                 if state["settled"] == true {
+                    crate::tool_progress::finish(id);
                     return Ok(state);
                 }
                 if wait_for == "command"
@@ -347,11 +373,27 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 crate::serve::beat();
             }
         }
-        "cancel" => manager().cancel(id),
-        "wait" => manager().wait(
-            id,
-            Duration::from_millis(args["wait_ms"].as_u64().unwrap_or(1000).min(10000)),
-        ),
+        "cancel" => {
+            let stopped = manager().cancel(id);
+            // A cancelled call is over: its row goes with it.
+            crate::tool_progress::finish(id);
+            stopped
+        }
+        // A caller polling an operation is the other place that owns its tail for a while (the
+        // `operation` tool's own loop, the window's `/operation` read): refresh the row while it
+        // waits, so a long call that the model is watching says what it is doing.
+        "wait" => {
+            let budget = Duration::from_millis(args["wait_ms"].as_u64().unwrap_or(1000).min(10000));
+            let started = std::time::Instant::now();
+            loop {
+                let state = manager()
+                    .wait(id, budget.min(Duration::from_millis(250)))
+                    .map_err(|e| e.to_string())?;
+                progress_tick(&state, args["tool"].as_str().filter(|name| !name.is_empty()).unwrap_or("operation"));
+                if state["settled"] == true { crate::tool_progress::finish(id); return Ok(state); }
+                if started.elapsed() >= budget { return Ok(state); }
+            }
+        }
         "read" => manager().read(
             id,
             args["stream"].as_str().unwrap_or("stdout"),

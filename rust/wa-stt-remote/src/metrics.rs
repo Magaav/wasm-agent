@@ -39,6 +39,9 @@ pub struct Metrics {
     pub fallback_taken: u64,
     /// The remote was not online (or was measured slower), so the local worker took it at once.
     pub local_immediate: u64,
+    /// Decisions the compute fabric made for a speech job (either side). The behaviour counters above
+    /// keep their old meaning, so a fleet with the fabric on and one with it off stay comparable.
+    pub fabric_decisions: u64,
     /// Jobs dropped for freshness: never decoded, never posted.
     pub stale_dropped: u64,
     /// A remote worker's call failed mid-job, so it abandoned the lease.

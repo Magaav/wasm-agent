@@ -180,6 +180,21 @@ local function generic_sections(role, declared, available)
     s.work = s.work .. "\n- Long missions: you own the loop. Write the goal and its done-criteria with " .. notes_write
       .. ", schedule your own next turn with " .. wake .. ", re-read the notes on each [self-wake], prefer event wakes to fast polling, and cancel the wake when the goal is done."
   end
+  -- How to work, not what to work on: three rules from the 08/11 incident, where a one-line UI request
+  -- spent 248 steps and 40 minutes because nothing said how long work is run here, what to verify first,
+  -- or when to stop and ask. They are stated once in the frozen prefix, so they cost their bytes on the
+  -- first request of a session and nothing after that (docs/AGENT-LOOP.md, docs/PROMPT-CACHE.md).
+  local operation, bash = ref("operation"), ref("bash")
+  if operation then
+    local log = bash and (" and whose log the next " .. bash .. " call cannot see") or ""
+    s.work = s.work .. "\n- Long work (a build, a test suite, a migration) is supervised, never a background `&` shell call"
+      .. " whose process dies with the call that started it" .. log .. ": start it with " .. operation
+      .. ", then read, await or cancel it."
+  end
+  s.work = s.work .. "\n- Verify with the cheapest check that can fail first, before a whole suite or a rebuild, "
+    .. "and say what you ran and what you could not."
+  s.work = s.work .. "\n- When a step fails the same way twice, or the work is blocked, say what is blocking it "
+    .. "and ask, instead of repeating the call."
   s.style = "Keep replies short and never invent facts."
   s.language = "Reply in the language of the user's latest message unless they ask for another, "
     .. "even though these instructions are in English."

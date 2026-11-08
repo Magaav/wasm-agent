@@ -2506,6 +2506,140 @@ function formatBytes(count) {
   return (n / (1024 * 1024)).toFixed(1) + " MiB";
 }
 
+// ---- the long-call row (docs/TOOL-PROGRESS.md) -----------------------------------------------
+//
+// `⟳ <tool> · <elapsed>` plus what the running operation's output says it is doing, on the SAME
+// session-status-content row the update notice uses - one line directly above the status bar - at the
+// LOWEST precedence: the standing notice and `updating…` both win, because they are facts about the
+// node while this is a fact about one call.
+//
+// The wording is pinned to `lua/core/tool_progress.lua` and `rust/wa-tool-progress` by the tests on
+// all three (the same glyphs, the same `no output for 3m`, the same 14-cell bar): a reader who moves
+// between the terminal and the window must not see two sentences for one call.
+const TOOL_BAR_CELLS = 14;
+const TOOL_STALL_SECONDS = 180;
+const TOOL_MIN_SECONDS = 2;
+// One call at a time is what a window watches: the run's own operation.
+// {operationId, tool, startedAt, lastLine, history[], outputBytes, lastChangeAt, text, stalled} - the
+// call the window is watching, and the sentence it produces from it.
+let toolRow = null;
+
+function toolClock(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (s >= 3600) return Math.floor(s / 3600) + "h" + String(Math.floor(s / 60) % 60).padStart(2, "0") + "m";
+  if (s >= 60) return Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+  return s + "s";
+}
+function toolCompact(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (s >= 3600) return Math.floor(s / 3600) + "h" + String(Math.floor(s / 60) % 60).padStart(2, "0") + "m";
+  if (s >= 60 && s % 60 === 0) return Math.floor(s / 60) + "m";
+  if (s >= 60) return Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+  return s + "s";
+}
+// The build loader's bar, to the cell: `▕████░░░░░░░░░░▏`.
+function toolBar(fraction) {
+  const value = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
+  const filled = Math.round(value * TOOL_BAR_CELLS);
+  return "\u2595" + "\u2588".repeat(filled) + "\u2591".repeat(TOOL_BAR_CELLS - filled) + "\u258F";
+}
+// The node redacts an operation's output before it writes it, so the tail this row draws is already
+// clean (`wa-operation`'s redactor, exact values). This is the second pass, for the shapes the log
+// redactor knows: a key the node was never configured with - a pasted `sk-...` in a file the agent
+// read - must not appear on a row that is always on screen. Same rule as `lua/core/redact.lua`.
+function toolScrub(text) {
+  return String(text == null ? "" : text)
+    .replace(/(sk-|sk_live_|sk_test_|rk_live_|gsk_|hf_|ghp_|gho_|ghs_|github_pat_|glpat-|xoxb-|xoxp-|npm_)[A-Za-z0-9_-]{10,}/g,
+      (token) => token.slice(0, 3) + "..." + token.slice(-4))
+    .replace(/(Bearer\s+)[A-Za-z0-9_\-.]{8,}/g, (all, prefix) => prefix + "<redacted>")
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "<redacted>");
+}
+
+// What the output's own dialect says, newest line first: a bar when the line carries numbers, the line
+// itself otherwise. The same dialects the Rust crate and the Lua module know (cargo, npm/pnpm, pip,
+// git); the window is the third renderer of one decision, so it is the third copy of the parse.
+function toolProgressDialect(line) {
+  const text = String(line == null ? "" : line).replace(/\u001b\[[\d;?]*[A-Za-z]/g, "").replace(/\u001b\][^\u0007]*\u0007/g, "")
+    .replace(/[\u0000-\u001f]/g, "").trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const pair = (source) => {
+    const m = /(\d+)\.?\d*\s*\/\s*(\d+)\.?\d*/.exec(source);
+    if (m && Number(m[2]) > 0) return {done: Number(m[1]), total: Number(m[2]), percent: false};
+    const p = /(\d+)%/.exec(source);
+    if (p && Number(p[1]) <= 100) return {done: Number(p[1]), total: 100, percent: true};
+    return null;
+  };
+  if (lower.startsWith("building [")) {
+    const n = pair(lower.slice(9));
+    const label = /: ([^:]+)$/.exec(text);
+    const first = label ? label[1].split(",")[0].trim() : "";
+    if (n) return {kind: "bar", label: first ? "building " + first : "building", done: n.done, total: n.total, percent: false};
+    return {kind: "text", text: "building"};
+  }
+  const compiling = /^Compiling\s+(\S+)/.exec(text);
+  if (compiling) return {kind: "text", text: "compiling " + compiling[1]};
+  const finished = /^Finished\b.* in (.+)$/.exec(text);
+  if (finished) return {kind: "text", text: "finished in " + finished[1]};
+  if (lower.startsWith("progress:")) {
+    const resolved = /resolved\s+(\d+)/.exec(lower);
+    return {kind: "text", text: resolved ? "resolved " + resolved[1] + " packages" : text};
+  }
+  const reify = lower.indexOf("reify:");
+  if (reify >= 0) return {kind: "text", text: (text.slice(reify).match(/^reify:[^:]+/) || ["reify"])[0]};
+  if (/^(downloading|collecting|installing) /.test(lower)) {
+    return {kind: "text", text: text.slice(0, 120).charAt(0).toLowerCase() + text.slice(0, 120).slice(1)};
+  }
+  const n = pair(text);
+  if (n) {
+    let words = "";
+    for (const [needle, label] of [["receiving objects", "receiving objects"], ["resolving deltas", "resolving deltas"],
+      ["counting objects", "counting objects"], ["compressing objects", "compressing objects"], ["download", "downloading"]]) {
+      if (lower.indexOf(needle) >= 0) { words = label; break; }
+    }
+    const shaped = n.percent || words || text.indexOf("|") >= 0 || lower.indexOf("resolved") >= 0;
+    if (shaped) return {kind: "bar", label: words, done: n.done, total: n.total, percent: n.percent};
+  }
+  if (lower.startsWith("cloning into") || lower.startsWith("remote: enumerating")) {
+    return {kind: "text", text: text.charAt(0).toLowerCase() + text.slice(1)};
+  }
+  // No dialect claimed this line: the caller decides whether the line itself is the answer.
+  return null;
+}
+// One line, as the row would say it: the dialect if one claims it, else the line itself.
+function toolProgressDetail(line) {
+  const found = toolProgressDialect(line);
+  if (found) return found;
+  const text = String(line == null ? "" : line).replace(/[\u0000-\u001F]/g, "").trim();
+  return text ? {kind: "text", text} : null;
+}
+// The detail for a row: the newest dialect line among the newest four the window saw, else the last
+// line. The window keeps only the newest line per poll, so it keeps its own short history.
+const TOOL_RECENT = 4;
+function toolRowDetail(row) {
+  const history = Array.isArray(row.history) ? row.history : [];
+  for (let index = history.length - 1; index >= 0 && index >= history.length - TOOL_RECENT; index--) {
+    const found = toolProgressDialect(history[index]);
+    if (found) return found;
+  }
+  return row.lastLine ? {kind: "text", text: String(row.lastLine).trim()} : null;
+}
+
+// The row's text: the tool, the clock, then the detail - or the stall hint when nothing has been
+// written for three minutes, which is the one fact a still picture cannot carry.
+function toolRowText(tool, elapsedSeconds, detail, silentSeconds) {
+  const name = String(tool || "tool").trim() || "tool";
+  const head = "\u27F3 " + name + " \u00B7 " + toolClock(elapsedSeconds);
+  if (silentSeconds >= TOOL_STALL_SECONDS) return head + " \u00B7 no output for " + toolCompact(silentSeconds);
+  if (!detail) return head;
+  if (detail.kind === "bar") {
+    const count = detail.percent ? detail.done + "%" : detail.done + "/" + detail.total;
+    return head + " " + toolBar(detail.total > 0 ? detail.done / detail.total : 0) + " " + count +
+      (detail.label ? " " + detail.label : "");
+  }
+  return detail.text ? head + " \u00B7 " + detail.text : head;
+}
+
 // While a tool call is in flight, show what the operation behind it is doing. A foreground
 // `bash` blocks its node-thread and returns nothing until it settles, so the window otherwise shows
 // only a clock - and a five-minute build is indistinguishable from a hang. The node already
@@ -2518,7 +2652,7 @@ function formatBytes(count) {
 // healthy), so the newest line is appended when there is one, not invented when there is not.
 async function refreshOperationProgress(health, running) {
   const activeTrace = trace;
-  if (!activeTrace || !activeTrace.pending || !running) return;
+  if (!activeTrace || !activeTrace.pending || !running) { clearToolProgress(); return; }
   // The owner is `run:<run_id>` - serve.rs sets it for the run before the interpreter starts,
   // so an in-turn operation carries the run, not the node-thread. An operation launched outside a run
   // carries the node-thread instead. A node built before this rename reports that id as `worker_id`
@@ -2532,7 +2666,8 @@ async function refreshOperationProgress(health, running) {
     : (running.worker_id != null ? running.worker_id : running.id);
   if (nodeThreadId != null) owners.push("worker:" + nodeThreadId);
   const operation = (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
-  if (!operation) return;
+  // No operation for this run any more: the call ended (or never started), so the row is not its.
+  if (!operation) { clearToolProgress(); return; }
   const bytes = Number(operation.output_bytes) || 0;
   let tail = "";
   if (bytes > 0) {
@@ -2556,6 +2691,19 @@ async function refreshOperationProgress(health, running) {
   // and detach this trace while it waits; only paint if this is still the live trace.
   if (trace !== activeTrace || !activeTrace.pending || typeof activeTrace.setProgress !== "function") return;
   activeTrace.setProgress((operation.state || "running") + " · " + formatBytes(bytes) + (tail ? " · " + tail : ""));
+  // The same facts, on the row above the status bar: the elapsed clock from the operation's own
+  // `elapsed_ms`, the newest line of its output, and - when the byte count has stopped moving - how
+  // long the silence is. `paintToolProgress` decides whether the row is this call's to draw.
+  const startedAt = Date.now() - (Number(operation.elapsed_ms) || 0);
+  const changed = !toolRow || toolRow.operationId !== operation.operation_id || toolRow.outputBytes !== bytes ||
+    toolRow.lastLine !== tail;
+  const history = toolRow && toolRow.operationId === operation.operation_id && Array.isArray(toolRow.history)
+    ? toolRow.history.slice(-(TOOL_RECENT * 2)) : [];
+  if (tail && (history.length === 0 || history[history.length - 1] !== tail)) history.push(tail);
+  toolRow = {operationId: operation.operation_id, tool: toolRow && toolRow.operationId === operation.operation_id ? toolRow.tool : "bash",
+    startedAt, lastLine: tail, history, outputBytes: bytes,
+    lastChangeAt: changed ? Date.now() : (toolRow ? toolRow.lastChangeAt : Date.now())};
+  paintToolProgress();
 }
 
 // The answer is the point; the route is reference. On reply, everything the run
@@ -5937,8 +6085,11 @@ function applyUpdateBanner(payload) {
 //
 // The composer footer (the account, context and model chips) is this page's status bar, and the same
 // sentence the CLI puts in its session-status-content area goes directly above it here: ONE yellow
-// line, the footer's own controls untouched and left where they were. The CLI's rule is the layout
-// rule (`lua/core/cli_view.lua`, `docs/RELEASE-UPDATE.md`):
+// line, the footer's own controls untouched and left where they were. Victor's 08/11 position spec is
+// why the line is inserted before the footer rather than above the text area: below the CLI's text
+// area and above its session status bar, and the window's order (textarea, notice, status bar) is what
+// both surfaces implement (`lua/core/cli_view.lua`, `rust/wa-term/src/terminal_editor.rs`,
+// `docs/RELEASE-UPDATE.md`):
 //
 //   * empty is no row at all - the element is removed, so there is never a blank gap above the
 //     status bar when this node is current;
@@ -5957,7 +6108,36 @@ function applyUpdateBanner(payload) {
 let sessionStandingNotice = "";
 let sessionUpdating = "";
 function paintSessionContent() {
-  return paintSessionNotice(sessionUpdating || sessionStandingNotice);
+  const standing = sessionUpdating || sessionStandingNotice;
+  if (standing) return paintSessionNotice(standing);
+  // Nothing about the node to say: a long tool call may have the row (docs/TOOL-PROGRESS.md).
+  const call = toolRow && toolRow.text;
+  if (call) return paintSessionNotice(call, toolRow.stalled ? "stall" : "tool");
+  return paintSessionNotice("");
+}
+
+// The long-call row's own painter: recompute the sentence from `toolRow`, then let
+// `paintSessionContent` decide whether it is this row's to draw. Called on every operation poll and
+// when the row would change; a call under two seconds is left to the status line.
+function paintToolProgress() {
+  if (!toolRow) return paintSessionContent();
+  const now = Date.now();
+  const elapsed = (now - toolRow.startedAt) / 1000;
+  const silent = (now - toolRow.lastChangeAt) / 1000;
+  if (elapsed < TOOL_MIN_SECONDS) { toolRow.text = ""; return paintSessionContent(); }
+  // The row's detail comes from the newest line the operation wrote, and the bar must not outlive the
+  // build: `toolProgressDetail` recognizes a dialect only in the newest four lines the caller kept, so
+  // a `cargo test` that has finished compiling shows its results rather than a frozen 143/412
+  // (`wa-tool-progress`'s `RECENT`, the same rule).
+  toolRow.text = toolScrub(toolRowText(toolRow.tool, elapsed, toolRowDetail(toolRow), silent));
+  toolRow.stalled = silent >= TOOL_STALL_SECONDS;
+  return paintSessionContent();
+}
+// The call is over: its row goes now, not on a timer - the operation's own record said so.
+function clearToolProgress() {
+  if (!toolRow) return null;
+  toolRow = null;
+  return paintSessionContent();
 }
 // `"updating…"` while an install is in progress and the node has not answered yet; empty to clear. It
 // never outlives the answer: `applyUpgradeState`/`recoverAfterNodeReturn` clear it on the recovery edge,
@@ -5968,21 +6148,25 @@ function paintUpdating(on) {
   document.body.classList.toggle("node-updating", !!on);
   return paintSessionContent();
 }
-function paintSessionNotice(text) {
+function paintSessionNotice(text, kind) {
   const row = document.querySelector("[data-session-status-content]");
   if (!text) {
     if (row) row.remove();
     return null;
   }
+  const classes = "session-status-content" + (kind === "tool" ? " session-status-tool"
+    : kind === "stall" ? " session-status-stall" : "");
   if (row) {
     if (row.textContent !== text) row.textContent = text;
+    if (row.className !== classes) row.className = classes;
+    row.dataset.sessionStatusContent = kind || "notice";
     return row;
   }
   const form = document.querySelector(".composer");
   if (!form || typeof document.createElement !== "function") return null;
   const line = document.createElement("div");
-  line.className = "session-status-content";
-  line.dataset.sessionStatusContent = "notice";
+  line.className = classes;
+  line.dataset.sessionStatusContent = kind || "notice";
   line.setAttribute("role", "status");
   line.setAttribute("aria-live", "polite");
   line.textContent = text;

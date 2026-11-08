@@ -42,6 +42,7 @@
 //! | listener address | `WASM_AGENT_MESH_BIND` | `127.0.0.1` |
 use crate::admission::{self, Admission, Admitter, Inbound};
 use crate::attest;
+use crate::attestation as attest_signer;
 use crate::audit::{FileSink, Sink, StderrSink, Tee};
 use crate::cache::PeerCache;
 use crate::client::{Client, ClientConfig, Inner};
@@ -270,6 +271,22 @@ fn policy_stamp(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
 }
 
+/// A file time is only a safe cache key once it has *settled*.
+///
+/// Windows derives file times from a clock that ticks about every 15.6 ms (a filesystem may be coarser
+/// still), so a writer's truncate and the write that follows it can carry the same stamp. A cache keyed
+/// on a fresh stamp would then miss the second write and keep serving the first answer until something
+/// else touched the file - which is a mount that never follows the policy. While a stamp is younger
+/// than this, the policy is re-read on every poll; a settled file costs exactly what it did before.
+const STAMP_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn stamp_settled(stamp: std::time::SystemTime) -> bool {
+    std::time::SystemTime::now()
+        .duration_since(stamp)
+        .map(|age| age >= STAMP_SETTLE)
+        .unwrap_or(false)
+}
+
 fn supervise(node_port: u16, poll: Duration, stop: Arc<AtomicBool>, status: Arc<Mutex<MountStatus>>) {
     let mut mounted: Option<Mounted> = None;
     let mut last_problem = String::new();
@@ -281,8 +298,9 @@ fn supervise(node_port: u16, poll: Duration, stop: Arc<AtomicBool>, status: Arc<
         // whole file exists to avoid. The last state stands, and the reason is on stderr once.
         let stamp = policy_stamp(&paths.policy);
         let policy = match (&cached, stamp) {
-            // Unchanged since the last read: the answer cannot have changed either.
-            (Some((cached_stamp, policy)), Some(stamp)) if *cached_stamp == stamp => policy.clone(),
+            // Unchanged since the last read, and settled: the answer cannot have changed either.
+            (Some((cached_stamp, policy)), Some(stamp))
+                if *cached_stamp == stamp && stamp_settled(stamp) => policy.clone(),
             _ => {
                 let loaded = match MeshPolicy::from_policy_file(&paths.policy) {
                     Ok(policy) => Some(policy),
@@ -294,8 +312,13 @@ fn supervise(node_port: u16, poll: Duration, stop: Arc<AtomicBool>, status: Arc<
                         None
                     }
                 };
-                if let Some(stamp) = stamp {
-                    cached = Some((stamp, loaded.clone()));
+                // A *failed* read is never cached. A writer truncates the file and then writes it, and
+                // Windows can give the two the same file-time tick; caching "unreadable" under that
+                // stamp would then pin the empty answer until something else changed the file, which is
+                // a mount that never comes up. Re-reading an unchanged unreadable file costs one small
+                // read per poll, and the log line above is still printed once per distinct reason.
+                if let (Some(stamp), Some(policy)) = (stamp, &loaded) {
+                    cached = Some((stamp, Some(policy.clone())));
                 }
                 loaded
             }
@@ -406,7 +429,7 @@ fn start_listener(
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
     let roster_verified = Roster::from_file(&paths.roster)
-        .and_then(|roster| roster.verify(&policy.roster_key, wire::now_seconds()))
+        .and_then(|roster| crate::seam::verify_roster(&roster, &policy.roster_key, wire::now_seconds()))
         .is_ok();
     let handler = Arc::new(
         LoopbackHandler::new(node_port, Duration::from_secs(120)).with_identity(handler_identity),
@@ -556,7 +579,7 @@ pub fn dispatch(request: &Value) -> Value {
         Err(error) => return unavailable("roster_unreadable", error.0),
     };
     let now_s = wire::now_seconds();
-    if let Err(error) = roster.verify(&policy.roster_key, now_s) {
+    if let Err(error) = crate::seam::verify_roster(&roster, &policy.roster_key, now_s) {
         return unavailable("roster_unverified", error.0);
     }
     let identity = match Identity::load(&paths.key) {
@@ -606,7 +629,7 @@ pub fn dispatch(request: &Value) -> Value {
         config,
     };
     let outcome = client.call(selector, capability, args, inner);
-    if let Err(error) = cache.save(&paths.cache, now_ms) {
+    if let Err(error) = crate::cache::save(&mut cache, &paths.cache, now_ms) {
         eprintln!("[mesh] peer cache not saved: {error}");
     }
     let mut answer = outcome.to_json();
@@ -686,7 +709,7 @@ fn admit_inbound(request: &Value) -> Value {
             // The mount holds this node's identity and signs *only here*, after `authorize()` said
             // allow: the proof a managed node's `wa_node_call` admits this call by its verb
             // ([`crate::attest`], docs/MESH.md §9). Nothing else in this crate signs an attestation.
-            let attestation = attest::sign(
+            let attestation = attest_signer::sign(
                 admitter.identity(),
                 &allowed.call.from.node_id,
                 allowed.verb.as_str(),
@@ -766,7 +789,7 @@ fn verify_roster(request: &Value) -> Value {
         Ok(roster) => roster,
         Err(error) => return json!({"ok": false, "error": "roster_unverified", "detail": error.0}),
     };
-    match roster.verify(key, wire::now_seconds()) {
+    match crate::seam::verify_roster(&roster, key, wire::now_seconds()) {
         Ok(()) => json!({
             "ok": true,
             "fleet": roster.fleet,
@@ -796,7 +819,7 @@ fn attest_call(request: &Value) -> Value {
             "detail": "caller, capability and one of read/control/call are required",
         });
     }
-    match attest::from_files(&Paths::resolve(), &caller, &verb, &capability, &field("signature")) {
+    match attest_signer::from_files(&Paths::resolve(), &caller, &verb, &capability, &field("signature")) {
         Ok(attestation) => json!({"ok": true, "attestation": attestation}),
         Err(error) => unavailable("identity_unavailable", error),
     }
@@ -856,7 +879,7 @@ pub fn dry_run(request: &Value) -> Value {
         Ok(roster) => roster,
         Err(error) => return unavailable("roster_unreadable", error.0),
     };
-    if let Err(error) = roster.verify(&policy.roster_key, wire::now_seconds()) {
+    if let Err(error) = crate::seam::verify_roster(&roster, &policy.roster_key, wire::now_seconds()) {
         return unavailable("roster_unverified", error.0);
     }
     let identity = match Identity::load(&paths.key) {
@@ -872,7 +895,7 @@ pub fn dry_run(request: &Value) -> Value {
         return json!({"ok": false, "error": "mesh_unknown_node", "node": selector, "fallback": null});
     };
     let verb = crate::hierarchy::Verb::from_capability(capability);
-    let verdict: Verdict = crate::hierarchy::authorize(&policy, &caller, &target, verb, wire::now_seconds());
+    let verdict: Verdict = crate::seam::decide(&policy, &caller, &target, verb, wire::now_seconds());
     json!({
         "ok": true, "decision": verdict.decision(), "reason": verdict.reason, "detail": verdict.detail,
         "verb": verb.as_str(), "from": {"node_id": caller.node_id, "level": caller.level},
@@ -937,7 +960,7 @@ impl Handler for LoopbackHandler {
             .identity
             .as_ref()
             .map(|identity| {
-                attest::sign(
+                attest_signer::sign(
                     identity,
                     &call.from.node_id,
                     call.verb.as_str(),

@@ -2734,6 +2734,10 @@ fn mesh_peer_call(lua: &Core, node_headers: &[(String, String)], body: &str) -> 
             Ok(answer) => answer,
             Err(error) => {
                 lua.rollback();
+                // A failed call must not leave the roster's one-shot admission behind: the node's own
+                // admission now accepts an attested caller only while it is in force (docs/MESH.md §9
+                // item 2), so the handoff has to end when the call does, however it ended.
+                mesh_clear_in_lua(lua);
                 error_body(&error)
             }
         };
@@ -2876,6 +2880,8 @@ fn mesh_admitted(lua: &Core, node_headers: &[(String, String)], body: &str) -> R
         Ok(answer) => answer,
         Err(error) => {
             lua.rollback();
+            // The admission ends with the call, even when the call failed (docs/MESH.md §9 item 2).
+            mesh_clear_in_lua(lua);
             error_body(&error)
         }
     };

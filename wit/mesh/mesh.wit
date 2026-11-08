@@ -1,0 +1,201 @@
+/// `wa:mesh` — the fleet's decisions, as a component (docs/MESH.md, docs/CORE-SPLIT.md).
+///
+/// The mesh has two halves and they fail in different ways. **What it decides** — is this roster the
+/// operator's, may this node command that one, what does the audit line say, is this attestation
+/// about *this* call — is a rule over a document and two node ids: no socket, no clock of its own, no
+/// key. **What it touches** — the listener, the relay, the rendezvous, the peer cache file, the node's
+/// identity — is the transport, and a component must not own a socket or a key.
+///
+/// This package is the first half. It exports five pure answers and imports nothing at all: not SQL
+/// (the mesh stores no rows), not a socket, not a clock (`now` is an argument), not a key. The one
+/// primitive it needs and cannot import is ed25519: it carries its own verifier
+/// (`ed25519-dalek`), which is the same ed25519 the node's ring verifies with — two implementations,
+/// one specification, asserted byte for byte against the canonical messages in `wa-mesh-core`.
+///
+/// **Nothing here is a JSON document.** A roster arrives as the operator's text because that is what a
+/// signature covers — the bytes, not a parse of them — and everything the seam answers is a record.
+/// The one string it *emits* is the audit line, and that is the point: the operator's log format is a
+/// contract between the two builds, so it is asserted literal-for-literal
+/// (`scripts/test-mesh-component.sh`).
+package wa:mesh@0.1.0;
+
+interface types {
+    /// One node, exactly as the roster file carries it: the id is `sha256(public-key)[..32]`, so a
+    /// roster entry that claims an id its key does not hash to is refused rather than believed.
+    record node {
+        id: string,
+        public-key: string,
+        name: string,
+        /// 0 is the top of the fleet. The ladder is small on purpose (0..=9).
+        level: u8,
+        /// `host:port`, most cheap to dial first is the *caller's* ordering, not the roster's.
+        addresses: list<string>,
+        /// Unix seconds the operator removed this node; `0` means valid. A revoked node is refused as
+        /// a caller and as a target.
+        revoked-at: u64,
+    }
+
+    /// Where the roster says a node is, in the form `decide` and `addresses` take: the two facts about
+    /// *who*, plus the addresses. `fingerprint` is the operator's own short check of the document.
+    record level-facts {
+        fleet: string,
+        fingerprint: string,
+        issued-at: u64,
+        expires-at: u64,
+        nodes: list<node>,
+    }
+
+    /// One per-peer grant from `policy.json`'s `mesh.grants`. `caller`/`target` match **node ids**, and
+    /// the patterns are the capability policy's (`*` and a single trailing `*`), never regular
+    /// expressions. `effect` is `allow` or `deny`, and deny is consulted first.
+    record grant {
+        caller: string,
+        target: string,
+        verb: string,
+        effect: string,
+        note: option<string>,
+    }
+
+    /// One call, as the decision needs it. The nodes arrive whole (level, revocation, id) so the seam
+    /// never has to ask the caller what its own level is: a caller that lies to itself reaches a target
+    /// that disagrees.
+    record call-facts {
+        caller: node,
+        target: node,
+        /// `read`, `call` or `control` (see `verb`), already resolved from the capability name.
+        verb: string,
+        now: u64,
+    }
+
+    /// The answer, with the word an audit line and an error body use. `reason` is one of the native
+    /// names (`hierarchy_allowed`, `hierarchy_denied`, `grant_allowed`, `grant_denied`, `revoked`,
+    /// `self_call`), so a refusal keeps reading the same on both paths.
+    record verdict {
+        allow: bool,
+        reason: string,
+        detail: string,
+    }
+
+    /// One line of `mesh.jsonl`. No message text, no capability arguments, no secrets: ids, levels,
+    /// verbs, the verdict, the reason, the address class and the duration (`docs/MESH.md` §6).
+    record audit-event {
+        /// `call` (outbound), `recv` (inbound) or `reply` (what was answered).
+        kind: string,
+        from-node: string,
+        to-node: string,
+        from-level: option<u8>,
+        to-level: option<u8>,
+        verb: string,
+        decision: string,
+        reason: string,
+        transport: string,
+        addr-class: string,
+        ok: bool,
+        status: option<u16>,
+        ms: u64,
+        attempt: u32,
+    }
+
+    /// The attestation a node signs after it admitted a call (`docs/MESH.md` §9): `mesh-allow` bound to
+    /// this caller, this verb, this capability and the caller's own request signature.
+    record ticket {
+        caller: string,
+        verb: string,
+        capability: string,
+        ts: u64,
+        signature: string,
+    }
+
+    /// What a verified attestation admits, in the words the local hop uses.
+    record ticket-facts {
+        node-id: string,
+        caller: string,
+        verb: string,
+        capability: string,
+        ts: u64,
+    }
+
+    /// One node's cached addresses, as the peer cache holds them: the roster's own list is passed
+    /// separately (it is in `node`), so this is only what the rendezvous or a successful dial taught.
+    variant roster-refusal {
+        /// Not JSON, or not this schema: `not-a-roster` carries the parser's own words.
+        not-a-roster(string),
+        /// No fleet key in `policy.json`, so nothing can be verified.
+        key-missing,
+        /// A key that is not 64 hex characters, carrying the validator's own sentence.
+        key-malformed(string),
+        /// The signature does not verify against the operator's key. A tampered roster lands here.
+        bad-signature,
+        /// Issued further in the future than the skew allows.
+        not-yet-valid,
+        /// Past `expires-at`, which is what makes a forgotten revocation eventually harmless.
+        expired,
+        version-unsupported(u32),
+        /// A level outside 0..=9, carrying the node's name.
+        level-out-of-range(string),
+        /// The same node id twice.
+        duplicate-node(string),
+        /// A `node-id` that is not the hash of its `public-key`, carrying the node's name.
+        node-id-mismatch(string),
+        /// An address that is not `host:port`.
+        bad-address(string),
+        /// More addresses than a node may declare, carrying its name.
+        too-many-addresses(string),
+        /// A name that is empty, too long or carries control characters.
+        bad-name(string),
+    }
+
+    /// Every reason an attestation is refused. `absent` is the one the local hop may answer by falling
+    /// back to the legacy capability list; the rest are refusals with their own names.
+    variant ticket-refusal {
+        absent,
+        /// A bound field does not match the call it accompanies, carrying the field's name.
+        mismatch(string),
+        bad-signature,
+        /// Signed too long ago (or in the future), carrying the age in seconds.
+        stale(u64),
+    }
+}
+
+interface mesh {
+    use types.{audit-event, call-facts, grant, level-facts, node, roster-refusal, ticket, ticket-facts, ticket-refusal, verdict};
+
+    /// Parse and verify the operator's roster: the signature first (a tampered document is a signature
+    /// failure, not a shape failure), then the window, then the nodes. The levels that come back are the
+    /// only levels the rest of the mesh may use — the rendezvous is never asked, and a node cannot
+    /// declare its own.
+    verify-roster: func(document: string, fleet-key: string, now: u64) -> result<level-facts, roster-refusal>;
+
+    /// May this node command that one? Revocation, then grants (deny before allow), then the
+    /// hierarchy: a node may call and control nodes at its own level or below, anything else needs an
+    /// operator's grant. Both ends of a call run this over the same roster, and the target's answer is
+    /// the one that executes anything.
+    decide: func(grants: list<grant>, facts: call-facts) -> verdict;
+
+    /// The verb a capability needs. Coarse on purpose, and an unclassified capability is `control`'s
+    /// neighbour `call` — never `read`, so a read-only grant cannot silently cover it.
+    verb: func(capability: string) -> string;
+
+    /// The audit line for one event: the operator's format, rendered by the build that decided.
+    render-audit: func(event: audit-event) -> string;
+
+    /// The exact bytes a node signs for one admitted call. The host signs them (the key is the node's);
+    /// this side owns the message, so both builds compose the same string.
+    attest-message: func(node-id: string, caller: string, verb: string, capability: string, caller-signature: string, ts: u64) -> string;
+
+    /// Check an attestation: its signature against *this* node's public key, its bound fields against
+    /// the call it accompanies, then its window.
+    verify-ticket: func(ticket: ticket, node-id: string, node-public-key: string, caller-signature: string, now: u64) -> result<ticket-facts, ticket-refusal>;
+
+    /// Where to dial: the roster's addresses in the roster's order, a private one before a public one,
+    /// then what the cache learned that the roster does not know — bounded to eight, deduplicated. The
+    /// roster wins on *who*; this only ever answers *where*.
+    addresses: func(target: node, learned: list<string>) -> list<string>;
+}
+
+/// The component: the fleet's rules, and nothing to hold. No import at all — no store, no path, no
+/// socket, no clock, no key — so an installed `mesh.wasm` grants nothing and can be reasoned about
+/// without asking what it was granted.
+world mesh-component {
+    export mesh;
+}

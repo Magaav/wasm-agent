@@ -143,6 +143,15 @@ Two properties this ordering is built to keep:
   stranger, and a node that pins a different fleet key refuses the push rather than being re-anchored
   silently.
 
+The roster decides **what executes**, not only whether the envelope may travel. After the mount
+verified the roster and the hierarchy it hands the call to the node's own `/node/call` admission
+together with an attestation it signed with this node's key; while that admission is in force,
+`wa_node_call` accepts the runner it names instead of asking `binding.authorize` — so a level-0 node
+can run a capability on a level-2 node that pins other operators, without the rendezvous being
+reachable. Everything else is unchanged: the pins still decide every call with no attestation, a
+forged, stale, replayed or differently-bound attestation falls back to them, and the caller's own
+signature, freshness window and replay guard run on both bases ([MESH.md](MESH.md) §9 item 2).
+
 ## Caller-side refusal reporting
 
 A peer refuses an unauthenticated call (`unknown_caller`, `forbidden_role`, `bad_signature`,

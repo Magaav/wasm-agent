@@ -224,8 +224,32 @@ function M.run(argv)
   if input.editor and host.input_commands then pcall(host.input_commands, json.encode(commands.menu())) end
   -- Set once the view is up (below): the `/status` snapshot refreshed at every round of a run.
   local refresh_status
+  -- The local views the client can draw while this interpreter is blocked
+  -- (`lua/core/local_views.lua`, docs/HOST.md), declared here because `agent.steer` below - the round
+  -- boundary - is where they are refreshed.
+  local local_views = dofile("lua/core/local_views.lua")
+  local views_reported = false
+  -- Publish the views that are missing or older than `opts.max_age`. Never blocks on the network
+  -- itself (`local_views.refresh`) and never waits for anything: it either hands the client a spec or
+  -- reports, once, that it could not.
+  local function publish_views(opts)
+    -- A panel needs the raw editor, the same condition `/status`'s snapshot has.
+    if not (view.editor and view.stdout) then return 0 end
+    local count, problem = local_views.refresh(opts)
+    if problem and not views_reported then
+      views_reported = true
+      -- Once, not once per round: a snapshot that never lands is a fact, and a fact repeated every
+      -- round is noise on a screen the reader is trying to read.
+      view:warn(redact.text("  local views: " .. tostring(problem) .. " (reported once)"))
+    end
+    return count
+  end
   agent.steer = function()
     if refresh_status then refresh_status() end
+    -- The round boundary: the only other moment at which this side runs during a run. `cached` keeps
+    -- the rendezvous out of the turn's critical path - a snapshot is allowed to be a minute old and to
+    -- say so, and is not allowed to make the model wait.
+    publish_views({ max_age = local_views.MAX_AGE, cached = true })
     local lines = input:take_steering()
     for _, line in ipairs(lines) do view:accepted(line) end
     return lines
@@ -305,6 +329,9 @@ function M.run(argv)
 
   local function turn(line)
     snapshot_status({ color = view.live, max_age = 300 })
+    -- Nothing is blocked yet: a live read of the roster is exactly what a `/nodes` typed in a moment
+    -- will be drawn from, and the reader is not waiting on anything but this turn.
+    publish_views({ max_age = local_views.MAX_AGE })
     view:run_started()
     local ok, reply = pcall(agent.run, agent, line)
     if not ok then
@@ -622,6 +649,7 @@ function M.run(argv)
       agent = agentlib.new(id, printer(view), "master", USER, NODE)
       agent.steer = function()
         if refresh_status then refresh_status() end
+        publish_views({ max_age = local_views.MAX_AGE, cached = true })
         local lines = input:take_steering()
         for _, text in ipairs(lines) do view:accepted(text) end
         return lines

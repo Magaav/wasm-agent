@@ -90,7 +90,15 @@ local function attempt(capability, verb, opts)
       attestation.signature = (attestation.signature:sub(1, 2) == "0" and "1" or "0") .. attestation.signature:sub(3)
     end
   end
+  -- The sequence every host path uses: the mount's admission for this call is handed over first
+  -- (`wa_mesh_admit`), the call runs, and the admission is cleared. The attested basis requires both
+  -- halves (docs/MESH.md §9 item 2), so the test makes both.
+  assert(json.decode(wa_mesh_admit(json.encode({
+    node_id = identity.node_id, public_key = identity.public_key, capability = capability,
+    request_id = "verb-admission", name = "peer", level = 1,
+  }))) .ok == true, "the host hands one admission over")
   local raw = wa_node_call(body, identity.node_id, identity.public_key, ts, signature, attestation)
+  wa_mesh_clear()
   local outer = json.decode(raw) or {}
   local inner = json.decode(outer.reply or "{}") or {}
   return inner

@@ -46,7 +46,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod admission;
-pub mod attest;
+pub mod attestation;
 pub mod audit;
 pub mod cache;
 pub mod client;
@@ -55,18 +55,25 @@ pub mod fleet;
 pub mod fleetchange;
 pub mod fleetkey;
 pub mod gate;
-pub mod hierarchy;
 pub mod host_call;
 pub mod http;
 pub mod identity;
-pub mod policy;
 pub mod relay;
-pub mod roster;
+pub mod seam;
 pub mod server;
 pub mod wire;
 
+// The mesh's *decisions* are `wa-mesh-core`'s, re-exported under the module names this crate has always
+// used, so `wa_mesh::roster::Roster`, `wa_mesh::authorize` and `wa_mesh::MeshPolicy` keep meaning what
+// they meant: one rule, compiled once for the node and once for the `wa:mesh` guest (`docs/CORE-SPLIT.md`).
+pub use wa_mesh_core::{attest, hierarchy, policy, roster};
+
 #[cfg(test)]
 pub mod testkit;
+#[cfg(test)]
+mod bench;
+#[cfg(test)]
+mod tests_component;
 #[cfg(test)]
 mod tests_e2e;
 #[cfg(test)]
@@ -81,6 +88,8 @@ pub use cache::PeerCache;
 pub use client::{Attempt, Client, ClientConfig, Inner, Outcome};
 pub use endpoint::Endpoint;
 pub use hierarchy::{authorize, Verb, Verdict};
+// The route: native, or the `mesh` component when `WA_MESH_COMPONENT=1` (docs/MESH.md, "A component").
+pub use seam::{decide, render_audit, verify_roster};
 pub use identity::Identity;
 pub use policy::{Effect, Grant, MeshPolicy};
 pub use relay::{RelayAnswer, RelayClient, RelayOutcome};

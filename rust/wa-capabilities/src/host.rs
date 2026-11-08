@@ -2988,6 +2988,7 @@ fn refresh_editor_size() -> Option<usize> {
     if state.editor.as_ref()?.row == 0 { return None; }
     resize_console(&mut state, columns as usize, rows as usize);
     refresh_build(&mut state);
+    refresh_tool_progress(&mut state);
     Some(state.editor.as_ref()?.status_row())
 }
 
@@ -2998,6 +2999,22 @@ fn refresh_build(state: &mut ConsoleInput) {
     let build = wa_term::build_status::current(editor.width);
     if build == editor.build { return; }
     editor.build = build;
+    let frame = layout_frame(state);
+    let _ = wa_term::terminal_editor::write(&frame);
+}
+
+/// A long tool call's row (`wa_term::tool_progress`, docs/TOOL-PROGRESS.md) as it reads now; redrawn
+/// only when its text changed, for the same reason `refresh_build` is.
+///
+/// The facts are published by whoever is waiting on the operation - `operations::foreground` for the
+/// `bash` tool, `operations::control("await")` for `operation start` - because this ticker is awake
+/// while Lua is blocked in that wait, and a wait loop is the only place that owns the operation's
+/// output tail. This only renders: one stat a quarter second, a read when the file moved.
+fn refresh_tool_progress(state: &mut ConsoleInput) {
+    let Some(editor) = state.editor.as_mut() else { return };
+    let row = wa_term::tool_progress::current(editor.width);
+    if row == editor.tool_progress { return; }
+    editor.tool_progress = row;
     let frame = layout_frame(state);
     let _ = wa_term::terminal_editor::write(&frame);
 }

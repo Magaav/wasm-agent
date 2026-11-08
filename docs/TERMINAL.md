@@ -35,6 +35,36 @@ Both heights are re-derived on every frame, so a resize moves the chat's region 
 frame only writes rows whose text changed (a full clear on a size change), which is what makes a
 streaming answer cost the rows that grew instead of the whole screen.
 
+## The status row does not blink
+
+The run-status line used to disappear and come back on every tool call: `cli_view`'s `clear` erased
+the status row (`\27[2K`) before *any* transcript write, and the line was drawn again a moment later.
+On a screen the status line has a row of its own, so that erase was never needed - nothing else
+writes there - and the pair of writes is what a reader saw as a blink.
+
+What the view does now, and what the tests pin:
+
+- `clear` leaves that row alone on a screen; the inline layout (where the status line shares the
+  reader's row) keeps its bounded blanking exactly as it was.
+- `status_draw` updates the row in place: address, the line, a pad over the columns the last frame
+  drew, then `\27[K` for the tail a wider mark may have left - the same rule `ticker_frame` follows
+  in `wa-capabilities`.
+- The line is taken off its row once, where a run ends (`status_blank`), not before every write.
+- Each frame - a transcript write plus the status, footer and session-status-content redraws that
+  follow it - is wrapped in synchronized output (DEC private mode 2026: `\27[?2026h` … `\27[?2026l`).
+  A terminal that implements the mode paints the frame as one update; one that does not ignores both
+  sequences and behaves as it did. A frame that writes nothing emits neither.
+- `rust/wa-term`'s editor leaves the status row alone for the same reason (`Editor::render`: "left
+  alone: the ticker owns it"), so the host's transcript redraw does not disturb it either.
+- `WASM_AGENT_CLI_SYNC=off` turns the frames off (the knob beside `WASM_AGENT_CLI_FRAME` and
+  `WASM_AGENT_CLI_TICKER`) for a terminal whose mode-2026 support is worse than the tearing it
+  prevents. It turns off the frames only: the erase is gone either way, so the blink does not come
+  back with the knob.
+
+`scripts/test-cli-view.lua` measures it: a scripted turn of ten tool calls on the boxed layout, one
+check per frame that the line is still on its row, and **zero** `\27[2K` writes to that row. Putting
+the erase back makes four of those checks fail, with one erase per tool call.
+
 ## Keys
 
 Bound by default:

@@ -1,6 +1,16 @@
 {
   "version": 1,
   "sensitive_capabilities": [],
+  "features": {
+    "selfloop": false,
+    "codemode": false,
+    "hooks": false,
+    "memory": false,
+    "gateway": false,
+    "mesh_component": false,
+    "agent_core": false,
+    "telemetry_sink": false
+  },
   "components": {
     "wa-whatsapp": {
       "note": "docs/GRANT-POLICY.md: an explicit requested send (whatsapp_send) may go to any chat - the owner's decision of 06/11 that the new bridge sends ordinary messages freely, like the old connector - under a global cap of 20/min, a per-chat cap of 6/min and a daily cap of 500, with every decision audited. The target is always the exact JID the caller named (chat:<jid>), so the old chat:self / chat:alerts aliases are gone: a status/broadcast or newsletter chat is denied outright, and the automatic paths (transcript posting and the own-chat alert log) keep their own gates (post_transcripts / post_allow / alerts) and are still charged by the global cap on every frame they write. net.dial and http.request mirror the addresses in rust/components/wa-whatsapp/manifest.json; each pattern may only ever NARROW that manifest. kv.write lists the key prefixes rust/components/wa-whatsapp/src/store.rs writes (dev, id/, ses/, pk/, spk/, sk/, sync/, ver/, mac/, lid/, tc/), the transcript prefix tx/ from src/lib.rs, the message fence prefix fence/ from src/guest.rs and the message index prefix ix/ from src/index.rs (records, secondary keys, the token index and the retention age index; docs/SERVICE-COMPONENTS.md, the message index section). credentials.read names the secret the component is given. stt.start is not sensitive (it has no target and no rate): the recognizer itself is granted by the manifest's capabilities.stt, and the empty rule records that this component asks the kernel to run it.",

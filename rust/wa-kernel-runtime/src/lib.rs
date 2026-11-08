@@ -32,6 +32,7 @@
 pub mod bus_host;
 pub mod components;
 pub mod dev;
+pub mod fabric_node;
 // The kernel half of a drained hot swap (`wa:kernel/drain`): wait for the work in flight instead of
 // stopping the instance and retrying its job (docs/SERVICE-COMPONENTS.md).
 pub mod drain;
@@ -48,6 +49,10 @@ pub mod profiles;
 pub mod registrations;
 pub mod queue_host;
 pub mod service_components;
+// The mesh seam served to the core: the `mesh` component (the roster, the hierarchy, the grants, the
+// audit line, the attestation), which imports nothing at all (`docs/MESH.md`, `docs/CORE-SPLIT.md`).
+pub mod mesh_host;
+
 // The self-loop seam served to the core: the `selfloop` component over its own scoped
 // `wa:kernel/sql` grant (docs/CORE-SPLIT.md).
 pub mod selfloop_host;

@@ -8,6 +8,10 @@ edition = "2021"
 # and the binary, and nothing else.
 [dependencies]
 wa-host-support = { path = "../wa-host-support" }
+# The row's *decision* (parsers, tail, stall rule, row text) for a long tool call: a leaf with one
+# dependency, shared with `wa-capabilities` (which feeds it the operation's tail) and pinned against
+# the Lua and window renderers by the same wording.
+wa-tool-progress = { path = "../wa-tool-progress" }
 serde_json = "1"
 base64 = "0.23"
 

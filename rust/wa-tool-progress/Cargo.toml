@@ -1,0 +1,16 @@
+[package]
+name = "wa-tool-progress"
+version = "0.1.0"
+edition = "2021"
+
+# What a long tool call is doing, as one line (docs/TOOL-PROGRESS.md): the parsers for the progress
+# dialects a build or an install speaks (cargo, npm/pnpm, pip, git), the tail that keeps the last
+# lines of a running operation, and the row text the three surfaces draw (`wa chat`'s
+# session-status-content row, the window's footer, and the transcript log line).
+#
+# A leaf with one dependency: no host, no console, no operation manager. The I/O that feeds it
+# (reading an operation's output tail, writing the live file) belongs to `wa-capabilities`; the
+# colour and the clipping belong to `wa-term` (Rust) and `lua/core/cli_view.lua` (Lua). This crate
+# is only the decision, so both renderers and the tests can share it.
+[dependencies]
+serde_json = "1"

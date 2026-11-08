@@ -353,7 +353,9 @@ impl LocalWorker<'_> {
                 }
                 Decision::Local { because } => match because {
                     LocalReason::GraceElapsed => metrics.fallback_taken += 1,
-                    LocalReason::RemoteOffline | LocalReason::RemoteSlower => metrics.local_immediate += 1,
+                    LocalReason::RemoteOffline | LocalReason::RemoteSlower | LocalReason::FabricLocal => {
+                        metrics.local_immediate += 1
+                    }
                 },
             }
         }

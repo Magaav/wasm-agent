@@ -32,8 +32,9 @@ local function text(value)
   return ok and encoded or tostring(value)
 end
 
--- The two interpreters. The switch is read once, when the module loads, exactly as a node reads it, so
--- the test flips the *host's* answer while each instance loads rather than reaching into the module.
+-- The two interpreters. The switch is `docs/FEATURES.md`'s `codemode` feature, resolved through
+-- `lua/core/features.lua` at every route; two instances of the module share one `host.features` table, so
+-- the seam instance carries the module's own test seam (`M.seam_override`) rather than a host stub.
 local memory = dofile('lua/core/memory.lua')
 memory.setup()
 local policy = dofile('lua/core/codemode_policy.lua')
@@ -41,13 +42,10 @@ local real_getenv, real_codemode, real_log = host.getenv, host.codemode, host.lo
 local logged = {}
 
 local function instance(seam)
-  host.getenv = function(name)
-    if name == 'WA_CODEMODE_COMPONENT' then return seam and '1' or nil end
-    return real_getenv(name)
-  end
   host.log = function(line) logged[#logged + 1] = tostring(line) end
   local module = dofile('lua/core/codemode.lua')
-  host.getenv, host.log = real_getenv, real_log
+  host.log = real_log
+  if seam then module.seam_override = function() return true, 'active_component' end end
   return module
 end
 

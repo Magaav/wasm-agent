@@ -1,0 +1,10 @@
+{
+  "name": "agent-core",
+  "kind": "core",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "needs_wasi_sdk": true,
+  "description": "The Lua core as one component (docs/KERNEL.md, A2.1): wa-host's vendored Lua 5.4 interpreter, every `host.*` reached through the single wa:kernel/host.call import, so one agent turn runs inside the sandbox instead of in the node process. The node picks it up with WA_AGENT_CORE_WASM, else `<components dir>/agent-core.wasm`; the `agent_core` feature (docs/FEATURES.md) is what says whether the node routes turns to it.",
+  "capabilities": {},
+  "limits": {"memory_mb": 256}
+}

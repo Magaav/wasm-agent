@@ -137,13 +137,19 @@ pub struct Editor {
     /// Whether the status line has its row (only while a run is in flight).
     pub status: bool,
     /// A sandbox rebuild in progress (crate::build_status). It shares the **session-status-content**
-    /// row with `session_notice` - one line directly above the status line - and replaces it while
-    /// there is a build to show (29/10, 07/11). "" = no build, so the notice (or the chat) has it.
+    /// row with `session_notice` - one line between the box and the footer - and replaces it while
+    /// there is a build to show (29/10, then 08/11 for the row's position). "" = no build, so the
+    /// notice (or the box) has the row.
     pub build: String,
     /// The **session-status-content** line's standing text: a transient session notice, plain text,
     /// painted yellow here (`lua/core/cli_view.lua` paints the same sentence in the canonical layout,
-    /// `lua/core/update_banner.lua` owns the wording). "" = no notice, so the chat keeps the row.
+    /// `lua/core/update_banner.lua` owns the wording). "" = no notice, so the box keeps the row.
     pub session_notice: String,
+    /// A long tool call's progress (`crate::tool_progress`, `docs/TOOL-PROGRESS.md`): `⟳ bash · 3m10s
+    /// ▕███░░▏ 143/412 compiling serde_json`, already coloured and clipped by that module. It is the
+    /// THIRD claimant of the session-status-content row and the lowest: a build loader and the standing
+    /// notice both win, because they are about the node while this is about the call. "" = no row.
+    pub tool_progress: String,
     /// Lines submitted during the run that the agent has not taken yet: drawn above the status line
     /// (`Steering queued`), never into the chat, so a steer is not printed twice. The host sets it.
     pub queued: Vec<String>,
@@ -334,8 +340,11 @@ impl Editor {
         if self.bash { self.bash = false; return true; }
         lone
     }
-    /// The box's bottom border, always the row above the footer.
-    pub fn bottom(&self) -> usize { self.row }
+    /// The box's bottom border: the row above the footer, one higher while the session-status-content
+    /// line has something to say - the line sits between the box and the footer (Victor, 08/11).
+    pub fn bottom(&self) -> usize { self.row.saturating_sub(self.session_rows()) }
+    /// The footer row: the last row of the screen, which is the CLI's session status bar.
+    pub fn footer_row(&self) -> usize { self.row + 1 }
     /// Inside a paste: an Esc here is the start of the paste's end marker, never the Esc key.
     pub fn pasting(&self) -> bool { self.paste }
     /// The input's top divider: as many rows above the bottom one as the draft shows.
@@ -343,19 +352,22 @@ impl Editor {
         let (lines, cursor) = self.layout();
         self.frame_geometry(lines.len(), cursor.0).2
     }
-    /// Bottom up: footer, bottom divider, the draft, top divider, the slash menu (opening upward),
-    /// the status line, the session-status-content row, then the output. Nothing is reserved that is
-    /// not drawn, so the chat sits right on top of the input.
+    /// Bottom up: footer, the session-status-content line, the box's bottom divider, the draft, the
+    /// top divider, the slash menu (opening upward), the status line, then the output. The run's own
+    /// status line stays above the box; the standing session line sits below it, between the box and
+    /// the footer - the order the window has (text area, notice, status bar). Nothing is reserved that
+    /// is not drawn, so the chat sits right on top of the input.
     pub fn status_row(&self) -> usize { self.top().saturating_sub(self.menu_rows() + 1) }
-    /// The **session-status-content** row: ONE line directly above the session status bar, shared by
-    /// the build loader and the standing session notice (`build` wins, `session_notice` otherwise).
-    /// It exists only while one of them has something to say - an empty area takes no line, so the
-    /// chat keeps the row and there is never a blank gap above the status bar. With no run there is
-    /// no status bar to sit above, so the row takes the row the status line would have had.
-    pub fn session_row(&self) -> usize { self.status_row().saturating_sub(usize::from(self.status)) }
+    /// The **session-status-content** row: ONE line directly below the CLI's text area and directly
+    /// above the session status bar (the footer), shared by the build loader, the standing session
+    /// notice and a long tool call's progress (`build` wins, then `session_notice`, then `tool_progress`). It exists only while one of them has
+    /// something to say - an empty area takes no line, so the box keeps the row and there is never a
+    /// blank gap above the status bar. The row is fixed at the last row before the footer, so it does
+    /// not move when the draft grows, when the slash menu opens or while a run's status line shows.
+    pub fn session_row(&self) -> usize { self.row }
     fn session_rows(&self) -> usize { usize::from(self.has_session_content()) }
     fn has_session_content(&self) -> bool {
-        !self.build.is_empty() || !self.session_notice.trim().is_empty()
+        !self.build.is_empty() || !self.session_notice.trim().is_empty() || !self.tool_progress.is_empty()
     }
     /// That row, rendered: the loader's own line when a build is showing (it carries its colour and
     /// is already clipped), else the notice in the warning yellow, clipped to the width so the row
@@ -363,14 +375,15 @@ impl Editor {
     pub fn session_content(&self) -> String {
         if !self.build.is_empty() { return self.build.clone(); }
         let notice = self.session_notice.trim();
-        if notice.is_empty() { return String::new(); }
+        if notice.is_empty() { return self.tool_progress.clone(); }
         let text = clip_cells(notice, self.width);
         if std::env::var_os("NO_COLOR").is_some() { text } else { format!("{NOTICE_ROW}{text}{RESET}") }
     }
-    /// The output region's last row: everything the bottom furniture draws is above it, and the
-    /// session-status-content row is reserved here the moment it has something to say.
+    /// The output region's last row: everything the bottom furniture draws is above it. The run's
+    /// status line and the queued-steer rows are taken out of the chat here; the session-status-content
+    /// row is below the box, so it costs the chat nothing.
     pub fn out_bottom(&self) -> usize {
-        self.session_row().saturating_sub(self.session_rows() + self.queued_count())
+        self.status_row().saturating_sub(usize::from(self.status) + self.queued_count())
     }
     /// How many rows the queued steers take above the status line (only while a run is in flight).
     fn queued_count(&self) -> usize {
@@ -566,9 +579,10 @@ impl Editor {
         for row in self.status_row() + 1..top {
             frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
         }
-        // Session-status-content, one row directly above the status line: the build loader while a
+        // Session-status-content, the row between the box and the footer: the build loader while a
         // build is in flight (it replaces the notice), the standing notice otherwise, nothing when
-        // there is neither - and then the row is the chat's again, which is what `out_bottom` says.
+        // there is neither - and then the box's bottom border takes the row, which is what `bottom`
+        // and `out_bottom` account for. Drawn before the box, so a shrinking box never erases it.
         let session = self.session_content();
         if !session.is_empty() {
             frame.push_str(&format!("\x1b[{};1H\x1b[2K{session}", self.session_row()));
@@ -590,7 +604,7 @@ impl Editor {
             }
         }
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{border}{}{RESET}", bottom, "\u{2500}".repeat(self.width)));
-        // The footer under the input - hints or the last run's numbers on the left, the model on the
+        // The footer under the box - hints or the last run's numbers on the left, the model on the
         // right - and the slash menu above the input, opening upward toward the chat.
         let right: String = self.footer_right.chars().take(self.width / 2).collect();
         let right_width: usize = right.chars().map(cell_width).sum();
@@ -599,9 +613,9 @@ impl Editor {
         let (color, text) = if !self.notice.is_empty() { (NOTICE, &self.notice) }
             else if self.bash { (BASH, &bash_hint) } else { (HINT, &self.footer) };
         let footer: String = text.chars().take(room).collect();
-        frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{footer}{RESET}", self.row + 1));
+        frame.push_str(&format!("\x1b[{};1H\x1b[2K{color}{footer}{RESET}", self.footer_row()));
         if !right.is_empty() {
-            frame.push_str(&format!("\x1b[{};{}H{MODEL}{right}{RESET}", self.row + 1, self.width - right_width + 1));
+            frame.push_str(&format!("\x1b[{};{}H{MODEL}{right}{RESET}", self.footer_row(), self.width - right_width + 1));
         }
         if menu > 0 {
             let selected = self.menu_at.min(items.len() - 1);
@@ -1094,51 +1108,54 @@ mod tests {
         assert!(!two.contains(PLACEHOLDER), "no hint once there is a draft");
     }
     #[test]
-    fn a_rebuild_row_sits_above_the_box_only_while_there_is_one() {
+    fn a_rebuild_row_sits_between_the_box_and_the_footer_only_while_there_is_one() {
         let mut e = Editor::default(); e.row = 29; e.width = 60; e.height = 3;
         assert_eq!(e.out_bottom(), 26, "no build: the chat ends right on the input");
         e.build = "\u{27f3} building".into();
-        assert_eq!((e.status_row(), e.session_row(), e.out_bottom()), (26, 26, 25),
-            "a build takes one row above the input and nothing else moves");
-        assert!(e.render().contains("\x1b[26;1H\x1b[2K\u{27f3} building"), "and is drawn there");
+        assert_eq!((e.status_row(), e.session_row(), e.out_bottom()), (25, 29, 25),
+            "a build takes the row under the box and pushes the box, not the chat, up one");
+        assert!(e.render().contains("\x1b[29;1H\x1b[2K\u{27f3} building"), "and is drawn there");
         e.status = true;
-        assert_eq!((e.status_row(), e.session_row(), e.out_bottom()), (26, 25, 24),
-            "a run's status line keeps its own row and the build sits above it");
+        assert_eq!((e.status_row(), e.session_row(), e.out_bottom()), (25, 29, 24),
+            "a run's status line keeps its own row above the box and the build stays under it");
     }
 
     // ---- session-status-content -----------------------------------------------------------
-    // One line directly above the session status bar for transient session notices; the build
-    // loader replaces the notice on that same line; empty takes no line at all. These are the twin
-    // of `lua/core/cli_view.lua`'s render tests (`scripts/test-cli-view.lua`) and of the
-    // `build_status` ones: three renderers, one layout rule.
+    // One line between the CLI's text area and its session status bar (the footer) for transient
+    // session notices; the build loader replaces the notice on that same line; empty takes no line at
+    // all. These are the twin of `lua/core/cli_view.lua`'s render tests (`scripts/test-cli-view.lua`)
+    // and of the `build_status` ones: three renderers, one layout rule.
     const SESSION_NOTICE: &str = "Update available (cccccccccccc): run wa update or /update";
 
     #[test]
-    fn no_notice_is_no_row_and_the_chat_keeps_it() {
+    fn no_notice_is_no_row_and_the_box_keeps_it() {
         let mut e = Editor::default(); e.row = 29; e.width = 60; e.height = 3;
         assert_eq!(e.session_content(), "");
-        assert_eq!((e.session_row(), e.out_bottom()), (26, 26), "no row: the chat ends on the input row");
+        assert_eq!((e.bottom(), e.out_bottom()), (29, 26), "no row: the box sits on its row and the chat ends on the input");
         assert!(!e.render().contains("Update available"));
         // An empty notice and a whitespace one are both nothing.
         e.session_notice = "  \t ".into();
-        assert_eq!(e.out_bottom(), 26, "whitespace is not a line");
+        assert_eq!((e.bottom(), e.out_bottom()), (29, 26), "whitespace is not a line");
     }
 
     #[test]
-    fn the_notice_is_one_yellow_row_above_the_status_bar() {
+    fn the_notice_is_one_yellow_row_below_the_text_area_and_above_the_status_bar() {
         let mut e = Editor::default(); e.row = 29; e.width = 60; e.height = 3;
         e.session_notice = SESSION_NOTICE.into();
-        assert_eq!((e.session_row(), e.out_bottom()), (26, 25), "the row is taken out of the chat");
+        assert_eq!((e.bottom(), e.session_row(), e.out_bottom()), (28, 29, 25),
+            "the row under the box, the box one row higher, the chat one row shorter");
         let row = e.session_content();
         assert!(row.starts_with(crate::build_status::NOTICE), "painted the warning yellow: {row:?}");
         assert!(row.ends_with("\x1b[0m"));
         assert!(crate::selection::plain(&row) == SESSION_NOTICE, "the sentence is unchanged");
         let frame = e.render();
-        assert!(frame.contains("\x1b[26;1H\x1b[2K"), "drawn on its own row");
-        // With a run in flight the status line is on 26 and the notice is directly above it.
+        assert!(frame.contains(&format!("\x1b[29;1H\x1b[2K{row}")), "drawn on the row under the box");
+        assert_eq!(e.footer_row(), 30, "with the status bar still on the last row");
+        // With a run in flight the status line is above the box and the notice never moves there.
         e.status = true;
-        assert_eq!((e.session_row(), e.out_bottom()), (25, 24), "directly above the status bar");
-        assert!(e.render().contains(&format!("\x1b[25;1H\x1b[2K{row}")));
+        assert_eq!((e.status_row(), e.session_row(), e.out_bottom()), (25, 29, 24),
+            "the run's own line is above the box, the notice below it");
+        assert!(e.render().contains(&format!("\x1b[29;1H\x1b[2K{row}")));
     }
 
     #[test]
@@ -1149,13 +1166,38 @@ mod tests {
         let frame = e.render();
         assert!(frame.contains("\u{27f3} building wasm-agent"), "the loader is drawn");
         assert!(!frame.contains("Update available"), "and the notice is gone from the same row");
-        assert_eq!(e.session_row(), 26, "the row does not move when the loader replaces the notice");
+        assert_eq!(e.session_row(), 29, "the row does not move when the loader replaces the notice");
         assert_eq!(e.out_bottom(), 25, "nor does the chat");
         // The build ends: the loader goes, the notice is back without moving anything.
         e.build.clear();
         let after = e.render();
         assert!(after.contains("Update available (cccccccccccc)") && !after.contains("building wasm-agent"));
-        assert_eq!(e.session_row(), 26);
+        assert_eq!(e.session_row(), 29);
+    }
+
+    #[test]
+    fn a_long_tool_call_is_the_rows_third_claimant_and_the_lowest() {
+        let mut e = Editor::default(); e.row = 29; e.width = 80; e.height = 3;
+        e.tool_progress = "\u{27f3} bash \u{b7} 3m10s \u{b7} compiling serde_json".into();
+        // Alone, it is the row - and it takes the row out of the chat like the notice does.
+        assert_eq!(e.session_content(), "\u{27f3} bash \u{b7} 3m10s \u{b7} compiling serde_json");
+        assert_eq!(e.session_row(), 29); let shrunk = e.out_bottom();
+        assert!(e.render().contains("compiling serde_json"));
+        // The standing notice wins over it: a node fact outranks a call fact.
+        e.session_notice = SESSION_NOTICE.into();
+        assert_eq!(crate::selection::plain(&e.session_content()), SESSION_NOTICE);
+        assert!(!e.render().contains("compiling serde_json"), "the call's line is not drawn under the notice");
+        // And a build wins over both.
+        e.build = "\u{27f3} building wasm-agent compiling serde".into();
+        assert!(e.session_content().contains("building wasm-agent"));
+        // The call ends: the row goes back down the precedence chain, and finally away.
+        e.build.clear();
+        assert_eq!(crate::selection::plain(&e.session_content()), SESSION_NOTICE);
+        e.session_notice.clear();
+        assert!(e.session_content().contains("compiling serde_json"));
+        e.tool_progress.clear();
+        assert_eq!(e.session_content(), "");
+        assert!(e.out_bottom() > shrunk, "no row: the chat keeps it again");
     }
 
     #[test]
@@ -1167,7 +1209,7 @@ mod tests {
         assert!(row.ends_with('\u{2026}'), "with an ellipsis");
         assert!(!row.contains('\n'), "one row, never wrapped");
         let frame = e.render();
-        assert!(!frame.contains(&format!("\x1b[27;1H\x1b[2K{row}")), "the box top is not the notice's row");
+        assert!(!frame.contains(&format!("\x1b[28;1H\x1b[2K{row}")), "the box's bottom border is not the notice's row");
     }
     fn commands() -> Vec<Command> {
         ["/help", "/login", "/logout-all", "/remember"].iter().map(|name| Command {

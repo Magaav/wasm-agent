@@ -4,6 +4,7 @@
 //! - `terminal_editor`: raw mode, the editor, panels and their redraw.
 //! - `selection`: what the pointer is on.
 //! - `build_status`: the deploy's progress line.
+//! - `tool_progress`: a long tool call's progress, on the same row (`docs/TOOL-PROGRESS.md`).
 //! - `transcript`: the scrollback, its navigation and its keys.
 //! - `scroll`: the fullscreen transcript on the alternate screen (`docs/TERMINAL.md`) - new, only
 //!   used when a caller chooses it, so the inline console above is unchanged.
@@ -19,4 +20,5 @@ pub mod build_status;
 pub mod scroll;
 pub mod selection;
 pub mod terminal_editor;
+pub mod tool_progress;
 pub mod transcript;

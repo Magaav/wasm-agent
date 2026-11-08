@@ -19,13 +19,23 @@ wa-vault = { path = "../wa-vault" }
 wa-keystore = { path = "../wa-keystore" }
 zeroize = "1"
 wa-host-support = { path = "../wa-host-support" }
+# The feature resolver (docs/FEATURES.md): `services {"action":"features"}` answers through it, so the
+# service surface and the Lua gates cannot disagree about which path a feature is on.
+wa-features = { path = "../wa-features" }
 wa-governance = { path = "../wa-governance" }
 wa-grant-policy = { path = "../wa-grant-policy" }
+# The mesh's decisions (docs/CORE-SPLIT.md, the `wa:mesh` seam): `mesh_host` serves them from the
+# component and speaks the roster's refusal vocabulary back to the node. A pure leaf crate: no socket,
+# no wasmtime, no file.
+wa-mesh-core = { path = "../wa-mesh-core" }
 wa-queue = { path = "../wa-queue" }
 # Queue phase 2 for speech (docs/QUEUE.md): the request payload, the signed wire bodies, the
 # preference policy and both worker loops. A leaf crate (wa-queue + serde_json) the node half in
 # `stt_node.rs` is wired to; it adds no arrow the queue split did not already have.
 wa-stt-remote = { path = "../wa-stt-remote" }
+# The compute fabric (docs/FABRIC.md): the rules, the score, the offer/accept window and the lease as
+# `wa-queue`'s lease. A leaf crate (wa-queue + serde_json); `fabric_node.rs` is the node half.
+wa-fabric = { path = "../wa-fabric" }
 wa-bus = { path = "../wa-bus" }
 wa-state = { path = "../wa-state" }
 wa-kv = { path = "../wa-kv" }

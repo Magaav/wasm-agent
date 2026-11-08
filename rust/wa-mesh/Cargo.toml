@@ -13,12 +13,21 @@ description = "Direct node-to-node calls by hierarchy: signed fleet roster, gran
 #   bridge the other capabilities use.
 # - `wa-grant-policy`: the `Pattern` type the operator's grant rules are written in, so the mesh's
 #   `deny`-before-`allow` rules match targets exactly the way a capability rule does.
+# - `wa-mesh-core`: every *decision* the mesh makes - the roster, the hierarchy, the grants, the
+#   attestation's bytes, the audit line, the peer-address rule - with no socket, no file and no key.
+#   `docs/CORE-SPLIT.md`'s fourth extraction (`wa:mesh`); this crate keeps the transport, the files and
+#   the node's identity, and the `mesh` component is the same crate compiled with a different crypto.
 # - `ring`: the node's existing ed25519 identity (there is no second identity to rotate).
 # - `serde`/`serde_json`: the roster, the policy section, the cache and the wire envelopes. No new
 #   external dependency is added for HTTP: the mesh speaks one small, explicit HTTP/1.1 dialect of
 #   its own (`src/http.rs`) so that a body is never ambiguous about who wrote it.
 [dependencies]
 wa-host-support = { path = "../wa-host-support" }
+wa-mesh-core = { path = "../wa-mesh-core", features = ["fs"] }
+# The `mesh` component, served: `WA_MESH_COMPONENT=1` routes the decisions in `crate::seam` through the
+# installed guest. The kernel side of that route is `wa_kernel_runtime::mesh_host` - the crate that owns
+# wasmtime - so this is the one arrow the split adds, and it points at the kernel, never back.
+wa-kernel-runtime = { path = "../wa-kernel-runtime" }
 wa-grant-policy = { path = "../wa-grant-policy" }
 ring = "0.17"
 # The fleet key may live in the vault (`wa fleet sign --key vault:<name>`, docs/VAULT.md): the seed is

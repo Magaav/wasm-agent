@@ -9,7 +9,7 @@
 //! is not the hash of its `public_key`, a level above [`MAX_LEVEL`] and a malformed address are all
 //! load errors. A roster is the authority on who may command whom, so a typo in it must be visible
 //! rather than silently weaker or stronger than the operator meant.
-use crate::identity::{derive_node_id, sha256_hex, unhex, verify, Identity};
+use crate::crypto::{derive_node_id, sha256_hex, unhex, Crypto, Signer};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -39,6 +39,97 @@ impl std::fmt::Display for RosterError {
 }
 
 impl std::error::Error for RosterError {}
+
+/// The same refusal, as a case rather than a sentence.
+///
+/// The sentence stays the contract an operator reads (`roster_unverified:bad_signature`,
+/// `level_out_of_range:oracle`) and every existing test asserts it, so it is unchanged. This is the
+/// typed view the `wa:mesh` seam needs: a component answers with a case, and a case cannot be
+/// re-lettered by a host that only forwards strings. `problem()` is derived from the sentence for
+/// exactly that reason -- one place writes the words, and the translation is tested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RosterProblem {
+    NotARoster(String),
+    KeyMissing,
+    /// A key that is not a 64-hex ed25519 public key. The sentence is the validator's own.
+    KeyMalformed(String),
+    BadSignature,
+    NotYetValid,
+    Expired,
+    VersionUnsupported(u32),
+    LevelOutOfRange(String),
+    DuplicateNode(String),
+    NodeIdMismatch(String),
+    PublicKeyMalformed(String),
+    BadAddress(String),
+    TooManyAddresses(String),
+    BadName(String),
+    /// A refusal this build does not classify. It is passed through as text, never as "verified".
+    Other(String),
+}
+
+/// The sentence a case is reported with. It is the *inverse* of [`RosterError::problem`] and it is
+/// asserted to round-trip, because the seam has to answer with the same words the native path answers
+/// with: a component's case is not allowed to become a different refusal on its way back to an
+/// operator.
+impl RosterProblem {
+    pub fn sentence(&self) -> String {
+        match self {
+            RosterProblem::NotARoster(text) => text.clone(),
+            RosterProblem::KeyMissing => "roster_key_missing".to_string(),
+            RosterProblem::KeyMalformed(text) => text.clone(),
+            RosterProblem::BadSignature => "roster_unverified:bad_signature".to_string(),
+            RosterProblem::NotYetValid => "roster_not_yet_valid".to_string(),
+            RosterProblem::Expired => "roster_expired".to_string(),
+            RosterProblem::VersionUnsupported(version) => {
+                format!("version {version} (this build speaks {ROSTER_SCHEMA})")
+            }
+            RosterProblem::LevelOutOfRange(name) => format!("level_out_of_range:{name} (0..={MAX_LEVEL})"),
+            RosterProblem::DuplicateNode(id) => format!("duplicate_node:{id}"),
+            RosterProblem::NodeIdMismatch(name) => format!("node_id_mismatch:{name}"),
+            RosterProblem::PublicKeyMalformed(name) => format!("public_key_malformed:{name}"),
+            RosterProblem::BadAddress(rest) => format!("bad_address:{rest}"),
+            RosterProblem::TooManyAddresses(name) => format!("too_many_addresses:{name}"),
+            RosterProblem::BadName(text) => text.clone(),
+            RosterProblem::Other(text) => text.clone(),
+        }
+    }
+}
+
+impl RosterError {
+    pub fn problem(&self) -> RosterProblem {
+        let text = self.0.as_str();
+        let after = |prefix: &str| text[prefix.len()..].to_string();
+        let named = |prefix: &str| {
+            // `level_out_of_range:oracle (0..=9)` -> `oracle`
+            let rest = after(prefix);
+            rest.split(" (").next().unwrap_or_default().trim().to_string()
+        };
+        match () {
+            _ if text.starts_with("not a valid roster") => RosterProblem::NotARoster(text.to_string()),
+            _ if text == "roster_key_missing" => RosterProblem::KeyMissing,
+            _ if text.starts_with("mesh.roster_key:") || text.starts_with("roster_key ") => {
+                RosterProblem::KeyMalformed(text.to_string())
+            }
+            _ if text == "roster_unverified:bad_signature" => RosterProblem::BadSignature,
+            _ if text == "roster_not_yet_valid" => RosterProblem::NotYetValid,
+            _ if text == "roster_expired" => RosterProblem::Expired,
+            _ if text.starts_with("version ") => RosterProblem::VersionUnsupported(
+                text.split_whitespace().nth(1).and_then(|word| word.parse().ok()).unwrap_or(0),
+            ),
+            _ if text.starts_with("level_out_of_range:") => RosterProblem::LevelOutOfRange(named("level_out_of_range:")),
+            _ if text.starts_with("duplicate_node:") => RosterProblem::DuplicateNode(after("duplicate_node:")),
+            _ if text.starts_with("node_id_mismatch:") => RosterProblem::NodeIdMismatch(named("node_id_mismatch:")),
+            _ if text.starts_with("public_key_malformed:") => {
+                RosterProblem::PublicKeyMalformed(named("public_key_malformed:"))
+            }
+            _ if text.starts_with("bad_address:") => RosterProblem::BadAddress(after("bad_address:")),
+            _ if text.starts_with("too_many_addresses:") => RosterProblem::TooManyAddresses(after("too_many_addresses:")),
+            _ if text.starts_with("nodes.name") => RosterProblem::BadName(text.to_string()),
+            _ => RosterProblem::Other(text.to_string()),
+        }
+    }
+}
 
 fn bad<T>(why: impl Into<String>) -> Result<T, RosterError> {
     Err(RosterError(why.into()))
@@ -135,21 +226,13 @@ pub struct Roster {
 /// Who signs a roster.
 ///
 /// Two implementations, and they are the two places an operator's fleet key may live: a node key file
-/// (`Identity`) and the vault (`wa fleet sign --key vault:<name>`, where the seed is opened for one
-/// signature and never exported). A node's own call path never signs a roster.
+/// (`identity::Identity`, implemented in `wa-mesh`, which owns the key) and the vault (`wa fleet sign
+/// --key vault:<name>`, where the seed is opened for one signature and never exported). A node's own
+/// call path never signs a roster, and the `wa:mesh` guest implements neither: it builds the bytes and
+/// verifies them, and the host signs.
 pub trait RosterSigner {
     fn public_key(&self) -> String;
     fn sign_message(&mut self, message: &str) -> Result<String, String>;
-}
-
-impl RosterSigner for Identity {
-    fn public_key(&self) -> String {
-        self.public_key.clone()
-    }
-
-    fn sign_message(&mut self, message: &str) -> Result<String, String> {
-        Ok(self.sign(message))
-    }
 }
 
 impl Roster {
@@ -191,8 +274,8 @@ impl Roster {
         }
         let mut seen = std::collections::BTreeSet::new();
         for node in &self.nodes {
-            check_hex("nodes.node_id", &node.node_id, 32)?;
-            check_hex("nodes.public_key", &node.public_key, 64)?;
+            check_hex(&format!("node_id_mismatch:{}", node.name), &node.node_id, 32)?;
+            check_hex(&format!("public_key_malformed:{}", node.name), &node.public_key, 64)?;
             match derive_node_id(&node.public_key) {
                 Some(derived) if derived == node.node_id => {}
                 _ => return bad(format!("node_id_mismatch:{}", node.name)),
@@ -275,7 +358,7 @@ impl Roster {
 
     /// Sign in place with the fleet key. The caller is the operator's tool, not a node's own view of
     /// itself: nothing in the running node calls this.
-    pub fn sign(&mut self, fleet_key: &Identity) {
+    pub fn sign(&mut self, fleet_key: &dyn Signer) {
         self.signature = fleet_key.sign(&self.canonical());
     }
 
@@ -296,12 +379,12 @@ impl Roster {
     /// Order matters for what the operator is told: a tampered roster is `bad_signature`, an expired
     /// one `roster_expired`, and only a roster that is authentically the operator's is checked for
     /// internal consistency.
-    pub fn verify(&self, fleet_public_key: &str, now_s: u64) -> Result<(), RosterError> {
+    pub fn verify(&self, crypto: &dyn Crypto, fleet_public_key: &str, now_s: u64) -> Result<(), RosterError> {
         if fleet_public_key.trim().is_empty() {
             return bad("roster_key_missing");
         }
         check_hex("mesh.roster_key", fleet_public_key, 64)?;
-        if !verify(fleet_public_key, &self.canonical(), &self.signature) {
+        if !crypto.verify_ed25519(fleet_public_key, self.canonical().as_bytes(), &self.signature) {
             return bad("roster_unverified:bad_signature");
         }
         if self.issued_at > now_s.saturating_add(FUTURE_SKEW_SECONDS) {
@@ -391,11 +474,11 @@ impl Draft {
     /// what keeps `wa fleet sign` over a fresh template byte-identical to what it wrote before revisions
     /// existed. A revisioned roster is produced by re-signing a signed one (`fleetkey::sign_with_signer`)
     /// or by `wa fleet revoke`/`rotate`.
-    pub fn sign(self, fleet_key: &Identity) -> Roster {
+    pub fn sign(self, fleet_key: &dyn Signer) -> Roster {
         self.sign_revision(fleet_key, 0, String::new())
     }
 
-    pub fn sign_revision(mut self, fleet_key: &Identity, revision: u32, prev_hash: String) -> Roster {
+    pub fn sign_revision(mut self, fleet_key: &dyn Signer, revision: u32, prev_hash: String) -> Roster {
         let mut roster = Roster {
             version: ROSTER_SCHEMA,
             fleet: std::mem::take(&mut self.fleet),
@@ -418,9 +501,9 @@ pub fn node_id_preview(node_id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{fleet_key, node};
+    use crate::testkit::{crypto, fleet_key, node, TestKey};
 
-    fn signed_roster() -> (Identity, Roster) {
+    fn signed_roster() -> (TestKey, Roster) {
         let fleet = fleet_key();
         let roster = Draft {
             fleet: "ohana".into(),
@@ -439,7 +522,7 @@ mod tests {
     #[test]
     fn a_signed_roster_verifies_and_says_its_levels() {
         let (fleet, roster) = signed_roster();
-        roster.verify(&fleet.public_key, 1_762_000_100).unwrap();
+        roster.verify(&crypto(), &fleet.public_key, 1_762_000_100).unwrap();
         assert_eq!(roster.level_of(&roster.nodes[1].node_id), Some(1));
         assert_eq!(roster.node("oracle").unwrap().level, 1);
         assert_eq!(roster.node(&roster.nodes[2].node_id).unwrap().name, "guest");
@@ -454,44 +537,44 @@ mod tests {
         let mut tampered = roster.clone();
         tampered.nodes[1].level = 0; // "oracle" promotes itself to the top
         assert_eq!(
-            tampered.verify(&fleet.public_key, now).unwrap_err().0,
+            tampered.verify(&crypto(), &fleet.public_key, now).unwrap_err().0,
             "roster_unverified:bad_signature"
         );
 
         let mut tampered = roster.clone();
         tampered.nodes[0].addresses = vec!["10.0.0.9:8891".into()];
-        assert!(tampered.verify(&fleet.public_key, now).is_err());
+        assert!(tampered.verify(&crypto(), &fleet.public_key, now).is_err());
 
         let mut tampered = roster.clone();
-        tampered.nodes[1].public_key = fleet.public_key.clone();
-        assert!(tampered.verify(&fleet.public_key, now).is_err());
+        tampered.nodes[1].public_key = fleet.public_key.to_string();
+        assert!(tampered.verify(&crypto(), &fleet.public_key, now).is_err());
 
         // Someone else's key signs: the operator's key is the anchor, not any key.
-        let impostor = fleet_key();
+        let impostor = TestKey::named("an-impostor");
         let mut tampered = roster.clone();
         tampered.sign(&impostor);
         assert_eq!(
-            tampered.verify(&fleet.public_key, now).unwrap_err().0,
+            tampered.verify(&crypto(), &fleet.public_key, now).unwrap_err().0,
             "roster_unverified:bad_signature"
         );
-        assert_eq!(tampered.verify("", now).unwrap_err().0, "roster_key_missing");
+        assert_eq!(tampered.verify(&crypto(), "", now).unwrap_err().0, "roster_key_missing");
     }
 
     #[test]
     fn the_window_and_the_consistency_checks_are_separate_answers() {
         let (fleet, roster) = signed_roster();
         assert_eq!(
-            roster.verify(&fleet.public_key, 1_793_536_000).unwrap_err().0,
+            roster.verify(&crypto(), &fleet.public_key, 1_793_536_000).unwrap_err().0,
             "roster_expired"
         );
         assert_eq!(
-            roster.verify(&fleet.public_key, 1_700_000_000).unwrap_err().0,
+            roster.verify(&crypto(), &fleet.public_key, 1_700_000_000).unwrap_err().0,
             "roster_not_yet_valid"
         );
         // A hand-written roster (never signed) is refused before it is looked at.
         let mut unsigned = roster.clone();
         unsigned.signature = String::new();
-        assert!(unsigned.verify(&fleet.public_key, 1_762_000_100).is_err());
+        assert!(unsigned.verify(&crypto(), &fleet.public_key, 1_762_000_100).is_err());
     }
 
     #[test]
@@ -504,18 +587,18 @@ mod tests {
             nodes: vec![node("a", 0, &["127.0.0.1:8891"])],
         }
         .sign(&fleet);
-        assert!(base.verify(&fleet.public_key, 1_762_000_100).is_ok());
+        assert!(base.verify(&crypto(), &fleet.public_key, 1_762_000_100).is_ok());
 
         let mut too_deep = base.clone();
         too_deep.nodes[0].level = MAX_LEVEL + 1;
         too_deep.sign(&fleet);
-        assert!(too_deep.verify(&fleet.public_key, 1_762_000_100).unwrap_err().0.starts_with("level_out_of_range"));
+        assert!(too_deep.verify(&crypto(), &fleet.public_key, 1_762_000_100).unwrap_err().0.starts_with("level_out_of_range"));
 
         let mut wrong_id = base.clone();
         wrong_id.nodes[0].node_id = fleet.node_id.clone();
         wrong_id.sign(&fleet);
         assert!(wrong_id
-            .verify(&fleet.public_key, 1_762_000_100)
+            .verify(&crypto(), &fleet.public_key, 1_762_000_100)
             .unwrap_err()
             .0
             .starts_with("node_id_mismatch"));
@@ -525,7 +608,7 @@ mod tests {
         duplicate.nodes.push(again);
         duplicate.sign(&fleet);
         assert!(duplicate
-            .verify(&fleet.public_key, 1_762_000_100)
+            .verify(&crypto(), &fleet.public_key, 1_762_000_100)
             .unwrap_err()
             .0
             .starts_with("duplicate_node"));
@@ -534,7 +617,7 @@ mod tests {
         bad_address.nodes[0].addresses = vec!["192.168.1.10".into()];
         bad_address.sign(&fleet);
         assert!(bad_address
-            .verify(&fleet.public_key, 1_762_000_100)
+            .verify(&crypto(), &fleet.public_key, 1_762_000_100)
             .unwrap_err()
             .0
             .starts_with("bad_address"));
@@ -544,6 +627,65 @@ mod tests {
         assert!(Roster::parse(&text).is_err());
         assert!(Roster::parse("{}").is_err());
         assert!(Roster::parse("not json").is_err());
+    }
+
+    /// Each refusal the roster can make, as the case the seam hands a caller. This is the bridge between
+    /// the operator's sentence and the component's typed answer, so it is pinned here rather than left to
+    /// a `starts_with` written twice.
+    #[test]
+    fn every_refusal_has_a_case_and_the_sentence_is_unchanged() {
+        let cases: [(RosterError, RosterProblem); 9] = [
+            (RosterError("not a valid roster: expected value".into()), RosterProblem::NotARoster("not a valid roster: expected value".into())),
+            (RosterError("roster_key_missing".into()), RosterProblem::KeyMissing),
+            (RosterError("roster_unverified:bad_signature".into()), RosterProblem::BadSignature),
+            (RosterError("roster_not_yet_valid".into()), RosterProblem::NotYetValid),
+            (RosterError("roster_expired".into()), RosterProblem::Expired),
+            (RosterError("version 2 (this build speaks 1)".into()), RosterProblem::VersionUnsupported(2)),
+            (RosterError("level_out_of_range:oracle (0..=9)".into()), RosterProblem::LevelOutOfRange("oracle".into())),
+            (RosterError("duplicate_node:8c11".into()), RosterProblem::DuplicateNode("8c11".into())),
+            (RosterError("bad_address:192.168.1.10".into()), RosterProblem::BadAddress("192.168.1.10".into())),
+        ];
+        for (error, want) in cases {
+            assert_eq!(error.problem(), want, "{error}");
+        }
+        assert_eq!(
+            RosterError("node_id_mismatch:oracle".into()).problem(),
+            RosterProblem::NodeIdMismatch("oracle".into())
+        );
+        assert_eq!(
+            RosterError("too_many_addresses:oracle".into()).problem(),
+            RosterProblem::TooManyAddresses("oracle".into())
+        );
+        assert_eq!(
+            RosterError("mesh.roster_key:expected_64_hex_characters".into()).problem(),
+            RosterProblem::KeyMalformed("mesh.roster_key:expected_64_hex_characters".into())
+        );
+        // Every case answers with the words it came from: the seam's refusal and the native one are one
+        // refusal, so an operator does not learn two vocabularies for the same mistake.
+        for sentence in [
+            "not a valid roster: expected value",
+            "roster_key_missing",
+            "mesh.roster_key:not_hex",
+            "roster_unverified:bad_signature",
+            "roster_not_yet_valid",
+            "roster_expired",
+            "version 2 (this build speaks 1)",
+            "level_out_of_range:oracle (0..=9)",
+            "duplicate_node:8c11",
+            "node_id_mismatch:oracle",
+            "public_key_malformed:oracle",
+            "bad_address:192.168.1.10 (expected host:port)",
+            "too_many_addresses:oracle",
+            "nodes.name must be 1..=64 bytes",
+            "something new",
+        ] {
+            assert_eq!(RosterError(sentence.to_string()).problem().sentence(), sentence);
+        }
+        assert_eq!(
+            RosterError("something new".into()).problem(),
+            RosterProblem::Other("something new".into()),
+            "an unclassified refusal is passed through, never read as verified"
+        );
     }
 
     #[test]
@@ -562,7 +704,7 @@ mod tests {
         let (fleet, mut roster) = signed_roster();
         roster.nodes[2].revoked_at = 1_762_000_050;
         roster.sign(&fleet);
-        roster.verify(&fleet.public_key, 1_762_000_100).unwrap();
+        roster.verify(&crypto(), &fleet.public_key, 1_762_000_100).unwrap();
         assert!(roster.nodes[2].is_revoked(1_762_000_100));
         assert!(!roster.nodes[2].is_revoked(1_762_000_000));
         assert!(!roster.nodes[0].is_revoked(1_762_000_100));

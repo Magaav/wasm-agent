@@ -151,9 +151,15 @@ for crate in rust/components/*/; do
     echo "error: component $name needs wasi-sdk (C inside); set WASI_SDK=<dir>" >&2; exit 2
   fi
   cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >/dev/null
-  wasm="$crate/target/$TARGET/release/$name.wasm"
+  # Cargo's artifact directory: `CARGO_TARGET_DIR` when the caller set one (a node that shares one
+  # target directory between every build, and the job harness that runs these builds), else the
+  # crate's own. A relative CARGO_TARGET_DIR is resolved against the directory cargo runs in, which
+  # is this script's cwd (the repository root).
+  target_dir="${CARGO_TARGET_DIR:-$crate/target}"
+  case "$target_dir" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;; *) target_dir="$PWD/$target_dir" ;; esac
+  wasm="$target_dir/$TARGET/release/$name.wasm"
   # A library component (cdylib) is named with underscores.
-  [ -f "$wasm" ] || wasm="$crate/target/$TARGET/release/${name//-/_}.wasm"
+  [ -f "$wasm" ] || wasm="$target_dir/$TARGET/release/${name//-/_}.wasm"
   [ -f "$wasm" ] || { echo "skip $name: no $wasm produced" >&2; continue; }
   # Install atomically: manifest and module first under temporary names, pin last, so a reader
   # never pairs a new module with an old pin (it would be refused, never run).

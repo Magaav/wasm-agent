@@ -115,6 +115,13 @@ pub struct PolicySet {
     /// Capabilities this node treats as sensitive in addition to [`DEFAULT_SENSITIVE`].
     #[serde(default)]
     pub sensitive_capabilities: Vec<String>,
+    /// The node's feature switches (`docs/FEATURES.md`). This engine does not read them: the switches
+    /// live in the same file as the rules so an operator has one place for "what this node may do"
+    /// and "what this node routes", and the crate that resolves them (`wa-features`) is the only
+    /// reader. They are kept as JSON here so this crate does not have to know which features exist,
+    /// and so a node whose binary is older than its policy file still parses that file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<serde_json::Value>,
     #[serde(default)]
     pub components: BTreeMap<String, ComponentPolicy>,
 }
@@ -233,7 +240,12 @@ impl PolicySet {
 
     /// An empty policy: every capability that is sensitive by default is denied, nothing else.
     pub fn empty() -> PolicySet {
-        PolicySet { version: SCHEMA_VERSION, sensitive_capabilities: Vec::new(), components: BTreeMap::new() }
+        PolicySet {
+            version: SCHEMA_VERSION,
+            sensitive_capabilities: Vec::new(),
+            features: None,
+            components: BTreeMap::new(),
+        }
     }
 
     /// Check everything the engine relies on: version, names, rate bounds, no empty rules that
@@ -327,6 +339,46 @@ mod tests {
         assert_eq!(rule.daily_cap, Some(500));
         assert!(rule.allow[0].matches("self"));
         assert!(rule.deny[0].matches("1-2@broadcast"));
+    }
+
+    /// The `features` section (docs/FEATURES.md) rides in the same file as the rules, and this engine
+    /// deliberately does not read it: what a node *may* do and what it *routes to* live in one file so an
+    /// operator has one place, and `wa-features` is the only reader of the section.
+    ///
+    /// The field exists for one reason. `deny_unknown_fields` is this crate's contract (a misspelled
+    /// `per_minutes` must not read as "no limit"), so before the field a policy file with a `features`
+    /// section failed to load - and a policy file that fails to load is `Mode::Policy` with an empty
+    /// policy, i.e. every sensitive capability refused with `no_policy`. A feature switch must never be
+    /// able to do that.
+    #[test]
+    fn a_features_section_is_carried_and_does_not_change_a_rule() {
+        let with = PolicySet::parse(
+            r#"{"version":1,"sensitive_capabilities":[],"features":{"memory":true,"hooks":false},
+                "components":{"wa-whatsapp":{"capabilities":{"kv.write":{"allow":["ix/*"]}}}}}"#,
+        )
+        .expect("a policy file with a features section parses");
+        assert_eq!(
+            with.features.as_ref().and_then(|features| features.get("memory")),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let without = PolicySet::parse(
+            r#"{"version":1,"sensitive_capabilities":[],"components":{"wa-whatsapp":{"capabilities":{"kv.write":{"allow":["ix/*"]}}}}}"#,
+        )
+        .expect("the same file without the section parses");
+        assert_eq!(with.components, without.components, "the features section decides no rule");
+        assert_eq!(without.features, None);
+        // ...and a misspelled top-level member is still refused (the field did not open the schema).
+        assert!(PolicySet::parse(r#"{"version":1,"components":{},"feature":"memory"}"#).is_err());
+    }
+
+    /// The file a deploy installs (`policies/default.json`) carries the section, so it must parse
+    /// through this engine: a shipped default that its own engine refuses would be a node with no rules.
+    #[test]
+    fn the_shipped_default_policy_parses_with_its_features_section() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../policies/default.json");
+        let text = std::fs::read_to_string(path).expect("policies/default.json is readable");
+        let set = PolicySet::parse(&text).expect("the shipped default parses");
+        assert!(set.features.is_some(), "the shipped default names the feature switches");
     }
 
     #[test]

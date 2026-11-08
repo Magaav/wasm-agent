@@ -67,25 +67,24 @@ for _, session in ipairs({
 end
 
 ------------------------------------------------------------------ the seam instance
--- A second instance of the same module with `WA_MEMORY_COMPONENT=1`. The switch is read once, at
--- load, exactly as a node reads it - so the test flips the *host's* answer rather than reaching into
--- the module, and the module's own code decides what to do with it.
+-- A second instance of the same module with the `memory` feature (docs/FEATURES.md) routed to the
+-- component. The switch is resolved through `lua/core/features.lua` at every call, and two instances of
+-- the module share one `host.features` table - so the seam instance carries the module's own test seam
+-- (`M.seam_override`) instead of a host stub, and the module's own code decides what to do with it.
 local real_getenv, real_memory, real_log = host.getenv, host.memory, host.log
 local logged = {}
 -- The stubs stay installed until `restore()`: the module reads `host.log` when it falls back, which is
 -- after the module was loaded, so a stub removed too early would be invisible to it.
 local function seam_instance(memory_capability)
-  host.getenv = function(name)
-    if name == 'WA_MEMORY_COMPONENT' then return '1' end
-    return real_getenv(name)
-  end
   host.memory = memory_capability or real_memory
   logged = {}
   host.log = function(line) logged[#logged + 1] = tostring(line) end
-  return dofile('lua/core/memory.lua')
+  local module = dofile('lua/core/memory.lua')
+  module.seam_override = function() return true, 'active_component' end
+  return module
 end
 local function restore()
-  host.getenv, host.memory, host.log = real_getenv, real_memory, real_log
+  host.memory, host.log = real_memory, real_log
 end
 
 -- Where the built component is. `WA_MEMORY_COMPONENT_WASM` wins (the same development override the

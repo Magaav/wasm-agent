@@ -23,7 +23,11 @@
 #         differently-bound attestation refused;
 #       - `scripts/test-mesh-attest.lua` — the same rule, with the attestation produced by the **Rust**
 #         mount (`host.mesh_call`'s `{attest: …}`, `wa_mesh::attest::sign`) and verified by the real
-#         `wa_node_call`: a roster-authorized `bash`/`sessions` call is admitted by its verb.
+#         `wa_node_call`: a roster-authorized `bash`/`sessions` call is admitted by its verb;
+#       - `scripts/test-mesh-trust.lua` — the *execution* trust basis (§9 item 2): the real `server.lua`
+#         and `binding.lua`, an unmanaged unpinned node, and a caller that is `unknown_caller` without
+#         the mount's attestation and executes with it — forged, expired, replayed, differently-bound,
+#         wrong-verb, wrong-caller and no-admission forms all refused as before.
 #     Skipped, never silently passed, when there is no `wa` binary to run them.
 #   * `scripts/test-mesh-gate.lua` — the client's own gate, run **without** `WA_MESH`: the real
 #     `lua/core/nodes.lua` asks `host.mesh_call`'s `{gate: true}` on every call, so a node whose only
@@ -65,7 +69,7 @@ fi
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 # The tests that need the feature gate answer it from `policy.json` themselves where they can; this
 # flag is the same one a fleet node would have, and it is the operator's process switch.
-for test in test-mesh-admission.lua test-mesh-verb-admission.lua test-mesh-attest.lua; do
+for test in test-mesh-admission.lua test-mesh-verb-admission.lua test-mesh-attest.lua test-mesh-trust.lua; do
   echo "== scripts/$test"
   home=$(mktemp -d "${TMPDIR:-/tmp}/wa-mesh-lua-XXXXXX")
   WASM_AGENT_LUA_ROOT="$(native "$ROOT")" WASM_AGENT_HOME="$(native "$home")"     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_MESH=1     WA_SCRIPT="$(native "$ROOT/scripts/$test")" timeout 120 "$bin" --db "$(native "$home/t.db")"     || status=1

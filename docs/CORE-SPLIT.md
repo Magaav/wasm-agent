@@ -1,14 +1,16 @@
 # The core split: what stays in the turn loop, what becomes a component
 
-Status (07/11, updated by the hooks lane): the map below is the decision, and the first four
+Status (07/11, updated by the hooks lane and the mesh lane): the map below is the decision, and five
 extractions are **landed** — the self-loop (behind `wa:selfloop`, `wit/selfloop/selfloop.wit`,
 `rust/components/selfloop`), code mode (behind `wa:codemode`, `wit/codemode/codemode.wit`,
 `rust/components/codemode`, importing `wa:kernel/quickjs` for the sandbox the kernel hosts), memory
-(`wa:memory`) and **hooks/mods** (`wa:hooks`, `wit/hooks/hooks.wit`, `rust/components/hooks`), each
-routed by its own `WA_*_COMPONENT=1`, each with the native path unchanged and parity asserted
-(`scripts/test-selfloop-component.lua`, `scripts/test-codemode-component.lua`,
-`scripts/test-memory-component.lua`, `scripts/test-hooks-component.lua`). Mesh is specified here, not
-built.
+(`wa:memory`), **hooks/mods** (`wa:hooks`, `wit/hooks/hooks.wit`, `rust/components/hooks`) and the
+**mesh/fleet decisions** (`wa:mesh`, `wit/mesh/mesh.wit`, `rust/components/mesh` over
+`rust/wa-mesh-core`), each routed by its own `WA_*_COMPONENT=1`, each with the native path unchanged
+and parity asserted (`scripts/test-selfloop-component.lua`, `scripts/test-codemode-component.lua`,
+`scripts/test-memory-component.lua`, `scripts/test-hooks-component.lua`,
+`scripts/test-mesh-component.sh`). The mesh's split is also a *Rust* crate split: `wa-mesh-core` is the
+rules, compiled once for the node (ring) and once for the guest (dalek).
 
 ## The rule
 
@@ -56,8 +58,8 @@ calls**: `getenv` 92 (31%), `read_file` 47 (16%), `sha256` 30 (10%), `sql_exec` 
 | `agent.lua`, `provider.lua`, `prompt_sections.lua`, `prompt_cache.lua`, `tools.lua`, `tool_output.lua`, `envelope.lua`, `json_contract.lua`, `session_view.lua` | **stays** (the hot loop) | session state, prompt assembly, the provider call, tool dispatch: one object, one lifetime; the gateway replaces the provider later | 295 host calls, ~everything above |
 | `selfloop.lua` (wakes, notes, probes) | **component, landed** (`wa:selfloop`) | a state machine over three tables; the node's tick and a restart both re-read rows; the probe *runner* and the agent turn stay in the loop | 2 host calls per tick native, 1 per seam op; ~1 op per wake |
 | `codemode.lua`, `codemode_policy.lua`, `codemode_view.lua` | **component, landed** (`wa:codemode`) | the guest's protocol — the fence, its tool table, `searchTools`/`describeTool`, the admit/deliver order and the script's report — as a state machine over one script; the QuickJS *sandbox* stays in the kernel as a capability (`wa:kernel/quickjs`), and admission, dispatch, the definition recheck, evidence, presentation and the session store stay in the loop | 1 call per step (2 for a trivial script, 13 for ten parallel calls) on the rounds that use code mode; 0 on the rest |
-| `hooks.lua`, `hook_events.lua` (hooks/mods) | **component, landed** (`wa:hooks`) | event→layers→verdict is a pure function of configuration; running a hook stays the node's (a process, or a Lua function); one call per hook answer, none on an inert node once the plan is cached |
-| `nodes.lua`, `federation.lua`, `routed_calls.lua`, `mesh`/fleet parts of `orchestrator.lua` | **component fourth** (`wa:mesh`) | roster, grants and routing decisions over the roster table; the transports stay capabilities | per peer call; 0 in a single-node turn |
+| `hooks.lua`, `hook_events.lua` (hooks/mods) | **component, landed** (`wa:hooks`) | event→layers→verdict is a pure function of configuration; running a hook stays the node's (a process, or a Lua function); one call per hook answer, none on an inert node once the plan is cached | 1 call per hookable event; 0–2 per turn, more on bus events |
+| `nodes.lua`, `federation.lua`, `routed_calls.lua`, `mesh`/fleet parts of `orchestrator.lua`, and (in Rust) `roster`/`hierarchy`/`policy`/`attest`/`audit`/`cache` decisions | **component, landed** (`wa:mesh`, `rust/wa-mesh-core`) | roster, grants, attestation bytes, audit line and dial order are a rule over documents and ids; the transports, the files and the node's key stay native | per peer call (0.2 ms through the seam); 0 in a single-node turn |
 | `provider.lua`'s call site (`M.complete_with`) → `lua/core/model_gateway.lua`, `wa:model` | **component, built, off by default** (`rust/components/model-gateway`) | the *decision* (class → model, data label vs `allowed_labels`, fallback, breaker, budget) is a pure function of policy + session label; the prompt, the transcript and tool dispatch stay in the loop. The seam is only entered under `WA_MODEL_GATEWAY=1` | 1 call per provider call, and only when enabled; measured 2 µs of decisions, 7 µs of protocol (`docs/MODEL-GATEWAY.md`, "Cost") |
 | `memory.lua` (recall, search, sessions, retention) | **component, landed** (`wa:memory`, see `docs/MEMORY.md`) | ranking and scope rules; `memory.db` stays the kernel's | 1–3 calls per turn |
 | `chat.lua`, `cli_view.lua`, `cli_panel.lua`, `completions.lua`, `markdown.lua` | **stays** (the console) | it *is* the client: it draws, it reads input, it reloads with the window | — |
@@ -87,7 +89,7 @@ is the seam to reject in review:
   through both paths and compares field for field, ids normalised; `scripts/bench-<name>.sh` reports
   the cost difference. A skip is reported as a skip.
 
-## The next three interfaces
+## The interfaces: what is left
 
 Sketches only — each is a design note, not a contract until it lands.
 
@@ -119,16 +121,23 @@ interface hooks {
 }
 world hooks-component { import wa:kernel/sql@0.1.0; export hooks; }
 
-// wa:mesh@0.1.0 — the roster and the routing decision. The transports stay capabilities
-// (`wa:kernel/net`, the relay), because a component must not own a socket.
+// wa:mesh@0.1.0 — landed, and not the sketch that was here. The transports stay native (the listener,
+// the relay, the peer cache file, the node's key), so the world imports *nothing*: the mesh stores no
+// rows (no `wa:kernel/sql`), reads no clock (`now` is an argument) and holds no key. What moved is the
+// decision, in the shape the node asks it in:
 package wa:mesh@0.1.0;
 interface mesh {
-    record peer { node-id: string, hierarchy: string, roles: list<string>, grants: list<string> }
-    record route { peer: string, grants: list<string>, reason: string }
-    roster: func() -> result<list<peer>, error>;
-    route: func(capability: string, target: option<string>) -> result<route, error>;
+    verify-roster: func(document: string, fleet-key: string, now: u64) -> result<level-facts, roster-refusal>;
+    decide: func(grants: list<grant>, facts: call-facts) -> verdict;
+    verb: func(capability: string) -> string;
+    render-audit: func(event: audit-event) -> string;
+    attest-message: func(node-id: string, caller: string, verb: string, capability: string,
+                         caller-signature: string, ts: u64) -> string;
+    verify-ticket: func(ticket: ticket, node-id: string, node-public-key: string,
+                        caller-signature: string, now: u64) -> result<ticket-facts, ticket-refusal>;
+    addresses: func(target: node, learned: list<string>) -> list<string>;
 }
-world mesh-component { import wa:kernel/sql@0.1.0; export mesh; }
+world mesh-component { export mesh; }
 ```
 
 ## Order, and why this order
@@ -152,8 +161,12 @@ world mesh-component { import wa:kernel/sql@0.1.0; export mesh; }
    `decide` per hook answer says what it means - because only a verdict can say whether the next hook
    still runs, and the native loop breaks on a refusal. The cost of that choice is in "Cost" below;
    the shape is in `docs/HOOK-EVENTS.md`, "The engine as a component".
-4. **mesh/fleet** — the widest and the least urgent: a single-node turn never touches it, and its
-   transports are capabilities that stay native.
+4. **mesh/fleet** — **landed** (`wa:mesh`, `rust/wa-mesh-core`). The widest and the least urgent (a
+   single-node turn never touches it), and the one whose cost profile is the opposite of the self-loop's:
+   the native path is *microseconds*, so the seam is a ~500x multiplier on the decision (0.2 ms and ~3 MB)
+   rather than a saving. It is also the extraction that proved the rule "no key, no socket": the guest
+   composes an attestation and checks one, and the node signs. Numbers, and the per-operation route
+   (`WA_MESH_COMPONENT_OPS`), are in `docs/MESH.md` §10.
 5. **the model gateway** — last, and not a component in this sense: it *replaces* `provider.lua`, and
    it will be a service with its own process topology rather than a guest with a grant.
 
@@ -213,6 +226,25 @@ an engine and a module instance for one guest, not a node's steady state. (3) Th
 numbers; the argument for the self-loop is not the 1.6 ms a tick costs but that its 1,100 lines of
 rules are now swappable and testable apart from the interpreter. (4) Nothing here measures a *model*
 turn: the gateway rewrite owns that, and these numbers do not predict it.
+
+### The mesh seam (measured)
+
+`bash scripts/bench-mesh.sh`, this machine (Windows, release, one process per path, p50/p95 over 2,000
+samples). The full table is `docs/MESH.md` §10's; the shape of it:
+
+| scenario | native | component |
+| --- | --- | --- |
+| `decide` (hierarchy, allow or deny) | 0.2–0.3 µs | 151–174 µs p50 / ~280–330 µs p95 |
+| `verify_roster` (4 nodes) | 83 µs | 410 µs |
+| `render_audit` | 1.1 µs | 153 µs |
+| `addresses` | 0.4 µs | 155 µs |
+| first call (compile + instance) | — | 1.7 ms |
+| peak RSS | 5,196 KB | 8,184 KB |
+
+So: **+0.2 ms and +3 MB per routed decision**, and the seam is worth it for the operations whose *rule* an
+operator may want to swap (`decide`, the signature checks), not for the ones whose output is formatting
+(`render_audit`, `addresses` — they pay the same price and buy nothing swappable).
+`WA_MESH_COMPONENT_OPS` is that choice, per operation, without a rebuild.
 
 ## Open questions
 

@@ -76,7 +76,7 @@ M.commands = {
   { name = "/merge all", usage = "/merge all", hint = "include all open PRs after review and required checks" },
   { name = "/bind", usage = "/bind [service]", hint = "two-sided fabric consent; permanent asks for no expiry; status/renew/run stay local" },
   { name = "/unbind", usage = "/unbind", hint = "revoke remote access; retain local identity and history" },
-  { name = "/nodes", usage = "/nodes [pending]", hint = "browse the cluster's nodes, or administrator pairing requests" },
+  { name = "/nodes", usage = "/nodes [pending]", local_view = true, hint = "browse the cluster's nodes, or administrator pairing requests" },
   { name = "/accept", usage = "/accept <code>", hint = "confirm exact pairing request as network guest" },
   { name = "/promote", usage = "/promote <node>", hint = "confirm network master, never administrator" },
   { name = "/demote", usage = "/demote <node>", hint = "confirm network guest; preserve local CLI" },
@@ -137,6 +137,20 @@ function M.names()
   for _, row in ipairs(M.commands) do
     names[#names + 1] = row.name
     for _, alias in ipairs(row.alias or {}) do names[#names + 1] = alias end
+  end
+  return names
+end
+
+-- The commands that are a read-only view rather than an operation (`local_view = true`).
+--
+-- The distinction is the whole point of `lua/core/local_views.lua`: a read-only view can be drawn by
+-- the client from a snapshot while a run is in flight, and an operation cannot - it changes state,
+-- so it keeps queuing behind the turn, which is correct. `/status` is the same class but has had its
+-- own one-panel channel for longer (`host.status_snapshot`), so it is not published here.
+function M.local_views()
+  local names = {}
+  for _, row in ipairs(M.commands) do
+    if row.local_view then names[#names + 1] = row.name end
   end
   return names
 end

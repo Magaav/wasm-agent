@@ -1495,6 +1495,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
       if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end
     end
+    -- The name the reader knows this call by, so the session-status-content row can say `⟳ operation`
+    -- while a long one runs (docs/TOOL-PROGRESS.md). Drawn, never used as a policy fact.
+    if args.action == "await" then args.tool = "operation" end
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     return json.decode(raw)
@@ -1640,7 +1643,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       return M.dispatch(memory, "operation", { action = "start", command = args.command,
         cwd = cwd, timeout_seconds = timeout }, role, ctx, launch_cwd(memory,ctx,requested_cwd))
     end
-    local result = run(args.command, timeout, cwd, launch_cwd(memory,ctx,requested_cwd))
+    local provenance = launch_cwd(memory,ctx,requested_cwd)
+    -- The name the reader knows this call by, for the session-status-content row while the command
+    -- runs (docs/TOOL-PROGRESS.md). A label the host draws; it is not a policy fact.
+    provenance.tool = "bash"
+    local result = run(args.command, timeout, cwd, provenance)
     -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
     -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
     -- been handed, so telling it to would be the same dead end the old refusal was. The host
@@ -2076,7 +2083,7 @@ function M.start_parallel_bash(calls, memory, role, ctx)
 end
 
 function M.await_parallel_bash(operation_id, role, ctx)
-  local state = M.dispatch(nil, "operation", { action = "await", id = operation_id }, role, ctx)
+  local state = M.dispatch(nil, "operation", { action = "await", id = operation_id, tool = "bash" }, role, ctx)
   if type(state) ~= "table" then return { error = "parallel_operation_await_failed" } end
   if state.error == "await_interrupted" then
     M.dispatch(nil, "operation", { action = "cancel", id = operation_id }, role, ctx)

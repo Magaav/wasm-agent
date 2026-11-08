@@ -1,0 +1,37 @@
+[package]
+name = "mesh"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The mesh's decisions as a component (`wa:mesh`, docs/MESH.md, docs/CORE-SPLIT.md's fourth extraction):
+# the roster's verify, the hierarchy and the grants, the audit line, the attestation's bytes and the
+# peer-address rule. Request-shaped (built for wasm32-wasip2) and built by `scripts/build-components.sh`,
+# never by the core build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bindings for `wa:mesh` (exported) from the world in `wit/mesh`. The component imports nothing at all:
+# no store, no path, no socket, no clock, no key.
+wit-bindgen = "0.63"
+# The decisions themselves, shared with the node (`wa-mesh`), so the two paths are one rule compiled
+# twice rather than two implementations that agree today. No `fs` feature: a guest must not link the
+# peer-cache file it is never given.
+wa-mesh-core = { path = "../../wa-mesh-core" }
+# `serde_json`: one job, and it is the roster's own document shape. The roster arrives as text because
+# that is what the operator's signature covers - the bytes, not a parse of them.
+serde_json = "1"
+# The ed25519 verifier this build supplies (`wa-mesh-core::crypto::Crypto`). The node uses ring (C and
+# assembly, not linkable in a component); this is the pure-Rust ed25519, and both are the same
+# specification: `wa-mesh-core`'s roster and attestation tests run against *this* verifier, and
+# `wa-mesh`'s run against ring's, on the same canonical bytes.
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "fast"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

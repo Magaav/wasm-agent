@@ -251,6 +251,24 @@ fn main() {
     let home = resolve_home();
     std::env::set_var("HOME", &home);
     let from_file = load_env_file();
+    // One answer to "which vault is this node's", bound before any command reads it: `wa vault …`
+    // (the engine, through the variable) and `wa fleet … --key vault:<name>` (wa-mesh's signer, through
+    // the same variable) must open the same vault, and neither of them guesses a directory. An
+    // operator's own WASM_AGENT_VAULT_DIR is never touched.
+    wa_capabilities::vault_cli::bind_default_dir();
+    // `wa vault …` (docs/VAULT.md "The vault as a component"): the operator's own command about this
+    // node's secrets. Dispatched here, before the database, the graph index, the Lua interpreter and
+    // the ripgrep install are touched, because it needs none of them: a node whose Lua tree is broken
+    // or whose database is locked must still be able to say `wa vault list`, and the command's `--dir`
+    // default is the node's vault directory (bound above). Until this line existed, `wa vault list`
+    // fell through to the Lua CLI and answered `unknown command: vault` on every node that had the
+    // engine (found live, 08/11).
+    if args.first().is_some_and(|arg| arg == "vault") {
+        if let Some(code) = wa_capabilities::vault_cli::run_node(&args) {
+            host::restore_input();
+            std::process::exit(code);
+        }
+    }
     // A detached launcher must not change the node's worktree/branch identity.
     // The deployment gate writes this explicit location; CLI one-shot commands
     // still use their caller's cwd, and scratch binaries have no such marker.
@@ -266,6 +284,26 @@ fn main() {
     if args.first().is_some_and(|arg| arg == "--capability-digest") {
         println!("{}", capabilities::digest());
         return;
+    }
+    // `wa features [--json]` (docs/FEATURES.md): the node's feature switches - per feature, the
+    // installed sha, whether it is enabled, where that came from (env/policy/default), which path is
+    // live (component/native) and why - from the one resolver the Lua gates and `services features`
+    // read. It answers before the interpreter boots (like `--capability-digest`) because it needs no
+    // model, no ledger and no node, and it must be answerable on a node whose core will not start.
+    // `HOME` is already resolved above, so `policy_path()` and the component directory are the ones a
+    // running node would use.
+    if args.first().is_some_and(|arg| arg == "features") {
+        let policy = wa_features::policy_path();
+        let list = wa_features::status_all();
+        if !args.iter().any(|arg| arg == "--json") {
+            print!("{}", wa_features::status_text(&list, &policy));
+        } else {
+            println!("{}", wa_features::status_json(&list, &policy));
+        }
+        // A feature that is on with nothing behind it is not a failure of this command (the node
+        // still runs, natively) - but the exit status says so, so a script that enables a feature can
+        // check that the path it asked for is the path it got.
+        std::process::exit(if list.iter().any(|s| s.enabled && s.active.as_str() == "native") { 3 } else { 0 });
     }
     if args.first().is_some_and(|arg| arg == "--lua-tree") {
         match load_lua_tree() {

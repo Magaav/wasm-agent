@@ -438,3 +438,84 @@ wa_component_restore() {
   echo "component_restored: $name files=$restored removed=$removed"
   return 0
 }
+
+# ---------------------------------------------------------------------------------------------------
+# The shipped set: every name components.lock pins, installed and rolled back as one set
+# ---------------------------------------------------------------------------------------------------
+
+# <repo> - the names components.lock pins, one per line, in the lock's own order.
+#
+# This is what a deploy installs. Before 08/11 the deploy named `graph` on its own command lines and
+# the other eight production components were built, tested and never installed, so their
+# `WA_*_COMPONENT` flags had nothing to turn on (docs/FEATURES.md). A name is shipped by being pinned in
+# components.lock; nothing else in the tree decides it, and a lock that pins nothing installs nothing
+# (the deploy refuses that rather than reporting a successful install of nothing).
+wa_components_shipped() {
+  local lock="$1/components.lock"
+  [ -f "$lock" ] || return 2
+  awk '/^[[:space:]]*(#|$)/ {next} $1 != "" && $2 ~ /^[0-9a-f]+$/ {print $1}' "$lock"
+}
+
+# <component_dir> <name>... - record the set that is installed NOW, before it is replaced, in
+# `<dir>/.prev/components.set` (`<name> <sha256|absent>` per line, sorted as given).
+#
+# The rollback already restores each component from its own `.prev/` triple; this record is what makes
+# the *set* answerable: which components were installed before this deploy, and which the deploy added
+# (they are `absent` here, so the rollback removes them instead of leaving a component this node never
+# had). It is written last-to-temporary then renamed, so a reader never sees half a set.
+wa_components_record_set() {
+  local dest="$1" name sha tmp
+  shift
+  mkdir -p "$dest/.prev" || { echo "component_dir_unwritable: $dest" >&2; return 3; }
+  tmp="$dest/.prev/.components.set.tmp"
+  : > "$tmp" || { echo "component_dir_unwritable: $dest" >&2; return 3; }
+  for name in "$@"; do
+    if [ -f "$dest/$name.wasm" ]; then
+      sha="$(wa_component_sha256 "$dest/$name.wasm" 2>/dev/null)"
+      printf '%s %s\n' "$name" "${sha:-unreadable}" >> "$tmp" || return 3
+    else
+      printf '%s absent\n' "$name" >> "$tmp" || return 3
+    fi
+  done
+  mv -f "$tmp" "$dest/.prev/components.set" || { echo "component_dir_unwritable: $dest" >&2; return 3; }
+  return 0
+}
+
+# <stage_dir> <component_dir> <name>... - install every staged triple, in the lock's order.
+#
+# One output line per component (`component_installed: …`) and the first refusal returned as-is: a
+# deploy that installs seven of nine and reports success is the failure this refuses.
+wa_components_install_set() {
+  local stage="$1" dest="$2" name out rc installed=""
+  shift 2
+  for name in "$@"; do
+    out="$(wa_component_install "$stage" "$dest" "$name" 2>&1)"; rc=$?
+    [ -z "$out" ] || printf '%s\n' "$out"
+    installed="$installed $name"
+    if [ "$rc" -ne 0 ]; then
+      # Nothing half-installed: the components this set already replaced go back to what they were, and
+      # the one that failed (whose bytes may already have landed) goes back too, before the refusal is
+      # returned. The caller's own rollback is then a no-op, never a second repair.
+      wa_components_restore_set "$dest" $installed >/dev/null 2>&1 || true
+      return "$rc"
+    fi
+  done
+  # What landed is what was verified, for the set as well as each component: a set whose sha lines do
+  # not match the files it just installed is not an install.
+  for name in "$@"; do
+    [ "$(wa_component_sha256 "$dest/$name.wasm" 2>/dev/null)" = "$(cat "$dest/$name.wasm.sha256" 2>/dev/null)" ] \
+      || { echo "component_hash_mismatch: $dest/$name.wasm does not match its pin after install" >&2; return 5; }
+  done
+  return 0
+}
+
+# <component_dir> <name>... - put the whole previous set back, in reverse order, and report each.
+wa_components_restore_set() {
+  local dest="$1" name rc=0 out
+  shift
+  for name in $(printf '%s\n' "$@" | awk '{lines[NR]=$0} END {for (i=NR;i>0;i--) print lines[i]}'); do
+    out="$(wa_component_restore "$dest" "$name" 2>&1)" || rc=3
+    [ -z "$out" ] || printf '%s\n' "$out"
+  done
+  return "$rc"
+}

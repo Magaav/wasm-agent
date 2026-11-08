@@ -339,7 +339,7 @@ fn three_nodes_call_each_other_after_the_rendezvous_dies() {
         let mut cache = PeerCache::empty();
         cache.merge_roster(&fleet.roster, wire::now_millis());
         cache.merge_rendezvous(&payload, wire::now_millis());
-        cache.save(&cache_path, wire::now_millis()).expect("cache saved");
+        crate::cache::save(&mut cache, &cache_path, wire::now_millis()).expect("cache saved");
 
         // Kill the rendezvous. From here on nothing may depend on it.
         drop(rendezvous);
@@ -493,8 +493,7 @@ fn a_tampered_roster_is_refused_and_a_node_holding_one_serves_nothing() {
     testkit::with_deadline("a_tampered_roster_is_refused_and_a_node_holding_one_serves_nothing", move || {
         let fleet = fleet();
         let tampered = testkit::tampered(fleet.roster.clone(), &fleet.fleet_key);
-        let error = tampered
-            .verify(&fleet.fleet_key.public_key, wire::now_seconds())
+        let error = crate::seam::verify_roster(&tampered, &fleet.fleet_key.public_key, wire::now_seconds())
             .expect_err("a roster edited after signing must not verify");
         assert_eq!(error.0, "roster_unverified:bad_signature");
 

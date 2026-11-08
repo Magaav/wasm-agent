@@ -49,7 +49,7 @@ fn a_legacy_roster_keeps_its_exact_signed_bytes() {
             fleet_name = roster.fleet
         )
     );
-    roster.verify(&fleet.public_key, roster.issued_at).expect("verifies as before");
+    roster.verify(crate::identity::crypto(), &fleet.public_key, roster.issued_at).expect("verifies as before");
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn a_revisioned_roster_is_signed_over_the_v2_bytes_and_the_chain_hash_covers_the
     roster.revision = 1;
     roster.sign(&fleet);
     assert!(roster.canonical().starts_with("mesh-roster-v2|ohana|"));
-    roster.verify(&fleet.public_key, roster.issued_at).expect("verifies");
+    roster.verify(crate::identity::crypto(), &fleet.public_key, roster.issued_at).expect("verifies");
     let hash = roster.chain_hash();
     assert_eq!(hash.len(), 64);
     // A different signature is a different chain hash even with identical nodes: a fork is visible.
@@ -69,7 +69,7 @@ fn a_revisioned_roster_is_signed_over_the_v2_bytes_and_the_chain_hash_covers_the
     // And a v1 signature can never be replayed as a v2 one: the domain string is in the bytes.
     let mut replay = roster.clone();
     replay.revision = 0;
-    replay.verify(&fleet.public_key, roster.issued_at).expect_err("revision is signed");
+    replay.verify(crate::identity::crypto(), &fleet.public_key, roster.issued_at).expect_err("revision is signed");
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn revoke_sets_revoked_at_chains_the_previous_document_and_re_signs() {
     // The re-signed document verifies under the same fleet key and says the node is gone.
     let text = std::fs::read_to_string(&changed.path).expect("signed roster");
     let roster = Roster::parse(&text).expect("parses");
-    roster.verify(&fleet_public, 1_760_000_500).expect("verifies");
+    roster.verify(crate::identity::crypto(), &fleet_public, 1_760_000_500).expect("verifies");
     let node = roster.node("wasm_the_first").expect("node");
     assert_eq!(node.revoked_at, 1_760_000_500);
     assert!(node.is_revoked(1_760_000_500));
@@ -149,9 +149,9 @@ fn rotate_re_signs_under_the_new_key_and_prints_the_anchor_the_old_key_must_sign
     assert_eq!(rotated.revision, 2);
     let text = std::fs::read_to_string(&rotated.path).expect("signed roster");
     let roster = Roster::parse(&text).expect("parses");
-    roster.verify(&rotated.public_key, 1_760_000_900).expect("the new key verifies it");
+    roster.verify(crate::identity::crypto(), &rotated.public_key, 1_760_000_900).expect("the new key verifies it");
     roster
-        .verify(&old_public, 1_760_000_900)
+        .verify(crate::identity::crypto(), &old_public, 1_760_000_900)
         .expect_err("the old key must not verify the rotated roster");
     assert_eq!(
         rotated.anchor_message,
@@ -218,7 +218,7 @@ fn the_fleet_key_signs_from_the_vault_and_the_seed_is_never_exported() {
         .expect("sign from the vault");
     let roster =
         Roster::parse(&std::fs::read_to_string(&signed.path).expect("roster")).expect("parses");
-    roster.verify(&public, 1_760_000_000).expect("the vault's public key verifies the roster");
+    roster.verify(crate::identity::crypto(), &public, 1_760_000_000).expect("the vault's public key verifies the roster");
     assert_eq!(signed.public_key, public);
 
     // A key that was never imported is a named refusal, not a panic or a wrong signature.

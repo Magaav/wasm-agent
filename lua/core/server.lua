@@ -701,8 +701,10 @@ local function signature_matches(public_key, action, from, ts, body, signature)
   return host.verify(public_key or "", table.concat(parts, "|"), signature or "")
 end
 
--- A peer must be a rendezvous-known master with a valid, fresh signature.
-local function verify_peer(from, public_key, ts, signature, action, body)
+-- A peer must be a rendezvous-known master with a valid, fresh signature - unless this node's own
+-- mesh mount attested the caller for exactly this call (`attested`, see `mesh_caller` below), which is
+-- the second trust basis docs/MESH.md §9 item 2 asks for.
+local function verify_peer(from, public_key, ts, signature, action, body, attested)
   if not from or from == "" then return nil, "bad_request" end
   local stamp = math.floor(tonumber(ts) or 0)
   -- The signed message includes the hash of the body, so a valid signature covers *what* was
@@ -710,14 +712,23 @@ local function verify_peer(from, public_key, ts, signature, action, body)
   -- body is hashed exactly as received.
   if not signature_matches(public_key, action, from, stamp, body, signature) then return nil, "bad_signature" end
   if math.abs(host.now() - stamp) > 120 then return nil, "stale_request" end
-  -- Fresh from the rendezvous, not from the local cache: a peer that has been removed there
-  -- must stop being welcome here at once, and if the rendezvous cannot be reached the call is
-  -- refused rather than allowed on the strength of a list nobody currently vouches for. This is
-  -- the answer to "a guest can fake a master call": it would have to hold the master's private
-  -- key *and* still be enrolled for that node id.
-  local caller = nodeslib.verify_caller(from, public_key, { fresh = true })
-  if not caller then return nil, "unknown_caller" end
-  if users.normalize(caller.role) ~= "master" then return nil, "forbidden_role" end
+  -- The attested basis is used only when it names the very caller and key the signature above just
+  -- proved: the attestation is bound to that signature, so an attestation carried along with someone
+  -- else's request is never a basis for theirs. With no usable attestation the old rule runs
+  -- unchanged: fresh from the rendezvous, not from the local cache - a peer that has been removed
+  -- there must stop being welcome here at once, and if the rendezvous cannot be reached the call is
+  -- refused rather than allowed on the strength of a list nobody currently vouches for. This is the
+  -- answer to "a guest can fake a master call": it would have to hold the master's private key *and*
+  -- still be enrolled for that node id.
+  local caller = attested
+  if not (type(caller) == "table" and caller.node_id == from and caller.public_key == public_key) then
+    caller = nil
+  end
+  if not caller then
+    caller = nodeslib.verify_caller(from, public_key, { fresh = true })
+    if not caller then return nil, "unknown_caller" end
+    if users.normalize(caller.role) ~= "master" then return nil, "forbidden_role" end
+  end
   -- Recorded only after every check has passed, so a forged request cannot burn the id of a
   -- real one. Two minutes is the freshness window; the record is kept a little longer than
   -- that so a request cannot be replayed at the edge of its own validity.
@@ -905,7 +916,7 @@ local function signed_reply(signature, ts, out)
   return json.encode({ reply = out, reply_sig = reply_sig or "" })
 end
 
--- The mesh's admission of a managed peer call (docs/MESH.md, sections 2 and 7).
+-- The mesh's admission of a peer call (docs/MESH.md sections 2, 7 and 9 item 2).
 --
 -- A managed guest admits an inbound peer call by a list of capability *names* (`allowed`, in
 -- `wa_node_call` below), because a name list is all it ever had. A call the mesh's own mount already
@@ -921,9 +932,9 @@ end
 --     check already rests on;
 --   * it is bound to one caller, one verb, one capability name and the caller's own request signature,
 --     so it cannot be replayed onto a different request or a different capability;
---   * it expires with the same 120-second window every peer request uses.
--- Without one - which is every call today: `serve.rs` and the relay's `binding.lua` both call
--- `wa_node_call` with five arguments - the legacy list is the whole rule, unchanged.
+--   * it is fresh for `ATTESTATION_SECONDS` (shorter than the 120 s a peer request may live, because
+--     it is minted for one loopback hop and spent at once) and it is spent at most once.
+-- Without one the legacy list is the whole rule, unchanged.
 local MESH_VERBS = {
   read = { read = true, read_many = true, ls = true, grep = true, sessions = true, session = true,
     search_messages = true, recall = true, status = true, health = true },
@@ -941,23 +952,82 @@ local function mesh_verb(capability)
   return "call"
 end
 
--- Does `attestation` prove that the mesh admitted this exact call? Answers the verb it proved, or nil
--- and one word for the log.
-local function mesh_admitted(attestation, caller, capability, signature)
+-- How long an attestation may be spent. Shorter than the 120 s a peer request may live, because this
+-- proof is minted for one loopback hop and used immediately; `rust/wa-mesh/src/attest.rs` names the
+-- same bound (`TTL_SECONDS`) and `scripts/test-mesh-trust.lua` measures both ends of it.
+local ATTESTATION_SECONDS = 60
+
+-- The one-shot admission this node's own mount handed over immediately before this call
+-- (`binding.lua`'s `wa_mesh_admit`, called by `serve.rs` and by `binding.lua`'s own relay runtime).
+-- It is a global there on purpose (`dofile` re-executes a module in this tree), so it is read from the
+-- same place; absent, old, or about another caller and no attested basis exists at all. The name is
+-- `binding.lua`'s; if that ever changes this answers nothing and today's admission runs - the
+-- fail-closed direction.
+local MESH_ADMISSION = "_WA_MESH_ADMISSION"
+local function mesh_pending()
+  local admission = rawget(_G, MESH_ADMISSION)
+  if type(admission) ~= "table" then return nil end
+  local at = tonumber(admission.at) or 0
+  if at == 0 or host.now() - at > 60 then return nil end
+  return admission
+end
+
+-- Does `attestation` prove that this node's mesh mount admitted **this exact call**, and what may the
+-- caller run as if it does? Answers the caller to execute it as, or nil and one word for the log.
+--
+-- The question is deliberately narrow, and every part of it is required (docs/MESH.md §9 item 2):
+--   * the attestation is signed with *this* node's key over `mesh-allow|<this node>|<ts>|sha256(...)`
+--     - the same shape every other peer signature uses - and the mount signs it only after the
+--     roster's `authorize()` returned allow for this caller, this capability and this verb;
+--   * it names this caller, the verb this capability is graded with, the capability and the caller's
+--     own request signature, so it cannot be moved to another request, capability, verb or caller;
+--   * it is fresh within `ATTESTATION_SECONDS` and spent at most once;
+--   * the admission this node's own mount set for this call names the same caller, key and capability.
+-- That last half is what says the loopback hop is executing *this* call; without it an attestation
+-- would be a standing permission rather than a proof about one request.
+--
+-- When any of it fails, nothing widens: `verify_peer` falls back to `nodeslib.verify_caller` (the
+-- operator pins, the enrollment, the rendezvous) and refuses `unknown_caller` exactly as before.
+local function mesh_caller(attestation, from, public_key, capability, signature)
   if type(attestation) ~= "table" then return nil, "no_attestation" end
+  if type(from) ~= "string" or from == "" then return nil, "attestation_caller_mismatch" end
+  if attestation.caller ~= from then return nil, "attestation_caller_mismatch" end
   local verb = mesh_verb(capability)
-  if attestation.caller ~= (caller.node_id or "") then return nil, "attestation_caller_mismatch" end
   if attestation.capability ~= capability then return nil, "attestation_capability_mismatch" end
   if attestation.verb ~= verb then return nil, "attestation_verb_mismatch" end
   local stamp = math.floor(tonumber(attestation.ts) or 0)
-  if stamp == 0 or math.abs(host.now() - stamp) > 120 then return nil, "attestation_stale" end
+  if stamp == 0 or math.abs(host.now() - stamp) > ATTESTATION_SECONDS then return nil, "attestation_stale" end
   local identity = nodeslib.identity() or {}
   if not identity.public_key or identity.public_key == "" then return nil, "no_identity" end
-  local material = table.concat({ caller.node_id, verb, capability, tostring(signature or "") }, "|")
+  local material = table.concat({ from, verb, capability, tostring(signature or "") }, "|")
   if not signature_matches(identity.public_key, "mesh-allow", identity.node_id, stamp, material, attestation.signature) then
     return nil, "attestation_bad_signature"
   end
-  return verb
+  local admission = mesh_pending()
+  if not admission then return nil, "no_mesh_admission" end
+  if admission.node_id ~= from or admission.public_key ~= public_key then return nil, "attestation_admission_mismatch" end
+  if admission.capability ~= nil and admission.capability ~= "" and admission.capability ~= capability then
+    return nil, "attestation_capability_mismatch"
+  end
+  -- Single use, one attestation per request. It is already bound to the request signature; this is the
+  -- second lock, in the same ledger every peer request is recorded in, so the *same* attestation
+  -- cannot be presented twice even if the receiver's replay window has moved on.
+  if nodeslib.seen_before("mesh-allow|" .. tostring(attestation.signature or "")) then
+    return nil, "attestation_replayed"
+  end
+  return {
+    node_id = from,
+    public_key = public_key,
+    -- The roster decided who may call and how far; `master` is the fleet's word for a caller an
+    -- attested admission may run as, which is the same answer `binding.lua`'s `M.authorize` gives for
+    -- the same decision (`MESH.md` §7). It is not a rendezvous role and grants nothing on its own.
+    role = "master",
+    name = (type(admission.name) == "string" and admission.name ~= "" and admission.name) or from,
+    level = tonumber(admission.level),
+    mesh = "roster",
+    capability = capability,
+    verb = verb,
+  }
 end
 
 function wa_node_call(payload, from, public_key, ts, signature, mesh)
@@ -966,7 +1036,11 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
   local capability = request.capability or ""
   if capability == "" then return json.encode({ error = "bad_request" }) end
   if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
-  local caller, problem = verify_peer(from, public_key, ts, signature, "call", payload)
+  -- The roster's basis for this call. Resolved before the caller's own signature is verified only
+  -- because the attestation binds that signature: `verify_peer` checks the signature first and refuses
+  -- anything whose attestation does not name the caller that signature proved.
+  local attested, mesh_problem = mesh_caller(mesh, from, public_key, capability, signature)
+  local caller, problem = verify_peer(from, public_key, ts, signature, "call", payload, attested)
   if problem then return json.encode({ error = problem }) end
   -- The signed body names its target for every capability, so a relay that re-addresses a valid call
   -- (a master's `bash` meant for node A, delivered to node B) is refused here.
@@ -985,10 +1059,10 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
     -- roster and the grants decided on; every other call is admitted by the legacy list and nothing
     -- more. Neither one can be borrowed for the other: an absent or bad attestation falls through to
     -- the list, and an attested `read` verb does not admit a `control` capability.
-    local verb, why = mesh_admitted(mesh, caller, capability, signature)
+    local verb = attested and attested.verb or nil
     if not verb and not allowed[capability] then
-      if why ~= "no_attestation" then
-        emit({ type = "log", message = "mesh admission refused: " .. why })
+      if mesh_problem and mesh_problem ~= "no_attestation" then
+        emit({ type = "log", message = "mesh admission refused: " .. mesh_problem })
       end
       return answer({ error = "capability_not_granted" })
     end

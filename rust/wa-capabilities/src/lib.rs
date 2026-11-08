@@ -30,6 +30,9 @@ pub mod core_bridge;
 pub mod core_component;
 pub mod core_pool;
 pub mod file_search;
+/// `host.features` (docs/FEATURES.md): the one door the Lua gates ask "is this feature on, and which
+/// path is live" through. The rule lives in `wa-features`; this crate only routes to it.
+pub mod features;
 pub mod graph;
 pub mod host;
 pub mod http_transport;
@@ -45,6 +48,12 @@ pub mod vault_cli;
 // The speech queue's node half, reached from Lua (`stt_node` in `wa-kernel-runtime`): one admitted
 // peer call, the operator view, and the pump the worker role borrows for its transport.
 pub mod stt;
+// The compute fabric's node half, reached from Lua (`fabric_node` in `wa-kernel-runtime`): presence,
+// the offer pump and the lease (`docs/FABRIC.md`).
+pub mod fabric;
+/// The live facts behind a long tool call's row (docs/TOOL-PROGRESS.md): fed by the operation wait
+/// loops, read by every renderer.
+pub mod tool_progress;
 pub mod subagents;
 // The explicit WhatsApp send (docs/HOST.md, "WhatsApp explicit sends"): validate the exact JID, ask
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.

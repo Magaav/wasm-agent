@@ -1035,7 +1035,16 @@ pub extern "C-unwind" fn service(l: *mut wa_host_support::lua::LuaState) -> std:
                 // everything whose imports are served and reporting what each other one waits for.
                 "supervise" => crate::supervisor::reconcile(&request),
                 "registrations" => json!(crate::registrations::node().status()),
+                // The feature switches (docs/FEATURES.md): the same document `wa features` prints and
+                // `host.features` answers, resolved live from policy.json by the one resolver. A
+                // service answer, not a service control: it starts nothing and installs nothing.
+                "features" => wa_features::node_value(),
                 "limits" => json!({"node": crate::limits::caps().to_json()}),
+                // The compute fabric (`docs/FABRIC.md`): the live view with each node's load and
+                // capabilities, the recent placements and the score that decided them, the local
+                // fallbacks by reason, and the leases the fabric queues carry. `configure`, `tick`,
+                // `submit`, `take` and `settle` are the same surface for the node's own loop.
+                "fabric" => crate::fabric_node::admin(&request),
                 _ => json!({"ok": false, "error": "invalid_service_action"}),
             }
         }

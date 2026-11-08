@@ -28,7 +28,11 @@ not a new incremental provider protocol.
 <!-- /generated -->
 
 - `<generic>`: who the agent is and how it works (identity, completion and verification, style,
-  language, time, the on-demand memory protocol). A tool is named only in a form the envelope can
+  language, time, the on-demand memory protocol). `work` also carries the three long-work rules -
+  supervised operations instead of a background shell command, the cheapest check that can fail first,
+  and asking when a step keeps failing - because they belong to a *rule* the prompt states once rather
+  than a procedure loaded on demand ([AGENT-LOOP.md](AGENT-LOOP.md), `skills/wasm-agent-dev`). A tool is
+  named only in a form the envelope can
   call: declared as `name`, otherwise `tool_call(name="...")`, otherwise not at all
   (`scripts/test-prompt-tool-names.lua`).
 - `<stack name="wasm-agent">`: the Sentinel-notice rule, the tool protocol (in progressive mode

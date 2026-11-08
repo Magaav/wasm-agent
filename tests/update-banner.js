@@ -20,6 +20,7 @@ const check = (condition, label) => {
 const source = fs.readFileSync("ui/app.js", "utf8");
 const css = fs.readFileSync("ui/style.css", "utf8");
 const lua = fs.readFileSync("lua/core/update_banner.lua", "utf8");
+const components = fs.readFileSync("ui/components.js", "utf8");
 
 // ---- the source is the source of truth ------------------------------------
 check(/function updateBannerText\(payload\)/.test(source), "app.js defines updateBannerText");
@@ -94,11 +95,18 @@ class El {
 
 const body = new El("body");
 const topbar = new El("div");
-// The composer form: `session-status-content` is inserted above its footer (this page's status bar).
+// The composer form: the text area row, then `session-status-content`, then the footer (this page's
+// status bar) - the order `ui/components.js` builds. Victor's 08/11 position spec is that the line
+// renders BELOW the text area and ABOVE the status bar, so the stub carries both rows.
 const composerFooter = new El("div");
 composerFooter.className = "composer-footer";
+const composerRow = new El("div");
+composerRow.className = "composer-row";
+const composerInput = new El("textarea");
+composerRow.append(composerInput);
 const composer = new El("form");
 composer.className = "composer";
+composer.append(composerRow);
 composer.append(composerFooter);
 const documentStub = {
   body,
@@ -129,6 +137,10 @@ let updateToastDismissed = false;
 // half). Both are extracted from the same shipping source, so this still fails when app.js drifts.
 let sessionStandingNotice = "";
 let sessionUpdating = "";
+// The row's third claimant since the long-call line (docs/TOOL-PROGRESS.md): a running tool call,
+// which is the LOWEST of the three, so the notice's half is unchanged and tests/tool-progress.js
+// covers the call's. Declared here because paintSessionContent reads it.
+let toolRow = null;
 const UPDATING_TEXT = "updating…";
 ${extract("updateBannerText")}
 ${extract("dismissUpdateToast")}
@@ -173,7 +185,9 @@ check(body.children.includes(toast()), "the toast lives on the page body, not in
 
 // ---- session-status-content: the notice's own line above the status bar ----------------
 // The composer footer is this page's status bar; the notice gets ONE line directly above it, in the
-// same yellow as the CLI's, and the footer keeps its own controls where they were.
+// same yellow as the CLI's, and the footer keeps its own controls where they were. Below the text
+// area and above the status bar is Victor's 08/11 position spec, and the same order the CLI's boxed
+// screen draws (`lua/core/cli_view.lua`, `rust/wa-term`).
 const noticeRow = () => documentStub.querySelector("[data-session-status-content]");
 check(!!noticeRow(), "a session-status-content line is drawn above the status bar");
 check(noticeRow().className === "session-status-content", "with its own class, not the status bar's");
@@ -183,6 +197,13 @@ check(noticeRow().attributes.role === "status" && noticeRow().attributes["aria-l
 check(noticeRow().parent === composer, "it lives in the composer, beside the status bar");
 check(composer.children.indexOf(noticeRow()) === composer.children.indexOf(composer.children.find((c) => c.className === "composer-footer")) - 1,
   "directly above the composer footer: the status bar's own row is untouched");
+check(composer.children.indexOf(noticeRow()) > composer.children.indexOf(composerRow),
+  "and directly BELOW the text area: textarea, notice, status bar - never above the text area");
+check(composer.children[composer.children.indexOf(composerRow) + 1] === noticeRow(),
+  "with no other row between the text area and the notice");
+check(
+  /class="composer"[\s\S]*?class="composer-row"[\s\S]*?class="composer-footer"/.test(components),
+  "the shipping markup keeps that order: the text row before the footer the line is inserted before");
 check(composer.children.filter((c) => c.className === "composer-footer").length === 1,
   "the status bar is still one row, not a second copy of it");
 check(/\.session-status-content \{/.test(css), "the line has its own style");

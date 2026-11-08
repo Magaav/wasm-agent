@@ -41,6 +41,7 @@
 //! Design notes that decide behaviour: `docs/QUEUE.md` ("Phase 2") and
 //! `docs/WHATSAPP-TRANSCRIPTION.md` ("Remote workers").
 
+pub mod fabric;
 pub mod metrics;
 pub mod policy;
 pub mod producer;
@@ -52,6 +53,7 @@ pub mod worker;
 #[cfg(test)]
 mod tests;
 
+pub use fabric::{decide as fabric_decide, place as fabric_place};
 pub use metrics::{JobTrace, Metrics, Who};
 pub use policy::{Decision, Latency, LocalReason, Preference, RemoteHealth};
 pub use producer::{AudioStore, LocalWorker, MemoryAudioStore, Producer, SttPolicy};

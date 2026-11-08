@@ -958,3 +958,283 @@ fn a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url(
     );
 }
 
+
+// ---------------------------------------------------------------------------------------------------
+// The execution trust basis (docs/MESH.md §9 item 2).
+// ---------------------------------------------------------------------------------------------------
+
+/// The caller's own `/node/call` request with a nonce, so two calls in one second are different bytes
+/// (Ed25519 is deterministic, and the replay guard refuses a byte-identical request twice).
+fn inner_request_nonce(caller: &Member, to: &RosterNode, capability: &str, nonce: &str) -> Inner {
+    let body = json!({
+        "from_node_id": caller.node.node_id,
+        "to_node_id": to.node_id,
+        "request_id": format!("inner-{nonce}"),
+        "capability": capability,
+        "args": {"path": "README.md", "nonce": nonce},
+    })
+    .to_string();
+    let ts = now();
+    let signature = caller
+        .identity
+        .sign(&format!("{CALL}|{}|{ts}|{}", caller.node.node_id, crate::identity::sha256_hex(&body)));
+    Inner {
+        body,
+        headers: vec![
+            ("X-WA-Node".to_string(), caller.node.node_id.clone()),
+            ("X-WA-Pub".to_string(), caller.node.public_key.clone()),
+            ("X-WA-Ts".to_string(), ts.to_string()),
+            ("X-WA-Sig".to_string(), signature),
+        ],
+    }
+}
+
+/// A mesh envelope that carries a real inner request *with its signed headers*, which is what the mount
+/// binds the attestation to (`attest::caller_signature` reads `x-wa-sig` out of them).
+fn envelope_with_inner(
+    caller: &Member,
+    to: &RosterNode,
+    capability: &str,
+    nonce: &str,
+) -> (String, Vec<(String, String)>) {
+    let inner = inner_request_nonce(caller, to, capability, nonce);
+    let envelope = wire::MeshCall {
+        schema: wire::SCHEMA,
+        request_id: format!("mesh-{nonce}"),
+        from_node_id: caller.node.node_id.clone(),
+        to_node_id: to.node_id.clone(),
+        capability: capability.into(),
+        args: json!({"path": "README.md", "nonce": nonce}),
+        inner_body: inner.body,
+        inner_headers: inner.headers,
+    };
+    let body = envelope.encode();
+    let ts = now();
+    let signature = caller
+        .identity
+        .sign(&wire::MeshCall::call_message(&caller.node.node_id, ts, &body));
+    let headers = vec![
+        ("x-wa-mesh".to_string(), "1".to_string()),
+        (crate::admission::CARRIER_HEADER.to_string(), "relay".to_string()),
+        ("content-type".to_string(), "application/json".to_string()),
+        ("x-wa-node".to_string(), caller.node.node_id.clone()),
+        ("x-wa-pub".to_string(), caller.node.public_key.clone()),
+        ("x-wa-ts".to_string(), ts.to_string()),
+        ("x-wa-sig".to_string(), signature),
+    ];
+    (body, headers)
+}
+
+/// Four local nodes: `work` at level 0 calls `cloud` at level 2, and `cloud`'s operator pins name
+/// `mail` and **not** the caller — the live fleet's shape (`work` → `nextcloud`). What makes the call
+/// executable on `cloud` is the attestation its own mount signed, not its pins.
+///
+/// The Rust half of that seam is measured here: the mount decides ALLOW on the relay path over real
+/// loopback sockets, and the attestation it signs is bound to the caller id, the verb, the capability
+/// and the caller's own request signature, is fresh only inside `attest::TTL_SECONDS`, and verifies for
+/// nothing else. The accepting half is `wa_node_call`'s `verify_peer` (Lua) and is measured by
+/// `scripts/test-mesh-trust.lua` against this same byte-for-byte signed message.
+#[test]
+fn the_target_executes_on_the_mounts_attestation_not_on_its_operators_pins() {
+    let fleet_key = testkit::fleet_key();
+    let work = Member::new("trust-work", 0, &[]); // the caller: level 0
+    let cloud = Member::new("trust-cloud", 2, &[]); // the target: level 2
+    let mail = Member::new("trust-mail", 2, &[]); // another level-2 node, and cloud's operator
+    let hub = Member::new("trust-hub", 1, &[]);
+    let roster = Draft {
+        fleet: "ohana".into(),
+        issued_at: wire::now_seconds().saturating_sub(60),
+        expires_at: 0,
+        nodes: vec![work.node.clone(), cloud.node.clone(), mail.node.clone(), hub.node.clone()],
+    }
+    .sign(&fleet_key);
+    let mut ids = std::collections::BTreeSet::new();
+    for member in [&work, &cloud, &mail, &hub] {
+        assert!(ids.insert(member.node.node_id.clone()), "four distinct local nodes");
+    }
+
+    let work_dir = NodeDir::new(&work, member_policy(&fleet_key.public_key, true), Some(&roster));
+    let cloud_dir = NodeDir::new(&cloud, member_policy(&fleet_key.public_key, true), Some(&roster));
+    let mail_dir = NodeDir::new(&mail, member_policy(&fleet_key.public_key, true), Some(&roster));
+    let hub_dir = NodeDir::new(&hub, member_policy(&fleet_key.public_key, true), Some(&roster));
+
+    // The target pins one operator, and it is not the caller: the `nextcloud` shape.
+    let cloud_pins = cloud_dir.pins(&mail);
+    assert!(
+        cloud_pins.iter().all(|(id, _)| id != &work.node.node_id),
+        "the target's pins must exclude the caller for this test to mean anything"
+    );
+
+    let w = TestNode::start(&work, work_dir.config.clone(), Vec::new());
+    let c = TestNode::start(&cloud, cloud_dir.config.clone(), cloud_pins.clone());
+    let m = TestNode::start(&mail, mail_dir.config.clone(), Vec::new());
+    let h = TestNode::start(&hub, hub_dir.config.clone(), Vec::new());
+    let mut routes = HashMap::new();
+    routes.insert(work.node.node_id.clone(), w.address);
+    routes.insert(cloud.node.node_id.clone(), c.address);
+    routes.insert(mail.node.node_id.clone(), m.address);
+    routes.insert(hub.node.node_id.clone(), h.address);
+    let relay = TestRelay::start(routes);
+
+    // --- 1. level 0 -> level 2, `bash`, carried by the relay and executed ---------------------
+    let (body, headers) = envelope_with_inner(&work, &cloud.node, "bash", "allow");
+    let carried = relay_send(&relay, &cloud.node.node_id, &work.identity, &headers, &body, "trust-allow");
+    assert_eq!(carried["ok"], true, "the relay carried it: {carried}");
+    let sealed = carried["body"].as_str().expect("the relay hands back a body");
+    let reply = RelayAnswer::open(
+        sealed,
+        &cloud.node.node_id,
+        &cloud.node.public_key,
+        &work.node.node_id,
+        now(),
+    )
+    .expect("the target's own signature opens the answer");
+    assert!(reply.ok, "the roster admitted a level-0 caller to a level-2 target: {reply:?}");
+    assert_eq!(reply.verb.as_deref(), Some("control"));
+    let ran: Value = serde_json::from_str(reply.body.as_deref().unwrap_or("{}")).expect("answer body");
+    assert_eq!(ran["ran"], "bash", "the capability the caller asked for is the one that ran: {ran}");
+    assert_eq!(ran["from"], "trust-work");
+    assert_eq!(ran["mesh"], true, "the roster decided, not the pins: {ran}");
+    assert!(
+        c.lines().iter().any(|line| line.contains("reason=hierarchy_allowed")),
+        "the target audited the decision it executed on: {:?}",
+        c.lines()
+    );
+
+    // --- 2. the proof the target's own admission executes on ----------------------------------
+    // Built the way the mount builds it (`admit_inbound`, `LoopbackHandler`): the node's own key, the
+    // caller, the verb the roster decided, the capability, and the caller's request signature.
+    let proof_inner = inner_request_nonce(&work, &cloud.node, "bash", "proof");
+    let (body_a, headers_a) = envelope_with_inner(&work, &cloud.node, "bash", "proof");
+    let admitter = Admitter::from_files(
+        NodeFiles {
+            policy: cloud_dir.config.join("policy.json"),
+            roster: cloud_dir.config.join("mesh-roster.json"),
+            config: cloud_dir.config.clone(),
+        },
+        Identity::load(&cloud_dir.config.join("node.key")).expect("cloud identity"),
+        Arc::new(MemorySink::new()),
+    );
+    let allowed = match admitter.decide(&Inbound::relayed(headers_a, body_a)) {
+        Admission::Allow(allowed) => allowed,
+        other => {
+            let _ = other;
+            panic!("the roster allows a level-0 node to control a level-2 one");
+        }
+    };
+    assert_eq!(allowed.verdict.reason, "hierarchy_allowed");
+    assert_eq!(
+        allowed.call.from.node_id, work.node.node_id,
+        "the caller the pins exclude is the one the roster allowed"
+    );
+    let caller_signature = crate::attest::caller_signature(&allowed.call.inner.headers);
+    let sent_signature = proof_inner
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-wa-sig"))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        caller_signature, sent_signature,
+        "the attestation binds the caller's own request signature"
+    );
+    let ts = wire::now_seconds();
+    let attestation = crate::attest::sign(
+        &Identity::load(&cloud_dir.config.join("node.key")).expect("cloud identity"),
+        &work.node.node_id,
+        allowed.verb.as_str(),
+        &allowed.call.capability,
+        &caller_signature,
+        ts,
+    );
+    let signed = crate::attest::message(
+        &cloud.node.node_id,
+        &work.node.node_id,
+        "control",
+        "bash",
+        &caller_signature,
+        ts,
+    );
+    let signature = attestation["signature"].as_str().expect("signature").to_string();
+    assert!(
+        crate::identity::verify(&cloud.node.public_key, &signed, &signature),
+        "the target's own key signed it"
+    );
+    assert_eq!(attestation["caller"], work.node.node_id);
+    assert_eq!(attestation["verb"], "control");
+    assert_eq!(attestation["capability"], "bash");
+    assert!(crate::attest::is_fresh(ts, ts), "minted now, spent now");
+    assert!(
+        !crate::attest::is_fresh(ts, ts + crate::attest::TTL_SECONDS + 1),
+        "past `attest::TTL_SECONDS` it proves nothing"
+    );
+    // Every part is bound: another verb, capability, caller, request or second verifies for nothing.
+    for other in [
+        crate::attest::message(&cloud.node.node_id, &work.node.node_id, "read", "bash", &caller_signature, ts),
+        crate::attest::message(&cloud.node.node_id, &work.node.node_id, "control", "read", &caller_signature, ts),
+        crate::attest::message(&cloud.node.node_id, &mail.node.node_id, "control", "bash", &caller_signature, ts),
+        crate::attest::message(&cloud.node.node_id, &work.node.node_id, "control", "bash", "some-other-request", ts),
+        crate::attest::message(&cloud.node.node_id, &work.node.node_id, "control", "bash", &caller_signature, ts + 1),
+    ] {
+        assert!(!crate::identity::verify(&cloud.node.public_key, &other, &signature), "{other}");
+    }
+    // A forged one (the holder edits what the target signed) proves nothing either.
+    let flipped = format!("{}{}", if signature.starts_with('0') { "1" } else { "0" }, &signature[1..]);
+    assert!(!crate::identity::verify(&cloud.node.public_key, &signed, &flipped));
+
+    // --- 3. level 2 -> level 0 is still denied, on the target --------------------------------
+    let (up_body, up_headers) = envelope_with_inner(&mail, &work.node, "bash", "upward");
+    let upward = relay_send(&relay, &work.node.node_id, &mail.identity, &up_headers, &up_body, "trust-upward");
+    assert_eq!(upward["ok"], true, "the relay carried it: {upward}");
+    let upward_reply = RelayAnswer::open(
+        upward["body"].as_str().expect("relay body"),
+        &work.node.node_id,
+        &work.node.public_key,
+        &mail.node.node_id,
+        now(),
+    )
+    .expect("the target's signed refusal opens");
+    assert!(!upward_reply.ok, "a level-2 node may not call upward to level 0: {upward_reply:?}");
+    assert_eq!(upward_reply.error.as_deref(), Some("mesh_denied"));
+    assert_eq!(upward_reply.reason.as_deref(), Some("hierarchy_denied"));
+
+    // --- 4. the same request twice: a replayed proof is not a second call --------------------
+    let (replay_body, replay_headers) = envelope_with_inner(&work, &cloud.node, "bash", "replay");
+    let first = relay_send(&relay, &cloud.node.node_id, &work.identity, &replay_headers, &replay_body, "trust-replay");
+    assert_eq!(first["ok"], true);
+    let second = relay_send(&relay, &cloud.node.node_id, &work.identity, &replay_headers, &replay_body, "trust-replay");
+    let second_body: Value = serde_json::from_str(second["body"].as_str().unwrap()).unwrap();
+    assert_eq!(second_body["error"], "replayed_request", "{second_body}");
+
+    // --- 5. no roster: the mesh does not decide, and today's pins are unchanged ---------------
+    let plain_dir = NodeDir::new(&hub, json!({"version": 1, "components": {}}), None);
+    let no_roster = Admitter::from_files(
+        NodeFiles {
+            policy: plain_dir.config.join("policy.json"),
+            roster: plain_dir.config.join("mesh-roster.json"),
+            config: plain_dir.config.clone(),
+        },
+        Identity::load(&plain_dir.config.join("node.key")).expect("hub identity"),
+        Arc::new(MemorySink::new()),
+    );
+    let from_work = inner_request_nonce(&work, &hub.node, "bash", "no-roster");
+    match no_roster.decide(&Inbound::direct(from_work.headers.clone(), from_work.body.clone())) {
+        Admission::Legacy { why, .. } => assert_eq!(why, "not_mesh", "a plain peer call is not the mesh's"),
+        _ => panic!("a call without a mesh envelope is never decided by the roster"),
+    }
+    let pins = Arc::new(Mutex::new(cloud_pins.clone()));
+    let legacy = legacy_call(
+        &Identity::load(&plain_dir.config.join("node.key")).expect("hub identity"),
+        &pins,
+        &from_work.body,
+        &from_work.headers,
+        true,
+    );
+    let legacy_body: Value = serde_json::from_str(&legacy.2).expect("legacy body");
+    assert_eq!(
+        legacy_body["error"], "unknown_caller",
+        "the operator pins are what executed calls before this change, and they still are without a roster: {legacy_body}"
+    );
+
+    let _ = (&relay, &w, &c, &m, &h);
+}

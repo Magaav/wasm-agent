@@ -232,7 +232,7 @@ function M.set_name(name)
   return name
 end
 
-local function fetch_peers(fresh)
+local function fetch_peers(fresh, cached_only)
   local url = M.rendezvous_url()
   if url == "" then return {} end
   local now = host.now()
@@ -240,7 +240,12 @@ local function fetch_peers(fresh)
   -- node - must not be made from a list read fifteen seconds ago: a peer removed from the
   -- rendezvous would stay welcome here for the rest of the window. A display can live with that;
   -- a capability check cannot.
-  if not fresh and cache and (now - cache_at) < CACHE_TTL then return cache end
+  if not fresh and cache and ((now - cache_at) < CACHE_TTL or cached_only) then return cache end
+  -- `cached_only` is the display that must not wait: a roster snapshot taken *inside* a run, by an
+  -- interpreter that will hand it to the client (lua/core/local_views.lua). An empty cache answers
+  -- with this node alone, which is true and cheap; a network read here would put the rendezvous'
+  -- latency inside somebody else's turn.
+  if cached_only then return cache or {} end
   local peers = {}
   pcall(function()
     local headers = json.encode(M.signed_headers("nodes") or {})
@@ -266,7 +271,12 @@ function M.invalidate()
 end
 
 -- Local host node + every other peer the rendezvous knows about.
-function M.list()
+--
+-- `opts.cached` reads the roster this process already has and never asks the rendezvous (see
+-- `fetch_peers`): what a snapshot taken during a run is made of. Every existing caller passes no
+-- options and behaves exactly as before.
+function M.list(opts)
+  opts = opts or {}
   local identity = M.identity() or {}
   local out = {
     {
@@ -291,7 +301,7 @@ function M.list()
       } or { "read", "ls", "grep", "spell_save", "spell_run", "spell_get" },
     },
   }
-  for _, peer in ipairs(fetch_peers()) do
+  for _, peer in ipairs(fetch_peers(false, opts.cached)) do
     if peer.node_id ~= identity.node_id then
       peer.id = peer.node_id
       peer.kind = "peer"

@@ -1,0 +1,19 @@
+[package]
+name = "wa-cli-views"
+version = "0.1.0"
+edition = "2021"
+
+# Read-only `/` views the *client* answers while a turn is in flight (docs/HOST.md, "Drawing while
+# Lua is blocked"). `/status` has had this channel since the status line existed
+# (`host.status_snapshot`); this crate is the same idea for views that are more than one panel:
+# a list, a page per entry, and a way back.
+#
+# It is deliberately small, pure and safe Rust: the caller is the CLI's console reader thread, which
+# must never panic, never block and never wait on the interpreter it is drawing beside.
+#
+#   serde + serde_json  the panel spec is JSON, because it crosses into Lua
+#                       (`host.local_view`) and out to `wa_term::terminal_editor::Panel::from_spec`.
+# No other dependency: nothing here reads a file, a clock, a socket or a node.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

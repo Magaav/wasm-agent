@@ -222,6 +222,35 @@ second. If a future editor moves this onto a hot route, that measurement is the 
 
 `wa update --check` only asks the release feed whether a newer release is published.
 
+## An update installs the whole component set, and enables none of it
+
+A deploy carries two things that update separately from the core: the Lua tree, and the pinned WASI
+components in `components.lock`. Since 08/11 the second one is **every** production component, not
+`graph` alone (`docs/COMPONENTS.md`, `docs/FEATURES.md`): a node that was told to run a component had
+nothing to run, because the component was never installed.
+
+What `/update` (and `wa update`, and a deploy) does with them, in order:
+
+1. the set is the names `components.lock` pins - read from the lock, never from a list in `deploy.sh`;
+2. every name is resolved (already installed, this node's cache, the release bundle
+   `components-<sha12 of the lock>`) and verified against the pin (sha256 **and** bytes) before anything
+   is written;
+3. the set that is installed now is recorded (`<components>/.prev/components.set`), each component's
+   previous triple is kept, and the new set is installed - module and manifest first, pin last;
+4. a refusal anywhere in the set puts the whole previous set back and the deploy stops with nothing
+   half-installed (`component_install_failed`, `component_hash_mismatch`, `component_size_mismatch`).
+
+**The lock's sha is the release identity**, so changing one pin - a new component, a rebuilt one - asks
+for a different bundle: `scripts/publish-components.sh` builds and verifies the assets for the current
+lock and prints the `gh release create` command. Until that release exists a node with a wasm toolchain
+can still deploy (a local build needs `WA_DEPLOY_COMPONENT_REPIN=1`), and a node without one refuses by
+name instead of half-installing.
+
+**Installing is not enabling.** The new components are inert until `policy.json` says otherwise
+(`features`), and `wa features` answers which of them this node actually routes to - installed sha,
+enabled, source, active path and reason. A rollback restores the previous component set along with the
+previous Lua tree, so "the node we were running an hour ago" includes its components.
+
 ## What this does not do
 
 - **Channels are two, and inferred.** `stable` follows releases; a node that runs a pre-release follows

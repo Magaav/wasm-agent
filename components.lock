@@ -1,23 +1,35 @@
-# Pinned WASI components this tree's core runs.
+# Pinned WASI components this tree's core runs - every component this node SHIPS, not just the ones
+# it cannot start without.
 #
 # `scripts/deploy.sh` installs these beside the core before the node is restarted
-# (scripts/lib/deploy-components.sh), and refuses to install bytes that are not the ones named
-# here: a core whose components are missing answers their capability with
-# `component_*_unavailable`, so the core and its components are one install.
+# (scripts/lib/deploy-components.sh), and refuses to install bytes that are not the ones named here: a
+# core whose components are missing answers their capability with `component_*_unavailable`, so the
+# core and its components are one install.
 #
-# The graph is required, not optional: every `host.graph_*` call runs the `graph` component
-# (docs/KERNEL.md, stream C).
+# WHY EVERY COMPONENT. Until 08/11 this file pinned `graph` alone. agent-core, codemode, hooks,
+# memory, model-gateway, selfloop, telemetry-sink and wa-email were built and tested but never
+# shipped, so their `WA_*_COMPONENT` flags had nothing to turn on and fell back to the native path:
+# a node could look like it ran the component it did not have. What this file pins is what a deploy
+# installs; what a node actually routes to is `policy.json`'s `features` section (docs/FEATURES.md).
+# **Installed is not enabled**: pinning a component here installs it, and leaves it off.
 #
-# Format: <name> <sha256> <bytes>. Regenerate the line on the machine that produces the release
+# WHAT IS NOT PINNED, and why. Test fixtures are built by the gate, never shipped: `svc-*`,
+# `memory-crash`, `memory-wedge`, `mcp-echo`. `wa-whatsapp` is installed by hand on the node that runs
+# it (its bytes carry the linked-device client and its credentials file is that node's), and
+# `mcp-whatsapp` is a registry definition an operator enables with `mcp put`/`enable`, not a core
+# component. A name is shipped by being pinned here; nothing else in the tree decides it.
+#
+# FORMAT: <name> <sha256> <bytes>. Regenerate a line on the machine that produces the release
 # artifacts, from the reviewed tree:
 #
-#   WASI_SDK=<dir> WA_COMPONENTS_DIR=<artifact-dir> bash scripts/build-components.sh graph
-#   sha256sum <artifact-dir>/graph.wasm      # -> this line (the size too)
+#   WASI_SDK=<dir> WA_COMPONENTS_DIR=<artifact-dir> bash scripts/build-components.sh <name>
+#   sha256sum <artifact-dir>/<name>.wasm      # -> this line (the size too)
 #
 # and commit the changed line with the component change that caused it. A build is not
 # byte-reproducible across checkout paths (the guest embeds three panic-location paths - measured
-# 05/11: two checkouts of the same tree gave 8,185,719 and 8,185,720 bytes), which is why a node
-# installs the pinned artifact instead of rebuilding it.
+# 05/11: two checkouts of the same tree gave 8,185,719 and 8,185,720 bytes; the graph moved again
+# when this lock was regenerated from the shipping checkout, 8,216,373 -> 8,216,118 bytes), which is
+# why a node installs the pinned artifact instead of rebuilding it.
 #
 # Where that artifact comes from, in the order a deploy tries it (docs/COMPONENTS.md "Distributing
 # components"): the component already installed (when it is these bytes), this node's cache
@@ -31,4 +43,12 @@
 # A deploy that builds from the tree instead (no pinned bytes reachable and
 # WA_DEPLOY_COMPONENT_SOURCE unset) is a development deploy, and it must say so with
 # WA_DEPLOY_COMPONENT_REPIN=1 to install what it just built.
-graph 7a1b4982ab849f449bf570e7bee77721451f1d70308b77c2dd9d301d4940ffc6 8216373
+agent-core 02be7eaeeab8521600e28c8d0e28aed8a917be5dfdb601f8c852fbacf44a3b26 396230
+codemode 9d49c2c72d0b9a3897a4e8374b39b11340e495e9f66d1dc4d49770ad43402175 212123
+graph fb888dcfe70da4e8d22c525b690d6dc785d875e914c639c645ab61bb9f62c937 8216118
+hooks d1552e198eb7c00e86406f85d2ec3620284bf4d7aa2a94123f6296bb770c8d4f 217631
+memory d591fe3785d780e36313ba824bad14c5574c57b7fe0dde8f5c2de704e613e079 207328
+model-gateway 73e1845c3bada03922dcd8d68a627cf923b1269dfb5b80351c6b72e4d27bda2a 404786
+selfloop 2ac381ae62407256c0328d115b357125ada42357e4d088a4b08176a48ff4b699 246427
+telemetry-sink 48d5d52aba78d986e857da523e00801ddfa9f2c98503e912fe4c8172188cd707 153650
+wa-email ac02a49b8d487ee839b82c6b1bacdb351869c88a983afdd8a38c44de611e743c 569853

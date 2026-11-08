@@ -148,6 +148,7 @@ itself, no built-in knowledge of the sentinel, and nine failed upgrade attempts 
 | skill | why it is a skill and not a paragraph in `AGENTS.md` |
 | --- | --- |
 | `self-update` | the procedure is long (the command, the whitelist, the deadlock, the recovery) and needed rarely. The description is written to match the *moment* — "use it whenever a change requires restarting or replacing this node" — so it is loaded when it matters and costs nothing when it does not. |
+| `wasm-agent-dev` | how to change *this repository*: which edits need no rebuild, that a Lua test only tested the tree when `WASM_AGENT_LUA_ROOT` is set, that a Rust build never runs on a weak node or as a background `&`, which test covers which area, and how to hand a diff back. It is a procedure an agent needs at the start of every change to the tree — long enough to be a skill, too expensive to inject in every prompt. The one-line *rules* it serves (long work is an operation, cheapest check first, ask when stuck) stay in the prompt's `<generic>`/`work` section; `docs/AGENT-LOOP.md` is the contract. |
 
 ### Historical full-catalogue economics
 

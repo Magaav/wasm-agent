@@ -1,0 +1,39 @@
+[features]
+# `fs`: read the peer cache from a file. Only the node needs it; the guest never does, and a guest that
+# links `wasi:filesystem` for a function it never calls is a grant nobody asked for.
+default = []
+fs = []
+
+[package]
+name = "wa-mesh-core"
+version = "0.1.0"
+edition = "2021"
+description = "The mesh's decisions as pure logic - roster, hierarchy, grants, attestation bytes, audit lines, peer address order - with no socket, no file and no key of its own (docs/MESH.md, docs/CORE-SPLIT.md)"
+
+# The split `docs/CORE-SPLIT.md` asks for, fourth extraction: everything the mesh *decides* is here,
+# and everything it *touches* stays in `wa-mesh` (the sockets, the relay, the polling, the cache file,
+# the node's key). Two builds consume this crate and nothing consumes it twice:
+#
+#   * `wa-mesh` (the node), which supplies ring-backed crypto and the node's identity;
+#   * `rust/components/mesh` (the `wa:mesh` guest, wasm32-wasip2), which supplies dalek-backed crypto,
+#     holds no key, and reads no file.
+#
+# Dependencies, and why each one is here:
+# - `wa-grant-policy`: the `Pattern` the operator's grants are written in, so deny-before-allow matches
+#   a target exactly the way a capability rule does. Pure (serde, serde_json, sha2).
+# - `sha2`: sha256 for node ids, roster fingerprints and the attestation's material hash. The guest
+#   needs the same hash, and a hash is not a capability: it is in this crate so both sides compute the
+#   same bytes rather than each calling its own.
+# - `serde`/`serde_json`: the roster document, the `mesh` policy section and the audit-line fields.
+#   No HTTP, no clock, no environment: nothing here reads the process.
+[dependencies]
+wa-grant-policy = { path = "../wa-grant-policy" }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# A real ed25519 for this crate's own tests: the trait is the seam, and a fake verifier would let a
+# broken signature check pass. It is the same crate the guest uses, so the tests here also exercise the
+# implementation the component ships.
+[dev-dependencies]
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }

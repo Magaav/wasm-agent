@@ -34,15 +34,14 @@ memory.setup()
 local real_getenv, real_selfloop, real_log = host.getenv, host.selfloop, host.log
 local logged = {}
 
+-- The switch is `docs/FEATURES.md`'s `selfloop` feature, resolved at every route; two instances of the
+-- module share one `host.features` table, so the seam instance carries the module's own test seam.
 local function instance(seam)
-  host.getenv = function(name)
-    if name == 'WA_SELFLOOP_COMPONENT' then return seam and '1' or nil end
-    return real_getenv(name)
-  end
   host.log = function(line) logged[#logged + 1] = tostring(line) end
   local module = dofile('lua/core/selfloop.lua')
   module.setup()
-  host.getenv, host.log = real_getenv, real_log
+  host.log = real_log
+  if seam then module.seam_override = function() return true, 'active_component' end end
   return module
 end
 

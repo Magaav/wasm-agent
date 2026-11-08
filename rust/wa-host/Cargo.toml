@@ -25,6 +25,9 @@ wa-mesh = { path = "../wa-mesh" }
 # `wa dev`: the dev-loop hot swap is `wa-kernel-runtime`'s (the same spawn a supervised start runs),
 # so the node does not grow a second way to start a component.
 wa-kernel-runtime = { path = "../wa-kernel-runtime" }
+# `wa features` (docs/FEATURES.md): the same resolver the Lua gates and `services features` read, so the
+# CLI cannot report a path the node is not taking.
+wa-features = { path = "../wa-features" }
 # The database the interpreter's own connection opens, and the sha256 of the installed Lua tree
 # (`--capability-digest`, `--lua-tree`) that must match this binary's.
 ring = "0.17"

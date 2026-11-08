@@ -1,0 +1,9 @@
+{
+  "name": "mesh",
+  "kind": "tool",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "The mesh seam (wa:mesh): the roster's verify, the hierarchy and the grants decision, the audit line, the attestation's bytes and the peer-address rule, over ed25519 the guest carries itself. It imports nothing: no store, no path, no socket, no clock, no key.",
+  "capabilities": {},
+  "limits": {"memory_mb": 32}
+}

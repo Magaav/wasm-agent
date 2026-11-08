@@ -118,14 +118,11 @@ end
 local memory = dofile('lua/core/memory.lua')
 memory.setup()
 local policy = dofile('lua/core/codemode_policy.lua')
-local real_getenv = host.getenv
 local function instance(seam)
-  host.getenv = function(name)
-    if name == 'WA_CODEMODE_COMPONENT' then return seam and '1' or nil end
-    return real_getenv(name)
-  end
   local module = dofile('lua/core/codemode.lua')
-  host.getenv = real_getenv
+  -- The seam instance carries the module's test seam: one `host.features` table cannot answer
+  -- differently for two instances in one process (docs/FEATURES.md).
+  if seam then module.seam_override = function() return true, 'active_component' end end
   return module
 end
 local codemode = instance(which == 'component')

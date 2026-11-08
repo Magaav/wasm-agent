@@ -100,7 +100,11 @@ ok(chat:find("view.session_status = function() return banner.session_content", 1
 local app = read("ui/app.js")
 ok(app:find('const UPDATING_TEXT = "updating…";', 1, true) ~= nil, "app.js pins the same sentence")
 ok(app:find("function paintSessionContent()", 1, true) ~= nil, "one resolver owns the row")
-ok(app:find("return paintSessionNotice(sessionUpdating || sessionStandingNotice);", 1, true) ~= nil,
+-- One resolver, and the same precedence as before: `updating…` replaces the standing notice, and
+-- both outrank the third claimant (a long tool call's row, docs/TOOL-PROGRESS.md) that was added
+-- underneath them. The call's own half is pinned by tests/tool-progress.js.
+ok(app:find("const standing = sessionUpdating || sessionStandingNotice;", 1, true) ~= nil
+  and app:find("if (standing) return paintSessionNotice(standing);", 1, true) ~= nil,
   "`updating…` replaces the standing notice on that row instead of competing with it")
 ok(app:find("if (upgradeState) paintUpdating(true);", 1, true) ~= nil,
   "the line appears when the node stops answering during an install")

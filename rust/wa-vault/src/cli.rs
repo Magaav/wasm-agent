@@ -146,17 +146,21 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "import-ed25519" => {
             let name = options.required(0)?;
             let path = options.flag("--from").ok_or_else(|| "flag_required:--from".to_string())?;
-            let seed = std::fs::read(&path).map_err(|error| format!("read_seed:{error}"))?;
-            let seed = match seed.strip_suffix(b"\n") {
-                Some(stripped) => stripped.to_vec(),
-                None => seed,
-            };
+            let bytes = std::fs::read(&path).map_err(|error| format!("read_seed:{error}"))?;
+            // The operator's own tooling decides the file format (`wa fleet keygen` writes pkcs8 hex,
+            // `node.key` too, a hand-made key may be 32 raw bytes): `seed::read` accepts what an
+            // operator actually has and names what it read.
+            let (seed, format) = crate::seed::read(&bytes)?;
             let mut vault = open_vault(&options)?;
-            let meta = vault.import_ed25519(&name, &seed, &operator_actor())?;
-            println!("{name}: ed25519 version {}", meta.version);
+            let actor = operator_actor();
+            let meta = vault.import_ed25519(&name, &seed, &actor)?;
+            println!("{name}: ed25519 version {} (read as {})", meta.version, format.as_str());
             println!("public_key: {}", crate::hex::encode(&vault.public_key(&name)?));
             if options.has("--shred") {
                 shred(Path::new(&path))?;
+                // The chain is what an operator reads afterwards to see that the source file is gone
+                // (`wa vault audit tail`); the line says which entry and which name, never a value.
+                vault.note("shred-source", &actor, &name, meta.version, "ok")?;
                 println!("source: shredded ({path})");
             } else {
                 println!("source: kept ({path}); pass --shred to destroy it after verification");
@@ -208,7 +212,10 @@ fn dispatch(args: &[String]) -> Result<(), String> {
 }
 
 const USAGE: &str = "\
-usage: wa vault <command> --dir <vault-dir|$WASM_AGENT_VAULT_DIR> [--policy <policy.json>]
+usage: wa vault <command> [--dir <vault-dir|$WASM_AGENT_VAULT_DIR>] [--policy <policy.json>]
+
+The node's own `wa vault` defaults --dir to <home>/.wasm-agent/vault. The standalone
+`wa-vault` binary requires it: an unset directory is a refusal, never a guess.
 
   status                      where the vault is and how its root key is protected
   list                        names and metadata (never a value)
@@ -220,6 +227,10 @@ usage: wa vault <command> --dir <vault-dir|$WASM_AGENT_VAULT_DIR> [--policy <pol
   public-key <name>           the ed25519 public key of an ed25519 entry
   sign <name> [--from <path>|--stdin]
   import-ed25519 <name> --from <path> [--shred]
+                              a 32-byte seed, 64 hex characters, or the pkcs8 hex that
+                              `wa fleet keygen` and node.key hold; --shred zeroes and
+                              removes the source after the entry verified, and the audit
+                              chain records that it did
   import-provider-keys --from <keys-dir>
   audit verify | audit tail [--lines N]";
 

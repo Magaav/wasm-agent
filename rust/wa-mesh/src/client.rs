@@ -9,9 +9,9 @@
 //!   different, older authority and could launder the refusal away;
 //! * **a transport failure** (`Unreachable`) — nobody decided; that is the only case in which the
 //!   caller's existing direct/relay path should run, and the outcome says so (`fallback: relay`).
-use crate::audit::{Event, Sink};
+use crate::audit::{Emit, Event, Sink};
 use crate::cache::PeerCache;
-use crate::hierarchy::{authorize, Verdict, Verb};
+use crate::hierarchy::{Verdict, Verb};
 use crate::http;
 use crate::identity::Identity;
 use crate::policy::MeshPolicy;
@@ -197,7 +197,7 @@ impl<'a> Client<'a> {
         };
         let verb = Verb::from_capability(capability);
         let now_s = wire::now_seconds();
-        let verdict = authorize(self.policy, &caller, &target, verb, now_s);
+        let verdict = crate::seam::decide(self.policy, &caller, &target, verb, now_s);
         if !verdict.is_allow() {
             Event::new("call", &caller.node_id, &target.node_id)
                 .levels(Some(caller.level), Some(target.level))
@@ -210,7 +210,7 @@ impl<'a> Client<'a> {
 
         // No address is not a reason to give up: a node with no public address is the case the relay
         // exists for, and the relay carries the same signed envelope (see the end of this function).
-        let addresses = self.cache.addresses(&target);
+        let addresses = crate::seam::addresses(self.cache, &target);
         let mut attempts: Vec<Attempt> = Vec::new();
         let mut attempt_index = 0u32;
         for address in addresses {

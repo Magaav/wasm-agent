@@ -15,7 +15,9 @@ const FRESH: f64 = 120.0;
 const INSTALLED_FOR: f64 = 30.0;
 const FAILED_FOR: f64 = 60.0;
 const BAR: usize = 14;
-const BUILDING: &str = "\x1b[38;2;177;185;249m";
+/// The loader's colour, published because the tool-progress row (`crate::tool_progress`) is the same
+/// row and the same kind of fact, and two blues one row apart would read as two features.
+pub const BUILDING: &str = "\x1b[38;2;177;185;249m";
 const DONE: &str = "\x1b[38;2;181;189;104m";
 const FAILED: &str = "\x1b[38;2;204;102;102m";
 const RESET: &str = "\x1b[0m";

@@ -343,12 +343,27 @@ wa vault import-provider-keys --from <keys-dir>
 wa vault audit verify | audit tail [--lines N]
 ```
 
+`wa` dispatches these itself (`rust/wa-host/src/main.rs` → `wa_capabilities::vault_cli::run_node`),
+*before* the database, the graph index, the Lua interpreter and the ripgrep install are touched: a node
+whose Lua tree is broken or whose database is locked still answers `wa vault list`. Until that
+`command == "vault"` arm existed (it did not until 09/11, while the engine had shipped on 7f6a711b)
+every node answered `unknown command: vault` and nothing was ever stored.
+
 Two rules: a **value is never an argument** (only `--from`/`--stdin`, because a shell history, a process
 listing and a terminal scrollback are all places a secret is copied to for free), and **only `reveal`
-prints a value**. `--dir` (or `WASM_AGENT_VAULT_DIR`) is required: the command refuses to guess a vault
-directory, so it can never reach a node's real vault from the wrong place. `--shred` overwrites the source
-with zeros and removes it *after* the entry verified, and the command says plainly that on an SSD or a
-copy-on-write filesystem the original blocks may still hold the bytes.
+prints a value**. The directory is `--dir`, else `WASM_AGENT_VAULT_DIR`: the node binds the latter once at
+startup to `<home>/.wasm-agent/vault`, so `wa vault …` and `wa fleet … --key vault:<name>` open the same
+vault and neither guesses. The standalone `wa-vault` binary does not bind it and refuses an unset
+directory, so a binary run from the wrong place cannot reach a vault by accident.
+
+`import-ed25519` reads the file an operator actually has, and says which form it read: 32 raw bytes
+(`raw-seed`), 64 hex characters (`hex-seed`), or the **pkcs8 hex** that `wa fleet keygen` and `node.key`
+write (`pkcs8-hex`). A pkcs8 document's seed is accepted only when it re-derives that document's public
+key, so an unrelated 32-byte window cannot be mistaken for it. The source file is **kept** unless
+`--shred` is passed; then it is overwritten with zeros and removed *after* the entry verified, and the
+command says plainly that on an SSD or a copy-on-write filesystem the original blocks may still hold the
+bytes. The chain records the shred (`shred-source`, `wa vault audit tail`), which is the only place an
+operator can read afterwards that the file is gone.
 
 ### Migration, and the fleet key
 
@@ -374,8 +389,17 @@ leaves the vault. Rotating the fleet key is `wa fleet rotate`; the old key is de
   needs `ed25519-dalek` (pure Rust) inside the guest, or - better - `sign` moves behind
   `wa:kernel/keystore` so the seed never enters a component at all. `rust/wa-vault` is host-side today on
   purpose; `REPORT.md` records this as the open decision.
-* `wa vault` is dispatched by `rust/wa-capabilities::vault_cli::run`; the one line to add to
-  `rust/wa-host/src/main.rs` is in that module's header, and `rust/wa-vault/src/bin/wa-vault.rs` is the
-  same code path until it lands.
+* `wa vault` is dispatched by `rust/wa-capabilities::vault_cli::run_node` from `rust/wa-host/src/main.rs`
+  (landed 09/11, with `rust/wa-host/tests/vault_cli.rs` proving the round trip, the fleet signature and
+  the keystore refusal through the real binary).
+* **No node installs `components/vault.wasm` yet, and the deploy does not look for one.** Every vault
+  operation a node answers today runs the host-side engine in `rust/wa-vault` (the CLI above, and
+  `wa_kernel_runtime::vault_host` for a run's credentials-by-reference). An installable component needs
+  three things this stream could not honestly produce: a guest-clean `wa-vault` (the `ring` split above,
+  plus `wa-keystore`/`wa-vault` being buildable for `wasm32-wasip2` - `wa-keystore` is outside the edit
+  set of this work), the linkable keystore host function, and a pin in `components.lock` made from real
+  bytes on the machine that builds components. Adding the name to `components.lock` without bytes, or to
+  the deploy's required list, would fail every deploy that cannot reach the new release bundle (the
+  bundle's tag is the lock's sha), so deploy was left alone: the recipe is in `REPORT.md`.
 * `wa fleet revoke|rotate|anchor` do **not** push: `wa fleet push-roster` stays the per-node act
   (`docs/MESH.md` §7), so a change is reviewable before it reaches a node.

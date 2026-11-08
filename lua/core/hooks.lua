@@ -243,11 +243,18 @@ end
 -- The JSON below is this tree's transport for every capability (`host.selfloop` and `host.memory` do
 -- the same); it stops at the host, which turns it into the typed records of `wit/hooks/hooks.wit`
 -- before the component sees anything.
-local seam_component = (function()
-  local ok, value = pcall(host.getenv, 'WA_HOOKS_COMPONENT')
-  return ok and tostring(value or '') == '1'
-end)()
-
+-- The switch is the `hooks` feature (docs/FEATURES.md), asked at every route through the one resolver
+-- (`lua/core/features.lua`): an operator turns it on in `policy.json` and the next event takes the
+-- component path, without a restart. A feature that is on with no component installed answers
+-- `component_missing`, and the fallback line below says so instead of the node looking native.
+local features = dofile('lua/core/features.lua')
+-- The test seam: two instances of this module in one process (native and seam) share one `host.features`
+-- table, so the component test sets this on the instance it wants routed. A node never sets it.
+M.seam_override = nil
+local function seam_component()
+  if M.seam_override ~= nil then return M.seam_override() end
+  return features.seam('hooks')
+end
 local fallback_logged = {}
 
 local function note_fallback(op, reason)
@@ -259,7 +266,8 @@ end
 
 -- One component call. Returns the seam's answer, or nil and the reason there is none.
 local function seam(op, args)
-  if not seam_component then return nil, 'seam_disabled' end
+  local active, reason = seam_component()
+  if not active then return nil, reason end
   if type(host.hooks) ~= 'function' then return nil, 'component_capability_missing' end
   args.op = op
   local ok, answer = pcall(host.hooks, json.encode(args))
@@ -444,7 +452,7 @@ function M.config(opts)
   local key = paths.home() .. '|' .. workdir .. '|' .. tostring(opts.reload) .. '|' ..
     tostring((host.getenv('WASM_AGENT_HOOKS') or '') .. '|' .. (host.getenv('WASM_AGENT_CLAUDE_HOOKS') or ''))
   if cache.key == key then return cache.value end
-  if seam_component then
+  if seam_component() then
     -- One configure per config generation. A view that says `compat` is asked again with Claude
     -- Code's two sources in the request, because only a native config or the environment can opt in.
     local facts = configure(workdir, false)
@@ -635,7 +643,7 @@ function M.entries(event, opts)
   opts = opts or {}
   local view = M.config(opts)
   if view.disabled then return {} end
-  if seam_component then
+  if seam_component() then
     local planned = seam_plan(event, view, opts.tool)
     if planned then return planned end
   end
@@ -1036,7 +1044,7 @@ function M.fire(event, payload, opts)
   if not match_opts.tool and type(payload) == 'table' then
     match_opts.tool = payload.tool_name or payload.profile or payload.component
   end
-  if seam_component then
+  if seam_component() then
     local sealed = seam_fire(event, payload, opts, match_opts)
     if sealed then return sealed end
   end
@@ -1069,7 +1077,7 @@ function M.bus(topic, payload, opts)
   topic = tostring(topic or '')
   if topic == '' or topic:find('%s') then return nil, 'bus_topic_required' end
   opts = opts or {}
-  if seam_component then
+  if seam_component() then
     local sealed = seam_bus(topic, payload, opts)
     if sealed then return sealed end
   end
@@ -1108,7 +1116,7 @@ function M.statusline(opts)
   local now = math.floor((host.now() or 0) * 1000)
   local hit = statusline_cache[key]
   if hit and now - hit.at < M.STATUSLINE_TTL_MS then return hit.text end
-  if seam_component then
+  if seam_component() then
     local text = seam_statusline(view, opts)
     if text then
       statusline_cache[key] = { at = now, text = text }

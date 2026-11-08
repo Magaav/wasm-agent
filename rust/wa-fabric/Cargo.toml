@@ -1,0 +1,21 @@
+[package]
+name = "wa-fabric"
+version = "0.1.0"
+edition = "2021"
+description = "The compute fabric: presence with a TTL, one-round-trip offer/accept placement over the live view, a local fallback that never blocks, and leases that reuse wa-queue. No wasmtime, no I/O of its own."
+license = "MIT"
+
+# Two dependencies, both already in the workspace graph:
+# * `wa-queue` is the lease (`docs/QUEUE.md`): the fabric does not invent a second lease rule, it
+#   routes work onto the queue the workers already lease from, so "first lease wins", heartbeat
+#   extension and "expiry requeues" are the queue's own semantics.
+# * `serde_json` is what the existing signed node call already carries (`/node/call` bodies are
+#   JSON); every fabric record is decoded by hand with a strict key set, so an unknown field is a
+#   refusal and not silently dropped.
+[dependencies]
+wa-queue = { path = "../wa-queue" }
+serde_json = "1"
+
+[lib]
+name = "wa_fabric"
+path = "src/lib.rs"

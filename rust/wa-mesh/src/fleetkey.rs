@@ -337,7 +337,7 @@ pub fn show(roster_path: &Path, key: Option<&str>, default_key: &str, now_s: u64
     let (verified, reason) = if key.is_empty() {
         (false, "roster_key_missing: no --key and this node's policy pins no fleet key".to_string())
     } else {
-        match roster.verify(&key, now_s) {
+        match crate::seam::verify_roster(&roster, &key, now_s) {
             Ok(()) => (true, "verified".to_string()),
             Err(error) => (false, error.0),
         }
@@ -575,7 +575,7 @@ pub fn run(args: &[String]) -> Option<i32> {
                         .unwrap_or(now_s);
                     match crate::fleetchange::revoke(
                         Path::new(&roster),
-                        &selector,
+                        selector,
                         signer.as_mut(),
                         out.as_deref().map(Path::new),
                         at,
@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(shown.entries[0].level, 0);
         assert_eq!(shown.entries[0].name, "laptop");
         // The signature is a real one over the documented canonical bytes.
-        Roster::from_file(&signed.path).unwrap().verify(&fleet.public_key, 1_762_000_100).unwrap();
+        crate::seam::verify_roster(&Roster::from_file(&signed.path).unwrap(), &fleet.public_key, 1_762_000_100).unwrap();
 
         // A tampered document is refused, with the reason a node would give.
         let mut tampered = Roster::from_file(&signed.path).unwrap();

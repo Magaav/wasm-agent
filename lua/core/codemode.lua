@@ -52,10 +52,19 @@ local function action_refusal(name,args) return nil end
 --- with one log line per reason. Once a script is live, a broken component is **reported**, never
 --- replayed: the calls already dispatched had effects, and docs/CODEMODE.md's rule is that a failed
 --- effectful script is never run again.
-local seam_component = (function()
-  local ok, value = pcall(host.getenv, "WA_CODEMODE_COMPONENT")
-  return ok and tostring(value or "") == "1"
-end)()
+--
+-- The switch is `docs/FEATURES.md`'s `codemode` feature, asked through `lua/core/features.lua` at every
+-- route (not read once at load): an operator turns it on in `policy.json` and the next script takes the
+-- component path, without a restart. A feature that is on with no component installed answers
+-- `component_missing` and the fallback line says so.
+local features = dofile("lua/core/features.lua")
+-- The test seam: two instances of this module in one process (native and seam) share one `host.features`
+-- table, so the component test sets this on the instance it wants routed. A node never sets it.
+M.seam_override = nil
+local function seam_component()
+  if M.seam_override ~= nil then return M.seam_override() end
+  return features.seam("codemode")
+end
 
 local fallback_logged = {}
 
@@ -69,7 +78,8 @@ end
 -- One component call. The capability speaks JSON like every other `host.*`; the component boundary
 -- itself is typed (`wit/codemode`).
 local function seam(request)
-  if not seam_component then return nil, "seam_disabled" end
+  local active, reason = seam_component()
+  if not active then return nil, reason end
   if type(host.codemode) ~= "function" then return nil, "component_capability_missing" end
   local ok, answer = pcall(host.codemode, json.encode(request))
   if not ok then return nil, "component_call_failed" end
@@ -460,7 +470,7 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
- if seam_component then
+ if seam_component() then
   local called,result,reason=pcall(component_run,policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
   -- A table is the component's answer (including its refusals and its sandbox failures). `nil, reason`
   -- means it could not answer *before a step was handed out*: only then is the native path run.

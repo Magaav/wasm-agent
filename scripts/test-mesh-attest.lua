@@ -91,7 +91,15 @@ local function attempt(capability, verb, opts)
     if opts.want_refusal then return { attest_refused = refused } end
     assert(attestation, "the host signed an attestation: " .. tostring(refused))
   end
+  -- The sequence both of `serve.rs`'s hops use: the mount's admission for this call is handed over
+  -- (`wa_mesh_admit`), the call runs, then it is cleared. The attested basis needs both halves
+  -- (docs/MESH.md §9 item 2).
+  assert(json.decode(wa_mesh_admit(json.encode({
+    node_id = identity.node_id, public_key = identity.public_key, capability = opts.admission_capability or capability,
+    request_id = "attest-test", name = "peer", level = 1,
+  }))).ok == true, "the host hands one admission over")
   local raw = wa_node_call(body, identity.node_id, identity.public_key, ts, signature, attestation)
+  wa_mesh_clear()
   local outer = json.decode(raw) or {}
   return json.decode(outer.reply or "{}") or {}
 end
@@ -137,7 +145,12 @@ do
   local attestation = rust_attestation(identity.node_id, "read", "sessions", signature)
   assert(attestation, "the host signed one")
   attestation.signature = (attestation.signature:sub(1, 2) == "0" and "1" or "0") .. attestation.signature:sub(3)
+  assert(json.decode(wa_mesh_admit(json.encode({
+    node_id = identity.node_id, public_key = identity.public_key, capability = "sessions",
+    request_id = "attest-tampered", name = "peer", level = 1,
+  }))).ok == true, "the host hands one admission over")
   local raw = wa_node_call(body, identity.node_id, identity.public_key, ts, signature, attestation)
+  wa_mesh_clear()
   local outer = json.decode(raw) or {}
   local inner = json.decode(outer.reply or "{}") or {}
   ok(inner.error == "capability_not_granted", "a tampered Rust attestation admits nothing")

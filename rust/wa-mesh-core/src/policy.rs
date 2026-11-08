@@ -83,7 +83,7 @@ pub struct MeshPolicy {
     ///
     /// Enabling the mesh on a live node cannot change a live process's environment, so a node that is
     /// turned on by its own policy needs the rest of the statement there too
-    /// ([`crate::host_call::Settings`]: environment first, then these, then off). `None` means "no
+    /// (`wa_mesh::host_call::Settings`: environment first, then these, then off). `None` means "no
     /// port was written", never "pick one": a flag alone must not open a port nobody meant to open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,

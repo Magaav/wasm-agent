@@ -23,8 +23,9 @@ const doc = fs.readFileSync("docs/RELEASE-UPDATE.md", "utf8");
 check(/const UPDATING_TEXT = "updating…";/.test(source), "app.js pins the sentence `updating…` once");
 check(/function paintSessionContent\(\) \{/.test(source), "app.js defines paintSessionContent");
 check(/function paintUpdating\(on\) \{/.test(source), "app.js defines paintUpdating");
-check(/return paintSessionNotice\(sessionUpdating \|\| sessionStandingNotice\);/.test(source),
-  "one resolver: `updating…` replaces the standing notice on the same row");
+check(/const standing = sessionUpdating \|\| sessionStandingNotice;/.test(source)
+  && /if \(standing\) return paintSessionNotice\(standing\);/.test(source),
+  "one resolver: `updating…` replaces the standing notice on the same row (and both outrank a tool call)");
 check(/if \(upgradeState\) paintUpdating\(true\);/.test(source),
   "the line appears when the node stops answering during a known install");
 const recovery = source.slice(source.indexOf("function clearNodeRestartStatus()"));
@@ -128,6 +129,9 @@ const updatingConst = (source.match(/const UPDATING_TEXT = [^;]+;/) || [""])[0];
 const sandbox = new Function("document", `
 let sessionStandingNotice = "";
 let sessionUpdating = "";
+// The row's third claimant (docs/TOOL-PROGRESS.md): a long tool call, the lowest of the three. Null
+// here because this test is about the node's half; tests/tool-progress.js covers the call's.
+let toolRow = null;
 ${updatingConst}
 let updateToastDismissed = false;
 let nodeWatch = null;

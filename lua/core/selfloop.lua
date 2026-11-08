@@ -162,10 +162,18 @@ end
 -- The JSON below is this tree's transport for every capability (`host.memory` does the same); it
 -- stops at the host, which turns it into the typed records of `wit/selfloop/selfloop.wit` before the
 -- component sees anything.
-local seam_component = (function()
-  local ok, value = pcall(host.getenv, "WA_SELFLOOP_COMPONENT")
-  return ok and tostring(value or "") == "1"
-end)()
+-- The switch is the `selfloop` feature (docs/FEATURES.md), asked at every route through the one
+-- resolver (`lua/core/features.lua`): turning it on in `policy.json` reaches a running node without a
+-- restart, and a feature that is on with no component installed answers `component_missing` (reported
+-- below) instead of the loop quietly looking native.
+local features = dofile("lua/core/features.lua")
+-- The test seam: two instances of this module in one process (native and seam) share one `host.features`
+-- table, so the component test sets this on the instance it wants routed. A node never sets it.
+M.seam_override = nil
+local function seam_component()
+  if M.seam_override ~= nil then return M.seam_override() end
+  return features.seam("selfloop")
+end
 
 local fallback_logged = {}
 
@@ -181,7 +189,8 @@ end
 -- One component call. Returns the seam's answer (which may be a refusal), or nil and the reason there
 -- is none.
 local function seam(op, args)
-  if not seam_component then return nil, "seam_disabled" end
+  local active, reason = seam_component()
+  if not active then return nil, reason end
   if type(host.selfloop) ~= "function" then return nil, "component_capability_missing" end
   args.op = op
   local ok, answer = pcall(host.selfloop, json.encode(args))
@@ -970,7 +979,7 @@ function M.tick(opts)
   -- The state machine's half (which rows are due, what a probe decided, who won the claim, what the
   -- scheduler said) is the component's; the node's half (running the probe, dispatching the turn) is
   -- this loop's, on both paths.
-  if seam_component then
+  if seam_component() then
     local plan = routed("plan", { now = now, stale_seconds = tonumber(opts.stale_seconds) or M.stale_seconds() })
     if plan then
       out.reconciled = tonumber(plan.reconciled) or 0
@@ -1108,7 +1117,7 @@ end
 -- pure, so a test can pin the shape without a provider.
 function M.turn_content(row, opts)
   local now = clock(opts)
-  if seam_component and row and row.id then
+  if seam_component() and row and row.id then
     local seam_answer = routed("turn", {
       id = tostring(row.id),
       session_id = tostring(row.session_id or ""),

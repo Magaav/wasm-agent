@@ -878,6 +878,11 @@ case "$STAGE_CHECK" in "installed lua tree: commit $COMMIT"*) echo "deploy: $STA
 #     verified by sha256 AND size, and the candidate binary then proves the pair answers before either
 #     replaces what is running.
 #
+#     The set is every name components.lock pins - not just `graph` - because a component that is
+#     built and tested but never shipped is a component whose `WA_*_COMPONENT` flag silently falls back
+#     to the native path (the 08/11 finding, docs/FEATURES.md). Installing it here does not enable it:
+#     what a node routes to is `policy.json`'s `features` section, and this file pins what a node has.
+#
 #     Where the bytes come from (docs/COMPONENTS.md "Distributing components"): the copy this node
 #     already has, the bundle it fetched for the same lock before, or the release
 #     `components-<short sha of components.lock>` that scripts/publish-components.sh uploads once from
@@ -888,13 +893,19 @@ case "$STAGE_CHECK" in "installed lua tree: commit $COMMIT"*) echo "deploy: $STA
 #     component, which needs wasi-sdk because tree-sitter and SQLite are C, and a deploy that builds must
 #     say WA_DEPLOY_COMPONENT_REPIN=1 because the bytes it just built are not the pinned ones.
 if ! command -v wa_component_stage >/dev/null 2>&1; then
-  fail "refused(component_installer_missing): scripts/lib/deploy-components.sh is not beside this deploy, so the graph component cannot be pinned and installed; a core installed without it answers every graph call with component_not_installed:graph. Nothing installed."
+  fail "refused(component_installer_missing): scripts/lib/deploy-components.sh is not beside this deploy, so the shipped components cannot be pinned and installed; a core installed without them answers their calls with component_not_installed:<name>. Nothing installed."
 fi
 COMPONENT_DIR="$(wa_components_dir)"
 COMPONENT_STAGE="$INSTALL_DIR/components.next"
+# The shipped set is the lock's own list, read once: no name is guessed here, and a component added to
+# components.lock is installed by the next deploy without editing this stage.
+COMPONENT_NAMES="$(wa_components_shipped "$ROOT")" || fail "refused(component_lock_unreadable): components.lock is not readable beside this deploy; the shipped components cannot be pinned, so nothing installed."
+[ -n "$COMPONENT_NAMES" ] || fail "refused(component_lock_empty): components.lock pins no component; nothing installed."
+case " $COMPONENT_NAMES " in *" graph "*) ;; *) fail "refused(component_lock_incomplete): components.lock does not pin graph, which every host.graph_* call runs; nothing installed." ;; esac
+COMPONENT_COUNT="$(printf '%s\n' "$COMPONENT_NAMES" | wc -l | tr -d '[:space:]')"
 rm -rf "$COMPONENT_STAGE" && mkdir -p "$COMPONENT_STAGE" || fail "cannot stage components in $COMPONENT_STAGE"
-if ! COMPONENT_ERROR="$(wa_components_prepare "$ROOT" "$COMPONENT_STAGE" "$INSTALL_DIR" graph 2>&1)"; then
-  fail "refused(component_not_installable): $COMPONENT_ERROR; nothing installed. Either let the deploy fetch the pinned bytes from the release that components.lock names (default; WA_COMPONENT_RELEASE_REPO=<owner/repo> if the release is not in origin's repo), install them from a directory (WA_DEPLOY_COMPONENT_SOURCE=<dir> holding graph.wasm and graph.json from the machine that built them), or accept a local build of this tree with WA_DEPLOY_COMPONENT_REPIN=1."
+if ! COMPONENT_ERROR="$(wa_components_prepare "$ROOT" "$COMPONENT_STAGE" "$INSTALL_DIR" $COMPONENT_NAMES 2>&1)"; then
+  fail "refused(component_not_installable): $COMPONENT_ERROR; nothing installed. Either let the deploy fetch the pinned bytes from the release that components.lock names (default; WA_COMPONENT_RELEASE_REPO=<owner/repo> if the release is not in origin's repo), install them from a directory (WA_DEPLOY_COMPONENT_SOURCE=<dir> holding <name>.wasm and <name>.json for every pinned name from the machine that built them), or accept a local build of this tree with WA_DEPLOY_COMPONENT_REPIN=1."
 fi
 # One line per component, either `component_source:` (which bytes and why) or a staging note. Read
 # without a pipe, so the resolved source can name what the staged bytes are in the line below.
@@ -916,6 +927,12 @@ COMPONENT_SHA="$(cat "$COMPONENT_STAGE/graph.wasm.sha256")"
 COMPONENT_SOURCE_SAID="${COMPONENT_SOURCE_SAID:-unrecorded}"
 [ -z "${WA_DEPLOY_COMPONENT_SOURCE:-}" ] || COMPONENT_SOURCE_SAID="$WA_DEPLOY_COMPONENT_SOURCE"
 echo "deploy: graph component staged from $COMPONENT_SOURCE_SAID (sha256 $COMPONENT_SHA, $(wc -c < "$COMPONENT_STAGE/graph.wasm" | tr -d '[:space:]') bytes)"
+# What the set is, in one line, so a deploy log says which components this install placed.
+COMPONENT_SET=""
+for component_name in $COMPONENT_NAMES; do
+  COMPONENT_SET="$COMPONENT_SET $component_name:$(cut -c1-12 "$COMPONENT_STAGE/$component_name.wasm.sha256")"
+done
+echo "deploy: $COMPONENT_COUNT pinned component(s) staged:$COMPONENT_SET"
 [ "${WA_DEPLOY_COMPONENTS_DRY_RUN:-0}" != 1 ] || echo "deploy: WA_DEPLOY_COMPONENTS_DRY_RUN=1 - the component will be proved but not installed"
 # The pair has to answer, not merely load: a component built for another engine, or a core whose
 # graph path is broken, fails here with nothing installed.
@@ -1034,19 +1051,22 @@ restore_lua_tree() {
   [ ! -d "$INSTALL_DIR/lua-core.prev" ] || mv "$INSTALL_DIR/lua-core.prev" "$INSTALL_DIR/lua-core"
 }
 # block swapped in next to the Lua tree swap
-# The component goes in with the same rule as the tree: the previous triple is kept, a failed upgrade
-# puts it back, and a first install is removed again rather than left half-done. WA_COMPONENTS_DIR is
-# the directory the core reads (components::component_dir()) and it is NOT under the install directory,
-# because it holds components that are not this core's (mcp-whatsapp and friends): this deploy replaces
-# one component and leaves the rest alone.
-if ! COMPONENT_INSTALL="$(wa_component_install "$COMPONENT_STAGE" "$COMPONENT_DIR" graph 2>&1)"; then
+# The component set goes in with the same rule as the tree: the previous set is recorded and every
+# previous triple kept, a failed upgrade puts the whole set back, and a first install is removed again
+# rather than left half-done. WA_COMPONENTS_DIR is the directory the core reads
+# (components::component_dir()) and it is NOT under the install directory, because it holds components
+# that are not this core's (wa-whatsapp and friends): this deploy replaces the pinned set and leaves the
+# rest alone. Installing is not enabling - `wa features` says which of them the node routes to.
+wa_components_record_set "$COMPONENT_DIR" $COMPONENT_NAMES || note "component: could not record the previous component set in $COMPONENT_DIR/.prev (the rollback still restores each component from its own previous triple)"
+if ! COMPONENT_INSTALL="$(wa_components_install_set "$COMPONENT_STAGE" "$COMPONENT_DIR" $COMPONENT_NAMES 2>&1)"; then
   rm -rf "$COMPONENT_STAGE"
-  fail "refused(component_install_failed): $COMPONENT_INSTALL; the Lua tree is installed but the component is not, so this node must not be restarted"
+  wa_components_restore_set "$COMPONENT_DIR" $COMPONENT_NAMES >/dev/null 2>&1 || true
+  fail "refused(component_install_failed): $COMPONENT_INSTALL; the Lua tree is installed but the component set is not, so this node must not be restarted"
 fi
 [ -z "$COMPONENT_INSTALL" ] || note "component: $COMPONENT_INSTALL"
 rm -rf "$COMPONENT_STAGE"
 restore_components() {
-  wa_component_restore "$COMPONENT_DIR" graph || echo "deploy: could not restore the previous graph component in $COMPONENT_DIR" >&2
+  wa_components_restore_set "$COMPONENT_DIR" $COMPONENT_NAMES || echo "deploy: could not restore the previous component set in $COMPONENT_DIR" >&2
 }
 
 # 6a. The grant policy is installed BEFORE the restart, not after it.
@@ -1291,8 +1311,10 @@ record_installed() {
 
   # Which component bytes this install placed, and where: the core answers every `host.graph_*` call
   # from them, so "what is running" includes them (a node whose graph component is missing answers
-  # every graph call with component_not_installed:graph and looks healthy otherwise).
-  printf 'components_dir=%s\ncomponent_graph_sha256=%s\n' "${COMPONENT_DIR:-unrecorded}" "${COMPONENT_SHA:-unrecorded}" >> "$record_tmp" || fail "node installed, but the component lines could not be written"
+  # every graph call with component_not_installed:graph and looks healthy otherwise). `component_set=`
+  # names the whole pinned set with the first 12 hex of each sha, so one line answers "which components
+  # did this deploy install" - and `wa features` answers which of them the node routes to.
+  printf 'components_dir=%s\ncomponent_graph_sha256=%s\ncomponent_set=%s\n' "${COMPONENT_DIR:-unrecorded}" "${COMPONENT_SHA:-unrecorded}" "${COMPONENT_SET:-unrecorded}" >> "$record_tmp" || fail "node installed, but the component lines could not be written"
   if [ "$LUA_FAST" = 1 ]; then
     printf 'binary_commit=%s\n' "$INSTALLED_BINARY_COMMIT" >> "$record_tmp" || fail "node installed, but the binary commit line could not be written"
   fi

@@ -17,7 +17,11 @@ that says so.
 Status: built and tested (`rust/wa-mesh`, see [What is implemented](#what-is-implemented)): on the
 direct path **and** on the relay path the target decides with the same signed roster, and a node that
 has no roster yet keeps today's operator pins until an operator installs one
-([§7](#7-bootstrapping-an-existing-operator-wa-fleet-push-roster)). Code: `rust/wa-mesh/src/*.rs`. Related: [FABRIC.md](FABRIC.md) (layers and
+([§7](#7-bootstrapping-an-existing-operator-wa-fleet-push-roster)). Code: `rust/wa-mesh/src/*.rs` (the transport and the operator’s tool) and
+`rust/wa-mesh-core/src/*.rs` (the decisions, compiled into the node and the guest).
+The fleet's *decisions* are also a component (`wa:mesh`, [§10](#10-the-mesh-as-a-component-wamesh)):
+`WA_MESH_COMPONENT=1` routes them through `rust/components/mesh`, and the native default is unchanged.
+Related: [FABRIC.md](FABRIC.md) (layers and
 transport direction), [RENDEZVOUS.md](RENDEZVOUS.md) (the directory and the relay),
 [GRANT-POLICY.md](GRANT-POLICY.md) (the file whose `mesh` section holds the grants), [BINDING.md](BINDING.md)
 (what a guest is).
@@ -120,7 +124,8 @@ and one line per node (name, level, id, addresses, revocation), and **exits 1** 
 not verify — a tampered roster is a failure, not a footnote.
 
 The canonical bytes these commands sign are the ones below; the producer and every consumer share
-`rust/wa-mesh/src/roster.rs`, so a signature made here is the signature a node checks.
+`rust/wa-mesh-core/src/roster.rs`, so a signature made here is the signature a node checks — in the
+node and in the `wa:mesh` guest alike.
 
 **Where the fleet key lives now: the vault.** The fleet key may also be an entry in the operator's vault
 (`docs/VAULT.md`): `wa vault import-ed25519 fleet --from <fleet.key> --shred` (the seed is sealed, and the
@@ -460,9 +465,9 @@ outside this command (it needs the old private key); the message it must sign is
 
 | piece | where | state |
 | --- | --- | --- |
-| roster parse/verify, levels, revocation | `rust/wa-mesh/src/roster.rs` | done, tested |
+| roster parse/verify, levels, revocation, the revision chain | `rust/wa-mesh-core/src/roster.rs` | done, tested |
 | **the operator makes the fleet key and signs the roster** (`wa fleet keygen`, `sign`, `show`) | `fleetkey.rs`, `rust/wa-host` (`wa fleet`) | done, tested (round trip, a tampered roster refused, keygen's path refusals) |
-| **every gate asks one resolver** (environment, then `policy.json` `mesh.enabled`, then off; read per call, cached by mtime) | `gate.rs`, `host_call.rs` (`{gate: true}`, `enabled_at_runtime`, `Settings`), `lua/core/nodes.lua` (`M.mesh_enabled`) | done, tested (`every_gate_answers_from_the_same_resolver`, `scripts/test-mesh-gate.lua`) |
+| **every gate asks one resolver** (environment, then `policy.json` `mesh.enabled`, then off; read per call, cached by a `policy.json` mtime that has settled) | `gate.rs`, `host_call.rs` (`{gate: true}`, `enabled_at_runtime`, `Settings`), `lua/core/nodes.lua` (`M.mesh_enabled`) | done, tested (`every_gate_answers_from_the_same_resolver`, `scripts/test-mesh-gate.lua`) |
 | **a service URL is resolved to `host:port`** (scheme-default ports, a path prefix, IPv6 literals, bare `host:port`) | `endpoint.rs`, `relay.rs` | done, tested (each URL shape, and a send over a real socket at `http://127.0.0.1:<port>/fleet`) |
 | `authorize(caller, target, verb)` | `hierarchy.rs` | done, tested |
 | grants from `policy.json` `"mesh"` | `policy.rs` | done, tested |
@@ -478,8 +483,8 @@ outside this command (it needs the old private key); the message it must sign is
 | a roster-authorized caller reaches the capability without the operator pins | `serve.rs` (`/node/admitted` + one-shot ticket), `binding.lua` (`wa_mesh_admit`) | done, tested |
 | **existing operators bootstrap it** (`wa fleet push-roster`, host call) | `fleet.rs`, `lua/core/fleet.lua`, `binding.lua` (`roster` capability) | done, tested |
 | **the listener mounts, moves and unmounts while the node runs** | `host_call.rs` (`spawn_supervisor`), `serve.rs` | done, tested (three live enable/disable cycles on one `wa serve`, one port, one pid) |
-| execution of a capability on the target | forwards to the node's own `/node/admitted` | **partial** — see §9 item 2 |
-| **admission by the mesh's verb**, for a call the mount attested | `lua/core/server.lua` (`mesh_verb`, `mesh_admitted`, `wa_node_call`), `attest.rs` (the signature), `serve.rs` (the sixth argument) | done and tested on both of `serve.rs`'s paths (`scripts/test-mesh-attest.lua`: the Rust signer's attestation, admitted by the real `wa_node_call`; legacy list unchanged; every forgery refused) — the Lua relay runtime still passes five arguments, §9 item 1 |
+| execution of a capability on the target | `lua/core/server.lua` (`verify_peer`, `mesh_caller`, `wa_node_call`) over the node's own `/node/admitted` | done on both of `serve.rs`'s paths — see §9 item 2 |
+| **admission by the mesh's verb**, for a call the mount attested | `lua/core/server.lua` (`mesh_verb`, `mesh_caller`, `wa_node_call`), `attest.rs` (the signature), `serve.rs` (the sixth argument) | done and tested on both of `serve.rs`'s paths (`scripts/test-mesh-attest.lua`, `scripts/test-mesh-trust.lua`: the Rust signer's attestation, admitted by the real `wa_node_call`; legacy list unchanged; every forgery refused) — the Lua relay runtime still passes five arguments, §9 item 1 |
 | hole punching / STUN / QUIC | — | not started |
 
 The wire and the caller's JSON contract (`host.mesh_call`) are documented in
@@ -566,7 +571,8 @@ on the next poll instead of the next start):
    admitted by the **verb** the roster and the grants decided on (`read`, `control` or `call`), and
    only with an attestation signed by the node's own key over
    `mesh-allow|<this node id>|<ts>|<sha256(caller|verb|capability|<caller signature>)>`
-   (`rust/wa-mesh/src/attest.rs`). The mount signs it after `authorize()` returned allow, and
+   (`rust/wa-mesh-core/src/attest.rs`; the node signs it in `rust/wa-mesh/src/attestation.rs`). The mount
+   signs it after `authorize()` returned allow, and
    `serve.rs` passes it as the sixth argument to `wa_node_call` — on the relay hop it decides
    (`mesh_peer_call`) and on the direct listener's one-shot-ticket hop (`mesh_admitted`). A missing,
    stale, forged, tampered or differently-bound attestation falls back to the legacy name list, which
@@ -576,19 +582,56 @@ on the next poll instead of the next start):
    `wa_node_call` with five arguments, so on a node whose relay is served from Lua a relayed mesh call
    is admitted by the legacy list only. That is the fail-closed direction (nothing widens), and the
    fix is two lines in `binding.lua` — carry the host's attestation through `wa_mesh_admit` and pass
-   it as the sixth argument — which this change's file allow-list does not include. Measured:
+   it as the sixth argument — which this change's file allow-list does not include. It is also, for the
+   same reason, the one path where item 2's execution basis is unavailable: a relayed call served from
+   that poller is admitted by the legacy pins and so still refuses `unknown_caller` there. Measured:
    `scripts/test-mesh-attest.lua` (the Rust signer's attestation, the real `wa_node_call`, 17 checks)
    and `scripts/test-mesh-verb-admission.lua` (the receiving rule on its own, a stubbed enrollment).
-2. **The target executes through today's trust basis.** The mounted listener authorizes the caller
-   against the roster and hierarchy, then forwards the call, with the caller's own inner request and
-   headers, to the node's loopback `/node/admitted`. That path verifies the caller the way it does
-   today: a *fresh* rendezvous lookup (`nodes.verify_caller`), or the node's enrollment when it is a
-   managed guest. So with the rendezvous down a real node still refuses `unknown_caller` at the last
-   step, even though discovery and the mesh verdict needed no directory — measured on a running node by
-   `scripts/test-mesh-live.sh`, which reports it rather than hiding it. Making the roster the execution
-   trust basis is a change in `lua/core/server.lua`'s `verify_peer`/`verify_caller` (a mesh-verified
-   caller basis carried only on the loopback hop), which this change deliberately does not make — it is
-   a security boundary, and the crate tests prove the mesh verdict without it.
+2. **The roster is the execution trust basis on `serve.rs`'s two paths** (closed 08/22; this was the
+   08/11 live failure: `work` at level 0 called `nextcloud` at level 2, the roster allowed it, and the
+   target still answered `layer=node reason=unknown_caller transport=relay`). The last step used to be
+   `nodeslib.verify_caller` and nothing else: a *fresh* rendezvous lookup, the node's enrollment, or
+   the operator pins a binding froze at bind time — so with the pins naming other operators (or the
+   directory unreachable) a call the roster had already authorized died at the node's own admission.
+
+   `wa_node_call` now has a second trust basis, and uses it only when the mount proved *this* call
+   (`lua/core/server.lua`, `mesh_caller`):
+
+   | required, all of it | why |
+   | --- | --- |
+   | the attestation is signed with *this* node's key over `mesh-allow|<this node id>|<ts>|<sha256(caller\|verb\|capability\|<caller signature>)>` | only the node's own mount can mint one (`attest.rs`, `admit_inbound`, `LoopbackHandler`); a caller holds its own key, and the message names this node |
+   | it names the caller of the request, the verb this capability is graded with (`mesh_verb`), and the capability | it cannot be moved to another caller, verb or capability |
+   | it is bound to the caller's own `x-wa-sig` | it cannot be moved to another request |
+   | `\|now − ts\| ≤ attest::TTL_SECONDS` (60 s, shorter than the 120 s request window) | expired proves nothing, and the window is smaller than a request's |
+   | its signature has not been spent (`mesh-allow|<sig>` in the node's replay ledger) | single use |
+   | the admission this node's own mount set for this call (`wa_mesh_admit`) names the same caller, key and capability | the loopback hop is executing *that* call, not one an attestation was left over from |
+
+   With all of it, `verify_peer` takes the attested caller — `role = "master"`, the name and level
+   the roster gave it, `mesh = "roster"` — and skips `nodeslib.verify_caller`. Everything else runs
+   exactly as before: the caller's own signature over its body, the 120 s freshness window, the replay
+   guard and `to_node_id`. When any part is missing, forged, stale, replayed, or bound elsewhere,
+   nothing widens and today's path decides (`unknown_caller`, or the pins' answer). The ledger entry is
+   written *before* the request replay guard, so a replayed attestation is `unknown_caller` — the same
+   answer it got before this change — and never a `replayed_request` that would suggest it was once
+   valid for *this* request.
+
+   Measured: `cargo test -p wa-mesh` (`the_target_executes_on_the_mounts_attestation_not_on_its_
+   operators_pins`: four local nodes over a real loopback relay, caller level 0 / target level 2, the
+   target's pins excluding the caller — allowed and executed with the attestation bound to the caller,
+   the verb, the capability and the caller's request signature; level 2 → level 0 denied; a replayed
+   request refused; a forged or expired attestation proves nothing; with no roster the pins still say
+   `unknown_caller`) and `scripts/test-mesh-trust.lua` (the real `lua/core/server.lua` and
+   `lua/core/binding.lua`, an unmanaged unpinned node, the **Rust** signer's attestation: the caller is
+   `unknown_caller` without it and executes with it, a control capability runs by its control verb,
+   and an expired, forged, replayed, differently-bound, wrong-verb, wrong-caller or wrong-capability
+   attestation, a cleared admission and a stale request are all refused as before). The remaining
+   hole-punching, TLS and QUIC work is item 4.
+
+   What is *still* not wired is the same hop when `lua/core/binding.lua`'s relay runtime (`M.tick`) is
+   the poller: it calls `wa_node_call` with five arguments, so a relayed call served from there is
+   admitted by the legacy rules only (fail-closed). `mesh_relayed_call` already *receives* the
+   attestation in the admission (`decoded.attestation`); passing it as the sixth argument is the
+   whole fix, and `binding.lua` is outside this change's file allow-list — see item 1.
 3. **`policy.json` cannot carry `mesh` for the grant policy yet.** `PolicySet` refuses unknown fields;
    one line in `rust/wa-grant-policy/src/policy.rs` (skip a top-level `mesh`) is the fix, plus its
    test. Until then a node that needs mesh grants must not also rely on the grant policy loading.
@@ -604,3 +647,105 @@ on the next poll instead of the next start):
 7. **The peer cache is per node, not per fleet**, so a node that has never called a peer and has no
    rendezvous has no address for it. That is correct (discovery has to come from somewhere) and worth
    saying: the cache survives the directory dying, it does not replace it the first time.
+8. **Which operations the guest owns by default.** The measurement in §10 says `decide` and the signature
+   checks are worth a guest call and that the audit line's formatting is not, but the default
+   (`WA_MESH_COMPONENT_OPS` unset = all) is chosen for swappability and parity, not for speed. Making
+   `render_audit` and `addresses` permanently native is a one-line change in `wa_mesh::seam`, and the
+   reason to do it is a fleet whose audit volume matters more than its rule swappability.
+9. **`verify_roster` re-parses a document the node already parsed.** The seam passes the roster as text
+   because that is what the signature covers, so the guest parses what the node had a moment ago
+   (83 µs native against 410 µs through the seam). A `verify-roster(parsed)` shape — the typed record
+   plus the canonical bytes to sign — would remove that, and needs the canonical-bytes question answered
+   once in `wa-mesh-core`, where it already is (`Roster::canonical`).
+10. **The attested admission on the Lua relay runtime** (item 1) is unchanged by this: the guest answers
+    the same check, but `lua/core/binding.lua` still passes five arguments to `wa_node_call`.
+
+## 10. The mesh as a component (`wa:mesh`)
+
+The mesh has two halves that fail differently. **What it decides** — is this roster the operator's, may
+this node command that one, what does the audit line say, is this attestation about *this* call — is a
+rule over a document and two node ids. **What it touches** — the listener, the relay, the rendezvous, the
+peer cache file, the node's identity — is transport, and a component must not own a socket or a key.
+
+The first half is `wit/mesh/mesh.wit` + `rust/components/mesh`, and it imports **nothing**: not SQL (the
+mesh stores no rows), not a socket, not a clock (`now` is an argument), not a key. So an installed
+`mesh.wasm` grants nothing, and there is no scope for a manifest mistake to widen. `WA_MESH_COMPONENT=1`
+routes `wa-mesh`'s decisions there (`wa_mesh::seam` → `wa_kernel_runtime::mesh_host`); without it — and
+whenever the component cannot answer — the native rule runs, with one log line per (operation, reason), so
+a broken or missing component is visible instead of looking like a working fleet.
+
+| routed | the seam answers | native |
+| --- | --- | --- |
+| `wa_mesh::seam::decide` | `decide(grants, caller, target, verb)` | `wa_mesh_core::hierarchy::authorize` |
+| `verify_roster` | `verify-roster(document, key, now) -> levels` | `Roster::verify` |
+| `verb_of` | `verb(capability)` | `Verb::from_capability` |
+| `render_audit` | `render-audit(event) -> string` | `Event::render` |
+| `addresses` | `addresses(target, learned) -> list<string>` | `PeerCache::addresses` |
+| `attest_message` | `attest-message(...) -> string` | `attest::message` |
+| `verify_attestation` | `verify-ticket(ticket, ...) -> ticket-facts` | `attest::verify` |
+
+What stays native, by design: the listener, the relay, the rendezvous client, the HTTP dialect, the peer
+cache *file*, the policy *file*, the replay window, the one-shot loopback tickets, and the node's
+identity. The guest composes an attestation's bytes and **verifies** one; it never signs, because a
+component that could sign would be a second identity for the node (§9, item 1).
+
+The logic is one crate, `rust/wa-mesh-core`, compiled twice: the node supplies ring's ed25519, the guest
+supplies `ed25519-dalek` (a component cannot link ring's C and assembly). Both are ed25519 as specified,
+and the canonical bytes are asserted in one place, so a signature either verifies on both sides or on
+neither.
+
+**Evidence.** `scripts/test-mesh-component.sh` runs the whole mesh suite twice — native, then with
+everything routed — requires the same number of tests on both (62 today), and requires the component run
+to print **no** `decided natively` line, which is what a missing or failed guest logs. It then drives
+`host.mesh` from `scripts/test-mesh-component.lua` through the real interpreter. The field-for-field
+comparison is `rust/wa-mesh/src/tests_component.rs`: every caller/target/verb pair, a tampered roster's
+refusal sentence (`roster_unverified:bad_signature`), every audit-line shape, the dial order, the
+attested bytes and every ticket refusal.
+
+A **tampered roster is refused by the guest** for the same reason it is refused natively: the operator's
+key did not sign those bytes. That case is asserted on both paths and the sentences are compared.
+
+One instantiation detail worth recording, because it was a measurement and not a preference: the instance
+is **per thread**, not per process. A single store behind one lock, shared by a listener's handler
+threads, the relay hop and the node's own thread, hung the four-node relay test (`tests_relay.rs`: one
+process, four nodes, several listener threads) about half the time; a store belongs to the thread that
+made it, and this seam holds no state two threads would want to share.
+
+### Cost (measured)
+
+`bash scripts/bench-mesh.sh` on this machine (Windows, release build, one process per path; p50/p95 of the
+routed call, i.e. the JSON request, the guest call and the answer, over 2,000 samples):
+
+| scenario | native p50 / p95 | component p50 / p95 |
+| --- | --- | --- |
+| `decide` (down, control) | 0.2 / 0.3 µs | 169 / 295 µs |
+| `decide` (up, denied) | 0.2 / 0.3 µs | 155 / 297 µs |
+| `verify_roster` (4 nodes, parse + verify) | 83 / 83 µs | 410 / 410 µs |
+| `verify_roster` (signature only) | 55 / 72 µs | 304 / 460 µs |
+| `render_audit` | 1.1 / 1.5 µs | 153 / 302 µs |
+| `addresses` | 0.4 / 0.5 µs | 155 / 300 µs |
+| `attest_message` | 2.4 / 2.9 µs | 170 / 299 µs |
+| `verify_ticket` | 45 / 80 µs | 310 / 425 µs |
+| first call (compile + instance) | — | 1.7 ms |
+| peak RSS | 5,196 KB | 8,184 KB |
+
+Read it as: **a routed decision costs about 0.2 ms and about 3 MB.** Unlike the self-loop seam, the native
+path here is *microseconds*, so the seam multiplies the decision's own cost by ~500; on a real peer call (a
+loopback connection, a signed envelope, a `/node/admitted` hop) it is a few per cent of the wall clock, and
+a node that makes no peer calls never pays it at all.
+
+The rows that matter for a default are `render_audit` and `addresses`: they are *formatting*, not policy,
+and they pay the same guest price as a decision. So the route is per operation —
+`WA_MESH_COMPONENT_OPS=decide,verify_roster,verify_ticket,attest_message` leaves the audit line and the
+dial order native, and the same bench then reports 1.7 µs and 2.4 µs for them (7,980 KB RSS) while the
+decisions stay in the guest. Which default an operator wants is a question about *swappability*, not
+speed: a fleet that expects its hierarchy rules to change wants `decide` in the guest, and no audit line's
+format is worth 0.15 ms an attempt.
+
+Two honest limits: (1) the measurement is a single-threaded, socket-free, node-free loop — a real peer
+call's clock is dominated by the network, and this measures the part the seam adds *to the decision*; (2)
+the guest's ed25519 is dalek's pure-Rust implementation, ~100 µs slower per verification than ring's here
+even with its `fast` backend, which is the price of checking a signature without the node's key. A repeat
+run of the same script moved `decide` between 151 and 169 µs p50 (~280–300 µs p95) and the peak RSS by a
+few hundred KB, so read the table as ±10% between runs on an idle machine, and do not read the last
+digit.

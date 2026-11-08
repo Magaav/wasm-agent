@@ -6,22 +6,43 @@
 //! because that one resolves its path from the process environment only — and a test with three
 //! nodes in one process cannot change the environment per node. Loading from an explicit path is
 //! the whole difference; the bytes on disk are identical.
+//!
+//! **The two halves live in two places.** The *hash* and the *verifier* are
+//! `wa-mesh-core::crypto`'s, because the roster, the node id and the attestation must be the same bytes
+//! in the guest. The *key* (signing, loading, generating) is this file's, because a key is the node's and
+//! never a component's. [`RingCrypto`] is the build input the core asks for: ring's ed25519, which is
+//! what signed every roster this node has ever seen.
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use std::path::{Path, PathBuf};
 
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+pub use wa_mesh_core::crypto::{derive_node_id, hex, sha256_bytes_hex, sha256_hex, unhex, Crypto, Signer};
+use crate::roster::RosterSigner;
+
+/// The verifier this build supplies to the mesh's logic. Stateless: a verifier holds no key.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RingCrypto;
+
+impl Crypto for RingCrypto {
+    fn verify_ed25519(&self, public_key_hex: &str, message: &[u8], signature_hex: &str) -> bool {
+        let (Some(public), Some(signature)) = (unhex(public_key_hex), unhex(signature_hex)) else {
+            return false;
+        };
+        UnparsedPublicKey::new(&ED25519, public)
+            .verify(message, &signature)
+            .is_ok()
+    }
 }
 
-pub fn unhex(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim();
-    if !text.is_ascii() || !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len() / 2)
-        .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok())
-        .collect()
+/// The one verifier a node has, for the call sites that do not want to name it.
+pub fn crypto() -> &'static dyn Crypto {
+    static RING: RingCrypto = RingCrypto;
+    &RING
+}
+
+/// `verify(pk, message, signature)` in the shape the rest of the crate already called it.
+pub fn verify(public_key_hex: &str, message: &str, signature_hex: &str) -> bool {
+    crypto().verify_ed25519(public_key_hex, message.as_bytes(), signature_hex)
 }
 
 /// The key file this process uses when nothing says otherwise: `WASM_AGENT_NODE_KEY`, else
@@ -49,6 +70,34 @@ impl std::fmt::Debug for Identity {
             .field("node_id", &self.node_id)
             .field("public_key", &self.public_key)
             .finish_non_exhaustive()
+    }
+}
+
+impl Signer for Identity {
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    fn public_key(&self) -> &str {
+        &self.public_key
+    }
+
+    fn sign(&self, message: &str) -> String {
+        Identity::sign(self, message)
+    }
+}
+
+/// The operator's fleet key may be this node key file (`wa fleet sign --key <path>`), and `fleetkey`
+/// takes any [`RosterSigner`]: this is the implementation that says a node key and a fleet key are the
+/// same ed25519 machinery, loaded through the same `Identity`. The vault's implementation is
+/// `fleetchange::VaultSigner`, where the seed never leaves the engine.
+impl RosterSigner for Identity {
+    fn public_key(&self) -> String {
+        self.public_key.clone()
+    }
+
+    fn sign_message(&mut self, message: &str) -> Result<String, String> {
+        Ok(Identity::sign(self, message))
     }
 }
 
@@ -132,31 +181,6 @@ pub fn generate() -> Result<(String, Identity), String> {
     Ok((text, identity))
 }
 
-/// The node id a public key answers to: the first 32 hex characters of `sha256(public_key)`.
-///
-/// This is why a roster entry can be checked at all: an entry that claims a `node_id` its
-/// `public_key` does not hash to is a typo or an attack, and either way it is refused.
-pub fn derive_node_id(public_key_hex: &str) -> Option<String> {
-    let public = unhex(public_key_hex)?;
-    let digest = ring::digest::digest(&ring::digest::SHA256, &public);
-    Some(hex(digest.as_ref())[..32].to_string())
-}
-
-pub fn verify(public_key_hex: &str, message: &str, signature_hex: &str) -> bool {
-    let (Some(public), Some(signature)) = (unhex(public_key_hex), unhex(signature_hex)) else {
-        return false;
-    };
-    UnparsedPublicKey::new(&ED25519, public)
-        .verify(message.as_bytes(), &signature)
-        .is_ok()
-}
-
-/// SHA-256 of a body, as hex. The mesh signs the hash of the bytes it sends, so what was signed is
-/// what was asked for and not merely that something was.
-pub fn sha256_hex(text: &str) -> String {
-    hex(ring::digest::digest(&ring::digest::SHA256, text.as_bytes()).as_ref())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +199,8 @@ mod tests {
         let signature = identity.sign("mesh-call-v1|x|1|y");
         assert!(verify(&identity.public_key, "mesh-call-v1|x|1|y", &signature));
         assert!(!verify(&identity.public_key, "mesh-call-v1|x|1|z", &signature));
+        // The trait and the inherent method are one signature, not two.
+        assert_eq!(Signer::sign(&identity, "a"), identity.sign("a"));
         assert_eq!(derive_node_id(&identity.public_key).unwrap(), identity.node_id);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -187,6 +213,15 @@ mod tests {
         std::fs::write(&path, "not-hex").unwrap();
         assert_eq!(Identity::load(&path).unwrap_err(), "bad_node_key");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ring_and_the_mesh_core_agree_on_a_signature() {
+        // The node verifies with ring, the guest with dalek; a signature is either valid or it is not.
+        let (_text, identity) = generate().unwrap();
+        let signature = identity.sign("mesh-roster-v1|fleet|1|0|{}");
+        assert!(crypto().verify_ed25519(&identity.public_key, b"mesh-roster-v1|fleet|1|0|{}", &signature));
+        assert!(!crypto().verify_ed25519(&identity.public_key, b"mesh-roster-v1|fleet|1|0|{ }", &signature));
     }
 
     const NODE_ID_TEST_LEN: usize = 32;

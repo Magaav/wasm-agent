@@ -17,7 +17,14 @@ wa-governance = { path = "../wa-governance" }
 wa-term = { path = "../wa-term" }
 wa-rendezvous = { path = "../wa-rendezvous" }
 wa-kernel-runtime = { path = "../wa-kernel-runtime" }
+# The feature resolver behind the `features` capability (docs/FEATURES.md): the Lua gates ask through it,
+# so the env override, the policy file and the installed-component check are resolved in one place.
+wa-features = { path = "../wa-features" }
 wa-operation = { path = "../wa-operation" }
+# The row for a long tool call (`tool_progress.rs`, docs/TOOL-PROGRESS.md): the parsers, the tail and
+# the stall rule, shared with the two renderers so the CLI, the native editor and the window cannot
+# disagree about what a call is doing. A leaf crate; this adds no arrow the split did not have.
+wa-tool-progress = { path = "../wa-tool-progress" }
 wa-jobs = { path = "../wa-jobs" }
 # The explicit WhatsApp send (`whatsapp_send.rs`) names the `wa:queue` request/job types it enqueues
 # and reads back, and the `wa-grant-policy` decision `node_policy` answers with. Both are leaf crates

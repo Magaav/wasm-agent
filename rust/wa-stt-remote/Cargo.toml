@@ -15,6 +15,10 @@ license = "MIT"
 [dependencies]
 wa-queue = { path = "../wa-queue" }
 serde_json = "1"
+# The compute fabric (`rust/wa-fabric`): this crate is its first user. A placement decision is
+# translated into this crate's own `Decision` (`src/fabric.rs`), so the speech queue keeps its one
+# policy and the fabric decides *which* node that policy prefers. Leaf crate: wa-queue + serde_json.
+wa-fabric = { path = "../wa-fabric" }
 
 [lib]
 name = "wa_stt_remote"

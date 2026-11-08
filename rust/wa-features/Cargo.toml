@@ -1,0 +1,30 @@
+[package]
+name = "wa-features"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The one feature resolver (docs/FEATURES.md). Every gate that can choose between a component and the
+# native path - `lua/core/{selfloop,codemode,hooks,memory}.lua`, the model gateway, the mesh, the
+# agent core, the telemetry sink - asks this crate, so "is this feature on, and which path is live"
+# has exactly one answer.
+#
+# It is a separate crate on purpose: it is tiny, it has no dependency on the kernel or the host (so
+# the Lua-side gates can reach it through one capability without pulling wasmtime into their build),
+# and it can be tested without a node, a component or a wasm toolchain.
+
+[dependencies]
+# The policy file, the component manifests and the wire answer are JSON; the rest of this tree already
+# speaks serde_json and nothing here invents a second encoding.
+serde_json = "1"
+# The node's home/state/component directories. Depending on the floor crate (not on wa-host) keeps the
+# path resolution single: `WA_COMPONENTS_DIR`, `WASM_AGENT_HOME` and `~/.wasm-agent` are resolved one
+# way in this tree (AGENTS.md: take paths from `host.paths()`).
+wa-host-support = { path = "../wa-host-support" }
+# A component's pin is a sha256 of its bytes. `ring` is already the digest of this workspace
+# (wa-capabilities, wa-governance) and is audited; a second sha256 implementation would be the kind of
+# divergence a pin check must not have.
+ring = "0.17"
+
+[dev-dependencies]
+tempfile = "3"

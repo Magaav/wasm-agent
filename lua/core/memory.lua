@@ -41,10 +41,20 @@ end
 -- A component that is missing, wedged or refused falls back to the native path *with a reason in the
 -- log*: a silent fallback would make a broken component look like a working store. The reason never
 -- carries text from the database - the capability answers with its own error names.
-local seam_component = (function()
-  local ok, value = pcall(host.getenv, "WA_MEMORY_COMPONENT")
-  return ok and tostring(value or "") == "1"
-end)()
+-- The switch is the `memory` feature (docs/FEATURES.md), asked at every call through the one resolver
+-- (`lua/core/features.lua`): a `policy.json` edit reaches a running node without a restart, and a
+-- feature that is on with no component installed answers `component_missing` (reported below) instead
+-- of the node looking native.
+local features = dofile("lua/core/features.lua")
+-- `M.seam_override` is the test seam: the component tests hold two instances of THIS module side by
+-- side (native and seam) in one process, and `host.features` is one host table, so it cannot answer
+-- differently for the two. A node never sets it (`scripts/test-memory-component.lua` does), and when it
+-- is set it is the whole answer - it is not merged with the resolver's.
+M.seam_override = nil
+local function seam_component()
+  if M.seam_override ~= nil then return M.seam_override() end
+  return features.seam("memory")
+end
 
 local fallback_logged = {}
 
@@ -59,7 +69,8 @@ end
 
 -- One component call. Returns the answer's `result`, or nil and the reason it is not there.
 local function seam(op, args)
-  if not seam_component then return nil, "seam_disabled" end
+  local active, reason = seam_component()
+  if not active then return nil, reason end
   if type(host.memory) ~= "function" then return nil, "component_capability_missing" end
   args.op = op
   local ok, answer = pcall(host.memory, json.encode(args))
@@ -404,7 +415,7 @@ end
 -- Without `id` this is unchanged: a content-identical fact in the same scope still dedupes to its
 -- existing id.
 function M.remember(content, scope, tags, id)
-  if seam_component then
+  if seam_component() then
     local stored, reason = seam_or_native("remember", {
       content = tostring(content or ""),
       scope = scope,

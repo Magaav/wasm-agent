@@ -1,0 +1,315 @@
+/// `wa:fabric` v0.1.0 — the compute fabric as a capability seam: presence, placement, the lease.
+///
+/// The Rust implementation is `rust/wa-fabric` (the rules, the score, the one-window offer/accept and
+/// the lease over `wa-queue`); the node half that publishes heartbeats and tunnels offers through the
+/// node's signed call is `rust/wa-kernel-runtime/src/fabric_node.rs`. This package is the typed
+/// contract a component sees, so a component that wants work done elsewhere names a job kind and a
+/// payload size instead of re-implementing "which node is best right now".
+///
+/// Three rules shape the contract, and they are the whole design (`docs/FABRIC.md`):
+///
+/// * **State, never a rule.** A node is a candidate because its last heartbeat is younger than three
+///   beats and its load is inside the safety gates — not because a config file names it. Machines come
+///   and go; the view is the truth, and it has a TTL.
+/// * **A sample is not a reservation.** `route` returns a placement and, when the winner is a peer, an
+///   offer is sent; the peer's `answer` is an admission check on its own load *now*. The job is only
+///   ever owned through the lease (`wa:queue`'s lease, unchanged): first lease wins, a lapsed lease is
+///   requeued, and a settle from a worker that lost the lease is refused. So two runners of one job
+///   cannot both write a result, whatever the fabric decided.
+/// * **The local path always exists.** A placement that cannot reach a peer inside the window (200 ms
+///   by default) is a placement on this node, now. `route` never returns "no capacity" for a job this
+///   node could run, and never blocks the node's loop: WASI 0.3 async means the guest task suspends
+///   while the round trip is in flight, not that a thread waits.
+///
+/// Nothing here carries a payload: an offer names a job id, and the bytes stay in the queue the lease
+/// is on. An admin view carries ids, kinds, numbers and one-word reasons — never text, never a result.
+package wa:fabric@0.1.0;
+
+interface types {
+    /// Why a fabric call did not happen. Every word is stable: a log line and a counter key.
+    variant error {
+        /// The manifest capability `fabric` does not cover this interface or this queue namespace.
+        refused(string),
+        /// The record is not the shape this generation names (the word is the field).
+        malformed(string),
+        /// A bounded field was longer than its bound.
+        too-large(string),
+        /// The caller no longer holds this lease (it expired, or another worker took the job).
+        lease-lost,
+        /// Nothing to do at this instant; not an error the caller has to retry blindly.
+        again,
+        /// The fabric is disabled on this node (`WASM_AGENT_FABRIC=0`): everything runs locally.
+        disabled,
+        /// The queue's or the transport's own failure. Never reported as success.
+        failed(string),
+    }
+
+    /// A node identity, as the transport names it (`[A-Za-z0-9._:-]`, at most 64 bytes).
+    type node-id = string;
+
+    /// One thing a node can serve: `stt`, `ocr`, `embed`, `index`, `build`, or a word this generation
+    /// does not know. The set is open so a new job kind needs no new interface.
+    type capability = string;
+
+    /// The three numbers placement scores. Advisory: they say what was true a moment ago.
+    record load {
+        /// Jobs ready or leased on this node's own fabric queues.
+        queue-depth: u32,
+        cpu-busy-pct: u8,
+        mem-used-pct: u8,
+    }
+
+    /// One heartbeat. `sent-at-ms` is the sender's clock and is informational: liveness is decided by
+    /// the receiver's clock, so a node with a wrong clock can only make itself look late.
+    record heartbeat {
+        node: node-id,
+        capabilities: list<capability>,
+        load: load,
+        version: string,
+        sent-at-ms: u64,
+    }
+
+    /// One term of a score, in milliseconds, named so an operator can read *why* a node won.
+    record score-part {
+        what: string,
+        ms: s64,
+    }
+
+    /// A node's cost for one job: the total and its terms. Lower is better.
+    record score {
+        total-ms: s64,
+        parts: list<score-part>,
+    }
+
+    /// One candidate, and whether it is the asking node itself.
+    record candidate {
+        node: node-id,
+        score: score,
+        is-self: bool,
+    }
+
+    /// Why the local path runs a job. Stable words: `disabled`, `self-best`, `no-peer`,
+    /// `no-capable-peer`, `offer-window-elapsed`, `all-refused`.
+    enum local-reason {
+        disabled,
+        self-best,
+        no-peer,
+        no-capable-peer,
+        offer-window-elapsed,
+        all-refused,
+    }
+
+    /// A node that was not eligible, and the one word that says why: `stale`, `incapable`, `busy`,
+    /// `slow`.
+    record excluded {
+        node: node-id,
+        why: string,
+    }
+
+    /// The peer an offer goes to, and how long the whole placement may take.
+    record offer-plan {
+        to: node-id,
+        window-ms: u32,
+    }
+
+    /// What to do with a job: ask `offer-plan.to`, or run it here.
+    variant plan {
+        /// Send one offer to this node and wait for its answer inside the window.
+        offer(offer-plan),
+        /// Run it here, now, for this reason.
+        local(local-reason),
+    }
+
+    /// A job to place. It names the work, never its content: the bytes stay in the queue.
+    record request {
+        /// The job kind, which is also the capability a node must serve.
+        kind: string,
+        /// Everything the job needs (always includes the kind itself).
+        needs: list<capability>,
+        payload-bytes: u64,
+        /// The node that already holds the payload, when there is one: the locality candidate.
+        affinity: option<node-id>,
+        job: u64,
+        lease-ms: u64,
+    }
+
+    /// The full decision: the plan, the ranking it came from and the nodes that were excluded.
+    record decision {
+        plan: plan,
+        candidates: list<candidate>,
+        excluded: list<excluded>,
+        self-score: option<score>,
+    }
+
+    /// One offer: "will you take job `job` of kind `kind`, and answer before `deadline-ms`?"
+    record offer {
+        kind: string,
+        job: u64,
+        sender: node-id,
+        target: node-id,
+        /// The sender's idempotency id: one id for the whole placement, so a retried call answers
+        /// the same offer and a reply to a previous attempt is ignored.
+        rid: string,
+        deadline-ms: u64,
+        payload-bytes: u64,
+        lease-ms: u64,
+        needs: list<capability>,
+    }
+
+    /// The peer's yes: it will take the lease for `lease-ms`.
+    record accept {
+        rid: string,
+        node: node-id,
+        lease-ms: u64,
+        at-ms: u64,
+    }
+
+    /// The peer's no, with one bounded word (`busy`, `incapable`, `late`, `wrong-target`,
+    /// `fabric-off`).
+    record refuse {
+        rid: string,
+        node: node-id,
+        reason: string,
+    }
+
+    /// How a placement ended, for the operator's recent list.
+    enum outcome {
+        offered,
+        accepted,
+        refused,
+        timeout,
+        local,
+    }
+
+    /// One placement the node made, and why: ids, numbers and words, never a payload.
+    record placement-record {
+        at-ms: u64,
+        job: u64,
+        kind: string,
+        node: option<node-id>,
+        score-ms: option<s64>,
+        parts: list<score-part>,
+        outcome: outcome,
+        because: option<string>,
+        excluded: list<excluded>,
+    }
+
+    /// One lease the fabric queues carry right now.
+    record lease {
+        job: u64,
+        queue: string,
+        /// `<node>:<generation>`: a restarted node is a new worker, so its old lease is nobody's.
+        worker: string,
+        until-ms: u64,
+        /// Negative once the lease has lapsed and recovery has not run yet.
+        expires-in-ms: s64,
+        attempts: u32,
+        lease-expiries: u32,
+    }
+}
+
+/// What every node says about itself, and what each node knows about the others.
+interface presence {
+    use types.{error, heartbeat, load, node-id, capability};
+
+    /// Publish this node's heartbeat to the peers the transport reaches. Called every 2–5 s by the
+    /// node's own tick; never blocks.
+    publish: func(beat: heartbeat) -> result<_, error>;
+
+    /// The heartbeats that arrived since the last call, oldest first. A guest task suspends here
+    /// instead of polling a view: the stream ends only when the fabric is disabled or stopping.
+    beats: func() -> stream<heartbeat>;
+
+    /// Every node the view holds right now, live or stale, with its load and its capabilities. A
+    /// snapshot, so a caller cannot hold the view open across a heartbeat.
+    snapshot: func() -> list<heartbeat>;
+
+    /// How long a peer may go unheard before it stops being a candidate (three beats, 9 s at the
+    /// default cadence).
+    stale-after-ms: func() -> u64;
+
+    /// Does this node serve `capability` right now? The local half of an offer's admission check.
+    serves: func(capability: capability) -> bool;
+}
+
+/// Which node runs the job: one round trip, or the local path.
+interface placement {
+    use types.{
+        accept, candidate, capability, decision, error, excluded, offer, refuse, request,
+    };
+
+    /// Place one job. Returns the decision (a plan plus the ranking and the exclusions).
+    ///
+    /// When the plan is an offer, the round trip happens **inside this call**: the guest task
+    /// suspends, the node keeps running, and the answer arrives within the configured window (200 ms
+    /// by default). If the winner refuses, the next candidate is offered inside the same window. When
+    /// the window elapses, or self is the cheapest candidate, the decision says `local` and the job
+    /// runs here — that is not an error path, and it never waits.
+    route: async func(request: request) -> result<decision, error>;
+
+    /// Answer an offer as the accepting node: an admission check on the load *now*, not a
+    /// reservation. The lease is taken afterwards, by `lease.take`, and the queue decides who wins.
+    answer: func(offer: offer) -> result<accept, refuse>;
+
+    /// The ranked candidates for one request without placing it, for an operator's "what if".
+    rank: func(request: request) -> result<list<candidate>, error>;
+}
+
+/// The lease: `wa:queue`'s lease, reached through the fabric so a worker on another node holds the
+/// same one. Every call names the job, and the queue refuses a settle from a worker that lost it.
+interface lease {
+    use types.{error};
+
+    /// Take the next due job of `queue` for `worker`, for `lease-ms`. `none` is "nothing due", not an
+    /// error. Suspends while the producing node answers.
+    take: async func(queue: string, worker: string, lease-ms: u64) -> result<option<u64>, error>;
+
+    /// Extend a lease and return its new expiry. `lease-lost` means: stop working, it is not ours.
+    heartbeat: func(job: u64, worker: string, lease-ms: u64) -> result<u64, error>;
+
+    /// Append one progress chunk (a segment, a partial index): the queue's own progress log.
+    progress: func(job: u64, chunk: list<u8>) -> result<_, error>;
+
+    /// Settle with the result. Fenced: a lease that lapsed and was taken by another worker makes this
+    /// `lease-lost`, so a second result is never written.
+    settle: func(job: u64, worker: string, outcome: list<u8>) -> result<_, error>;
+
+    /// Give the job up: retry with the queue's backoff, or dead-letter it once its attempts are spent.
+    /// The reason is one sanitized line, never a payload.
+    fail: func(job: u64, worker: string, reason: string) -> result<_, error>;
+}
+
+/// The operator view (`services {"action":"fabric"}`): who is in the fabric, what was placed and why,
+/// what fell back, and what is leased.
+interface admin {
+    use types.{error, heartbeat, lease, local-reason, placement-record, score-part};
+
+    /// Who is in the fabric right now: every node the view holds, with its age in beats.
+    nodes: func() -> list<heartbeat>;
+
+    /// The last placements, newest first, with the score's terms and the excluded nodes' reasons.
+    recent: func(limit: u32) -> list<placement-record>;
+
+    /// Local runs and their reasons, and the offers that timed out or were refused.
+    fallbacks: func() -> list<tuple<string, u64>>;
+
+    /// The leases the fabric queues carry, and when each lapses.
+    leases: func() -> list<lease>;
+
+    /// The measured placement round trips: p50, p95 and how many samples they are. `none` means "not
+    /// measured", never zero.
+    latency: func() -> tuple<option<u64>, option<u64>, u32>;
+}
+
+/// A component that places work: presence in, placement and the lease out.
+world fabric-client {
+    import presence;
+    import placement;
+    import lease;
+}
+
+/// The node's own view, for an operator surface.
+world fabric-admin {
+    import presence;
+    import admin;
+}

@@ -471,6 +471,11 @@ command -v cygpath >/dev/null 2>&1 && export WA_COMPONENTS_DIR="$(cygpath -w "$G
 # sha256 and size check, the atomic swap and the rollback. No toolchain, no node: the component itself
 # is proved by the graph tests below and by scripts/check-graph-component.lua during a deploy.
 gate_run bash scripts/test-deploy-components.sh
+# The shipped set: a component is shipped by being PINNED (`components.lock`), and a deploy installs,
+# records and rolls back that whole set (docs/FEATURES.md). Proves the lock (production set, no fixture),
+# the set's install/rollback/refusal mechanics on a fixture lock, and - when this checkout has built
+# artifacts - the real set end to end. No toolchain, no network, no node.
+gate_run bash scripts/test-deploy-components-shipped.sh
 # The same idea one level up: the node BINARY from a release, so a node that cannot afford a rebuild
 # (openclaw: 2 cores, 99% disk) installs the bytes another machine built (docs/COMPONENTS.md "The node
 # binary itself"). Two halves, both with fixtures and no network, no cargo, no zig and no gh: the deploy

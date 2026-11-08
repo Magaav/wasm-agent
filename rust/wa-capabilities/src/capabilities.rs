@@ -181,6 +181,11 @@ pub const REGISTRY: &[Capability] = &[
     upvalue!("invoke", RunsProcess, crate::host::invoke, "Invoke one registered WASM plugin with JSON arguments"),
     // ---- WASI components ---------------------------------------------------------------------
     plain!("components", ReadOnly, wa_kernel_runtime::components::components, "List installed WASI components: pin state and declared capabilities"),
+    // The feature resolver (docs/FEATURES.md): one answer per feature - installed (with its verified
+    // sha), enabled, source (env|policy|default), the active path (component|native) and the reason -
+    // read live from `policy.json`, so a switch takes effect without a restart. `wa features` and
+    // `services {"action":"features"}` print the same document.
+    plain!("features", ReadOnly, crate::features::capability, "The node's feature switches: per feature, installed sha, enabled, source (env/policy/default), active path (component/native) and why, resolved live from policy.json by one resolver"),
     plain!("service", RunsProcess, wa_kernel_runtime::services::service, "Supervise long-lived WASI service components (docs/SERVICE-COMPONENTS.md): start, stop, status, logs, the transactional upgrade, the effective configuration profile and the start-by-imports reconcile"),
     plain!("component_mcp", RunsProcess, wa_kernel_runtime::components::component_mcp, "One MCP request (probe or call) against a pinned WASI component, with exactly the granted env/file/network capabilities"),
     plain!("state", WritesFiles, wa_kernel_runtime::state_host::capability, "Component state: status, dry run, export, import and verify of a component's versioned kv namespace, its migration journal and its snapshots"),
@@ -201,6 +206,13 @@ pub const REGISTRY: &[Capability] = &[
     // node that never opts in. The component holds no capability: the node reads the config files and
     // runs the hooks, and this call never runs a process.
     plain!("hooks", ReadOnly, wa_kernel_runtime::hooks_host::capability, "One wa:hooks call against the installed hooks component: the catalogue, the merged config view, the entries an event runs in order, one hook's answer interpreted into the decision, or the footer segment"),
+    // The mesh seam (docs/MESH.md, docs/CORE-SPLIT.md "mesh/fleet"): the `mesh` component answers the
+    // fleet's *decisions* — the roster's verify, the hierarchy and the grants, the audit line, the
+    // attestation's bytes and check, the peer-address rule — over no grant at all (its world imports
+    // nothing). `wa-mesh` routes its own call path here when `WA_MESH_COMPONENT=1`; this capability is
+    // the same answers for a caller outside that path (a CLI verb, a Lua check, `scripts/test-mesh-component.lua`),
+    // and it is inert on a node that never opts in because the artifact is simply not installed.
+    plain!("mesh", ReadOnly, wa_kernel_runtime::mesh_host::capability, "One wa:mesh call against the installed mesh component: verify-roster, decide, verb, render-audit, attest-message, verify-ticket or addresses - the fleet's decisions, with the sockets and the node's key left in the kernel"),
     // ---- WhatsApp (docs/SERVICE-COMPONENTS.md, docs/GRANT-POLICY.md) ---------------------------
     // One capability per effect: `whatsapp_send` asks the node's `whatsapp.send` policy and enqueues
     // a job on `wa:queue`; `whatsapp_send_status` reads the job back. Neither carries message text
@@ -238,6 +250,13 @@ pub const REGISTRY: &[Capability] = &[
     plain!("stt_admin", WritesFiles, crate::stt::admin, "The speech queue's operator surface: configure the node's producer/worker role, status (attached workers, latency, local vs remote counts), one job's state, a sweep"),
     plain!("stt_pending", ReadOnly, crate::stt::pending, "The next signed stt.requests call the worker thread wants sent (null when idle), for the node's Lua pump"),
     plain!("stt_deliver", ReadOnly, crate::stt::deliver, "Deliver one peer answer to the waiting worker thread and return the next pending call"),
+    // ---- the compute fabric (docs/FABRIC.md) ---------------------------------------------------
+    // The rules live in `wa-fabric`; these four are the node's own half: configure and read the live
+    // view, answer a peer's heartbeat or offer, and pump the records the node must sign.
+    plain!("fabric_admin", WritesFiles, crate::fabric::admin, "The compute fabric's operator surface: configure, status (nodes with load, age and capabilities, recent placements with their score, fallbacks by reason, leases), tick, submit/take/settle - ids, numbers and words, never a payload"),
+    plain!("fabric_call", WritesFiles, crate::fabric::call, "One admitted fabric call from a peer node: its heartbeat (observed in the live view) or an offer, answered from this node's load right now"),
+    plain!("fabric_pending", ReadOnly, crate::fabric::pending, "The next fabric record the node must sign and send (a heartbeat or an offer), or null when there is nothing to say"),
+    plain!("fabric_deliver", ReadOnly, crate::fabric::deliver, "Deliver one peer answer to the fabric (accept, refuse, heartbeat or unreachable) and return the next record to send"),
     // ---- audio -------------------------------------------------------------------------------
     // The contract is one entry because it is one capability with two calls: `capture` (the ear)
     // and `play` (the mouth). Voice itself is the `voice` WASM plugin; this is only the transport.

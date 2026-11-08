@@ -649,6 +649,11 @@ editor_status        device
 enqueue_completion   writes files
 exec                 runs a process
 exec_timeout         read-only
+fabric_admin         writes files
+fabric_call          writes files
+fabric_deliver       read-only
+fabric_pending       read-only
+features             read-only
 getenv               read-only
 graph_caps           read-only
 graph_explain        read-only
@@ -683,6 +688,7 @@ list_dir             read-only
 log                  device
 mark_db_ready        writes files
 memory               writes files
+mesh                 read-only
 mesh_call            network
 monotonic_ms         read-only
 node_identity        read-only

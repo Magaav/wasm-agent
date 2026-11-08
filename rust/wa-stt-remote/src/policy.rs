@@ -106,6 +106,9 @@ pub enum RemoteReason {
     /// A remote that has never decoded anything gets one chance; the grace bounds the cost of being
     /// wrong about it.
     RemoteUnmeasured,
+    /// The compute fabric placed the job on a peer from its live view (`src/fabric.rs`). The fabric's
+    /// evidence is newer than `RemoteHealth`, so this reason does not consult it.
+    FabricPlaced,
 }
 
 /// Why the local worker took (or is about to take) the job.
@@ -117,6 +120,9 @@ pub enum LocalReason {
     RemoteSlower,
     /// The grace ran out with the job still ready.
     GraceElapsed,
+    /// The compute fabric placed the job here: self was the cheapest candidate, or nothing answered
+    /// inside the offer window (`src/fabric.rs`).
+    FabricLocal,
 }
 
 /// What the local worker should do with one job.

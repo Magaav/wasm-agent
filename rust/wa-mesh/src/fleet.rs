@@ -232,7 +232,7 @@ impl PushRequest {
             Err(error) => return refuse("roster_unverified", error.0),
         };
         let now_s = crate::wire::now_seconds();
-        if let Err(error) = roster.verify(&key, now_s) {
+        if let Err(error) = crate::seam::verify_roster(&roster, &key, now_s) {
             return refuse("roster_unverified", error.0);
         }
         if roster.node(&self.target_node_id).is_none() {
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(merged["mesh"]["roster"], ROSTER_FILE);
         // The roster is the signed one, and the running node now decides by it.
         let installed = Roster::from_file(dir.join(ROSTER_FILE)).unwrap();
-        installed.verify(&key.public_key, crate::wire::now_seconds()).unwrap();
+        crate::seam::verify_roster(&installed, &key.public_key, crate::wire::now_seconds()).unwrap();
         let policy = crate::policy::MeshPolicy::from_policy_file(dir.join(POLICY_FILE)).unwrap();
         assert!(crate::admission::in_force(&policy));
         assert_eq!(std::fs::read_to_string(dir.join(ENV_FILE)).unwrap().trim(), "WASM_AGENT_MANAGED=0\nWA_MESH=1");

@@ -21,8 +21,8 @@
 //! cannot change its own environment, so the operator's own `policy.json` carries the same statement
 //! (`"mesh": {"enabled": true, …}`) and [`MeshPolicy::enabled`] is read per call: pushing a roster must
 //! take effect without a restart, or the bootstrap could never verify itself.
-use crate::audit::{Event, Sink};
-use crate::hierarchy::{authorize, Verdict, Verb};
+use crate::audit::{Emit, Event, Sink};
+use crate::hierarchy::{Verdict, Verb};
 use crate::identity::Identity;
 use crate::policy::MeshPolicy;
 use crate::roster::Roster;
@@ -247,7 +247,7 @@ impl Admitter {
     pub fn status(&self) -> (bool, String) {
         match self.source.load() {
             Err(error) => (false, error),
-            Ok((roster, policy)) => match roster.verify(&policy.roster_key, wire::now_seconds()) {
+            Ok((roster, policy)) => match crate::seam::verify_roster(&roster, &policy.roster_key, wire::now_seconds()) {
                 Ok(()) => (in_force(&policy), "verified".to_string()),
                 Err(error) => (false, error.0),
             },
@@ -275,7 +275,7 @@ impl Admitter {
         // Whether this node is enabled at all (the process flag, or `mesh.enabled` in its own policy)
         // is the *route's* gate: the listener is only mounted when it is, and `host.mesh_call` answers
         // `mesh_disabled` before it gets here. What is left to decide is the roster.
-        if let Err(error) = roster.verify(&policy.roster_key, now_s) {
+        if let Err(error) = crate::seam::verify_roster(&roster, &policy.roster_key, now_s) {
             // No verified roster: the operator's pins are the authority, exactly as before.
             return self.legacy(inbound, &format!("roster_unverified:{}", error.0));
         }
@@ -323,8 +323,8 @@ impl Admitter {
         let Some(target) = roster.node(&self.identity.node_id).cloned() else {
             return unsigned(503, "handler_unavailable");
         };
-        let verb = Verb::from_capability(&call.capability);
-        let verdict = authorize(&policy, &caller, &target, verb, now_s);
+        let verb = crate::seam::verb_of(&call.capability);
+        let verdict = crate::seam::decide(&policy, &caller, &target, verb, now_s);
         if !verdict.is_allow() {
             Event::new("recv", &caller.node_id, &target.node_id)
                 .levels(Some(caller.level), Some(target.level))

@@ -22,8 +22,17 @@ as every other connector (`mcp_*` names are connector tools, callable inside scr
 | `<name>.json` | its manifest: name, kind, description, declared `capabilities` |
 
 `bash scripts/build-components.sh [name...]` builds `rust/components/*` for `wasm32-wasip2` and
-installs all three atomically (pin last). `host.components()` lists what is installed and whether
+installs all three atomically (pin last). It reads Cargo's artifact directory from `CARGO_TARGET_DIR`
+when one is set, so a build inside a shared target directory (a node that builds everything into one,
+and the job harness) finds what it just built. `host.components()` lists what is installed and whether
 each pin verifies.
+
+**What a deploy installs is what `components.lock` pins**, and since 08/11 that is every production
+component - not `graph` alone. The set is read from the lock by `scripts/lib/deploy-components.sh`
+(`wa_components_shipped`), installed as one set (`wa_components_install_set`), recorded before it is
+replaced (`<components>/.prev/components.set`) and rolled back as one set. A name is shipped by being
+pinned there; nothing else in the tree decides it. **Installed is not enabled**: a feature is switched
+on per node in `policy.json` (`docs/FEATURES.md`), and `wa features` says which path is live.
 
 ## Distributing components: build once, install everywhere
 
@@ -423,10 +432,27 @@ enters a record. `kernel.record()` / `kernel.save_replay()` / `kernel.replay_fro
 
 ## Components so far
 
-| component | what | notes |
-| --- | --- | --- |
-| `mcp-whatsapp` | WhatsApp linked-device read tools (port of `scripts/mcp-whatsapp.mjs`) | loopback connector only (no TLS inside); send stays on the operator route; `scripts/test-component-whatsapp-parity.mjs` proves identical answers to the Node server |
-| `mcp-echo` | test fixture | proves grants, sandbox, deadline (`scripts/test-mcp-component.lua`) |
+Shipping: what `components.lock` pins, i.e. what every deploy installs.
+
+| component | kind | what | default path |
+| --- | --- | --- | --- |
+| `graph` | mcp | tree-sitter code graph in SQLite: index, search, source, explain, path, impact, patch audit | **component** - every `host.graph_*` call runs it, there is no native fallback |
+| `agent-core` | core | the Lua core as one component (`wa:kernel/host.call`), the whole turn inside the sandbox | native node core, until the `agent_core` gate is wired |
+| `codemode` | tool | the code-mode guest protocol and tool table over `wa:kernel/quickjs` | native `lua/core/codemode.lua` (`codemode`) |
+| `hooks` | hooks | hook/mods matching, ordering, timeouts and the Claude Code protocol's interpretation | native `lua/core/hooks.lua` (`hooks`) |
+| `memory` | memory | recall ranking, transcript search, scope rules, retention decision | native `lua/core/memory.lua` (`memory`) |
+| `model-gateway` | model | task classes, data-label gating, route/fallback/breaker/budget over the provider edges | native gateway, until the `gateway` gate is wired |
+| `selfloop` | selfloop | the wake/notes/probe state machine | native `lua/core/selfloop.lua` (`selfloop`) |
+| `telemetry-sink` | service | subscribes to the bus, batches spans/metrics/events into the node's bounded sink | native sink, until the `telemetry_sink` gate is wired |
+| `wa-email` | service | IMAP in / SMTP out through `email.outbox`, indexed in its own kv | installed and inert until an operator enables it |
+
+Not shipped, built by the gate only: the fixtures `svc-*`, `memory-crash`, `memory-wedge`, `mcp-echo`,
+and the MCP servers `mcp-whatsapp` (a registry definition an operator enables with `mcp put`/`enable`)
+and `wa-whatsapp` (installed by hand on the node that runs it, `scripts/build-whatsapp.sh`).
+
+`components.lock`'s own header says how a pin is regenerated, and why a build is not byte-reproducible
+across checkout paths. `scripts/test-deploy-components-shipped.sh` proves the shipped set: the lock,
+the real artifacts (when this checkout has them), install, rollback and the deploy's use of the set.
 
 ## Next: service components
 

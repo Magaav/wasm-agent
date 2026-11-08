@@ -30,6 +30,7 @@ pub mod cli;
 pub mod hex;
 pub mod migrate;
 pub mod policy;
+pub mod seed;
 pub mod store;
 #[cfg(test)]
 mod tests;
@@ -567,6 +568,16 @@ impl Vault {
         let lines: Vec<&str> = log.lines().filter(|line| !line.trim().is_empty()).collect();
         let records = audit::parse(&lines)?;
         audit::verify(&records, &self.doc.audit_head)
+    }
+
+    /// Append one audit line the engine itself has no operation for.
+    ///
+    /// There is exactly one caller (`wa vault import-ed25519 --shred`): overwriting and removing the
+    /// source file is a thing that happened to a key, and the chain is the only place an operator can
+    /// read afterwards that it did. `op`, `name`, `version` and `result` are names and words; a value
+    /// cannot ride here because the caller only ever passes a reason word (`ok`).
+    pub fn note(&mut self, op: &str, actor: &Actor, name: &str, version: u32, result: &str) -> Result<()> {
+        self.commit(op, actor, name, version, result)
     }
 
     pub fn audit_lines(&self) -> Vec<String> {
