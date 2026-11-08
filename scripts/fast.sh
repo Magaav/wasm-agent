@@ -94,7 +94,10 @@ else
   # request/answer seam; both are shared by the node and the wa-whatsapp component, and both are
   # workspace members with no host dependency, so they are cheap here. The component itself is its own
   # workspace and is built and tested from its directory (docs/SERVICE-COMPONENTS.md).
-  for crate in wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote; do
+  # wa-model-gateway is the model gateway's rules (`docs/MODEL-GATEWAY.md`): a leaf crate with no host
+  # dependency, so its 79 native tests are seconds, and they are the only place the seam's decisions are
+  # exercised (the component itself is its own workspace, like every other component).
+  for crate in wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway; do
     if [ "$all_rust" = 1 ] || printf '%s\n' "$changed" | grep -q "^rust/$crate/"; then crates="$crates $crate"; fi
   done
   printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh"

@@ -1,0 +1,31 @@
+[package]
+name = "model-gateway"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The model gateway as a component (docs/MODEL-GATEWAY.md, docs/CORE-SPLIT.md "what a seam must look
+# like"): `wa:model/chat` and `wa:model/embed` over `wa:kernel/http@0.2.0`. Provider adapters, the
+# route/fallback/breaker/budget rules and the data-label gate are in `rust/wa-model-gateway`, a plain
+# library so the same source is unit-tested natively (`cargo test -p wa-model-gateway`) and linked into
+# this guest; what is here is only the component edge: the kernel's http/credentials/kv/log, and the
+# `stream<event>` the caller consumes.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+# The seam's logic, shared with the native tests: no host dependency, so it builds for
+# wasm32-wasip2 unchanged.
+wa-model-gateway = { path = "../../wa-model-gateway" }
+# The `models` section of policy.json, the model's own tool-call arguments and the JSON at the
+# provider HTTP edge. Nothing the seam *decides* travels as JSON.
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

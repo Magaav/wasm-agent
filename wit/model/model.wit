@@ -1,0 +1,331 @@
+/// `wa:model` v0.1.0 — the model gateway as a capability seam (docs/MODEL-GATEWAY.md,
+/// docs/CORE-SPLIT.md).
+///
+/// Today the provider call is the last thing inside the turn loop (`lua/core/provider.lua`): it picks
+/// one endpoint from environment variables, posts one JSON body, and owns its own retry arithmetic.
+/// This package is that call as a *seam*: a caller names a **task class** (`plan`, `code`, `cheap`,
+/// `vision`, `default`) or an explicit model, carries the **data label** of everything it is about to
+/// send, and receives a `stream<event>` — deltas, tool calls, usage, finish — whichever provider
+/// actually served it.
+///
+/// The provider adapters live behind this package (Anthropic Messages, OpenAI-compatible, Google
+/// Gemini), as do the routing policy, the fallback chain, the per-provider circuit breaker, the token
+/// budgets and the accounting. Three rules shape the contract:
+///
+/// * **The label is not advice.** A request whose `label` a provider does not allow is never sent
+///   there: the router skips it with a typed `label-not-allowed` reason and either serves the request
+///   from the next allowed provider or refuses it with `refusal::label-not-allowed`. `client`
+///   (a message from a client of the operator) is the strictest; `internal` a node's own; `public`
+///   anything the operator chose to publish. A tool result inherits the label of its source, and a
+///   session's label is the strictest label seen in it.
+/// * **The prefix is frozen.** The gateway never reorders, merges or rewrites `messages`, `tools` or a
+///   `cache-breakpoint`: the same request built twice, or built by the direct path, is byte-identical
+///   on the wire, because a prefix that changed costs a prompt-cache miss on every call
+///   (`lua/core/prefix_audit.lua`, `docs/MODEL-GATEWAY.md` "Prompt cache").
+/// * **The key never enters here.** A provider's credential is a *reference*: the kernel's
+///   `wa:kernel/http` adds the value from `wa:kernel/credentials` for the named secret, so this
+///   component never holds a key and a log line cannot leak one.
+///
+/// JSON appears in exactly the places where the model's own protocol is JSON by nature, and each is
+/// named so: `tool-def.schema-json` (the model-facing parameter schema, opaque here),
+/// `tool-call.arguments-json` (the model's own arguments), and `policy-json` (the `models` section of
+/// policy.json, which is the operator's file and stays opaque to the seam). Everything the seam
+/// decides — a route, a refusal, a usage — is a typed record.
+///
+/// Async is WASI 0.3 (`wa:kernel@0.2`): the provider body is a `stream<list<u8>>` in the kernel, and
+/// the caller gets this seam's `stream<event>`; the guest task suspends between chunks instead of
+/// polling (docs/KERNEL.md, "The model gateway as a component").
+package wa:model@0.1.0;
+
+interface types {
+    /// What the caller is doing, which is what picks a model. `default` is the ordinary turn.
+    enum task-class {
+        plan,
+        code,
+        cheap,
+        vision,
+        default,
+    }
+
+    /// The data label a request carries. Order is the strictness order: `client` is the strictest.
+    enum label {
+        public,
+        internal,
+        client,
+    }
+
+    enum role {
+        system,
+        user,
+        assistant,
+        tool,
+    }
+
+    enum provider-kind {
+        anthropic,
+        openai,
+        gemini,
+    }
+
+    record model-ref {
+        provider: string,
+        model: string,
+    }
+
+    record image {
+        mime: string,
+        bytes: list<u8>,
+    }
+
+    variant part {
+        text(string),
+        image(image),
+    }
+
+    record tool-call {
+        id: string,
+        name: string,
+        /// The model's own arguments, verbatim (`{}` when the provider sent none).
+        arguments-json: string,
+    }
+
+    /// One message, exactly as the caller assembled it. The gateway treats the list as an ordered,
+    /// immutable prefix: no merging, no role sorting, no re-flowing.
+    record message {
+        role: role,
+        parts: list<part>,
+        /// Assistant tool calls this message carries; empty otherwise.
+        tool-calls: list<tool-call>,
+        /// The call this message answers (role `tool` only).
+        tool-call-id: option<string>,
+        /// Author of a `tool` message: the tool name.
+        name: option<string>,
+        /// A prompt-cache breakpoint comes *after* this message. It never moves, and a provider that
+        /// has no breakpoint concept ignores it rather than growing a prefix of its own.
+        cache-breakpoint: bool,
+    }
+
+    record tool-def {
+        name: string,
+        description: string,
+        /// The model-facing parameter schema (JSON Schema), opaque to this seam.
+        schema-json: string,
+    }
+
+    record chat-request {
+        /// The host's session id; the gateway keys budgets, breakers and accounting by it.
+        session: string,
+        class: task-class,
+        /// An explicit model wins over the class's route (it is still subject to the label rule).
+        model: option<model-ref>,
+        label: label,
+        messages: list<message>,
+        tools: list<tool-def>,
+        max-output-tokens: u32,
+        temperature: option<f32>,
+        /// The caller's own estimate (bytes/4 in the loop today), so a drained budget can refuse
+        /// before a byte leaves the node. A hint, never the thing accounting trusts.
+        estimated-input-tokens: option<u64>,
+        timeout-ms: option<u64>,
+    }
+
+    record usage {
+        input-tokens: u64,
+        output-tokens: u64,
+        /// Prompt-cache reads, when the provider reports them.
+        cache-read-tokens: u64,
+        /// Prompt-cache writes, when the provider reports them.
+        cache-write-tokens: u64,
+        reasoning-tokens: u64,
+    }
+
+    enum finish-reason {
+        stop,
+        length,
+        tool-calls,
+        content-filter,
+        error,
+    }
+
+    /// Where a request actually went, and why — also what `wa models explain` prints.
+    record route {
+        provider: string,
+        model: string,
+        kind: provider-kind,
+        /// The host:port the call was granted (`https://host` → `host:443`).
+        host: string,
+        class: task-class,
+        label: label,
+        /// 1 for the first candidate of a route; 2+ after a fallback.
+        attempt: u32,
+        /// The model that failed before this one served, when this call is a fallback.
+        fallback-from: option<model-ref>,
+        /// Why this candidate was tried (`route:plan#1`, `explicit`, `route:default#2 after 429`).
+        reason: string,
+    }
+
+    record label-refusal {
+        provider: string,
+        model: string,
+        label: label,
+        /// The labels this provider does allow, so the reason can name them.
+        allowed: list<label>,
+        reason: string,
+    }
+
+    record skip {
+        provider: string,
+        model: string,
+        reason: string,
+    }
+
+    record no-route {
+        class: task-class,
+        label: label,
+        /// Every candidate the router considered and dropped, with its reason.
+        skipped: list<skip>,
+    }
+
+    record budget-refusal {
+        /// `node` or `session:<id>`.
+        scope: string,
+        spent: u64,
+        limit: u64,
+        reason: string,
+    }
+
+    /// A refusal is an answer: the caller's own vocabulary, never a provider fault.
+    variant refusal {
+        label-not-allowed(label-refusal),
+        no-route(no-route),
+        budget-exceeded(budget-refusal),
+        invalid(string),
+    }
+
+    /// One item of the call: the model's answer as it arrives, then its usage, then the finish.
+    variant event {
+        delta(string),
+        reasoning-delta(string),
+        /// A tool call the model completed (deltas are assembled here, not by the caller).
+        tool-call(tool-call),
+        usage(usage),
+        finish(finish),
+    }
+
+    record finish {
+        reason: finish-reason,
+        route: route,
+        usage: usage,
+        /// How many provider attempts this call took (1 when nothing failed).
+        attempts: u32,
+        latency-ms: u64,
+        /// True when this call reported more cache reads than cache writes.
+        cache-hit: bool,
+    }
+
+    /// One accounted call, as the kernel's telemetry receives it (no message text, ever).
+    record accounted {
+        session: string,
+        provider: string,
+        model: string,
+        class: task-class,
+        label: label,
+        usage: usage,
+        /// Cost in micro-units of the operator's currency, from the policy's per-model rates.
+        cost-micros: u64,
+        cache-hit: bool,
+        latency-ms: u64,
+    }
+
+    record embed-request {
+        session: string,
+        class: task-class,
+        model: option<model-ref>,
+        label: label,
+        texts: list<string>,
+        timeout-ms: option<u64>,
+    }
+
+    record embeddings {
+        route: route,
+        vectors: list<list<f32>>,
+        usage: usage,
+    }
+
+    /// What a caller is told when the call produced no stream at all. A refusal is a decision; a
+    /// fault is the provider or the transport breaking, and it carries no message text.
+    variant error {
+        refused(refusal),
+        fault(string),
+    }
+
+    /// One candidate of a route, as `explain`/`routes` reports it.
+    record candidate {
+        model: model-ref,
+        kind: provider-kind,
+        /// Why this candidate is or is not usable for the label and class in hand.
+        usable: bool,
+        reason: string,
+    }
+
+    /// The dry-run decision, as `wa models explain` prints it and a caller can act on it.
+    record explanation {
+        class: task-class,
+        label: label,
+        candidates: list<candidate>,
+        /// The model that *would* serve it, absent when none can.
+        chosen: option<model-ref>,
+        /// The refusal the call would get, absent when it would proceed.
+        refusal: option<refusal>,
+        /// The same decision as one line per candidate, for `wa models explain`.
+        text: string,
+    }
+
+    record route-line {
+        class: task-class,
+        candidates: list<candidate>,
+    }
+}
+
+interface chat {
+    use types.{
+        accounted, chat-request, error, event, explanation, label, route-line,
+    };
+
+    /// Serve one turn. The refusal (a bad label, a drained budget, no route) is known before the
+    /// stream exists; a provider fault after the stream started is the `finish` event with
+    /// `reason: error` and the account's own text.
+    chat: async func(request: chat-request) -> result<stream<event>, error>;
+
+    /// Decide without sending anything: the `wa models explain` dry run.
+    explain: func(request: chat-request) -> result<explanation, error>;
+
+    /// Install a new `models` section (live reload). Answers the policy generation it installed; a
+    /// call already in flight keeps the policy it started with.
+    configure: func(policy-json: string) -> result<u32, error>;
+
+    /// Every class's route for one label, as the operator's `wa models` list shows it.
+    routes: func(label: label) -> result<list<route-line>, error>;
+
+    /// The accounting since the last reset (the kernel ships it to telemetry too).
+    accounting: func() -> list<accounted>;
+
+    reset-accounting: func();
+}
+
+interface embed {
+    use types.{embed-request, embeddings, error};
+
+    /// Embed `texts` with the embedding model of the request's class (or the explicit one). Same
+    /// label rule and same budget as `chat`.
+    embed: async func(request: embed-request) -> result<embeddings, error>;
+}
+
+world model-gateway {
+    import wa:kernel/http@0.2.0;
+    import wa:kernel/kv@0.2.0;
+    import wa:kernel/log@0.2.0;
+    import wa:kernel/credentials@0.2.0;
+    export chat;
+    export embed;
+}

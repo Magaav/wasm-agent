@@ -1,0 +1,22 @@
+[package]
+name = "wa-model-gateway"
+version = "0.1.0"
+edition = "2021"
+
+# The model gateway's rules, as plain Rust: task classes and data labels, the `models` policy section,
+# route planning, the fallback chain with backoff and jitter, the per-provider circuit breaker, token
+# budgets, the three provider adapters with their streaming parsers, cache accounting and the
+# `wa models explain` rendering (docs/MODEL-GATEWAY.md).
+#
+# It lives outside the component on purpose: the same source is linked into
+# `rust/components/model-gateway` (wasm32-wasip2, the `wa:model` guest) and unit-tested natively
+# (`cargo test -p wa-model-gateway`) against a mock transport, with no wasm runtime and no network.
+# No host dependency, no threads, no clock of its own: time and the transport are injected, so every
+# rule below is a deterministic function of its inputs.
+
+[dependencies]
+# The `models` section of policy.json is JSON (the operator's file), and the provider HTTP edge is JSON
+# (the model's own protocol). Nothing the seam *decides* travels as JSON: a refusal is an enum case, a
+# route a struct. Parsing the policy by hand keeps every refusal named ("models.routes.plan[1]: not a
+# provider/model ref") instead of hiding it behind a derive.
+serde_json = "1"

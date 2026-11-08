@@ -30,6 +30,16 @@ streaming) is the last thing to move, not the first — it is the hottest and it
 gateway replaces; and **nothing moves that the model sees mid-turn** (tool argument validation, tool
 output shaping, the transcript), because a failed seam there costs a turn rather than a retry.
 
+Status 07/11: the gateway is now **specified, built and off by default** rather than unstarted —
+`wit/model/model.wit` (`wa:model`), `rust/wa-model-gateway` (the rules, 79 native tests),
+`rust/components/model-gateway` (the `wasm32-wasip2` guest) and `lua/core/model_gateway.lua` behind
+`WA_MODEL_GATEWAY=1`, with the native provider path unchanged. What is *not* landed is the host
+capability that calls the component (`host.model_gateway`), so the flag currently logs
+`component_capability_missing` and serves natively. The reason the seam exists at all is the **data
+label**: "which provider may see this message" has to be enforced once, before bytes leave the node,
+whatever path the turn took — see `docs/MODEL-GATEWAY.md` for the contract, the policy section, the
+label rules and the measured cost.
+
 ## The map
 
 Measured call frequency: `scripts/bench-core-calls.lua` wraps every `host.*` function and runs one
@@ -45,6 +55,7 @@ calls**: `getenv` 92 (31%), `read_file` 47 (16%), `sha256` 30 (10%), `sql_exec` 
 | `codemode.lua`, `codemode_policy.lua`, `codemode_view.lua` | **component, landed** (`wa:codemode`) | the guest's protocol — the fence, its tool table, `searchTools`/`describeTool`, the admit/deliver order and the script's report — as a state machine over one script; the QuickJS *sandbox* stays in the kernel as a capability (`wa:kernel/quickjs`), and admission, dispatch, the definition recheck, evidence, presentation and the session store stay in the loop | 1 call per step (2 for a trivial script, 13 for ten parallel calls) on the rounds that use code mode; 0 on the rest |
 | `hooks.lua`, `hook_events.lua` (hooks/mods) | **component third** (`wa:hooks`) | event→layers→verdict is a pure function of configuration; the plugin bodies stay capabilities | 1 call per hookable event; 0–2 per turn, more on bus events |
 | `nodes.lua`, `federation.lua`, `routed_calls.lua`, `mesh`/fleet parts of `orchestrator.lua` | **component fourth** (`wa:mesh`) | roster, grants and routing decisions over the roster table; the transports stay capabilities | per peer call; 0 in a single-node turn |
+| `provider.lua`'s call site (`M.complete_with`) → `lua/core/model_gateway.lua`, `wa:model` | **component, built, off by default** (`rust/components/model-gateway`) | the *decision* (class → model, data label vs `allowed_labels`, fallback, breaker, budget) is a pure function of policy + session label; the prompt, the transcript and tool dispatch stay in the loop. The seam is only entered under `WA_MODEL_GATEWAY=1` | 1 call per provider call, and only when enabled; measured 2 µs of decisions, 7 µs of protocol (`docs/MODEL-GATEWAY.md`, "Cost") |
 | `memory.lua` (recall, search, sessions, retention) | **component, landed** (`wa:memory`, see `docs/MEMORY.md`) | ranking and scope rules; `memory.db` stays the kernel's | 1–3 calls per turn |
 | `chat.lua`, `cli_view.lua`, `cli_panel.lua`, `completions.lua`, `markdown.lua` | **stays** (the console) | it *is* the client: it draws, it reads input, it reloads with the window | — |
 | `server.lua`, `subagents.lua`, `orchestrator.lua` (placement), `steering.lua`, `completions.lua` | **stays** (the node) | admission, scheduling, run ownership: the things a component must not own | — |

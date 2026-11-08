@@ -13,6 +13,10 @@ local prefix_audit = dofile("lua/core/prefix_audit.lua")
 local M = {}
 local vault = dofile("lua/core/vault.lua")
 local state = dofile("lua/core/state.lua")
+-- The model gateway (`docs/MODEL-GATEWAY.md`). Loaded unconditionally because it is a few tables and two
+-- reads of one small file; it *acts* only when `WA_MODEL_GATEWAY=1`, which is what keeps the native path
+-- below byte-for-byte what it was (`scripts/test-model-gateway.lua` asserts it).
+local gateway = dofile("lua/core/model_gateway.lua")
 
 local function env(name) return host.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
@@ -1106,6 +1110,14 @@ end
 -- WASM_AGENT_LLM_SUMMARY_MODEL is set, otherwise the main model).
 function M.complete_with(model, messages, tools, stream, opts)
   opts=opts or {}
+  -- The gateway owns the call when it is enabled: it picks the model by task class, enforces the session's
+  -- data label against each provider's `allowed_labels`, applies the fallback chain, the breaker and the
+  -- budgets, and returns the same result shape this function does. A missing capability or an unset flag
+  -- leaves every line below untouched, with one log line saying so (never a silent fallback).
+  if gateway.enabled() then
+    local served = gateway.complete(M, model, messages, tools, stream, opts)
+    if served ~= nil then return served end
+  end
   local settings = M.settings()
   local provider = M.active()
   local body = { model = model or settings.model, messages = messages }
