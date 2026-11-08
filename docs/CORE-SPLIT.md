@@ -1,11 +1,14 @@
 # The core split: what stays in the turn loop, what becomes a component
 
-Status (07/11): the map below is the decision, and the first two extractions are **landed** — the
-self-loop (behind `wa:selfloop`, `wit/selfloop/selfloop.wit`, `rust/components/selfloop`) and code mode
-(behind `wa:codemode`, `wit/codemode/codemode.wit`, `rust/components/codemode`, importing
-`wa:kernel/quickjs` for the sandbox the kernel hosts), both routed by their own `WA_*_COMPONENT=1`, both
-with the native path unchanged and parity asserted (`scripts/test-selfloop-component.lua`,
-`scripts/test-codemode-component.lua`). Hooks and mesh are specified here, not built.
+Status (07/11, updated by the hooks lane): the map below is the decision, and the first four
+extractions are **landed** — the self-loop (behind `wa:selfloop`, `wit/selfloop/selfloop.wit`,
+`rust/components/selfloop`), code mode (behind `wa:codemode`, `wit/codemode/codemode.wit`,
+`rust/components/codemode`, importing `wa:kernel/quickjs` for the sandbox the kernel hosts), memory
+(`wa:memory`) and **hooks/mods** (`wa:hooks`, `wit/hooks/hooks.wit`, `rust/components/hooks`), each
+routed by its own `WA_*_COMPONENT=1`, each with the native path unchanged and parity asserted
+(`scripts/test-selfloop-component.lua`, `scripts/test-codemode-component.lua`,
+`scripts/test-memory-component.lua`, `scripts/test-hooks-component.lua`). Mesh is specified here, not
+built.
 
 ## The rule
 
@@ -53,7 +56,7 @@ calls**: `getenv` 92 (31%), `read_file` 47 (16%), `sha256` 30 (10%), `sql_exec` 
 | `agent.lua`, `provider.lua`, `prompt_sections.lua`, `prompt_cache.lua`, `tools.lua`, `tool_output.lua`, `envelope.lua`, `json_contract.lua`, `session_view.lua` | **stays** (the hot loop) | session state, prompt assembly, the provider call, tool dispatch: one object, one lifetime; the gateway replaces the provider later | 295 host calls, ~everything above |
 | `selfloop.lua` (wakes, notes, probes) | **component, landed** (`wa:selfloop`) | a state machine over three tables; the node's tick and a restart both re-read rows; the probe *runner* and the agent turn stay in the loop | 2 host calls per tick native, 1 per seam op; ~1 op per wake |
 | `codemode.lua`, `codemode_policy.lua`, `codemode_view.lua` | **component, landed** (`wa:codemode`) | the guest's protocol — the fence, its tool table, `searchTools`/`describeTool`, the admit/deliver order and the script's report — as a state machine over one script; the QuickJS *sandbox* stays in the kernel as a capability (`wa:kernel/quickjs`), and admission, dispatch, the definition recheck, evidence, presentation and the session store stay in the loop | 1 call per step (2 for a trivial script, 13 for ten parallel calls) on the rounds that use code mode; 0 on the rest |
-| `hooks.lua`, `hook_events.lua` (hooks/mods) | **component third** (`wa:hooks`) | event→layers→verdict is a pure function of configuration; the plugin bodies stay capabilities | 1 call per hookable event; 0–2 per turn, more on bus events |
+| `hooks.lua`, `hook_events.lua` (hooks/mods) | **component, landed** (`wa:hooks`) | event→layers→verdict is a pure function of configuration; running a hook stays the node's (a process, or a Lua function); one call per hook answer, none on an inert node once the plan is cached |
 | `nodes.lua`, `federation.lua`, `routed_calls.lua`, `mesh`/fleet parts of `orchestrator.lua` | **component fourth** (`wa:mesh`) | roster, grants and routing decisions over the roster table; the transports stay capabilities | per peer call; 0 in a single-node turn |
 | `provider.lua`'s call site (`M.complete_with`) → `lua/core/model_gateway.lua`, `wa:model` | **component, built, off by default** (`rust/components/model-gateway`) | the *decision* (class → model, data label vs `allowed_labels`, fallback, breaker, budget) is a pure function of policy + session label; the prompt, the transcript and tool dispatch stay in the loop. The seam is only entered under `WA_MODEL_GATEWAY=1` | 1 call per provider call, and only when enabled; measured 2 µs of decisions, 7 µs of protocol (`docs/MODEL-GATEWAY.md`, "Cost") |
 | `memory.lua` (recall, search, sessions, retention) | **component, landed** (`wa:memory`, see `docs/MEMORY.md`) | ranking and scope rules; `memory.db` stays the kernel's | 1–3 calls per turn |
@@ -140,14 +143,44 @@ world mesh-component { import wa:kernel/sql@0.1.0; export mesh; }
    `docs/CODEMODE.md` "Code mode as a component". It also answers one open question by measurement:
    code mode is *not* the self-loop's shape — one instance per script is right, and a script that pays
    instantiation for `return 1` is 3.6 ms against the native 1.5 ms.
-3. **hooks/mods** — pure, event-driven, and the node fires from many threads; a component makes the
-   rule set swappable per event rather than per process.
+3. **hooks/mods** — **landed** (`wa:hooks`). The boundary turned out to be *the rules*, not the hooks:
+   both config shapes, the matchers, the ordering, the per-hook timeouts, the protocol's
+   interpretation, the bounds and the mods surface moved, while running a hook stayed the node's (a
+   command is a process with the node's grants; a Lua plugin is a function in the interpreter) and the
+   config files stayed the node's to read (a guest has no path to `~/.wasm-agent` and no grant to it).
+   So the seam is two calls, not one: `configure`/`entries` say what runs and in which order, and one
+   `decide` per hook answer says what it means - because only a verdict can say whether the next hook
+   still runs, and the native loop breaks on a refusal. The cost of that choice is in "Cost" below;
+   the shape is in `docs/HOOK-EVENTS.md`, "The engine as a component".
 4. **mesh/fleet** — the widest and the least urgent: a single-node turn never touches it, and its
    transports are capabilities that stay native.
 5. **the model gateway** — last, and not a component in this sense: it *replaces* `provider.lua`, and
    it will be a service with its own process topology rather than a guest with a grant.
 
 ## Cost (measured)
+
+`bash scripts/bench-hooks.sh` on this machine (Windows, release build, median of 21 in-process fires;
+one process per path; the hook command is a `sh` that answers `{}`):
+
+| path | scenario | p50 ms | p95 ms | `host.hooks` calls per fire | peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| native | fire, 0 hooks | 0.00 | 0.01 | 0 | 16.0 MB |
+| component | fire, 0 hooks | 0.01 | 0.01 | 0 | 26.1 MB |
+| native | fire, 1 hook | 63.8 | 64.6 | 0 | 16.0 MB |
+| component | fire, 1 hook | 65.8 | 72.1 | 1 | 26.1 MB |
+| native | fire, 10 hooks | 701.4 | 727.3 | 0 | 16.0 MB |
+| component | fire, 10 hooks | 733.8 | 879.6 | 10 | 26.1 MB |
+| component | decide one row, 1 hook configured | 0.47 | 0.51 | 1 | 26.1 MB |
+| component | decide one row, 10 hooks configured | 1.46 | 2.21 | 1 | 26.1 MB |
+
+Read it as: **the seam's own cost is ~0.5 to ~2 ms per hook answer** (the row is handed in; the
+verdict comes back), and the round trip grows with the verdict's `outcomes` because the accumulated
+verdict is what the next step carries. On this host a *hook* costs 60–70 ms (a process spawn), so a
+turn with one hook pays ~3% more and a turn with ten pays ~5% more; the absolute numbers are this
+machine's process spawn, not the seam's. An **inert node pays nothing** after its first
+(event, tool) plan, because the matched entry list is cached per config generation exactly as the
+native view is. RSS is +10 MB for the engine and one module instance, the same order as the self-loop
+seam.
 
 `bash scripts/bench-selfloop.sh` on this machine (Windows, release build, median of 21 in-process
 runs; one process per path; `wa` = this checkout's build):
@@ -200,6 +233,15 @@ turn: the gateway rewrite owns that, and these numbers do not predict it.
 4. **Where the schema lives.** `setup()` (DDL) is still in the core because a grant has no DDL. When
    the last `setup()` moves to a migration runner owned by the kernel, the components can assume it —
    until then, a node that opens an old store gets one `store-failed` per operation, with a log line.
-5. **One router per seam, or one?** `memory.lua` and `selfloop.lua` each grew a ~40-line seam block
+5. **One decision call per hook answer.** The hooks seam pays one crossing per **hook**, not per event,
+because the node runs the hook and only the verdict says whether the next one still runs (the native
+loop breaks on a refusal, and running a hook the native path would have skipped is a side effect a
+seam must not invent). The alternative that would make it one crossing per event is the nested
+callback the self-loop's probe question describes: the guest asks the *host* to run hook N and hands
+the answer straight back. It needs a `wa:hooks/host` import and a synchronous host callback a
+WASI 0.3 `async func` seam makes cheap; nobody has measured it, and the numbers above say what it
+would buy (~2 ms per hook on a 60 ms process spawn).
+
+6. **One router per seam, or one?** `memory.lua` and `selfloop.lua` each grew a ~40-line seam block
    (`seam`, `routed`, `note_fallback`). A third copy is the point to factor it into
    `lua/core/seam.lua` — with the same three-answer shape (`result`/`refused`/`ok:false`).

@@ -1,0 +1,28 @@
+[package]
+name = "hooks"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The hooks/mods engine as a component (docs/CORE-SPLIT.md, docs/HOOK-EVENTS.md): event -> entries ->
+# decision, with the config text handed over by the node and the hooks run by the node. Request-shaped
+# (built for wasm32-wasip2) by scripts/build-components.sh, never by the core build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bindings for `wa:hooks` (exported), from the world in `wit/hooks`.
+wit-bindgen = "0.63"
+# One dependency, and the reason it is here: the protocol's own two documents are JSON — the payload
+# a hook is handed on stdin and the object it answers on stdout — and the config files are JSON. The
+# rules stay typed records in wit/hooks; `preserve_order` keeps a rewritten payload's key order, so
+# two hooks of one chain see the same bytes.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

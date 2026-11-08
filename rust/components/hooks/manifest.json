@@ -1,0 +1,9 @@
+{
+  "name": "hooks",
+  "kind": "hooks",
+  "version": "0.1.0",
+  "target": "wasm32-wasip2",
+  "description": "The hooks/mods engine (wa:hooks): config sources, matchers, ordering, timeouts, the Claude Code compatible protocol's interpretation and the mods surface. Holds no capability: the node reads the config files and runs the hooks.",
+  "capabilities": {},
+  "limits": {"memory_mb": 32}
+}

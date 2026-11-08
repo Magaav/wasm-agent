@@ -1,0 +1,269 @@
+/// `wa:hooks` — the hooks/mods engine as a component (docs/CORE-SPLIT.md, docs/HOOK-EVENTS.md):
+/// which hooks are configured for an event, in which order, what one hook's answer means, and the
+/// decision the caller acts on.
+///
+/// The split is: the **pure** half moves here (config sources, both config shapes, matchers,
+/// ordering, per-hook timeouts, the protocol's interpretation, the bounds, the mods surface and the
+/// catalogue), and the **two impure acts stay in the node**: reading the operator's config files (a
+/// component has no path to `~/.wasm-agent` and no grant to it) and running a hook (a command is a
+/// process with the node's grants; a Lua plugin is a function in the node's interpreter). Those two
+/// are the node's hands, and a verdict the component produced is the same whichever hand ran the
+/// hook.
+///
+/// Nothing on the seam is a JSON document *as an interface type*: the config arrives as source
+/// text and the hook's payload/answer as bytes because that is exactly what the protocol is — a
+/// JSON object on a hook's stdin and a JSON object on its stdout (`docs/HOOKS.md`, "The protocol").
+/// Everything the component *decides* is a record, and the two fields that stay opaquely JSON say
+/// so in their names (`updated-input-json`, `input-changes-json`): they are the operator's own
+/// rewrite, carried to a caller that must apply it to a tool call.
+package wa:hooks@0.1.0;
+
+interface types {
+    /// Kernel-side failures, the same shape `wa:kernel/types` uses.
+    variant error {
+        /// The request is not one this component serves (an unknown op, an unknown event).
+        refused(string),
+        /// The component could not answer.
+        failed(string),
+    }
+
+    /// One hook point, as the catalogue documents it (`lua/core/hooks.lua` `M.EVENTS`, docs/HOOKS.md).
+    record event-facts {
+        name: string,
+        /// Whether a `matcher` narrows this event (tool events, subagent, component, bus).
+        matcher: bool,
+        /// What a hook for this event may decide: `context`, `systemMessage`, `block`, `allow`,
+        /// `deny`, `ask`, `updatedInput`, `continue`, `stop`, `reschedule`, `text`.
+        may: list<string>,
+        /// When it fires, in one sentence.
+        when: string,
+        /// The payload fields it carries beside the envelope.
+        fields: list<string>,
+    }
+
+    /// The bounds a hook runs under, so the node and the component cannot drift apart
+    /// (`scripts/test-hooks-component.lua` compares these with the Lua side's `M.MAX_*`).
+    record bounds {
+        version: u32,
+        default-timeout-ms: u32,
+        max-timeout-ms: u32,
+        max-stdout-bytes: u32,
+        max-stderr-bytes: u32,
+        max-context-bytes: u32,
+        max-system-messages: u32,
+        max-system-message-bytes: u32,
+        max-stop-continues: u32,
+        statusline-ttl-ms: u32,
+        statusline-timeout-ms: u32,
+        statusline-max: u32,
+        last-kept: u32,
+    }
+
+    /// One configured hook, normalized from either config shape (`command` + `timeout_ms`, or
+    /// Claude Code's `matcher` wrapper + `timeout` in seconds).
+    record entry {
+        name: string,
+        event: string,
+        /// `command` (a config entry, run by the node) or `lua` (a registered function, run by the
+        /// node's interpreter and handed over as `row.json`).
+        kind: string,
+        matcher: option<string>,
+        command: string,
+        timeout-ms: f64,
+        on-ask: string,
+        origin: string,
+        path: option<string>,
+        order: u32,
+    }
+
+    /// One config file as the node found it. `text` is the file; `problem` is
+    /// `missing` / `invalid_json` / `unreadable`, exactly the three the native reader reports.
+    record source {
+        name: string,
+        path: string,
+        /// `native` (this node's own hooks.json shape) or `claude` (Claude Code's settings.json).
+        kind: string,
+        text: option<list<u8>>,
+        problem: option<string>,
+    }
+
+    /// Everything the component needs to answer the merged config: the four sources in the
+    /// documented order, and the two environment opt-ins the node already resolved.
+    record config-request {
+        workdir: string,
+        /// `WASM_AGENT_HOOKS=off|0|false`.
+        disabled: bool,
+        /// `WASM_AGENT_CLAUDE_HOOKS=1|on|true`.
+        claude-env-opt-in: bool,
+        sources: list<source>,
+    }
+
+    record source-fact {
+        name: string,
+        path: string,
+        kind: string,
+    }
+
+    record command-entry {
+        name: string,
+        description: string,
+        command: string,
+        timeout-ms: f64,
+        origin: string,
+    }
+
+    record keybinding {
+        key: string,
+        command: string,
+        description: string,
+        origin: string,
+    }
+
+    /// One event's entries, in run order.
+    record event-entries {
+        event: string,
+        entries: list<entry>,
+    }
+
+    /// The merged view of every source (`M.config`): what is configured, what could not be read,
+    /// and the mods beside the hooks.
+    record config-facts {
+        disabled: bool,
+        present: bool,
+        compat: bool,
+        workdir: string,
+        sources: list<source-fact>,
+        errors: list<string>,
+        hooks: list<event-entries>,
+        statusline: list<entry>,
+        commands: list<command-entry>,
+        keybindings: list<keybinding>,
+    }
+
+    /// One hook's outcome, as the node observed it: what the protocol turns into a decision.
+    record row {
+        name: string,
+        event: string,
+        kind: string,
+        origin: string,
+        /// `ok`, `timeout` or `error`.
+        status: string,
+        timeout-ms: f64,
+        /// Epoch milliseconds the hook was started at.
+        at: u64,
+        exit-code: option<s32>,
+        stdout: option<list<u8>>,
+        stderr: option<list<u8>>,
+        /// A Lua hook's answer table, as JSON (the native path hands it to the interpreter directly).
+        json: option<list<u8>>,
+        ms: option<u64>,
+        error: option<string>,
+        /// The bounded, already-redacted stderr a caller shows.
+        detail: option<string>,
+        stdout-clipped: bool,
+        answered: bool,
+        system-message: option<string>,
+    }
+
+    record decision-error {
+        name: option<string>,
+        error: string,
+        detail: option<string>,
+    }
+
+    /// The verdict (`M.fire`'s answer): one entry per hook that ran, and what the caller acts on.
+    record decision {
+        version: u32,
+        /// The fired event — `bus:<topic>` for a bus publish, which is also the name a
+        /// `hookEventName` mismatch is judged against.
+        event: string,
+        ran: u32,
+        outcomes: list<row>,
+        errors: list<decision-error>,
+        notes: list<string>,
+        system-messages: list<string>,
+        blocked: bool,
+        /// `no_hooks`, `ok` or the state the deciding hook left: `blocked`, `denied`, `ask`.
+        status: string,
+        additional-context: option<string>,
+        /// The merge a PreToolUse hook asked for, as a JSON object (the operator's own values).
+        updated-input-json: string,
+        /// The same merge, named field by field, for the log: never the previous value.
+        input-changes-json: string,
+        permission: option<string>,
+        allowed-by: option<string>,
+        blocked-by: option<string>,
+        reason: option<string>,
+        stop: bool,
+        stop-reason: option<string>,
+        reschedule-seconds: option<u64>,
+        /// A `StatusLine` hook's segment.
+        text: option<string>,
+    }
+
+    record entries-request {
+        event: string,
+        /// The thing a matcher is matched against: the tool name, the profile, the component name.
+        tool: option<string>,
+        /// The event's configured entries (from `config-facts.hooks`).
+        entries: list<entry>,
+    }
+
+    record decide-request {
+        /// The event being fired; used only to build the verdict when `prior` is absent.
+        event: string,
+        /// The payload the hook was handed, as the JSON bytes it received on stdin.
+        payload: list<u8>,
+        /// The verdict so far, for the second and later hooks of one event.
+        prior: option<decision>,
+        entry: entry,
+        row: row,
+    }
+
+    record step {
+        decision: decision,
+        /// True when this answer ends the event: a refusal or a stop. The caller runs no further
+        /// hook for the event, exactly as the native loop breaks.
+        stop: bool,
+        /// The payload with `updatedInput` merged into `tool_input`, when a hook rewrote it, so a
+        /// later hook sees the chain it is part of.
+        payload: option<list<u8>>,
+    }
+
+    record segment-request {
+        entries: list<entry>,
+        rows: list<row>,
+    }
+}
+
+interface hooks {
+    use types.{bounds, config-facts, config-request, decide-request, decision, entries-request, entry, error, event-facts, segment-request, step};
+
+    /// The one catalogue: event names, matcher flags, what each may decide, when it fires.
+    catalogue: func() -> list<event-facts>;
+
+    /// The bounds (timeouts, caps, cache TTLs) the decision is made under.
+    engine-bounds: func() -> bounds;
+
+    /// Read every source, in the documented order, and answer the merged view. An unreadable or
+    /// invalid file is reported and skipped: an operator editing a config must not lose the hooks
+    /// that already worked.
+    configure: func(request: config-request) -> result<config-facts, error>;
+
+    /// The entries that run for `event`, in run order, after matchers. A non-tool event ignores
+    /// matchers; a plain word matches case-insensitively anywhere in the name, a pattern is a Lua
+    /// pattern against the lowered name.
+    entries: func(request: entries-request) -> result<list<entry>, error>;
+
+    /// Interpret one hook's outcome into the accumulated decision. Called once per hook, in run
+    /// order, because only a verdict can say whether the next hook still runs.
+    decide: func(request: decide-request) -> result<step, error>;
+
+    /// The footer text a set of statusline rows produces (`M.statusline`): one line, each segment
+    /// clipped, a broken mod named `!<name>` instead of one fact fewer.
+    segment: func(request: segment-request) -> string;
+}
+
+world hooks-component {
+    export hooks;
+}

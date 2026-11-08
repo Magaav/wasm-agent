@@ -194,6 +194,13 @@ pub const REGISTRY: &[Capability] = &[
     // `wa:kernel/sql` grant. `WA_SELFLOOP_COMPONENT=1` is what routes `lua/core/selfloop.lua` here;
     // without it the native path runs, so this capability is inert on a node that never opts in.
     plain!("selfloop", WritesFiles, wa_kernel_runtime::selfloop_host::capability, "One wa:selfloop call against the installed selfloop component: the wake/notes/probe state machine (schedule, list, cancel, summary, notes, publish, plan, claim, settle, finish, turn) over a scoped wa:kernel/sql grant"),
+    // The hooks/mods seam (docs/CORE-SPLIT.md, docs/HOOK-EVENTS.md): the `hooks` component answers
+    // "what is configured for this event", "which entries run, in which order", "what does this answer
+    // mean" and "what does the footer say". `WA_HOOKS_COMPONENT=1` is what routes
+    // `lua/core/hooks.lua` here; without it the native engine runs, so this capability is inert on a
+    // node that never opts in. The component holds no capability: the node reads the config files and
+    // runs the hooks, and this call never runs a process.
+    plain!("hooks", ReadOnly, wa_kernel_runtime::hooks_host::capability, "One wa:hooks call against the installed hooks component: the catalogue, the merged config view, the entries an event runs in order, one hook's answer interpreted into the decision, or the footer segment"),
     // ---- WhatsApp (docs/SERVICE-COMPONENTS.md, docs/GRANT-POLICY.md) ---------------------------
     // One capability per effect: `whatsapp_send` asks the node's `whatsapp.send` policy and enqueues
     // a job on `wa:queue`; `whatsapp_send_status` reads the job back. Neither carries message text

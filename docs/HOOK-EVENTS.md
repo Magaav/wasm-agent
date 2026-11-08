@@ -2,7 +2,9 @@
 
 > **This file is the inventory.** The hook *engine* - the config files, the Claude Code compatible
 > protocol, the mods surface and the pass/fail rules - is [HOOKS.md](HOOKS.md) and
-> [MODS.md](MODS.md). The catalogue below describes what exists as events and event jobs; `/hooks`
+> [MODS.md](MODS.md). The engine can also run as the `wa:hooks` component, off by default: see
+> [The engine as a component](#the-engine-as-a-component-wahooks-off-by-default) at the end of this
+> file. The catalogue below describes what exists as events and event jobs; `/hooks`
 > shows which hook points are actually configured on this node, and what the last one did.
 
 Engine gains a read-only **hooks / events** topic beside Jobs. This inventory is
@@ -153,3 +155,65 @@ reading both:
 `beforeFinalAnswer` is still not implemented, and the engine does not pretend
 otherwise: the reliable boundary remains `Stop`, and it is still before commit
 and after the checks, not before streamed text.
+
+## The engine as a component (`wa:hooks`, off by default)
+
+Status: **landed behind `WA_HOOKS_COMPONENT=1`**, with the native engine in `lua/core/hooks.lua`
+untouched and parity asserted (`scripts/test-hooks-component.lua`, 33 comparisons; the four native
+suites - engine 136, tools, agent, mods - run on both paths through
+`scripts/test-hooks-component.sh`). Without the variable, every line of this document describes code
+that has not moved.
+
+The split is **the rules move, the hands stay**. `wit/hooks/hooks.wit` exports `wa:hooks`, served by
+`rust/components/hooks` and `rust/wa-kernel-runtime/src/hooks_host.rs`; the component:
+
+* reads the four config sources *as text the node hands over* and merges them (both shapes: this
+  node's `hooks.json`, Claude Code's `matcher` → `hooks[]` wrapper with `timeout` in seconds);
+* evaluates a matcher (a **Lua pattern** against the lowered name, a plain word as a case-insensitive
+  substring - `bash|shell` is a literal, because Lua patterns have no alternation, and that is the
+  behaviour both paths keep);
+* orders an event's entries, clamps a per-hook timeout (default 5 s, cap 60 s, floor 0.1 s) and names
+  an unknown event in the errors list instead of dropping it;
+* interprets one hook's answer - exit 2, `permissionDecision` allow/deny/ask, `updatedInput` merged
+  over the arguments, `additionalContext`, `continue:false`, `decision:block/approve`,
+  `systemMessage`, `reschedule_seconds` - into the same verdict the callers already read, with the
+  documented bounds (8 KiB stdout, 2 KiB stderr, 4000-byte context, four 500-byte messages);
+* answers the catalogue, the footer segments (`statusline`) and the merged view `/hooks` renders.
+
+Four things stay in the node, each because a guest cannot do them or must not own them:
+
+| stays native | why |
+| --- | --- |
+| reading `hooks.json` / `.claude/settings.json` | a component has no path to the operator's config directory and no grant to it; the text crosses, the parse does not |
+| **running a hook** | a command hook is a process with the node's grants (`host.exec`, its own deadline, its capped output); a Lua plugin hook is a function in this interpreter |
+| building the payload envelope | `session_id`/`run_id`/`cwd`/`node_id`/`role` are the host's identity, and `session_id` is not the component's to mint |
+| the outcome log, redaction and rendering | a hook's words pass through `lua/core/redact.lua` and `host.log`, and `/hooks`' text lines are rendered from the facts the component returns (so the text is identical on both paths by construction) |
+
+What the component **cannot** do is the grant, and that is the point: its manifest declares no
+`capabilities` and its world imports nothing, so `host.hooks` can read no file, open no socket, run no
+process and read no secret. `cargo test -p wa-kernel-runtime hooks_host` asserts the manifest and walks
+the artifact's imports (tier A WASI only, nothing from `wa:kernel/`). A **mod** registered through the
+engine is therefore still a command the operator wrote, run by the node under the node's grants - the
+component decides *whether* it runs, never *with what*; and a mod that wants a capability the node
+does not grant cannot obtain one through `wa:hooks`.
+
+The seam is deliberately two calls, not one: `configure` (cached per config generation) + `entries`
+(cached per event and tool) say what runs, and one `decide` per hook answer says what it means. The
+verdict has to be consulted between hooks because a refusal ends the event - running hook N+1 after
+hook N denied is a side effect the native path never had. Cost, crossings and RSS:
+`docs/CORE-SPLIT.md`, "Cost".
+
+Deliberate differences, both visible rather than silent:
+
+* a **clip** counts bytes and appends `…` (native `#value`), but here the cut backs off to a character
+  boundary: a byte slice that is not UTF-8 cannot cross the seam, so a hook that prints a multi-byte
+  character exactly at byte 8192 is clipped one character earlier. For ASCII (every config, every test)
+  the two are identical;
+* a payload a hook rewrote is re-encoded by the component (key order preserved), so a later hook in the
+  same chain sees the same bytes but not necessarily the same whitespace as the native path's
+  `json.encode`.
+
+Not done here, and needing the integration step that lands this: `docs/HOOKS.md` still says "Not built,
+on purpose: hooks as WASI components" and carries the sketch this component implements; that section
+and the `components.lock` pin (the component is currently only reachable through
+`WA_HOOKS_COMPONENT_WASM`, the development override) belong to the lane that ships the artifact.

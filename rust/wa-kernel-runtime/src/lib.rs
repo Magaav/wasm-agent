@@ -39,6 +39,9 @@ pub mod guest_kv;
 pub mod imports;
 pub mod install;
 pub mod limits;
+// The hooks/mods seam served to the core (`docs/CORE-SPLIT.md`, `docs/HOOK-EVENTS.md`): the `hooks`
+// component answers the engine's rules, while the node reads the config and runs the hooks.
+pub mod hooks_host;
 // The memory seam served to the core: the `memory` component over a scoped `wa:kernel/sql` grant.
 pub mod memory_host;
 pub mod profiles;
