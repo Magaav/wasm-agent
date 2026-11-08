@@ -665,6 +665,7 @@ graph_sources        read-only
 graph_stats          read-only
 graph_status         read-only
 grep                 read-only
+hooks                read-only
 http                 network
 http_sse             network
 http_stream          network
