@@ -32,7 +32,7 @@
 //! Nothing here reads a clock: `now_ms` is read once per check and passed to the crate, exactly as
 //! the library requires. No `await` is ever held with the engine's lock (WASI 0.3 note).
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -162,6 +162,39 @@ impl Paths {
     }
 }
 
+/// The top-level sections of `policy.json` whose schema another crate owns, so this node's loader can
+/// say whether one is usable. `mesh` is `wa-mesh-core`'s (`docs/MESH.md`); a section nothing registers
+/// is carried and reported, never a reason to refuse the rules (`docs/GRANT-POLICY.md`, "Sections this
+/// crate does not read").
+fn section_owners() -> Vec<wa_grant_policy::SectionOwner> {
+    vec![wa_mesh_core::policy::section_owner()]
+}
+
+/// What the loaded file's *other* sections are, and what is wrong with the ones that are wrong.
+#[derive(Default, Clone, Debug)]
+struct Sections {
+    carried: Vec<String>,
+    errors: BTreeMap<String, String>,
+}
+
+fn sections_of(policy: &PolicySet, owners: &[wa_grant_policy::SectionOwner]) -> Sections {
+    let mut carried: Vec<String> = policy.sections.keys().cloned().collect();
+    carried.sort();
+    Sections { carried, errors: policy.section_errors.clone() }
+}
+
+/// The loud half: one line per unusable section, at load and at every reload that changes the answer.
+/// An invalid section is reported by name and never silently ignored - and it never takes the capability
+/// rules down with it (the 08/11 incident: a `mesh` section made every `wa-whatsapp` rule unreadable).
+fn report_sections(path: &std::path::Path, sections: &Sections) {
+    for (name, why) in &sections.errors {
+        eprintln!(
+            "[policy] {}: section `{name}` is unusable: {why} (the capability rules beside it are still in force; docs/GRANT-POLICY.md)",
+            path.display()
+        );
+    }
+}
+
 #[derive(Default)]
 struct Counters {
     checks: AtomicU64,
@@ -227,6 +260,10 @@ pub struct NodePolicy {
     /// "is the policy layer on at all".
     loaded: AtomicBool,
     load_error: Mutex<Option<String>>,
+    /// The file's other sections (`mesh`, `vault`, `models`, a future one): which are carried, and which
+    /// one is unusable and why. Reported in `host.policy_status` and logged - never a reason to drop the
+    /// capability rules beside them.
+    sections: Mutex<Sections>,
     /// The file the loaded policy came from, and what the watcher last looked at.
     fingerprint: Mutex<Fingerprint>,
     reloads: AtomicU64,
@@ -250,9 +287,14 @@ impl NodePolicy {
         // not re-parse (and re-log) the same bytes. `absent` is a fingerprint too: a file that
         // appears later is a change.
         let loaded_fingerprint = fingerprint(&paths.policy).unwrap_or_default();
+        let owners = section_owners();
+        let mut sections = Sections::default();
         let (policy, mode, loaded, load_error) = match std::fs::read(&paths.policy) {
-            Ok(bytes) => match PolicySet::parse(&String::from_utf8_lossy(&bytes)) {
-                Ok(policy) => (policy, Mode::Policy, true, None),
+            Ok(bytes) => match PolicySet::parse_owned(&String::from_utf8_lossy(&bytes), &owners) {
+                Ok(policy) => {
+                    sections = sections_of(&policy, &owners);
+                    (policy, Mode::Policy, true, None)
+                }
                 Err(error) => {
                     eprintln!("[policy] {}: {error}", paths.policy.display());
                     (PolicySet::empty(), Mode::Policy, false, Some(error.to_string()))
@@ -274,6 +316,7 @@ impl NodePolicy {
                 paths.policy.display()
             );
         }
+        report_sections(&paths.policy, &sections);
         let mut engine = Engine::new(policy);
         if let Ok(text) = std::fs::read_to_string(&paths.state) {
             if let Err(error) = engine.restore_json(&text) {
@@ -297,6 +340,7 @@ impl NodePolicy {
             mode: AtomicU8::new(mode.code()),
             loaded: AtomicBool::new(loaded),
             load_error: Mutex::new(load_error),
+            sections: Mutex::new(sections),
             fingerprint: Mutex::new(loaded_fingerprint),
             reloads: AtomicU64::new(0),
             reload_checked_at_ms: AtomicU64::new(0),
@@ -380,7 +424,7 @@ impl NodePolicy {
                 return reload;
             }
         };
-        let policy = match PolicySet::parse(&String::from_utf8_lossy(&bytes)) {
+        let policy = match PolicySet::parse_owned(&String::from_utf8_lossy(&bytes), &section_owners()) {
             Ok(policy) => policy,
             Err(error) => {
                 // Keep the working policy: a broken write is a bug to fix, not a reason to run
@@ -397,6 +441,22 @@ impl NodePolicy {
                 self.mode.store(Mode::Policy.code(), Ordering::Relaxed);
                 self.loaded.store(true, Ordering::Relaxed);
                 *self.load_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                // The sections are re-read with the rules: a `mesh` section fixed by the operator is a
+                // section that stops being reported on the next tick, exactly like a rule.
+                let owners = section_owners();
+                let sections = {
+                    let engine = self.engine();
+                    sections_of(engine.policy(), &owners)
+                };
+                let changed_error = {
+                    let mut held = self.sections.lock().unwrap_or_else(|e| e.into_inner());
+                    let changed = held.errors != sections.errors;
+                    *held = sections.clone();
+                    changed
+                };
+                if changed_error {
+                    report_sections(&self.paths.policy, &sections);
+                }
                 *self.fingerprint.lock().unwrap_or_else(|e| e.into_inner()) = current.clone();
                 self.reloads.fetch_add(1, Ordering::Relaxed);
                 eprintln!("[policy] reloaded {} (sha256 {}…)", self.paths.policy.display(), &current.sha256[..12.min(current.sha256.len())]);
@@ -663,6 +723,7 @@ impl NodePolicy {
         let memory = json!({"records": audit.memory.len(), "dropped": audit.memory.dropped()});
         let audit_error = audit.file_error.clone();
         drop(audit);
+        let sections_report = self.sections.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let refusals: Vec<Value> = self
             .refusals
             .lock()
@@ -693,7 +754,14 @@ impl NodePolicy {
                     "error": reload.error,
                 })),
             },
-            "policy": {"path": self.paths.policy.to_string_lossy(), "error": self.load_error.lock().unwrap_or_else(|e| e.into_inner()).clone(), "components": components, "rules": rules},
+            "policy": {"path": self.paths.policy.to_string_lossy(), "error": self.load_error.lock().unwrap_or_else(|e| e.into_inner()).clone(), "components": components, "rules": rules,
+                // The file's other sections: carried (`mesh`, `vault`, `models`, …) and the ones that are
+                // unusable, by name. A section error is visible here and in the node's log; the rules
+                // above are still in force (docs/GRANT-POLICY.md, "Sections this crate does not read").
+                "sections": {
+                    "carried": sections_report.carried,
+                    "errors": sections_report.errors,
+                }},
             "state": {
                 "path": self.paths.state.to_string_lossy(),
                 "saved_at_ms": snapshot.saved_at_ms,
@@ -1244,6 +1312,51 @@ mod tests {
         assert!(removed.error.as_deref().unwrap_or_default().contains("policy_removed"), "{removed:?}");
         assert_eq!(policy.mode(), Mode::Policy);
         assert!(!policy.check_at("wa", "net.dial", Some("c.example:443"), 4_000).is_allow(), "still ruled");
+        std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
+    }
+
+    /// The incident of 08/11 03:51–04:10 (openclaw), at the layer the operator met it: a `mesh` section
+    /// hand-added to the node's `policy.json` and the component's own rule answered `deny(no_policy)` -
+    /// `wa-whatsapp` `net.dial` refused with the rule right there in the file. The whole file was
+    /// unreadable (an unknown field is a load error in the engine's schema), so the node ran `Mode::Policy`
+    /// with an *empty* policy. Now the section rides along and the rule decides.
+    #[test]
+    fn the_0811_incident_a_mesh_section_does_not_refuse_the_component_rules() {
+        let paths = temp_paths("mesh-section");
+        let text = serde_json::json!({
+            "version": 1,
+            "sensitive_capabilities": [],
+            "mesh": {"version": 1, "enabled": true, "roster_key": "a".repeat(64), "roster": "mesh-roster.json"},
+            "components": {"wa-whatsapp": {"capabilities": {"net.dial": {
+                "allow": ["*.whatsapp.net:443"],
+                "rate": {"per_minute": 60, "burst": 120}
+            }}}}
+        })
+        .to_string();
+        test_policy(&paths, &text);
+        let policy = NodePolicy::open(paths.clone());
+        assert_eq!(policy.mode(), Mode::Policy);
+        assert!(policy.is_loaded(), "the file loaded: it is the sections that used to break it");
+        assert!(policy.check_at("wa-whatsapp", "net.dial", Some("mmg.whatsapp.net:443"), 1_000).is_allow(), "the component's own rule decides");
+        assert!(!policy.check_at("wa-whatsapp", "net.dial", Some("elsewhere.example:443"), 1_000).is_allow());
+        let status = policy.status();
+        assert_eq!(status["policy"]["error"], Value::Null, "no load error: {status}");
+        assert_eq!(status["policy"]["sections"]["carried"][0], "mesh", "the section is reported as carried");
+        assert!(status["policy"]["sections"]["errors"].as_object().unwrap().is_empty(), "{status}");
+        // A rule the operator did *not* write is still refused by default: the section did not open the
+        // node up either.
+        assert!(!policy.check_at("wa-whatsapp", "credentials.read", Some("WA_WHATSAPP_TOKEN"), 1_100).is_allow());
+
+        // And the loud half: an *invalid* mesh section is named in `policy_status` (and logged), while the
+        // rules beside it keep deciding. A broken section must never be a silent drop either.
+        let broken = text.replace(r#""enabled":true"#, r#""enabled":true,"port":0"#);
+        test_policy(&paths, &broken);
+        let reload = policy.reload_at(2_000);
+        assert!(reload.applied, "the file parses; only a section is unusable: {reload:?}");
+        assert!(policy.check_at("wa-whatsapp", "net.dial", Some("mmg.whatsapp.net:443"), 2_000).is_allow(), "the rules are still in force");
+        let status = policy.status();
+        let error = status["policy"]["sections"]["errors"]["mesh"].as_str().unwrap_or_default().to_string();
+        assert!(error.contains("port"), "the section error is reported by name: {status}");
         std::fs::remove_dir_all(paths.policy.parent().unwrap()).ok();
     }
 }

@@ -212,8 +212,18 @@ pub fn flag_on() -> bool {
 /// Is the mesh in force on this node? The flag, or the operator's own statement in `policy.json`
 /// (`mesh.enabled`), which is what a roster pushed to a running node writes — the same rule, and the
 /// same precedence, as every other gate ([`crate::gate`]).
+///
+/// This is the *policy statement* half: a caller that has already verified this node's roster asks
+/// [`in_force_verified`] instead, which also applies the 08/11 default (on when a roster verifies against
+/// the pinned key, off otherwise).
 pub fn in_force(policy: &MeshPolicy) -> bool {
     crate::gate::decide(crate::gate::env_answer(), Some(policy)).enabled
+}
+
+/// [`in_force`] with the roster's own answer: `roster_verified` is what
+/// [`crate::gate::roster_verified`] said about this node's pinned key and roster file.
+pub fn in_force_verified(policy: &MeshPolicy, roster_verified: bool) -> bool {
+    crate::gate::decide_with_roster(crate::gate::env_answer(), Some(policy), roster_verified).enabled
 }
 
 /// The one place a mesh envelope is decided, for the direct listener, the relay hop and the Lua
@@ -248,8 +258,10 @@ impl Admitter {
         match self.source.load() {
             Err(error) => (false, error),
             Ok((roster, policy)) => match crate::seam::verify_roster(&roster, &policy.roster_key, wire::now_seconds()) {
-                Ok(()) => (in_force(&policy), "verified".to_string()),
-                Err(error) => (false, error.0),
+                // A verified roster is also the default switch (docs/MESH.md): this node decides by the
+                // roster unless the operator's file or the environment says otherwise.
+                Ok(()) => (in_force_verified(&policy, true), "verified".to_string()),
+                Err(error) => (in_force_verified(&policy, false), error.0),
             },
         }
     }

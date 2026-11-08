@@ -53,8 +53,8 @@ pub use engine::{
 };
 pub use pattern::{Pattern, PatternError, MAX_PATTERN_LEN};
 pub use policy::{
-    ComponentPolicy, Effect, PolicyError, PolicySet, RateLimit, Rule, TargetRate, DEFAULT_SENSITIVE,
-    SCHEMA_VERSION,
+    ComponentPolicy, Effect, PolicyError, PolicySet, RateLimit, Rule, SectionOwner, TargetRate,
+    DEFAULT_SENSITIVE, SCHEMA_VERSION,
 };
 
 #[cfg(test)]

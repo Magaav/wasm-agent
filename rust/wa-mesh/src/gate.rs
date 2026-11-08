@@ -17,7 +17,14 @@
 //! | --- | --- | --- |
 //! | 1 | `WA_MESH` (or `WASM_AGENT_MESH`) says on or off | that, `source: environment` |
 //! | 2 | `policy.json`'s `mesh.enabled` | that, `source: policy` |
-//! | 3 | neither | off, `source: default` |
+//! | 3 | neither, and a roster verifies against the pinned `mesh.roster_key` | **on**, `source: roster` |
+//! | 4 | neither, and no roster verifies | off (the legacy path), `source: default` |
+//!
+//! Rule 3 is the 08/11 change ("every new feature on by default, each with a live per-feature off
+//! switch"): a node whose policy pins a fleet key *and* whose roster verifies against it is a node an
+//! operator deliberately put in a fleet, so it decides by the roster unless the operator says otherwise.
+//! Everything else keeps the old answer — no pinned key, no roster, an unreadable or expired roster, or
+//! `mesh.enabled: false` — which is the legacy path, and `wa features` reports which one is live.
 //!
 //! An explicit `WA_MESH=0` is a statement too: an operator who writes it to a node's env file means
 //! off, and a policy that says `enabled: true` must not quietly overrule the person who started the
@@ -35,10 +42,19 @@
 use crate::policy::MeshPolicy;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The process variables that are a statement, in the order they are read.
 pub const FLAGS: [&str; 2] = ["WA_MESH", "WASM_AGENT_MESH"];
+
+/// The variable that points at a roster file directly (`wa-mesh/src/host_call::Paths` honours it too).
+pub const ROSTER_ENV: &str = "WASM_AGENT_MESH_ROSTER";
+/// The roster a node looks for when nothing names one: `<config>/mesh-roster.json`, where `config` is
+/// the directory `policy.json` is in (`~/.wasm-agent` on a real node).
+pub const DEFAULT_ROSTER: &str = "mesh-roster.json";
+/// How long a verified roster is believed before it is verified again: a roster has an expiry, so a
+/// gate that cached "verified" forever would keep an expired fleet alive.
+const ROSTER_TRUST_MS: u64 = 60_000;
 
 /// Where an answer came from. Spelled the way the existing lines already spell it, so the supervisor's
 /// log and an audit line keep meaning the same thing.
@@ -46,6 +62,8 @@ pub const FLAGS: [&str; 2] = ["WA_MESH", "WASM_AGENT_MESH"];
 pub enum Source {
     Environment,
     Policy,
+    /// No statement either way, and a roster verifies against the pinned key: on by default.
+    Roster,
     Default,
 }
 
@@ -54,6 +72,7 @@ impl Source {
         match self {
             Source::Environment => "environment WA_MESH",
             Source::Policy => "policy.json mesh.enabled",
+            Source::Roster => "default: roster verified",
             Source::Default => "default off",
         }
     }
@@ -104,32 +123,125 @@ pub fn env_answer() -> Option<bool> {
     None
 }
 
-/// The rule, pure and testable: the environment's statement, else the operator's, else off.
-pub fn decide(env: Option<bool>, policy: Option<&MeshPolicy>) -> Switch {
+/// The rule, pure and testable: the environment's statement, else the operator's, else the default —
+/// which is on when `roster_verified` says a roster verifies against the pinned key, off otherwise.
+pub fn decide_with_roster(env: Option<bool>, policy: Option<&MeshPolicy>, roster_verified: bool) -> Switch {
     if let Some(enabled) = env {
         return Switch::from_env(enabled);
     }
     match policy {
-        Some(policy) if policy.enabled => {
-            Switch { enabled: true, source: Source::Policy, problem: None }
-        }
-        Some(_) | None => Switch::off(None),
+        Some(policy) => match policy.enabled {
+            Some(enabled) => Switch { enabled, source: Source::Policy, problem: None },
+            None if roster_verified && policy.has_pinned_key() => {
+                Switch { enabled: true, source: Source::Roster, problem: None }
+            }
+            None => Switch::off(None),
+        },
+        None => Switch::off(None),
     }
 }
 
+/// [`decide_with_roster`] without a roster answer: what the pure rule says when nobody checked one.
+pub fn decide(env: Option<bool>, policy: Option<&MeshPolicy>) -> Switch {
+    decide_with_roster(env, policy, false)
+}
+
+/// The roster file this node would verify: `WASM_AGENT_MESH_ROSTER`, else `mesh.roster` relative to the
+/// config directory, else `<config>/mesh-roster.json`.
+pub fn roster_path(policy: &MeshPolicy, config: &Path) -> PathBuf {
+    if let Ok(explicit) = std::env::var(ROSTER_ENV) {
+        let explicit = explicit.trim();
+        if !explicit.is_empty() {
+            return PathBuf::from(explicit);
+        }
+    }
+    policy.roster_path(config).unwrap_or_else(|| config.join(DEFAULT_ROSTER))
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Would a roster verify against this policy's pinned key right now? Cheap-gated by mtime and size of the
+/// roster file and re-verified at most once a minute, because a gate on a call path asks this per call
+/// and an ed25519 verify is not free. A missing pin, a missing roster, an unreadable one or one that does
+/// not verify are all `false`, which is the legacy path.
+pub fn roster_verified(policy: &MeshPolicy, config: &Path) -> bool {
+    if !policy.has_pinned_key() {
+        return false;
+    }
+    let path = roster_path(policy, config);
+    let stamp = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified().map(|modified| (modified, metadata.len())))
+        .ok();
+    let Some(stamp) = stamp else { return false };
+    let now = now_ms();
+    {
+        let held = roster_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = held.as_ref() {
+            if entry.path == path
+                && entry.stamp == stamp
+                && entry.key == policy.roster_key
+                && now.saturating_sub(entry.verified_at_ms) < ROSTER_TRUST_MS
+            {
+                return entry.verified;
+            }
+        }
+    }
+    let verified = match crate::roster::Roster::from_file(&path) {
+        Ok(roster) => crate::seam::verify_roster(&roster, &policy.roster_key, now / 1000).is_ok(),
+        Err(_) => false,
+    };
+    let mut held = roster_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *held = Some(RosterCache {
+        path,
+        stamp,
+        key: policy.roster_key.clone(),
+        verified_at_ms: now,
+        verified,
+    });
+    verified
+}
+
+struct RosterCache {
+    path: PathBuf,
+    stamp: (SystemTime, u64),
+    key: String,
+    verified_at_ms: u64,
+    verified: bool,
+}
+
+fn roster_cache() -> &'static Mutex<Option<RosterCache>> {
+    static CACHE: OnceLock<Mutex<Option<RosterCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 /// Read the file and answer — no cache. `Ok` is a parsed section; a file with no `mesh` section is a
-/// node whose policy says nothing, which is the default.
+/// node whose policy says nothing, which is the default. The roster is looked for beside the policy file
+/// (that directory is the node's config directory), so a test's temp config is a self-contained one.
 pub fn from_file(policy_path: &Path) -> Switch {
     match MeshPolicy::from_policy_file(policy_path) {
-        Ok(policy) => decide(None, Some(&policy)),
+        Ok(policy) => {
+            let config = config_dir(policy_path);
+            decide_with_roster(None, Some(&policy), roster_verified(&policy, &config))
+        }
         Err(error) => Switch::off(Some(error.0)),
     }
+}
+
+fn config_dir(policy_path: &Path) -> PathBuf {
+    policy_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
 }
 
 struct Cached {
     path: PathBuf,
     stamp: (SystemTime, u64),
     switch: Switch,
+    /// When this answer was computed. The roster half of the answer is not keyed by a stat (the roster
+    /// path is only known once the policy is parsed), so an answer older than [`ROSTER_TRUST_MS`] is
+    /// recomputed: a roster that appears, is replaced or expires is noticed within that window, and a
+    /// policy edit is still noticed on the next call.
+    answered_at_ms: u64,
 }
 
 fn cache() -> &'static Mutex<Option<Cached>> {
@@ -148,13 +260,21 @@ pub fn cached(policy_path: &Path) -> Switch {
         .ok();
     let mut held = cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let (Some(stamp), Some(entry)) = (stamp, held.as_ref()) {
-        if entry.path == policy_path && entry.stamp == stamp {
+        if entry.path == policy_path
+            && entry.stamp == stamp
+            && now_ms().saturating_sub(entry.answered_at_ms) < ROSTER_TRUST_MS
+        {
             return entry.switch.clone();
         }
     }
     let switch = from_file(policy_path);
     // A missing file is *not* cached: it may be written a moment from now, and a gate must notice.
-    *held = stamp.map(|stamp| Cached { path: policy_path.to_path_buf(), stamp, switch: switch.clone() });
+    *held = stamp.map(|stamp| Cached {
+        path: policy_path.to_path_buf(),
+        stamp,
+        switch: switch.clone(),
+        answered_at_ms: now_ms(),
+    });
     switch
 }
 
@@ -163,6 +283,7 @@ pub fn cached(policy_path: &Path) -> Switch {
 /// that has just written the policy itself and does not want to reason about clock resolution.
 pub fn reset_cache() {
     *cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *roster_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
 #[cfg(test)]
@@ -272,5 +393,113 @@ mod tests {
         assert_eq!(answer.label(), "default off");
         assert!(answer.problem.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 08/11 default: the mesh is **on** when a roster verifies against the pinned key, and the
+    /// legacy path otherwise. This is the switch `wa features` reports, so it is tested through the same
+    /// [`cached`] door every call path uses, on files an operator would have (a policy, a roster beside
+    /// it) and with no environment statement at all.
+    #[test]
+    fn the_default_is_on_when_a_roster_verifies_and_the_legacy_path_without_one() {
+        let _lock = crate::testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::testkit::EnvGuard::set(&[
+            ("WA_MESH", None),
+            ("WASM_AGENT_MESH", None),
+            (ROSTER_ENV, None),
+        ]);
+        let dir = temp_dir("gate-roster");
+        let fleet = crate::testkit::fleet_key();
+        let roster = crate::testkit::roster_of(
+            &fleet,
+            vec![crate::testkit::node("laptop", 0, &[]), crate::testkit::node("oracle", 1, &[])],
+        );
+        let path = dir.join("policy.json");
+        let silent = format!(
+            r#"{{"version":1,"components":{{}},"mesh":{{"version":1,"roster_key":"{}"}}}}"#,
+            fleet.public_key
+        );
+        std::fs::write(&path, &silent).expect("policy");
+
+        // A pinned key and no roster yet: the legacy path, and it says so.
+        reset_cache();
+        let answer = cached(&path);
+        assert!(!answer.enabled, "nothing to verify yet: {answer:?}");
+        assert_eq!(answer.label(), "default off");
+
+        // The roster lands (`wa fleet push-roster` writes it beside the policy): on by default.
+        std::fs::write(dir.join(DEFAULT_ROSTER), serde_json::to_string(&roster).expect("roster json"))
+            .expect("roster");
+        reset_cache();
+        let answer = cached(&path);
+        assert!(answer.enabled, "a verified roster is the default: {answer:?}");
+        assert_eq!(answer.label(), "default: roster verified");
+
+        // The per-feature off switch: the operator's own statement wins over the default.
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"version":1,"components":{{}},"mesh":{{"version":1,"enabled":false,"roster_key":"{}"}}}}"#,
+                fleet.public_key
+            ),
+        )
+        .expect("policy");
+        reset_cache();
+        let answer = cached(&path);
+        assert!(!answer.enabled, "mesh.enabled:false is the off switch: {answer:?}");
+        assert_eq!(answer.label(), "policy.json mesh.enabled");
+
+        // A roster that does not verify (here: not a roster at all) is the legacy path again, never a
+        // guess and never a weaker admission.
+        std::fs::write(&path, &silent).expect("policy");
+        std::fs::write(dir.join(DEFAULT_ROSTER), "{\"version\":1}").expect("broken roster");
+        reset_cache();
+        assert!(!cached(&path).enabled, "an unverified roster is off");
+
+        // ...and a key that is pinned to *another* fleet does not verify this roster either.
+        let other = crate::testkit::fleet_key();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"version":1,"components":{{}},"mesh":{{"version":1,"roster_key":"{}"}}}}"#,
+                other.public_key
+            ),
+        )
+        .expect("policy");
+        std::fs::write(dir.join(DEFAULT_ROSTER), serde_json::to_string(&roster).expect("roster json"))
+            .expect("roster");
+        reset_cache();
+        assert!(!cached(&path).enabled, "a roster signed by another fleet is not this node's roster");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pure rule, so the ordering is asserted without a filesystem: env > policy statement >
+    /// roster default > off.
+    #[test]
+    fn decide_with_roster_orders_the_four_statements() {
+        let fleet = crate::testkit::fleet_key();
+        let pinned = MeshPolicy::from_policy_text(&format!(
+            r#"{{"version":1,"mesh":{{"version":1,"roster_key":"{}"}}}}"#,
+            fleet.public_key
+        ))
+        .expect("policy");
+        assert!(!decide_with_roster(None, Some(&pinned), false).enabled);
+        let by_roster = decide_with_roster(None, Some(&pinned), true);
+        assert!(by_roster.enabled);
+        assert_eq!(by_roster.source, Source::Roster);
+        // no pinned key: a "verified" roster is nothing this node could have checked
+        let unpinned = MeshPolicy::from_policy_text(r#"{"version":1,"mesh":{"version":1}}"#).expect("policy");
+        assert!(!decide_with_roster(None, Some(&unpinned), true).enabled);
+        // the operator's statement wins over the default, in both directions
+        let off = MeshPolicy::from_policy_text(&format!(
+            r#"{{"version":1,"mesh":{{"version":1,"enabled":false,"roster_key":"{}"}}}}"#,
+            fleet.public_key
+        ))
+        .expect("policy");
+        assert!(!decide_with_roster(None, Some(&off), true).enabled);
+        let on = MeshPolicy::from_policy_text(r#"{"version":1,"mesh":{"version":1,"enabled":true}}"#).expect("policy");
+        assert!(decide_with_roster(None, Some(&on), false).enabled);
+        assert_eq!(decide_with_roster(None, Some(&on), false).source, Source::Policy);
+        // and the environment wins over everything, still
+        assert!(!decide_with_roster(Some(false), Some(&on), true).enabled);
     }
 }

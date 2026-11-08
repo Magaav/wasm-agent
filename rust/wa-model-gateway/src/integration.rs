@@ -185,6 +185,15 @@ fn a_client_request_never_reaches_a_provider_that_does_not_allow_it() {
             assert_eq!(refusal.label, Label::Client);
             assert_eq!(refusal.allowed, vec![Label::Public, Label::Internal]);
             assert!(refusal.reason.contains("allows public,internal"), "{}", refusal.reason);
+            // The refusal a `client` turn gets must say what to do about it (08/11): the default
+            // provider carries the operator's data and never a client's, so the operator names one that
+            // may. `docs/MODEL-GATEWAY.md`, "Allowed labels".
+            assert!(
+                refusal.reason.contains("configure a provider allowed for client data"),
+                "the client refusal is actionable: {}",
+                refusal.reason
+            );
+            assert_eq!(refusal.reason.split(':').next(), Some("label_not_allowed"));
         }
         other => panic!("expected label_not_allowed, got {other:?}"),
     }

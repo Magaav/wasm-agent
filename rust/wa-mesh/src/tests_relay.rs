@@ -522,7 +522,7 @@ fn the_roster_decides_on_the_relay_path_too_and_an_existing_operator_bootstraps_
     assert!(t_dir.config.join("mesh-roster.json").exists());
     // The running node now decides by the roster: `mesh.enabled` in its own policy.
     let t_policy = t_dir.policy();
-    assert!(t_policy.enabled);
+    assert_eq!(t_policy.enabled, Some(true));
     assert!(admission::in_force(&t_policy));
 
     // --- 3. a -> t through the relay is now allowed, by the hierarchy ----------------------

@@ -1,14 +1,14 @@
 -- The feature switches at the gate (docs/FEATURES.md), against the real resolver.
 --
 -- What this proves, in one process with no restart:
---   1. `policy.json`'s `features` section is what turns a seam on: write it, wait one watch interval
---      (`WA_FEATURES_WATCH_MS`, one second by default), and the SAME module instance routes to the
---      component;
---   2. switching it back off returns the same module to the native path - the answer is asked per
---      call, not captured at load, which is the whole point of `lua/core/features.lua`;
---   3. a feature that is on while its component is not installed reports `component_missing` (and
+--   1. `features.<id>: false` is the live off switch: write it, wait one watch interval
+--      (`WA_FEATURES_WATCH_MS`, one second by default), and the SAME module instance goes native;
+--   2. switching it back on routes the same module to the component - the answer is asked per call,
+--      not captured at load, which is the whole point of `lua/core/features.lua`;
+--   3. a feature nobody turned off is ON (the 08/11 default) and its shipped component answers;
+--   4. a feature that is on while its component is not installed reports `component_missing` (and
 --      runs native) instead of looking like a working component;
---   4. the resolver's own env names and `features.status()` agree with this module's `env` table, so
+--   5. the resolver's own env names and `features.status()` agree with this module's `env` table, so
 --      the Lua fallback (a host with no `host.features`) cannot drift from the real switch.
 --
 -- Everything here goes through `host.features`, i.e. `rust/wa-features`: the policy file, the
@@ -102,6 +102,19 @@ component_calls = 0
 local back = memory.remember('the feature gate is off again', 'global')
 check(component_calls == 0, 'turning it back off returns the same instance to the native path')
 check(type(back) == 'string', 'the native path answered after the switch back')
+
+-------------------------------------------------- 3b. nobody said anything: ON by default (08/11)
+-- The default is enabled, not off (Victor, 08/11: every feature on by default, each with a live
+-- per-feature off switch). A policy file whose `features` section names nothing is a node running its
+-- shipped components, and `default_on` says why nobody is to blame for it.
+write_policy(nil)
+after_watch()
+active, reason = features.seam('memory')
+check(active == true, 'a feature nobody turned off is on by default, reason ' .. tostring(reason))
+check(reason == 'default_on', 'and the reason says the default did it, got ' .. tostring(reason))
+component_calls = 0
+memory.remember('on by default', 'global')
+check(component_calls == 1, 'the component answers by default (calls=' .. component_calls .. ')')
 
 ------------------------------------------------------------------ 4. on with no component: component_missing
 write_policy({ hooks = true, memory = false })

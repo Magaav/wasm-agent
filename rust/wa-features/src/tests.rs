@@ -67,16 +67,46 @@ fn every_feature_is_declared_once_and_names_a_component_an_env_and_a_native_path
     assert!(spec("nope").is_none());
 }
 
+/// 08/11: every feature is **on** by default, and its component is the active path when it is installed
+/// with a verified pin. The "why" says nobody turned it off, and the source says it was not the policy.
 #[test]
-fn nothing_turns_a_feature_on_by_accident() {
+fn every_feature_is_on_by_default_with_its_component_installed() {
     let spec = spec("memory").expect("memory");
     let status = resolve(spec, None, &empty_policy(), &Installed::Verified("abc".into()));
-    assert!(!status.enabled, "default is off");
+    assert!(status.enabled, "on by default");
     assert_eq!(status.source, Source::Default);
-    assert_eq!(status.active, ActivePath::Native, "installed is not enabled");
-    assert_eq!(status.reason, REASON_DEFAULT_OFF);
+    assert_eq!(status.active, ActivePath::Component, "installed and enabled: the component answers");
+    assert_eq!(status.reason, REASON_DEFAULT_ON, "why: nobody turned it off");
     assert_eq!(status.to_json()["installed"], Value::String("abc".into()));
     assert_eq!(status.to_json()["source"], Value::String("default".into()));
+    assert_eq!(status.to_json()["enabled"], Value::Bool(true));
+}
+
+/// The 08/11 "every new feature on by default" statement, in one assertion over the shipped table: no
+/// policy, no environment, a verified component, and every feature routes to it.
+#[test]
+fn the_whole_table_is_on_by_default() {
+    for spec in FEATURES {
+        let status = resolve(spec, None, &empty_policy(), &Installed::Verified("abc".into()));
+        assert!(status.enabled, "{} is on by default", spec.id);
+        assert_eq!(status.active, ActivePath::Component, "{} routes to its component", spec.id);
+        assert_eq!(status.source, Source::Default);
+    }
+}
+
+/// The per-feature off switch, on the default: `features.<id>: false` is the native path, and the env
+/// flag says the same. This is what a live node's operator writes (docs/FEATURES.md).
+#[test]
+fn a_false_in_the_policy_turns_one_feature_off_and_leaves_the_rest_on() {
+    let policy = policy_with(&[("memory", Value::Bool(false))]);
+    let memory = resolve(spec("memory").expect("memory"), None, &policy, &Installed::Verified("abc".into()));
+    assert!(!memory.enabled);
+    assert_eq!(memory.source, Source::Policy);
+    assert_eq!(memory.active, ActivePath::Native);
+    assert_eq!(memory.reason, REASON_OFF);
+    let hooks = resolve(spec("hooks").expect("hooks"), None, &policy, &Installed::Verified("abc".into()));
+    assert!(hooks.enabled, "one switch does not turn the others off");
+    assert_eq!(hooks.active, ActivePath::Component);
 }
 
 #[test]
@@ -91,15 +121,26 @@ fn policy_turns_it_on_and_a_verified_component_makes_it_the_active_path() {
     assert_eq!(status.to_json()["active"], Value::String("component".into()));
 }
 
+/// Item 5 of the 08/11 job: a missing component is *reported*, and the native path runs - never a crash,
+/// and never a silent "the component is what is running". Both when the operator asked for it and when
+/// it is on by default.
 #[test]
 fn a_feature_on_without_its_component_says_component_missing_and_runs_native() {
     let spec = spec("codemode").expect("codemode");
-    let policy = policy_with(&[("codemode", Value::Bool(true))]);
-    let status = resolve(spec, None, &policy, &Installed::Missing);
-    assert!(status.enabled, "the operator asked for it: that part is not undone");
+    let asked = policy_with(&[("codemode", Value::Bool(true))]);
+    for (label, policy) in [("operator asked", &asked), ("on by default", &empty_policy())] {
+        let status = resolve(spec, None, policy, &Installed::Missing);
+        assert!(status.enabled, "{label}: that part is not undone");
+        assert_eq!(status.active, ActivePath::Native, "{label}: the native path runs");
+        assert_eq!(status.reason, REASON_COMPONENT_MISSING, "{label}");
+        assert_eq!(status.to_json()["installed"], Value::Null);
+        assert_eq!(status.to_json()["native"], Value::String("lua/core/codemode.lua".into()));
+    }
+    // A component whose bytes are not its pin is the same answer, with the pin's own reason.
+    let mismatched = Installed::PinMismatch("component_hash_mismatch:pinned=x".into());
+    let status = resolve(spec, None, &empty_policy(), &mismatched);
     assert_eq!(status.active, ActivePath::Native);
-    assert_eq!(status.reason, REASON_COMPONENT_MISSING);
-    assert_eq!(status.to_json()["installed"], Value::Null);
+    assert!(status.reason.starts_with(REASON_PIN_MISMATCH), "{}", status.reason);
 }
 
 #[test]
@@ -176,22 +217,27 @@ fn the_policy_section_is_parsed_and_a_broken_one_is_visible() {
     assert!(broken.error.as_deref().unwrap_or_default().starts_with("json:"));
 }
 
+/// 08/11: the file a deploy installs names every feature and turns every one **on**. Naming them
+/// explicitly (rather than relying on the default) is what makes the deploy's file say what the node
+/// routes, and it is what an operator edits one line of to turn a single feature off.
 #[test]
-fn the_shipped_default_names_every_feature_and_turns_every_one_off() {
-    // The file a deploy installs (`policies/default.json`): a missing feature is a silent default, so
-    // the shipped file must name all of them - and `installed` is not `enabled` (docs/FEATURES.md).
+fn the_shipped_default_names_every_feature_and_turns_every_one_on() {
     let default: Value = serde_json::from_str(include_str!("../../../policies/default.json"))
         .expect("policies/default.json parses");
     let features = default.get("features").and_then(Value::as_object).expect("a features section");
     for spec in FEATURES {
         assert_eq!(
             features.get(spec.id),
-            Some(&Value::Bool(false)),
-            "policies/default.json must ship {} as false",
+            Some(&Value::Bool(true)),
+            "policies/default.json must ship {} as true",
             spec.id
         );
     }
     assert_eq!(features.len(), FEATURES.len(), "no feature in the default that this crate does not know");
+    // ...and the file is a valid grant policy too: a shipped default its own engine refuses would be a
+    // node with no capability rules at all.
+    let set = wa_grant_policy::PolicySet::parse(&serde_json::to_string(&default).unwrap()).expect("engine");
+    assert!(set.features.is_some());
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! The policy model: JSON in, validated rules out.
 //!
-//! Schema (version 1), all field names snake_case, unknown fields are a **load error** so a typo
-//! (`per_minutes`, `require_aprovall`) can never silently drop a limit:
+//! Schema (version 1), all field names snake_case, unknown fields *inside a rule* are a **load error**
+//! so a typo (`per_minutes`, `require_aprovall`) can never silently drop a limit:
 //!
 //! ```json
 //! {
@@ -45,6 +45,29 @@
 //! * `target_rates` — per-pattern override of `per_target`, first match wins. `exempt_from_global`
 //!   means a matching target does not consume the capability-wide bucket.
 //! * `daily_cap` — hard count per capability per UTC day (injected clock, ms since the epoch).
+//!
+//! ## Sections this crate does not read
+//!
+//! One `policy.json` carries more than capability rules: `features` (docs/FEATURES.md), `mesh`
+//! (docs/MESH.md), `vault` (docs/VAULT.md), `models` (docs/MODEL-GATEWAY.md), and whatever the next one
+//! is called. Before 08/11 every one of them was an unknown field here, and an unknown field was a load
+//! error — so a node whose operator hand-wrote a `mesh` section was `Mode::Policy` with an *empty*
+//! policy, i.e. every component's own rules answered `deny(no_policy)` (the live incident of 08/11
+//! 03:51–04:10 on openclaw: `wa-whatsapp` `net.dial` refused though its rule was right there in the
+//! file).
+//!
+//! So the top level is parsed in two stages, and the strictness rule follows the blast radius:
+//!
+//! * a **known section** is validated field by field, exactly as before: a typo in a rule is a load
+//!   error;
+//! * a **section this crate does not interpret** is *carried* ([`PolicySet::sections`], opaque JSON) and
+//!   never changes a rule. A future section can therefore reach a node's file before the binary that
+//!   reads it, which is the whole point of a section;
+//! * a section with an **owner** in this process (the crate that knows its schema, registered through
+//!   [`SectionOwner`]) is validated by that owner, and a section that is invalid — or that is not even a
+//!   JSON object — is recorded in [`PolicySet::section_errors`], reported by `host.policy_status` and
+//!   logged once. It is **never** silently ignored and **never** takes the rules down with it: a broken
+//!   `mesh` section must not be able to refuse a `wa-whatsapp` send.
 use crate::pattern::{Pattern, PatternError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -108,8 +131,12 @@ fn bad<T>(why: impl Into<String>) -> Result<T, PolicyError> {
 }
 
 /// A whole policy file.
+///
+/// `components` (the rules), `version` and `sensitive_capabilities` are this crate's; `features` and
+/// every other top-level member is carried for the crate that owns it (`sections`). The top level is
+/// deliberately *not* `deny_unknown_fields`: a section this crate does not know must never be able to
+/// make the rules unreadable (see the module docs). Everything *inside* a rule still is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PolicySet {
     pub version: u32,
     /// Capabilities this node treats as sensitive in addition to [`DEFAULT_SENSITIVE`].
@@ -124,6 +151,27 @@ pub struct PolicySet {
     pub features: Option<serde_json::Value>,
     #[serde(default)]
     pub components: BTreeMap<String, ComponentPolicy>,
+    /// Every other top-level section, verbatim: `mesh`, `vault`, `models`, and any section a later crate
+    /// owns. Carried so a file that names one parses; never interpreted here, so it cannot change a
+    /// rule. [`PolicySet::section`] is the reader's door.
+    #[serde(default, flatten)]
+    pub sections: BTreeMap<String, serde_json::Value>,
+    /// Sections that are there and are not usable: `not_an_object`, or whatever the section's owner
+    /// refused. Reported by `host.policy_status` and logged once by the loader; **never** a reason to
+    /// drop the rules beside them.
+    #[serde(skip)]
+    pub section_errors: BTreeMap<String, String>,
+}
+
+/// The crate that knows one top-level section's schema (`mesh` → `wa-mesh-core`, and so on).
+///
+/// `validate` gets the section's JSON as written and answers why it is unusable, if it is: version,
+/// required fields, a key that is not the right length — the checks the reader itself would make. The
+/// grant policy calls it while loading, so an invalid section is named on the node's log and in
+/// `host.policy_status` instead of being discovered (or not) by whoever reads that section next.
+pub struct SectionOwner {
+    pub name: &'static str,
+    pub validate: fn(&serde_json::Value) -> Result<(), String>,
 }
 
 /// One component's rules, keyed by capability (`whatsapp.send`, `net.dial`, …).
@@ -224,8 +272,16 @@ impl TargetRate {
 impl PolicySet {
     /// Load and validate from JSON text.
     pub fn parse(text: &str) -> Result<PolicySet, PolicyError> {
-        let set: PolicySet = serde_json::from_str(text)
+        PolicySet::parse_owned(text, &[])
+    }
+
+    /// [`PolicySet::parse`], with the section owners this process has: each owner validates its own
+    /// section, and a section that does not validate lands in [`PolicySet::section_errors`] (reported)
+    /// while the rules beside it keep working. No owner, no opinion: the section is carried verbatim.
+    pub fn parse_owned(text: &str, owners: &[SectionOwner]) -> Result<PolicySet, PolicyError> {
+        let mut set: PolicySet = serde_json::from_str(text)
             .map_err(|e| PolicyError(format!("not valid JSON for schema {SCHEMA_VERSION}: {e}")))?;
+        set.check_sections(owners);
         set.validate()?;
         Ok(set)
     }
@@ -245,7 +301,61 @@ impl PolicySet {
             sensitive_capabilities: Vec::new(),
             features: None,
             components: BTreeMap::new(),
+            sections: BTreeMap::new(),
+            section_errors: BTreeMap::new(),
         }
+    }
+
+    /// The JSON of a top-level section this crate carries but does not interpret (`mesh`, `vault`, …),
+    /// or `None` when the file has no such section.
+    pub fn section(&self, name: &str) -> Option<&serde_json::Value> {
+        self.sections.get(name).filter(|value| !value.is_null())
+    }
+
+    /// Why a section is unusable, when one is (`[not_an_object]`, or the owner's own words).
+    pub fn section_error(&self, name: &str) -> Option<&str> {
+        self.section_errors.get(name).map(String::as_str)
+    }
+
+    /// Is a section there and *not* usable? A loader reports every one of these by name.
+    pub fn has_section_errors(&self) -> bool {
+        !self.section_errors.is_empty()
+    }
+
+    /// The sections this file carries that no owner in this process interprets - a notice, not an
+    /// error: a section a newer binary owns is expected to be one of these.
+    pub fn unclaimed_sections(&self, owners: &[SectionOwner]) -> Vec<&str> {
+        self.sections
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !owners.iter().any(|owner| owner.name == *name))
+            .collect()
+    }
+
+    /// The section half of validation: every carried section must be a JSON object (or `null`, which
+    /// means "nothing here"), and an owner's `validate` must accept it. Problems are *recorded*, never
+    /// returned: dropping the rules because a sibling section is malformed is the 08/11 incident.
+    fn check_sections(&mut self, owners: &[SectionOwner]) {
+        let mut errors = BTreeMap::new();
+        for (name, value) in &self.sections {
+            if let Err(why) = check_name("sections key", name) {
+                errors.insert(name.clone(), why.0);
+                continue;
+            }
+            if value.is_null() {
+                continue;
+            }
+            if !value.is_object() {
+                errors.insert(name.clone(), "not_an_object".to_string());
+                continue;
+            }
+            for owner in owners.iter().filter(|owner| owner.name == name.as_str()) {
+                if let Err(why) = (owner.validate)(value) {
+                    errors.insert(name.clone(), why);
+                }
+            }
+        }
+        self.section_errors = errors;
     }
 
     /// Check everything the engine relies on: version, names, rate bounds, no empty rules that
@@ -367,8 +477,76 @@ mod tests {
         .expect("the same file without the section parses");
         assert_eq!(with.components, without.components, "the features section decides no rule");
         assert_eq!(without.features, None);
-        // ...and a misspelled top-level member is still refused (the field did not open the schema).
-        assert!(PolicySet::parse(r#"{"version":1,"components":{},"feature":"memory"}"#).is_err());
+        // ...and a misspelled *rule* member is still refused, mesh or no mesh: the field did not open
+        // the schema this crate owns.
+        assert!(PolicySet::parse(
+            r#"{"version":1,"components":{"c":{"capabilities":{"x":{"rate":{"per_minutes":5}}}}},"mesh":{"version":1}}"#
+        )
+        .is_err());
+    }
+
+    /// The incident of 08/11 03:51–04:10 (openclaw), reproduced exactly: a `mesh` section hand-added to
+    /// the node's `policy.json` ({version, enabled, roster_key, roster}) and the component's own rules
+    /// answered `deny(no_policy)` - `wa-whatsapp` `net.dial` refused with its rule right there in the
+    /// file. The fix: a section this crate does not interpret is carried, so the rules load and are
+    /// enforced, whatever the section says.
+    #[test]
+    fn the_0811_incident_a_mesh_section_does_not_make_the_component_rules_unreadable() {
+        let key = "a".repeat(64);
+        for enabled in [true, false] {
+            let text = serde_json::json!({
+                "version": 1,
+                "sensitive_capabilities": [],
+                "mesh": {"version": 1, "enabled": enabled, "roster_key": key, "roster": "mesh-roster.json"},
+                "components": {"wa-whatsapp": {"capabilities": {"net.dial": {
+                    "allow": ["*.whatsapp.net:443"],
+                    "rate": {"per_minute": 60, "burst": 120}
+                }}}}
+            })
+            .to_string();
+            let set = PolicySet::parse(&text).expect("a file with a mesh section parses");
+            assert!(!set.has_section_errors(), "a valid mesh section is not an error: {:?}", set.section_errors);
+            assert!(set.section("mesh").is_some(), "the section is carried for its owner to read");
+            assert_eq!(set.components.len(), 1, "the rules are there");
+            let rule = set.rule("wa-whatsapp", "net.dial").expect("the net.dial rule is readable");
+            assert!(rule.allow[0].matches("mmg.whatsapp.net:443"));
+            assert_eq!(rule.rate.unwrap().capacity(), 120);
+            // And the answer the operator saw as `deny(no_policy)` is an allow again.
+            let mut engine = crate::Engine::new(set);
+            assert_eq!(
+                engine.check("wa-whatsapp", "net.dial", Some("mmg.whatsapp.net:443"), 1_760_000_000_000),
+                crate::Decision::Allow
+            );
+        }
+    }
+
+    /// A section that is there and unusable is *reported*, and the rules beside it still load: the
+    /// failure mode is loud, never a silent drop. (The real `mesh` owner is `wa-mesh-core`; a fake owner
+    /// here proves the registry half without a dependency.)
+    #[test]
+    fn an_invalid_section_is_recorded_and_never_drops_the_rules() {
+        let rules = r#""components":{"wa-whatsapp":{"capabilities":{"kv.write":{"allow":["ix/*"]}}}},"#;
+        let set = PolicySet::parse(&format!(r#"{{"version":1,{rules}"mesh":"on"}}"#)).expect("parses");
+        assert_eq!(set.section_error("mesh"), Some("not_an_object"));
+        assert!(set.rule("wa-whatsapp", "kv.write").is_some(), "the rules survived");
+
+        fn refuse_version(value: &serde_json::Value) -> Result<(), String> {
+            match value.get("version").and_then(|v| v.as_u64()) {
+                Some(1) => Ok(()),
+                Some(other) => Err(format!("version {other} (this build speaks 1)")),
+                None => Err("version: missing".into()),
+            }
+        }
+        let owners = [SectionOwner { name: "mesh", validate: refuse_version }];
+        let set = PolicySet::parse_owned(&format!(r#"{{"version":1,{rules}"mesh":{{"version":9}}}}"#), &owners)
+            .expect("an invalid section is reported, not fatal");
+        assert_eq!(set.section_error("mesh"), Some("version 9 (this build speaks 1)"));
+        assert!(set.rule("wa-whatsapp", "kv.write").is_some(), "the rules survived");
+        assert_eq!(set.unclaimed_sections(&owners), Vec::<&str>::new());
+
+        let set = PolicySet::parse_owned(&format!(r#"{{"version":1,{rules}"mesh":{{"version":1}}}}"#), &owners)
+            .expect("parses");
+        assert!(!set.has_section_errors(), "a valid section is clean");
     }
 
     /// The file a deploy installs (`policies/default.json`) carries the section, so it must parse
@@ -383,13 +561,50 @@ mod tests {
 
     #[test]
     fn unknown_fields_and_wrong_versions_are_refused() {
-        // "per_minutes" is the typo this test exists for.
+        // "per_minutes" is the typo this test exists for: a misspelt limit inside a rule is a load
+        // error, because guessing it away would widen what the file allows.
         assert!(PolicySet::parse(r#"{"version":1,"components":{"c":{"capabilities":{"x":{"rate":{"per_minutes":5}}}}}}"#).is_err());
         assert!(PolicySet::parse(r#"{"version":2,"components":{}}"#).is_err());
-        assert!(PolicySet::parse(r#"{"version":1,"components":{},"default":"allow"}"#).is_err());
         assert!(PolicySet::parse(r#"{"version":1,"components":{"c":{"capabilites":{}}}}"#).is_err());
         assert!(PolicySet::parse("{}").is_err());
         assert!(PolicySet::parse("not json").is_err());
+    }
+
+    /// The top level is deliberately *not* `deny_unknown_fields` any more (module docs, "Sections this
+    /// crate does not read"): a member this crate does not interpret is carried, so a top-level typo is a
+    /// carried section rather than a load error - reportable by `host.policy_status`
+    /// (`unclaimed_sections` + the loader's log line), never guessed at. What it must never do is change
+    /// a rule.
+    #[test]
+    fn a_member_this_crate_does_not_interpret_is_carried_and_changes_no_rule() {
+        let with = PolicySet::parse(
+            r#"{"version":1,"default":"allow","components":{"c":{"capabilities":{"kv.write":{"allow":["ix/*"]}}}}}"#,
+        )
+        .expect("an unknown top-level member is carried, not refused");
+        assert_eq!(with.sections.get("default"), Some(&serde_json::Value::String("allow".into())));
+        // A non-object member is carried verbatim and reported; it is not offered as a section object.
+        assert_eq!(with.section_error("default"), Some("not_an_object"));
+        let without = PolicySet::parse(
+            r#"{"version":1,"components":{"c":{"capabilities":{"kv.write":{"allow":["ix/*"]}}}}}"#,
+        )
+        .expect("the same file without the section parses");
+        assert_eq!(with.components, without.components, "an unread member decides no rule");
+        assert_eq!(with.unclaimed_sections(&[]), vec!["default"]);
+        assert_eq!(without.unclaimed_sections(&[]), Vec::<&str>::new());
+    }
+
+    /// The carried sections round-trip: a `PolicySet` read from a file and written back keeps `mesh`, so
+    /// a tool that rewrites the policy cannot lose the section a *different* crate reads.
+    #[test]
+    fn carried_sections_round_trip_through_serde() {
+        let set = PolicySet::parse(
+            r#"{"version":1,"mesh":{"version":1,"enabled":true,"roster_key":""},"components":{}}"#,
+        )
+        .expect("parses");
+        let text = serde_json::to_string(&set).expect("serialises");
+        let back: PolicySet = serde_json::from_str(&text).expect("reads back");
+        assert_eq!(back.section("mesh").and_then(|m| m.get("enabled")), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(back.section_errors, set.section_errors, "errors are a load report, not file content");
     }
 
     #[test]

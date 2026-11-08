@@ -3,10 +3,11 @@
 -- Every gate that can choose between a component and the native path asks HERE - `lua/core/selfloop`,
 -- `codemode`, `hooks` and `memory` - so "is this feature on, which path is live, and why" has one
 -- answer per node. The answer is the host's: `host.features` is bound to `rust/wa-features`, the crate
--- that resolves env override > policy.json `features` > default false and checks that the component is
--- installed with a verified pin. This module adds no rule of its own and caches nothing: a `policy.json`
--- edit reaches a running node, and a feature turned on with no component behind it reports
--- `component_missing` instead of quietly running the native path.
+-- that resolves env override > policy.json `features` > default (ON since 08/11) and checks that the
+-- component is installed with a verified pin. This module adds no rule of its own and caches nothing: a
+-- `policy.json` edit reaches a running node, and a feature that is on with no component behind it
+-- reports `component_missing` instead of quietly running the native path. One line per feature in the
+-- policy file turns it off live: `"memory": false`.
 --
 -- WHY IT IS ASKED PER CALL AND NOT ONCE AT LOAD. The switch used to be a module-load constant read from
 -- `WA_*_COMPONENT`: turning a feature on meant a restart, and turning one off meant a restart that
@@ -57,7 +58,11 @@ function M.resolve(feature)
     if type(entry) ~= 'table' then return nil, 'features_no_answer' end
     return entry
   end
-  -- No capability: the env flag, read the way this gate read it before the resolver existed.
+  -- No capability: the env flag, read the way this gate read it before the resolver existed. It is
+  -- deliberately the *conservative* half of the rule: a stub host has no component directory to check a
+  -- pin against, so it may claim the component only when the flag names it. A real node always has the
+  -- capability (the Lua tree is pinned to the binary's digest at boot), so the default-on rule is the
+  -- resolver's, never this fallback's guess.
   local name = M.env[feature]
   if not name then return nil, 'unknown_feature:' .. tostring(feature) end
   local ok, value = pcall(host.getenv, name)
@@ -110,6 +115,14 @@ function M.text()
   end
   lines[#lines + 1] = 'policy: ' .. tostring(answer.policy)
   if answer.policy_error then lines[#lines + 1] = 'policy error: ' .. tostring(answer.policy_error) end
+  -- The mesh's own switch (docs/MESH.md): on by default when a roster verifies against the pinned key,
+  -- the legacy path otherwise. `mesh_component` above says which *code* decides; this says whether the
+  -- mesh is in use at all, so the table never leaves that to a guess.
+  if type(answer.mesh) == 'table' then
+    lines[#lines + 1] = 'mesh: ' .. (answer.mesh.enabled and 'on' or 'off') ..
+      ' (' .. tostring(answer.mesh.source or 'unknown') .. ')'
+    if answer.mesh.problem then lines[#lines + 1] = 'mesh error: ' .. tostring(answer.mesh.problem) end
+  end
   return table.concat(lines, '\n')
 end
 

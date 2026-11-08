@@ -2,14 +2,14 @@
   "version": 1,
   "sensitive_capabilities": [],
   "features": {
-    "selfloop": false,
-    "codemode": false,
-    "hooks": false,
-    "memory": false,
-    "gateway": false,
-    "mesh_component": false,
-    "agent_core": false,
-    "telemetry_sink": false
+    "selfloop": true,
+    "codemode": true,
+    "hooks": true,
+    "memory": true,
+    "gateway": true,
+    "mesh_component": true,
+    "agent_core": true,
+    "telemetry_sink": true
   },
   "components": {
     "wa-whatsapp": {

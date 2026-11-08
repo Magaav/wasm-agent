@@ -14,23 +14,25 @@
 //! ## The rule
 //!
 //! ```text
-//! enabled := env override, else policy.json `features.<id>`, else false
+//! enabled := env override, else policy.json `features.<id>`, else true (since 08/11)
 //! active  := component  when enabled AND the component is installed with a verified pin
 //!            native     otherwise, with the reason
 //! ```
 //!
+//! * **on by default** (Victor, 08/11: "every new feature ON by default, each with a live per-feature
+//!   off switch"). The features are built, tested and shipped (`components.lock` pins the whole set), so
+//!   a node that has them installed runs them. `features.<id>: false` — or `WA_*_COMPONENT=0` — turns
+//!   one off live, without a restart.
 //! * **env wins** (`WA_MEMORY_COMPONENT=1`): a local experiment must not have to edit the policy file
 //!   a deploy owns. `WA_*_COMPONENT=0` is as explicit as `=1` - "off, whatever the policy says".
 //! * **the policy file is read live**, like the rest of it (`docs/GRANT-POLICY.md`, "The policy
 //!   reload"): one stat per `WA_FEATURES_WATCH_MS` (default 1000) and a parse only when the file
-//!   moved. Turning a feature on is an edit to a file, never a restart.
-//! * **default false.** A feature is never on because a component happens to be installed:
-//!   "installed" and "enabled" are different questions (`docs/COMPONENTS.md`,
-//!   `docs/RELEASE-UPDATE.md`).
-//! * **a refusal is never a silent fallback.** A feature that is on with no component behind it is
-//!   `enabled: true, active: "native", reason: "component_missing"` - a node that reads the table
-//!   knows the component is not what is running. A broken policy file or a non-boolean value is
-//!   reported too, never guessed away.
+//!   moved. Turning a feature off (or back on) is an edit to a file, never a restart.
+//! * **default on is not "whatever happens to be installed".** `enabled` answers "may this node run the
+//!   component", `active` answers "is it running it"; a feature that is enabled and has no verified
+//!   component is `enabled: true, active: "native", reason: "component_missing"`, so a node that reads
+//!   the table knows the component is not what is running, and the native path runs instead of crashing.
+//!   A broken policy file or a non-boolean value is reported too, never guessed away.
 //!
 //! ## What this crate deliberately does not do
 //!
@@ -238,13 +240,23 @@ fn parse_flag(value: &str) -> Option<bool> {
 /// The reason a feature is not on, or is on and native. Stable strings: they are matched by tests and
 /// read by operators, so they are never reworded in place.
 pub const REASON_COMPONENT: &str = "active_component";
+/// `WA_*_COMPONENT=0` (or `features.<id>: false`): the operator turned it off, and the native path is
+/// the answer.
 pub const REASON_OFF: &str = "feature_off";
-pub const REASON_DEFAULT_OFF: &str = "default_off";
+/// No env, no policy value: the feature is on because that is the default since 08/11. The reason name
+/// is kept distinct from [`REASON_COMPONENT`] so "nobody said anything" stays distinguishable from
+/// "the operator wrote `true`" on a node's table.
+pub const REASON_DEFAULT_ON: &str = "default_on";
 pub const REASON_COMPONENT_MISSING: &str = "component_missing";
 pub const REASON_PIN_MISMATCH: &str = "component_pin_mismatch";
 pub const REASON_ENV_INVALID: &str = "feature_env_invalid";
 pub const REASON_VALUE_INVALID: &str = "feature_value_invalid";
 pub const REASON_POLICY_UNREADABLE: &str = "features_unreadable";
+
+/// The default when neither the environment nor the policy file names a feature (`docs/FEATURES.md`).
+/// One constant, because every gate and every test must agree about it: 08/11 turned every feature on by
+/// default, with the per-feature `false` as the switch.
+pub const DEFAULT_ENABLED: bool = true;
 
 /// What the policy file's `features` section says, including why it could not be read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -277,11 +289,11 @@ pub fn resolve(spec: &FeatureSpec, env: Option<&str>, policy: &PolicyFeatures, i
         env: spec.env,
         native: spec.native,
         summary: spec.summary,
-        enabled: false,
+        enabled: DEFAULT_ENABLED,
         source: Source::Default,
         installed: installed.clone(),
         active: ActivePath::Native,
-        reason: REASON_DEFAULT_OFF.to_string(),
+        reason: REASON_DEFAULT_ON.to_string(),
     };
     // 1. the environment: an explicit 0/1 wins, an unusable value is refused by name.
     match env.map(parse_flag) {
@@ -292,7 +304,9 @@ pub fn resolve(spec: &FeatureSpec, env: Option<&str>, policy: &PolicyFeatures, i
         }
         Some(None) => {
             // Env names it and the value is not a flag: report, do not fall through to the policy
-            // (falling through would turn a typo into "whatever the file says").
+            // (falling through would turn a typo into "whatever the file says"), and **do not run the
+            // component**: an unreadable statement about a component is not permission to start one.
+            status.enabled = false;
             status.source = Source::Env;
             status.reason = REASON_ENV_INVALID.to_string();
             return status_with_path(status);
@@ -307,12 +321,19 @@ pub fn resolve(spec: &FeatureSpec, env: Option<&str>, policy: &PolicyFeatures, i
                         if enabled { REASON_COMPONENT.to_string() } else { REASON_OFF.to_string() };
                 }
                 Ok(None) => {
-                    // 3. the default: off.
+                    // 3. the default: on, and the component answers when it is there. A policy file that
+                    // does not parse leaves every feature at that default and says why.
+                    status.enabled = DEFAULT_ENABLED;
+                    status.source = Source::Default;
+                    status.reason = REASON_DEFAULT_ON.to_string();
                     if let Some(error) = &policy.error {
                         status.reason = format!("{REASON_POLICY_UNREADABLE}:{error}");
                     }
                 }
                 Err(reason) => {
+                    // A value the file names that is not a boolean is an error, not a decision: the
+                    // native path runs and the reason says why (same rule as an unusable env value).
+                    status.enabled = false;
                     status.source = Source::Policy;
                     status.reason = reason;
                 }
@@ -336,7 +357,13 @@ fn status_with_path(mut status: Status) -> Status {
     match &status.installed {
         Installed::Verified(_) => {
             status.active = ActivePath::Component;
-            status.reason = REASON_COMPONENT.to_string();
+            // The reason keeps saying *why* it is on: "nobody turned it off" is a different statement
+            // from "the operator turned it on", and the source column already carries the difference.
+            if status.source != Source::Default {
+                status.reason = REASON_COMPONENT.to_string();
+            } else if status.reason == REASON_OFF {
+                status.reason = REASON_DEFAULT_ON.to_string();
+            }
         }
         Installed::Missing => {
             status.active = ActivePath::Native;

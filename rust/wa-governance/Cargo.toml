@@ -10,6 +10,10 @@ edition = "2021"
 [dependencies]
 wa-host-support = { path = "../wa-host-support" }
 wa-grant-policy = { path = "../wa-grant-policy" }
+# The `mesh` section of `policy.json` is `wa-mesh-core`'s schema, so this node's loader asks that crate
+# whether a file's section is usable instead of keeping a second copy of the rules. Pure logic only
+# (no socket, no key): the mesh's *decisions* crate, not `wa-mesh`.
+wa-mesh-core = { path = "../wa-mesh-core" }
 wa-telemetry = { path = "../wa-telemetry" }
 wa-bounded = { path = "../wa-bounded" }
 serde_json = "1"

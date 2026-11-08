@@ -165,13 +165,25 @@ fn label_refusal(provider: &crate::policy::ProviderSpec, model: &ModelRef, label
         model: model.model.clone(),
         label,
         allowed: provider.allowed_labels.clone(),
-        reason: format!(
-            "label_not_allowed: {} is labelled {} and {} allows {}",
-            model.as_string(),
-            label.as_str(),
-            provider.id,
-            provider.labels_text()
-        ),
+        // The `client` sentence is the actionable one (docs/MODEL-GATEWAY.md, "Allowed labels"): the
+        // default providers carry the operator's own data and never a client's, so the operator has to
+        // name a provider that may. A refusal that does not say what to write is a dead end at 03:00.
+        reason: if label == Label::Client {
+            format!(
+                "label_not_allowed: {} is labelled client and {} allows {} - configure a provider allowed for client data",
+                model.as_string(),
+                provider.id,
+                provider.labels_text()
+            )
+        } else {
+            format!(
+                "label_not_allowed: {} is labelled {} and {} allows {}",
+                model.as_string(),
+                label.as_str(),
+                provider.id,
+                provider.labels_text()
+            )
+        },
     }
 }
 

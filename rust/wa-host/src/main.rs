@@ -295,10 +295,26 @@ fn main() {
     if args.first().is_some_and(|arg| arg == "features") {
         let policy = wa_features::policy_path();
         let list = wa_features::status_all();
+        // The mesh's own switch (docs/MESH.md), beside the table: `mesh_component` says which *code*
+        // decides a peer call, this says whether the mesh is in use - on by default when a roster
+        // verifies against the pinned key, off (the legacy path) otherwise.
+        let mesh_paths = wa_mesh::host_call::Paths::resolve();
+        let mesh = wa_mesh::gate::cached(&mesh_paths.policy);
         if !args.iter().any(|arg| arg == "--json") {
             print!("{}", wa_features::status_text(&list, &policy));
+            println!("mesh: {} ({})", if mesh.enabled { "on" } else { "off" }, mesh.label());
+            if let Some(problem) = &mesh.problem {
+                println!("mesh error: {problem}");
+            }
         } else {
-            println!("{}", wa_features::status_json(&list, &policy));
+            let mut document = wa_features::status_value(&list, &policy);
+            document["mesh"] = serde_json::json!({
+                "enabled": mesh.enabled,
+                "source": mesh.label(),
+                "problem": mesh.problem,
+                "policy": mesh_paths.policy.to_string_lossy(),
+            });
+            println!("{document}");
         }
         // A feature that is on with nothing behind it is not a failure of this command (the node
         // still runs, natively) - but the exit status says so, so a script that enables a feature can

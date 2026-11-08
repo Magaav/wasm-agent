@@ -116,8 +116,10 @@ pub struct Settings {
 impl Settings {
     pub fn resolve(policy: &MeshPolicy) -> Settings {
         // The same rule every other gate uses, so the mount and a call can never disagree about
-        // whether this node is on: environment, then the operator's file, then off.
-        let switch = crate::gate::decide(crate::gate::env_answer(), Some(policy));
+        // whether this node is on: environment, then the operator's file, then the default — which is
+        // on when a roster verifies against the pinned key (docs/MESH.md, "On by default").
+        let verified = crate::gate::roster_verified(policy, &Paths::resolve().config);
+        let switch = crate::gate::decide_with_roster(crate::gate::env_answer(), Some(policy), verified);
         let (enabled, enabled_from) = (switch.enabled, switch.label());
         let (port, port_from) = match env("WASM_AGENT_MESH_PORT")
             .and_then(|value| value.parse::<u16>().ok())

@@ -77,8 +77,14 @@ pub struct MeshPolicy {
     /// `wa fleet push-roster` writes (`rust/wa-mesh/src/fleet.rs`). It only ever takes effect together
     /// with a `roster_key` that verifies a roster: an `enabled` node whose roster does not verify falls
     /// back to today's admission, never to anything weaker.
-    #[serde(default)]
-    pub enabled: bool,
+    ///
+    /// **`None` is not `false`.** Since 08/11 the mesh is on by default when a roster verifies against
+    /// the pinned key (`docs/MESH.md`, "On by default, off without a roster"), so the section has to be
+    /// able to say "the operator wrote nothing here" to let that default apply. `false` is the
+    /// operator's own statement and wins over the roster: `features.mesh_component: false` or
+    /// `mesh.enabled: false` turns the mesh off on a running node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// The port this node's mesh listener answers on, when the environment does not name one.
     ///
     /// Enabling the mesh on a live node cannot change a live process's environment, so a node that is
@@ -100,7 +106,7 @@ impl Default for MeshPolicy {
             version: MESH_SCHEMA_VERSION,
             roster_key: String::new(),
             roster: None,
-            enabled: false,
+            enabled: None,
             port: None,
             bind: None,
             grants: Vec::new(),
@@ -111,6 +117,17 @@ impl Default for MeshPolicy {
 impl MeshPolicy {
     pub fn empty() -> MeshPolicy {
         MeshPolicy::default()
+    }
+
+    /// What the operator's file says about `enabled`, when it says anything at all.
+    pub fn enabled_statement(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    /// Is a fleet key pinned? Without one no roster can verify, so the mesh has nothing to be on by
+    /// default (`docs/MESH.md`).
+    pub fn has_pinned_key(&self) -> bool {
+        !self.roster_key.trim().is_empty()
     }
 
     /// Read the `mesh` section out of a whole `policy.json`. A file with no `mesh` section is not an
@@ -215,6 +232,30 @@ fn matches(grant: &Grant, caller_id: &str, target_id: &str, verb: &str) -> bool 
     grant.caller.matches(caller_id) && grant.target.matches(target_id) && grant.verb.matches(verb)
 }
 
+/// The name of the section this crate owns in the node's `policy.json`.
+pub const SECTION_NAME: &str = "mesh";
+
+/// The `mesh` section's own validator, for the grant policy's loader (`wa_grant_policy::SectionOwner`).
+///
+/// This crate is the one that knows the section's schema, so it is the one that says whether a section
+/// is usable. The grant policy calls it while loading a `policy.json`, which is how an invalid `mesh`
+/// section becomes a named error in `host.policy_status` **without** taking the capability rules beside
+/// it down (the 08/11 incident: a valid mesh section used to make every component rule unreadable).
+/// `null` means "no section", which is a valid empty statement.
+pub fn validate_section(value: &serde_json::Value) -> Result<(), String> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let policy: MeshPolicy = serde_json::from_value(value.clone())
+        .map_err(|error| format!("mesh section: {error}"))?;
+    policy.validate().map_err(|error| error.0)
+}
+
+/// This crate's registration for the grant policy's section registry.
+pub fn section_owner() -> wa_grant_policy::SectionOwner {
+    wa_grant_policy::SectionOwner { name: SECTION_NAME, validate: validate_section }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,8 +281,9 @@ mod tests {
         assert!(!policy.has_grants());
         assert!(policy.roster_key.is_empty());
         assert_eq!(policy.version, MESH_SCHEMA_VERSION);
-        // Absent means off: a node that never had a roster pushed to it decides as it did before.
-        assert!(!policy.enabled);
+        // Absent means "the operator wrote nothing here": not off, and not on either - the gate's
+        // default decides (on when a roster verifies against a pinned key).
+        assert_eq!(policy.enabled, None);
     }
 
     #[test]
@@ -312,7 +354,8 @@ mod tests {
             "a".repeat(64)
         ))
         .unwrap();
-        assert!(policy.enabled);
+        assert_eq!(policy.enabled, Some(true));
+        assert!(policy.has_pinned_key());
         assert_eq!(
             policy.roster_path(Path::new("/home/x/.wasm-agent")).unwrap(),
             std::path::PathBuf::from("/home/x/.wasm-agent/mesh-roster.json")
@@ -322,5 +365,44 @@ mod tests {
             r#"{"version":1,"mesh":{"version":1,"enabled":"yes"}}"#
         )
         .is_err());
+    }
+
+    /// The section owner: what the grant policy calls while it loads a `policy.json`. A valid section is
+    /// accepted; an invalid one is refused by name (and the grant policy reports it rather than dropping
+    /// the rules); `null` is an empty statement.
+    #[test]
+    fn the_section_owner_accepts_a_valid_section_and_names_what_is_wrong() {
+        let owner = section_owner();
+        assert_eq!(owner.name, SECTION_NAME);
+        let valid = serde_json::json!({"version": 1, "enabled": true, "roster_key": "a".repeat(64)});
+        assert_eq!((owner.validate)(&valid), Ok(()));
+        assert_eq!((owner.validate)(&serde_json::Value::Null), Ok(()));
+        assert_eq!((owner.validate)(&serde_json::json!({"version": 1, "enabled": false})), Ok(()));
+        let wrong_version = (owner.validate)(&serde_json::json!({"version": 9})).unwrap_err();
+        assert!(wrong_version.contains("version 9"), "{wrong_version}");
+        let typo = (owner.validate)(&serde_json::json!({"version": 1, "grants": [{"caller": "*", "target": "*", "verb": "*", "efect": "deny"}]})).unwrap_err();
+        assert!(typo.contains("mesh section"), "{typo}");
+        assert!((owner.validate)(&serde_json::json!({"version": 1, "roster_key": "short"})).is_err());
+    }
+
+    /// The whole point of the owner: a file with a valid `mesh` section and capability rules is a file
+    /// the grant policy parses with the rules intact (the 08/11 incident is `wa-grant-policy`'s test;
+    /// this one proves the section the *mesh* wrote passes *its own* validator).
+    #[test]
+    fn a_policy_file_with_a_mesh_section_validates_with_the_grant_policy() {
+        let text = format!(
+            r#"{{"version":1,"mesh":{{"version":1,"enabled":true,"roster_key":"{}","roster":"mesh-roster.json"}},
+                 "components":{{"wa-whatsapp":{{"capabilities":{{"net.dial":{{"allow":["*.whatsapp.net:443"]}}}}}}}}}}"#,
+            "a".repeat(64)
+        );
+        let set = wa_grant_policy::PolicySet::parse_owned(&text, &[section_owner()])
+            .expect("the file parses with its mesh section");
+        assert!(!set.has_section_errors(), "{:?}", set.section_errors);
+        assert!(set.rule("wa-whatsapp", "net.dial").is_some(), "the component rules are readable");
+        // ...and a broken section is named, with the rules still there.
+        let broken = text.replace(r#""version":1,"enabled":true"#, r#""version":1,"enabled":true,"port":0"#);
+        let set = wa_grant_policy::PolicySet::parse_owned(&broken, &[section_owner()]).expect("parses");
+        assert!(set.section_error("mesh").unwrap_or_default().contains("port"), "{:?}", set.section_errors);
+        assert!(set.rule("wa-whatsapp", "net.dial").is_some(), "the component rules are still readable");
     }
 }

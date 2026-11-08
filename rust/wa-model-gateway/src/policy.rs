@@ -28,9 +28,19 @@
 //! }
 //! ```
 //!
-//! Two defaults are deliberately strict. A provider with no `allowed_labels` allows **`public`
-//! only** (never `internal`, never `client`): a misconfigured policy must lose capability, not leak.
-//! A provider with no `credential` is anonymous, which is what a local endpoint wants.
+//! Two defaults, and the difference between them is the 08/11 decision ("every feature on by default,
+//! each with a live per-feature off switch"):
+//!
+//! * **a provider that names no `allowed_labels` allows `public` and `internal`.** That is today's
+//!   configured provider inherited unchanged: before the gateway existed a turn went to DeepSeek or
+//!   opencode-go with the operator's own text and no label at all, and `public`/`internal` do not
+//!   distinguish anything about a *person*. It still allows **no `client` data** — another person's
+//!   message never reaches a provider the operator did not name for it, whatever the default is.
+//! * **a provider with no `credential` is anonymous**, which is what a local endpoint wants.
+//!
+//! Allowing a provider to carry client data is therefore one explicit line, never a default and never a
+//! side effect of upgrading: `"allowed_labels": ["public", "internal", "client"]`
+//! (`docs/MODEL-GATEWAY.md`, "Allowed labels").
 
 use std::collections::BTreeMap;
 
@@ -452,8 +462,10 @@ impl ProviderSpec {
                     .collect::<Result<Vec<_>, String>>()?;
                 Label::parse_list(&texts).map_err(|error| format!("allowed_labels: {error}"))?
             }
-            // Fail closed: a provider nobody labelled may carry public data and nothing else.
-            None => vec![Label::Public],
+            // Today's provider, inherited: the operator's own text (public) and the operator's own
+            // material (internal) may go where a turn went before the gateway existed. Client data is
+            // never in the default - naming a provider for it is an explicit line in the policy file.
+            None => vec![Label::Public, Label::Internal],
         };
         if allowed_labels.is_empty() {
             return Err("allowed_labels: empty — a provider that may carry nothing is a broken route".into());
@@ -628,17 +640,30 @@ mod tests {
         assert_eq!(policy.budgets.session_tokens, Some(2_000_000));
     }
 
+    /// The default provider policy (08/11): a provider nobody labelled carries the operator's own data
+    /// (public and internal - what a turn was sent with before the gateway existed) and never a client's.
     #[test]
-    fn an_absent_allowed_labels_allows_only_public() {
+    fn an_absent_allowed_labels_inherits_todays_provider_and_never_client() {
         let policy = Policy::parse(
             r#"{"providers":[{"id":"p","kind":"openai","base_url":"http://127.0.0.1:8080/v1"}],
                 "routes":{"default":["p/m"]}}"#,
         )
         .expect("parses");
         let provider = policy.provider("p").expect("p");
-        assert_eq!(provider.allowed_labels, vec![Label::Public]);
-        assert!(!provider.allows_label(Label::Internal));
+        assert_eq!(provider.allowed_labels, vec![Label::Public, Label::Internal]);
+        assert!(provider.allows_label(Label::Public));
+        assert!(provider.allows_label(Label::Internal), "public/internal are unchanged by the default");
+        assert!(!provider.allows_label(Label::Client), "client data needs a provider that says so");
+        assert_eq!(provider.labels_text(), "public,internal");
         assert_eq!(provider.hosts, vec!["127.0.0.1:8080"]);
+        // ...and naming client is the documented one-line change, nothing else.
+        let allowed = Policy::parse(
+            r#"{"providers":[{"id":"p","kind":"openai","base_url":"http://127.0.0.1:8080/v1",
+                 "allowed_labels":["public","internal","client"]}],
+                "routes":{"default":["p/m"]}}"#,
+        )
+        .expect("parses");
+        assert!(allowed.provider("p").expect("p").allows_label(Label::Client));
     }
 
     #[test]
