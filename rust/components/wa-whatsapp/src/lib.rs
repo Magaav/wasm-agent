@@ -18,7 +18,8 @@
 //! The crate is split so the decisions can be tested on the host: `queue` (freshness, retry, the
 //! express lane), `posting` (allowlist gate, holds, chunks, edit pacing), `alerts` (own-chat log,
 //! group titles), `holds` (chats held until a revoke is proven), `recognize` (the segment stream +
-//! transcript future as one job, with the timings a shadow run compares) and `telemetry` (the
+//! transcript future as one job, with the timings a shadow run compares), `ocr` (the image reader's
+//! policy, its bounds and the attach into the index) and `telemetry` (the
 //! stable `wa-transcript key=value` log lines) are pure logic with no host call and no wasm target
 //! requirement; everything else (`guest`, `wasm`) needs the wasm32-wasip2 bindings and is compiled
 //! only for that target, so `cargo test` runs the decisions natively while
@@ -36,6 +37,9 @@ pub mod history;
 pub mod index;
 /// One inbound message as the index keeps it: every kind, plus the source mutations as events.
 pub mod record;
+/// OCR for image messages: the 20 MiB bound, which record is worth reading, what a permanent answer
+/// is, and the attach that makes a photo searchable by what it shows (`docs/WHATSAPP-OCR.md`).
+pub mod ocr;
 /// The explicit-send outbox's wire shape (quote, mentions, the exact chat) and its retry rule: pure,
 /// so `cargo test` pins it natively while the guest loop that uses it stays wasm-only.
 pub mod outbox;

@@ -11,6 +11,7 @@
     ],
     "storage": true,
     "stt": true,
+    "ocr": true,
     "queue": {
       "consume": [
         "whatsapp.outbox",

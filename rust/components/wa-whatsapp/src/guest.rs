@@ -2,7 +2,8 @@
 //!
 //! whatsapp-rust's protocol core, with everything that touches the outside world supplied by the
 //! host: the websocket (`wa:kernel/websocket`, TLS in the host), HTTP (`wa:kernel/http`), the
-//! recognizer (`wa:kernel/speech`), the store (`wa:kernel/kv`), the clock (WASI 0.3
+//! recognizer (`wa:kernel/speech`), the OCR reader (`wa:kernel/vision`), the store
+//! (`wa:kernel/kv`), the clock (WASI 0.3
 //! `monotonic-clock.wait-for`) and stop (`wa:kernel/lifecycle`).
 //!
 //! Native async: there is no reactor and no polling loop over host I/O. The inbound frames are a
@@ -24,11 +25,11 @@
 //! `cargo build --target wasm32-wasip2` builds the component.
 use crate::holds::{Author, Holds, Mutation, POSTING_ONLY};
 use crate::wa::kernel::types::Error as KError;
-use crate::wa::kernel::{drain, http as khttp, kv as kkv, lifecycle, speech, websocket};
+use crate::wa::kernel::{drain, http as khttp, kv as kkv, lifecycle, speech, vision, websocket};
 use crate::wasi::clocks::monotonic_clock;
 use crate::index::{self, Store as IndexStore};
 use crate::record::{self, Record};
-use crate::{alerts, export, exports, history, outbox, posting, queue, recognize, store, telemetry};
+use crate::{alerts, export, exports, history, ocr, outbox, posting, queue, recognize, store, telemetry};
 use wa_whatsapp_index as seam;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -221,6 +222,11 @@ thread_local! {
     /// Every message and event the handler turned into a record, indexed by the pipeline's own loop
     /// (`index.rs`): the handler must not wait on a store write, so it hands the record over.
     static INDEX_INBOX: RefCell<Vec<Record>> = const { RefCell::new(Vec::new()) };
+    /// Images the index lane wrote and the OCR lane has not read yet (`ocr.rs`). An [`OcrJob`] is the
+    /// record's identity plus its attempt count, never its bytes: the image is fetched when the lane
+    /// gets to it, under the same media limits the query lane's download uses, so a burst of photos
+    /// costs a deque of ids and not a deque of blobs.
+    static OCR_INBOX: RefCell<std::collections::VecDeque<OcrJob>> = RefCell::new(std::collections::VecDeque::new());
     /// The history syncs the event handler received and the pipeline has not indexed yet.
     ///
     /// The blob stays compressed until the drain reads it (`LazyHistorySync::stream` inflates one
@@ -1027,6 +1033,14 @@ const QUERY_LEASE_MS: u64 = 30_000;
 const QUERY_EVERY: Duration = Duration::from_millis(200);
 /// Most records indexed per pipeline tick, so a history sync cannot starve the audio queue.
 const INDEX_PER_TICK: usize = 200;
+/// Most images waiting for an OCR pass. A burst of screenshots is read in order; beyond this the
+/// oldest id is dropped, and the backlog pass (`index::ocr_backlog`) still finds it later - a dropped
+/// id costs a scan, never an image that is silently never read.
+const OCR_PENDING: usize = 64;
+/// How many attempts one image gets before the lane stops retrying it: the first read plus one retry
+/// after a transient failure (a restarting worker, a download that timed out). What comes back after
+/// that is logged as the reason and left to the backlog pass.
+const OCR_ATTEMPTS: u8 = 2;
 /// One progress chunk. 32 KiB keeps a 512 KiB download inside sixteen entries, well below the queue's
 /// 1 MiB progress bound.
 const DOWNLOAD_CHUNK: usize = 32 * 1024;
@@ -1063,6 +1077,14 @@ impl IndexStore for IndexKv {
 #[derive(Clone, Copy, Debug)]
 struct IndexConfig {
     enabled: bool,
+    /// `index_ocr` (default on): image messages are read by the kernel's text reader and their text
+    /// attached to the index record. Off is a decision (a node without the OCR worker provisioned),
+    /// honoured as one - nothing is downloaded and nothing is queued.
+    ocr: bool,
+    /// How often an empty OCR inbox is refilled from the index (`index_ocr_every_seconds`), and how
+    /// many images one refill may queue (`index_ocr_budget`).
+    ocr_every: Duration,
+    ocr_budget: usize,
     retention: index::Retention,
     prune_every: Duration,
     prune_budget: usize,
@@ -1078,6 +1100,9 @@ impl IndexConfig {
             // On unless the definition says otherwise: the owner's requirement is that every message is
             // indexed, so an absent key is not a reason to stop.
             enabled: config["index"].as_bool().unwrap_or(true),
+            ocr: config["index_ocr"].as_bool().unwrap_or(true),
+            ocr_every: Duration::from_secs(config["index_ocr_every_seconds"].as_u64().unwrap_or(60).clamp(10, 86_400)),
+            ocr_budget: config["index_ocr_budget"].as_u64().unwrap_or(8).clamp(1, 200) as usize,
             retention: index::Retention::new(config["index_retention_days"].as_u64().unwrap_or(90) as u32),
             prune_every: Duration::from_secs(config["index_prune_every_seconds"].as_u64().unwrap_or(300).clamp(30, 86_400)),
             prune_budget: config["index_prune_budget"].as_u64().unwrap_or(200).clamp(1, 5_000) as usize,
@@ -1094,6 +1119,31 @@ impl IndexConfig {
             },
         }
     }
+}
+
+/// One image the OCR lane still owes an answer: the record it will attach to, and how many times the
+/// lane has tried. The bytes are not kept.
+struct OcrJob {
+    chat: String,
+    id: String,
+    attempts: u8,
+}
+
+impl OcrJob {
+    fn of(record: &Record) -> OcrJob {
+        OcrJob { chat: record.chat.clone(), id: record.id.clone(), attempts: 0 }
+    }
+}
+
+/// Queue one image for the OCR lane, dropping the oldest id when the deque is full.
+fn queue_ocr(record: &Record) {
+    OCR_INBOX.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.len() >= OCR_PENDING {
+            q.pop_front();
+        }
+        q.push_back(OcrJob::of(record));
+    });
 }
 
 /// Index what the message handler handed over. Bounded per tick; a failed write is reported, never
@@ -1119,9 +1169,153 @@ async fn index_inbox(enabled: bool) -> usize {
             Ok(()) => indexed += 1,
             Err(reason) => say!("index: write failed chat={} id={} reason={reason}", record.chat, record.id),
         }
+        // After the write, never before: the OCR lane attaches the text to this record, and a text
+        // attached to a record that does not exist yet is a message the agent will never find.
+        // `wanted` is the cheap policy (kind, media keys, the declared size) - no bytes are fetched
+        // here, and the real decision is taken again when the lane gets to it.
+        if crate::ocr::wanted(record).is_ok() {
+            queue_ocr(record);
+        }
     }
     say!("index: {indexed}/{} records written", batch.len());
     indexed
+}
+
+// ---- OCR lane ---------------------------------------------------------------------------------
+// An image message becomes searchable by what it shows: index lane -> bounded download (the record's
+// own media keys, the same `download_from_params` the query lane uses) -> the kernel's text reader
+// (`wa:kernel/vision`, `docs/WHATSAPP-OCR.md`) -> `index::attach_text(Source::Ocr)`. One image at a
+// time, on the main loop's own tick, because the reader is one warm worker: a second concurrent read
+// would queue inside the kernel for nothing. Logged with the job, the chat, the kind and a count -
+// never the text.
+
+/// Read one image and attach what it says to its record. Everything that can be decided from the
+/// index (is it still an image worth reading, is it still there) is `ocr::` - the same code a native
+/// test drives; this function is the two host calls around it.
+async fn ocr_one(job: OcrJob) -> ocr::Outcome {
+    let record = match index::load(&IndexKv, &job.chat, &job.id).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return ocr::Outcome::Skipped(ocr::Skip::NotFound),
+        Err(reason) => return ocr::Outcome::Retry(format!("index:{reason}")),
+    };
+    if let Err(skip) = ocr::wanted(&record) {
+        return ocr::Outcome::Skipped(skip);
+    }
+    // An earlier pass already learned this image has no legible text (or is too large): the word is
+    // in the index, so the image is not downloaded again to learn it a second time.
+    match index::unreadable(&IndexKv, &job.chat, &job.id).await {
+        Ok(Some(_word)) => return ocr::Outcome::Skipped(ocr::Skip::Unreadable),
+        Ok(None) => {}
+        Err(reason) => return ocr::Outcome::Retry(format!("index:{reason}")),
+    }
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else {
+        // Not connected: retryable, and the backlog pass picks it up after a re-link.
+        return ocr::Outcome::Retry("not_connected".into());
+    };
+    let Some(media) = record.media.as_ref() else { return ocr::Outcome::Skipped(ocr::Skip::NoMedia) };
+    let Some(media_key) = unhex(&media.media_key) else {
+        return ocr::Outcome::Skipped(ocr::Skip::NotDownloadable);
+    };
+    let params = whatsapp_rust::download::DownloadParams {
+        direct_path: media.direct_path.clone(),
+        media_key: Some(media_key),
+        file_sha256: unhex(&media.sha256).unwrap_or_default(),
+        file_enc_sha256: unhex(&media.enc_sha256),
+        file_length: media.size,
+        media_type: media_type(&media.kind),
+    };
+    let started = now_ms();
+    let bytes = match client.download_from_params(&params).await {
+        Ok(bytes) => bytes,
+        Err(error) => return ocr::Outcome::Retry(format!("download:{}", one_line(&error.to_string()))),
+    };
+    let downloaded = now_ms() - started;
+    let outcome = ocr::run(&IndexKv, &record, bytes, |bytes, mime| async move {
+        vision::read(bytes, mime).await.map(|reading| reading.text).map_err(|error| match error {
+            // A full reader queue is a "come back", not a refusal of this image.
+            KError::Again => "busy".to_string(),
+            other => reason_of(&other),
+        })
+    })
+    .await;
+    match &outcome {
+        ocr::Outcome::Attached { chars, bytes } => {
+            say!("ocr ready chat={} id={} chars={chars} bytes={bytes} download_ms={downloaded}", job.chat, job.id);
+            note(telemetry::Note::new("ready").about(&job.chat, &job.id).field("stage", "ocr").count("chars", *chars).count("bytes", *bytes));
+        }
+        ocr::Outcome::Skipped(skip) => say!("ocr skipped chat={} id={} reason={}", job.chat, job.id, skip.word()),
+        other => {
+            let reason = other.reason().unwrap_or("unknown");
+            say!("ocr {} chat={} id={} reason={}", other.word(), job.chat, job.id, one_line(reason));
+            note(telemetry::Note::new(if other.retry() { "retry" } else { "failed" }).about(&job.chat, &job.id).field("stage", "ocr").field("reason", reason));
+        }
+    }
+    outcome
+}
+
+/// One turn of the OCR lane: the image at the front of the inbox, read or refused. Returns true when
+/// one image was handled, so the caller knows the lane had work.
+async fn ocr_tick(cfg: &IndexConfig) -> bool {
+    if !cfg.ocr {
+        let dropped = OCR_INBOX.with(|q| {
+            let mut q = q.borrow_mut();
+            let n = q.len();
+            q.clear();
+            n
+        });
+        if dropped > 0 {
+            say!("ocr: off; {dropped} image(s) dropped unread");
+        }
+        return false;
+    }
+    let Some(job) = OCR_INBOX.with(|q| q.borrow_mut().pop_front()) else { return false };
+    let attempts = job.attempts;
+    let chat = job.chat.clone();
+    let id = job.id.clone();
+    let outcome = ocr_one(OcrJob { chat, id, attempts }).await;
+    // A permanent "there is nothing to read here" is remembered in the index, so the backlog pass
+    // does not download this image again every pass. Only the two words that are a property of the
+    // image itself: a record that lost its media keys or was revoked is re-filtered cheaply.
+    if let ocr::Outcome::Skipped(skip @ (ocr::Skip::NoText | ocr::Skip::TooLarge)) = &outcome {
+        if let Err(reason) = index::mark_unreadable(&IndexKv, &job.chat, &job.id, skip.word()).await {
+            say!("ocr: could not remember id={} reason={}", job.id, one_line(&reason));
+        }
+    }
+    // A transient failure gets one more attempt; a permanent answer is never queued again, and a
+    // third attempt would re-download the same bytes to learn the same thing.
+    if outcome.retry() && attempts + 1 < OCR_ATTEMPTS {
+        OCR_INBOX.with(|q| q.borrow_mut().push_back(OcrJob { chat: job.chat, id: job.id, attempts: attempts + 1 }));
+    }
+    true
+}
+
+/// Refill the OCR inbox from the index when it is empty: images that were indexed without text (the
+/// lane was off, the node restarted mid-download, or a history sync wrote them) are still read, one
+/// bounded scan per pass and never a re-download the media limits would refuse
+/// (`index::ocr_backlog`).
+async fn ocr_refill(cfg: &IndexConfig) {
+    if !cfg.ocr {
+        return;
+    }
+    let pending = OCR_INBOX.with(|q| q.borrow().len());
+    if pending > 0 {
+        return;
+    }
+    let backlog = match index::ocr_backlog(&IndexKv, cfg.ocr_budget).await {
+        Ok(backlog) => backlog,
+        Err(reason) => {
+            say!("ocr: backlog scan failed reason={}", one_line(&reason));
+            return;
+        }
+    };
+    let mut queued = 0usize;
+    for (chat, id) in backlog {
+        OCR_INBOX.with(|q| q.borrow_mut().push_back(OcrJob { chat, id, attempts: 0 }));
+        queued += 1;
+    }
+    if queued > 0 {
+        say!("ocr: {queued} image(s) still to read (backlog)");
+    }
 }
 
 /// One query job: take, decide, answer, settle. Returns true when a job was handled.
@@ -1805,6 +1999,7 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut last_outbox = Instant::now();
     let mut last_query = Instant::now();
     let mut last_prune = Instant::now();
+    let mut last_ocr = Instant::now();
     loop {
         for mutation in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_mutation(mutation).await;
@@ -1859,6 +2054,17 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         if index.enabled && last_prune.elapsed() >= index.prune_every {
             last_prune = Instant::now();
             prune_index(index).await;
+        }
+        // The OCR lane, after the index (a just-arrived photo is already a record) and before the
+        // next tick: one image per turn, because the kernel's reader is one warm worker. It is
+        // skipped while a swap is draining - a read in flight would outlive the deadline, and the
+        // next instance finds the image in the backlog.
+        if index.enabled && !drain::draining() {
+            ocr_tick(index).await;
+            if last_ocr.elapsed() >= index.ocr_every {
+                last_ocr = Instant::now();
+                ocr_refill(index).await;
+            }
         }
         if lifecycle::stopping() {
             say!("wa-whatsapp: stopping");

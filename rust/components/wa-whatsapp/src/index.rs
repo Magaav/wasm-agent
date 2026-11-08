@@ -187,6 +187,13 @@ fn key_pending(chat: &str, id: &str) -> String {
     format!("{PREFIX}pend/{chat}/{id}")
 }
 
+/// One image that answered a word making another read pointless (`no_text_detected`, too large): the
+/// word only. Without it the OCR lane's backlog pass would re-download the same screenshot every
+/// pass to learn the same thing (`docs/WHATSAPP-OCR.md`).
+fn key_ocr_seen(chat: &str, id: &str) -> String {
+    format!("{PREFIX}ocr/{chat}/{id}")
+}
+
 /// The word a record's age entry carries: `history` for a backfilled record, empty for a live one.
 ///
 /// The age index (`ix/all`) was written with an empty value until history sync existed, and nothing
@@ -273,6 +280,7 @@ async fn write<S: Store>(store: &S, record: &Record) -> Result<(), String> {
 /// record's, and are removed by [`apply_delete`]).
 async fn remove<S: Store>(store: &S, record: &Record) -> Result<(), String> {
     store.del(key_message(&record.chat, record.ts, &record.id).as_bytes()).await?;
+    store.del(key_ocr_seen(&record.chat, &record.id).as_bytes()).await?;
     store.del(key_id(&record.chat, &record.id).as_bytes()).await?;
     store.del(key_age(record.ts, &record.chat, &record.id).as_bytes()).await?;
     store.del(key_sender(&record.sender, record.ts, &record.id, &record.chat).as_bytes()).await?;
@@ -428,6 +436,58 @@ pub async fn attach_text<S: Store>(store: &S, chat: &str, id: &str, text: &str, 
 pub enum Source {
     Transcript,
     Ocr,
+}
+
+/// Remember that this image will not be read again, and why (`no_text_detected`, `image_too_large`).
+/// The word is a reason, never text. A later pass sees it and does not re-download the image.
+pub async fn mark_unreadable<S: Store>(store: &S, chat: &str, id: &str, word: &str) -> Result<(), String> {
+    store.set(key_ocr_seen(chat, id).as_bytes(), word.as_bytes()).await
+}
+
+/// Why this image is not worth reading again, if a previous pass decided it is not. One `get`.
+pub async fn unreadable<S: Store>(store: &S, chat: &str, id: &str) -> Result<Option<String>, String> {
+    Ok(store.get(key_ocr_seen(chat, id).as_bytes()).await?.map(|word| String::from_utf8_lossy(&word).into_owned()).filter(|word| !word.is_empty()))
+}
+
+/// The images a later OCR pass may still read: `(chat, id)` pairs, newest first, at most `budget`.
+///
+/// The backlog is scanned rather than queued: an image indexed without text (the pipeline was off,
+/// the component restarted mid-download, or the record arrived by a history sync) must still become
+/// searchable without the owner having to remember which photo it was. Walking `ix/k/image` and
+/// `ix/k/document` is one bounded scan per kind instead of a walk over every record, and the pair is
+/// returned, not the record: the caller decides what is worth reading (`ocr::wanted`) and downloads
+/// under the same media limits the query lane already enforces, so this function duplicates no
+/// policy - it only knows which kinds can carry an image.
+pub async fn ocr_backlog<S: Store>(store: &S, budget: usize) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    // The scan reads more candidates than it answers with: a candidate it skips (already read, no
+    // media keys) must not starve the pass, and four pages' worth is still a bounded read.
+    let scan = budget.saturating_mul(4).clamp(8, PAGE);
+    for kind in ["image", "document"] {
+        if out.len() >= budget {
+            break;
+        }
+        for candidate in collect(store, format!("{PREFIX}k/{kind}/"), scan).await? {
+            if out.len() >= budget {
+                break;
+            }
+            let Some(record) = load(store, &candidate.chat, &candidate.id).await? else { continue };
+            if record.deleted || !record.ocr.is_empty() {
+                continue;
+            }
+            if store.get(key_ocr_seen(&record.chat, &candidate.id).as_bytes()).await?.is_some() {
+                continue;
+            }
+            let Some(media) = record.media.as_ref().filter(|media| media.downloadable) else { continue };
+            // A document only carries an image when its own media type says so: a PDF is a text
+            // extraction problem, and queueing it would download it to learn that.
+            if kind == "document" && !media.mime.trim().to_ascii_lowercase().starts_with("image/") {
+                continue;
+            }
+            out.push((candidate.chat, candidate.id));
+        }
+    }
+    Ok(out)
 }
 
 // ---- reading -------------------------------------------------------------------------------------

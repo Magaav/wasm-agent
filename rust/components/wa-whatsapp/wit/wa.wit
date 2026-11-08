@@ -18,6 +18,11 @@ package wa:whatsapp@0.1.0;
 world whatsapp-service {
     include wa:kernel/service-component@0.2.0;
     import wa:queue/worker@0.1.0;
+    // The OCR reader (`wit/deps/kernel.wit`, `interface vision`): the image text the index needs to
+    // make a photo searchable by what it shows (`docs/WHATSAPP-OCR.md`). It is not one of the
+    // service world's imports - that world is the obligations every 0.2 service has - so a component
+    // that reads images opts in here, and the manifest's `ocr: true` is the grant behind the call.
+    import wa:kernel/vision@0.2.0;
     // The drain (`wit/deps/kernel.wit`, `interface drain`): a hot swap asks this instance to finish
     // the send or index operation in hand and report idle before it stops it, so an upgrade does not
     // retry a job whose effect was already half-applied (`docs/SERVICE-COMPONENTS.md`, "A swap waits
