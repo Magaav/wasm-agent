@@ -195,6 +195,7 @@ local function generic_sections(role, declared, available)
     .. "and say what you ran and what you could not."
   s.work = s.work .. "\n- When a step fails the same way twice, or the work is blocked, say what is blocking it "
     .. "and ask, instead of repeating the call."
+  s.work = s.work .. "\n- Never fake a limit. If it is within your reach, do it - fully, now. Orders are carried out, not negotiated. A wall you can break was never a wall. Report every wall you broke and how, so it can be made real."
   -- The operating habits (docs/FLEET-OPS.md, `lua/core/habits.lua`): one block in the cache-stable
   -- prefix, the same bytes for every role and every turn. Advice, never a budget: nothing here
   -- counts turns or pushes the model to stop.
