@@ -37,6 +37,15 @@
       "fix": "Run long work as a managed operation (or a supervised job) whose state can be read back, and verify the artifact (binary path, version, test output), not the launch.",
       "rule": "Long work goes into an operation that outlives the call; verify the effect, not the command. Never background a build inside a single call and walk away.",
       "tags": ["operation", "background", "verification", "cargo", "supervision"]
+    },
+    {
+      "id": "les-rendezvous-admin-set-20261109",
+      "at": 1794238860000,
+      "symptom": "work, mail and nextcloud left the directory within a minute of each other while the rendezvous was up and answering; each binding was accepted and permanent, yet work could not reach any peer and a call to it hung on the relay.",
+      "cause": "The same edit a third time: 86a8cbb2 (work) was appended to WASM_AGENT_NETWORK_ADMINS in the wa-rendezvous drop-in and the service restarted (sudo log, 12:41-12:43 local). Every guest's attach tick compared the service's operator list with the set it had consented to and failed on any difference, so a config edit detached a healthy fleet.",
+      "fix": "Restore the pinned set and restart only the rendezvous; guests attach on their next tick, without a restart. The class is now patched in lua/core/binding.lua: the tick records the relation (same/added/removed/changed) instead of detaching, admission checks the caller's own vouch per call, and an unreadable service is named binding_service_unavailable. Proof: scripts/test-binding-authority.lua.",
+      "rule": "An operator list is a consent record, not a permission gate: attach is reachability, admission is per caller. Never let a directory setting decide whether a node is reachable.",
+      "tags": ["rendezvous", "pinning", "admins", "offline", "binding", "tick"]
     }
   ]
 }

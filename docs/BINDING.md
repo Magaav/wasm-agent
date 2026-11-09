@@ -152,6 +152,28 @@ reachable. Everything else is unchanged: the pins still decide every call with n
 forged, stale, replayed or differently-bound attestation falls back to them, and the caller's own
 signature, freshness window and replay guard run on both bases ([MESH.md](MESH.md) §9 item 2).
 
+### When the service's operator set changes
+
+An operator list is a consent record, so a change to `WASM_AGENT_NETWORK_ADMINS` is compared, not
+obeyed. The attach tick reads `/service` and classifies the current list against the set this node
+consented to — `same`, `added`, `removed` or `changed` — and `wa bind status` reports it in
+`authority`, with the ids gained or lost and in words.
+
+- **added** — a new operator is vouched for. Every operator this node pinned is still vouched for, and
+  its own pins still decide who may call it, so the node keeps attaching and nothing is admitted that
+  was not admitted before.
+- **removed** / **changed** — a pinned operator lost the service's vouch. The node also keeps
+  attaching (the directory decides reachability, not permission), and `binding.authorize` refuses
+  exactly that caller: admission is per caller, by `(node_id, public_key)`, against the service's
+  current list. Re-binding is how a node consents to a different set; no config edit can do it.
+
+Before 2026-11-09 any difference failed the tick with `binding_service_authority_changed`, so
+appending one administrator took every guest that pinned the old set off the directory (work, mail and
+nextcloud; the third occurrence of that class — `skills/fleetops/incidents.json`). The tick is
+reachability, not permission: it registers and serves the relay, and the permission decision belongs
+to `binding.authorize`, once per call. An unreadable `/service` is still a failure and is named
+`binding_service_unavailable`, never `…_authority_changed`.
+
 ## Caller-side refusal reporting
 
 A peer refuses an unauthenticated call (`unknown_caller`, `forbidden_role`, `bad_signature`,
