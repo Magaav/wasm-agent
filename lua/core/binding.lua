@@ -176,10 +176,48 @@ function M.inspect(service)
   table.sort(pins,function(a,b)return a.node_id<b.node_id end)
   return {ok=true,service=origin,operators=pins,identity=identity(),scope='user-account-tools',hours=24,lifetimes=lifetimes}
 end
-local function same_pins(a,b)
-  if type(a)~='table' or type(b)~='table' or #a~=#b then return false end
-  for i,p in ipairs(a) do if p.node_id~=b[i].node_id or p.public_key~=b[i].public_key then return false end end
-  return true
+local function pin_set(pins)
+  local set={}
+  for _,p in ipairs(pins or {}) do
+    if type(p)=='table' and type(p.node_id)=='string' and type(p.public_key)=='string' then
+      set[p.node_id..'\0'..p.public_key]=true
+    end
+  end
+  return set
+end
+-- What the service's current operator list is, relative to the set this node consented to. `same` and
+-- `added` are both admissible: a new operator being vouched for does not take the vouch away from any
+-- operator this node pinned. `removed`/`changed` mean a pinned operator lost that vouch, which is the
+-- only case admission must refuse. Compared as (node_id, public_key) pairs, never by position: the
+-- order in WASM_AGENT_NETWORK_ADMINS is presentation, not consent.
+local function pins_relation(service_pins,pinned_pins)
+  local service,pinned=pin_set(service_pins),pin_set(pinned_pins)
+  local lost,gained=false,false
+  for k in pairs(pinned) do if not service[k] then lost=true end end
+  for k in pairs(service) do if not pinned[k] then gained=true end end
+  if lost then return gained and 'changed' or 'removed' end
+  return gained and 'added' or 'same'
+end
+local function same_pins(a,b) return pins_relation(a,b)=='same' end
+-- The service's current authority, read as an observation rather than as a verdict. Used by the attach
+-- tick and by every relayed call's admission. It used to be one boolean: any difference in the operator
+-- list stopped the outbound runtime, so adding one administrator detached a healthy fleet from the
+-- directory (measured 2026-11-09: work, mail and nextcloud, the third occurrence of this class). An
+-- unreadable service is still a failure; a different operator LIST is a fact the caller decides about.
+local function authority(s)
+  local checked=M.inspect(s.service)
+  if not checked.ok then return nil,'binding_service_unavailable',checked and checked.error end
+  local relation=pins_relation(checked.operators,s.operators)
+  local current,pinned=pin_set(checked.operators),pin_set(s.operators)
+  local lost,gained={},{}
+  for _,p in ipairs(s.operators or {}) do
+    if not current[tostring(p.node_id)..'\0'..tostring(p.public_key)] then lost[#lost+1]=tostring(p.node_id) end
+  end
+  for _,p in ipairs(checked.operators or {}) do
+    if not pinned[tostring(p.node_id)..'\0'..tostring(p.public_key)] then gained[#gained+1]=tostring(p.node_id) end
+  end
+  return {relation=relation,operators=checked.operators,service=checked.service,
+    lost=lost,gained=gained,admissible=(relation=='same' or relation=='added')}
 end
 function M.begin(preview,consent,renew,lifetime)
   lifetime=lifetime or 'standard'
@@ -257,6 +295,9 @@ function M.status()
   local v,err=request_status(s);if not v then return {ok=false,active=false,error='binding_status_unavailable',detail=err} end
   if not valid_reply(s,v) then return {ok=false,active=false,error='binding_response_identity_mismatch'} end
   local transport=decode(host.binding_transport('status')) or {}
+  -- The service's current operator set, reported, never used to hide the rest of this answer: a changed
+  -- list is the fact an operator needs to see, and the calls it permits are decided per call.
+  local observed,auth_error=authority(s)
   local own,lookup_error=http(s.service,'GET','/lookup?node_id='..s.request.node_id,'lookup')
   local registered=own and own.public_key==s.request.public_key and own.online==true or false
   local active=s.active==true and s.consent==true and s.expires_at>host.now() and v.binding.state=='accepted'
@@ -265,12 +306,17 @@ function M.status()
   -- - the one fact that decides whether this node can do anything at all (measured 2026-11-01: a
   -- permanent grant that was silent for an hour while every field read as if it were fine). Name it.
   local note
+  if observed and observed.relation=='added' then
+    note='the service now vouches for operators this node did not consent to ('..table.concat(observed.gained,',')..'); the pins it consented to are unchanged, and this node keeps attaching'
+  elseif observed and (observed.relation=='removed' or observed.relation=='changed') then
+    note='a pinned operator is no longer vouched for by the service ('..table.concat(observed.lost,',')..'); calls from it are refused until this node is re-bound'
+  end
   if v.binding.state=='accepted' and s.phase~='accepted' then
     note='accepted at the registry, but this node has not attached it yet: no outbound runtime has run the tick (phase '..tostring(s.phase)..')'
   elseif v.binding.state=='pending' and s.request.pairing_expires_at<=host.now() then
     note='no administrator has accepted this request and the ten-minute pairing window has closed; submit a new request'
   end
-  return {ok=true,state=v.binding.state,active=active,registered=registered,attached=registered and own.relay_attached==true or false,lookup_error=lookup_error,local_role_preserved=true,phase=s.phase,attachment_note=note,pairing_expires_at=s.request.pairing_expires_at,network_role=s.network_role,node_id=s.request.node_id,code=s.request.code,expires_at=s.expires_at,lifetime=lifetime_of(s),consent=M.lifetime_label(s),transport=transport}
+  return {ok=true,state=v.binding.state,active=active,registered=registered,attached=registered and own.relay_attached==true or false,lookup_error=lookup_error,local_role_preserved=true,phase=s.phase,attachment_note=note,authority=observed and {relation=observed.relation,vouched=#observed.operators,consented=#(s.operators or {}),gained=observed.gained,lost=observed.lost} or {ok=false,error=auth_error},pairing_expires_at=s.request.pairing_expires_at,network_role=s.network_role,node_id=s.request.node_id,code=s.request.code,expires_at=s.expires_at,lifetime=lifetime_of(s),consent=M.lifetime_label(s),transport=transport}
 end
 function M.profile(include_inactive)
   local s,err=M.saved()
@@ -305,7 +351,13 @@ function M.authorize(id,key)
   local s=M.profile();if not s then return nil end
   local pinned=false;for _,p in ipairs(s.operators) do if p.node_id==id and p.public_key==key then pinned=true end end
   if not pinned then return nil end
-  local service=M.inspect(s.service);if not service.ok or not same_pins(service.operators,s.operators) then return nil end
+  -- Admission is per caller: the service must still vouch for this exact (node_id, public_key) pair.
+  -- A removed operator is refused; whether some other pinned operator was also removed is not this
+  -- caller's business and must not stop the node from answering the ones still vouched for.
+  local service=M.inspect(s.service);if not service.ok then return nil end
+  local vouched=false
+  for _,p in ipairs(service.operators or {}) do if p.node_id==id and p.public_key==key then vouched=true end end
+  if not vouched then return nil end
   local v=request_status(s);if not valid_reply(s,v) or v.binding.state~='accepted' or v.binding.request.expires_at<=host.now() then return nil end
   return {node_id=id,public_key=key,role='master',name=id}
 end
@@ -516,7 +568,8 @@ function M.tick()
     local v,err=request_status(s);if not v then return failure('binding_status_unavailable',err) end
     if not valid_reply(s,v) then return failure('binding_response_identity_mismatch') end
     if v.binding.state=='accepted' then
-      local checked=M.inspect(s.service);if not checked.ok or not same_pins(checked.operators,s.operators) then return failure('binding_service_authority_changed') end
+      local auth0,auth0_error,auth0_detail=authority(s)
+      if not auth0 then return failure(auth0_error,auth0_detail) end
       local next={};for k,x in pairs(s) do next[k]=x end;next.active=true;next.phase='accepted';next.revision=v.binding.revision
       s,problem=cas(s,next);if not s then return failure(problem) end
       -- Bound: the cluster's connectors are usable from this node at once (lua/core/federation.lua).
@@ -525,7 +578,11 @@ function M.tick()
     elseif s.request.pairing_expires_at<=host.now() then return {state='pairing_expired'}
     else return {state='pending',code=s.request.code} end
   end
-  local checked=M.inspect(s.service);if not checked.ok or not same_pins(checked.operators,s.operators) then return failure('binding_service_authority_changed') end
+  -- Attaching is reachability, not permission: every inbound call is still decided by M.authorize
+  -- (the roster, else the pins). An operator list that gained a name used to stop this tick and detain
+  -- a healthy node; it is now reported on the result and the node keeps answering its operators.
+  local observed,auth_error,auth_detail=authority(s)
+  if not observed then return failure(auth_error,auth_detail) end
   local v,err=request_status(s);if not valid_reply(s,v) or v.binding.state~='accepted' then return failure('binding_approval_unavailable',err) end
   if not M.last_heartbeat or host.now()-M.last_heartbeat>=60 then
     -- Same v2 announcement as node.rs: the signature covers the name and the (empty) endpoint list.
@@ -557,6 +614,7 @@ function M.tick()
     local sent,e=http(s.service,'POST','/relay/respond','relay-respond',{node_id=s.request.node_id,id=r.id,status=status,body=body})
     if not sent then return failure('binding_response_submission_unknown',e) end
   end
-  return {state='attached',registered=true,attached=true,node_id=s.request.node_id}
+  return {state='attached',registered=true,attached=true,node_id=s.request.node_id,
+    authority=observed.relation,authority_gained=observed.gained,authority_lost=observed.lost}
 end
 return M
