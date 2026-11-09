@@ -174,6 +174,22 @@ reachability, not permission: it registers and serves the relay, and the permiss
 to `binding.authorize`, once per call. An unreadable `/service` is still a failure and is named
 `binding_service_unavailable`, never `…_authority_changed`.
 
+### A network administrator cannot be bound
+
+The registry refuses a request whose subject is a network administrator
+(`binding_administrator_identity_forbidden`, 403): an administrator vouches for bindings, it is not
+admitted by one. Two consequences matter once every master is an administrator (operator decision,
+2026-10-05):
+
+- **Reachability.** `/relay/send` requires an accepted binding on *both* ends, so an administrator
+  has no relay address. A master that must be *called* needs a direct endpoint: a reachable address
+  in the signed roster (`wa fleet push-roster`, which needs the fleet key) or in the node's policy.
+  The default bind is localhost-only and reachable by no peer.
+- **Re-binding after an operator change.** A guest is re-bound by `unbind` -> `bind` -> an
+  administrator accepting the request (`ACCEPT-PERMANENT`). The request pins the service's current
+  operator list, so adding an operator means re-binding each guest that must admit it. On
+  2026-10-05 that is how `work` was admitted to `mail` and `nextcloud`.
+
 ## Caller-side refusal reporting
 
 A peer refuses an unauthenticated call (`unknown_caller`, `forbidden_role`, `bad_signature`,
