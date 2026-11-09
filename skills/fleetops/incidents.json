@@ -46,6 +46,15 @@
       "fix": "Restore the pinned set and restart only the rendezvous; guests attach on their next tick, without a restart. The class is now patched in lua/core/binding.lua: the tick records the relation (same/added/removed/changed) instead of detaching, admission checks the caller's own vouch per call, and an unreadable service is named binding_service_unavailable. Proof: scripts/test-binding-authority.lua.",
       "rule": "An operator list is a consent record, not a permission gate: attach is reachability, admission is per caller. Never let a directory setting decide whether a node is reachable.",
       "tags": ["rendezvous", "pinning", "admins", "offline", "binding", "tick"]
+    },
+    {
+      "id": "les-mesh-relay-unbound-20261109",
+      "at": 1794248500000,
+      "symptom": "With the roster installed and mesh enabled, a peer call became worse than before: openclaw -> mail answered 'mesh call from=2b941f3d to=f6195be1 levels=1->2 verb=read decision=deny reason=unreachable:read_failed:Connection reset by peer (os error 104) transport=relay', and the call failed instead of falling back to the pins it used before. work -> mail stayed remote_refused, and a push-roster from openclaw to work was denied with reason=hierarchy_denied (openclaw level 1 calling up to work level 0).",
+      "cause": "Two measured limits, not one. (1) No node has a roster address (all addresses: []), so every mesh call uses the relay hop, and that hop resets the connection for a caller with no binding (openclaw is an unbound host); a mesh denial is an answer, so the caller no longer falls back to pins. (2) The roster hierarchy is strict: a level-1 node cannot call a level-0 node, so openclaw cannot reach work or wasm_the_first.",
+      "fix": "Revert mesh.enabled on openclaw (pinned calls work again) and keep the guests' installed roster: it is inert while no mesh call is made. To finish the direct/mesh path: either give the roster real host:port addresses and re-sign it with the fleet private key (not present on work, openclaw or wasm_the_first), or fix the relay's mesh hop to accept an unbound caller, and set every master to level 0 in a re-signed roster for master<->master.",
+      "rule": "Enabling mesh on a fleet whose roster has no addresses can reduce reach: a mesh denial does not fall back to pins. Prove a mesh call between two real nodes before enabling it fleet-wide, and treat 'all addresses empty' as 'relay only'.",
+      "tags": ["mesh", "relay", "roster", "hierarchy", "addresses", "unbound"]
     }
   ]
 }
