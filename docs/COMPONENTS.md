@@ -170,6 +170,29 @@ patch. Two things are Windows-specific and measured: at the default 16 jobs cc-r
 the script caps `CARGO_BUILD_JOBS=6` on a Windows host; and `strip --strip-all` removed 16 bytes, so
 the binaries are what they are (a release profile keeps no symbols worth stripping).
 
+**How a landed commit gets its binary (the normal path).** A commit that touches a compiled input needs a
+`node-<sha12>` release before a node that cannot compile can install it, so a landing is not finished until
+that release exists. The last step of a landing (`skills/git-orchestrator/SKILL.md`,
+`docs/FACTORY.md`) is one command on the canonical checkout, after `origin/main` has been read back:
+
+```
+CARGO_TARGET_DIR=<canonical>/build/node-binaries/target \
+  bash scripts/publish-node-binaries.sh --ensure --publish \
+    --target aarch64-unknown-linux-gnu --commit "$(git -C <canonical> rev-parse HEAD)"
+```
+
+`--ensure` asks the published releases whether one already carries this commit's `compiled_inputs=`
+digest - the same rule the deploy's fallback uses - so a Lua-only or docs-only landing answers in seconds
+and publishes nothing, while a commit that changed a compiled input builds once. `--publish` creates
+`node-<sha12>` with the manifest and both binaries, or uploads over it, so re-running the step is
+idempotent. `CARGO_TARGET_DIR` keeps the cross target bounded under the untracked `build/` directory
+instead of mixing it into the native `rust/target`. Measured on wasm_the_first 2026-11-10
+(16 threads, `CARGO_BUILD_JOBS=6`): **73 s** for `wa` and `wa-sentinel` together (42.8 s + 29.0 s) with
+the dependency graph already built; a cold graph had reached 616 compiled dependencies at the 5-minute
+mark, so the first build after a toolchain or cache reset pays the ~7 min in the table above. A covered
+commit answered in **5.9 s** (release list plus one manifest read, nothing built). There is no watcher
+and no recurring wake behind this: the landing runs it, and nothing else does.
+
 **A cross build does not embed the code-mode assets by default** - `rust/wa-host/build.rs` exempts a
 cross build from the `WA_CODEMODE_BUILD_ASSETS` rule, because a cross build is not the *build host's*
 artifact. It is the node's, though, and a node without them starts every run with
