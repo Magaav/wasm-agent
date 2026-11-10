@@ -1,27 +1,34 @@
 -- "Update available (<short sha>): run wa update or /update" - the banner Claude Code and pi show.
 --
--- This is NOT `lua/core/release.lua`. That module compares release *tags* (`v0.2.0`) and answers a
--- node installed from a release bundle; this one compares the node's installed *commit* with the
--- newest `node-<sha12>` release of its own repository - the per-commit binaries `scripts/lib/
--- node-binaries.sh` publishes and the deploy downloads. A tree install records a commit, not a tag,
--- so the tag feed cannot answer for it; the commit feed can.
+-- This is NOT `lua/core/release.lua`. That module compares release *tags* (`v0.2.0`); this one
+-- answers the question the sentence asks: can this machine install something newer, and what is it?
+--
+-- TWO CHANNELS, because `wa update` has two:
+--
+--   * **tree** (`runtime-worktree.txt` names a checkout): the update is a build of the tree's
+--     `origin/main`. The banner names that commit, and never a release. No feed is read at all.
+--   * **release** (no tree): the update is a published `node-<sha12>` release, but only one that
+--     carries the manifest, node and sentinel assets for THIS machine's target triple. An
+--     aarch64-only release is not an update for x86_64, however new it is.
 --
 -- Five facts shape the whole module:
 --
 --   1. **Installed** is `installed.txt` (`commit=`, `binary_source=`, `binary_release=`), read through
 --      `lua/core/update.lua`'s own reader so a check and a deploy cannot disagree about what landed.
---   2. **Latest** is the newest non-draft release whose tag is `node-<twelve hex>`; a version tag
---      (`v0.2.0`) or an Android bundle (`wa-android-<commit>`) is not this node's binary release and
---      is skipped. The list is newest-first as GitHub returns it; the module never re-sorts it.
---   3. **No fetch.** The check never runs `git fetch` and never merges. Local git is consulted for one
---      thing only - whether the installed commit is an ancestor of the release commit - because that
---      is the difference between "behind" and "this tree is ahead of the feed", and the objects are
---      already on disk or the question stays `unknown`.
---   4. **One network call per fifteen minutes, shared by every process.** The cache
---      `<state>/update-check.json` holds the feed (never the verdict): the state is recomputed on
---      every read from the cached feed and the *current* installed record, so the banner disappears
---      the moment the node runs the release, without waiting for the next call. The slot is claimed
---      (written) before the request, so a crash or a timeout cannot become a retry loop.
+--   2. **Latest** is the tree's `origin/main` on the tree channel, or the first `node-<twelve hex>`
+--      release in the feed with this target's three assets on the release channel. A version tag
+--      (`v0.2.0`), an Android bundle (`wa-android-<commit>`) and a release with no asset for this
+--      machine are not candidates. The list is newest-first as GitHub returns it.
+--   3. **No fetch.** The check never runs `git fetch` and never merges. On the release channel local
+--      git answers whether the installed commit is an ancestor of the release commit; on the tree
+--      channel it answers the same question against `origin/main`. An unanswerable question is
+--      `unknown`, never a guess.
+--   4. **One network call per fifteen minutes, shared by every process - on the release channel.**
+--      The cache `<state>/update-check.json` holds the published window (including the asset names,
+--      never the verdict): the state is recomputed on every read from that window and the *current*
+--      installed record, so the banner disappears the moment the node runs the new commit, without
+--      waiting for the next call. The tree channel reads no cache and makes no request. The slot is
+--      claimed (written) before the request, so a crash or a timeout cannot become a retry loop.
 --   5. **A failed check is silent and visible in the state.** `unknown` with a named reason is an
 --      answer; "up to date" is only ever `current`, and only when the commits are equal.
 --
@@ -33,11 +40,15 @@ local M = {}
 
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
+local platform = dofile("lua/core/platform.lua")
 -- The one reader of the install record and of the runtime tree. `update.lua` does not load this
 -- module, so the dependency is one-way.
 local update = dofile("lua/core/update.lua")
 
-M.SCHEMA = 1
+-- Schema 2 added the release's asset names (the window, not just the newest tag): a `node-<sha12>`
+-- release can exist for one architecture only, and a schema-1 cache cannot say whether this machine
+-- can install it. An old cache is refused rather than guessed at, which costs one immediate refresh.
+M.SCHEMA = 2
 M.TOPIC = "kernel.update.available"
 M.CACHE_MS = 15 * 60 * 1000
 -- Reads of the cache during one process are memoised for this long: the CLI polls nothing, and a
@@ -45,6 +56,14 @@ M.CACHE_MS = 15 * 60 * 1000
 M.READ_MEMO_MS = 60 * 1000
 M.DEFAULT_REPO = "Magaav/wasm-agent"
 M.DEFAULT_PER_PAGE = 5
+-- The target triples the prebuilt channel names its assets with (`scripts/lib/node-binaries.sh`).
+-- `host.platform().arch` is Rust's `std::env::consts::ARCH`; the aliases are there because the
+-- kernel, a bootstrap and a test all spell the same machine differently. A platform this table does
+-- not name has no prebuilt channel; a tree install still updates by building.
+M.TARGETS = {
+  x86_64 = "x86_64-unknown-linux-gnu", amd64 = "x86_64-unknown-linux-gnu",
+  aarch64 = "aarch64-unknown-linux-gnu", arm64 = "aarch64-unknown-linux-gnu",
+}
 -- "Update available (abc123456789): run wa update or /update" - one wording, used by the CLI footer,
 -- the session-start line and the window, so the three surfaces cannot drift (docs/RELEASE-UPDATE.md).
 M.LINE = "Update available (%s): run wa update or /update"
@@ -155,18 +174,64 @@ function M.parse_feed(text)
     if type(entry) == "table" and entry.draft ~= true then
       local sha = M.parse_release_tag(entry.tag_name)
       if sha then
+        -- The asset names are the installability fact: a release with only
+        -- `wa-aarch64-unknown-linux-gnu-<sha>` cannot be installed on an x86_64 node. Names only -
+        -- no download URL, no size, no release notes, so the cache stays a fact about the feed.
+        local assets = {}
+        for _, asset in ipairs(type(entry.assets) == "table" and entry.assets or {}) do
+          local name = trim(type(asset) == "table" and asset.name or "")
+          if name ~= "" then assets[name] = true end
+        end
         list[#list + 1] = {
           tag = trim(entry.tag_name),
           sha12 = sha,
           name = trim(entry.name),
           url = trim(entry.html_url),
           published_at = trim(entry.published_at),
+          assets = assets,
         }
       end
     end
   end
   if #list == 0 then return nil, "no_node_release" end
   return list
+end
+
+-- ---- what this machine can install ------------------------------------------
+
+-- The triples this host can run. `WA_NODE_TARGET` wins (a cross-built node, a test naming a triple);
+-- otherwise `host.platform()` is the one source of os and arch. A non-Linux host has no prebuilt
+-- channel at all: an install there is a build from a tree, if the node has one.
+function M.target(options)
+  local o = options or {}
+  local explicit = trim(o.target ~= nil and tostring(o.target) or getenv("WA_NODE_TARGET"))
+  if explicit ~= "" then return explicit end
+  local info = platform.info()
+  local os_name = trim(o.os ~= nil and tostring(o.os) or (info.os or ""))
+  local arch = trim(o.arch ~= nil and tostring(o.arch) or (info.arch or ""))
+  if os_name ~= "linux" then return nil end
+  return M.TARGETS[arch:lower()]
+end
+
+-- A release is installable here when it carries the three files the prebuilt path verifies for this
+-- target: the manifest that pins the release's identity, the node and the supervisor. A release with
+-- only the aarch64 row is not installable on x86_64, however new it is.
+function M.installable(entry, target)
+  if type(entry) ~= "table" or type(entry.assets) ~= "table" then return false end
+  if not target or target == "" or not entry.sha12 then return false end
+  return entry.assets["node-" .. entry.sha12 .. ".manifest"] == true
+    and entry.assets["wa-" .. target .. "-" .. entry.sha12] == true
+    and entry.assets["wa-sentinel-" .. target .. "-" .. entry.sha12] == true
+end
+
+-- The newest release this machine can install, or nil. The feed is newest-first, so the first
+-- installable entry is the answer; entries without an asset for this target are skipped, not treated
+-- as a reason to tell the reader about a download that would fail.
+function M.newest_installable(feed, target)
+  for _, entry in ipairs(type(feed) == "table" and feed or {}) do
+    if M.installable(entry, target) then return entry end
+  end
+  return nil
 end
 
 -- `git@github.com:owner/repo.git`, `https://github.com/owner/repo`, or a local mirror path: only the
@@ -316,36 +381,67 @@ end
 --   newer   -> ahead    (local git proves the installed commit is a descendant of the release)
 --   unknown -> unknown  (no record, no feed, or a commit the feed does not mention and local git
 --                        cannot order - a tree whose unpublished commits may be ahead or behind)
+--
+-- The comparison is against a release **this machine can install** (`o.installable`, or the first
+-- feed entry whose assets name this target). A newer aarch64-only release is not a reason to tell an
+-- x86_64 node to update, and a prebuilt install that is actually ahead of the feed is not "behind"
+-- just because its release fell out of the five-entry window - local ancestry answers that first.
+-- The third return value is the release compared against, so a caller does not have to recompute it.
 function M.compare(identity, feed, options)
   local o = options or {}
   if not identity or not identity.sha12 then return "unknown", "unknown_installed_commit" end
   if type(feed) ~= "table" or #feed == 0 then return "unknown", "feed_unavailable" end
-  local latest = feed[1]
-  if M.same_commit(identity.sha12, latest.sha12) then return "equal", "same_commit" end
+  local target = o.target
+  if target == nil then target = M.target(o) end
+  local latest = o.installable or M.newest_installable(feed, target)
+  if not latest then
+    -- Nothing in the window can be installed here. "Ahead" and "current" remain provable against the
+    -- newest published entry; anything else is not the update banner's claim to make.
+    local newest = feed[1]
+    if M.same_commit(identity.sha12, newest.sha12) then return "equal", "same_commit" end
+    if type(o.order) == "function" then
+      local verdict = o.order(identity, newest)
+      if verdict == "newer" then return "newer", "local_ancestry" end
+      if verdict == "equal" then return "equal", "local_ancestry" end
+    end
+    return "unknown", "no_installable_asset"
+  end
+  if M.same_commit(identity.sha12, latest.sha12) then return "equal", "same_commit", latest end
+  -- Local ancestry first: it is the only fact that can tell an older prebuilt install from one that
+  -- is newer than the release its own release name no longer appears beside.
+  if type(o.order) == "function" then
+    local verdict = o.order(identity, latest)
+    if verdict == "older" or verdict == "newer" or verdict == "equal" then
+      return verdict, "local_ancestry", latest
+    end
+  end
   for index = 2, #feed do
-    if M.same_commit(identity.sha12, feed[index].sha12) then return "older", "installed_release_in_window" end
+    if M.same_commit(identity.sha12, feed[index].sha12) then
+      return "older", "installed_release_in_window", latest
+    end
   end
   -- A prebuilt install names a published release; if that release is not among the newest ones, every
   -- one of those is newer than it.
-  if identity.prebuilt then return "older", "installed_release_older_than_window" end
+  if identity.prebuilt then return "older", "installed_release_older_than_window", latest end
   -- A tree install: the unanswerable case is a commit the feed does not carry. Local ancestry (no
   -- network) turns it into a fact when both objects are on disk; otherwise it stays unknown rather
   -- than guessing "behind" at the tree that is actually ahead of the last release.
-  if type(o.order) == "function" then
-    local verdict = o.order(identity, latest)
-    if verdict == "older" or verdict == "newer" then return verdict, "local_ancestry" end
-  end
-  return "unknown", "installed_not_in_release_feed"
+  return "unknown", "installed_not_in_release_feed", latest
 end
 
 local STATE = { older = "behind", equal = "current", newer = "ahead", unknown = "unknown" }
 
 function M.verdict(identity, feed, comparison, reason, meta)
   meta = meta or {}
+  local latest = meta.latest or (type(feed) == "table" and feed[1] or nil)
   local verdict = {
     schema = M.SCHEMA,
     state = STATE[comparison] or "unknown",
     reason = reason,
+    -- `tree` is origin/main of a buildable checkout; `release` is a published binary with an asset
+    -- for this machine. The channel is part of the fact: "behind" means something different in each.
+    channel = meta.channel,
+    target = meta.target,
     repo = meta.repo,
     installed = identity and {
       commit = identity.commit,
@@ -359,19 +455,27 @@ function M.verdict(identity, feed, comparison, reason, meta)
     transport = meta.transport,
     error = meta.error,
   }
-  if type(feed) == "table" and feed[1] then
-    verdict.latest = feed[1]
-    verdict.window = #feed
-  end
-  if verdict.state == "behind" and verdict.latest then
-    verdict.line = string.format(M.LINE, verdict.latest.sha12)
-    verdict.message = "installed " .. tostring((identity and identity.sha12) or "?") ..
-      " is behind the newest published release " .. tostring(verdict.latest.tag)
+  if latest then verdict.latest = latest end
+  if type(feed) == "table" and #feed > 0 then verdict.window = #feed end
+  local installed = tostring((identity and identity.sha12) or "?")
+  if verdict.state == "behind" and latest and latest.sha12 then
+    verdict.line = string.format(M.LINE, latest.sha12)
+    verdict.message = "installed " .. installed .. " is behind " ..
+      (meta.channel == "tree" and "origin/main " or "the newest installable release ") .. tostring(latest.tag or latest.sha12)
   elseif verdict.state == "current" then
-    verdict.message = "installed " .. tostring((identity and identity.sha12) or "?") .. " is the newest published release"
+    verdict.message = "installed " .. installed ..
+      (meta.channel == "tree" and " is origin/main" or " is the newest installable release")
   elseif verdict.state == "ahead" then
-    verdict.message = "installed " .. tostring((identity and identity.sha12) or "?") ..
-      " is newer than the newest published release " .. tostring(verdict.latest and verdict.latest.tag or "?")
+    verdict.message = "installed " .. installed ..
+      (meta.channel == "tree" and " is ahead of origin/main " or " is newer than the newest installable release ") ..
+      tostring(latest and (latest.tag or latest.sha12) or "?")
+  elseif reason == "no_installable_asset" then
+    verdict.message = "no published release carries a " .. tostring(meta.target or "this machine") ..
+      " binary, so there is nothing this machine can install"
+  elseif reason == "tree_dirty" then
+    verdict.message = "the runtime tree has uncommitted changes, so wa update would refuse; nothing is offered"
+  elseif reason == "tree_origin_unknown" then
+    verdict.message = "the runtime tree names no origin/main, so it is unknown what a build would install"
   else
     verdict.message = "cannot tell whether this node is behind: " .. tostring(reason or "feed_unavailable")
   end
@@ -399,7 +503,9 @@ local function read_cache(path)
   local ok, cached = pcall(json.decode, text)
   if not ok or type(cached) ~= "table" then return nil end
   if tonumber(cached.schema) ~= M.SCHEMA then return nil end
-  if type(cached.latest) ~= "table" or not M.parse_release_tag(cached.latest.tag) then
+  local latest = type(cached.latest) == "table" and cached.latest
+    or (type(cached.window) == "table" and cached.window[1] or nil)
+  if type(latest) ~= "table" or not M.parse_release_tag(latest.tag) then
     -- A feed with no usable latest is no feed: the verdict then says `unknown` rather than comparing
     -- against a version nobody published (the release cache's rule, applied here).
     if cached.checked_at ~= nil then return { checked_at = tonumber(cached.checked_at), last_ok_at = tonumber(cached.last_ok_at), error = cached.error } end
@@ -416,7 +522,29 @@ end
 
 -- The cached feed, rebuilt into the list shape the comparison takes. There is no request here.
 local function feed_from_cache(cached)
-  if not cached or type(cached.latest) ~= "table" then return nil end
+  if not cached then return nil end
+  -- Schema 2 stores the whole published window, asset names included, because choosing the newest
+  -- release this machine can install needs the assets of *every* window entry, not only the newest
+  -- tag. The entries are facts about the feed; the verdict is still recomputed from the record.
+  if type(cached.window) == "table" then
+    local feed = {}
+    for _, entry in ipairs(cached.window) do
+      if type(entry) == "table" then
+        local sha = M.parse_release_tag(entry.tag)
+        if sha then
+          feed[#feed + 1] = {
+            tag = trim(entry.tag), sha12 = sha, name = trim(entry.name),
+            url = trim(entry.url), published_at = trim(entry.published_at),
+            assets = type(entry.assets) == "table" and entry.assets or {},
+          }
+        end
+      end
+    end
+    if #feed > 0 then return feed end
+  end
+  -- A hand-written fixture from before schema 2. It carries no asset names, so no entry in it can be
+  -- proven installable here; the shape survives only so an old fixture still parses.
+  if type(cached.latest) ~= "table" then return nil end
   local latest = cached.latest
   local sha = M.parse_release_tag(latest.tag)
   if not sha then return nil end
@@ -445,6 +573,7 @@ local function claim(cached, repo, now)
     repo = repo,
     latest = cached and cached.latest or nil,
     order = cached and cached.order or nil,
+    window = cached and cached.window or nil,
     transport = cached and cached.transport or nil,
     error = nil,
     pending = true,
@@ -469,6 +598,37 @@ function M.order_by_ancestry(tree, identity, latest)
   if ancestor(installed, release) then return "older" end
   if ancestor(release, installed) then return "newer" end
   return nil
+end
+
+-- ---- the buildable-tree channel --------------------------------------------
+
+-- The commit `wa update` would build: the tree's local `origin/main` (then `main`), and no fetch -
+-- the banner is not allowed to make one. A dirty tree is refused by `update.lua` before it queues,
+-- so it is not an install this banner may offer either. Returns `sha12, ref` or `nil, reason`.
+function M.tree_target(tree)
+  if not tree or tree == "" then return nil, "tree_unavailable" end
+  local path = slashes(tree)
+  local status = shell("git -C " .. quote(path) .. " status --porcelain 2>/dev/null")
+  if not status or tonumber(status.code) ~= 0 then return nil, "tree_unreadable" end
+  if trim(status.stdout) ~= "" then return nil, "tree_dirty" end
+  for _, ref in ipairs({ "refs/remotes/origin/main", "refs/heads/main" }) do
+    local result = shell("git -C " .. quote(path) .. " rev-parse --short=12 " .. ref .. " 2>/dev/null")
+    if result and tonumber(result.code) == 0 then
+      local sha = trim(result.stdout):lower()
+      if #sha >= 7 and not sha:find("[^0-9a-f]") then return sha, ref end
+    end
+  end
+  return nil, "tree_origin_unknown"
+end
+
+-- The tree's answer is the same four-valued comparison, with `origin/main` as the candidate. Local
+-- ancestry is the only fact needed; there is no release and no asset because the install is a build.
+function M.tree_compare(identity, target, order)
+  if not identity or not identity.commit or not target then return "unknown", "tree_origin_unknown" end
+  if M.same_commit(identity.commit, target) then return "equal", "same_commit" end
+  local verdict = type(order) == "function" and order(identity, { sha12 = target }) or nil
+  if verdict == "older" or verdict == "newer" or verdict == "equal" then return verdict, "local_ancestry" end
+  return "unknown", "tree_origin_unknown"
 end
 
 -- ---- the bus ----------------------------------------------------------------
@@ -510,6 +670,48 @@ function M.check(options)
   local record = o.record or update.installed_record(install)
   local identity = M.identity(record)
   local repo = o.repo or M.repo(tree)
+  local target = M.target(o)
+
+  -- A node with a buildable tree updates by building it: `wa update` fetches origin and deploys the
+  -- tree's main. The release feed is not consulted at all on that path, which is what keeps an
+  -- aarch64-only release from being advertised to an x86_64 node. `o.tree_main` lets a test name the
+  -- ref without a git fixture; a real check reads it (and the dirty flag) locally.
+  local tree_main, tree_ref, tree_reason
+  if o.tree_main ~= nil then
+    tree_main = trim(o.tree_main):lower()
+    if tree_main == "" then tree_main = nil end
+    tree_ref = "injected"
+    tree_reason = o.tree_reason
+  elseif tree and tree ~= "" then
+    local sha, ref_or_reason = M.tree_target(tree)
+    tree_main = sha
+    if sha then tree_ref = ref_or_reason else tree_reason = ref_or_reason end
+  end
+  if tree_main and (#tree_main < 7 or tree_main:find("[^0-9a-f]")) then
+    tree_main, tree_reason = nil, "tree_origin_unknown"
+  end
+  if tree and tree ~= "" and (tree_main ~= nil or tree_reason ~= nil) then
+    local order = o.order
+    if order == nil then
+      order = function(installed, latest) return M.order_by_ancestry(tree, installed, latest) end
+    end
+    local comparison, compare_reason
+    local latest
+    if tree_main then
+      latest = { tag = "origin/main", name = "origin/main", sha12 = tree_main }
+      comparison, compare_reason = M.tree_compare(identity, tree_main, order)
+    else
+      comparison, compare_reason = "unknown", tree_reason or "tree_origin_unknown"
+    end
+    local verdict = M.verdict(identity, nil, comparison, compare_reason, {
+      repo = repo, checked_at = now, cached = false, channel = "tree", target = target,
+      latest = latest, error = tree_reason,
+    })
+    verdict.tree, verdict.fresh, verdict.attempted = tree, false, false
+    verdict.tree_ref = tree_ref
+    return verdict
+  end
+
   local path = o.cache_path or M.cache_path(o.state_dir)
   local cached = read_cache(path)
   -- A cache written for another repository (a mirror switched, an origin changed) names releases this
@@ -531,7 +733,7 @@ function M.check(options)
       feed, reason, transport = fetched, nil, used
       write_cache(path, {
         schema = M.SCHEMA, checked_at = now, last_ok_at = now, repo = repo,
-        transport = used, latest = fetched[1], order = order_of(fetched),
+        transport = used, latest = fetched[1], order = order_of(fetched), window = fetched,
       })
     else
       reason = fetch_reason
@@ -542,7 +744,7 @@ function M.check(options)
         last_ok_at = cached and tonumber(cached.last_ok_at) or nil,
         repo = repo, transport = transport,
         latest = cached and cached.latest or nil, order = cached and cached.order or nil,
-        error = reason,
+        window = cached and cached.window or nil, error = reason,
       })
     end
   elseif fresh then
@@ -556,9 +758,14 @@ function M.check(options)
   if order == nil then
     order = function(installed, latest) return M.order_by_ancestry(tree, installed, latest) end
   end
-  local comparison, compare_reason = M.compare(identity, feed, { prebuilt = identity and identity.prebuilt, order = order })
+  local comparison, compare_reason, installable = M.compare(identity, feed,
+    { target = target, order = order, installable = o.installable })
   local verdict = M.verdict(identity, feed, comparison, compare_reason, {
     repo = repo, checked_at = now, age_ms = age, cached = fresh, transport = transport, error = reason,
+    channel = "release", target = target,
+    -- The comparison's own choice when it made one; the newest tag otherwise, so a caller still sees
+    -- what the feed held even when nothing in it can be installed here.
+    latest = installable or (type(feed) == "table" and feed[1] or nil),
   })
   verdict.tree = tree
   verdict.fresh = fresh

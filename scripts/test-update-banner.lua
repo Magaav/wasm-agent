@@ -3,12 +3,13 @@
 --   WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=<scratch> WA_SCRIPT=scripts/test-update-banner.lua wa --db <scratch>/t.db
 --
 -- No network: every case is a fixture file, an injected fetch, or a pure function. What this pins is
--- the part that would otherwise be an opinion - that "behind" is proven (the installed release is in
--- the published window, local ancestry says so, or a prebuilt install is older than the window), that
--- a tree the feed does not mention stays `unknown` instead of being called behind, that the banner
--- line is the one the window and the CLI print, that fifteen minutes is one request per process set
--- even across a failed request, and that the cache never stores a verdict (so the banner disappears
--- the moment the node runs the release).
+-- the part that would otherwise be an opinion - that "behind" is proven on the right channel (a tree
+-- against origin/main, a release against the newest entry with this machine's assets), that a newer
+-- aarch64-only release is never offered to x86_64, that a tree the feed does not mention is not called
+-- behind, that the banner line is the one the window and the CLI print, that fifteen minutes is one
+-- request per process set even across a failed request, that the same world gives the same line across
+-- repeated reads and window rollovers, and that the cache never stores a verdict (so the banner
+-- disappears the moment the node runs the new commit).
 local banner = dofile("lua/core/update_banner.lua")
 local updater = dofile("lua/core/update.lua")
 local json = dofile("lua/vendor/json.lua")
@@ -73,12 +74,26 @@ eq(banner.identity(theirs).sha12, banner.identity(updater.installed_record(insta
 
 -- ---- the published side -----------------------------------------------------
 
+-- The machine the fixtures are for: the tests must state a target, because the banner's whole job is
+-- to ask whether a release carries an asset this machine can run. An x86_64 asset on the second
+-- release and only an aarch64 one on the first is the operator's `work` feed, reduced to two entries.
+local TARGET = "x86_64-unknown-linux-gnu"
+local function asset_json(sha, triple)
+  triple = triple or TARGET
+  return '"assets":[' ..
+    '{"name":"node-' .. sha .. '.manifest"},' ..
+    '{"name":"wa-' .. triple .. '-' .. sha .. '"},' ..
+    '{"name":"wa-sentinel-' .. triple .. '-' .. sha .. '"}]'
+end
+
 local FEED_BODY = '[' ..
   '{"tag_name":"node-cccccccccccc","name":"node-cccccccccccc","html_url":"https://example.invalid/c",' ..
-  '"published_at":"2026-11-06T10:00:00Z","draft":false,"prerelease":true,"body":"SECRET notes text"},' ..
+  '"published_at":"2026-11-06T10:00:00Z","draft":false,"prerelease":true,"body":"SECRET notes text",' ..
+  asset_json("cccccccccccc") .. '},' ..
   '{"tag_name":"v0.2.0","name":"wasm-agent 0.2.0","html_url":"https://example.invalid/v020"},' ..
   '{"tag_name":"wa-android-a7bbcda92b76","name":"android","html_url":"https://example.invalid/a"},' ..
-  '{"tag_name":"node-aaaaaaabbbbb","name":"node-aaaaaaabbbbb","html_url":"https://example.invalid/ab"},' ..
+  '{"tag_name":"node-aaaaaaabbbbb","name":"node-aaaaaaabbbbb","html_url":"https://example.invalid/ab",' ..
+  asset_json("aaaaaaabbbbb") .. '},' ..
   '{"tag_name":"node-dddddddddddd","name":"draft","draft":true},' ..
   '{"tag_name":"nightly","name":"nightly"}' ..
   ']'
@@ -104,11 +119,17 @@ eq(banner.parse_remote(""), nil, "an empty remote names nothing")
 
 -- ---- the comparison ---------------------------------------------------------
 
-local LATEST = { tag = "node-cccccccccccc", sha12 = "cccccccccccc", url = "https://example.invalid/c" }
-local OLDER = { tag = "node-aaaaaaabbbbb", sha12 = "aaaaaaabbbbb" }
+local function release(sha)
+  local assets = { ["node-" .. sha .. ".manifest"] = true,
+    ["wa-" .. TARGET .. "-" .. sha] = true, ["wa-sentinel-" .. TARGET .. "-" .. sha] = true }
+  return { tag = "node-" .. sha, sha12 = sha, assets = assets }
+end
+local LATEST = release("cccccccccccc")
+LATEST.url = "https://example.invalid/c"
+local OLDER = release("aaaaaaabbbbb")
 
 local function compare(installed, list, order, prebuilt)
-  return banner.compare(installed, list, { order = order, prebuilt = prebuilt })
+  return banner.compare(installed, list, { order = order, prebuilt = prebuilt, target = TARGET })
 end
 eq((compare(banner.identity({ commit = "cccccccccccc" }), { LATEST, OLDER })), "equal",
    "an install at the newest release is current")
@@ -122,6 +143,132 @@ eq((compare(build, { LATEST }, function() return nil end)), "unknown", "an unans
 eq((compare(nil, { LATEST })), "unknown", "no identity is unknown")
 eq((select(2, compare(nil, { LATEST }))), "unknown_installed_commit", "and says which fact is missing")
 eq((select(2, compare(build, {}))), "feed_unavailable", "no feed is unknown, never current")
+
+-- ---- installability: the asset must be for this machine ----------------------
+-- The operator's feed (`work`, 10/11): the newest release is aarch64-only, the next one has an
+-- x86_64 asset. The banner may name the second or nothing; it may never name the first.
+local AARCH64_ONLY = { tag = "node-4147192f2725", sha12 = "4147192f2725", assets = {
+  ["node-4147192f2725.manifest"] = true,
+  ["wa-aarch64-unknown-linux-gnu-4147192f2725"] = true,
+  ["wa-sentinel-aarch64-unknown-linux-gnu-4147192f2725"] = true } }
+local X86 = OLDER
+
+eq(banner.target({ os = "linux", arch = "x86_64" }), TARGET, "x86_64 Linux names the gnu triple")
+eq(banner.target({ os = "linux", arch = "aarch64" }), "aarch64-unknown-linux-gnu", "aarch64 Linux names its triple")
+eq(banner.target({ os = "windows", arch = "x86_64" }), nil, "a non-Linux host has no prebuilt channel")
+ok(not banner.installable(AARCH64_ONLY, TARGET), "an aarch64-only release is not installable on x86_64")
+ok(banner.installable(LATEST, TARGET), "a release with this target's manifest, node and sentinel is")
+eq((banner.newest_installable({ AARCH64_ONLY, X86 }, TARGET) or {}).sha12, "aaaaaaabbbbb",
+  "the newest installable release skips the aarch64-only entry")
+
+local older_prebuilt = banner.identity({ commit = "9999999999999999999999999999999999999999",
+  binary_source = "prebuilt-release", binary_release = "node-111111111111" })
+local newer_installable, newer_reason = banner.compare(older_prebuilt, { AARCH64_ONLY, X86 },
+  { target = TARGET, order = function() return "older" end })
+eq(newer_installable, "older", "a newer installable release is behind, even behind a skipped one")
+eq(newer_reason, "local_ancestry", "and the reason is the ancestry that proved it")
+local no_asset, no_asset_reason = banner.compare(older_prebuilt, { AARCH64_ONLY },
+  { target = TARGET, order = function() return "older" end })
+eq(no_asset, "unknown", "a newer release with no asset for this arch is never called behind")
+eq(no_asset_reason, "no_installable_asset", "and the reason names the missing asset")
+eq((banner.compare(banner.identity({ commit = "4147192f2725" }), { AARCH64_ONLY }, { target = TARGET })),
+  "equal", "the same version is current even when it has no asset for this machine")
+local no_asset_line = banner.verdict(older_prebuilt, { AARCH64_ONLY }, no_asset, no_asset_reason,
+  { target = TARGET, channel = "release" })
+eq(no_asset_line.line, nil, "and it draws no line at all")
+ok(tostring(no_asset_line.message):find("nothing this machine can install", 1, true) ~= nil,
+  "the verdict still says why, for /update and the JSON")
+
+-- ---- the buildable-tree channel ---------------------------------------------
+-- A tree install updates by building origin/main, so the release feed must not be consulted at all.
+-- This is the `work` regression: installed 090858da, origin/main ahead, newest release aarch64-only.
+local tree_identity = banner.identity({ commit = "090858da", branch = "main", via = "deploy.sh" })
+local tree_calls = 0
+local tree_verdict = banner.check({
+  install = install, tree = "/fixture/tree", tree_main = "73b63548cba1",
+  record = { commit = "090858da", branch = "main", via = "deploy.sh" },
+  cache_path = scratch .. "/cache/tree.json", target = TARGET, now = 6000,
+  order = function(installed, latest)
+    if latest.sha12 == "73b63548cba1" then return "older" end
+    return nil
+  end,
+  fetch = function() tree_calls = tree_calls + 1; return FEED_BODY end,
+})
+eq(tree_verdict.channel, "tree", "a runtime tree takes the build channel")
+eq(tree_verdict.state, "behind", "and is behind origin/main")
+eq(tree_verdict.line, "Update available (73b63548cba1): run wa update or /update",
+  "the line names origin/main, never the aarch64 release")
+eq(tree_verdict.latest and tree_verdict.latest.sha12, "73b63548cba1", "and that is the latest fact")
+eq(tree_calls, 0, "the release feed is not even requested on a tree install")
+
+local tree_current = banner.check({
+  install = install, tree = "/fixture/tree", tree_main = "73b63548cba1",
+  record = { commit = "73b63548", via = "deploy.sh" }, cache_path = scratch .. "/cache/tree2.json",
+  now = 6100, target = TARGET,
+})
+eq(tree_current.state, "current", "the same tree commit is current, with no line")
+eq(tree_current.line, nil, "nothing is drawn")
+local tree_dirty = banner.check({
+  install = install, tree = "/fixture/tree", tree_main = "", tree_reason = "tree_dirty",
+  record = { commit = "090858da", via = "deploy.sh" }, cache_path = scratch .. "/cache/tree3.json",
+  now = 6200, target = TARGET,
+})
+eq(tree_dirty.state, "unknown", "a dirty tree is not offered")
+eq(tree_dirty.line, nil, "a tree wa update would refuse draws no line")
+eq(tree_dirty.reason, "tree_dirty", "and the reason is the refusal")
+
+-- ---- stability: the same world gives the same line, every time ----------------
+-- The report was a banner that appeared and disappeared. The verdict must depend only on the
+-- record, the tree's origin/main and the cached feed - never on how many times it was asked, nor
+-- on the fifteen-minute window rolling over with an unchanged feed.
+local stable_cache = scratch .. "/cache/stable.json"
+local function stable_base(extra)
+  local o = { install = install, tree = "", cache_path = stable_cache, repo = "Magaav/wasm-agent",
+    target = TARGET, fetch = function() return FEED_BODY end, order = function() return nil end }
+  for k, v in pairs(extra or {}) do o[k] = v end
+  return o
+end
+banner.reset()
+local stable_opts = stable_base({ now = 10 * banner.CACHE_MS, cache_path = stable_cache,
+  order = function() return "older" end })
+local first = banner.check(stable_opts)
+eq(first.state, "behind", "the stable fixture starts behind")
+for i = 1, 5 do
+  local again = banner.status(stable_base({ now = 10 * banner.CACHE_MS + i * 1000, cache_path = stable_cache,
+    order = function() return "older" end }))
+  eq(again.state, first.state, "repeat " .. i .. " keeps the same state")
+  eq(again.line, first.line, "repeat " .. i .. " keeps the same line")
+end
+for i = 1, 3 do
+  banner.reset()
+  local later = banner.check(stable_base({ now = 10 * banner.CACHE_MS + i * banner.CACHE_MS,
+    cache_path = stable_cache, order = function() return "older" end }))
+  eq(later.state, first.state, "window " .. i .. " keeps the same state")
+  eq(later.line, first.line, "window " .. i .. " keeps the same line")
+end
+-- The same property with the aarch64-only release first: the banner still names the x86_64 release
+-- and does not alternate between the two as the cache is reread.
+local asset_cache = scratch .. "/cache/assets.json"
+local asset_feed = '[' ..
+  '{"tag_name":"node-4147192f2725","assets":[' ..
+    '{"name":"node-4147192f2725.manifest"},{"name":"wa-aarch64-unknown-linux-gnu-4147192f2725"},' ..
+    '{"name":"wa-sentinel-aarch64-unknown-linux-gnu-4147192f2725"}]},' ..
+  '{"tag_name":"node-aaaaaaabbbbb",' .. asset_json("aaaaaaabbbbb") .. '}]'
+banner.reset()
+local asset_first = banner.check({ install = install, tree = "", record = { commit = "9999999",
+  binary_source = "prebuilt-release", binary_release = "node-999999999999" },
+  cache_path = asset_cache, repo = "o/r",
+  target = TARGET, now = 20000, fetch = function() return asset_feed end,
+  order = function() return "older" end })
+eq(asset_first.latest and asset_first.latest.sha12, "aaaaaaabbbbb", "the first answer names the x86_64 release")
+for i = 1, 5 do
+  local again = banner.status({ install = install, tree = "", record = { commit = "9999999",
+    binary_source = "prebuilt-release", binary_release = "node-999999999999" },
+    cache_path = asset_cache, repo = "o/r",
+    target = TARGET, now = 20000 + i * 1000, order = function() return "older" end })
+  eq(again.latest and again.latest.sha12, "aaaaaaabbbbb", "reread " .. i .. " never flips to the aarch64 release")
+  eq(again.line, asset_first.line, "reread " .. i .. " keeps the same line")
+end
 
 -- ---- the line ---------------------------------------------------------------
 
@@ -166,7 +313,7 @@ local function fetch_counts(options)
 end
 local function base(extra)
   local o = { install = install, tree = "", record = nil, cache_path = cache,
-    repo = "Magaav/wasm-agent", fetch = fetch_counts, order = function() return nil end }
+    repo = "Magaav/wasm-agent", target = TARGET, fetch = fetch_counts, order = function() return nil end }
   for k, v in pairs(extra or {}) do o[k] = v end
   return o
 end
@@ -227,7 +374,7 @@ host.write_file(install .. "/installed.txt", RECORD)
 banner.reset()
 local offline_calls = 0
 local offline = banner.check({ install = install, tree = "", cache_path = scratch .. "/none.json",
-  repo = "o/r", offline = "1", now = 2000,
+  repo = "o/r", target = TARGET, offline = "1", now = 2000,
   fetch = function() offline_calls = offline_calls + 1; return FEED_BODY end })
 eq(offline.state, "unknown", "offline with no cache is unknown")
 eq(offline.reason, "feed_unavailable", "and the reason is the feed it does not have")
@@ -237,7 +384,7 @@ eq(offline.line, nil, "offline prints no line")
 -- A known update survives going offline: the cached feed still answers, with no request.
 banner.reset()
 local offline_cached = banner.check({ install = install, tree = "", cache_path = cache, repo = "Magaav/wasm-agent",
-  offline = "1", now = 1000 + banner.CACHE_MS + 5000,
+  target = TARGET, offline = "1", now = 1000 + banner.CACHE_MS + 5000,
   fetch = function() offline_calls = offline_calls + 1; return FEED_BODY end })
 eq(offline_cached.state, "behind", "a cached release still shows while offline")
 eq(offline_calls, 0, "and offline still makes no request")
@@ -248,12 +395,12 @@ local broken_calls = 0
 local function broken() broken_calls = broken_calls + 1; return nil, "feed_status_500" end
 banner.reset()
 local broken_first = banner.check({ install = install, tree = "", cache_path = broken_cache, repo = "o/r",
-  now = 3000, fetch = broken })
+  target = TARGET, now = 3000, fetch = broken })
 eq(broken_first.state, "unknown", "a failed feed is unknown")
 eq(broken_first.error, "feed_status_500", "and names the failure")
 eq(broken_calls, 1, "the failed attempt is one request")
 local broken_again = banner.check({ install = install, tree = "", cache_path = broken_cache, repo = "o/r",
-  now = 3000 + 60 * 1000, fetch = broken })
+  target = TARGET, now = 3000 + 60 * 1000, fetch = broken })
 eq(broken_again.state, "unknown", "a second check inside the window is still unknown")
 eq(broken_calls, 1, "and costs no second request, because the window was claimed first")
 eq(tonumber((json.decode(host.read_file(broken_cache) or "{}") or {}).checked_at), 3000,
@@ -275,7 +422,7 @@ eq(payload.message, nil, "and never a rendered message")
 eq(bus_verdict.published, true, "the verdict says the fact was published")
 
 local absent = banner.check({ install = install, tree = "", cache_path = scratch .. "/bus-none.json",
-  repo = "o/r", now = 9000, fetch = function() return FEED_BODY end })
+  repo = "o/r", target = TARGET, now = 9000, fetch = function() return FEED_BODY end })
 eq(absent.bus, "bus_unavailable", "no bus reachable from Lua is named, not failed")
 eq(absent.published, false, "and the check still answers")
 
@@ -499,7 +646,7 @@ host.write_file(other_repo_cache, json.encode({ schema = 1, checked_at = 7000, r
 banner.reset()
 local repo_calls = 0
 local repo_check = banner.check({ install = install, tree = "", cache_path = other_repo_cache, repo = "Magaav/wasm-agent",
-  now = 7100, fetch = function() repo_calls = repo_calls + 1; return FEED_BODY end })
+  target = TARGET, now = 7100, fetch = function() repo_calls = repo_calls + 1; return FEED_BODY end })
 eq(repo_calls, 1, "a cache for another repository is not reused")
 eq(repo_check.latest and repo_check.latest.sha12, "cccccccccccc", "the answer is this repository's release")
 
@@ -523,7 +670,7 @@ eq(banner.CACHE_MS, 15 * 60 * 1000, "fifteen minutes")
 -- The fixture file (no injected fetch) is the same path a test or an operator points the check at.
 banner.reset()
 local from_fixture = banner.check({ install = install, tree = "", cache_path = scratch .. "/cache/fixture.json",
-  fixture = fixture, repo = "o/r", now = 500 })
+  fixture = fixture, repo = "o/r", target = TARGET, now = 500 })
 eq(from_fixture.state, "behind", "the fixture file answers without a request")
 
 if failed == 0 then

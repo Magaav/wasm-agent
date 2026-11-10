@@ -32,32 +32,53 @@ read as "up to date" - that is the silent success this module exists to prevent.
 
 ## The commit banner: `Update available (<short sha>): run wa update or /update`
 
-`lua/core/update_banner.lua` is the Claude Code/pi-shaped indicator the tags above cannot give a tree
-install: it compares the **installed commit** (`installed.txt` `commit=`, plus `binary_source=` and
-`binary_release=` when the binary came from a published release) with the newest `node-<sha12>`
-release of this repository - the per-commit binaries `scripts/lib/node-binaries.sh` publishes and the
-deploy downloads (owner/repo resolved by `wa_node_release_repo`'s rule, `WA_NODE_RELEASE_REPO` first).
+`lua/core/update_banner.lua` answers the question `wa update` can actually answer, in the **two
+channels the updater has**. It compares the **installed commit** (`installed.txt` `commit=`, plus
+`binary_source=` and `binary_release=` when the binary came from a published release):
+
+- **tree** (`runtime-worktree.txt` names a checkout): the candidate is the tree's local `origin/main`,
+  because `wa update` fetches it and deploys a build of it. No release feed is read and no request is
+  made on this path. A dirty tree is refused by `update.lua`, so it draws nothing either.
+- **release** (no runtime tree): the candidate is the newest `node-<sha12>` release in the feed that
+  carries **this machine's** three assets - `node-<sha>.manifest`, `wa-<triple>-<sha>` and
+  `wa-sentinel-<triple>-<sha>` (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`;
+  `WA_NODE_TARGET` overrides). A newer aarch64-only release is skipped, not advertised to x86_64.
 
 | state | when | what is drawn |
 | --- | --- | --- |
-| `behind` | the installed release is in the published window but not first, a prebuilt install's release fell out of it, or local git proves the release commit descends from the installed one | `Update available (<latest sha12>): run wa update or /update` on the CLI's **session-status-content** line (yellow, directly above the session status bar), once at session start, and on the window's own **session-status-content** line (same yellow, directly above the composer footer, one line, ellipsised) plus a topbar badge - never an overlay |
-| `current` | installed == newest release | nothing; an existing badge and line are cleared on the next load |
-| `ahead` | local git proves the installed commit descends from the release | nothing - a tree ahead of the feed is not told to update |
-| `unknown` | no recorded commit, no feed, or a tree commit the feed does not mention and local ancestry cannot order | nothing (the reason is in the cache and the JSON) |
+| `behind` | tree: local `origin/main` descends from the installed commit. release: the newest installable release is newer, by ancestry or by the published window | `Update available (<candidate sha12>): run wa update or /update` on the CLI's **session-status-content** line (yellow, directly above the session status bar), once at session start, and on the window's own **session-status-content** line (same yellow, directly above the composer footer, one line, ellipsised) plus a topbar badge - never an overlay |
+| `current` | installed == the candidate | nothing; an existing badge and line are cleared on the next load |
+| `ahead` | local git proves the installed commit descends from the candidate | nothing - a tree ahead of `origin/main`, or an install newer than the feed, is not told to update |
+| `unknown` | no recorded commit, no feed, a dirty tree, or no release with an asset for this machine (`no_installable_asset`) | nothing (the reason is in the cache and the JSON; `wa update` still explains its own refusal) |
 
 The check **never fetches and never merges**. Local git answers one question only (`merge-base
---is-ancestor`, on objects already on disk); the release feed is the only network fact.
+--is-ancestor`, on objects already on disk); on the release channel the feed is the only network fact.
 
-Caching: `<state>/update-check.json` (`host.paths().config`, i.e. `~/.wasm-agent`) holds the feed and
-when it was last asked for - **not** the verdict, which is recomputed on every read from the cached
-feed and the *current* install record. So the indicator disappears the moment the node runs the
-release, without waiting for a request. The window is claimed (written) before the request, so fifteen
-minutes is at most one call even across a failure, a crash or three processes; a failed refresh keeps
-the last good feed, so a known update survives transient outages. `POST /update {"check": true}` now
-also returns `banner` (cache only - a page load never costs a request). The served node refreshes the
-cache on its quiet housekeeping tick (`wa_sync_tick`, which only runs in a real node); the CLI asks at
-session start. A bus fact `kernel.update.available` is published per completed refresh when the host
-exposes a bus to Lua (today it does not - docs/BUS.md - so the cache is the whole surface).
+Caching: `<state>/update-check.json` (`host.paths().config`, i.e. `~/.wasm-agent`) holds the published
+**window** - tag, commit and asset names, never the verdict - and when it was last asked for. The
+verdict is recomputed on every read from that window and the *current* install record, so the
+indicator disappears the moment the node runs the new commit, without waiting for a request. The
+window is claimed (written) before the request, so fifteen minutes is at most one call even across a
+failure, a crash or three processes; a failed refresh keeps the last good window, so a known update
+survives transient outages. `POST /update {"check": true}` returns `banner` (cache only - a page load
+never costs a request). The served node refreshes the cache on its quiet housekeeping tick
+(`wa_sync_tick`, which only runs in a real node); the CLI asks at session start. A bus fact
+`kernel.update.available` is published per completed refresh when the host exposes a bus to Lua
+(today it does not - docs/BUS.md - so the cache is the whole surface).
+
+**Stability.** The verdict depends only on the install record, the tree's `origin/main` and the cached
+window - never on how many times it is asked, nor on the fifteen-minute window rolling over with an
+unchanged feed. The window's earlier rendering put the same sentence in a floating toast **and** on the
+standing line, and hid both under `body.ui-resting` whenever the pointer rested (`ui/style.css`), which
+is the appear/disappear the operator reported. The toast is gone and the standing line is never hidden
+by UI rest: one answer, one row, until the answer changes. `scripts/test-update-banner.lua` pins the
+same line across repeated reads and across window rollovers; `tests/update-banner.js` pins the same row
+across repeated draws and with `ui-resting` toggled.
+
+**`/update` typed in the composer.** The shell submits the form on Enter; an exact command name now
+dispatches even when the slash menu was never opened (`ui/app.js`'s `exactCommand`). Before that, an
+`/update` typed without the menu highlighted was sent to the model as a message: `work`'s sentinel box
+was empty and nothing was installed, so the reader saw no effect and no reason.
 
 Knobs: `WA_UPDATE_CHECK=off`, the existing `WA_OFFLINE=1` / `WA_SKIP_UPDATE_CHECK=1`, a feed override
 `WA_UPDATE_CHECK_FEED=<url>|off`, `WA_UPDATE_CHECK_FIXTURE=<file>` (no network), `WA_UPDATE_CHECK_CACHE=<file>`
@@ -221,7 +242,9 @@ second. If a future editor moves this onto a hot route, that measurement is the 
   bootstrap for real in a transient `systemd-run --user` unit - it stops `wa-sentinel.service`, so it must
   not be a child of the node it replaces. Its log is `<config>/release-update.log`.
 
-`wa update --check` only asks the release feed whether a newer release is published.
+`wa update --check` is read-only: a tree install fetches origin and compares the installed commit
+with `origin/main`; a release install runs the bootstrap's verified `--check`. It writes no request
+and installs nothing.
 
 ## An update installs the whole component set, and enables none of it
 
