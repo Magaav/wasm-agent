@@ -1057,6 +1057,11 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
       -- connector from any master" means. Read-only questions only: the send path and the phone
       -- backfill stay behind the owning node's own tools.
       whatsapp_search=true, whatsapp_read=true, whatsapp_reactions=true, whatsapp_media=true,
+      -- Connector federation (lua/core/federation.lua): a master uses every peer's connectors as its
+      -- own, run where they live. The handler itself refuses any caller whose role is not master, so
+      -- admitting the capability admits masters only - and each tool still runs under the peer's own
+      -- guards, approvals and refusals.
+      federation=true,
       -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
       -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
       stt=true }
