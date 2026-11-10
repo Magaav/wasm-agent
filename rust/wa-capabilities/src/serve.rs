@@ -358,6 +358,46 @@ fn set_current_run_cancel(flag: Option<Arc<AtomicBool>>) {
     });
 }
 
+/// Install the bound one relayed call was given on the thread about to run it, and clear it after.
+///
+/// This is the seam a child task already uses (`subagents::TaskContext`): the provider reader, the
+/// agent loop and `host.exec` all consult it, so a relayed call is bounded end to end instead of only
+/// between model calls. Flipping the flag at the deadline is what stops a `bash` (the operation
+/// runtime kills the child) and a silent provider read (its socket is shut down).
+///
+/// The bound is absolute, stamped by the relay from the wait the caller was given, so the node cannot
+/// disagree with the caller about how long the work had. `None` installs nothing: an older relay does
+/// not stamp a deadline, and inventing one would be a number the caller was never told.
+///
+/// Provenance is `Child`, not `Orchestrator`: a peer's request is not the operator's own run, and the
+/// hooks that let a shell move `main` must not be reachable through a relayed one.
+pub fn install_relay_context(cancel: Option<Arc<AtomicBool>>, deadline_ms: Option<u64>, owner: String) {
+    match cancel {
+        Some(cancel) => {
+            let deadline = deadline_ms.map(|at| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis() as u64)
+                    .unwrap_or(0);
+                let left = at.saturating_sub(now);
+                std::time::Instant::now() + std::time::Duration::from_millis(left)
+            });
+            set_current_run_cancel(Some(cancel.clone()));
+            crate::subagents::enter_task(crate::subagents::TaskContext {
+                cancel,
+                deadline,
+                sockets: Arc::new(Mutex::new(Vec::new())),
+                owner,
+                provenance: crate::subagents::Provenance::Child,
+            });
+        }
+        None => {
+            set_current_run_cancel(None);
+            crate::subagents::leave_task();
+        }
+    }
+}
+
 /// Install (or clear) the whole current-run IO context for this node-thread thread: the run's cancel
 /// flag and its own socket slot. The transport registers the socket it connects on into this slot,
 /// so a cancel on the accept thread can `shutdown` it and wake a silent provider read at once. The
@@ -2511,13 +2551,37 @@ fn node_thread_loop(
         // bypass the scheduler by arriving on node-thread 0's housekeeping path; `/node/chat` is a run and is
         // forced into the background lane, while the other relay routes are control calls and stay here.
         for job in wa_rendezvous::relay_client::take_jobs() {
+            // A request whose caller has already given up is not started: the relay stamped the bound
+            // its caller was given, and the responder has already answered it (`relay_client`).
+            // Starting it here would be work nobody can collect.
+            let expired = job.deadline_ms.map(|at| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis() as u64)
+                    .unwrap_or(0);
+                now > at
+            }).unwrap_or(false);
+            if expired {
+                eprintln!("[relay] abandon node-thread rid={} reason=deadline_passed", job.id);
+                continue;
+            }
             let route = split_path(&job.path).0;
             if !(job.method == "POST" && route == "/node/chat") {
                 begin_work(format!("relay {} {}", job.method, job.path));
+                // The bound the relay stamped on the request travels with the job. Executing it on this
+                // thread is safe for polling because `relay_client` no longer waits for the answer; the
+                // context is what stops the work at the bound (the runtime kills its `bash` and cuts a
+                // silent read), while `relay_client` has already answered the caller's named timeout.
+                install_relay_context(Some(job.cancel.clone()), job.deadline_ms, format!("relay:{}", job.id));
                 let (status, body) = process_relay_job(&lua, &agent_ui, &job, None);
+                install_relay_context(None, None, String::new());
                 end_work();
                 beat();
-                let _ = job.reply.send((status, body));
+                if job.reply.send((status, body)).is_err() {
+                    // Nobody is waiting: the bound passed and the caller was answered with the named
+                    // timeout. The result is never delivered as if it were fresh.
+                    eprintln!("[relay] late node-thread rid={} reason=answer after the bound, discarded", job.id);
+                }
                 continue;
             }
             // Verify the peer's signature ONCE here, before admission, so the conversation is keyed by
@@ -2913,6 +2977,9 @@ fn process_relay_job(
         headers: job.headers.clone(),
         body: job.body.clone(),
         reply: job.reply.clone(),
+        deadline_ms: job.deadline_ms,
+        budget_ms: job.budget_ms,
+        cancel: job.cancel.clone(),
     };
     let (route, _query) = split_path(&job.path);
     // The relay is untrusted transport, never a tunnel into unauthenticated local UI APIs.

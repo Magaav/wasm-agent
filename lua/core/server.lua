@@ -1,6 +1,10 @@
 -- Server entry for `wa serve`: one agent per user behind the web UI.
 local binding=dofile('lua/core/binding.lua')
 function wa_binding_tick() return dofile('lua/vendor/json.lua').encode(binding.tick()) end
+-- The worker lane's entry (`rust/wa-rendezvous/src/binding_runtime.rs`): one relayed request in, the
+-- answer it carries out. It is a separate global because `tick` never runs a request, and the two
+-- lanes run on different threads.
+function wa_binding_serve(raw) return dofile('lua/vendor/json.lua').encode(binding.serve(raw)) end
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 local changeset = dofile("lua/core/changeset.lua")

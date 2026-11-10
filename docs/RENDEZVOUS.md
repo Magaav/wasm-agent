@@ -185,8 +185,31 @@ Design points that matter:
   operation; the relay queues that action **at most once**. A retry after a slow
   fetch re-collects the same result instead of re-running the action — so a
   click or a file write can never double-apply because the network was slow.
-- **Abandoned work is dropped.** When a caller gives up, the request is removed
-  from the queue, so a node never receives a stale, out-of-date instruction.
+- **Every request carries the bound its caller was given.** The relay stamps
+  `budget_ms` and `deadline_ms` on the queued request: the wait the caller holds on
+  this connection (`45 s` attached, `20 s` for a node that is not attached), less
+  `3 s` for the answer to arrive. A caller may name a shorter `timeout_ms`; it can
+  never lengthen the wait. The node runs the work with that bound and answers
+  `504 {"error":"relay_request_timeout",...}` at it.
+- **Polling never waits for execution.** A node polls while its relayed calls run
+  (`docs/BINDING.md` "Runtime and recovery"), at most
+  `WA_BINDING_RELAY_CONCURRENCY` at a time (bound) or `WA_RELAY_CONCURRENCY` (the
+  legacy client). Over that it answers `503 {"error":"relay_busy","not_started":true}`
+  immediately; the relay erases the rid for a `not_started` answer instead of
+  settling it, because nothing ran and the same request may be sent again.
+- **A late answer is not a fresh one.** A result that reaches the relay after the
+  request's deadline is stored and labelled: a retry with the same rid receives
+  `"replayed":true,"late":true,"expired":true`, and the relay logs
+  `[relay] late node=... rid=...`. A result that reaches the node after its bound
+  is discarded by the node, never posted.
+- **Abandoned work is dropped, and the reason is logged.** When a caller gives up,
+  the request is removed from the queue (`[relay] abandon ... reason=deadline_passed`),
+  so a node never receives a stale, out-of-date instruction.
+- **Attach and detach are logged on both sides.** The node writes
+  `[relay] attach|detach node=<id> at=<iso> reason=<...>`; the registry writes the
+  same line, plus `[relay] slow`/`unreachable` when a caller's wait expires, and
+  `[relay] busy`/`late` for a request. A node that stops polling is reported by a
+  5 s sweep, so a drop is visible without a reproduction.
 - **Attach gating.** `POST /relay/send` returns `503 node_not_attached`
   immediately when the target has not polled recently, instead of hanging.
 - **Authenticated end to end.** Every relay call carries `action|node_id|ts`

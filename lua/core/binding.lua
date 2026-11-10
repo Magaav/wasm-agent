@@ -554,7 +554,37 @@ local function roster_call(body, headers)
   return finish(result)
 end
 
--- Runs only on the leased outbound runtime, never on the model or a scheduled job.
+-- ---- the poll lane's own record: attach and detach, said once ---------------------------------
+--
+-- Polling and execution are separate lanes (`binding_runtime.rs`): this module only ever polls, so
+-- a line here means the transport itself changed state, never that a request took long. That is what
+-- lets a drop be told apart from a slow call afterwards - with the old inline shape both showed up
+-- as `node_not_attached` at the registry and neither side wrote a line (measured 2026-11-10).
+local function log(text)
+  if type(host.log)=='function' then pcall(host.log,'[relay] '..text) end
+end
+local function stamp() return os.date('!%Y-%m-%dT%H:%M:%SZ',math.floor(host.now())) end
+local function observe_attached(node_id)
+  if M.transport_attached==true then return end
+  local away=M.attached_lost_at and (host.now()-M.attached_lost_at) or nil
+  M.transport_attached=true;M.attached_lost_at=nil
+  log('attach node='..tostring(node_id)..' at='..stamp()..' reason='..
+    (away and ('poll after '..string.format('%.1f',away)..'s away') or 'first poll'))
+end
+local function observe_detached(node_id,reason)
+  -- Once per transition, including the first failure of a fresh process: a node that cannot attach
+  -- must say so, and a node that keeps failing must not fill the log with the same line.
+  if M.transport_attached==false then return end
+  M.transport_attached=false;M.attached_lost_at=host.now()
+  log('detach node='..tostring(node_id)..' at='..stamp()..' reason='..tostring(reason))
+end
+
+-- One poll. Runs only on the leased outbound runtime, never on the model or a scheduled job.
+--
+-- It never runs the request it receives: a relayed call can take minutes, and polling has to keep
+-- going while it does - a node that polls late is detached, and then every caller is told
+-- `node_not_attached` until it happens to poll again (the defect this replaced). The request is
+-- handed back in `dispatch` and executed on the transport's worker lane, which answers it.
 function M.tick()
   local s,problem=M.saved();if not s then return failure(problem or 'not_bound') end
   if not s.consent or s.expires_at<=host.now() or s.phase=='revoked' then return {state='inactive'} end
@@ -582,8 +612,15 @@ function M.tick()
   -- (the roster, else the pins). An operator list that gained a name used to stop this tick and detain
   -- a healthy node; it is now reported on the result and the node keeps answering its operators.
   local observed,auth_error,auth_detail=authority(s)
-  if not observed then return failure(auth_error,auth_detail) end
-  local v,err=request_status(s);if not valid_reply(s,v) or v.binding.state~='accepted' then return failure('binding_approval_unavailable',err) end
+  if not observed then
+    observe_detached(s.request.node_id,'authority_lost:'..tostring(auth_error or auth_detail))
+    return failure(auth_error,auth_detail)
+  end
+  local v,err=request_status(s)
+  if not valid_reply(s,v) or v.binding.state~='accepted' then
+    observe_detached(s.request.node_id,'binding_approval_unavailable:'..tostring(err or (v and v.binding and v.binding.state)))
+    return failure('binding_approval_unavailable',err)
+  end
   if not M.last_heartbeat or host.now()-M.last_heartbeat>=60 then
     -- Same v2 announcement as node.rs: the signature covers the name and the (empty) endpoint list.
     -- The name a node answers to now, not the one frozen into its binding request: a node bound before it
@@ -593,28 +630,61 @@ function M.tick()
     local name=current~='' and current or tostring(s.request.name or '')
     local ts=math.floor(host.now());local i=identity();local sig=decode(host.sign('v2|'..i.node_id..'|'..ts..'|'..name..'|[]'))
     local r,e=http(s.service,'POST','/register',nil,{node_id=i.node_id,public_key=i.public_key,name=name,role=s.network_role,endpoints={},ts=ts,signature=sig.signature})
-    if not r then return failure('binding_registration_failed',e) end;M.last_heartbeat=host.now()
+    if not r then
+      observe_detached(s.request.node_id,'binding_registration_failed:'..tostring(e))
+      return failure('binding_registration_failed',e)
+    end;M.last_heartbeat=host.now()
   end
   local response,why=http(s.service,'GET','/relay/poll?node_id='..s.request.node_id,'relay-poll')
-  if not response then return failure('binding_relay_unavailable',why) end
-  if response.request then
-    local r=response.request;local body,status='{"error":"binding_route_not_granted"}',403
-    if r.method=='POST' and r.path=='/node/call' then
-      local h=lowered(r.headers)
-      status=200
-      -- A mesh envelope is admitted by this node's roster (when it has a verified one); a `roster`
-      -- call installs that roster and is admitted by today's operator pins. Everything else is a
-      -- peer capability call, exactly as before.
-      local mesh=mesh_relayed_call(h,r.body or '')
-      local asked=decode(r.body or '')
-      if mesh then body=mesh
-      elseif asked and asked.capability=='roster' then body=roster_call(r.body or '',h)
-      else body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '') end
-    end
-    local sent,e=http(s.service,'POST','/relay/respond','relay-respond',{node_id=s.request.node_id,id=r.id,status=status,body=body})
-    if not sent then return failure('binding_response_submission_unknown',e) end
+  if not response then
+    observe_detached(s.request.node_id,'relay_poll_failed:'..tostring(why))
+    return failure('binding_relay_unavailable',why)
   end
-  return {state='attached',registered=true,attached=true,node_id=s.request.node_id,
+  observe_attached(s.request.node_id)
+  local view={state='attached',registered=true,attached=true,node_id=s.request.node_id,
     authority=observed.relation,authority_gained=observed.gained,authority_lost=observed.lost}
+  if response.request then
+    -- Hand it to the runtime, never run it here (see the note on M.tick).
+    view.dispatch={service=s.service,node_id=s.request.node_id,request=response.request}
+  end
+  return view
+end
+
+-- Executes one relayed request and answers it, on the transport's worker lane.
+--
+-- A fresh interpreter per admitted call (`binding_runtime.rs`, bounded): this function is what the
+-- node did inline before, with two additions - the bound and the answer's honesty. The bound is the
+-- relay's `deadline_ms`, stamped from the wait the caller was given, and it is already installed as
+-- this call's exec/cancel budget by the runtime that started this lane, so work that can be stopped
+-- (a `bash`, a provider read) stops at it. If the call nonetheless returns after the bound, the
+-- result is named as a timeout instead of being handed back as a fresh answer.
+function M.serve(raw)
+  local r=decode(raw)
+  if not r or type(r.id)~='string' then
+    return {status=400,body=json.encode({error='relay_request_unreadable',not_started=true})}
+  end
+  local started=host.now()
+  local deadline_ms=tonumber(r.deadline_ms)
+  local budget_ms=tonumber(r.budget_ms)
+  local body,status='{"error":"binding_route_not_granted"}',403
+  if r.method=='POST' and r.path=='/node/call' then
+    local h=lowered(r.headers)
+    status=200
+    -- A mesh envelope is admitted by this node's roster (when it has a verified one); a `roster`
+    -- call installs that roster and is admitted by today's operator pins. Everything else is a
+    -- peer capability call, exactly as before.
+    local mesh=mesh_relayed_call(h,r.body or '')
+    local asked=decode(r.body or '')
+    if mesh then body=mesh
+    elseif asked and asked.capability=='roster' then body=roster_call(r.body or '',h)
+    else body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '') end
+  end
+  local elapsed_ms=math.floor((host.now()-started)*1000)
+  if deadline_ms and host.now()*1000>=deadline_ms then
+    return {status=504,late=true,elapsed_ms=elapsed_ms,body=json.encode({
+      error='relay_request_timeout',id=r.id,budget_ms=budget_ms or 0,elapsed_ms=elapsed_ms,
+      hint='the call passed the deadline its caller was given; the work was stopped and this answer is not fresh'})}
+  end
+  return {status=status,body=body,elapsed_ms=elapsed_ms}
 end
 return M
