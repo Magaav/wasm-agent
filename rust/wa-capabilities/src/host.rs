@@ -2820,6 +2820,10 @@ struct ConsoleInput {
     selection: Option<Selection>,
     /// `host.transcript_hold(true)`: writes are kept, not drawn, until the hold ends (a replay).
     transcript_held: bool,
+    /// The long tool call's line as this process last drew it (`wa_term::tool_progress`, the host's own
+    /// ticker). It lives in that call's **block** in the transcript, never on the
+    /// session-status-content row (Victor, 2026-11-10); kept so an unchanged phrase is not redrawn.
+    tool_progress: String,
     /// The `/status` panel as Lua last described it (`host.status_snapshot`), shown by this thread when
     /// `/status` is submitted during a run - Lua is blocked in the model call then and cannot open it.
     status_snapshot: Option<Value>,
@@ -3003,18 +3007,23 @@ fn refresh_build(state: &mut ConsoleInput) {
     let _ = wa_term::terminal_editor::write(&frame);
 }
 
-/// A long tool call's row (`wa_term::tool_progress`, docs/TOOL-PROGRESS.md) as it reads now; redrawn
-/// only when its text changed, for the same reason `refresh_build` is.
+/// A long tool call's line (`wa_term::tool_progress`, docs/TOOL-PROGRESS.md) as it reads now, drawn
+/// **inside that call's own block** in the transcript - never on the session-status-content row, which
+/// belongs to the update notice and its loader (Victor, 2026-11-10). Redrawn only when its text
+/// changed, for the same reason `refresh_build` is.
 ///
 /// The facts are published by whoever is waiting on the operation - `operations::foreground` for the
 /// `bash` tool, `operations::control("await")` for `operation start` - because this ticker is awake
 /// while Lua is blocked in that wait, and a wait loop is the only place that owns the operation's
 /// output tail. This only renders: one stat a quarter second, a read when the file moved.
 fn refresh_tool_progress(state: &mut ConsoleInput) {
-    let Some(editor) = state.editor.as_mut() else { return };
-    let row = wa_term::tool_progress::current(editor.width);
-    if row == editor.tool_progress { return; }
-    editor.tool_progress = row;
+    if state.editor.as_ref().is_none_or(|editor| editor.row == 0) { return }
+    let width = state.editor.as_ref().map(|editor| editor.width).unwrap_or(0);
+    let row = wa_term::tool_progress::current(width);
+    if row == state.tool_progress { return; }
+    state.tool_progress = row;
+    let text = if state.tool_progress.is_empty() { None } else { Some(state.tool_progress.as_str()) };
+    state.transcript.live(text);
     let frame = layout_frame(state);
     let _ = wa_term::terminal_editor::write(&frame);
 }
@@ -3414,6 +3423,42 @@ pub extern "C-unwind" fn transcript_block(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.transcript.block(topic);
     unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
+    1
+}
+
+/// `host.transcript_live(text)`: the running tool call's line, INSIDE that call's own block - the
+/// heading is the block's first row, this is the row under it, rewritten in place. Empty text (or no
+/// text at all) takes it away. The host's ticker keeps it current while Lua is blocked
+/// (`refresh_tool_progress`); a view that has no host transcript has no live row and this is a no-op.
+///
+/// It never touches the session-status-content row: that one is the update notice's (Victor,
+/// 2026-11-10).
+pub extern "C-unwind" fn transcript_live(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if text.trim().is_empty() { state.transcript.live(None) } else { state.transcript.live(Some(&text)) }
+    let ok = if state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
+        let frame = layout_frame(&mut state);
+        wa_term::terminal_editor::write(&frame).is_ok()
+    } else { true };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.transcript_head(text)`: replace the first line of the current block. A tool call prints its
+/// heading when it **starts** (so the block its progress belongs to exists while the call runs) and
+/// rewrites that same row when the result lands, which is where its dot says how the call went.
+pub extern "C-unwind" fn transcript_head(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = state.transcript.head(&text);
+    if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
+        let frame = layout_frame(&mut state);
+        let _ = wa_term::terminal_editor::write(&frame);
+    }
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 

@@ -230,12 +230,13 @@ Health observes every worker, not just worker zero. Output activity is not proof
 of useful progress; a quiet compiler can be healthy. No model calls are made to
 poll an operation.
 
-The reader's own view of a long call is the **session-status-content** row: while a
-tool call runs past two seconds the CLI, the native editor and the window say
-`⟳ <tool> · <elapsed>` plus the newest line the output's progress dialect gives
-(cargo, npm/pnpm, pip, git), or `· no output for 3m` when it has gone quiet. The
-supervisor's wait loop publishes those facts at most four times a second, from the
-already-redacted output file, so no surface polls a process; see
+The reader's own view of a long call is the line inside that call's block in the transcript:
+while a tool call runs past two seconds the CLI, the native editor and the window say
+`⟳ <tool> · <elapsed>` under the call's own heading, plus the newest line the output's progress
+dialect gives (cargo, npm/pnpm, pip, git), or `· no output for 3m` when it has gone quiet. It is
+never drawn on the session-status-content row above the status bar, which belongs to the update
+notice and its loader. The supervisor's wait loop publishes those facts at most four times a
+second, from the already-redacted output file, so no surface polls a process; see
 [TOOL-PROGRESS.md](TOOL-PROGRESS.md).
 
 Master-only `/operations` and `/operation` expose observation/cancellation through

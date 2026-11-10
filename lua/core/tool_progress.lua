@@ -1,30 +1,33 @@
--- Live progress for a long tool call, on the CLI's session-status-content row
+-- Live progress for a long tool call, INSIDE that call's own block in the transcript
 -- (docs/TOOL-PROGRESS.md).
 --
 -- The finding (08/11): the agent ran `cargo test` in its `bash` tool for twenty minutes and the CLI
 -- showed only "Running bash" - no output, no movement - so a healthy build and a wedged process
--- looked the same. The row above the status bar already carries the *node rebuild* loader
--- (`lua/core/update_banner.lua`, `rust/wa-term/src/build_status.rs`); this module is the same row for
--- the *tool calls the agent makes*:
+-- looked the same. This module is the sentence that fixes it:
 --
 --   ⟳ bash · 3m10s ▕████░░░░░░░░░░▏ 143/412 building serde_json
 --   ⟳ bash · 41s · Downloading numpy-1.26.0-cp311.whl (15.8 MB)
 --   ⟳ bash · 4m20s · no output for 3m
 --
+-- Where it is drawn, and where it is not (Victor, 2026-11-10: "this bash description should be
+-- printed in the bash toolcall not at the footer. that place belongs to update message and update
+-- launcher seeker, not info about tools, which should be in the terminal content"): the row under the
+-- call's own `⏺ Bash(...)` heading, rewritten in place while the call runs
+-- (`lua/core/cli_view.lua`'s `tool_live`, `wa_term::transcript::Transcript::live`), and NEVER the
+-- session-status-content row above the status bar - that row is the update notice's, its rebuild
+-- loader's and its result's.
+--
 -- Where the facts come from, and why a file: a foreground `bash` blocks this interpreter inside
 -- `host.exec`, so Lua cannot poll and cannot paint. The host's operation wait loop is awake, and it
 -- publishes the tail it reads to `<data>/tool-progress.json` (at most four times a second;
--- `rust/wa-capabilities/src/tool_progress.rs`). This module reads that file, and keeps its own tail
--- for the calls it is told about directly (`observe`), so the CLI can say something true even when the
--- file is not there.
+-- `rust/wa-capabilities/src/tool_progress.rs`), where the host's own ticker reads it and rewrites the
+-- call's row. This module reads the same file, and keeps its own tail for the calls it is told about
+-- directly (`observe`), so the CLI can say something true even when the file is not there.
 --
 -- The decision is `rust/wa-tool-progress`'s, in Rust, and this is its Lua twin: the same wording, the
 -- same thresholds and the same dialects, pinned against each other by
 -- `scripts/test-tool-progress.lua` and the Rust crate's own tests. Two implementations exist because
 -- the CLI is Lua and the editor's row is Rust; one *rule* exists because the tests compare them.
---
--- Precedence: this line is the LOWEST claimant of the row. A build loader and the standing update
--- notice both win (`lua/core/chat.lua` resolves that, `lua/core/cli_view.lua` draws it), because they
 -- are facts about the node while this is a fact about one call.
 local json = dofile('lua/vendor/json.lua')
 local redact = dofile('lua/core/redact.lua')

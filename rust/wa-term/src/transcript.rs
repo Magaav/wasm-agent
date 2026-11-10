@@ -29,7 +29,10 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     /// Rows to move a frozen view by at the next draw (PageUp > 0).
     page_delta: isize,
     /// Navigating topics (Ctrl+Up): the view stays frozen even at the bottom.
-    pub nav: bool }
+    pub nav: bool,
+    /// Where the live line sits while a tool call runs: `(block, line)` of the row the host rewrites
+    /// in place. `None` = there is no such line. It is never a committed line - see `live`.
+    live_row: Option<(usize, usize)> }
 
 /// One PageUp/PageDown step for a chat that occupies `area` screen rows: a third of it, at least one
 /// row. A whole screen jumped past what the reader was following; a third keeps two thirds in view.
@@ -38,15 +41,65 @@ pub fn page_step(area: usize) -> isize { (area / 3).max(1) as isize }
 impl Transcript {
     /// Start a new block (`topic` = collapsible). An empty current block is reused.
     pub fn block(&mut self, topic: bool) {
+        self.clear_live();
         if let Some(last) = self.blocks.last_mut() {
             if last.lines.is_empty() { last.topic = topic; last.expanded = false; return; }
         }
         self.blocks.push(Block { topic, ..Default::default() });
     }
 
+    /// The running tool call's line, **inside that call's own block** (Victor, 2026-11-10: the
+    /// session-status-content row below the box belongs to the update notice and its loader, never to
+    /// a tool). `Some(text)` writes it where it already is, replacing the text in place - the host's
+    /// ticker is the only painter awake while Lua is blocked in `host.exec`, so that is what keeps the
+    /// clock and the output tail moving; `None` (or an empty text) takes it away.
+    ///
+    /// It is not a committed line: the next real `write` or `block` drops it first, so a result can
+    /// never land under a progress row that has outlived its call.
+    pub fn live(&mut self, text: Option<&str>) {
+        let text = text.map(str::trim).filter(|text| !text.is_empty());
+        let Some(text) = text else { self.clear_live(); return };
+        match self.live_row {
+            Some((block, line)) if self.blocks.get(block).is_some_and(|b| line < b.lines.len()) => {
+                if self.blocks[block].lines[line] != text {
+                    self.blocks[block].lines[line] = text.to_string();
+                    self.dirty = true;
+                }
+            }
+            _ => {
+                if self.blocks.is_empty() { self.blocks.push(Block::default()); }
+                let block = self.blocks.len() - 1;
+                self.blocks[block].lines.push(text.to_string());
+                self.blocks[block].open = false;
+                self.live_row = Some((block, self.blocks[block].lines.len() - 1));
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Take the live line away (its call finished, or real output is about to land under it).
+    pub fn clear_live(&mut self) {
+        let Some((block, line)) = self.live_row.take() else { return };
+        if let Some(found) = self.blocks.get_mut(block) { if line < found.lines.len() { found.lines.remove(line); } }
+        self.dirty = true;
+    }
+
+    /// Replace the current block's first line - a tool call's heading, rewritten once its result lands
+    /// so that row's dot can say how the call went. Returns false when there is nothing to rewrite (no
+    /// block, an empty one, or a live line that is the only row). It never touches the live line.
+    pub fn head(&mut self, text: &str) -> bool {
+        let Some(block) = self.blocks.len().checked_sub(1) else { return false };
+        let live_here = matches!(self.live_row, Some((at, 0)) if at == block);
+        let found = &mut self.blocks[block];
+        if live_here || found.lines.is_empty() { return false }
+        if found.lines[0] != text { found.lines[0] = text.to_string(); self.dirty = true; }
+        true
+    }
+
     /// Append text to the current block. A newline ends a line; text without one leaves the line
     /// open for the next write.
     pub fn write(&mut self, text: &str) {
+        self.clear_live();
         if self.blocks.is_empty() { self.blocks.push(Block::default()); }
         let block = self.blocks.last_mut().unwrap();
         let text = text.replace('\r', "");
@@ -498,6 +551,48 @@ mod tests {
         assert_eq!(second("\u{2502} quoted words wrap under the bar"), "  wrap under the");
         assert_eq!(second("\u{23fa} the answer wraps under its dot"), "  wraps under");
         assert_eq!(wrap_rows("abcdefghij", 4), vec![format!("abcd{RESET}"), format!("efgh{RESET}"), "ij".to_string()]);
+    }
+    // ---- the live line a running tool call owns (docs/TOOL-PROGRESS.md) ----------------------
+    // Victor, 2026-11-10: a call's progress is a row in that call's OWN block, under its heading,
+    // rewritten while the call runs - not a line on the session-status-content row below the box.
+    #[test]
+    fn a_live_line_sits_in_the_call_block_and_is_replaced_in_place() {
+        let mut t = Transcript::default();
+        t.block(true);
+        t.write("\u{23fa} Bash(test-remote-call-shape)\n");
+        t.live(Some("\u{27f3} bash \u{b7} 43s \u{b7} remote call shape ok"));
+        assert_eq!(t.blocks.len(), 1, "one block: the call's own");
+        assert_eq!(t.blocks[0].lines.len(), 2, "heading, then the live row");
+        assert!(t.blocks[0].lines[1].contains("43s"));
+        t.live(Some("\u{27f3} bash \u{b7} 44s \u{b7} remote call shape ok"));
+        assert_eq!(t.blocks[0].lines.len(), 2, "an update rewrites that row, never adds one");
+        assert!(t.blocks[0].lines[1].contains("44s"));
+        // The result lands under the same heading: the live row is gone, the heading can be
+        // rewritten in place (its dot says how the call went), and nothing is duplicated.
+        assert!(t.head("\u{23fa} Bash(test-remote-call-shape)"), "the heading is there to rewrite");
+        t.write("\u{23fa} ok \u{b7} 43s\nremote call shape ok (59 checks, 0 skipped)\n");
+        assert_eq!(t.blocks[0].lines.len(), 3, "heading, the result's lead and its output: {:#?}", t.blocks[0].lines);
+        assert!(!t.blocks[0].lines.iter().any(|line| line.contains("\u{27f3}")), "no clock row left behind");
+        t.live(None);
+        assert_eq!(t.blocks[0].lines.len(), 3, "and nothing is removed when there is no live row");
+    }
+    #[test]
+    fn the_next_real_write_takes_the_live_line_away() {
+        let mut t = Transcript::default();
+        t.block(true);
+        t.write("heading\n");
+        t.live(Some("progress"));
+        t.write("answer\n");
+        assert_eq!(t.blocks[0].lines, vec!["heading".to_string(), "answer".to_string()],
+            "a result never lands under a progress row that outlived its call");
+        // A new block does the same: the live row belongs to the block it was opened in.
+        t.live(Some("progress for the next call"));
+        t.block(true);
+        assert_eq!(t.blocks.len(), 2);
+        assert_eq!(t.blocks[0].lines, vec!["heading".to_string(), "answer".to_string()]);
+        assert!(t.blocks[1].lines.is_empty(), "and it is not carried into the next block");
+        // `head` refuses to rewrite a row that is the live one, and an empty block has none.
+        assert!(!t.head("x"), "nothing to rewrite in an empty block");
     }
     #[test]
     fn nav_keys() {

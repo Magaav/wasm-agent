@@ -179,7 +179,14 @@ publish({ state = "running", tool = "bash", started_at = now - 400, at = now, la
 eq((tp.status({ now = now }) or {}).text, "\u{27F3} bash \u{00B7} 6m40s \u{00B7} no output for 6m40s",
   "the stall rule applies to the host's file too")
 
--- ---- the row's precedence, in the view -------------------------------------------
+-- ---- the session-status-content row is the update's, never a tool's -----------------
+-- Victor, 2026-11-10: "this bash description should be printed in the bash toolcall not at the
+-- footer. that place belongs to update message and update launcher seeker, not info about tools,
+-- which should be in the terminal content". A running call's sentence - the tool, its clock, the
+-- newest line of its output - is drawn INSIDE that call's block in the transcript
+-- (`lua/core/cli_view.lua` `METHODS:tool_live`, `wa_term::transcript::Transcript::live`); this row
+-- is the update notice's, its loader's and its result's. The module still decides the wording, so
+-- the wording is asserted here, and nothing about it is asked of the row.
 
 local function view_with(module)
   local clock = { now = 1000 }
@@ -195,38 +202,35 @@ tp.begin("bash", 1000)
 tp.observe("Building [=====> ] 143/412: serde_json, syn\n", 1190)
 local view, clock = view_with(tp)
 clock.now = 1190
-local content = view:session_content()
-eq(content and content.kind, "tool", "with nothing else to say, the row is the call")
-eq(view_lib.session_role("tool"), "borderAccent", "painted like a loader, not like the notice")
-eq(view_lib.session_role("stall"), "dim", "and a stall is dim")
+-- The sentence the call's own block draws: the same words, the same bar, one row.
+local sentence = tp.status({ now = clock.now, limit = 80 }) or {}
+ok(sentence.text and sentence.text:find(tp.bar(143 / 412), 1, true) ~= nil,
+  "the call's own line still decides the bar and the count")
+ok(sentence.text and not sentence.text:find("\n", 1, true), "on one row, never a wrapped one")
+-- And the row above the status bar says nothing about it.
+eq(view:session_content(), nil, "a call in flight writes no session-status-content line")
+eq(view:session_line(), nil, "so the row is not drawn at all")
 eq(view_lib.session_role("notice"), "warning", "the notice keeps its yellow")
-local line = select(1, view:session_line())
-ok(line and line:find(tp.bar(143 / 412), 1, true) ~= nil, "the view draws the bar")
-ok(line and not line:find("\n", 1, true), "on one row")
+ok(view_lib.session_role("tool") ~= "borderAccent" and view_lib.session_role("stall") ~= "dim",
+  "and there is no row role for a tool: it has no kind on this row")
 
--- The standing notice wins: it is a fact about the node, and the call is one about a tool.
+-- The notice owns the row, and a loader outranks the notice - the same precedence as before, with
+-- the call no longer among the claimants.
 view.session_notice = "Update available (cccccccccccc): run wa update or /update"
 eq((view:session_content() or {}).text, "Update available (cccccccccccc): run wa update or /update",
-  "the notice outranks the call")
--- A build loader wins over both.
+  "the update notice owns the row")
 view.session_status = function() return { text = "\u{27F3} building wasm-agent compiling serde", kind = "building" } end
-eq((view:session_content() or {}).kind, "building", "a build loader outranks the notice and the call")
+eq((view:session_content() or {}).kind, "building", "and a build loader replaces it")
 view.session_status = nil
 view.session_notice = nil
-eq((view:session_content() or {}).kind, "tool", "and with both gone the call has the row back")
-
--- The width: the row is clipped to one row by the view, never wrapped by the module.
-local narrow = view_lib.new({ live = false, out = function() end, now = function() return clock.now end,
-  limit = 30, rows = function() return 24 end })
-narrow.tool_progress = tp
-local clipped = select(1, narrow:session_line())
-local visible = (tostring(clipped):gsub("\27%[[%d;]*m", ""))
-local columns = (utf8 and utf8.len(visible)) or #visible
-ok(columns <= 30, "clipped to the terminal's width (" .. columns .. " columns)")
-ok(visible:find("\u{2026}", 1, true) ~= nil, "with an ellipsis, not a wrap: " .. visible)
-
+eq(view:session_content(), nil, "with both gone the row is empty, never the call's")
+-- The width is the block's business, not the module's: the sentence is one row here (asserted
+-- above) and the transcript wraps it to whatever the terminal is. What the module must never do is
+-- hand out more than one line, or an escape sequence of its own.
+local wide = tp.status({ now = clock.now, limit = 30 }) or {}
+ok(wide.text and not wide.text:find("\27", 1, true), "no escape sequence in the sentence: " .. tostring(wide.text))
 tp.finish()
-eq(view:session_content(), nil, "the call ends: the row goes away")
+eq(view:session_content(), nil, "the call ends: the row stays the update's, empty")
 
 print(string.format("%d checks, %d failed", checks, failed))
 if failed > 0 then os.exit(1) end

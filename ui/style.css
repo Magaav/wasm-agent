@@ -981,11 +981,9 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
   color: var(--warn); font-size: 11.5px; line-height: 1.4;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-/* The same row, when a long tool call owns it (docs/TOOL-PROGRESS.md): the loader's blue, because a
-   build and a long call are the same kind of fact, and dim for the stall hint - the one quiet fact
-   on the row. The notice keeps the yellow, and it always wins: app.js decides the precedence. */
-.session-status-content.session-status-tool { color: var(--accent); }
-.session-status-content.session-status-stall { color: var(--muted); }
+/* The row is the update notice's and its loader's, and nothing else's (Victor, 2026-11-10): a
+   running tool call says what it is doing inside its own topic in the transcript, so there is no
+   tool/stall variant of this row to style. */
 
 /* One declarative per-message action row; current hosts use the shared Send/Stop only. */
 .chat-actions { display: flex; flex:none; align-items: center; gap: var(--gap); }

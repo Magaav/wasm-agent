@@ -1094,6 +1094,14 @@ end
 -- the status bar's own content (the session numbers used to be pushed to the right of it on the same
 -- row) and stops shortening it.
 --
+-- **The row is the update notice's, and nothing else's** (Victor, 2026-11-10: "this bash description
+-- should be printed in the bash toolcall not at the footer. that place belongs to update message and
+-- update launcher seeker, not info about tools, which should be in the terminal content"). A running
+-- tool call's progress - its name, its clock and the newest line of its output - is drawn INSIDE that
+-- call's own block in the transcript, under its heading (`METHODS:tool_live`,
+-- `wa_term::transcript::Transcript::live`), and never here. The kinds below are therefore only the
+-- update's own:
+--
 -- What the line says now is `update_banner.session_content`'s decision, not this module's:
 --
 --   notice     the standing sentence, in the warning yellow - `Update available (<sha>): run wa
@@ -1120,15 +1128,16 @@ function METHODS:session_content()
   if self.session_notice and self.session_notice ~= "" then
     return { text = self.session_notice, kind = "notice" }
   end
-  -- Lowest claimant: a long tool call's progress, when neither a node fact nor a notice has the line.
-  return self:tool_line()
+  -- No third claimant: a tool call's progress is not a session notice, and this row is not where a
+  -- tool speaks (Victor, 2026-11-10).
+  return nil
 end
 
--- The colour of each kind of line: the notice is the warning yellow, a loader (a build, or a long
--- tool call) is the border accent, a result is success or error, and a stalled call is dim - the one
--- quiet fact on the row. `lua/core/tool_progress.lua` decides the `tool`/`stall` kinds.
-local SESSION_ROLES = { building = "borderAccent", tool = "borderAccent", installed = "success",
-  failed = "error", stall = "dim", notice = "warning" }
+-- The colour of each kind of line: the notice is the warning yellow, a loader (a build) is the
+-- border accent, and a result is success or error. A tool call has no kind here at all - its line
+-- lives in its own block in the transcript.
+local SESSION_ROLES = { building = "borderAccent", installed = "success", failed = "error",
+  notice = "warning" }
 function M.session_role(kind)
   return SESSION_ROLES[tostring(kind or "")] or "warning"
 end
@@ -1597,9 +1606,9 @@ function METHODS:progress(action, tool)
   if action == "begin" then pcall(module.begin, tool, self.now()) else pcall(module.finish) end
 end
 
--- What the long-call row says now, for `session_content`: `{ text, kind }` or nil. Asked only after
--- the build loader and the standing notice have both declined the line, because a fact about the node
--- outranks a fact about one call.
+-- What the call's own line says now: `{ text, kind }` or nil. It is the row *inside* the call's
+-- block - `⟳ bash · 43s · remote call shape ok`, from this process's tail or the host's live file -
+-- and it is never offered to the session-status-content row (Victor, 2026-11-10).
 function METHODS:tool_line()
   local module = self.tool_progress
   if not module then return nil end
@@ -1608,11 +1617,32 @@ function METHODS:tool_line()
   return value
 end
 
+-- The live line of the call in flight, written inside its own transcript block: `""` takes it away.
+-- Nothing here can repaint it while the call runs (a foreground `bash` blocks this interpreter inside
+-- `host.exec`), so the host's ticker owns it - `wa-capabilities`' `refresh_tool_progress` rewrites the
+-- same row from `tool-progress.json`; this only opens it, seeds it and takes it down.
+function METHODS:tool_live(text)
+  if not (self:transcript() and host and host.transcript_live) then return end
+  pcall(host.transcript_live, tostring(text or ""))
+end
+
+-- The call's heading rewritten once its result is in, so that row's dot can say how it went.
+function METHODS:tool_head(text)
+  if not (self:transcript() and host and host.transcript_head) then return end
+  pcall(host.transcript_head, tostring(text or ""))
+end
+
 -- A call whose result never arrived (a second call started, or the run ended) still gets its
--- heading, with a neutral dot: what was asked must not vanish from the transcript.
+-- heading, with a neutral dot: what was asked must not vanish from the transcript. A call whose block
+-- was opened when it started already has that heading; its live line is taken down here, because the
+-- facts behind it are gone.
 function METHODS:flush_call()
   local pending = self.pending
-  if not pending or pending.shown then return end
+  if not pending then return end
+  -- Its block was opened when it started: the heading is already there, and what has to go is the
+  -- live row under it - the facts behind it belong to a call that is no longer in flight.
+  if pending.block then self:tool_live("") return end
+  if pending.shown then return end
   pending.shown = true
   self:topic(true)
   self:line(paint(DOT, "muted", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
@@ -1835,11 +1865,20 @@ function METHODS:event(event)
     local label, inside = M.tool_title(event.name, event.arguments, self.limit - 4)
     self.pending = { name = event.name or "?", started = self.now(), label = label, inside = inside,
       arguments = event.arguments }
-    -- A call that outlasts a couple of seconds gets the session-status-content row
-    -- (docs/TOOL-PROGRESS.md): the elapsed time, what its output says it is doing, and - when it has
-    -- gone quiet - how long for. Started here and ended with the result, so the row cannot outlive
-    -- the call it describes. A module that is absent is not fatal: the view draws what it always did.
+    -- A call that outlasts a couple of seconds says what it is doing **inside its own block**: the
+    -- heading now, and the progress line under it, rewritten in place while the call runs
+    -- (docs/TOOL-PROGRESS.md, Victor 2026-11-10). The block has to exist while the call is in flight,
+    -- which is why the heading is printed here and not with the result; only the host's transcript can
+    -- hold a row its ticker rewrites while this process is blocked, so the plain layout keeps the old
+    -- order (heading with the result) and prints no live line.
     self:progress("begin", event.name or "tool")
+    if self:transcript() then
+      self:topic(true)
+      self.pending.block, self.pending.shown = true, true
+      self:line(paint(DOT, "muted", self.live) .. " " .. self:call_heading(label, inside))
+      local live = self:tool_line()
+      if live then self:tool_live(live.text) end
+    end
     if event.timeout_ms then self.pending.bound = tonumber(event.timeout_ms) / 1000 end
     -- `quiet`: a `!command` the reader ran outside any run (lua/core/bash_mode.lua) - drawn like a
     -- tool, but with no run there is no status line to name it on, and none must be started.
@@ -1855,13 +1894,23 @@ function METHODS:event(event)
     local name = event.name or (self.pending and self.pending.name) or "?"
     local ms = self.pending and ((self.now() - self.pending.started) * 1000) or nil
     local pending = self.pending
-    if not pending or pending.shown or pending.name ~= name then
+    -- A call whose block was opened when it started keeps its own heading, its arguments and its
+    -- block: only an announcement that was never printed (or one for another tool) is rebuilt here.
+    if not pending or (pending.shown and not pending.block) or pending.name ~= name then
       local label = M.tool_title(name, nil, self.limit - 4)
       pending = { label = label, inside = "" }
     end
     local ok, note = M.outcome(name, event.result, pending.arguments)
-    self:topic(true)
-    self:line(paint(DOT, ok and "success" or "error", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
+    -- The heading is already on screen when the block was opened as the call started: rewrite it in
+    -- place (its dot says how it went, green or red as Claude Code does) instead of printing a second
+    -- one, and let the first real write take the live progress line down - the result is what the row
+    -- under the heading says now.
+    if pending.block then
+      self:tool_head(paint(DOT, ok and "success" or "error", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
+    else
+      self:topic(true)
+      self:line(paint(DOT, ok and "success" or "error", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
+    end
     -- In the transcript a tool call is a topic that folds to three rows, so it keeps more of the
     -- output for when it is expanded.
     local preview, hidden = M.preview(name, event.result, self:transcript() and 200 or 3, pending.arguments)

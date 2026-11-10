@@ -1191,6 +1191,132 @@ do
   eq(table.concat(plain_written), notice .. "\n", "a captured transcript prints the line once, as plain text")
 end
 
+
+-- ---- a running tool call owns its own block, and never this row --------------------------------
+-- Victor, 2026-11-10: "this bash description should be printed in the bash toolcall not at the
+-- footer. that place belongs to update message and update launcher seeker, not info about tools,
+-- which should be in the terminal content". The session-status-content row is the update notice's,
+-- its loader's and its result's; a call's name, its clock and its newest output line are drawn
+-- INSIDE that call's block, under its heading, rewritten in place while the host's ticker is the
+-- only painter awake (`wa_term::transcript::Transcript::live`, pinned in that crate's own tests).
+do
+  local notice = "Update available (cccccccccccc): run wa update or /update"
+  -- The host's transcript as a small model of the four calls the view makes: a block, a write, the
+  -- live line, and the heading rewritten when the result lands. `live` follows the rules the view
+  -- relies on: replace the row it already wrote, append it inside the current block otherwise, and
+  -- let the next real write take it away.
+  local function fake_transcript()
+    local blocks = { { topic = false, lines = {} } }
+    local api = { blocks = blocks }
+    local function last() return blocks[#blocks] end
+    api.block = function(topic)
+      api.live_at = nil
+      if #last().lines == 0 then last().topic = topic
+      else blocks[#blocks + 1] = { topic = topic, lines = {} } end
+      return true
+    end
+    api.write = function(text)
+      -- The Rust rule the view relies on: the first real write takes the live row away, so a result
+      -- never lands under a progress row that outlived its call.
+      if api.live_at and last().lines[api.live_at] then table.remove(last().lines, api.live_at) end
+      api.live_at = nil
+      for line in (tostring(text):gsub("\n$", "") .. "\n"):gmatch("([^\n]*)\n") do
+        last().lines[#last().lines + 1] = line
+      end
+      return true
+    end
+    api.live = function(text)
+      local body = tostring(text or "")
+      if body == "" then
+        if api.live_at and last().lines[api.live_at] then table.remove(last().lines, api.live_at) end
+        api.live_at = nil
+        return true
+      end
+      if api.live_at and last().lines[api.live_at] then
+        last().lines[api.live_at] = body
+      else
+        last().lines[#last().lines + 1] = body
+        api.live_at = #last().lines
+      end
+      return true
+    end
+    api.head = function(text)
+      if #last().lines == 0 then return false end
+      last().lines[1] = tostring(text or "")
+      return true
+    end
+    return api
+  end
+  local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head }
+  local fake = fake_transcript()
+  host.transcript_block, host.transcript_write = fake.block, fake.write
+  host.transcript_live, host.transcript_head = fake.live, fake.head
+  local clock = { now = 1000 }
+  local view = capture({ live = true, stdout = true, limit = 100, now = function() return clock.now end })
+  view.screen = view_lib.screen_rows(24, true)
+  view.editor, view.editor_ready = true, true
+  view:event({ type = "tool", name = "bash", arguments = { command = "test-remote-call-shape" }, call_id = "c1" })
+  local block = fake.blocks[#fake.blocks]
+  eq(#fake.blocks, 1, "the call opens ONE block of its own, as it starts")
+  eq(block and block.topic, true, "as a collapsible topic, like every tool call")
+  eq(block and #block.lines, 1, "its first row is the heading, printed while the call runs")
+  ok(has(visible(block and block.lines[1]), view_lib.DOT .. " Bash"), "the heading carries the step's dot")
+  ok(has(visible(block and block.lines[1]), "test-remote-call-shape"), "and names what is running")
+  eq(view:session_content(), nil, "a running call writes no session-status-content line")
+  eq(view:session_line(), nil, "so the row is not drawn at all")
+  -- The host ticker's sentence, written where the call's own block is: one row, replaced in place.
+  fake.live("\u{27F3} bash \u{b7} 43s \u{b7} remote call shape ok")
+  block = fake.blocks[#fake.blocks]
+  eq(#fake.blocks, 1, "the progress line joins the call's own block, never a new one")
+  eq(#block.lines, 2, "as one row under the heading")
+  ok(has(visible(block.lines[2]), "43s"), "carrying the call's clock")
+  fake.live("\u{27F3} bash \u{b7} 44s \u{b7} remote call shape ok")
+  eq(#fake.blocks[#fake.blocks].lines, 2, "an update rewrites that row in place, never adding one")
+  ok(has(visible(fake.blocks[#fake.blocks].lines[2]), "44s"), "with the newer sentence")
+  eq(view:session_content(), nil, "and the row still says nothing: it is not the call's")
+  -- A notice still owns the row while the call runs, untouched by it.
+  view.session_notice = notice
+  eq((view:session_content() or {}).text, notice, "the update notice owns the row, call or no call")
+  eq(select(2, view:session_line()), "notice", "in its own kind: nothing about the call reaches it")
+  view.session_notice = nil
+  -- The result lands in the same block: the heading is rewritten (its dot says how it went), the live
+  -- row goes with the first real write, and the output follows.
+  clock.now = 1043
+  view:event({ type = "tool_result", name = "bash",
+    result = { code = 0, stdout = "remote call shape ok (59 checks, 0 skipped)\n" } })
+  block = fake.blocks[1]
+  eq(#fake.blocks, 2, "the result does not open a block of its own")
+  ok(#fake.blocks[2].lines <= 1 and not has(visible(table.concat(fake.blocks[2].lines, "\n")), "Bash"),
+    "the topic that follows carries nothing of the call")
+  ok(has(visible(block.lines[1]), view_lib.DOT .. " Bash"), "the call's heading is rewritten, not printed twice")
+  local shown = visible(table.concat(block.lines, "\n"))
+  ok(has(shown, "59 checks"), "the result is what the block says now: " .. shown)
+  ok(not has(shown, "\u{27F3}"), "and the live clock line is not left behind: " .. shown)
+  eq(view:session_content(), nil, "and the row is still nobody's but the update's")
+  -- A call whose result never arrives keeps the heading it already had: it is not printed twice.
+  local orphan = fake_transcript()
+  host.transcript_block, host.transcript_write = orphan.block, orphan.write
+  host.transcript_live, host.transcript_head = orphan.live, orphan.head
+  local second = capture({ live = true, stdout = true, limit = 100, now = function() return 2000 end })
+  second.screen = view_lib.screen_rows(24, true)
+  second.editor, second.editor_ready = true, true
+  second:event({ type = "tool", name = "bash", arguments = { command = "sleep 600" }, call_id = "c2" })
+  orphan.live("\u{27F3} bash \u{b7} 5m01s \u{b7} no output for 3m")
+  second:flush_call()
+  eq(#orphan.blocks, 1, "a call with no result keeps its one block")
+  eq(#orphan.blocks[1].lines, 1, "and its heading is not printed a second time")
+  -- The plain layout has no host transcript to hold a live row: the heading keeps the old order.
+  host.transcript_block, host.transcript_write = saved[2], saved[1]
+  host.transcript_live, host.transcript_head = saved[3], saved[4]
+  local plain, plain_written = capture({ live = false, limit = 100 })
+  plain:event({ type = "tool", name = "bash", arguments = { command = "echo hi" } })
+  plain:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
+  ok(has(table.concat(plain_written), "Bash"), "a captured transcript still prints the call")
+  eq(plain:session_content(), nil, "and its row says nothing about it either")
+  host.transcript_write, host.transcript_block = saved[1], saved[2]
+  host.transcript_live, host.transcript_head = saved[3], saved[4]
+end
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)
