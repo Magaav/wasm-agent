@@ -110,6 +110,9 @@ import crypto from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
+// The lease and the two process facts are shared with the landing queue (scripts/landing-queue.mjs):
+// one definition of "held", so a node replacement is decided the same way by both lanes.
+import {holdLease, releaseLease, leaseHeld, pidAlive} from './lib/sqlite-lease.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
@@ -132,7 +135,6 @@ CREATE INDEX IF NOT EXISTS history_request ON history(request,id);
 `;
 const now = () => Math.floor(Date.now() / 1000);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const held = new Map();
 const laneError = (message, exit = 76) => Object.assign(Error(message), {exit});
 
 function stateDir(options) {
@@ -160,36 +162,10 @@ function openLane(dir) {
   } catch(error) { db.exec('ROLLBACK'); throw error; }
   return db;
 }
-// The lease is the proof of life, and it is the repository's own primitive (resources.rs):
-// an exclusive SQLite lock that the OS releases when the process dies, so a crashed holder
-// never needs a timeout to be recognised.
-function leaseFile(dir, uuid) { return path.join(dir, 'leases', `${uuid}.sqlite`); }
-function holdLease(dir, uuid) {
-  const db = new DatabaseSync(leaseFile(dir, uuid));
-  db.exec('PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE');
-  held.set(uuid, db);
-}
-function releaseLease(uuid) {
-  const db = held.get(uuid);
-  held.delete(uuid);
-  if (!db) return;
-  try { db.exec('ROLLBACK'); } catch {}
-  try { db.close(); } catch {}
-}
-function leaseHeld(dir, uuid) {
-  if (held.has(uuid)) return true;
-  const file = leaseFile(dir, uuid);
-  if (!fs.existsSync(file)) return false;
-  let probe;
-  try { probe = new DatabaseSync(file); } catch { return true; }
-  try { probe.exec('PRAGMA busy_timeout=0'); probe.exec('BEGIN EXCLUSIVE'); probe.exec('ROLLBACK'); return false; }
-  catch { return true; } finally { try { probe.close(); } catch {} }
-}
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return error.code === 'EPERM' || error.code === 'EACCES'; }
-}
+// The lease is the proof of life, and it is the repository's own primitive (resources.rs): an
+// exclusive SQLite lock that the OS releases when the process dies, so a crashed holder never needs
+// a timeout to be recognised. It lives in scripts/lib/sqlite-lease.mjs, shared with the landing
+// queue; the three call sites below are this file's only use of it.
 // Release and inheritance are effects of the live holder, not of whoever knows
 // the row number. Fail closed if this host cannot observe the caller's ancestry.
 function descendantOf(pid, ancestor) {
@@ -414,7 +390,7 @@ function reconcileHolders(db, dir) {
   const moved = [];
   for (const entry of rows(db, "SELECT * FROM requests WHERE state IN ('running','waiting','orphaned')")) {
     if (entry.state !== 'waiting') observeHolder(db, entry);
-    if (held.has(entry.lease) || leaseHeld(dir, entry.lease)) continue;
+    if (leaseHeld(dir, entry.lease)) continue;
     const holderAlive = pidAlive(entry.pid);
     if (entry.state === 'waiting') {
       const reason = `abandoned while waiting: pid ${entry.pid}`

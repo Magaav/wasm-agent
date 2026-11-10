@@ -143,14 +143,14 @@ The fabric routes work onto a `wa-queue` queue (`fabric.<kind>`, one per job kin
 a second notion of ownership. So the properties are the queue's own (`docs/QUEUE.md`):
 
 - **A killed node costs one lease.** Its heartbeats stop, `take`'s own recovery (or the producer's
-  `sweep`) puts the job back to `Ready`, and the next worker — another peer or this node — takes it.
-- **Exactly once.** The queue refuses a settle from a worker that no longer holds the lease, so a node
+  `sweep`) puts the job back to `Ready`, and the next lease holder — another peer or this node — takes it.
+- **Exactly once.** The queue refuses a settle from a lease holder that no longer holds it, so a node
   that wakes up after being declared dead cannot write a second result.
 - **Heartbeat progress.** A running job extends its lease and appends progress chunks; an admin reads
   the same records to tell "running" from "stuck".
 
-A node's lease worker id is `<node>:<generation>`, so a restarted node is a new worker and its old
-lease is nobody's.
+A node's lease id (`worker_id`, `rust/wa-fabric/src/lease.rs`) is `<node>:<generation>`, so a
+restarted node is a new lease holder and its old lease is nobody's.
 
 ## Job kinds are open
 

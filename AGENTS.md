@@ -16,6 +16,9 @@ publication and Sentinel.
 
 - Work on a short-lived `change/<name>` branch cut from `origin/main`; `git pull` before
   editing. Keep the `Agent:` trailer and prove `git merge-tree --write-tree origin/main HEAD`.
+- **The canonical checkout takes one lander at a time, in order:** `node scripts/landing-queue.mjs land
+  --branch change/<name> --checks "bash scripts/fast.sh"` queues behind the holder, refuses a dirty
+  canonical tree nobody owns, and retests only what the move changed (`docs/LANDING-QUEUE.md`).
 - Use ordinary Git integration. Self-review is allowed;
   self-review must be labelled self-review, never independent review.
   Do not fabricate a factory receipt or disable remote protection; remote protection is the
