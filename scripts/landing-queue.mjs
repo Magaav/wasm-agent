@@ -375,40 +375,54 @@ function judgedRun(captured, what) {
 }
 
 // The baseline for the main this landing starts from: the recorded one when the tree's check inputs
-// are unchanged, otherwise ONE measurement on a pristine checkout of that commit, recorded so no
+// are unchanged, otherwise ONE measurement of that commit in the CANONICAL CHECKOUT, recorded so no
 // later landing on the same inputs pays for it again.
+//
+// Why the canonical checkout and not a fresh `git worktree`: measured here on 2026-11-10 (row #27),
+// the same commit checked out in a throw-away worktree failed a DIFFERENT set of checks than the same
+// commit in the canonical directory (in the worktree: test-binding-runtime, test-capability-inventory,
+// test-changes-roundtrip, test-cli-bash-restart; in the canonical checkout: the graph/codemode/features
+// set the installed component set produces). The difference is state the worktree does not have and
+// the directory does, and a baseline not measured where the candidate runs refuses correct branches.
+// So the baseline is main's own commit, detached, in the canonical checkout, under the lease; the tree
+// is put back on `main` before anything else happens. A record whose `source` is `pristine` (the older
+// worktree measurement) is never reused: it is not the same environment.
 async function ensureBaseline({id, canonical, upstream, command, dir, db, say}) {
   const digest = treeDigest(canonical, upstream).retest;
   const cached = baselineOf(db, {digest, command});
-  if (cached) {
-    say(`#${id} baseline reused: ${(cached.names || []).length} known failure(s) recorded for main's check inputs ${digest.slice(0, 12)} by ${cached.recorded_by || 'an earlier landing'} (${cached.source || 'recorded'}), measured on ${String(cached.commit || '').slice(0, 12)}; no pristine run`);
+  if (cached && cached.source !== 'pristine') {
+    say(`#${id} baseline reused: ${(cached.names || []).length} known failure(s) recorded for main's check inputs ${digest.slice(0, 12)} by ${cached.recorded_by || 'an earlier landing'} (${cached.source || 'recorded'}), measured on ${String(cached.commit || '').slice(0, 12)}; no extra run`);
     return cached;
   }
-  const worktree = path.join(os.tmpdir(), `wa-baseline-${upstream.slice(0, 12)}-${process.pid}`);
-  say(`#${id} no baseline recorded for main ${upstream.slice(0, 12)} with \`${checkCommandKey(command)}\` (check inputs ${digest.slice(0, 12)}); measuring it once on a pristine tree`);
-  fs.rmSync(worktree, {recursive: true, force: true});
-  const added = git(canonical, ['worktree', 'add', '--detach', worktree, upstream]);
-  if (added.status !== 0) {
-    throw new QueueError(`baseline_unavailable: cannot check out ${upstream.slice(0, 12)} to measure the baseline: ${String(added.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was merged or pushed.`, 75, 'baseline_unavailable');
+  say(`#${id} no usable baseline for main ${upstream.slice(0, 12)} with \`${checkCommandKey(command)}\` (check inputs ${digest.slice(0, 12)}); measuring it once, in this checkout`);
+  const checkout = git(canonical, ['checkout', '--quiet', '--detach', upstream]);
+  if (checkout.status !== 0) {
+    throw new QueueError(`baseline_unavailable: cannot put ${canonical} at ${upstream.slice(0, 12)} to measure the baseline: ${String(checkout.stderr || checkout.stdout || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was merged or pushed.`,
+      75, 'baseline_unavailable');
   }
+  let captured;
   try {
-    const captured = await captureCommand({
-      cwd: worktree, command, env: checksEnvironment(worktree), echo: false,
+    captured = await captureCommand({
+      cwd: canonical, command, env: checksEnvironment(canonical), echo: false,
       log: path.join(dir, `baseline-${upstream.slice(0, 12)}.log`),
     });
-    const run = parseCheckLog(captured.output, {exitCode: captured.code});
-    if (!run.named && !run.ok) {
-      throw new QueueError(`baseline_unavailable: '${checkCommandKey(command)}' exited ${captured.code} on pristine ${upstream.slice(0, 12)} without naming a failing test, so a by-name comparison would be a guess. Run a check command that prints \`FAIL <section> <name> (exit N)\` lines (scripts/fast.sh does). Nothing was merged or pushed.`, 75, 'baseline_unavailable');
-    }
-    const record = baselineRecord({run, command: checkCommandKey(command), commit: upstream, digest, host: hostName(), source: 'pristine'});
-    recordBaseline(db, {digest, command, commit: upstream, record, by: 'queue'});
-    logRow(db, 0, 'baseline', `measured on pristine ${upstream.slice(0, 12)} (check inputs ${digest.slice(0, 12)}) with '${checkCommandKey(command)}': ${record.names.length} known failure(s), exit ${captured.code}`);
-    say(`#${id} baseline measured on pristine ${upstream.slice(0, 12)}: ${record.names.length} known failure(s)${record.names.length ? ` (${record.names.slice(0, 4).join(', ')}${record.names.length > 4 ? ', ...' : ''})` : ''}; recorded for check inputs ${digest.slice(0, 12)}`);
-    return record;
   } finally {
-    const removed = git(canonical, ['worktree', 'remove', '--force', worktree]);
-    if (removed.status !== 0) git(canonical, ['worktree', 'prune']);
+    const back = git(canonical, ['checkout', '--quiet', 'main']);
+    if (back.status !== 0) {
+      throw new QueueError(`baseline_checkout_stuck: measured the baseline but could not put ${canonical} back on main: ${String(back.stderr || back.stdout || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was merged or pushed; the checkout is at ${upstream.slice(0, 12)}, detached, and a person must put it back on main.`,
+        76, 'baseline_checkout_stuck');
+    }
   }
+  const run = parseCheckLog(captured.output, {exitCode: captured.code});
+  if (!run.named && !run.ok) {
+    throw new QueueError(`baseline_unavailable: '${checkCommandKey(command)}' exited ${captured.code} on ${upstream.slice(0, 12)} without naming a failing test, so a by-name comparison would be a guess. Run a check command that prints \`FAIL <section> <name> (exit N)\` lines (scripts/fast.sh does). Nothing was merged or pushed.`,
+      75, 'baseline_unavailable');
+  }
+  const record = baselineRecord({run, command: checkCommandKey(command), commit: upstream, digest, host: hostName(), source: 'canonical'});
+  recordBaseline(db, {digest, command, commit: upstream, record, by: 'queue'});
+  logRow(db, 0, 'baseline', `measured on ${upstream.slice(0, 12)} in ${canonical} (check inputs ${digest.slice(0, 12)}) with '${checkCommandKey(command)}': ${record.names.length} known failure(s), exit ${captured.code}`);
+  say(`#${id} baseline measured on ${upstream.slice(0, 12)}: ${record.names.length} known failure(s)${record.names.length ? ` (${record.names.slice(0, 4).join(', ')}${record.names.length > 4 ? ', ...' : ''})` : ''}; recorded for check inputs ${digest.slice(0, 12)}`);
+  return record;
 }
 
 // ---- land ---------------------------------------------------------------------------------------
@@ -535,7 +549,6 @@ async function commandLand(options) {
     // against main's known-failures baseline (see ensureBaseline above), not against zero.
     let candidateRun = null;
     if (rerun) {
-      const baseline = await ensureBaseline({id, canonical, upstream, command: options.checks, dir, db, say});
       say(`#${id} retest required; running ${options.checks} on the merged tree ${merged.slice(0, 12)}`);
       const started = Date.now();
       let captured = await captureCommand({
@@ -544,6 +557,10 @@ async function commandLand(options) {
       });
       let took = Math.round((Date.now() - started) / 1000);
       let judged = judgedRun(captured, 'merged tree');
+      // A green candidate needs no baseline at all: there is nothing to compare. Only a red one has to
+      // be read against what main already fails, and only then is the baseline measured (if nobody has
+      // recorded one for main's check inputs).
+      let baseline = judged.run.ok ? null : await ensureBaseline({id, canonical, upstream, command: options.checks, dir, db, say});
       let outcome = judged.run.ok ? {verdict: 'pass', why: 'the checks passed'} : judgeRun({baseline, run: judged.run});
       if (outcome.verdict === 'environment') {
         // Never a verdict on the code: one serial retry on the same tree (WA_FAST_JOBS=1, which

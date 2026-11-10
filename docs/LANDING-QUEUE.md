@@ -152,11 +152,17 @@ node scripts/landing-queue.mjs baseline [--command "bash scripts/fast.sh"] [--co
 node scripts/landing-queue.mjs baseline --record <log> [--exit-code <n>]   # prime it from a saved run
 ```
 
-Reuse is the point. A landing with no record for main's check inputs measures **one** pristine tree
-(`git worktree add --detach <main>`), records the result by name, and then lands; and every successful
-landing records its own candidate run as the baseline for the commit it just made main, so the next
-landing on that main pays **no pristine run at all**. `scripts/test-landing-baseline.mjs` measures
-exactly that: the first landing runs the check twice (pristine + candidate), the second runs it once.
+Reuse is the point, and so is measuring where the candidate runs. A landing with no record for main's
+check inputs measures **one** baseline - main's own commit, detached in the **canonical checkout**,
+under the lease, then put back on `main` - records the result by name, and lands. It is measured there
+and not in a throw-away `git worktree` because the same commit fails a different set of checks in a
+fresh worktree (measured 2026-11-10, row #27: `test-binding-runtime`, `test-capability-inventory`,
+`test-changes-roundtrip`, `test-cli-bash-restart` there; the graph/codemode/features set in the
+canonical directory), and a baseline not measured where the candidate runs refuses correct branches.
+A green candidate needs no baseline at all: there is nothing to compare. Every successful landing then
+records its own candidate run as the baseline for the commit it just made main, so the next landing on
+that main pays **no extra run at all**. `scripts/test-landing-baseline.mjs` measures exactly that: the
+first landing runs the check twice (baseline + candidate), the second runs it once.
 
 ### 4. Durable state that survives a node replacement
 

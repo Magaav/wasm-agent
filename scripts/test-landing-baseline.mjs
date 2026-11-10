@@ -184,8 +184,8 @@ branch('change/one', 'lua/core/x.lua', 'return 1 -- one\n');
 const first = land('change/one');
 check('a landing on a red main passes when it adds no failure', first.status === 0, first.stdout + first.stderr);
 check('and it says so by name, not by silence', /only the 1 failure\(s\) the base tree already has/.test(first.stdout || ''), first.stdout);
-check('the first landing measured ONE pristine tree plus its own candidate', runCount() === 2, `${runCount()} run(s)`);
-check('the measurement is reported as measured, once', /baseline measured on pristine/.test(first.stdout || ''), first.stdout);
+check('the first landing measured ONE baseline plus its own candidate', runCount() === 2, `${runCount()} run(s)`);
+check('the measurement is reported as measured, once', /baseline measured on [0-9a-f]{12}/.test(first.stdout || ''), first.stdout);
 const firstMain = originMain();
 check('the first landing is on origin/main', /readback origin refs\/heads\/main/.test(first.stdout || '') && git(CANONICAL, 'rev-parse', 'HEAD').trim() === firstMain, firstMain);
 
@@ -194,7 +194,7 @@ branch('change/two', 'lua/core/x.lua', 'return 2\n');
 const before = runCount();
 const second = land('change/two');
 check('a second landing on the same main lands too', second.status === 0, second.stdout + second.stderr);
-check('it reused the recorded baseline instead of measuring a pristine tree', /baseline reused/.test(second.stdout || '') && !/baseline measured on pristine/.test(second.stdout || ''), second.stdout);
+check('it reused the recorded baseline instead of measuring a pristine tree', /baseline reused/.test(second.stdout || '') && !/baseline measured on [0-9a-f]{12}/.test(second.stdout || ''), second.stdout);
 check('so exactly one check run happened: the candidate\'s own', runCount() === before + 1, `${runCount() - before} run(s) for the second landing`);
 check('and it recorded the baseline for the main it landed', /baseline recorded for the new main/.test(second.stdout || ''), second.stdout);
 
