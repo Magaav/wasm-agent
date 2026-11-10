@@ -22,7 +22,17 @@ local function federation() return dofile('lua/core/federation.lua') end
 -- `probe` is the handshake, `last_call` the last tool call; either failing is the error the reader needs,
 -- and a connector that never probed is disabled, not broken.
 local function local_state(server)
-  if server.enabled == true then return 'enabled', nil end
+  if server.enabled == true then
+    -- Still on, but the catalogue the operator approved is not the one the connector now reports: the next
+    -- call refuses before dispatch until it is probed again. Saying `disabled` here (what a call used to do by
+    -- turning the connector off) sent a reader looking for a connector that had never gone away.
+    local stale = server.probe_stale
+    if type(stale) == 'table' then
+      return 'stale', 'its tool list changed since the last probe (' .. tostring(stale.error or 'schema_changed')
+        .. '); it is still on, and a call refuses until it is probed again'
+    end
+    return 'enabled', nil
+  end
   local probe = server.probe
   if type(probe) == 'table' and probe.ok ~= true then return 'failing', probe.error or 'probe_failed' end
   local call = server.last_call
@@ -224,7 +234,7 @@ function M.list(ctx, opts)
   for _, entry in ipairs(peer_list) do connectors[#connectors + 1] = entry end
   local enabled, tools = 0, 0
   for _, entry in ipairs(connectors) do
-    if entry.state == 'enabled' then enabled = enabled + 1 end
+    if entry.enabled == true then enabled = enabled + 1 end
     tools = tools + (tonumber(entry.tool_count) or 0)
   end
   return {
