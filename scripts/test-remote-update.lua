@@ -296,6 +296,16 @@ ok(peer_status.installed_binary and peer_status.installed_binary.source == "preb
   "and names the prebuilt release that was installed", peer_status.installed_binary and peer_status.installed_binary.source)
 ok(record_of(admitted.record).outcome == "installed", "the peer's record settled once, in place")
 
+-- The install went further than the request: main moved while the request waited, so installed.txt names
+-- a DESCENDANT of the commit that was asked for. That is installed, not "running" - the requested commit
+-- is contained in what was installed (measured on `work`, 2026-11-10).
+put(install .. "/installed.txt", "commit=" .. NEWER .. "\nbranch=main\n")
+local descendant = remote.serve({ action = "status", id = admitted.record }, MASTER)
+ok(descendant.state == "installed", "an install of a descendant counts as installed", descendant.state)
+ok(descendant.contains_target == true, "and the answer says the requested commit is contained, not equal")
+ok(tostring(descendant.detail):find("contains the requested", 1, true) ~= nil, "in words a caller can act on", descendant.detail)
+put(install .. "/installed.txt", "commit=" .. TARGET .. "\nbranch=main\nbinary_source=prebuilt-release\nbinary_release=node-" .. TARGET:sub(1, 12) .. "\n")
+
 -- Another master's record is not readable through this node's id.
 local stranger = remote.serve({ action = "status", id = admitted.record },
   { role = "master", node_id = "another-master", name = "elsewhere" })
