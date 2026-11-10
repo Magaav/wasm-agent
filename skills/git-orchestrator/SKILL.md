@@ -306,6 +306,23 @@ rebuild/gate the final combined candidate after any source-tree change.
 
 ### 3. Push under the sole lock; gate only for user-selected pre-release
 
+**The sole lock is the landing queue.** The canonical checkout takes one lander at a time, in order:
+
+```
+node scripts/landing-queue.mjs land --branch change/<name> --checks "bash scripts/fast.sh"
+node scripts/landing-queue.mjs status      # who holds it, your position, whether the tree is dirty
+```
+
+`land` enqueues you, tells you your position and the holder while you wait, is handed the lease in
+order, classifies the upstream move, retests only what can change the result, merges, pushes, reads
+the ref back and releases. A second lander behind it waits instead of rebasing into a storm: measured
+on wasm_the_first (2026-11-10) six interleaved landings cost session `883ffeda` ~20 minutes of
+rebase-plus-full-fast-path rounds, two of which were docs-only moves that could not have changed the
+result. The lease is an OS-held lock, so a killed lander frees the tree immediately and its row is
+reclaimed with a logged reason - never a pid file that outlives its owner (lesson
+`les-dcbabb9d2835`). A dirty canonical tree with no lease is refused by name before anyone waits.
+`docs/LANDING-QUEUE.md` has the commands, the state and the risks.
+
 For routine landings, keep the default `--gate-mode none`, source review, LF checks,
 current bindings and exact ref readback. The full-gate instructions below apply only
 when the user explicitly requests pre-release gating, never as a routine prerequisite.
