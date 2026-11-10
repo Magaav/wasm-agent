@@ -257,7 +257,13 @@ What this section owns is how many of them fit, and what is serial.
 - **Wide production, serial landing.** Producers and reviewers run many at a time; the merge, the
   merged tree's gate and the push to `origin/main` are one at a time per tree. Within one tree, one
   unlanded editor per hot file - `skills/git-orchestrator/SKILL.md` says which file counts as hot and
-  why the hot file's change lands first.
+  why the hot file's change lands first. The canonical checkout's turn is enforced, not assumed:
+  `scripts/landing-queue.mjs` hands one lease at a time to the landers who ask for it, in FIFO order,
+  tells each one its position and the holder, refuses a dirty canonical tree that belongs to nobody
+  (naming the files), reclaims a dead holder with a logged reason, and retests a branch only when the
+  upstream move can change the result (`docs/LANDING-QUEUE.md`). Measured 2026-11-10: six interleaved
+  landings cost one session ~20 minutes of rebase-plus-fast-path rounds, two of them for docs-only
+  moves.
 
 The reservation above is now enforced by a queue rather than by convention: `scripts/gate-lane.mjs` is a
 durable, node-wide admission lane for the CPU-heavy commands the serial resource runs. It decides *when*,
@@ -397,10 +403,10 @@ what happens at it, can an operator see it, and what does a cancel do to it. `dr
 | One websocket frame / one service HTTP body (`service_io.rs`) | `MAX_MESSAGE` 32 MiB / `MAX_HTTP_BODY` 96 MiB | the frame closes the socket; the body read is limited | stderr line / error | - |
 | `wa:bus` per-subscription buffer (`wa-bus`) | `SubscribeOptions.capacity`, default 64 | `OverflowPolicy::DropOldest` (or `DropNewest`), counted | `Delivery::dropped`, `Subscription::dropped` | the stream drop unsubscribes and stops the pump |
 | `wa:bus` -> guest stream channel (`bus_host.rs`) | the subscription's capacity | drop oldest, counted by the bus | subscription counters | component stop revokes the subscription and the pump exits |
-| `wa:queue` (`wa-queue`) | `Policy::max_inflight`, per-worker lease | `TakeOutcome::AtLimit {leased}` (`lease_lost`, `empty`) | queue metrics, `/health` | a leased job returns on lease expiry, counted `lease_expired` |
+| `wa:queue` (`wa-queue`) | `Policy::max_inflight`, per-lease-holder lease | `TakeOutcome::AtLimit {leased}` (`lease_lost`, `empty`) | queue metrics, `/health` | a leased job returns on lease expiry, counted `lease_expired` |
 | STT job leases (`stt_node.rs`, `wa-stt-remote`) | `lease_ms` + heartbeat | the queue recovers a lapsed lease | `lease_recovered`, `stt` health | **not released early**: a cancelled decode keeps its lease until expiry (below) |
 | STT settled receipts (`stt_node.rs`) | `RECENT_KEPT` = 32 | oldest dropped | `/health stt.recent` | - |
-| STT tunnel calls (`stt_node.rs`) | one worker thread, one job at a time | the worker is the only producer of calls | tunnel counters | the worker thread is the node's, not the run's |
+| STT tunnel calls (`stt_node.rs`) | one tunnel thread, one job at a time | that thread is the only producer of calls | tunnel counters | the tunnel thread is the node's, not the run's |
 | Operation output (`wa-operation`) | `output_limit`, default 8 MiB (max 64 MiB) | truncated, `output_limit_exceeded`, head+tail kept | `state.output_truncated`, `stdout_path` | the run's cancel cancels the operation and waits up to 1 s for settlement |
 | Operation index / history (`wa-operation`) | SQLite rows, cursor reads (`VIEW_BYTES` pages) | pagination | `next_offset` | - |
 | Telemetry sink buffer (`wa-telemetry-sink`) | `Bounds`: 4096 records, 4 MiB, 64 KiB per record | drop-oldest, a larger record is refused | `telemetry_dropped` | - |
@@ -448,14 +454,14 @@ at every step is `host::run_cancel_requested()`:
 
 - **A cancelled STT decode keeps its lease** until `lease_ms` expires, so the audio can still be
   decoded for a run that is gone. Fixing it means a queue-side `release` the `wa-queue` policy does
-  not have yet (`take`/`settle` are worker-side), so it is a change to the queue contract, not to the
+  not have yet (`take`/`settle` are on the lease holder's side), so it is a change to the queue contract, not to the
   caller.
 - **A relay or mesh call in flight is not aborted** when the calling run is cancelled: it finishes or
   times out inside its own budget. It writes nothing into the run (its answer is dropped), so the
   cost is time, not an effect.
-- **The STT tunnel's `pending`/`waiting` maps have no cap.** They are produced by one worker thread
+- **The STT tunnel's `pending`/`waiting` maps have no cap.** They are produced by one tunnel thread
   that handles one job at a time, so the number of outstanding signed calls is bounded by that
-  thread's behaviour rather than by a constant; a second worker would need the cap.
+  thread's behaviour rather than by a constant; a second tunnel thread would need the cap.
 
 ## The per-run output sink
 

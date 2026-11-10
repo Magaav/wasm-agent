@@ -138,8 +138,13 @@ WA_BIN="$bin" check prompt-docs bash scripts/sync-prompt-docs.sh --check
 if command -v node >/dev/null 2>&1; then
   check instructions node scripts/check-instructions.mjs
   check direct-workflow node scripts/test-direct-workflow-instructions.mjs
+  # The landing queue's own evidence: one lander at a time, FIFO, reclaim of a dead holder, the
+  # dirty-canonical refusal, and the upstream-delta classification that decides what is retested.
+  # Seconds, self-contained (a fixture repository and a fixture ledger), so it belongs here and not
+  # only in the nightly gate.
+  check landing-queue node scripts/test-landing-queue.mjs
 else
-  echo "fast: instructions, direct-workflow SKIPPED (node not on PATH)"; skipped=$((skipped + 2))
+  echo "fast: instructions, direct-workflow, landing-queue SKIPPED (node not on PATH)"; skipped=$((skipped + 3))
 fi
 
 elapsed=$(( $(date +%s) - started ))
