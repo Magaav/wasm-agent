@@ -224,6 +224,11 @@ NATIVE_TOOLS={
  lookup_self={cap='identity',description='The WhatsApp account this node is paired with',
   schema=object({})},
 }
+-- `lookup_self` needs no capability: the account is in the connector's own binding.
+local function native_identity(server)
+ local config=type(server.config)=='table' and server.config or {}
+ return {ok=true,account=config.account,generation=config.generation}
+end
 local function invoke_native(input)
  local server=input.server or {}
  local function probe()
