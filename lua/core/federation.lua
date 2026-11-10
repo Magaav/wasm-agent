@@ -31,8 +31,35 @@ end
 
 -- The connector tools this node exports: its enabled MCP tools and its WhatsApp facade, with the tier
 -- each was approved at. Exactly the names `call` accepts; nothing else is reachable through it.
+-- The node's own read-only WhatsApp questions, exported beside the connector tools.
+--
+-- The account lives on exactly one node, and these are the questions that path answers natively
+-- (wa-whatsapp's queue), not through the MCP bridge. Measured 2026-11-10: the bridge answered
+-- `connector_transport_failed` even on the machine that holds it, so a master whose only door was
+-- the connector had no working WhatsApp at all. Same names the agent calls locally, so the answer
+-- shape is identical whichever door a master uses.
+local NATIVE = {
+  { name = 'whatsapp_search', description = 'Search the message index this node holds (text, chat, kind, sender, time window)',
+    parameters = { type = 'object', properties = { q = { type = 'string' }, chat = { type = 'string' },
+      kind = { type = 'string' }, ['from'] = { type = 'string' }, ['since'] = { type = 'integer' },
+      ['until'] = { type = 'integer' }, limit = { type = 'integer' } } } },
+  { name = 'whatsapp_read', description = 'Read one chat newest-first from the index this node holds',
+    parameters = { type = 'object', properties = { chat = { type = 'string' }, before = { type = 'string' },
+      limit = { type = 'integer' } }, required = { 'chat' } } },
+  { name = 'whatsapp_reactions', description = 'Who reacted to one message, with which emoji',
+    parameters = { type = 'object', properties = { chat = { type = 'string' }, id = { type = 'string' } },
+      required = { 'chat', 'id' } } },
+  { name = 'whatsapp_media', description = 'Media metadata of one message (mime, filename, size, sha256)',
+    parameters = { type = 'object', properties = { chat = { type = 'string' }, id = { type = 'string' } },
+      required = { 'chat', 'id' } } },
+}
+
 function M.exported()
   local tools = {}
+  for _, tool in ipairs(NATIVE) do
+    tools[#tools + 1] = { name = tool.name, description = '[native] ' .. tool.description,
+      parameters = tool.parameters, effect = 'read' }
+  end
   local mcp = dofile('lua/core/mcp.lua')
   local ok, schemas = pcall(mcp.schemas)
   for _, schema in ipairs(ok and schemas or {}) do
