@@ -185,6 +185,40 @@ local function record_of(id)
   return (decoded_ok and type(value) == "table") and value or nil
 end
 
+-- ---- 0. the capability is WIRED, not only implemented --------------------------------------------
+-- Measured 2026-11-10 (openclaw, 3ea2917f): the branch that serves `update` in
+-- lua/core/server.lua was added with its comment and WITHOUT the line that calls this module, so
+-- every remote update answered `plugin_not_found:update` - the call fell through to the plugin
+-- dispatcher. This test calls the module directly, so it was green; nothing here could see the
+-- wiring. These two checks read the server the way the node loads it: the branch must return this
+-- module, and the capability must be named in the managed allow-list (else a bound peer answers
+-- `capability_not_granted` before the branch is reached).
+local server_source = host.read_file("lua/core/server.lua") or ""
+local lines = {}
+for line in server_source:gmatch("%C+") do lines[#lines + 1] = line end
+local branch = nil
+for index, line in ipairs(lines) do
+  if line:find('elseif capability == "update" then', 1, true) then branch = index break end
+end
+ok(branch ~= nil, "lua/core/server.lua has an `update` branch in node_capability")
+local call
+for index = (branch or 0) + 1, #lines do
+  local line = lines[index]
+  if line:match("^%s*%-%-") then
+    -- a comment is not a statement; keep looking
+  else
+    call = line
+    break
+  end
+end
+ok(call ~= nil and call:find('return dofile("lua/core/remote_update.lua").serve(args, caller)', 1, true) ~= nil,
+  "and its first statement hands the call to this module (a comment alone is an empty block, and Lua accepts it)",
+  tostring(call))
+ok(server_source:find("update=true", 1, true) ~= nil,
+  "the capability is named in the managed allow-list a bound peer checks first")
+ok(server_source:find('MESH_VERBS', 1, true) ~= nil and server_source:find("update = true", 1, true) == nil,
+  "and it is NOT classified in MESH_VERBS, so a roster attestation grades it `call`")
+
 -- ---- 1. a guest is refused, and nothing happens -------------------------------------------------
 issued = {}
 local refused = remote.serve({ action = "request", commit = TARGET }, GUEST)

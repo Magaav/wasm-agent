@@ -879,6 +879,7 @@ local function node_capability(capability, args, caller)
     -- peer's own provenance), and the module refuses any caller the binding or the roster does not
     -- name as a master. It still installs nothing itself - it writes the request this node's own
     -- `/update` writes, and this node's Sentinel performs it under its existing rules.
+    return dofile("lua/core/remote_update.lua").serve(args, caller)
   elseif capability == "federation" then
     -- Connector federation (lua/core/federation.lua): a master peer lists and runs this node's connector
     -- tools here, under this node's own guards. The dispatch is the same one the fallthrough below uses.
