@@ -20,7 +20,7 @@ not a new incremental provider protocol.
 ## Order and ownership
 
 <!-- generated:prompt-layers (scripts/sync-prompt-docs.lua) -->
-- `<generic>`: `identity`, `work`, `habits`, `style`, `language`, `time`, `memory`
+- `<generic>`: `identity`, `law`, `work`, `habits`, `style`, `language`, `time`, `memory`, `turn`
 - `<stack>`: `safety`, `tools`, `guidelines`, `skills`
 - `<workflow>`: `orchestration`
 - `<project>`: `project_instructions`

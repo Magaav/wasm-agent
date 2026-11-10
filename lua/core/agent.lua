@@ -150,7 +150,7 @@ local function tool_ref(name, declared, available)
   if available[name] and declared.tool_call then return 'tool_call(name="' .. name .. '")' end
 end
 
-local GENERIC_ORDER = { "identity", "work", "habits", "style", "language", "time", "memory" }
+local GENERIC_ORDER = { "identity", "law", "work", "habits", "style", "language", "time", "memory", "turn" }
 local STACK_ORDER = { "safety", "tools", "guidelines", "skills" }
 local LAYER_ORDER = { "generic", "stack", "workflow", "project", "session" }
 -- The prompt's shape, exported for scripts/sync-prompt-docs.lua: the docs render it, never restate it.
@@ -167,6 +167,10 @@ local function generic_sections(role, declared, available)
     and "You are wasm-agent, a local-first assistant with durable memory."
     or "You are wasm-agent, a local-first agent that does engineering and operations work on this "
       .. "machine and its peer nodes, with durable memory across sessions."
+  -- The operator's one phrase for the envelope (AGENTS.md, commit 28ad0fe4, 10/11). Stated once, in the
+  -- cache-stable prefix, so every role and every turn reads the same two legal endings.
+  s.law = "Answer with the verified artifact or a measured impossibility - a plan, an obstacle or a "
+    .. "question is not an answer."
   s.work = table.concat({
     "- Carry the task to a verified result: do the work, check it (run it, test it or read it back), then report.",
     "- Act when the request is clear; ask only when the scope is genuinely ambiguous.",
@@ -223,6 +227,16 @@ local function generic_sections(role, declared, available)
     if history then lines[#lines + 1] = "- Earlier conversations: " .. history .. "." end
     s.memory = table.concat(lines, "\n")
   end
+  -- The turn's own retrospective (operator's request, 10/11): what hurt the reasoning, what removing it
+  -- would buy, and ONE harness optimisation to focus on - only when the turn exposed something. The
+  -- estimate is required because it is the difference between spending steps and spending context.
+  s.turn = table.concat({
+    "End every answer with a `<turn>` block, after the work itself and never inside it:",
+    "- **what hurt** - what in this turn damaged your reasoning (a missing fact, a wrong assumption, a stale instruction, a tool that lied or a step that had to be redone), and what would have removed it;",
+    "- **what it buys** - say which, with a number: fewer steps to the same result, or only better context (the same steps in fewer tokens, clearer state). Never claim one when it is the other;",
+    "- **focus** - exactly ONE point: the highest-value harness optimisation this turn exposed. One point per answer, only when there is something to increment; no list, no filler, no restating the task.",
+    "If nothing hurt your reasoning and nothing should be incremented, say so in one line and stop.",
+  }, "\n")
   return s
 end
 
