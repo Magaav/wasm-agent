@@ -176,7 +176,10 @@ end
 local function current_state(current)
  local system=tostring(current.system or '')
  local tools_json=json.encode(current.tools or {})
- return {system=system,tools_json=tools_json,system_sha256=sha(system),tools_sha256=sha(tools_json),
+ -- `tools` travels beside its encoded form because `classify` compares the two lists by name: without it
+ -- every catalogue change was reported as "removed: <every tool>" and named no addition (found 2026-11-10
+ -- while proving that an `/mcp` toggle reaches a running session with the tool names it added).
+ return {system=system,tools_json=tools_json,tools=current.tools or {},system_sha256=sha(system),tools_sha256=sha(tools_json),
    parts=current.parts or {},orchestration=current.orchestration==true,
    facts=current.facts or (current.parts or {}).facts or {}}
 end

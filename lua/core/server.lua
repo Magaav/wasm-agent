@@ -410,11 +410,43 @@ function wa_provider_management(body, node, session)
   return json.encode({error='unknown_provider_management_action'})
 end
 
+-- `/mcp` (lua/core/mcp_command.lua) is the same inventory for both surfaces: the list the window draws and
+-- the one `wa chat` prints. `overview` is the command's view - this node's registry *and* the connectors
+-- federated from peers, each with its state and tool count; `inspect` opens one to the exact names and
+-- schemas the model is offered; `toggle` changes one through the path that owns it (mcp.control here, the
+-- peer's own registry through the fabric there). The registry actions below (put/probe/enable/disable) are
+-- unchanged, and `list` keeps every field it had - `servers`, `adapters`, `templates` - and gains
+-- `connectors`, so the existing panel and the command read one answer.
 function wa_mcp(body, session)
   local user=require_master(session);if not user then return json.encode({error='forbidden'}) end
   local ok,args=pcall(json.decode,body or '{}');if not ok or type(args)~='table' then return json.encode({error='invalid_mcp_request'}) end
-  local done,result=pcall(dofile('lua/core/mcp.lua').control,args,{role=effective_role(user),session_id='mcp-control:'..tostring(user.id)})
+  local ctx={role=effective_role(user),session_id='mcp-control:'..tostring(user.id),user_id=user.id}
+  local action=tostring(args.action or 'list')
+  if action=='overview' or action=='inspect' or action=='toggle' then
+    local command=dofile('lua/core/mcp_command.lua')
+    -- Cache only: a window's request has its own timeout and must not wait on the federation budget. The
+    -- command in `wa chat` refreshes on its ten-minute rule, and the age is printed there.
+    local opts={cache_only=true,expected_revision=tonumber(args.expected_revision)}
+    local done,result=pcall(function()
+      if action=='overview' then return command.list(ctx,opts) end
+      if action=='inspect' then return command.inspect(ctx,args.connector,opts) end
+      if args.enable==nil then return {ok=false,error='mcp_toggle_needs_enable'} end
+      return command.toggle(ctx,args.connector,args.enable==true,opts)
+    end)
+    if not done then return json.encode({ok=false,error=tostring(result)}) end
+    return json.encode(result)
+  end
+  local done,result=pcall(dofile('lua/core/mcp.lua').control,args,ctx)
   if not done then return json.encode({ok=false,error=tostring(result)}) end
+  if action=='list' then
+    local composed,overview=pcall(dofile('lua/core/mcp_command.lua').list,ctx,{cache_only=true})
+    if composed and type(overview)=='table' and overview.ok~=false then
+      result.connectors=overview.connectors
+      result.counts=overview.counts
+      result.read_only=overview.read_only
+      result.command_note=overview.note
+    end
+  end
   return json.encode(result)
 end
 

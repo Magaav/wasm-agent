@@ -8,12 +8,20 @@
 -- refusals). Nothing secret moves, no node is configured by hand, and a node that has just been bound or
 -- promoted to master sees everything the cluster offers on its next turn.
 --
--- Peer side: `catalog` (what this node exports) and `call` (run one exported tool for a verified master).
--- Local side: `schemas` (cached, never waits on the network), `resolve`, `call`, `refresh`.
+-- Peer side: `catalog` (what this node exports, and the connectors that export it), `call` (run one
+-- exported tool for a verified master) and `control` (turn one of this node's connectors on or off, decided
+-- by this node's own registry).
+-- Local side: `schemas` (cached, never waits on the network), `resolve`, `call`, `refresh`, `control`.
+--
+-- `/mcp` (`lua/core/mcp_command.lua`) is the reader of both halves: the catalog carries `connectors` so a
+-- master lists a peer's connectors as connectors - state, transport and tool count - instead of inferring
+-- them from a flat list of tool names.
 local json = dofile('lua/vendor/json.lua')
 
-local M = { SCHEMA = 1, TTL = 600, RETRY = 60, PREFIX = 'peer_' }
-local CACHE_KEY = 'federation.catalog.v1'
+local M = { SCHEMA = 2, TTL = 600, RETRY = 60, PREFIX = 'peer_' }
+-- v2 carries `connectors` beside `tools`. A v1 row is not read as a v2 answer: an old cache would list a
+-- peer with tools and no registry, which is the "older build" case and must say so, not be guessed at.
+local CACHE_KEY = 'federation.catalog.v2'
 
 local function meta_get(key)
   local ok, raw = pcall(host.sql_query, 'SELECT value FROM meta WHERE key=?', json.encode({ key }))
@@ -70,6 +78,40 @@ function M.exported()
   if next(M.operator_profiles()) and M.operator_script() then tools[#tools + 1] = M.operator_schema(M.operator_profiles()) end
   table.sort(tools, function(a, b) return a.name < b.name end)
   return tools
+end
+
+-- This node's connectors as one list, for a master's `/mcp`: its registry, composed by the same module the
+-- local view uses (`lua/core/mcp_command.lua`) so the two answers cannot disagree, plus the two things it
+-- exports that are not registry entries - the native WhatsApp read path and, where an operator profile is
+-- installed, the operator route. Those are always on: there is no registry row to toggle, and saying so is
+-- better than listing them as if there were.
+function M.connectors()
+  local list = {}
+  local ok, command = pcall(dofile, 'lua/core/mcp_command.lua')
+  if ok and type(command) == 'table' and command.local_connectors then
+    local connectors = command.local_connectors({})
+    for _, entry in ipairs(connectors or {}) do list[#list + 1] = entry end
+  end
+  local native = { id = 'native', name = 'WhatsApp read path (native)', transport = 'native', enabled = true,
+    state = 'enabled', tools = {}, approved = #NATIVE, discovered = #NATIVE,
+    note = 'The node\'s own WhatsApp reads, answered by its capabilities - not a registry entry, so always on.' }
+  for _, tool in ipairs(NATIVE) do
+    native.tools[#native.tools + 1] = { name = tool.name, description = '[native] ' .. tool.description,
+      schema = json.encode(tool.parameters), approval = 'read', published = true }
+  end
+  table.sort(native.tools, function(a, b) return a.name < b.name end)
+  native.tool_count = #native.tools
+  list[#list + 1] = native
+  local profiles = M.operator_profiles()
+  if next(profiles) then
+    local schema = M.operator_schema(profiles)
+    list[#list + 1] = { id = 'whatsapp_operator', name = 'WhatsApp operator route', transport = 'native',
+      enabled = true, state = 'enabled', approved = 1, discovered = 1, tool_count = 1,
+      tools = { { name = schema.name, description = schema.description,
+        schema = json.encode(schema.parameters), approval = 'write', published = true } },
+      note = 'Operator-directed text; the connector re-checks scope, recipient and approval digest on every call.' }
+  end
+  return list
 end
 
 -- ---------------------------------------------------------------- operator-directed WhatsApp send
@@ -170,7 +212,9 @@ function M.serve(args, caller, dispatch)
   local action = args.action or 'catalog'
   if action == 'catalog' then
     local identity = dofile('lua/core/nodes.lua').identity() or {}
-    return { ok = true, schema = M.SCHEMA, node_id = identity.node_id, tools = M.exported() }
+    return { ok = true, schema = M.SCHEMA, node_id = identity.node_id, tools = M.exported(), connectors = M.connectors() }
+  elseif action == 'control' then
+    return M.control_here(args, caller)
   elseif action == 'call' then
     local name = tostring(args.name or '')
     local exported = false
@@ -180,6 +224,41 @@ function M.serve(args, caller, dispatch)
     return dispatch(name, type(args.args) == 'table' and args.args or {})
   end
   return { ok = false, error = 'unknown_federation_action' }
+end
+
+-- Turn one of THIS node's connectors on or off for a verified master, and answer with the fresh state.
+--
+-- The decision is this node's own: `mcp.control` validates the id, requires a passing probe to enable and
+-- CASes the revision, exactly as the `mcp` tool does. The master's `expected_revision` is the one its
+-- cached catalog carried, so a registry that moved since refuses (`mcp_store_revision_changed`) and
+-- nothing is written - a master cannot silently overwrite a change made here. The record stays on this
+-- node: `harness_events` (kind `mcp_control`) names the caller, and the registry revision moves.
+function M.control_here(args, caller)
+  local control = type(args.control) == 'table' and args.control or nil
+  if not control then return { ok = false, error = 'federation_control_invalid' } end
+  local action = tostring(control.action or '')
+  if action ~= 'enable' and action ~= 'disable' then
+    return { ok = false, error = 'federation_control_unsupported', action = action }
+  end
+  local id = tostring(control.id or '')
+  local ctx = { role = 'master', session_id = 'federation-control:' .. tostring(caller.node_id), peer = caller.node_id }
+  local mcp = dofile('lua/core/mcp.lua')
+  local answer = mcp.control({ action = action, id = id, expected_revision = tonumber(control.expected_revision) }, ctx)
+  local ok, inventory = pcall(mcp.inventory)
+  local revision = ok and type(inventory) == 'table' and inventory.revision or nil
+  pcall(function()
+    dofile('lua/core/telemetry.lua').event(ctx.session_id, '', '', 'mcp_control', action,
+      { connector = id, caller = caller.node_id, ok = answer.ok == true, error = answer.error, revision = revision })
+  end)
+  if not answer.ok then
+    answer.revision = revision
+    answer.node_id = (dofile('lua/core/nodes.lua').identity() or {}).node_id
+    return answer
+  end
+  local identity = dofile('lua/core/nodes.lua').identity() or {}
+  return { ok = true, schema = M.SCHEMA, node_id = identity.node_id, id = id, enabled = answer.enabled == true,
+    revision = revision, tools = M.exported(), connectors = M.connectors(),
+    note = 'Applied by this node\'s own registry and recorded here (harness_events kind mcp_control).' }
 end
 
 -- ---------------------------------------------------------------- local side
@@ -241,6 +320,11 @@ function M.refresh()
   return cache
 end
 
+-- The cache as it stands, with no refresh attempt. `catalog` may wait up to BUDGET seconds on peers, which
+-- a window's own request timeout cannot afford; a view that must answer now (GET /mcp) reads this and says
+-- how old it is.
+function M.cached() return load_cache() end
+
 -- The cache, refreshed when it is older than TTL (at most once per RETRY when peers keep failing). This
 -- is the only place a turn may wait on peers, and only once in ten minutes.
 function M.catalog()
@@ -266,6 +350,49 @@ function M.cached_peers()
   end
   table.sort(names)
   return names
+end
+
+-- Ask a peer to change one of its connectors, and take its answer as the new catalog for that peer.
+--
+-- Writing the answer into the cache is what makes the change reach this node's own tool list at once: a
+-- peer toggle that waited for the ten-minute refresh would leave a running session's `[session update]`
+-- note owed for ten minutes, which is the silent delay this command exists to avoid. `opts.call` exists so
+-- a Lua test can stand in for the signed node call; production always uses `nodes.remote_call`.
+function M.control(peer_name, args, opts)
+  opts = opts or {}
+  -- The cache key is the one the catalog used, not the id the answer carries: they are the same on a real
+  -- cluster, and a peer that renames or re-registers must not leave this node writing under a key nothing
+  -- reads.
+  local key, node = nil, nil
+  for id, peer in pairs(load_cache().peers or {}) do
+    if peer.name == peer_name or peer.node_id == peer_name or id == peer_name then key, node = id, peer end
+  end
+  if not node then return { ok = false, error = 'unknown_peer', peer = tostring(peer_name) } end
+  local call = opts.call or function(node_id, capability, payload)
+    return dofile('lua/core/nodes.lua').remote_call(node_id, capability, payload)
+  end
+  local answer = call(node.node_id, 'federation', { action = 'control', control = args or {} })
+  if type(answer) ~= 'table' then return { ok = false, error = 'peer_answer_unreadable', peer = node.name } end
+  if answer.ok and type(answer.connectors) == 'table' then
+    answer.catalog_updated = M.remember(key, answer) == true
+  end
+  answer.peer = answer.peer or node.name
+  return answer
+end
+
+-- The peer's answer replaces what the cache held for it: `tools` and `connectors` are the state after the
+-- change, read from the peer in the same call. `cache.at` is left alone - the refresh TTL is about when
+-- peers were last asked, and this did not ask them all.
+function M.remember(node_id, answer)
+  local cache = load_cache()
+  local peer = cache.peers[node_id]
+  if not peer then return false end
+  if type(answer.tools) == 'table' then peer.tools = answer.tools end
+  if type(answer.connectors) == 'table' then peer.connectors = answer.connectors end
+  if answer.node_id then peer.node_id = answer.node_id end
+  peer.at = host.now()
+  meta_set(CACHE_KEY, json.encode(cache))
+  return true
 end
 
 function M.schemas()
