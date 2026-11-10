@@ -6,7 +6,9 @@ local tools = dofile('lua/core/tools.lua')
 local checks = 0
 local function ok(value, label) checks = checks + 1; assert(value, label) end
 
-local absent = { error = 'whatsapp_component_absent', owner = 'openclaw', component = 'wa-whatsapp', effect = 'none' }
+-- The host prefixes the refusal with the capability's tool name (`whatsapp_search_<code>`), so the
+-- matcher must find the code as a suffix, not compare it whole.
+local absent = { error = 'whatsapp_search_whatsapp_component_absent', owner = 'openclaw', component = 'wa-whatsapp', effect = 'none' }
 
 -- 1. the question is asked of the owner, unchanged, and the answer says who served it
 local asked = nil

@@ -1460,7 +1460,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- The account lives on exactly one node. When this one runs no component it says so and names
     -- the owner; ask the owner here, so a caller on any node reads one answer instead of a queue
     -- that will never settle, and the answer carries which node served it.
-    if decoded.error=='whatsapp_component_absent' and type(decoded.owner)=='string' and decoded.owner~='' then
+    if type(decoded.error)=='string' and decoded.error:find('whatsapp_component_absent',1,true)
+       and type(decoded.owner)=='string' and decoded.owner~='' then
       return M.whatsapp_forward(decoded,name,args)
     end
     return decoded
