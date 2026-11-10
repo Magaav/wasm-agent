@@ -2552,7 +2552,13 @@ fn request(args: &[String]) -> Result<()> {
         if fields.get("session").and_then(Value::as_str).unwrap_or("").is_empty() {
             // Say it where the caller reads it, not only in `status` days later: a deploy with no session has
             // no destination for a report, and that is the exact state the 07:09 deploy was written in.
-            say("WARNING no --session was given: this deploy will install, and no notice can reach any session - nothing can report back into an empty address");
+            //
+            // One door asks for exactly this form on purpose: a remote update (`wa update <node>`,
+            // docs/REMOTE-UPDATE.md) carries no `--session`, because the session that asked lives on
+            // another node and a peer below it may not wake it. That case is not silent - it reports
+            // through the asking node's own record - so the warning says which absence it is about
+            // instead of implying that nothing can ever reach anyone.
+            say("WARNING no --session was given: this deploy will install, and no notice can reach any session on this node - nothing can report back into an empty address (a remote update from another node is not that case: it reports through the asking node's own record, docs/REMOTE-UPDATE.md)");
         }
     }
     if let Err(error) = wa_operation::atomic_json(&path,&Value::Object(fields.clone()))
