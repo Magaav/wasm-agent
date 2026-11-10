@@ -9287,9 +9287,14 @@ async function refreshHooks() {
 
 const mcpReads=new Map(),mcpControls=new Set(),mcpEpochs=new Map();
 const mcpScope=()=>JSON.stringify([session||'',activeNode||'']);
-async function mcpRequest(method,body,headers,timeout,controller=new AbortController()){
+async function mcpRequest(method,body,headers,timeout,controller=new AbortController(),options={}){
   const timer=setTimeout(()=>controller.abort(),timeout);
   try{const response=await apiFetch('mcp',{method,headers,signal:controller.signal,...(body?{body:JSON.stringify(body)}:{})});const payload=await response.json();
+    // A refusal is a decision, not an unknown effect: the node answered, said `ok:false` and wrote nothing.
+    // Reporting it as "response uncertain; never replay" would make an operator read a clean no as an
+    // unknown outcome and stop trusting the control. Only a transport failure or an unhealthy body is
+    // uncertain.
+    if(response.ok&&payload&&payload.ok===false&&options.allowRefusal)return payload;
     if(!response.ok||payload.error||payload.registry_observation_error)throw Error(payload.error||payload.registry_observation_error||`HTTP ${response.status}`);return payload;
   }finally{clearTimeout(timer);}
 }
@@ -9317,6 +9322,19 @@ function openMcps(){
   if(head)head.scrollIntoView({block:'nearest'});
   return refreshMcps();
 }
+// Why a control was refused, in the words of the rule that refused it, so the panel does not invent a
+// failure where the node made a decision.
+function mcpRefusalText(answer){
+  const error=String((answer&&answer.error)||'not_changed'),
+    hints={connector_registry_not_reported:'that peer reported its tools, not its registry, so it cannot be turned on or off from here',
+      mcp_store_revision_changed:'the registry moved since this list was drawn; it is refreshed now',
+      mcp_probe_required:'a connector is only enabled after a probe passed',
+      forbidden:'read-only: turning a connector on or off needs a master',
+      unknown_connector:'no connector has that key',
+      unknown_peer:'that peer is not in the federation catalog'},
+    hint=hints[error];
+  return hint?`${error} - ${hint}`:error;
+}
 document.getElementById('mcp-box').addEventListener('mcp-action',async event=>{
   const {action,args}=event.detail;if(action==='list'){await refreshMcps();return;}
   const panel=document.querySelector('#mcp-box wa-mcps'),scope=mcpScope();if(mcpControls.has(scope))return;
@@ -9328,7 +9346,9 @@ document.getElementById('mcp-box').addEventListener('mcp-action',async event=>{
   const body={...args,action,expected_revision:expected},headers=apiHeaders({'Content-Type':'application/json'});
   mcpEpochs.set(scope,(mcpEpochs.get(scope)||0)+1);mcpReads.get(scope)?.controller.abort();mcpReads.delete(scope);
   mcpControls.add(scope);panel.busy=true;panel.message='Explicit MCP control pending; no automatic retry.';
-  try{await mcpRequest('POST',body,headers,action==='probe'?120000:8000);if(mcpScope()===scope)await refreshMcps();}
+  try{const answer=await mcpRequest('POST',body,headers,action==='probe'?120000:8000,undefined,{allowRefusal:true});
+    if(answer&&answer.ok===false){if(mcpScope()===scope){await refreshMcps();panel.message='Not changed: '+mcpRefusalText(answer)+'.';}}
+    else if(mcpScope()===scope)await refreshMcps();}
   catch(error){if(mcpScope()===scope)panel.message='MCP control failed or response uncertain; inspect/refresh before a new decision, never replay automatically: '+String(error.message||error);}
   finally{mcpControls.delete(scope);if(mcpScope()===scope)panel.busy=false;}
 });
