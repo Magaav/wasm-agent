@@ -349,17 +349,22 @@ function captureCommand({cwd, command, log, env = process.env, echo = true}) {
   });
 }
 
-// The same host binary the canonical checkout would use, handed to a pristine tree as WA_BIN: a fresh
-// `git worktree` has no `rust/target`, so a baseline run there would otherwise answer "no wa binary"
-// and be recorded as a tree with no checks at all.
+// The same host binary the rest of this machine uses, handed to a pristine tree as WA_BIN only when it
+// cannot be found on PATH: a fresh `git worktree` has no `rust/target`, so a baseline run there would
+// otherwise answer "no wa binary" and be recorded as a tree with no checks at all. PATH wins when it
+// has one, because that is the binary `scripts/fast.sh` itself would pick, and a baseline measured with
+// a different build than the candidate is not a comparison.
 function checksEnvironment(canonical, extra = {}) {
   const env = {...process.env, ...extra};
-  if (!env.WA_BIN) {
-    for (const candidate of [path.join(canonical, 'rust', 'target', 'release', 'wa.exe'),
-      path.join(canonical, 'rust', 'target', 'release', 'wa'),
-      path.join(os.homedir(), '.local', 'bin', 'wa')]) {
-      if (fs.existsSync(candidate)) { env.WA_BIN = candidate; break; }
-    }
+  if (env.WA_BIN) return env;
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const onPath = dirs.flatMap(dir => [path.join(dir, 'wa.exe'), path.join(dir, 'wa')])
+    .find(candidate => { try { return fs.statSync(candidate).isFile(); } catch { return false; } });
+  if (onPath) return env;
+  for (const candidate of [path.join(canonical, 'rust', 'target', 'release', 'wa.exe'),
+    path.join(canonical, 'rust', 'target', 'release', 'wa'),
+    path.join(os.homedir(), '.local', 'bin', 'wa')]) {
+    if (fs.existsSync(candidate)) { env.WA_BIN = candidate; break; }
   }
   return env;
 }
