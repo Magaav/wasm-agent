@@ -156,3 +156,13 @@ Two defects that only a real peer could show, both fixed and pinned by tests:
 Both were visible on `openclaw` within a minute of the first attempt, and neither was visible from the
 unit tests alone. The bootstrap itself was never the problem: the install a peer performs on request is
 the same one it performs for itself.
+
+## What each step cost (2026-11-10, measured)
+
+| step | what it took |
+| --- | --- |
+| capability call, peer writes its request | ~1.2 s (`wa update openclaw` returns the record id) |
+| peer installs from a published release | 44.6 s build-shipped node install; 15 s for a Lua-only commit (the fast path) |
+| peer compiles because no release covered the commit | ~19 min on a 2-vCPU aarch64 host - the case the publisher exists to remove |
+| publishing the release in the landing (`--ensure --publish`) | 169 s when the compiled inputs changed, 4 s when an earlier release covers them |
+| reading the outcome back (`--status`) | one call; the notice is handed over once per request per session |
