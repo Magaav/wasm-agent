@@ -125,7 +125,7 @@ local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
 function M.validate(def)
  if type(def)~='table' or not valid_id(def.id) then return 'invalid_mcp_id' end
- local allowed={id=true,name=true,transport=true,program=true,args=true,cwd=true,url=true,env=true,headers=true,secret_env=true,timeout_seconds=true,tools=true,component=true,file_env=true,net=true,config=true}
+ local allowed={id=true,name=true,transport=true,program=true,args=true,cwd=true,url=true,env=true,headers=true,secret_env=true,timeout_seconds=true,tools=true,component=true,file_env=true,net=true,config=true,native=true}
  for key in pairs(def)do if not allowed[key]then return 'unsupported_mcp_definition_field:'..tostring(key) end end
  if def.name~=nil and (type(def.name)~='string' or #def.name>200)then return 'invalid_mcp_name' end
  if def.transport=='stdio' then
@@ -133,6 +133,15 @@ function M.validate(def)
   if def.cwd~=nil and not absolute(def.cwd)then return 'mcp_cwd_requires_absolute_path' end
  elseif def.transport=='http' then
   if type(def.url)~='string' or #def.url>2048 or not def.url:match('^https?://') or def.url:find('[\r\n%z]')then return 'invalid_mcp_url' end
+ elseif def.transport=='native' then
+  -- A connector answered in this process by the node's own capabilities (2026-11-10): the Rust
+  -- WhatsApp path lives in wa-whatsapp's queue, not behind an HTTP API, so a tool that maps onto
+  -- what the node already does needs no program, no socket and no token.
+  if type(def.native)~='table' or next(def.native)==nil then return 'invalid_mcp_native_map' end
+  for tool,cap in pairs(def.native)do
+   if not valid_id(tool) or type(cap)~='string' or (cap~='identity' and not NATIVE_CAPS[cap]) then return 'invalid_mcp_native_map' end
+  end
+  if def.program~=nil or def.args~=nil or def.cwd~=nil or def.url~=nil or def.headers~=nil or def.component~=nil or def.net~=nil or def.file_env~=nil then return 'mcp_native_takes_no_transport' end
  elseif def.transport=='component' then
   -- A pinned WASI component (docs/COMPONENTS.md): no program, no args, no cwd. What it may touch is
   -- exactly env/file_env/net, each of which its manifest must also declare (the host enforces it).
@@ -141,7 +150,7 @@ function M.validate(def)
   if def.net~=nil then if not dense(def.net,16) then return 'invalid_mcp_component_net' end
    for _,addr in ipairs(def.net)do if not addr:match('^[%w%.%-]+:%d+$') and not addr:match('^%[[%x:]+%]:%d+$') then return 'invalid_mcp_component_net' end end end
  else return 'invalid_mcp_transport' end
- if def.config~=nil and (type(def.config)~='table' or def.transport~='component') then return 'invalid_mcp_component_config' end
+ if def.config~=nil and (type(def.config)~='table' or (def.transport~='component' and def.transport~='native')) then return 'invalid_mcp_component_config' end
  if def.transport~='component' and (def.component~=nil or def.file_env~=nil or def.net~=nil) then return 'mcp_component_fields_require_component_transport' end
  for _,field in ipairs({'env','headers','file_env'})do
   if def[field]~=nil then if type(def[field])~='table' then return 'invalid_mcp_references' end
@@ -187,9 +196,76 @@ local function invoke_component(input)
  if not answer then return fail('component_answer_unreadable',{tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'}) end
  return answer
 end
+-- The node capabilities a native connector may map onto, with the JSON schema each one takes.
+-- Read-only questions only: a connector has never been the send path (the operator route is), and
+-- an effectful capability would need the approvals an MCP call does not carry.
+NATIVE_CAPS={
+ whatsapp_search={description='Search the WhatsApp message index this node holds',
+  schema='{"type":"object","properties":{"q":{"type":"string"},"chat":{"type":"string"},"kind":{"type":"string"},"from":{"type":"string"},"since":{"type":"integer"},"until":{"type":"integer"},"limit":{"type":"integer"}},"additionalProperties":false}'},
+ whatsapp_read={description='Read one WhatsApp chat newest-first from the index this node holds',
+  schema='{"type":"object","properties":{"chat":{"type":"string"},"before":{"type":"string"},"limit":{"type":"integer"}},"required":["chat"],"additionalProperties":false}'},
+ whatsapp_reactions={description='Who reacted to one WhatsApp message, with which emoji',
+  schema='{"type":"object","properties":{"chat":{"type":"string"},"id":{"type":"string"}},"required":["chat","id"],"additionalProperties":false}'},
+ whatsapp_media={description='Media metadata of one WhatsApp message',
+  schema='{"type":"object","properties":{"chat":{"type":"string"},"id":{"type":"string"}},"required":["chat","id"],"additionalProperties":false}'},
+}
+-- `lookup_self` needs no capability: the account is in the connector's own binding.
+local function native_identity(server)
+ local config=type(server.config)=='table' and server.config or {}
+ return {ok=true,account=config.account,generation=config.generation}
+end
+local function invoke_native(input)
+ local server=input.server or {}
+ local function probe()
+  local tools={}
+  for tool,cap in pairs(server.native or {})do
+   local spec=NATIVE_CAPS[cap]
+   local description=spec and spec.description or 'The account this node is paired with'
+   local schema=spec and spec.schema or '{"type":"object","properties":{},"additionalProperties":false}'
+   tools[#tools+1]={name=tool,description=description,input_schema_json=schema}
+  end
+  table.sort(tools,function(a,b)return a.name<b.name end)
+  return {ok=true,tools=tools,schema_hash=host.sha256(json.encode(tools))}
+ end
+ if input.action=='probe' or input.action=='list' then return probe() end
+ local tool=tostring(input.tool or '')
+ local cap=(server.native or {})[tool]
+ if not cap then return fail('mcp_tool_not_approved') end
+ local args=input.arguments
+ if args==nil and type(input.arguments_json)=='string' then args=decode(input.arguments_json) end
+ args=type(args)=='table' and args or {}
+ -- The MCP tool names are older than the capability names; translate the fields the caller knows
+ -- (`conversation_id`, `n`, `query`) onto the capability's own (`chat`, `limit`, `q`) and drop what
+ -- the capability does not take, so a tool call is the same question whichever door asked it.
+ local ALIAS={read_newest={conversation_id='chat',n='limit'},inspect_chat={conversation_id='chat'},
+  read_snapshot={conversation_id='chat',query='q'}}
+ local function translate()
+  local alias=ALIAS[tool]
+  if not alias then return args end
+  local mapped={}
+  for key,value in pairs(args)do mapped[alias[key] or key]=value end
+  if tool=='inspect_chat' then mapped.limit=mapped.limit or 1 end
+  return mapped
+ end
+ args=translate()
+ local answer
+ if cap=='identity' then answer=native_identity(server)
+ elseif NATIVE_CAPS[cap] then
+  if type(host[cap])~='function' then return fail(cap..'_unavailable',{tool_call_issued=false}) end
+  local ok,raw=pcall(host[cap],json.encode(args))
+  if not ok then return fail(cap..'_failed',{detail=tostring(raw):sub(1,160)}) end
+  answer=decode(raw)
+  if type(answer)~='table' then return fail(cap..'_answer_unreadable') end
+ else return fail('mcp_native_capability_unknown') end
+ local ok=answer.ok~=false and answer.error==nil
+ return {ok=ok,error=answer.error,tool_call_issued=true,session_mode='native',
+  result={structuredContent=answer,content={{type='text',text=json.encode(answer)}}}}
+end
+M.invoke_native=invoke_native
 M.invoke_component=invoke_component
 function M.invoke(input,ctx)
  ctx=ctx or {}
+ if input.server and input.server.transport=='native' then return invoke_native(input) end
  if input.server and input.server.transport=='component' then return invoke_component(input) end
  local directory=M.script_dir()
  if input.persistent_read and host.getenv('WA_MCP_SESSION_MODE')~='request' then
