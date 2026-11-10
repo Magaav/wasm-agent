@@ -549,7 +549,10 @@ function M.request(node, path, body, inner_headers)
       if response and tonumber(response.status) == 200 then
         local decoded = json.decode(response.body)
         if decoded and decoded.ok then
-          return { status = decoded.status, body = decoded.body, rid = rid, transport = "relay" }
+          -- `late` is the relay's word that the answer arrived after the deadline this caller was
+          -- given: a result, but not a fresh one, and the caller is told so rather than guessing.
+          return { status = decoded.status, body = decoded.body, rid = rid, transport = "relay",
+            late = decoded.late == true }
         end
         -- relay_timeout is retryable too: the relay keeps the result for two
         -- minutes and the id is stable, so a retry re-fetches it.
@@ -558,8 +561,11 @@ function M.request(node, path, body, inner_headers)
         end
       elseif response and tonumber(response.status) == 503 then
         -- Retired by the relay (it holds now), kept for an older rendezvous:
-        -- the node was not attached, which is a reason to wait, not to fail.
-        last_error = "node_not_attached"
+        -- the node was not attached, which is a reason to wait, not to fail. A `node_busy` answer is
+        -- different: the target was reached and refused before starting, so the same rid may be sent
+        -- again and nothing has run twice.
+        local decoded = json.decode(response.body)
+        last_error = (decoded and decoded.error == "node_busy") and "node_busy" or "node_not_attached"
       elseif response and tonumber(response.status) == 504 then
         -- The relay held the request and the node did not answer: either it
         -- never attached (retry when it is back) or it is busy and the action
@@ -622,6 +628,9 @@ M.RELAY_REFUSALS = {
   to_required = "no target node id was sent.",
   request_id_conflict = "the relay holds a different request under this rid; send a new call.",
   request_too_large = "the request exceeds the relay's body limit; send less (split the call).",
+  node_busy = "%s is running its limit of relayed calls and refused this one before starting it: nothing ran, and the same request may be sent again.",
+  relay_busy = "%s is running its limit of relayed calls; nothing ran.",
+  relay_request_timeout = "%s stopped work that passed the deadline its caller was given; the result is not fresh - re-run the call if the action is still needed (docs/RENDEZVOUS.md, Relay).",
 }
 local UNSIGNED_NOTE = "Unsigned: a peer cannot sign a refusal of a caller it has not verified, so the relay or the network path could have forged or altered this. Diagnostic only; nothing here is a result."
 

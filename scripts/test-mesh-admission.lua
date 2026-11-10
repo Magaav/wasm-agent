@@ -129,10 +129,19 @@ end
 -- A push from the stranger's point of view: the signature cannot be made for a key we do not hold, so
 -- the same body signed by this node but *claimed* to be the stranger is a bad signature, not an
 -- unknown caller. The unknown-caller refusal is exercised above, where admission is decided.
+--
+-- One poll, and the answer the worker lane produces for what it hands over: `binding.tick` never runs
+-- a relayed call itself, so the answer comes from `binding.serve` (`docs/BINDING.md`, "Runtime and
+-- recovery"). In production the runtime does this on its own thread and posts the answer.
+local function poll_and_serve()
+  local ticked = binding.tick()
+  if not (ticked and ticked.dispatch) then return ticked, nil end
+  return ticked, binding.serve(json.encode(ticked.dispatch.request))
+end
 do
   local job = push_request(identity)
   relay_queue = { job }
-  local ticked = binding.tick()
+  local ticked = poll_and_serve()
   ok(ticked and ticked.state == 'attached', 'the runtime ticked with a push queued: ' .. json.encode(ticked or {}))
   ok(host.read_file(config .. '/policy.json') == nil, 'a refused push writes no policy')
   ok(host.read_file(config .. '/mesh-roster.json') == nil, 'a refused push writes no roster')
@@ -145,9 +154,8 @@ ok(host.write_file(config .. '/policy.json', policy_before), 'a policy exists be
 do
   local job = push_request(identity)
   relay_queue = { job }
-  local ticked = binding.tick()
+  local ticked, answered = poll_and_serve()
   ok(ticked and ticked.state == 'attached', 'the push tick finished: ' .. json.encode(ticked or {}))
-  local answered = last_response and json.decode(last_response)
   local reply = answered and answered.body and json.decode(answered.body)
   local inner = reply and reply.reply and json.decode(reply.reply) or reply
   ok(type(inner) == 'table', 'the push was answered with a signed reply')
@@ -170,7 +178,7 @@ do
   local policy_first = host.read_file(config .. '/policy.json')
   local job = push_request(identity)
   relay_queue = { job }
-  binding.tick()
+  poll_and_serve()
   eq(host.read_file(config .. '/policy.json'), policy_first, 'a second push changes nothing')
 end
 

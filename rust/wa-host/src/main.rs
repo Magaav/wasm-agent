@@ -482,6 +482,16 @@ fn main() {
         state
     });
     binding_runtime::set_factory(interpreter_factory.clone());
+    // The bound transport's worker lane (`rust/wa-rendezvous/src/binding_runtime.rs`): execution and
+    // its bound are `wa-capabilities`', the signed answer is this crate's, and only this binary names
+    // both. Without it a relayed request would be polled and never run - the tick says so plainly.
+    binding_runtime::set_lane(binding_runtime::RelayLane {
+        serve: binding_runtime::lua_serve(interpreter_factory.clone()),
+        context: std::sync::Arc::new(|cancel, deadline, owner| {
+            wa_capabilities::serve::install_relay_context(cancel, deadline, owner)
+        }),
+        respond: std::sync::Arc::new(binding_runtime::relay_respond),
+    });
     let factory_for_subagents = interpreter_factory.clone();
     subagents::set_factory(Box::new(move || factory_for_subagents()));
 

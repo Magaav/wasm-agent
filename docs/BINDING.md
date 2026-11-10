@@ -220,6 +220,31 @@ conversation state. No background model, placement, watcher job or second proces
 is launched. Pending approval checks are bounded by the original pairing deadline;
 accepted transport polls the relay and heartbeats at the ordinary cadence.
 
+**Polling never waits for a request.** The transport runs two lanes. The poll lane
+(`lua/core/binding.lua` `M.tick`, driven every 2 s by `binding_runtime.rs`) polls,
+registers and reports status; it never executes a request. A request it receives is
+handed to the worker lane, which runs it on its own thread and its own fresh
+interpreter (`M.serve` via `wa_binding_serve`) and posts the answer to
+`/relay/respond`. The worker lane runs at most `WA_BINDING_RELAY_CONCURRENCY`
+(default 3, 1-8) calls at once; beyond that the node answers immediately with
+`{"error":"relay_busy","not_started":true}`, which the relay does **not** settle
+under the rid, so the caller may send the same request again.
+
+A request carries the bound the relay stamped on it (`deadline_ms`, `budget_ms`):
+the wait its caller was given, less a margin for the answer to arrive. The worker
+installs that bound on its thread as the call's `bash`/provider budget and cancel
+flag, so work that can be stopped (an operation, a provider read) is stopped at it,
+and the caller is answered `504 {"error":"relay_request_timeout",...}` at the bound
+even if the interpreter is stuck. An answer that arrives after the bound is
+discarded and logged `late`; it is never posted as if it were fresh. A relayed
+`/node/chat` turn is bounded by the run runtime instead, because its answer is
+collected by rid.
+
+The poll lane logs its own state changes once each, with the node id, the instant
+and the reason: `[relay] attach node=... at=... reason=first poll|poll after Ns away`
+and `[relay] detach node=... at=... reason=<what failed>`. A slow call no longer
+writes either line, which is what tells a drop apart from a slow call afterwards.
+
 Every privileged call rechecks local consent and fresh service authority at dispatch.
 Failure/expiry leaves authority off and visible. Reconnect collects the existing
 request; it never resubmits an uncertain effect. Corrupt local state refuses rather
