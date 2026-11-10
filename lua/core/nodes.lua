@@ -445,8 +445,25 @@ end
 -- `{ refused = ... }` when the mesh decided against the call, and nil when nobody answered (which is
 -- the only case that may fall back). The difference is the whole point: a denial is an answer, and
 -- the relay behind this function knows none of the hierarchy and would allow it.
+--
+-- A peer whose last mesh attempt died **on the wire** (an address that does not resolve, a connection
+-- reset by the relay) is skipped for MESH_COOLDOWN seconds, so the next call goes straight to the
+-- relay path instead of paying the same dead attempt again. This changes which transport is tried
+-- first, never how many times a capability is sent: the refusal itself is still returned for the call
+-- that hit it (the mesh may already have carried it), only the *following* calls short-circuit. The
+-- 10/11 session spent a dozen calls this way before anyone noticed the mesh was on with no reachable
+-- address.
+M.MESH_COOLDOWN = 120
+local mesh_down = {}
+local function mesh_transport_failure(reason)
+  local text = tostring(reason or "")
+  return text:match("^unreachable") ~= nil or text:match("^read_failed") ~= nil
+end
 function M.mesh_attempt(node, capability, args, body, headers)
   if type(host.mesh_call) ~= "function" then return nil end
+  local key = node.node_id
+  local seen = mesh_down[key]
+  if seen and (os.time() - seen) < M.MESH_COOLDOWN then return nil end
   local ok, raw = pcall(host.mesh_call, json.encode({
     node = node.node_id,
     capability = capability,
@@ -463,6 +480,7 @@ function M.mesh_attempt(node, capability, args, body, headers)
   local decoded_ok, answer = pcall(json.decode, raw)
   if not decoded_ok or type(answer) ~= "table" then return nil end
   if answer.ok then
+    mesh_down[key] = nil
     return { response = {
       status = tonumber(answer.status) or 200,
       body = tostring(answer.body or ""),
@@ -471,6 +489,11 @@ function M.mesh_attempt(node, capability, args, body, headers)
     } }
   end
   if answer.error == "mesh_unreachable" or answer.error == "mesh_disabled" then return nil end
+  -- A transport death is remembered, so the *next* call to this peer starts on the relay instead of
+  -- repeating it; the call that hit it still answers with the refusal it got.
+  if mesh_transport_failure(answer.reason) or answer.error == "mesh_relay_failed" then
+    mesh_down[key] = os.time()
+  end
   return { refused = {
     error = answer.error == "mesh_denied" and "mesh_denied" or "mesh_refused",
     reason = tostring(answer.reason or answer.code or answer.error),
