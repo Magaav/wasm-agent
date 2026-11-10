@@ -52,6 +52,28 @@ New/edited definitions and every successful or failed probe stay disabled until
 explicit enabling. Failed probes are durable. Changed tool input schemas refuse
 before dispatch and invalidate approval. No live PID/continuous health is invented.
 
+A **call never reverses the operator's decision**. A refusal that says the
+connector's catalogue changed (`mcp_tool_schemas_changed`, `mcp_catalogue_changing`)
+is answered before dispatch - nothing is issued against a schema nobody approved - but
+it no longer sets `enabled=false` or discards the cached probe: it records
+`probe_stale` in the registry, the connector stays on with its approved tools in the
+catalogue, and `/mcp` reports `stale - re-probe` instead of `disabled`. A passing
+call, a probe and an enable each clear the note. Before 10/11 a call did disable the
+connector and drop its probe, which is how a connector the operator had enabled came
+back disabled after a deploy, with its tools gone from the catalogue
+(`scripts/test-mcp-registry-state.lua`).
+
+A read session reserves uncertainty in `meta` *before* submitting, so a read that may
+have been issued is never replayed. The reservation is released by an answer: a
+verified result, a refusal the server itself returned (`mcp_rpc_error:`), or a
+submission that was never issued. A marker left behind by a process that died is
+reconciled from the evidence on disk - the request written before submission and the
+retained answer beside it - and only when that evidence is definite in the same sense;
+a complete result whose sha256 the lost reply would have confirmed keeps the marker,
+and a new call is issued only after the old reservation is released
+(`lua/core/mcp_session.lua`, `scripts/test-mcp-session-settlement.lua`, and
+`scripts/test-mcp-recovery.lua` for the no-replay line).
+
 Definitions have id/name, transport, program/args or url, optional absolute cwd,
 `env`/`headers` reference maps, optional `secret_env` target-env-key array,
 `timeout_seconds`, and `tools` mapping exact names to locally approved read/write.

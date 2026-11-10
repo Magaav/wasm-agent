@@ -21,6 +21,59 @@ function M.accepted(result,schema_hash)
  end
  return false,'unsettled'
 end
+-- Settling a reservation that was left behind is done from its evidence, never by replaying it.
+--
+-- A marker outlives the process that wrote it, so a session that died after issuing a read leaves that
+-- connector answering `mcp_connection_uncertain` for ever - measured on this node: session db57bc92 was
+-- killed at 18:14 while the `google` connector was mid-repair, and nothing could release the reservation
+-- afterwards. What happened is still on disk: the request written before submission (`<id>.json`) and,
+-- when the server answered, the retained answer beside it (`<id>.json.result.json`).
+--
+-- `M.reconcilable` names the only evidence that may settle a marker WITHOUT trusting an artifact that
+-- nothing verified: an answer the server itself returned as a refusal (`mcp_rpc_error:`), and a
+-- submission that was never issued (`not_submitted`). A complete result whose sha256 only the lost reply
+-- could have confirmed is deliberately NOT enough - that reservation stays, and
+-- `scripts/test-mcp-recovery.lua` owns the line (`same-VM no replay`).
+function M.reconcilable(answer,schema_hash)
+ local ok,why=M.accepted(answer,schema_hash)
+ if not ok then return false,why end
+ if why=='server_error' or why=='not_submitted' then return true,why end
+ return false,'needs_the_lost_reply'
+end
+local function request_id_of(request)
+ local name=tostring(request or ''):gsub('\\\\','/'):match('([^/]+)%.json$')
+ return name
+end
+-- The evidence for one reserved request, or nil and why it cannot settle it. Reads only: the call that
+-- may have been issued is never sent again from here.
+function M.answered(request,schema_hash)
+ local want=request_id_of(request)
+ if not want or want=='' then return nil,'no_request' end
+ local answer=decode(host.read_file(request..'.result.json'))
+ if not answer then return nil,'no_retained_answer' end
+ -- The answer must BE the answer to this request. The request file carries its own id; the file name
+ -- carries it too, and they disagreeing means this evidence belongs to something else.
+ local sent=decode(host.read_file(request))
+ if type(sent)=='table' and type(sent.request_id)=='string' and sent.request_id~=want then
+  return nil,'evidence_not_this_request'
+ end
+ if type(answer.request_id)~='string' or answer.request_id~=want then return nil,'evidence_not_this_request' end
+ local ok,why=M.reconcilable(answer,schema_hash)
+ if not ok then return nil,why end
+ return answer,why
+end
+-- Release one marker when its evidence decides it. Returns {released=true,reason=..} or
+-- {released=false,reason=..}; a release that is not durable is reported as not released, because a marker
+-- that survives a failed DELETE must keep refusing.
+function M.reconcile(uncertain_key,request,schema_hash)
+ local answer,why=M.answered(request,schema_hash)
+ if not answer then return {released=false,reason=why} end
+ local released=decode(host.sql_exec('DELETE FROM meta WHERE key=? AND value=?',json.encode({uncertain_key,request})))
+ if not released or released.error or released.ok~=true or released.changes~=1 then
+  return {released=false,reason='reconcile_not_durable'}
+ end
+ return {released=true,reason=why}
+end
 function M.invoke(input,ctx,directory)
  ctx=ctx or {};if not input.read_tools or #input.read_tools==0 then return failure('mcp_read_scope_required') end
  local owner=tostring(ctx.user_id or '')..'\0'..tostring(ctx.session_id or '')..'\0'..tostring(ctx.role or '')
@@ -29,10 +82,16 @@ function M.invoke(input,ctx,directory)
  local uncertain_key='mcp.read_uncertain.v1:'..key
  local saved=decode(host.sql_query('SELECT value FROM meta WHERE key=?',json.encode({uncertain_key})))
  if not saved or saved.error then return failure('mcp_session_store_unreadable') end
- if saved[1] then return failure('mcp_connection_uncertain',{request=saved[1].value}) end
--- A held reservation is never reopened, even when a retained answer sits beside it: the reply was not
--- verified, and `scripts/test-mcp-recovery.lua` holds that line (`same-VM no replay`). The defect was
--- CREATING this state for an answer the server actually gave - see M.accepted.
+ -- A marker left behind by an earlier process is settled from its evidence before this one refuses, and a
+ -- marker that no retained evidence decides keeps refusing exactly as before.
+ local reconciled
+ if saved[1] then
+  local settled=M.reconcile(uncertain_key,saved[1].value,input.schema_hash)
+  if not settled.released then
+   return failure('mcp_connection_uncertain',{request=saved[1].value,reason=settled.reason})
+  end
+  reconciled={request=saved[1].value,reason=settled.reason}
+ end
  local function hold(slot,request)
   slot.unknown=request
   local r=decode(host.sql_exec('INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)',json.encode({uncertain_key,request})))
@@ -93,6 +152,9 @@ function M.invoke(input,ctx,directory)
   if not released or released.error or released.ok~=true or released.changes~=1 then error('mcp_uncertainty_release_unverified: '..request) end
   slot.unknown=nil
  end
+ -- A settled marker is named in the answer that follows it: the reader learns that an earlier reservation was
+ -- reconciled from its evidence, not that a read was silently repeated.
+ if reconciled then result.reconciled=reconciled end
  return result
 end
 function M.close()

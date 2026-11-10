@@ -321,8 +321,12 @@ function M.close_read_sessions()return read_sessions.close() end
 function M.inventory()
  local store=load_store();local servers={}
  for id,row in pairs(store.servers)do
+  -- A stale connector is still enabled: the call it refused changed nothing about the operator's decision.
+  -- Saying so here is what makes the refusal actionable instead of looking like a connector that went away.
+  local observed=row.probe_stale and ('enabled, but its tool list changed since the last probe ('..tostring(row.probe_stale.error or 'schema_changed')..') - re-probe to approve it')
+   or (row.probe and (row.probe.ok and 'last probe passed' or 'last probe failed') or 'not verified')
   servers[#servers+1]={id=id,name=row.definition.name or id,definition=row.definition,enabled=row.enabled==true,revision=row.revision,
-   probe=row.probe,last_call=row.last_call,session_mode='read-reuse/write-request',observed_status=row.probe and (row.probe.ok and 'last probe passed' or 'last probe failed') or 'not verified'}
+   probe=row.probe,probe_stale=row.probe_stale,last_call=row.last_call,session_mode='read-reuse/write-request',observed_status=observed}
  end
  table.sort(servers,function(a,b)return a.id<b.id end)
  return {ok=true,revision=store.revision,servers=servers,templates={},can_manage=true,
@@ -347,10 +351,12 @@ function M.control(args,ctx)
    for name in pairs(row.definition.tools)do if not found[name] then return fail('mcp_approved_tool_missing:'..name) end end
    if total>131072 then return fail('mcp_selected_schema_budget_exceeded',{bytes=total,maximum=131072}) end
   end
-  return mutate(raw,function(current)current.servers[args.id].enabled=action=='enable';return {ok=true,id=args.id,enabled=action=='enable'}end)
+  return mutate(raw,function(current)current.servers[args.id].enabled=action=='enable';if action=='enable' then current.servers[args.id].probe_stale=nil end;return {ok=true,id=args.id,enabled=action=='enable'}end)
  elseif action=='probe' then
   local answer=M.invoke({action='probe',server=row.definition},ctx)
-  local saved=mutate(raw,function(current)current.servers[args.id].probe=answer;current.servers[args.id].enabled=false;return {ok=true} end)
+  -- A fresh probe is the one operation that may replace the cached catalogue, so it is also what clears a
+  -- staleness note: the next call is measured against the list this probe just read.
+  local saved=mutate(raw,function(current)current.servers[args.id].probe=answer;current.servers[args.id].probe_stale=nil;current.servers[args.id].enabled=false;return {ok=true} end)
   if not saved.ok then answer.registry_observation_error=saved.error end
   return answer
  end
@@ -377,6 +383,29 @@ function M.resolve_tool(name)
  end end
 end
 function M.is_read(name)local id,row,tool=M.resolve_tool(name);return id~=nil and row.definition.tools[tool.name]=='read' end
+-- What one tool call may change in the registry.
+--
+-- A call is evidence about the connector; it is never a reason to reverse the operator's decision. Until
+-- 10/11 the call below did the opposite: an answer of `mcp_tool_schemas_changed` set `enabled=false` and
+-- threw the cached probe away, so a connector the operator had enabled came back DISABLED with its tools
+-- gone from the catalogue and nothing to re-enable it but a manual probe - measured on this node after a
+-- deploy, where a cached probe that no longer matched the running runtime was reported exactly that way.
+-- The refusal itself is safe and unchanged: `mcp_tool_schemas_changed` is answered before dispatch
+-- (`tool_call_issued=false`), so nothing is issued against a catalogue nobody approved. What changes is the
+-- side effect: the enable decision stays, the cached probe stays (its tools are still the approved ones),
+-- and the staleness is recorded so `/mcp` and the inventory can say "re-probe" instead of "disabled".
+-- A later passing call proves the catalogue matches again, and a probe or an enable clears the note.
+function M.record_call(entry,answer)
+ if type(entry)~='table' then return entry end
+ answer=answer or {}
+ entry.last_call={at=host.now(),ok=answer.ok,error=answer.error,outcome=answer.outcome,operation_id=answer.operation_id}
+ if answer.error=='mcp_tool_schemas_changed' or answer.error=='mcp_catalogue_changing' then
+  entry.probe_stale={at=host.now(),error=answer.error,operation_id=answer.operation_id}
+ elseif answer.ok==true then
+  entry.probe_stale=nil
+ end
+ return entry
+end
 function M.call(name,args,ctx)
  local id,row,tool=M.resolve_tool(name);if not id then return fail('mcp_tool_not_approved') end
  local options={action='call',server=row.definition,tool=tool.name,schema_hash=row.probe.schema_hash}
@@ -390,18 +419,19 @@ function M.call(name,args,ctx)
  local current,raw=load_store();local same=current.servers[id]
  if same and same.revision==row.revision then
   local recorded=mutate(raw,function(value)
-   local entry=value.servers[id];entry.last_call={at=host.now(),ok=answer.ok,error=answer.error,outcome=answer.outcome,operation_id=answer.operation_id}
-   if answer.error=='mcp_tool_schemas_changed' then entry.enabled=false;entry.probe=nil end
-   return {ok=true}
+   local entry=M.record_call(value.servers[id],answer)
+   return {ok=true,probe_stale=entry.probe_stale}
   end)
   if not recorded.ok then answer.registry_observation_error=recorded.error end
+  if recorded.ok and recorded.probe_stale then answer.probe_stale=recorded.probe_stale end
  end
  return M.project(answer)
 end
 -- Catalogue/transport evidence stays exact on disk, outside ordinary model replies.
 function M.project(answer)
  local out={ok=answer.ok,error=answer.error,phase=answer.phase,rpc_error=answer.rpc_error,outcome=answer.outcome,tool_call_issued=answer.tool_call_issued,evidence=answer.evidence,
-  session_mode=answer.session_mode,reused=answer.reused,unsupported_content_types=answer.unsupported_content_types,content_delivery=answer.content_delivery,registry_observation_error=answer.registry_observation_error}
+  session_mode=answer.session_mode,reused=answer.reused,unsupported_content_types=answer.unsupported_content_types,content_delivery=answer.content_delivery,registry_observation_error=answer.registry_observation_error,
+  reconciled=answer.reconciled,probe_stale=answer.probe_stale}
  if answer.result_json then out.result=json.raw(answer.result_json) elseif answer.result then out.result=answer.result end
  if not answer.evidence and not answer.result_json and not answer.result then out.detail=answer end
  return out
