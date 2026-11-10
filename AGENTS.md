@@ -5,6 +5,8 @@ made from this checkout, so it stays short; detail lives in `docs/` and loads on
 
 ## How work lands
 
+Answer with the verified artifact or a measured impossibility — a plan, an obstacle or a question is not an answer.
+
 The default is the operator-selected direct workflow (`AGENTS.orchestrator.md`): implement,
 self-review, run the fast path (`bash scripts/fast.sh`), integrate through canonical main, push and read back
 `origin/main`, and leave both trees clean.
