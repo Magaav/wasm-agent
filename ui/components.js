@@ -1870,7 +1870,12 @@ class WaMcps extends HTMLElement {
         controls.append(edit);
       }
       const toggle=button(connector.enabled?'Turn off':'Turn on','toggle',{connector:connector.key,enable:!connector.enabled});
-      toggle.dataset.approvalRequired=String(readOnly);toggle.disabled=readOnly;
+      // A connector whose registry the peer did not report cannot be changed from here: the row says so in
+      // its policy line, so the control must not contradict it. Disabled with the reason, not offered and
+      // then refused.
+      const untoggleable=connector.note==='connector_registry_not_reported';
+      toggle.dataset.approvalRequired=String(readOnly||untoggleable);toggle.disabled=readOnly||untoggleable;
+      if(untoggleable)toggle.title='That peer reported its tools, not its registry: nothing to toggle here until it runs a build that lists connectors.';
       controls.append(toggle);
       row.append(name,status,policy,controls);
       const details=document.createElement('details'),summary=document.createElement('summary');
