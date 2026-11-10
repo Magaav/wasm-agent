@@ -207,12 +207,9 @@ local object=function(properties,required)
  local body={}
  for key,value in pairs(properties)do body[#body+1]='"'..key..'":'..value end
  table.sort(body)
- local fields=table.concat(body,',')
- local parts={}
- if fields~='' then parts[1]=fields end
- if required and #required>0 then parts[#parts+1]='"required":['..table.concat(required,',')..']' end
- parts[#parts+1]='"additionalProperties":false'
- return '{'..table.concat(parts,',')..'}'
+ local schema='{"type":"object","properties":{'..table.concat(body,',')..'}'
+ if required and #required>0 then schema=schema..',"required":['..table.concat(required,',')..']' end
+ return schema..',"additionalProperties":false}'
 end
 NATIVE_TOOLS={
  read_newest={cap='whatsapp_read',description='Read one WhatsApp chat newest-first from the index this node holds',
