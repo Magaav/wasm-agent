@@ -839,6 +839,14 @@ local function node_capability(capability, args, caller)
     -- `watch` is a projection over the ledger and is the reason this pair has two names.
     return dofile("lua/core/session_watch.lua").serve(
       capability == "session_start" and "start" or "watch", args, caller)
+  elseif capability == "update" then
+    -- A master asks this node to update itself (lua/core/remote_update.lua, docs/REMOTE-UPDATE.md).
+    -- Measured 2026-11-10: no install could cross a node boundary, because every remote door was a
+    -- shell and a relayed shell carries `WASM_AGENT_PROVENANCE=child`, which the sentinel refuses. This
+    -- branch is not a shell: it runs in this node's own process (so the peer's installer sees the
+    -- peer's own provenance), and the module refuses any caller the binding or the roster does not
+    -- name as a master. It still installs nothing itself - it writes the request this node's own
+    -- `/update` writes, and this node's Sentinel performs it under its existing rules.
   elseif capability == "federation" then
     -- Connector federation (lua/core/federation.lua): a master peer lists and runs this node's connector
     -- tools here, under this node's own guards. The dispatch is the same one the fallthrough below uses.
@@ -1080,6 +1088,12 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
       -- authority: watching a session is a read and starting one is control, and a single name would
       -- be graded by one verb for both.
       session_start=true, session_watch=true,
+      -- Updating this node from distance (lua/core/remote_update.lua). The handler refuses every
+      -- caller `author_of` does not name as a master, so admitting the name admits masters only - a
+      -- guest is refused twice (here and in the module). Unclassified in MESH_VERBS on purpose: a
+      -- roster attestation grades it `call`, the strongest grant, which is the right price for
+      -- installing a runtime rather than inheriting `control`'s price for a shell.
+      update=true,
       -- `operation`, restored 2026-11-10. Measured cause of its loss: this list never named it (it
       -- was created whole in 6342ce8b, 2026-09-20, and `operation` has not been in it since); the
       -- call that worked on 2026-11-04 reached an *unbound* node, where `enrollment.managed()` was

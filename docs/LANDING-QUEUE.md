@@ -185,3 +185,38 @@ is never retried by itself); 76 the queue or the repository could not answer.
 - **`docs/` and `skills/` are treated as documentation** except the listed check inputs. That is the
   operator's measured case (`skills/clean-disk`), and it is the one place where the classifier is a
   policy decision rather than a fact about the tree.
+
+## The aarch64 release a landing publishes
+
+A landing is the moment a commit becomes installable, so it is the moment the prebuilt binary for that
+commit must exist: `scripts/deploy.sh` installs a published release when the commit's compiled inputs
+are covered, and compiles on the node only when there is none. Measured 2026-11-10: neither of that
+day's two landings published one (`graph c54b3957`, `ui 1d23cbed`), and the aarch64 release for
+`1d23cbed` had to be made by hand afterwards — so a remote update (`docs/REMOTE-UPDATE.md`) of
+`openclaw` would have fallen back to a build on the node it was replacing.
+
+After the push and the readback, `land` therefore runs
+
+```
+bash scripts/publish-node-binaries.sh --ensure --publish --target aarch64-unknown-linux-gnu --commit <merged>
+```
+
+in the canonical checkout, and prints and records what it answered:
+
+```
+landing-queue: #7 release covered (aarch64-unknown-linux-gnu): covered: node-4147192f2725 covers the
+  compiled inputs of <merged> for aarch64-unknown-linux-gnu; nothing to build or publish in 2s
+```
+
+- `--ensure` answers in seconds for a Lua/docs/test-only landing (its compiled inputs are unchanged,
+  so an earlier release already covers it) and builds once for a Rust landing — here, not on every
+  node;
+- it can never fail the landing: the merge is pushed and read back before it runs, so a publisher that
+  cannot run records `release failed (aarch64-unknown-linux-gnu): <reason>` in the row and keeps its
+  log at `<queue dir>/release-<sha12>.log`, and `main` stays what was pushed;
+- the publisher finds its own toolchain (`zig`, one `CARGO_TARGET_DIR` for both Cargo workspaces), so
+  a landing needs no caller environment — see `scripts/publish-node-binaries.sh`'s header.
+
+`scripts/test-landing-queue.mjs` proves the call (its fixture's publisher records its arguments and
+the row's line) and the failure path, and `scripts/test-node-binaries.sh` proves the toolchain is the
+script's own.

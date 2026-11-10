@@ -19,6 +19,7 @@
 // Exit codes: 0 the command's own success; 75 refused (named, terminal - a refusal is never retried
 // by itself); 76 the queue or the repository could not answer.
 import path from 'node:path';
+import fs from 'node:fs';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {
@@ -60,6 +61,52 @@ function open(options) {
 }
 
 const age = seconds => (seconds === null || seconds === undefined ? 'now' : `${Math.max(0, now() - seconds)}s`);
+
+// ---- the release a landed commit needs ----------------------------------------------------------
+//
+// A landing is the moment a commit becomes installable, so it is the moment the prebuilt binary for
+// it must exist: `scripts/deploy.sh` installs a published release when the commit's compiled inputs
+// are covered, and compiles on the node only when there is none. Measured 2026-11-10: neither of
+// that day's two landings published anything, and the aarch64 release for 1d23cbed had to be made by
+// hand afterwards - so a remote update of openclaw would have fallen back to a build on the node it
+// was replacing, which is the path this project does not want.
+//
+// `--ensure` is what makes this affordable: a commit whose compiled inputs are already covered (every
+// Lua-only, docs-only or test-only landing) answers in seconds and builds nothing. A Rust landing
+// pays one build here instead of on each node.
+//
+// It can never fail the landing: the merge is already pushed and read back, and a failed publish is a
+// fact about the release, not about main. The outcome - published, covered by an earlier release, or
+// why not - is recorded in the queue row and printed, and the publisher's own log is kept beside the
+// queue so an operator can read what happened without re-running it.
+const RELEASE_TARGET = 'aarch64-unknown-linux-gnu';
+const RELEASE_TIMEOUT_MS = 45 * 60 * 1000;
+
+const lastLine = text => String(text || '').trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || '';
+
+function publishNodeRelease(canonical, commit, dir) {
+  const started = Date.now();
+  const run = spawnSync('bash', ['scripts/publish-node-binaries.sh', '--ensure', '--publish',
+    '--target', RELEASE_TARGET, '--commit', commit],
+  {cwd: canonical, encoding: 'utf8', timeout: RELEASE_TIMEOUT_MS, env: process.env});
+  const output = `${run.stdout || ''}${run.stderr || ''}`.trim();
+  const seconds = Math.round((Date.now() - started) / 1000);
+  const log = path.join(dir, `release-${commit.slice(0, 12)}.log`);
+  try { fs.writeFileSync(log, `${output}\n`, 'utf8'); } catch { /* the row still carries the reason */ }
+  if (run.error && run.error.code === 'ETIMEDOUT') {
+    return {state: 'failed', target: RELEASE_TARGET, seconds, detail: `the publisher did not finish within ${RELEASE_TIMEOUT_MS / 60000} min`, log};
+  }
+  if (run.status !== 0) {
+    return {state: 'failed', target: RELEASE_TARGET, seconds, detail: lastLine(output) || `the publisher exited ${run.status}`, log};
+  }
+  const covered = /covered: \S+ covers the compiled inputs/.test(output);
+  const tag = (output.match(/publish-node-binaries ok: (\S+)/) || [])[1]
+    || (output.match(/covered: (\S+) covers/) || [])[1] || '';
+  return {
+    state: covered ? 'covered' : 'published', tag, target: RELEASE_TARGET, seconds, log,
+    detail: lastLine(output) || (covered ? `covered by ${tag}` : `published ${tag}`),
+  };
+}
 
 // ---- status -------------------------------------------------------------------------------------
 function commandStatus(options) {
@@ -411,9 +458,15 @@ async function commandLand(options) {
       throw new QueueError(`readback_mismatch: pushed ${merged.slice(0, 12)} but origin/main reads ${readback.slice(0, 12)}`, 76, 'readback_mismatch');
     }
     say(`#${id} pushed main ${headAt.slice(0, 12)}..${merged.slice(0, 12)}; readback origin refs/heads/main = ${readback.slice(0, 12)}`);
+    // A landing makes a commit installable, so it publishes the prebuilt binary for it. This runs
+    // AFTER the push and the readback, so nothing here can make main's content depend on a build; a
+    // failure is recorded, never rolled back into a refusal of a landing that already happened.
+    heartbeat(db, id, lease);
+    const release = publishNodeRelease(canonical, merged, dir);
+    say(`#${id} release ${release.state} (${release.target}): ${release.detail}${release.tag ? ` [${release.tag}]` : ''} in ${release.seconds}s`);
     finish('landed', `${options.branch} landed at ${merged.slice(0, 12)} in ${now() - acquired.row.created_at}s (${rerun ? 'retested' : 'no retest'}; upstream ${delta.retest.why})`,
-      {result: JSON.stringify({merged, upstream, rerun, delta: delta.counts})});
-    return {id, granted: true, merged, pushed: true, rerun};
+      {result: JSON.stringify({merged, upstream, rerun, delta: delta.counts, release})});
+    return {id, granted: true, merged, pushed: true, rerun, release};
   } catch (error) {
     // An error that is not already a terminal state leaves the claim abandoned, never silently held.
     const row = db.prepare('SELECT state FROM queue WHERE id=?').get(id);

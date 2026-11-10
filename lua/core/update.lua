@@ -593,6 +593,23 @@ function M.run(options)
     end
     facts = M.facts(options)
   end
+  -- A commit the caller names (a remote master asking for one exact landed commit, `remote_update`).
+  -- Asked here, after every other precondition and immediately before the request is written, because
+  -- "install X" must not become "install whatever the tree happens to be at": the answer says which
+  -- commit the gate will build, and a tree that moved in between is a refusal, not a different install.
+  if options.expected_commit and tostring(options.expected_commit) ~= '' then
+    local head = trim(git(facts.tree or '', 'rev-parse HEAD') or '')
+    if head == '' or head:sub(1, #tostring(options.expected_commit)) ~= tostring(options.expected_commit) then
+      return {
+        ok = false, status = "source_moved", error = "source_moved", tree = facts.tree,
+        observed = "the tree is at " .. (head ~= "" and head:sub(1, 12) or "an unknown commit") .. " and the request names " ..
+          tostring(options.expected_commit):sub(1, 12) .. "; nothing was queued.",
+        message = "the runtime source moved before the deploy request was written, so nothing was queued.",
+        next = "ask again: the install must name the commit the gate will build",
+        installed_commit = facts.installed_commit, candidate = facts.candidate,
+      }
+    end
+  end
   local verdict = decorate(M.verdict(facts), facts)
   if verdict.status ~= "queue" then
     return verdict

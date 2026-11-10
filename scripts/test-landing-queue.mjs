@@ -105,6 +105,18 @@ function fixture() {
   fs.writeFileSync(path.join(CANONICAL, 'docs/a.md'), '# a\n');
   fs.writeFileSync(path.join(CANONICAL, 'scripts/foo.sh'), 'echo hi\n');
   fs.writeFileSync(path.join(CANONICAL, 'rust/wa-host/src/lib.rs'), 'pub fn nothing() {}\n');
+  // The release step a landing runs (docs/COMPONENTS.md "How a landed commit gets its binary"): a stub,
+  // so this test measures THAT the landing calls the publisher with the right arguments and records its
+  // answer, without a compiler or a network. WA_TEST_PUBLISH_FAIL makes it fail on purpose.
+  fs.writeFileSync(path.join(CANONICAL, 'scripts/publish-node-binaries.sh'), [
+    '#!/usr/bin/env bash',
+    `printf '%s\n' "$*" >> "${WORK}/publisher-args"`,
+    'if [ "${WA_TEST_PUBLISH_FAIL:-}" = 1 ]; then echo "publish-node-binaries: publish_tool_missing: gh is not on PATH" >&2; exit 2; fi',
+    'echo "publish-node-binaries: covered: node-fixture covers the compiled inputs of $6 for aarch64-unknown-linux-gnu; nothing to build or publish"',
+    'echo "publish-node-binaries ok: node-fixture"',
+    '',
+  ].join('\n'));
+  fs.chmodSync(path.join(CANONICAL, 'scripts/publish-node-binaries.sh'), 0o755);
   git(CANONICAL, 'add', '-A');
   git(CANONICAL, 'commit', '-q', '-m', 'base');
   git(CANONICAL, 'remote', 'add', 'origin', ORIGIN);
@@ -236,12 +248,32 @@ async function deltaClassification() {
   const originMain = git(ORIGIN, 'rev-parse', 'refs/heads/main').trim();
   const canonicalHead = git(CANONICAL, 'rev-parse', 'HEAD').trim();
   check('the landing is on origin/main and read back', originMain === canonicalHead && /readback origin refs\/heads\/main/.test(landed.stdout), landed.stdout);
+  // A landing is the moment a commit becomes installable, so it publishes the aarch64 release for what
+  // it just pushed - or says why not. Measured 2026-11-10: neither of that day's landings published one,
+  // and the release had to be made by hand afterwards.
+  const publisherArgs = fs.existsSync(path.join(WORK, 'publisher-args')) ? fs.readFileSync(path.join(WORK, 'publisher-args'), 'utf8').trim() : '';
+  check('the landing publishes the aarch64 release for the landed commit',
+    publisherArgs.includes('--ensure --publish --target aarch64-unknown-linux-gnu --commit ' + originMain), publisherArgs);
+  check('and records the publisher answer in its own line',
+    /release covered \(aarch64-unknown-linux-gnu\)/.test(landed.stdout), landed.stdout);
 
   const after = q(['classify', '--from', 'HEAD~1', '--to', 'HEAD', '--json']);
   const delta = JSON.parse(after.stdout);
   check('classify reports the moved paths with their classes',
     delta.paths.length > 0 && delta.paths.every(entry => typeof entry.class === 'string'), JSON.stringify(delta.paths));
   check('classify says a code move is test-relevant', delta.retest.required === true, JSON.stringify(delta.retest));
+
+  // A publisher that cannot run is a fact about the release, never a rollback of a landing that
+  // happened: main stays where it was pushed and the row says why no binary was published.
+  fs.rmSync(path.join(WORK, 'publisher-args'), {force: true});
+  branch('change/no-release', 'docs/no-release.md', '# no release\n');
+  const unreleased = q(['land', '--branch', 'change/no-release', '--owner', SESSION, '--checks', 'echo fixture-checks-ran'],
+    {env: {WA_TEST_PUBLISH_FAIL: '1'}});
+  check('a landing whose release could not be published still lands', unreleased.status === 0, unreleased.stdout + unreleased.stderr);
+  check('and the row records why the release was not published',
+    /release failed \(aarch64-unknown-linux-gnu\): .*publish_tool_missing/.test(unreleased.stdout), unreleased.stdout);
+  check('main is the same commit the landing pushed',
+    git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === git(CANONICAL, 'rev-parse', 'HEAD').trim());
 }
 
 // ---- 4. a dirty canonical checkout with no lease is refused, naming the files --------------------
