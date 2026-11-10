@@ -203,7 +203,9 @@ is visible and cannot earn a second attempt, even after revision or restart.
 This is the trusted runtime completion boundary, not a guarantee that an
 arbitrary downstream external effect occurred.
 
-Protocol deploys omit the legacy continuation wake. The request-bound installer
+Protocol deploys omit the legacy continuation wake, and they do not open a deploy-outcome record
+either: one deploy has one reporter, and for an admitted protocol deploy (`ready()` gates admission on
+it) that reporter is this return engine. The request-bound installer
 result, final clean-built installation record, and actual fresh verifier must
 agree on full source/tree and actual node/sentinel/script/UI hashes, listener
 and watcher identities, with zero failures or skips. The verifier derives UI
@@ -363,8 +365,14 @@ the UI **and** the sentinel. Two properties make it work, and both are deliberat
   outlive its parent, because the parent is the process being replaced, and on Windows only a *different*
   process can overwrite the image of a running one. Nothing is lost by that: `deploy.sh` proves the new
   node before it goes near the live one, records `installed.txt` and `deploy.log`, and rolls back on its
-  own. The completion signal is the continuation wake, queued by the script once the new node answers
-  `/health` and performed by the **new** watcher.
+  own. The completion signal is the **deploy outcome record** (`rust/wa-sentinel/src/deploy_outcome.rs`):
+  `request deploy --session … --prompt …` writes `sentinel/deploy-outcome/<id>.json` before the request
+  itself exists, and that record is settled **exactly once** by whichever terminal event survives - the
+  sentinel's wait on the installer it spawned, the `result.json` the installer writes against its
+  `--request-id`, or the watchdog in the watcher loop (and once at watcher start). Each settlement queues one
+  `wake` under the deterministic key `deploy-return-<id>.json`, which the next watcher delivers. It is never
+  written by the installer's last lines: that process is the one the swap stops, the restart signals and the
+  sentinel replacement outlives.
 
 Two details that decide whether a *requested* deploy can work at all:
 
@@ -375,14 +383,23 @@ Two details that decide whether a *requested* deploy can work at all:
   on exactly this: it read `unknown` for the commit, built in the install directory and reported "the
   build failed", with the tree it should have used recorded in a file nothing read.
 - **a failure answers the requester.** The request is `done` as soon as the script is *spawned*, so for a
-  deploy that is a launch receipt and nothing more: a deploy that refused before the swap left the node
-  untouched and told nobody. `deploy.sh` now wakes the requesting session on its failure path too, naming
-  the refusal and where the evidence is; a hand-run deploy passes no `--session` and wakes nobody.
+  deploy that is a launch receipt and nothing more. The answer comes from the outcome record, in all three
+  shapes: `success` (the installer's own verdict), `failure` (its refusal reason), and `silent` - the
+  watchdog's report that no outcome reached the session within `WA_SENTINEL_DEPLOY_TIMEOUT` seconds (900 by
+  default: measured deploys on this node on 2026-11-10 took 1m30s-5m29s), carrying the deploy id, the last
+  step the queue recorded, the installer's pid and whether it is still alive, and the commit `installed.txt`
+  names. A deploy that is still installing, or still held in the box waiting for an idle node, is not called
+  silent; a deploy that named no `--session` has no address and the door says so. Measured 2026-11-10: a
+  deploy and a `request run` retry both went out with no session, one succeeded and one was refused, and the
+  session that was waiting for them sat idle for 1h45m. `request run --script` now refuses an installer
+  (`deploy.sh`, `upgrade.sh`) by name, before any request file exists: that door reports the *script's* exit,
+  and a deploy's exit is a node replacement.
 
 `scripts/verify-install.sh` is the one-command check afterwards: installed vs built hashes, shipped
 scripts vs the repo, the recorded pid vs the listener, the watcher alive - PASS/FAIL, `--json` if you want
-it as data. `deploy.sh` also writes `<install>/deploy-result.json` and puts a one-line verdict in the
-continuation wake, so the outcome is read once instead of re-derived. `request run --script` executes only
+it as data. `deploy.sh` also writes `<install>/deploy-result.json` and a per-request copy at
+`sentinel/deploy-protocol/<id>/result.json`, which is how the outcome record attributes a verdict to the
+request that asked for it even after the sentinel that spawned it is gone. `request run --script` executes only
 from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/`, set by the gate, the unit and
 `scripts/install-sentinel-task.ps1`); use it for work that must happen outside a turn.
 On Windows an approved `.ps1` script uses the native system PowerShell executable

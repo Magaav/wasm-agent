@@ -386,7 +386,7 @@ fn a_deploy_under_a_supervisor_is_refused_rather_than_become_our_child() {
     let path = std::env::var_os("PATH");
     std::env::set_var("PATH", &fixture.dir);
     let capture = deploy_capture_path();
-    let outcome = verb_deploy_script(&stub, "", "", "role fixture", &capture);
+    let outcome = verb_deploy_script(&stub, "", "", "", "role fixture", &capture);
     match path { Some(path) => std::env::set_var("PATH", path), None => std::env::remove_var("PATH") }
     std::env::remove_var("WA_SENTINEL_SUPERVISOR");
 

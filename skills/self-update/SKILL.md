@@ -157,7 +157,11 @@ positive verdict. Source/owner/process mismatches remain refusals. See
 sentinel executes it only from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/` is what the
 gate and the service set). That is a deliberate boundary, not an obstacle to route around with
 `Start-Process` or Task Scheduler - a run that fights the OS for eight rounds is a run that should have
-queued a request. Approved `.js`/`.mjs`/`.cjs` use native Node dispatch, never Bash;
+queued a request. It is **not** the door for an installer: `deploy.sh` and `upgrade.sh` are refused by
+name here (`installer_run_refused`) because this door reports the script's own exit while a deploy's exit
+is a node replacement. Queue the install with `request deploy --session <id> --prompt <text>` - that is
+the door whose outcome reaches the session as a `[Sentinel notice]`, settled from disk and watched by a
+timeout, measured 2026-11-10 after a deploy and its retry both reported nothing. Approved `.js`/`.mjs`/`.cjs` use native Node dispatch, never Bash;
 Node must be on the watcher's PATH or in its standard Windows Program Files install,
 or pinned by absolute `WA_SENTINEL_NODE`. Missing/invalid Node refuses before spawn.
 Preflight the script's own child executables separately: native Node selection does

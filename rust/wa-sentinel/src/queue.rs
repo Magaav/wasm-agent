@@ -44,6 +44,10 @@ fn read_record(path: &Path) -> Option<Value> {
     std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
 
+pub(crate) fn read(id: &str) -> Option<Value> {
+    record_path(id).as_deref().and_then(read_record)
+}
+
 /// Record one observation. Repeated identical observations are skipped: the watcher ticks five times a
 /// second and an unchanged "waiting" must not rewrite a file five times a second (or move its timestamp,
 /// which is what "how long has this been stuck?" reads). Observation never fails a request: a record that

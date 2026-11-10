@@ -78,6 +78,9 @@ mod watchdog;
 
 mod deploy_protocol;
 mod deploy_bootstrap;
+// One deploy, one report, written on disk before the installer starts and settled by whichever process
+// outlives it: the sentinel's wait on the child, the installer's own result file, or the watchdog.
+mod deploy_outcome;
 mod sentinel_return;
 #[cfg(test)]
 mod sentinel_return_tests;
@@ -95,6 +98,8 @@ mod node_script_tests;
 mod deploy_protocol_tests;
 #[cfg(test)]
 mod deploy_recovery_tests;
+#[cfg(test)]
+mod deploy_outcome_tests;
 #[cfg(test)]
 mod target_identity_tests;
 #[cfg(test)]
@@ -1449,19 +1454,27 @@ fn to_msys_path(path: &Path) -> String {
 /// only way to replace a running image on Windows is to be a different process while it happens. The
 /// evidence is not lost by that - `deploy.sh` proves the new node on a scratch port before it goes near
 /// the live one, records `installed.txt` and `deploy.log`, and rolls back on its own - and the completion
-/// signal is the continuation wake, which the *new* watcher performs.
-pub(crate) fn verb_deploy(session: &str, prompt: &str, reason: &str) -> Result<String> {
+/// signal is the **deploy outcome record** (`deploy_outcome`), settled by this process's wait on the child,
+/// by the installer's own result file, or by the watchdog - never by the installer's last line, which is
+/// written by the process the swap replaces.
+pub(crate) fn verb_deploy(id: &str, session: &str, prompt: &str, reason: &str) -> Result<String> {
     let script = resolve_deploy_script()?;
     let capture = deploy_capture_path();
-    verb_deploy_script(&script, session, prompt, reason, &capture)
+    verb_deploy_script(&script, id, session, prompt, reason, &capture)
 }
 
 /// The deploy itself, with the script and the capture named by the caller - which is what lets the evidence
 /// be proved on a machine that does not deploy (`deploy_visibility_tests`).
-pub(crate) fn verb_deploy_script(script: &Path, session: &str, prompt: &str, reason: &str, capture: &Path) -> Result<String> {
+pub(crate) fn verb_deploy_script(script: &Path, id: &str, session: &str, prompt: &str, reason: &str, capture: &Path) -> Result<String> {
     queue::step("deploying", "running deploy.sh detached");
     let (interpreter, script_arg) = shell_for(script);
     let mut args = vec![script_arg, "--reason".to_string(), reason.to_string()];
+    // The request id, on both doors: it is what makes `deploy-result.json` attributable to *this* deploy, so
+    // the installer's own verdict can still be read after the sentinel that spawned it is gone.
+    if !id.is_empty() {
+        args.push("--request-id".to_string());
+        args.push(id.to_string());
+    }
     if !session.is_empty() {
         args.push("--session".to_string());
         args.push(session.to_string());
@@ -1472,13 +1485,15 @@ pub(crate) fn verb_deploy_script(script: &Path, session: &str, prompt: &str, rea
     }
     let started = start_deploy_detached(script, capture, reason, &interpreter, &args)?;
     audit("deploy", &format!("{} {started}", script.display()), reason);
+    // What this returns is a launch receipt, and it says so. The outcome arrives as a notice in `session`,
+    // written by whichever process outlives the installer - including the watchdog, if this one does not.
     let continuation = if session.is_empty() {
-        "no continuation was requested (no --session)".to_string()
+        "no session was named, so no notice can be delivered for it (pass --session)".to_string()
     } else {
-        format!("{session} will be woken when it finishes")
+        format!("the sentinel reports success, failure or silence into {session} - it does not depend on the installer surviving")
     };
     Ok(format!(
-        "deploy started detached ({started}) from {}; it waits for idle, installs the node, the UI and the sentinel, and {continuation}",
+        "deploy started detached ({started}) from {}; it waits for idle, installs the node, the UI and the sentinel; {continuation}",
         script.display()
     ))
 }
@@ -1564,6 +1579,11 @@ fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interprete
                         &mut file,
                         &format!("--- started by systemd, outside the watcher's control group; how it ended: systemctl status {started}\n"),
                     );
+                    // A unit's pid is the supervisor's to know, not ours - but the clock still starts here, or a
+                    // deploy that legitimately runs for minutes would be reported silent for the wrong length.
+                    if let Some(id) = request_id(args) {
+                        deploy_outcome::started(&id, None);
+                    }
                     return Ok(format!("unit {started}, output appended to {}", capture.display()));
                 }
                 Err(error) => {
@@ -1610,12 +1630,24 @@ fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interprete
     }
     let child = command.spawn().context("start the deploy script detached")?;
     let pid = child.id();
-    let protocol=args.windows(2).find(|pair|pair[0]=="--request-id").map(|pair|pair[1].clone());
-    let exit_file=protocol.as_deref().map(|id|sentinel_dir().join("deploy-protocol").join(id).join("process-exit.json"));
-    let identity=protocol.as_deref().and_then(|id|std::fs::read(sentinel_dir().join("deploy-protocol").join(id).join("effect.json")).ok())
+    let request_id = request_id(args);
+    if let Some(id) = &request_id {
+        // Before the wait begins: a record that says which process is installing, so a notice can say whether
+        // it is still alive when the watchdog speaks.
+        deploy_outcome::started(id, Some(pid));
+    }
+    let exit_file=request_id.as_deref().map(|id|sentinel_dir().join("deploy-protocol").join(id).join("process-exit.json"));
+    let identity=request_id.as_deref().and_then(|id|std::fs::read(sentinel_dir().join("deploy-protocol").join(id).join("effect.json")).ok())
         .and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok());
-    watch_deploy_exit(child, capture.to_path_buf(), Instant::now(), exit_file, identity);
+    watch_deploy_exit(child, capture.to_path_buf(), Instant::now(), exit_file, identity, request_id);
     Ok(format!("pid {pid}, output appended to {}", capture.display()))
+}
+
+/// The request id a deploy was started for, from the arguments it was started with. One reader, so the spawn,
+/// the exit wait and the watchdog all mean the same deploy by the same name.
+fn request_id(args: &[String]) -> Option<String> {
+    args.windows(2).find(|pair| pair[0] == "--request-id").map(|pair| pair[1].clone())
+        .filter(|id| !id.is_empty())
 }
 
 /// A deploy nobody can see the end of is a deploy nobody can call finished, so one thread waits for it and
@@ -1623,7 +1655,7 @@ fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interprete
 /// the question the capture exists to answer. It costs a thread per deploy (deploys are rare), and it is
 /// best-effort by nature: if this process exits first - a `once` run, or the watcher being replaced - the
 /// ending is missing, and the absence of any later line is then the evidence.
-fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: Instant, exit_file:Option<PathBuf>, effect:Option<Value>) {
+fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: Instant, exit_file:Option<PathBuf>, effect:Option<Value>, request_id: Option<String>) {
     std::thread::spawn(move || {
         let pid = child.id();
         let (ending,exit) = match child.wait() {
@@ -1632,6 +1664,12 @@ fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: 
             Err(error) => (format!("--- deploy pid {pid} could not be waited on: {error}\n"),json!({"wait_ok":false,"error":error.to_string()})),
         };
         append_to_capture(&capture, &ending);
+        // The installer is over: this is the first place that can say how it went, and for a deploy that named a
+        // session it is the report. A wait that failed leaves the outcome unknown on purpose - the watchdog
+        // reports it as silence rather than this thread guessing.
+        if let (Some(id), true) = (request_id.as_deref(), exit["wait_ok"] == true) {
+            deploy_outcome::settle_from_exit(id, exit["success"] == true);
+        }
         if let (Some(file),Some(effect))=(exit_file,effect) {
             let record=json!({"schema":1,"id":effect["id"],"expected_sha":effect["expected_sha"],"effect":effect,
                 "pid":pid,"at":now_epoch(),"exit":exit,"elapsed_ms":started.elapsed().as_millis(),
@@ -1740,6 +1778,14 @@ fn is_management_verb(verb: &str) -> bool {
 /// stops the node has somewhere to be right, and `tests` below fail if it is forgotten.
 fn waits_for_idle(verb: &str) -> bool {
     matches!(verb, "restart" | "spell" | "deploy" | "stop")
+}
+
+/// Is this the installer? Compared by exact file name, because the `run` door has legitimate scripts whose
+/// names merely contain "deploy" - `scripts/deploy-rendezvous.sh` installs a *component* from outside a turn
+/// and is sanctioned there. Only the two scripts that replace this node are refused through `run`.
+pub(crate) fn installer_script(script: &str) -> bool {
+    let name = Path::new(script).file_name().and_then(|value| value.to_str()).unwrap_or("");
+    matches!(name.to_ascii_lowercase().as_str(), "deploy.sh" | "upgrade.sh")
 }
 
 fn approved_script(script: &str) -> Result<PathBuf> {
@@ -1876,11 +1922,17 @@ fn perform(request: &Value) -> Result<String> {
                 let args = vec![script_arg, "--request-id".into(), request["id"].as_str().unwrap_or("").into(),
                     "--expected-sha".into(), sha.into(), "--reason".into(), reason.into()];
                 start_deploy_detached(&script, &deploy_capture_path(), reason, &interpreter, &args)
-            } else { verb_deploy(session, prompt, reason) }
+            } else { verb_deploy(request["id"].as_str().unwrap_or(""), session, prompt, reason) }
         }
         "run" => {
             validate_run_continuation(request)?;
-            verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason)
+            let script = request.get("script").and_then(Value::as_str).unwrap_or("");
+            // The same refusal as `request`, for a request file that already exists: an installer performed
+            // here would replace the node under the supervised operation that is meant to report it.
+            if installer_script(script) {
+                bail!("installer_run_refused: {script} is a deploy script, and `run` cannot report a deploy; queue it with: request deploy --session <id> --prompt <text> --if-no-pending");
+            }
+            verb_run(script, reason)
         },
         // A plan the agent exported. Validated against a whitelist before a single step runs, and
         // settled by this process's own /health check - the assertion the node cannot make about
@@ -2046,6 +2098,14 @@ fn finish_request(claim: &Path, request: &Value) {
         Ok(Err(error))=>("failed",false,error.to_string()),
         Err(_)=>("failed",false,"request worker panicked; outcome unknown".into()),
     };
+    // A deploy that failed before an installer existed is a failure the session is owed, and this is the only
+    // place that sees it: `ok` for a deploy means *spawned*, never installed, so only the failing half is
+    // settled here. Success is settled by the wait on the child, by its own result file, or by the watchdog.
+    if !ok && request["verb"] == "deploy" {
+        if let Err(error) = deploy_outcome::settle(id, "failure", &detail) {
+            audit("deploy-outcome-failed", id, &error.to_string());
+        }
+    }
     // Typed capacity contention is a read refusal BEFORE reservation, not an
     // installer outcome. Put only this immutable, proven unadmitted claim back.
     if !ok && admission_read_contention(&detail) && request.get("expected_sha").is_some()
@@ -2407,6 +2467,19 @@ fn request(args: &[String]) -> Result<()> {
         index += 2;
     }
     if verb=="run"{validate_run_continuation(&Value::Object(fields.clone()))?;}
+    // An installer cannot be run through the `run` door and still be reported. `run` settles the *script's*
+    // own exit under a 302s supervised operation, while `deploy.sh` replaces the node - and the watcher -
+    // from inside it, so its exit is not its result and the operation can be stopped by the swap it performs.
+    // Measured 2026-11-10 07:14:07: this door was used for exactly that, with no session, and the request
+    // was refused into `sentinel/failed/` where the session that was waiting for it could not read it.
+    // Refused here, before any file exists, naming the door that does report.
+    if verb=="run" {
+        if let Some(script)=fields.get("script").and_then(Value::as_str) {
+            if installer_script(script) {
+                bail!("installer_run_refused: {script} is a deploy script, and `run` cannot report a deploy - it replaces the node (and this watcher) while the run is still going. Queue it with: request deploy --session <id> --prompt <text> [--reason <why>] --if-no-pending; the sentinel then reports success, failure or silence into that session. Nothing was written.");
+            }
+        }
+    }
     let _lifecycle_lock=if dedupe_deploy {
         let file=open_lock(&start_lock_path())?;
         file.try_lock().map_err(|e|anyhow::anyhow!("lifecycle change in progress; no request written: {e}"))?;
@@ -2457,8 +2530,30 @@ fn request(args: &[String]) -> Result<()> {
         std::fs::create_dir_all(&dir)?;
         wa_operation::atomic_json(&dir.join("intent.json"), &Value::Object(fields.clone()))?;
     }
-    wa_operation::atomic_json(&path,&Value::Object(fields.clone()))
-        .with_context(|| format!("write {}", path.display()))?;
+    // The durable half of "a deploy you asked for reports back": written before the request file, so a crash
+    // between the two leaves a record the watchdog can settle instead of a deploy nobody can be told about.
+    // Only the legacy door: a protocol deploy opens its own return engine, and two owners would be two
+    // notices.
+    let records_outcome = verb == "deploy" && !fields.contains_key("expected_sha");
+    if records_outcome {
+        if let Err(error) = deploy_outcome::open(&stamp, &Value::Object(fields.clone())) {
+            bail!("no deploy was requested: its outcome record could not be written ({error:#})");
+        }
+        if fields.get("session").and_then(Value::as_str).unwrap_or("").is_empty() {
+            // Say it where the caller reads it, not only in `status` days later: a deploy with no session has
+            // no destination for a report, and that is the exact state the 07:09 deploy was written in.
+            say("WARNING no --session was given: this deploy will install, and no notice can reach any session - nothing can report back into an empty address");
+        }
+    }
+    if let Err(error) = wa_operation::atomic_json(&path,&Value::Object(fields.clone()))
+        .with_context(|| format!("write {}", path.display()))
+    {
+        // Nothing will run, and the record must not sit pending for a watchdog to call it silent later.
+        if records_outcome {
+            let _ = deploy_outcome::settle(&stamp, "failure", &format!("the request file could not be written: {error:#}"));
+        }
+        return Err(error);
+    }
     // The request is now durable. Record the same fact where the queue is observable, before any watcher
     // tick: "I wrote it" and "it is queued" must not be separated by an unreadable gap.
     queue::ensure_queued(&Value::Object(fields), &stamp);
@@ -2697,6 +2792,13 @@ fn watch() -> Result<()> {
     let mut down_since: Option<Instant> = None;
     let mut announced = false;
     let mut triggers = TriggerState::default();
+    // At watcher start, before anything else: a deploy the previous watcher could not report is still on disk,
+    // and this is the process that replaced it. That is the whole reason the record exists - the deploy's
+    // report must not die with the process that started it.
+    if deploy_outcome::sweep(now_epoch()) > 0 {
+        say("settled an unreported deploy left by the previous watcher (see sentinel.log: deploy-outcome)");
+    }
+    let mut swept = Instant::now();
     if !load_triggers().is_empty() {
         say(&format!("triggers: {}", triggers_path().display()));
     }
@@ -2711,6 +2813,15 @@ fn watch() -> Result<()> {
         }
         if let Err(error) = process_requests(true, &mut held) {
             audit("box-error", "requests", &error.to_string());
+        }
+        // The watchdog, on the same tick as everything else but ten times less often: it reads a handful of
+        // small files, and a deploy is not urgent to the second. A deploy whose installer died, or whose
+        // report died with the process that owed it, still reaches its session from here.
+        if swept.elapsed() >= Duration::from_secs(10) {
+            swept = Instant::now();
+            if deploy_outcome::sweep(now_epoch()) > 0 {
+                say("a deploy was reported by the watchdog - see sentinel.log: deploy-outcome");
+            }
         }
         if stop_path().exists() || service_stopping(){continue;}
         if let Ok(entries)=std::fs::read_dir(sentinel_dir().join("deploy-protocol")) {
@@ -2938,7 +3049,7 @@ fn restart_self() -> Result<()> {
     start_self_unlocked()
 }
 
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     #[cfg(windows)] {return winproc::pid_alive(pid);}
     #[cfg(not(windows))] {
     reap_children();
@@ -3632,7 +3743,7 @@ mod self_update_tests {
         .expect("stub");
         // `WA_SENTINEL_DEPLOY` is the same override an operator uses when the script lives elsewhere.
         std::env::set_var("WA_SENTINEL_DEPLOY", &script);
-        let detail = verb_deploy("thread-1", "continue", "fixture").expect("deploy accepted");
+        let detail = verb_deploy("", "thread-1", "continue", "fixture").expect("deploy accepted");
         assert!(detail.contains("detached"), "{detail}");
         assert!(detail.contains("thread-1"), "the continuation must be named: {detail}");
         // The child is detached, so it is *not* awaited - that is the property under test. Give it a

@@ -145,25 +145,12 @@ fail() {
   printf '%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
   write_result false "$*"
-  # A requested deploy is answered, including when the answer is no. This is the other half of the wake
-  # below: that one says the install landed, and without this one a deploy that failed *before* the swap
-  # told nobody - the request was already `done` (it had been spawned), the node was untouched, and the
-  # only trace was a line in deploy.log nobody had a reason to read. A hand-run deploy passes no --session
-  # and wakes nobody: a refusal at a shell is read by the person at the shell.
-  # The wording claims nothing about the install, because `fail` is reached on both sides of the swap.
-  if [ -n "${SESSION:-}" ]; then
-    FAIL_SENTINEL="${INSTALL_DIR:-}/wa-sentinel.exe"
-    [ -x "$FAIL_SENTINEL" ] || FAIL_SENTINEL="${INSTALL_DIR:-}/wa-sentinel"
-    if [ -x "$FAIL_SENTINEL" ]; then
-      if "$FAIL_SENTINEL" request wake --session "$SESSION" \
-        --prompt "Deploy failed: $*  This report does not establish what is installed. Evidence: $INSTALL_DIR/installed.txt and $INSTALL_DIR/deploy.log." \
-        --reason "deploy failed: $*" >/dev/null 2>&1; then
-        echo "deploy: failure reported to $SESSION" >&2
-      else
-        echo "deploy: WARNING could not report the failure to $SESSION" >&2
-      fi
-    fi
-  fi
+  # A requested deploy is answered, including when the answer is no - but not from here. The report belongs to
+  # the sentinel that spawned this script (`deploy_outcome`), which settles it from the `result.json` written
+  # just above, from this process's exit status, or from its own watchdog. It used to be queued here, and that
+  # is exactly the defect measured on 2026-11-10: this process is the one the swap kills, so a wake written
+  # only by its last lines is a wake that never arrives when it matters. A hand-run deploy passes no --session
+  # and has nobody to wake; a refusal at a shell is read by the person at the shell.
   exit 1
 }
 
@@ -1659,23 +1646,12 @@ wa_phase ""
 wa_status installed done "" "$(( $(wa_status_now 2>/dev/null || date +%s) - ${WA_STATUS_STARTED:-0} ))s"
 VERDICT="[deploy result] ok commit=$COMMIT node_sha=$HASH sentinel_sha=$SENTINEL_HASH watcher=${SENTINEL_WATCH_PID:-none}->${SENTINEL_NEW_PID:-none}. Evidence: $INSTALL_DIR/deploy-result.json and installed.txt; run scripts/verify-install.sh for the checks."
 
-# The continuation, and the reason this script takes --session/--prompt at all: the deploy is performed
-# detached (the sentinel cannot replace itself while it is the process running the replacement), so the
-# wake is the only completion signal the run that asked for this will ever see. Queued *here* - after the
-# new node answered /health - and performed by the **new** watcher, which is the one thing that can
-# honestly say the upgrade landed. A failure to queue it is reported and does not fail the deploy: the
-# node and the sentinel are already installed, and saying so is better than rolling back over a wake.
-if [ -n "$SESSION" ]; then
-  SENTINEL_BIN="$INSTALL_DIR/wa-sentinel.exe"
-  [ -x "$SENTINEL_BIN" ] || SENTINEL_BIN="$INSTALL_DIR/wa-sentinel"
-  if [ -x "$SENTINEL_BIN" ] && [ -n "$PROMPT" ]; then
-    "$SENTINEL_BIN" request wake --session "$SESSION" --prompt "$PROMPT
-
-$VERDICT" \
-      --reason "deploy finished: $REASON" >/dev/null 2>&1 \
-      && echo "deploy: continuation queued for $SESSION" \
-      || echo "deploy: WARNING could not queue the continuation for $SESSION; the install itself is done"
-  else
-    echo "deploy: WARNING no sentinel beside $INSTALL_DIR to queue the continuation with"
-  fi
-fi
+# The result is written; the notice is not sent from here. `write_result` above is the durable verdict - it
+# names the request id it was run for - and the sentinel that spawned this script settles the session's report
+# from it (`deploy_outcome`: the wait on this process, this file, or its watchdog). The wake used to be queued
+# here, after the swap, and that is the defect the watchdog exists for: this process is the one the swap
+# stops, the restart signals and the sentinel replacement outlives, so a report written only by its last lines
+# is a report that arrives only when nothing went wrong. Nothing to do here now, and no WARNING that implies
+# the session was told.
+echo "deploy: result recorded (request ${REQUEST_ID:-hand-run}); the sentinel reports it to ${SESSION:-nobody}"
+echo "$VERDICT"
