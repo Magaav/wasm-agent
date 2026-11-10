@@ -183,6 +183,32 @@ check(command.toggle({ role = 'guest' }, 'whatsapp_native', false).error == 'for
 check(command.toggle({ role = 'master', subagent = {} }, 'whatsapp_native', false).error
   == 'mcp_management_forbidden_for_subagent', 'a child cannot change one')
 
+-- ---------------------------------------------------------------- 5b. a peer on an older build
+-- A peer that answers with tools and no registry is grouped by its own descriptions, and nothing there can
+-- be toggled: the group says so rather than offering a control the peer cannot honour.
+meta_set('federation.catalog.v2', json.encode({ at = host.now(), peers = {
+  ['peer-legacy'] = { name = 'legacy', node_id = 'peer-legacy', at = host.now(),
+    tools = {
+      { name = 'mcp_mail_read_messages_cafebabe', effect = 'read',
+        description = 'MCP mail / read_messages: Read one mailbox' },
+      { name = 'mcp_mail_send_message_deadbeef', effect = 'write',
+        description = 'MCP mail / send_message: Send one message' },
+      { name = 'whatsapp_read', effect = 'read', description = '[native] Read one chat newest-first' },
+      { name = 'whatsapp_operator', effect = 'write', description = 'Operator-directed WhatsApp text' },
+    } },
+} }))
+local legacy = command.list(ctx)
+local mail = command.find(legacy, 'legacy:mail')
+check(mail ~= nil, "an older peer's tools are grouped into the connector its own descriptions name")
+check(mail.tool_count == 2 and mail.state == 'enabled', 'with the tool count it exports')
+check(mail.tools[1].name == federation.local_name('legacy', 'mcp_mail_read_messages_cafebabe'),
+  'and the exact peer name per tool')
+check(command.find(legacy, 'legacy:native') ~= nil, 'its native path is its own connector too')
+check(command.find(legacy, 'legacy:*') ~= nil, 'and a tool matching neither keeps an other-tools group')
+check(command.toggle(ctx, 'legacy:mail', false, { call = peer_transport }).error == 'connector_registry_not_reported',
+  'a group inferred from an older peer cannot be toggled')
+seed_peer_cache() -- back to the peer that does report its registry, for the sections below
+
 -- ---------------------------------------------------------------- 6. a running session is told
 -- A session freezes its prefix (system prompt + tool list) on its first turn, so a catalogue change is
 -- delivered as the existing `[session update]` note rather than by editing the prefix. This proves a

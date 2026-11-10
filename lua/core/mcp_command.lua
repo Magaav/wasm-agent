@@ -152,25 +152,51 @@ function M.peer_connectors(opts)
         list[#list + 1] = peer_connector(peer, connector, exported)
       end
     elseif #(peer.tools or {}) > 0 then
-      local tools = {}
+      -- An older peer reports its exported tools and not its registry. Group them by the peer's OWN words -
+      -- `mcp.schemas` composes `MCP <id> / <tool>: ...`, and `[native] ...` is its native path - so the
+      -- operator still sees that peer's connectors as connectors, with the exact names. Nothing here is a
+      -- guess: a tool matching neither pattern keeps its own "other exported tools" group, and every group
+      -- says the registry was not reported, so `toggle` refuses instead of pretending it could.
+      local groups, order = {}, {}
+      local function bucket(id, label, transport)
+        if not groups[id] then
+          groups[id] = { name = label, transport = transport, tools = {} }
+          order[#order + 1] = id
+        end
+        return groups[id]
+      end
       for _, tool in ipairs(peer.tools) do
-        tools[#tools + 1] = { name = federation().local_name(peer.name, tool.name), tool = tool.name,
-          description = tool.description, parameters = tool.parameters, approval = tool.effect or 'unknown',
+        local description = tostring(tool.description or '')
+        local id = description:match('^MCP ([%w_%-]+) / ')
+        local label, transport
+        if id then
+          label, transport = id, 'unknown'
+        elseif description:sub(1, 8) == '[native]' then
+          id, label, transport = 'native', tostring(peer.name) .. ' native', 'native'
+        else
+          id, label, transport = '*', tostring(peer.name) .. ' (other exported tools)', 'unknown'
+        end
+        local group = bucket(id, label, transport)
+        group.tools[#group.tools + 1] = { name = federation().local_name(peer.name, tool.name), tool = tool.name,
+          description = description, parameters = tool.parameters, approval = tool.effect or 'unknown',
           published = true }
       end
-      table.sort(tools, function(a, b) return a.name < b.name end)
-      list[#list + 1] = {
-        key = tostring(peer.name) .. ':*', id = '*', peer = peer.name, node_id = peer.node_id,
-        where = tostring(peer.name), scope = 'peer', name = tostring(peer.name) .. ' (exported tools)',
-        transport = 'unknown', state = 'enabled', enabled = true,
-        tool_count = #tools, approved = #tools, discovered = #tools, tools = tools,
-        policy = { tier = 'mcp', managed_by = tostring(peer.name),
-          approval = 'the peer decided each tool\'s effect; this node cannot read its registry',
-          note = 'The peer did not report its connector registry (older build), so its exported tools are '
-            .. 'listed as one group and cannot be turned on or off from here.' },
-        note = 'connector_registry_not_reported',
-      }
-    elseif peer.error then
+      for _, id in ipairs(order) do
+        local group = groups[id]
+        table.sort(group.tools, function(a, b) return a.name < b.name end)
+        list[#list + 1] = {
+          key = tostring(peer.name) .. ':' .. id, id = id, peer = peer.name, node_id = peer.node_id,
+          where = tostring(peer.name), scope = 'peer', name = group.name, transport = group.transport,
+          state = 'enabled', enabled = true, tool_count = #group.tools, approved = #group.tools,
+          discovered = #group.tools, tools = group.tools,
+          policy = { tier = 'mcp', managed_by = tostring(peer.name),
+            approval = 'the peer decided each tool\'s effect; this node cannot read its registry',
+            note = 'The peer did not report its connector registry (older build): its exported tools are grouped '
+              .. 'by its own descriptions, and cannot be turned on or off from here.' },
+          note = 'connector_registry_not_reported',
+        }
+      end
+    elseif #(peer.tools or {}) == 0 and peer.error then
       list[#list + 1] = {
         key = tostring(peer.name) .. ':*', id = '*', peer = peer.name, node_id = peer.node_id,
         where = tostring(peer.name), scope = 'peer', name = tostring(peer.name) .. ' (no answer)',
