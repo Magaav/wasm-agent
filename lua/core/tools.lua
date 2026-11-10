@@ -647,6 +647,15 @@ M.admin[#M.admin+1]=schema('capture_inspect','Inspect retained JSON model-reques
 
 M.admin[#M.admin+1]=schema('web_search','Search the public web; results keep their evidence behind a cache ref. Use it and web_read instead of curl for public pages; use curl in bash for authenticated APIs, POST or private hosts.',{query={type='string',maxLength=512},limit={type='integer',minimum=1,maximum=10},refresh={type='boolean'}},{'query'})
 M.admin[#M.admin+1]=schema('web_read','Read a public HTTPS page (static text/HTML/JSON/XML) or a cache ref, paged by bytes. A challenge returns a human handoff: do not retry it with curl. pending_ref reads one async result.',{url={type='string'},ref={type='string'},pending_ref={type='string'},offset={type='integer',minimum=0},limit={type='integer',minimum=4,maximum=16384},refresh={type='boolean'}})
+M.admin[#M.admin+1]=schema('node_update','Ask another node of the fabric to update ITSELF from distance - the node runtime, or the rendezvous where that node runs one. The peer performs it with its own Sentinel under its own rules (prebuilt binary when the commit is covered, disk floor, deploy lock, one outcome record); this tool only asks and reads back, it installs nothing itself and cannot run on a guest. "Queued" is not installed: `action="status"` reads the peer\'s own records (installed.txt, the installer\'s deploy-result.json and the sentinel\'s done/failed and deploy-outcome files) and answers once per request; a request made from a turn also schedules one wake so the outcome comes back to this session. Restating the target commit: with no `commit` the node installs origin/main; with `commit` it installs that landed commit and refuses one that is not on main, or that would need a reset.',{
+  node={type='string',description='Peer name or node id.'},
+  action={type='string',enum={'request','status','check'},description='request (default) asks for an install; status reads one back; check is read-only.'},
+  commit={type='string',description='Full or short commit id that must be on origin/main; omitted means origin/main.'},
+  rendezvous={type='boolean',description='Also update the rendezvous registry this node runs (scripts/deploy-rendezvous.sh, through that node\'s Sentinel).'},
+  reason={type='string',maxLength=400,description='Why; recorded in the peer\'s audit record and its Sentinel log.'},
+  id={type='string',description='status: the record id a request answered with.'},
+  follow_up_seconds={type='integer',minimum=30,maximum=3600,description='Seconds before the session is woken to read the outcome (default 180).'},
+},{'node'})
 
 function M.batch_base(name)return BATCH[name] and BATCH[name].base end
 function M.batch_enabled()return batches_enabled end
@@ -677,6 +686,7 @@ M.tier_of = {
   spell_get = "spells", spell_forget = "spells", spell_export = "spells", spell_compose = "spells",
   lessons = "memory", fleetview = "nodes",
   nodes = "nodes", remote = "nodes",
+  node_update = "nodes",
 }
 
 local TIER_ORDER = {
@@ -788,6 +798,7 @@ local CUES = {
   email_read = "Read one mailbox newest first, or one message by uid, with its attachments listed",
   email_media = "The attachment metadata of one email, with the handle a download names",
   capture_inspect = "Inspect retained model-request captures as bounded metadata before reading raw dumps",
+  node_update = "Ask another node to update itself, and read its outcome",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
   spell_compose = "Combine a verified spell sequence with its checks intact",
@@ -1526,6 +1537,34 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
     if not ok then return {error=tostring(raw)} end
     return json.decode(raw)
+  end
+  if name == "node_update" then
+    -- Distance update (lua/core/remote_update.lua, docs/REMOTE-UPDATE.md). Master only, and the peer
+    -- re-checks the same authority on its own side; this branch adds the local half only - the record
+    -- of what was asked, and the one follow-up wake that brings the outcome back to THIS session.
+    if not is_master(role) then return {error="forbidden_for_role:"..role} end
+    local remote = dofile("lua/core/remote_update.lua")
+    local action = tostring(args.action or "request")
+    local selector = tostring(args.node or "")
+    if selector == "" then return {error="node_required", effect="none", allowed_actions=remote.ACTIONS} end
+    if action == "check" then return remote.inspect(nodeslib.remote_call, selector, args) end
+    if action == "status" then
+      return remote.status(nodeslib.remote_call, selector, { id = args.id, session = ctx.session_id })
+    end
+    if action ~= "request" then return {error="unknown_update_action", action=action, allowed_actions=remote.ACTIONS} end
+    local reply = remote.request(nodeslib.remote_call, selector, {
+      commit = args.commit, rendezvous = args.rendezvous == true,
+      reason = args.reason, session = ctx.session_id,
+    })
+    if reply.ok == true and reply.record and ctx.session_id then
+      local scheduled = remote.schedule_followup({ user_id = user_id, session_id = ctx.session_id }, selector, reply,
+        args.follow_up_seconds)
+      reply.follow_up = scheduled and scheduled.wake or nil
+      if not scheduled then
+        reply.follow_up_error = "no wake was scheduled; read the outcome with action=\"status\" and id=" .. tostring(reply.record)
+      end
+    end
+    return reply
   end
   if name == "time" then
     return platform.local_clock()

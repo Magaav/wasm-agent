@@ -43,6 +43,14 @@
 #   bash scripts/publish-node-binaries.sh --ensure            # exit 0 when a published release already covers
 #                                                              # this commit's compiled inputs; build only otherwise
 #   bash scripts/publish-node-binaries.sh --publish            # create/update the GitHub release itself
+#   bash scripts/publish-node-binaries.sh --target-dir DIR     # the one cargo target directory (default rust/target)
+#
+# The toolchain is the script's own, never the caller's: it finds `zig` (PATH, then the pip `ziglang`
+# package, then ~/.local/bin, /usr/local/bin, /opt/homebrew/bin, build/zig - `WA_ZIG` names one), puts
+# its directory on PATH for the build, and exports ONE `CARGO_TARGET_DIR` so `wa-host`'s workspace and
+# `wa-sentinel`'s own workspace land in the same tree. Measured 2026-11-10: a publisher that needed a
+# human to recreate that environment worked only for the human, and `wa-sentinel`'s binary landed in
+# rust/wa-sentinel/target where this script did not look.
 #
 # THE NORMAL PATH (docs/COMPONENTS.md, "How a landed commit gets its binary"): a landing ends with
 # `--ensure --publish --target aarch64-unknown-linux-gnu`, so a commit that changed no compiled input
@@ -64,6 +72,7 @@ GLIBC_FLOOR="2.31"
 TARGETS=""
 ALLOW_EMPTY=0
 RUNNER="${WA_PUBLISH_RUNNER:-}"
+TARGET_DIR_FLAG=""
 say() { printf 'publish-node-binaries: %s\n' "$*"; }
 fail() { printf 'publish-node-binaries: %s\n' "$*" >&2; exit "${2:-2}"; }
 while [ "$#" -gt 0 ]; do
@@ -75,6 +84,7 @@ while [ "$#" -gt 0 ]; do
     --target) [ "$#" -ge 2 ] || fail 'target_value_required'; TARGETS="$TARGETS $2"; shift 2 ;;
     --glibc) [ "$#" -ge 2 ] || fail 'glibc_value_required'; GLIBC_FLOOR="$2"; shift 2 ;;
     --runner) [ "$#" -ge 2 ] || fail 'runner_value_required'; RUNNER="$2"; shift 2 ;;
+    --target-dir) [ "$#" -ge 2 ] || fail 'target_dir_value_required'; TARGET_DIR_FLAG="$2"; shift 2 ;;
     --check) CHECK=1; shift ;;
     --local) LOCAL=1; shift ;;
     --ensure) ENSURE=1; shift ;;
@@ -91,6 +101,51 @@ done
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail "not_a_checkout: $ROOT"
 . "$ROOT/scripts/lib/node-binaries.sh"
 . "$ROOT/scripts/lib/build-requirements.sh"
+
+# ---- the toolchain this script owns, not the caller's shell --------------------------------------
+#
+# Measured 2026-11-10 (the aarch64 publisher that had to be recreated by hand): `zig` was installed
+# but not on PATH - it ships inside the pip package `ziglang` - and `CARGO_TARGET_DIR` was whatever
+# the caller's shell happened to export. Two consequences, both silent: the publisher only worked
+# after a human rebuilt the hidden environment, and `wa-sentinel` (its own workspace,
+# rust/wa-sentinel/Cargo.toml) wrote its binary under rust/wa-sentinel/target while this script read
+# rust/target, so a landing that published would have failed at "binary_missing". Both are this
+# script's business: it finds zig, and it names ONE target directory for both crates. A caller needs
+# no environment at all; `--target-dir` and `WA_ZIG` are the supported overrides.
+find_zig() {
+  local candidate
+  if candidate="$(command -v zig 2>/dev/null)" && [ -n "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+  local python_zig
+  python_zig="$(python3 -c 'import ziglang,os;print(os.path.join(os.path.dirname(ziglang.__file__),"zig.exe" if os.name=="nt" else "zig").replace(chr(92),"/"))' 2>/dev/null)" \
+    || python_zig="$(python -c 'import ziglang,os;print(os.path.join(os.path.dirname(ziglang.__file__),"zig.exe" if os.name=="nt" else "zig").replace(chr(92),"/"))' 2>/dev/null)" \
+    || python_zig=""
+  for candidate in \
+    "${WA_ZIG:-}" \
+    "$HOME/.local/bin/zig" \
+    "$HOME/.local/bin/zig.exe" \
+    "$HOME/.cargo/bin/zig" \
+    "/usr/local/bin/zig" \
+    "/opt/homebrew/bin/zig" \
+    "$ROOT/build/zig/zig" \
+    "$python_zig" ; do
+    if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  return 1
+}
+ZIG_BIN="$(find_zig || true)"
+if [ -n "$ZIG_BIN" ]; then
+  ZIG_DIR="$(dirname "$ZIG_BIN")"
+  case ":$PATH:" in
+    *":$ZIG_DIR:"*) ;;
+    *) PATH="$ZIG_DIR:$PATH"; export PATH
+       say "zig: $ZIG_BIN (found outside PATH; its directory is on PATH for this build)" ;;
+  esac
+fi
+# One target directory for both crates: `wa-host` (workspace rust/Cargo.toml) and `wa-sentinel`
+# (its own workspace) otherwise resolve different `target/` roots, and the second one is invisible to
+# the lookup below. Named here, exported, and used by the build loop - never read from the caller.
+TARGET_DIR="${TARGET_DIR_FLAG:-$ROOT/rust/target}"
+export CARGO_TARGET_DIR="$TARGET_DIR"
 
 [ -n "$TARGETS" ] || TARGETS=" aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
 TARGETS="${TARGETS# }"
@@ -191,6 +246,8 @@ asset_list() {
 if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
   say "would build $COMMIT for: $MANIFEST_TRIPLES"
   say "with: cargo zigbuild --release --offline --locked -p wa-host --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
+  say "zig: ${ZIG_BIN:-none found (a build would refuse with zig_missing; pass WA_ZIG or install pip ziglang)}"
+  say "cargo target dir: $TARGET_DIR (one directory for wa-host and wa-sentinel; --target-dir overrides)"
   say "code-mode assets: $CODEMODE${ASSETS:+ ($ASSETS)}${ASSETS_WHY:+ - $ASSETS_WHY}"
   say "compiled inputs: $(wa_compiled_inputs_digest "$ROOT" "$COMMIT" 2>&1) (a later commit with this digest installs this release)"
   say "release tag: $TAG   (repo $REPO_SLUG)${LOCAL:+ [--local: not publishable]}"
@@ -292,7 +349,7 @@ else
   # ---- build ---------------------------------------------------------------------------------------
   command -v cargo >/dev/null 2>&1 || fail 'cargo_missing: the build half needs cargo'
   command -v cargo-zigbuild >/dev/null 2>&1 || fail 'cargo_zigbuild_missing: cargo install cargo-zigbuild (and put zig on PATH: pip install ziglang)'
-  command -v zig >/dev/null 2>&1 || fail 'zig_missing: pip install ziglang (or unpack a zig tarball) and put it on PATH'
+  [ -n "$ZIG_BIN" ] || fail 'zig_missing: no zig was found on PATH, in the pip package `ziglang`, in ~/.local/bin or in build/zig; install it (pip install ziglang) or name it with WA_ZIG=/path/to/zig'
   # Windows spawns a `zig cc` process per C file, and 16 at once runs the desktop heap out: measured on
   # wasm_the_first, `cargo zigbuild` at the default 16 jobs failed with `Not enough quota is available to
   # process this command. (os error 1816)` inside cc-rs, on zstd/lua, not on anything this tree wrote.
@@ -319,7 +376,7 @@ else
     ( cd "$ROOT/rust" && cargo zigbuild --release --offline --locked --manifest-path wa-sentinel/Cargo.toml --target "$zig_target" ) > "$OUT/build-sentinel-$triple.log" 2>&1 \
       || { tail -20 "$OUT/build-sentinel-$triple.log" >&2; fail "build_failed: wa-sentinel for $zig_target (log $OUT/build-sentinel-$triple.log)" 8; }
     say "built $triple in $(( $(date +%s) - started ))s"
-    target_dir="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
+    target_dir="$TARGET_DIR"
     wa_bin="$target_dir/$zig_target/release/wa"
     sentinel_bin="$target_dir/$zig_target/release/wa-sentinel"
     # cargo names the directory after the triple WITHOUT the glibc suffix.

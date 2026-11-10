@@ -297,3 +297,36 @@ expect_status 2 "$?" "--publish with --local"
 contains "$out" "publish_local_refused:" "a test artifact is never published"
 
 echo "node binaries (publish) ok ($checks checks)"
+
+# ---- the toolchain is the script's own, not the caller's --------------------------------------------
+# Measured 2026-11-10 (the aarch64 publisher): `zig` lives in the pip package `ziglang` and was not on
+# PATH, and `CARGO_TARGET_DIR` was whatever the caller's shell exported - so `wa-sentinel`, whose Cargo
+# workspace is its own, wrote its binary under rust/wa-sentinel/target while the publisher looked under
+# rust/target. Both are the script's business: a landing must be able to run it with no environment.
+# A PATH with git and the shell utilities but WITHOUT the directory zig was found in (when there is
+# one): that is the caller environment the bug was measured in.
+GIT_DIR_ON_PATH="$(dirname "$(command -v git)")"
+ZIG_DIR_ON_PATH="$(dirname "$(command -v zig 2>/dev/null || echo /nonexistent/zig)")"
+BARE_PATH=""
+for part in /usr/bin /bin "$GIT_DIR_ON_PATH" "$ZIG_DIR_ON_PATH"; do
+  [ "$part" = "$ZIG_DIR_ON_PATH" ] && continue
+  case ":$BARE_PATH:" in *":$part:"*) continue ;; esac
+  BARE_PATH="${BARE_PATH:+$BARE_PATH:}$part"
+done
+out="$(env -u CARGO_TARGET_DIR -u WA_ZIG PATH="$BARE_PATH" bash "$PUBLISH" --repo "$fixture"   --out "$WORK/never" --check --local --allow-empty-codemode 2>&1)"
+expect_status 0 "$?" "--check with zig off PATH and no CARGO_TARGET_DIR"
+contains "$out" "zig: " "the plan names the zig it would use (or says none was found)"
+contains "$out" "cargo target dir: $fixture/rust/target" "the plan names the one target directory"
+contains "$out" "--target-dir overrides" "and the supported override"
+# The two crates are built from two workspaces; one exported target directory is what makes the second
+# one visible to the lookup that copies the artifacts out.
+grep -q 'export CARGO_TARGET_DIR="$TARGET_DIR"' "$PUBLISH" \
+  || fail "the publisher does not export one CARGO_TARGET_DIR for both workspaces"
+ok
+# The discovery covers the pip package on every host that has one, and an operator can always name the
+# binary explicitly.
+contains "$(cat "$PUBLISH")" 'import ziglang,os' "the publisher looks inside the pip ziglang package"
+contains "$(cat "$PUBLISH")" 'WA_ZIG' "and an operator can name zig explicitly"
+out="$(WA_ZIG=/nonexistent/zig bash "$PUBLISH" --repo "$fixture" --out "$WORK/never" \
+  --check --local --allow-empty-codemode 2>&1)"
+expect_status 0 "$?" "a bad WA_ZIG does not break the plan (the build refuses, not the plan)"

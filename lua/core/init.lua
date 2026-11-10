@@ -81,7 +81,13 @@ end
 -- `wa update` / `wa --update`: the same request `/update` makes in the chat and the window, from a
 -- shell - so one command updates any node: a tree install queues the Sentinel deploy, a release install
 -- runs the verifying bootstrap. `--check` is read-only: is this node behind what an update would install?
+--
+-- `wa update <node> [...]` is the fabric form (lua/core/remote_update.lua, docs/REMOTE-UPDATE.md): a
+-- master asks another node to update ITSELF, under that node's own Sentinel and rules. It is checked
+-- first and falls through to this node's own update when the second word is not a node name.
 if command == "update" or command == "--update" then
+  local remote = dofile("lua/core/remote_update.lua").cli(args)
+  if remote ~= nil then os.exit(remote) end
   local check = false
   for i = 2, #args do if args[i] == "--check" then check = true end end
   local updater = dofile("lua/core/update.lua")

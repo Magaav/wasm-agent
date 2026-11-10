@@ -115,6 +115,7 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `mcp`: List and manage MCP connectors; new or edited ones stay disabled until enabled
 - `services`: List and manage long-lived WASI service components: start, stop, logs
 - `capture_inspect`: Inspect retained model-request captures as bounded metadata before reading raw dumps
+- `node_update`: Ask another node to update itself, and read its outcome
 <!-- /generated -->
 
 ## Tool catalogue
@@ -203,6 +204,7 @@ runs on the client too, while `bash` runs on this node.
 | `capture_inspect` | `path` `item_index?` `limit?` `offset?` `request_index?` `snapshot?` `view?` | Inspect retained model-request captures as bounded metadata before reading raw dumps |
 | `web_search` | `query` `limit?` `refresh?` | Search public web sources with retained evidence |
 | `web_read` | `limit?` `offset?` `pending_ref?` `ref?` `refresh?` `url?` | Read a public source or page an immutable cache ref |
+| `node_update` | `node` `action?` `commit?` `follow_up_seconds?` `id?` `reason?` `rendezvous?` | Ask another node to update itself, and read its outcome |
 
 A guest's catalogue is `time`, `remember`, `recall`, `memories`, `wake`, `wake_list`, `wake_cancel`, `notes_read`, `notes_write`, `notes_append`, `notes_compact`, `skill`, `capabilities`, `lessons`, `fleetview`, `tool_search`, `tool_call`, `subagent`, `sessions`, `session`, `search_messages`, `resume_session`.
 <!-- /generated -->
