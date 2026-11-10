@@ -1052,6 +1052,11 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
     if not enrollment.target(request) then return answer({ error = "wrong_target" }) end
     local allowed = { status=true, set_role=true, read=true, write=true, edit=true,
       ls=true, grep=true, bash=true, shell=true, client=true,
+      -- The message index (2026-11-10). The account lives on the one node that runs wa-whatsapp,
+      -- and a master must be able to ask it from anywhere - that is what "reach the WhatsApp
+      -- connector from any master" means. Read-only questions only: the send path and the phone
+      -- backfill stay behind the owning node's own tools.
+      whatsapp_search=true, whatsapp_read=true, whatsapp_reactions=true, whatsapp_media=true,
       -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
       -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
       stt=true }
