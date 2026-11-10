@@ -986,7 +986,6 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
    on the row. The notice keeps the yellow, and it always wins: app.js decides the precedence. */
 .session-status-content.session-status-tool { color: var(--accent); }
 .session-status-content.session-status-stall { color: var(--muted); }
-body.ui-resting .session-status-content { display: none; }
 
 /* One declarative per-message action row; current hosts use the shared Send/Stop only. */
 .chat-actions { display: flex; flex:none; align-items: center; gap: var(--gap); }

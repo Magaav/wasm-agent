@@ -292,17 +292,20 @@ a matching-but-tampered release refused, and a docs-only HEAD installed end to e
 read out of `deploy.sh`. So a change there cannot pass by never running.
 
 
-**Does this node run a newer release?** `lua/core/update_banner.lua` answers with the same release
-identity the deploy installs: `installed.txt`'s `commit=` (and `binary_release=` for a prebuilt
-install) against the newest `node-<sha12>` release, then shows
-`Update available (<sha12>): run wa update or /update` in the CLI footer, once at session start, and
-as one yellow line above the composer footer plus a topbar badge in the window (one line, in the
-layout - not a toast over the text area). It is not the deploy and it changes nothing:
-no fetch, no merge, one cached feed read per fifteen minutes in `<state>/update-check.json`, and the
-verdict is recomputed from the current install record so the indicator disappears after the swap
-without waiting for a request. `git` is consulted only for local ancestry (`merge-base
---is-ancestor`), which is what tells a tree ahead of the feed (no banner) from one behind a published
-release (banner). Details and knobs: `docs/RELEASE-UPDATE.md`.
+**Does this node run a newer release?** `lua/core/update_banner.lua` answers what an update would
+actually install, in the two channels the updater has. A **tree** install compares `installed.txt`'s
+`commit=` with the tree's local `origin/main` (a build), and never reads a release feed. A
+**no-tree release** install picks the newest `node-<sha12>` release that carries this machine's
+manifest, node and sentinel assets, so an aarch64-only release is never offered to x86_64. It then
+shows `Update available (<sha12>): run wa update or /update` in the CLI footer, once at session
+start, and as one yellow line above the composer footer plus a topbar badge in the window (one line,
+in the layout - not a toast over the text area, and never hidden by `ui-resting`). It is not the
+deploy and it changes nothing: no fetch, no merge, one cached feed read per fifteen minutes on the
+release channel in `<state>/update-check.json` (the tree channel is local git only), and the verdict
+is recomputed from the current install record so the indicator disappears after the swap without
+waiting for a request. `git` is consulted only for local ancestry (`merge-base --is-ancestor`),
+which is what tells a tree ahead of `origin/main` (no banner) from one behind it (banner). Details
+and knobs: `docs/RELEASE-UPDATE.md`.
 ## Reproducible builds: the checkout path is not an input
 
 Same source, same toolchain, same bytes - wherever the tree is checked out. What embedded absolute

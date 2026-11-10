@@ -5539,6 +5539,19 @@ chatShell.addEventListener("chat-send", (event) => {
   }
   if (!text && attachments.length === 0) return;
   commandMenu.close();
+  // A command typed in full is the command even when the list is closed. Enter submits the form,
+  // and without this an exact `/update` was sent to the model as a message: the reader saw no
+  // request in the sentinel's box and had no way to know why (operator, `work`, 10/11). The menu is
+  // a convenience; the exact name is the contract. Attachments keep the message path.
+  const command = attachments.length === 0 ? exactCommand(text) : null;
+  if (command) {
+    pushDraft();
+    input.value = "";
+    draftNow = snapshotDraft();
+    autosize();
+    command.run();
+    return;
+  }
   // send() retains the draft through preflight and clears only the confirmed
   // submission, never newer typing/files or a request refused behind a background turn.
   send(text);
@@ -6268,6 +6281,14 @@ function commandMatches(value) {
   let typed = value.slice(1).trim().toLowerCase();
   if(typed.startsWith('ochestration'))typed='orchestration'+typed.slice('ochestration'.length);
   return COMMANDS.filter((command) => command.name.slice(1).startsWith(typed));
+}
+
+// The exact spelling of a command, independent of the menu's open/closed state. `/merge all` is one
+// command name, so the whole trimmed line has to match; `/update please` is a message, not a command.
+function exactCommand(value) {
+  const text = String(value || "").trim();
+  if (!text.startsWith("/")) return null;
+  return COMMANDS.find((command) => command.name === text) || null;
 }
 
 function syncCommands() {

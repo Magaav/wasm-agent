@@ -216,6 +216,47 @@ check(noticeRow() === sameRow, "a second draw reuses the row rather than adding 
 check(composer.children.filter((c) => c.className === "session-status-content").length === 1,
   "and there is exactly one notice line in the composer");
 
+// ---- stability: the answer may change, the surface must not blink --------
+// The operator saw it appear and disappear. The old floating toast was hidden by
+// `body.ui-resting` whenever the pointer rested, so the same fact came and went with the idle
+// state. The standing line is never tied to UI activity, and repeated refreshes with the same
+// answer reuse one row instead of stacking or clearing one.
+check(!/body\.ui-resting[^}]*\.update-toast/.test(css), "no ui-resting rule hides an update toast (it is gone)");
+check(!/body\.ui-resting[^}]*\.session-status-content/.test(css), "and none hides the standing line");
+check(!/\.session-status-content \{[^}]*display:\s*none/.test(css), "the line is never display:none");
+const stableRow = noticeRow();
+for (let i = 0; i < 5; i++) {
+  body.className = i % 2 ? "ui-resting" : "";
+  const again = sandbox.applyUpdateBanner(behind);
+  check(again === drawn, "refresh " + i + " keeps the same sentence");
+  check(noticeRow() === stableRow, "refresh " + i + " reuses the one row");
+  check(composer.children.filter((c) => c.className === "session-status-content").length === 1,
+    "refresh " + i + " leaves exactly one line");
+  check(documentStub.querySelector("[data-update-badge]") === badge(), "refresh " + i + " leaves one badge");
+}
+body.className = "";
+
+// ---- a typed command runs without the menu -------------------------------
+// `/update` typed in full and submitted used to be sent to the model when the slash menu was not
+// open and highlighted; the sentinel never saw a request, so the operator saw no install and no
+// reason (confirmed in node `work`'s session: 0 waiting, nothing after 14:33). The exact name is the
+// contract, whether or not the menu is up.
+check(/function exactCommand\(value\)/.test(source), "app.js defines exactCommand");
+const exactSandbox = new Function("COMMANDS", extract("exactCommand") + "\nreturn exactCommand;")([
+  { name: "/update", run: () => {} },
+  { name: "/new", run: () => {} },
+  { name: "/merge all", run: () => {} },
+]);
+check(exactSandbox("/update") && exactSandbox("/update").name === "/update", "a typed /update is the command");
+check(exactSandbox("  /update  ").name === "/update", "surrounding whitespace does not hide it");
+check(exactSandbox("/merge all").name === "/merge all", "a two-word command matches as one name");
+check(exactSandbox("/update please") === null, "a sentence that starts with a command is still a message");
+check(exactSandbox("update") === null, "and a name without the slash is not a command");
+const sendAt = source.indexOf('chatShell.addEventListener("chat-send"');
+const sendPath = source.slice(sendAt, sendAt + 1600);
+check(/exactCommand\(text\)/.test(sendPath) && sendPath.indexOf("exactCommand(text)") < sendPath.indexOf("send(text)"),
+  "the send path runs the exact command before it sends the text");
+
 // The badge acts: the same request `/update` makes.
 sandbox.applyUpdateBanner(behind);
 badge().fire("click");

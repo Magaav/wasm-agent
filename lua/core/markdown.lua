@@ -98,17 +98,63 @@ end
 -- The inline forms, in the order they win. `**` before `*` matters: `**bold**` is a bold
 -- word and not two italic ones, and a scanner that tried `*` first would render it as one.
 -- Lua patterns have no backreferences, so each pair is written out rather than derived.
+--
+-- Underscore emphasis is not a pattern: CommonMark forbids it inside a word, and that is
+-- exactly where a tool name lives (`peer_openclaw__mcp_whatsapp_native_read_newest_...`).
+-- `find_underscore` below applies the flanking rule the patterns cannot express.
 local INLINE = {
   { pattern = "`([^`]+)`", style = "mdCode" },
   { pattern = "%*%*(.-)%*%*", style = { "bold", "text" } },
-  { pattern = "__(.-)__", style = { "bold", "text" } },
+  { underscore = 2, style = { "bold", "text" } },
   { pattern = "~~(.-)~~", style = "dim" },
   { pattern = "%*([^%*]-)%*", style = "italic" },
-  { pattern = "_([^_]-)_", style = "italic" },
+  { underscore = 1, style = "italic" },
   { pattern = "%[([^%]]*)%]%(([^%)]*)%)", link = true },
   { pattern = "<(https?://[^>]+)>", style = "mdLinkUrl" },
   { pattern = "https?://[%w%._%-/~%?%%&=:#%+@]+", style = "mdLinkUrl" },
 }
+
+-- One `_` is a word character here, never a delimiter: a run is a delimiter only when at least
+-- one side of it is outside a word. Bytes >= 0x80 are letters (or emoji) and count as word bytes;
+-- treating them as punctuation would italicise the middle of a non-ASCII identifier. This is the
+-- CommonMark rule restricted to the case this renderer must get right; `*` emphasis keeps its own
+-- (intra-word) behaviour because the grammar allows it there.
+local function word_byte(byte)
+  return byte ~= nil and (byte >= 128 or (byte >= 48 and byte <= 57)
+    or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122))
+end
+local function space_byte(byte)
+  return byte == nil or byte == 32 or byte == 9 or byte == 10 or byte == 13
+end
+local function boundary(rest, start, stop)
+  return not (word_byte(rest:byte(start - 1)) and word_byte(rest:byte(stop + 1)))
+end
+
+-- The first valid `_` (want = 1) or `__` (want = 2) pair in `rest`, or nil. A run opens when it
+-- is not followed by whitespace and sits on a word boundary; it closes when it is not preceded by
+-- whitespace and sits on a word boundary. Runs of the other length are skipped, so `__bold__` is
+-- one bold span rather than two italic markers, and a single `_` inside `__x__` is not a closer.
+local function find_underscore(rest, want)
+  local position = 1
+  while true do
+    local start, stop = rest:find("_+", position)
+    if not start then return nil end
+    if (stop - start + 1) == want and not space_byte(rest:byte(stop + 1)) and boundary(rest, start, stop) then
+      local inner = stop + 1
+      local search = inner
+      while true do
+        local close_start, close_stop = rest:find("_+", search)
+        if not close_start then break end
+        if (close_stop - close_start + 1) == want and not space_byte(rest:byte(close_start - 1))
+          and boundary(rest, close_start, close_stop) and close_start > inner then
+          return start, close_stop, rest:sub(inner, close_start - 1)
+        end
+        search = close_stop + 1
+      end
+    end
+    position = stop + 1
+  end
+end
 
 -- Text, then the styled pieces of it. Styles are role names from pi's theme, or a list of
 -- them (`{ "bold", "text" }`); `cli_view.paint` applies each in turn.
@@ -117,7 +163,12 @@ local function inline(text, base)
   while rest ~= "" do
     local at, found = nil, nil
     for _, form in ipairs(INLINE) do
-      local start, stop, first, second = rest:find(form.pattern)
+      local start, stop, first, second
+      if form.underscore then
+        start, stop, first = find_underscore(rest, form.underscore)
+      else
+        start, stop, first, second = rest:find(form.pattern)
+      end
       if start and (at == nil or start < at) then
         at, found = start, { start = start, stop = stop, first = first, second = second, form = form }
       end

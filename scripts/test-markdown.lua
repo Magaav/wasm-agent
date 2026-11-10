@@ -123,6 +123,31 @@ local _, spaced = render("a **b** c")
 ok(has(spaced.text(), "a b c"), "the spaces around an inline token are not lost")
 ok(not has(spaced.text(), "abc"), "and two words are never glued into one")
 
+-- CommonMark: an underscore inside a word is never emphasis. The old `_([^_]-)_` pattern ate
+-- every pair in a tool name and printed `peeropenclawmcp...`; these are the exact identifiers
+-- from the operator's screenshot (`work`, 10/11), plus the namespaces and column names beside
+-- them. Nothing here may lose a byte, and no piece of them may be styled as emphasis.
+local IDENT = "peer_openclaw__mcp_whatsapp_native_read_newest_662289dd"
+local _, ident = render("call " .. IDENT .. " with conversation_id and scan_days")
+ok(has(ident.text(), IDENT), "a tool identifier with double underscores renders verbatim")
+ok(has(ident.text(), "conversation_id"), "and a single intra-word underscore survives")
+ok(has(ident.text(), "scan_days"), "so does every other identifier in the line")
+ok(not has(ident.text(), "peeropenclawmcp"), "the old stripped rendering is gone")
+ok(ident.role_of("peer_openclaw__mcp") == "-", "an intra-word underscore is not emphasis")
+ok(ident.role_of("conversation_id") == "-", "nor is the one in a column name")
+
+-- The Thinking block passes the same renderer a base style; the rule is the renderer's, so it
+-- holds there too rather than in a second copy of the parser.
+local _, thinking = render("the tool " .. IDENT, { style = "thinkingText" })
+ok(has(thinking.text(), IDENT), "the Thinking view renders the identifier verbatim")
+ok(thinking.role_of("peer_openclaw__mcp") == "thinkingText", "and keeps thinking's own colour")
+
+-- Boundary underscores still emphasise, and an underscore inside an emphasised span is literal.
+local _, emphasis = render("_one_ and __two__ and _foo_bar_")
+ok(emphasis.role_of("one") == "italic", "a word wrapped in single underscores is italic")
+ok(emphasis.role_of("two") == "bold+text", "a word wrapped in double underscores is bold")
+ok(emphasis.role_of("foo_bar") == "italic", "an underscore inside an italic span stays literal")
+
 -- ---- wrapping, and the width -------------------------------------------------------
 
 local long = string.rep("word ", 60)
