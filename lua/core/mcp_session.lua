@@ -5,6 +5,22 @@ local platform=dofile('lua/core/platform.lua')
 local M={};local pool={}
 local function decode(raw)local ok,value=pcall(json.decode,tostring(raw or ''));return ok and type(value)=='table' and value or nil end
 local function failure(err,extra)local r=extra or {};r.ok=false;r.error=err;r.outcome=r.outcome or 'not_submitted';r.tool_call_issued=r.tool_call_issued==true;return r end
+-- WHAT COUNTS AS DECIDED. The durable reservation below exists so a read that may have been issued is
+-- never replayed; it must therefore be released by an ANSWER, not only by a happy one. The first
+-- version accepted a result only when it carried `result_json` and a matching schema hash, so an
+-- answer the MCP server itself gave as a refusal - `-32002 IMAP account 'default' is not configured`
+-- (10/11) - was rewritten to `outcome=unknown`, the reservation stayed, and every later call to that
+-- connector answered `mcp_connection_uncertain` for good. Nothing was in doubt: the call was issued
+-- and the server answered it. An unreadable or unverifiable answer is still `unknown`.
+function M.accepted(result,schema_hash)
+ if type(result)~='table' then return false,'unreadable' end
+ if result.outcome=='not_submitted' and result.tool_call_issued==false then return true,'not_submitted' end
+ if result.tool_call_issued==true and type(result.ok)=='boolean' then
+  if type(result.result_json)=='string' and result.schema_hash==schema_hash then return true,'verified' end
+  if result.ok==false and type(result.error)=='string' and result.error:match('^mcp_rpc_error:') then return true,'server_error' end
+ end
+ return false,'unsettled'
+end
 function M.invoke(input,ctx,directory)
  ctx=ctx or {};if not input.read_tools or #input.read_tools==0 then return failure('mcp_read_scope_required') end
  local owner=tostring(ctx.user_id or '')..'\0'..tostring(ctx.session_id or '')..'\0'..tostring(ctx.role or '')
@@ -14,6 +30,9 @@ function M.invoke(input,ctx,directory)
  local saved=decode(host.sql_query('SELECT value FROM meta WHERE key=?',json.encode({uncertain_key})))
  if not saved or saved.error then return failure('mcp_session_store_unreadable') end
  if saved[1] then return failure('mcp_connection_uncertain',{request=saved[1].value}) end
+-- A held reservation is never reopened, even when a retained answer sits beside it: the reply was not
+-- verified, and `scripts/test-mcp-recovery.lua` holds that line (`same-VM no replay`). The defect was
+-- CREATING this state for an answer the server actually gave - see M.accepted.
  local function hold(slot,request)
   slot.unknown=request
   local r=decode(host.sql_exec('INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)',json.encode({uncertain_key,request})))
@@ -62,8 +81,12 @@ function M.invoke(input,ctx,directory)
  end
  local result=decode(retained);if not result or result.request_id~=id then hold(slot,request);return failure('mcp_session_result_unreadable',{outcome='unknown',tool_call_issued=true,request=request}) end
  result.operation_id=slot.operation_id;result.request=request;result.evidence={path=input.result_file,sha256=answer.result_sha256,bytes=answer.result_bytes}
- if result.outcome~='unknown' and not (result.outcome=='not_submitted' and result.tool_call_issued==false) and not (type(result.result_json)=='string' and type(result.ok)=='boolean' and result.tool_call_issued==true and result.schema_hash==input.schema_hash) then
+ local decided=M.accepted(result,input.schema_hash)
+ if not decided then
   result.ok=false;result.error='mcp_result_settlement_unverified';result.outcome='unknown';result.tool_call_issued=true
+ elseif result.outcome=='unknown' then
+  -- The answer is on disk and it verifies, so it is decided: name what it was instead of hedging.
+  result.outcome=result.ok and 'settled' or 'error'
  end
  if result.outcome~='unknown' then
   local released=decode(host.sql_exec('DELETE FROM meta WHERE key=? AND value=?',json.encode({uncertain_key,request})))
