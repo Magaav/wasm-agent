@@ -203,28 +203,40 @@ end
 -- connector publishes must name those, and the alias below is what turns them into the capability's.
 -- Read-only questions only: a connector has never been the send path (the operator route is).
 NATIVE_CAPS={whatsapp_search=true,whatsapp_read=true,whatsapp_reactions=true,whatsapp_media=true}
-local object=function(properties,required)
- local body={}
- for key,value in pairs(properties)do body[#body+1]='"'..key..'":'..value end
- table.sort(body)
- local schema='{"type":"object","properties":{'..table.concat(body,',')..'}'
- if required and #required>0 then schema=schema..',"required":['..table.concat(required,',')..']' end
- return schema..',"additionalProperties":false}'
-end
+-- A schema is data: it is written as a table and encoded, never assembled from strings. Three of the
+-- four defects this file had on 2026-11-10 were hand-built JSON (a missing wrapper, `required` nested
+-- inside `properties`, a comma before an empty map), and none of them could survive json.encode.
+local string=function()return {type='string'} end
+local integer=function()return {type='integer'} end
 NATIVE_TOOLS={
  read_newest={cap='whatsapp_read',description='Read one WhatsApp chat newest-first from the index this node holds',
-  schema=object({conversation_id='{"type":"string"}',n='{"type":"integer"}',scan_days='{"type":"integer"}'},{'"conversation_id"'})},
+  schema={type='object',properties={conversation_id=string(),n=integer(),scan_days=integer()},required={'conversation_id'},additionalProperties=false}},
  inspect_chat={cap='whatsapp_read',description='Inspect one WhatsApp chat: newest messages of that exact chat',
-  schema=object({conversation_id='{"type":"string"}',limit='{"type":"integer"}'},{'"conversation_id"'})},
+  schema={type='object',properties={conversation_id=string(),limit=integer()},required={'conversation_id'},additionalProperties=false}},
  read_snapshot={cap='whatsapp_search',description='Search the WhatsApp message index this node holds',
-  schema=object({conversation_id='{"type":"string"}',query='{"type":"string"}',kind='{"type":"string"}',from='{"type":"string"}',since='{"type":"integer"}',['until']='{"type":"integer"}',limit='{"type":"integer"}'})},
+  schema={type='object',properties={conversation_id=string(),query=string(),kind=string(),from=string(),since=integer(),['until']=integer(),limit=integer()},additionalProperties=false}},
  lookup_self={cap='identity',description='The WhatsApp account this node is paired with',
-  schema=object({})},
+  schema={type='object',properties={},additionalProperties=false}},
 }
 -- `lookup_self` needs no capability: the account is in the connector's own binding.
 local function native_identity(server)
  local config=type(server.config)=='table' and server.config or {}
  return {ok=true,account=config.account,generation=config.generation}
+end
+-- What the caller said, in the capability's own field names. MCP tool names predate the capability
+-- names (`conversation_id`/`n`/`query` against `chat`/`limit`/`q`), and the translation lives here so a
+-- Lua test can assert it without a node: the published schema and this map must agree, or the call is
+-- refused before it leaves the process.
+local ALIAS={read_newest={conversation_id='chat',n='limit'},inspect_chat={conversation_id='chat'},
+ read_snapshot={conversation_id='chat',query='q'}}
+function M.native_arguments(tool,args)
+ local alias=ALIAS[tool]
+ args=type(args)=='table' and args or {}
+ if not alias then return args end
+ local mapped={}
+ for key,value in pairs(args)do mapped[alias[key] or key]=value end
+ if tool=='inspect_chat' then mapped.limit=mapped.limit or 1 end
+ return mapped
 end
 local function invoke_native(input)
  local server=input.server or {}
@@ -233,7 +245,7 @@ local function invoke_native(input)
   for tool,cap in pairs(server.native or {})do
    local spec=NATIVE_TOOLS[tool]
    if not spec or spec.cap~=cap then return fail('mcp_native_tool_unknown',{tool=tool}) end
-   tools[#tools+1]={name=tool,description=spec.description,input_schema_json=spec.schema}
+   tools[#tools+1]={name=tool,description=spec.description,input_schema_json=json.encode(spec.schema)}
   end
   table.sort(tools,function(a,b)return a.name<b.name end)
   return {ok=true,tools=tools,schema_hash=host.sha256(json.encode(tools))}
@@ -248,19 +260,9 @@ local function invoke_native(input)
  -- The MCP tool names are older than the capability names; translate the fields the caller knows
  -- (`conversation_id`, `n`, `query`) onto the capability's own (`chat`, `limit`, `q`) and drop what
  -- the capability does not take, so a tool call is the same question whichever door asked it.
- local ALIAS={read_newest={conversation_id='chat',n='limit'},inspect_chat={conversation_id='chat'},
-  read_snapshot={conversation_id='chat',query='q'}}
  local known=NATIVE_TOOLS[tool]
  if not known then return fail('mcp_native_tool_unknown',{tool=tool}) end
- local function translate()
-  local alias=ALIAS[tool]
-  if not alias then return args end
-  local mapped={}
-  for key,value in pairs(args)do mapped[alias[key] or key]=value end
-  if tool=='inspect_chat' then mapped.limit=mapped.limit or 1 end
-  return mapped
- end
- args=translate()
+ args=M.native_arguments(tool,args)
  local answer
  if cap=='identity' then answer=native_identity(server)
  elseif NATIVE_CAPS[cap] then
