@@ -271,6 +271,15 @@ elseif command == "call" then
     if ok and type(decoded) == "table" then payload = decoded end
   end
   print(json.encode(nodes.remote_call(args[2], args[3], payload)))
+elseif command == "watch" then
+  -- Follow a session on another node, read-only (docs/SESSION-WATCH.md). The body is the module's: this
+  -- is the dispatch only, and it is next to `call` because it is the same signed peer path.
+  local code = dofile("lua/core/session_watch.lua").cli(args)
+  if code then os.exit(code) end
+elseif command == "session" and args[2] == "start" then
+  -- The operator's half of `session_start`: start a session on another node, print its id at once.
+  local code = dofile("lua/core/session_watch.lua").start_cli(args)
+  if code then os.exit(code) end
 elseif command == 'bind' or command == 'unbind' or command == 'accept' or command == 'promote' or command == 'demote' or command == 'revoke' then
   -- The whole remainder, not args[2]: `wa bind permanent renew <service>` is one intent, and keeping
   -- only the second word made the one-shot CLI unable to express it (it fell back to the service
@@ -312,6 +321,8 @@ elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
+  print("    watch <node> <session> [--from <cursor>]  follow a session on another node, read-only")
+  print("    session start <node> --prompt <text> [--cwd <dir>]  start a session on another node, print its id")
   print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")

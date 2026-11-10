@@ -827,6 +827,14 @@ local function node_capability(capability, args, caller)
     local decoded, answer = pcall(json.decode, raw or "")
     if not decoded or type(answer) ~= "table" then return { error = "stt_answer_unreadable" } end
     return answer
+  elseif capability == "session_start" or capability == "session_watch" then
+    -- Start a session here for a master on another node, and follow it read-only
+    -- (lua/core/session_watch.lua, docs/SESSION-WATCH.md). The module decides the authority as well as
+    -- the work: both actions refuse a caller whose role is not master, so this branch adds no
+    -- reach of its own to the gate above it. `start` returns the session id before the run begins;
+    -- `watch` is a projection over the ledger and is the reason this pair has two names.
+    return dofile("lua/core/session_watch.lua").serve(
+      capability == "session_start" and "start" or "watch", args, caller)
   elseif capability == "federation" then
     -- Connector federation (lua/core/federation.lua): a master peer lists and runs this node's connector
     -- tools here, under this node's own guards. The dispatch is the same one the fallthrough below uses.
@@ -1062,6 +1070,19 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
       -- admitting the capability admits masters only - and each tool still runs under the peer's own
       -- guards, approvals and refusals.
       federation=true,
+      -- Starting and following a session (lua/core/session_watch.lua, docs/SESSION-WATCH.md). A master
+      -- starts a run on a peer and keeps its id; the follow half is read-only, and both handlers
+      -- refuse a caller whose role is not master. Two names, not one, because the split is the
+      -- authority: watching a session is a read and starting one is control, and a single name would
+      -- be graded by one verb for both.
+      session_start=true, session_watch=true,
+      -- `operation`, restored 2026-11-10. Measured cause of its loss: this list never named it (it
+      -- was created whole in 6342ce8b, 2026-09-20, and `operation` has not been in it since); the
+      -- call that worked on 2026-11-04 reached an *unbound* node, where `enrollment.managed()` was
+      -- false and this list did not run at all. Binding the node switched the gate on and the call
+      -- became `capability_not_granted`. The `operation` tool is master-only in dispatch
+      -- (`lua/core/tools.lua`, `forbidden_for_role`), so admitting the name admits masters only.
+      operation=true,
       -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
       -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
       stt=true }

@@ -644,12 +644,16 @@ end
 -- Reuse the newest open session for this (user, node) pair, or start one.
 -- Child (subagent) sessions are excluded: a normal turn must never land in a
 -- child's transcript just because it is the newest open row for the pair.
+-- A session another node started (`objective='remote'`, `lua/core/session_watch.lua`) is excluded for
+-- the same reason, from the other side: it belongs to the master that asked for it, and a bare
+-- `wa chat` on this node asking for "the newest open thread" must not silently adopt work it did not
+-- request. It is still an ordinary session - `wa chat --session <id>` reaches it by name.
 function M.ensure_session(user_id, node_id, title)
   user_id = user_id or "master"
   node_id = node_id or ""
   local rows = query(
     "SELECT id FROM sessions WHERE user_id=? AND node_id=? AND ended_at IS NULL " ..
-    "AND parent_session_id IS NULL AND (objective IS NULL OR objective<>'subagent') " ..
+    "AND parent_session_id IS NULL AND (objective IS NULL OR (objective<>'subagent' AND objective<>'remote')) " ..
     "ORDER BY started_at DESC LIMIT 1", {user_id, node_id})
   if #rows > 0 then return rows[1].id end
   return M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })
