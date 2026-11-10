@@ -1457,6 +1457,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not ok then return {error=name..'_failed',detail=tostring(answer):sub(1,160),effect='none'} end
     local decoded=json.decode(tostring(answer or ''))
     if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
+    -- The account lives on exactly one node. When this one runs no component it says so and names
+    -- the owner; ask the owner here, so a caller on any node reads one answer instead of a queue
+    -- that will never settle, and the answer carries which node served it.
+    if decoded.error=='whatsapp_component_absent' and type(decoded.owner)=='string' and decoded.owner~='' then
+      return M.whatsapp_forward(decoded,name,args)
+    end
     return decoded
   end
   if name=='email_send' or name=='email_send_status' then
@@ -2274,6 +2280,23 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
   end
   if not ok then error(result) end
   return result
+end
+
+
+-- The WhatsApp account lives on exactly one node. A node that runs no wa-whatsapp component answers
+-- `whatsapp_component_absent` with the owner, and the question is asked there instead of queued
+-- where the component will never settle. `call` is injected so the shape is tested without a peer.
+function M.whatsapp_forward(decoded, name, args, call)
+  call = call or nodeslib.remote_call
+  local ok, served = pcall(call, decoded.owner, name, args)
+  if not ok then
+    return { error = 'whatsapp_owner_unreachable', owner = decoded.owner, detail = tostring(served):sub(1, 160), effect = 'none' }
+  end
+  if type(served) ~= 'table' then
+    return { error = 'whatsapp_owner_unreachable', owner = decoded.owner, effect = 'none' }
+  end
+  if served.error == nil then served.served_by = decoded.owner end
+  return served
 end
 
 return M

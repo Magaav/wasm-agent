@@ -772,6 +772,13 @@ pub fn beat() {
     }
 }
 
+/// Whether this process is the serving node: it built the run pool, so its service registry and its
+/// component supervision are the node's own. A CLI or `WA_SCRIPT` process is not serving, and its
+/// empty registry must never be read as "the component is absent".
+pub(crate) fn serving() -> bool {
+    POOL.get().is_some()
+}
+
 /// Proof of life for the duration of a host call that is known to be in progress and
 /// known to be bounded.
 ///

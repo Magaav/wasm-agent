@@ -80,7 +80,7 @@ pub extern "C-unwind" fn media(l: *mut wa_host_support::lua::LuaState) -> std::o
 pub extern "C-unwind" fn download(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => ask_download(&args),
+        Ok(args) => component_absent(seam::Op::Download).unwrap_or_else(|| ask_download(&args)),
         Err(_) => seam::refusal(seam::Op::Download, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);
@@ -101,11 +101,40 @@ pub extern "C-unwind" fn backfill(l: *mut wa_host_support::lua::LuaState) -> std
 
 // ---- one query ---------------------------------------------------------------------------------
 
+/// The honest answer when this node runs no `wa-whatsapp` component.
+///
+/// A question whose worker does not exist anywhere on this node is not slow: queueing it can only
+/// end in `..._slow` and a retry that reads the same idle job. The account lives on exactly one
+/// node, so the answer names it when the node was told (`WASM_AGENT_WHATSAPP_OWNER`) instead of
+/// pretending the job is in flight. A CLI or `WA_SCRIPT` process has no registry of its own and is
+/// skipped: only the serving node may call its own absent component absent.
+fn component_absent(op: seam::Op) -> Option<Value> {
+    if !crate::serve::serving() {
+        return None;
+    }
+    let status = wa_kernel_runtime::services::status(Some(COMPONENT));
+    if status["state"].as_str() == Some("running") {
+        return None;
+    }
+    let owner = std::env::var("WASM_AGENT_WHATSAPP_OWNER").ok().filter(|value| !value.trim().is_empty());
+    let detail = match &owner {
+        Some(owner) => format!("this node runs no {COMPONENT} component; the WhatsApp account is served by {owner}"),
+        None => format!("this node runs no {COMPONENT} component"),
+    };
+    let mut answer = seam::refusal(op, "whatsapp_component_absent", detail);
+    answer["component"] = json!(COMPONENT);
+    answer["state"] = status["state"].clone();
+    if let Some(owner) = owner {
+        answer["owner"] = json!(owner);
+    }
+    Some(answer)
+}
+
 /// The common shape of the four text answers: validate, enqueue, wait, read the settled result.
 fn answer(l: *mut wa_host_support::lua::LuaState, op: seam::Op) -> std::os::raw::c_int {
     let raw = wa_host_support::lua::arg_string(l, 1).unwrap_or_default();
     let answer = match serde_json::from_str::<Value>(&raw) {
-        Ok(args) => ask(op, &args, seam::WAIT_MS),
+        Ok(args) => component_absent(op).unwrap_or_else(|| ask(op, &args, seam::WAIT_MS)),
         Err(_) => seam::refusal(op, "invalid_request", "the arguments are not a JSON object"),
     };
     wa_host_support::json::push_json(l, &answer);

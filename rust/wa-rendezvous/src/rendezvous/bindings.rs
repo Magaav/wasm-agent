@@ -110,7 +110,10 @@ fn request(c:&Connection,stream:&mut TcpStream,p:&Value,body:&[u8],header:&dyn F
     }
     let Some(pins)=p["operators"].as_array() else{return respond(stream,400,"{\"error\":\"binding_pins_invalid\"}");};
     let admins=network_admins();
-    if admins.iter().any(|a|a==node_id){return respond(stream,403,"{\"error\":\"binding_administrator_identity_forbidden\"}");}
+    // An administrator may also be a transport guest (operator decision, 2026-10-05). The role decides
+    // what a node may *vouch for*; the binding decides how it is *reached*, and `/relay/send` needs an
+    // accepted binding on both ends. Refusing an administrator here left every master unreachable
+    // through the relay - which is how another master could not reach this fleet's WhatsApp connector.
     if pins.is_empty()||pins.len()>32||pins.len()!=admins.len()||admins.iter().any(|a|{
         let matching:Vec<_>=pins.iter().filter(|pin|pin["node_id"]==a.as_str()).collect();
         matching.len()!=1||lookup(c,a).map(|n|matching[0]["public_key"]!=n["public_key"]).unwrap_or(true)
