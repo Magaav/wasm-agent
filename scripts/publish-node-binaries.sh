@@ -140,6 +140,13 @@ if [ -n "$ZIG_BIN" ]; then
     *) PATH="$ZIG_DIR:$PATH"; export PATH
        say "zig: $ZIG_BIN (found outside PATH; its directory is on PATH for this build)" ;;
   esac
+  # PATH is not enough, and that is measured, not guessed: `cargo-zigbuild` (0.24.1) resolves zig with
+  # `which -a zig`, which on this host found nothing for a real `zig.exe` on a PATH that demonstrably
+  # contained its directory - the landing of a33e57c7f579 failed with exactly
+  # `Error: Failed to find zig / cannot find binary path` while this script had just printed the zig
+  # it had found. The crate's own supported answer is `CARGO_ZIGBUILD_ZIG_COMMAND`: it names the
+  # binary, is used verbatim, and skips the search entirely (src/zig/locate.rs::find_zig).
+  CARGO_ZIGBUILD_ZIG_COMMAND="$ZIG_BIN"; export CARGO_ZIGBUILD_ZIG_COMMAND
 fi
 # One target directory for both crates: `wa-host` (workspace rust/Cargo.toml) and `wa-sentinel`
 # (its own workspace) otherwise resolve different `target/` roots, and the second one is invisible to
@@ -247,6 +254,7 @@ if [ "$CHECK" = 1 ] && [ -z "$FROM" ]; then
   say "would build $COMMIT for: $MANIFEST_TRIPLES"
   say "with: cargo zigbuild --release --offline --locked -p wa-host --target <triple>.$GLIBC_FLOOR (and wa-sentinel likewise)"
   say "zig: ${ZIG_BIN:-none found (a build would refuse with zig_missing; pass WA_ZIG or install pip ziglang)}"
+  [ -n "$ZIG_BIN" ] && say "cargo zigbuild uses: CARGO_ZIGBUILD_ZIG_COMMAND=$CARGO_ZIGBUILD_ZIG_COMMAND"
   say "cargo target dir: $TARGET_DIR (one directory for wa-host and wa-sentinel; --target-dir overrides)"
   say "code-mode assets: $CODEMODE${ASSETS:+ ($ASSETS)}${ASSETS_WHY:+ - $ASSETS_WHY}"
   say "compiled inputs: $(wa_compiled_inputs_digest "$ROOT" "$COMMIT" 2>&1) (a later commit with this digest installs this release)"
