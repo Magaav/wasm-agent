@@ -238,6 +238,11 @@ ok(admitted.record ~= nil and admitted.record ~= "", "the answer names an audit 
 local deploy_calls = issued_matching("request deploy")
 ok(#deploy_calls == 1, "exactly one deploy request was written", tostring(#deploy_calls))
 ok(deploy_calls[1]:find("--if-no-pending", 1, true) ~= nil, "and it dedupes like the local /update")
+-- The peer's host stamps `child` on every shell it runs for an inbound peer call, and the sentinel
+-- refuses a child; this command is a signed master request the binding/roster already admitted, so
+-- the marker is cleared for exactly this command and nothing else.
+ok(deploy_calls[1]:sub(1, 23) == "WASM_AGENT_PROVENANCE= ",
+  "the one sentinel command runs without the child marker (and only this command)", deploy_calls[1]:sub(1, 40))
 ok(deploy_calls[1]:find("the fabric update test", 1, true) ~= nil, "and it carries the reason the master gave")
 ok(#issued_matching("preflight") >= 1, "the peer's own watcher was proved before queueing")
 
@@ -342,6 +347,8 @@ ok(wrapper_path ~= nil and wrapper_path:find((scripts_dir:gsub("\\", "/")), 1, t
   "the script is inside a directory WA_SENTINEL_SCRIPTS names", wrapper_path)
 local wrapper_text = wrapper_path and host.read_file(wrapper_path) or ""
 ok(wrapper_text:find("deploy-rendezvous.sh", 1, true) ~= nil, "the wrapper calls the supported script")
+ok(wrapper_text:find("exec bash ", 1, true) ~= nil,
+  "through bash, because the script is mode 100644 and `exec <script>` answers EACCES")
 ok(wrapper_text:find(TARGET, 1, true) ~= nil, "with the exact landed commit")
 ok(wrapper_text:find(MASTER.name, 1, true) ~= nil or wrapper_text:find("rendezvous test", 1, true) ~= nil,
   "and a reason that names who asked")

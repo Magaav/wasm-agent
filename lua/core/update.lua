@@ -642,6 +642,18 @@ function M.run(options)
     session_id = session_id,
     prompt = M.CONTINUATION_PROMPT,
   })
+  -- WHOSE REQUEST THIS IS. `wa-sentinel request` refuses to act for a child task
+  -- (`sentinel_coordinator_only`), and the node's host stamps `WASM_AGENT_PROVENANCE=child` on every
+  -- shell it runs on behalf of an inbound peer call. For most paths that is exactly right: a peer's
+  -- shell is a child, and a child may not replace the supervisor. A remote update is not that: it was
+  -- admitted as a *signed master request* by the binding/roster before this line ran
+  -- (`lua/core/remote_update.lua`, master-only, audited), and the sentinel's own door is the only
+  -- thing that can perform it. So the marker is cleared for THIS ONE COMMAND, never for the node's
+  -- environment, and only when the caller passed `signed_request` - which only the `update`
+  -- capability does. Every local agent subprocess, every hook and every other shell keeps the marker:
+  -- `remote_update.lua` is reachable only through that capability, and the refusal for a child shell
+  -- is unchanged.
+  if options.signed_request then command = "WASM_AGENT_PROVENANCE= " .. command end
   -- `PreDeploy`: the request is about to be written into the sentinel's drop-box, which is the last
   -- moment a refusal costs nothing (the backup is taken, nothing is installed). A hook cannot verify
   -- the install and is not asked to; it can say "not from this machine, not now".

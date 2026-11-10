@@ -249,6 +249,9 @@ local function request_node(record)
   local request = {
     skip_source_sync = true,
     expected_commit = record.target_commit,
+    -- This call is a signed master request the binding/roster already admitted (see `serve`), not a
+    -- child shell: `update.run` clears the child marker for the one sentinel command it writes.
+    signed_request = true,
     reason = record.reason ~= '' and record.reason or ('remote update from ' .. (record.requester.name ~= '' and record.requester.name or record.requester.node_id)),
   }
   -- The install and sentinel directory are the peer's own in production; a test points both at a
@@ -289,7 +292,9 @@ local function rendezvous_script(record)
     '#!/usr/bin/env bash',
     '# written by lua/core/remote_update.lua for remote request ' .. record.id,
     'set -euo pipefail',
-    'exec ' .. quote(slashes(record.server.tree) .. '/scripts/deploy-rendezvous.sh') .. ' '
+    -- `exec bash <script>`: the script is mode 100644 in git, so `exec <script>` answers EACCES
+    -- (`code=126 Permission denied`, measured on openclaw 2026-11-10).
+    'exec bash ' .. quote(slashes(record.server.tree) .. '/scripts/deploy-rendezvous.sh') .. ' '
       .. quote(record.target_commit) .. ' ' .. quote(record.reason ~= '' and record.reason or 'remote update'),
     '',
   }, '\n')
@@ -319,7 +324,10 @@ local function request_rendezvous(record)
   end
   local script, problem = rendezvous_script(record)
   if not script then return nil, problem end
-  local command = table.concat({
+  -- The same authority the deploy door uses: this request was admitted as a signed master request by
+  -- `serve`, and the node stamps `child` on shells it runs for a peer call. Cleared for this command
+  -- only (see `update.run`'s `signed_request`).
+  local command = 'WASM_AGENT_PROVENANCE= ' .. table.concat({
     quote(facts.sentinel), 'request', 'run', '--script', quote(script),
     '--reason', quote('remote update from ' .. (record.requester.name ~= '' and record.requester.name or record.requester.node_id)
       .. ': ' .. (record.reason ~= '' and record.reason or 'rendezvous deploy')),
