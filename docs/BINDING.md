@@ -174,21 +174,26 @@ reachability, not permission: it registers and serves the relay, and the permiss
 to `binding.authorize`, once per call. An unreadable `/service` is still a failure and is named
 `binding_service_unavailable`, never `…_authority_changed`.
 
-### A network administrator cannot be bound
+### A network administrator may also be bound
 
-The registry refuses a request whose subject is a network administrator
-(`binding_administrator_identity_forbidden`, 403): an administrator vouches for bindings, it is not
-admitted by one. Two consequences matter once every master is an administrator (operator decision,
-2026-10-05):
+An administrator vouches for bindings and a binding decides how a node is reached; those are
+different questions, and refusing the second for the first left every master off the relay.
+`/relay/send` needs an accepted binding on **both** ends, so an unbound master could be called by
+nobody: `work -> openclaw` died on an address that only resolves on one laptop. Since 2026-11-10 the
+registry accepts a request whose subject is a network administrator (operator decision), and
+`openclaw` and the operator's PC are bound like any guest relative to the directory.
 
-- **Reachability.** `/relay/send` requires an accepted binding on *both* ends, so an administrator
-  has no relay address. A master that must be *called* needs a direct endpoint: a reachable address
-  in the signed roster (`wa fleet push-roster`, which needs the fleet key) or in the node's policy.
-  The default bind is localhost-only and reachable by no peer.
-- **Re-binding after an operator change.** A guest is re-bound by `unbind` -> `bind` -> an
-  administrator accepting the request (`ACCEPT-PERMANENT`). The request pins the service's current
-  operator list, so adding an operator means re-binding each guest that must admit it. On
-  2026-10-05 that is how `work` was admitted to `mail` and `nextcloud`.
+Consequences to keep in mind:
+
+- **Every bound node is "managed"** (`enrollment.managed()` is true with a binding). Its peer-call
+  allowlist, not only the pins, decides what another node may run on it. The read-only WhatsApp
+  questions (`whatsapp_search`, `whatsapp_read`, `whatsapp_reactions`, `whatsapp_media`) are in that
+  list since 2026-11-10; `whatsapp_send` and the phone backfill are not.
+- **A question about the message index is answered by the node that runs `wa-whatsapp`.** A caller
+  without the component answers `whatsapp_component_absent` naming the owner
+  (`WASM_AGENT_WHATSAPP_OWNER`), and the tool layer asks that node and stamps the answer
+  `served_by`. `whatsapp_search` from any master therefore reads the same index, through the relay.
+
 
 ## Caller-side refusal reporting
 
