@@ -112,8 +112,19 @@ function M.materialize(node,keymap)
  end
  return node.value
 end
-local annotations={description=true,title=true,default=true,examples=true}
-local supported={type=true,properties=true,required=true,enum=true,minimum=true,maximum=true,minLength=true,maxLength=true,minItems=true,maxItems=true,additionalProperties=true,items=true,anyOf=true}
+local annotations={description=true,title=true,default=true,examples=true,
+ ['$schema']=true,['$id']=true,['$comment']=true,['$defs']=true,['$ref']=true,format=true}
+-- WHY THESE ARE ANNOTATIONS AND NOT REFUSALS. `$schema` is metadata naming the dialect, and refusing
+-- it refused the TOOL: mail-mcp 0.6.1 (pydantic v2) stamps `"$schema": "https://json-schema.org/
+-- draft/2020-12/schema"` inside every `inputSchema`, so 34 of the connector's 37 tools answered
+-- `schema_unsupported:arguments:$schema` before the MCP server was contacted at all - the call never
+-- left this process. `$defs`/`$ref` name subschemas, `format` is a presentation hint, and the
+-- constraints a `$ref` stands for are validated by the server's own pydantic model, which still runs
+-- and still answers. A keyword that changes the SHAPE of an accepted value (patternProperties,
+-- allOf, propertyNames, ...) is still refused: the guard is a guard, not a rubber stamp.
+-- `nullable` is NOT an annotation: it is handled in validate(), because it changes what is accepted.
+local supported={type=true,properties=true,required=true,enum=true,minimum=true,maximum=true,minLength=true,maxLength=true,minItems=true,maxItems=true,additionalProperties=true,items=true,anyOf=true,
+ nullable=true}
 local function supported_schema(schema,path)
  if type(schema)~='table' then return 'schema_unsupported:'..path end
  for key in pairs(schema)do if not supported[key] and not annotations[key] then return 'schema_unsupported:'..path..':'..key end end
@@ -123,6 +134,9 @@ local function supported_schema(schema,path)
  for _,v in ipairs(schema.enum or {})do if type(v)=='table' then return 'schema_unsupported:'..path..':composite_enum' end end
 end
 local function validate(schema,node,path)
+ -- OpenAPI/pydantic `nullable: true`: a null is accepted where the schema says it may be, otherwise
+ -- the `type` check below would refuse an argument the connector's own contract allows.
+ if schema.nullable==true and node.kind=='null' then return nil end
  if schema.anyOf then
   local accepted=false;for _,branch in ipairs(schema.anyOf)do if not validate(branch,node,path) then accepted=true;break end end
   if not accepted then return 'schema_anyof:'..path end
