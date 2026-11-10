@@ -56,13 +56,13 @@ that field at offset0. Versions are not content signatures or a pinned snapshot.
 An unrelated audio-state change does not invalidate a message-body record version;
 a change to another column of the same owning record may require restart.
 
-Operator CLI example (all values/reference metadata come from an authorized page):
+Reads come from the native index - `whatsapp_search` / `whatsapp_read`, or
+`peer_<node>__whatsapp_*` where another node holds the account. The `whatsapp-read.mjs` CLI
+that used to print a page went with the Node MCP bridge (10/11). An exact field chunk is the
+component's `read_field` tool (`whatsapp_wasm`), which takes the same window:
 
-```sh
-node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_OPERATOR_PROFILE" --limit 700
-node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_OPERATOR_PROFILE" \
-  --resource read_snapshot --row "$ROW" --field body --version "$FIELD_VERSION" \
-  --offset 0 --length 16384
+```json
+{"resource":"read_snapshot","row":"$ROW","field":"body","version":"$FIELD_VERSION","offset":0,"length":16384}
 ```
 
 Repeat with next_offset until complete. The agent reaches the same exact field read

@@ -3,7 +3,7 @@
 import {readFileSync,lstatSync} from 'node:fs';
 import {isAbsolute} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {connectorRequest} from './mcp-whatsapp.mjs';
+import {connectorRequest} from './whatsapp-connector-http.mjs';
 export function operatorConfig(path,action){
  if(!isAbsolute(path))throw Error('operator_absolute_authority_file_required');
  const info=lstatSync(path);if(!info.isFile()||info.isSymbolicLink()||info.size>65536||(process.platform!=='win32'&&(info.mode&0o077)))throw Error('operator_private_authority_file_required');

@@ -1843,8 +1843,11 @@ class WaMcps extends HTMLElement {
   }
   set inventory(data){
     this.connectedCallback();this.data=data;this.list.replaceChildren();
+    // The template button only appears when the node actually publishes one: the WhatsApp template was
+    // the Node bridge, deleted 10/11, so an empty templates map hides it instead of leaving a dead button.
+    this.template.hidden=!data?.templates?.whatsapp;
     for(const adapter of data.adapters||[]){const row=document.createElement('section');row.className='job-row';const label=document.createElement('strong');label.textContent=adapter.name+' · built-in profile-managed MCP';const body=document.createElement('p');body.textContent=(adapter.capabilities||[]).join(' · ')+'. '+adapter.note;row.append(label,body);this.list.append(row);}
-    if(!(data.servers||[]).length){const empty=document.createElement('p');empty.textContent='No MCPs configured. WhatsApp is available as a read-only template; adding it does not enable sending or Jobs.';this.list.append(empty);}
+    if(!(data.servers||[]).length){const empty=document.createElement('p');empty.textContent='No MCPs configured. Reads go through the native index; WhatsApp sends go through the operator path alone.';this.list.append(empty);}
     for(const server of data.servers||[]){
       const row=document.createElement('section');row.className='job-row';const name=document.createElement('strong');name.textContent=server.name||server.id;
       const status=document.createElement('div');status.textContent=`${server.enabled?'enabled':'disabled'} · ${server.definition.transport} · ${server.observed_status} · request-scoped, not a persistent connection`;

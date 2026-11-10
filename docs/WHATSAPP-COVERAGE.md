@@ -180,14 +180,12 @@ Use the existing authorized native peer and SERVER-private profile, NOT SSH from
 worker/model tool or a new public port. After supported coordinator-only deployment/
 source/readback, examples executed on server through that existing approved route:
 
+Reads run through the native index tools from code mode - `whatsapp_search`,
+`whatsapp_read` or, where another node holds the account, `peer_<node>__whatsapp_*`
+(`scripts/whatsapp-read.mjs` went with the Node MCP bridge, 10/11). The readiness check
+survives:
+
 ```sh
-node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_SERVER_PROFILE" --list-chats --refresh-names --limit 32
-# Keep scope/window consistent; use returned next_before for another explicit page.
-node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_SERVER_PROFILE" --list-chats --refresh-names --limit 32 --before "$NEXT_BEFORE"
-# Or refresh just ONE already observed permitted exact ID, including deferred groups:
-node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_SERVER_PROFILE" --list-chats --chat "$EXACT_CHAT" --refresh-names --limit 1
-node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_SERVER_PROFILE" --list-chats --query "$UNTRUSTED_LABEL" --limit 20
-node scripts/whatsapp-read.mjs --profile-file "$PRIVATE_SERVER_PROFILE" --chat "$EXACT_CHAT" --query "$LITERAL_TERM" --limit 50
 node scripts/whatsapp-readiness.mjs --profile-file "$PRIVATE_SERVER_PROFILE"
 ```
 

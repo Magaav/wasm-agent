@@ -1494,7 +1494,7 @@ ship_file "$ROOT/scripts/web-http-outcomes.mjs" "$INSTALL_DIR/scripts/web-http-o
 # The MCP runtime also lives in <data>/scripts, where scripts/install.sh puts it and where a node started
 # without its install dir in the environment looks. A deploy that refreshed only the install copy left that
 # one stale - mcp-client.mjs without web-core.mjs - and every web_search died at import (28/10).
-MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-whatsapp.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
+MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
 MCP_DATA_SCRIPTS="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/scripts"
 if [ -d "$MCP_DATA_SCRIPTS" ]; then
   for MCP_FILE in $MCP_RUNTIME; do
@@ -1533,7 +1533,8 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   #
   # The glob above ships `scripts/whatsapp-*` and nothing else, and that is how the install came to hold a
   # reader whose own import was absent: `5cc38d1` moved the WebSocket runtime into
-  # `scripts/lib/websocket-runtime.mjs`, the install got the new `whatsapp-read.mjs` and no `lib/`, and every
+  # `scripts/lib/websocket-runtime.mjs`, the install got the new reader (`whatsapp-read.mjs`, deleted 10/11
+  # with the Node bridge) and no `lib/`, and every
   # delivery then failed at step 2 - the transcribe step, which runs the same reader - with
   # `{"step":"read","error":"process_output_unreadable: ... ERR_MODULE_NOT_FOUND"}`, one per 30 s tick,
   # while the deploy reported success. A pipeline that cannot start is not a deployed pipeline, and a

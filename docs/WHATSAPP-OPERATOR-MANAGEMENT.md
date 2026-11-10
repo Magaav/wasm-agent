@@ -75,8 +75,10 @@ write ingress is a separate coordinator decision, not necessary for server CLI u
 
 ## Convenient supported CLI (trusted operator process only)
 
-Use reviewed `scripts/whatsapp-operator.mjs` and its existing `mcp-whatsapp.mjs` /
-`mcp-server-core.mjs` dependencies from the exact source/install script closure.
+Use reviewed `scripts/whatsapp-operator.mjs` and its existing
+`whatsapp-connector-http.mjs` / `mcp-server-core.mjs` dependencies from the exact source/install
+script closure. (The `mcp-whatsapp.mjs` the CLI used to import was deleted 10/11; the connector
+HTTP client it carried moved to `scripts/whatsapp-connector-http.mjs`.)
 The Go ARM64 service bundle alone does NOT install Node/scripts or register a
 native tool/MCP. On a server with the approved private config and native execution,
 the assistant/coordinator can run this CLI there without a Windows secret copy.

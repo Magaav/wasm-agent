@@ -60,7 +60,7 @@ function M.script_candidates()return script_candidates() end
 -- scripts/install.ps1 and scripts/deploy.sh ship exactly this list, and
 -- scripts/test-mcp-runtime-closure.mjs fails when any of them, or the real import graph, disagrees.
 M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-session.mjs','mcp-web.mjs',
- 'mcp-whatsapp.mjs','mcp-mail.mjs','web-core.mjs','web-http-outcomes.mjs'}
+ 'mcp-mail.mjs','web-core.mjs','web-http-outcomes.mjs'}
 local function complete(dir)
  for _,file in ipairs(M.RUNTIME) do if host.path_kind(dir..'/'..file)~='file' then return false end end
  return true
@@ -167,10 +167,10 @@ function M.validate(def)
  if def.timeout_seconds~=nil and (type(def.timeout_seconds)~='number' or def.timeout_seconds%1~=0 or def.timeout_seconds<1 or def.timeout_seconds>86400)then return 'invalid_mcp_timeout' end
  if type(def.tools)~='table' then return 'mcp_tool_permissions_required' end
  for name,effect in pairs(def.tools)do if type(name)~='string' or name=='' or #name>128 or (effect~='read' and effect~='write')then return 'invalid_mcp_tool_permission' end end
+ -- Generic WhatsApp sends never ride an MCP server: the operator path is the only sender. The stdio
+ -- filename rule this used to carry named the Node bridge, deleted 10/11; the component branch below
+ -- is what enforces it now.
  if def.tools.send_message and def.transport=='component' and def.component=='mcp-whatsapp' then return 'whatsapp_send_uses_operator_route' end
- if def.tools.send_message and def.transport=='stdio' then
-  for _,arg in ipairs(def.args)do if arg:gsub('\\','/'):lower():match('[/]mcp%-whatsapp%.mjs$') or arg:lower()=='mcp-whatsapp.mjs' then return 'whatsapp_send_uses_operator_route' end end
- end
  return nil
 end
 function M.namespace(id,name)
@@ -318,12 +318,6 @@ function M.invoke(input,ctx)
  return answer
 end
 function M.close_read_sessions()return read_sessions.close() end
-function M.default_whatsapp()
- local directory=M.script_dir() or '<installed scripts directory>'
- return {id='whatsapp',name='WhatsApp',transport='stdio',program=node_program(),args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode({backend='linked_device',allowed_conversations=json.decode('[]')})},
-  env={WA_MCP_WHATSAPP_ACCOUNT='WA_WHATSAPP_ACCOUNT',WA_MCP_WHATSAPP_GENERATION='WA_WHATSAPP_GENERATION',WA_MCP_WHATSAPP_URL='WA_WHATSAPP_CONNECTOR_URL',WA_MCP_WHATSAPP_TOKEN_FILE='WA_WHATSAPP_TOKEN_FILE'},
-  timeout_seconds=60,tools={read_snapshot='read',lookup_self='read',inspect_chat='read'}}
-end
 function M.inventory()
  local store=load_store();local servers={}
  for id,row in pairs(store.servers)do
@@ -331,7 +325,7 @@ function M.inventory()
    probe=row.probe,last_call=row.last_call,session_mode='read-reuse/write-request',observed_status=row.probe and (row.probe.ok and 'last probe passed' or 'last probe failed') or 'not verified'}
  end
  table.sort(servers,function(a,b)return a.id<b.id end)
- return {ok=true,revision=store.revision,servers=servers,templates={whatsapp=M.default_whatsapp()},can_manage=true,
+ return {ok=true,revision=store.revision,servers=servers,templates={},can_manage=true,
   adapters={{id='whatsapp',name='WhatsApp',profile_managed=true,capabilities={'scoped linked-device journal reads','explicit self/target identity','draft visibility unsupported; general sends refused'},note='Linked-device connector only. Private deterministic transcript policy is activated by the operator separately; no generic send authority, Chrome fallback or automatic wake.'}},
   note='Explicit trusted connectors; last probe is not live health. Approved reads may reuse idle-bounded sessions; writes and WhatsApp stay request-scoped. Jobs owns wakes.'}
 end
@@ -412,15 +406,7 @@ function M.project(answer)
  if not answer.evidence and not answer.result_json and not answer.result then out.detail=answer end
  return out
 end
--- Trusted WhatsApp facade only. Its caller already reserved the effect and
--- checked profile/event/budget/operator-precedence; MCP cannot grant those.
-function M.whatsapp(method,args,binding,ctx)
- local directory=M.script_dir();if not directory then return fail('mcp_script_directory_unbound') end
- binding=binding or {}
- local server={transport='stdio',program=node_program(),args={directory..'/mcp-whatsapp.mjs','--binding-json',json.encode(binding)},timeout_seconds=120}
- local input={action='call',server=server,tool=method};if next(args or {})then input.arguments=args end
- local answer=M.invoke(input,ctx);local data=native_data(answer)
- if data and not answer.error then data.mcp_operation_id=answer.operation_id;return data end
- return fail(answer.error or 'mcp_whatsapp_result_unreadable',{observed=answer,dispatch=answer.tool_call_issued and 'mcp' or nil,outcome=answer.outcome,operation_id=answer.operation_id})
-end
+-- The WhatsApp facade (M.whatsapp) is gone with the Node bridge it spawned (10/11): sends go through
+-- the operator path (lua/core/federation.lua -> scripts/whatsapp-operator.mjs) and reads through the
+-- native index or the wa-whatsapp component. There is no MCP server in this process for WhatsApp.
 return M

@@ -58,6 +58,22 @@ end
 local function names_of(value)
  local list={};for _,entry in ipairs(value.tools or {})do list[#list+1]=entry.name end;return list
 end
+-- A refusal is a value on the stub transport and a thrown Error on the real one: `settle` rejects the
+-- guest promise when the tool answers success=false, and the Error's message carries the refusal JSON.
+-- Read both shapes, so the assertion measures the refusal code and not the transport's delivery style
+-- (this build embeds QuickJS, so the real transport is the one that runs here).
+local function refusal(value,result)
+ if type(value)=='table' and value.error then return value.error end
+ local raw=result and result.error
+ if type(raw)=='string' then
+  local ok,err=pcall(json.decode,raw)
+  if ok and type(err)=='table' and type(err.message)=='string' then
+   local ok2,body=pcall(json.decode,err.message)
+   if ok2 and type(body)=='table' then return body.error end
+  end
+ end
+ return nil
+end
 
 -- 1. An exact batch returns exactly those definitions, in order, and admits no call.
 local batch,batch_result=run({names={'read','grep','ls','write'}})
@@ -79,11 +95,13 @@ local selected=run('select:read, grep')
 check(table.concat(names_of(selected),',')=='read,grep','searchTools("select:a,b,c") loads the same batch')
 
 -- 4. Refusals match the outer facade.
-local exclusive=run({query='read',names={'grep'}})
-check(exclusive.error=='tool_search_arguments_exclusive','query and names are mutually exclusive in a script')
+local exclusive,exclusive_result=run({query='read',names={'grep'}})
+check(refusal(exclusive,exclusive_result)=='tool_search_arguments_exclusive','query and names are mutually exclusive in a script')
 local nine={};for i=1,9 do nine[i]='read'..i end
-check(run({names=nine}).error=='invalid_tool_search_names','more than 8 names is refused in a script')
-check(run({names={}}).error=='invalid_tool_search_names','an empty guest batch is refused')
+local nine_value,nine_result=run({names=nine})
+check(refusal(nine_value,nine_result)=='invalid_tool_search_names','more than 8 names is refused in a script')
+local empty_value,empty_result=run({names={}})
+check(refusal(empty_value,empty_result)=='invalid_tool_search_names','an empty guest batch is refused')
 
 -- 5. Inside the guest, "not callable here" is disclosed with its route, not hidden: parity with the
 -- existing searchTools contract, and different from a name outside the ceiling.

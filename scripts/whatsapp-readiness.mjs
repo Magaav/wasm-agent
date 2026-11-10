@@ -1,6 +1,5 @@
 // One-shot, read-only live readiness check. Never pairs, activates, sends or changes bindings.
-import {readBinding} from './whatsapp-mcp-client.mjs';
-import {connectorRequest} from './mcp-whatsapp.mjs';
+import {readBinding,connectorRequest} from './whatsapp-connector-http.mjs';
 const args=process.argv.slice(2);
 try {
  if(args.length!==2||args[0]!=='--profile-file')throw Error('usage');

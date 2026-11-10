@@ -30,7 +30,7 @@ test('every MCP runtime list is the real import closure of the servers the node 
   const ps = sorted([...read('scripts/install.ps1').matchAll(/"((?:mcp|web)[\w-]*\.mjs)"/g)].map((m) => m[1]));
   const deploy = read('scripts/deploy.sh');
   const deployData = sorted(deploy.match(/MCP_RUNTIME="([^"]+)"/)[1].split(/\s+/));
-  const graph = closure(['mcp-client.mjs', 'mcp-session.mjs', 'mcp-web.mjs', 'mcp-whatsapp.mjs', 'mcp-mail.mjs']);
+  const graph = closure(['mcp-client.mjs', 'mcp-session.mjs', 'mcp-web.mjs', 'mcp-mail.mjs']);
   assert.deepEqual(lua, graph, 'lua/core/mcp.lua M.RUNTIME');
   assert.deepEqual(sh, graph, 'scripts/install.sh MCP_RUNTIME');
   assert.deepEqual(deployData, graph, 'scripts/deploy.sh MCP_RUNTIME (the data-directory copy)');
