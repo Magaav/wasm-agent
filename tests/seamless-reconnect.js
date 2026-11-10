@@ -116,9 +116,6 @@ const documentStub = {
     if (selector === "[data-update-badge]") {
       return topbar.children.find((c) => c.dataset && c.dataset.updateBadge) || null;
     }
-    if (selector === "[data-update-toast]") {
-      return body.children.find((c) => c.dataset && c.dataset.updateToast) || null;
-    }
     return null;
   },
 };
@@ -133,16 +130,13 @@ let sessionUpdating = "";
 // here because this test is about the node's half; tests/tool-progress.js covers the call's.
 let toolRow = null;
 ${updatingConst}
-let updateToastDismissed = false;
 let nodeWatch = null;
 // The status bar's own line, as the node-offline path leaves it: the recovery edge must clear it too.
 let statusLine = { textContent: "the node is restarting to install a new build - it will answer again shortly" };
 let statusCleared = 0;
 function clearStatus() { statusCleared += 1; }
 ${extract("updateBannerText")}
-${extract("dismissUpdateToast")}
 ${extract("paintUpdateBadge")}
-${extract("paintUpdateToast")}
 ${extract("paintSessionNotice")}
 ${extract("paintSessionContent")}
 ${extract("paintUpdating")}

@@ -40,8 +40,8 @@ deploy downloads (owner/repo resolved by `wa_node_release_repo`'s rule, `WA_NODE
 
 | state | when | what is drawn |
 | --- | --- | --- |
-| `behind` | the installed release is in the published window but not first, a prebuilt install's release fell out of it, or local git proves the release commit descends from the installed one | `Update available (<latest sha12>): run wa update or /update` on the CLI's **session-status-content** line (yellow, directly above the session status bar), once at session start, and as a dismissible toast + topbar badge + standing footer line in the window |
-| `current` | installed == newest release | nothing; an existing badge/toast is cleared on the next load |
+| `behind` | the installed release is in the published window but not first, a prebuilt install's release fell out of it, or local git proves the release commit descends from the installed one | `Update available (<latest sha12>): run wa update or /update` on the CLI's **session-status-content** line (yellow, directly above the session status bar), once at session start, and on the window's own **session-status-content** line (same yellow, directly above the composer footer, one line, ellipsised) plus a topbar badge - never an overlay |
+| `current` | installed == newest release | nothing; an existing badge and line are cleared on the next load |
 | `ahead` | local git proves the installed commit descends from the release | nothing - a tree ahead of the feed is not told to update |
 | `unknown` | no recorded commit, no feed, or a tree commit the feed does not mention and local ancestry cannot order | nothing (the reason is in the cache and the JSON) |
 
@@ -148,10 +148,11 @@ still writes an interim record with no tag - the deploy owns the final record.
   `update available: installed v0.1.0-alpha.11 is behind the latest release v0.2.0 - /update installs it`.
   Silent for `current`, `ahead` and `unknown`, and never inside the transcript.
 - **CLI**, `/update`: the deploy verdict, then `release: ...` when behind.
-- **Window**, on load: a dismissible toast and a topbar badge with the node's sentence, drawn once
-  after the first paint from `POST /update {"check": true}` (`banner`) - and the same sentence on the
-  session-status-content line directly above the composer footer, in yellow, for as long as the node
-  is behind (the toast can be dismissed; the line is the standing state). Not a transcript row.
+- **Window**, on load: a topbar badge and the same sentence on the session-status-content line
+  directly above the composer footer, in yellow, for as long as the node is behind - drawn once after
+  the first paint from `POST /update {"check": true}` (`banner`). Not a transcript row, and not an
+  overlay: the line takes its own row under the text area (a toast pinned to the window's bottom edge
+  covered the text area and its divider - operator, 10/11, removed).
 - **Window**, `/update`: the same sentence in its notice.
 
 `POST /update {"check": true}` is **read-only**: it never synchronizes the tree, never takes a backup
@@ -281,9 +282,9 @@ precedence and the notice coming back, the freshness windows pinned against
 build-status file reader (a fixture, a broken file, a missing one) - and the view itself, driven with
 its screen set: no notice takes no row, the notice is drawn yellow on the row above the status bar
 while the bar keeps its own content, a build replaces it on the same row, a failure hands it back,
-and 40 columns is 40 columns with an ellipsis. `tests/update-banner.js` - 68 checks in the gate's
-`js:` set: reads the real `ui/app.js` functions and runs them against a stub DOM (toast + badge
-drawn, dismiss keeps the badge, badge acts, current clears all three), the session-status-content line
+and 40 columns is 40 columns with an ellipsis. `tests/update-banner.js` - 64 checks in the gate's
+`js:` set: reads the real `ui/app.js` functions and runs them against a stub DOM (line + badge
+drawn, nothing floats over the text area, badge acts, current clears both), the session-status-content line
 above `.composer-footer` in the stylesheet's yellow, removed when there is nothing to say and
 ellipsised rather than wrapped, and pins the one sentence across `lua/core/update_banner.lua`,
 `app.js` and the CLI. `rust/wa-term`: `cargo test -p wa-term` covers the same layout rule on the

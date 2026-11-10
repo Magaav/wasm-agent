@@ -1,13 +1,14 @@
-// The window's half of the update banner: the dismissible toast, the standing badge, and the one
-// sentence the CLI footer prints too.
+// The window's half of the update banner: the one line in the composer, the standing badge, and the
+// one sentence the CLI footer prints too.
 //
 //   node tests/update-banner.js
 //
 // The functions are read out of the shipping `ui/app.js` (not re-implemented) and run against a stub
 // DOM that implements exactly what they touch, so this fails when the source drifts rather than when a
-// copy of it does. Three things are pinned: the text comes from the node (`banner.line`) and falls back
-// to the same wording when a node is too old to send it; the banner is a toast + badge and never a row
-// in the transcript; dismissing hides the toast and leaves the badge, which acts. The cross-language
+// copy of it does. Four things are pinned: the text comes from the node (`banner.line`) and falls back
+// to the same wording when a node is too old to send it; the banner is a row + badge and never a row
+// in the transcript; nothing is drawn as an overlay on the text area (operator, 10/11); the badge acts.
+// The cross-language
 // check at the end reads `lua/core/update_banner.lua` so the two surfaces cannot disagree about the
 // sentence.
 const fs = require("fs");
@@ -33,9 +34,9 @@ check(/body: JSON\.stringify\(\{ check: true \}\)/.test(source),
 check(!/showReleaseBanner/.test(source), "the old transcript banner is gone");
 check(!/messages\.append\(banner\)/.test(source), "no update banner is appended to the transcript");
 check(/data-update-badge|dataset\.updateBadge/.test(source), "the badge is marked for lookup");
-check(/data-update-toast|dataset\.updateToast/.test(source), "the toast is marked for lookup");
-check(/dismissUpdateToast/.test(source), "the toast has a dismiss path");
-check(/\.update-toast \{/.test(css), "the toast has its own style");
+check(!/data-update-toast|dataset\.updateToast|paintUpdateToast|dismissUpdateToast/.test(source),
+  "no floating toast exists in the window's source");
+check(!/\.update-toast \{/.test(css), "and no overlay rule is left in the stylesheet");
 check(/\.update-badge \{/.test(css), "the badge has its own style");
 
 // ---- run the real functions against a stub DOM ----------------------------
@@ -122,16 +123,12 @@ const documentStub = {
     if (selector === "[data-update-badge]") {
       return topbar.children.find((c) => c.dataset && c.dataset.updateBadge) || null;
     }
-    if (selector === "[data-update-toast]") {
-      return body.children.find((c) => c.dataset && c.dataset.updateToast) || null;
-    }
     return null;
   },
 };
 
 let updatesAsked = 0;
 const sandbox = new Function("document", "updateNode", `
-let updateToastDismissed = false;
 // The row has two producers since the seamless-update change: the banner is the standing text and
 // \`updating…\` replaces it while the node is away being replaced (tests/seamless-reconnect.js tests that
 // half). Both are extracted from the same shipping source, so this still fails when app.js drifts.
@@ -143,9 +140,7 @@ let sessionUpdating = "";
 let toolRow = null;
 const UPDATING_TEXT = "updating…";
 ${extract("updateBannerText")}
-${extract("dismissUpdateToast")}
 ${extract("paintUpdateBadge")}
-${extract("paintUpdateToast")}
 ${extract("paintSessionNotice")}
 ${extract("paintSessionContent")}
 ${extract("paintUpdating")}
@@ -153,14 +148,11 @@ ${extract("applyUpdateBanner")}
 return {
   updateBannerText,
   applyUpdateBanner,
-  dismissUpdateToast,
   paintSessionNotice,
-  toastDismissed: () => updateToastDismissed,
 };
 `)(documentStub, () => { updatesAsked += 1; });
 
 const badge = () => documentStub.querySelector("[data-update-badge]");
-const toast = () => documentStub.querySelector("[data-update-toast]");
 const behind = {
   banner: {
     state: "behind",
@@ -176,12 +168,10 @@ check(!!badge(), "a badge is added to the topbar");
 check(badge().title === drawn, "the badge carries the full sentence as its title");
 check(badge().attributes["aria-label"] === drawn, "the badge is described for a screen reader");
 check(badge().dataset.updateBadge === "available", "the badge is marked as an available update");
-check(!!toast(), "a toast is added");
-check(toast().textContent === drawn, "the toast carries the sentence");
-check(toast().className === "update-toast", "the toast has its own class, not a transcript notice");
-check(toast().attributes.role === "status" && toast().attributes["aria-live"] === "polite",
-  "the toast is announced politely rather than stealing focus");
-check(body.children.includes(toast()), "the toast lives on the page body, not in the transcript");
+check(body.children.every((c) => !(c.dataset && c.dataset.updateToast)), "no toast is added to the page body");
+check(body.children.every((c) => c.className !== "update-toast"), "and nothing that would float over the page either");
+check(!/\.session-status-content \{[^}]*position: fixed/.test(css),
+  "the one line the reader gets is in the layout, never pinned over the text area");
 
 // ---- session-status-content: the notice's own line above the status bar ----------------
 // The composer footer is this page's status bar; the notice gets ONE line directly above it, in the
@@ -211,23 +201,20 @@ check(/\.session-status-content \{[^}]*color: var\(--warn\)/.test(css), "it is y
 check(/\.session-status-content \{[^}]*white-space: nowrap/.test(css), "and never wraps");
 check(/\.session-status-content \{[^}]*text-overflow: ellipsis/.test(css),
   "a narrow window truncates it with an ellipsis (width 40 included)");
-// A node with no `.composer` in the document is not an error: the badge and the toast still draw.
+// A node with no `.composer` in the document is not an error: the badge still draws.
 const bareDocument = { ...documentStub, querySelector: (selector) => (selector === ".composer" || selector === "[data-session-status-content]" ? null : documentStub.querySelector(selector)) };
 const bare = new Function("document", `${extract("paintSessionNotice")} return paintSessionNotice;`)(bareDocument);
 check(bare("Update available") === null, "a page with no composer draws no line rather than failing");
 
-check(noticeRow().textContent === drawn, "the line carries the same sentence as the toast and the badge");
+check(noticeRow().textContent === drawn, "the line carries the same sentence as the badge");
 
-// Dismissing removes the toast and keeps the standing badge; a later draw does not resurrect it.
-const close = toast().children.find((c) => c.className === "update-toast-close");
-check(!!close, "the toast has a dismiss button");
-check(close.attributes["aria-label"] === "Dismiss the update notice", "the dismiss button is described");
-close.fire("click");
-check(toast() === null, "dismissing removes the toast");
-check(!!badge(), "the badge stays after the toast is dismissed");
-check(sandbox.toastDismissed() === true, "the dismissal is remembered");
+// One draw, one row: a second call while the node is still behind updates the sentence in place and
+// never stacks a second surface under the text area.
+const sameRow = noticeRow();
 sandbox.applyUpdateBanner(behind);
-check(toast() === null, "a second draw does not bring a dismissed toast back");
+check(noticeRow() === sameRow, "a second draw reuses the row rather than adding one");
+check(composer.children.filter((c) => c.className === "session-status-content").length === 1,
+  "and there is exactly one notice line in the composer");
 
 // The badge acts: the same request `/update` makes.
 sandbox.applyUpdateBanner(behind);
@@ -259,7 +246,7 @@ check(sandbox.updateBannerText({ release: { state: "current", message: "current"
 // ---- the indicator disappears once the node runs that version -----------
 sandbox.applyUpdateBanner({ banner: { state: "current" } });
 check(badge() === null, "a current node clears the badge on the next load");
-check(toast() === null, "and any toast is gone");
+check(body.children.every((c) => c.className !== "update-toast"), "and nothing floating is left behind");
 check(noticeRow() === null, "and the session-status-content line goes: no empty row above the status bar");
 
 // ---- one sentence, two languages ---------------------------------------
