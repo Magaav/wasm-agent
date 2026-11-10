@@ -5,7 +5,9 @@
 #
 # It measures and reports. It deletes NOTHING: no rm, no prune, no cargo clean, no recycle-bin
 # clear, no prune of a worktree. The skill's section 1 points here, so the numbers a plan is made
-# from and the numbers this file prints cannot drift apart.
+# from and the numbers this file prints cannot drift apart. It also names the build-output targets
+# (canonical, worktree and job-clone cargo targets, benchmark cargo-targets), the worktrees git could
+# release, and the disk floor - sections 2.1, 4 and 6 of the skill.
 #
 # The two traps the skill records are encoded here, in the code that can get them wrong:
 #
@@ -46,6 +48,8 @@ TEMP_DIR="$(unix_path "${TEMP:-$LOCAL/Temp}")"
 EXPLORER_DIR="$(unix_path "$LOCAL/Microsoft/Windows/Explorer")"
 CHROME_CACHE="$(unix_path "$LOCAL/Google/Chrome/User Data/Default/Cache")"
 CARGO_REGISTRY="$HOME_DIR/.cargo/registry"
+# Job clones set CARGO_TARGET_DIR to $WA_PI_DIR/target-<job>; the clones' source is not a target.
+PI_DIR="${WA_PI_DIR:-$HOME_DIR/wa-pi}"
 
 human_bytes() {
   awk -v b="${1:-0}" 'BEGIN {
@@ -85,6 +89,36 @@ measure_files() {
     total=$((total + bytes))
   done
   if [ "$found" -eq 0 ]; then printf 'absent\n'; else printf '%s\n' "$(human_bytes "$total")"; fi
+}
+
+# A list of named directories, each measured with the same bound, summed into one number and a count.
+# Used for worktree and job-clone cargo targets: never a walk of the whole tree.
+measure_dirs_sum() {
+  local total=0 found=0 d out mb
+  for d in "$@"; do
+    [ -d "$d" ] || continue
+    out="$(timeout "$LIMIT" du -sm -- "$d" 2>/dev/null)" || continue
+    mb="${out%%[[:space:]]*}"
+    case "$mb" in ''|*[!0-9]*) continue ;; esac
+    total=$((total + mb)); found=$((found + 1))
+  done
+  if [ "$found" -eq 0 ]; then printf 'absent\n'
+  else printf '%s (%s dirs)\n' "$(human_bytes $((total * 1048576)))" "$found"; fi
+}
+
+# The same for every directory called NAME under ROOT (benchmark arm cargo-target dirs).
+measure_named_dirs_sum() {
+  local root="$1" name="$2" total=0 found=0 d out mb
+  if [ ! -d "$root" ]; then printf 'absent\n'; return; fi
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    out="$(timeout "$LIMIT" du -sm -- "$d" 2>/dev/null)" || continue
+    mb="${out%%[[:space:]]*}"
+    case "$mb" in ''|*[!0-9]*) continue ;; esac
+    total=$((total + mb)); found=$((found + 1))
+  done < <(find "$root" -maxdepth 3 -type d -name "$name" 2>/dev/null)
+  if [ "$found" -eq 0 ]; then printf 'absent\n'
+  else printf '%s (%s dirs)\n' "$(human_bytes $((total * 1048576)))" "$found"; fi
 }
 
 # A Windows directory that du cannot read but PowerShell can (WinSxS, Recycle Bin). `-ErrorAction
@@ -154,12 +188,39 @@ fi
 
 printf 'clean-disk: DRY RUN - nothing is deleted, pruned or cleaned by this script\n'
 printf 'path | size | verdict\n'
+floor_state="absent (scripts/check-disk-floor.sh not found)"
+if [ -f "$REPO/scripts/check-disk-floor.sh" ]; then
+  floor_out="$(bash "$REPO/scripts/check-disk-floor.sh" 2>&1)"; floor_rc=$?
+  if [ "$floor_rc" -eq 0 ]; then
+    floor_state="ok - $(printf '%s\n' "$floor_out" | awk '/^  free:/{sub(/^  free:  */,""); print; exit}')"
+  elif [ "$floor_rc" -eq 1 ]; then
+    floor_state="REFUSED - $(printf '%s\n' "$floor_out" | awk '/^FAIL:/{sub(/^FAIL: /,""); print; exit}')"
+  else
+    floor_state="UNMEASURABLE (exit $floor_rc)"
+  fi
+fi
+row 'disk floor (3.71 GiB)' "$floor_state" \
+  'below it a build or a deploy fallback is refused; free target dirs first'
 row 'session-scratch' "$(measure_dir "$WASM/session-scratch")" \
   'per session, oldest first (keep newest 5 + any open session)'
 row 'benchmarks' "$(measure_dir "$WASM/benchmarks")" \
-  'finished runs only, oldest first; keep what a delivery record references'
-row 'rust/target' "$(measure_dir "$TARGET_DIR")" \
+  'run dir is evidence; per-arm cargo-target is build output; worktrees via git'
+row 'rust/target (canonical)' "$(measure_dir "$TARGET_DIR")" \
   'cargo clean is opt-in - say the rebuild cost out loud; debug before release'
+worktree_targets=()
+while IFS= read -r wt; do
+  [ "$(unix_path "$wt")" = "$REPO" ] && continue
+  [ -n "$MAIN_TREE" ] && [ "$wt" = "$MAIN_TREE" ] && continue
+  [ -d "$wt/rust/target" ] && worktree_targets+=("$wt/rust/target")
+done < <(git -C "$REPO" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0,10)}')
+row 'worktree rust/targets' "$(measure_dirs_sum "${worktree_targets[@]:-}")" \
+  'build output; disposable when no .cargo-lock - the worktree and its drafts are not'
+job_targets=()
+for d in "$PI_DIR"/target-*; do [ -d "$d" ] && job_targets+=("$d"); done
+row 'job-clone targets (wa-pi/target-*)' "$(measure_dirs_sum "${job_targets[@]:-}")" \
+  'CARGO_TARGET_DIR build output; the clone source is not'
+row 'benchmark cargo-target dirs' "$(measure_named_dirs_sum "$WASM/benchmarks" cargo-target)" \
+  'per-arm build output; the run dir (manifest/report/logs) is evidence - worktrees via git'
 row '%TEMP%' "$(measure_dir "$TEMP_DIR")" \
   'harness output; safe when no test-ui.ps1 is running'
 row 'operations' "$(measure_dir "$WASM/operations")" \
@@ -167,9 +228,22 @@ row 'operations' "$(measure_dir "$WASM/operations")" \
 row 'sentinel logs' "$(measure_files "$WASM/sentinel/deploy.out" "$WASM/sentinel/deploy.log" "$WASM/sentinel/sentinel.log")" \
   'rotate, keep the last ~50 MB each; NEVER delete requests/done/failed evidence'
 
-worktree_count="$(git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -c '^worktree ')"
-row 'worktrees' "${worktree_count:-unknown} worktrees (count only)" \
-  'sizes NOT measured - per-worktree du is slow; release only clean + inactive + merged'
+worktree_list="$(git -C "$REPO" worktree list --porcelain 2>/dev/null)"
+worktree_count="$(printf '%s\n' "$worktree_list" | grep -c '^worktree ')"
+prunable_count="$(printf '%s\n' "$worktree_list" | grep -c '^prunable')"
+releasable_count=0
+while IFS= read -r wt; do
+  [ -n "$wt" ] || continue
+  [ "$(unix_path "$wt")" = "$REPO" ] && continue
+  [ -n "$MAIN_TREE" ] && [ "$wt" = "$MAIN_TREE" ] && continue
+  [ -d "$wt" ] || continue
+  branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" || continue
+  git -C "$wt" merge-base --is-ancestor "$branch" origin/main 2>/dev/null || continue
+  [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || continue
+  releasable_count=$((releasable_count + 1))
+done < <(printf '%s\n' "$worktree_list" | awk '/^worktree /{print substr($0,10)}')
+row 'worktrees' "${worktree_count:-unknown} registered, ${prunable_count:-0} prunable, ${releasable_count} clean+merged (count only)" \
+  'inactivity NOT measured; release only an idle clean+merged tree via git worktree remove'
 
 # Docker: `docker system df` is the authority, and RECLAIMABLE is the delete candidate.
 docker_df=""
