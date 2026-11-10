@@ -71,8 +71,11 @@ OUT="$(run_block "$TREE" "$WORK/install")"
 [ $? = "0" ] || fail "the ship block refused a complete tree: $OUT"
 echo "$OUT" | grep -q 'PIPELINE=' || fail "the ship block did not reach its end: $OUT"
 
-# 1. The reader and the module it imports are both installed, and every other relative import resolves.
-[ -f "$WORK/install/scripts/whatsapp-read.mjs" ] || fail "the reader itself was not installed"
+# 1. The operator (the send path) and the module it imports are both installed, and every other relative
+#    import resolves. whatsapp-read.mjs went with the Node bridge (10/11); whatsapp-operator.mjs is the
+#    shipped script this checks now.
+[ -f "$WORK/install/scripts/whatsapp-operator.mjs" ] || fail "the operator itself was not installed"
+[ -f "$WORK/install/scripts/whatsapp-connector-http.mjs" ] || fail "the operator's connector client was not installed"
 [ -f "$WORK/install/scripts/lib/private-fixture.mjs" ] \
   || fail "synthetic lib import was not shipped"
 for source in "$WORK/install"/scripts/whatsapp-*; do

@@ -310,8 +310,10 @@ No arbitrary SQL, authentication-store or media-key access.
 While serving, use authenticated `/status`; offline CLI `status` cannot take the owner
 lock of a running server. Offline status has no live connection observation.
 
-`mcp-whatsapp.mjs` and the read-only `scripts/whatsapp-read.mjs` CLI use
-`backend: linked_device`. A locally approved profile binds:
+`scripts/whatsapp-operator.mjs` (send) and the read-only `scripts/whatsapp-readiness.mjs`
+use `backend: linked_device`, both through `scripts/whatsapp-connector-http.mjs`. The old
+read-only `scripts/whatsapp-read.mjs` CLI went with the Node MCP bridge (10/11): reads now
+come from the native index and the `wa-whatsapp` component. A locally approved profile binds:
 
 ```json
 {"resources":{"backend":"linked_device","account":"<exact-PN-JID>","generation":1,
@@ -323,9 +325,9 @@ lock of a running server. Offline status has no live connection observation.
 
 For a narrower profile omit both wide flags and set `allowed_conversations` to its
 exact approved IDs. No existing/delegated profile is automatically widened. Operator
-on-demand account reads use `scripts/whatsapp-read.mjs --profile-file <private-file>`
-(or the explicitly configured read-only MCP). The agent sees that MCP as
-`mcp_whatsapp_*` tools (or federated `peer_<node>__*` tools where another node holds
+on-demand account reads use the native index tools (`scripts/whatsapp-read.mjs` went with
+the Node MCP bridge, 10/11). The agent sees them as
+`whatsapp_search` / `whatsapp_read` (or federated `peer_<node>__*` tools where another node holds
 the connector) and calls them only from code mode: `await tools.<name>(args)`.
 Raw API credentials are account-owner credentials; delegated children receive only
 their scoped MCP binding, not token values or arbitrary HTTP/FS.
@@ -360,7 +362,7 @@ held across rollback; never restore an old “ready” outbox over a later dispa
 `go test -v ./...` in `connectors/whatsapp` uses real SQLite, actual pinned adapter
 compilation/event mappings, fake WhatsApp transport, real HTTP handlers and private
 process fixtures. Set `WA_TEST_PYTHON` for the warm-process fixture; missing it is a skip.
-`node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs`,
+`node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs`,
 `python scripts/test-whatsapp-local.py` and Rust wa-jobs tests cover the boundary
 behavior. These are deterministic fixtures, NOT
 recognition-quality measurements or proof of real pairing/send/reconnect behavior.

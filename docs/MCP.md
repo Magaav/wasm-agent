@@ -85,7 +85,11 @@ the catalog with its reason and no tools. Guests neither list nor call. Proof: `
 separate provisioned CLI/API capability, NOT generic MCP `send_message` or a
 permission widening of this read boundary. GENERAL responder sends remain refused.
 
-The built-in `mcp-whatsapp.mjs` now uses ONLY explicit linked-device account,
+The Node MCP bridge (`scripts/mcp-whatsapp.mjs`, `scripts/whatsapp-mcp-client.mjs`) was deleted
+on 10/11/2026: WhatsApp reads answer from the native index (`whatsapp_native`) and the
+`wa-whatsapp` component, so no Node server is registered for WhatsApp on any node. The connector
+HTTP client the bridge also carried survives as `scripts/whatsapp-connector-http.mjs`, imported by
+the operator send path and the readiness check. A binding still uses ONLY explicit linked-device account,
 generation, exact chat scope, connector URL and credential FILE references.
 Explicit operator-wide bindings can read a service account approved with --all-chats;
 child/event reads stay narrow and model arguments cannot grant account scope. One
@@ -146,9 +150,10 @@ for exact cache, permission, paging and shadow-benchmark limits.
 
 ## Focused proof
 
-- `node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-whatsapp.mjs`
-  uses private stdio/HTTP peers, credentials, malformed output, schema change,
-  timeout/no replay, linked-device scope/auth and explicit model-send refusal.
+- `node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs`
+  uses private stdio/HTTP peers, credentials, malformed output, schema change and
+  timeout/no replay. The operator send path's negatives are covered by
+  `scripts/test-whatsapp-operator-process.mjs` against the real unpaired connector binary.
   Go connector fixtures separately cover fake transport/STT/posting against real SQLite.
   No real WhatsApp messages or paid model.
 - `node scripts/test-mcp-native.cjs <built-wa> <fresh-evidence>` and `--post`

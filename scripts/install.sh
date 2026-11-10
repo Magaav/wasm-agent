@@ -177,7 +177,7 @@ if [ "$HAVE_LIB" = "1" ]; then
 else
   MCP_DATA_DIR="${WASM_AGENT_HOME:-$HOME}/.wasm-agent"
 fi
-MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-whatsapp.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
+MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
 MCP_MISSING=""
 for MCP_TARGET in "$SCRIPTS_DIR" "$MCP_DATA_DIR/scripts"; do
   mkdir -p "$MCP_TARGET" || { MCP_MISSING="$MCP_MISSING $MCP_TARGET"; continue; }
@@ -192,9 +192,9 @@ for MCP_TARGET in "$SCRIPTS_DIR" "$MCP_DATA_DIR/scripts"; do
   done
 done
 if [ -z "$MCP_MISSING" ]; then
-  ok "MCP runtime: mcp-web.mjs, mcp-whatsapp.mjs and their imports"
+  ok "MCP runtime: mcp-web.mjs, mcp-mail.mjs and their imports"
 else
-  warn "MCP runtime incomplete (missing:$MCP_MISSING) - web_search, web_read and the WhatsApp connector refuse until it is installed"
+  warn "MCP runtime incomplete (missing:$MCP_MISSING) - web_search, web_read and mail refuse until it is installed"
 fi
 
 # Node is the runtime those scripts need. Shipping the scripts without it is the same half-fix one level

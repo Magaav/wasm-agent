@@ -426,7 +426,8 @@ pub fn run(installed: &Installed, grant: &Grant, stdin: Vec<u8>, timeout_ms: u64
         builder.inherit_network();
         // Two wasmtime 37 → 50 behaviour changes meet here, both of which silently turned a granted
         // component network into "permission denied" (`Os { code: 2 }` in the guest, EACCES) until
-        // `scripts/test-component-whatsapp-parity.mjs` caught it:
+        // the WhatsApp component's parity check (then `scripts/test-component-whatsapp-parity.mjs`, itself
+        // deleted with the Node bridge on 10/11) caught it:
         //
         // 1. `WasiCtx`'s blanket TCP/UDP switch: 37 wrote `udp: true, tcp: true` into
         //    `AllowedNetworkUses::default()`, 50 derives the default, i.e. both are off, and

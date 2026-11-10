@@ -298,7 +298,7 @@ if ($haveSentinel) {
 # always reports, with no environment variable and no install layout involved.
 $mcpRuntime = @(
   "mcp-client.mjs", "mcp-client-core.mjs", "mcp-server-core.mjs", "mcp-session.mjs",
-  "mcp-web.mjs", "mcp-whatsapp.mjs", "mcp-mail.mjs", "web-core.mjs", "web-http-outcomes.mjs"
+  "mcp-web.mjs", "mcp-mail.mjs", "web-core.mjs", "web-http-outcomes.mjs"
 )
 $mcpMissing = @()
 foreach ($mcpTarget in @((Join-Path $nodeDir "scripts"), (Join-Path $waHome "scripts"))) {
@@ -318,9 +318,9 @@ foreach ($mcpTarget in @((Join-Path $nodeDir "scripts"), (Join-Path $waHome "scr
   }
 }
 if ($mcpMissing.Count -eq 0) {
-  Ok "MCP runtime: mcp-web.mjs, mcp-whatsapp.mjs and their imports"
+  Ok "MCP runtime: mcp-web.mjs, mcp-mail.mjs and their imports"
 } else {
-  Warn "MCP runtime incomplete (missing: $($mcpMissing -join ', ')) - web_search, web_read and the WhatsApp connector refuse until it is installed"
+  Warn "MCP runtime incomplete (missing: $($mcpMissing -join ', ')) - web_search, web_read and mail refuse until it is installed"
 }
 
 # Node is the runtime those scripts need. Shipping the scripts without it is the same half-fix one

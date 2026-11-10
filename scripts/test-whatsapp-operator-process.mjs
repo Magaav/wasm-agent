@@ -5,7 +5,7 @@ import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import net from 'node:net';
-import {connectorRequest} from './mcp-whatsapp.mjs';
+import {connectorRequest} from './whatsapp-connector-http.mjs';
 const binary=resolve(process.argv[2]);const root=mkdtempSync(join(tmpdir(),'wa-operator-unpaired-'));
 const state=join(root,'state'),owners=join(root,'owners'),account='100@s.whatsapp.net';
 const run=(action,args=[])=>spawnSync(binary,[action,'--state',state,...args],{encoding:'utf8',timeout:10000});

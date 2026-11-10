@@ -200,20 +200,13 @@ all following production effects; do not ask another worker to finish this sourc
 7. **Approve local operator read binding, no delegated widening.** Use the private
    profile shape in connector docs with exact account/generation, BOTH owner-read
    flags, HTTPS URL and token/CA FILE paths. Do not modify shipped narrow profiles.
-   For local conversation tool access, coordinator can explicitly put/probe/enable
-   a read-only stdio MCP definition through Engine's existing revision-fenced UI:
-   ```json
-   {"id":"whatsapp","name":"WhatsApp operator reads","transport":"stdio",
-    "program":"<absolute-node-executable>",
-    "args":["<absolute-reviewed-source>/scripts/mcp-whatsapp.mjs","--profile-file","<absolute-private-operator-profile>"],
-    "cwd":"<absolute-reviewed-source>","timeout_seconds":120,
-    "tools":{"read_snapshot":"read","list_chats":"read","posting_status":"read",
-             "read_field":"read","lookup_self":"read","inspect_chat":"read"}}
-   ```
-   Retain current revision, put/probe readback and explicitly enable only those six
-   reads. A probe is not account health/permission to send. No generic send/media
-   registration. Discovery namespaced tools then support this operator conversation
-   from code mode. Registry changes belong to coordinator.
+   The read-only stdio MCP definition this step used to register is gone with the Node bridge
+   (`scripts/mcp-whatsapp.mjs`, deleted 10/11/2026): there is nothing left to put, probe or
+   enable for WhatsApp reads. They answer from the native index (`whatsapp_native`, the tool
+   names `peer_<node>__whatsapp_*`) and, for the queue-backed surface, from the `wa-whatsapp`
+   component. Keep the revision-fenced UI for other connectors; no generic send/media
+   registration exists, and WhatsApp sends go through the operator path alone. Registry
+   changes belong to coordinator.
 
 ## Practical bounded navigation after authorized setup
 
@@ -221,13 +214,14 @@ Run on the authorized LOCAL operator device (same approved profile/transport):
 
 ```sh
 node scripts/whatsapp-readiness.mjs --profile-file "$PROFILE"
-node scripts/whatsapp-read.mjs --profile-file "$PROFILE" --list-chats --query 'Ana' --limit 20
-# Human/operator chooses exact ID after inspecting duplicate labels + ID + provenance.
-node scripts/whatsapp-read.mjs --profile-file "$PROFILE" --chat "$CHAT" --limit 100 --sent-since "$START_EPOCH" --until "$END_EPOCH"
-node scripts/whatsapp-read.mjs --profile-file "$PROFILE" --chat "$CHAT" --query 'orçamento' --limit 50
-# Retain SAME filters and pass returned next_before if truncated. Recover referenced fields:
-node scripts/whatsapp-read.mjs --profile-file "$PROFILE" --resource read_snapshot --row "$ROW" --field transcript --version "$VERSION" --offset 0 --length 16384
 ```
+
+Then navigate with the native index tools from code mode
+(`peer_<node>__whatsapp_search` / `whatsapp_read` where another node holds the account):
+search by a name or a literal term, take the exact chat ID from the answer, and read a
+bounded window with `conversation_id` plus `limit` and the time bounds. Human/operator
+chooses the exact ID after inspecting duplicate labels + ID + provenance. The
+`whatsapp-read.mjs` CLI these examples used went with the Node MCP bridge (10/11).
 
 MCP calls use the same fields without loading all chats into model context. Read
 only relevant named candidates and selected bounded windows. Search covers only

@@ -1,9 +1,10 @@
-//! WhatsApp linked-device MCP, as a WASI component (wasm32-wasip2).
+//! The WhatsApp linked-device MCP, as a WASI component (wasm32-wasip2).
 //!
-//! Port of scripts/mcp-whatsapp.mjs: the same tools, schemas and fail-closed checks, speaking MCP
-//! over stdio. It runs inside the host's wasmtime with exactly what the registry grants (see
-//! manifest.json): the account/generation/url env values, the connector token (a file the HOST
-//! reads), and TCP to a loopback connector port. No filesystem, no other network.
+//! It was ported from `scripts/mcp-whatsapp.mjs`, the Node stdio bridge that was deleted on
+//! 10/11/2026; this component is now the only MCP surface onto WhatsApp, with the same tools,
+//! schemas and fail-closed checks. It runs inside the host's wasmtime with exactly what the registry
+//! grants (see manifest.json): the account/generation/url env values, the connector token (a file the
+//! HOST reads), and TCP to a loopback connector port. No filesystem, no other network.
 //!
 //! Binding: `WA_COMPONENT_CONFIG` (the registry's non-secret `config` object, e.g.
 //! `{"allowed_conversations":[...]}` or `{"account_wide":true,"operator_account_read":true}`)
