@@ -139,7 +139,9 @@ function M.validate(def)
   -- what the node already does needs no program, no socket and no token.
   if type(def.native)~='table' or next(def.native)==nil then return 'invalid_mcp_native_map' end
   for tool,cap in pairs(def.native)do
-   if not valid_id(tool) or type(cap)~='string' or (cap~='identity' and not NATIVE_CAPS[cap]) then return 'invalid_mcp_native_map' end
+   if not valid_id(tool) or type(cap)~='string' then return 'invalid_mcp_native_map' end
+   local known=NATIVE_TOOLS[tool]
+   if not known or known.cap~=cap then return 'invalid_mcp_native_map' end
   end
   if def.program~=nil or def.args~=nil or def.cwd~=nil or def.url~=nil or def.headers~=nil or def.component~=nil or def.net~=nil or def.file_env~=nil then return 'mcp_native_takes_no_transport' end
  elseif def.transport=='component' then
@@ -196,33 +198,40 @@ local function invoke_component(input)
  if not answer then return fail('component_answer_unreadable',{tool_call_issued=input.action=='call',outcome=input.action=='call' and 'unknown' or 'not_submitted'}) end
  return answer
 end
--- The node capabilities a native connector may map onto, with the JSON schema each one takes.
--- Read-only questions only: a connector has never been the send path (the operator route is), and
--- an effectful capability would need the approvals an MCP call does not carry.
-NATIVE_CAPS={
- whatsapp_search={description='Search the WhatsApp message index this node holds',
-  schema='{"type":"object","properties":{"q":{"type":"string"},"chat":{"type":"string"},"kind":{"type":"string"},"from":{"type":"string"},"since":{"type":"integer"},"until":{"type":"integer"},"limit":{"type":"integer"}},"additionalProperties":false}'},
- whatsapp_read={description='Read one WhatsApp chat newest-first from the index this node holds',
-  schema='{"type":"object","properties":{"chat":{"type":"string"},"before":{"type":"string"},"limit":{"type":"integer"}},"required":["chat"],"additionalProperties":false}'},
- whatsapp_reactions={description='Who reacted to one WhatsApp message, with which emoji',
-  schema='{"type":"object","properties":{"chat":{"type":"string"},"id":{"type":"string"}},"required":["chat","id"],"additionalProperties":false}'},
- whatsapp_media={description='Media metadata of one WhatsApp message',
-  schema='{"type":"object","properties":{"chat":{"type":"string"},"id":{"type":"string"}},"required":["chat","id"],"additionalProperties":false}'},
-}
--- `lookup_self` needs no capability: the account is in the connector's own binding.
-local function native_identity(server)
- local config=type(server.config)=='table' and server.config or {}
- return {ok=true,account=config.account,generation=config.generation}
+-- What a native connector may publish, in the MCP tool's own vocabulary: the caller's fields are
+-- `conversation_id`/`n`/`query` (older than the capability's `chat`/`limit`/`q`), so the schema a
+-- connector publishes must name those, and the alias below is what turns them into the capability's.
+-- Read-only questions only: a connector has never been the send path (the operator route is).
+NATIVE_CAPS={whatsapp_search=true,whatsapp_read=true,whatsapp_reactions=true,whatsapp_media=true}
+local object=function(properties,required)
+ local body={}
+ for key,value in pairs(properties)do body[#body+1]='"'..key..'":'..value end
+ table.sort(body)
+ local fields=table.concat(body,',')
+ local parts={}
+ if fields~='' then parts[1]=fields end
+ if required and #required>0 then parts[#parts+1]='"required":['..table.concat(required,',')..']' end
+ parts[#parts+1]='"additionalProperties":false'
+ return '{'..table.concat(parts,',')..'}'
 end
+NATIVE_TOOLS={
+ read_newest={cap='whatsapp_read',description='Read one WhatsApp chat newest-first from the index this node holds',
+  schema=object({conversation_id='{"type":"string"}',n='{"type":"integer"}',scan_days='{"type":"integer"}'},{'"conversation_id"'})},
+ inspect_chat={cap='whatsapp_read',description='Inspect one WhatsApp chat: newest messages of that exact chat',
+  schema=object({conversation_id='{"type":"string"}',limit='{"type":"integer"}'},{'"conversation_id"'})},
+ read_snapshot={cap='whatsapp_search',description='Search the WhatsApp message index this node holds',
+  schema=object({conversation_id='{"type":"string"}',query='{"type":"string"}',kind='{"type":"string"}',from='{"type":"string"}',since='{"type":"integer"}',['until']='{"type":"integer"}',limit='{"type":"integer"}'})},
+ lookup_self={cap='identity',description='The WhatsApp account this node is paired with',
+  schema=object({})},
+}
 local function invoke_native(input)
  local server=input.server or {}
  local function probe()
   local tools={}
   for tool,cap in pairs(server.native or {})do
-   local spec=NATIVE_CAPS[cap]
-   local description=spec and spec.description or 'The account this node is paired with'
-   local schema=spec and spec.schema or '{"type":"object","properties":{},"additionalProperties":false}'
-   tools[#tools+1]={name=tool,description=description,input_schema_json=schema}
+   local spec=NATIVE_TOOLS[tool]
+   if not spec or spec.cap~=cap then return fail('mcp_native_tool_unknown',{tool=tool}) end
+   tools[#tools+1]={name=tool,description=spec.description,input_schema_json=spec.schema}
   end
   table.sort(tools,function(a,b)return a.name<b.name end)
   return {ok=true,tools=tools,schema_hash=host.sha256(json.encode(tools))}
@@ -239,6 +248,8 @@ local function invoke_native(input)
  -- the capability does not take, so a tool call is the same question whichever door asked it.
  local ALIAS={read_newest={conversation_id='chat',n='limit'},inspect_chat={conversation_id='chat'},
   read_snapshot={conversation_id='chat',query='q'}}
+ local known=NATIVE_TOOLS[tool]
+ if not known then return fail('mcp_native_tool_unknown',{tool=tool}) end
  local function translate()
   local alias=ALIAS[tool]
   if not alias then return args end
