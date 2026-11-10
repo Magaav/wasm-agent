@@ -117,6 +117,47 @@ inputs that changed; it never lands unproven and never silently reruns. `--check
 command **on the merged tree** after the merge and before the push, and rolls the merge back if it
 fails.
 
+### 3b. Judged against what main already fails, not against zero
+
+Measured on wasm_the_first, 2026-11-10: main's own fast path was red with twelve Lua checks that fail
+because the installed node's component set is behind the tree (graph, codemode and features compare
+pinned contracts). A landing that demanded zero failures therefore demanded something no correct
+branch could reach, and five sessions improvised their own judge - a subset of the suite
+(`graph c54b3957`, `ui 1d23cbed`), a "scoped phase-1 check" (`whatsapp 3f40b12f`), and a by-name
+matcher against a pristine tree (`footer`, row #15 -> `a1bed507`, "12 tolerated, 0 new"). Each landing
+paid 6-15 minutes re-running a pristine baseline.
+
+There is now **one** implementation, `scripts/lib/landing-baseline.mjs`, folded from those two
+improvisations (the footer session's by-name matcher and session `08c59fbc`'s `wa-fast-baseline.sh`,
+which also refused an increase in the failing-check count and any failure in a non-Lua section). The
+queue applies it to every `--checks` run, by default:
+
+- **pass** - no failing name main does not already fail, no more failing checks than main, and no
+  section (rust, prompt-docs, instructions, landing-queue, fast-environment) that main passed;
+- **worse** (refused, named) - a new failing name, a passing one now failing, more failing checks, or
+  a stricter section that now fails: a crate that will not compile is never an environment fact;
+- **fixed** - a name main fails and the candidate does not is *reported*, never treated as a failure:
+  the base moves while a landing waits in the queue;
+- **environment** - the only NEW failures are ones `scripts/fast.sh` classified as the machine
+  (`cannot fork`, exit 125/126, errno 5, `scripts/lib/fast-environment.sh`). That is never a verdict on
+  the code: the queue retries the check once, serially, and if it still cannot run it refuses with
+  `environment_blocked`, which says plainly that the branch was not judged and no code change is owed;
+- **unproven** (refused) - the check command names no failing test, so a by-name comparison would be a
+  guess.
+
+The baseline itself is a record per (check command, machine, retest digest of main's tree):
+
+```
+node scripts/landing-queue.mjs baseline [--command "bash scripts/fast.sh"] [--commit <rev>] [--show]
+node scripts/landing-queue.mjs baseline --record <log> [--exit-code <n>]   # prime it from a saved run
+```
+
+Reuse is the point. A landing with no record for main's check inputs measures **one** pristine tree
+(`git worktree add --detach <main>`), records the result by name, and then lands; and every successful
+landing records its own candidate run as the baseline for the commit it just made main, so the next
+landing on that main pays **no pristine run at all**. `scripts/test-landing-baseline.mjs` measures
+exactly that: the first landing runs the check twice (pristine + candidate), the second runs it once.
+
 ### 4. Durable state that survives a node replacement
 
 `<git-common-dir>/wa-landing-queue/` (`WA_LANDING_QUEUE_DIR` to move it): `queue.sqlite` holds one row
@@ -152,6 +193,8 @@ acquire   --branch <name> [--no-wait]       enqueue and hold the lease (blocks; 
           [--wait-timeout <s>] [--lease-seconds <s>] [--no-hold]
 record    --tree <ref> [--command <what ran>] record a proof for a tree's retest digest
 classify  --from <rev> --to <rev> [--json]  what moved and whether it forces a retest
+baseline  [--command <cmd>] [--commit <rev>] what main already fails, by name (the landing baseline)
+          [--record <log>] [--exit-code <n>] [--json]
 land      --branch <name> [--checks <cmd>] [--dry-run] [--no-push]
 release   --id <n> [--result landed|abandoned] [--evidence <text>]
 reconcile --id <n> --evidence <text> [--force]
@@ -180,6 +223,16 @@ is never retried by itself); 76 the queue or the repository could not answer.
 - **The skip trusts the recorded proof.** `record` is the lander's own claim about its own run; the
   queue stores who said it and what command ran, and any session can read that, but it does not re-run
   the proof to check the claim (`--checks` does, and the nightly gate does for the exact tree).
+- **A baseline is a measurement of a machine, not a licence.** The names it tolerates were observed on
+  this host with this install; the record is keyed by host and check command so it is never borrowed
+  from another machine. If a tolerated failure gets worse inside its own name (the same test failing
+  for a new reason), a by-name judge cannot see it - the count, the strict sections and the nightly
+  gate are what remain.
+- **`scripts/fast.sh` decides what "the machine" looks like.** A check that prints a fork/spawn
+  signature in its last line is classified environmental. The rule is deliberately narrow
+  (`scripts/lib/fast-environment.sh`: exit 125/126 or a system-level signature) and the test beside it
+  proves a real assertion failure is never excused - but a regression whose own message ends in
+  `cannot fork:` would be reported as `environment_blocked` rather than as bad code.
 - **Reclaim is automatic only for a holder whose process is provably gone.** An alive-but-wedged
   holder blocks until a person reconciles it, on purpose.
 - **`docs/` and `skills/` are treated as documentation** except the listed check inputs. That is the

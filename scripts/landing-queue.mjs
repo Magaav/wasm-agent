@@ -14,19 +14,24 @@
 //   node scripts/landing-queue.mjs release --id <n> [--result landed|abandoned] [--evidence <text>]
 //   node scripts/landing-queue.mjs reconcile --id <n> --evidence <text> [--force]
 //   node scripts/landing-queue.mjs classify --from <rev> --to <rev> [--repo <dir>] [--json]
+//   node scripts/landing-queue.mjs baseline [--command "<cmd>"] [--commit <rev>] [--record <log>] [--exit-code <n>]
+//                                          [--source <label>] [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs history [--limit <n>] [--json] [--repo <dir>]
 //
 // Exit codes: 0 the command's own success; 75 refused (named, terminal - a refusal is never retried
 // by itself); 76 the queue or the repository could not answer.
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import crypto from 'node:crypto';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {
   QueueError, classifyDelta, treeDigest, candidateTree, canonicalDirt, describeDirt, git, gitOk,
   mainWorktree, openQueue, queueDir, logRow, resolveOwner, holderOf, reclaimPass, grantNext,
   queuePosition, waitingRows, heartbeat, resolveCommit, bootId, hostName, proofOf, recordProof,
+  baselineOf, recordBaseline, checkCommandKey,
 } from './lib/landing-queue.mjs';
+import {parseCheckLog, baselineRecord, judgeRun, describeRun} from './lib/landing-baseline.mjs';
 import {holdLease, releaseLease} from './lib/sqlite-lease.mjs';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -308,6 +313,99 @@ function commandClassify(options) {
   return delta;
 }
 
+// ---- running the checks, and what the tree already fails -----------------------------------------
+//
+// A landing's checks are judged against the known-failures baseline of the main it lands on
+// (scripts/lib/landing-baseline.mjs), not against zero: on wasm_the_first, main itself fails twelve
+// Lua checks because the installed node's component set is behind the tree, so "zero failures" is a
+// condition no correct branch can reach, and demanding it made five sessions improvise their own
+// judge. What a landing must prove is that it is not WORSE than main:
+//
+//   * no failing check that main does not already fail (a new name, or a passing one now failing);
+//   * no more failing checks than main, and no section (rust, prompt-docs, ...) that main passed;
+//   * an environment-only failure (`cannot fork`, exit 125/126 - scripts/lib/fast-environment.sh) is
+//     never a verdict on the code: it is retried once, serially, and only then named as blocked.
+//
+// The baseline is recorded per (check command, machine, retest digest of main's tree) and reused, so
+// a landing pays for a pristine run only when no measurement exists for that tree - and a landing
+// that succeeded records the measurement it just made of the merged tree as the baseline for the new
+// main, so the next landing on it pays nothing at all.
+
+function captureCommand({cwd, command, log, env = process.env, echo = true}) {
+  return new Promise(resolve => {
+    const child = spawn(command, {shell: true, cwd, env});
+    let output = '';
+    const take = chunk => { const text = chunk.toString(); output += text; if (echo) process.stdout.write(text); };
+    child.stdout.on('data', take);
+    child.stderr.on('data', take);
+    child.on('error', error => {
+      try { fs.writeFileSync(log, `${output}\n${error.message}\n`, 'utf8'); } catch { /* the row carries it */ }
+      resolve({code: 127, output: `${output}\n${error.message}`, log, error: String(error.message)});
+    });
+    child.on('close', code => {
+      try { fs.writeFileSync(log, output, 'utf8'); } catch { /* the row carries it */ }
+      resolve({code: code === null ? 126 : code, output, log});
+    });
+  });
+}
+
+// The same host binary the canonical checkout would use, handed to a pristine tree as WA_BIN: a fresh
+// `git worktree` has no `rust/target`, so a baseline run there would otherwise answer "no wa binary"
+// and be recorded as a tree with no checks at all.
+function checksEnvironment(canonical, extra = {}) {
+  const env = {...process.env, ...extra};
+  if (!env.WA_BIN) {
+    for (const candidate of [path.join(canonical, 'rust', 'target', 'release', 'wa.exe'),
+      path.join(canonical, 'rust', 'target', 'release', 'wa'),
+      path.join(os.homedir(), '.local', 'bin', 'wa')]) {
+      if (fs.existsSync(candidate)) { env.WA_BIN = candidate; break; }
+    }
+  }
+  return env;
+}
+
+function judgedRun(captured, what) {
+  const run = parseCheckLog(captured.output, {exitCode: captured.code});
+  return {run, what, log: captured.log, code: captured.code};
+}
+
+// The baseline for the main this landing starts from: the recorded one when the tree's check inputs
+// are unchanged, otherwise ONE measurement on a pristine checkout of that commit, recorded so no
+// later landing on the same inputs pays for it again.
+async function ensureBaseline({id, canonical, upstream, command, dir, db, say}) {
+  const digest = treeDigest(canonical, upstream).retest;
+  const cached = baselineOf(db, {digest, command});
+  if (cached) {
+    say(`#${id} baseline reused: ${(cached.names || []).length} known failure(s) recorded for main's check inputs ${digest.slice(0, 12)} by ${cached.recorded_by || 'an earlier landing'} (${cached.source || 'recorded'}), measured on ${String(cached.commit || '').slice(0, 12)}; no pristine run`);
+    return cached;
+  }
+  const worktree = path.join(os.tmpdir(), `wa-baseline-${upstream.slice(0, 12)}-${process.pid}`);
+  say(`#${id} no baseline recorded for main ${upstream.slice(0, 12)} with \`${checkCommandKey(command)}\` (check inputs ${digest.slice(0, 12)}); measuring it once on a pristine tree`);
+  fs.rmSync(worktree, {recursive: true, force: true});
+  const added = git(canonical, ['worktree', 'add', '--detach', worktree, upstream]);
+  if (added.status !== 0) {
+    throw new QueueError(`baseline_unavailable: cannot check out ${upstream.slice(0, 12)} to measure the baseline: ${String(added.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was merged or pushed.`, 75, 'baseline_unavailable');
+  }
+  try {
+    const captured = await captureCommand({
+      cwd: worktree, command, env: checksEnvironment(worktree), echo: false,
+      log: path.join(dir, `baseline-${upstream.slice(0, 12)}.log`),
+    });
+    const run = parseCheckLog(captured.output, {exitCode: captured.code});
+    if (!run.named && !run.ok) {
+      throw new QueueError(`baseline_unavailable: '${checkCommandKey(command)}' exited ${captured.code} on pristine ${upstream.slice(0, 12)} without naming a failing test, so a by-name comparison would be a guess. Run a check command that prints \`FAIL <section> <name> (exit N)\` lines (scripts/fast.sh does). Nothing was merged or pushed.`, 75, 'baseline_unavailable');
+    }
+    const record = baselineRecord({run, command: checkCommandKey(command), commit: upstream, digest, host: hostName(), source: 'pristine'});
+    recordBaseline(db, {digest, command, commit: upstream, record, by: 'queue'});
+    logRow(db, 0, 'baseline', `measured on pristine ${upstream.slice(0, 12)} (check inputs ${digest.slice(0, 12)}) with '${checkCommandKey(command)}': ${record.names.length} known failure(s), exit ${captured.code}`);
+    say(`#${id} baseline measured on pristine ${upstream.slice(0, 12)}: ${record.names.length} known failure(s)${record.names.length ? ` (${record.names.slice(0, 4).join(', ')}${record.names.length > 4 ? ', ...' : ''})` : ''}; recorded for check inputs ${digest.slice(0, 12)}`);
+    return record;
+  } finally {
+    const removed = git(canonical, ['worktree', 'remove', '--force', worktree]);
+    if (removed.status !== 0) git(canonical, ['worktree', 'prune']);
+  }
+}
+
 // ---- land ---------------------------------------------------------------------------------------
 async function commandLand(options) {
   if (!options.branch) throw new QueueError('land needs --branch <name>', 75, 'usage');
@@ -428,19 +526,50 @@ async function commandLand(options) {
     }
     // A required retest runs on the MERGED tree, because that is the tree the landing pushes and the
     // only tree whose result means anything here. It runs before the push, so a failure rolls the
-    // merge back to exactly the base the landing started from and nothing is published.
+    // merge back to exactly the base the landing started from and nothing is published. It is judged
+    // against main's known-failures baseline (see ensureBaseline above), not against zero.
+    let candidateRun = null;
     if (rerun) {
+      const baseline = await ensureBaseline({id, canonical, upstream, command: options.checks, dir, db, say});
       say(`#${id} retest required; running ${options.checks} on the merged tree ${merged.slice(0, 12)}`);
       const started = Date.now();
-      const run = spawnSync(options.checks, {shell: true, cwd: canonical, stdio: 'inherit', env: process.env});
-      const took = Math.round((Date.now() - started) / 1000);
-      if (run.status !== 0) {
-        const rollback = git(canonical, ['reset', '--hard', headAt]);
-        finish('refused', `checks_failed: '${options.checks}' exited ${run.status} after ${took}s on ${merged.slice(0, 12)}; rolled back to ${headAt.slice(0, 12)}`);
-        throw new QueueError(`checks_failed: '${options.checks}' exited ${run.status} after ${took}s on the merged tree ${merged.slice(0, 12)}; the merge was rolled back to ${headAt.slice(0, 12)} (reset ${rollback.status === 0 ? 'ok' : 'FAILED'}) and nothing was pushed`, 75, 'checks_failed');
+      let captured = await captureCommand({
+        cwd: canonical, command: options.checks, env: checksEnvironment(canonical),
+        log: path.join(dir, `checks-${merged.slice(0, 12)}.log`),
+      });
+      let took = Math.round((Date.now() - started) / 1000);
+      let judged = judgedRun(captured, 'merged tree');
+      let outcome = judged.run.ok ? {verdict: 'pass', why: 'the checks passed'} : judgeRun({baseline, run: judged.run});
+      if (outcome.verdict === 'environment') {
+        // Never a verdict on the code: one serial retry on the same tree (WA_FAST_JOBS=1, which
+        // scripts/fast.sh honours), and only then a named "could not run".
+        say(`#${id} the failures are the machine, not the tree (${outcome.why}); retrying ${options.checks} once, serially`);
+        const retryStarted = Date.now();
+        captured = await captureCommand({
+          cwd: canonical, command: options.checks, env: checksEnvironment(canonical, {WA_FAST_JOBS: '1', WA_FAST_SERIAL: '1'}),
+          log: path.join(dir, `checks-${merged.slice(0, 12)}-retry.log`),
+        });
+        took = Math.round((Date.now() - retryStarted) / 1000);
+        judged = judgedRun(captured, 'merged tree, serial retry');
+        outcome = judged.run.ok ? {verdict: 'pass', why: 'the serial retry passed'} : judgeRun({baseline, run: judged.run});
       }
-      say(`#${id} checks passed in ${took}s on ${merged.slice(0, 12)}`);
-      recordProof(db, {digest: digest.retest, tree, by: owner.id, command: options.checks, log: `merged ${merged}`});
+      candidateRun = judged.run;
+      if (outcome.verdict !== 'pass') {
+        const rollback = git(canonical, ['reset', '--hard', headAt]);
+        const detail = describeRun(judged.run);
+        if (outcome.verdict === 'environment') {
+          finish('refused', `environment_blocked: the checks could not run on ${merged.slice(0, 12)} (unchanged after a serial retry): ${outcome.why}; rolled back to ${headAt.slice(0, 12)}`);
+          throw new QueueError(`environment_blocked: ${outcome.why}.\n${detail}\n`
+            + `  This is the machine (fork/spawn limits), not a verdict on ${options.branch}: the merge was rolled back to ${headAt.slice(0, 12)} (reset ${rollback.status === 0 ? 'ok' : 'FAILED'}) and nothing was pushed. Retry the landing; no code change is needed. The check log is ${judged.log}.`,
+          75, 'environment_blocked');
+        }
+        finish('refused', `checks_failed: ${outcome.verdict} on ${merged.slice(0, 12)}: ${outcome.why}; rolled back to ${headAt.slice(0, 12)}`);
+        throw new QueueError(`checks_failed: ${outcome.why}` + (outcome.baseline_environment && outcome.baseline_environment.length ? ` (main's own environment-only failures: ${outcome.baseline_environment.join(', ')})` : '') + `.\n${detail}\n`
+          + `  ${options.branch} is WORSE than main's baseline for check inputs ${treeDigest(canonical, upstream).retest.slice(0, 12)}: a failing name main does not fail, or a stricter section it passes. The merge was rolled back to ${headAt.slice(0, 12)} (reset ${rollback.status === 0 ? 'ok' : 'FAILED'}) and nothing was pushed. The check log is ${judged.log}.`,
+        75, 'checks_failed');
+      }
+      say(`#${id} checks passed in ${took}s on ${merged.slice(0, 12)}: ${outcome.why}`);
+      recordProof(db, {digest: digest.retest, tree, by: owner.id, command: options.checks, log: `merged ${merged}; ${outcome.why}`});
     }
     if (options.noPush) {
       finish('abandoned', `no-push: merged ${merged.slice(0, 12)} locally, not pushed`);
@@ -458,6 +587,16 @@ async function commandLand(options) {
       throw new QueueError(`readback_mismatch: pushed ${merged.slice(0, 12)} but origin/main reads ${readback.slice(0, 12)}`, 76, 'readback_mismatch');
     }
     say(`#${id} pushed main ${headAt.slice(0, 12)}..${merged.slice(0, 12)}; readback origin refs/heads/main = ${readback.slice(0, 12)}`);
+    // The merged tree was just measured by a full run of the check command, and main is now exactly
+    // that tree, so that measurement IS the known-failures baseline of the new main - recorded here so
+    // the next landing on it pays no pristine run at all. Recorded after the readback, so nothing is
+    // recorded for a commit that did not land.
+    if (candidateRun) {
+      const landedDigest = treeDigest(canonical, merged).retest;
+      const record = baselineRecord({run: candidateRun, command: checkCommandKey(options.checks), commit: merged, digest: landedDigest, host: hostName(), source: 'candidate'});
+      recordBaseline(db, {digest: landedDigest, command: options.checks, commit: merged, record, by: owner.id});
+      say(`#${id} baseline recorded for the new main: ${record.names.length} known failure(s) at check inputs ${landedDigest.slice(0, 12)}; the next landing on it needs no pristine run`);
+    }
     // A landing makes a commit installable, so it publishes the prebuilt binary for it. This runs
     // AFTER the push and the readback, so nothing here can make main's content depend on a build; a
     // failure is recorded, never rolled back into a refusal of a landing that already happened.
@@ -515,6 +654,43 @@ function commandReconcile(options) {
   return {id: row.id, state: 'abandoned', reason};
 }
 
+// ---- baseline -----------------------------------------------------------------------------------
+//
+// The recorded known-failures baseline, read or primed by a person. `land` keeps it up to date by
+// itself (a measure on a pristine tree, then the measurement of every merged tree it lands); this
+// command exists for the two cases the queue cannot cover: reading what the next landing will tolerate,
+// and recording a measurement that was made outside the queue (a session that ran the checks on a
+// pristine checkout itself). The record is keyed by the check command, this machine and main's retest
+// digest, so a log recorded for a different tree is refused rather than trusted.
+function commandBaseline(options) {
+  const {repo, canonical, dir, db} = open(options);
+  const command = options.command || 'bash scripts/fast.sh';
+  const commit = resolveCommit(repo, options.commit || 'origin/main');
+  if (!commit) throw new QueueError(`baseline: cannot resolve ${options.commit || 'origin/main'} in ${repo}`, 75, 'baseline_commit_unknown');
+  const digest = treeDigest(canonical, commit).retest;
+  if (options.record) {
+    const log = path.resolve(options.record);
+    if (!fs.existsSync(log)) throw new QueueError(`baseline --record: no such log ${log}`, 75, 'baseline_log_missing');
+    const text = fs.readFileSync(log, 'utf8');
+    const run = parseCheckLog(text, {exitCode: options.exitCode === undefined ? null : Number(options.exitCode)});
+    if (!run.named && !run.ok) {
+      throw new QueueError(`baseline --record: ${log} names no failing test and does not say the checks passed, so it cannot describe a tree. Pass --exit-code <n> for a log that ended in a bare exit code, or use scripts/fast.sh's output.`,
+        75, 'baseline_log_unnamed');
+    }
+    const record = baselineRecord({run, command: checkCommandKey(command), commit, digest, host: hostName(), source: options.source || 'recorded'});
+    recordBaseline(db, {digest, command, commit, record, by: resolveOwner(options).id});
+    logRow(db, 0, 'baseline', `recorded by ${resolveOwner(options).id} from ${log} for ${commit.slice(0, 12)} (check inputs ${digest.slice(0, 12)}): ${record.names.length} known failure(s)`);
+    const line = `recorded ${record.names.length} known failure(s) for ${commit.slice(0, 12)} with \`${checkCommandKey(command)}\` (check inputs ${digest.slice(0, 12)})`;
+    return emit({recorded: record, digest, commit, command: checkCommandKey(command)}, options, line);
+  }
+  const record = baselineOf(db, {digest, command});
+  if (options.json) return emit({commit, digest, command: checkCommandKey(command), baseline: record}, options);
+  if (!record) { say(`no baseline recorded for ${commit.slice(0, 12)} with \`${checkCommandKey(command)}\` (check inputs ${digest.slice(0, 12)}): the next landing that needs one will measure a pristine tree once`); return null; }
+  say(`${commit.slice(0, 12)} with \`${checkCommandKey(command)}\`: ${record.names.length} known failure(s) recorded by ${record.recorded_by} (${record.source}, check inputs ${digest.slice(0, 12)}, measured on ${String(record.commit || '').slice(0, 12)})`);
+  for (const name of record.names) say(`  known: ${name}${(record.environment_names || []).includes(name) ? '  [environment]' : ''}`);
+  return record;
+}
+
 // ---- history ------------------------------------------------------------------------------------
 function commandHistory(options) {
   const {db} = open(options);
@@ -541,8 +717,9 @@ async function main() {
   else if (command === 'release') result = commandRelease(options);
   else if (command === 'reconcile') result = commandReconcile(options);
   else if (command === 'classify') result = commandClassify(options);
+  else if (command === 'baseline') result = commandBaseline(options);
   else if (command === 'history') result = commandHistory(options);
-  else throw new QueueError('usage: landing-queue.mjs status|acquire|record|land|release|reconcile|classify|history [options]', 75, 'usage');
+  else throw new QueueError('usage: landing-queue.mjs status|acquire|record|land|release|reconcile|classify|baseline|history [options]', 75, 'usage');
   if (result && result.exit) process.exitCode = result.exit;
   return result;
 }

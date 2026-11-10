@@ -9,24 +9,50 @@
 #   2. Rust unit tests for the crates this change touches (vs the merge base with origin/main, plus the
 #      working tree); --all-rust runs every crate. wa-sentinel runs single-threaded (its tests share
 #      process-wide environment);
-#   3. contract checks: prompt docs in sync with the code; instruction-file checks when node is present.
+#   3. contract checks: prompt docs in sync with the code; the instruction files; the landing queue; and
+#      the two checks the landing baseline rests on (scripts/test-landing-baseline.mjs judges a run by
+#      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code).
 #
 # A check that cannot run here (no node, no cargo) is reported SKIPPED and counted, never passed.
 # The full gate (scripts/test.sh) is the nightly job, not a landing requirement (AGENTS.md).
 # --docker runs the whole fast path inside the sandbox image (a laptop with no wa binary).
+#
+# PARALLELISM. Default is `nproc` capped at 4 on Windows/MSYS (8 elsewhere), and WA_FAST_JOBS or
+# --jobs overrides it. Measured on wasm_the_first, 2026-11-10: under three or four concurrent sessions
+# the suite produced `cannot fork: Input/output error`, `CreateProcessW failed ... errno 5` and exits
+# 125/126 - the process spawns, not the code. A landing was rolled back for one of them, and the same
+# starvation is the attributed cause of a ten-minute `relay_busy` outage. A row that fails that way is
+# classified by scripts/lib/fast-environment.sh and retried ONCE, alone, before it is reported; if it
+# still cannot run, the fast path exits 3 ("the machine, not the tree") and the landing queue treats
+# that as retry-later rather than as a verdict on the branch.
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
-jobs=$(nproc 2>/dev/null || echo 4); all_rust=0; docker_mode=0
+jobs=${WA_FAST_JOBS:-}; all_rust=0; docker_mode=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jobs) jobs=${2:?}; shift 2 ;;
     --all-rust) all_rust=1; shift ;;
     --docker) docker_mode=1; shift ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "fast: unknown option $1" >&2; exit 2 ;;
   esac
 done
+if [ -z "$jobs" ]; then
+  jobs=$(nproc 2>/dev/null || echo 4)
+  # The fork ceiling is per machine, not per process: the cap leaves room for the sessions this node is
+  # running for, and a row that hits the wall is retried serially below instead of reporting a code
+  # failure nobody can fix.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) cap=4 ;;
+    *) cap=8 ;;
+  esac
+  [ "$jobs" -gt "$cap" ] 2>/dev/null && jobs=$cap
+fi
+. "$ROOT/scripts/lib/fast-environment.sh"
+# The parallel rows run in `bash -c` workers, so the classifier they use has to travel with them.
+export WA_FAST_ENVIRONMENT_SIGNATURES
+export -f wa_environment_reason wa_environment_kind last_line_of 2>/dev/null || true
 
 # ---- the binary -------------------------------------------------------------------------------------
 bin="${WA_BIN:-}"
@@ -48,7 +74,7 @@ native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else pri
 started=$(date +%s)
 work=$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-XXXXXX")
 trap 'rm -rf "$work"' EXIT
-fails=0; skipped=0; ran=0
+fails=0; envfails=0; skipped=0; ran=0
 
 # ---- 1. Lua -----------------------------------------------------------------------------------------
 excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
@@ -60,20 +86,60 @@ if [ -n "$timings" ] && [ -s "$timings" ]; then
     && mv "$work/lua.sorted" "$work/lua.list"
 fi
 export FAST_BIN="$bin" FAST_ROOT="$(native "$ROOT")" FAST_WORK="$work"
-run_lua() {
-  f=$1; h=$(mktemp -d "$FAST_WORK/h.XXXXXX"); s=$(date +%s%N)
-  WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$( (command -v cygpath >/dev/null && cygpath -w "$h") || echo "$h")" \
-    WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$f" \
-    timeout 120 "$FAST_BIN" --db "$h/t.db" > "$h/out" 2>&1; c=$?
-  printf '%s\t%s\t%s\t%s\n' "$c" "$(( ($(date +%s%N)-s)/1000000 ))" "$f" "$(tail -1 "$h/out" | tr '\t' ' ' | cut -c1-160)"
+mkdir -p "$FAST_WORK/logs"
+# One definition of "run this test hermetically", used by the parallel batch AND by the serial retry,
+# so the retry measures exactly what the first attempt measured.
+lua_run() { # <script> <home>
+  WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$( (command -v cygpath >/dev/null && cygpath -w "$2") || echo "$2")" \
+    WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$1" \
+    timeout 120 "$FAST_BIN" --db "$2/t.db"
 }
-export -f run_lua
+run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict kind
+  f=$1; s=$(date +%s%N); code=0; kind=ok
+  # A scratch home that cannot be made is the machine (the same signature the classifier reads in a
+  # test's output: `mkdir ... -> nil`), never the tree. Reported as a row so it is counted, retried and
+  # named rather than vanishing into a failed redirection.
+  if ! h=$(mktemp -d "$FAST_WORK/h.XXXXXX" 2>/dev/null); then
+    printf '1\t0\t%s\t%s\tenvironment\n' "$f" 'a scratch home could not be made (mkdir -> nil)'
+    return
+  fi
+  lua_run "$f" "$h" > "$h/out" 2>&1; c=$?; code=$c
+  last=$(last_line_of "$h/out")
+  if [ "$c" != 0 ]; then
+    kind=$(wa_environment_kind "$c" "$last")
+    cp "$h/out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$(( ($(date +%s%N)-s)/1000000 ))" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
+}
+export -f lua_run run_lua
 xargs -P "$jobs" -I{} bash -c 'run_lua "$1"' _ {} < "$work/lua.list" > "$work/lua.tsv"
+# The rows the machine could not run: retried once, one at a time, AFTER the batch, so the retry is
+# genuinely alone on the machine. A row that passes then is a pass (reported as one); a row that still
+# cannot run is marked `, environment` in its FAIL line, which is what the landing queue reads.
+envrows=$(awk -F'\t' '$1!=0 && $5=="environment"{print $3}' "$work/lua.tsv")
+if [ -n "$envrows" ]; then
+  echo "fast: $(printf '%s\n' "$envrows" | grep -c .) row(s) could not run (fork/spawn): retrying them once, serially"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    h=$(mktemp -d "$FAST_WORK/h.XXXXXX"); log="$FAST_WORK/logs/$(basename "$f").retry.log"; s=$(date +%s%N); c=0
+    wa_environment_retry "lua $f" "$log" lua_run "$f" "$h"; c=$?
+    kind=ok; [ "$c" != 0 ] && kind=environment
+    case "$WA_FAST_RETRY" in
+      retried) echo "fast: environment retry passed: $f (exit 0 after the machine refused the first attempt)" ;;
+      environment) echo "fast: ENVIRONMENT still cannot run after a serial retry: $f (exit $c)" ;;
+      *) cp "$log" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true ;; # a real failure: keep the retry's log
+    esac
+    awk -F'\t' -v f="$f" -v c="$c" -v k="$kind" -v ms="$(( ($(date +%s%N)-s)/1000000 ))" -v l="$(last_line_of "$log" | tr '\t' ' ' | cut -c1-160)" \
+      'BEGIN{OFS="\t"} $3==f {print c,ms,$3,l,k; next} {print}' "$work/lua.tsv" > "$work/lua.new" && mv "$work/lua.new" "$work/lua.tsv"
+  done <<< "$envrows"
+fi
 lua_total=$(wc -l < "$work/lua.list"); lua_fail=$(awk -F'\t' '$1!=0' "$work/lua.tsv" | wc -l)
+envleft=$(awk -F'\t' '$1!=0 && $5=="environment"' "$work/lua.tsv" | wc -l)
 [ -n "$timings" ] && cp "$work/lua.tsv" "$timings" 2>/dev/null || true
-ran=$((ran + lua_total)); fails=$((fails + lua_fail))
-awk -F'\t' '$1!=0{printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4}' "$work/lua.tsv"
+ran=$((ran + lua_total)); fails=$((fails + lua_fail));
+awk -F'\t' '$1!=0{ if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
 echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(printf '%s\n' "$excluded" | grep -c . ) excluded: scripts/fast-path.exclude)"
+[ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
 
 # ---- 2. Rust: the crates this change touches ----------------------------------------------------------
 if [ "${WA_FAST_IN_DOCKER:-}" = 1 ]; then
@@ -132,8 +198,14 @@ else
 fi
 
 # ---- 3. contract checks -------------------------------------------------------------------------------
-check() { name=$1; shift; s=$(date +%s%N); out=$("$@" 2>&1); c=$?; ran=$((ran + 1))
-  if [ "$c" = 0 ]; then echo "fast: $name ok ($(( ($(date +%s%N)-s)/1000000 ))ms)"; else fails=$((fails + 1)); echo "FAIL $name (exit $c): $(printf '%s' "$out" | tail -3)"; fi; }
+check() { name=$1; shift; s=$(date +%s%N)
+  wa_environment_retry "$name" "$work/check-$name.log" "$@"; c=$?
+  ran=$((ran + 1))
+  if [ "$c" = 0 ]; then echo "fast: $name ok ($(( ($(date +%s%N)-s)/1000000 ))ms)"; return 0; fi
+  fails=$((fails + 1))
+  case "$WA_FAST_RETRY" in environment) envfails=$((envfails + 1)); echo "FAIL $name (exit $c, environment): $(last_line_of "$work/check-$name.log")" ;;
+    *) echo "FAIL $name (exit $c): $(tail -3 "$work/check-$name.log" | tr '\n' ' ')" ;; esac
+}
 WA_BIN="$bin" check prompt-docs bash scripts/sync-prompt-docs.sh --check
 if command -v node >/dev/null 2>&1; then
   check instructions node scripts/check-instructions.mjs
@@ -143,13 +215,26 @@ if command -v node >/dev/null 2>&1; then
   # Seconds, self-contained (a fixture repository and a fixture ledger), so it belongs here and not
   # only in the nightly gate.
   check landing-queue node scripts/test-landing-queue.mjs
+  # The known-failures baseline the landing queue judges a candidate against: same failures pass, a new
+  # failure refuses, a fixed failure is tolerated, an environment-only failure is a retry (not a
+  # verdict), and a recorded baseline is reused instead of a pristine run when the tree's check inputs
+  # are unchanged.
+  check landing-baseline node scripts/test-landing-baseline.mjs
 else
-  echo "fast: instructions, direct-workflow, landing-queue SKIPPED (node not on PATH)"; skipped=$((skipped + 3))
+  echo "fast: instructions, direct-workflow, landing-queue, landing-baseline SKIPPED (node not on PATH)"; skipped=$((skipped + 4))
 fi
+# The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
+# commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
+check fast-environment bash scripts/test-fast-environment.sh
 
 elapsed=$(( $(date +%s) - started ))
 if [ "$fails" = 0 ]; then
   echo "fast path ok ($ran checks, $skipped skipped, ${elapsed}s)"
+elif [ "${envfails:-0}" -gt 0 ] && [ "${envfails:-0}" = "$fails" ]; then
+  # Every failure was the machine refusing to start a process. That is not a verdict on the tree, and
+  # the landing queue reads exit 3 as "retry", never as "this branch is worse than main".
+  echo "fast path could not run: $fails check(s) were the machine (fork/spawn, retried serially once), ${skipped} skipped, ${elapsed}s"
+  exit 3
 else
   echo "fast path FAILED ($fails of $ran checks, $skipped skipped, ${elapsed}s)"; exit 1
 fi

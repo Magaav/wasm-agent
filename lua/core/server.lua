@@ -1083,6 +1083,58 @@ local function mesh_caller(attestation, from, public_key, capability, signature)
   }
 end
 
+-- The capability names a managed node admits from a peer, and the only place that list exists.
+--
+-- It is a module-level table rather than a local inside `wa_node_call` for one measured reason: a name
+-- in this list is a promise that the dispatch serves it, and on 2026-11-10 the `update` branch was
+-- added without its `return` - the module's own tests passed and the capability was dead on the wire,
+-- because nothing compared the list with the dispatch. `scripts/test-node-dispatch-wiring.lua` now
+-- reads this table and the `node_capability` branches in one audit, so a name here without a branch
+-- that returns (or a real tool behind the fallthrough) fails the fast path.
+local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true, edit=true,
+  ls=true, grep=true, bash=true, shell=true, client=true,
+  -- The message index (2026-11-10). The account lives on the one node that runs wa-whatsapp,
+  -- and a master must be able to ask it from anywhere - that is what "reach the WhatsApp
+  -- connector from any master" means. Read-only questions only: the send path and the phone
+  -- backfill stay behind the owning node's own tools.
+  whatsapp_search=true, whatsapp_read=true, whatsapp_reactions=true, whatsapp_media=true,
+  -- Connector federation (lua/core/federation.lua): a master uses every peer's connectors as its
+  -- own, run where they live. The handler itself refuses any caller whose role is not master, so
+  -- admitting the capability admits masters only - and each tool still runs under the peer's own
+  -- guards, approvals and refusals.
+  federation=true,
+  -- Starting and following a session (lua/core/session_watch.lua, docs/SESSION-WATCH.md). A master
+  -- starts a run on a peer and keeps its id; the follow half is read-only, and both handlers
+  -- refuse a caller whose role is not master. Two names, not one, because the split is the
+  -- authority: watching a session is a read and starting one is control, and a single name would
+  -- be graded by one verb for both.
+  session_start=true, session_watch=true,
+  -- Updating this node from distance (lua/core/remote_update.lua). The handler refuses every
+  -- caller `author_of` does not name as a master, so admitting the name admits masters only - a
+  -- guest is refused twice (here and in the module). Unclassified in MESH_VERBS on purpose: a
+  -- roster attestation grades it `call`, the strongest grant, which is the right price for
+  -- installing a runtime rather than inheriting `control`'s price for a shell.
+  update=true,
+  -- `operation`, restored 2026-11-10. Measured cause of its loss: this list never named it (it
+  -- was created whole in 6342ce8b, 2026-09-20, and `operation` has not been in it since); the
+  -- call that worked on 2026-11-04 reached an *unbound* node, where `enrollment.managed()` was
+  -- false and this list did not run at all. Binding the node switched the gate on and the call
+  -- became `capability_not_granted`. The `operation` tool is master-only in dispatch
+  -- (`lua/core/tools.lua`, `forbidden_for_role`), so admitting the name admits masters only.
+  operation=true,
+  -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
+  -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
+  stt=true }
+
+-- The list as data, for the wiring guard: it asks this node's own gate what it admits instead of
+-- keeping a copy that could drift. Sorted, so a failure names the same capability on every run.
+function wa_managed_capabilities()
+  local names = {}
+  for name in pairs(MANAGED_CAPABILITIES) do names[#names + 1] = name end
+  table.sort(names)
+  return names
+end
+
 function wa_node_call(payload, from, public_key, ts, signature, mesh)
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
@@ -1103,40 +1155,7 @@ function wa_node_call(payload, from, public_key, ts, signature, mesh)
   local function answer(value) return signed_reply(signature, ts, json.encode(value)) end
   if enrollment.managed() then
     if not enrollment.target(request) then return answer({ error = "wrong_target" }) end
-    local allowed = { status=true, set_role=true, read=true, write=true, edit=true,
-      ls=true, grep=true, bash=true, shell=true, client=true,
-      -- The message index (2026-11-10). The account lives on the one node that runs wa-whatsapp,
-      -- and a master must be able to ask it from anywhere - that is what "reach the WhatsApp
-      -- connector from any master" means. Read-only questions only: the send path and the phone
-      -- backfill stay behind the owning node's own tools.
-      whatsapp_search=true, whatsapp_read=true, whatsapp_reactions=true, whatsapp_media=true,
-      -- Connector federation (lua/core/federation.lua): a master uses every peer's connectors as its
-      -- own, run where they live. The handler itself refuses any caller whose role is not master, so
-      -- admitting the capability admits masters only - and each tool still runs under the peer's own
-      -- guards, approvals and refusals.
-      federation=true,
-      -- Starting and following a session (lua/core/session_watch.lua, docs/SESSION-WATCH.md). A master
-      -- starts a run on a peer and keeps its id; the follow half is read-only, and both handlers
-      -- refuse a caller whose role is not master. Two names, not one, because the split is the
-      -- authority: watching a session is a read and starting one is control, and a single name would
-      -- be graded by one verb for both.
-      session_start=true, session_watch=true,
-      -- Updating this node from distance (lua/core/remote_update.lua). The handler refuses every
-      -- caller `author_of` does not name as a master, so admitting the name admits masters only - a
-      -- guest is refused twice (here and in the module). Unclassified in MESH_VERBS on purpose: a
-      -- roster attestation grades it `call`, the strongest grant, which is the right price for
-      -- installing a runtime rather than inheriting `control`'s price for a shell.
-      update=true,
-      -- `operation`, restored 2026-11-10. Measured cause of its loss: this list never named it (it
-      -- was created whole in 6342ce8b, 2026-09-20, and `operation` has not been in it since); the
-      -- call that worked on 2026-11-04 reached an *unbound* node, where `enrollment.managed()` was
-      -- false and this list did not run at all. Binding the node switched the gate on and the call
-      -- became `capability_not_granted`. The `operation` tool is master-only in dispatch
-      -- (`lua/core/tools.lua`, `forbidden_for_role`), so admitting the name admits masters only.
-      operation=true,
-      -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
-      -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
-      stt=true }
+    local allowed = MANAGED_CAPABILITIES
     -- Two admissions, one gate. A call the mesh's own mount authorized is admitted by the verb the
     -- roster and the grants decided on; every other call is admitted by the legacy list and nothing
     -- more. Neither one can be borrowed for the other: an absent or bad attestation falls through to
