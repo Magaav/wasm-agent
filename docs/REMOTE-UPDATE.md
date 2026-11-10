@@ -134,3 +134,25 @@ row says `release failed (...): <reason>` and keeps its log beside the queue.
   workspaces use.
 - Live, 2026-11-10: `wa update openclaw` and `wa update work` from `wasm_the_first` after the feature
   landed (see the session's report for the exact records, release tags and installed commits).
+
+## What the first live runs found
+
+Two defects that only a real peer could show, both fixed and pinned by tests:
+
+1. **The branch that serves the capability was empty.** `node_capability`'s
+   `elseif capability == "update" then` had its comment and no statement after it. Lua accepts an
+   empty block between `then` and the next `elseif`, so the file parsed and the node ran - and every
+   remote update answered `plugin_not_found:update`, because the call fell through the whole chain to
+   the plugin dispatcher. `scripts/test-remote-update.lua` called `remote_update.serve` directly and
+   was green; it now also reads `lua/core/server.lua` the way the node loads it: the branch exists,
+   its first non-comment statement is the `return dofile("lua/core/remote_update.lua").serve(...)`
+   call, the capability is in the managed allow-list, and it is not classified in `MESH_VERBS`.
+   A comment is not a statement.
+
+2. **`scripts/deploy-rendezvous.sh` is mode `100644` in git.** The rendezvous wrapper `exec`'d it and
+   the sentinel's run reported `code=126 Permission denied`; the wrapper now runs it through `bash`,
+   which is what the run door does for every `.sh` anyway.
+
+Both were visible on `openclaw` within a minute of the first attempt, and neither was visible from the
+unit tests alone. The bootstrap itself was never the problem: the install a peer performs on request is
+the same one it performs for itself.
