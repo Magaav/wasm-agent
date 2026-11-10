@@ -402,6 +402,36 @@ fn a_deploy_with_no_session_opens_no_record_and_says_so() {
     assert_eq!(records[0]["state"], json!("pending"), "and starts pending, before the installer exists");
 }
 
+/// The link the live proof broke on (2026-11-10 12:38): a legacy deploy's request file carried **no id**, so
+/// `perform` handed the installer nothing to attribute its result to, `installer_pid` was never recorded, and
+/// the session's report fell through to the 900s watchdog instead of carrying the installer's own verdict.
+/// The request and its ledger record must name the same deploy.
+#[test]
+fn a_deploy_request_names_itself_so_the_installer_can_report() {
+    let _alone = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixture = Fixture::new("request-id");
+    request(&["deploy".into(), "--session".into(), SESSION.into(), "--prompt".into(), "go".into(),
+        "--reason".into(), "fixture: request id".into()]).expect("the deploy is requested");
+
+    let read_all = |dir: PathBuf| -> Vec<Value> {
+        std::fs::read_dir(dir).expect("directory")
+            .flatten()
+            .filter_map(|entry| std::fs::read(entry.path()).ok())
+            .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .collect()
+    };
+    let records = read_all(fixture.state().join("deploy-outcome"));
+    let requests = read_all(fixture.state().join("requests"));
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    let record_id = records[0]["id"].as_str().expect("the record names its deploy");
+    assert_eq!(requests[0]["id"], json!(record_id),
+        "the request must carry the same id the ledger uses - that string is what `perform` passes as \
+         --request-id, and without it nothing can attribute the installer's result to this deploy: {:#?}",
+        requests[0]);
+    assert_eq!(requests[0]["verb"], json!("deploy"));
+}
+
 /// The door the 07:14 retry used: an installer through `run`. Refused before any file exists, naming the door
 /// that does report.
 #[test]

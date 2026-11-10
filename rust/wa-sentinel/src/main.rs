@@ -2521,6 +2521,16 @@ fn request(args: &[String]) -> Result<()> {
         fields.insert("id".into(), json!(stamp));
         deploy_protocol::validate(&Value::Object(fields.clone()), &stamp)?;
     }
+    // Every deploy names itself in its own request file, on both doors. Without this the legacy door handed the
+    // installer no request id at all, and the chain that reports a deploy was dead from that link on. Measured
+    // live 2026-11-10 12:38: the deploy succeeded, `deploy-result.json` recorded `request_id: ""`, the sentinel
+    // never learned the installer's pid (`started_at` stayed null so the notice could not say whether it was
+    // still running), and the session's report fell through to the 900s watchdog instead of arriving with the
+    // installer's own verdict. The record id and the request id are the same string on purpose: it is how a
+    // result file, a queue step and a ledger record are known to be about one deploy.
+    if verb == "deploy" && !fields.contains_key("id") {
+        fields.insert("id".into(), json!(stamp));
+    }
     let path = sentinel_dir().join("requests").join(format!("{stamp}.json"));
     // Read the reason before the map is moved into the file: the audit line is written from the same
     // request, and a supervisor's log must not depend on the order of two statements.
