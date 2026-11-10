@@ -311,6 +311,18 @@ on change, debounced so one save's burst is one parse. Watcher errors are logged
 query-time verification is the correctness backstop. This verifies a source
 snapshot, not the version already loaded into a running Lua worker.
 
+A failed background build is not retried at once. The delay grows per consecutive failure (2 s,
+4 s, 8 s ... capped at 300 s) and the streak stops after 8 failures, so a broken root costs a
+bounded amount of CPU instead of one attempt per edit event; `index_attempts`, `retry_in_ms` and
+`retry_exhausted` report that state, and one failing streak prints one line, not one per attempt.
+Only a new error text prints another. An explicit `graph_index` resumes a stopped streak. A
+failure whose text says the database is corrupt (`database disk image is malformed`, `file is not
+a database`) is derived-state damage: the database and SQLite's siblings are renamed to
+`graph.db.malformed-<UTC stamp>` under the same cross-process lock the calls take - moved aside,
+never deleted - and the rebuild is queued at once. Three consecutive quarantines stop the loop and
+leave the files for an operator, because a disk that keeps producing a malformed database is not a
+scheduling problem.
+
 ## Drawing while Lua is blocked
 
 `host.ticker(spec_json)` is the one capability that draws, and it exists for a single

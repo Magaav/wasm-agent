@@ -42,6 +42,13 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 #[path = "graph_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+type TestCall = Box<dyn Fn(&Path, &str) -> Value + Send + Sync>;
+/// A unit test cannot run the wasm component; it substitutes a deterministic answer so the
+/// scheduling policy (backoff, quarantine, stop) is what the test measures.
+#[cfg(test)]
+static TEST_CALL: Mutex<Option<TestCall>> = Mutex::new(None);
+
 /// Resolve the graph location once, at node startup. Root defaults to the runtime worktree (the
 /// node's cwd), which is the source the agent is actually running from.
 pub fn configure(root: PathBuf, db: PathBuf) {
@@ -122,6 +129,63 @@ fn excluded(relative: &Path) -> bool {
 
 // ---- scheduling: one entry per (root, db), one background worker, one OS watcher ---------------
 
+/// A failing index backs off instead of trying again at once. One attempt on a real tree costs
+/// minutes, and a guest that traps costs the same every time, so the delay grows per consecutive
+/// failure, is capped, and the streak stops. A broken root therefore costs a bounded amount of CPU
+/// and then waits for an explicit `graph index force=true` (measured 10/11 on node `work`: a trapping
+/// index re-ran with no delay at all and held one thread at ~90 % CPU while the CLI sat idle).
+const RETRY_BASE: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(300);
+/// Consecutive failures after which automatic retry stops; the delays below sum to ~8 min.
+const RETRY_LIMIT: u32 = 8;
+/// A database is quarantined at most this many times in a row: a disk that keeps producing a
+/// malformed database is reported, not rewritten in a loop.
+const QUARANTINE_LIMIT: u32 = 3;
+
+/// Delay before attempt `attempts + 1`: 2 s, 4 s, 8 s ... capped at `RETRY_MAX`.
+fn retry_delay(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(8);
+    (RETRY_BASE * (1u32 << shift)).min(RETRY_MAX)
+}
+
+/// Whether another automatic attempt is allowed after `attempts` consecutive failures.
+fn retry_allowed(attempts: u32) -> bool {
+    attempts < RETRY_LIMIT
+}
+
+/// One failing streak prints one line: only a new error text is worth another line.
+fn report_needed(reported: Option<&str>, error: &str) -> bool {
+    reported != Some(error)
+}
+
+/// The texts a corrupt database answers with. The guest reports SQLite's own message
+/// (`database disk image is malformed`, `file is not a database` - measured 10/11 on node `work`)
+/// and its own stable marker.
+fn malformed(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    ["graph_db_malformed", "database disk image is malformed", "file is not a database"]
+        .iter()
+        .any(|marker| error.contains(marker))
+}
+
+/// `YYYYMMDDTHHMMSSZ` for `seconds` since the Unix epoch, with no date crate. Days-to-civil is
+/// Howard Hinnant's algorithm.
+fn utc_stamp(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let rest = seconds % 86_400;
+    let (hour, minute, second) = (rest / 3_600, (rest % 3_600) / 60, rest % 60);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { yoe + era * 400 + 1 } else { yoe + era * 400 };
+    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
+}
+
 #[derive(Default)]
 struct State {
     queued: bool,
@@ -130,6 +194,18 @@ struct State {
     watched: bool,
     watch_error: Option<String>,
     failure: Option<String>,
+    /// Consecutive failed background attempts; reset by a success.
+    attempts: u32,
+    /// Earliest instant the next automatic attempt may start.
+    retry_at: Option<Instant>,
+    /// Automatic retry stopped after `RETRY_LIMIT` failures; an explicit index resumes it.
+    stopped: bool,
+    /// The last error text printed, so one failing streak prints one line, not one per attempt.
+    reported: Option<String>,
+    /// Where malformed databases were moved, newest last.
+    quarantined: Vec<PathBuf>,
+    /// Consecutive quarantines, bounding a disk that keeps corrupting.
+    corruptions: u32,
 }
 
 struct Entry {
@@ -141,7 +217,7 @@ struct Entry {
 
 struct Scheduler {
     entries: Mutex<BTreeMap<(PathBuf, PathBuf), Arc<Entry>>>,
-    ready: Mutex<VecDeque<Arc<Entry>>>,
+    ready: Mutex<VecDeque<(Option<Instant>, Arc<Entry>)>>,
     wake: Condvar,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
@@ -207,10 +283,13 @@ impl Scheduler {
     fn enqueue(&self, entry: &Arc<Entry>) {
         let mut state = entry.state.lock().unwrap();
         state.dirty = true;
-        if state.queued || state.active {return;}
+        // A hint records that content may have changed, but a stopped streak stays stopped: an
+        // edit event must never resurrect a failing index by itself, or the retry is unbounded.
+        if state.queued || state.active || state.stopped {return;}
         state.queued = true;
+        let due = state.retry_at;
         drop(state);
-        self.ready.lock().unwrap().push_back(entry.clone());
+        self.ready.lock().unwrap().push_back((due, entry.clone()));
         self.wake.notify_one();
     }
 
@@ -240,24 +319,105 @@ impl Scheduler {
 
     fn run(&self) {
         loop {
+            // Only an entry whose retry time has come is taken; the rest wait on the condvar until
+            // the earliest one is due. This is what turns a failing index into a bounded delay
+            // instead of a loop that re-runs it as soon as the previous attempt returns.
             let entry = {
                 let mut ready = self.ready.lock().unwrap();
-                while ready.is_empty() {ready = self.wake.wait(ready).unwrap();}
-                ready.pop_front().unwrap()
+                loop {
+                    let now = Instant::now();
+                    if let Some(index) = ready.iter().position(|(due, _)| due.map_or(true, |due| due <= now)) {
+                        break ready.remove(index).unwrap().1;
+                    }
+                    let wait = ready.iter().filter_map(|(due, _)| *due).map(|due| due.saturating_duration_since(now)).min();
+                    ready = match wait {
+                        Some(wait) => self.wake.wait_timeout(ready, wait).unwrap().0,
+                        None => self.wake.wait(ready).unwrap(),
+                    };
+                }
             };
             // A bounded quiet window coalesces bursts without waiting forever for a busy writer.
             std::thread::sleep(Duration::from_millis(75));
-            {let mut state = entry.state.lock().unwrap(); state.queued = false; state.active = true; state.dirty = false;}
+            {let mut state = entry.state.lock().unwrap(); state.queued = false; state.active = true; state.dirty = false; state.retry_at = None;}
             let outcome = call(&entry, "index", json!({}), Instant::now() + INDEX_BUDGET);
             let error = outcome.get("error").and_then(Value::as_str).map(str::to_string);
-            if let Some(error) = &error {eprintln!("graph_index_failed root={} error={error}", entry.root.display());}
-            let mut state = entry.state.lock().unwrap();
-            state.active = false;
-            state.failure = error;
-            let again = state.dirty;
-            drop(state);
-            if again {self.enqueue(&entry);}
+            {entry.state.lock().unwrap().active = false;}
+            match error {
+                None => self.recovered(&entry),
+                Some(error) => self.failed(&entry, error),
+            }
         }
+    }
+
+    /// A success ends the streak, so the next failure starts again at the first delay.
+    fn recovered(&self, entry: &Arc<Entry>) {
+        let mut state = entry.state.lock().unwrap();
+        let attempts = std::mem::take(&mut state.attempts);
+        state.stopped = false;
+        state.retry_at = None;
+        state.failure = None;
+        state.reported = None;
+        state.corruptions = 0;
+        drop(state);
+        if attempts > 0 {eprintln!("graph_index_recovered root={} after_failures={attempts}", entry.root.display());}
+    }
+
+    /// One failure, one decision and at most one log line: quarantine a malformed database, else
+    /// back off, and stop after `RETRY_LIMIT` consecutive failures.
+    fn failed(&self, entry: &Arc<Entry>, error: String) {
+        let mut state = entry.state.lock().unwrap();
+        state.attempts = state.attempts.saturating_add(1);
+        state.failure = Some(error.clone());
+        let attempts = state.attempts;
+        let quarantine = malformed(&error) && state.corruptions < QUARANTINE_LIMIT && entry.db.exists();
+        drop(state);
+        if quarantine {
+            let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0);
+            match quarantine_database(entry, &utc_stamp(seconds)) {
+                Ok(moved) if !moved.is_empty() => {
+                    let names: Vec<String> = moved.iter().map(|path| path.display().to_string()).collect();
+                    let mut state = entry.state.lock().unwrap();
+                    state.corruptions = state.corruptions.saturating_add(1);
+                    state.quarantined.extend(moved);
+                    // The rebuild is the fix: a fresh database, attempted at once, is not a retry of
+                    // the broken one. `corruptions` bounds a disk that keeps producing garbage.
+                    state.attempts = 0;
+                    state.stopped = false;
+                    state.retry_at = None;
+                    state.reported = Some(error.clone());
+                    drop(state);
+                    eprintln!("graph_db_quarantined root={} moved={} next=rebuild", entry.root.display(), names.join(","));
+                    self.enqueue(&entry);
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("graph_db_quarantine_failed root={} error={error}", entry.root.display()),
+            }
+        }
+        let retry = retry_allowed(attempts);
+        let mut state = entry.state.lock().unwrap();
+        state.stopped = !retry;
+        state.retry_at = retry.then(|| Instant::now() + retry_delay(attempts));
+        let report = report_needed(state.reported.as_deref(), &error);
+        if report {state.reported = Some(error.clone());}
+        let next = match state.retry_at {Some(at) => format!("retry_in_ms={}", at.saturating_duration_since(Instant::now()).as_millis()), None => "automatic_retry=stopped use=graph_index_force".to_string()};
+        drop(state);
+        if report {eprintln!("graph_index_failed root={} attempts={attempts} {next} error={error}", entry.root.display());}
+        if retry {self.enqueue(&entry);}
+    }
+
+    /// An explicit index is a deliberate retry: clear the streak so the policy starts from the
+    /// first delay again, and let queued hints run.
+    fn resume(&self, entry: &Arc<Entry>) {
+        let mut state = entry.state.lock().unwrap();
+        state.attempts = 0;
+        state.stopped = false;
+        state.retry_at = None;
+        state.corruptions = 0;
+        let queued = state.dirty && !state.queued && !state.active;
+        if queued {state.queued = true;}
+        drop(state);
+        if queued {self.ready.lock().unwrap().push_back((None, entry.clone()));self.wake.notify_one();}
     }
 }
 
@@ -307,6 +467,12 @@ fn mountable(path: &str) -> String {
 /// Run one tool of the graph component for `entry`, holding the entry's call lock (and the
 /// database directory's file lock, for other processes on the same node) until `deadline`.
 fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant) -> Value {
+    // Tests drive the scheduling policy with a failing component; the component itself needs the
+    // built wasm binary, which a unit test does not have.
+    #[cfg(test)]
+    if let Some(replacement) = TEST_CALL.lock().unwrap_or_else(|error| error.into_inner()).as_ref() {
+        return replacement(&entry.root, tool);
+    }
     let calls = loop {
         match entry.calls.try_lock() {
             Ok(guard) => break guard,
@@ -371,6 +537,26 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
     result
 }
 
+/// Move a malformed database - and SQLite's own siblings - aside under a timestamped name. It is
+/// derived state but still state: renamed, never deleted (skills/clean-disk rule 4). The rename runs
+/// under the same cross-process lock every graph call takes, so another node process sharing this
+/// database cannot keep writing into a file that is being moved.
+fn quarantine_database(entry: &Arc<Entry>, stamp: &str) -> std::io::Result<Vec<PathBuf>> {
+    let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let file = entry.db.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| DB_FILE.to_string());
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!(".{file}.lock")))?;
+    lock.lock()?;
+    let mut moved = Vec::new();
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let source = dir.join(format!("{file}{suffix}"));
+        if !source.exists() {continue;}
+        let target = dir.join(format!("{file}.malformed-{stamp}{suffix}"));
+        if std::fs::rename(&source, &target).is_ok() {moved.push(target);}
+    }
+    let _ = lock.unlock();
+    Ok(moved)
+}
+
 /// A changeset may name files by absolute host path (native changesets do); inside the component
 /// the root is `/graph/root`. Paths outside the root stay as they are and are refused there.
 fn guest_changes(arguments: &mut Value, root: &Path) {
@@ -398,6 +584,11 @@ fn overlay(entry: &Entry, value: &mut Value) {
     value["dirty_hint"] = json!(state.dirty);
     value["watch_registered"] = json!(state.watched);
     value["watch_error"] = json!(state.watch_error);
+    value["failure"] = json!(state.failure);
+    value["index_attempts"] = json!(state.attempts);
+    value["retry_exhausted"] = json!(state.stopped);
+    value["retry_in_ms"] = json!(state.retry_at.map(|at| at.saturating_duration_since(Instant::now()).as_millis() as u64));
+    value["quarantined"] = json!(state.quarantined);
 }
 
 fn wait_deadline(options: &Value) -> Instant {
@@ -412,7 +603,11 @@ fn run(options: Value, tool: &str, extra: &[(&str, Value)]) -> Value {
         let deadline = if tool == "index" {Instant::now() + INDEX_BUDGET} else {wait_deadline(&options)};
         let mut arguments = if options.is_object() {options.clone()} else {json!({})};
         for (key, value) in extra {arguments[*key] = value.clone();}
+        // An explicit index is a deliberate retry: clear a stopped streak first so the attempt is
+        // allowed, and end it on success.
+        if tool == "index" {scheduler().resume(&entry);}
         let mut answer = call(&entry, tool, arguments, deadline);
+        if tool == "index" && answer.get("error").is_none() {scheduler().recovered(&entry);}
         if let Some(snapshot) = answer.get_mut("graph_snapshot") {overlay(&entry, snapshot);}
         if answer.get("error").is_some() && answer.get("required_revision").is_some() {overlay(&entry, &mut answer);}
         Ok(answer)
