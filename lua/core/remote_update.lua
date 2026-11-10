@@ -118,6 +118,20 @@ local function same_commit(a, b)
   return a:sub(1, n):match('^%x+$') ~= nil
 end
 
+-- Is the requested commit INSTALLED, even when the install went further? The deploy door builds the
+-- tree, and main can move while a request waits (measured on `work`, 2026-11-10: a request for
+-- c76c180a installed 4eba0d14, a descendant, and the old answer was "running" forever). A commit that
+-- is an ancestor of what installed.txt names is contained in that install; one that is not is a
+-- different install, and the answer must say so rather than call it done.
+local function installed_contains(tree, installed, target)
+  if same_commit(installed, target) then return true, 'exact' end
+  if type(tree) ~= 'string' or tree == '' then return false end
+  if type(installed) ~= 'string' or installed == '' or type(target) ~= 'string' or target == '' then return false end
+  local answer = git(tree, 'merge-base --is-ancestor ' .. quote(target) .. ' ' .. quote(installed))
+  if answer ~= nil then return true, 'contains' end
+  return false
+end
+
 local function decode(raw)
   if type(raw) ~= 'string' or raw == '' then return nil end
   local ok, value = pcall(json.decode, raw)
@@ -490,10 +504,15 @@ local function outcome_of(record)
   if failed then
     return settled('failed', tostring(failed.detail or failed.phase or 'refused by the sentinel'), { refused = true })
   end
-  if record.target_commit ~= '' and same_commit(installed.commit, record.target_commit) then
+  local contained, how = installed_contains(record.server and record.server.tree, installed.commit, record.target_commit)
+  if record.target_commit ~= '' and contained then
     local detail = 'installed.txt names ' .. tostring(installed.commit)
+    if how == 'contains' then
+      detail = detail .. ', which contains the requested ' .. tostring(record.target_commit):sub(1, 12) ..
+        ' (main moved while the request waited; the deploy installs the tree it was given)'
+    end
     if installed.binary_source then detail = detail .. ' (' .. tostring(installed.binary_source) .. (installed.binary_release and (' ' .. installed.binary_release) or '') .. ')' end
-    return settled('installed', detail, { verified = true })
+    return settled('installed', detail, { verified = true, contains_target = how == 'contains' })
   end
   local ledger = decode(read(sentinel_dir .. '/deploy-outcome/' .. id .. '.json'))
   if ledger and ledger.state == 'settled' then
@@ -549,6 +568,7 @@ function M.read_status(args, caller)
     request = record.request_path, sentinel_request_id = record.sentinel_request_id,
     installed_commit = outcome.installed_commit, installed_binary = outcome.installed_binary,
     verified = outcome.verified == true, refused = outcome.refused == true,
+    contains_target = outcome.contains_target == true,
     server = record.server,
   }
   if (outcome.state == 'installed' or outcome.state == 'failed' or outcome.state == 'silent') and record.outcome == nil then
