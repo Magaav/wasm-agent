@@ -425,6 +425,10 @@ round-boundary steering, not per-keystroke interruption.
   The chat itself is a transcript the host draws (`transcript_block(topic)`,
   `transcript_write(text)`): topics (thinking, tool calls) fold to three rows; Ctrl+Up from the
   draft focuses them, Up/Down move, Right/Left expand/fold, Esc returns to the draft.
+  `transcript_live(text)` writes the row a *running* tool call owns, inside that call's own block
+  under its heading, replaced in place as its facts change (`""` takes it away);
+  `transcript_head(text)` rewrites the current block's first line, which is how a heading printed
+  when the call started gets its outcome dot when the result lands.
   `transcript_hold(on)` keeps writes undrawn until it is released, then draws once (a resumed
   session's replay); while the chat follows the bottom only the rows on screen are wrapped.
   `status_snapshot(spec)` stores the `/status` panel; `/status` submitted while a run is in
@@ -741,7 +745,9 @@ terminal_size        device
 terminal_write       device
 ticker               device
 transcript_block     device
+transcript_head      device
 transcript_hold      device
+transcript_live      device
 transcript_write     device
 uuid                 read-only
 verify               read-only

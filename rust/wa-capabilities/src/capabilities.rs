@@ -274,6 +274,8 @@ pub const REGISTRY: &[Capability] = &[
     plain!("panel", Device, crate::host::panel, "Open, replace or close the CLI's bottom panel and wait for the reader's choice"),
     plain!("transcript_write", Device, crate::host::transcript_write, "Append text to the CLI transcript's current block"),
     plain!("transcript_block", Device, crate::host::transcript_block, "Start a CLI transcript block (a collapsible topic or plain text)"),
+    plain!("transcript_live", Device, crate::host::transcript_live, "Write or clear the running tool call's live line inside its own transcript block"),
+    plain!("transcript_head", Device, crate::host::transcript_head, "Rewrite the current transcript block's first line (a call's heading when its result lands)"),
     plain!("status_snapshot", Device, crate::host::status_snapshot, "Store the /status panel the CLI shows by itself while a run is in flight"),
     plain!("transcript_hold", Device, crate::host::transcript_hold, "Keep CLI transcript writes undrawn until released, then draw once"),
     plain!("editor_status", Device, crate::host::editor_status, "Show or hide the CLI's status line row (shown while a run is in flight)"),

@@ -2506,12 +2506,13 @@ function formatBytes(count) {
   return (n / (1024 * 1024)).toFixed(1) + " MiB";
 }
 
-// ---- the long-call row (docs/TOOL-PROGRESS.md) -----------------------------------------------
+// ---- the long-call line (docs/TOOL-PROGRESS.md) -----------------------------------------------
 //
-// `⟳ <tool> · <elapsed>` plus what the running operation's output says it is doing, on the SAME
-// session-status-content row the update notice uses - one line directly above the status bar - at the
-// LOWEST precedence: the standing notice and `updating…` both win, because they are facts about the
-// node while this is a fact about one call.
+// `⟳ <tool> · <elapsed>` plus what the running operation's output says it is doing, drawn INSIDE that
+// call's own topic in the transcript (`wa-tool`'s `setProgress`), under its heading - never on the
+// session-status-content row above the status bar, which is the update notice's and its loader's
+// (Victor, 2026-11-10: "that place belongs to update message and update launcher seeker, not info about
+// tools, which should be in the terminal content").
 //
 // The wording is pinned to `lua/core/tool_progress.lua` and `rust/wa-tool-progress` by the tests on
 // all three (the same glyphs, the same `no output for 3m`, the same 14-cell bar): a reader who moves
@@ -2690,10 +2691,6 @@ async function refreshOperationProgress(health, running) {
   // The operation read above is asynchronous. A reply, repaint, or session switch can finish
   // and detach this trace while it waits; only paint if this is still the live trace.
   if (trace !== activeTrace || !activeTrace.pending || typeof activeTrace.setProgress !== "function") return;
-  activeTrace.setProgress((operation.state || "running") + " · " + formatBytes(bytes) + (tail ? " · " + tail : ""));
-  // The same facts, on the row above the status bar: the elapsed clock from the operation's own
-  // `elapsed_ms`, the newest line of its output, and - when the byte count has stopped moving - how
-  // long the silence is. `paintToolProgress` decides whether the row is this call's to draw.
   const startedAt = Date.now() - (Number(operation.elapsed_ms) || 0);
   const changed = !toolRow || toolRow.operationId !== operation.operation_id || toolRow.outputBytes !== bytes ||
     toolRow.lastLine !== tail;
@@ -2703,7 +2700,10 @@ async function refreshOperationProgress(health, running) {
   toolRow = {operationId: operation.operation_id, tool: toolRow && toolRow.operationId === operation.operation_id ? toolRow.tool : "bash",
     startedAt, lastLine: tail, history, outputBytes: bytes,
     lastChangeAt: changed ? Date.now() : (toolRow ? toolRow.lastChangeAt : Date.now())};
-  paintToolProgress();
+  // The clock, the newest line and - when the byte count has stopped moving - how long the silence is,
+  // inside the call's own topic. Nothing of it goes to the row above the status bar: that row is the
+  // update notice's (Victor, 2026-11-10).
+  activeTrace.setProgress(toolCallSentence());
 }
 
 // The answer is the point; the route is reference. On reply, everything the run
@@ -6097,34 +6097,34 @@ let sessionUpdating = "";
 function paintSessionContent() {
   const standing = sessionUpdating || sessionStandingNotice;
   if (standing) return paintSessionNotice(standing);
-  // Nothing about the node to say: a long tool call may have the row (docs/TOOL-PROGRESS.md).
-  const call = toolRow && toolRow.text;
-  if (call) return paintSessionNotice(call, toolRow.stalled ? "stall" : "tool");
+  // Nothing about the node to say, so there is no row: a running tool call says what it is doing
+  // inside its own topic, and this row is not its to take (Victor, 2026-11-10).
   return paintSessionNotice("");
 }
 
-// The long-call row's own painter: recompute the sentence from `toolRow`, then let
-// `paintSessionContent` decide whether it is this row's to draw. Called on every operation poll and
-// when the row would change; a call under two seconds is left to the status line.
-function paintToolProgress() {
-  if (!toolRow) return paintSessionContent();
+// The long call's sentence: recomputed from `toolRow` and handed to the call's own topic by
+// `refreshOperationProgress`. A call under two seconds says nothing here - the topic's own clock
+// already says it is running.
+function toolCallSentence() {
+  if (!toolRow) return "";
   const now = Date.now();
   const elapsed = (now - toolRow.startedAt) / 1000;
   const silent = (now - toolRow.lastChangeAt) / 1000;
-  if (elapsed < TOOL_MIN_SECONDS) { toolRow.text = ""; return paintSessionContent(); }
-  // The row's detail comes from the newest line the operation wrote, and the bar must not outlive the
+  if (elapsed < TOOL_MIN_SECONDS) { toolRow.text = ""; return ""; }
+  // Its detail comes from the newest line the operation wrote, and the bar must not outlive the
   // build: `toolProgressDetail` recognizes a dialect only in the newest four lines the caller kept, so
   // a `cargo test` that has finished compiling shows its results rather than a frozen 143/412
   // (`wa-tool-progress`'s `RECENT`, the same rule).
   toolRow.text = toolScrub(toolRowText(toolRow.tool, elapsed, toolRowDetail(toolRow), silent));
   toolRow.stalled = silent >= TOOL_STALL_SECONDS;
-  return paintSessionContent();
+  return toolRow.text;
 }
-// The call is over: its row goes now, not on a timer - the operation's own record said so.
+// The call is over: its line goes now, not on a timer - the operation's own record said so.
 function clearToolProgress() {
   if (!toolRow) return null;
   toolRow = null;
-  return paintSessionContent();
+  if (trace && typeof trace.setProgress === "function") trace.setProgress("");
+  return null;
 }
 // `"updating…"` while an install is in progress and the node has not answered yet; empty to clear. It
 // never outlives the answer: `applyUpgradeState`/`recoverAfterNodeReturn` clear it on the recovery edge,
@@ -6141,8 +6141,7 @@ function paintSessionNotice(text, kind) {
     if (row) row.remove();
     return null;
   }
-  const classes = "session-status-content" + (kind === "tool" ? " session-status-tool"
-    : kind === "stall" ? " session-status-stall" : "");
+  const classes = "session-status-content";
   if (row) {
     if (row.textContent !== text) row.textContent = text;
     if (row.className !== classes) row.className = classes;

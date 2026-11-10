@@ -145,11 +145,6 @@ pub struct Editor {
     /// painted yellow here (`lua/core/cli_view.lua` paints the same sentence in the canonical layout,
     /// `lua/core/update_banner.lua` owns the wording). "" = no notice, so the box keeps the row.
     pub session_notice: String,
-    /// A long tool call's progress (`crate::tool_progress`, `docs/TOOL-PROGRESS.md`): `⟳ bash · 3m10s
-    /// ▕███░░▏ 143/412 compiling serde_json`, already coloured and clipped by that module. It is the
-    /// THIRD claimant of the session-status-content row and the lowest: a build loader and the standing
-    /// notice both win, because they are about the node while this is about the call. "" = no row.
-    pub tool_progress: String,
     /// Lines submitted during the run that the agent has not taken yet: drawn above the status line
     /// (`Steering queued`), never into the chat, so a steer is not printed twice. The host sets it.
     pub queued: Vec<String>,
@@ -359,15 +354,19 @@ impl Editor {
     /// is not drawn, so the chat sits right on top of the input.
     pub fn status_row(&self) -> usize { self.top().saturating_sub(self.menu_rows() + 1) }
     /// The **session-status-content** row: ONE line directly below the CLI's text area and directly
-    /// above the session status bar (the footer), shared by the build loader, the standing session
-    /// notice and a long tool call's progress (`build` wins, then `session_notice`, then `tool_progress`). It exists only while one of them has
-    /// something to say - an empty area takes no line, so the box keeps the row and there is never a
-    /// blank gap above the status bar. The row is fixed at the last row before the footer, so it does
-    /// not move when the draft grows, when the slash menu opens or while a run's status line shows.
+    /// above the session status bar (the footer), shared by the build loader and the standing session
+    /// notice (`build` wins, then `session_notice`). It exists only while one of them has something to
+    /// say - an empty area takes no line, so the box keeps the row and there is never a blank gap above
+    /// the status bar. The row is fixed at the last row before the footer, so it does not move when the
+    /// draft grows, when the slash menu opens or while a run's status line shows.
+    ///
+    /// A tool call's progress is **not** one of its claimants (Victor, 2026-11-10): it belongs in that
+    /// call's own block in the transcript (`crate::transcript::Transcript::live`), where the host's
+    /// ticker rewrites it while Lua is blocked. The row is the update notice's.
     pub fn session_row(&self) -> usize { self.row }
     fn session_rows(&self) -> usize { usize::from(self.has_session_content()) }
     fn has_session_content(&self) -> bool {
-        !self.build.is_empty() || !self.session_notice.trim().is_empty() || !self.tool_progress.is_empty()
+        !self.build.is_empty() || !self.session_notice.trim().is_empty()
     }
     /// That row, rendered: the loader's own line when a build is showing (it carries its colour and
     /// is already clipped), else the notice in the warning yellow, clipped to the width so the row
@@ -375,7 +374,7 @@ impl Editor {
     pub fn session_content(&self) -> String {
         if !self.build.is_empty() { return self.build.clone(); }
         let notice = self.session_notice.trim();
-        if notice.is_empty() { return self.tool_progress.clone(); }
+        if notice.is_empty() { return String::new(); }
         let text = clip_cells(notice, self.width);
         if std::env::var_os("NO_COLOR").is_some() { text } else { format!("{NOTICE_ROW}{text}{RESET}") }
     }
@@ -1176,28 +1175,27 @@ mod tests {
     }
 
     #[test]
-    fn a_long_tool_call_is_the_rows_third_claimant_and_the_lowest() {
+    fn a_tool_calls_progress_never_takes_the_row() {
+        // Victor, 2026-11-10: a running call says what it is doing inside its own block in the
+        // transcript (`crate::transcript::Transcript::live`); this row is the update notice's, the
+        // loader's and the result's. The row therefore has no third claimant to give it to.
         let mut e = Editor::default(); e.row = 29; e.width = 80; e.height = 3;
-        e.tool_progress = "\u{27f3} bash \u{b7} 3m10s \u{b7} compiling serde_json".into();
-        // Alone, it is the row - and it takes the row out of the chat like the notice does.
-        assert_eq!(e.session_content(), "\u{27f3} bash \u{b7} 3m10s \u{b7} compiling serde_json");
-        assert_eq!(e.session_row(), 29); let shrunk = e.out_bottom();
-        assert!(e.render().contains("compiling serde_json"));
-        // The standing notice wins over it: a node fact outranks a call fact.
+        assert_eq!(e.session_content(), "");
+        let chat = e.out_bottom();
+        // The notice owns it, and the row is exactly the notice's.
         e.session_notice = SESSION_NOTICE.into();
         assert_eq!(crate::selection::plain(&e.session_content()), SESSION_NOTICE);
-        assert!(!e.render().contains("compiling serde_json"), "the call's line is not drawn under the notice");
-        // And a build wins over both.
+        assert!(e.render().contains("Update available (cccccccccccc)"));
+        // A build replaces the notice on the same row.
         e.build = "\u{27f3} building wasm-agent compiling serde".into();
         assert!(e.session_content().contains("building wasm-agent"));
-        // The call ends: the row goes back down the precedence chain, and finally away.
+        assert!(!e.render().contains("Update available"));
+        // And with neither, there is no row at all - never a call's line standing in for one.
         e.build.clear();
-        assert_eq!(crate::selection::plain(&e.session_content()), SESSION_NOTICE);
         e.session_notice.clear();
-        assert!(e.session_content().contains("compiling serde_json"));
-        e.tool_progress.clear();
         assert_eq!(e.session_content(), "");
-        assert!(e.out_bottom() > shrunk, "no row: the chat keeps it again");
+        assert_eq!(e.out_bottom(), chat, "no row: the chat keeps the row it had");
+        assert!(!e.render().contains("bash"), "nothing about a tool is drawn under the box");
     }
 
     #[test]

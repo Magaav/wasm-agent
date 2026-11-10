@@ -1,14 +1,16 @@
-// The window's half of the long-call row: `⟳ <tool> · <elapsed>` plus what the running operation's
-// output says, on the session-status-content row above the status bar (docs/TOOL-PROGRESS.md).
+// The window's half of a long call's line: `⟳ <tool> · <elapsed>` plus what the running operation's
+// output says, drawn INSIDE that call's own topic in the transcript (docs/TOOL-PROGRESS.md), never on
+// the session-status-content row - that row is the update notice's, its loader's and its result's
+// (Victor, 2026-11-10).
 //
 //   node tests/tool-progress.js
 //
 // The functions are read out of the shipping `ui/app.js` (not re-implemented) and run against a stub
 // DOM and a clock the test controls, so this fails when the source drifts rather than when a copy of it
-// does. What is pinned: the row's exact wording (the same strings the Rust crate and the Lua module
+// does. What is pinned: the line's exact wording (the same strings the Rust crate and the Lua module
 // assert, so the terminal and the window cannot disagree), each progress dialect, the two-second gate,
-// the three-minute stall hint, the row's precedence against the update notice, that a secret never
-// reaches it, and that the CSS gives the call's row its own colour.
+// the three-minute stall hint, that the sentence goes to the call's own node and never to the row, that
+// the notice still owns the row, and that a secret never reaches either.
 const fs = require("fs");
 let failures = 0;
 const check = (condition, label) => {
@@ -24,20 +26,21 @@ const doc = fs.readFileSync("docs/TOOL-PROGRESS.md", "utf8");
 
 // ---- the source is the source of truth ------------------------------------
 for (const name of ["toolClock", "toolCompact", "toolBar", "toolProgressDialect", "toolProgressDetail", "toolRowDetail", "toolRowText",
-  "toolScrub", "paintToolProgress", "clearToolProgress", "paintSessionContent", "paintSessionNotice"]) {
+  "toolScrub", "toolCallSentence", "clearToolProgress", "paintSessionContent", "paintSessionNotice"]) {
   check(new RegExp("function " + name + "\\(").test(source), "app.js defines " + name);
 }
 check(/const TOOL_STALL_SECONDS = 180;/.test(source), "the stall threshold is named once");
 check(/const TOOL_BAR_CELLS = 14;/.test(source), "the bar's width is the build loader's");
-check(/const TOOL_MIN_SECONDS = 2;/.test(source), "a call under two seconds has no row");
+check(/const TOOL_MIN_SECONDS = 2;/.test(source), "a call under two seconds has no line");
 check(/const TOOL_RECENT = 4;/.test(source), "a finished build's bar is not allowed to speak for four lines");
 check(/if \(standing\) return paintSessionNotice\(standing\);/.test(source),
-  "the notice and `updating…` still win the row");
-check(/\.session-status-content\.session-status-tool \{/.test(css), "the call's row has its own colour");
-check(/\.session-status-content\.session-status-stall \{/.test(css), "and the stall hint a dimmer one");
-check(/session-status-tool/.test(source), "the painter applies the tool class");
+  "the notice and `updating…` are the row's");
+check(!/session-status-tool/.test(css) && !/session-status-tool/.test(source),
+  "the row has no tool variant left to paint: the sentence goes to the call's own topic");
+check(/activeTrace\.setProgress\(toolCallSentence\(\)\)/.test(source),
+  "the sentence is handed to the call in flight, not to the row");
 check(/void refreshOperationProgress\(health,threadOfRun\(health,ownId\)\)/.test(source),
-  "the row is fed by the /health + /operation poll that already runs during a call");
+  "the line is fed by the /health + /operation poll that already runs during a call");
 
 // ---- the same sentence in all three renderers ------------------------------
 // One rule, three renderers: the glyphs and the two clocks are asserted here against the Rust and Lua
@@ -131,6 +134,7 @@ ${constants}
 let toolRow = null;
 let sessionStandingNotice = "";
 let sessionUpdating = "";
+let trace = null;
 ${extract("toolClock")}
 ${extract("toolCompact")}
 ${extract("toolBar")}
@@ -141,17 +145,20 @@ ${extract("toolRowDetail")}
 ${extract("toolRowText")}
 ${extract("paintSessionNotice")}
 ${extract("paintSessionContent")}
-${extract("paintToolProgress")}
+${extract("toolCallSentence")}
 ${extract("clearToolProgress")}
 function setCall(tool, startedAt, lastLine, lastChangeAt, bytes, history) {
   toolRow = { operationId: "op-1", tool, startedAt, lastLine, outputBytes: bytes || 0,
     history: history || (lastLine ? [lastLine] : []),
     lastChangeAt: lastChangeAt == null ? startedAt : lastChangeAt };
 }
+// The call in flight, as the page holds it: wa-tool's setProgress paints the sentence under the
+// call's heading. This stub is where the sentence is read back in the assertions below.
+function setTrace(api) { trace = api; }
 function setNotice(text) { sessionStandingNotice = text; }
 function setUpdating(on) { sessionUpdating = on ? "updating…" : ""; }
-return { toolClock, toolCompact, toolBar, toolScrub, toolProgressDialect, toolProgressDetail, toolRowDetail, toolRowText, paintToolProgress,
-  clearToolProgress, paintSessionContent, paintSessionNotice, setCall, setNotice, setUpdating,
+return { toolClock, toolCompact, toolBar, toolScrub, toolProgressDialect, toolProgressDetail, toolRowDetail, toolRowText, toolCallSentence,
+  clearToolProgress, paintSessionContent, paintSessionNotice, setCall, setNotice, setUpdating, setTrace,
   hasRow: () => !!toolRow };
 `)(documentStub, FakeDate);
 
@@ -218,46 +225,53 @@ check(!sandbox.toolScrub("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123signature")
   "a JWT is masked");
 check(sandbox.toolScrub("exit 0") === "exit 0", "ordinary output is untouched");
 
-// ---- the row, on the page --------------------------------------------------
+// ---- the call's own line, and the row it never takes -----------------------
+// Victor, 2026-11-10: "this bash description should be printed in the bash toolcall not at the
+// footer. that place belongs to update message and update launcher seeker, not info about tools,
+// which should be in the terminal content". So the sentence is what the call's own node draws, and
+// the session-status-content row keeps only the update's sentences.
+let painted = null;
+sandbox.setTrace({ setProgress: (text) => { painted = text; } });
 sandbox.setCall("bash", clock.now - 190_000, "    Building [=============>         ] 143/412: serde_json, syn", clock.now - 1_000, 4096);
-sandbox.paintToolProgress();
-check(!!row(), "a call past two seconds takes the row");
-check(row().textContent === "\u27F3 bash \u00B7 3m10s " + BAR(143 / 412) + " 143/412 building serde_json",
-  "with the sentence above: " + (row() && row().textContent));
-check(row().className === "session-status-content session-status-tool", "in the loader's colour, not the notice's yellow");
-check(row().dataset.sessionStatusContent === "tool", "marked as the call's row");
-check(row().parent === composer && composer.children.filter((c) => /session-status-content/.test(c.className)).length === 1,
-  "one row, directly above the status bar, never a second copy");
+const sentence = sandbox.toolCallSentence();
+check(sentence === "\u27F3 bash \u00B7 3m10s " + BAR(143 / 412) + " 143/412 building serde_json",
+  "the call's own line carries the sentence: " + sentence);
+check(row() === null, "and the session-status-content row is not drawn for it");
+sandbox.paintSessionContent();
+check(row() === null, "even when the row is repainted: nothing about a tool is on it");
 
-// A young call is the status line's business.
+// A young call says nothing on its own line either: its topic's clock already says it is running.
 sandbox.setCall("bash", clock.now - 1_000, "Compiling x", clock.now - 1_000, 10);
-sandbox.paintToolProgress();
-check(row() === null, "a call under two seconds leaves the row to the status line");
+check(sandbox.toolCallSentence() === "", "a call under two seconds has no line of its own");
+check(row() === null, "and still nothing on the row");
 
-// The stall hint, dim, after three minutes of silence.
+// The stall hint, after three minutes of silence.
 sandbox.setCall("bash", clock.now - 260_000, "Compiling x", clock.now - 180_000, 10);
-sandbox.paintToolProgress();
-check(row().textContent === "\u27F3 bash \u00B7 4m20s \u00B7 no output for 3m", "three minutes of silence says so: " + row().textContent);
-check(row().className === "session-status-content session-status-stall", "and it is the dim one");
+check(sandbox.toolCallSentence() === "\u27F3 bash \u00B7 4m20s \u00B7 no output for 3m",
+  "three minutes of silence says so: " + sandbox.toolCallSentence());
+check(row() === null, "and it is the call's line, not the row's");
 
-// The notice wins, and gives the row back.
+// The update's sentences own the row, untouched by any call in flight.
 sandbox.setUpdating(true);
-sandbox.paintToolProgress();
-check(row().textContent === "updating…", "`updating…` wins the row while the node is away");
+sandbox.paintSessionContent();
+check(row() && row().textContent === "updating…", "`updating…` is the row while the node is away");
 sandbox.setUpdating(false);
 sandbox.setNotice("Update available (cccccccccccc): run wa update or /update");
-sandbox.paintToolProgress();
-check(row().textContent === "Update available (cccccccccccc): run wa update or /update",
-  "the standing notice outranks the call");
-check(row().className === "session-status-content", "and paints it as the notice");
+sandbox.paintSessionContent();
+check(row() && row().textContent === "Update available (cccccccccccc): run wa update or /update",
+  "the standing notice owns the row, call or no call");
+check(row().className === "session-status-content", "painted as the notice, with no tool variant");
 sandbox.setNotice("");
-sandbox.paintToolProgress();
-check(/no output for 3m/.test(row().textContent), "with the notice gone the call has the row back");
+sandbox.paintSessionContent();
+check(row() === null, "and with neither, the row is gone: never the call's");
+check(sandbox.toolCallSentence().indexOf("no output for 3m") >= 0, "while the call still says its own line");
 
-// The call ends: the row goes, and there is no blank gap.
+// The call ends: its line goes now, and nothing of it is left on the row.
 sandbox.clearToolProgress();
-check(row() === null, "the call ends: no row, no blank gap above the status bar");
+check(painted === "", "the call's own topic is cleared when the operation's record says it is over");
+check(row() === null, "and the row stays empty: no blank gap above the status bar");
 check(!sandbox.hasRow(), "and nothing is left to paint");
 
 console.log(failures === 0 ? "tool-progress: all checks passed" : `tool-progress: ${failures} failed`);
+process.exit(failures === 0 ? 0 : 1);
 process.exit(failures === 0 ? 0 : 1);
