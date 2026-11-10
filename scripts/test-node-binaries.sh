@@ -327,6 +327,10 @@ ok
 # binary explicitly.
 contains "$(cat "$PUBLISH")" 'import ziglang,os' "the publisher looks inside the pip ziglang package"
 contains "$(cat "$PUBLISH")" 'WA_ZIG' "and an operator can name zig explicitly"
+# PATH alone is not enough (measured: cargo-zigbuild 0.24.1 could not find a zig its own PATH held), so
+# the binary is named through the crate's supported variable instead of being searched for.
+contains "$(cat "$PUBLISH")" 'CARGO_ZIGBUILD_ZIG_COMMAND' "the publisher names the zig binary for cargo-zigbuild"
 out="$(WA_ZIG=/nonexistent/zig bash "$PUBLISH" --repo "$fixture" --out "$WORK/never" \
   --check --local --allow-empty-codemode 2>&1)"
 expect_status 0 "$?" "a bad WA_ZIG does not break the plan (the build refuses, not the plan)"
+contains "$out" "cargo zigbuild uses: CARGO_ZIGBUILD_ZIG_COMMAND=" "and the plan names the binary cargo-zigbuild will use, not only a PATH"
