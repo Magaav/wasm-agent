@@ -166,3 +166,17 @@ the same one it performs for itself.
 | peer compiles because no release covered the commit | ~19 min on a 2-vCPU aarch64 host - the case the publisher exists to remove |
 | publishing the release in the landing (`--ensure --publish`) | 169 s when the compiled inputs changed, 4 s when an earlier release covers them |
 | reading the outcome back (`--status`) | one call; the notice is handed over once per request per session |
+
+## A node that had no door: `work`
+
+`work` ran `f2af9c67` (before this capability) and no interactive session was alive, so the door could
+not be used to install the door. The path that worked is the one the fabric already has: a session
+started **on that node** by a master (`session_start`, `wa watch`), which runs `wa update` there as that
+node's own coordinator - no `child` marker, because the run is the node's, not a peer shell's. The
+session's own words:
+
+    queued: the sentinel will deploy b8819b5e through the gate once this node is idle. This is not done yet.
+
+Two facts worth keeping: the first attempt was refused `tree_dirty` (two uncommitted paths - another
+session's draft), and the refusal named the count but not the paths, so the fix took a second look. The
+draft was preserved with `git stash push -u` rather than discarded, and the install then queued.
