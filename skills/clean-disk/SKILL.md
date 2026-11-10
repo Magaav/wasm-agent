@@ -65,7 +65,37 @@ Measure only the targets named below, one `du -sm` per area. A full-tree `du` is
 measured on this Windows node, `du -sm` across 169 worktrees took **14.5 minutes**. `du -sm` over all
 of `C:/Users/Victor/wa-pi` also exceeded 60 s on 2026-11-10; measure its `target-*` dirs instead.
 
+### 1.1 Apparent size is not what a delete frees
+
+`du` counts each inode once per invocation, not each name. A file with a second hard link outside the
+delete set is counted in full and frees **nothing** when the link inside the set is removed; `ls -l`,
+`stat %s` and `snap list` show apparent size, which is not reclaimable size. Check the link count
+before naming a number, and report both:
+
+```bash
+stat -c '%h %s %n' <path>          # links, apparent bytes, name; %h > 1 means another link exists
+# a delete set: apparent bytes vs allocated bytes whose every link is inside the set
+find "$dir" -xdev -type f -printf '%i %n %s %b\n' | awk '
+  { size[$1]=$3; blocks[$1]=$4; links[$1]=$2; seen[$1]++ }
+  END { for (i in size) { apparent+=size[i]; if (seen[i]>=links[i]) reclaim+=blocks[i]*512; else outside++ }
+        printf "apparent %.1f MiB, reclaimable %.1f MiB (%d inodes linked outside the set)\n",
+               apparent/1048576, reclaim/1048576, outside }'
+```
+
+- `seen >= links` means every link of that inode is inside the set, so deleting the set frees its
+  allocated blocks; otherwise it frees 0 until the outside link also goes.
+- `du -sm` and `ls -l` are **upper bounds** for ranking, never the number in "deleted ... freed".
+- A target whose reclaimable is 0 is reported as skipped, with the link count and where the other link
+  is (or "link count 2, other link not in this set"), not as a win.
+- The recipe was checked on this node with a 1 MiB scratch file (2026-11-10): both links in the set ->
+  reclaimable 1.0 MiB; one link outside -> reclaimable 0.0 MiB. (`stat -c` and `find -printf` are GNU;
+  on macOS use `stat -f '%l %z %N'` and `gfind`, or a `stat -f '%l %z %b'` loop.)
+
 ## 2. Safe targets by platform (tiered)
+
+Every size in this section is a `du` upper bound (section 1.1). Where a file has `stat -c %h` > 1,
+report the reclaimable number; a target whose reclaimable is 0 is skipped with its link count, not
+counted as a win.
 
 ### Tier 1 - caches, nothing stops
 
@@ -75,12 +105,27 @@ of `C:/Users/Victor/wa-pi` also exceeded 60 s on 2026-11-10; measure its `target
 | Linux | systemd journal | `sudo journalctl --vacuum-size=200M` | keeps recent entries; measured **4.1 GB** of `/var/log` there |
 | Linux | `/tmp` old entries | `sudo find /tmp -maxdepth 1 -mtime +7 -exec rm -rf {} +` | only with `-mtime`; never the whole directory |
 | Linux | user caches | `rm -rf ~/.cache/<tool>` | pip/npm/cargo caches rebuild |
-| Linux | snap old revisions | `sudo snap list --all`, `snap set system refresh.retain=2` | never `snap remove` a live revision |
+| Linux | snap old revisions | `sudo snap list --all`, `snap set system refresh.retain=2`; `snap remove --revision=<rev> <name>` only for a disabled revision | **hard-linked**: measured 2026-11-10 on openclaw, 12/12 `.snap` files had link count 2, `du` 1,429 MiB but **0.0 MiB reclaimable**; report the link count, never the apparent sum. **Never `snap remove` a live revision** |
 | Windows | `$LOCALAPPDATA/Temp/wa-*`, `wa-ui-test-*`, `ui-*`, `fa-*` | check no `test-ui.ps1` runs, then delete | measured 2.8 GB; the rest of Temp belongs to other tools |
 | Windows | Explorer thumbnail cache | delete `…/Explorer/thumbcache_*.db` | Windows rebuilds it |
 | Windows | npm / pip / cargo cache | `npm cache clean --force`, delete `~/.cargo/registry` | re-downloads; measured 731 MB (cargo) |
 | Windows | Recycle Bin | `Clear-RecycleBin -Force` | **ask first** - nothing is restorable afterwards; measured 9.5 GB |
 | macOS | `~/Library/Caches`, Xcode `DerivedData` | - | **not measured by this file**: measure before claiming any number |
+
+**snap revisions, the measured case.** On `openclaw`, every `.snap` under `/var/lib/snapd/snaps` was
+hard-linked: measured 2026-11-10 17:22-17:26 UTC, **12 of 12 files had `stat -c %h` = 2**, `du -sm`
+said **1,429 MiB**, the apparent sum was **1,428.3 MiB**, and the link rule gave **0.0 MiB
+reclaimable** (12 inodes linked outside the directory). Session `883ffeda` measured the same shape on
+its 9 disabled revisions: its dry run listed **1,244 MB** to free and removal freed **about 3 MB**. So:
+
+- Report a disabled revision as `apparent N, reclaimable ~0` while `stat -c %h` is 2; `snap list --all`
+  alone cannot tell you the difference.
+- The supported action is `snap set system refresh.retain=<N>` and, for a disabled revision only,
+  `snap remove --revision=<rev> <name>`; never `snap remove` a live revision. Measure `df` before and
+  after and report the delta, not the apparent sum.
+- When the snap number collapses, go to the real reclaim: on `openclaw`, the canonical `rust/target`
+  was **5,567 MiB at 17:00 UTC** and **1,022 MiB at 17:26 UTC**, while `/` free rose from **2.10 GiB to
+  6.6 GiB** - the `cargo clean` path in section 2.1, not another cache.
 
 ### Tier 2 - this node's build and evidence areas
 
@@ -333,13 +378,15 @@ skipped:  wt-relay rust/target 3.1G (branch change/relay-attach not merged; targ
           docker_data.vhdx 30.0G (tier 3: Docker Desktop not stopped, no idle window yet)
           benchmark run dirs (evidence; only their cargo-target dirs are candidates)
           docker volumes (568.3M, 1 active)
+          snap revisions (9 disabled) 1,244 MB apparent, ~3 MB freed - link count 2 (section 1.1)
           git worktree <path> (branch not merged)
 not touched: databases, volumes, installed build, sentinel evidence, repo trees
 ```
 
 Every number comes from a command that was actually run. If a size was not measured, say
-`not measured` rather than guessing. A tier-3 image is reported with its before size even when it is
-skipped, so the next run knows what is waiting.
+`not measured` rather than guessing. Every number in `deleted` is the reclaimable one; where apparent
+and reclaimable differ, print both and name the reason (hard links, compaction gap). A tier-3 image is
+reported with its before size even when it is skipped, so the next run knows what is waiting.
 
 ## 9. Traps that have already produced wrong answers
 
@@ -357,4 +404,8 @@ skipped, so the next run knows what is waiting.
   refusal is the answer: report the path and `git status --porcelain`, never `--force`.
 - **32 of 62 registered worktrees were "prunable" on 2026-11-10**: `git worktree prune` clears dead
   metadata and frees no bytes; it is not a substitute for releasing a live merged tree.
+- **A hard-linked file's apparent size is not what a delete frees.** Measured on `openclaw` 2026-11-10:
+  all 12 `.snap` files had `stat -c %h` 2, `du` 1,429 MiB, link rule **0.0 MiB**; session `883ffeda`'s
+  9 disabled revisions read 1,244 MB and removal freed ~3 MB. `du` counts each inode once per
+  invocation; check `%h` and report `apparent X, reclaimable Y`.
 - **A size that did not change after a cleanup is a result to report**, never a cue to retry harder.

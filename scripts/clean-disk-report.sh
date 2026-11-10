@@ -9,6 +9,12 @@
 # (canonical, worktree and job-clone cargo targets, benchmark cargo-targets), the worktrees git could
 # release, and the disk floor - sections 2.1, 4 and 6 of the skill.
 #
+# NOT EVERY MEASURED BYTE IS FREED BY A DELETE. `du` counts each inode once per invocation; a file
+# whose second hard link is outside the tree is counted and frees nothing when the tree is removed.
+# `measure_files` prints `apparent, reclaimable` from `stat -c %h`; every directory row is a `du`
+# upper bound, not a promise. Measured 2026-11-10 on openclaw: 12/12 snap files link count 2,
+# `du` 1,429 MiB, link rule 0.0 MiB (skill section 1.1).
+#
 # The two traps the skill records are encoded here, in the code that can get them wrong:
 #
 #   * a directory the measuring process was DENIED prints `UNREADABLE (access denied)` and never
@@ -59,7 +65,10 @@ human_bytes() {
   }'
 }
 
-# One named directory, measured with the skill's own targeted `du -sm` and a hard time bound.
+# One named directory, measured with the skill's own targeted `du -sm` and a hard time bound. This is
+# an upper bound on what a delete frees: du counts each inode once per invocation, so a hard link
+# outside the tree is counted here and frees nothing when the tree is deleted (`measure_files` is the
+# link-aware path, skill section 1.1).
 measure_dir() {
   local path="$1" err out rc mb
   if [ ! -d "$path" ]; then printf 'absent\n'; return; fi
@@ -79,16 +88,22 @@ measure_dir() {
   rm -f "$err"
 }
 
-# A named set of files (no directory walk): sentinel logs, Explorer's cache files.
+# A named set of files (no directory walk): sentinel logs, Explorer's cache files. A file whose
+# `stat -c %h` is > 1 has another hard link; deleting this name frees 0 until that link goes too, so
+# report apparent bytes and reclaimable bytes separately (skill section 1.1).
 measure_files() {
-  local total=0 found=0 f bytes
+  local total=0 reclaim=0 found=0 f bytes links
   for f in "$@"; do
     [ -f "$f" ] || continue
     found=1
     bytes="$(stat -c %s -- "$f" 2>/dev/null)" || continue
+    links="$(stat -c %h -- "$f" 2>/dev/null)" || links=1
     total=$((total + bytes))
+    if [ "$links" -eq 1 ]; then reclaim=$((reclaim + bytes)); fi
   done
-  if [ "$found" -eq 0 ]; then printf 'absent\n'; else printf '%s\n' "$(human_bytes "$total")"; fi
+  if [ "$found" -eq 0 ]; then printf 'absent\n'
+  elif [ "$reclaim" -eq "$total" ]; then printf '%s\n' "$(human_bytes "$total")"
+  else printf '%s apparent, %s reclaimable\n' "$(human_bytes "$total")" "$(human_bytes "$reclaim")"; fi
 }
 
 # A list of named directories, each measured with the same bound, summed into one number and a count.
@@ -201,6 +216,8 @@ if [ -f "$REPO/scripts/check-disk-floor.sh" ]; then
 fi
 row 'disk floor (3.71 GiB)' "$floor_state" \
   'below it a build or a deploy fallback is refused; free target dirs first'
+row 'hard-link accounting' 'du = inode-once upper bound; stat -c %h > 1 is apparent, not reclaimable' \
+  'measure_files prints apparent vs reclaimable; no directory size here promises freed bytes'
 row 'session-scratch' "$(measure_dir "$WASM/session-scratch")" \
   'per session, oldest first (keep newest 5 + any open session)'
 row 'benchmarks' "$(measure_dir "$WASM/benchmarks")" \
