@@ -96,12 +96,19 @@ Each of these cost real time in this batch; each has a cheap detector.
    a release (`scripts/wave-release.mjs`), which gates the exact tree it will name.
 4. **Push `origin/main` and read the ref back.** A push that reports success and a ref
    that matches are two facts, not one.
-5. **Prove integration before deleting anything.** `git branch -d` is not proof: on git
+5. **Publish the node binary for the landed sha.** A node that cannot compile installs the published
+   `node-<sha12>`, so a landing that changed a compiled input is not done until that release exists
+   (`docs/COMPONENTS.md`, "How a landed commit gets its binary"). One command on the canonical checkout,
+   after step 4: `bash scripts/publish-node-binaries.sh --ensure --publish --target
+   aarch64-unknown-linux-gnu --commit <landed sha>`. `--ensure` answers in seconds when a published
+   release already covers the commit's compiled inputs, so only a real change builds (measured 73 s warm,
+   ~7 min cold, on wasm_the_first); `--publish` creates the release and is idempotent.
+6. **Prove integration before deleting anything.** `git branch -d` is not proof: on git
    2.55 it deletes a branch whose tip lives only in its own upstream. Use
    `git branch --merged main` or `git merge-base --is-ancestor <tip> main`.
-6. **Delete the branch, prune the worktree, release the session workspace.** Keep the
+7. **Delete the branch, prune the worktree, release the session workspace.** Keep the
    transcript; the tree is disposable, the evidence is not.
-7. **Deploy through the sentinel**, never from inside a run: queue the request, then read
+8. **Deploy through the sentinel**, never from inside a run: queue the request, then read
    `installed.txt` and `deploy-result.json` rather than trusting the request's receipt.
 
 ## The merge lane (2026-09-29)

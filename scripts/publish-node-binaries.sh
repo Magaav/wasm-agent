@@ -40,6 +40,14 @@
 #   bash scripts/publish-node-binaries.sh --from DIR          # verify artifacts built elsewhere, pin them
 #   bash scripts/publish-node-binaries.sh --target aarch64-unknown-linux-gnu --commit <sha>
 #   bash scripts/publish-node-binaries.sh --local             # any clean commit; refuses --publish
+#   bash scripts/publish-node-binaries.sh --ensure            # exit 0 when a published release already covers
+#                                                              # this commit's compiled inputs; build only otherwise
+#   bash scripts/publish-node-binaries.sh --publish            # create/update the GitHub release itself
+#
+# THE NORMAL PATH (docs/COMPONENTS.md, "How a landed commit gets its binary"): a landing ends with
+# `--ensure --publish --target aarch64-unknown-linux-gnu`, so a commit that changed no compiled input
+# costs a few release-list reads and a commit that did is built once, here, and published before any
+# node deploys it. Without --publish nothing here runs gh, exactly as before.
 #
 # Exit codes: 0 ok; 2 missing tool/target/manifest/asset; 5 a binary is not the pinned one (hash or ELF
 # machine); 6 a size differs from the pin; 7 no sha256 tool; 8 the build or the run failed.
@@ -49,6 +57,8 @@ OUT="$ROOT/build/node-binaries"
 FROM=""
 CHECK=0
 LOCAL=0
+ENSURE=0
+PUBLISH=0
 COMMIT=""
 GLIBC_FLOOR="2.31"
 TARGETS=""
@@ -67,6 +77,8 @@ while [ "$#" -gt 0 ]; do
     --runner) [ "$#" -ge 2 ] || fail 'runner_value_required'; RUNNER="$2"; shift 2 ;;
     --check) CHECK=1; shift ;;
     --local) LOCAL=1; shift ;;
+    --ensure) ENSURE=1; shift ;;
+    --publish) PUBLISH=1; shift ;;
     --allow-empty-codemode) ALLOW_EMPTY=1; shift ;;
     -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown_option: $1" ;;
@@ -115,6 +127,43 @@ if [ "$LOCAL" = 0 ] && [ -z "$FROM" ]; then
   git -C "$ROOT" fetch -q origin 2>/dev/null || say 'fetch of origin failed; checking against the origin/main this clone has'
   git -C "$ROOT" merge-base --is-ancestor "$COMMIT" origin/main 2>/dev/null \
     || fail "not_on_main: $COMMIT is not on origin/main; a node installs main (--local for a test artifact)"
+fi
+if [ "$PUBLISH" = 1 ]; then
+  # Publishing is the landing's job now, but never for a test artifact and never for a run that built
+  # nothing: both would put a tag on the channel that names something no node should install.
+  [ "$LOCAL" = 0 ] || fail 'publish_local_refused: --local artifacts are test builds; they are never published'
+  [ "$CHECK" = 0 ] || fail 'publish_check_refused: --check builds nothing, so there is nothing to publish'
+fi
+
+# ---- --ensure: is this commit already covered? ------------------------------------------------------
+# A landing runs this before paying for a build. The question is not "does a release name this commit"
+# but "does a published release have this commit's compiled inputs" - the same digest rule the deploy's
+# fallback uses (scripts/lib/node-binaries.sh, wa_node_release_digest_search), so a Lua-only or docs-only
+# landing answers in seconds and a rust change builds once. A matching-but-broken release is a refusal
+# here exactly as it is in a deploy, never a reason to build around it.
+if [ "$ENSURE" = 1 ]; then
+  ensure_cache="$OUT/cache"
+  ensure_tag=""
+  ensure_commit=""
+  ensure_missing=""
+  for triple in $MANIFEST_TRIPLES; do
+    out="$(wa_node_release_digest_search "$ROOT" "$COMMIT" "$triple" "$ensure_cache" 2>&1)"; rc=$?
+    case "$rc" in
+      0)
+        found_tag="$(printf '%s\n' "$out" | sed -n 's/^release_tag=//p' | head -1)"
+        found_commit="$(printf '%s\n' "$out" | sed -n 's/^release_commit=//p' | head -1)"
+        ensure_tag="${ensure_tag:-$found_tag}"
+        ensure_commit="${ensure_commit:-$found_commit}"
+        ;;
+      8) ensure_missing="$ensure_missing $triple" ;;
+      *) printf '%s\n' "$out" >&2; fail "ensure_refused: the release that covers $COMMIT for $triple could not be verified" "$rc" ;;
+    esac
+  done
+  if [ -z "$ensure_missing" ]; then
+    say "covered: $ensure_tag covers the compiled inputs of $COMMIT for $MANIFEST_TRIPLES (source_commit $ensure_commit); nothing to build or publish"
+    exit 0
+  fi
+  say "not covered for$ensure_missing; building $MANIFEST_TRIPLES (a deploy of $COMMIT needs this release)"
 fi
 
 # ---- the code-mode assets: what makes this binary the node's binary ---------------------------------
@@ -169,6 +218,7 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     echo "compiled_inputs=$digest"
     echo "rustc_version=$(rustc --version 2>/dev/null | sed 's/^rustc //')"
     echo "zig_version=$(zig version 2>/dev/null || echo unknown)"
+    [ -n "${BUILD_SECONDS:-}" ] && echo "build_seconds=$BUILD_SECONDS"
     echo "glibc_floor=$GLIBC_FLOOR"
     echo "codemode=$CODEMODE"
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -252,6 +302,8 @@ else
     say "CARGO_BUILD_JOBS=6 (a Windows host runs out of desktop heap above that: os error 1816)"
   fi
   say "building $COMMIT for $MANIFEST_TRIPLES (glibc floor $GLIBC_FLOOR, code-mode $CODEMODE${ASSETS:+ from $ASSETS})"
+  BUILD_SECONDS=""
+  build_started=$(date +%s)
   # The pin this build claims must be the pin it produces: the target's own glibc floor is read back
   # from the bytes below, so a `--glibc` this toolchain cannot honour is a refusal, not a quiet lie.
   export WA_CODEMODE_BUILD_ASSETS="${ASSETS:-}"
@@ -279,7 +331,9 @@ else
     cp -f "$sentinel_bin" "$OUT/.wa-sentinel-$triple-$SHORT.$$" && mv -f "$OUT/.wa-sentinel-$triple-$SHORT.$$" "$OUT/wa-sentinel-$triple-$SHORT" || fail "bundle_unwritable: $OUT" 2
     chmod +x "$OUT/wa-$triple-$SHORT" "$OUT/wa-sentinel-$triple-$SHORT" 2>/dev/null || true
   done
+  BUILD_SECONDS=$(( $(date +%s) - build_started ))
   emit_manifest "$OUT" >/dev/null || fail "manifest_unwritable: $OUT" 2
+  say "total build: ${BUILD_SECONDS}s for $MANIFEST_TRIPLES"
 fi
 
 # ---- verify every member BEFORE anything is printed for upload --------------------------------------
@@ -375,11 +429,28 @@ for asset in $assets; do
   asset_paths="$asset_paths $p"
 done
 notes="Prebuilt node binaries for $COMMIT (${MANIFEST_TRIPLES// /, }, glibc <= $GLIBC_FLOOR, code-mode $CODEMODE)"
-say 'publishing is a human/coordinator action; this script never runs gh. The exact command:'
+if [ "$PUBLISH" = 1 ]; then
+  say 'the release is published by --publish (idempotent: a tag that exists is uploaded over, never recreated)'
+else
+  say 'publishing is a human/coordinator action unless --publish is passed; this script never runs gh otherwise. The exact command:'
+fi
 printf '\ngh release create %s -R %s --target %s --title %s --notes %s%s\n\n' \
   "$TAG" "$REPO_SLUG" "$COMMIT" "$TAG" "'$notes'" "$asset_paths"
 say 'If the tag already exists (a re-publish of the same commit), upload over it instead:'
 printf '\ngh release upload %s -R %s --clobber%s\n\n' "$TAG" "$REPO_SLUG" "$asset_paths"
+if [ "$PUBLISH" = 1 ]; then
+  command -v gh >/dev/null 2>&1 \
+    || fail 'publish_tool_missing: --publish needs gh on PATH and an authenticated account (gh auth status)' 2
+  if gh release view "$TAG" -R "$REPO_SLUG" >/dev/null 2>&1; then
+    gh release upload "$TAG" -R "$REPO_SLUG" --clobber $asset_paths \
+      || fail "publish_failed: gh release upload $TAG" 8
+    say "published $TAG (uploaded over the existing release): https://github.com/$REPO_SLUG/releases/tag/$TAG"
+  else
+    gh release create "$TAG" -R "$REPO_SLUG" --target "$COMMIT" --title "$TAG" --notes "$notes" $asset_paths \
+      || fail "publish_failed: gh release create $TAG" 8
+    say "published $TAG: https://github.com/$REPO_SLUG/releases/tag/$TAG"
+  fi
+fi
 say "A node then needs nothing but this: bash scripts/deploy.sh (it fetches $TAG for its own triple,"
 say "checks source_commit and every sha256/size, caches it under <install>/node-binaries/$SHORT)${RUN_DONE:+; ran: $RUN_DONE}"
 say "publish-node-binaries ok: $TAG"

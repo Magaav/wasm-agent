@@ -40,11 +40,16 @@ absent() { # <text> <needle> <what>
   ok
 }
 
-# `gh` exists, is first on PATH, and only records that it was asked to do something.
+# `gh` exists, is first on PATH, and records what it was asked to do. `release view` fails (no release),
+# `release create`/`release upload` succeed - so --publish is proved without a network or a token, and every
+# default path still proves it never called gh at all.
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/gh" <<SHIM
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$WORK/gh-called"
+case "\$1 \$2" in
+  "release create"|"release upload") exit 0 ;;
+esac
 exit 1
 SHIM
 chmod +x "$WORK/bin/gh" 2>/dev/null || true
@@ -236,5 +241,59 @@ contains "$out" "cargo zigbuild --release --offline --locked" "the exact build c
 ok
 [ ! -f "$WORK/gh-called" ] || fail "gh was run during --check: $(cat "$WORK/gh-called")"
 ok
+
+# ---- --ensure: a commit whose compiled inputs a published release already covers builds nothing ------
+# The landing's cheap answer, on the same digest rule the deploy's fallback uses. A stub release (a local
+# directory: no network, no gh) holds this fixture commit's manifest and pins.
+releases="$WORK/releases"
+mkdir -p "$releases"
+printf 'node-%s\n' "$FIXTURE_SHORT" > "$releases/releases.txt"
+mkelf "$releases/wa-$TRIPLE-$FIXTURE_SHORT" 3e
+mkelf "$releases/wa-sentinel-$TRIPLE-$FIXTURE_SHORT" 3e
+cat > "$releases/node-$FIXTURE_SHORT.manifest" <<MANIFEST
+schema=wasm-agent-node-binaries/1
+source_commit=$FIXTURE_SHA
+compiled_inputs=$(wa_compiled_inputs_digest "$fixture" "$FIXTURE_SHA")
+codemode=embedded
+$TRIPLE $(sha "$releases/wa-$TRIPLE-$FIXTURE_SHORT") $(bytes "$releases/wa-$TRIPLE-$FIXTURE_SHORT") $(sha "$releases/wa-sentinel-$TRIPLE-$FIXTURE_SHORT") $(bytes "$releases/wa-sentinel-$TRIPLE-$FIXTURE_SHORT")
+MANIFEST
+rm -f "$WORK/gh-called"
+out="$(WA_NODE_BINARIES_URL="$releases" bash "$PUBLISH" --repo "$fixture" --out "$WORK/ensure" --ensure --target "$TRIPLE" --allow-empty-codemode 2>&1)"
+expect_status 0 "$?" "--ensure where a release covers the commit"
+contains "$out" "covered: node-$FIXTURE_SHORT covers the compiled inputs of $FIXTURE_SHA" "the covering release is named"
+contains "$out" "nothing to build or publish" "a covered commit builds nothing"
+[ ! -f "$WORK/ensure/node-$FIXTURE_SHORT.manifest" ] || fail "--ensure built when it was already covered"
+ok
+[ ! -f "$WORK/gh-called" ] || fail "--ensure called gh: $(cat "$WORK/gh-called")"
+ok
+
+# A release whose manifest matches the digest but whose bytes do not is a refusal, not a rebuild: the
+# bytes that claim to be this commit's build are not, exactly as in a deploy.
+badrelease="$WORK/releases-tampered"; cp -r "$releases" "$badrelease"
+printf 'tampered' >> "$badrelease/wa-$TRIPLE-$FIXTURE_SHORT"
+out="$(WA_NODE_BINARIES_URL="$badrelease" bash "$PUBLISH" --repo "$fixture" --out "$WORK/ensure-bad" --ensure --target "$TRIPLE" --allow-empty-codemode 2>&1)"
+expect_status 5 "$?" "--ensure against a matching release whose bytes were tampered with"
+contains "$out" "ensure_refused:" "the tampered-release refusal is named"
+contains "$out" "node_hash_mismatch:" "the hash refusal is the deploy's own"
+
+# Nothing published for this commit's digest: --ensure says so and lets the caller continue. --from keeps
+# this hermetic: the artifact set is verified, no compiler runs.
+empty="$WORK/releases-empty"; mkdir -p "$empty"; : > "$empty/releases.txt"
+out="$(WA_NODE_BINARIES_URL="$empty" bash "$PUBLISH" --from "$built" --out "$WORK/ensure-none" --ensure --target "$TRIPLE" 2>&1)"
+expect_status 0 "$?" "--ensure on a commit nothing covers"
+contains "$out" "not covered for $TRIPLE" "the uncovered target is named"
+contains "$out" "verified wa-$TRIPLE-$SHORT:" "the caller continues with the artifact it has"
+
+# ---- --publish: the release is created by the landing step, not pasted by hand ----------------------
+rm -f "$WORK/gh-called"
+out="$(bash "$PUBLISH" --from "$built" --out "$WORK/bundle-pub" --target "$TRIPLE" --publish 2>&1)"
+expect_status 0 "$?" "--publish creates the release"
+contains "$out" "published node-$SHORT:" "the published release is named"
+grep -q "release create node-$SHORT -R .* --target $HEAD_SHA " "$WORK/gh-called" \
+  || fail "the publish did not create node-$SHORT against $HEAD_SHA: $(cat "$WORK/gh-called")"
+ok
+out="$(bash "$PUBLISH" --from "$built" --out "$WORK/bundle-pub-local" --target "$TRIPLE" --local --publish 2>&1)"
+expect_status 2 "$?" "--publish with --local"
+contains "$out" "publish_local_refused:" "a test artifact is never published"
 
 echo "node binaries (publish) ok ($checks checks)"

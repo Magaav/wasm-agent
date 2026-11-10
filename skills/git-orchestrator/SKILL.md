@@ -363,6 +363,26 @@ and remote layout; compare `timings_ms`, `counts`, `gate_ms`, `skipped`, and
 `gate_exit`. This measures wall time and work avoided, not correctness by itself.
 No historical baseline is implied by adding telemetry.
 
+### 3a. Publish the node binary for the landed commit
+
+A node that cannot compile (openclaw) installs a published `node-<sha12>`, so a landing that changed a
+compiled input is not done until that release exists (`docs/COMPONENTS.md`, "How a landed commit gets its
+binary"). On the canonical checkout, after the readback above:
+
+```
+CARGO_TARGET_DIR=<canonical>/build/node-binaries/target \
+  bash scripts/publish-node-binaries.sh --ensure --publish \
+    --target aarch64-unknown-linux-gnu --commit "$(git -C <canonical> rev-parse HEAD)"
+```
+
+`--ensure` asks the published releases whether one already carries the commit's `compiled_inputs=`
+digest - the rule the deploy's fallback uses - so a Lua-only or docs-only landing answers in seconds and
+publishes nothing; only a compiled change builds. `--publish` creates `node-<sha12>` with the manifest and
+both binaries, or uploads over it, so re-running is idempotent. Measured on wasm_the_first 2026-11-10
+(16 threads, zig 0.17.1, cargo-zigbuild 0.24.1): **73 s** for `wa` + `wa-sentinel` on a warm dependency
+graph (~7 min cold); a covered commit answered in **5.9 s**. Keep the cross target under `build/`, and
+note that nothing polls or wakes for this: the landing runs it and nothing else does.
+
 ### 4. Close the authorized wave with an external finisher
 
 An explicit main-only wave supersedes the historical permanent-local-ref retention
