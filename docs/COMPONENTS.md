@@ -193,6 +193,13 @@ mark, so the first build after a toolchain or cache reset pays the ~7 min in the
 commit answered in **5.9 s** (release list plus one manifest read, nothing built). There is no watcher
 and no recurring wake behind this: the landing runs it, and nothing else does.
 
+The first deploy through this path was openclaw itself: `ad488c22` installed `node-4147192f2725` in 55 s
+(preflight 1.7 s, fetching 12.6 s, proving 2.8 s, installing 38.0 s; no compile), its deploy log carrying
+`deploy: binary_source: aarch64-unknown-linux-gnu ... (verified against node-4147192f2725, the build of
+4147192f2725; this commit changes no compiled input)` and its install record
+`binary_source=prebuilt-release binary_release=node-4147192f2725`. The published aarch64 pair is
+42,783,232 B (`wa`) and 5,355,632 B (`wa-sentinel`).
+
 **A cross build does not embed the code-mode assets by default** - `rust/wa-host/build.rs` exempts a
 cross build from the `WA_CODEMODE_BUILD_ASSETS` rule, because a cross build is not the *build host's*
 artifact. It is the node's, though, and a node without them starts every run with
