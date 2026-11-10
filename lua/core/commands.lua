@@ -87,6 +87,11 @@ M.commands = {
     usage = "/hooks [reload]",
     hint = "list the active hook points and mods, and the last outcome; `reload` rereads the config files",
   },
+  {
+    name = "/mcp",
+    usage = "/mcp [<key>] [on|off]",
+    hint = "every MCP connector, here and from peers: state, tools, and the exact names the model is given; on/off changes one",
+  },
   { name = "/help", usage = "/help", hint = "this help" },
   { name = "/exit", usage = "/exit", alias = { "/quit" }, hint = "quit" },
 }

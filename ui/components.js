@@ -1847,20 +1847,49 @@ class WaMcps extends HTMLElement {
     // the Node bridge, deleted 10/11, so an empty templates map hides it instead of leaving a dead button.
     this.template.hidden=!data?.templates?.whatsapp;
     for(const adapter of data.adapters||[]){const row=document.createElement('section');row.className='job-row';const label=document.createElement('strong');label.textContent=adapter.name+' · built-in profile-managed MCP';const body=document.createElement('p');body.textContent=(adapter.capabilities||[]).join(' · ')+'. '+adapter.note;row.append(label,body);this.list.append(row);}
-    if(!(data.servers||[]).length){const empty=document.createElement('p');empty.textContent='No MCPs configured. Reads go through the native index; WhatsApp sends go through the operator path alone.';this.list.append(empty);}
-    for(const server of data.servers||[]){
-      const row=document.createElement('section');row.className='job-row';const name=document.createElement('strong');name.textContent=server.name||server.id;
-      const status=document.createElement('div');status.textContent=`${server.enabled?'enabled':'disabled'} · ${server.definition.transport} · ${server.observed_status} · request-scoped, not a persistent connection`;
-      const evidence=document.createElement('p');evidence.textContent=server.probe?.error?`Probe failed: ${server.probe.error}`:server.last_call?.error?`Last call: ${server.last_call.error}`:'No continuous health observation';
+    // One list, from the node's own answer (`GET /mcp` composes this node's registry and every peer's
+    // connectors into `connectors`). The rows are the same facts `wa chat` prints: where it runs, its
+    // transport, its state, how many tools the model is given now - and, opened, the exact names, their
+    // descriptions and their input schemas. Nothing here probes or connects on its own.
+    const readOnly=data.read_only===true;
+    const connectors=Array.isArray(data.connectors)?data.connectors:null;
+    if(!connectors){const note=document.createElement('p');note.textContent='This node did not report a connector list (older build). Refresh after it is updated.';this.list.append(note);}
+    if(connectors&&!connectors.length){const empty=document.createElement('p');empty.textContent='No MCP connector is registered here and no peer exports one. Reads go through the native index; WhatsApp sends go through the operator path alone.';this.list.append(empty);}
+    for(const connector of connectors||[]){
+      const row=document.createElement('section');row.className='job-row';row.dataset.connector=String(connector.key||'');
+      const name=document.createElement('strong');name.textContent=`${connector.name||connector.id} · ${connector.key}`;
+      const status=document.createElement('div');status.className='job-status';
+      status.textContent=`${connector.state} · ${connector.transport} · runs on ${connector.where} · ${connector.tool_count} tool${connector.tool_count===1?'':'s'} callable now${connector.error?` · last error: ${connector.error}`:''}`;
+      const policy=document.createElement('p');policy.textContent=`policy: tier ${connector.policy?.tier||'?'} — ${connector.policy?.approval||'no approval recorded'}`;
       const controls=document.createElement('div');controls.className='job-controls';
-      const button=(label,action)=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=()=>this.emit(action,{id:server.id},b);return b;};
-      const probe=button('Probe (no tool call)','probe'),toggle=button(server.enabled?'Disable':'Enable approved tools',server.enabled?'disable':'enable');toggle.dataset.approvalRequired=String(!server.enabled&&server.probe?.ok!==true);toggle.disabled=toggle.dataset.approvalRequired==='true';
-      const edit=document.createElement('button');edit.type='button';edit.textContent='Edit permissions/config';edit.onclick=()=>{this.editor.value=JSON.stringify(server.definition,null,2);this.editor.closest('details').open=true;};
-      controls.append(probe,toggle,edit);row.append(name,status,evidence,controls);
-      const tools=document.createElement('ul');tools.className='mcp-tools';
-      for(const tool of server.probe?.tools||[]){const item=document.createElement('li');item.textContent=`${tool.name} · ${server.definition.tools?.[tool.name]||'not approved'} — ${tool.description||''}`;tools.append(item);}row.append(tools);this.list.append(row);
+      const button=(label,action,args)=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=()=>this.emit(action,{...args,expected_revision:connector.revision},b);return b;};
+      if(connector.scope==='local'){
+        controls.append(button('Probe (no tool call)','probe',{id:connector.id}));
+        const edit=document.createElement('button');edit.type='button';edit.textContent='Edit definition';
+        edit.onclick=()=>{const server=(this.data.servers||[]).find(entry=>entry.id===connector.id);if(!server)return;this.editor.value=JSON.stringify(server.definition,null,2);this.editor.closest('details').open=true;};
+        controls.append(edit);
+      }
+      const toggle=button(connector.enabled?'Turn off':'Turn on','toggle',{connector:connector.key,enable:!connector.enabled});
+      toggle.dataset.approvalRequired=String(readOnly);toggle.disabled=readOnly;
+      controls.append(toggle);
+      row.append(name,status,policy,controls);
+      const details=document.createElement('details'),summary=document.createElement('summary');
+      summary.textContent=`Controls it gives the model (${(connector.tools||[]).length})`;
+      details.append(summary);
+      const list=document.createElement('ul');list.className='mcp-tools';
+      for(const tool of connector.tools||[]){
+        const item=document.createElement('li');
+        const exact=document.createElement('code');exact.textContent=String(tool.name||'');
+        const meta=document.createElement('span');meta.textContent=` · ${tool.approval||'unknown'}${tool.published?' · callable now':' · not callable now'}${tool.note?` · ${tool.note}`:''}`;
+        item.append(exact,meta);
+        if(tool.description){const description=document.createElement('div');description.textContent=String(tool.description);item.append(description);}
+        const schema=document.createElement('pre');schema.className='mcp-schema';
+        schema.textContent='schema: '+String(tool.schema||JSON.stringify(tool.parameters||{}));
+        item.append(schema);list.append(item);
+      }
+      details.append(list);row.append(details);this.list.append(row);
     }
-    this.message=`${(data.servers||[]).length} configured MCPs · registry revision ${data.revision}. Inventory does not probe or connect.`;
+    this.message=`${(connectors||[]).length} connectors · registry revision ${data.revision}${readOnly?' · read-only (a master turns one on or off)':''}. Inventory does not probe or connect.`;
     if(!this.postingLoaded){this.postingLoaded=true;this.loadPosting();}
   }
 }

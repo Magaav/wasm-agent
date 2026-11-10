@@ -5848,6 +5848,11 @@ const COMMANDS = [
     hint: "list the active hook points and mods, and the last outcome",
     run: hooksReport,
   },
+  {
+    name: "/mcp",
+    hint: "every MCP connector here and from peers — state, tools, and the exact names the model is given; turn one on or off",
+    run: openMcps,
+  },
 ];
 
 // `/vault`: a key the agent uses by reference and never sees (lua/core/keys.lua). The value is typed
@@ -9294,16 +9299,34 @@ async function refreshMcps(){
   if(mcpReads.has(scope))return mcpReads.get(scope).promise;
   const epoch=mcpEpochs.get(scope)||0,controller=new AbortController();
   const headers=apiHeaders(),current=()=>mcpScope()===scope&&panel.scope===scope&&(mcpEpochs.get(scope)||0)===epoch;
-  const promise=(async()=>{try{if(current())panel.message='Loading configured MCPs (no server starts)…';
+  const promise=(async()=>{try{if(current())panel.message='Loading MCP connectors (no server starts)…';
     const payload=await mcpRequest('GET',null,headers,8000,controller);if(current())panel.inventory=payload;
   }catch(error){if(current())panel.message='MCP inventory unavailable; retained last data. Refresh to retry: '+String(error.message||error);}
   finally{if(mcpReads.get(scope)?.promise===promise)mcpReads.delete(scope);}})();mcpReads.set(scope,{promise,controller});return promise;
+}
+// `/mcp`: the same inventory `wa chat` prints - every connector registered here and every one a peer
+// federates - opened in the engine view, from the one payload `GET /mcp` composes. Opening it is a read;
+// nothing probes or connects until a button is pressed.
+function openMcps(){
+  setEngine(true);
+  const content=document.getElementById('mcp-box');
+  const head=document.querySelector('.engine-head[data-target="mcp-box"]');
+  if(content&&content.hidden){
+    content.hidden=false;
+    const caret=head&&head.querySelector('.engine-caret');if(caret)caret.textContent='▾';
+  }
+  if(head)head.scrollIntoView({block:'nearest'});
+  return refreshMcps();
 }
 document.getElementById('mcp-box').addEventListener('mcp-action',async event=>{
   const {action,args}=event.detail;if(action==='list'){await refreshMcps();return;}
   const panel=document.querySelector('#mcp-box wa-mcps'),scope=mcpScope();if(mcpControls.has(scope))return;
   panel.configureScope(scope);if(!panel.data){panel.message='Load this node’s current registry before changing it.';return;}
-  const body={...args,action,expected_revision:panel.data.revision},headers=apiHeaders({'Content-Type':'application/json'});
+  // The revision the row was drawn from, not a fresh one: a change that raced another writer must refuse
+  // and say so instead of overwriting it. `toggle` is the `/mcp` path (local registry here, the peer's own
+  // registry through the fabric); `probe`/`put` stay the registry actions they always were.
+  const expected=(args&&args.expected_revision!=null)?args.expected_revision:panel.data.revision;
+  const body={...args,action,expected_revision:expected},headers=apiHeaders({'Content-Type':'application/json'});
   mcpEpochs.set(scope,(mcpEpochs.get(scope)||0)+1);mcpReads.get(scope)?.controller.abort();mcpReads.delete(scope);
   mcpControls.add(scope);panel.busy=true;panel.message='Explicit MCP control pending; no automatic retry.';
   try{await mcpRequest('POST',body,headers,action==='probe'?120000:8000);if(mcpScope()===scope)await refreshMcps();}

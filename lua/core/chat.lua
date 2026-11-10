@@ -763,6 +763,15 @@ function M.run(argv)
         print("usage: /hooks [reload]")
       end
       print(hooks.report({ session_id = agent.session_id, cwd = platform.cwd() }))
+    elseif line == "/mcp" or line:sub(1, 5) == "/mcp " then
+      -- Every connector this node can use - its own registry and each peer's - and the exact names the
+      -- model is given (lua/core/mcp_command.lua). A change goes through mcp.control here or the peer's
+      -- own registry through the fabric; a running session is told by the existing [session update] note.
+      local done, problem = pcall(dofile("lua/core/mcp_cli.lua").run, line:sub(5), {
+        print = print,
+        ctx = { user_id = USER, role = "master", session_id = agent.session_id },
+      })
+      if not done then print(redact.text(tostring(problem))) end
     elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
       -- A slash word that is not a built-in command: the operator's own command (docs/MODS.md), run
       -- with the payload on stdin, and printed. Unknown words stay a refusal rather than a model turn:
