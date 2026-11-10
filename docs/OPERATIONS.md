@@ -5,6 +5,11 @@ absolute execution budget, output cursors, cancellation and a terminal outcome.
 A **job** is an automation definition, never another name for an operation.
 See [JOBS.md](JOBS.md) and ARCHITECTURE.md section 6.
 
+An operation is what lets a run outlive the call that asked for it: `session_start`
+(`lua/core/session_watch.lua`) launches `wa chat --session <id> <prompt>` as one, returns
+the session id at once, and a master elsewhere follows that session read-only from a
+cursor ([SESSION-WATCH.md](SESSION-WATCH.md)). The receipt is a launch, never the run.
+
 ## Windows Git shell environment
 
 An absolute Git Bash/sh command receives that verified installation's bundled
