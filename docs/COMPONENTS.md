@@ -468,7 +468,13 @@ enters a record. `kernel.record()` / `kernel.save_replay()` / `kernel.replay_fro
 
 `host.graph_*` is served by the `graph` component, so a test that asserts a graph *answer* needs one
 installed in the directory its node reads (`WA_COMPONENTS_DIR`, else `$HOME/.wasm-agent/components`).
-A test declares that with `scripts/lib/test-components.lua`:
+There are two ways a test declares that, and `scripts/fast.sh` honours both:
+
+* **It names the artifact.** A seam suite says `WA_HOOKS_COMPONENT_WASM` (the variable the host reads, and
+the one its skip message printed) in its own text; the runner installs that component - pinned, with its
+manifest - into the row's own directory and hands the host the override and the feature switch. That is
+how the hooks, memory, selfloop and mesh suites RUN in the fast path instead of printing a skip per case.
+* **It installs it itself**, through `scripts/lib/test-components.lua`:
 
 ```lua
 local components = dofile('scripts/lib/test-components.lua')
@@ -476,18 +482,22 @@ local seeded, why = components.require('graph')
 if not seeded then components.skip('test-graph-freshness', why); return end
 ```
 
-`require` copies the component, with its pin and manifest, from the set the runner built
-(`WA_FAST_COMPONENT_SOURCE`) into the test's *own* component directory, and re-checks the pin the
-loader would check. Absent - no wasi-sdk, the docker fast path, a checkout that never built one - it
-returns the reason and the test prints `SKIP <test>: <reason>`: a named hole, never a silent pass.
+`require` copies the component from the set the runner built (`WA_FAST_COMPONENT_SOURCE`) and re-checks
+the pin the loader would check. Absent - no wasi-sdk, the docker fast path, a checkout that never built
+one - it returns the reason and the test prints `SKIP <test>: <reason>`: a named hole, never a silent pass.
 
-`scripts/fast.sh` builds that set once from this tree with `scripts/build-components.sh` (so it
-carries the pin a deploy would install) and caches it under the worktree's own git dir; a row that
-needs no component pays nothing, and a test that asserts what an *absent* component does keeps
-seeing an absent one. The full gate exports a single `WA_COMPONENTS_DIR` for its whole run
-(`scripts/test.sh`) because its home is shared; the fast path's rows are hermetic and parallel, so
-each installs into its own home - which is also the only directory `scripts/test-features-gate.lua`
-will write its stubs into ("never a node's component directory").
+`scripts/fast.sh` builds that set once from this tree with `scripts/build-components.sh` (so it carries the
+pin a deploy would install) and caches it under the worktree's own git dir: 53 s cold, ~6 s for five
+components when nothing changed. A row that needs no component pays an empty directory, and a test that
+asserts what an *absent* component does keeps seeing an absent one. The full gate exports a single
+`WA_COMPONENTS_DIR` for its whole run (`scripts/test.sh`) because its home is shared; the fast path's rows
+are hermetic and parallel, so each installs into its own home - which is also the only directory
+`scripts/test-features-gate.lua` will write its stubs into ("never a node's component directory").
+
+Two things the runner refuses to call green, because both were measured as silent failures first: a row
+that names a component and still reports it missing (`FAIL component-provisioning ...`), and a skipped
+`scripts/test-fast-row-environment.lua`, the probe row that asks the node what it received from the runner
+(the variables live on the row's own command line for that reason).
 
 ## Components so far
 

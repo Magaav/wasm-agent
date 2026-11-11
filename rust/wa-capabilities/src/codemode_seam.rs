@@ -305,9 +305,17 @@ fn events_of(answer: &Value) -> Vec<sandbox::Event> {
                     console: item.and_then(|item| item.get("console")).and_then(Value::as_bool).unwrap_or(false),
                 }))
             }
+            // A finished script reports its value; a FAILED one reports its message in `error`
+            // (`rust/wa-capabilities/src/quickjs.rs`, the `done` event: `ok` selects which field the
+            // guest fills). The seam's `done-event` has one payload field, `value`, and the component
+            // reads it as the error when `ok` is false - so the failure message has to travel in it.
+            // Without this the component answered `{ok: false}` with no reason at all, which is the
+            // one thing a code-mode failure may never be (`scripts/test-codemode-component.lua`,
+            // "a script that throws": the same script through both loops, compared field for field).
             "done" => events.push(sandbox::Event::Done(sandbox::DoneEvent {
                 ok: event.get("ok").and_then(Value::as_bool).unwrap_or(false),
-                value: event.get("value").and_then(Value::as_str).map(str::to_string),
+                value: event.get("value").or_else(|| event.get("error"))
+                    .and_then(Value::as_str).map(str::to_string),
                 writes: event.get("writes").and_then(Value::as_str).map(str::to_string),
             })),
             other => events.push(sandbox::Event::Output(sandbox::OutputEvent {

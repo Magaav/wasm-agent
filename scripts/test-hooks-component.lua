@@ -61,7 +61,12 @@ local function instance(seam)
   host.log = function(line) logged[#logged + 1] = tostring(line) end
   local module = dofile('lua/core/hooks.lua')
   host.log = real_log
-  if seam then module.seam_override = function() return true, 'active_component' end end
+  -- BOTH sides are pinned (see `scripts/test-selfloop-component.lua`): an unpinned instance asks the
+  -- resolver, which answers `active_component` whenever this tree's component is installed - so on such
+  -- a machine the `native` side ran the component and the comparisons compared it with itself. The flag
+  -- is read when the module loads, which is why it is set here rather than before each call.
+  module.seam_override = seam and function() return true, 'active_component' end
+    or function() return false, 'seam_disabled' end
   return module
 end
 
