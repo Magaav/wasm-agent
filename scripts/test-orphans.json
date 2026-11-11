@@ -1,0 +1,150 @@
+{
+  "schema": 1,
+  "why": "The JS/CJS test scripts no harness names, each with the reason it is not wired. scripts/test-orphan-tests.mjs fails when a new orphan appears undeclared, when a declared file is gone, or when a declared one becomes wired (delete that entry - the list only shrinks). A wired script is named by a harness (scripts/fast.sh, scripts/test.sh, scripts/wave-release.mjs) or by another test.",
+  "entries": [
+    {
+      "file": "scripts/test-agent-benchmark-blind-reference.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-bundle.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-forced-policy.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-forced-unknown.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-pi-route.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-pilot-policy.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-sandbox-lifecycle.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-vault-route.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-worth-policy.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-worth.mjs",
+      "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-audit-driver.mjs",
+      "reason": "long-running driver: does not finish standalone inside 25 s; gate/audit scale"
+    },
+    {
+      "file": "scripts/test-bg-responsiveness.cjs",
+      "reason": "needs a built tree (`rust/target/release/wa.exe`): it starts the node from the build output, which a landing tree does not have"
+    },
+    {
+      "file": "scripts/test-capability-inventory.mjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-child-supervisor.cjs",
+      "reason": "fails standalone on its own fixture (`TypeError: (r.stderr + r.stdout).includes is not a function`) - the fixture or the test needs repair before it can gate anything"
+    },
+    {
+      "file": "scripts/test-codemode-context-build.mjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-codemode-default.mjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-codemode-model-boundary.mjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-codemode-presentation.mjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-envelope-report.cjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-evaluation-feedback.cjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-failure-history.cjs",
+      "reason": "fails standalone on its own fixture (`AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:`) - the fixture or the test needs repair before it can gate anything"
+    },
+    {
+      "file": "scripts/test-final-answer-browser.mjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-gate-drain.cjs",
+      "reason": "fails standalone on its own fixture (`Error: Cannot find module 'C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-gate-drain-Y52uxq\\drain-work\\scripts\\gate-lane.mjs'`) - the fixture or the test needs repair before it can gate anything"
+    },
+    {
+      "file": "scripts/test-graph-repair.cjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-history-regressions.cjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-managed-network.cjs",
+      "reason": "needs a built tree (`rust/target/release/wa.exe`): it starts the node from the build output, which a landing tree does not have"
+    },
+    {
+      "file": "scripts/test-mcp-ui.cjs",
+      "reason": "takes a path argument (its own usage assertion) for the tree or evidence it inspects"
+    },
+    {
+      "file": "scripts/test-native-ui-mutations.cjs",
+      "reason": "takes a path argument (its own usage assertion) for the tree or evidence it inspects"
+    },
+    {
+      "file": "scripts/test-read-admission.cjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-retry-ui.js",
+      "reason": "browser page fragment: uses `window`/`document` and runs inside the UI harness page (`scripts/test-ui.ps1`), not under node"
+    },
+    {
+      "file": "scripts/test-sentinel-ack.cjs",
+      "reason": "takes a path argument (its own usage assertion) for the tree or evidence it inspects"
+    },
+    {
+      "file": "scripts/test-sentinel-return.mjs",
+      "reason": "fails standalone on its own fixture (`AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:`) - the fixture or the test needs repair before it can gate anything"
+    },
+    {
+      "file": "scripts/test-skill-content.cjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-wave-autoflush.cjs",
+      "reason": "fails standalone on its own fixture (`AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:`) - the fixture or the test needs repair before it can gate anything"
+    },
+    {
+      "file": "scripts/test-wave-closure-reporting.cjs",
+      "reason": "takes a path argument (its own usage assertion) for the tree or evidence it inspects"
+    },
+    {
+      "file": "scripts/test-workspace-cwd.mjs",
+      "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    }
+  ]
+}
