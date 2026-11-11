@@ -188,6 +188,21 @@ function M.operator_call(args)
   local allowed = false
   for _, id in ipairs(profile.conversations) do if id == request.conversation_id then allowed = true end end
   if not allowed then return { ok = false, error = 'operator_conversation_outside_profile', profile = args.profile } end
+  -- The Rust/WASI path (Phase 2 of the 10/11 decision): the same state machine, with the send on the
+  -- node's explicit-send outbox and the component's posting-hold/fence gate in front of the wire. It
+  -- is opt-in by node (`WA_WHATSAPP_OPERATOR_BACKEND=native`) until a live account proves it in place;
+  -- the Node CLI below remains the route for a node whose Go connector still owns the linked session.
+  if (host.getenv('WA_WHATSAPP_OPERATOR_BACKEND') or '') == 'native' and type(host.whatsapp_send) == 'function' then
+    local ok, operator = pcall(dofile, 'lua/core/whatsapp_operator.lua')
+    if ok and type(operator) == 'table' and type(operator.call) == 'function' then
+      local answer = operator.call({ action = action, profile = args.profile, request = request })
+      answer.action = action
+      answer.profile = args.profile
+      answer.backend = 'native'
+      answer.note = 'One call, no retry. After a timeout or unknown outcome use status with the same intent_id.'
+      return answer
+    end
+  end
   local script, node = operator_script()
   if not script or not node then return { ok = false, error = 'operator_cli_not_installed' } end
   local dir = operator_dir() .. '/requests'

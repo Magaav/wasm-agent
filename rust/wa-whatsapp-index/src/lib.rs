@@ -106,13 +106,19 @@ pub const BACKFILL_MAX: u32 = 500;
 /// the phone, and a caller that names no chat is asking for "the ones I talk in", not for all of them.
 pub const BACKFILL_MAX_CHATS: usize = 20;
 
-/// The six questions the agent may ask about the index.
+/// The seven questions the agent may ask about the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     /// `whatsapp_search {q, chat?, kind?, from?, since?, until?, limit}` - full-text over records.
     Search,
     /// `whatsapp_read {chat, before?, limit}` - one thread, newest first, reactions folded on.
     Read,
+    /// `whatsapp_message {chat, id}` - one exact message by id, with its full stored text.
+    ///
+    /// It exists because a `read` answer carries a 280-character snippet: an exact reply source and
+    /// the echo of a just-sent message must be compared to the bytes the index stored, not to a
+    /// preview (`docs/SERVICE-COMPONENTS.md`, the operator send).
+    Message,
     /// `whatsapp_reactions {chat, id}` - who reacted to one message, with which emoji.
     Reactions,
     /// `whatsapp_media {chat, id}` - the metadata of one message's media, never the bytes.
@@ -129,6 +135,7 @@ impl Op {
         match self {
             Op::Search => "search",
             Op::Read => "read",
+            Op::Message => "message",
             Op::Reactions => "reactions",
             Op::Media => "media",
             Op::Download => "download",
@@ -140,6 +147,7 @@ impl Op {
         match text {
             "search" => Some(Op::Search),
             "read" => Some(Op::Read),
+            "message" => Some(Op::Message),
             "reactions" => Some(Op::Reactions),
             "media" => Some(Op::Media),
             "download" => Some(Op::Download),
@@ -153,6 +161,7 @@ impl Op {
         match self {
             Op::Search => "whatsapp_search",
             Op::Read => "whatsapp_read",
+            Op::Message => "whatsapp_message",
             Op::Reactions => "whatsapp_reactions",
             Op::Media => "whatsapp_media",
             Op::Download => "whatsapp_download",
@@ -164,6 +173,7 @@ impl Op {
         match name {
             "whatsapp_search" => Some(Op::Search),
             "whatsapp_read" => Some(Op::Read),
+            "whatsapp_message" => Some(Op::Message),
             "whatsapp_reactions" => Some(Op::Reactions),
             "whatsapp_media" => Some(Op::Media),
             "whatsapp_download" => Some(Op::Download),
@@ -237,7 +247,7 @@ impl Request {
     /// Check every argument. The first refusal wins; a query is all-or-nothing.
     pub fn validate(&self) -> Result<Verified, Refusal> {
         let op = Op::parse(self.op.trim()).ok_or_else(|| {
-            Refusal::new("bad_op", "op must be search, read, reactions, media, download or backfill")
+            Refusal::new("bad_op", "op must be search, read, message, reactions, media, download or backfill")
         })?;
         let chat = match self.chat.as_deref().map(str::trim) {
             None | Some("") => None,
@@ -312,6 +322,12 @@ impl Request {
                     return Err(Refusal::new("chat_required", "read needs the exact chat JID"));
                 }
                 (clamp_limit(self.limit, READ_DEFAULT, READ_MAX), 0)
+            }
+            Op::Message => {
+                if chat.is_none() || id.is_none() {
+                    return Err(Refusal::new("chat_and_id_required", "one message: pass chat and id"));
+                }
+                (1, 0)
             }
             Op::Reactions | Op::Media | Op::Download => {
                 if chat.is_none() || id.is_none() {
@@ -871,6 +887,20 @@ mod tests {
         for reason in ["not_indexed", "no_media", "not_downloadable", "deleted", "download_too_large", "bad_chat", "chat_and_id_required"] {
             assert!(!retryable(reason), "{reason} can never succeed on a retry");
         }
+    }
+
+    #[test]
+    fn an_exact_message_needs_a_chat_and_an_id_and_has_a_tool_name() {
+        let exact = Request { op: "message".into(), chat: Some("5511999999999@lid".into()), id: Some("3EB0ABCD".into()), ..Request::default() };
+        let verified = exact.validate().expect("an exact message is a valid request");
+        assert_eq!((verified.op, verified.limit), (Op::Message, 1));
+        let missing_id = Request { op: "message".into(), chat: Some("5511999999999@lid".into()), ..Request::default() };
+        assert_eq!(missing_id.validate().unwrap_err().code, "chat_and_id_required");
+        let missing_chat = Request { op: "message".into(), id: Some("3EB0ABCD".into()), ..Request::default() };
+        assert_eq!(missing_chat.validate().unwrap_err().code, "chat_and_id_required");
+        assert_eq!(Op::Message.tool(), "whatsapp_message");
+        assert_eq!(Op::parse_tool("whatsapp_message"), Some(Op::Message));
+        assert_eq!(Op::parse("message"), Some(Op::Message));
     }
 
     #[test]

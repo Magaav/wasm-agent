@@ -815,6 +815,7 @@ whatsapp_download    writes files
 whatsapp_media       read-only
 whatsapp_reactions   read-only
 whatsapp_read        read-only
+whatsapp_message     read-only
 whatsapp_search      read-only
 whatsapp_backfill    network
 email_send           network
@@ -982,9 +983,9 @@ the component writes still passes the kernel's opaque-send cap, so an explicit s
 [GRANT-POLICY.md](GRANT-POLICY.md#the-shipped-default) has the rule, and
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) has the component side.
 
-## WhatsApp message index (`host.whatsapp_search`, `read`, `reactions`, `media`, `download`)
+## WhatsApp message index (`host.whatsapp_search`, `read`, `message`, `reactions`, `media`, `download`)
 
-Five read-shaped capabilities over the index the `wa-whatsapp` component keeps of **every** message it
+Six read-shaped capabilities over the index the `wa-whatsapp` component keeps of **every** message it
 receives (text, image, video, audio and voice notes, documents, stickers, locations, contact cards,
 polls, and reactions/edits/deletions as events), in the component's own kv namespace. The transport is
 the explicit send's: a question is a **job on the shared queue**, queue name `whatsapp.query`
@@ -996,6 +997,7 @@ consumes as a `worker` and settles with `done(answer)` - see
 | --- | --- | --- |
 | `whatsapp_search` | `q?, chat?, kind?, from?, since?, until?, limit` (one of the four narrowings is required) | `hits[{chat, id, ts, sender, kind, text, score, media?}], count, matched, candidates, truncated` |
 | `whatsapp_read` | `chat, before?, limit` | `messages[...]` newest first, `has_more`, `next_before`; reactions folded onto what they answer |
+| `whatsapp_message` | `chat, id` | `message{chat, id, ts, sender, sender_name, kind, text, own, edited?, deleted?, unsupported?, source?}` with the **full stored text** - the exact value an operator reply source and a sent-message echo are compared against |
 | `whatsapp_reactions` | `chat, id` | `reactions[{sender, emoji, ts}], count, by_emoji` |
 | `whatsapp_media` | `chat, id` | the media metadata: `mime, filename, size, sha256, duration_s, pages`, plus place/contact/poll |
 | `whatsapp_download` | `chat, id` | the decrypted bytes on disk: `{path, bytes, mime, filename, sha256}` |
