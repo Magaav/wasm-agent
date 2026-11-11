@@ -1621,6 +1621,20 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
       || fail "node installed, but could not ship scripts/lib/$module"
     PIPELINE=$((PIPELINE + 1))
   done
+  # A file this tree no longer ships must not stay in the install. The proof below reads the *install*, so a
+  # script deleted from the tree kept its import and failed every later deploy with "imports ..., which this
+  # deploy did not install": the Node bridge went on 10/11, `whatsapp-reply.mjs` stayed in the install from an
+  # older deploy importing the `whatsapp-mcp-client.mjs` that went with it, and the deploy that installed an
+  # unrelated fix recorded `ok=false` (2026-11-11). Only the two globs this block ships are pruned, and a file
+  # is removed only when the tree does not have it, so nothing this deploy means to install can be deleted.
+  PRUNED=0
+  for installed in "$INSTALL_DIR"/scripts/whatsapp-* "$INSTALL_DIR"/scripts/mcp-*.mjs; do
+    if [ ! -f "$installed" ]; then continue; fi
+    if [ -f "$ROOT/scripts/$(basename "$installed")" ]; then continue; fi
+    rm -f "$installed" || fail "could not remove $(basename "$installed"), which this tree no longer ships"
+    PRUNED=$((PRUNED + 1))
+  done
+  if [ "$PRUNED" -gt 0 ]; then echo "deploy: pruned $PRUNED installed script(s) this tree no longer ships"; fi
   # And prove the install is import-closed, so a script that cannot load is a refused deploy instead of a
   # silent run of failing deliveries: every relative import of a shipped script must resolve inside
   # <install>/scripts, next to the script that names it.

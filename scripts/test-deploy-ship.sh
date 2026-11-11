@@ -15,7 +15,10 @@
 #   1. every module a shipped script imports is installed beside it;
 #   2. a tree whose imported module is missing is **refused**, naming the module; and
 #   3. a shipped script that imports something this deploy cannot install is refused too - the closure
-#      check, which is the one that would have caught the live failure from the other side.
+#      check, which is the one that would have caught the live failure from the other side; and
+#   4. a script the tree no longer ships is pruned out of the install instead of failing that check, while
+#      a script the tree does ship is kept (whatsapp-reply.mjs outlived the Node bridge and held a healthy
+#      deploy red with "imports ..., which this deploy did not install").
 #
 # Hermetic: a temp directory per run, no browser, no sentinel, no model, and nothing outside it is touched.
 set -uo pipefail
@@ -111,5 +114,25 @@ LEAKY_STATUS=$?
 echo "$LEAKY_OUT" | grep -q 'whatsapp-not-shipped.mjs' \
   || fail "the closure refusal did not name the unshipped import: $LEAKY_OUT"
 echo "ok   a shipped script importing an uninstalled module is refused, naming it"
+
+# 4. A script the tree no longer ships must not stay in the install. The closure check reads the install,
+#    so a removed script whose import went with it (whatsapp-reply.mjs after the Node bridge, 10/11) failed
+#    every later deploy with "imports ... which this deploy did not install" - a healthy deploy recorded
+#    ok=false. The install is pruned of the two globs this block ships, and only of what the tree lacks.
+STALE_INSTALL="$WORK/install-stale"
+mkdir -p "$STALE_INSTALL/scripts" || fail "could not make the stale install"
+printf 'import "./whatsapp-mcp-client.mjs";\n' > "$STALE_INSTALL/scripts/whatsapp-reply.mjs"
+printf 'export const kept=true;\n' > "$STALE_INSTALL/scripts/whatsapp-kept-by-tree.mjs"
+printf 'export const kept=true;\n' > "$TREE/scripts/whatsapp-kept-by-tree.mjs"
+STALE_OUT="$(run_block "$TREE" "$STALE_INSTALL")"
+STALE_STATUS=$?
+[ "$STALE_STATUS" = "0" ] || fail "a stale installed script failed a healthy deploy: $STALE_OUT"
+[ ! -f "$STALE_INSTALL/scripts/whatsapp-reply.mjs" ] \
+  || fail "the script this tree no longer ships was left in the install and only escaped the closure check by luck"
+[ -f "$STALE_INSTALL/scripts/whatsapp-kept-by-tree.mjs" ] \
+  || fail "pruning removed a script the tree does ship"
+echo "$STALE_OUT" | grep -q 'pruned 1 installed script' \
+  || fail "the deploy did not say what it pruned: $STALE_OUT"
+echo "ok   a script the tree no longer ships is pruned, and one it ships is kept"
 
 echo "ALL PASS"
