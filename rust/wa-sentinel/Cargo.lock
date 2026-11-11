@@ -737,11 +737,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "wa-host-support"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "wa-jobs"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
  "serde_json",
+ "wa-host-support",
  "wa-sqlite",
 ]
 
