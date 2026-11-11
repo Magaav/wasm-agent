@@ -880,6 +880,14 @@ local function node_capability(capability, args, caller)
     -- name as a master. It still installs nothing itself - it writes the request this node's own
     -- `/update` writes, and this node's Sentinel performs it under its existing rules.
     return dofile("lua/core/remote_update.lua").serve(args, caller)
+  elseif capability == "services" then
+    -- This node's service components, from a master that is not sitting at it (11/11). The verbs are
+    -- the ones `wa services` runs locally (`lua/core/services_cli.lua` is only the printing), so a
+    -- coordinator and an operator on the machine cannot disagree about what a verb means. The gate
+    -- above already refused a caller `author_of` does not name as master; `services.control` refuses a
+    -- guest, an admin without master and a child agent again, in its own words.
+    return dofile("lua/core/services.lua").control(args,
+      { role = "master", user_id = tostring(author), session_id = caller and caller.session_id })
   elseif capability == "federation" then
     -- Connector federation (lua/core/federation.lua): a master peer lists and runs this node's connector
     -- tools here, under this node's own guards. The dispatch is the same one the fallthrough below uses.
@@ -1000,7 +1008,7 @@ local MESH_VERBS = {
     search_messages = true, recall = true, status = true, health = true },
   control = { bash = true, write = true, edit = true, shell = true, chat = true, client = true,
     set_role = true, set_model = true, set_model_less = true, set_provider = true, subagent = true, spell_save = true,
-    spell_run = true, access = true },
+    spell_run = true, access = true, services = true },
 }
 
 -- The verb the mesh grades a capability with. Anything unlisted is `call`, which the mesh's own rules
@@ -1131,7 +1139,14 @@ local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true
   operation=true,
   -- The speech queue's worker path (docs/QUEUE.md "Phase 2"). An enrolled worker may take,
   -- heartbeat and settle a job; it cannot enqueue, requeue or read another job's audio.
-  stt=true }
+  stt=true,
+  -- The service components of this node, from a master that is not sitting at it (11/11): the same
+  -- verbs `wa services` runs locally, for a coordinator that must stop a misbehaving component on a
+  -- managed node without a turn there. Admitting the name admits masters only - `node_capability`
+  -- refused a caller `author_of` does not name as master before the branch runs, and
+  -- `services.control` refuses a guest/child again on its own. Graded `control` in MESH_VERBS because
+  -- stopping a service is the same authority as a shell on this node, not a read.
+  services=true }
 
 -- The list as data, for the wiring guard: it asks this node's own gate what it admits instead of
 -- keeping a copy that could drift. Sorted, so a failure names the same capability on every run.

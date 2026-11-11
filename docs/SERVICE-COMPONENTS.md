@@ -447,10 +447,35 @@ All of it is the `services` admin tool (master only, never a child agent) plus `
 | --- | --- |
 | `list` / `status` / `logs` | unchanged, plus: a definition whose imports nobody serves reports `state: "waiting"` with `waiting_for: ["wa:vision/text-reader@0.1.0"]` and `waiting_reason` (`imports_not_served` / `not_installed`), and a running one reports its `generation`, its `instance` (`name#N`) and how many `registrations` it holds |
 | `enable` / `disable` / `restart` / `remove` | unchanged. Boot now starts enabled definitions **by imports** (`supervise`), not in store order. A `stop` is final: the definition leaves the supervisor's set (it would otherwise be restarted by the next reconcile), and `enable`/`autostart`/`supervise` put it back |
+| `start` / `stop` | the instance, without deciding the boot question: `start` runs a stored definition now, `stop` stops it and hands its claimed queue jobs back. `enable` is `start` **and** the boot decision; `disable` is `stop` **and** forgetting it |
 | `upgrade {name, source}` | the transactional install below. The definition's grants stay the ones it was enabled with - an upgrade replaces bytes, not authority |
 | `profile_dump [name]` | the effective configuration after base → node → user → patch, rows by id |
 
-### `upgrade` — stage, verify, start beside, switch, stop
+### The operator's own door: `wa services` (11/11)
+
+```text
+wa services list [--json]            every definition, enabled/not and its live state
+wa services status <name> [--json]   one definition plus what the host says it is doing
+wa services start <name>             run it now (does not change what happens at boot)
+wa services stop <name>              stop it now; claimed queue jobs go back to the queue
+wa services enable <name>            start it now and at every boot
+wa services disable <name>           stop it now and do not start it at boot
+```
+
+No turn and no model: this is the door for a node declared model-less (`docs/MODEL-LESS.md`), where the
+`services` tool cannot run because running a tool is running a turn. The decisions are still
+`lua/core/services.lua`'s - the CLI is dispatch and printing (`lua/core/services_cli.lua`) - so the two
+doors cannot disagree about what "enable" means, and the same master gate applies. A refusal names its
+reason and exits non-zero; a name nobody stores is `unknown service`, not a `not_running` that looks like
+success.
+
+A master on another node runs the same verbs through the **`services` peer capability** (same gate style
+as the WhatsApp read capabilities: `author_of` in `lua/core/server.lua`, then the registry's own
+master/admin check), so a coordinator can stop a misbehaving component on a managed node without a turn
+there. It is graded `control` for the mesh - stopping a service is the same authority as a shell, not a
+read.
+
+### `upgrade` — stage, verify, retire, start, health, switch
 
 ```text
 services upgrade {name:"wa-whatsapp",
@@ -469,18 +494,32 @@ The order is the contract and every failure before the switch costs nothing:
    running (this is the same rule the supervisor uses, read from the artifact's own type);
 4. the grant is checked against the staged manifest, and a missing `config` is filled from the profile
    stack;
-5. the candidate starts **beside** the old instance (same name, same grants, same state; the manifest's
-   `state_version` migration runs on a snapshot copy first);
+5. the running instance is **retired first** (11/11): a component that imports `wa:kernel/drain` is asked
+to finish the job in hand and report `idle`, then stopped and joined, and the queue leases it still holds
+are handed back to the queue. Then the candidate starts - same name, same grants, same state; the
+manifest's `state_version` migration runs on a snapshot copy first. **One instance per service name, at
+every step**: `services::claim` refuses a second instance of a name that is starting, running, draining
+or stopping, whichever door asks (`start`, `enable`, `autostart`/`supervise`, this upgrade, the dev loop).
+The old order - start the candidate beside the running one - is right for a stateless component and wrong
+for one that owns a device session, a port or a lock: on 09-11 the `wa-whatsapp` cutover had both
+instances restore the same device and authenticate, WhatsApp replaced one (`conflict=replaced`), and the
+replaced one's outbox went on claiming sends it could not deliver;
 6. health: `lifecycle.report(ready)`/`degraded`, or - for a guest that never reports, which includes
-   every wasip1 module - "still alive after the window", reported as `health: "unreported"` rather than
-   invented;
+every wasip1 module - "still alive after the window", reported as `health: "unreported"` rather than
+invented;
 7. the files are committed (wasm, manifest, **pin last**) and the instance is switched: the retired
-   generation's bus subscriptions and queue grants are revoked, the new instance's are not touched.
+generation's bus subscriptions and queue grants are revoked, the new instance's are not touched.
+
+A refusal after step 4 therefore finds the service retired, and **puts the previous pin back**
+(`restore_previous`): the installed bytes were never committed over, so the pair that was running starts
+again through the supervisor, and the answer says `restored: {restored: true, generation: …}`. A refused
+upgrade costs a restart, never an outage and never two instances.
 
 The answer names what happened (`mode: install|upgrade`, `sha256`, `previous`, `health`, `contract`,
-`instance`, `switch.retired`), so a script can tell "installed", "upgraded" and "kept the old one" apart
-without reading a log. `cargo test -p wa-kernel-runtime install` walks the whole path, including two
-refusals that must leave the running instance and the installed files exactly as they were.
+`instance`, `retired`, `restored`), so a script can tell "installed", "upgraded" and "kept the old one"
+apart without reading a log. `cargo test -p wa-kernel-runtime install` walks the whole path, including two
+refusals that must leave the installed files exactly as they were - and
+`one_service_name_never_runs_two_instances` is the negative control for the invariant itself.
 
 ### Per-component limits
 

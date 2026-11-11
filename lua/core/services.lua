@@ -120,11 +120,27 @@ function M.control(args,ctx)
   if not row.enabled then return fail('service_not_enabled') end
   host_call({action='stop',name=args.name});return host_call(start_request(row.definition))
  end
+ if action=='start' then
+  -- Run it now, without deciding whether it starts at boot: `enable` is the persistence, `start` is
+  -- the instance. Two verbs because they are two decisions, and an operator testing a definition must
+  -- not have to make the boot one to try it (`wa services start <name>`, docs/SERVICE-COMPONENTS.md).
+  local row=type(args.name)=='string' and load_store().services[args.name]
+  if not row then return fail('service_unknown') end
+  return host_call(start_request(row.definition))
+ end
+ if action=='stop' then
+  -- The other half: one instance, stopped, with its claimed queue jobs handed back
+  -- (`services::stop`). `enabled` stays as it was, so the next boot still starts it.
+  local row=type(args.name)=='string' and load_store().services[args.name]
+  if not row then return fail('service_unknown') end
+  return host_call({action='stop',name=args.name})
+ end
  if action=='upgrade' then
   -- Transactional install/upgrade (docs/KERNEL.md, lesson 5). The *grants* stay the ones the
   -- definition was enabled with - an upgrade replaces bytes, not authority - and the artifact comes
-  -- from `source`. A candidate that fails any stage leaves the running instance untouched, so this is
-  -- not a registry change either: nothing is stored unless the host answers ok.
+  -- from `source`. A name holds one instance, so the host retires the running one before the candidate
+  -- starts; a candidate that fails any stage puts the previous pin back, and the answer says so
+  -- (`restored`). Nothing is stored here either way: the definition has not changed.
   local row=type(args.name)=='string' and load_store().services[args.name]
   if not row then return fail('service_unknown') end
   if not row.enabled then return fail('service_not_enabled') end
