@@ -2219,7 +2219,15 @@ dependencies = [
  "ring",
  "rusqlite",
  "serde_json",
+ "wa-sqlite",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "wa-sqlite"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
 ]
 
 [[package]]
