@@ -346,6 +346,9 @@ local function request_rendezvous(record)
     '--reason', quote('remote update from ' .. (record.requester.name ~= '' and record.requester.name or record.requester.node_id)
       .. ': ' .. (record.reason ~= '' and record.reason or 'rendezvous deploy')),
   }, ' ')
+  -- The box before the call: a request file that appears during it is this call's, even when the
+  -- sentinel prints nothing (the node door proves the same thing, `update.M.new_requests`).
+  local box_before = update.request_box(facts)
   local result = shell(command)
   if not result then return nil, { error = 'sentinel_unreachable', observed = 'calling ' .. tostring(facts.sentinel) .. ' produced no answer' } end
   if (result.code or 0) ~= 0 then
@@ -354,7 +357,22 @@ local function request_rendezvous(record)
   end
   local requested = tostring(result.stdout or ''):match('requested run:%s*([^\r\n]+)')
   if not requested then
-    return nil, { error = 'sentinel_unverifiable', observed = 'the sentinel exited successfully without naming a durable request' }
+    -- No line: the box is the evidence. A `run` request that appeared during the call is this call's,
+    -- and the refusal (when nothing appeared) carries the sentinel's own words - the node door does the
+    -- same, for the same reason (`update.M.new_requests`).
+    local fresh = update.new_requests(box_before)
+    if #fresh == 1 then
+      local text = read(fresh[1])
+      local ok, request = pcall(json.decode, tostring(text or ''))
+      if ok and type(request) == 'table' and request.verb == 'run' then
+        return { door = 'run', request = fresh[1], script = script, sentinel = trim(first_line(result.stdout)), commit = record.target_commit }
+      end
+    end
+    return nil, { error = 'sentinel_unverifiable',
+      observed = 'the sentinel exited ' .. tostring(result.code) .. ' naming no run request; stdout ' ..
+        (#trim(tostring(result.stdout or '')) > 0 and trim(tostring(result.stdout)) or 'was empty') .. '; stderr ' ..
+        (trim(tostring(result.stderr or '')) ~= '' and trim(tostring(result.stderr)) or 'was empty'),
+      evidence = { code = result.code, sentinel_dir = box_before.root, appeared = #fresh } }
   end
   return { door = 'run', request = trim(requested), script = script, sentinel = trim(first_line(result.stdout)), commit = record.target_commit }
 end

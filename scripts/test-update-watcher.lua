@@ -211,6 +211,39 @@ ok(report.error == "already_pending" and not report.queued,"atomic concurrent du
 request_answer = function() return wrapper(0,"","") end
 report = ask()
 ok(report.error == "sentinel_unverifiable" and not report.queued,"exit zero without durable request evidence is refused")
+-- ... and that refusal now carries the sentinel's own words and its box, because the 11/11 record on
+-- `work` said only "exited successfully without naming a durable request" and could not be diagnosed.
+ok(report.evidence and report.evidence.code == 0, "the refusal carries the sentinel's exit code", json.encode(report.evidence))
+ok(tostring(report.evidence.sentinel_dir):find("sentinel", 1, true) ~= nil, "and its box", json.encode(report.evidence))
+ok(tostring(report.observed):find("stdout was empty", 1, true) ~= nil, "and says stdout said nothing", tostring(report.observed))
+
+-- 9. THE REGRESSION CASE (11/11, `work`): the sentinel exits 0 and prints no request line, but a
+--    request DID appear in its box during the call. The file is the fact; a node that can see the box
+--    must not answer "unverifiable" for a request it can point at.
+request_answer = function()
+  vfs[sentinel_dir .. "/requests/1700000000-99.json"] = '{"verb":"deploy","reason":"the watcher test"}'
+  return wrapper(0, "", "")
+end
+report = ask()
+ok(report.queued == true and report.status == "queue", "a request that appeared is a queue even with no line, got " .. tostring(report.status))
+ok(tostring(report.request):find("1700000000%-99.json") ~= nil, "and the request the box holds is the one named: " .. tostring(report.request))
+ok(tostring(report.observed):find("printed no request line", 1, true) ~= nil, "the answer says the line was missing", tostring(report.observed))
+vfs[sentinel_dir .. "/requests/1700000000-99.json"] = nil
+
+-- 10. The negative control for that: a file that was ALREADY in the box is not this call's request.
+--     Only what appeared during the call counts, so a stale request cannot be claimed as a new one.
+vfs[sentinel_dir .. "/requests/1700000000-95.json"] = '{"verb":"restart","reason":"earlier work"}'
+request_answer = function() return wrapper(0, "", "") end
+report = ask()
+ok(report.error == "sentinel_unverifiable" and not report.queued, "a file that was already there is not a new request, got " .. tostring(report.error))
+ok(report.evidence and report.evidence.requests_appeared == 0, "and the evidence counts what appeared, not what is there", json.encode(report.evidence))
+vfs[sentinel_dir .. "/requests/1700000000-95.json"] = nil
+
+-- 11. A refusal the sentinel printed on stderr is quoted back, not replaced by a word of ours.
+request_answer = function() return wrapper(0, "", "sentinel: the request box is on another mount") end
+report = ask()
+ok(report.error == "sentinel_unverifiable", "a silent exit is still a refusal")
+ok(tostring(report.observed):find("another mount", 1, true) ~= nil, "and the sentinel's own stderr is in the answer", tostring(report.observed))
 request_answer = nil
 inventory_verified = false
 report = ask()
