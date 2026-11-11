@@ -73,7 +73,17 @@ function unitsOf(doc, label) {
     units.set('top:' + key, doc[key]);
   }
   const components = doc.components;
-  if (components === undefined) return units;
+  // "No components" has two shapes on a real node: `{}` and `[]`. The second is what an install writes for
+  // a node that names none - measured on wasm_the_first 10/11, whose 98-byte policy.json is exactly
+  // `{"components":[],"features":{...},"sensitive_capabilities":[],"version":3}` - and refusing it meant
+  // the merge never ran there: every deploy kept that file, so no component had a rule and every
+  // sensitive capability was refused with no_policy. An empty list and an empty object are the same fact.
+  // A NON-empty list is still not a policy, and still refuses.
+  if (components === undefined || components === null) return units;
+  if (Array.isArray(components)) {
+    if (components.length !== 0) throw new Error(`${label}: components is a list, not an object`);
+    return units;
+  }
   if (!isObject(components)) throw new Error(`${label}: components is not an object`);
   for (const name of Object.keys(components)) {
     const entry = components[name];
@@ -279,7 +289,7 @@ function parseArgs(argv) {
 
 function summaryLines(result, args) {
   const lines = [
-    `mode=${args.base && !args.additionsOnly ? 'three-way' : 'additions-only'}`,
+    `mode=${result.bootstrapEmpty ? 'additions-only (bootstrap: the node file names no components)' : args.base && !args.additionsOnly ? 'three-way' : 'additions-only'}`,
     `base=${args.baseLabel || 'none'}`,
     `changed=${result.changed ? 1 : 0}`,
     `node_edits=${result.nodeEdits ?? 0}`,
@@ -328,11 +338,47 @@ function main(argv) {
     const ours = { document: oursDoc, units: unitsOf(oursDoc, 'ours') };
     const theirs = { document: theirsDoc, units: unitsOf(theirsDoc, 'theirs') };
     const baseDoc = args.base && !args.additionsOnly ? readJson(args.base, 'base') : null;
-    const merged = baseDoc === null
+    // A file that names no components AT ALL (`"components": []`) is the shape an install writes, not
+    // something an operator typed - an operator who wants no rules writes `"components": {}`. Read three-way,
+    // it looks like the node deleted every shipped rule, so the merge kept the file empty for ever (the
+    // state wasm_the_first was in). Its own settings still win - adding units never touches them - and the
+    // release's rules are added beside them. The summary names the mode so the deploy log says why.
+    const bootstrapEmpty = Array.isArray(oursDoc.components) && oursDoc.components.length === 0;
+    const merged = baseDoc === null || bootstrapEmpty
       ? mergeAdditions(ours, theirs)
       : mergeThreeWay({ document: baseDoc, units: unitsOf(baseDoc, 'base') }, ours, theirs);
+    // NOTHING THE NODE ALREADY HAD MAY DISAPPEAR UNANNOUNCED. Every unit above is decided deliberately and
+    // a deletion is recorded in `applied`; this is the backstop for a value a later change could lose
+    // without recording it. The node's own top-level settings and its component rules are exactly the
+    // grants a deploy must never take away, so a merge that would drop one refuses to write (exit 5) and
+    // the installer keeps the node's file with a warning, exactly as it does for a file it cannot parse.
+    const removed = new Set(merged.applied.filter((entry) => entry.how === 'removed').map((entry) => entry.id));
+    const outComponents = isObject(merged.document.components) ? merged.document.components : {};
+    const lost = [];
+    for (const key of Object.keys(oursDoc)) {
+      if (key === 'components') continue;
+      if (!(key in merged.document) && !removed.has('top:' + key)) lost.push('top:' + key);
+    }
+    if (isObject(oursDoc.components)) {
+      for (const [name, entry] of Object.entries(oursDoc.components)) {
+        if (!isObject(entry) || !isObject(entry.capabilities)) {
+          if (!(name in outComponents) && !removed.has('component:' + name)) lost.push('component:' + name);
+          continue;
+        }
+        for (const capability of Object.keys(entry.capabilities)) {
+          const id = 'rule:' + name + '/' + capability;
+          const kept = isObject(outComponents[name]) && isObject(outComponents[name].capabilities)
+            && capability in outComponents[name].capabilities;
+          if (!kept && !removed.has(id)) lost.push(id);
+        }
+      }
+    }
+    if (lost.length) {
+      throw Object.assign(new Error('refusing to write: the merge would drop ' + lost.slice(0, 6).join(', ')
+        + (lost.length > 6 ? ` and ${lost.length - 6} more` : '')), { exit: 5 });
+    }
     const changed = canonical(merged.document) !== canonical(oursDoc);
-    const result = { ...merged, changed };
+    const result = { ...merged, changed, bootstrapEmpty };
     if (args.summary) writeFileSync(args.summary, summaryLines(result, args).join('\n') + '\n');
     if (changed && args.out) writeFileSync(args.out, JSON.stringify(merged.document, null, 2) + '\n');
     for (const line of report(result, args)) process.stdout.write(line + '\n');
