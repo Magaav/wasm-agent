@@ -50,10 +50,13 @@ which is why an import can work at all.
 1. The node runs a binary built from a tree that contains Phase 2 (the `whatsapp_message` capability,
    `lua/core/whatsapp_operator.lua`) and this document. Deploy through Sentinel, not by hand
    (`skills/self-update/SKILL.md`).
-2. The `wa-whatsapp` component built from the same tree
-   (`cargo build --release --target wasm32-wasip2` in `rust/components/wa-whatsapp`,
-   `docs/COMPONENTS.md`) and installed with `services upgrade` and a pin. It is not in
-   `components.lock`; it is installed by hand on the account's node.
+2. The `wa-whatsapp` component, at the pinned bytes. Since 11/11 it is pinned in `components.lock`, so
+   it is built once on the machine that has wasi-sdk (`scripts/publish-components.sh`) and every
+   node's deploy installs the pinned artifact - no arm64 build on the account's node and no wasi-sdk
+   there (`docs/COMPONENTS.md`, "Distributing components"). The bytes are wasm32-wasip2, so the CPU
+   of the node is irrelevant. **Installed is not enabled**: the deploy writes the artifact, its pin
+   and its manifest and creates no service definition, so nothing starts and nothing contacts
+   WhatsApp until step 2 of the chosen option. Check with `wa features` and the `services` tool.
 3. The operator is present. Option A needs him for the first connect; option B needs the phone for the
    pairing code.
 4. Disk: the Go state is ~135 MB; keep it. The component state is small.
@@ -121,8 +124,10 @@ and confirm the text. The send and the echo are the two facts that make the cuto
 
 ## Option B: pair the Rust component as a new device
 
-1. Stop nothing. Install the component and configure `pair_phone` (the account's own number) in its
-   config; `docs/SERVICE-COMPONENTS.md` and `docs/WHATSAPP-CONNECTOR.md` carry the pairing flow.
+1. Stop nothing. The last deploy already installed the pinned component; installing it again is not a
+   step, and enabling it is what starts it. Create the service definition and configure `pair_phone`
+   (the account's own number) in it; `docs/SERVICE-COMPONENTS.md` and `docs/WHATSAPP-CONNECTOR.md`
+   carry the pairing flow.
 2. `services start wa-whatsapp`, read the one-time pairing code from the log, and enter it on the phone
    (WhatsApp > Linked devices > Link with phone number). Nothing is unlinked.
 3. Prove the self-chat send and read-back exactly as in Option A step 8.
