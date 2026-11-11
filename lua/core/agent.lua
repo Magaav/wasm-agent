@@ -1736,6 +1736,22 @@ function M:run_body(text, images)
   -- one, or the loop would wake itself for waking itself.
   if not self.self_wake then pcall(selfloop.on_user_message, self.session_id) end
 
+  -- A model-less node (docs/MODEL-LESS.md) refuses the turn *before* anything is sent, with a named
+  -- reason. It must not fall through to `local_run`: an answer assembled from memory is shaped exactly
+  -- like a model reply, and to a Sentinel wake it looks like the wake was handled. The refusal is
+  -- recorded in the transcript like any other turn with `ok=false`, so "nothing ran" can never be read
+  -- as "the model had nothing to say" - the failure this replaces (empty turns on a 401 provider).
+  if provider.model_less() then
+    local refusal = provider.model_less_refusal()
+    local reply = refusal.reason .. ' - ' .. refusal.detail
+    local message_id = host.uuid()
+    record_turn(self, { id = message_id, role = 'assistant', content = reply, debug = self.debug, ok = false })
+    self.emit({ type = 'status', text = 'turn refused: ' .. refusal.error })
+    self.emit({ type = 'reply', text = reply, message_id = message_id })
+    telemetry.event(self.session_id, self.run_id, '', 'step', 'refused', { reason = refusal.error })
+    return reply
+  end
+
   if not provider.configured() then
     local reply = self:local_run(text)
     local message_id = host.uuid()

@@ -930,6 +930,13 @@ local function node_capability(capability, args, caller)
     local ok, problem = provider.set_model(args.name or "", args.revision)
     if not ok then return {error=problem} end
     return json.decode(wa_model("", ""))
+  elseif capability == "set_model_less" then
+    -- A declared fact, not an inference from a missing key (docs/MODEL-LESS.md). Reachable from
+    -- another node through `nodeslib.remote_call`, which is how a coordinator declares a node it
+    -- cannot shell into - the node keeps its own decision, and no key is read, moved or printed.
+    local result = provider.set_model_less(args.on, args.revision)
+    if not result or not result.ok then return {error=(result and result.error) or "model_less_refused"} end
+    return json.decode(wa_model("", ""))
   elseif capability == "chat" then
     local bot, agent_problem = node_agent(caller)
     if not bot then return { error = agent_problem } end
@@ -992,7 +999,7 @@ local MESH_VERBS = {
   read = { read = true, read_many = true, ls = true, grep = true, sessions = true, session = true,
     search_messages = true, recall = true, status = true, health = true },
   control = { bash = true, write = true, edit = true, shell = true, chat = true, client = true,
-    set_role = true, set_model = true, set_provider = true, subagent = true, spell_save = true,
+    set_role = true, set_model = true, set_model_less = true, set_provider = true, subagent = true, spell_save = true,
     spell_run = true, access = true },
 }
 
@@ -1718,6 +1725,9 @@ function wa_model(node, session, chat_session)
     model = settings.model,
     base_url = settings.base_url,
     configured = provider.configured(),
+    -- A model-less node is a stated fact, not a missing key (docs/MODEL-LESS.md): `configured` can be
+    -- true while `model_less` is, which is exactly the case this declaration exists for.
+    model_less = provider.model_less(),
     providers = providers,
     usage = agentlib.usage(),
     observability=observation,

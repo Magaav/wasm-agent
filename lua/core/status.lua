@@ -31,8 +31,10 @@ end
 -- is the difference between "the model is quiet" and "nothing works".
 function M.model()
   local settings = provider.settings()
-  return string.format("%s  provider=%s  configured=%s", settings.model,
-    settings.provider, provider.configured() and "yes" or "no")
+  local less = provider.model_less()
+  return string.format("%s  provider=%s  configured=%s%s", settings.model,
+    settings.provider, provider.configured() and "yes" or "no",
+    less and "  model-less=yes (no turn can run here)" or "")
 end
 
 function M.session_id()
