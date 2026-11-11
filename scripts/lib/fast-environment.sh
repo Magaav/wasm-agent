@@ -94,6 +94,10 @@ wa_environment_retry() { # <label> <log file> <command...>
 # The row's verdict line: runners print one summary line last, so the tail is the right window to look
 # for a system-level signature in (and the wrong window for a test's own long output).
 last_line_of() { # <file>
+  # A file that is not there has no last line, and saying so on the runner's stderr would put a stray
+  # `environment: ...: No such file or directory` in the middle of a verdict table (the shell names its
+  # own exported-function frame `environment`). The caller reads an empty line and decides.
+  [ -f "$1" ] || return 0
   tr -d '\000' < "$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-400
 }
 

@@ -13,6 +13,12 @@
 #      the two checks the landing baseline rests on (scripts/test-landing-baseline.mjs judges a run by
 #      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code).
 #
+# Before any of that it builds the components the Lua rows need (`graph`) from this tree, pinned the way
+# a deploy installs them, and gives each row a component directory inside its own home. A row that needs
+# a component installs it there (scripts/lib/test-components.lua) and a machine that cannot build one
+# gets `SKIP <test>: <reason>`; those reasons are printed under the counts, so a pass with a hole in it
+# never looks whole. Why each row cannot simply share one directory is in the block itself.
+#
 # A check that cannot run here (no node, no cargo) is reported SKIPPED and counted, never passed.
 # The full gate (scripts/test.sh) is the nightly job, not a landing requirement (AGENTS.md).
 # --docker runs the whole fast path inside the sandbox image (a laptop with no wa binary).
@@ -76,6 +82,61 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-XXXXXX")
 trap 'rm -rf "$work"' EXIT
 fails=0; envfails=0; skipped=0; ran=0
 
+# ---- the components the Lua rows need ---------------------------------------------------------------
+# A test's node reads its components from `WA_COMPONENTS_DIR`, else `$HOME/.wasm-agent/components`
+# (rust/wa-host-support/src/paths.rs), and a row's HOME is its own scratch home - so the graph tests found
+# `component_not_installed:graph` on a tree whose graph was perfect, while the nightly gate never saw it:
+# the gate builds `graph` once and exports WA_COMPONENTS_DIR for the whole run (scripts/test.sh, "host.graph_*
+# is served by the graph component"). The fast path does the same one level down.
+#
+#  * The set is built from THIS tree by `scripts/build-components.sh`, so it carries its pin, its manifest
+#    and its manifest's wasi-sdk requirement exactly as a deploy would install it - not whatever happens to
+#    be in the node's own directory, whose graph may be another commit's.
+#  * It is cached under the worktree's own git dir and rebuilt by cargo's own fingerprinting: 53 s cold on
+#    wasm_the_first, 1.4 s when nothing changed. Per worktree, so two branches never overwrite each other.
+#  * Each row gets WA_COMPONENTS_DIR inside its OWN home plus WA_FAST_COMPONENT_SOURCE, and installs a
+#    component into it only if the test asks (`scripts/lib/test-components.lua`): a test that needs the
+#    graph pays an 8 MB copy, and the 150 that do not pay an empty directory. A test whose subject is not
+#    the component keeps whatever it asserted about an absent one.
+#  * The directory being inside the test's home is not decoration: `scripts/test-features-gate.lua` writes
+#    its own stubs into the component directory and refuses one outside its home, "never a node's component
+#    directory", so a shared directory would either be polluted by that test or wrongly skipped by it.
+#  * When the machine cannot build one (no cargo, no wasi-sdk, the docker fast path) the rows that need it
+#    print `SKIP <test>: <reason>` and the reason names the command that would build it. A skip is counted
+#    as a skip, never as a pass.
+FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph}
+fast_components_prepare() {
+  [ -n "$FAST_COMPONENT_NAMES" ] || return 0
+  local gitdir cache log reason
+  if [ "${WA_FAST_IN_DOCKER:-}" = 1 ] || ! command -v cargo >/dev/null 2>&1; then
+    reason="no cargo on PATH here ($([ "${WA_FAST_IN_DOCKER:-}" = 1 ] && echo 'the sandbox image' || echo 'this machine')), so a component built from this tree is out of reach"
+    echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): $reason"
+    echo "fast: rows that need one print SKIP with that reason; a skip is counted as a skip, not a pass"
+    return 0
+  fi
+  gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) \
+    || { echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): not a git checkout, so there is nowhere to cache a build"; return 0; }
+  cache="${WA_FAST_COMPONENTS_DIR:-$gitdir/wa-fast-components}"
+  if ! mkdir -p "$cache/set" "$cache/target" 2>/dev/null; then
+    echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): cannot create $cache"
+    return 0
+  fi
+  log="$work/components.log"
+  # The sandbox's WASI_SDK, when it has one, travels in the environment; otherwise build-components.sh finds
+  # ~/wasi-sdk*. CARGO_TARGET_DIR is shared across digests so a source change is an incremental build.
+  if WA_COMPONENTS_DIR="$(native "$cache/set")" CARGO_TARGET_DIR="$(native "$cache/target")" \
+       bash scripts/build-components.sh $FAST_COMPONENT_NAMES >"$log" 2>&1; then
+    FAST_COMPONENT_SOURCE="$(native "$cache/set")"
+    export FAST_COMPONENT_SOURCE
+    echo "fast: components $(printf '%s' "$FAST_COMPONENT_NAMES") built from this tree and pinned in $cache/set"
+  else
+    reason=$(last_line_of "$log")
+    echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): ${reason:-build-components.sh failed, see $log}"
+    echo "fast: rows that need one print SKIP with that reason; a skip is counted as a skip, not a pass"
+  fi
+}
+fast_components_prepare
+
 # ---- 1. Lua -----------------------------------------------------------------------------------------
 excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
 for f in scripts/test-*.lua; do printf '%s\n' "$excluded" | grep -qxF "$f" || printf '%s\n' "$f"; done > "$work/lua.list"
@@ -87,9 +148,16 @@ fi
 export FAST_BIN="$bin" FAST_ROOT="$(native "$ROOT")" FAST_WORK="$work"
 mkdir -p "$FAST_WORK/logs"
 # One definition of "run this test hermetically", used by the parallel batch AND by the serial retry,
-# so the retry measures exactly what the first attempt measured.
+# so the retry measures exactly what the first attempt measured. WA_COMPONENTS_DIR is inside the row's own
+# home (see "the components the Lua rows need" above): a component the test installs lands there, and a
+# test that never installs one sees an empty directory rather than an unset variable.
 lua_run() { # <script> <home>
-  WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$( (command -v cygpath >/dev/null && cygpath -w "$2") || echo "$2")" \
+  local home_native components
+  home_native=$( (command -v cygpath >/dev/null && cygpath -w "$2") || echo "$2")
+  components=$( (command -v cygpath >/dev/null && cygpath -w "$2/.wasm-agent/components") || echo "$2/.wasm-agent/components")
+  mkdir -p "$2/.wasm-agent/components" 2>/dev/null || true
+  WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
+    WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$1" \
     timeout 120 "$FAST_BIN" --db "$2/t.db"
 }
@@ -102,11 +170,21 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
     printf '1\t0\t%s\t%s\tenvironment\n' "$f" 'a scratch home could not be made (mkdir -> nil)'
     return
   fi
-  lua_run "$f" "$h" > "$h/out" 2>&1; c=$?; code=$c
-  last=$(last_line_of "$h/out")
+  # The row's output is kept OUTSIDE its home: a home is scratch, and one row in five deleted its own
+  # `out` before the verdict was read (a stray `environment: .../out: No such file or directory` in the
+  # runner's output, and the row's skip lines with it). `logs/` is the run's, so the verdict and the skip
+  # lines are always readable, and a failing row's log is already where the FAIL line points.
+  out="$FAST_WORK/logs/$(basename "$f").out"
+  lua_run "$f" "$h" > "$out" 2>&1; c=$?; code=$c
+  last=$(last_line_of "$out")
+  # A row can pass while naming something it could not check (`SKIP <test>: <reason>`, a fixture that is
+  # not installed, a component this machine cannot build). A skip inside a green row is invisible in this
+  # runner's own output - the log is only kept for a failure - so the lines are collected here and printed
+  # under the counts. A skip is never a pass; it is a pass with a named hole, and the hole is spoken.
+  grep -h '^SKIP ' "$out" 2>/dev/null | sed "s|^SKIP |$f: |" >> "$FAST_WORK/skips" 2>/dev/null || true
   if [ "$c" != 0 ]; then
     kind=$(wa_environment_kind "$c" "$last")
-    cp "$h/out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
+    cp "$out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$(( ($(date +%s%N)-s)/1000000 ))" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
 }
@@ -139,6 +217,18 @@ ran=$((ran + lua_total)); fails=$((fails + lua_fail));
 awk -F'\t' '$1!=0{ if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
 echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(printf '%s\n' "$excluded" | grep -c . ) excluded: scripts/fast-path.exclude)"
 [ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
+# The holes in those passes, by name: a row that could not check what it is about says so, and this is
+# where a reader sees it without opening 150 logs. Grouped per test - one suite can name thirty of them
+# (the hooks seam names one per case it cannot run) - with the count and the first reason, so the
+# summary stays a table instead of thirty repeats. `sort -u` first: a serial retry appends again.
+if [ -s "$work/skips" ]; then
+  echo "fast: $(sort -u "$work/skips" | grep -c .) named skip(s) inside passing rows (a skip is not a pass):"
+  sort -u "$work/skips" | awk -F': ' '
+    { test = $1; if (!(test in seen)) { seen[test] = 1; order[++n] = test; first[test] = $0 }
+      count[test]++ }
+    END { for (i = 1; i <= n; i++) { t = order[i]; line = first[t]; sub(/^[^:]*: /, "", line)
+            printf "fast:   %s: %d skip(s), first: %s\n", t, count[t], substr(line, 1, 150) } }'
+fi
 
 # ---- 2. Rust: the crates this change touches ----------------------------------------------------------
 if [ "${WA_FAST_IN_DOCKER:-}" = 1 ]; then

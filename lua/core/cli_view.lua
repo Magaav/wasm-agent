@@ -1157,9 +1157,17 @@ end
 -- the row stated by `screen_rows` and `content - 1` is the fallback's own spelling of it.
 -- `row("O")` and `screen_on` are the two places that already answer "where does output end", so they
 -- ask this instead of the height.
+--
+-- TWO claimants take that row above the box, and both must be honoured here: the
+-- session-status-content line, and a run's own status line while it is in flight. The boxed layout
+-- puts both on rows of their own, but the chat's own last row (`bottom`) is the row directly above the
+-- box - the status line's - so a run that reserved nothing for itself had its status line written over
+-- by the next transcript block and repainted under it: the blink `METHODS:clear` was rewritten to
+-- avoid (`scripts/test-cli-view.lua`, "a turn of ten tool calls erases the status row no times").
+-- `rust/wa-term/src/terminal_editor.rs`'s `out_bottom` reserves the same row from the same two facts.
 function METHODS:region_bottom()
   if not self.screen then return nil end
-  if self:session_content() then
+  if self:session_content() or self.turn then
     return math.max(1, self.screen.region or (self.screen.content - 1))
   end
   return self.screen.bottom

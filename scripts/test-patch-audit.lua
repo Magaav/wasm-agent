@@ -1,4 +1,9 @@
 -- The patch audit must anchor changed lines and never turn leads into a safety verdict.
+-- The audit reads the graph, which is a WASI component: install the pinned one built from this tree into
+-- this test's own home, or skip by name on a machine that cannot build it (scripts/lib/test-components.lua).
+local components = dofile('scripts/lib/test-components.lua')
+local seeded, why = components.require('graph')
+if not seeded then components.skip('patch-audit', why); return end
 local json = dofile("lua/vendor/json.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local audit = dofile("lua/core/patch_audit.lua")

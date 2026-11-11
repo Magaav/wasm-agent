@@ -1,4 +1,10 @@
 -- Private, model-free native dispatch: no manual graph index, jobs or child runs.
+-- The graph is a WASI component (docs/KERNEL.md, stream C): these checks are about its answers, so the
+-- row installs the pinned component built from this tree into this test's own home first, and a machine
+-- that could not build one gets a named SKIP rather than `component_not_installed` dressed as a failure.
+local components = dofile('scripts/lib/test-components.lua')
+local seeded, why = components.require('graph')
+if not seeded then components.skip('graph-automatic', why); return end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')

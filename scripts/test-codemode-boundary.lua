@@ -82,7 +82,12 @@ local names={};for _,s in ipairs(projected)do names[s['function'].name]=true end
 check(not names.mcp_mail_list_messages_deadbeef and not names.peer_box__fetch,'connectors left out of the outer tool list')
 check(names.web_search,'web stays an outer tool under code mode')
 local prompt=policy.prompt(catalog)
-check(prompt:find('- mail: list_messages',1,true) and prompt:find('- whatsapp: read_messages',1,true) and prompt:find('- peer box: fetch',1,true),'hint lists connectors: '..prompt:sub(-300))
+-- The names in the hint are the CALLABLE ones, verbatim (12bae363: a shortened tool name made the envelope
+-- say `mcp_whatsapp_*` while the callable name carried its peer prefix and pinned hash, and the model spent
+-- six calls guessing). The group label is still what groups them, so this asserts both halves: the label the
+-- model routes by, and the exact name it must call.
+check(prompt:find('- mail: mcp_mail_list_messages_deadbeef',1,true) and prompt:find('- whatsapp: mcp_whatsapp_read_messages_cafebabe',1,true) and prompt:find('- peer box: peer_box__fetch',1,true),'hint lists connectors by their exact callable names: '..prompt:sub(-300))
+check(not prompt:find('- mail: list_messages',1,true),'and never the shortened tool name, which is not callable')
 check(prompt:find('tools.web_search(',1,true) and prompt:find('Default to code mode',1,true),'hint prefers code mode and names web inside it')
 check(prompt:find('preferred programmatic coding path',1,true) and prompt:find('Use ordinary tools for',1,true),'hint carries the routing rule')
 check(policy.prompt({catalog[1]})==policy.guidance,'no connectors, no index line')
