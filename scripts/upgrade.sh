@@ -383,15 +383,40 @@ finish() {
   _rc=$?
   if [ "$_rc" -eq 0 ]; then phase done complete; else phase failed "$UPGRADE_PHASE"; fi
 }
-trap finish EXIT
+# The deploy-pending signal (lua/core/deploy_pause.lua). Written BEFORE the wait, so a running turn can
+# reach a step boundary and pause instead of making the install wait for the whole turn to end - or
+# dying inside the swap. It carries its own BOUND and is removed on every exit: a crashed installer must
+# not freeze the node's sessions, and the reader ignores a marker past its bound anyway.
+DEPLOY_SIGNAL_DIR="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
+DEPLOY_SIGNAL_LIB="$(dirname "$0")/lib/deploy-signal.sh"
+[ -f "$DEPLOY_SIGNAL_LIB" ] || DEPLOY_SIGNAL_LIB="$INSTALL_DIR/scripts/lib/deploy-signal.sh"
+if [ -f "$DEPLOY_SIGNAL_LIB" ]; then
+  . "$DEPLOY_SIGNAL_LIB"
+else
+  say "the deploy-pending signal library is missing ($DEPLOY_SIGNAL_LIB): running turns will not be asked to pause, and the wait has only its bound"
+fi
+DEPLOY_IDLE_BOUND="${WA_DEPLOY_IDLE_BOUND:-1800}"
+case "$DEPLOY_IDLE_BOUND" in ''|*[!0-9]*|0) DEPLOY_IDLE_BOUND=1800 ;; esac
+if command -v wa_deploy_signal_write >/dev/null 2>&1; then
+  wa_deploy_signal_write "$DEPLOY_SIGNAL_DIR" "${PREVIOUS_COMMIT:-unknown}" "${COMMIT:-unknown}" "$DEPLOY_IDLE_BOUND" "upgrade.sh"     || say "could not write the deploy-pending signal in $DEPLOY_SIGNAL_DIR: this wait will not be shortened by sessions pausing"
+fi
+clear_deploy_signal() { command -v wa_deploy_signal_clear >/dev/null 2>&1 && wa_deploy_signal_clear "$DEPLOY_SIGNAL_DIR"; }
+trap 'finish; clear_deploy_signal' EXIT
 # The marker is `queued`, NOT `upgrading`, until the stop actually begins. Writing `upgrading` here was a
 # self-deadlock, measured on 2026-10-22: the node derives node_state from this file, the idle gate reads
 # node_state, so the installer announced an install the gate would then wait forever to see finish - and
 # the window drew a "waiting" bar that never moved. `upgrading` starts at the stop, when it is true.
-phase queued waiting
-say "waiting for the running node to finish what it is doing"
+#
+# `waiting_for_idle` is its own state, not "queued": the measured failure (2026-11-10, wasm_the_first)
+# was a deploy that waited 14 and 37 minutes while a watchdog called it silent. A reader that sees this
+# state knows three things - nothing has been stopped, sessions have been asked to pause, and the bound
+# by which they should reach a boundary is DEPLOY_IDLE_BOUND - and the watchdog can report the wait
+# instead of a silence.
+phase waiting_for_idle waiting
+say "deploy pending: asked every running turn to pause after its current step (bound ${DEPLOY_IDLE_BOUND}s); waiting for the node to become idle"
 waited=0
 FINE_TICKS=0
+IDLE_BOUND_REPORTED=0
 
 # ONE predicate from ONE snapshot. /health publishes `node_state`, derived from a single read of runs,
 # queue, subagents and workers. The four independent greps this replaces could each pass while a different
@@ -432,7 +457,7 @@ while :; do
   # one line and then went silent for 40 minutes, and a wait and a wedge were indistinguishable because
   # the only channel was the parent's pipe. This trail names the poll the run died on.
   polls=$((polls + 1))
-  printf '%s poll=%s waited=%ss idle_ticks=%s node_state=%s bytes=%s\n' "$(date +%H:%M:%S%z)" "$polls" "$waited" "$idle_ticks" \
+  printf '%s poll=%s state=waiting_for_idle bound=%ss waited=%ss idle_ticks=%s node_state=%s bytes=%s\n' "$(date +%H:%M:%S%z)" "$polls" "$DEPLOY_IDLE_BOUND" "$waited" "$idle_ticks" \
     "$(printf '%s' "$state" | sed -n 's/.*"node_state":{[^}]*"state":"\([a-z]*\)".*/\1/p' | head -1)" "${#state}" \
     >> "${WAIT_LOG:-$INSTALL_DIR/upgrade-wait.log}" 2>/dev/null
   if [ "$polls" -gt "${WA_IDLE_MAX_POLLS:-1440}" ]; then
@@ -462,6 +487,21 @@ while :; do
   if [ "$IDLE_MAX" -gt 0 ] && [ "$waited" -ge "$IDLE_MAX" ]; then
     say "still busy after ${IDLE_MAX}s (WA_IDLE_MAX_SECONDS); not upgrading"
     exit 1
+  fi
+  # The waiting state's own bound. A session from this build pauses at its next step boundary and the
+  # node goes idle in seconds; a session from an older binary cannot see the marker and would make this
+  # wait as long as its turn lasts - the 14- and 37-minute waits measured on wasm_the_first. The bound
+  # is its own reported state, and exceeding it refuses WITHOUT touching the node: nothing is stopped,
+  # no turn is killed, and the operator gets a named decision instead of a silent wait.
+  if [ "$IDLE_BOUND_REPORTED" = "0" ] && [ "$waited" -ge "$DEPLOY_IDLE_BOUND" ]; then
+    IDLE_BOUND_REPORTED=1
+    phase waiting_for_idle bound_exceeded
+    say "no session reached a step boundary within ${DEPLOY_IDLE_BOUND}s (WA_DEPLOY_IDLE_BOUND); the deploy-pending signal is ${DEPLOY_SIGNAL}"
+    if [ "${WA_DEPLOY_IDLE_BOUND_STRICT:-1}" = "1" ]; then
+      say "not installing: the node, its turns and its files are untouched. A session on a binary older than lua/core/deploy_pause.lua cannot pause; finish or stop it, or raise WA_DEPLOY_IDLE_BOUND (and set WA_DEPLOY_IDLE_BOUND_STRICT=0 to wait without a bound)."
+      exit 1
+    fi
+    say "continuing to wait without a bound (WA_DEPLOY_IDLE_BOUND_STRICT=0)"
   fi
   [ $((waited % 30)) -eq 0 ] && say "  busy after ${waited}s; waiting for the turn to finish"
   # Two cadences, because the two situations are different. A long turn should not be polled 50 times a

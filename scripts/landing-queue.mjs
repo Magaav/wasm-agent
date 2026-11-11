@@ -8,6 +8,8 @@
 //   node scripts/landing-queue.mjs status [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs acquire --branch <name> [--owner <session id>] [--no-wait]
 //                                          [--wait-timeout <s>] [--lease-seconds <s>] [--repo <dir>]
+//   node scripts/landing-queue.mjs pin --commit <sha> [--pin-dir <dir>] [--owner <session id>]
+//                                       [--wait-timeout <s>] [--repo <dir>]
 //   node scripts/landing-queue.mjs record --tree <ref> [--command "<what ran>"] [--owner <id>]
 //   node scripts/landing-queue.mjs land --branch <name> [--checks "<cmd>"] [--dry-run] [--no-push]
 //                                       [--owner <session id>] [--lease-seconds <s>] [--repo <dir>]
@@ -29,7 +31,7 @@ import {
   QueueError, classifyDelta, treeDigest, candidateTree, canonicalDirt, describeDirt, git, gitOk,
   mainWorktree, openQueue, queueDir, logRow, resolveOwner, holderOf, reclaimPass, grantNext,
   queuePosition, waitingRows, heartbeat, resolveCommit, bootId, hostName, proofOf, recordProof,
-  baselineOf, recordBaseline, checkCommandKey,
+  baselineOf, recordBaseline, checkCommandKey, recoverUnpushed, writeHolder, clearHolder,
 } from './lib/landing-queue.mjs';
 import {parseCheckLog, baselineRecord, judgeRun, describeRun} from './lib/landing-baseline.mjs';
 import {holdLease, releaseLease} from './lib/sqlite-lease.mjs';
@@ -153,6 +155,9 @@ function commandStatus(options) {
   const holder = holderOf(db, dir);
   const waiting = waitingRows(db);
   const dirt = canonicalDirt(canonical);
+  // What a dead lander left in the canonical checkout. Read without touching anything: the next
+  // acquire finishes (or rolls back) it, and this line says which before anyone queues.
+  const recovery = recoverUnpushed({canonical, db, apply: false, say: () => {}});
   // What a landing here would tolerate, before anyone queues: the recorded known-failures baseline of
   // the main that is checked out. A session should be able to read it without landing once (it is the
   // question every improvised judge on 2026-11-10 was really asking), and an empty answer is a fact
@@ -165,6 +170,7 @@ function commandStatus(options) {
     queue_dir: dir,
     holder: holder && {
       id: holder.id, owner: holder.owner, owner_source: holder.owner_source, branch: holder.branch,
+      kind: holder.kind || 'landing',
       started_at: holder.started_at, held_seconds: now() - holder.started_at,
       heartbeat_seconds_ago: now() - (holder.heartbeat_at || holder.started_at),
       expires_in: Math.max(0, (holder.expires_at || 0) - now()), lease_held: holder.lease_held,
@@ -174,6 +180,7 @@ function commandStatus(options) {
       position: index + 1, id: row.id, owner: row.owner, branch: row.branch, waiting_seconds: now() - row.created_at,
     })),
     reclaimed,
+    recovery: recovery.action === 'none' ? null : recovery,
     canonical_dirt: {dirty: dirt.dirty, count: dirt.count, files: dirt.files},
     verdict: holder ? 'busy' : 'free',
     baseline: baseline && {command: checkCommandKey(command), names: baseline.names || [],
@@ -182,7 +189,7 @@ function commandStatus(options) {
   if (options.json) return emit(state, options);
   const lines = [];
   lines.push(holder
-    ? `holder #${holder.id} ${holder.owner} (${holder.owner_source}) on ${holder.branch}, held ${age(holder.started_at)}${holder.lease_held ? '' : ' [LEASE NOT HELD - reclaimable]'}, expires in ${Math.max(0, (holder.expires_at || 0) - now())}s`
+    ? `holder #${holder.id} ${holder.owner} (${holder.owner_source}) on ${holder.branch}${holder.kind === 'deploy' ? ' [deploy: pinning a build commit]' : ''}, held ${age(holder.started_at)}${holder.lease_held ? '' : ' [LEASE NOT HELD - reclaimable]'}, expires in ${Math.max(0, (holder.expires_at || 0) - now())}s`
     : 'free: nobody holds the canonical checkout');
   if (waiting.length) {
     lines.push(`waiting ${waiting.length}: ` + waiting.map((row, i) => `#${i + 1} #${row.id} ${row.owner} (${row.branch}, ${age(row.created_at)})`).join(', '));
@@ -194,6 +201,11 @@ function commandStatus(options) {
     ? `baseline for ${String(upstream).slice(0, 12)} with \`${checkCommandKey(command)}\`: ${(baseline.names || []).length} known failure(s) (${baseline.source || 'recorded'}, measured on ${String(baseline.commit || '').slice(0, 12)} by ${baseline.recorded_by || 'an earlier landing'}) - a landing is refused only for a failure this list does not have`
     : `baseline for ${String(upstream).slice(0, 12)} with \`${checkCommandKey(command)}\`: none recorded - the next red candidate measures one, once, and records it`);
   for (const entry of reclaimed) lines.push(`reclaimed #${entry.id} (${entry.owner}): ${entry.reason}`);
+  if (recovery.action !== 'none') {
+    lines.push(recovery.action === 'refused'
+      ? `canonical recovery: REFUSED ${recovery.code}: ${recovery.reason}`
+      : `canonical recovery: ${recovery.action} ${String(recovery.branch || '')} (HEAD ${String(recovery.head || '').slice(0, 12)} is ${recovery.ahead} commit(s) ahead of origin/main) - the next acquire records it`);
+  }
   say(lines.join('\nlanding-queue: '));
   return state;
 }
@@ -239,6 +251,17 @@ async function enqueueAndWait(options) {
   const {repo, canonical, dir, db} = open(options);
   const owner = resolveOwner(options);
   const branch = options.branch;
+  const log = options.log || say;
+  // A claim that looks free may still be the residue of a lander that died between its merge and its
+  // push: reclaim the dead row first, then finish (or undo) the effect it left in the tree before the
+  // dirty check reads it. Both are logged; neither is inferred from a timeout.
+  reclaimPass(db, dir);
+  const recovery = recoverUnpushed({canonical, db, apply: true, say: log});
+  if (recovery.action === 'refused') {
+    throw new QueueError(`${recovery.code}: ${recovery.reason}.\n`
+      + `  The canonical checkout ${canonical} is not a landing's to finish: a person must decide whether that`
+      + ` commit is pushed, rebased or dropped. Nothing was merged and nothing was pushed.`, 75, recovery.code);
+  }
   const holderBefore = holderOf(db, dir);
   const dirt = canonicalDirt(canonical);
   if (!holderBefore && dirt.dirty) {
@@ -251,13 +274,14 @@ async function enqueueAndWait(options) {
   const base = resolveCommit(repo, 'origin/main');
   if (!base) throw new QueueError(`origin/main is not resolvable in ${repo}; fetch first`, 75, 'no_base');
   const lease = crypto.randomUUID();
-  db.prepare(`INSERT INTO queue(owner,owner_source,owner_evidence,branch,worktree,canonical,state,lease,pid,host,boot,base,created_at,lease_seconds)
-              VALUES(?,?,?,?,?,?,'waiting',?,?,?,?,?,?,?)`)
+  db.prepare(`INSERT INTO queue(owner,owner_source,owner_evidence,branch,worktree,canonical,kind,state,lease,pid,host,boot,base,created_at,lease_seconds)
+              VALUES(?,?,?,?,?,?,?,'waiting',?,?,?,?,?,?,?)`)
     .run(owner.id, owner.source, JSON.stringify(owner.evidence), branch, path.resolve(options.repo || process.cwd()),
-      canonical, lease, process.pid, hostName(), bootId(), base, now(), Number(options.leaseSeconds || 1800));
+      canonical, options.kind === 'deploy' ? 'deploy' : 'landing', lease, process.pid, hostName(), bootId(), base, now(),
+      Number(options.leaseSeconds || (options.kind === 'deploy' ? 300 : 1800)));
   const id = Number(db.prepare('SELECT last_insert_rowid() AS id').get().id);
-  logRow(db, id, 'enqueued', `${owner.id} (${owner.source}) branch ${branch} on ${canonical}, base ${base.slice(0, 12)}`);
-  say(`#${id} enqueued for ${owner.id} (${owner.source}): branch ${branch}, base ${base.slice(0, 12)}`);
+  logRow(db, id, 'enqueued', `${owner.id} (${owner.source}) ${options.kind === 'deploy' ? 'deploy-pin ' : ''}branch ${branch} on ${canonical}, base ${base.slice(0, 12)}`);
+  log(`#${id} enqueued for ${owner.id} (${owner.source}): branch ${branch}, base ${base.slice(0, 12)}`);
 
   if (options.noWait) {
     const position = queuePosition(db, id);
@@ -268,12 +292,13 @@ async function enqueueAndWait(options) {
       `#${id} NOT granted (--no-wait): position ${position}, ${holder ? `holder #${holder.id} ${holder.owner} on ${holder.branch}` : 'no holder'}`);
     return {id, granted: false, position, exit: 75};
   }
-  const granted = await waitForLease({db, dir, id, lease, options});
+  const granted = await waitForLease({db, dir, id, lease, options: {...options, log}});
   if (!granted.granted) return granted;
   return {id, lease, granted: true, row: db.prepare('SELECT * FROM queue WHERE id=?').get(id)};
 }
 
 async function waitForLease({db, dir, id, lease, options}) {
+  const log = options.log || say;
   const deadline = options.waitTimeout ? now() + Number(options.waitTimeout) : null;
   let announced = -1;
   for (;;) {
@@ -285,7 +310,7 @@ async function waitForLease({db, dir, id, lease, options}) {
     if (granted && granted.id === id) break;
     if (position !== announced) {
       announced = position;
-      say(`#${id} waiting: position ${position} of ${waitingRows(db).length + 1}; holder ${holder ? `#${holder.id} ${holder.owner} on ${holder.branch} for ${age(holder.started_at)}` : 'none'}`);
+      log(`#${id} waiting: position ${position} of ${waitingRows(db).length + 1}; holder ${holder ? `#${holder.id} ${holder.owner} on ${holder.branch} for ${age(holder.started_at)}` : 'none'}`);
     }
     if (deadline && now() > deadline) {
       db.prepare("UPDATE queue SET state='refused', reason=?, ended_at=? WHERE id=?")
@@ -300,11 +325,99 @@ async function waitForLease({db, dir, id, lease, options}) {
   holdLease(dir, lease);
   db.prepare('UPDATE queue SET pid=?, host=?, boot=? WHERE id=?').run(process.pid, hostName(), bootId(), id);
   const row = db.prepare('SELECT * FROM queue WHERE id=?').get(id);
+  // Publish the holder for the tool-layer guard (lua/core/canonical_guard.lua). The row remains the authority.
+  writeHolder(dir, row);
   const waited = now() - row.created_at;
   const behind = waitingRows(db).filter(other => other.id !== id).length;
   logRow(db, id, 'granted', `after waiting ${waited}s; ${behind} still waiting; expires in ${row.expires_at - now()}s`);
-  say(`#${id} GRANTED to ${row.owner} on ${row.branch} after waiting ${waited}s (base ${row.base.slice(0, 12)}, lease ${lease.slice(0, 8)}, expires in ${row.expires_at - now()}s); ${behind} waiting`);
+  log(`#${id} GRANTED to ${row.owner} on ${row.branch} after waiting ${waited}s (base ${row.base.slice(0, 12)}, lease ${lease.slice(0, 8)}, expires in ${row.expires_at - now()}s); ${behind} waiting`);
   return {id, lease, dir, granted: true, row, waited};
+}
+
+// ---- pin ---------------------------------------------------------------------------------------
+//
+// A deploy must not build from the canonical checkout while a landing may merge into it. Measured on
+// wasm_the_first (2026-11-10, three deploys): landing #28 merged 3bea7b97 - which rewrites
+// lua/core/server.lua - into the canonical tree while a deploy was reading it, and the deploy staged
+// one commit and verified another (`stale embedded module: lua/core/server.lua`). Retrying the stage
+// (commit 2231fc6f) treated the symptom; this is the coordination it was missing.
+//
+// `pin` takes the queue's lease - so it waits for a landing in progress, and a landing waits for it -
+// and uses that moment to create a DETACHED worktree at the exact commit the deploy will build. The
+// lease is then ended with evidence and every later step of the deploy reads the pinned tree, which no
+// landing can move. The lease is short (one resolve, one worktree add); the build is not behind it.
+const PIN_ROOT_DEFAULT = () => path.join(os.tmpdir(), 'wa-deploy-pins');
+
+function ensurePinnedWorktree({canonical, commit, pinDir}) {
+  const root = path.join(pinDir, commit);
+  const usable = () => {
+    if (!fs.existsSync(path.join(root, '.git'))) return false;
+    const head = git(root, ['rev-parse', 'HEAD']).status === 0 ? gitOk(root, ['rev-parse', 'HEAD']).trim() : '';
+    return head === commit;
+  };
+  if (usable()) return {root, reused: true};
+  if (fs.existsSync(root)) {
+    spawnSync('git', ['-C', canonical, 'worktree', 'remove', '--force', root], {encoding: 'utf8'});
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+  spawnSync('git', ['-C', canonical, 'worktree', 'prune'], {encoding: 'utf8'});
+  fs.mkdirSync(pinDir, {recursive: true});
+  const added = spawnSync('git', ['-C', canonical, 'worktree', 'add', '--detach', '--force', root, commit], {encoding: 'utf8'});
+  if (added.status !== 0) {
+    throw new QueueError(`pin_failed: cannot create a pinned worktree for ${commit.slice(0, 12)} at ${root}: ${String(added.stderr || added.stdout || '').trim().split('\n').slice(-2).join(' | ')}`,
+      76, 'pin_failed');
+  }
+  const head = gitOk(root, ['rev-parse', 'HEAD']).trim();
+  if (head !== commit) {
+    throw new QueueError(`pin_mismatch: the pinned worktree ${root} is at ${head.slice(0, 12)}, not ${commit.slice(0, 12)}; refusing to build something that cannot say what it is`, 76, 'pin_mismatch');
+  }
+  return {root, reused: false};
+}
+
+async function commandPin(options) {
+  if (!options.commit) throw new QueueError('pin needs --commit <sha> (the exact commit to build)', 75, 'usage');
+  const {repo, canonical, dir, db} = open(options);
+  const owner = resolveOwner(options);
+  const commit = resolveCommit(repo, options.commit);
+  if (!commit) throw new QueueError(`pin: cannot resolve ${options.commit} in ${repo}`, 75, 'pin_commit_unknown');
+  const branchRef = gitOk(canonical, ['symbolic-ref', '--short', '-q', 'HEAD']).trim();
+  if (branchRef !== 'main') {
+    throw new QueueError(`pin_not_on_main: ${canonical} has HEAD on '${branchRef || 'detached'}'; a deploy pins a commit from the canonical main, never from another branch`, 75, 'pin_not_on_main');
+  }
+  const dirt = canonicalDirt(canonical);
+  if (dirt.dirty) {
+    throw new QueueError(`pin_dirty_canonical: ${canonical} has ${dirt.count} uncommitted change(s) and cannot say which commit is deployed: ${describeDirt(dirt)}. Commit them in their own worktree, or revert them; nothing was pinned`,
+      75, 'pin_dirty_canonical');
+  }
+  const fetch = git(canonical, ['fetch', 'origin', '--prune']);
+  if (fetch.status !== 0) say(`pin: warning: git fetch failed (${String(fetch.stderr || '').trim().split('\n').pop()}); pinning against the last known origin/main`);
+  const upstream = resolveCommit(canonical, 'origin/main');
+  const onMain = upstream && git(canonical, ['merge-base', '--is-ancestor', commit, upstream]).status === 0;
+  if (!onMain) {
+    throw new QueueError(`pin_not_on_main: ${commit.slice(0, 12)} is not contained in origin/main ${String(upstream || '').slice(0, 12)}; a deploy installs a commit that is on main`, 75, 'pin_not_on_main');
+  }
+  const pinDir = path.resolve(options.pinDir || PIN_ROOT_DEFAULT());
+  const quiet = options.json ? () => {} : say;
+  const acquired = await enqueueAndWait({...options, log: quiet, branch: options.branch || `deploy/${commit.slice(0, 12)}`, kind: 'deploy'});
+  if (!acquired.granted) return acquired;
+  const id = acquired.id;
+  const finish = (state, reason, extra = {}) => {
+    db.prepare('UPDATE queue SET state=?, reason=?, ended_at=?, result=? WHERE id=?').run(state, reason, now(), extra.result || '', id);
+    logRow(db, id, state, reason);
+    clearHolder(dir, id);
+    releaseLease(acquired.lease);
+    quiet(`#${id} ${state}: ${reason}`);
+  };
+  try {
+    const pinned = ensurePinnedWorktree({canonical, commit, pinDir});
+    const reason = `pinned ${commit.slice(0, 12)} at ${pinned.root} for a deploy to build from (canonical ${canonical} stays free; ${pinned.reused ? 'an existing pinned tree was reused' : 'a detached worktree was created'}); the lease is released and a landing may proceed`;
+    db.prepare('UPDATE queue SET candidate_tree=?, verified_tree=? WHERE id=?').run(commit, commit, id);
+    finish('pinned', reason, {result: JSON.stringify({commit, pin: pinned.root, reused: pinned.reused, owner: owner.id})});
+    return emit({id, commit, pin: pinned.root, reused: pinned.reused, canonical}, options, reason);
+  } catch (error) {
+    finish('abandoned', `error: ${error.code || 'failed'}: ${String(error.message).split('\n')[0]}`);
+    throw error;
+  }
 }
 
 // ---- record -------------------------------------------------------------------------------------
@@ -611,6 +724,7 @@ async function commandLand(options) {
     const row = db.prepare('SELECT * FROM queue WHERE id=?').get(id);
     db.prepare('UPDATE queue SET state=?, reason=?, ended_at=?, result=? WHERE id=?').run(state, reason, now(), extra.result || '', id);
     logRow(db, id, state, reason);
+    clearHolder(dir, id);
     releaseLease(lease);
     const next = waitingRows(db)[0];
     say(`#${id} ${state}: ${reason}${next ? `; next is #${next.id} ${next.owner} (${next.branch}, waiting ${age(next.created_at)})` : '; nobody waiting'}`);
@@ -829,10 +943,11 @@ async function commandLand(options) {
 function commandRelease(options) {
   const {dir, db} = open(options);
   const row = ownedRow(db, options);
-  const state = options.result === 'abandoned' ? 'abandoned' : 'landed';
+  const state = ['abandoned', 'pinned'].includes(options.result) ? options.result : 'landed';
   const reason = options.evidence || `${state} by its holder (pid ${process.pid})`;
   db.prepare('UPDATE queue SET state=?, reason=?, ended_at=? WHERE id=?').run(state, reason, now(), row.id);
   logRow(db, row.id, state, reason);
+  clearHolder(dir, row.id);
   releaseLease(row.lease);
   const next = waitingRows(db)[0];
   say(`#${row.id} ${state}: ${reason}${next ? `; next is #${next.id} ${next.owner} (${next.branch}, waiting ${age(next.created_at)})` : '; nobody waiting'}`);
@@ -923,6 +1038,7 @@ async function main() {
   let result;
   if (command === 'status') result = commandStatus(options);
   else if (command === 'acquire') result = await commandAcquire(options);
+  else if (command === 'pin') result = await commandPin(options);
   else if (command === 'record') result = commandRecord(options);
   else if (command === 'land') result = await commandLand(options);
   else if (command === 'release') result = commandRelease(options);
@@ -930,7 +1046,7 @@ async function main() {
   else if (command === 'classify') result = commandClassify(options);
   else if (command === 'baseline') result = commandBaseline(options);
   else if (command === 'history') result = commandHistory(options);
-  else throw new QueueError('usage: landing-queue.mjs status|acquire|record|land|release|reconcile|classify|baseline|history [options]', 75, 'usage');
+  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|record|land|release|reconcile|classify|baseline|history [options]', 75, 'usage');
   if (result && result.exit) process.exitCode = result.exit;
   return result;
 }

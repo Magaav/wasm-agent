@@ -110,6 +110,23 @@ fn installed_commit() -> String {
     }
 }
 
+/// The installer's own phase record, written by `scripts/upgrade.sh` beside the binary.
+///
+/// Why this exists: the watchdog's deadline is measured from the installer's start, and a deploy that is
+/// waiting for the node to go idle is *working as designed*, not silent. Measured on wasm_the_first
+/// (2026-11-10): a deploy waited 14 and 37 minutes for long sessions, the 900 s deadline expired in the
+/// middle of the wait, and the session was told the deploy was silent while it was only waiting - the
+/// false notice this function removes. `waiting_for_idle` is a named state with its own bound
+/// (`WA_DEPLOY_IDLE_BOUND`, written into the record), so the watchdog waits that much longer and, if
+/// even the bound is exceeded, reports the state by name instead of calling it silence.
+fn installer_phase() -> Option<(String, Option<u64>)> {
+    let text = std::fs::read_to_string(install_dir().join("deploy-state.json")).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let state = value.get("state")?.as_str()?.to_string();
+    let bound = value.get("bound_seconds").and_then(Value::as_u64);
+    Some((state, bound))
+}
+
 /// The installer's own verdict for this deploy, if it got far enough to write one.
 ///
 /// Two places, both attributable to one id: the per-request copy `deploy.sh` makes when it is given
@@ -424,15 +441,26 @@ pub(crate) fn sweep(now: u64) -> u32 {
             continue;
         }
         let started = record["started_at"].as_u64();
+        // A deploy in a named installer state is not silence. `waiting_for_idle` says nothing has been
+        // stopped and the sessions have been asked to pause; its own bound is how long that may last.
+        let phase = installer_phase();
+        let waiting = phase.as_ref().is_some_and(|(state, _)| state == "waiting_for_idle");
+        let waiting_bound = phase.as_ref().and_then(|(_, bound)| *bound).unwrap_or(0);
+        let grace = if waiting { waiting_bound } else { 0 };
         let due = match started {
-            Some(started) => started.saturating_add(timeout),
+            Some(started) => started.saturating_add(timeout).saturating_add(grace),
             None if still_in_the_box(id) => continue,
             None => record["requested_at"].as_u64().unwrap_or(now).saturating_add(timeout),
         };
         if now < due {
             continue;
         }
-        match settle(id, "silent", "the watchdog reported it; no outcome reached the session in time") {
+        let (outcome, detail) = if waiting {
+            ("waiting_for_idle", "the deploy was waiting for the node to become idle when its own bound                 (WA_DEPLOY_IDLE_BOUND) ran out; nothing was stopped and no outcome reached the session")
+        } else {
+            ("silent", "the watchdog reported it; no outcome reached the session in time")
+        };
+        match settle(id, outcome, detail) {
             Ok(true) => reports += 1,
             Ok(false) => {}
             Err(error) => audit("deploy-outcome-failed", id, &error.to_string()),

@@ -229,6 +229,57 @@ pub(crate) fn observe(id:&str) -> Result<()> {
     observe_at(id,now_epoch())
 }
 
+/// What an observation of this protocol directory needs and does not have.
+///
+/// A protocol directory is created at intake and filled in over the following seconds; a watcher that runs
+/// between those writes sees a directory that is not incomplete forever, only not yet. Measured on `work`
+/// (2026-11-10): five directories without `observation.json` made every `protocol observe` pass return an
+/// error, and the job that calls it retried the same five forever - a spin on a missing file, reported as if
+/// the observer were broken. Naming what is missing is the honest answer, and it is a fact a reader can act
+/// on.
+pub(crate) fn missing_observation_files(dir:&Path) -> Vec<&'static str> {
+    ["binding.json","ack.json","intent.json"].into_iter().filter(|name|!dir.join(name).exists()).collect()
+}
+
+/// Observe one directory without letting one incomplete directory stop the pass. The answer is one record
+/// per directory: observed, deferred, or missing a named file. Errors are recorded (`audit`) and returned in
+/// the record - never swallowed, and never the reason the other directories wait.
+pub(crate) fn observe_one(id:&str) -> Value {
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    let missing=missing_observation_files(&dir);
+    if !missing.is_empty() {
+        let detail=format!("missing: {}",missing.join(", "));
+        audit("protocol-observe-missing",id,&detail);
+        return json!({"id":id,"ok":false,"missing":missing,"detail":detail});
+    }
+    match observe(id) {
+        Ok(())=>json!({"id":id,"ok":true}),
+        Err(error)=>{
+            let detail=format!("{error:#}");
+            audit("protocol-observe-failed",id,&detail);
+            json!({"id":id,"ok":false,"detail":detail})
+        }
+    }
+}
+
+/// Observe every protocol directory, one record each. `ok` is false when any directory was not observed, so
+/// a caller can report a partial pass without retrying the impossible ones.
+pub(crate) fn observe_all() -> Value {
+    let root=sentinel_dir().join("deploy-protocol");
+    let mut entries=Vec::new();
+    if let Ok(listing)=std::fs::read_dir(&root) {
+        for entry in listing.flatten() {
+            if entry.path().is_dir() {
+                if let Some(id)=entry.file_name().to_str() { entries.push(id.to_string()); }
+            }
+        }
+    }
+    entries.sort();
+    let results:Vec<Value>=entries.iter().map(|id|observe_one(id)).collect();
+    let skipped:Vec<&Value>=results.iter().filter(|record|record["ok"]!=true).collect();
+    json!({"ok": skipped.is_empty(), "observed": results.len()-skipped.len(), "skipped": skipped, "records": results})
+}
+
 pub(crate) fn observe_at(id:&str,now:u64) -> Result<()> {
     if !identity_text(id) {bail!("return_request_id_invalid");}
     let dir=sentinel_dir().join("deploy-protocol").join(id);

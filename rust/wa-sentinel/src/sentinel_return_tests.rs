@@ -45,3 +45,32 @@ fn returns_bind_runtime_owner_and_refuse_event_session_authority(){
  for(key,value)in[("WASM_AGENT_HOME",oldhome),("WASM_AGENT_PORT",oldport)]{match value{Some(v)=>std::env::set_var(key,v),None=>std::env::remove_var(key)}}
  eprintln!("return owner evidence retained {}",home.display());
 }
+
+/// A protocol directory that is not filled in yet is reported as missing its named files, and it does not
+/// stop the other directories from being observed.
+///
+/// Measured on `work` (2026-11-10): five directories without `observation.json` made `protocol observe`
+/// return an error on every pass, and the job that calls it retried the same five forever - a spin on a
+/// missing file, reported as if the observer were broken.
+#[test]
+fn missing_observation_files_are_named_and_never_stop_the_pass() {
+    let _lock=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let home=std::env::temp_dir().join(format!("wa-observe-missing-{}",std::process::id()));
+    let _=std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".wasm-agent/sentinel/deploy-protocol/empty-one")).unwrap();
+    std::fs::create_dir_all(home.join(".wasm-agent/sentinel/deploy-protocol/empty-two")).unwrap();
+    let oldhome=std::env::var_os("WASM_AGENT_HOME");
+    std::env::set_var("WASM_AGENT_HOME",&home);
+    let report=sentinel_return::observe_all();
+    match oldhome {Some(v)=>std::env::set_var("WASM_AGENT_HOME",v),None=>std::env::remove_var("WASM_AGENT_HOME")}
+    assert_eq!(report["ok"],false,"a partial pass says so: {report}");
+    assert_eq!(report["observed"],0,"nothing could be observed: {report}");
+    let skipped=report["skipped"].as_array().expect("skipped list");
+    assert_eq!(skipped.len(),2,"every incomplete directory is reported, not just the first: {report}");
+    for record in skipped {
+        let missing=record["missing"].as_array().expect("named files");
+        assert!(missing.iter().any(|name|name=="binding.json"),"the missing file is named: {record}");
+        assert!(record["detail"].as_str().unwrap_or("").contains("missing: "),"and the detail names them: {record}");
+    }
+    let _=std::fs::remove_dir_all(&home);
+}

@@ -316,6 +316,10 @@ fi
 [ -n "$ROOT" ] || fail "cannot tell which worktree to deploy from: run this script from one, set WA_DEPLOY_ROOT, or record it in $INSTALL_DIR/runtime-worktree.txt - a deploy that cannot say what it builds does not build"
 [ -d "$ROOT" ] || fail "the worktree to deploy from does not exist: $ROOT"
 cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
+# The tree this command was pointed at. Everything checked before the pin below is checked HERE, and every
+# fact recorded about where the deploy came from names this directory. If it is a canonical checkout a
+# landing may move it at any moment; the build reads a pinned worktree instead (step 3c).
+SOURCE_ROOT="$ROOT"
 # Arm the checkout's git hooks by default (CRLF, main guard, generated prompt docs). Advisory: a
 # config write cannot dirty the tree, and a failure here never stops a deploy.
 [ -f "$ROOT/scripts/setup-hooks.sh" ] && bash "$ROOT/scripts/setup-hooks.sh" "$ROOT" || true
@@ -787,15 +791,63 @@ deploy_requirements
 
 # A deploy and onStale both build into rust/target/release. They must not do it at the same time:
 # on 2026-10-22 onStale's build overwrote the deploy's proved candidate between proof and install, and
-# the deploy correctly refused an installed binary that was not the proved one. This lock is shared
-# with on-stale.sh and held until this deploy exits.
+# the deploy correctly refused an installed binary that was not the proved one. The lock itself - and the
+# reclaim of a dead holder's lock, with its evidence - is scripts/lib/deploy-lock.sh, tested by
+# scripts/test-deploy-lock.sh. A live holder refuses; a holder whose pid is gone is moved aside and logged.
 DEPLOY_LOCK="$INSTALL_DIR/.deploy.lock"
-if ! mkdir "$DEPLOY_LOCK" 2>/dev/null; then
-  fail "another deploy/onStale build holds $DEPLOY_LOCK; nothing built"
+DEPLOY_LOCK_LOG="$INSTALL_DIR/deploy-lock.log"
+DEPLOY_LOCK_LIB="$SOURCE_ROOT/scripts/lib/deploy-lock.sh"
+[ -f "$DEPLOY_LOCK_LIB" ] || DEPLOY_LOCK_LIB="$(dirname "$0")/lib/deploy-lock.sh"
+[ -f "$DEPLOY_LOCK_LIB" ] || fail "refused(deploy_lock_lib_missing): $DEPLOY_LOCK_LIB is not in this tree, so the build lock cannot tell a dead holder from a live one; nothing built"
+. "$DEPLOY_LOCK_LIB"
+if ! wa_deploy_lock_claim "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG" "$SOURCE_ROOT"; then
+  fail "${WA_DEPLOY_LOCK_REASON:-another deploy/onStale build holds $DEPLOY_LOCK; nothing built}"
 fi
-printf '%s
-' "$$" > "$DEPLOY_LOCK/pid" 2>/dev/null || true
-trap 'rm -rf "$DEPLOY_LOCK"' EXIT
+trap 'wa_deploy_lock_release "$DEPLOY_LOCK" "$DEPLOY_LOCK_LOG"' EXIT
+
+# 3c. PIN THE COMMIT THE BUILD READS. The build used to read the tree this command was pointed at, and on
+#     wasm_the_first a landing merged into the canonical checkout while a deploy was staging it: the staged
+#     tree named one commit's server.lua and the check read another's (`stale embedded module:
+#     lua/core/server.lua`), three deploys failed in one night, and commit 2231fc6f could only make the
+#     race retryable. Here the deploy takes the landing queue's own lease (so it waits for a landing in
+#     progress, and a landing waits for it), creates a DETACHED worktree at the exact commit, and releases
+#     the lease. Every later step - cargo, codemode, the Lua stage, the components, the shipped scripts -
+#     reads only the pinned tree, which no landing can move because it is not the canonical checkout.
+WA_DEPLOY_PIN="${WA_DEPLOY_PIN:-1}"
+BUILD_PIN=""
+BUILD_PIN_ROOT=""
+if [ "$WA_DEPLOY_PIN" = "1" ]; then
+  PIN_COMMIT="$(git rev-parse HEAD)"
+  PIN_DIR="${WA_DEPLOY_PIN_DIR:-${TMPDIR:-/tmp}/wa-deploy-pins}"
+  PIN_WAIT="${WA_DEPLOY_PIN_WAIT:-600}"
+  PIN_OUT="$(mktemp 2>/dev/null || echo "$INSTALL_DIR/.deploy-pin.$$.json")"
+  PIN_ERR="$(mktemp 2>/dev/null || echo "$INSTALL_DIR/.deploy-pin.$$.err")"
+  if ! command -v node >/dev/null 2>&1; then
+    rm -f "$PIN_OUT" "$PIN_ERR"
+    fail "refused(pin_tool_unavailable): node is not on PATH, so this deploy cannot take the landing queue's lease and pin the commit it would build. A deploy never builds from the live canonical tree, because a landing can move it under the build. Install node, or set WA_DEPLOY_ALLOW_UNPINNED=1 as an explicit exception. Nothing was built."
+  fi
+  if ! ( cd "$SOURCE_ROOT" && node scripts/landing-queue.mjs pin --commit "$PIN_COMMIT" --pin-dir "$PIN_DIR" \
+        --wait-timeout "$PIN_WAIT" --json ) > "$PIN_OUT" 2> "$PIN_ERR"; then
+    PIN_REASON="$(tail -3 "$PIN_ERR" 2>/dev/null | tr '\n' ' ')"
+    rm -f "$PIN_OUT" "$PIN_ERR"
+    if [ "${WA_DEPLOY_ALLOW_UNPINNED:-0}" = "1" ]; then
+      note "WA_DEPLOY_ALLOW_UNPINNED=1: building from $SOURCE_ROOT although the pin failed: $PIN_REASON"
+    else
+      fail "refused(deploy_pin_failed): could not pin $PIN_COMMIT for the build: ${PIN_REASON:-the queue gave no reason}. A deploy never builds from the live canonical tree, because a landing can move it under the build. Nothing was built. 'node scripts/landing-queue.mjs status' names the holder, if a landing is in progress."
+    fi
+  else
+    BUILD_PIN_ROOT="$(node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(j.pin||"")' "$PIN_OUT" 2>/dev/null)"
+    rm -f "$PIN_OUT" "$PIN_ERR"
+    if [ -z "$BUILD_PIN_ROOT" ] || [ ! -d "$BUILD_PIN_ROOT" ]; then
+      fail "refused(deploy_pin_unreadable): the queue answered but named no pinned worktree; nothing was built"
+    fi
+    BUILD_PIN="$PIN_COMMIT"
+    ROOT="$BUILD_PIN_ROOT"
+    export WA_DEPLOY_ROOT="$ROOT"
+    cd "$ROOT" || fail "cannot enter the pinned worktree $ROOT"
+    echo "deploy: building $PIN_COMMIT from pinned worktree $ROOT (the source checkout $SOURCE_ROOT stays free for landings)"
+  fi
+fi
 
 # A queued/running upgrade and a deploy both install the same binary and record. Refuse a deploy
 # while an upgrade is active; onStale stands down on the shared lock for the build phase.
@@ -911,7 +963,7 @@ if [ "$STAGE_RC" = 2 ]; then
 fi
 case "$STAGE_RC" in
   0) ;;
-  2) fail "the Lua tree cannot be staged from a tree that holds still: $ROOT moved twice while it was copied, so a landing is merging into it. Nothing was installed; deploy again once the landing finishes." ;;
+  2) fail "the Lua tree cannot be staged from a tree that holds still: $ROOT moved twice while it was copied. A deploy stages from its pinned worktree (step 3c), so this means the pin itself is being written to - nothing was installed; inspect $ROOT, then deploy again." ;;
   *) fail "cannot write the Lua tree" ;;
 esac
 STAGE_CHECK="$(WA_LUA_TREE="$LUA_STAGE" "$NEW" --lua-tree 2>&1)"
@@ -1076,7 +1128,7 @@ wa_status_follow /dev/null installing
 # happened to build this release. Selection is read-only and refuses dirty/stale
 # canonical state; explicit overrides remain deliberate active-wave knobs.
 if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
-  BINDING_SCRIPT="$ROOT/scripts/runtime-install-binding.mjs"; BINDING_REPO="$ROOT"
+  BINDING_SCRIPT="${SOURCE_ROOT:-$ROOT}/scripts/runtime-install-binding.mjs"; BINDING_REPO="${SOURCE_ROOT:-$ROOT}"
   if command -v cygpath >/dev/null 2>&1; then
     BINDING_SCRIPT="$(cygpath -w "$BINDING_SCRIPT")"; BINDING_REPO="$(cygpath -w "$BINDING_REPO")"
   fi
@@ -1335,8 +1387,9 @@ record_installed() {
   # `install_dir=` is the record's own statement of where it was written, and of which directory the machine
   # runs the node from. A record that cannot say that is a record a later reader has to guess about - and
   # `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
-  printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=%s\nreason=%s\n' \
+  printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nsource_worktree=%s\nbuild_pin=%s\nat=%s\nreason=%s\n' \
     "$record_commit" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
+    "${SOURCE_ROOT:-$ROOT}" "${BUILD_PIN:-unpinned}" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
     > "$record_tmp" || fail "node installed, but installed.txt could not be written"
   # `source_provenance=clean-built-by-deploy` keeps its meaning - the bytes are a clean build of exactly
@@ -1538,6 +1591,8 @@ fi
 ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard.sh" "scripts/lib/turn-guard.sh beside deploy.sh"
 # ...and the build's progress file and requirement check, which it sources too (29/10).
 ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-status.sh" "scripts/lib/build-status.sh beside deploy.sh"
+ship_file "$ROOT/scripts/lib/deploy-lock.sh" "$INSTALL_DIR/scripts/lib/deploy-lock.sh" "scripts/lib/deploy-lock.sh beside deploy.sh (the build lock a dead holder cannot block)"
+ship_file "$ROOT/scripts/lib/deploy-signal.sh" "$INSTALL_DIR/scripts/lib/deploy-signal.sh" "scripts/lib/deploy-signal.sh beside deploy.sh (the deploy-pending signal)"
 ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/build-requirements.sh" "scripts/lib/build-requirements.sh beside deploy.sh"
 
 ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/deploy-components.sh" "scripts/lib/deploy-components.sh beside deploy.sh"
