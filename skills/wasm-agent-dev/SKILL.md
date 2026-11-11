@@ -118,3 +118,14 @@ Agent: <harness> <model> on <node>
 
 An unverified claim is worse than a hand-off: say `gate_verified:false` and
 `release_verified:false` and let the integrator run what you could not.
+
+## 7. Searching the tree with ripgrep
+
+`rg` is ripgrep, and **`-r` means REPLACE**, not recursive - recursion is the default. `rg -rn foo`
+rewrites every match to the literal `n` *in the output* (and `rg -r '' foo` deletes it), which is how
+identifiers "turned into `n`" in what looked like a read-only search. For a normal numbered recursive
+search write `rg -n foo`; filter files with `-g '*.lua'`; never pass `-r` unless you mean to rewrite what
+is printed. A URL or path argument is not the pattern - put the pattern first, then the path.
+
+If `rg` is not installed, say so in the report and use `grep -rn` instead; a silent fallback to a
+different matcher is how a search quietly answers a different question.
