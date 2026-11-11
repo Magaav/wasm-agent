@@ -63,8 +63,8 @@ check(not visible('master',context({id='specialized',allowed=allowed})).codemode
 check(not visible('master',context({id='self-reporter',allowed=allowed})).codemode,'other specialist profile not promoted')
 local worker=context({id='orchestration-worker',allowed=allowed})
 check(visible('master',worker).codemode,'authorized coding-worker gets default')
-local bounded=tools.dispatch(memory,'codemode',{code='return ("grep" in tools)+"/"+("integrate" in tools)+"/"+("session_worktree" in tools);'},'master',worker)
-check(bounded.ok and bounded.value=='"false/false/false"','worker ceiling and outside-guest control plane retained')
+local bounded=tools.dispatch(memory,'codemode',{code='let fenced=false; try{ await tools.session_worktree({}); }catch(e){ fenced=/Direct call only/.test(String((e&&e.message)||e)); } return String(fenced);'},'master',worker)
+check(bounded.ok and bounded.value=='"true"','worker ceiling retained: the control plane is visible and still refuses: '..json.encode(bounded):sub(1,300))
 local discovery=tools.dispatch(memory,'codemode',{code='const r=await searchTools("read",{limit:8}); return r.tools.some(t=>t.name==="read") && !r.tools.some(t=>t.name==="integrate");'},'master',worker)
 -- The tool_search shape and a listing: both used to be refused (28/10).
 local shapes=tools.dispatch(memory,'codemode',{code='const a=await searchTools({query:"read",limit:3}); const b=await searchTools("*"); const c=await searchTools(""); const d=await searchTools({query:"*",limit:1,offset:1}); return JSON.stringify([a.tools.some(t=>t.name==="read"), b.matches>0 && b.tools.length===Math.min(50,b.matches), c.matches===b.matches, d.tools.length===1 && d.offset===1]);'},'master',worker)
