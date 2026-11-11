@@ -91,7 +91,9 @@ check(#batched.results==3 and batched.failed==1 and batched.ok==false,'batched r
 check(batched.results[1].content==tools.dispatch(memory,'read',requests[1],'master').content
   and batched.results[2].content==tools.dispatch(memory,'read',requests[2],'master').content,
   'batched ranges equal individual reads exactly')
-check(batched.results[3].error=='not_found' and tools.dispatch(memory,'read_many',{requests=requests},'guest').error~=nil,
+check(batched.results[3].error=='read_file_missing'
+  and tostring(batched.results[3].detail):find('missing',1,true)~=nil
+  and tools.dispatch(memory,'read_many',{requests=requests},'guest').error~=nil,
   'batched missing files and role denial remain visible')
 host.read_file=read_original
 local large_batch={ok=true,results={{path='first',content=text},{path='second',content=text}}}

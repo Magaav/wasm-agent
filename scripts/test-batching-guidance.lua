@@ -53,8 +53,15 @@ local function execute(mode)
   for _,row in ipairs(memory.session_messages(sid,{all=true})) do if row.role=='tool' then results[#results+1]=row end end
   check(#results==2 and results[1].tool_call_id=='range-group' and results[2].tool_call_id=='single-range','group keeps original call ids and result order')
   local batch=json.decode(results[1].content)
+  -- The reason is the HOST's, not a bare "not_found": `host.read_file` answers (text, why) and
+  -- `lua/core/file_tools.lua` returns the host's own code with its detail (`read_file_missing:<path>`),
+  -- keeping `not_found` only as the fallback for a host that reports no reason (the comment there,
+  -- measured 10/11, is the reason that changed). Pinning the reason and the path is what separates a
+  -- missing file from one too large or not text.
   check(batch.failed==1 and #batch.results==3 and batch.results[1].content=='beta\n' and batch.results[2].content=='second\n'
-    and batch.results[3].error=='not_found','all ranges and partial failures survive batching')
+    and batch.results[3].error=='read_file_missing'
+    and tostring(batch.results[3].detail):find('missing.txt',1,true)~=nil,
+    'all ranges and partial failures survive batching')
   check(json.decode(results[2].content).content=='alpha\n','sibling exact result retained')
   local starts,ends={},{}
   for _,e in ipairs(telemetry.events(sid,0,100).events) do
