@@ -164,6 +164,10 @@ end
 local function tool_lookup(catalog,execution,dispatch)
  local function described(name)
   local wanted=tostring(name)
+  -- `describeTool("showCall")` is the presentation's help, as it always was; only the other names come
+  -- from the catalogue. Without this the native path answered `unknown_tool` for it (measured 11/11 by
+  -- scripts/test-codemode-presentation.lua).
+  if wanted=='showCall' then return presentation.help end
   for _,schema in ipairs(catalog)do
    local f=schema['function']
    if f.name==wanted then

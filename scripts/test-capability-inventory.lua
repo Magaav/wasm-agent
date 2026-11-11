@@ -28,27 +28,36 @@ local sid=memory.start_session('','capability inventory fixture',{user_id='maste
 local ctx={session_id=sid,user_id='master',role='master'}
 local function call(code)return tools.dispatch(memory,'codemode',{code=code},'master',ctx)end
 
--- The sandbox's own view of the whole list. The globals are asynchronous (the guest settles each
--- one through the bridge), exactly like `tools.read`; a guest return value arrives as its own JSON
--- text, so the string the sandbox hands back IS the document.
+-- `capabilities()` is the tool grant list: the outer `capabilities` tool dispatched, so the guest and
+-- the facade cannot answer differently (11/11). Its entries are tool names, not registry capabilities.
 local r=call('const all=await capabilities(); return JSON.stringify(all);')
 check(r.ok and type(r.value)=='string','the sandbox answered capabilities()')
-local sandbox_text=json.decode(r.value)
+local grant_text=json.decode(r.value)
+local granted=json.decode(grant_text)
+local outer=tools.dispatch(memory,'capabilities',{},'master',ctx)
+check(type(granted)=='table' and type(granted.capabilities)=='table',
+ 'capabilities() is the grant document: '..tostring(grant_text):sub(1,160))
+check(json.encode(granted)==json.encode(outer),
+ 'sandbox capabilities() is the outer tool grant list ('..#json.encode(granted)..' vs '..#json.encode(outer)..' bytes)')
+check(#r.attempts==1,'one capability read, one attempt')
+check(r.attempts[1].target=='global' and r.attempts[1].admitted~=true,'the inventory call goes through no tool envelope and admits no effect')
+
+-- `describe()` with no name is the registry document, byte for byte: the same bytes
+-- `wa capabilities --json` prints, which is exactly what `capabilities()` used to return.
+local doc=call('const all=await describe(); return JSON.stringify(all);')
+check(doc.ok and type(doc.value)=='string','the sandbox answered describe() with no name')
+local sandbox_text=json.decode(doc.value)
 check(type(sandbox_text)=='string','the guest return value is the JSON text it produced')
--- Equality the coordinator asked for, in its strongest form: the sandbox's document is the
--- registry's document, byte for byte - the same bytes `wa capabilities --json` prints.
-check(sandbox_text==raw,'sandbox capabilities() returns the registry document unchanged ('..#sandbox_text..' vs '..#raw..' bytes)')
-check(host.sha256(sandbox_text)==host.sha256(raw),'sandbox capabilities() hashes to the registry digest')
+check(sandbox_text==raw,'describe() returns the registry document unchanged ('..#sandbox_text..' vs '..#raw..' bytes)')
+check(host.sha256(sandbox_text)==host.sha256(raw),'describe() hashes to the registry digest')
 local seen=json.decode(sandbox_text)
-check(#seen==#list,'sandbox capabilities() lists every registry entry ('..#seen..' vs '..#list..')')
+check(#seen==#list,'describe() lists every registry entry ('..#seen..' vs '..#list..')')
 for i,entry in ipairs(seen)do
   local expected=list[i]
   check(entry.name==expected.name and entry.description==expected.description and entry.effect==expected.effect,
    'sandbox entry '..i..' is the registry entry ('..tostring(entry.name)..')')
 end
--- Introspection is metadata: one global call, and it admits no effect.
-check(#r.attempts==1,'one capability read, one attempt')
-check(r.attempts[1].target=='global' and r.attempts[1].admitted~=true,'the inventory call goes through no tool envelope and admits no effect')
+check(#doc.attempts==1 and doc.attempts[1].admitted~=true,'describe() admits no effect')
 
 -- One row by exact name.
 local one=call('const row=await describe("exec"); return JSON.stringify(row);')
