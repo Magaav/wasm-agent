@@ -12,6 +12,9 @@ edition = "2021"
 # the binary wires it. That direction is what the split buys: a change to a capability rebuilds this
 # crate and the binary, and does not touch the engine, the policy or the console.
 [dependencies]
+# Contention policy for every SQLite store (rust/wa-sqlite): one busy timeout, WAL, and a bounded
+# retry that names itself instead of dying as `database is locked`. A leaf crate.
+wa-sqlite = { path = "../wa-sqlite" }
 wa-host-support = { path = "../wa-host-support" }
 wa-governance = { path = "../wa-governance" }
 wa-term = { path = "../wa-term" }

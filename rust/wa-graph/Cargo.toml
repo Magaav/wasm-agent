@@ -17,6 +17,9 @@ default = ["native"]
 native = ["dep:notify"]
 
 [dependencies]
+# Contention policy for every SQLite store (rust/wa-sqlite): one busy timeout, WAL, and a bounded
+# retry that names itself instead of dying as `database is locked`. A leaf crate.
+wa-sqlite = { path = "../wa-sqlite" }
 tree-sitter = "0.24"
 tree-sitter-go = "=0.23.4"
 tree-sitter-rust = "=0.23.3"

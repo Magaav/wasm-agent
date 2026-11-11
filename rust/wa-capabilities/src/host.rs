@@ -452,58 +452,141 @@ fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
 /// autocommit the later write, breaking atomicity. A transaction is closed only at
 /// an uncaught callback error (`host::rollback_if_open`) or when the interpreter's
 /// connection drops.
+///
+/// A busy/locked refusal is the one error retried here, and the retry is the
+/// statement's, never a unit's (see `under_policy`).
 pub extern "C-unwind" fn sql_exec(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let sql = arg_string(l, 1).unwrap_or_default();
     let params_json = arg_string(l, 2).unwrap_or_else(|| "[]".into());
     let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
+    let action = action_of(&sql);
     let outcome = (|| -> Result<Value, String> {
         let conn = host.db.lock().map_err(|e| e.to_string())?;
-        if values.is_empty() {
-            conn.execute_batch(&sql).map_err(|e| e.to_string())?;
-            Ok(json!({"ok": true, "changes": conn.changes()}))
-        } else {
-            let owned = params(&values);
-            let changes = conn
-                .execute(&sql, params_from_iter(owned.iter().map(|p| p.as_ref())))
-                .map_err(|e| e.to_string())?;
-            Ok(json!({"ok": true, "changes": changes}))
-        }
+        under_policy(&conn, &action, || {
+            if values.is_empty() {
+                conn.execute_batch(&sql)?;
+                Ok(json!({"ok": true, "changes": conn.changes()}))
+            } else {
+                let owned = params(&values);
+                let changes = conn.execute(&sql, params_from_iter(owned.iter().map(|p| p.as_ref())))?;
+                Ok(json!({"ok": true, "changes": changes}))
+            }
+        })
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }
 
+/// A short, single-line name for a statement, so a contention failure says what it was doing
+/// (`BEGIN IMMEDIATE`, `INSERT INTO messages(...)`) without pasting a whole statement into a log.
+fn action_of(sql: &str) -> String {
+    let collapsed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = collapsed.chars().take(60).collect();
+    if collapsed.chars().count() > 60 {
+        out.push('\u{2026}');
+    }
+    if out.is_empty() {
+        out.push_str("statement");
+    }
+    out
+}
+
+/// Run one statement under the node's contention policy (rust/wa-sqlite).
+///
+/// The rules, and why they are these rules:
+///
+/// * Only `SQLITE_BUSY`/`SQLITE_LOCKED` is retried. Any other error is returned at once - a missing
+///   table or a constraint violation must never be attempted twice.
+/// * A refused statement applied nothing, so running *this statement* again cannot double-apply an
+///   effect. That is why the retry lives here and not around a transaction: a unit is not re-run,
+///   because a Lua closure may have done work outside SQLite by the time it failed.
+/// * The exception SQLite itself creates is a write conflict inside a transaction
+///   (`SQLITE_BUSY_SNAPSHOT`): it ROLLS THE TRANSACTION BACK. Retrying the statement then would run
+///   it in autocommit and commit alone what the caller meant to be one unit, so that case is
+///   detected (`is_autocommit` before/after) and reported as a failure to retry *the unit*.
+/// * Total patience is bounded (`WASM_AGENT_SQLITE_RETRY_MS`) and the failure is named
+///   (`database_busy: ... (retryable)`), so a caller can decide to retry instead of dying.
+fn under_policy<T>(
+    conn: &Connection,
+    action: &str,
+    mut run: impl FnMut() -> rusqlite::Result<T>,
+) -> Result<T, String> {
+    let started = std::time::Instant::now();
+    let inside_transaction = !conn.is_autocommit();
+    let attempts_max = wa_sqlite::attempts_max();
+    let deadline = started + std::time::Duration::from_millis(wa_sqlite::retry_ms());
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match run() {
+            Ok(value) => {
+                let slow = wa_sqlite::slow_ms();
+                let spent = started.elapsed();
+                if slow > 0 && spent.as_millis() as u64 >= slow {
+                    eprintln!(
+                        "[sql] {action}: {}ms{} (WASM_AGENT_SQLITE_SLOW_MS={slow})",
+                        spent.as_millis(),
+                        if inside_transaction { " inside a transaction" } else { "" }
+                    );
+                }
+                return Ok(value);
+            }
+            Err(error) => {
+                if !wa_sqlite::is_busy(&error) {
+                    return Err(error.to_string());
+                }
+                if inside_transaction && conn.is_autocommit() {
+                    return Err(format!(
+                        "{}: {action} hit a write conflict and SQLite rolled the transaction back; \
+                         re-running this one statement would commit it alone (retry the whole unit): {error}",
+                        wa_sqlite::BUSY_NAME
+                    ));
+                }
+                if attempt >= attempts_max || std::time::Instant::now() >= deadline {
+                    return Err(wa_sqlite::failure(action, &error.to_string(), attempt, started.elapsed()));
+                }
+                wa_sqlite::backoff(attempt);
+            }
+        }
+    }
+}
+
 /// host.sql_query(sql, params_json) -> [ {column: value}, ... ] | {error}
+///
+/// A read takes no write lock, so the only contention it meets is a schema/journal transition; it is
+/// retried under the same policy as a write (`under_policy`), which is what makes a `status` call
+/// answer while another lane is committing.
 pub extern "C-unwind" fn sql_query(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let sql = arg_string(l, 1).unwrap_or_default();
     let params_json = arg_string(l, 2).unwrap_or_else(|| "[]".into());
     let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
+    let action = action_of(&sql);
     let outcome = (|| -> Result<Value, String> {
         let conn = host.db.lock().map_err(|e| e.to_string())?;
-        let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
-        let owned = params(&values);
-        let mut rows = statement
-            .query(params_from_iter(owned.iter().map(|p| p.as_ref())))
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let mut object = serde_json::Map::new();
-            for (index, name) in names.iter().enumerate() {
-                let value = match row.get_ref(index).map_err(|e| e.to_string())? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(n) => json!(n),
-                    rusqlite::types::ValueRef::Real(f) => json!(f),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
-                };
-                object.insert(name.clone(), value);
+        under_policy(&conn, &action, || {
+            let mut statement = conn.prepare(&sql)?;
+            let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
+            let owned = params(&values);
+            let mut rows = statement.query(params_from_iter(owned.iter().map(|p| p.as_ref())))?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let mut object = serde_json::Map::new();
+                for (index, name) in names.iter().enumerate() {
+                    let value = match row.get_ref(index)? {
+                        rusqlite::types::ValueRef::Null => Value::Null,
+                        rusqlite::types::ValueRef::Integer(n) => json!(n),
+                        rusqlite::types::ValueRef::Real(f) => json!(f),
+                        rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                        rusqlite::types::ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
+                    };
+                    object.insert(name.clone(), value);
+                }
+                out.push(Value::Object(object));
             }
-            out.push(Value::Object(object));
-        }
-        Ok(Value::Array(out))
+            Ok(Value::Array(out))
+        })
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1

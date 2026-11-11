@@ -433,6 +433,7 @@ impl Kv {
             let dir = path.parent().ok_or_else(|| "kv path".to_string())?;
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
+            wa_sqlite::tune_wait(&conn).map_err(|e| e.to_string())?;
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS kv(k BLOB PRIMARY KEY, v BLOB NOT NULL);")
                 .map_err(|e| e.to_string())?;
             self.conn = Some(conn);

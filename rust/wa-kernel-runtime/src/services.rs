@@ -323,6 +323,9 @@ fn linker(engine: &wasmtime::Engine) -> Result<Linker<State>> {
             let path = c.data().kv_path.clone()?;
             std::fs::create_dir_all(path.parent()?).ok()?;
             let conn = rusqlite::Connection::open(&path).ok()?;
+            // The wait, not the journal mode: a component's own state keeps its own durability choice
+            // and still must not fail because another process was committing (`rust/wa-sqlite`).
+            wa_sqlite::tune_wait(&conn).ok()?;
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS kv(k BLOB PRIMARY KEY, v BLOB NOT NULL);").ok()?;
             c.data_mut().kv = Some(conn);
         }

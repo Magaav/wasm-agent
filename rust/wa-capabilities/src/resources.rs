@@ -338,11 +338,9 @@ impl Store {
         lease
             .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE")
             .map_err(err)?;
-        let db = Connection::open(root.join("claims.sqlite")).map_err(err)?;
-        db.busy_timeout(Duration::from_secs(5)).map_err(err)?;
+        let db = wa_sqlite::open(root.join("claims.sqlite")).map_err(err)?;
         db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS claims (
+            "CREATE TABLE IF NOT EXISTS claims (
               key TEXT PRIMARY KEY, principal TEXT NOT NULL, session TEXT NOT NULL,
               run TEXT NOT NULL, boot TEXT NOT NULL, uncertain INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS history (
@@ -685,6 +683,7 @@ fn registered_inspect(args: &Value) -> Result<Value> {
         return Err("registered_store_read_lock_metadata_missing".into());
     }
     let mut db = Connection::open_with_flags(root.join("claims.sqlite"),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+    wa_sqlite::tune_read_only(&db).map_err(err)?;
     let tx = db.transaction().map_err(err)?;
     let mut inventory = Store::inventory_at(&tx,&root,"",true)?;
     let conflicts = inventory["claims"].as_array().ok_or("registered_inventory_incomplete")?.iter().filter_map(|claim| {

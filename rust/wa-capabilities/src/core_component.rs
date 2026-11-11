@@ -990,8 +990,7 @@ pub fn boot_native_state(home: &str, db: &str, args: &[String], embedded: &[(&st
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
     let connection = rusqlite::Connection::open_with_flags(&database, flags)
         .map_err(|e| wasmtime::Error::msg(format!("open_db {database}: {e}")))?;
-    connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+    wa_sqlite::tune(&connection)
         .map_err(|e| wasmtime::Error::msg(format!("db_pragmas {database}: {e}")))?;
     let host: Box<crate::host::Host> = Box::new(crate::host::Host {
         db: Mutex::new(connection),

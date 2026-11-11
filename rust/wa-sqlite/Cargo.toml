@@ -1,0 +1,11 @@
+[package]
+name = "wa-sqlite"
+version = "0.1.0"
+edition = "2021"
+
+# One policy for the node's SQLite stores (docs/HOST.md, "contention"): the busy timeout, the
+# journal mode, and the bounded retry every store shares. A leaf crate - it depends on rusqlite and
+# nothing else - so the CLI, `serve`, the relay lanes, `wa-jobs`, `wa-graph`, `wa-operation` and the
+# components all answer a lock the same way instead of each choosing its own number.
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }

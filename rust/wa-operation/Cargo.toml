@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Contention policy for every SQLite store (rust/wa-sqlite): one busy timeout, WAL, and a bounded
+# retry that names itself instead of dying as `database is locked`. A leaf crate.
+wa-sqlite = { path = "../wa-sqlite" }
 serde_json = "1"
 base64 = "0.23"
 rusqlite = { version = "0.32", features = ["bundled"] }
