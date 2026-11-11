@@ -1066,7 +1066,7 @@ the retired instance's rows are gone and the live instance's are not. `registrat
 same two properties on the ledger alone, including that a cancel runs (so "revoked" never means only
 "forgotten").
 
-### 3. Transactional install (`install.rs`, `services::replace`)
+### 3. Transactional install (`install.rs`, `services::retire`/`replace`)
 
 `services upgrade {name, source: {wasm, manifest|manifest_path, pin}, ready_ms?}`:
 
@@ -1074,20 +1074,33 @@ same two properties on the ledger alone, including that a cancel runs (so "revok
 stage (<components>/.stage-<name>-<pid>/, three files)   -> pin verified against the staged bytes
 -> every imported interface is served                    -> else refused, quoting the interface
 -> grant checked against the staged manifest              -> state migration on a snapshot copy
--> candidate started beside the old instance             -> lifecycle.report(ready), or alive-unreported
--> staged files committed (wasm, manifest, pin last)      -> services::replace: switch, revoke, stop old
+-> the running instance is retired                        -> drain (if it opted in), stop, join, leases back
+-> candidate started (one instance per name: services::claim)
+-> lifecycle.report(ready), or alive-unreported
+-> staged files committed (wasm, manifest, pin last)      -> services::replace: switch and revoke the retired generation
 ```
 
+One service name holds **one** instance at every step (`services::claim`, 11/11): the claim is taken
+inside `spawn_instance`, so `start`, `enable`, `autostart`/`supervise`, this upgrade and the dev loop all
+meet the same refusal (`service_already_running`) instead of stacking. The earlier order - start the
+candidate beside the old instance - is right for a stateless component and wrong for one that owns a
+device, a port or a lock: on 09-11 both `wa-whatsapp` instances restored the same device and
+authenticated, WhatsApp replaced one, and the replaced instance's outbox kept claiming sends it could not
+deliver.
+
 Any failure before the switch stops the candidate, deletes the staging directory, and leaves the
-installed files and the running instance untouched - the test walks a pin mismatch, a non-wasm source
-and an unserved import before the successful upgrade, and asserts each time that the installed pin and
-the running instance did not move. The health rule is `dev::wait_ready`'s, extracted so the dev loop
-and this path cannot disagree: `ready`/`degraded` is health, a vanished thread is an exit, and an
-instance that runs for the whole window without reporting is accepted **and reported as
-`unreported`** (the report is optional in the WIT and absent in a wasip1 module, so inventing health
-would be worse than naming its absence). The files are committed *before* the switch, so a crash
-between the switch and the next start finds a consistent installation (the pin moves last: new bytes
-with an old pin are `component_hash_mismatch`, never an unverified run).
+installed files untouched; because the previous instance was already retired, the previous pin is then
+**put back** (`restore_previous`) and the answer says `restored: {restored: true}`. A refused upgrade
+costs a restart, never an outage and never two instances. The test walks a pin mismatch, a non-wasm
+source and an unserved import before the successful upgrade - each refused before anything is retired,
+so the running instance does not move - plus the restore path and the negative control for the claim.
+The health rule is `dev::wait_ready`'s, extracted so the dev loop and this path cannot disagree:
+`ready`/`degraded` is health, a vanished thread is an exit, and an instance that runs for the whole
+window without reporting is accepted **and reported as `unreported`** (the report is optional in the WIT
+and absent in a wasip1 module, so inventing health would be worse than naming its absence). The files are
+committed *before* the switch, so a crash between the switch and the next start finds a consistent
+installation (the pin moves last: new bytes with an old pin are `component_hash_mismatch`, never an
+unverified run).
 
 ### 4. Profiles as layers (`profiles.rs`)
 

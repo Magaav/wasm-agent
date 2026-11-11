@@ -353,6 +353,42 @@ pub fn state_word(queue_state: &str) -> &str {
     }
 }
 
+/// What the component's own bot is doing, as its outbox has to see it.
+///
+/// The distinction that matters is [`Bot::Stopped`]: the protocol task returned (`bot stopped`), so the
+/// instance can never send again. Before 11/11 the pipeline kept ticking anyway - the guest's driver
+/// future never completes by design - and the outbox went on claiming jobs and failing them `client is
+/// not connected` while the *replacement* instance was `CONNECTED`: jobs 73 and 74 died that way. A job
+/// belongs to the queue, not to an instance, and an instance that cannot send must not take one.
+///
+/// The rule lives here, beside `decide` and `retryable`, for the same reason they do: the two ends of
+/// the queue must not disagree, and this crate's tests run on every node's gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bot {
+    /// The protocol task has not connected yet: pairing, restoring the store, the handshake.
+    Starting,
+    /// `on_connected` ran: the client can send.
+    Connected,
+    /// The protocol task ended. Nothing this instance does can send any more.
+    Stopped,
+}
+
+/// May the outbox claim a job right now? Only from a connected client: a job claimed by an instance that
+/// cannot send is at best delayed (a retryable failure) and at worst failed with `client is not
+/// connected` (a lost send), so the rule is asked *before* the claim, never after it.
+pub fn may_claim(bot: Bot) -> bool {
+    matches!(bot, Bot::Connected)
+}
+
+/// Why the outbox is not claiming, as the one stable code its log line carries.
+pub fn claim_refusal(bot: Bot) -> Option<&'static str> {
+    match bot {
+        Bot::Connected => None,
+        Bot::Starting => Some("bot_starting"),
+        Bot::Stopped => Some("bot_stopped"),
+    }
+}
+
 /// The `whatsapp_send_status` shape, built here so the host answer and the documented answer cannot
 /// differ. Counts and an id only: never the text, never the chat.
 pub fn status(
@@ -395,6 +431,20 @@ mod tests {
 
     fn req(chat: &str, text: &str) -> Request {
         Request { chat: chat.into(), text: text.into(), reply_to: None, mentions: Vec::new() }
+    }
+
+    /// THE RULE THE 09-11 FAILURE NEEDED. An instance whose bot stopped claims nothing, and one that has
+    /// not connected yet claims nothing either: a job it cannot send is not its job. The negative control
+    /// is the third state - if `Stopped` were allowed to claim, an instance that WhatsApp had already
+    /// replaced would keep failing sends while its replacement was `CONNECTED` (jobs 73 and 74).
+    #[test]
+    fn only_a_connected_bot_claims_a_job() {
+        assert!(may_claim(Bot::Connected));
+        assert!(!may_claim(Bot::Starting), "pairing is not a reason to take a send");
+        assert!(!may_claim(Bot::Stopped), "a stopped bot can never send again");
+        assert_eq!(claim_refusal(Bot::Connected), None);
+        assert_eq!(claim_refusal(Bot::Starting), Some("bot_starting"));
+        assert_eq!(claim_refusal(Bot::Stopped), Some("bot_stopped"));
     }
 
     #[test]

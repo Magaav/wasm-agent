@@ -163,15 +163,21 @@ fn start_installed(installed: Installed, grant: Grant) -> Result<DevInstance, St
 /// `force_restart` asks for the other order (stop, then start) - the shape a component needs when
 /// two instances cannot coexist (a fixed port, a device, a lock): the caller says so, because the
 /// host cannot know, and the answer says which order was used.
+///
+/// Since 11/11 a name may hold only one instance at a time (`services::claim`), so the hot path is
+/// only reachable when *nothing* of this name is live - a first build of a loop, or a slot whose
+/// instance the host has already retired. A name that is claimed is restarted in the other order,
+/// and the answer says why (`because: one instance per name`).
 pub fn swap(slot: &mut Option<DevInstance>, request: &Value, ready: Duration, force_restart: bool) -> Value {
     let name = request.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
     let began = Instant::now();
     let previous = slot.as_ref().map(|old| json!({"sha256": old.sha256(), "health": old.health()}));
-    if force_restart || slot.is_none() {
+    let claimed = crate::services::claimed(&name);
+    if force_restart || slot.is_none() || claimed {
         // The other order, for a component whose two instances cannot coexist: stop, then start. The
         // answer names the order that was used, so `--restart` reads the same with or without an
         // instance to stop (there is nothing to swap in on the first build of a loop).
-        let mode = if force_restart { "restart" } else { "start" };
+        let mode = if force_restart { "restart" } else if claimed && slot.is_none() { "kept_previous" } else { "start" };
         let stop_began = Instant::now();
         let previous_exit = slot.take().map(|mut old| old.stop());
         let stop_ms = stop_began.elapsed().as_millis() as u64;

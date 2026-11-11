@@ -114,7 +114,11 @@ fails=0; envfails=0; skipped=0; ran=0
 # reason, which crosses the seam in `done-event.error` - a host-side record field. A node whose binary
 # predates it answers the suite with one named SKIP and returns in full once that node is installed;
 # nothing about the comparison is narrowed while it waits (scripts/test-codemode-component.lua).
-FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode}
+FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode svc-echo}
+# `svc-echo` (11/11) is the service-component fixture: `scripts/test-services-cli.lua` runs the whole
+# start/status/stop/enable/disable lifecycle through the operator's `wa services` door, and it used to be
+# a row whose lifecycle half silently skipped because no service artifact was ever built for it. The
+# fixture is a wa:kernel@0.2 component, so it builds where the others do and caches the same way.
 # The rows read this list from their own process (see `lua_run`): a shell variable that is not exported is
 # simply absent in the `bash -c` worker each row runs in, and the install loop then finds nothing to do
 # while every check still passes - a run that promises components and delivers none. Exported here, once.

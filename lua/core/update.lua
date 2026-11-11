@@ -382,7 +382,54 @@ function M.verdict(facts)
   }
 end
 
--- ---- the only thing that acts -----------------------------------------------
+-- ---- the request the sentinel wrote ------------------------------------------
+
+-- Where the sentinel keeps its box on this node.
+local function request_root(facts)
+  return facts.sentinel_dir or (slashes(paths.config()) .. '/sentinel')
+end
+
+-- The request files in one box directory, as full paths. A box that cannot be read answers "nothing":
+-- a narrower answer than "no request was written", and the refusal below says which one it got (the
+-- count is reported, never guessed).
+local function request_names(dir, into)
+  local answer = shell('ls -1 -- ' .. quote(dir) .. ' 2>/dev/null')
+  for line in tostring(answer and answer.stdout or ''):gmatch('[^\r\n]+') do
+    line = trim(line)
+    if line ~= '' and line:sub(-5) == '.json' then into[dir .. '/' .. line] = true end
+  end
+  return into
+end
+
+-- The box before a request is written, so a file that appears during the call is *this* call's and a
+-- request that was already waiting is not mistaken for one.
+function M.request_box(facts)
+  local root = request_root(facts)
+  local box = { root = root, files = {} }
+  request_names(root .. '/requests', box.files)
+  request_names(root .. '/claimed', box.files)
+  return box
+end
+
+-- The requests that appeared since `before`; a count is always available, so a refusal can say how
+-- many it saw instead of "unverifiable".
+function M.new_requests(before)
+  local after = M.request_box({ sentinel_dir = before.root })
+  local fresh = {}
+  for path in pairs(after.files) do
+    if not before.files[path] then fresh[#fresh + 1] = path end
+  end
+  table.sort(fresh)
+  return fresh, after.files
+end
+
+-- One bounded line of the sentinel's own words, for a refusal that has to carry them.
+local function bounded(text, limit)
+  local one = trim(tostring(text or '')):gsub('[\r\n]+', ' | ')
+  if #one > (limit or 240) then one = one:sub(1, limit or 240) .. '...' end
+  return one
+end
+
 
 local function reason_for(facts)
   local where = facts.tree or "an unknown tree"
@@ -668,6 +715,10 @@ function M.run(options)
     verdict.next = "change the hook, or deploy by hand: " .. command
     return verdict
   end
+  -- The box as it was before the call: a request file that appears during it is this call's request,
+  -- whether or not the sentinel says so on stdout (measured on `work`, 11/11: exit 0, no line, and the
+  -- refusal that followed could not say why).
+  local box_before = M.request_box(facts)
   local result = shell(command)
   if not result then
     verdict.ok, verdict.queued, verdict.status = false, nil, "sentinel_unreachable"
@@ -697,11 +748,51 @@ function M.run(options)
     return verdict
   end
   verdict.request = output:match("requested[^:]*:%s*([^\r\n]+)")
+  if verdict.request then
+    verdict.request = trim(verdict.request)
+    -- The line names a path, and that path is what a later `done/`/`failed/` record is keyed by. When the
+    -- box cannot show it, say so rather than leave `queued` unqualified - but do not refuse: a sentinel
+    -- running as another user may have written it beyond this process's reach.
+    if not exists(verdict.request) then
+      verdict.warning = "the sentinel named " .. verdict.request ..
+        " but no such file is readable from here (it may still be queued; check the sentinel's own box)"
+    end
+  else
+    -- No line. The durable question is not "what did it print" but "did a request appear", and this node
+    -- can see the box itself. Exactly one new request during the call is this call's; two is ambiguous
+    -- and is refused rather than guessed; none is the refusal below, which now carries the sentinel's own
+    -- exit code, stdout and stderr instead of the word "unverifiable".
+    local fresh = M.new_requests(box_before)
+    if #fresh == 1 then
+      local text = read(fresh[1])
+      local ok, request = pcall(json.decode, tostring(text or ''))
+      if ok and type(request) == 'table' and request.verb == 'deploy' then
+        verdict.request = fresh[1]
+        verdict.observed = 'the sentinel printed no request line; the request it wrote is ' .. fresh[1]
+      else
+        verdict.note = 'a request file appeared during the call but it does not name a deploy: ' .. fresh[1]
+      end
+    elseif #fresh > 1 then
+      verdict.note = string.format('%d request files appeared during the call (%s); none is claimed as this one', #fresh, table.concat(fresh, ', '))
+    end
+  end
   if not verdict.request then
     verdict.ok, verdict.queued, verdict.status, verdict.error = false, nil, "sentinel_unverifiable", "sentinel_unverifiable"
-    verdict.observed = "sentinel exited successfully without naming a durable request"
-    verdict.message = "the sentinel did not name a durable request, so it is unknown whether anything was queued."
-    verdict.next = "inspect the sentinel request box and log before retrying"
+    -- The words are the sentinel's, not this module's: whatever its reason, the record names what it said
+    -- and where its box is, so the next question is answerable without a rerun.
+    verdict.evidence = {
+      code = result.code,
+      stdout = bounded(output),
+      stderr = bounded(result.stderr),
+      sentinel_dir = box_before.root,
+      requests_seen = (function() local seen = 0; for _ in pairs(M.request_box(facts).files) do seen = seen + 1 end; return seen end)(),
+      requests_appeared = (function() local seen = 0; for _ in ipairs(M.new_requests(box_before)) do seen = seen + 1 end; return seen end)(),
+    }
+    verdict.observed = "the sentinel exited " .. tostring(result.code) .. " naming no request; stdout " ..
+      (#trim(output) > 0 and ('said ' .. bounded(output)) or 'was empty') .. '; stderr ' ..
+      (trim(tostring(result.stderr or '')) ~= '' and ('said ' .. bounded(result.stderr)) or 'was empty')
+    verdict.message = "the sentinel named no durable request, so it is unknown whether anything was queued."
+    verdict.next = "inspect " .. box_before.root .. "/requests and " .. box_before.root .. "/sentinel.log on this node, and `wa-sentinel status`; nothing this call wrote is visible to this node"
     return verdict
   end
   verdict.sentinel = trim(first_line(output))

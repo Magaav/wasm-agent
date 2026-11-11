@@ -323,6 +323,12 @@ elseif command == "capabilities" then
     os.exit(1)
   end
   if args[2] == "--json" then print(text) else print(inventory.text()) end
+elseif command == "services" then
+  -- The operator's door to the service components (lua/core/services_cli.lua): list, status, start,
+  -- stop, enable, disable - no turn and no model required, which is the whole point on a model-less
+  -- node. Every verb goes through the registry's own master gate (lua/core/services.lua).
+  local code = dofile("lua/core/services_cli.lua").run({ table.unpack(args, 2) })
+  if code and code ~= 0 then os.exit(code) end
 elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
@@ -331,6 +337,7 @@ elseif command == "help" then
   print("    session start <node> --prompt <text> [--cwd <dir>]  start a session on another node, print its id")
   print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
+  print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    paths  where this node keeps its files, and the config file it would read")
   print('    bind [service|status|renew|run] | unbind | nodes pending | accept <pairing-code>')

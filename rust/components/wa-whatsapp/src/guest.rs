@@ -218,6 +218,11 @@ thread_local! {
     static INBOX_MUTATIONS: RefCell<Vec<Mutation>> = const { RefCell::new(Vec::new()) };
     /// The connected client, for media downloads from the audio pipeline.
     static CLIENT: RefCell<Option<Arc<whatsapp_rust::Client>>> = const { RefCell::new(None) };
+    /// What this instance's own bot is doing (`outbox::Bot`). Set on connect, and set to `Stopped` when
+    /// the protocol task ends - the moment this instance can no longer send anything. The outbox reads
+    /// it *before* claiming, and the main loop ends on it: a job is never taken by an instance that
+    /// cannot send it (the 09-11 jobs 73/74 failure).
+    static BOT: std::cell::Cell<outbox::Bot> = const { std::cell::Cell::new(outbox::Bot::Starting) };
     /// Audio messages handed over by the (Send) message handler, admitted by the main loop.
     static AUDIO_INBOX: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
     /// Every message and event the handler turned into a record, indexed by the pipeline's own loop
@@ -921,6 +926,22 @@ fn query_note(text: String) {
     }
 }
 
+/// What this instance's own bot is doing, and the two transitions that matter to every lane.
+fn bot() -> outbox::Bot {
+    BOT.with(|bot| bot.get())
+}
+
+fn set_bot(next: outbox::Bot) {
+    BOT.with(|bot| bot.set(next));
+}
+
+/// The protocol task ended (`bot stopped`, `build failed`, `store: unavailable`): this instance can
+/// never send again. Drop the client and say so once - the outbox and the main loop read `bot()`.
+fn bot_is_gone() {
+    set_bot(outbox::Bot::Stopped);
+    CLIENT.with(|client| *client.borrow_mut() = None);
+}
+
 /// Say once why the outbox is not working, then stay quiet until it works again.
 fn outbox_note(text: String) {
     let first = OUTBOX_NOTE.with(|note| {
@@ -964,6 +985,14 @@ fn one_line(text: &str) -> String {
 /// The outbox's turn: take at most one job, decide, send, settle. Returns true when a job was handled.
 async fn outbox_tick() -> bool {
     use crate::wa::queue::worker;
+    // BEFORE THE CLAIM, always: a job taken by an instance that cannot send is at best delayed and at
+    // worst failed with `client is not connected` - the send is lost, and the queue's own retry was
+    // never the thing that failed (jobs 73 and 74, 11/11). An instance whose bot stopped claims
+    // nothing at all; the instance that replaces it takes the job.
+    if let Some(reason) = outbox::claim_refusal(bot()) {
+        outbox_note(format!("not claiming: {reason}"));
+        return false;
+    }
     let Some(client) = CLIENT.with(|c| c.borrow().clone()) else { return false };
     let taken = match worker::take(wa_whatsapp_outbox::QUEUE.to_string(), OUTBOX_WORKER.to_string(), Some(OUTBOX_LEASE_MS)).await {
         Ok(worker::TakeOutcome::Taken(lease)) => lease,
@@ -1908,6 +1937,8 @@ async fn serve(config: serde_json::Value) {
             .on_connected(|client| {
                 CLIENT.with(|c| *c.borrow_mut() = Some(client));
                 async move {
+                    // The one transition that makes this instance allowed to claim a send.
+                    set_bot(outbox::Bot::Connected);
                     say!("CONNECTED");
                     lifecycle::report(lifecycle::Health::Ready, None);
                 }
@@ -2019,6 +2050,10 @@ async fn serve(config: serde_json::Value) {
             Ok(bot) => bot.run().await,
             Err(error) => say!("build failed: {error}"),
         }
+        // THE END OF THIS INSTANCE'S BOT. Whatever ended it (a conflict with another device, a logout,
+        // a dropped session with auto-reconnect off), this instance can never send again - so it says
+        // so before the line that has always been here, and the outbox stops claiming from this tick.
+        bot_is_gone();
         say!("bot stopped");
     }));
     futures::pin_mut!(tasks);
@@ -2065,6 +2100,16 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
             // Returning is safe and is what the last generation of the run does: the runner treats a
             // run that reported idle as *stopping*, never as a crash to restart (services.rs), so this
             // instance cannot come back beside the one that replaced it.
+            return;
+        }
+        // The bot is gone: nothing this instance does can be sent or answered, so the pipeline goes
+        // with it. The host's own loop then restarts *one* instance (with backoff), and the queue keeps
+        // the job for whoever is up - an instance that stays alive without a bot only claims work it
+        // cannot do (the 09-11 failure: a replaced instance's outbox went on failing sends while the
+        // replacement was CONNECTED).
+        if bot() == outbox::Bot::Stopped {
+            say!("bot stopped: this instance takes no more work");
+            persist_state().await;
             return;
         }
         if last_tick.elapsed() >= TICK * 2 {

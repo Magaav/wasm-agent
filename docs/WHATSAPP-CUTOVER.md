@@ -155,3 +155,17 @@ and confirm the text. The send and the echo are the two facts that make the cuto
 the component's log from the first connect, and the message id of the self-chat proof with its read-back.
 `dev.json` holds the private keys: keep it 0600 and delete it after the component state is installed.
 The Go state directory stays until Phase 4, as the rollback copy of everything that was not migrated.
+
+## Known inert artifact: a send queued on a node without the component (#99)
+
+`host.whatsapp_send` enqueues on the **calling node's** queue (`whatsapp.outbox`), and only a
+`wa-whatsapp` component running on that same node consumes it (`worker::take`). A send issued from a
+node that runs no component therefore stays `queued` with `attempts: 0` for ever: it is durable, it
+is never delivered, and nothing exposes a way to cancel it once the tool has answered.
+
+Measured 2026-11-11 while proving the Rust send from `wasm_the_first`: job id `4`, chat
+`5519994939204@s.whatsapp.net`, state `queued`, `attempts: 0`, no worker on that node. It is inert
+until a component is enabled there - which must never happen, because a second component on the
+account's keys is exactly what the "one client per linked device" rule forbids. Do not hand-edit the
+queue to remove it; an operator send belongs on the node that holds the account, through
+`whatsapp_operator` (prepare -> approve -> send -> status).

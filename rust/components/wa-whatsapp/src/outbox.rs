@@ -44,6 +44,14 @@ pub fn retryable(reason: &str) -> bool {
     wa_whatsapp_outbox::retryable(reason)
 }
 
+/// What this instance's own bot is doing, and the rule the outbox asks before it claims
+/// ([`wa_whatsapp_outbox::may_claim`]): the seam owns it because both ends of the queue must agree and
+/// its tests run on every node's gate. `Bot::Stopped` is the state 11/11 needed - the protocol task
+/// returned (`bot stopped`) while the pipeline was still ticking, and the outbox went on claiming jobs
+/// and failing them `client is not connected` while the replacement instance was `CONNECTED` (jobs 73
+/// and 74).
+pub use wa_whatsapp_outbox::{claim_refusal, may_claim, Bot};
+
 /// The facts about a reply source this component can prove from its own index. It is the subset of
 /// `record::Record` the dispatch gate needs, so the rule compiles and is tested without a store.
 pub struct SourceFacts {
@@ -95,6 +103,14 @@ pub fn dispatch_refusal(chat_held: bool, reply_to: Option<&str>, reply_fenced: b
 mod tests {
     use super::*;
     use wa_whatsapp_outbox::{Chat, Request, Verified};
+
+    /// The rule the 09-11 failure needed is tested where the gate runs it (the seam crate); this only
+    /// keeps the re-export honest for the guest that uses it.
+    #[test]
+    fn the_seam_rule_is_the_one_this_module_exposes() {
+        assert!(may_claim(Bot::Connected));
+        assert!(!may_claim(Bot::Stopped));
+    }
 
     fn verified(request: Request) -> Verified {
         request.validate().expect("a valid request")
