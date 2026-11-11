@@ -224,7 +224,7 @@ for _,item in ipairs(requests[request_count()].body.tools or {}) do
 end
 ok(fresh_declared.route_task and fresh_declared.subagent,
   'a session that starts in orchestration mode declares the mode tools from the start')
-ok(requests[request_count()].body.messages[1].content:find('mode="on"',1,true)~=nil,
+ok(requests[request_count()].body.messages[1].content:find('orchestration="on"',1,true)~=nil,
   'and its system prompt carries the mode-on instructions')
 
 -- ---- session B: the full envelope, where the skill list lives in the prefix ---------------------------

@@ -107,7 +107,7 @@ check(refusal(empty_value,empty_result)=='invalid_tool_search_names','an empty g
 -- existing searchTools contract, and different from a name outside the ceiling.
 local outside=run({names={'subagent'}})
 check(outside.tools[1] and outside.tools[1].name=='subagent' and outside.tools[1].callable==false,'an outside tool is returned with callable:false')
-check(tostring(outside.tools[1].route):find('outside codemode',1,true)~=nil and #(outside.missing or {})==0,'an outside tool keeps its route instead of reading as missing')
+check(tostring(outside.tools[1].route):find('Direct call only',1,true)~=nil and #(outside.missing or {})==0,'an outside tool keeps its route instead of reading as missing')
 
 -- 6. A name outside the caller's ceiling is never disclosed as a suggestion.
 local narrow={};for _,item in ipairs(all)do

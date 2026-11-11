@@ -11,22 +11,35 @@
 
 use serde_json::{json, Map, Value};
 
-/// Tools refused inside a script, because being a single reviewable action or owning the session is the
-/// safety argument: delegation/authority/recursion, session shaping, the internal autoflush, and the
-/// outer facades that have in-sandbox equivalents. Everything else is callable, with exactly the
-/// per-call checks an ordinary call gets.
+/// Tools that are a direct call only: the effect stays one reviewable call with a receipt outside the
+/// script, and each one is here for a stated reason. Everything else is callable inside a script with
+/// exactly the per-call checks an ordinary call gets, and a tool that refuses outside refuses inside
+/// with the same text because both reach the same dispatcher.
+///
+/// This list must equal `DIRECT_ONLY` in `lua/core/codemode.lua`; `scripts/test-codemode-parity.lua`
+/// asserts the two seams answer the same way for every name in it.
 pub const FORBIDDEN: &[&str] = &[
+    // a second sandbox inside the first would hide one effect stream behind another
     "codemode",
+    // the outer facades pin definitions into this session's loadout
     "tool_call",
     "tool_search",
-    "capabilities",
+    // delegation spends model calls and creates a child session
     "subagent",
+    // landing a worker tip is a single receipted integration action
     "integrate",
+    // owns this session's worktree / folds a session into this conversation / shapes this session
     "session_worktree",
     "resume_session",
     "session_debug",
     "session_fixture",
+    // installs a durable wave-end obligation
     "wave_autoflush",
+    // a deployment, not a script step
+    "node_update",
+    // outbound messages are operator-gated effects with a durable message id
+    "whatsapp_send",
+    "email_send",
 ];
 
 /// The guest globals that come from the node rather than from this seam: the retained evidence behind

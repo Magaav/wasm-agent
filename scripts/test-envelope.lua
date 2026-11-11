@@ -33,7 +33,17 @@ local names={};for _,r in ipairs(found.tools)do names[r.name]=true end
 check(names.web_search and names.web_read,'web fixture discovery reaches both tools')
 check(json.encode(tools.envelope('master',ctx))==before,'schema prefix does not expand')
 local first=agent.new(sid,function()end,'master','master',''):build_context()[1].content
-check(first:find('are called with tool_call(name, arguments)',1,true)~=nil and first:find('\n- memories: ',1,true)~=nil,'model instructed about discovery, with the on-demand index')
+-- Code mode is the rule now (11/11): with it admitted, the prompt states it and points discovery at the
+-- guest's own globals instead of restating a seventy-line catalogue every request.
+check(first:find('is ONE codemode script',1,true)~=nil and first:find('capabilities()',1,true)~=nil
+  and first:find('searchTools(query)',1,true)~=nil and first:find('describeTool(name)',1,true)~=nil,
+  'model instructed about code mode and in-guest discovery')
+check(first:find('\n- memories: ',1,true)==nil,'the on-demand catalogue is not restated under code mode')
+-- Without code mode there is no in-guest discovery to point at, so the on-demand index returns intact.
+local without=agent.system_prompt('master',nil,nil,tools.envelope('master',ctx),'progressive',
+  {codemode=false,catalog=tools.all('master',ctx,memory),workdir='/work'})
+check(without:find('are called with tool_call(name, arguments)',1,true)~=nil
+  and without:find('\n- memories: ',1,true)~=nil,'without code mode the on-demand index is still listed')
 check(not first:find('web_search -',1,true),'no full optional tool index')
 local second=agent.new(sid,function()end,'master','master',''):build_context()[1].content
 check(first==second,'stable system before/after discovery')

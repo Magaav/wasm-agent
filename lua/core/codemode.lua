@@ -18,14 +18,34 @@ local M={}
 -- callable from a script - connectors (mcp), the user's own shell and client, spells, and every peer
 -- capability - with exactly the per-call permission, effect, workspace and binding checks an ordinary call
 -- gets (31/10: the operator asked code mode to do everything it can, after a peer effect was refused).
-local forbidden={codemode=true,tool_call=true,tool_search=true,capabilities=true,
- subagent=true,integrate=true,session_worktree=true,resume_session=true,
- session_debug=true,session_fixture=true,wave_autoflush=true}
+-- Direct-call-only (operator's decision, 11/11): the effect stays one reviewable call with a receipt
+-- outside the script, and each entry carries the reason it is not a script step. Everything NOT in this
+-- table is callable inside code mode with exactly the per-call permission, effect, workspace and
+-- binding checks an ordinary call gets - the fence is this table, never a second policy. A tool that
+-- outside would refuse (binding, role, managed capability, operator gate) refuses inside with the same
+-- text, because it reaches the same dispatcher.
+local DIRECT_ONLY={
+ codemode='a script does not nest: a second sandbox inside the first would hide one effect stream behind another',
+ tool_call='the outer facade pins definitions into this session\'s loadout; a script calls await tools.<name>(args) directly instead',
+ tool_search='the outer facade pins definitions into this session\'s loadout; searchTools/describeTool answer the same question inside without changing it',
+ subagent='delegation spends model calls and creates a child session: one reviewable call, never a step inside a script',
+ integrate='landing a worker tip is a single receipted integration action, never a script step',
+ session_worktree='it allocates and owns this session\'s worktree; a bound root that re-points mid-script would change what every later call means',
+ resume_session='it folds another session into the conversation the script is already running in',
+ session_debug='it sets this session\'s recording mode: changing what is recorded mid-script makes the script its own unrecorded effect',
+ session_fixture='it exports this session as a fixture while the script is still writing that session',
+ wave_autoflush='it installs a durable wave-end obligation for the coordinator; installation is a direct receipted action',
+ node_update='it updates and restarts a node: a deployment, not a script step',
+ whatsapp_send='an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call',
+ email_send='an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call',
+}
+local forbidden={}
+for name in pairs(DIRECT_ONLY)do forbidden[name]=true end
+M.DIRECT_ONLY=DIRECT_ONLY
 -- What a tool that is not callable here is for, so discovery never reads as "does not exist" (29/10).
 local function route_of(name,status)
- if name=='codemode' then return 'You are inside codemode; scripts do not nest.' end
+ if DIRECT_ONLY[name] then return 'Direct call only: '..DIRECT_ONLY[name]..'. End the script, then call '..name..' as an ordinary tool.' end
  if name=='tool_search' or name=='tool_call' then return 'Outer facade: inside a script use searchTools/describeTool and call await tools.<name>(args) directly.' end
- if name=='capabilities' then return 'Outer tool; inside a script call the capabilities() global.' end
  if status and (status.status=='blocked' or status.status=='unknown') then return 'Not callable in this run: '..tostring(status.reason or status.status)..'. '..tostring(status.next or '') end
  return 'Control plane: call '..name..' as an ordinary tool, outside codemode (end the script, then call it directly). Inside a script it is refused.'
 end
@@ -117,12 +137,56 @@ end
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
-local function host_global(name, params, calls, selected)
+local function host_global(name, params, calls, selected, lookup)
   if name == 'showCall' then return presentation.select(calls, selected, params) end
-  if name == 'describeTool' then return presentation.help, true end
+  -- `describeTool(name)` is the definition the catalogue holds for that name - callable, or outside
+  -- with its route. It answered `presentation.help` for every argument, so a component-path script
+  -- that asked about a tool was told about showCall instead (measured 11/11). The native path is
+  -- corrected too, so one lookup answers both.
+  if name == 'describeTool' then
+    local asked = type(params) == 'string' and params or (type(params) == 'table' and params[1]) or nil
+    if asked == nil or asked == 'showCall' then return presentation.help, true end
+    return lookup.describe(asked), true
+  end
+  -- `capabilities()` inside is the tool grant list: the same object the outer `capabilities` tool
+  -- returns, and it is answered by dispatching that tool. It used to return the host inventory
+  -- (`wa capabilities --json`: audio, disk, http), which is a different question under the same name
+  -- (measured 11/11). `describe()` keeps the inventory.
+  if name == 'capabilities' then return lookup.capabilities(params), true end
   local value, success = inventory.global(name, params)
   if value == nil then return { error = 'codemode_global_not_available' }, false end
   return value, success
+end
+
+-- One lookup for both seams: the definition a name has - callable, or fenced with the route that says
+-- where it runs - or the nearest permitted names when the catalogue has none. `capabilities()` is the
+-- outer `capabilities` tool dispatched, so the two views of the grant list cannot drift.
+local function tool_lookup(catalog,execution,dispatch)
+ local function described(name)
+  local wanted=tostring(name)
+  -- `describeTool("showCall")` is the presentation's help, as it always was; only the other names come
+  -- from the catalogue. Without this the native path answered `unknown_tool` for it (measured 11/11 by
+  -- scripts/test-codemode-presentation.lua).
+  if wanted=='showCall' then return presentation.help end
+  for _,schema in ipairs(catalog)do
+   local f=schema['function']
+   if f.name==wanted then
+    local status=execution(f.name)
+    local fenced=forbidden[f.name] or status.status=='blocked' or status.status=='unknown'
+    return {name=f.name,description=f.description,parameters=f.parameters,execution=status,
+      callable=not fenced,route=fenced and route_of(f.name,status) or nil}
+   end
+  end
+  local catalogue={};for _,schema in ipairs(catalog)do catalogue[schema['function'].name]=true end
+  local echo=envelope.echo_name(wanted)
+  return {error='unknown_tool',name=echo,suggestions=envelope.nearest(echo,catalogue,3)}
+ end
+ return {describe=described,codemode_only=function(name) return codemode_only(name,{}) end,
+  capabilities=function(params)
+   local ok,value=pcall(dispatch,'capabilities',type(params)=='table' and params or {})
+   if ok and type(value)=='table' then return value end
+   return {error='capabilities_unavailable',effect='none'}
+  end}
 end
 
 -- The native path: byte for byte the loop this file has always run. `workspace` and `scope` are the
@@ -130,17 +194,24 @@ end
 local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
  local descriptors,definitions,outside={},{},{}
  for _,schema in ipairs(catalog)do
-  local f=schema['function'];local status=execution(f.name)
-  if forbidden[f.name] or status.status=='blocked' or status.status=='unknown' then
+  local f=schema['function'];local status=execution(f.name);local js=f.name:gsub('[^%w_]','_')
+  local fenced=forbidden[f.name] or status.status=='blocked' or status.status=='unknown'
+  if fenced then
    outside[f.name]={name=f.name,schema=schema,route=route_of(f.name,status)}
   else
-   local js=f.name:gsub('[^%w_]','_')
    if definitions[js] and definitions[js].name~=f.name then return {error='codemode_identifier_collision'} end
    definitions[f.name]={name=f.name,schema=schema,hash=host.sha256(json.encode(schema))}
    definitions[js]=definitions[f.name]
-   descriptors[#descriptors+1]={name=f.name,jsName=js,description=f.description}
   end
+  -- Every name the model can see outside is a member inside, so *reading* one is never a TypeError
+  -- that reads as "does not exist" (11/11: `typeof tools.capabilities` killed a startup script and
+  -- sent it hunting for a capability it already had). A fenced member answers with its route - the
+  -- same refusal a call to it already got. `searchTools` still marks it callable:false.
+  descriptors[#descriptors+1]={name=f.name,jsName=js,description=tostring(f.description or ''),outside=fenced}
  end
+ -- One lookup for both paths: the definition a name has, callable or fenced-with-route, or the
+ -- nearest permitted names when there is none.
+ local lookup=tool_lookup(catalog,execution,dispatch)
  local globals={{name='searchTools',spread=true},{name='describeTool',spread=false},{name='showCall',spread=false},
   -- Introspection of what this node can do, for a workflow that would otherwise guess. They read
   -- the host capability registry and nothing else: no authority moves, no effect is admitted.
@@ -233,8 +304,9 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
       if type(limit)~='number' or limit%1~=0 or limit<1 or limit>200 or type(offset)~='number' or offset%1~=0 or offset<0 then value={error='invalid_tool_search_limit'};success=false
       else
        -- The whole guest catalogue, names and one-line descriptions only; describeTool(name) gives a schema.
-       local names={};for _,descriptor in ipairs(descriptors)do names[#names+1]=descriptor.name end
-       for name in pairs(outside)do names[#names+1]=name end
+       local names,listed={},{}
+       for _,descriptor in ipairs(descriptors)do if not listed[descriptor.name] then listed[descriptor.name]=true;names[#names+1]=descriptor.name end end
+       for name in pairs(outside)do if not listed[name] then listed[name]=true;names[#names+1]=name end end
        table.sort(names)
        local page={};for i=offset+1,math.min(#names,offset+limit)do
         local def=definitions[names[i]] or outside[names[i]];local text=tostring(def.schema['function'].description or '')
@@ -254,18 +326,18 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
        for term in query:lower():gmatch('[%w_]+')do if hay:find(term,1,true)then score=score+1 end end
        if score>0 then matches[#matches+1]={name=def.name,schema=def.schema,execution=execution(def.name),score=score,callable=route==nil,route=route} end
       end
-      for _,descriptor in ipairs(descriptors)do consider(definitions[descriptor.name]) end
+      for _,descriptor in ipairs(descriptors)do local def=definitions[descriptor.name];if def then consider(def) end end
       for _,def in pairs(outside)do consider(def,def.route) end
       table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
       local found={};for i=1,math.min(limit,#matches)do found[i]=matches[i];found[i].score=nil end
       value={tools=found,matches=#matches,invocation='Guest-local metadata only; callable:false entries run outside the script (see route). Native current-catalog/profile/type/effect checks apply to each call.'};success=true
      end
     elseif call.name=='describeTool' then
-     local name=type(params)=='string' and params or params[1]
-     local def=definitions[name];local out=type(name)=='string' and outside[name]
-     value=name=='showCall' and presentation.help or def and {name=def.name,description=def.schema['function'].description,parameters=def.schema['function'].parameters,execution=execution(def.name),callable=true}
-      or out and {name=out.name,description=out.schema['function'].description,parameters=out.schema['function'].parameters,callable=false,route=out.route} or nil;success=true
-    elseif call.name=='capabilities' or call.name=='describe' then
+     local name=type(params)=='string' and params or (type(params)=='table' and params[1]) or nil
+     value=name==nil and presentation.help or lookup.describe(name);success=true
+    elseif call.name=='capabilities' then
+     value,success=lookup.capabilities(params),true
+    elseif call.name=='describe' then
      -- The host.* inventory, exactly as `wa capabilities --json` prints it and `/health`
      -- digests it. Read-only metadata over the registry; it admits no call, changes no ceiling.
      value,success=inventory.global(call.name,params)
@@ -405,7 +477,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
      if step.kind=='host_global' then
       local called,params=pcall(global_params,argument_text)
       if not called then error(params) end
-      value,success=host_global(step.name,params,calls,selected)
+      value,success=host_global(step.name,params,calls,selected,lookup)
      elseif step.refusal then
       value,success=refusal_value(step.refusal),false
      else

@@ -20,17 +20,29 @@ check(open.ok and tostring(open.value):find('[true,true,true,true,true,true,true
 local listed=run('const r=await tools.sessions({limit:5}); return Array.isArray(r.sessions||r)||typeof r==="object";')
 check(listed.ok,'sessions runs inside code mode: '..json.encode(listed):sub(1,300))
 
--- Control plane that is refused stays out: delegation/authority/recursion, session shaping and the outer
--- facades. Effects, the user's shell/client, spells and multi-action tools are callable now (31/10).
-local closed=run('return JSON.stringify(["subagent","integrate","session_worktree","resume_session","tool_call","codemode","capabilities"].map(n=>n in tools));')
-check(closed.ok and tostring(closed.value):find('[false,false,false,false,false,false,false]',1,true),'delegation, session shaping and the facades stay out inside: '..json.encode(closed):sub(1,300))
+-- Direct-call-only names are now *members* that refuse with their reason (11/11): a script can see
+-- them and ask about them instead of meeting a TypeError that reads as "does not exist". The fence is
+-- unchanged - the call is still refused - and `capabilities`, which is a read, executes.
+local direct_names={}
+for _,item in ipairs(dofile('lua/core/tools.lua').all('master',ctx))do local name=item['function'].name
+ local in_scope=false;for _,candidate in ipairs({'subagent','integrate','session_worktree','resume_session','session_debug','session_fixture','wave_autoflush','tool_call','tool_search','codemode'})do if candidate==name then in_scope=true end end
+ if in_scope then direct_names[#direct_names+1]=name end
+end
+check(#direct_names>=3,'the control plane is in this catalogue: '..json.encode(direct_names))
+local closed=run('const names='..json.encode(direct_names)..'; return JSON.stringify(names.filter(n=>!(n in tools)));')
+check(closed.ok and tostring(closed.value):find('%[%]',1)~=nil,'every direct-call name is a member inside, none absent: '..json.encode(closed):sub(1,300))
+local refusal=run('try{ await tools.session_worktree({}); return "NO_ERROR"; }catch(e){ return String((e&&e.message)||e); }')
+check(refusal.ok and tostring(refusal.value):find('Direct call only',1,true),'a direct-call member refuses with its stated reason: '..json.encode(refusal):sub(1,400))
+local grants=run('const r=await tools.capabilities({}); text(JSON.stringify({role:r.role,count:(r.capabilities||[]).length})); return 1;')
+local granted=grants.items and grants.items[1] and grants.items[1].text or ''
+check(grants.ok and granted:find('"role":"master"',1,true)~=nil,'capabilities executes inside and returns the grant list: '..granted:sub(1,200))
 local widened=run('return JSON.stringify(["shell","client","spell_save","spell_run","operation","resource"].map(n=>n in tools));')
 check(widened.ok and tostring(widened.value):find('[true,true,true,true,true,true]',1,true),'effects, shell/client, spells and multi-action tools are callable inside: '..json.encode(widened):sub(1,300))
 -- ...but discoverable, with its route (29/10): never indistinguishable from "does not exist".
 local found=run('const s=await searchTools("subagent"); const d=await describeTool("session_worktree"); const all=await searchTools("*",{limit:200}); return JSON.stringify({s:s.tools.find(t=>t.name==="subagent"),d,listed:all.tools.filter(t=>t.callable===false).map(t=>t.name)});')
 local fv=found.value;for _=1,2 do if type(fv)=='string' then fv=json.decode(fv) end end;fv=type(fv)=='table' and fv or {}
-check(fv.s and fv.s.callable==false and tostring(fv.s.route):find('outside codemode',1,true) and fv.s.schema,'searchTools finds an outside tool with schema and route: '..json.encode(found):sub(1,400))
-check(fv.d and fv.d.callable==false and fv.d.parameters and tostring(fv.d.route):find('outside codemode',1,true),'describeTool gives an outside tool its schema and route')
+check(fv.s and fv.s.callable==false and tostring(fv.s.route):find('Direct call only',1,true) and fv.s.schema,'searchTools finds an outside tool with schema and route: '..json.encode(found):sub(1,400))
+check(fv.d and fv.d.callable==false and fv.d.parameters and tostring(fv.d.route):find('Direct call only',1,true),'describeTool gives an outside tool its schema and route')
 local listed_outside={};for _,n in ipairs(fv.listed or {}) do listed_outside[n]=true end
 check(listed_outside.subagent and listed_outside.tool_call and not listed_outside.remote,'the full listing marks outside tools; remote is callable')
 check(not listed_outside.shell and not listed_outside.spell_run and not listed_outside.client,'the widened set is not listed as outside: '..json.encode(fv.listed))

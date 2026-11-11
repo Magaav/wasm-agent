@@ -51,7 +51,17 @@ function M.global(name, params)
     return json.decode(raw), true
   end
   if name == 'describe' then
-    local entry = M.describe(type(params) == 'table' and params[1] or params)
+    local asked
+    if type(params) == 'table' then asked = params[1] else asked = params end
+    -- No name asks for the whole registry: the document `wa capabilities --json` prints, byte for byte.
+    -- `capabilities()` used to be this document; it is the tool grant list now (11/11), so the inventory
+    -- keeps its place under `describe()` instead of losing it.
+    if asked == nil then
+      local registry = M.raw()
+      if not registry then return { error = 'capability_inventory_unavailable' }, false end
+      return json.decode(registry), true
+    end
+    local entry = M.describe(asked)
     if not entry then return { error = 'unknown_capability' }, false end
     return entry, true
   end
