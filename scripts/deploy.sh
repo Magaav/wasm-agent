@@ -879,17 +879,41 @@ fi
 #     prefers it over its compiled-in copy only when everything verifies; installing it on full builds
 #     too keeps it equal to HEAD, so a stale tree can never shadow a newer binary.
 LUA_STAGE="$INSTALL_DIR/lua-core.next"
-rm -rf "$LUA_STAGE" && mkdir -p "$LUA_STAGE" || fail "cannot stage the Lua tree"
 NEW_DIGEST="$("$NEW" --capability-digest 2>/dev/null | tr -d '[:space:]')"
 printf '%s' "$NEW_DIGEST" | grep -qE '^[0-9a-f]{64}$' || fail "the binary being installed cannot state its capability digest"
-{
-  echo "capabilities $NEW_DIGEST"
-  echo "commit $COMMIT"
-  ( cd "$ROOT" && { find lua/core lua/vendor -type f \( -name '*.lua' -o -name '*.sql' \); printf '%s\n' AGENTS.orchestrator.md AGENTS.subagents.md; } | LC_ALL=C sort ) | while read -r f; do
-    mkdir -p "$LUA_STAGE/$(dirname "$f")" && cp "$ROOT/$f" "$LUA_STAGE/$f" || exit 1
-    printf '%s  %s\n' "$(sha256sum < "$ROOT/$f" | awk '{print $1}')" "$f"
-  done
-} > "$LUA_STAGE/manifest.txt" || fail "cannot write the Lua tree"
+# Staging copies from a checkout another session can be landing into at the same moment, and the check
+# below used to re-read that checkout later. Measured 10/11 on wasm_the_first: landing #28 merged
+# 3bea7b97 - which rewrites lua/core/server.lua (87 lines) - into the canonical tree and rolled it back
+# while a deploy was running; the staged tree named 67724745's server.lua, the check read 3bea7b97's, and
+# the deploy refused with `stale embedded module: lua/core/server.lua` although nothing was wrong with
+# either tree. Staging is only meaningful from a tree that holds still, so the source is recorded before
+# and after the copy: one retry, and then a refusal that names the race instead of blaming the binary.
+stage_lua_tree() {
+  local head_before dirty_before head_after dirty_after
+  head_before="$(git rev-parse HEAD 2>/dev/null)"; dirty_before="$(git status --porcelain 2>/dev/null)"
+  rm -rf "$LUA_STAGE" && mkdir -p "$LUA_STAGE" || return 1
+  {
+    echo "capabilities $NEW_DIGEST"
+    echo "commit $COMMIT"
+    ( cd "$ROOT" && { find lua/core lua/vendor -type f \( -name '*.lua' -o -name '*.sql' \); printf '%s\n' AGENTS.orchestrator.md AGENTS.subagents.md; } | LC_ALL=C sort ) | while read -r f; do
+      mkdir -p "$LUA_STAGE/$(dirname "$f")" && cp "$ROOT/$f" "$LUA_STAGE/$f" || exit 1
+      printf '%s  %s\n' "$(sha256sum < "$ROOT/$f" | awk '{print $1}')" "$f"
+    done
+  } > "$LUA_STAGE/manifest.txt" || return 1
+  head_after="$(git rev-parse HEAD 2>/dev/null)"; dirty_after="$(git status --porcelain 2>/dev/null)"
+  [ "$head_before" = "$head_after" ] && [ "$dirty_before" = "$dirty_after" ] || return 2
+  return 0
+}
+stage_lua_tree; STAGE_RC=$?
+if [ "$STAGE_RC" = 2 ]; then
+  echo "deploy: the source tree moved while the Lua tree was staged ($(git rev-parse --short HEAD 2>/dev/null)); staging it again"
+  stage_lua_tree; STAGE_RC=$?
+fi
+case "$STAGE_RC" in
+  0) ;;
+  2) fail "the Lua tree cannot be staged from a tree that holds still: $ROOT moved twice while it was copied, so a landing is merging into it. Nothing was installed; deploy again once the landing finishes." ;;
+  *) fail "cannot write the Lua tree" ;;
+esac
 STAGE_CHECK="$(WA_LUA_TREE="$LUA_STAGE" "$NEW" --lua-tree 2>&1)"
 case "$STAGE_CHECK" in "installed lua tree: commit $COMMIT"*) echo "deploy: $STAGE_CHECK" ;; *) fail "the staged Lua tree does not verify against the binary: $STAGE_CHECK" ;; esac
 # Only the two proving runs below see the staged tree (WA_LUA_TREE on their command lines); upgrade.sh
@@ -978,7 +1002,11 @@ echo "deploy: the candidate binary answers graph calls through the staged compon
 wa_phase proving
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
-EMBEDDED_ROOT="$ROOT"; EMBEDDED_SCRIPT="$ROOT/scripts/check-embedded-runtime.lua"; EMBEDDED_HOME="$SCRATCH_HOME"
+# The binary is checked against the bytes it is about to install, not against the checkout they were
+# copied from: that checkout can move between the staging and this line (the race named above), and the
+# staged tree's own manifest already pins every file's sha256 and the binary's capability digest. A
+deploy must never refuse because another session landed while it ran.
+EMBEDDED_ROOT="$LUA_STAGE"; EMBEDDED_SCRIPT="$ROOT/scripts/check-embedded-runtime.lua"; EMBEDDED_HOME="$SCRATCH_HOME"
 if command -v cygpath >/dev/null 2>&1; then
   EMBEDDED_ROOT="$(cygpath -w "$EMBEDDED_ROOT")"; EMBEDDED_SCRIPT="$(cygpath -w "$EMBEDDED_SCRIPT")"
   EMBEDDED_HOME="$(cygpath -w "$EMBEDDED_HOME")"
