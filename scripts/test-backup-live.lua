@@ -228,5 +228,28 @@ ok(tostring(copy_message):find("integrity_check", 1, true) ~= nil,
   "and the refusal names the check, got: " .. tostring(copy_message))
 ok(integrity_reads == 3, "each attempt's copy was checked", integrity_reads)
 
+-- 3e. The retry lands on the destination the failed attempt left behind. A copy that passes its own
+-- `integrity_check` only on the second read is the case the retry exists for, and until 2026-11-11 it
+-- could never succeed: `VACUUM INTO` refuses a destination that exists and is not empty, so attempt 2
+-- reported `output file already exists` instead of copying again. That is the exact refusal that
+-- blocked `wa update openclaw` and `wa update work` on both peers, so the emptying is asserted here.
+reset({
+  vacuum = function() return { ok = true, changes = 0 } end,
+  quick_check = function() return sound end,
+  -- The first copy is unsound, the second is good: what a store with a live writer produces.
+  integrity_check = function() return integrity_reads == 1 and { { integrity_check = "Tree 0 page 5: broken" } } or checked end,
+})
+local emptied = {}
+host.write_file = function(path, text)
+  if text == "" and tostring(path):find("ledger.db", 1, true) then emptied[#emptied + 1] = path end
+  return true
+end
+local replaced = backup.run("replaced-copy")
+ok(replaced.ok == true, "a copy that is unsound once and sound on the next attempt is snapshotted")
+ok(replaced.stores[1].attempts == 2, "the second attempt is what kept it", replaced.stores[1].attempts)
+ok(replaced.stores[1].check == "ok", "and the kept copy passed integrity_check")
+ok(#emptied == 1 and emptied[1]:find("ledger.db", 1, true) ~= nil,
+  "the destination the failed attempt left was emptied first: " .. json.encode(emptied))
+
 host = real_host
 print("backup live ok (" .. checks .. " checks)")
