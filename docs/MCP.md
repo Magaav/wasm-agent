@@ -47,7 +47,9 @@ refuses before a tool call. Nonstandard credential env keys must be tagged.
 `lua/core/mcp.lua` stores `mcp.extensions.v1` in SQLite meta. Updates use a single
 native atomic expected-value CAS, not a Lua-spanning transaction on a shared DB.
 `GET /mcp` reads inventory only. Master-only `POST /mcp` accepts list/put/probe/
-enable/disable; changes require `expected_revision` from the current inventory.
+enable/disable/remove; changes require `expected_revision` from the current inventory.
+Removal refuses an enabled connector (disable it first) and leaves a revision bump, so a
+stale editor cannot recreate or clobber another entry.
 New/edited definitions and every successful or failed probe stay disabled until
 explicit enabling. Failed probes are durable. Changed tool input schemas refuse
 before dispatch and invalidate approval. No live PID/continuous health is invented.

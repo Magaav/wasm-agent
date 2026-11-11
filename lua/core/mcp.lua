@@ -344,6 +344,12 @@ function M.control(args,ctx)
   return mutate(raw,function(current)local old=current.servers[args.definition.id];current.servers[args.definition.id]={definition=args.definition,enabled=false,revision=(old and old.revision or 0)+1};return {ok=true,id=args.definition.id,enabled=false}end)
  end
  local row=store.servers[args.id];if not row then return fail('unknown_mcp_server') end
+ if action=='remove' then
+  -- Removal is the one action that leaves nothing to inspect, so it refuses an enabled connector:
+  -- turn it off first, which is already durable and visible, and then drop the dead definition.
+  if row.enabled then return fail('mcp_server_enabled_disable_first') end
+  return mutate(raw,function(current)current.servers[args.id]=nil;return {ok=true,id=args.id,removed=true}end)
+ end
  if action=='enable' or action=='disable' then
   if action=='enable' and (not row.probe or row.probe.ok~=true or not row.probe.schema_hash)then return fail('mcp_probe_required') end
   if action=='enable' then

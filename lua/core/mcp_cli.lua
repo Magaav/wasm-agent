@@ -12,6 +12,7 @@ local function refusal(answer)
   local hints = {
     mcp_store_revision_changed = 'the registry moved to revision ' .. tostring(answer.revision)
       .. ' since this list was read; run /mcp again and repeat the change',
+    mcp_server_enabled_disable_first = 'turn the connector off first, then remove it',
     mcp_probe_required = 'a connector is only enabled after a probe passed: run the mcp tool with '
       .. 'action=probe, id=' .. tostring(answer.connector or '?') .. ' (the window has the same button)',
     forbidden = 'read-only: turning a connector on or off needs a master',

@@ -30,6 +30,7 @@ check(probed.tools[1].input_schema_json:find('"value":{}',1,true)~=nil,'exact sc
 check(mcp.inventory().servers[1].enabled==false,'probe does not enable')
 check(#mcp.schemas()==0,'disabled schemas not exposed')
 check(control('enable',{id='fixture'}).ok,'explicit selected approval')
+check(control('remove',{id='fixture'}).error=='mcp_server_enabled_disable_first','an enabled connector is not silently dropped')
 local names=mcp.schemas();check(#names==1,'only selected schemas')
 local name=names[1]['function'].name
 check(#name<=64 and name:sub(1,12)=='mcp_fixture_','bounded namespace')
@@ -68,4 +69,7 @@ local template={id='whatsapp_wasm',transport='component',component='mcp-whatsapp
 check(mcp.validate(template)=='whatsapp_send_uses_operator_route','a WhatsApp MCP server cannot carry a send tool')
 check(mcp.validate({id='bad',transport='stdio',program='node',args={},tools={},env={TOKEN='inline-secret-value'}})=='mcp_credentials_require_environment_references','inline credentials refused')
 check(mcp.namespace('fixture','same/x')~=mcp.namespace('fixture','same_x'),'sanitized names cannot collide')
+check(control('remove',{id='fixture'}).removed==true,'a disabled connector is removed')
+check(#mcp.inventory().servers==0,'the removed definition is gone from the registry')
+check(control('remove',{id='fixture'}).error=='unknown_mcp_server','removal names exactly one existing connector')
 print('mcp native ok ('..checks..' checks)')
