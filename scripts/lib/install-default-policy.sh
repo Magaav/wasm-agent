@@ -287,6 +287,15 @@ install_default_policy_merge() { # source destination -> 0 merged/kept, 1 failur
       printf 'mode=three-way\nbase=%s\nchanged=0\nnode_edits=0\nhint=%s\n' "$label" \
         "$destination is not valid JSON; no shipped rule could be merged into it" > "$summary"
       ;;
+    5)
+      # The merge ran but would have dropped something the node already had (a top-level member or a
+      # component rule) without recording it as a deletion. Writing that file would take a grant away in
+      # silence, so the node's own bytes stay and the deploy says exactly what the merge refused to do.
+      printf 'policy: kept %s (merging this release would have dropped rules the node has: %s)\n' "$destination" "$(tail -1 "$scratch/report.txt" 2>/dev/null)"
+      rm -f "$out"
+      printf 'mode=three-way\nbase=%s\nchanged=0\nnode_edits=0\nhint=%s\n' "${label:-none}" \
+        "merging would have dropped rules the node has; its file was kept" > "$summary"
+      ;;
     *)
       printf 'policy: kept %s (the rule merge could not run: %s)\n' "$destination" "$(tail -1 "$scratch/report.txt" 2>/dev/null)"
       rm -f "$out"
