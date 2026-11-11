@@ -19,18 +19,19 @@ publication and Sentinel.
 - **The canonical checkout takes one lander at a time, in order:** `node scripts/landing-queue.mjs land
   --branch change/<name> --checks "bash scripts/fast.sh"` queues behind the holder, refuses a dirty
   canonical tree nobody owns, and retests only what the move changed (`docs/LANDING-QUEUE.md`).
+- **A landing is judged against what main already FAILS, not zero** (`docs/LANDING-QUEUE.md` §3b);
+  read `landing-queue.mjs baseline`, never improvise a subset or matcher.
 - Use ordinary Git integration. Self-review is allowed;
   self-review must be labelled self-review, never independent review.
   Do not fabricate a factory receipt or disable remote protection; remote protection is the
   boundary that cannot be skipped, hooks are a convenience.
 - **Day to day: the fast path.** `bash scripts/fast.sh` (minutes) must pass before you integrate;
-  report what it SKIPPED. It runs every self-contained `scripts/test-*.lua`, the Rust unit tests of
-  the crates you touched and the contract checks. A new Lua test belongs in it: make it
-  self-contained, don't add it to `scripts/fast-path.exclude`.
+  report what it SKIPPED. It runs every self-contained `scripts/test-*.lua`, touched-crate Rust tests
+  and the contract checks. A new Lua test belongs in it: make it self-contained, don't add it to
+  `scripts/fast-path.exclude`. On Windows at most 4 run at once (`WA_FAST_JOBS`).
 - **The full gate is nightly, and for releases.** `scripts/test.sh` (via `scripts/wave-release.mjs`,
-  ~50 min) runs as the nightly job and when a human asks for a release. Never gate a landing or wait
-  for it before merging; landings report `gate_verified:false` and `release_verified:false`
-  (`lane-policy.json`).
+  ~50 min) runs nightly and on request; never gate a landing on it (landings report
+  `gate_verified:false`, `release_verified:false` - `lane-policy.json`).
 - Cleanup: back up dirty drafts, rejected code and evidence before retiring verified obsolete
   work. Unknown effects remain unresolved: never manufacture settlement or replay them. Report
   Git cleanup and runtime readiness separately.

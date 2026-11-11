@@ -277,6 +277,15 @@ CREATE TABLE IF NOT EXISTS queue(
 CREATE TABLE IF NOT EXISTS proofs(
   digest TEXT PRIMARY KEY, tree TEXT NOT NULL, verified_at INTEGER NOT NULL,
   verified_by TEXT NOT NULL, command TEXT NOT NULL, log TEXT);
+-- The known-failures baseline (scripts/lib/landing-baseline.mjs), one row per (check command, machine,
+-- retest digest of the tree it measured). Keyed by the digest and not by the commit because that is
+-- what makes it reusable: two main commits whose check inputs are identical are indistinguishable to
+-- every check, so a landing on the second must not pay for a pristine run that the first already paid
+-- for. The commit is kept for the record - it says which main the names were observed on.
+CREATE TABLE IF NOT EXISTS baselines(
+  digest TEXT NOT NULL, chk TEXT NOT NULL, host TEXT NOT NULL,
+  commit_ TEXT NOT NULL, record TEXT NOT NULL, recorded_at INTEGER NOT NULL, recorded_by TEXT NOT NULL,
+  PRIMARY KEY(digest, chk, host));
 CREATE TABLE IF NOT EXISTS log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, queue_id INTEGER NOT NULL,
   action TEXT NOT NULL, detail TEXT NOT NULL);
@@ -458,6 +467,29 @@ export function recordProof(db, {digest, tree, by, command, log}) {
               ON CONFLICT(digest) DO UPDATE SET tree=excluded.tree, verified_at=excluded.verified_at,
               verified_by=excluded.verified_by, command=excluded.command, log=excluded.log`)
     .run(digest, tree, now(), by, command || '', log || '');
+}
+
+// ---- the known-failures baseline ----------------------------------------------------------------
+//
+// `scripts/lib/landing-baseline.mjs` judges a run against one of these. The key is the triple
+// (check command, machine, retest digest): the command because a different suite fails differently,
+// the machine because the twelve red Lua checks on wasm_the_first are the installed node's component
+// set being behind the tree, not a property of the commit, and the digest because two trees with the
+// same check inputs cannot fail differently. A baseline from another machine is never reused: it
+// would either tolerate a failure this machine does not have or refuse one it cannot help.
+export const checkCommandKey = command => String(command || '').trim().replace(/\s+/g, ' ');
+
+export function baselineOf(db, {digest, command, host = hostName()}) {
+  const row = db.prepare('SELECT * FROM baselines WHERE digest=? AND chk=? AND host=?').get(digest, checkCommandKey(command), host);
+  if (!row) return null;
+  try { return {...JSON.parse(row.record), recorded_by: row.recorded_by, commit: row.commit_}; } catch { return null; }
+}
+
+export function recordBaseline(db, {digest, command, host = hostName(), commit, record, by}) {
+  db.prepare(`INSERT INTO baselines(digest,chk,host,commit_,record,recorded_at,recorded_by) VALUES(?,?,?,?,?,?,?)
+              ON CONFLICT(digest,chk,host) DO UPDATE SET commit_=excluded.commit_, record=excluded.record,
+              recorded_at=excluded.recorded_at, recorded_by=excluded.recorded_by`)
+    .run(digest, checkCommandKey(command), host, commit || '', JSON.stringify(record), now(), by || '');
 }
 
 export function queuePosition(db, id) {
