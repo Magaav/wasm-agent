@@ -19,6 +19,8 @@ local json_contract = dofile("lua/core/json_contract.lua")
 local selfloop = dofile("lua/core/selfloop.lua")
 local hooks = dofile("lua/core/hooks.lua")
 local done_gate = dofile("lua/core/done_gate.lua")
+local progress_guard = dofile("lua/core/progress_guard.lua")
+local run_failure = dofile("lua/core/run_failure.lua")
 
 -- One place that tells a hook what it is being told about. Ids, names, lengths and bounded views
 -- only: a hook never receives the transcript, a credential or a whole tool result unless the node
@@ -339,7 +341,6 @@ local PREFIX_SUMMARY_PROMPT = table.concat({
 
 -- Tool views are projected once by tool_output.lua; full output is retrievable.
 
-local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 200
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
 local COMPACT_KEEP = 20000         -- newest tokens left un-summarised (like pi)
 
@@ -803,6 +804,10 @@ function M.new(session_id, on_event, role, user, node, opts)
     session_id = memory.ensure_session(user, node, "chat")
     session = memory.session(session_id)
   end
+  -- This process is now serving the session, and says so where a reader can see it: a row that a
+  -- restart, a wake or another `wa chat` closed is not evidence that nobody is here. A child is not
+  -- the session's owner, so it does not claim presence.
+  if not opts.subagent then pcall(memory.presence_begin, session_id, { role = role }) end
   return setmetatable({
     session_id = session_id,
     role = role,
@@ -1510,6 +1515,10 @@ end
 
 function M:run(text, images)
   self.run_id=host.uuid()
+  -- The run's own request, kept for the failure path: a wake this harness scheduled starts with a
+  -- known mark, and a run that fails while answering one must not schedule another.
+  self.last_user_text=tostring(text or "")
+  self.pending_failure=nil
   self.run_origin=(json.decode(host.runtime_info()) or {}).run_origin
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
@@ -1601,6 +1610,25 @@ function M:run(text, images)
   emit_counts(self)
   local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
   if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
+  -- A run that did not answer says so by name, once - the durable row, the event stream, the bus
+  -- fact and, when a rerun can plausibly finish it, one wake (lua/core/run_failure.lua). Done
+  -- *before* the claim is released, so a session is never free with no record of why it stopped.
+  if not ok then
+    local failure=self.pending_failure or {}
+    local ending=run_failure.handle(tostring(result), {
+      session_id=self.session_id,user_id=self.user,run_id=self.run_id,
+      trace=failure.trace,round=failure.round,attempts=failure.attempts,
+      debug=self.debug,subagent=self.subagent and true or false,
+      last_user=self.last_user_text,
+      record=function(turn) return record_turn(self, turn) end,
+      ms=math.max(0,math.floor((host.now()-(self.run_counts.started_at or host.now()))*1000)),
+      emit=function(event) pcall(self.emit,event) end,
+    })
+    self.failure=ending.info
+  end
+  -- Releasing the claim is unconditional on every exit path: a run that ended holds nothing, so
+  -- the next `wa resume` never needs the process killed. Uncertainty is not a lock - the host
+  -- records it in the claim's history and deletes the claim (rust/wa-capabilities/src/resources.rs).
   local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
   local released=marked.ok and resources.finish(resource_ctx) or marked
   if not released.ok then
@@ -1608,11 +1636,49 @@ function M:run(text, images)
     ok,result=false,"resource_release_failed: "..json.encode(released)
   end
   telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
-  if not ok then
-    if result == "runaway_guard" then error(result, 0) end
-    error(result)
-  end
+  if not ok then error(result, 0) end
   return result
+end
+
+-- The notes checkpoint a guard stop leaves behind.
+--
+-- A turn the guard ends must not leave the thread cold: the next one reads why it stopped and what
+-- it had already done, from facts rather than by re-deriving them. The document is the session's
+-- own notes (docs/SELF-LOOP.md), so the model finds it where it already looks, and it is appended -
+-- a plan a model wrote is never replaced by a harness sentence. Best effort, and a failed write is
+-- said out loud instead of being skipped: a guard stop with no checkpoint is exactly the silent
+-- stop this exists to prevent.
+local function write_guard_checkpoint(self, reason, round, calls, trace, request)
+  local ok, answer = pcall(function()
+    local changes = changeset.summary(self.changes) or {}
+    local files = {}
+    for _, file in ipairs(changes.files or {}) do
+      files[#files + 1] = tostring(file.path) .. (file.created and " (created)" or "")
+    end
+    local ran = {}
+    for _, span in ipairs(trace or {}) do
+      if type(span) == "table" and span.kind == "tool" and #ran < 8 then
+        ran[#ran + 1] = tostring(span.name) .. (span.ok and " ok" or " failed")
+      end
+    end
+    local goal = redact.text(tostring(request or "")):gsub("%s+", " "):sub(1, 400)
+    local text = table.concat({
+      "## Guard checkpoint " .. os.date("!%Y-%m-%dT%H:%M:%SZ", math.floor(host.now())),
+      "- stopped: " .. tostring(reason),
+      "- round " .. tostring(round) .. " of run " .. tostring(self.run_id),
+      "- goal (the user's request): " .. goal,
+      "- changed files: " .. (#files > 0 and table.concat(files, ", ") or "none recorded"),
+      "- last tools: " .. (#ran > 0 and table.concat(ran, ", ") or "none"),
+      "- next: verify the state above on the machine (`git status`, re-read the changed files), then continue the goal. The progress guard stopped the turn between calls; nothing was cut mid-call.",
+    }, "\n")
+    return selfloop.notes_append({ text = text }, { session_id = self.session_id, user_id = self.user })
+  end)
+  local refused = (not ok) or (type(answer) == "table" and answer.error)
+  if refused then
+    self.emit({ type = "status", text = "guard checkpoint not written ("
+      .. redact.text(tostring(not ok and answer or answer.error)):sub(1, 200) .. ")" })
+  end
+  return not refused
 end
 
 function M:run_body(text, images)
@@ -1863,8 +1929,10 @@ function M:run_body(text, images)
   -- Instead the message keeps its rounds and, when the request approaches the
   -- window, compacts mid-message (pi calls this a split message) and rebuilds the
   -- context from the transcript. Each round checks; nothing is cut off.
-  -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
-  -- against a long task: it should never fire in practice.
+  --
+  -- There is no round budget (lua/core/progress_guard.lua): a turn stops on a repeated call or on
+  -- rounds that changed nothing, never on a count. An operator who wants a ceiling sets
+  -- WASM_AGENT_MAX_TOOL_ROUNDS, and the guard honours it as the explicit exception it is.
 
   -- The done gate (lua/core/done_gate.lua). A "do X" request gets its acceptance checks recorded next
   -- to the operator's words, and at every turn end the harness runs them. A failing check re-enters
@@ -1924,6 +1992,11 @@ function M:run_body(text, images)
     end
     return message, outcome
   end
+  -- The progress guard is the loop's own stop, and it is facts, not a count: a repeated decision, or
+  -- rounds that changed nothing. It stops a runaway loop the done gate cannot see (the gate speaks
+  -- about the request, this speaks about the loop), and the caller writes a notes checkpoint first.
+  local guard = progress_guard.new()
+  local guard_stop = nil
   local function consume_steering()
     local rows=steering.consume(self.user,self.session_id,self.steering_run_id)
     for _,row in ipairs(rows) do
@@ -1933,7 +2006,9 @@ function M:run_body(text, images)
     end
     return #rows
   end
-  for round = 1, MAX_TOOL_ROUNDS do
+  local round = 0
+  while true do
+    round = round + 1
     consume_steering()
     -- A CLI reader can collect complete messages while a model/tool call blocks Lua.
     -- Deliver them before the next request, as durable user turns, not transient
@@ -1983,15 +2058,11 @@ function M:run_body(text, images)
       telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="context_overflow",context_estimate=context_tokens})
       error("context_overflow: compaction could not make a valid next request; transcript preserved")
     end
-    -- Two rounds before the runaway guard, ask the model to wrap up. This is
-    -- not a task budget - it is the last resort of a loop that should have
-    -- finished long before.
-    if (MAX_TOOL_ROUNDS - round) == 2 then
-      messages[#messages + 1] = { role = "user", content =
-        "You have used a very large number of tool rounds. Stop exploring, verify what you have "
-        .. "changed, commit it, and state plainly what is unfinished." }
-      self.emit({ type = "status", text = "runaway guard reached - asking the model to wrap up" })
-    end
+    -- What the progress guard reads: the decision this round asked for, whether anything it did
+    -- changed state, and whether its tool results were new. Collected here because the tool loop
+    -- below is the only place that knows them.
+    local round_effects = 0
+    local round_results = {}
     -- One loop round is one decision step, not necessarily one provider request:
     -- response-timeout retries and overflow recovery below can send multiple
     -- model-call attempts in this step. `round` is the legacy UI event/index;
@@ -1999,7 +2070,10 @@ function M:run_body(text, images)
     -- transcript reads step -> its tools -> next step.
     -- Proof of life for the node's own watchdog: the interpreter is working, so a
     -- /health check can tell this from a wedged message. Cheap (an atomic store).
+    -- The same instant keeps this process's session presence fresh (memory.lua): a reader that asks
+    -- "is anyone running this session?" must not have to guess from a row a restart may have closed.
     host.beat()
+    pcall(memory.presence_beat, self.session_id)
     -- `tools` is the one fact the window cannot derive from the stream: whether this request
     -- carried a tool surface at all. A run that carried none is answering in its first content
     -- prose; a run that carried some may still be choosing, so its prose starts as commentary
@@ -2181,12 +2255,11 @@ function M:run_body(text, images)
       local problem = cancelled and "run_cancelled" or tostring(result)
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(problem):sub(1, 400) }
-      record_turn(self, {
-        role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
-        ms = math.floor((host.now() - run_started) * 1000),
-      })
       telemetry.event(self.session_id,self.run_id,"","step","end",
         {outcome = cancelled and "run_cancelled" or "provider_failed"})
+      -- The row is written once, by M:run's failure path: one named record, one announcement, one
+      -- wake - not an empty assistant message followed by an error nobody hears.
+      self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
       error(problem)
     end
 
@@ -2413,10 +2486,9 @@ function M:run_body(text, images)
           -- budget, so a bounded head of it is kept where a reader can find it.
           span.reasoning_head = (result.reasoning or ""):sub(1, 2000)
         end
-        record_turn(self, {
-          role = "assistant", content = "", reasoning=reply_reasoning, ok = false, trace = trace, debug = self.debug,
-          ms = math.floor((host.now() - run_started) * 1000),
-        })
+        -- One ending, one row: M:run writes the named failure (with this trace) and announces it.
+        -- An empty assistant row here was the silent stop this change exists to remove.
+        self.pending_failure = { trace = trace, round = round, attempts = transient_attempt + 1 }
         telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="empty_reply"})
         error(reason)
       end
@@ -2618,6 +2690,7 @@ function M:run_body(text, images)
           read_many_ranges=function_.name=="read_many" and type(args.requests)=="table" and #args.requests or nil,
           batching_guidance=batching_mode,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
+      pcall(memory.presence_beat, self.session_id)
       local handled, output = pcall(function() if argument_error then return argument_error end
         if parallel_op then
           if parallel_op.operation_id then
@@ -2716,6 +2789,10 @@ function M:run_body(text, images)
       local nav = navigation_outcome(function_.name, args, output)
       if nav then nav.trial_phase=patch_audit.PHASE end
       local cancelled = projected and tool_output.cancelled(output)
+      -- The progress guard's facts about this call: did a real effect succeed, and what did it
+      -- answer (a digest - the same bytes again is checkable without keeping them twice).
+      if ok_tool and not cancelled and tools.has_effect(function_.name) then round_effects = round_effects + 1 end
+      round_results[#round_results + 1] = tostring(function_.name) .. ":" .. host.sha256(tostring(content))
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,cancelled=cancelled or nil,
         outcome=cancelled and 'cancelled_before_execution' or nil,code=type(output)=="table" and output.code or nil,
         tool_group_id=assistant_id,tool_group_size=#calls,tool_group_index=tool_index,
@@ -2739,6 +2816,27 @@ function M:run_body(text, images)
     end
     materialize_tool_images(messages)
 
+    -- The progress guard (lua/core/progress_guard.lua): named facts, never a round count. A round
+    -- that answered has already left the loop above, so this only sees rounds that asked for tools.
+    local changes_digest = host.sha256(json.encode(changeset.summary(self.changes) or {}))
+    guard_stop = progress_guard.observe(guard, {
+      signature = progress_guard.fingerprint(calls),
+      results = #round_results > 0 and host.sha256(table.concat(round_results, "\n")) or nil,
+      effects = round_effects,
+      changes = changes_digest,
+      label = #calls > 0 and (tostring((calls[1]["function"] or {}).name or "?")
+        .. "(" .. tostring((calls[1]["function"] or {}).arguments or ""):gsub("%s+", " "):sub(1, 120) .. ")"
+        .. (#calls > 1 and (" +" .. (#calls - 1) .. " more") or "")) or nil,
+    })
+    if guard_stop then
+      -- A guard stop is a stop, not a cut: the notes checkpoint goes down first, so the next turn
+      -- reads why this one ended and what it had already done. The named failure record and the
+      -- wake are written by M:run's failure path, which owns the claim's release.
+      write_guard_checkpoint(self, guard_stop, round, calls, trace, text)
+      completed = false
+      break
+    end
+
     -- Mid-message compaction (pi's "split message"): everything so far is already in
     -- the transcript, so when the request approaches the window we summarise the
     -- older part and rebuild the context, then keep going in the same message. The
@@ -2748,7 +2846,12 @@ function M:run_body(text, images)
   end
 
   if not completed then
-    reply = "(runaway guard: " .. MAX_TOOL_ROUNDS .. " tool rounds without a final answer)"
+    -- The reason the guard gave is the record's name (progress_guard returns the code). M:run
+    -- writes the one durable row, announces it and wakes the thread; a second row here would
+    -- describe the same ending twice.
+    self.pending_failure = { trace = trace, round = guard and guard.round or 0,
+      changes = changeset.summary(self.changes), reason = guard_stop }
+    error(guard_stop or "runaway_guard: the turn ended without a final answer", 0)
   end
   -- The message's changed files ride with the message, so the diff topic is rebuilt from the
   -- ledger like everything else: a reload, a resume or another reader all see the same
@@ -2790,8 +2893,8 @@ function M:run_body(text, images)
     ms = math.floor((host.now() - run_started) * 1000),
     changes = changes,
   })
-  memory.record_run(self.run_id, self.session_id, completed and "completed" or "incomplete", completed and "answered" or "runaway_guard", reply)
-  telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=completed and "answered" or "runaway_guard",assistant_message_id=message_id})
+  memory.record_run(self.run_id, self.session_id, "completed", "answered", reply)
+  telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="answered",assistant_message_id=message_id})
   M.usage_total.runs = M.usage_total.runs + 1
   M.usage_total.last = message
   -- `prompt` is the last model call's own count, which is the size of the context as it
@@ -2817,7 +2920,6 @@ function M:run_body(text, images)
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the message touched.
-  if not completed then error("runaway_guard", 0) end
   self.emit({ type = "reply", text = reply, changes = changes, message_id = message_id })
   return reply
 end
@@ -2833,7 +2935,14 @@ function M:local_run(text)
 end
 
 function M:close()
-  memory.finish_session(self.session_id)
+  -- The process is letting go of a session. Ending the *conversation* row stays the interactive
+  -- CLI's promise (a `wa chat` that ends leaves an ended thread), but only when no other live
+  -- process is serving it: a short-lived child used to close its caller's own row here (10/11), and
+  -- that is exactly what `finish_session` now refuses - presence is the liveness that counts, and
+  -- the watchdog is the process, not the row.
+  local ended, why = memory.finish_session(self.session_id)
+  memory.presence_end(self.session_id)
+  return ended, why
 end
 
 return M

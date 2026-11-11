@@ -349,8 +349,18 @@ const REFUSED_OWNER = [
   '(`wake-start <id> ...`) carries it too - then pass it as `--owner <id>` (or set',
   'WASM_AGENT_SESSION_ID, which code-mode children already inherit).',
 ].join(' ');
-export function resolveOwner({owner, ledger, ownerMaxAge = 900, env = process.env} = {}) {
-  const marker = env.WASM_AGENT_SESSION_ID || env.WA_SESSION_ID;
+// The row that names the process serving this session, or null. Read defensively: a ledger written
+// by a binary older than this one has no `session_presence` table, and an unreadable ledger must not
+// turn into a queue refusal about liveness that is really about schema.
+function presenceOf(db, owner) {
+  try {
+    const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_presence'").get();
+    if (!table) return null;
+    return db.prepare('SELECT session_id,pid,boot,role,started_at,heartbeat_at FROM session_presence WHERE session_id=?').get(owner) || null;
+  } catch { return null; }
+}
+
+export function resolveOwner({owner, ledger, ownerMaxAge = 900, env = process.env} = {}) {  const marker = env.WASM_AGENT_SESSION_ID || env.WA_SESSION_ID;
   if (marker) {
     if (owner && owner !== marker) {
       throw new QueueError(`owner_mismatch: --owner ${owner} is not this process's harness session ${marker} (WASM_AGENT_SESSION_ID)`, 75, 'owner_mismatch');
@@ -375,12 +385,27 @@ export function resolveOwner({owner, ledger, ownerMaxAge = 900, env = process.en
     if (!session) {
       throw new QueueError(`owner_unknown_to_harness: no session ${owner} in ${ledgerPath}; that id is not a session on this node`, 75, 'owner_unknown_to_harness');
     }
+    // Liveness is a running process, never a row's `ended_at` (measured 10/11: the queue refused a
+    // live session because its ledger row was closed when the node restarted; a duplicate wake
+    // closed another row while its turn was running; a piped `wa chat` closed its caller's own row
+    // on the way out). The process that serves a session writes `session_presence` and keeps its
+    // heartbeat fresh (lua/core/memory.lua), so that is the question asked first - and `ended_at`
+    // is only evidence of an ending once no live process is left.
+    const presence = presenceOf(db, owner);
+    const heartbeat_age = presence ? Math.max(0, now() - Math.floor(Number(presence.heartbeat_at || 0))) : null;
+    if (presence && heartbeat_age <= ownerMaxAge && pidAlive(Number(presence.pid))) {
+      return {id: owner, source: 'live-process', evidence: {ledger: ledgerPath, pid: Number(presence.pid),
+        boot: presence.boot || '', heartbeat_seconds_ago: heartbeat_age, role: presence.role || ''}};
+    }
     if (session.ended_at !== null && session.ended_at !== undefined) {
-      throw new QueueError(`owner_ended: session ${owner} ended at ${new Date(Number(session.ended_at) * 1000).toISOString()}; a lease is held by a live session`, 75, 'owner_ended');
+      const why = presence
+        ? `its last heartbeat was ${heartbeat_age}s ago from pid ${presence.pid}, which is not alive`
+        : 'no session_presence row names a running process';
+      throw new QueueError(`owner_ended: session ${owner} ended at ${new Date(Number(session.ended_at) * 1000).toISOString()} and ${why}; a lease is held by a live session`, 75, 'owner_ended');
     }
     const age = Math.max(0, now() - Math.floor(Number(session.updated_at || session.started_at || 0)));
     if (age > ownerMaxAge) {
-      throw new QueueError(`owner_stale: session ${owner} has not been active for ${age}s (limit ${ownerMaxAge}s); confirm the id is your own`, 75, 'owner_stale');
+      throw new QueueError(`owner_stale: session ${owner} has not been active for ${age}s (limit ${ownerMaxAge}s${presence ? `; its presence heartbeat is ${heartbeat_age}s old` : '; it has no session_presence row'}); confirm the id is your own`, 75, 'owner_stale');
     }
     return {id: owner, source: 'ledger-live-session', evidence: {ledger: ledgerPath, active_seconds_ago: age, session_started_at: session.started_at}};
   } finally { try { db.close(); } catch {} }

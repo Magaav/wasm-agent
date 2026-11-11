@@ -83,6 +83,26 @@ function M.idle()
   return not decoded or type(value) ~= "table" or value.idle ~= false
 end
 
+-- A restart is where a run can be cut. This CLI restarts only between runs, but the binary can be
+-- replaced under a run in flight (a deploy does not ask the session first), and an interrupted
+-- transcript must not be left without a name - measured 11/11: a deploy rewrote `wa`, the CLI
+-- re-execed, and the turn that was running ended with an empty assistant row and no announcement.
+--
+-- Only an unfinished tail is recorded: a restart between two answered turns is not an interruption
+-- and must not write one.
+function M.note_interruption(session_id, reason)
+  local memory = dofile("lua/core/memory.lua")
+  local state = memory.session_state(session_id)
+  if not state or state.state ~= "unfinished" then return nil end
+  local run_failure = dofile("lua/core/run_failure.lua")
+  local session = memory.session(session_id) or {}
+  local ending = run_failure.handle(
+    "run_interrupted: the process running this turn was replaced (" .. tostring(reason) .. ")",
+    { session_id = session_id, user_id = session.user_id,
+      last_user = state.question or "", ms = state.at and math.floor((host.now() - state.at) * 1000) or nil })
+  return ending
+end
+
 -- Restart into `session_id`. `before()` gives the screen back (the view's own teardown); the host
 -- restores the console itself. Only returns on refusal or failure: the sentence to print, and whether
 -- the screen was already given back (an exec that failed after it: the REPL cannot continue).
@@ -95,6 +115,11 @@ function M.restart(session_id, reason, before)
     if type(host.read_file(request)) == "string" then return "not restarting: could not remove " .. request end
   end
   if not host.cli_reexec then return "not restarting: this wa binary cannot re-exec itself" end
+  -- Before the process is replaced: the session's interrupted run, if there is one, gets its named
+  -- record and its announcement. Best effort - a failure to record is printed, never swallowed, and
+  -- never stops a restart that is already due.
+  local noted, note_error = pcall(M.note_interruption, session_id, reason)
+  if not noted then print("  (the interrupted run could not be recorded: " .. tostring(note_error) .. ")") end
   if before then pcall(before) end
   local raw = host.cli_reexec(json.encode({ "chat", "--resume", session_id }),
     json.encode({ WA_CLI_RESTARTS = carried, WA_CLI_RESTARTED = reason or "restart" }))

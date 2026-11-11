@@ -829,6 +829,44 @@ end
 -- to execute. That makes it the one provider timeout safe enough for a bounded replay. It is still
 -- possible the upstream completed and billed the inference before its edge lost the response, so the
 -- retry count is explicit and operator-disableable rather than a general retry policy.
+-- How long a provider call may take to produce its first response before this process calls it
+-- stalled. The process-wide HTTP deadline (`WASM_AGENT_HTTP_RESPONSE_TIMEOUT`, 120s) is the node's
+-- safety net for every endpoint; a model call gets its own, shorter one so a dead gateway surfaces
+-- in minutes rather than after three long attempts (measured 10/11, session a073ee85: a 12-minute
+-- stall, three `timeout: receive response` failures, and an empty assistant row). 0 disables the
+-- per-call deadline and leaves the process-wide timeouts in charge.
+function M.first_response_seconds()
+  local raw = host.getenv("WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS")
+  if raw == nil or raw == "" then return 90 end
+  local value = tonumber(raw)
+  if value == nil then return 90 end
+  if value <= 0 then return 0 end
+  return math.max(10, math.floor(value))
+end
+
+-- The host marks a call that hit this deadline with `provider_stalled`; the marker survives the
+-- `provider_error: ` prefix, so a reader can tell "the provider stalled" from "the provider refused".
+function M.is_stalled(problem)
+  return tostring(problem or ""):find("provider_stalled", 1, true) ~= nil
+end
+
+-- The named event. Same shape as the update banner's bus fact (schema + version + ids + a bounded
+-- excerpt), published to the durable bus so a hook or a wake can subscribe to it, and best effort:
+-- an event that cannot be published must not replace the failure it reports.
+M.STALLED_TOPIC = "wa.provider.stalled"
+function M.announce_stalled(problem, opts)
+  local fact = { schema = M.STALLED_TOPIC, schema_version = 1,
+    session_id = opts and opts.session_id or nil, run_id = opts and opts.run_id or nil,
+    deadline_seconds = M.first_response_seconds(),
+    detail = tostring(problem or ""):sub(1, 400), at = math.floor(host.now() * 1000) }
+  if host.bus_publish then pcall(host.bus_publish, M.STALLED_TOPIC, json.encode(fact)) end
+  local ok, answer = pcall(function()
+    return dofile("lua/core/selfloop.lua").publish("provider.stalled", fact,
+      { session_id = fact.session_id, user_id = opts and opts.user_id or nil })
+  end)
+  return ok and type(answer) == "table" and answer.ok == true
+end
+
 function M.is_response_timeout(problem)
   local text=tostring(problem or ""):lower()
   return text:find("provider_error: timeout: receive response", 1, true) ~= nil
@@ -1168,9 +1206,17 @@ function M.complete_with(model, messages, tools, stream, opts)
   if opts.on_call_start then opts.on_call_start(opts.kind or "model_call",request_meta,M.budget(body.model).context) end
   local ok,result=pcall(function()
   if stream then
-    local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized))
+    local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized,
+      json.encode({ first_response_seconds = M.first_response_seconds() })))
     record_serving_http(provider,body.model,result,serving_request_binding)
-    if result.error then error(redact.text("provider_error: " .. tostring(result.error))) end
+    if result.error then
+      local problem = redact.text("provider_error: " .. tostring(result.error))
+      -- A stall is announced while it is still the only thing that happened: the bus fact carries
+      -- the deadline and the ids, so a reader does not have to wait for the run to fail to learn
+      -- that the provider stopped answering.
+      if M.is_stalled(problem) then pcall(M.announce_stalled, problem, opts) end
+      error(problem)
+    end
     if result.status ~= 200 then
       error(http_problem(result.status, result.body, result.retry_after_ms))
     end

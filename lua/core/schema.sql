@@ -23,6 +23,20 @@ CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY, route_id TEXT NOT NULL DEFAULT '', objective TEXT NOT NULL DEFAULT '',
   parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL);
 
+-- Who is running this session right now, as a process - not as a row's `ended_at`. A session that a
+-- node restart, a wake or a child `wa chat` closed is still live while a process that owns it is
+-- alive (measured 10/11: the landing queue refused a live session because its row was closed; a
+-- piped `wa chat` closed its caller's own row). The row is written by the process that serves the
+-- session, refreshed while it works and deleted by its owner; a reader (scripts/lib/landing-queue.mjs)
+-- treats it as one more claim, never as the only evidence.
+CREATE TABLE IF NOT EXISTS session_presence (
+  session_id TEXT PRIMARY KEY,
+  pid INTEGER NOT NULL,
+  boot TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  started_at REAL NOT NULL,
+  heartbeat_at REAL NOT NULL);
+
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '', reply TEXT NOT NULL DEFAULT '',

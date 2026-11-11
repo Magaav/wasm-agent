@@ -137,8 +137,17 @@ function M.read(args,store_image,view_bytes)
   if not line or not column or not limit then return {error='invalid_read_range'} end
   local image=read_image(args,store_image)
   if image then return image end
-  local text=host.read_file(args.path)
-  if not text then return {error='not_found',path=args.path} end
+  local text,why=host.read_file(args.path)
+  -- A nil has a reason and the reason is the tool's answer: "not_found" for a missing file, and the
+  -- host's own name for a file too large, not text, or a directory (measured 10/11: an 8 MB file
+  -- answered a bare nil and every one of those looked identical to the reader).
+  if not text then
+    if type(why)=='string' and why~='' then
+      local code=why:match('^([%w_]+):') or 'read_failed'
+      return {error=code,path=args.path,detail=why}
+    end
+    return {error='not_found',path=args.path}
+  end
   local hash=host.sha256(text)
   if args.version and args.version~=hash then return {error='file_changed',path=args.path,version=hash} end
   local starts=index(text,hash)

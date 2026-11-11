@@ -175,9 +175,11 @@ and cancellation remain available. No failed call or external effect is auto-rep
   Later context growth and provider usage remain subject to the child-loop check;
   an estimate is not a tokenizer guarantee. Output over the byte budget is
   truncated with a visible marker; token/cost overruns stop with a named error.
-- Runaway guard exhaustion preserves its incomplete assistant draft, settles the child as
-  `failed` with the stable error `runaway_guard`, and carries that reason into the parent's
-  completion notice. A normal final answer remains `completed`; cancellation remains `cancelled`.
+- A guard stop (the progress guard: a repeated call, or rounds that changed nothing) preserves its
+  incomplete assistant draft, writes the session's notes checkpoint first so the continuation is warm,
+  settles the child as `failed` with the guard's own named reason (`guard_repeated_calls`,
+  `guard_no_progress`, or an operator's `runaway_guard` ceiling), and carries that reason into the
+  parent's completion notice. A normal final answer remains `completed`; cancellation remains `cancelled`.
 - When a child settles, the coordinator is woken with a **settlement evaluation packet** rather than a
   bare status line: the child's id, profile, model and provider, its state and error, its session and
   measured duration, the usage and cost the receipt recorded, and the artifact facts of its own

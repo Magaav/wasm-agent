@@ -77,7 +77,7 @@ proceeds. The last turn is an exact record of how far the process got:
 | --- | --- | --- |
 | `empty` | none | nothing said yet |
 | `answered` | assistant reply | the thread is settled |
-| `failed` | assistant with `ok=0` | the model call errored or the runaway guard was exhausted — a **landed** outcome, not an unfinished one |
+| `failed` | assistant with `ok=0` | the model call errored or the progress guard stopped the turn (a repeated call, rounds that changed nothing, or an operator's round ceiling) — a **landed** outcome, not an unfinished one |
 | `unfinished` | user, tool, retry, assistant commentary, or assistant with `tool_calls` | no completed answer is recorded after this turn; the process may have stopped or may still be working |
 
 Failed state details now use the last failed span's recorded error (UTF-8-safe
@@ -162,7 +162,7 @@ wa --db /tmp/kill.db resume
 
 Caveat: the notice is a `system` message placed after the first one, verified against
 the provider this node uses. If an endpoint rejects a mid-conversation system
-message, it should become a `user` turn instead (the runaway guard already does that):
+message, it should become a `user` turn instead (a harness notice already does that):
 recovery must not be the thing that breaks the request.
 
 ## Two recording modes

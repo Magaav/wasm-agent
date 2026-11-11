@@ -128,7 +128,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("run_cancelled", ReadOnly, crate::host::run_cancelled, "Whether the current run has been cancelled, for cooperative loops"),
     plain!("log", Device, crate::host::log, "Print one redacted line to this process's standard error"),
     // ---- files -------------------------------------------------------------------------------
-    plain!("read_file", ReadOnly, crate::host::read_file, "Read a UTF-8 text file; nil when missing or not text"),
+    plain!("read_file", ReadOnly, crate::host::read_file, "Read a UTF-8 text file; nil plus a named reason when missing, not text, or over the read limit"),
     plain!("read_image_base64", ReadOnly, crate::host::read_image_base64, "Read a bounded PNG/JPEG/WebP/GIF as base64 with its MIME type"),
     plain!("write_file", WritesFiles, crate::host::write_file, "Create or overwrite a text file"),
     plain!("path_kind", ReadOnly, crate::host::path_kind, "Classify a path as file/dir/missing/other without reading it"),
