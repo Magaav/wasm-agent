@@ -1840,10 +1840,25 @@ pub fn run(first: Core, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, 
     let listener = match TcpListener::bind((address.as_str(), port)) {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("[serve] bind {address}:{port} failed: {error}");
-            return;
+            // A process that loses the bind must not touch a component, and must not look like a clean
+            // exit. On openclaw (11/11) a systemd unit and the sentinel both ran `wa serve`; the loser
+            // could never bind, but it autostarted wa-whatsapp first, opened the device session and got
+            // the winner kicked off the phone (`conflict=replaced`, `bot stopped`), then exited 0 and
+            // systemd started it again 3 s later - 4251 starts. Services now start after the bind (see
+            // `wa_autostart_services` below), and a bind failure exits non-zero so a `Restart=on-failure`
+            // policy stops instead of looping and the operator sees a failure, not a clean stop.
+            eprintln!("[serve] bind {address}:{port} failed: {error}; this process does not own the port, so it starts no service and exits");
+            std::process::exit(3);
         }
     };
+    // The port is owned from here on, so this process - and only this process - may start services.
+    // Asked of the core (native or component) because the registry lives in Lua; a failure is reported
+    // and does not take the node down (a broken service is not a reason to stop answering /health).
+    match first.call_string("wa_autostart_services", &[]) {
+        Ok(answer) if answer.trim() != "true" => eprintln!("[serve] services: {answer}"),
+        Ok(_) => {}
+        Err(error) => eprintln!("[serve] services: autostart failed: {error}"),
+    }
     let ceiling = max_node_threads();
     let warm = warm_read_node_threads().min(ceiling);
     let queue_depth = env_usize("WASM_AGENT_QUEUE_DEPTH", 256);

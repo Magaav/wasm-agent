@@ -1032,7 +1032,101 @@ fn start_and_verify_once(binary: &Path, reason: &str) -> Result<()> {
     bail!("the node did not come up within {seconds}s - {}", node_log_tail())
 }
 
+/// Who owns this node's `serve`? (#101, measured on openclaw 11/11.)
+///
+/// On a systemd node, deploy.sh's service target *is* the unit: it carries the node's environment
+/// (`WASM_AGENT_NETWORK_ADMINS`) and `Restart=always`. The sentinel spawning its own serve beside it
+/// produced two processes, two registries and the WhatsApp `conflict=replaced` cycle; so when the unit
+/// runs **this** install, the watcher asks the unit instead of spawning. A unit from another install
+/// is not an owner - that was the 61,117-restart incident (`scripts/lib/service-target.sh`), where the
+/// unit pointed at a ten-day-old binary and neither the deploy nor the process serving was its child.
+#[derive(Debug, PartialEq)]
+enum Ownership {
+    /// No unit owns serve: spawn one node ourselves, as on Windows and on a bare machine.
+    Spawn,
+    /// This unit runs this install; it is the one supervisor, and it is asked to (re)start the node.
+    Unit(String),
+}
+
+fn unit_ownership(unit: &str, load_state: &str, exec_start: &str, binary: &Path) -> Ownership {
+    if load_state != "loaded" {
+        return Ownership::Spawn;
+    }
+    let wanted = binary.display().to_string();
+    if !wanted.is_empty() && exec_start.contains(&wanted) {
+        Ownership::Unit(unit.to_string())
+    } else {
+        Ownership::Spawn
+    }
+}
+
+/// The unit that owns serve on this machine, if any. Read, never guessed: systemd's own `LoadState`
+/// and `ExecStart` (which knows about drop-ins) are the only things that answer it.
+#[cfg(target_os = "linux")]
+fn owning_unit(binary: &Path) -> Option<String> {
+    let unit = std::env::var("WA_SERVICE_UNIT").ok().filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "wa-serve.service".to_string());
+    let show = |field: &str| -> String {
+        std::process::Command::new("systemctl")
+            .args(["show", &unit, "-p", field, "--value"])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    match unit_ownership(&unit, &show("LoadState"), &show("ExecStart"), binary) {
+        Ownership::Unit(unit) => Some(unit),
+        Ownership::Spawn => None,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn owning_unit(_binary: &Path) -> Option<String> {
+    None
+}
+
+/// Restart through the unit, and record *its* MainPID as the node's pid. That record is the fix for the
+/// stale-`serve.pid` class too: the pid written here is the one the supervisor itself reports, not one
+/// this process guessed.
+#[cfg(target_os = "linux")]
+fn start_via_unit(unit: &str) -> Result<u32> {
+    let output = std::process::Command::new("systemctl")
+        .args(["restart", unit])
+        .output()
+        .context("run systemctl restart")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "node_owned_by_unit: {unit} owns this node's serve and `systemctl restart {unit}` failed ({stderr}); \
+             this watcher will not spawn a second serve beside it - run `sudo systemctl restart {unit}`"
+        );
+    }
+    let pid = std::process::Command::new("systemctl")
+        .args(["show", unit, "-p", "MainPID", "--value"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if pid == 0 {
+        bail!("node_owned_by_unit: {unit} restarted but reports no MainPID; check `systemctl status {unit}`");
+    }
+    say(&format!("{unit} restarted; its MainPID is {pid}"));
+    Ok(pid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_via_unit(unit: &str) -> Result<u32> {
+    bail!("node_owned_by_unit: {unit} owns this node's serve; this host cannot ask it")
+}
+
 fn start_node(binary: &Path, reason: &str) -> Result<u32> {
+    // One node, one supervisor (#101): a unit that runs this install owns serve, so ask it instead of
+    // spawning a second node beside it - the second one is what opened the WhatsApp session a second
+    // time and got the first kicked off the phone.
+    if let Some(unit) = owning_unit(binary) {
+        say(&format!("{unit} owns this node's serve (systemd); asking the unit instead of spawning a second node"));
+        return start_via_unit(&unit);
+    }
     let ui = ui_dir();
     let port = node_port();
     let cport = client_port();
@@ -4088,6 +4182,37 @@ mod request_verb_tests {
             None=>std::env::remove_var("WASM_AGENT_HOME"),
         }
         let _=std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod unit_owner_tests {
+    /// One node, one supervisor (#101). A systemd unit that runs *this* install owns serve, so the
+    /// watcher must ask the unit; `loaded` alone is not ownership, and neither is a unit from another
+    /// install (the 61,117-restart incident). Both negative controls are the point of the test.
+    #[test]
+    fn a_unit_owns_serve_only_when_it_runs_this_install() {
+        let binary = std::path::Path::new("/home/ubuntu/.local/bin/wa");
+        assert_eq!(
+            super::unit_ownership(
+                "wa-serve.service",
+                "loaded",
+                "{ path=/home/ubuntu/.local/bin/wa ; argv[]=/home/ubuntu/.local/bin/wa serve --port 8799 --client-port 8800 }",
+                binary
+            ),
+            super::Ownership::Unit("wa-serve.service".into()),
+            "a loaded unit that runs this install owns serve"
+        );
+        assert_eq!(super::unit_ownership("wa-serve.service", "not-found", "", binary), super::Ownership::Spawn);
+        assert_eq!(
+            super::unit_ownership(
+                "wa-serve.service",
+                "loaded",
+                "{ path=/home/ubuntu/.local/share/wasm-agent/wa ; argv[]=/home/ubuntu/.local/share/wasm-agent/wa serve }",
+                binary
+            ),
+            super::Ownership::Spawn
+        );
     }
 }
 
