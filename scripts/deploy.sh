@@ -336,6 +336,32 @@ if [ -n "$REQUEST_ID" ]; then
   case "$REQUEST_ID" in *[!a-zA-Z0-9-]*) REQUEST_ID=""; fail "invalid protocol request id" ;; esac
 fi
 
+# 0b. A canonical checkout that is mid-landing is not a tree to read. Measured on wasm_the_first
+#     (2026-11-10/11): a deploy asked to install while the landing queue's holder had merged and not yet
+#     pushed, so HEAD was a merge commit that was not on origin/main, and the deploy refused with "this
+#     tree's commit ... is not on origin/main" - correct, and useless: the next attempt met the next
+#     landing. The deploy now WAITS (bounded) for the tree to be exactly origin/main and clean, saying
+#     what it is waiting for, instead of racing the queue. The pin below then takes the lease and cannot
+#     be moved by a landing at all.
+WA_TREE_WAIT="${WA_DEPLOY_TREE_WAIT:-600}"
+case "$WA_TREE_WAIT" in ''|*[!0-9]*) WA_TREE_WAIT=600 ;; esac
+TREE_WAITED=0
+git fetch -q origin 2>/dev/null || true
+while :; do
+  HEAD_NOW="$(git rev-parse HEAD 2>/dev/null || true)"
+  MAIN_NOW="$(git rev-parse origin/main 2>/dev/null || true)"
+  DIRT_NOW="$(git status --porcelain | wc -l | tr -d ' ')"
+  [ "$HEAD_NOW" = "$MAIN_NOW" ] && [ "$DIRT_NOW" = "0" ] && break
+  if [ "$TREE_WAITED" -ge "$WA_TREE_WAIT" ]; then
+    fail "refused(canonical_busy): $SOURCE_ROOT is not exactly origin/main after waiting ${WA_TREE_WAIT}s (HEAD ${HEAD_NOW:0:12}, origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s)); a landing is in progress or the tree owns edits nobody has committed. Nothing was built. The queue's status names its holder."
+  fi
+  [ "$TREE_WAITED" = "0" ] && note "waiting for the canonical tree to be exactly origin/main: HEAD ${HEAD_NOW:0:12}, origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s) - a landing is in progress"
+  sleep 5
+  TREE_WAITED=$((TREE_WAITED + 5))
+  [ $((TREE_WAITED % 60)) -eq 0 ] && note "still waiting for a quiet canonical tree after ${TREE_WAITED}s"
+done
+[ "$TREE_WAITED" = "0" ] || note "canonical tree is quiet after ${TREE_WAITED}s (origin/main ${MAIN_NOW:0:12}); continuing"
+
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.
 DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
