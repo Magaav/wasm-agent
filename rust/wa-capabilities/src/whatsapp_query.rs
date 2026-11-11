@@ -66,6 +66,11 @@ pub extern "C-unwind" fn read(l: *mut wa_host_support::lua::LuaState) -> std::os
     answer(l, seam::Op::Read)
 }
 
+/// `host.whatsapp_message({chat, id})` - one exact message, full stored text.
+pub extern "C-unwind" fn message(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer(l, seam::Op::Message)
+}
+
 /// `host.whatsapp_reactions({chat, id})`.
 pub extern "C-unwind" fn reactions(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
     answer(l, seam::Op::Reactions)

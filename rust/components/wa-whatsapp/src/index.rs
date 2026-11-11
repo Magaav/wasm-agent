@@ -861,6 +861,51 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
     ))
 }
 
+/// `whatsapp_message`: one exact message by `(chat, id)`, with its full stored text.
+///
+/// The read path answers snippets (280 characters) because that is what a model reading a thread
+/// needs; an exact reply source and the echo of a sent message are compared against the bytes the
+/// index stored, so this op returns the record itself, bounded by the record's own text bound. A
+/// missing id is a refusal, never an empty message: "not indexed" is not "the message says nothing".
+pub async fn message<S: Store>(store: &S, request: &seam::Verified) -> Result<serde_json::Value, String> {
+    let (Some(chat), Some(id)) = (&request.chat, &request.id) else {
+        return Ok(seam::refusal(seam::Op::Message, "chat_and_id_required", "one message: pass chat and id"));
+    };
+    let chat = chat.jid();
+    let Some(record) = load(store, &chat, id).await? else {
+        return Ok(seam::refusal(seam::Op::Message, "not_found", "no message with that id in this chat"));
+    };
+    Ok(seam::answer(seam::Op::Message, serde_json::json!({"message": message_json(&record)})))
+}
+
+/// One record as the exact-message answer carries it: the fields a caller compares, with the full
+/// stored text and no snippet.
+fn message_json(record: &Record) -> serde_json::Value {
+    let mut message = serde_json::json!({
+        "chat": record.chat,
+        "id": record.id,
+        "ts": record.ts,
+        "sender": record.sender,
+        "sender_name": record.push_name,
+        "kind": record.kind,
+        "text": record.text,
+        "own": record.own,
+    });
+    if record.edited {
+        message["edited"] = serde_json::Value::Bool(true);
+    }
+    if record.deleted {
+        message["deleted"] = serde_json::Value::Bool(true);
+    }
+    if !record.unsupported.is_empty() {
+        message["unsupported"] = serde_json::Value::String(record.unsupported.clone());
+    }
+    if record.from_history() {
+        message["source"] = serde_json::Value::String(record::SOURCE_HISTORY.to_string());
+    }
+    message
+}
+
 /// `whatsapp_reactions`: who reacted to one message, with which emoji.
 pub async fn reactions<S: Store>(store: &S, request: &seam::Verified) -> Result<serde_json::Value, String> {
     let (Some(chat), Some(id)) = (&request.chat, &request.id) else {

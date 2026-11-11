@@ -990,30 +990,65 @@ async fn outbox_tick() -> bool {
                 outbox_note(format!("fail refused: {error:?}"));
             }
         }
-        wa_whatsapp_outbox::Decision::Send(request) => match send_outbox(&client, &request).await {
-            Ok(message_id) => {
-                say!("outbox: sent job={id} message={} {} mentions={}", privacy::mark(&message_id), privacy::chat(&request.chat.jid()), request.mentions.len());
-                let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone() }.encode();
-                if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
-                    // The message is out; a settle that failed is a queue problem, and retrying the
-                    // send would be a second message. Report it, let the lease lapse.
-                    outbox_note(format!("done refused for job={id} message={}: {error:?}", privacy::mark(&message_id)));
-                }
-            }
-            Err(reason) => {
-                // `retryable` is the classification; the queue's attempt count is the only retry budget
-                // there is, so the reason is stored for the operator to read in
-                // `whatsapp_send_status`, one sanitized line and never the message text.
-                let kind = if outbox::retryable(&reason) { "retry" } else { "permanent" };
-                say!("outbox: send failed job={id} kind={kind} reason={}", one_line(&reason));
-                let stored = format!("{kind}:{}", one_line(&reason));
-                if let Err(error) = worker::fail(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), stored).await {
+        wa_whatsapp_outbox::Decision::Send(request) => {
+            // The last gate before the wire (`outbox::dispatch_refusal`): a posting hold, a revoke/edit
+            // fence or a reply source the index cannot prove refuses the send. A refusal is permanent;
+            // retrying it would post into a chat whose message the user revoked.
+            if let Some(code) = outbox_gate(&request).await {
+                say!("outbox: blocked job={id} code={code}");
+                if let Err(error) = worker::fail(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), code.to_string()).await {
                     outbox_note(format!("fail refused: {error:?}"));
                 }
+            } else {
+                match send_outbox(&client, &request).await {
+                    Ok(message_id) => {
+                        say!("outbox: sent job={id} message={} {} mentions={}", privacy::mark(&message_id), privacy::chat(&request.chat.jid()), request.mentions.len());
+                        let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone() }.encode();
+                        if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
+                            // The message is out; a settle that failed is a queue problem, and retrying the
+                            // send would be a second message. Report it, let the lease lapse.
+                            outbox_note(format!("done refused for job={id} message={}: {error:?}", privacy::mark(&message_id)));
+                        }
+                    }
+                    Err(reason) => {
+                        // `retryable` is the classification; the queue's attempt count is the only retry budget
+                        // there is, so the reason is stored for the operator to read in
+                        // `whatsapp_send_status`, one sanitized line and never the message text.
+                        let kind = if outbox::retryable(&reason) { "retry" } else { "permanent" };
+                        say!("outbox: send failed job={id} kind={kind} reason={}", one_line(&reason));
+                        let stored = format!("{kind}:{}", one_line(&reason));
+                        if let Err(error) = worker::fail(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), stored).await {
+                            outbox_note(format!("fail refused: {error:?}"));
+                        }
+                    }
+                }
             }
-        },
+        }
     }
     true
+}
+
+/// The pre-dispatch facts: the chat's hold, the reply source's fence, and the exact source record.
+/// The rule itself is pure (`outbox::dispatch_refusal`); this only gathers what the component knows.
+async fn outbox_gate(request: &wa_whatsapp_outbox::Verified) -> Option<&'static str> {
+    let chat = request.chat.jid();
+    let reply = request.reply_to.as_deref();
+    let (held, fenced) = HOLDS.with(|h| {
+        let h = h.borrow();
+        (h.posting_held(&chat), reply.is_some_and(|id| h.blocked(&chat, id)))
+    });
+    let source = match reply {
+        Some(id) => index::load(&IndexKv, &chat, id).await.ok().flatten().map(|record| outbox::SourceFacts {
+            kind: record.kind,
+            text: record.text,
+            own: record.own,
+            deleted: record.deleted,
+            unsupported: record.unsupported,
+            ts: record.ts,
+        }),
+        None => None,
+    };
+    outbox::dispatch_refusal(held, reply, fenced, source.as_ref())
 }
 
 // ---- the message index (`whatsapp.query`) ------------------------------------------------------
@@ -1356,6 +1391,7 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
     let answer = match op {
         seam::Op::Search => index::search(&IndexKv, &request).await,
         seam::Op::Read => index::read(&IndexKv, &request).await,
+        seam::Op::Message => index::message(&IndexKv, &request).await,
         seam::Op::Reactions => index::reactions(&IndexKv, &request).await,
         seam::Op::Media => index::media(&IndexKv, &request).await,
         seam::Op::Download => download(&request, id, cfg).await,

@@ -8,7 +8,7 @@ description: WhatsApp through the linked-device connector - reading chats, opera
 ## Where the connector runs - look before saying "not available"
 
 The connector (`wa-whatsapp`, linked device) usually runs on ONE node, not on every node. A node with
-no `~/.config/wa-whatsapp` and a disabled `whatsapp` MCP entry does not mean WhatsApp is unavailable:
+no `~/.config/wa-whatsapp` and no running `wa-whatsapp` component does not mean WhatsApp is unavailable:
 it means it lives on a peer. Before answering that you cannot read or send:
 
 1. List the peers (`nodes`, or `tool_call("nodes")`) and find the online one that holds the state:
@@ -49,7 +49,11 @@ outgoing-only history.
 For a direct human-approved new text/reply, use the DISTINCT opt-in operator CLI
 in [operator management](../../docs/WHATSAPP-OPERATOR-MANAGEMENT.md), only from an
 authorized native operator process with separately provisioned approval/dispatch
-FILE references. No generic MCP, child/event role or existing read token grants it.
+FILE references. On a node whose `wa-whatsapp` component holds the linked session,
+`WA_WHATSAPP_OPERATOR_BACKEND=native` runs the same four actions on the Rust/WASI
+outbox instead (`lua/core/whatsapp_operator.lua`); a reply source and the sent echo
+are then read back exactly from the index. No generic MCP, child/event role or
+existing read token grants either route.
 Find/read/search exact recipients; disambiguate identities, never trust a sole
 pushname. Exact content/direct approval need not be requested twice; do not alter
 that content. Preserve the prepared intent ID, compare exact recipient/body/quote,

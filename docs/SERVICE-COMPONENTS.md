@@ -255,6 +255,30 @@ and the real enqueue on a binary that carries the capability).
 still one warm worker), and anything at all against a live account: this lane did not pair, connect or
 send, so the component's behaviour on a phone is the same unknown it was at B3.
 
+**The operator send on this path (Phase 2, 10/11).** `prepare -> approve -> send -> status` is the
+same state machine the Go connector ran (`connectors/whatsapp/operator.go`), now in Lua
+(`lua/core/whatsapp_operator.lua`) with the dispatch on this same `whatsapp.outbox`:
+
+* prepare composes the `🤖 _Copiloto_` line before anything is stored, so the approval binds the exact
+  bytes; the digest covers the intent id, chat, signed body, reply, mentions, reply-source digest and
+  the prepared second. approve must echo the exact fields and the digest; send records the durable
+  dispatch intent *before* the enqueue, and a repeated send reads the same intent, never a second job.
+* the reply source is loaded exactly (`host.whatsapp_message`, full stored text - a `read` answer is a
+  280-character snippet and cannot bind a body): in that chat, plain text, not our own, not deleted,
+  with no own message newer on the newest page. The digest changes with the source, so approve and
+  send refuse a stale preparation (`operator_preparation_stale_reprepare_and_reapprove`).
+* the last gate is the component's (`src/outbox.rs` `dispatch_refusal`): a posting hold, a revoke/edit
+  fence, or a reply source it cannot prove refuses the job with its own word, and a refusal is never
+  retried into a send.
+* status maps the queue job to `dispatched`, `accepted` (a message id from the server ACK), `failed`,
+  or `echo_confirmed` when the exact own id/chat/body is in the index. Delivery and read stay unknown.
+* the capability files (`approval_token_file`, `dispatch_token_file`) are required as provisioning
+  proof, as in the Go path. The route is opt-in per node with `WA_WHATSAPP_OPERATOR_BACKEND=native`,
+  so a node whose Go connector still owns the linked session keeps its working route.
+* the one weaker point, stated: mentions are the exact JIDs the operator names (validated, at most 8);
+  the Go connector also proved each against the group's observed participant list. A mention of a JID
+  outside the group is ignored by WhatsApp, so this cannot reach a stranger.
+
 ## Iterating on a component: `wa dev` and `wa-fake-kernel`
 
 A service component's loop used to be: edit, `cargo build --target wasm32-wasip2`, install the three
@@ -610,10 +634,10 @@ media key and the direct path never leave the component: they are how it decrypt
   by the component's storage grant; a write that fails is logged, never treated as done.
 
 **The query lane.** `wa:queue`, queue name `whatsapp.query` (`rust/wa-whatsapp-index` is the shared
-request/answer shape; the node's six capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):
+request/answer shape; the node's seven capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):
 
 ```text
-tool whatsapp_search | read | reactions | media | download | backfill
+tool whatsapp_search | read | message | reactions | media | download | backfill
   -> validate + bound the request            wa-whatsapp-index
   -> enqueue `whatsapp.query` (fresh 2 min, 2 attempts, dedupe = the request itself)
 component wa-whatsapp (queue worker on `whatsapp.query`, one lease at a time)

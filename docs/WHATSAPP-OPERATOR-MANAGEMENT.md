@@ -345,3 +345,23 @@ boundaries). Whether a real receipt actually arrives on a real device, and how
 quickly, is UNPROVED here: this worker used no real account, send or receipt.
 Historical holds, unknown sends and the running service are untouched.
 
+## The Rust/WASI backend (Phase 2, 10/11/2026)
+
+The same four actions now also exist without the Go connector or the Node CLI:
+`lua/core/whatsapp_operator.lua` keeps the durable intents in the node's database and dispatches on the
+explicit-send outbox (`host.whatsapp_send` -> `whatsapp.outbox` -> the `wa-whatsapp` component), which
+is the path Phase 3 installs on the account's node. The gates are the same ones this document
+describes: a provisioned authority file with exact account/generation/chats, the separate approval and
+dispatch capability files, the `🤖 _Copiloto_` line composed at prepare, a digest that approve must
+echo, a 600-second freshness window, and one dispatch per intent with an unknown outcome left for
+`status`. The last gate moved into the component: a posting hold, a revoke/edit fence, or a reply
+source it cannot prove refuses the job before the wire (`outbox::dispatch_refusal`). Read-back is the
+index's exact own id/chat/body (`echo_confirmed`), and delivery/read stay unknown.
+
+The route is opt-in per node: `WA_WHATSAPP_OPERATOR_BACKEND=native` on a node whose `wa-whatsapp`
+component holds the linked session. Without it the CLI and the Go connector below remain the working
+route, which is what a node keeps until Phase 3 proves the component on a real account.
+
+One deliberate difference: mentions are the exact JIDs the operator names (validated, at most 8); the
+Go connector also proved each against the group's observed participant list. WhatsApp ignores a
+mention of a JID outside the group, so a mention cannot reach a stranger; it can only fail to notify.

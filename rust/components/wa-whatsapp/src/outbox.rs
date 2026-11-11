@@ -44,6 +44,53 @@ pub fn retryable(reason: &str) -> bool {
     wa_whatsapp_outbox::retryable(reason)
 }
 
+/// The facts about a reply source this component can prove from its own index. It is the subset of
+/// `record::Record` the dispatch gate needs, so the rule compiles and is tested without a store.
+pub struct SourceFacts {
+    pub kind: String,
+    pub text: String,
+    pub own: bool,
+    pub deleted: bool,
+    pub unsupported: String,
+    pub ts: i64,
+}
+
+/// The last gate before the wire: why this verified request must not be dispatched, if it must not.
+///
+/// The placement is deliberate and is the Go connector's: the node already asked its policy, but a
+/// posting hold or a revoke/edit fence can have arrived while the job waited, and only the component
+/// holds that state. A held chat and a fenced reply source are refusals, never retries - sending would
+/// post into a chat whose earlier message the user revoked, which is the one thing the hold exists to
+/// prevent.
+///
+/// A reply source is checked exactly, from the index: a reference quote to an own message, to a
+/// deleted one, or to a non-text bubble would render as something the operator did not approve, so it
+/// is refused instead of sent. The explicit send accepted a quote without this check before the hold
+/// work landed; the check is here, on the one path that reaches the wire.
+pub fn dispatch_refusal(chat_held: bool, reply_to: Option<&str>, reply_fenced: bool, source: Option<&SourceFacts>) -> Option<&'static str> {
+    if chat_held {
+        return Some("posting_held_chat");
+    }
+    let Some(_reply) = reply_to else { return None };
+    if reply_fenced {
+        return Some("source_fence");
+    }
+    let Some(source) = source else { return Some("reply_source_not_indexed") };
+    if source.own {
+        return Some("reply_source_own");
+    }
+    if source.deleted {
+        return Some("reply_source_deleted");
+    }
+    if !source.unsupported.is_empty() {
+        return Some("reply_source_unsupported");
+    }
+    if source.kind != "text" || source.text.trim().is_empty() || source.ts <= 0 {
+        return Some("reply_source_not_plain_text");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +187,33 @@ mod tests {
         assert!(!retryable("not_logged_in"));
         assert!(retryable("websocket closed"));
         assert!(retryable("timeout"));
+    }
+
+    fn source(kind: &str, text: &str, own: bool) -> SourceFacts {
+        SourceFacts { kind: kind.into(), text: text.into(), own, deleted: false, unsupported: String::new(), ts: 1_760_000_000_000 }
+    }
+
+    #[test]
+    fn a_posting_hold_or_a_fenced_source_blocks_the_wire() {
+        let plain = source("text", "oi", false);
+        assert_eq!(dispatch_refusal(true, None, false, None), Some("posting_held_chat"));
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), true, Some(&plain)), Some("source_fence"));
+        // No reply: the hold is the only gate, and a clean chat sends.
+        assert_eq!(dispatch_refusal(false, None, false, None), None);
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&plain)), None);
+    }
+
+    #[test]
+    fn a_reply_source_must_be_exact_plain_text_by_someone_else() {
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, None), Some("reply_source_not_indexed"));
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&source("text", "oi", true))), Some("reply_source_own"));
+        let mut deleted = source("text", "oi", false);
+        deleted.deleted = true;
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&deleted)), Some("reply_source_deleted"));
+        let mut unsupported = source("text", "oi", false);
+        unsupported.unsupported = "view_once".into();
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&unsupported)), Some("reply_source_unsupported"));
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&source("audio", "", false))), Some("reply_source_not_plain_text"));
+        assert_eq!(dispatch_refusal(false, Some("3EB0"), false, Some(&source("text", "   ", false))), Some("reply_source_not_plain_text"));
     }
 }
