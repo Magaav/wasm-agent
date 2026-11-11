@@ -330,6 +330,12 @@ end
 
 -- The newest operator turn in this session, verbatim. The request a gate is judged against is always
 -- one of these rows, never a string the model typed: a paraphrase of the request cannot weaken it.
+-- A row the harness itself wrote (the gate's own re-entry, `phase = done_gate`) is not operator words.
+function M.is_harness_row(row)
+  return tostring(row.phase or "") == "done_gate"
+    or tostring(row.content or ""):sub(1, 10) == "[done gate"
+end
+
 function M.latest_user_text(session_id)
   local ok, rows = pcall(function()
     return dep("memory").session_messages(session_id, { all = true, limit = 400 })
@@ -337,7 +343,8 @@ function M.latest_user_text(session_id)
   if not ok or type(rows) ~= "table" then return nil end
   for index = #rows, 1, -1 do
     local row = rows[index]
-    if row.role == "user" and type(row.content) == "string" and M.normalize(row.content) ~= "" then
+    if row.role == "user" and not M.is_harness_row(row) and type(row.content) == "string"
+        and M.normalize(row.content) ~= "" then
       return row.content, tonumber(row.seq)
     end
   end
@@ -355,7 +362,7 @@ function M.operator_said(session_id, quote)
   end)
   if not ok or type(rows) ~= "table" then return nil end
   for _, row in ipairs(rows) do
-    if row.role == "user" and type(row.content) == "string" then
+    if row.role == "user" and not M.is_harness_row(row) and type(row.content) == "string" then
       if M.normalize(row.content):find(wanted, 1, true) then return row end
     end
   end

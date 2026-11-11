@@ -80,7 +80,9 @@ recorded next to the request.
 - **a gate whose checks pass** → the gate closes `passed`, and the turn ends.
 - **a gate whose checks fail** → the run is **re-entered**: the next user turn is the operator's words,
   verbatim, plus the failing check output, marked `[done gate · harness]` so no later reader mistakes it
-  for a human message. The candidate answer stays in the transcript as what it was — a step, not the
+  for a human message — **and stored durably** (`phase = done_gate`), so a session read after a restart
+  still says why the run continued past its own stop. That row is not operator words: the consent check
+  skips it, so a check cannot be removed by quoting the harness back at itself. The candidate answer stays in the transcript as what it was — a step, not the
   answer.
 - **a closed gate** (passed, impossible, exempt, stalled) → nothing. A settled mission is not re-judged.
 
@@ -154,7 +156,7 @@ gated: a bounded child's acceptance criteria belong to its parent, which asked f
 ## Checks that pin it
 
 `scripts/test-done-gate.lua` (model-free: a scripted provider, a real shell, a scratch database) —
-fifty-two checks, including the five the operator asked for:
+fifty-eight checks, including the five the operator asked for:
 
 | case | what it pins |
 | --- | --- |

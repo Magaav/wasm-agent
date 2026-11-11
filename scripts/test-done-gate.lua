@@ -221,6 +221,17 @@ ok(last_request_has('[done gate') or last_request_has('done gate'),
   'and it is labelled as the harness, not as a new request')
 local rows1 = gate_rows(s1)
 ok(count_where(rows1, 'Phase 1 is done') == 1, 'the early answer is kept in the transcript')
+-- The harness's own re-entry is a durable row: a later reader sees why the run continued past its own
+-- stop, and it is not operator words - a check cannot be removed by quoting it.
+local gate_row, gate_row_seq = nil, nil
+for _, row in ipairs(rows1) do
+  if row.phase == 'done_gate' then gate_row, gate_row_seq = row, row.seq end
+end
+ok(gate_row ~= nil, 'the gate re-entry is a durable row, not only a transient message')
+ok(gate_row and gate_row.role == 'user' and tostring(gate_row.content):find('[done gate', 1, true) == 1,
+  'and it is marked as the harness, not as a human message')
+ok(done_gate.operator_said(s1, '[done gate · harness] The operator\'s request is not finished') == nil,
+  'the harness row is not a source of operator consent')
 local gate1 = last_gate(s1)
 ok(gate1 and gate1.status == 'passed', 'the gate closed as passed: ' .. tostring(gate1 and gate1.status))
 ok(memory.session_messages(s1, { all = true })[#memory.session_messages(s1, { all = true })] ~= nil, 'the session still reads')
