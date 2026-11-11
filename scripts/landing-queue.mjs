@@ -425,6 +425,80 @@ async function ensureBaseline({id, canonical, upstream, command, dir, db, say}) 
   return record;
 }
 
+// ---- re-checking a "new" failure -----------------------------------------------------------------
+//
+// Measured here on 2026-11-10 (rows #27 and #28): the set of checks this machine fails MOVES between
+// two runs minutes apart. At 21:00 the merged tree failed graph/codemode/cli-view/patch-audit; at 21:02
+// main failed completion-packet/context-usage/features-gate/hooks-agent instead; at 21:08 the graph,
+// codemode and cli-view tests failed on main too. The installed component set and the load on a shared
+// node change under a run, so "a name the baseline does not have" is not by itself the branch's fault -
+// and refusing a correct branch is the failure this whole change exists to remove.
+//
+// So a new failure is only the branch's when it reproduces where the branch is and does NOT reproduce
+// on main's own tree, measured now:
+//   * re-run the new rows on main (detached in this checkout, the same directory as the candidate);
+//   * whatever fails there too is this machine's churn: tolerated, named, and folded into the recorded
+//     baseline so the next landing inherits the fresher measurement instead of paying for it again;
+//   * what passes there is re-run on the merged tree once: a failure that reproduces there is the
+//     branch's and refuses the landing; one that does not was transient and is reported, not charged.
+//
+// It costs one run of the handful of rows involved, and only when a candidate would otherwise be
+// refused - never for a landing that is merely tolerated.
+function onlyFor(run) {
+  const names = run.failures.filter(failure => /^lua scripts\/[^ ]+\.lua$/.test(failure.name)).map(failure => failure.name.slice(4));
+  const other = run.failures.filter(failure => !/^lua scripts\/[^ ]+\.lua$/.test(failure.name)).map(failure => failure.name);
+  return {rows: [...new Set(names)].sort(), other: [...new Set(other)].sort()};
+}
+
+async function recheckNewFailures({id, canonical, upstream, baseDigest, command, baseline, names, dir, db, say}) {
+  const wanted = names.filter(name => /^lua scripts\/[^ ]+\.lua$/.test(name));
+  const outsideLua = names.filter(name => !/^lua scripts\/[^ ]+\.lua$/.test(name));
+  const result = {reproduced: [], unstable: [], transient: [], outside_lua: outsideLua};
+  if (wanted.length === 0) return result;
+  const rows = wanted.map(name => name.slice(4)).join(' ');
+  say(`#${id} ${wanted.length} new failure(s); re-checking them on main's own tree before calling them the branch's`);
+  const checkout = git(canonical, ['checkout', '--quiet', '--detach', upstream]);
+  if (checkout.status !== 0) {
+    throw new QueueError(`recheck_unavailable: cannot put ${canonical} at ${upstream.slice(0, 12)} to re-check ${rows}: ${String(checkout.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was pushed.`, 75, 'recheck_unavailable');
+  }
+  let onMain;
+  try {
+    onMain = await captureCommand({
+      cwd: canonical, command, env: checksEnvironment(canonical, {FAST_ONLY: rows}), echo: false,
+      log: path.join(dir, `recheck-main-${upstream.slice(0, 12)}.log`),
+    });
+  } finally {
+    const back = git(canonical, ['checkout', '--quiet', 'main']);
+    if (back.status !== 0) throw new QueueError(`recheck_checkout_stuck: could not put ${canonical} back on main after the re-check: ${String(back.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was pushed; the checkout is at ${upstream.slice(0, 12)}, detached, and a person must put it back on main.`, 76, 'recheck_checkout_stuck');
+  }
+  const onMainRun = parseCheckLog(onMain.output, {exitCode: onMain.code});
+  const failsOnMain = new Set(onMainRun.failures.map(failure => failure.name));
+  result.unstable = wanted.filter(name => failsOnMain.has(name));
+  const suspects = wanted.filter(name => !failsOnMain.has(name));
+  if (result.unstable.length) {
+    say(`#${id} on main now too, so not this branch's: ${result.unstable.join(', ')} (this machine fails them either way)`);
+    // The re-check just measured main more recently than the baseline did: keep the fresher fact, so
+    // the next landing on the same check inputs does not pay for the same discovery.
+    const merged = [...new Set([...(baseline.names || []), ...result.unstable])].sort();
+    const environmentNames = [...new Set([...(baseline.environment_names || []), ...result.unstable])].sort();
+    const record = {...baseline, names: merged, environment_names: environmentNames, at: Math.floor(Date.now() / 1000),
+      source: 'recheck', failed_checks: Math.max(Number(baseline.failed_checks) || 0, merged.length)};
+    recordBaseline(db, {digest: baseDigest, command, commit: upstream, record, by: 'queue'});
+  }
+  if (suspects.length === 0) return result;
+  const suspectRun = await captureCommand({
+    cwd: canonical, command, env: checksEnvironment(canonical, {FAST_ONLY: suspects.map(name => name.slice(4)).join(' ')}),
+    echo: true, log: path.join(dir, `recheck-merged-${Date.now()}.log`),
+  });
+  const suspectParsed = parseCheckLog(suspectRun.output, {exitCode: suspectRun.code});
+  const failsOnMerged = new Set(suspectParsed.failures.map(failure => failure.name));
+  result.reproduced = suspects.filter(name => failsOnMerged.has(name));
+  result.transient = suspects.filter(name => !failsOnMerged.has(name));
+  if (result.transient.length) say(`#${id} did not reproduce on the merged tree, so transient: ${result.transient.join(', ')}`);
+  if (result.reproduced.length) say(`#${id} reproduce on the merged tree and pass on main: ${result.reproduced.join(', ')}`);
+  return result;
+}
+
 // ---- land ---------------------------------------------------------------------------------------
 async function commandLand(options) {
   if (!options.branch) throw new QueueError('land needs --branch <name>', 75, 'usage');
@@ -576,6 +650,25 @@ async function commandLand(options) {
         outcome = judged.run.ok ? {verdict: 'pass', why: 'the serial retry passed'} : judgeRun({baseline, run: judged.run});
       }
       candidateRun = judged.run;
+      if (outcome.verdict === 'worse') {
+        // "A name main does not fail" is not the branch's fault by itself on a machine whose failures
+        // move between runs: re-check the new names on main's own tree, and charge only what
+        // reproduces on the merged tree and passes on main.
+        const recheck = await recheckNewFailures({id, canonical, upstream, baseDigest: treeDigest(canonical, upstream).retest,
+          command: options.checks, baseline, names: outcome.new_failures || [], dir, db, say});
+        const charged = [...(outcome.strict || []).filter(name => (outcome.new_failures || []).includes(name)),
+          ...recheck.reproduced, ...recheck.outside_lua];
+        if (charged.length === 0) {
+          outcome = {...outcome, verdict: 'pass', charged: [],
+            why: `only failures this machine also fails on main right now (${[...recheck.unstable, ...recheck.transient].join(', ')})`};
+          db.prepare('UPDATE queue SET reason=? WHERE id=?').run(`recheck: ${recheck.unstable.length} unstable on main, ${recheck.transient.length} transient`, id);
+          logRow(db, id, 'recheck', `${recheck.unstable.length} new name(s) fail on main too (unstable on this machine): ${recheck.unstable.join(', ') || 'none'}; ${recheck.transient.length} did not reproduce on the merged tree: ${recheck.transient.join(', ') || 'none'}`);
+        } else {
+          outcome = {...outcome, verdict: 'worse', new_failures: charged,
+            why: `${charged.length} new failing check(s) reproduce where the branch is and pass on main: ${charged.join(', ')}`};
+          judged = {...judged, run: {...judged.run, failures: judged.run.failures.filter(failure => charged.includes(failure.name))}};
+        }
+      }
       if (outcome.verdict !== 'pass') {
         const rollback = git(canonical, ['reset', '--hard', headAt]);
         const detail = describeRun(judged.run);

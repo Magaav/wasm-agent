@@ -35,6 +35,7 @@ const ORIGIN = path.join(WORK, 'origin.git');
 const CANONICAL = path.join(WORK, 'canonical');
 const LEDGER = path.join(WORK, 'ledger.db');
 const COUNTER = path.join(WORK, 'check-runs');
+const CHURN = path.join(WORK, 'churn');
 const ENV = {...process.env, WA_LANDING_QUEUE_LEDGER: LEDGER};
 delete ENV.WASM_AGENT_SESSION_ID;
 delete ENV.WA_SESSION_ID;
@@ -138,21 +139,25 @@ function fixture() {
   git(CANONICAL, 'push', '-q', 'origin', 'main');
   git(ORIGIN, 'symbolic-ref', 'HEAD', 'refs/heads/main');
   // The check command: main's own known failure, plus one the branch adds when it carries the marker
-  // file - which is what a real regression looks like, because it travels with the branch and is
-  // absent from the pristine tree the baseline is measured on. Every run appends to one counter, so
-  // "did this landing measure a pristine tree?" is a number, not an impression.
+  // file (a real regression, because it travels with the branch and is absent from main), plus one the
+  // whole MACHINE fails while a flag outside the repository is set (churn: it fails on main and on the
+  // branch, which is what the re-check has to tell apart from a regression). Every run appends to one
+  // counter, so "did this landing measure an extra tree?" is a number, not an impression. FAST_ONLY is
+  // honoured the way scripts/fast.sh honours it, because the queue's re-check runs a named row.
   const checks = path.join(WORK, 'fixture-checks.sh');
   fs.writeFileSync(checks, [
     '#!/usr/bin/env bash',
     `printf 'run\\n' >> '${COUNTER.replace(/\\/g, '/')}'`,
-    'if [ -f marker/broken ]; then echo "FAIL lua scripts/test-branch-broke.lua (exit 1): an assertion the branch changed"; fi',
-    'if [ -f marker/env ]; then',
+    'only() { [ -z "${FAST_ONLY:-}" ] && return 0; case " $FAST_ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac }',
+    'only scripts/test-branch-broke.lua && [ -f marker/broken ] && echo "FAIL lua scripts/test-branch-broke.lua (exit 1): an assertion the branch changed"',
+    `only scripts/test-churn.lua && [ -f '${CHURN.replace(/\\/g, '/')}' ] && echo "FAIL lua scripts/test-churn.lua (exit 1): this machine fails it for any tree"`,
+    'if only scripts/test-needs-a-process.lua && [ -f marker/env ]; then',
     '  echo "fast: ENVIRONMENT lua scripts/test-needs-a-process.lua (exit 126: cannot fork) - retrying once, serially"',
     '  echo "FAIL lua scripts/test-needs-a-process.lua (exit 126, environment): cannot fork: Resource temporarily unavailable"',
     '  echo "fast path could not run: 1 check(s) were the machine (fork/spawn, retried serially once), 0 skipped, 1s"',
     '  exit 3',
     'fi',
-    'echo "FAIL lua scripts/test-known-on-main.lua (exit 1): the machine\'s component set is behind the tree"',
+    'only scripts/test-known-on-main.lua && echo "FAIL lua scripts/test-known-on-main.lua (exit 1): the machine\'s component set is behind the tree"',
     'echo "fast: lua 9/10 passed (0 excluded: scripts/fast-path.exclude)"',
     'echo "fast path FAILED (1 of 11 checks, 0 skipped, 1s)"',
     'exit 1', '',
@@ -198,16 +203,35 @@ check('it reused the recorded baseline instead of measuring a pristine tree', /b
 check('so exactly one check run happened: the candidate\'s own', runCount() === before + 1, `${runCount() - before} run(s) for the second landing`);
 check('and it recorded the baseline for the main it landed', /baseline recorded for the new main/.test(second.stdout || ''), second.stdout);
 
-// ---- 4. a branch that adds a failing name is refused, and nothing is pushed ----------------------
+// ---- 4. a failure this machine has for ANY tree is not charged to the branch ----------------------
+// The measured 2026-11-10 case: the suite's red set moves between two runs minutes apart. The check
+// fails `test-churn.lua` for every tree while the flag exists, and the queue must not read that as the
+// branch's doing - it re-checks on main and finds the same failure there.
+branch('change/churn', 'lua/core/x.lua', 'return 3\n');
+fs.writeFileSync(CHURN, 'on\n');
+const churned = land('change/churn');
+fs.rmSync(CHURN, {force: true});
+check('a failure main also has right now does not refuse the landing', churned.status === 0, churned.stdout + churned.stderr);
+check('and the queue says it checked main, by name', /on main now too, so not this branch's: lua scripts\/test-churn\.lua/.test(churned.stdout || ''), churned.stdout);
+const history = q(['history', '--limit', '60']).stdout || '';
+check('the tolerated churn is in the durable log, not only in the answer',
+  history.includes('unstable on this machine): lua scripts/test-churn.lua'), history.slice(-600));
+check('the re-check cost exactly one extra run of the named row, not a suite',
+  runCount() === before + 3, `${runCount() - before} run(s): landing two, then the churn landing (candidate + re-check)`);
+
+// ---- 5. a branch that adds a failing name is refused, and nothing is pushed ----------------------
 branch('change/broken', 'marker/broken', 'x\n');
 const mainBeforeBroken = originMain();
 const broken = land('change/broken');
 check('a new failing name refuses the landing', broken.status === 75, `${broken.status}: ${broken.stdout}${broken.stderr}`);
 check('the refusal names the new failure and the rollback', /checks_failed/.test(broken.stderr || '') && /lua scripts\/test-branch-broke\.lua/.test(broken.stderr || '') && /rolled back/.test(broken.stderr || ''), broken.stderr);
+check('and it says the failure reproduced where the branch is and passed on main', /reproduce where the branch is and pass on main/.test(broken.stderr || ''), broken.stderr);
 check('origin/main did not move', originMain() === mainBeforeBroken, `${originMain()} vs ${mainBeforeBroken}`);
 check('the canonical tree was rolled back clean', git(CANONICAL, 'status', '--porcelain').trim() === '' && git(CANONICAL, 'rev-parse', 'HEAD').trim() === mainBeforeBroken);
+check('a real regression costs three runs: the candidate, main re-check and one confirmation',
+  runCount() === before + 6, `${runCount() - before} run(s) including the refused landing`);
 
-// ---- 5. a machine that cannot run the check is a retry, never a code verdict ---------------------
+// ---- 6. a machine that cannot run the check is a retry, never a code verdict ---------------------
 branch('change/starved', 'marker/env', 'x\n');
 const mainBeforeStarved = originMain();
 const runsBeforeStarved = runCount();
@@ -218,7 +242,7 @@ check('it retried the check exactly once, serially', /retrying .* once, serially
   `${runCount() - runsBeforeStarved} run(s): ${starved.stdout}`);
 check('origin/main did not move for a machine failure', originMain() === mainBeforeStarved);
 
-// ---- 6. the record can be primed from a saved log, and read back ---------------------------------
+// ---- 7. the record can be primed from a saved log, and read back ---------------------------------
 fs.writeFileSync(path.join(WORK, 'saved.log'), [
   'FAIL lua scripts/test-known-on-main.lua (exit 1): measured elsewhere',
   'fast path FAILED (1 of 11 checks, 0 skipped, 1s)', '',
