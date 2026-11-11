@@ -25,6 +25,32 @@ contains() { # <text> <needle> <what>
   ok
 }
 
+# A hash is the bytes' hash, whatever path they were read by (11/11: a Windows path made sha256sum
+# escape the filename, so the deploy asked for `components-\1d22f2ced44` instead of
+# `components-1d22f2ced448` and then refused the install `component_hash_mismatch`). Both spellings of
+# the same file must agree, and the answer must be 64 hex characters - no escape prefix.
+probe="$WORK/hash-probe.bin"
+printf 'the same bytes either way' > "$probe"
+plain="$(wa_component_sha256 "$probe")"
+case "$plain" in
+  *[!0-9a-f]*|'') fail "wa_component_sha256 is not hex: [$plain]" ;;
+esac
+[ "${#plain}" = 64 ] || fail "wa_component_sha256 returned ${#plain} characters: [$plain]"
+ok
+if command -v cygpath >/dev/null 2>&1; then
+  windows="$(wa_component_sha256 "$(cygpath -w "$probe")")"
+  [ "$windows" = "$plain" ] || fail "a Windows path hashed to [$windows], the same file by a POSIX path to [$plain]"
+  ok
+else
+  # A filename that really contains a backslash is legal here and impossible on Windows; it is the
+  # other way to make sha256sum escape the line.
+  escaped="$WORK/a\\b.bin"
+  printf 'the same bytes either way' > "$escaped"
+  with_backslash="$(wa_component_sha256 "$escaped")"
+  [ "$with_backslash" = "$plain" ] || fail "a file named with a backslash hashed to [$with_backslash], the same bytes to [$plain]"
+  ok
+fi
+
 repo="$WORK/repo"
 artifacts="$WORK/artifacts"
 dest="$WORK/components"

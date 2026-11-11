@@ -40,10 +40,18 @@ wa_components_dir() {
 }
 
 wa_component_sha256() {
+  # The file is fed on **stdin**, not named on the command line. GNU `sha256sum` escapes a filename
+  # that contains a backslash by prefixing the whole line with one (`\1d22…  C:\\Users\\…`), and a
+  # Windows path is exactly that: `awk` then hands back a hash that starts with a backslash. Measured
+  # on wasm_the_first, 11/11: the deploy computed the components-lock identity as `\1d22f2ced44`,
+  # asked GitHub for the release `components-\1d22f2ced44` (which cannot exist), fell back to building
+  # wa-whatsapp from the tree, and refused the deploy `component_hash_mismatch` - while
+  # `components-1d22f2ced448` was published all along. A hash is a property of the bytes, not of the
+  # path they were read from.
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    sha256sum < "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
+    shasum -a 256 < "$1" | awk '{print $1}'
   else
     return 1
   fi
