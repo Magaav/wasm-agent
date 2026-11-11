@@ -2165,6 +2165,7 @@ dependencies = [
  "wa-operation",
  "wa-queue",
  "wa-rendezvous",
+ "wa-sqlite",
  "wa-term",
  "wa-tool-progress",
  "wa-vault",
@@ -2287,6 +2288,7 @@ dependencies = [
  "tree-sitter-powershell",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "wa-sqlite",
 ]
 
 [[package]]
@@ -2302,6 +2304,7 @@ dependencies = [
  "wa-kernel-runtime",
  "wa-mesh",
  "wa-rendezvous",
+ "wa-sqlite",
 ]
 
 [[package]]
@@ -2320,6 +2323,7 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "serde_json",
+ "wa-sqlite",
 ]
 
 [[package]]
@@ -2343,6 +2347,7 @@ dependencies = [
  "wa-kv",
  "wa-mesh-core",
  "wa-queue",
+ "wa-sqlite",
  "wa-state",
  "wa-stt-remote",
  "wa-vault",
@@ -2437,6 +2442,7 @@ dependencies = [
  "ring",
  "rusqlite",
  "serde_json",
+ "wa-sqlite",
  "windows-sys 0.61.2",
 ]
 
@@ -2458,6 +2464,7 @@ dependencies = [
  "ureq",
  "wa-host-support",
  "wa-operation",
+ "wa-sqlite",
 ]
 
 [[package]]
@@ -2466,6 +2473,13 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "tempfile",
+]
+
+[[package]]
+name = "wa-sqlite"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
 ]
 
 [[package]]

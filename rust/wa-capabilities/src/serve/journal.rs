@@ -37,8 +37,11 @@ impl Journal {
         lease.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
             .map_err(|e| format!("run_journal_already_owned: {e}"))?;
         let db = Connection::open(std::path::PathBuf::from(format!("{}.run-journal.sqlite",path.display()))).map_err(|e| e.to_string())?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS admissions (
+        // The run journal is written by every lane of `serve` at once, so it is a store like any
+        // other: one busy timeout, WAL, `synchronous=FULL` from `rust/wa-sqlite`. It had the journal
+        // mode and not the wait, which is how a lane's first write after a busy second one failed.
+        wa_sqlite::tune(&db).map_err(|e| e.to_string())?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS admissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, conversation TEXT NOT NULL,
                 state TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, had_error INTEGER NOT NULL DEFAULT 0, request TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()));

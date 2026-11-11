@@ -27,10 +27,8 @@ impl Index {
         let boot = format!("boot-{}-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).map_err(error)?.as_nanos(), crate::SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let lease = Connection::open(root.join(format!("{boot}.lease.sqlite"))).map_err(error)?;
         lease.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE").map_err(error)?;
-        let db = Connection::open(root.join("index.sqlite")).map_err(error)?;
-        db.busy_timeout(Duration::from_secs(5)).map_err(error)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-          CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,cwd TEXT NOT NULL,blocked INTEGER NOT NULL,state TEXT NOT NULL,originals TEXT NOT NULL);
+        let db = wa_sqlite::open(root.join("index.sqlite")).map_err(error)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,cwd TEXT NOT NULL,blocked INTEGER NOT NULL,state TEXT NOT NULL,originals TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS relevant ON operations(blocked,cwd,id);
           CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS reconciliation(id TEXT PRIMARY KEY,expected TEXT NOT NULL,evidence TEXT NOT NULL,at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);

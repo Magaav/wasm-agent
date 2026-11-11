@@ -13,6 +13,9 @@ edition = "2021"
 # capability crate and the binary. Nothing here imports the capability crate: `push_json` is the only
 # answer shape it shares with it, and that lives in `wa-host-support`.
 [dependencies]
+# The node's one SQLite contention policy (`rust/wa-sqlite`). The kernel's `wa:kernel/sql` seam opens a
+# connection per call, so it was the one store with its own number and its own durability setting.
+wa-sqlite = { path = "../wa-sqlite" }
 # The vault (`docs/VAULT.md`): the kernel is the only caller of `use_by_ref`/`reveal`, and the fleet's
 # signing key may live there (`rust/wa-mesh/src/fleetchange.rs`). `wa-keystore` wraps its root key.
 wa-vault = { path = "../wa-vault" }

@@ -47,7 +47,11 @@ impl Store {
    let source=std::str::from_utf8(bytes)?;prepared.push((path.clone(),lang.to_string(),extract::extract_progress(path,lang,source,progress).map_err(|e|format!("{e}"))?,hash,bytes));progress("parsing",prepared.len());
   }
   let removed:Vec<_>=self.all_file_paths()?.into_iter().filter(|p|!manifest.files.contains_key(p)).collect();
-  self.conn.execute_batch("BEGIN IMMEDIATE")?;
+  // The whole run is one `BEGIN IMMEDIATE`. Take it under the node's contention policy
+  // (`rust/wa-sqlite`): a BEGIN that failed took no lock, so retrying it cannot half-apply a
+  // generation, and the failure names itself (`database_busy: ... (retryable)`) instead of arriving
+  // as `graph_index_failed: database is locked` after one long wait.
+  wa_sqlite::begin_immediate(&self.conn)?;
   let outcome=(||->Result<IndexReport>{
    if (self.generation()?,self.manifest_fingerprint()?,self.committed_revision()?)!=base{return Err("graph_index_commit_conflict".into());}
    self.conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS affected_edges(id INTEGER PRIMARY KEY);DELETE FROM affected_edges;")?;

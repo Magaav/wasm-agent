@@ -148,8 +148,10 @@ impl Store {
             std::fs::create_dir_all(dir)?;
         }
         let conn = graph_connection(path, rusqlite::OpenFlags::default())?;
-        conn.busy_timeout(std::time::Duration::from_secs(10))?;
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        // The node's one contention policy (`rust/wa-sqlite`): the busy timeout, WAL and
+        // `synchronous=FULL` are the same here as on the ledger, and a lock met while switching the
+        // journal mode is waited for instead of failing the open.
+        wa_sqlite::tune(&conn)?;
         guest_pragmas(&conn)?;
         let store = Self { conn };
         store.init()?;
@@ -163,7 +165,7 @@ impl Store {
             path.as_ref(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        wa_sqlite::tune_read_only(&conn)?;
         guest_pragmas(&conn)?;
         Ok(Self { conn })
     }

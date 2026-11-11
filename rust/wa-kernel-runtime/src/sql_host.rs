@@ -252,8 +252,11 @@ impl SqlScope {
         )
         .map_err(|error| SqlFailure::Failed(format!("open: {error}")))?;
         // The host sets its own pragmas, before the authorizer exists: the guest may not.
-        connection
-            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+        //
+        // The policy is the node's (`rust/wa-sqlite`), not this seam's own: `memory.db` is the ledger,
+        // and a component call is one more writer of it. `synchronous=NORMAL` here would have made the
+        // memory component's writes less durable than the native path writing the same rows.
+        wa_sqlite::tune(&connection)
             .map_err(|error| SqlFailure::Failed(format!("pragmas: {error}")))?;
         let guard = Guard {
             name: self.name.clone(),

@@ -8,6 +8,9 @@ edition = "2021"
 # it resolves home, signs with ring and keeps its own sqlite book-keeping; the host and the serve layer
 # call into it, and it calls into nothing above itself.
 [dependencies]
+# Contention policy for every SQLite store (rust/wa-sqlite): one busy timeout, WAL, and a bounded
+# retry that names itself instead of dying as `database is locked`. A leaf crate.
+wa-sqlite = { path = "../wa-sqlite" }
 wa-host-support = { path = "../wa-host-support" }
 wa-operation = { path = "../wa-operation" }
 ring = "0.17"

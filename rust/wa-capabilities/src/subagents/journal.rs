@@ -4,9 +4,11 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub fn create(path: &Path) -> Result<(), String> {
-    let db = Connection::open(path).map_err(|e| e.to_string())?;
-    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-        CREATE TABLE events(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL,
+    // A child's evidence is written while other children run, so this store takes the node's policy
+    // too (`rust/wa-sqlite`): before this it had no busy timeout at all and a shared moment of
+    // contention failed the append.
+    let db = wa_sqlite::open(path).map_err(|e| e.to_string())?;
+    db.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL,
             message_seq INTEGER NOT NULL DEFAULT 0);").map_err(|e| e.to_string())
 }
 
@@ -14,7 +16,7 @@ pub fn append(path: &Path, payload: &str) -> Result<(), String> {
     let event: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|e| e.to_string())?;
-    db.execute_batch("PRAGMA synchronous=FULL;").map_err(|e| e.to_string())?;
+    wa_sqlite::tune(&db).map_err(|e| e.to_string())?;
     let checkpoint = if event["type"] == "checkpoint" { event["seq"].as_u64().unwrap_or(0) } else { 0 };
     db.execute("INSERT INTO events(payload,message_seq) VALUES(?,?)", params![payload,checkpoint])
         .map_err(|e| e.to_string())?;
@@ -24,6 +26,7 @@ pub fn append(path: &Path, payload: &str) -> Result<(), String> {
 pub fn page(path: &Path, after: u64, archive: bool) -> Result<Value, String> {
     let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("native_event_evidence_unavailable: {e}"))?;
+    wa_sqlite::tune_read_only(&db).map_err(|e| format!("native_event_evidence_unavailable: {e}"))?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let (checkpoint, message): (u64,u64) = tx.query_row(
         "SELECT seq,message_seq FROM events WHERE message_seq>0 ORDER BY seq DESC LIMIT 1", [],

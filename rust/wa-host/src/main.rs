@@ -194,14 +194,15 @@ fn open_db(path: &str) -> Connection {
         | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
     let connection = Connection::open_with_flags(&database, flags).expect("open database");
-    connection
-        .execute_batch(
-            // FULL, not NORMAL: in WAL mode NORMAL can lose the last commits on power loss, and the
-            // node's durable records (claims, operations, receipts) must survive a reboot.
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;\
-             PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-        )
-        .expect("pragma");
+    // One policy for every store (`rust/wa-sqlite`, docs/HOST.md "contention"): `busy_timeout`
+    // first, then WAL, `synchronous=FULL` and foreign keys - with a bounded retry, because
+    // switching the journal mode is a write and two interpreters booting at the same moment is the
+    // ordinary case on a busy node. A store that cannot be tuned must not take the node down with
+    // it: the connection is still usable, the failure is named on stderr, and the next connection
+    // tries again. The old `.expect("pragma")` turned a momentary lock into a dead process.
+    if let Err(error) = wa_sqlite::tune(&connection) {
+        eprintln!("[db] pragmas not applied to {database}: {error}");
+    }
     connection
 }
 

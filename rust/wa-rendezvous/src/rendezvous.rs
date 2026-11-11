@@ -187,12 +187,12 @@ fn sweep(state: &mut RelayState) -> Vec<String> {
 }
 
 pub fn run(bind: &str, port: u16, db_path: &str) {
-    // Schema first, on a short-lived connection.
-    match Connection::open(db_path) {
+    // Schema first, on a short-lived connection. The registry is a store like any other: one busy
+    // timeout, WAL, `synchronous=FULL` (`rust/wa-sqlite`).
+    match wa_sqlite::open(db_path) {
         Ok(connection) => {
             if let Err(error) = connection.execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 CREATE TABLE IF NOT EXISTS nodes (
+                "CREATE TABLE IF NOT EXISTS nodes (
                    node_id TEXT PRIMARY KEY,
                    public_key TEXT NOT NULL,
                    name TEXT,
@@ -232,7 +232,7 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
         }
     }
 
-    if let Ok(connection) = Connection::open(db_path) { prune(&connection); }
+    if let Ok(connection) = wa_sqlite::open(db_path) { prune(&connection); }
 
     let listener = match TcpListener::bind((bind, port)) {
         Ok(listener) => listener,
@@ -287,7 +287,9 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
 }
 
 fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>) -> std::io::Result<()> {
-    let connection = match Connection::open(db_path) {
+    // One connection per request, so it needs the shared policy or every concurrent registration
+    // races the lock with no wait at all (`rust/wa-sqlite`).
+    let connection = match wa_sqlite::open(db_path) {
         Ok(connection) => connection,
         Err(error) => {
             return respond(stream, 500, &json!({"error": error.to_string()}).to_string());

@@ -2,10 +2,7 @@
 //! A job is a disabled-by-default trigger + declared action. A delivery pins its revision.
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 pub mod artifact;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Clone)]
@@ -264,10 +261,10 @@ impl Store {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Connection::open(&self.path)?;
-        db.busy_timeout(Duration::from_secs(2))?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-          CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,enabled INTEGER NOT NULL,definition TEXT NOT NULL,next_at INTEGER NOT NULL DEFAULT 0,source_status TEXT NOT NULL DEFAULT 'not observed');
+        // One policy for every store (`rust/wa-sqlite`). This one waited 2 s - the shortest of any
+        // store on the node - so an enqueue lost the race to a slightly slower writer.
+        let db = wa_sqlite::open(&self.path)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,enabled INTEGER NOT NULL,definition TEXT NOT NULL,next_at INTEGER NOT NULL DEFAULT 0,source_status TEXT NOT NULL DEFAULT 'not observed');
           CREATE TABLE IF NOT EXISTS deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,revision INTEGER NOT NULL,event_id TEXT NOT NULL,payload TEXT NOT NULL,action_kind TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,started_at INTEGER,ended_at INTEGER,detail TEXT,UNIQUE(job_id,revision,event_id));
           CREATE TABLE IF NOT EXISTS source_cursors(job_id TEXT NOT NULL,revision INTEGER NOT NULL,key TEXT NOT NULL,PRIMARY KEY(job_id,revision,key));
           CREATE INDEX IF NOT EXISTS deliveries_queue ON deliveries(state,id);
@@ -730,7 +727,7 @@ impl Store {
     /// after enqueue but before the producer records acknowledgement.
     pub fn event_receipt(&self, id: &str, revision: i64, event_id: &str, payload: &Value) -> Result<Value> {
         let mut db = Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        db.busy_timeout(Duration::from_secs(5))?;
+        wa_sqlite::tune_read_only(&db)?;
         let tx = db.transaction()?;
         let job = tx.query_row("SELECT revision,enabled,definition FROM jobs WHERE id=?", [id],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, r.get::<_, String>(2)?))).optional()?;

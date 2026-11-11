@@ -11,6 +11,9 @@ path = "src/main.rs"
 # dispatches the CLI and hands the run to a library crate. Each dependency below is a layer of the split
 # and is in the list because `main.rs` names it, not because the crate it came from needed it.
 [dependencies]
+# Contention policy for every SQLite store (rust/wa-sqlite): one busy timeout, WAL, and a bounded
+# retry that names itself instead of dying as `database is locked`. A leaf crate.
+wa-sqlite = { path = "../wa-sqlite" }
 # The floor: the Lua 5.4 ABI, the host paths and the JSON answer shared with the kernel.
 wa-host-support = { path = "../wa-host-support" }
 # Node identity and the rendezvous/relay transport (docs/KERNEL.md, carve-out map): the CLI dispatches
