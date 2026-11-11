@@ -29,6 +29,12 @@ end
 
 local native = dofile('lua/core/memory.lua')
 native.setup()
+-- The native half is PINNED to the native path. Without this the module asks the resolver, and the
+-- resolver answers `active_component` as soon as this tree's component is installed in the test's own
+-- component directory - which is what `scripts/fast.sh` now does - so `native` was the component too and
+-- "native versus component" compared it with itself (it showed up here as one wedge logged twice, once
+-- by each instance).
+native.seam_override = function() return false, 'seam_disabled' end
 
 ------------------------------------------------------------------ the store, built once
 -- Facts through the native path (the store both halves read), and a transcript built by hand: a

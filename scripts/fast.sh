@@ -13,11 +13,14 @@
 #      the two checks the landing baseline rests on (scripts/test-landing-baseline.mjs judges a run by
 #      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code).
 #
-# Before any of that it builds the components the Lua rows need (`graph`) from this tree, pinned the way
-# a deploy installs them, and gives each row a component directory inside its own home. A row that needs
-# a component installs it there (scripts/lib/test-components.lua) and a machine that cannot build one
-# gets `SKIP <test>: <reason>`; those reasons are printed under the counts, so a pass with a hole in it
-# never looks whole. Why each row cannot simply share one directory is in the block itself.
+# Before any of that it builds the components the Lua rows need (`graph`, `hooks`, `memory`, `selfloop`,
+# `mesh`) from this tree, pinned the way a deploy installs them, and gives each row a component directory
+# inside its own home. A row gets the artifact it names installed there and switched on, so the seam suites
+# RUN; a machine that cannot build one gets `SKIP <test>: <reason>`, and those reasons are printed under the
+# counts. Two invariants are enforced, not hoped for: a row that names a component and still reports it
+# missing is a FAIL, and so is a `scripts/test-fast-row-environment.lua` that does not confirm - from inside
+# the node - that the variables this runner sets arrived. Why each row cannot share one directory is in the
+# block itself.
 #
 # A check that cannot run here (no node, no cargo) is reported SKIPPED and counted, never passed.
 # The full gate (scripts/test.sh) is the nightly job, not a landing requirement (AGENTS.md).
@@ -94,17 +97,29 @@ fails=0; envfails=0; skipped=0; ran=0
 #    be in the node's own directory, whose graph may be another commit's.
 #  * It is cached under the worktree's own git dir and rebuilt by cargo's own fingerprinting: 53 s cold on
 #    wasm_the_first, 1.4 s when nothing changed. Per worktree, so two branches never overwrite each other.
-#  * Each row gets WA_COMPONENTS_DIR inside its OWN home plus WA_FAST_COMPONENT_SOURCE, and installs a
-#    component into it only if the test asks (`scripts/lib/test-components.lua`): a test that needs the
-#    graph pays an 8 MB copy, and the 150 that do not pay an empty directory. A test whose subject is not
-#    the component keeps whatever it asserted about an absent one.
+#  * Each row gets WA_COMPONENTS_DIR inside its OWN home plus WA_FAST_COMPONENT_SOURCE, and gets the
+#    component it names: a row whose own text names `WA_<NAME>_COMPONENT_WASM` - the variable its skip
+#    message used to print - has that artifact installed, pinned, in its own directory and handed to the
+#    host, so the seam suites RUN instead of skipping. Every other row pays an empty directory and keeps
+#    whatever it asserted about an absent component.
 #  * The directory being inside the test's home is not decoration: `scripts/test-features-gate.lua` writes
 #    its own stubs into the component directory and refuses one outside its home, "never a node's component
 #    directory", so a shared directory would either be polluted by that test or wrongly skipped by it.
 #  * When the machine cannot build one (no cargo, no wasi-sdk, the docker fast path) the rows that need it
 #    print `SKIP <test>: <reason>` and the reason names the command that would build it. A skip is counted
 #    as a skip, never as a pass.
-FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph}
+#
+# `codemode` is deliberately NOT in the set: its parity suite runs (it is a row) and finds three real
+# divergences between the two loops - a failed script's reason dropped at the host seam (fixed in this tree,
+# active at the next install), no journal row for the globals the component answers in place, and
+# `capabilities()` failing only on the component path. Each is named where it is measured; provisioning it
+# here would turn them into red rows before they are fixed. `scripts/test-codemode-component.sh` is the
+# runner that drives all of it.
+FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh}
+# The rows read this list from their own process (see `lua_run`): a shell variable that is not exported is
+# simply absent in the `bash -c` worker each row runs in, and the install loop then finds nothing to do
+# while every check still passes - a run that promises components and delivers none. Exported here, once.
+export FAST_COMPONENT_NAMES
 fast_components_prepare() {
   [ -n "$FAST_COMPONENT_NAMES" ] || return 0
   local gitdir cache log reason
@@ -152,12 +167,48 @@ mkdir -p "$FAST_WORK/logs"
 # home (see "the components the Lua rows need" above): a component the test installs lands there, and a
 # test that never installs one sees an empty directory rather than an unset variable.
 lua_run() { # <script> <home>
-  local home_native components
+  local home_native components name upper base env_file
   home_native=$( (command -v cygpath >/dev/null && cygpath -w "$2") || echo "$2")
   components=$( (command -v cygpath >/dev/null && cygpath -w "$2/.wasm-agent/components") || echo "$2/.wasm-agent/components")
   mkdir -p "$2/.wasm-agent/components" 2>/dev/null || true
-  WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
+  # The component this row's own text names, if the runner built it: installed (pinned, with its manifest)
+  # into the row's own directory AND handed to the host through the development override the suites read.
+  # Both halves are needed and neither is a guess - `WA_<NAME>_COMPONENT_WASM` is the variable the suite's
+  # skip message used to print, so the file says which one it needs.
+  local -a overrides=()
+  if [ -n "${FAST_COMPONENT_SOURCE:-}" ]; then
+    for name in $FAST_COMPONENT_NAMES; do
+      [ -f "$FAST_COMPONENT_SOURCE/$name.wasm" ] || continue
+      upper=$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')
+      grep -q "WA_${upper}_COMPONENT_WASM" "$1" 2>/dev/null || continue
+      cp "$FAST_COMPONENT_SOURCE/$name.json" "$FAST_COMPONENT_SOURCE/$name.wasm" \
+         "$FAST_COMPONENT_SOURCE/$name.wasm.sha256" "$2/.wasm-agent/components/" 2>/dev/null || continue
+      overrides+=("WA_${upper}_COMPONENT_WASM=$( (command -v cygpath >/dev/null && cygpath -w "$2/.wasm-agent/components/$name.wasm") || echo "$2/.wasm-agent/components/$name.wasm")")
+      overrides+=("WA_${upper}_COMPONENT=1")
+    done
+  fi
+  # Every variable this row is given, on ONE line each, for the probe row that checks they arrived
+  # (`scripts/test-fast-row-environment.lua`): a variable the runner sets and the row never sees is the
+  # failure this table exists to catch, and it is caught from inside the row, not from here.
+  base=$(basename "$1")
+  env_file=$(native "$FAST_WORK/env/$base.env")
+  mkdir -p "$FAST_WORK/env" 2>/dev/null || true
+  {
+    printf 'WASM_AGENT_LUA_ROOT=%s\n' "$FAST_ROOT"
+    printf 'WASM_AGENT_HOME=%s\n' "$home_native"
+    printf 'WA_COMPONENTS_DIR=%s\n' "$components"
+    printf 'WA_FAST_COMPONENT_SOURCE=%s\n' "${FAST_COMPONENT_SOURCE:-}"
+    printf 'WASM_AGENT_RENDEZVOUS=\n'
+    printf 'WASM_AGENT_RELAY=\n'
+    printf 'WASM_AGENT_MANAGED=0\n'
+    printf 'WA_SCRIPT=%s\n' "$1"
+    for name in "${overrides[@]}"; do printf '%s\n' "$name"; done
+    printf 'WA_FAST_ROW_ENV=%s\n' "$env_file"
+  } > "$env_file" 2>/dev/null || true
+  env "${overrides[@]}" \
+    WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
     WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
+    WA_FAST_ROW_ENV="$env_file" \
     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$1" \
     timeout 120 "$FAST_BIN" --db "$2/t.db"
 }
@@ -188,7 +239,7 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$(( ($(date +%s%N)-s)/1000000 ))" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
 }
-export -f lua_run run_lua
+export -f lua_run run_lua native
 xargs -P "$jobs" -I{} bash -c 'run_lua "$1"' _ {} < "$work/lua.list" > "$work/lua.tsv"
 # The rows the machine could not run: retried once, one at a time, AFTER the batch, so the retry is
 # genuinely alone on the machine. A row that passes then is a pass (reported as one); a row that still
@@ -217,6 +268,41 @@ ran=$((ran + lua_total)); fails=$((fails + lua_fail));
 awk -F'\t' '$1!=0{ if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
 echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(printf '%s\n' "$excluded" | grep -c . ) excluded: scripts/fast-path.exclude)"
 [ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
+# A component this runner PROMISED cannot be missing in the row that asked for it. The row names the
+# artifact in its own text (`WA_<NAME>_COMPONENT_WASM`), `lua_run` installs that artifact in the row's own
+# directory and hands the host the override - so a row that reports the component missing is the runner
+# failing, not the test skipping. Measured once, on wasm_the_first: the component list was a shell variable
+# that never reached the row's worker, so every seam suite skipped while the build line above said the set
+# was installed. This is the check that would have caught it, from the two facts the run already has.
+for promised in $FAST_COMPONENT_NAMES; do
+  [ -n "${FAST_COMPONENT_SOURCE:-}" ] && [ -f "$FAST_COMPONENT_SOURCE/$promised.wasm" ] || continue
+  upper=$(printf '%s' "$promised" | tr '[:lower:]-' '[:upper:]_')
+  grep -q "WA_${upper}_COMPONENT_WASM" scripts/test-*.lua 2>/dev/null || continue
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    grep -q "WA_${upper}_COMPONENT_WASM" "$f" 2>/dev/null || continue
+    log="$work/logs/$(basename "$f").out"
+    [ -f "$log" ] || continue
+    if grep -qE "no ${promised} component|component_not_installed:${promised}|component_unavailable:component_not_installed:${promised}" "$log" 2>/dev/null; then
+      fails=$((fails + 1))
+      echo "FAIL component-provisioning $f (exit 1): the runner promised $promised (a pinned copy in this row's own home) and the row reports it missing: $(grep -m1 -E "no ${promised} component|component_not_installed:${promised}" "$log" | cut -c1-160)"
+    fi
+  done <<< "$(awk -F'\t' '{print $3}' "$work/lua.tsv")"
+done
+# The row-environment probe must have RUN and PASSED, not merely exited 0. It is the one row that can say
+# whether the variables this runner sets arrive in the node (`scripts/test-fast-row-environment.lua`), so a
+# probe that skipped - the table it reads was dropped, which is exactly the incident - would otherwise let
+# the run call itself green by saying nothing. Its own failure is already a FAIL row; this covers the
+# silent case.
+probe_row=scripts/test-fast-row-environment.lua
+probe_status=$(awk -F'\t' -v f="$probe_row" '$3==f{print $1}' "$work/lua.tsv" 2>/dev/null | head -1)
+if [ "${probe_status:-missing}" = "0" ] && ! grep -q '^fast row environment ok' "$work/logs/$(basename "$probe_row").out" 2>/dev/null; then
+  fails=$((fails + 1))
+  echo "FAIL fast-row-environment (exit 1): the probe row passed without confirming the table it was given: $(last_line_of "$work/logs/$(basename "$probe_row").out")"
+elif [ -z "${probe_status:-}" ]; then
+  fails=$((fails + 1))
+  echo "FAIL fast-row-environment (exit 1): $probe_row never ran, so nothing checked that this runner's variables reach its rows"
+fi
 # The holes in those passes, by name: a row that could not check what it is about says so, and this is
 # where a reader sees it without opening 150 logs. Grouped per test - one suite can name thirty of them
 # (the hooks seam names one per case it cannot run) - with the count and the first reason, so the

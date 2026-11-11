@@ -41,7 +41,13 @@ local function instance(seam)
   local module = dofile('lua/core/selfloop.lua')
   module.setup()
   host.log = real_log
-  if seam then module.seam_override = function() return true, 'active_component' end end
+  -- BOTH sides are pinned, not just the seam one. A `nil` override means "ask the resolver", and the
+  -- resolver answers `active_component` as soon as this tree's component is installed - so the instance
+  -- this file calls `native` was, on any machine with the component, the component too, and the parity
+  -- comparisons compared it with itself. (`scripts/fast.sh` now installs the component in the row's own
+  -- home, which is what made that visible.)
+  module.seam_override = seam and function() return true, 'active_component' end
+    or function() return false, 'seam_disabled' end
   return module
 end
 
