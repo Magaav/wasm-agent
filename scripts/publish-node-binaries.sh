@@ -154,7 +154,12 @@ fi
 TARGET_DIR="${TARGET_DIR_FLAG:-$ROOT/rust/target}"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 
-[ -n "$TARGETS" ] || TARGETS=" aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
+# The channel's published targets, and a landing publishes BOTH of them in one run: `work` is x86_64 Linux
+# and compiles every update on 2 cores otherwise (measured 2026-11-11: ~100 s incremental, 19 min bootstrap).
+# `wa_node_target_triple` (scripts/lib/node-binaries.sh) maps a node's uname to exactly one of these, and a
+# deploy that finds no row for its triple falls back to building - the cost this pair exists to remove.
+DEFAULT_RELEASE_TARGETS=" aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
+[ -n "$TARGETS" ] || TARGETS="$DEFAULT_RELEASE_TARGETS"
 TARGETS="${TARGETS# }"
 # The tag suffix carries the glibc floor: `<triple>.2.31` is cargo-zigbuild's spelling, and the plain
 # triple is what the manifest rows and the node's own detection use.
