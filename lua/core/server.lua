@@ -1858,4 +1858,16 @@ function wa_observability_events(id,cursor,since,session,node)
 end
 
 -- Long-lived WASI service components marked enabled start with the node (idempotent in the host).
-pcall(function() dofile('lua/core/services.lua').autostart() end)
+--
+-- **Not at load time.** This module is read before the listener binds, and autostarting there meant a
+-- `wa serve` that then lost the bind had already opened every service: on openclaw (11/11) a systemd
+-- unit and the sentinel each ran a serve, the loser could never bind 8799, and it still autostarted
+-- wa-whatsapp, opened the device session and got the winner kicked off the phone (`conflict=replaced`,
+-- `bot stopped`) on a 3-36 s cycle that reached 4251 starts. The port is the right of way, so the host
+-- calls this **after** it owns it (`rust/wa-capabilities/src/serve.rs`, right after the bind); a process
+-- that does not own the port starts no service and touches no component.
+function wa_autostart_services()
+  local ok, err = pcall(function() dofile('lua/core/services.lua').autostart() end)
+  if not ok then return 'false: ' .. tostring(err) end
+  return 'true'
+end

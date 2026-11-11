@@ -504,6 +504,30 @@ The old order - start the candidate beside the running one - is right for a stat
 for one that owns a device session, a port or a lock: on 09-11 the `wa-whatsapp` cutover had both
 instances restore the same device and authenticate, WhatsApp replaced one (`conflict=replaced`), and the
 replaced one's outbox went on claiming sends it could not deliver;
+
+### One instance per machine, too: the port first, then the lock file
+
+`services::claim` is a claim *in one process*, and on 11/11 openclaw proved that a second **process** is
+where the invariant breaks. Two supervisors ran `wa serve` on one port - a systemd unit
+(`wa-serve.service`) and the sentinel - so there were two registries; the process that could never bind
+8799 still autostarted `wa-whatsapp` first, opened the device session and got the winner kicked off the
+phone (`conflict=replaced`, `bot stopped`, 4251 starts). Three rules now hold, each with a test:
+
+1. **The port is the right of way.** `serve` binds/claims `--port` *before* it starts anything, and a
+   process that loses the bind starts **no service and touches no component** (`wa_autostart_services`
+   is called by the host after the bind, not at `server.lua` load time) and exits non-zero, so a
+   `Restart=on-failure` policy stops instead of looping and the operator sees a failure rather than a
+   clean stop;
+2. **The lock file is the machine-wide claim.** A start takes an OS lock on
+   `<components>/<name>.state/instance.lock` and holds it for the instance's life; a second process's
+   start is refused `service_locked`, before anything is compiled or opened. The kernel releases it when
+   the holder dies, so a crashed instance never leaves a claim a human has to clear - the failure mode
+   `serve.pid` has;
+3. **One supervisor, named.** On a systemd node the unit is the owner (it carries the node's
+   environment and `Restart=always`): the sentinel asks the unit to restart the node and records the
+   unit's `MainPID` as the node pid, and never spawns a serve of its own beside it. The deploy path
+   already worked this way (`upgrade.sh`'s `MANAGED_UNIT`: swap the bytes, end the old pid, let systemd
+   start the new binary).
 6. health: `lifecycle.report(ready)`/`degraded`, or - for a guest that never reports, which includes
 every wasip1 module - "still alive after the window", reported as `health: "unreported"` rather than
 invented;

@@ -98,6 +98,9 @@ struct Handle {
     /// The name this instance holds. Dropped when the handle is dropped - after the thread has been
     /// joined - which is what frees the name for the next instance (see [`claim`]).
     _claim: Claim,
+    /// The machine-wide half of the same claim: the lock file this instance holds for its life, so a
+    /// second *process* cannot run the same service either (see [`InstanceLock`]).
+    _lock: InstanceLock,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Handle>> {
@@ -155,6 +158,69 @@ fn claim(name: &str) -> std::result::Result<Claim, Value> {
 /// Is an instance of this name live (starting, running, draining or stopping)?
 pub(crate) fn claimed(name: &str) -> bool {
     claims().lock().unwrap_or_else(|e| e.into_inner()).contains(name)
+}
+
+/// The machine-wide claim on a service name: an OS lock on `<components>/<name>.state/instance.lock`.
+///
+/// The registry's [`Claim`] answers "is this name taken *in this process*". It cannot answer the
+/// question openclaw asked on 11/11: two `wa serve` processes - a systemd unit and the sentinel, each
+/// with its own registry - each started `wa-whatsapp` and each opened the device session, so WhatsApp
+/// answered the second with `conflict=replaced` and the phone kicked the first one off
+/// (`Auto-reconnect disabled`, `bot stopped`), on a 3-36 s cycle that reached 4251 starts. One lock
+/// file per name, held for the instance's life, makes the second process's start a refusal instead.
+///
+/// An OS lock, not a pid file: the kernel releases it when the holder exits, so a crashed instance
+/// never leaves a claim behind that a human has to clear - the failure mode the install's `serve.pid`
+/// has (a pid that outlives its process and is then trusted by the next start).
+pub(crate) struct InstanceLock {
+    _file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+impl std::fmt::Debug for InstanceLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InstanceLock({})", self.path.display())
+    }
+}
+
+fn instance_lock(name: &str) -> std::result::Result<InstanceLock, Value> {
+    let dir = crate::components::component_dir().join(format!("{name}.state"));
+    let _ = std::fs::create_dir_all(&dir);
+    instance_lock_at(&dir.join("instance.lock")).map_err(|mut error| {
+        if let Some(object) = error.as_object_mut() {
+            object.insert("name".into(), json!(name));
+        }
+        error
+    })
+}
+
+fn instance_lock_at(path: &std::path::Path) -> std::result::Result<InstanceLock, Value> {
+    let file = match std::fs::OpenOptions::new().create(true).read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(json!({
+                "ok": false,
+                "error": "service_lock_unavailable",
+                "observed": format!("cannot open {}: {error}", path.display()),
+                "next": "fix the component state directory; nothing was started",
+            }))
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(InstanceLock { _file: file, path: path.to_path_buf() }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(json!({
+            "ok": false,
+            "error": "service_locked",
+            "observed": format!("another process holds {}: one service name runs one instance per machine", path.display()),
+            "next": "stop the other node process running this service - two supervisors running `wa serve` on one port is the usual cause; nothing was started",
+        })),
+        Err(std::fs::TryLockError::Error(error)) => Err(json!({
+            "ok": false,
+            "error": "service_lock_unavailable",
+            "observed": format!("cannot lock {}: {error}", path.display()),
+            "next": "fix the component state directory; nothing was started",
+        })),
+    }
 }
 
 struct State {
@@ -637,6 +703,7 @@ pub fn start(request: &Value) -> Value {
             generation: instance.generation,
             drain_aware: spawned.drain_aware,
             _claim: spawned.claim,
+            _lock: spawned.lock,
         },
     );
     // A provider that just came up can let something that was waiting for it start. The supervisor
@@ -670,6 +737,9 @@ pub(crate) struct Spawned {
     /// The name this instance holds for as long as it lives (`claim`). Moved into the registry by
     /// `start`/`replace`, and dropped - freeing the name - when the instance is stopped.
     pub(crate) claim: Claim,
+    /// The machine-wide claim: an OS lock on `<name>.state/instance.lock`, held for the instance's
+    /// life and released by the OS if this process dies (see [`InstanceLock`]).
+    pub(crate) lock: InstanceLock,
 }
 
 /// The instance token a runner's guest calls carry (`name#generation`), or the plain name for a store
@@ -688,6 +758,14 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
     // One instance per service name, taken before anything is compiled or started: every caller goes
     // through here (`start`, `install::upgrade`, `dev::swap`), so this is where the invariant lives.
     let claim = claim(&name)?;
+    // ...and the machine-wide one, before anything is compiled or started. The claim above is per
+    // process; openclaw (11/11) proved that a *second process* is what breaks the invariant there: a
+    // systemd unit and the sentinel each ran `wa serve`, each with its own registry, and the loser
+    // autostarted the same service and opened the same device session - WhatsApp answered
+    // `conflict=replaced` and the phone kicked the real instance off, every 3-36 s. An OS lock is
+    // released when the holder dies, so a crashed instance never blocks the next one (the reason this
+    // is not a pid file). See `docs/SERVICE-COMPONENTS.md`.
+    let lock = instance_lock(&name)?;
     // The transactional install (docs/STATE.md): before anything is compiled or started, a
     // manifest that declares `state_version` must find its namespace at that version. The migration
     // runs on a snapshot copy and is swapped in only if it succeeds; a refusal here leaves the
@@ -858,6 +936,7 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             instance,
             drain_aware,
             claim,
+            lock,
             report: json!({
                 "state": state.to_json(),
                 "grants": {
@@ -1014,6 +1093,7 @@ pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
             generation: candidate.instance.generation,
             drain_aware: candidate.drain_aware,
             _claim: candidate.claim,
+            _lock: candidate.lock,
         },
     );
     let retired = match previous {
@@ -1266,6 +1346,35 @@ pub(crate) mod support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The machine-wide half of "one service name, one instance". openclaw (11/11) had two `wa serve`
+    /// processes - a systemd unit and the sentinel - and the per-process registry in [`claim`] could
+    /// not see the other one; both started `wa-whatsapp` and both opened the device session. This is
+    /// the negative control: a second holder of the same file must be refused, and the lock must be
+    /// free again the moment the first holder is gone (which is how a crashed process is released).
+    #[test]
+    fn a_second_process_cannot_claim_a_running_service() {
+        let dir = std::env::temp_dir().join(format!(
+            "wa-instance-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("instance.lock");
+        let first = instance_lock_at(&path).expect("the first instance takes the lock");
+        let refused = instance_lock_at(&path).err().expect("a second instance must be refused");
+        assert_eq!(refused["error"], "service_locked", "a refusal that names the reason: {refused}");
+        assert!(refused["observed"].as_str().unwrap_or_default().contains("one instance per machine"));
+        drop(first);
+        let again = instance_lock_at(&path).expect("the lock is free once the holder is gone");
+        drop(again);
+        // ...and the lock file is not what holds the claim: a file left on disk by a dead holder is
+        // taken without complaint, which is the whole reason this is an OS lock and not a pid file.
+        assert!(path.exists(), "the lock file itself stays; only the lock on it is released");
+        let after_crash = instance_lock_at(&path).expect("a stale file blocks nobody");
+        drop(after_crash);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn dial_allowlist_exact_and_suffix() {
