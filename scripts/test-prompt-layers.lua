@@ -21,8 +21,8 @@ check(not pcall(parts.section,'good','x',{['bad"']='v'}),'invalid attribute refu
 check(parts.section('good','x',{source='a"&<'})=='<good source="a&quot;&amp;&lt;">\nx\n</good>','attribute escaping')
 local prompt=agent.system_prompt('master','PROJECT_KEEP','a"&<.md',schemas,'progressive')
 local previous=0;for _,tag in ipairs({'generic','stack','workflow','project','session'})do local at=assert(prompt:find('<'..tag,1,true));check(at>previous,'stable layer order '..tag);previous=at end
-for _,tag in ipairs({'identity','work','style','language','time','memory','tools','skills','guidelines','safety','environment','role','workdir','orchestration'})do check(prompt:find('<'..tag,1,true),'visible section '..tag)end
-check(prompt:find('mode="off"',1,true) and two.workflow:find('mode="on"',1,true),'explicit active workflow mode')
+for _,tag in ipairs({'identity','work','style','language','time','memory','tools','skills','guidelines','safety','environment','role','workdir','workflow'})do check(prompt:find('<'..tag,1,true),'visible section '..tag)end
+check(prompt:find('orchestration="off"',1,true) and two.workflow:find('orchestration="on"',1,true),'explicit active workflow mode, one tag and one attribute')
 check(prompt:find('PROJECT_KEEP',1,true) and prompt:find('source="a&quot;&amp;&lt;.md"',1,true),'project bytes retained, source escaped')
 check(not prompt:find('Available tools:',1,true),'no progressive duplicate schema index')
 check(prompt:find('request them together with read_many',1,true),'direct batching cue retained')

@@ -33,8 +33,9 @@ local closed=run('const names='..json.encode(direct_names)..'; return JSON.strin
 check(closed.ok and tostring(closed.value):find('%[%]',1)~=nil,'every direct-call name is a member inside, none absent: '..json.encode(closed):sub(1,300))
 local refusal=run('try{ await tools.session_worktree({}); return "NO_ERROR"; }catch(e){ return String((e&&e.message)||e); }')
 check(refusal.ok and tostring(refusal.value):find('Direct call only',1,true),'a direct-call member refuses with its stated reason: '..json.encode(refusal):sub(1,400))
-local grants=run('const r=await tools.capabilities({}); return JSON.stringify({role:r.role,count:(r.capabilities||[]).length});')
-check(grants.ok and tostring(grants.value):find('"role":"master"',1,true),'capabilities executes inside and returns the grant list: '..json.encode(grants):sub(1,300))
+local grants=run('const r=await tools.capabilities({}); text(JSON.stringify({role:r.role,count:(r.capabilities||[]).length})); return 1;')
+local granted=grants.items and grants.items[1] and grants.items[1].text or ''
+check(grants.ok and granted:find('"role":"master"',1,true)~=nil,'capabilities executes inside and returns the grant list: '..granted:sub(1,200))
 local widened=run('return JSON.stringify(["shell","client","spell_save","spell_run","operation","resource"].map(n=>n in tools));')
 check(widened.ok and tostring(widened.value):find('[true,true,true,true,true,true]',1,true),'effects, shell/client, spells and multi-action tools are callable inside: '..json.encode(widened):sub(1,300))
 -- ...but discoverable, with its route (29/10): never indistinguishable from "does not exist".

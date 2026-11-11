@@ -22,7 +22,7 @@ not a new incremental provider protocol.
 <!-- generated:prompt-layers (scripts/sync-prompt-docs.lua) -->
 - `<generic>`: `identity`, `law`, `work`, `habits`, `style`, `language`, `time`, `memory`, `turn`
 - `<stack>`: `safety`, `tools`, `guidelines`, `skills`
-- `<workflow>`: `orchestration`
+- `<workflow>`: `workflow`
 - `<project>`: `project_instructions`
 - `<session>`: `environment`, `role`, `workdir`, `keys`
 <!-- /generated -->
@@ -37,9 +37,11 @@ not a new incremental provider protocol.
   (`scripts/test-prompt-tool-names.lua`).
 - `<stack name="wasm-agent">`: the Sentinel-notice rule, the tool protocol (in progressive mode
   the generated on-demand index), capability-aware guidelines and the skill-use rule.
-- `<workflow>`: `AGENTS.orchestrator.md`, inside `<orchestration mode="off|on">`. The file has one
-  section per mode (`## Orchestration off` / `## Orchestration on`); only the active one is
-  injected. A file without those headings is injected whole.
+- `<workflow orchestration="off|on" source="...">`: `AGENTS.orchestrator.md`, one tag with the mode as
+  an attribute. The file has one section per mode (`## Orchestration off` / `## Orchestration on`);
+  only the active one is injected. A file without those headings is injected whole. Authority (this
+  session lands and deploys, a child's report does not) lives in `<law>`, not here, so it is stated
+  once for every mode.
 - `<project>`: pi-style project instructions, one `<project_instructions path="...">` frame per
   file: `<config>/AGENTS.md`, then every `AGENTS.md` from the filesystem root down to the
   session's workdir (its worktree when it has one), nearest last. `WASM_AGENT_AGENTS_MD` names one
