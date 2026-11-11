@@ -145,19 +145,29 @@ function fixture() {
   // counter, so "did this landing measure an extra tree?" is a number, not an impression. FAST_ONLY is
   // honoured the way scripts/fast.sh honours it, because the queue's re-check runs a named row.
   const checks = path.join(WORK, 'fixture-checks.sh');
+  // The rows the queue's A-B-A re-check runs DIRECTLY (not through the check command), so they are real
+  // Lua tests: one main always fails (the machine's), one fails only while the churn flag exists, and
+  // one the branch adds - and a row a tree does not have cannot fail there.
+  const posix = value => value.split(String.fromCharCode(92)).join('/');
+  fs.writeFileSync(path.join(CANONICAL, 'scripts/test-known-on-main.lua'),
+    "error('the machine component set is behind the tree')\n");
+  fs.writeFileSync(path.join(CANONICAL, 'scripts/test-churn.lua'),
+    "local flag = '" + posix(CHURN) + "'\nif host.read_file(flag) then error('this machine fails it for any tree') end\nprint('churn: ok')\n");
+  // The check command: main's own known failure, plus one the branch adds when it carries the marker
+  // file, plus one the whole MACHINE fails while a flag outside the repository is set. Every run appends
+  // to one counter, so "how many times did the suite run for this landing?" is a number.
   fs.writeFileSync(checks, [
     '#!/usr/bin/env bash',
-    `printf 'run\\n' >> '${COUNTER.replace(/\\/g, '/')}'`,
-    'only() { [ -z "${FAST_ONLY:-}" ] && return 0; case " $FAST_ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac }',
-    'only scripts/test-branch-broke.lua && [ -f marker/broken ] && echo "FAIL lua scripts/test-branch-broke.lua (exit 1): an assertion the branch changed"',
-    `only scripts/test-churn.lua && [ -f '${CHURN.replace(/\\/g, '/')}' ] && echo "FAIL lua scripts/test-churn.lua (exit 1): this machine fails it for any tree"`,
-    'if only scripts/test-needs-a-process.lua && [ -f marker/env ]; then',
+    "printf 'run\n' >> '" + posix(COUNTER) + "'",
+    '[ -f marker/broken ] && echo "FAIL lua scripts/test-branch-broke.lua (exit 1): an assertion the branch changed"',
+    '[ -f "' + posix(CHURN) + '" ] && echo "FAIL lua scripts/test-churn.lua (exit 1): this machine fails it for any tree"',
+    '[ -f marker/env ] && {',
     '  echo "fast: ENVIRONMENT lua scripts/test-needs-a-process.lua (exit 126: cannot fork) - retrying once, serially"',
     '  echo "FAIL lua scripts/test-needs-a-process.lua (exit 126, environment): cannot fork: Resource temporarily unavailable"',
     '  echo "fast path could not run: 1 check(s) were the machine (fork/spawn, retried serially once), 0 skipped, 1s"',
     '  exit 3',
-    'fi',
-    'only scripts/test-known-on-main.lua && echo "FAIL lua scripts/test-known-on-main.lua (exit 1): the machine\'s component set is behind the tree"',
+    '}',
+    'echo "FAIL lua scripts/test-known-on-main.lua (exit 1): the machine component set is behind the tree"',
     'echo "fast: lua 9/10 passed (0 excluded: scripts/fast-path.exclude)"',
     'echo "fast path FAILED (1 of 11 checks, 0 skipped, 1s)"',
     'exit 1', '',
@@ -212,24 +222,31 @@ fs.writeFileSync(CHURN, 'on\n');
 const churned = land('change/churn');
 fs.rmSync(CHURN, {force: true});
 check('a failure main also has right now does not refuse the landing', churned.status === 0, churned.stdout + churned.stderr);
-check('and the queue says it checked main, by name', /on main now too, so not this branch's: lua scripts\/test-churn\.lua/.test(churned.stdout || ''), churned.stdout);
+check('and the queue says it checked main, by name', /fails on main too, so not this branch's: lua scripts\/test-churn\.lua/.test(churned.stdout || ''), churned.stdout);
 const history = q(['history', '--limit', '60']).stdout || '';
 check('the tolerated churn is in the durable log, not only in the answer',
   history.includes('unstable on this machine): lua scripts/test-churn.lua'), history.slice(-600));
-check('the re-check cost exactly one extra run of the named row, not a suite',
-  runCount() === before + 3, `${runCount() - before} run(s): landing two, then the churn landing (candidate + re-check)`);
+check('the re-check runs the named rows, not the suite (the check command ran once for the landing)',
+  runCount() === before + 2, `${runCount() - before} run(s): landing two, then the churn landing`);
 
 // ---- 5. a branch that adds a failing name is refused, and nothing is pushed ----------------------
 branch('change/broken', 'marker/broken', 'x\n');
+// The branch also ADDS a failing test of its own, which is what a regression looks like: main has no
+// such row (so it cannot fail there), the merged tree fails it.
+git(CANONICAL, 'checkout', '-q', 'change/broken');
+fs.writeFileSync(path.join(CANONICAL, 'scripts/test-branch-broke.lua'), "error('an assertion the branch changed')\n");
+git(CANONICAL, 'add', '-A');
+git(CANONICAL, 'commit', '-q', '-m', 'change/broken: a test that fails');
+git(CANONICAL, 'checkout', '-q', 'main');
 const mainBeforeBroken = originMain();
 const broken = land('change/broken');
 check('a new failing name refuses the landing', broken.status === 75, `${broken.status}: ${broken.stdout}${broken.stderr}`);
 check('the refusal names the new failure and the rollback', /checks_failed/.test(broken.stderr || '') && /lua scripts\/test-branch-broke\.lua/.test(broken.stderr || '') && /rolled back/.test(broken.stderr || ''), broken.stderr);
-check('and it says the failure reproduced where the branch is and passed on main', /reproduce where the branch is and pass on main/.test(broken.stderr || ''), broken.stderr);
+check('and it says the new failure passes on main twice and fails on the merged tree', /pass on main twice and fail on the merged tree/.test(broken.stderr || ''), broken.stderr);
 check('origin/main did not move', originMain() === mainBeforeBroken, `${originMain()} vs ${mainBeforeBroken}`);
 check('the canonical tree was rolled back clean', git(CANONICAL, 'status', '--porcelain').trim() === '' && git(CANONICAL, 'rev-parse', 'HEAD').trim() === mainBeforeBroken);
-check('a real regression costs three runs: the candidate, main re-check and one confirmation',
-  runCount() === before + 6, `${runCount() - before} run(s) including the refused landing`);
+check('a refused landing still costs one suite run: the attribution is measured per row',
+  runCount() === before + 3, `${runCount() - before} run(s) including the refused landing`);
 
 // ---- 6. a machine that cannot run the check is a retry, never a code verdict ---------------------
 branch('change/starved', 'marker/env', 'x\n');

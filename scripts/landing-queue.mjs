@@ -427,75 +427,126 @@ async function ensureBaseline({id, canonical, upstream, command, dir, db, say}) 
 
 // ---- re-checking a "new" failure -----------------------------------------------------------------
 //
-// Measured here on 2026-11-10 (rows #27 and #28): the set of checks this machine fails MOVES between
-// two runs minutes apart. At 21:00 the merged tree failed graph/codemode/cli-view/patch-audit; at 21:02
-// main failed completion-packet/context-usage/features-gate/hooks-agent instead; at 21:08 the graph,
-// codemode and cli-view tests failed on main too. The installed component set and the load on a shared
-// node change under a run, so "a name the baseline does not have" is not by itself the branch's fault -
+// Measured here on 2026-11-10 (rows #27, #28 and #30): the set of checks this machine fails MOVES
+// between runs - within eight minutes the same main failed graph/codemode/cli-view, then a disjoint
+// completion-packet/context-usage set, then the first set again, and the same five rows run directly
+// failed identically on main and on the merge. The installed component set and the load on a shared
+// node change under a run, so "a name the baseline does not have" is not by itself the branch's fault,
 // and refusing a correct branch is the failure this whole change exists to remove.
 //
-// So a new failure is only the branch's when it reproduces where the branch is and does NOT reproduce
-// on main's own tree, measured now:
-//   * re-run the new rows on main (detached in this checkout, the same directory as the candidate);
-//   * whatever fails there too is this machine's churn: tolerated, named, and folded into the recorded
-//     baseline so the next landing inherits the fresher measurement instead of paying for it again;
-//   * what passes there is re-run on the merged tree once: a failure that reproduces there is the
-//     branch's and refuses the landing; one that does not was transient and is reported, not charged.
+// The attribution used here is A-B-A, the classic answer to a flaky environment, and it measures the
+// TREE and nothing else: the named Lua rows are run directly (the row recipe of scripts/fast.sh's
+// lua_run: this binary, this tree as the Lua root, a scratch home, no node, no rendezvous) on main,
+// then on the merged tree, then on main again. Running the rows directly rather than through the
+// check command is deliberate: the baseline tree carries its own scripts/, and an older runner there
+// would not honour a "just these rows" request - which is exactly how row #30 got a false answer.
 //
-// It costs one run of the handful of rows involved, and only when a candidate would otherwise be
-// refused - never for a landing that is merely tolerated.
-function onlyFor(run) {
-  const names = run.failures.filter(failure => /^lua scripts\/[^ ]+\.lua$/.test(failure.name)).map(failure => failure.name.slice(4));
-  const other = run.failures.filter(failure => !/^lua scripts\/[^ ]+\.lua$/.test(failure.name)).map(failure => failure.name);
-  return {rows: [...new Set(names)].sort(), other: [...new Set(other)].sort()};
+//   * fails in EITHER main run -> unstable on this machine, never charged to the branch;
+//   * passes both main runs and the merged run -> the branch's: the landing is refused;
+//   * passes on the merged tree -> transient, reported and not charged.
+//
+// It runs only when a candidate would otherwise be refused, and only over the rows involved.
+function luaRowsOf(run) {
+  return [...new Set(run.failures.map(failure => failure.name)
+    .filter(name => /^lua scripts\/[^ ]+\.lua$/.test(name))
+    .map(name => name.slice(4)))].sort();
 }
 
+// One row, the way scripts/fast.sh runs it: WA_SCRIPT with this tree as WASM_AGENT_LUA_ROOT, its own
+// scratch home and its own database, no rendezvous and no relay. Returns true when the row passed.
+function runLuaRow({binary, cwd, row, timeoutMs = 180000}) {
+  // A row the tree does not have cannot fail there. This is the whole difference between "main passes
+  // it" and "main never had it", and it is what makes a row a branch ADDS measurable.
+  if (!fs.existsSync(path.join(cwd, row))) return {row, ok: true, code: null, last: 'not in this tree'};
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-recheck-'));
+  try {
+    const result = spawnSync(binary, ['--db', path.join(home, 't.db')], {
+      cwd, timeout: timeoutMs, encoding: 'utf8',
+      env: {...process.env, WASM_AGENT_LUA_ROOT: cwd, WASM_AGENT_HOME: home,
+        WASM_AGENT_RENDEZVOUS: '', WASM_AGENT_RELAY: '', WASM_AGENT_MANAGED: '0', WA_SCRIPT: row},
+    });
+    return {row, ok: result.status === 0, code: result.status, last: String(result.output || '').trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || ''};
+  } finally {
+    try { fs.rmSync(home, {recursive: true, force: true}); } catch { /* windows may hold a handle */ }
+  }
+}
+
+function runLuaRows({binary, cwd, rows, log, label}) {
+  const outcomes = new Map();
+  const lines = [`# ${label}: ${rows.length} row(s) in ${cwd}`];
+  for (const row of rows) {
+    const outcome = runLuaRow({binary, cwd, row});
+    outcomes.set(row, outcome.ok);
+    lines.push(`${outcome.ok ? 'pass' : 'FAIL'} ${row} (exit ${outcome.code}) ${outcome.last.slice(0, 160)}`);
+  }
+  try { fs.writeFileSync(log, `${lines.join('\n')}\n`, 'utf8'); } catch { /* the row carries it */ }
+  return outcomes;
+}
+
+function hostBinary(canonical) {
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const onPath = dirs.flatMap(dir => [path.join(dir, process.platform === 'win32' ? 'wa.exe' : 'wa'), path.join(dir, 'wa')])
+    .find(candidate => { try { return fs.statSync(candidate).isFile(); } catch { return false; } });
+  if (onPath) return onPath;
+  for (const candidate of [path.join(canonical, 'rust', 'target', 'release', 'wa.exe'),
+    path.join(canonical, 'rust', 'target', 'release', 'wa'),
+    path.join(os.homedir(), '.local', 'bin', 'wa')]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'wa';
+}
+
+// main -> merged -> main, on the same rows, seconds apart.
 async function recheckNewFailures({id, canonical, upstream, baseDigest, command, baseline, names, dir, db, say}) {
   const wanted = names.filter(name => /^lua scripts\/[^ ]+\.lua$/.test(name));
   const outsideLua = names.filter(name => !/^lua scripts\/[^ ]+\.lua$/.test(name));
   const result = {reproduced: [], unstable: [], transient: [], outside_lua: outsideLua};
   if (wanted.length === 0) return result;
-  const rows = wanted.map(name => name.slice(4)).join(' ');
-  say(`#${id} ${wanted.length} new failure(s); re-checking them on main's own tree before calling them the branch's`);
-  const checkout = git(canonical, ['checkout', '--quiet', '--detach', upstream]);
-  if (checkout.status !== 0) {
-    throw new QueueError(`recheck_unavailable: cannot put ${canonical} at ${upstream.slice(0, 12)} to re-check ${rows}: ${String(checkout.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was pushed.`, 75, 'recheck_unavailable');
-  }
-  let onMain;
+  const rows = wanted.map(name => name.slice(4));
+  const binary = hostBinary(canonical);
+  say(`#${id} ${rows.length} new row(s); measuring them on main, merged, main (A-B-A) before calling them the branch's`);
+  const detached = what => {
+    const out = git(canonical, ['checkout', '--quiet', '--detach', what]);
+    if (out.status !== 0) {
+      throw new QueueError(`recheck_unavailable: cannot put ${canonical} at ${what.slice(0, 12)} to re-check ${rows.join(' ')}: ${String(out.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was pushed.`,
+        75, 'recheck_unavailable');
+    }
+  };
+  const backToMain = () => {
+    const out = git(canonical, ['checkout', '--quiet', 'main']);
+    if (out.status !== 0) {
+      throw new QueueError(`recheck_checkout_stuck: could not put ${canonical} back on main after the re-check: ${String(out.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was pushed; the checkout is at ${upstream.slice(0, 12)}, detached, and a person must put it back on main.`,
+        76, 'recheck_checkout_stuck');
+    }
+  };
+  let onMainFirst, onMerged, onMainAgain;
   try {
-    onMain = await captureCommand({
-      cwd: canonical, command, env: checksEnvironment(canonical, {FAST_ONLY: rows}), echo: false,
-      log: path.join(dir, `recheck-main-${upstream.slice(0, 12)}.log`),
-    });
+    detached(upstream);
+    onMainFirst = runLuaRows({binary, cwd: canonical, rows, log: path.join(dir, `recheck-a1-${upstream.slice(0, 12)}.log`), label: `main ${upstream.slice(0, 12)}`});
+    backToMain();
+    onMerged = runLuaRows({binary, cwd: canonical, rows, log: path.join(dir, `recheck-b-${Date.now()}.log`), label: 'merged tree'});
+    detached(upstream);
+    onMainAgain = runLuaRows({binary, cwd: canonical, rows, log: path.join(dir, `recheck-a2-${upstream.slice(0, 12)}.log`), label: `main ${upstream.slice(0, 12)} again`});
   } finally {
-    const back = git(canonical, ['checkout', '--quiet', 'main']);
-    if (back.status !== 0) throw new QueueError(`recheck_checkout_stuck: could not put ${canonical} back on main after the re-check: ${String(back.stderr || '').trim().split('\n').slice(-2).join(' | ')}. Nothing was pushed; the checkout is at ${upstream.slice(0, 12)}, detached, and a person must put it back on main.`, 76, 'recheck_checkout_stuck');
+    backToMain();
   }
-  const onMainRun = parseCheckLog(onMain.output, {exitCode: onMain.code});
-  const failsOnMain = new Set(onMainRun.failures.map(failure => failure.name));
-  result.unstable = wanted.filter(name => failsOnMain.has(name));
-  const suspects = wanted.filter(name => !failsOnMain.has(name));
+  result.unstable = rows.filter(row => !onMainFirst.get(row) || !onMainAgain.get(row))
+    .map(row => `lua ${row}`);
+  const suspects = rows.filter(row => onMainFirst.get(row) && onMainAgain.get(row));
+  result.reproduced = suspects.filter(row => !onMerged.get(row)).map(row => `lua ${row}`);
+  result.transient = suspects.filter(row => onMerged.get(row)).map(row => `lua ${row}`);
   if (result.unstable.length) {
-    say(`#${id} on main now too, so not this branch's: ${result.unstable.join(', ')} (this machine fails them either way)`);
-    // The re-check just measured main more recently than the baseline did: keep the fresher fact, so
-    // the next landing on the same check inputs does not pay for the same discovery.
+    say(`#${id} fails on main too, so not this branch's: ${result.unstable.join(', ')} (unstable on this machine)`);
+    // main was measured more recently than the baseline was: keep the fresher fact, so the next
+    // landing on the same check inputs does not pay to discover it again.
     const merged = [...new Set([...(baseline.names || []), ...result.unstable])].sort();
-    const environmentNames = [...new Set([...(baseline.environment_names || []), ...result.unstable])].sort();
-    const record = {...baseline, names: merged, environment_names: environmentNames, at: Math.floor(Date.now() / 1000),
-      source: 'recheck', failed_checks: Math.max(Number(baseline.failed_checks) || 0, merged.length)};
-    recordBaseline(db, {digest: baseDigest, command, commit: upstream, record, by: 'queue'});
+    recordBaseline(db, {digest: baseDigest, command, commit: upstream, by: 'queue',
+      record: {...baseline, names: merged, failed_checks: Math.max(Number(baseline.failed_checks) || 0, merged.length),
+        environment_names: [...new Set([...(baseline.environment_names || []), ...result.unstable])].sort(),
+        source: 'recheck', at: Math.floor(Date.now() / 1000)}});
   }
-  if (suspects.length === 0) return result;
-  const suspectRun = await captureCommand({
-    cwd: canonical, command, env: checksEnvironment(canonical, {FAST_ONLY: suspects.map(name => name.slice(4)).join(' ')}),
-    echo: true, log: path.join(dir, `recheck-merged-${Date.now()}.log`),
-  });
-  const suspectParsed = parseCheckLog(suspectRun.output, {exitCode: suspectRun.code});
-  const failsOnMerged = new Set(suspectParsed.failures.map(failure => failure.name));
-  result.reproduced = suspects.filter(name => failsOnMerged.has(name));
-  result.transient = suspects.filter(name => !failsOnMerged.has(name));
-  if (result.transient.length) say(`#${id} did not reproduce on the merged tree, so transient: ${result.transient.join(', ')}`);
-  if (result.reproduced.length) say(`#${id} reproduce on the merged tree and pass on main: ${result.reproduced.join(', ')}`);
+  if (result.transient.length) say(`#${id} passed on the merged tree when measured alone, so transient: ${result.transient.join(', ')}`);
+  if (result.reproduced.length) say(`#${id} passes on main twice and fails on the merged tree: ${result.reproduced.join(', ')}`);
   return result;
 }
 
@@ -665,7 +716,7 @@ async function commandLand(options) {
           logRow(db, id, 'recheck', `${recheck.unstable.length} new name(s) fail on main too (unstable on this machine): ${recheck.unstable.join(', ') || 'none'}; ${recheck.transient.length} did not reproduce on the merged tree: ${recheck.transient.join(', ') || 'none'}`);
         } else {
           outcome = {...outcome, verdict: 'worse', new_failures: charged,
-            why: `${charged.length} new failing check(s) reproduce where the branch is and pass on main: ${charged.join(', ')}`};
+            why: `${charged.length} new failing check(s) pass on main twice and fail on the merged tree: ${charged.join(', ')}`};
           judged = {...judged, run: {...judged.run, failures: judged.run.failures.filter(failure => charged.includes(failure.name))}};
         }
       }

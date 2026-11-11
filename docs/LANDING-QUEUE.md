@@ -145,14 +145,17 @@ queue applies it to every `--checks` run, by default:
 - **unproven** (refused) - the check command names no failing test, so a by-name comparison would be a
   guess.
 
-Before a `worse` verdict is acted on, the new names are **re-checked on main's own tree** (one run of the
-named rows, `FAST_ONLY`, in the canonical checkout): whatever fails there too is this machine's churn
-and is tolerated by name; whatever passes there is re-run once on the merged tree, and only a failure
-that reproduces is charged to the branch. This is not leniency, it is the measured condition of a shared
-node: on 2026-11-10, within eight minutes the same main failed the graph/codemode/cli-view set, then a
-disjoint completion-packet/context-usage/hooks set, then the first set again. A by-name diff across two
-moments refuses correct branches; a re-check at one moment does not. A landing that is merely tolerated
-pays nothing for it.
+Before a `worse` verdict is acted on, the new rows are measured **A-B-A**: directly on main, then on the
+merged tree, then on main again (the row recipe of `scripts/fast.sh` - this binary, this tree as the Lua
+root, a scratch home - not the check command, because an older runner in the baseline tree does not honour
+a "just these rows" request; that is how row #30 got a false answer). A row that fails in either main run
+is this machine's churn and is tolerated by name; a row that passes both main runs and fails on the merged
+tree is the branch's and refuses the landing; a row that passes on the merged tree was transient. This is
+not leniency, it is the measured condition of a shared node: on 2026-11-10, within eight minutes the same
+main failed the graph/codemode/cli-view set, then a disjoint completion-packet/context-usage/hooks set,
+then the first set again, and the same rows run directly failed identically on main and on the merge. A
+by-name diff across two moments refuses correct branches; A-B-A at one moment does not. A landing that is
+merely tolerated pays nothing for it: the re-check runs only when a candidate would otherwise be refused.
 
 The baseline itself is a record per (check command, machine, retest digest of main's tree):
 

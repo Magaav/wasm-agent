@@ -79,16 +79,6 @@ fails=0; envfails=0; skipped=0; ran=0
 # ---- 1. Lua -----------------------------------------------------------------------------------------
 excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
 for f in scripts/test-*.lua; do printf '%s\n' "$excluded" | grep -qxF "$f" || printf '%s\n' "$f"; done > "$work/lua.list"
-# FAST_ONLY restricts the batch to the named scripts. It exists for one caller - the landing queue's
-# re-check of the rows a candidate fails and main does not, which decides whether a "new" failure is
-# the branch's or this machine's churn - and it says so loudly, because a subset is not the fast path.
-only=${FAST_ONLY:-}
-if [ -n "$only" ]; then
-  : > "$work/lua.only"
-  for f in $only; do grep -qxF "$f" "$work/lua.list" && printf '%s\n' "$f" >> "$work/lua.only"; done
-  mv "$work/lua.only" "$work/lua.list"
-fi
-# Slowest first, from this checkout's previous run, so a long test does not start last and set the tail.
 timings=$(git rev-parse --git-path wa-fast-timings.tsv 2>/dev/null || true)
 if [ -n "$timings" ] && [ -s "$timings" ]; then
   awk -F'\t' 'NR==FNR{ms[$3]=$2; next} {print (($0 in ms)?ms[$0]:999999) "\t" $0}' "$timings" "$work/lua.list" | sort -rn | cut -f2 > "$work/lua.sorted" \
@@ -143,7 +133,6 @@ if [ -n "$envrows" ]; then
   done <<< "$envrows"
 fi
 lua_total=$(wc -l < "$work/lua.list"); lua_fail=$(awk -F'\t' '$1!=0' "$work/lua.tsv" | wc -l)
-[ -n "$only" ] && echo "fast: ONLY mode - $lua_total named row(s) of the Lua suite, no Rust, no contract checks (a landing queue re-check, not the fast path)"
 envleft=$(awk -F'\t' '$1!=0 && $5=="environment"' "$work/lua.tsv" | wc -l)
 [ -n "$timings" ] && cp "$work/lua.tsv" "$timings" 2>/dev/null || true
 ran=$((ran + lua_total)); fails=$((fails + lua_fail));
@@ -152,9 +141,7 @@ echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(printf '%s\n' "$e
 [ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
 
 # ---- 2. Rust: the crates this change touches ----------------------------------------------------------
-if [ -n "$only" ]; then
-  echo "fast: rust SKIPPED (ONLY mode: a re-check of named rows, not the suite)"; skipped=$((skipped + 1))
-elif [ "${WA_FAST_IN_DOCKER:-}" = 1 ]; then
+if [ "${WA_FAST_IN_DOCKER:-}" = 1 ]; then
   echo "fast: rust SKIPPED (inside the sandbox image: no toolchain; run on a node with cargo)"; skipped=$((skipped + 1))
 elif ! command -v cargo >/dev/null 2>&1; then
   echo "fast: rust SKIPPED (cargo not on PATH)"; skipped=$((skipped + 1))
@@ -219,9 +206,7 @@ check() { name=$1; shift; s=$(date +%s%N)
     *) echo "FAIL $name (exit $c): $(tail -3 "$work/check-$name.log" | tr '\n' ' ')" ;; esac
 }
 WA_BIN="$bin" check prompt-docs bash scripts/sync-prompt-docs.sh --check
-if [ -n "$only" ]; then
-  echo "fast: contract checks SKIPPED (ONLY mode: a re-check of named rows, not the suite)"; skipped=$((skipped + 6))
-elif command -v node >/dev/null 2>&1; then
+if command -v node >/dev/null 2>&1; then
   check instructions node scripts/check-instructions.mjs
   check direct-workflow node scripts/test-direct-workflow-instructions.mjs
   # The landing queue's own evidence: one lander at a time, FIFO, reclaim of a dead holder, the
