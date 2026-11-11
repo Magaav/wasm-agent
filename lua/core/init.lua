@@ -2,6 +2,12 @@
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 
+-- Every command this process runs passes the path guard first (lua/core/path_guard.lua): a recursive
+-- delete of a home, a root, `~/.wasm-agent` or the install tree is refused by name, whoever asked for
+-- it. Installed here, once, so a call site added later cannot forget it. Measured 11/11: a test took
+-- its scratch from WASM_AGENT_HOME and deleted the operator's whole home.
+dofile("lua/core/path_guard.lua").install(host)
+
 -- Where this Lua came from: the compiled-in copy, or - on an installed node - the pinned tree
 -- deploy installs beside the binary (<install>/lua-core, verified against the binary's capability
 -- digest; `wa --lua-tree` says which). That tree is the shipping copy, not dev mode: none of the

@@ -174,6 +174,10 @@ local function generic_sections(role, declared, available)
   -- cache-stable prefix, so every role and every turn reads the same two legal endings.
   s.law = "Answer with the verified artifact or a measured impossibility - a plan, an obstacle or a "
     .. "question is not an answer."
+  -- The 11/11 loss, as a law: a test took its scratch from the environment and deleted the operator's
+  -- home. Scratch belongs to the run that made it, and a delete may only take what that run created.
+  s.law = s.law .. " Never delete what you did not create in this run; tests use their own scratch, "
+    .. "never a path from the environment."
   -- Authority, stated once in the prefix every mode reads, instead of restated inside each workflow
   -- mode as it was (11/11). Only the session that can delegate lands and deploys; the landing path is
   -- the queue, never a hand-integration in the canonical checkout a child or a sentinel note could reach.

@@ -1160,6 +1160,11 @@ end
 local function run(command, timeout_seconds, cwd, provenance)
   -- Set the process launch directory, never hide it in shell command text. Later shell `cd`
   -- remains command behavior, not something the operation receipt claims to observe.
+  -- A recursive delete of a protected path never reaches the shell: the guard names the path and the
+  -- rule. init.lua installs the same check around `host.exec`; this is the second wall, because a test
+  -- or a host that swaps `host.exec` after init would otherwise be enough to lose a home.
+  local allowed, refused = dofile("lua/core/path_guard.lua").command(command, cwd)
+  if not allowed then return { error = refused, effect = "none", blocked_by = "path_guard" } end
   local ok, raw = pcall(host.exec, command, cwd or "", timeout_seconds, json.encode(provenance))
   if not ok then return { error = tostring(raw) } end
   local decoded = json.decode(raw)

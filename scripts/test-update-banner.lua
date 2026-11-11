@@ -1,6 +1,10 @@
 -- `lua/core/update_banner.lua`: the compare logic, the release feed, the cache TTL and the bus fact.
 --
---   WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=<scratch> WA_SCRIPT=scripts/test-update-banner.lua wa --db <scratch>/t.db
+--   WASM_AGENT_LUA_ROOT=$PWD WA_SCRIPT=scripts/test-update-banner.lua wa --db <scratch>/t.db
+--
+-- Its scratch is its own (`mktemp -d`, marked, removed only while the marker is this run's) and never a
+-- path from the environment (measured 11/11: this file used WASM_AGENT_HOME, which inside `wa` is the
+-- operator's home, and deleted it).
 --
 -- No network: every case is a fixture file, an injected fetch, or a pure function. What this pins is
 -- the part that would otherwise be an opinion - that "behind" is proven on the right channel (a tree
@@ -60,9 +64,30 @@ eq(banner.identity({ commit = "unknown" }), nil, "a record that names no commit 
 eq(banner.identity(nil), nil, "no record means no identity")
 
 -- The reader must agree with the deploy's own reader (`update.lua` keeps `installed.txt` single).
-local scratch = host.getenv("WASM_AGENT_HOME") or (dofile("lua/core/platform.lua").cwd() .. "/.git/wa-update-banner-test")
+local function shell(command)
+  local ok, raw = pcall(host.exec, command, "", 30)
+  if not ok or type(raw) ~= "string" then return nil end
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  if not decoded_ok or type(decoded) ~= "table" then return nil end
+  return tostring(decoded.stdout or ""):gsub("%s+$", "")
+end
+-- Never a path from the environment: `WASM_AGENT_HOME` answers "where is the node's home", not "where
+-- may a test write". This run creates its own directory and marks it, and cleanup deletes only a
+-- directory that still carries the marker it wrote.
+local scratch = shell("mktemp -d 2>/dev/null || mktemp -d -t wa-update-banner")
+assert(scratch and scratch ~= "", "update banner: could not create a scratch directory; refusing to run without its own")
 local scratch_sh = scratch:gsub("\\", "/")
-pcall(host.exec, "rm -rf '" .. scratch_sh .. "' && mkdir -p '" .. scratch_sh .. "/install' '" .. scratch_sh .. "/cache'", "")
+local marker = scratch_sh .. "/.wa-test-scratch"
+local token = tostring(host.uuid and host.uuid() or (host.now and host.now() or ""))
+assert(host.write_file(marker, "test-update-banner " .. token .. "\n"), "update banner: could not mark its own scratch")
+local function cleanup()
+  local read_ok, text = pcall(host.read_file, marker)
+  if not read_ok or type(text) ~= "string" or not text:find(token, 1, true) then return false end
+  if not dofile("lua/core/path_guard.lua").command("rm -rf '" .. scratch_sh .. "'") then return false end
+  pcall(host.exec, "rm -rf '" .. scratch_sh .. "'", "", 30)
+  return true
+end
+assert(shell("mkdir -p '" .. scratch_sh .. "/install' '" .. scratch_sh .. "/cache'") ~= nil, "update banner: could not prepare its scratch")
 local install = scratch .. "/install"
 local RECORD = "commit=aaaaaaa\nbranch=main\ndirty=0\nsource_provenance=clean-built-by-deploy\nvia=deploy.sh\n"
 host.write_file(install .. "/installed.txt", RECORD)
@@ -674,7 +699,7 @@ local from_fixture = banner.check({ install = install, tree = "", cache_path = s
 eq(from_fixture.state, "behind", "the fixture file answers without a request")
 
 if failed == 0 then
-  pcall(host.exec, "rm -rf '" .. scratch_sh .. "'", "")
+  cleanup()
   print("update banner ok (" .. checks .. " checks)")
   return
 end
