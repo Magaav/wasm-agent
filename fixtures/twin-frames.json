@@ -1,0 +1,45 @@
+{
+  "why": "One layout, two renderers: lua/core/cli_view.lua and rust/wa-term's Editor draw the same console, and on 2026-11-11 two rendering bugs came from the twins disagreeing (the status-row geometry and session_content) rather than from either being wrong on its own. This file is the contract BOTH tests read: scripts/test-twin-render.lua asserts the Lua side and the `twin_frames_agree_with_the_shared_fixture` test in rust/wa-term/src/terminal_editor.rs asserts the Rust side, so a change to one renderer that the other does not follow fails where it was made. Add a case here when a frame's state matters; never edit an expectation to match one side alone.",
+  "cases": [
+    {
+      "name": "a notice on a 30-row screen",
+      "rows": 30,
+      "width": 80,
+      "notice": "Update available (abc123): run wa update or /update",
+      "build": "",
+      "session_text": "Update available (abc123): run wa update or /update"
+    },
+    {
+      "name": "a notice clipped to a narrow screen",
+      "rows": 12,
+      "width": 24,
+      "notice": "Update available (abc123): run wa update or /update",
+      "build": "",
+      "session_text": "Update available (abc12…"
+    },
+    {
+      "name": "the build loader replaces the notice on the same row",
+      "rows": 30,
+      "width": 80,
+      "notice": "Update available (abc123): run wa update or /update",
+      "build": "⟳ building",
+      "session_text": "⟳ building"
+    },
+    {
+      "name": "no notice and no build: no row at all",
+      "rows": 30,
+      "width": 80,
+      "notice": "",
+      "build": "",
+      "session_text": null
+    },
+    {
+      "name": "wide glyphs are clipped by cells, not bytes",
+      "rows": 12,
+      "width": 12,
+      "notice": "更新 🧭 update",
+      "build": "",
+      "session_text": "更新 🧭 upd…"
+    }
+  ]
+}

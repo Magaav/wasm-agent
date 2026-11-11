@@ -1328,4 +1328,51 @@ mod tests {
         assert!(frame.contains("\x1b[21;31H\x1b[38;2;153;153;153mgpt-6-luna"), "the model ends at the right edge");
     }
 
+    // ---- the twin-render contract -----------------------------------------------------------------
+    // `lua/core/cli_view.lua` draws the same console as this editor, and on 2026-11-11 two rendering
+    // bugs came from the twins disagreeing (the status-row geometry and `session_content`) rather than
+    // from either being wrong alone. Both tests read `fixtures/twin-frames.json`: the Lua one is
+    // scripts/test-twin-render.lua, and this is the Rust one, so a change to either renderer that the
+    // other does not follow fails where it was made.
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut skip = false;
+        for ch in text.chars() {
+            if ch == '\u{1b}' { skip = true; }
+            else if skip { if ch == 'm' { skip = false; } }
+            else { out.push(ch); }
+        }
+        out
+    }
+
+    #[test]
+    fn twin_frames_agree_with_the_shared_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/twin-frames.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&text).expect("fixtures/twin-frames.json is valid JSON");
+        let cases = fixture["cases"].as_array().expect("the fixture has cases");
+        assert!(!cases.is_empty(), "the twin-render contract has no cases");
+        for case in cases {
+            let name = case["name"].as_str().expect("every case is named");
+            let rows = case["rows"].as_u64().expect("rows") as usize;
+            let width = case["width"].as_u64().expect("width") as usize;
+            let mut editor = Editor::default();
+            // The editor's `row` is the input row, which is the row above the footer.
+            editor.row = rows - 1;
+            editor.width = width;
+            editor.height = 3;
+            editor.session_notice = case["notice"].as_str().unwrap_or("").to_string();
+            editor.build = case["build"].as_str().unwrap_or("").to_string();
+            assert_eq!(editor.session_row(), rows - 1, "{name}: the session row is the row above the footer");
+            assert_eq!(editor.footer_row(), rows, "{name}: the footer is the screen's last row");
+            let drawn = strip_ansi(&editor.session_content());
+            match case["session_text"].as_str() {
+                Some(want) => assert_eq!(drawn, want, "{name}: session_content"),
+                None => assert!(drawn.is_empty(), "{name}: nothing claims the row, so nothing is drawn (got {drawn:?})"),
+            }
+        }
+    }
+
 }
