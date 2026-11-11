@@ -1,6 +1,6 @@
 {
   "id": "disk-reclaim",
-  "name": "Disk reclaim: hourly REPORT ONLY vs the 3.71 GiB floor; removal only with WA_RECLAIM_MODE=apply",
+  "name": "Disk reclaim: hourly ACTIVE pass over the safe categories, with the bytes it freed",
   "trigger": {
     "kind": "schedule",
     "every_seconds": 3600

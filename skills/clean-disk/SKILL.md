@@ -171,9 +171,15 @@ Rules for every row:
   **1,045,916,377 B (0.97 GiB)** and took **1119 s (~19 min)**, measured 2026-09-30 on `ab827c8` and
   recorded in `scripts/check-disk-floor.sh`. Rebuilding a 2-5 GiB target is a gate, not a probe: clean
   `debug`/`incremental` first and state the cost before the release target.
-- **`scripts/reclaim-disk.mjs` is the repository's report-first pass** for managed session worktrees'
-  `rust/target` and bounded temp families. Run it (report) before a hand clean; `--apply` removes only
-  the subset it proves ended and never touches the canonical checkout or a live session's tree.
+- **`scripts/reclaim-disk.mjs` is the repository's automatic reclaim pass**, and since 11/11 it runs
+  **active** from the `disk-reclaim` job (hourly) and the `disk-reclaim-live` job (the moment free space
+  drops below 5 GB or 5 %). It removes four categories and nothing else: `*-pre-update` backups beyond the
+  newest 3 (plus any a pending rollback names), `graph.db.malformed-*` older than the newest stamp, the
+  `session-scratch` of sessions that ended more than 24 h ago, and the `rust/target` of a managed
+  worktree whose session ended. The never-touch list is enforced in one function at the only removal, so
+  a wrong pattern shows up as "nothing removed", never as a store that is gone. For the plan:
+  `bash scripts/reclaim-disk.sh --dry-run` (or `node scripts/reclaim-disk.mjs --dry-run`); never
+  `--apply` by hand while a deploy is running - the pass refuses the build category then, and says so.
 
 ### Tier 3 - a service stops, or a virtual disk is rewritten
 

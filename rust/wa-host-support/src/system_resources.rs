@@ -100,6 +100,11 @@ fn disk(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
+// The disk answer, for the callers that have to decide something on it. `None` is "this platform cannot
+// tell me", not "there is plenty": the graph indexer treats a measured low disk as a reason to defer a
+// rebuild and names an unmeasurable one separately, which it could not do if this returned 0 or a guess.
+pub fn free_space(path: &Path) -> Option<(u64, u64)> { disk(path) }
+
 pub fn sample() -> Value {
     let memory = memory();
     let disk = std::env::current_dir().ok().and_then(|path| disk(&path));

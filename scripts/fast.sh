@@ -393,6 +393,10 @@ if command -v node >/dev/null 2>&1; then
   # close: the 10/11 `owner_ended` refusal of a live session, pinned against a real ledger and a
   # real pid.
   check session-liveness node scripts/test-session-liveness.mjs
+  # The automatic disk reclaim (weakness #81): each safe category's rule, the keep-newest counts, the
+  # never-touch list (both as a predicate and as what survives a real run), the deploy guard, and that
+  # the dry run removes nothing while the active run frees exactly the plan it printed.
+  check reclaim-disk node scripts/test-reclaim-disk.mjs
   # The known-failures baseline the landing queue judges a candidate against: same failures pass, a new
   # failure refuses, a fixed failure is tolerated, an environment-only failure is a retry (not a
   # verdict), and a recorded baseline is reused instead of a pristine run when the tree's check inputs

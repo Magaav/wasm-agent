@@ -1,0 +1,15 @@
+{
+  "id": "disk-reclaim-live",
+  "name": "Disk reclaim: the same pass, run at once when free space drops below 5 GB or 5%",
+  "trigger": {
+    "kind": "disk",
+    "below_bytes": 5368709120,
+    "below_percent": 5,
+    "cooldown_seconds": 900
+  },
+  "action": {
+    "kind": "run",
+    "script": "PREPARED_BY_INSTALL/scripts/reclaim-disk.sh",
+    "timeout_seconds": 900
+  }
+}

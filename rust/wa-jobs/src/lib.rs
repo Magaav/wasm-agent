@@ -144,6 +144,27 @@ pub fn validate(job: &Value) -> Result<()> {
                 return fail("file_trigger_needs_absolute_directory");
             }
         }
+        // A condition on free space. It takes no clock: `cooldown_seconds` bounds how often it may fire,
+        // and at least one threshold has to be a positive number, or the job would be a trigger that can
+        // never fire - which reads exactly like one that is broken.
+        "disk" => {
+            let below_bytes = trigger["below_bytes"].as_u64().unwrap_or(5 * 1024 * 1024 * 1024);
+            let below_percent = trigger["below_percent"].as_f64().unwrap_or(5.0);
+            if below_bytes == 0 && below_percent <= 0.0 {
+                return fail("disk_trigger_needs_a_threshold");
+            }
+            if below_percent < 0.0 || below_percent > 100.0 {
+                return fail("invalid_disk_percent");
+            }
+            if let Some(path) = trigger["path"].as_str() {
+                if !Path::new(path).is_absolute() {
+                    return fail("disk_trigger_needs_absolute_path");
+                }
+            }
+            if !matches!(trigger["cooldown_seconds"].as_u64(), None | Some(60..=604800)) {
+                return fail("invalid_disk_cooldown");
+            }
+        }
         _ => return fail("unknown_job_trigger"),
     }
     validate_action(&job["action"])?;
@@ -498,7 +519,18 @@ impl Store {
     pub fn schedule(&self, now: i64) -> Result<u64> {
         let mut count = 0;
         for job in self.list()?.as_array().unwrap() {
-            if job["enabled"] != true || job["trigger"]["kind"] != "schedule" {
+            if job["enabled"] != true {
+                continue;
+            }
+            let kind = job["trigger"]["kind"].as_str().unwrap_or("");
+            // A `disk` trigger is a condition, not a clock: it is evaluated on every tick and fires when
+            // the filesystem is below its threshold, so the reclaim run does not wait for the next hour
+            // while the disk is already the reason a build fails.
+            if kind == "disk" {
+                count += self.disk_trigger(&job, now)?;
+                continue;
+            }
+            if kind != "schedule" {
                 continue;
             }
             let id = job["id"].as_str().unwrap();
@@ -547,6 +579,58 @@ impl Store {
             }
         }
         Ok(count)
+    }
+    /// One `disk` trigger, evaluated against the filesystem it names.
+    ///
+    /// WHY A TRIGGER AND NOT A SHORTER SCHEDULE. The reclaim pass walks the state directory; running it
+    /// every minute would cost more than it frees, and running it hourly is exactly the window in which a
+    /// disk that is already full stays full - on 11/11 this node froze twice for it. So the *condition*
+    /// is cheap (one `statvfs`/`GetDiskFreeSpaceExW`) and checked often, and the *pass* runs at most once
+    /// per `cooldown_seconds`.
+    ///
+    /// THE THRESHOLD IS EITHER ONE, and the default names both: below `below_bytes` free OR below
+    /// `below_percent` free. A byte floor is the right rule on a small disk and a useless one on a 96 GB
+    /// host where 5 GB is 5 % - which is the second, and why both exist.
+    ///
+    /// DEDUPE. The event id is the cooldown bucket, so the store's own `UNIQUE(job_id, revision, event_id)`
+    /// makes a second tick inside one window a no-op: no extra code, and a node restart cannot produce a
+    /// second immediate run for the same window.
+    fn disk_trigger(&self, job: &Value, now: i64) -> Result<u64> {
+        let trigger = &job["trigger"];
+        let id = job["id"].as_str().unwrap();
+        let rev = job["revision"].as_i64().unwrap();
+        let below_bytes = trigger["below_bytes"].as_u64().unwrap_or(5 * 1024 * 1024 * 1024);
+        let below_percent = trigger["below_percent"].as_f64().unwrap_or(5.0);
+        let cooldown = trigger["cooldown_seconds"].as_i64().unwrap_or(900).max(60);
+        // The state directory is the default subject: it holds the backups, the quarantines and the
+        // scratch this trigger exists to relieve, so it is on the filesystem that runs out. An explicit
+        // `path` overrides it for a node whose state lives elsewhere.
+        let subject = trigger["path"].as_str().map(PathBuf::from).unwrap_or_else(|| {
+            self.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+        });
+        let Some((free, total)) = wa_host_support::system_resources::free_space(&subject) else {
+            // An unmeasurable disk is not a healthy one, and it is not a reason to fire either: the
+            // status says which, so the next reader does not mistake silence for plenty.
+            let _ = self.source_status(id, rev, &format!("unmeasurable: no free-space answer for {}", subject.display()));
+            return Ok(0);
+        };
+        let percent_free = if total > 0 {free as f64 / total as f64 * 100.0} else {100.0};
+        let low_bytes = free < below_bytes;
+        let low_percent = percent_free < below_percent;
+        if !low_bytes && !low_percent {
+            let _ = self.source_status(id, rev, &format!("above threshold: {free} B free of {total} B ({percent_free:.1} %)"));
+            return Ok(0);
+        }
+        let bucket = now.div_euclid(cooldown);
+        let event = format!("disk:{bucket}");
+        let payload = json!({
+            "free_bytes": free, "total_bytes": total, "percent_free": (percent_free * 10.0).round() / 10.0,
+            "below_bytes": below_bytes, "below_percent": below_percent, "subject": subject.display().to_string(),
+            "why": if low_bytes { "below_bytes" } else { "below_percent" },
+        });
+        let fired = self.enqueue(id, rev, &event, &payload, now)?;
+        let _ = self.source_status(id, rev, &format!("low disk: {free} B free of {total} B ({percent_free:.1} %), run in bucket {bucket}"));
+        Ok(fired as u64)
     }
     pub fn source_status(&self, id: &str, revision: i64, status: &str) -> Result<()> {
         self.db()?.execute(

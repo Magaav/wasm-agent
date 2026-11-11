@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# A `disk` trigger fires on a filesystem fact, and this is the crate that owns the one free-space
+# measurement (statvfs / GetDiskFreeSpaceExW). A second one here would be a second answer to "is the
+# disk full", which is how two parts of a system disagree about the same number.
+wa-host-support = { path = "../wa-host-support" }
 # Contention policy for every SQLite store (rust/wa-sqlite): one busy timeout, WAL, and a bounded
 # retry that names itself instead of dying as `database is locked`. A leaf crate.
 wa-sqlite = { path = "../wa-sqlite" }
