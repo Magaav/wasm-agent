@@ -277,6 +277,9 @@ async function deltaClassification() {
   check('a landing whose release could not be published still lands', unreleased.status === 0, unreleased.stdout + unreleased.stderr);
   check('and the row records why the release was not published, for every target',
     /release failed \(aarch64-unknown-linux-gnu=failed, x86_64-unknown-linux-gnu=failed\): .*publish_tool_missing/.test(unreleased.stdout), unreleased.stdout);
+  check('a land prints the PREVIOUS landing\'s release verdict per target',
+    new RegExp(`release for ${originMain.slice(0, 12)} \\(landed by change/proven #\\d+, .*aarch64-unknown-linux-gnu=covered, x86_64-unknown-linux-gnu=covered`).test(unreleased.stdout),
+    unreleased.stdout);
   check('main is the same commit the landing pushed',
     git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === git(CANONICAL, 'rev-parse', 'HEAD').trim());
 }
@@ -368,6 +371,17 @@ function dirtyCanonical() {
   check('status flags the tree as dirty and lists the files',
     state.canonical_dirt.dirty === true && state.canonical_dirt.files.includes('docs/stray-edit.md'),
     JSON.stringify(state.canonical_dirt));
+  // The landing before this one could not publish: `status` says so per target, as a named warning row,
+  // and still exits 0 (a fact about a release is not a reason to stop reading the queue).
+  const noRelease = git(ORIGIN, 'rev-parse', 'refs/heads/main').trim();
+  check('status names the previous landing and its verdict per target',
+    state.previous_release && state.previous_release.commit === noRelease
+      && state.previous_release.release.targets['aarch64-unknown-linux-gnu'].state === 'failed',
+    JSON.stringify(state.previous_release));
+  check('status fails loudly, as a named warning row, when a landed commit is not covered',
+    state.release_warnings.length === 2
+      && state.release_warnings.every(warning => new RegExp(`^WARNING release_uncovered ${noRelease.slice(0, 12)} (aarch64|x86_64)-unknown-linux-gnu: failed`).test(warning)),
+    JSON.stringify(state.release_warnings));
   fs.rmSync(path.join(CANONICAL, 'docs', 'stray-edit.md'));
   const clean = q(['acquire', '--branch', 'change/anyone', '--owner', SESSION, '--no-wait']);
   check('the same queue accepts the tree once it is clean', clean.status === 0 || /NOT granted/.test(clean.stdout), clean.stdout + clean.stderr);

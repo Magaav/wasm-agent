@@ -399,9 +399,24 @@ if command -v node >/dev/null 2>&1; then
   # verdict), and a recorded baseline is reused instead of a pristine run when the tree's check inputs
   # are unchanged.
   check landing-baseline node scripts/test-landing-baseline.mjs
+  # The JavaScript tests no harness named (measured 2026-11-11: 45 of 237) were audited: the ones that are
+  # self-contained and test live code run here, and scripts/test-orphans.json carries the reason for every
+  # one that cannot. The ledger check fails on a new orphan, a stale entry or a declared one gone wired.
+  check orphan-tests node scripts/test-orphan-tests.mjs
+  check run-key-ui node scripts/test-run-key-ui.mjs
+  check wave-current-user-record node scripts/test-wave-current-user-record.mjs
+  check whatsapp-lifecycle node scripts/test-whatsapp-lifecycle.mjs
+  check agent-benchmark-forced node scripts/test-agent-benchmark-forced.mjs
+  check agent-benchmark-proxy node scripts/test-agent-benchmark-proxy.mjs
+  check delivery-intent-race node scripts/test-delivery-intent-race.mjs
+  check wave-no-third-party node scripts/test-wave-no-orca.mjs
+  check wave-ship-mutation node scripts/test-wave-ship-mutation.mjs
 else
-  echo "fast: instructions, direct-workflow, landing-queue, session-liveness, landing-baseline SKIPPED (node not on PATH)"; skipped=$((skipped + 5))
+  echo "fast: instructions, direct-workflow, landing-queue, session-liveness, landing-baseline, orphan-tests and the JS test rows SKIPPED (node not on PATH)"; skipped=$((skipped + 5))
 fi
+# The deploy's retirement rule: a shipped script main deleted must not survive in the install (measured
+# 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
+check deploy-prune bash scripts/test-deploy-prune.sh
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
 check fast-environment bash scripts/test-fast-environment.sh

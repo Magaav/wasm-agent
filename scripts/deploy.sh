@@ -70,7 +70,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
-for wa_lib_part in build-status build-requirements deploy-components node-binaries; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries retire-unshipped; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
@@ -1601,6 +1601,17 @@ ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/dep
 # node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2
 # cores, no disk for ~600 crates) cannot do. Measured 06/11: the prebuilt path was reached only from the tree.
 ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-binaries.sh" "scripts/lib/node-binaries.sh beside deploy.sh"
+# ...and the rule that retires a script this release no longer ships: it runs at the end of THIS deploy, from
+# the copy beside deploy.sh, so an installed `request deploy` prunes exactly as the checkout deploy does.
+ship_file "$ROOT/scripts/lib/retire-unshipped.sh" "$INSTALL_DIR/scripts/lib/retire-unshipped.sh" "scripts/lib/retire-unshipped.sh beside deploy.sh"
+# The disk-reclaim job's own files. The job is installed below, and a run step is only useful if the install
+# has the pass AND the floor it is compared with: measured 2026-11-11, the install held a `reclaim-disk.sh`
+# from an older era and no `reclaim-disk.mjs` at all, so enabling the job would have run a script that could
+# not start - a job that is on and never works, which reads exactly like a disk with nothing to report.
+ship_file "$ROOT/scripts/reclaim-disk.sh" "$INSTALL_DIR/scripts/reclaim-disk.sh" "disk-reclaim job entry point"
+ship_file "$ROOT/scripts/reclaim-disk.mjs" "$INSTALL_DIR/scripts/reclaim-disk.mjs" "the disk reclaim report pass"
+ship_file "$ROOT/scripts/check-disk-floor.sh" "$INSTALL_DIR/scripts/check-disk-floor.sh" "the build floor the reclaim report compares against"
+ship_file "$ROOT/scripts/lib/proc-use.mjs" "$INSTALL_DIR/scripts/lib/proc-use.mjs" "the reclaim pass's process evidence"
 ship_file "$ROOT/components.lock" "$INSTALL_DIR/components.lock" "components.lock beside deploy.sh (the pins this install verified)"
 ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
 ship_file "$ROOT/scripts/check-graph-component.lua" "$INSTALL_DIR/scripts/check-graph-component.lua" "the graph component proof the deploy runs"
@@ -1682,14 +1693,15 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   # older deploy importing the `whatsapp-mcp-client.mjs` that went with it, and the deploy that installed an
   # unrelated fix recorded `ok=false` (2026-11-11). Only the two globs this block ships are pruned, and a file
   # is removed only when the tree does not have it, so nothing this deploy means to install can be deleted.
-  PRUNED=0
-  for installed in "$INSTALL_DIR"/scripts/whatsapp-* "$INSTALL_DIR"/scripts/mcp-*.mjs; do
-    if [ ! -f "$installed" ]; then continue; fi
-    if [ -f "$ROOT/scripts/$(basename "$installed")" ]; then continue; fi
-    rm -f "$installed" || fail "could not remove $(basename "$installed"), which this tree no longer ships"
-    PRUNED=$((PRUNED + 1))
-  done
-  if [ "$PRUNED" -gt 0 ]; then echo "deploy: pruned $PRUNED installed script(s) this tree no longer ships"; fi
+  # ...and the same rule for EVERY shipped family, not only the two globs above: a `scripts/lib/*` import, a
+  # wave script, a subagent-return script or a job definition whose tree file is gone is exactly as stale as
+  # `whatsapp-reply.mjs` was. Moved to <install>/scripts/.retired/<utc>/, never deleted, so the old bytes stay
+  # recoverable (scripts/lib/retire-unshipped.sh owns the list and the proof).
+  if command -v retire_unshipped >/dev/null 2>&1; then
+    retire_unshipped "$INSTALL_DIR" "$ROOT" || fail "could not retire the shipped scripts this tree no longer has"
+  else
+    note "no scripts/lib/retire-unshipped.sh beside this deploy: a script main deleted can survive in $INSTALL_DIR/scripts"
+  fi
   # And prove the install is import-closed, so a script that cannot load is a refused deploy instead of a
   # silent run of failing deliveries: every relative import of a shipped script must resolve inside
   # <install>/scripts, next to the script that names it.
@@ -1711,7 +1723,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
       || fail "node installed, but could not ship $(basename "$source")"
     PIPELINE=$((PIPELINE + 1))
   done
-  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json "$ROOT"/jobs/on-stale.json; do
+  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json "$ROOT"/jobs/on-stale.json "$ROOT"/jobs/disk-reclaim.json; do
     [ -f "$source" ] || continue
     JOB_NAME="$(basename "$source" .json)"
     # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from

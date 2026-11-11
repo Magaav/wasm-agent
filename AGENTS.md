@@ -7,42 +7,38 @@ made from this checkout, so it stays short; detail lives in `docs/` and loads on
 
 Answer with the verified artifact or a measured impossibility — a plan, an obstacle or a question is not an answer.
 
-The default is the operator-selected direct workflow (`AGENTS.orchestrator.md`): implement,
-self-review, run the fast path (`bash scripts/fast.sh`), integrate through canonical main, push and read back
-`origin/main`, and leave both trees clean.
-Do not start subagents or external inference agents unless the operator explicitly enables
-`/orchestration` (`docs/ORCHESTRATION-MODE.md`). Only the coordinator owns `/update`, UI
-publication and Sentinel.
+The default is the operator-selected direct workflow (`AGENTS.orchestrator.md`): implement, self-review,
+run `bash scripts/fast.sh`, integrate through canonical main, push and read back `origin/main`, leave both
+trees clean. No subagents or external inference agents unless the operator explicitly enables
+`/orchestration` (`docs/ORCHESTRATION-MODE.md`). Only the coordinator owns `/update`, UI publication and
+Sentinel.
 
 - Work on a short-lived `change/<name>` branch cut from `origin/main`; `git pull` before
   editing. Keep the `Agent:` trailer and prove `git merge-tree --write-tree origin/main HEAD`.
-- **The canonical checkout takes one lander at a time, in order:** `node scripts/landing-queue.mjs land
-  --branch change/<name> --checks "bash scripts/fast.sh"` queues behind the holder, refuses a dirty
-  canonical tree nobody owns, and retests only what the move changed (`docs/LANDING-QUEUE.md`).
-- **A landing is judged against what main already FAILS, not zero** (`docs/LANDING-QUEUE.md` §3b);
-  read `landing-queue.mjs baseline`, never improvise a subset or matcher.
+- **Land through the queue**, one lander at a time and in order:
+  `node scripts/landing-queue.mjs land --branch change/<name> --checks "bash scripts/fast.sh"`. It refuses
+  a dirty canonical tree nobody owns, retests only what the move changed, judges the result against what
+  main already FAILS (never against zero), and publishes BOTH Linux binaries for the landed commit.
+  `status` prints the queue and the previous landing's release verdict per target; an uncovered landed
+  commit is a named `WARNING release_uncovered` row. Procedure: `skills/git-orchestrator/SKILL.md`;
+  commands and state: `docs/LANDING-QUEUE.md`; baseline: `landing-queue.mjs baseline`.
 - Use ordinary Git integration. Self-review is allowed;
   self-review must be labelled self-review, never independent review.
   Do not fabricate a factory receipt or disable remote protection; remote protection is the
   boundary that cannot be skipped, hooks are a convenience.
 - **Day to day: the fast path.** `bash scripts/fast.sh` (minutes) must pass before you integrate;
-  report what it SKIPPED. It runs every self-contained `scripts/test-*.lua`, touched-crate Rust tests
-  and the contract checks. A new Lua test belongs in it: make it self-contained, don't add it to
-  `scripts/fast-path.exclude`. On Windows at most 4 run at once (`WA_FAST_JOBS`).
-- **The full gate is nightly, and for releases.** `scripts/test.sh` (via `scripts/wave-release.mjs`,
-  ~50 min) runs nightly and on request; never gate a landing on it (landings report
-  `gate_verified:false`, `release_verified:false` - `lane-policy.json`).
-- Cleanup: back up dirty drafts, rejected code and evidence before retiring verified obsolete
+  report what it SKIPPED. The full gate (`scripts/test.sh`) is nightly and for releases, never a landing
+  gate. Test-component contract, what a SKIP means, and a new test's home: `skills/fast-path/SKILL.md`.
+- **Cleanup**: back up dirty drafts, rejected code and evidence before retiring verified obsolete
   work. Unknown effects remain unresolved: never manufacture settlement or replay them. Report
   Git cleanup and runtime readiness separately.
 
-Topology: every tree is a linked worktree of one repo whose source of truth is
-`github.com/Magaav/wasm-agent` (`origin`, SSH alias `github-wasm-agent`). The cloud
-(`openclaw.ohana:/local/projects/wasm-agent`) builds and hosts the rendezvous and relay; the
-canonical checkout `orca/projects/wasm-agent` is on `main`; the node's own worktree and each
-lane (`orca/workspaces/wasm-agent/<name>`) are on a branch of that name. A lane owns its tree.
-Lanes, the merge lane and The integration protocol: `skills/git-orchestrator/SKILL.md`;
-layers and names (node-thread, subagent, run): `docs/FABRIC.md`.
+Topology: one repository whose source of truth is `github.com/Magaav/wasm-agent` (`origin`, SSH alias
+`github-wasm-agent`), checked out once per host and per lane; the cloud
+(`openclaw.ohana:/local/projects/wasm-agent`) builds and hosts the rendezvous and relay, the canonical
+checkout `orca/projects/wasm-agent` owns `main`, and each lane (`orca/workspaces/wasm-agent/<name>`) is a
+linked worktree on its own branch that owns its tree. Lanes, the merge lane and The integration protocol:
+`skills/git-orchestrator/SKILL.md`; layers and names (node-thread, subagent, run): `docs/FABRIC.md`.
 
 ## Rules
 
@@ -56,36 +52,34 @@ layers and names (node-thread, subagent, run): `docs/FABRIC.md`.
   The Cargo manifest is `rust/Cargo.toml` (pass `--manifest-path` or run from `rust/`).
 - **Prompt docs are generated.** After changing the tool catalogue, bootstrap set or prompt
   layers, run `scripts/sync-prompt-docs.lua`; the pre-commit hook refuses stale blocks.
-- **Install through Sentinel; never replace yourself in-turn.** Queue
-  `wa-sentinel request upgrade` (node/UI) or `request deploy` (Sentinel) with a session
-  continuation. Restore a stopped watcher via the checked node-side `-RestoreOnly` task path,
-  even with a bound workspace. Never strip run markers, elevate, hand-copy binaries or treat
-  watcher readiness as a verified install. Procedure: `skills/self-update/SKILL.md`.
+- **Install through Sentinel; never replace yourself in-turn.** Queue `wa-sentinel request upgrade`
+  (node/UI) or `request deploy` (Sentinel) with a session continuation. Restore a stopped watcher via the checked node-side `-RestoreOnly` task path,
+  even with a bound workspace. Never strip run markers, elevate, hand-copy binaries or treat watcher
+  readiness as a verified install (`skills/self-update/SKILL.md`).
 - **Never restart or replace the window.** It is a client and reloads itself; a dead-looking
   window is a page problem (`skills/self-update/SKILL.md`). You cannot restart the node you
   run on: ask the Sentinel. Stop a node by the pid in `serve.pid`, never by image name.
 - **Never hand a POSIX path to a native Windows process.** Convert `/c/...` with `cygpath -w`.
 - **More than one node-thread is normal.** `/health` lists them with `role: "runs"`/`"reads"`.
-- **Skills carry procedures, not context** (`docs/SKILLS.md`): write the trigger into the
-  description. A spell is deterministic, verified execution with a mandatory `post`
-  (`docs/SPELLS.md`); load the `spells` skill before saving or repairing one.
+- **Skills carry procedures, not context** (`docs/SKILLS.md`): the trigger goes in the description. A
+  spell is deterministic, verified execution with a mandatory `post` (`docs/SPELLS.md`; load `spells`
+  first).
 - **Graph checks impact; it does not replace reading source** (`docs/GRAPH-PATCH-AUDIT.md`).
 - **UI changes need the UI test** (`scripts/test-ui.ps1`, `skills/see-your-output/SKILL.md`).
 - **Memory is on demand.** The only automatic injections are these instruction files, scoped by
   role; guests get `AGENTS.guest.md` and never this file.
 - **Failures are visible**: no silent success, no silent data loss.
-- **A long mission is the model's loop** (`docs/SELF-LOOP.md`): the tools are optional, not a schema.
-  Write the goal and done-criteria with `notes_write`; schedule your own next turn with `wake`, event
-  wakes before fast polling; attach a `probe` so an unchanged world does not spend a turn; re-read the
-  notes on each `[self-wake]`; turn repeated failures into written rules; notify only on events; and
-  cancel the wake when the goal is done.
+- **A long mission is the model's loop** (`docs/SELF-LOOP.md`): notes_write the goal and its
+  done-criteria, wake yourself (an event before fast polling, a `probe` so an unchanged world spends no
+  turn), re-read the notes on each `[self-wake]`, write a repeated failure down as a rule, and cancel the
+  wake when the goal is done.
 - **Raw over compacted**, unless evidence shows the task result does not degrade; a token
   saving alone never justifies making the model less aware.
 - **Know how you are risking.** Name the risk in the patch; prefer a knob plus its measurement
   over a default picked from a weak experiment, and say when a measurement cannot settle it.
 - **Verify before claiming**: run the smoke test; prefer a real two-node check.
-- **A Lua test has only tested the tree when a Lua root is in use.** Without
-  `WASM_AGENT_LUA_ROOT`, `WA_SCRIPT` runs the modules embedded in the binary, not `lua/`.
+- **A Lua test needs a Lua root** (`WASM_AGENT_LUA_ROOT`); without one it runs the binary's embedded
+  modules, not `lua/` (`skills/fast-path/SKILL.md`).
 - **A skipped test is reported as skipped**, never with the sentence of a run that tested it.
 
 ## Reports

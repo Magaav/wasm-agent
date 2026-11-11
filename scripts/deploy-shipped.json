@@ -25,7 +25,10 @@
     "scripts/measure-sentinel-io.ps1",
     "scripts/install-sentinel-service.ps1",
     "scripts/web-core.mjs",
-    "scripts/web-http-outcomes.mjs"
+    "scripts/web-http-outcomes.mjs",
+    "scripts/reclaim-disk.sh",
+    "scripts/reclaim-disk.mjs",
+    "scripts/check-disk-floor.sh"
   ],
   "globs": [
     "scripts/mcp-*",

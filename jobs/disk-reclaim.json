@@ -1,9 +1,9 @@
 {
   "id": "disk-reclaim",
-  "name": "Reclaim disk: report free space, expire stale temp families, prune ended sessions' rust/target (reports by default; WA_RECLAIM_MODE=apply to remove)",
+  "name": "Disk reclaim: hourly REPORT ONLY vs the 3.71 GiB floor; removal only with WA_RECLAIM_MODE=apply",
   "trigger": {
-    "kind": "event",
-    "topic": "disk.reclaim"
+    "kind": "schedule",
+    "every_seconds": 3600
   },
   "action": {
     "kind": "run",
