@@ -306,14 +306,15 @@ fn a_second_script_does_not_share_the_first_ones_state() {
 }
 
 
-/// A failed script's message crosses the seam as the `done` event's payload.
+/// A failed script's message crosses the seam in `error`, and in `value` for an older component.
 ///
 /// The guest fills `value` for a script that finished and `error` for one that failed
-/// (`rust/wa-capabilities/src/quickjs.rs`, the `done` event), and the seam's `done-event` has ONE payload
-/// field - `value`, which the component reads as the reason when `ok` is false. Reading only `value` left
-/// every failed script through the component answering `{ok: false}` with no reason at all while the
+/// (`rust/wa-capabilities/src/quickjs.rs`, the `done` event). The record used to carry only `value`, so
+/// every failed script through the component answered `{ok: false}` with no reason at all while the
 /// native loop still named it; the parity suite is what noticed
-/// (`scripts/test-codemode-component.lua`, "a script that throws").
+/// (`scripts/test-codemode-component.lua`, "a script that throws"). `error` is the field a component
+/// reads now, `value` keeps the legacy spelling so a component built against the older record still
+/// learns why.
 #[test]
 fn a_failed_scripts_message_crosses_the_seam_as_the_done_payload() {
     let answer = json!({"ok": true, "events": [
@@ -329,10 +330,13 @@ fn a_failed_scripts_message_crosses_the_seam_as_the_done_payload() {
         .collect();
     assert_eq!(done.len(), 2, "one done event per script");
     assert!(!done[0].ok, "the failing script stays failed");
+    assert_eq!(done[0].error.as_deref(), Some("{\"name\":\"Error\",\"message\":\"boom\"}"),
+        "the reason travels in the field the component reads");
     assert_eq!(done[0].value.as_deref(), Some("{\"name\":\"Error\",\"message\":\"boom\"}"),
-        "the failure's message travels in the payload the component reads as the reason");
+        "and in `value` too, for a component built against the older record");
     assert!(done[0].writes.is_none(), "a failed script writes nothing");
     assert!(done[1].ok);
     assert_eq!(done[1].value.as_deref(), Some("42"));
+    assert!(done[1].error.is_none(), "a finished script has no error");
     assert_eq!(done[1].writes.as_deref(), Some("[[\"k\",\"v\"]]"));
 }

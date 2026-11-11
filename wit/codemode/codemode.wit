@@ -167,8 +167,25 @@ interface types {
         payload-json: string,
     }
 
+    /// One guest global the seam answered itself, with the same facts the node journals for a call it
+    /// answered in place: the native loop records an `attempt` per guest call (`target: "global"`,
+    /// `admitted: false`, `ok`, and the argument and result references). A component that answered a
+    /// global inside the guest left that row out, so the two journals disagreed about which calls
+    /// happened - the model's record of the run differed between the two loops.
+    record answered-call {
+        id: u64,
+        name: string,
+        ok: bool,
+        args-json: option<string>,
+        /// The answer, as the guest's own JSON text: the loop stores it through the same encoder the
+        /// native path uses, so both journals hold the same bytes.
+        result-json: string,
+    }
+
     record progress {
         items: list<output-item>,
+        /// The in-place answers that happened before `step`, oldest first.
+        answered: list<answered-call>,
         step: step,
     }
 

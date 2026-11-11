@@ -386,6 +386,16 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
    if not progress then loop_error=reason
    else
     for _,item in ipairs(progress.items or {})do items[#items+1]=item end
+    -- The globals this seam answered inside the guest, journaled exactly as the native loop journals
+    -- the same call: one attempt per guest call, `target: "global"`, `admitted: false`. The seam hands
+    -- the answer as JSON text and it is re-encoded here through the same encoder the native path uses,
+    -- so the argument and result references hold the same bytes on both paths (`output.store` hashes
+    -- them, and the parity suite compares those hashes).
+    for _,answer in ipairs(progress.answered or {})do
+     attempts[#attempts+1]={id=answer.id,name=answer.name,target='global',admitted=false,ok=answer.ok==true,
+      arguments=output.store(answer.args_json or '{}'),
+      result=output.store(json.encode(json.decode(answer.result_json or '{}')))}
+    end
     local step=progress.step or {}
     if step.kind=='aborted' then loop_error=tostring(step.reason)
     elseif step.kind=='finished' then outcome=step.outcome;break
@@ -423,7 +433,8 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
        end
       end
      end
-     attempts[#attempts+1]={id=step.id,name=step.name,target=step.target or 'tool',admitted=admitted or false,
+     attempts[#attempts+1]={id=step.id,name=step.name,
+      target=(step.kind=='host_global' and 'global') or step.target or 'tool',admitted=admitted or false,
       ok=success,arguments=output.store(argument_text or '{}'),result=output.store(json.encode(value))}
      reply={call_id=step.id,ok=success and true or false,payload_json=json.encode(value)}
     else loop_error='codemode_protocol_unknown_step'
