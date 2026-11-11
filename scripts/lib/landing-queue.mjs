@@ -370,12 +370,22 @@ function presenceOf(db, owner) {
   } catch { return null; }
 }
 
-export function resolveOwner({owner, ledger, ownerMaxAge = 900, env = process.env} = {}) {  const marker = env.WASM_AGENT_SESSION_ID || env.WA_SESSION_ID;
+export function resolveOwner({owner, ledger, ownerMaxAge = 900, env = process.env, allowDeploy = false} = {}) {
+  const marker = env.WASM_AGENT_SESSION_ID || env.WA_SESSION_ID;
   if (marker) {
     if (owner && owner !== marker) {
       throw new QueueError(`owner_mismatch: --owner ${owner} is not this process's harness session ${marker} (WASM_AGENT_SESSION_ID)`, 75, 'owner_mismatch');
     }
     return {id: marker, source: 'harness-env', evidence: {variable: env.WASM_AGENT_SESSION_ID ? 'WASM_AGENT_SESSION_ID' : 'WA_SESSION_ID'}};
+  }
+  // A deploy that pins a commit for a build is not a session claiming a landing: the sentinel performs
+  // it with no harness session in the environment. Requiring one there made every build deploy refuse
+  // with `deploy_pin_failed: owner_required` (measured 2026-11-11 02:07 on wasm_the_first), so the pin
+  // takes the machine's own identity - distinct from any session id, so a row it holds can never be
+  // read as a person's claim.
+  const deployId = `deploy@${hostName()}`;
+  if (allowDeploy && (!owner || owner === deployId)) {
+    return {id: deployId, source: 'deploy', evidence: {host: hostName(), boot: bootId(), pid: process.pid}};
   }
   if (!owner) throw new QueueError(`owner_required: no harness session id in the environment. ${REFUSED_OWNER}`, 75, 'owner_required');
   if (!SESSION_ID.test(owner)) {

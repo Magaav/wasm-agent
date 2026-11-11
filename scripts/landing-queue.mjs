@@ -169,7 +169,9 @@ function normalizeRelease(release) {
 }
 
 function previousLanding(db) {
-  const row = db.prepare("SELECT id, owner, branch, ended_at, result FROM queue WHERE state='landed' ORDER BY id DESC LIMIT 1").get();
+  // A `release`d acquire also ends as 'landed' and carries no result: only a row that actually merged
+  // (its result names the commit) is a landing whose release verdict can be read.
+  const row = db.prepare("SELECT id, owner, branch, ended_at, result FROM queue WHERE state='landed' AND result IS NOT NULL AND result != '' ORDER BY id DESC LIMIT 1").get();
   if (!row || !row.result) return null;
   let result;
   try { result = JSON.parse(row.result); } catch { return null; }
@@ -438,7 +440,7 @@ function ensurePinnedWorktree({canonical, commit, pinDir}) {
 async function commandPin(options) {
   if (!options.commit) throw new QueueError('pin needs --commit <sha> (the exact commit to build)', 75, 'usage');
   const {repo, canonical, dir, db} = open(options);
-  const owner = resolveOwner(options);
+  const owner = resolveOwner({...options, allowDeploy: true});
   const commit = resolveCommit(repo, options.commit);
   if (!commit) throw new QueueError(`pin: cannot resolve ${options.commit} in ${repo}`, 75, 'pin_commit_unknown');
   const branchRef = gitOk(canonical, ['symbolic-ref', '--short', '-q', 'HEAD']).trim();
@@ -459,7 +461,7 @@ async function commandPin(options) {
   }
   const pinDir = path.resolve(options.pinDir || PIN_ROOT_DEFAULT());
   const quiet = options.json ? () => {} : say;
-  const acquired = await enqueueAndWait({...options, log: quiet, branch: options.branch || `deploy/${commit.slice(0, 12)}`, kind: 'deploy'});
+  const acquired = await enqueueAndWait({...options, log: quiet, branch: options.branch || `deploy/${commit.slice(0, 12)}`, kind: 'deploy', allowDeploy: true});
   if (!acquired.granted) return acquired;
   const id = acquired.id;
   const finish = (state, reason, extra = {}) => {

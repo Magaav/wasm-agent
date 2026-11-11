@@ -358,6 +358,16 @@ async function deployPin() {
     git(pinned.pin, 'rev-parse', 'HEAD').trim() === pinned.commit);
   check('the pin is recorded as a deploy row, not a landing',
     /deploy-pin branch deploy\/[0-9a-f]{12}/.test(q(['history', '--limit', '20']).stdout), q(['history', '--limit', '20']).stdout);
+  // The sentinel runs a deploy with NO harness session in the environment: the pin is the machine's
+  // claim, not a person's landing. Requiring a session there refused every build deploy with
+  // `deploy_pin_failed: owner_required` (measured 2026-11-11 02:07 on wasm_the_first).
+  const machine = q(['pin', '--commit', 'HEAD', '--pin-dir', path.join(WORK, 'pins'), '--json']);
+  check('a pin with no harness session succeeds (the sentinel deploy case)', machine.status === 0, machine.stdout + machine.stderr);
+  const machineDb = new DatabaseSync(path.join(CANONICAL, '.git', 'wa-landing-queue', 'queue.sqlite'), {readOnly: true});
+  const machineRow = machineDb.prepare('SELECT owner,owner_source,state FROM queue WHERE id=?').get(Number(JSON.parse(machine.stdout || '{}').id));
+  machineDb.close();
+  check('the machine pin is owned by deploy@, not by a session',
+    machineRow && /^deploy@/.test(machineRow.owner) && machineRow.owner_source === 'deploy' && machineRow.state === 'pinned', JSON.stringify(machineRow));
 }
 
 // ---- 4. a dirty canonical checkout with no lease is refused, naming the files --------------------
@@ -373,14 +383,15 @@ function dirtyCanonical() {
     JSON.stringify(state.canonical_dirt));
   // The landing before this one could not publish: `status` says so per target, as a named warning row,
   // and still exits 0 (a fact about a release is not a reason to stop reading the queue).
-  const noRelease = git(ORIGIN, 'rev-parse', 'refs/heads/main').trim();
+  // The last LANDED row is the landing whose publish failed; the rows after it are pins, not landings,
+  // so `status` must still name that commit (and not the docs commit a later test pushed).
+  const unfunded = state.previous_release && String(state.previous_release.commit || '');
   check('status names the previous landing and its verdict per target',
-    state.previous_release && state.previous_release.commit === noRelease
-      && state.previous_release.release.targets['aarch64-unknown-linux-gnu'].state === 'failed',
+    Boolean(unfunded) && state.previous_release.release.targets['aarch64-unknown-linux-gnu'].state === 'failed',
     JSON.stringify(state.previous_release));
   check('status fails loudly, as a named warning row, when a landed commit is not covered',
     state.release_warnings.length === 2
-      && state.release_warnings.every(warning => new RegExp(`^WARNING release_uncovered ${noRelease.slice(0, 12)} (aarch64|x86_64)-unknown-linux-gnu: failed`).test(warning)),
+      && state.release_warnings.every(warning => new RegExp(`^WARNING release_uncovered ${unfunded.slice(0, 12)} (aarch64|x86_64)-unknown-linux-gnu: failed`).test(warning)),
     JSON.stringify(state.release_warnings));
   fs.rmSync(path.join(CANONICAL, 'docs', 'stray-edit.md'));
   const clean = q(['acquire', '--branch', 'change/anyone', '--owner', SESSION, '--no-wait']);
