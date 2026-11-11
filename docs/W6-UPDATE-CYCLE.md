@@ -28,3 +28,32 @@ Why compiling dominates: this host has no published node binary (the release pub
 `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` only), so a deploy builds the pinned tree
 itself, into a **per-pin** `CARGO_TARGET_DIR` (`<tmp>/wa-deploy-pins/<sha>/rust/target`). Every deploy
 therefore compiles the workspace from cold, even when the landing changed no Rust at all.
+
+## Round 0: the first cycle, and what it found
+
+The first full cycle (land `2199eaffe310`, then a deploy to make it live) did not reach the install.
+It spent **646 s** and refused `canonical_busy`, naming a *pin*:
+
+```
+refused(canonical_busy): C:\...\Temp\wa-deploy-pins\b9cf087907a9... is not exactly origin/main
+after waiting 600s (HEAD b9cf087907a9, origin/main 2199eaffe310, 0 uncommitted change(s))
+```
+
+Two defects, both found by running the cycle rather than by reading it:
+
+1. **The deploy exports the tree it builds from, and the watcher it restarts inherits it.**
+   `deploy.sh` exports `WA_DEPLOY_ROOT` for its own children; it then restarts `wa-sentinel`, which
+   inherits that variable and hands it to the *next* deploy. From then on every deploy resolves its
+   source tree to the previous deploy's detached build pin - a worktree no landing ever
+   fast-forwards. The fix is to start the supervisor with those deploy-scoped variables removed
+   (`env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET
+   -u WA_CODEMODE_TARGET_DIR`).
+2. **A wait that cannot succeed is not a wait.** The quiet-canonical-tree gate now refuses at once
+   (`source_pin_stale`) when its tree is detached and behind `origin/main`, instead of sleeping the
+   whole `WA_DEPLOY_TREE_WAIT` (600 s) to say the same thing.
+
+A third, separate finding belongs to the rehearsal: `wa-sentinel request deploy` written at 07:03:01Z
+was spawned at 07:14:18Z, because the sentinel's **own** idle gate defers a deploy while the node is
+busy and it carries no pause signal. The pause marker is written by `upgrade.sh` only after the
+build, so the first gate still waits a whole turn's length. Bound 1800 s, not exceeded, no false
+`deploy silent` - but the pause path was not exercised by the two long turns that were running.
