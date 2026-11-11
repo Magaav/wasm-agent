@@ -389,8 +389,15 @@ binary"). On the canonical checkout, after the readback above:
 ```
 CARGO_TARGET_DIR=<canonical>/build/node-binaries/target \
   bash scripts/publish-node-binaries.sh --ensure --publish \
-    --target aarch64-unknown-linux-gnu --commit "$(git -C <canonical> rev-parse HEAD)"
+    --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-gnu \
+    --commit "$(git -C <canonical> rev-parse HEAD)"
 ```
+
+Name **both** Linux targets in one run: the release tag is the commit and it carries ONE manifest, so a
+second run per target would upload a one-row manifest over the first and send that target's nodes back to
+compiling (`work` is x86_64 Linux; measured 2026-11-11: ~100 s incremental, 19 min bootstrap on 2 cores).
+The landing queue does this itself (`RELEASE_TARGETS` in `scripts/landing-queue.mjs`); the command above is
+the manual equivalent.
 
 `--ensure` asks the published releases whether one already carries the commit's `compiled_inputs=`
 digest - the rule the deploy's fallback uses - so a Lua-only or docs-only landing answers in seconds and
