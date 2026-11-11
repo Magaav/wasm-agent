@@ -264,6 +264,11 @@ CREATE TABLE IF NOT EXISTS queue(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   owner TEXT NOT NULL, owner_source TEXT NOT NULL, owner_evidence TEXT NOT NULL,
   branch TEXT NOT NULL, worktree TEXT NOT NULL, canonical TEXT NOT NULL,
+  -- 'landing' or 'deploy'. Both take the same lease, because both are a claim on the canonical
+  -- checkout: a landing merges into it and a deploy resolves the commit it will build from it. The
+  -- kind is what status and the log say when one of them waits for the other, and it is how a
+  -- deploy's short claim on the tree is told apart from a lander's long one.
+  kind TEXT NOT NULL DEFAULT 'landing',
   state TEXT NOT NULL, reason TEXT,
   lease TEXT NOT NULL, pid INTEGER NOT NULL, host TEXT NOT NULL, boot TEXT NOT NULL,
   base TEXT NOT NULL,
@@ -300,6 +305,11 @@ export function openQueue(dir) {
   // transaction at a time is the whole load, and a busy timeout is what keeps them off each other.
   db.exec('PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
   db.exec(SCHEMA);
+  // A queue that was opened before `kind` existed keeps its rows and gains the column, so the deploy
+  // interlock does not require an empty queue (the alternative - a fresh database on upgrade - would
+  // lose the history that explains a blocked tree).
+  const columns = db.prepare('PRAGMA table_info(queue)').all().map(column => column.name);
+  if (!columns.includes('kind')) db.exec("ALTER TABLE queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'landing'");
   return db;
 }
 
@@ -435,8 +445,72 @@ export function describeDirt(dirt, limit = 12) {
   return dirt.count > limit ? `${shown}, +${dirt.count - limit} more` : shown;
 }
 
+// ---- what a dead lander left behind -------------------------------------------------------------
+//
+// Measured on wasm_the_first, ~23:49 (session 397f0459): a lander merged into the canonical checkout
+// and died before it pushed. The next lander inherited an unpushed merge and reset the tree by hand.
+// The queue's own rule ("nothing was merged or pushed") was true of the run that wrote it and false of
+// the tree, which is exactly the kind of residue this file exists to turn into a recorded decision.
+//
+// A landing is two effects - merge, then push - and the push is the one that publishes. When a holder
+// is gone and HEAD is a queue merge ahead of origin/main, the effect the dead holder had already
+// decided is finished: push, read back, record. When the push cannot be made, the merge is kept
+// reachable on `refs/wa/recovered/<sha>` before the tree is put back, so a rollback never destroys a
+// commit nobody has seen. Anything else (a local commit that is not the queue's own merge form, a
+// diverged checkout, uncommitted changes) is a person's decision and is refused by name.
+//
+// `apply: false` answers the same question without touching anything, so `status` can report what the
+// next acquire will do instead of doing it.
+export function recoverUnpushed({canonical, db, apply = true, say = () => {}}) {
+  const head = resolveCommit(canonical, 'HEAD');
+  const upstream = resolveCommit(canonical, 'origin/main');
+  if (!head || !upstream || head === upstream) return {action: 'none'};
+  if (git(canonical, ['merge-base', '--is-ancestor', upstream, head]).status !== 0) {
+    return {action: 'refused', code: 'diverged', head, upstream,
+      reason: `HEAD ${head.slice(0, 12)} and origin/main ${upstream.slice(0, 12)} have diverged`};
+  }
+  const ahead = Number(gitOk(canonical, ['rev-list', '--count', `${upstream}..${head}`]).trim() || 0);
+  if (ahead === 0) return {action: 'none'};
+  const parents = gitOk(canonical, ['rev-list', '--parents', '-n', '1', head]).trim().split(/\s+/).length - 1;
+  const subject = gitOk(canonical, ['log', '-1', '--format=%s', head]).trim();
+  const merge = /^merge\(([^)]+)\):/.exec(subject);
+  const dirt = canonicalDirt(canonical);
+  const detail = {head, upstream, ahead, parents, subject, dirty: dirt.count};
+  if (parents !== 2 || !merge) {
+    return {action: 'refused', code: 'unpushed_canonical', ...detail,
+      reason: `HEAD ${head.slice(0, 12)} is ${ahead} commit(s) ahead of origin/main ${upstream.slice(0, 12)} and is not a landing merge ('${subject}')`};
+  }
+  if (dirt.dirty) {
+    return {action: 'refused', code: 'unpushed_canonical_dirty', ...detail,
+      reason: `HEAD ${head.slice(0, 12)} is an unpushed landing merge of ${merge[1]} but the tree has ${dirt.count} uncommitted change(s): ${describeDirt(dirt)}`};
+  }
+  if (!apply) return {action: 'would_push', branch: merge[1], ...detail};
+  const push = git(canonical, ['push', 'origin', 'main']);
+  if (push.status === 0) {
+    const readback = gitOk(canonical, ['ls-remote', 'origin', 'refs/heads/main']).trim().split(/\s+/)[0];
+    if (readback === head) {
+      const reason = `finished the push of a dead holder's landing merge: ${merge[1]} at ${head.slice(0, 12)} (origin/main read back as ${readback.slice(0, 12)}; ${ahead} commit(s) were local only)`;
+      logRow(db, 0, 'recovered', reason);
+      say(reason);
+      return {action: 'pushed', branch: merge[1], readback, ...detail};
+    }
+    detail.readback = readback;
+  }
+  detail.push_error = String(push.stderr || push.stdout || '').trim().split('\n').slice(-2).join(' | ');
+  const rescue = `refs/wa/recovered/${head.slice(0, 12)}`;
+  const kept = git(canonical, ['update-ref', rescue, head]).status === 0;
+  const reset = git(canonical, ['reset', '--hard', upstream]);
+  const reason = `rolled back a dead holder's unpushed landing merge ${merge[1]}: ${head.slice(0, 12)}`
+    + ` could not be pushed (${detail.push_error || 'push failed'})`
+    + (kept ? `; the merge is kept on ${rescue}` : '; the merge could not be kept on a ref')
+    + `; ${canonical} is now ${upstream.slice(0, 12)} (reset ${reset.status === 0 ? 'ok' : 'FAILED'})`;
+  logRow(db, 0, 'recovered', reason);
+  say(reason);
+  return {action: 'rolled_back', branch: merge[1], rescue: kept ? rescue : '', reset: reset.status === 0, ...detail};
+}
+
 // ---- the queue ----------------------------------------------------------------------------------
-export const STATES = ['waiting', 'granted', 'landed', 'abandoned', 'refused', 'reclaimed'];
+export const STATES = ['waiting', 'granted', 'landed', 'pinned', 'abandoned', 'refused', 'reclaimed'];
 
 export function holderOf(db, dir) {
   const row = db.prepare("SELECT * FROM queue WHERE state='granted' ORDER BY id LIMIT 1").get();
@@ -474,10 +548,49 @@ export function reclaimPass(db, dir) {
       : `holder pid ${row.pid} is not observable on this boot (recorded ${row.host}/${row.boot}, now ${hostName()}/${bootId()}), lease ${row.lease} not held`;
     const reason = `reclaimed after ${elapsed}s: ${why}`;
     db.prepare("UPDATE queue SET state='reclaimed', reason=?, ended_at=? WHERE id=? AND state='granted'").run(reason, now(), row.id);
+    clearHolder(dir, row.id);
     logRow(db, row.id, 'reclaimed', `${reason}; owner ${row.owner}, branch ${row.branch}, base ${row.base}`);
     reclaimed.push({id: row.id, owner: row.owner, reason});
   }
   return reclaimed;
+}
+
+// ---- who may touch the canonical checkout, for a tool --------------------------
+//
+// The lease is a fact in SQLite, and the tool layer is Lua: a guard there must not read the queue's
+// database (a second reader of a WAL under a live lander is how a status call blocks a merge). So the
+// holder is also published as one small JSON file beside the queue, written when the lease is granted
+// and removed when it ends. It is a HINT for the guard, never the authority - `holderOf` remains the
+// decision the queue acts on - and a stale file can only make the guard stricter, never laxer than the
+// holder check the guard also performs against the row's own id.
+export function holderFile(dir) { return path.join(dir, 'holder.json'); }
+
+export function writeHolder(dir, row) {
+  const file = holderFile(dir);
+  const tmp = `${file}.tmp.${process.pid}`;
+  const record = { id: row.id, owner: row.owner, kind: row.kind || 'landing', branch: row.branch,
+    lease: row.lease, pid: row.pid, host: row.host || hostName(), boot: row.boot || bootId(), since: now() };
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(record)}
+`, 'utf8');
+    fs.renameSync(tmp, file);
+  } catch {
+    try { fs.rmSync(tmp, {force: true}); } catch { /* the row is still the authority */ }
+  }
+  return record;
+}
+
+export function readHolder(dir) {
+  try { return JSON.parse(fs.readFileSync(holderFile(dir), 'utf8')); } catch { return null; }
+}
+
+/// Remove the published holder, but only when it names the row that is ending: a reconcile of an old
+/// row must not erase the hint of the row that now holds the tree.
+export function clearHolder(dir, id) {
+  const current = readHolder(dir);
+  if (!current) return false;
+  if (id !== undefined && Number(current.id) !== Number(id)) return false;
+  try { fs.rmSync(holderFile(dir), {force: true}); return true; } catch { return false; }
 }
 
 // A recorded proof, keyed by the digest of the tree that was checked rather than by the landing that

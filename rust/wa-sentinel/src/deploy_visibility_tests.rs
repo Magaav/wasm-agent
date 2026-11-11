@@ -288,7 +288,7 @@ fn a_not_ready_deploy_protocol_is_held_with_a_named_reason() {
     let queue: Value = serde_json::from_slice(&std::fs::read(
         fixture.state().join("queue").join(format!("{id}.json"))).expect("queue record"))
         .expect("queue json");
-    assert_eq!(queue["state"], "waiting");
+    assert_eq!(queue["state"], "waiting_for_idle");
     assert_eq!(queue["phase"], "held");
     assert!(queue["detail"].as_str().unwrap_or("").contains("deploy_protocol_not_ready"),
         "the queue record must name the reason: {}", queue["detail"]);

@@ -323,6 +323,40 @@ fn a_live_install_and_a_held_request_are_not_reported_as_silent() {
     assert_eq!(fixture.notices().len(), 1, "and only the one that was due");
 }
 
+/// A deploy that is waiting for the node to go idle is a named state with its own bound, not silence.
+///
+/// Measured on wasm_the_first (2026-11-10): the 900 s deadline expired in the middle of a 37-minute wait for
+/// long sessions, and the watchdog told the session the deploy was silent while it was only waiting. The
+/// installer writes `waiting_for_idle` with its own bound, and until that bound runs out the watchdog says
+/// nothing; past it, the report names the state instead of calling it silence.
+#[test]
+fn a_deploy_waiting_for_idle_is_not_silent_before_its_own_bound() {
+    let _alone = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixture = Fixture::new("waiting-for-idle");
+    let id = "1794310000000000000-3-0000000000000000000003";
+    fixture.open(id, SESSION, "");
+    deploy_outcome::started(id, Some(dead_pid()));
+    std::fs::write(fixture.install.join("deploy-state.json"),
+        json!({"state": "waiting_for_idle", "phase": "waiting", "bound_seconds": 1800,
+            "at": "2026-11-11T02:00:00Z", "from": "aaaaaaa", "to": "bbbbbbb"}).to_string())
+        .expect("installer phase record");
+
+    // Past the plain deadline, inside the waiting bound: waiting is not silence.
+    fixture.rewind(id, deploy_outcome::timeout_secs() + 120);
+    assert_eq!(deploy_outcome::sweep(now_epoch()), 0,
+        "a deploy in `waiting_for_idle` must not be reported silent before its own bound");
+    assert!(fixture.notices().is_empty(), "and nothing is queued for the session");
+
+    // Past the bound: reported, by name, as the state it was in.
+    fixture.rewind(id, deploy_outcome::timeout_secs() + 1800 + 120);
+    assert_eq!(deploy_outcome::sweep(now_epoch()), 1, "past its own bound the wait is reported");
+    let notices = fixture.notices();
+    assert_eq!(notices.len(), 1, "exactly one notice");
+    let reason = notices[0]["reason"].as_str().unwrap_or("");
+    assert!(reason.contains("waiting_for_idle"), "the notice names the state, not 'silent': {reason}");
+    assert!(!reason.contains("silent"), "and never calls a bounded wait silence: {reason}");
+}
+
 /// End to end through the sentinel's own code: `verb_deploy_script` spawns the installer, records the pid in
 /// the ledger, waits for it, and settles the session from the result file the installer wrote - nothing here
 /// calls `settle` by hand. This is the wiring the falsification at the top of the file breaks.
@@ -358,10 +392,17 @@ exit 0
         "the installer pid is recorded: {record}");
 
     // The exit wait is a thread, so the assertion waits for its effect instead of assuming a schedule.
+    // It waits for the LEDGER to be settled, not merely for the notice to appear: `settle` writes the notice
+    // first and the record second on purpose (a crash between them is recoverable by the next settler), so a
+    // test that stops at the notice reads a record that is still `pending` under load. That is a fact about
+    // the order, not about the deploy.
     let mut notices = Vec::new();
-    for _ in 0..100 {
+    for _ in 0..200 {
         notices = fixture.notices();
-        if !notices.is_empty() {
+        let settled = deploy_outcome::read(id)
+            .map(|record| record["state"] == json!("settled"))
+            .unwrap_or(false);
+        if settled && !notices.is_empty() {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));

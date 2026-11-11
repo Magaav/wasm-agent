@@ -965,9 +965,55 @@ fn child_exit(pid: u32) -> Option<Option<i32>> {
     { if pid_alive(pid) { None } else { Some(None) } }
 }
 
+/// Whether a failed start is the port being released rather than a broken install.
+///
+/// Measured after a failed deploy on wasm_the_first (2026-11-10): the restart hit the previous listener's
+/// socket in TIME_WAIT, the node exited with `Address already in use`, and nothing tried again - the node
+/// stayed down until the sentinel's next check. These are the exact sentences the kernel and this project's
+/// own transport use; anything else (a missing binary, a crash, a bad flag) is not retried, because trying
+/// a broken install three times only makes the failure slower to read.
+pub(crate) fn start_failure_is_transient(detail: &str) -> bool {
+    ["Address already in use", "address already in use", "address in use",
+        "os error 98", "os error 10048", "binding_transport_already_owned"]
+        .iter().any(|needle| detail.contains(needle))
+}
+
+fn bind_retry_attempts() -> u32 {
+    std::env::var("WA_SENTINEL_BIND_RETRIES").ok().and_then(|value| value.trim().parse().ok())
+        .filter(|value: &u32| *value > 0).unwrap_or(3)
+}
+
+fn bind_retry_delay_secs() -> u64 {
+    std::env::var("WA_SENTINEL_BIND_RETRY_SECONDS").ok().and_then(|value| value.trim().parse().ok())
+        .filter(|value: &u64| *value > 0).unwrap_or(3)
+}
+
 /// Start the installed node and wait for it to answer, failing early - with its exit code and the end
-/// of its log - when it exits before answering.
+/// of its log - when it exits before answering. A start that fails because the port is still being
+/// released is retried (bounded, each attempt logged); any other failure is reported at once.
 fn start_and_verify(binary: &Path, reason: &str) -> Result<()> {
+    let attempts = bind_retry_attempts();
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match start_and_verify_once(binary, reason) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last = format!("{error:#}");
+                if attempt == attempts || !start_failure_is_transient(&last) {
+                    break;
+                }
+                let attempt_label = format!("{attempt}/{attempts}");
+                audit("start-bind-retry", &attempt_label, &last);
+                say(&format!("the node could not bind on attempt {attempt_label} ({}); retrying in {}s - the previous listener's socket is still being released",
+                    last.chars().take(180).collect::<String>(), bind_retry_delay_secs()));
+                std::thread::sleep(Duration::from_secs(bind_retry_delay_secs()));
+            }
+        }
+    }
+    bail!("{last}")
+}
+
+fn start_and_verify_once(binary: &Path, reason: &str) -> Result<()> {
     let pid = start_node(binary, reason)?;
     let seconds = start_wait_secs();
     queue::step("verifying", "waiting for the node to answer /health");
@@ -2210,21 +2256,40 @@ impl Held {
     }
 }
 
+/// How long a session is given to reach a step boundary before a wait for idle is reported as bounded.
+/// The installer writes the same number into the deploy-pending marker and its phase record
+/// (`WA_DEPLOY_IDLE_BOUND`, scripts/upgrade.sh); this is the sentinel's read of that one knob, so the
+/// deferral line and the installer cannot disagree about how long "waiting" may last.
+pub(crate) fn deploy_idle_bound_secs() -> u64 {
+    std::env::var("WA_DEPLOY_IDLE_BOUND")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1800)
+}
+
 /// Make a held request visible: one line in the log and one on the console, once per request. It is not a
 /// failure and it is not a claim: the request stays where it is and is retried next tick.
+///
+/// The hold is recorded as `waiting_for_idle`, not as a generic `waiting`: measured on wasm_the_first
+/// (2026-11-10), a deploy held behind long sessions looked exactly like a request that had been forgotten,
+/// and the watchdog then called the deploy silent. The state, the reason and the bound are one record, so
+/// `status`, the log line and the watchdog's own clock describe the same wait.
 fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str) {
+    let bound = deploy_idle_bound_secs();
+    let why = format!("{why} (waiting for idle; running turns pause at their next step, bound {bound}s)");
     if let Ok(bytes) = std::fs::read(sentinel_dir().join("requests").join(key)) {
         if let Ok(request) = serde_json::from_slice::<Value>(&bytes) {
-            if let Err(error) = deploy_protocol::record(&request, key.trim_end_matches(".json"), "held", why) {
+            if let Err(error) = deploy_protocol::record(&request, key.trim_end_matches(".json"), "held", &why) {
                 audit("protocol-record-failed", key, &error.to_string());
             }
             // The hold is the state an operator most needs to see: the request exists, nothing is wrong with
             // it, and it is waiting for a named reason. It is written every time the reason changes, which is
             // exactly when `status` would otherwise still show the previous reason.
-            queue::observe(&request, key.trim_end_matches(".json"), "waiting", "held", why);
+            queue::observe(&request, key.trim_end_matches(".json"), "waiting_for_idle", "held", &why);
         }
     }
-    if let Some(line) = held.announcement(key, verb, why, asked) {
+    if let Some(line) = held.announcement(key, verb, &why, asked) {
         audit("maintenance-deferred", &format!("{verb} {key}"), &line);
         say(&format!("{line} - retried next tick"));
     }
@@ -3499,10 +3564,11 @@ fn main() -> Result<()> {
         "job" => jobs::cli(rest),
         "protocol" => match rest.first().map(String::as_str) {
             Some("observe") if rest.len()==1 => {
-                let root=sentinel_dir().join("deploy-protocol");
-                if root.exists(){for entry in std::fs::read_dir(root)?.flatten(){if entry.path().is_dir(){
-                    sentinel_return::observe(entry.file_name().to_str().context("protocol id encoding")?)?;
-                }}}
+                // One record per directory, and a directory that is not filled in yet is reported as
+                // missing its named files instead of failing the pass. Measured on `work` (2026-11-10): five
+                // incomplete directories made every pass fail, and the caller retried them forever.
+                let report=sentinel_return::observe_all();
+                println!("{}",report);
                 Ok(())
             },
             Some("bootstrap") if rest.len()==9 && rest[1]=="--expected-sha" && rest[3]=="--owner" && rest[5]=="--session" && rest[7]=="--reason" => {
@@ -3727,7 +3793,7 @@ mod self_update_tests {
         assert!(!sentinel_dir().join("done").join("100-upgrade.json").exists());
         let queue: Value = serde_json::from_slice(&std::fs::read(
             sentinel_dir().join("queue").join("100-upgrade.json")).expect("queue record")).expect("queue json");
-        assert_eq!(queue["state"], "waiting");
+        assert_eq!(queue["state"], "waiting_for_idle");
         assert_eq!(queue["phase"], "held");
         assert!(queue["detail"].as_str().unwrap_or("").contains("upgrade_disabled_use_deploy"),
             "{}", queue["detail"]);

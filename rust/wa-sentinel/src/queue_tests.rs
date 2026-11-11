@@ -25,9 +25,11 @@ fn a_held_request_is_recorded_with_the_reason_it_waits() {
     let mut held = Held::default();
     announce_hold(&mut held, &format!("{id}.json"), "restart", "the node is busy", "waiting test");
     let record: Value = serde_json::from_slice(&std::fs::read(queue::dir().join(format!("{id}.json"))).unwrap()).unwrap();
-    assert_eq!(record["state"], "waiting");
+    assert_eq!(record["state"], "waiting_for_idle");
     assert_eq!(record["phase"], "held");
-    assert_eq!(record["detail"], "the node is busy");
+    let detail = record["detail"].as_str().unwrap_or("");
+    assert!(detail.starts_with("the node is busy"), "the reason is kept: {detail}");
+    assert!(detail.contains("bound 1800s"), "the wait names its own bound: {detail}");
     assert_eq!(record["reason"], "waiting test");
     let first_at = record["updated_at"].as_u64().unwrap();
 
@@ -40,7 +42,8 @@ fn a_held_request_is_recorded_with_the_reason_it_waits() {
     // A new reason is new information and replaces the detail.
     announce_hold(&mut held, &format!("{id}.json"), "restart", "the node's state cannot be proven", "waiting test");
     let changed: Value = serde_json::from_slice(&std::fs::read(queue::dir().join(format!("{id}.json"))).unwrap()).unwrap();
-    assert_eq!(changed["detail"], "the node's state cannot be proven");
+    assert!(changed["detail"].as_str().unwrap_or("").starts_with("the node's state cannot be proven"),
+        "a new reason replaces the old one: {}", changed["detail"]);
 
     std::env::remove_var("WASM_AGENT_HOME");
     let _ = std::fs::remove_dir_all(home);

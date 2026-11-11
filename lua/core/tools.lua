@@ -9,6 +9,7 @@ local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
+local canonical_guard = dofile("lua/core/canonical_guard.lua")
 local read_batch = dofile('lua/core/read_batch.lua')
 local mcp = dofile('lua/core/mcp.lua')
 local envelope = dofile('lua/core/envelope.lua')
@@ -2305,6 +2306,15 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
     end
     ctx.hook_pre = pre
     ctx.hook_nested = true
+  end
+  -- The canonical checkout is one shared resource (lua/core/canonical_guard.lua): a session that does not
+  -- hold the landing lease may not write into it. Refused HERE, before the tool runs, because a check after
+  -- the write is a report about damage, not a boundary. Reads stay allowed.
+  local protected = canonical_guard.guard(name, call_args, ctx)
+  if protected then
+    if outermost then ctx.hook_nested = nil end
+    ctx.hook_pre = nil
+    return protected
   end
   local ok,result=pcall(dispatch,memory,name,call_args,role,ctx,cwd_provenance)
   if outermost then ctx.hook_nested = nil end

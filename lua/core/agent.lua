@@ -1996,6 +1996,9 @@ function M:run_body(text, images)
   -- rounds that changed nothing. It stops a runaway loop the done gate cannot see (the gate speaks
   -- about the request, this speaks about the loop), and the caller writes a notes checkpoint first.
   local guard = progress_guard.new()
+  -- Loaded once, not once per round: the marker is read from the filesystem at each boundary by the module,
+  -- but the module itself is compiled once for the run.
+  local deploy_pause = dofile("lua/core/deploy_pause.lua")
   local guard_stop = nil
   local function consume_steering()
     local rows=steering.consume(self.user,self.session_id,self.steering_run_id)
@@ -2009,6 +2012,23 @@ function M:run_body(text, images)
   local round = 0
   while true do
     round = round + 1
+    -- The deploy pause (lua/core/deploy_pause.lua). This is the step boundary: between decisions,
+    -- never inside a call. A marker written by the installer before it waits means the node is about
+    -- to be replaced; the turn ends cleanly here - a paused turn with a checkpoint and one resume
+    -- wake - instead of dying inside the swap or making the installer wait for a whole turn to end.
+    if round > 1 then
+      local pause = deploy_pause.at_boundary(self, text)
+      if pause then
+        telemetry.event(self.session_id, self.run_id, "", "deploy_pending", "pause",
+          { round = round, since = pause.marker and pause.marker.since, wake = pause.wake and pause.wake.id or nil,
+            wake_error = pause.wake_error })
+        self.emit({ type = "status", text = pause.text })
+        reply = pause.text
+        completed = true
+        reply_message_id = host.uuid()
+        break
+      end
+    end
     consume_steering()
     -- A CLI reader can collect complete messages while a model/tool call blocks Lua.
     -- Deliver them before the next request, as durable user turns, not transient

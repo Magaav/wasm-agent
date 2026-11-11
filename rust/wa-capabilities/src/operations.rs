@@ -121,6 +121,47 @@ fn spec(launch: &Launch, cwd: &str, seconds: u64, owner: String, promote: bool) 
         promote,
     )
 }
+/// The kinds an operation can be, and what each one's default deadline is when the caller gives none.
+///
+/// Measured on wasm_the_first (2026-11-10): a supervised build was killed at the 300 s default because the
+/// caller passed no `timeout_seconds` at all - the deadline existed, was applied, and was never said. `bash`
+/// documents its own 300 s in the tool description, but `operation start` promised a supervised long command
+/// and silently gave it the short one. The default now follows what the command IS, and every start that used
+/// a default says so in its receipt (`timeout_source`, `timeout_kind`, `timeout_notice`), so nobody has to
+/// learn it from a kill.
+pub(crate) const OPERATION_KINDS: [&str; 4] = ["command", "build", "test", "deploy"];
+
+pub(crate) fn default_operation_timeout_seconds(kind: &str) -> u64 {
+    match kind {
+        "build" => 5400,
+        "test" => 3600,
+        "deploy" => 3600,
+        _ => 300,
+    }
+}
+
+/// What this operation is: the caller's explicit `kind`, or a conservative read of its command line.
+/// An explicit kind is validated; an inference is only ever used to pick a default, and the receipt says
+/// which one was used, so a wrong guess costs time and never silently shortens the caller's intent.
+pub(crate) fn operation_kind(args: &Value, command: &str) -> Result<&'static str, String> {
+    if let Some(kind) = args["kind"].as_str().filter(|kind| !kind.is_empty()) {
+        return OPERATION_KINDS.iter().copied().find(|known| *known == kind)
+            .ok_or_else(|| format!("operation_kind_unknown:{kind}: expected one of {}", OPERATION_KINDS.join(", ")));
+    }
+    let text = command.to_ascii_lowercase();
+    if ["cargo build", "build-window.sh", "codemode-build", "publish-node-binaries", "build-components", "build-plugins"]
+        .iter().any(|needle| text.contains(needle)) {
+        return Ok("build");
+    }
+    if ["deploy.sh", "upgrade.sh", "install.sh", "wa update", "wa update"].iter().any(|needle| text.contains(needle)) {
+        return Ok("deploy");
+    }
+    if ["test.sh", "fast.sh", "cargo test", "test-", "bench-"].iter().any(|needle| text.contains(needle)) {
+        return Ok("test");
+    }
+    Ok("command")
+}
+
 fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
     spec.cwd = cwd.into();
     spec.timeout = Duration::from_secs(seconds);
@@ -270,9 +311,19 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         "start" => {
             if args.get("replay_of").is_some(){return Err("operation_replay_forbidden: inspect original and make a separately authorized decision".into());}
             let owner = args["owner"].as_str().unwrap_or("").to_string();
-            let seconds = args["timeout_seconds"]
-                .as_u64()
-                .unwrap_or(crate::host::exec_timeout_seconds());
+            let command_hint = args["command"].as_str().unwrap_or("");
+            let requested_seconds = args["timeout_seconds"].as_u64();
+            let default_kind = if requested_seconds.is_none() {
+                Some(operation_kind(args, command_hint)?)
+            } else {
+                // An explicit kind with an explicit timeout is still validated, so a typo cannot look applied.
+                if args["kind"].as_str().is_some_and(|kind| !kind.is_empty()) {
+                    let _ = operation_kind(args, command_hint)?;
+                }
+                None
+            };
+            let seconds = requested_seconds
+                .unwrap_or_else(|| default_operation_timeout_seconds(default_kind.unwrap_or("command")));
             let cwd=args["cwd"].as_str().unwrap_or("");
             let mut staged_script: Option<std::path::PathBuf> = None;
             let launch=if let Some(program)=args["program"].as_str() {
@@ -306,6 +357,21 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 .map_err(|e| e.to_string())?;
             let state = manager().snapshot(&id).map_err(|e| e.to_string())?;
             let mut receipt = json!({"operation_id":id,"state":"accepted","settled":false,"note":"Launch receipt, not execution success. Observe this operation; do not launch it again. Keep background commands in the foreground of this shell (or use wait)."});
+            // No silent deadline. A caller that named one gets `timeout_source: caller`; a caller that did
+            // not gets the kind's default AND a sentence saying which default was used and how to raise it.
+            match default_kind {
+                Some(kind) => {
+                    receipt["timeout_source"] = json!("default");
+                    receipt["timeout_kind"] = json!(kind);
+                    receipt["timeout_ms"] = json!(seconds * 1000);
+                    receipt["timeout_notice"] = json!(format!(
+                        "no timeout_seconds was given: this {kind} operation uses the {kind} default of {seconds}s. Pass timeout_seconds (1-86400) to set it explicitly; when it runs out the operation is killed and reported deadline_exceeded."));
+                }
+                None => {
+                    receipt["timeout_source"] = json!("caller");
+                    receipt["timeout_ms"] = json!(seconds * 1000);
+                }
+            }
             if let Some(path) = staged_script.as_ref() {
                 receipt["staged_script"] = json!(path.to_string_lossy());
                 receipt["staged_script_note"] = json!("the command was too long for the Windows command line and ran from this staged file; $0 is the file path, the script is not removed while the operation may still read it");
@@ -560,5 +626,43 @@ mod command_launch_tests {
     fn counts_quoting_overhead_towards_the_bound() {
         let command = "\"".repeat(WINDOWS_INLINE_COMMAND_BUDGET / 2 + 10);
         assert_eq!(command_line_overflow("bash", "-c", &command), cfg!(windows));
+    }
+}
+
+/// No silent deadline. A caller that gives no `timeout_seconds` gets a default chosen by what the command
+/// IS, and the receipt says so; an explicit timeout is used as given. Measured on wasm_the_first
+/// (2026-11-10): a supervised build died at the 300 s command default because its caller passed nothing -
+/// the deadline was real, applied, and never mentioned.
+#[cfg(test)]
+mod operation_deadline_tests {
+    use super::{default_operation_timeout_seconds, operation_kind};
+    use serde_json::json;
+
+    #[test]
+    fn the_default_follows_the_kind_of_work() {
+        assert_eq!(default_operation_timeout_seconds("build"), 5400);
+        assert_eq!(default_operation_timeout_seconds("test"), 3600);
+        assert_eq!(default_operation_timeout_seconds("deploy"), 3600);
+        assert_eq!(default_operation_timeout_seconds("command"), 300);
+        assert_eq!(default_operation_timeout_seconds("something-else"), 300);
+    }
+
+    #[test]
+    fn a_command_is_classified_from_what_it_runs() {
+        assert_eq!(operation_kind(&json!({}), "cargo build --release --offline").unwrap(), "build");
+        assert_eq!(operation_kind(&json!({}), "bash scripts/build-window.sh").unwrap(), "build");
+        assert_eq!(operation_kind(&json!({}), "bash scripts/fast.sh").unwrap(), "test");
+        assert_eq!(operation_kind(&json!({}), "cargo test --offline -p wa-host").unwrap(), "test");
+        assert_eq!(operation_kind(&json!({}), "bash scripts/deploy.sh").unwrap(), "deploy");
+        assert_eq!(operation_kind(&json!({}), "git status").unwrap(), "command");
+        assert_eq!(operation_kind(&json!({}), "rm -rf /tmp/x").unwrap(), "command");
+    }
+
+    #[test]
+    fn an_explicit_kind_wins_and_a_wrong_one_is_refused() {
+        assert_eq!(operation_kind(&json!({"kind": "build"}), "git status").unwrap(), "build");
+        let error = operation_kind(&json!({"kind": "everything"}), "git status").unwrap_err();
+        assert!(error.starts_with("operation_kind_unknown:everything"), "{error}");
+        assert!(error.contains("expected one of command, build, test, deploy"), "{error}");
     }
 }

@@ -276,6 +276,82 @@ async function deltaClassification() {
     git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === git(CANONICAL, 'rev-parse', 'HEAD').trim());
 }
 
+// ---- 6. a dead lander's unpushed merge is finished or rolled back, recorded ----------------------
+function deadMergeRecovery() {
+  const made = (name) => {
+    git(CANONICAL, 'checkout', '-q', '-b', name, 'main');
+    fs.writeFileSync(path.join(CANONICAL, 'docs', `${name.replace(/\//g, '-')}.md`), '# dead lander\n');
+    git(CANONICAL, 'add', '-A');
+    git(CANONICAL, 'commit', '-q', '-m', `${name}: a change`);
+    git(CANONICAL, 'checkout', '-q', 'main');
+    git(CANONICAL, 'merge', '-q', '--no-ff', '-m', `merge(${name}): a merge the lander never pushed`, name);
+    return git(CANONICAL, 'rev-parse', 'HEAD').trim();
+  };
+  const before = git(ORIGIN, 'rev-parse', 'refs/heads/main').trim();
+  const merged = made('change/dead-lander');
+  check('the fixture has an unpushed landing merge and no holder', merged !== before && qJson(['status']).holder === null);
+  const reported = qJson(['status']);
+  check('status reports the unpushed merge without touching it',
+    reported.recovery && reported.recovery.action === 'would_push' && reported.recovery.branch === 'change/dead-lander',
+    JSON.stringify(reported.recovery));
+  check('status did not push anything', git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === before);
+  const next = q(['acquire', '--branch', 'change/after-dead', '--owner', SESSION, '--no-wait']);
+  check('the next acquire finishes the dead holder\'s push', /NOT granted/.test(next.stdout), next.stdout + next.stderr);
+  check('the push is the dead holder\'s merge, read back', git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === merged);
+  const history = q(['history', '--limit', '20']);
+  check('the recovery is recorded with the reason and the commit',
+    /recovered: finished the push of a dead holder's landing merge: change\/dead-lander at [0-9a-f]{12}/.test(history.stdout), history.stdout);
+
+  // The same residue, a push that cannot be made: roll back and keep the commit reachable.
+  const rolled = made('change/dead-unpushed');
+  const remote = git(CANONICAL, 'remote', 'get-url', 'origin').trim();
+  git(CANONICAL, 'remote', 'set-url', 'origin', path.join(WORK, 'missing-origin.git'));
+  const after = q(['acquire', '--branch', 'change/after-rollback', '--owner', SESSION, '--no-wait']);
+  git(CANONICAL, 'remote', 'set-url', 'origin', remote);
+  check('an unpushable merge is rolled back rather than left blocking the tree',
+    /rolled back a dead holder's unpushed landing merge/.test(after.stdout), after.stdout + after.stderr);
+  check('the rollback puts the tree back on origin/main',
+    git(CANONICAL, 'rev-parse', 'HEAD').trim() === git(ORIGIN, 'rev-parse', 'refs/heads/main').trim());
+  check('the rolled-back merge is kept on a rescue ref, never destroyed',
+    git(CANONICAL, 'rev-parse', `refs/wa/recovered/${rolled.slice(0, 12)}`).trim() === rolled);
+  check('the rollback is in the durable log',
+    /recovered: rolled back a dead holder's unpushed landing merge/.test(q(['history', '--limit', '10']).stdout));
+  git(CANONICAL, 'checkout', '-q', 'main');
+}
+
+// ---- 7. a deploy pins the commit it builds; a landing can move on afterwards --------------------
+async function deployPin() {
+  // A lander in progress first: the pin must wait for it, not resolve under it.
+  const holder = lander(['acquire', '--branch', 'change/pin-holder', '--owner', SESSION, '--wait-seconds', '60']);
+  const holderId = rowIdOf(await waitFor(holder, /GRANTED/, 'the pin fixture holder'));
+  const pinner = lander(['pin', '--commit', 'HEAD', '--owner', SESSION, '--pin-dir', path.join(WORK, 'pins')]);
+  const waiting = await waitFor(pinner, /waiting: position 1 of 2/, 'the deploy pin to queue behind the landing');
+  check('a deploy pin names the landing it waits for', /holder #\d+ .*change\/pin-holder/.test(waiting), waiting);
+  check('the pin has not resolved while the landing holds', !/pinned/.test(pinner.out), pinner.out);
+  release(holderId);
+  const granted = await waitFor(pinner, /pinned [0-9a-f]{12} at/, 'the pin to be granted after the landing');
+  check('the pin ends its own lease and says the canonical tree is free again',
+    /the lease is released and a landing may proceed/.test(granted), granted);
+  await pinner.ended;
+  check('the pin exits 0', pinner.code === 0, String(pinner.code));
+
+  const pinned = JSON.parse((q(['pin', '--commit', 'HEAD', '--owner', SESSION, '--pin-dir', path.join(WORK, 'pins'), '--json']).stdout));
+  check('a second pin reports its path and commit', /^[0-9a-f]{40,64}$/.test(pinned.commit) && fs.existsSync(pinned.pin), JSON.stringify(pinned));
+  check('the pinned tree is detached at exactly the commit',
+    git(pinned.pin, 'rev-parse', 'HEAD').trim() === pinned.commit,
+    git(pinned.pin, 'rev-parse', 'HEAD').trim());
+  // A landing after the pin moves main. The pin must not move with it: that is the whole point.
+  fs.writeFileSync(path.join(CANONICAL, 'docs', 'after-pin.md'), '# after pin\n');
+  git(CANONICAL, 'add', '-A');
+  git(CANONICAL, 'commit', '-q', '-m', 'docs: a landing after the pin');
+  git(CANONICAL, 'push', '-q', 'origin', 'main');
+  check('a landing moved main after the pin', git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() !== pinned.commit);
+  check('the pinned build tree still holds the commit it was pinned at',
+    git(pinned.pin, 'rev-parse', 'HEAD').trim() === pinned.commit);
+  check('the pin is recorded as a deploy row, not a landing',
+    /deploy-pin branch deploy\/[0-9a-f]{12}/.test(q(['history', '--limit', '20']).stdout), q(['history', '--limit', '20']).stdout);
+}
+
 // ---- 4. a dirty canonical checkout with no lease is refused, naming the files --------------------
 function dirtyCanonical() {
   fs.writeFileSync(path.join(CANONICAL, 'docs', 'stray-edit.md'), '# edited in the wrong tree\n');
@@ -352,6 +428,8 @@ try {
   await deadHolder();
   await deltaClassification();
   dirtyCanonical();
+  deadMergeRecovery();
+  await deployPin();
   ownerIdentity();
   classifierParity();
   console.log(`landing queue: ${passed} checks passed in ${Math.round((Date.now() - started) / 1000)}s`);

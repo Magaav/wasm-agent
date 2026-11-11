@@ -97,3 +97,26 @@ fn unix_scripts_run_with_bash_when_there_is_one() {
     let (shell, _) = crate::shell_for(std::path::Path::new("/tmp/deploy.sh"));
     if std::path::Path::new("/bin/bash").exists() { assert!(shell.ends_with("bash"), "{shell}"); }
 }
+
+/// A start that fails because the previous listener's socket is still in TIME_WAIT is retried; a broken
+/// install is reported at once. Measured (wasm_the_first, 2026-11-10): after a failed deploy the restart hit
+/// TIME_WAIT, the node exited `Address already in use`, and nothing tried again - the node stayed down until
+/// the sentinel's next check.
+#[test]
+fn a_bind_failure_is_retried_and_a_broken_install_is_not() {
+    for transient in [
+        "the node (pid 42) exited with code 1 before answering /health - bind 127.0.0.1:8799 failed: Address already in use (os error 98)",
+        "bind failed: address in use",
+        "the node (pid 7) exited with code 1 before answering /health - binding_transport_already_owned: the owner did not yield",
+        "listen: Address already in use (os error 10048)",
+    ] {
+        assert!(start_failure_is_transient(transient), "a released socket is transient: {transient}");
+    }
+    for fatal in [
+        "the node (pid 9) exited with code 1 before answering /health - Error: Cannot find module '/x/lua/core/server.lua'",
+        "no built binary at rust/target/release/wa",
+        "the node did not come up within 180s - serve.log is empty",
+    ] {
+        assert!(!start_failure_is_transient(fatal), "a broken install is not retried: {fatal}");
+    }
+}

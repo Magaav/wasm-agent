@@ -291,3 +291,32 @@ landing-queue: #7 release covered (aarch64-unknown-linux-gnu): covered: node-414
 `scripts/test-landing-queue.mjs` proves the call (its fixture's publisher records its arguments and
 the row's line) and the failure path, and `scripts/test-node-binaries.sh` proves the toolchain is the
 script's own.
+
+## A deploy builds a pinned commit, and a dead lander's merge is finished
+
+Two residues from the 2026-11-10 night wave, both recorded rather than remembered:
+
+- **A deploy never builds the live canonical tree.** `scripts/deploy.sh` resolves the commit, takes the
+  queue's own lease (`landing-queue.mjs pin`), creates a **detached worktree at that commit** under
+  `$WA_DEPLOY_PIN_DIR` (default `<tmp>/wa-deploy-pins/<sha>`), releases the lease, and builds, stages and
+  ships only from the pinned tree. A landing can therefore merge into the canonical checkout at any moment
+  without moving the bytes a build is reading — the failure that produced three failed deploys
+  (`stale embedded module: lua/core/server.lua`) and that commit `2231fc6f` could only make retryable. A
+  `pin` waits (bounded by `--wait-timeout`, default 600 s in the deploy) for a landing in progress, so a
+  deploy never resolves the tree mid-landing. `installed.txt` records `source_worktree=` and `build_pin=`.
+  `WA_DEPLOY_PIN=0` is an explicit exception, and `WA_DEPLOY_ALLOW_UNPINNED=1` is the only way past a pin
+  that failed.
+
+- **A lander that died between merge and push is recovered on the next acquire.** When no holder is live and
+  the canonical `HEAD` is a queue-shaped merge (`merge(<branch>): …`) ahead of `origin/main`, `acquire` /
+  `land` finishes the push and reads it back, or — if the push cannot be made — keeps the merge on
+  `refs/wa/recovered/<sha>` and resets the tree to `origin/main`. Both outcomes are written to the durable
+  log (`recovered: …`), and `status` reports `recovery: would_push|refused|none` without touching the tree.
+  A local commit that is not the queue's own merge form is refused by name (`unpushed_canonical`), never
+  pushed or dropped by guess.
+
+- **The holder is published for the tool layer.** On every grant the queue writes `holder.json` beside
+  `queue.sqlite` (`id`, `owner`, `kind`, `branch`, `lease`) and removes it when the row ends. It is a hint
+  for `lua/core/canonical_guard.lua`, never the authority: a write/edit into the canonical checkout, or a
+  bash/`operation start` command that would write there, is refused at the tool layer with the rule and the
+  worktree to use — unless the caller's session id is the holder. Reads stay allowed.

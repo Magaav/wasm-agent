@@ -347,3 +347,12 @@ See [OPENAI-SUB.md](OPENAI-SUB.md#stream-diagnostics-and-visible-reconnect-cycle
 - `scripts/install.sh`/`install.ps1` are fetched from a moving `main`; pin a tag and its checksum when
   handing them to anyone else.
 
+
+## Deadlines: no silent default
+
+`operation start` without `timeout_seconds` used to inherit the 300 s command default, so a supervised
+build was killed at five minutes and nothing in the receipt said why (measured 2026-11-10). The default now
+follows the kind of work — `command` 300 s, `build` 5400 s, `test` and `deploy` 3600 s — inferred from the
+command line or given explicitly with `kind`. Every start says which it used: `timeout_source:
+"default"|"caller"`, `timeout_kind` and a `timeout_notice` naming the default and how to change it
+(`wa-capabilities/src/operations.rs`). `bash` keeps its documented 300 s and its `timeout_seconds`.
