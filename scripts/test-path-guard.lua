@@ -58,9 +58,10 @@ if home ~= '' then
     check(not guard.command('rm -rf ' .. parent), 'an ancestor of HOME is refused (' .. parent .. ')')
   end
 end
--- A recursive delete whose target the shell computes cannot be checked statically: fail closed.
-check(not guard.command('rm -rf "$SOME_DIR"'), 'a variable target is refused rather than guessed')
-check(not guard.command('rm -rf $(mktemp -d)'), 'a command substitution target is refused')
+-- A computed target is NOT refused for being computed: the runtime wall expands it and judges the
+-- result. `T=$(mktemp -d); rm -rf "$T"` is what a test should do, and it must work.
+check(guard.command('rm -rf "$SOME_DIR"') == true, 'a variable target passes the static wall (the runtime wall judges it)')
+check(guard.command('rm -rf $(mktemp -d)') == true, 'a command substitution target passes the static wall')
 
 -- ---- the allow case: a directory this run made and marked ---------------------------------------
 local function shell(command)
@@ -100,17 +101,37 @@ if home ~= '' then
   check(kind_ok and tostring(kind):find("dir", 1, true) ~= nil, "HOME still exists after the refused delete")
 end
 
--- ---- wall two: the bash tool --------------------------------------------------------------------
+-- ---- wall two: the resolved target, through the bash tool --------------------------------------
 local sid = memory.start_session('', 'path guard', { user_id = 'master' })
 local ctx = { session_id = sid, user_id = 'master', role = 'master' }
-local binned = tools.dispatch(memory, 'bash', { command = 'rm -rf "$HOME"' }, 'master', ctx)
-check(type(binned) == 'table' and binned.error ~= nil, 'the bash tool refuses a variable target: ' .. json.encode(binned):sub(1, 200))
-check(tostring(binned.error):find('path_guard', 1, true) ~= nil, 'and names the guard')
+-- EXPANDED form of the 11/11 loss: "$HOME" is not a literal, and it must still be refused - by the
+-- prelude, after the shell expanded it. The proof is not an exit code (a shell keeps going after a
+-- refused command, and that is normal): it is that the directory and a file inside it survive.
+if home ~= '' then
+  local made = tools.dispatch(memory, 'bash', { command = 'printf survives > "$HOME/keep.txt"; cat "$HOME/keep.txt"' }, 'master', ctx)
+  check(tostring(made.stdout or ''):find('survives', 1, true) ~= nil, 'a file inside HOME was written before the attempt')
+end
+local expanded = tools.dispatch(memory, 'bash', { command = 'H="$HOME"; rm -rf "$H"; echo after' }, 'master', ctx)
+local said = tostring(expanded.stderr or '') .. tostring(expanded.error or '')
+check(said:find('path_guard', 1, true) ~= nil, 'H=$HOME; rm -rf "$H" is refused by name: ' .. said:sub(1, 200))
+if home ~= '' then
+  check(host.read_file(home .. '/keep.txt') ~= nil, 'and the file inside HOME survived the refused delete')
+  check(host.path_kind(home) == 'dir', 'and HOME is still a directory')
+end
+-- The same shape, allowed: a directory this run made. This is the idiom the 66 regressions used.
+local own = tools.dispatch(memory, 'bash', { command = 'T=$(mktemp -d); echo x > "$T/f"; rm -rf "$T"; if [ -e "$T" ]; then echo kept; else echo gone; fi' }, 'master', ctx)
+check(own.ok == true and tostring(own.stdout or ''):find('gone', 1, true) ~= nil,
+  'T=$(mktemp -d); rm -rf "$T" is allowed and actually deletes: ' .. json.encode(own):sub(1, 200))
+-- `command rm` walks past a function; the prelude intercepts the builtin too.
+local bypass = tools.dispatch(memory, 'bash', { command = 'H="$HOME"; command rm -rf "$H"; echo after' }, 'master', ctx)
+check((tostring(bypass.stderr or '') .. tostring(bypass.error or '')):find('path_guard', 1, true) ~= nil,
+  'command rm is refused as well: ' .. json.encode(bypass):sub(1, 200))
 local root_delete = tools.dispatch(memory, 'bash', { command = 'rm -rf /' }, 'master', ctx)
-check(tostring(root_delete.error):find('path_guard', 1, true) ~= nil, 'the bash tool refuses a root delete')
+check(tostring(root_delete.stderr or root_delete.error):find('path_guard', 1, true) ~= nil, 'a root delete is refused')
 -- An ordinary command still runs: the guard is a fence, not a wall in front of everything.
 local fine = tools.dispatch(memory, 'bash', { command = 'echo path-guard-ok' }, 'master', ctx)
 check(fine.ok == true and tostring(fine.stdout or ''):find('path-guard-ok', 1, true) ~= nil, 'an ordinary command is untouched')
+check(tostring(fine.stdout or ''):find('__wa_path_guard', 1, true) == nil, 'and carries no prelude bytes')
 
 -- ---- the cause: the test that deleted a home ----------------------------------------------------
 -- Read the tree under test, not the process's working directory: a run started inside another checkout

@@ -10,6 +10,10 @@ local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
 local canonical_guard = dofile("lua/core/canonical_guard.lua")
+-- The path guard, once: `run()` below is where every shell command this tool launches passes, and the
+-- runtime wall (the shell prelude) has to be added here, not only in init.lua - a WA_SCRIPT run does not
+-- load init.lua, and that is exactly how a test runs.
+local path_guard = dofile("lua/core/path_guard.lua")
 local read_batch = dofile('lua/core/read_batch.lua')
 local mcp = dofile('lua/core/mcp.lua')
 local envelope = dofile('lua/core/envelope.lua')
@@ -1163,9 +1167,9 @@ local function run(command, timeout_seconds, cwd, provenance)
   -- A recursive delete of a protected path never reaches the shell: the guard names the path and the
   -- rule. init.lua installs the same check around `host.exec`; this is the second wall, because a test
   -- or a host that swaps `host.exec` after init would otherwise be enough to lose a home.
-  local allowed, refused = dofile("lua/core/path_guard.lua").command(command, cwd)
+  local allowed, refused = path_guard.command(command, cwd)
   if not allowed then return { error = refused, effect = "none", blocked_by = "path_guard" } end
-  local ok, raw = pcall(host.exec, command, cwd or "", timeout_seconds, json.encode(provenance))
+  local ok, raw = pcall(host.exec, path_guard.wrap(command), cwd or "", timeout_seconds, json.encode(provenance))
   if not ok then return { error = tostring(raw) } end
   local decoded = json.decode(raw)
   if type(decoded) ~= "table" then return { error = tostring(raw) } end
