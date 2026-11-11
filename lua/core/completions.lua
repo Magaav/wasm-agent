@@ -24,8 +24,23 @@ local nodes=dofile('lua/core/nodes.lua')
 local workspaces=dofile('lua/core/workspaces.lua')
 local M={}
 local scan_after=0
+-- The outbox is written on the node's placement tick every two seconds while runs, lanes and the CLI
+-- write the same ledger, so its statements take the node's contention policy
+-- (`lua/core/sqlite_busy.lua`). Measured 2026-11-12: `[placement] lua/core/completions.lua:28:
+-- database is locked` in serve.log - a tick that met a lock and raised instead of waiting, losing that
+-- tick's completions for no reason.
+local sqlite_busy=dofile('lua/core/sqlite_busy.lua')
+local function sql_once(method,s,p)
+  local ok,raw=pcall(host[method],s,json.encode(p or {}))
+  if not ok then error(tostring(raw),0) end
+  local r=json.decode(raw)
+  if type(r)~='table' then error('no_result_from_host',0) end
+  if r.error then error(tostring(r.error),0) end
+  return r
+end
 local function sql(method,s,p)
-  local r=json.decode(host[method](s,json.encode(p or {})));if r.error then error(r.error) end;return r
+  return sqlite_busy.retry(method=='sql_exec' and 'completion outbox write' or 'completion outbox read',
+    function() return sql_once(method,s,p) end)
 end
 local function query(s,p) return sql('sql_query',s,p) end
 local function exec(s,p) return sql('sql_exec',s,p) end

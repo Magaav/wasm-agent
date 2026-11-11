@@ -6,6 +6,9 @@
 -- ~/.wasm-agent/nodes/<node_id>/, with the legacy flat files as a read
 -- fallback so existing selections survive the move.
 local json = dofile("lua/vendor/json.lua")
+-- A setting is read and written while runs, lanes and the window all touch the one ledger, so this
+-- store takes the node's contention policy too (`lua/core/sqlite_busy.lua`).
+local sqlite_busy = dofile("lua/core/sqlite_busy.lua")
 local M = {}
 
 local function base()
@@ -50,11 +53,19 @@ local function selection_key(name)
   return name == 'provider' or name:match('^model%.') or name:match('^reasoning%.')
 end
 
-local function sql(verb, statement, params)
+local function sql_once(verb, statement, params)
   local result = host[verb](statement, json.encode(params or {}))
   if type(result) == 'string' then result = json.decode(result) end
   if type(result) ~= 'table' or result.error then error('selection_store: ' .. tostring(result and result.error)) end
   return result
+end
+
+-- One statement, retried while the reason is a lock. A refused statement applied nothing, so
+-- repeating THIS statement is safe - the surrounding transaction in `M.mutate` is never repeated.
+local function sql(verb, statement, params)
+  return sqlite_busy.retry(verb == 'sql_exec' and 'selection write' or 'selection read', function()
+    return sql_once(verb, statement, params)
+  end)
 end
 
 local frozen, writing, ready
@@ -94,6 +105,10 @@ end
 
 -- Validation and the write share SQLite's writer lock across all interpreters.
 -- Optional CAS prevents an old window's model choice applying to a new provider.
+--
+-- `BEGIN IMMEDIATE` here is where a UI settings write met `database is locked` while a run held the
+-- lock for a moment; it now waits (and fails, if it must, as `database_busy: ... (retryable)`) instead
+-- of raising SQLite's sentence into a settings panel.
 function M.mutate(fn, expected_revision)
   if not host.sql_query then return fn() end
   setup()

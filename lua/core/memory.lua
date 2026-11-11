@@ -4,6 +4,8 @@ local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local evidence = dofile("lua/core/evidence_view.lua")
 local redact = dofile("lua/core/redact.lua")
+-- The one place a lock is waited for and the one name it fails under (`database_busy`).
+local sqlite_busy = dofile("lua/core/sqlite_busy.lua")
 local M = {}
 local in_transaction
 
@@ -28,6 +30,17 @@ end
 
 local function exec(sql, params)
   return check(decode(host.sql_exec(sql, json.encode(params or {}))))
+end
+
+-- The same statement with the reason RETURNED instead of raised. A retry has to look at *why* a
+-- statement failed before it can decide, and a raised error cannot be inspected without wrapping
+-- every call site in its own pcall.
+local function try_exec(sql, params)
+  local called, raw = pcall(host.sql_exec, sql, json.encode(params or {}))
+  if not called then return nil, tostring(raw) end
+  local result = decode(raw)
+  if type(result) == "table" and result.error then return nil, tostring(result.error) end
+  return result
 end
 
 -- ---------------------------------------------------------------- the memory seam
@@ -1047,21 +1060,46 @@ end
 -- against the turn that produced them. `BEGIN IMMEDIATE` takes the write lock for the whole append, so the
 -- read-modify-write is atomic, writers are serialised, and the three writes (message, search row, session
 -- touch) are one unit a kill cannot tear in half.
+--
+-- The lock itself is waited for now (`lua/core/sqlite_busy.lua`, `rust/wa-sqlite`). Measured 2026-11-12:
+-- this function was where a RUN DIED - `lua/core/memory.lua:1056: database is locked` - because three
+-- relay lanes, `serve`, the placement tick and the CLI all write the one ledger. Only the acquisition is
+-- retried: a `BEGIN IMMEDIATE` that failed took no lock, so repeating it cannot half-apply a unit. `fn`
+-- is never re-run here - a closure may already have done work outside the database - and a lock met
+-- inside it is raised as the named error (`database_busy: ... (retryable)`) for the caller that knows its
+-- own unit is safe to repeat (`M.append_turn` does).
 in_transaction = function(fn)
   -- Reentrant: a write that is already inside a transaction joins it. The depth is kept on the
   -- interpreter, not in this module, because several modules load their own copy of this file and all
   -- of them share the interpreter's one connection.
   local depth = rawget(_G, "__wa_tx_depth") or 0
   if depth > 0 then return fn() end
-  exec("BEGIN IMMEDIATE")
+  sqlite_busy.retry("BEGIN IMMEDIATE", function()
+    local taken, problem = try_exec("BEGIN IMMEDIATE")
+    if not taken then error(problem, 0) end
+  end)
   rawset(_G, "__wa_tx_depth", 1)
   local ok, result, reason = pcall(fn)
   rawset(_G, "__wa_tx_depth", 0)
   if not ok then
-    pcall(exec, "ROLLBACK")
-    error(result)
+    pcall(try_exec, "ROLLBACK")
+    error(result, 0)
   end
-  exec("COMMIT")
+  -- The commit is retried on its own, never the body. A `COMMIT` that returns busy has NOT committed
+  -- and the transaction is still open, so repeating it is what SQLite asks for; `no transaction is
+  -- active` after such a refusal means an earlier attempt landed, which is success. A commit that
+  -- still cannot proceed is rolled back here, so the connection is left clean and a caller repeating
+  -- the whole unit does not meet `cannot start a transaction within a transaction`.
+  local committed, problem = pcall(sqlite_busy.retry, "COMMIT", function()
+    local done, failure = try_exec("COMMIT")
+    if done then return true end
+    if failure and tostring(failure):find("no transaction is active", 1, true) then return true end
+    error(failure, 0)
+  end)
+  if not committed then
+    pcall(try_exec, "ROLLBACK")
+    error(problem, 0)
+  end
   return result, reason
 end
 
@@ -1097,7 +1135,14 @@ local function append_turn(session_id, turn)
 end
 
 function M.append_turn(session_id, turn)
-  return in_transaction(function() return append_turn(session_id,turn) end)
+  -- The one write unit that is safe to repeat whole, and therefore the one that is. Everything it
+  -- does - the message row, the search row, the session touch, the journal row - is inside a single
+  -- transaction, so a failed attempt rolled all of it back and repeating it cannot duplicate a row.
+  -- It is also the unit tonight's run died of (`memory.lua:1056`), which is why the repeat lives here
+  -- and not around every caller's closure.
+  return sqlite_busy.retry("append_turn", function()
+    return in_transaction(function() return append_turn(session_id,turn) end)
+  end)
 end
 M.transaction = function(fn) return in_transaction(fn) end
 M.append_turn_in_transaction = append_turn

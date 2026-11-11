@@ -219,6 +219,59 @@ atomicity. A transaction is closed only when:
   `Lua::rollback_if_open()`; or
 - the interpreter's connection drops with the VM, rolling back whatever it held.
 
+### Contention: one policy, and a name when it cannot be had
+
+Measured 2026-11-12, the failure this section exists to remove: on `work` an interactive run ended at
+18:14:58 with `lua/core/memory.lua:1056: database is locked` while `wa serve` handled relayed calls; a
+relay proof against `wasm_the_first` lost 2 of 10 parallel `status` calls while one long call ran (0 of
+10 without it); serve.log carried `[placement] lua/core/completions.lua:28: database is locked`. Since
+the relay fix up to three admitted calls run at once, each in its own interpreter with its own
+connection to the one WAL database, so contention is the ordinary case - and a call or a run that fails
+of it is a defect.
+
+`rust/wa-sqlite` owns the policy. Every store - the ledger, the graph, jobs, the operation index, the
+resource claims, the subagent journal, the run journal, the rendezvous registry, the component pool -
+opens through it and gets the same `PRAGMA busy_timeout`, WAL, `synchronous=FULL` and foreign keys. A
+read-only connection gets the wait and not the journal mode: a reader cannot change it, and asking it to
+on a store that is not yet WAL fails the read.
+
+| knob | default | what it bounds |
+| --- | --- | --- |
+| `WASM_AGENT_SQLITE_BUSY_MS` | 5000 | one statement's wait inside SQLite |
+| `WASM_AGENT_SQLITE_RETRY_MS` | 20000 | all attempts of one statement/transaction together |
+| `WASM_AGENT_SQLITE_RETRY_ATTEMPTS` | 5 | how many attempts one unit may make |
+| `WASM_AGENT_SQLITE_SLOW_MS` | 0 (off) | report one statement slower than this on stderr, to find a long holder |
+
+What is retried, and the rule that makes it safe:
+
+- **A statement, never a unit.** `host.sql_exec`/`host.sql_query` retry `SQLITE_BUSY`/`SQLITE_LOCKED`
+  with jittered bounded backoff. A refused statement applied nothing, so re-running *that statement*
+  cannot double-apply an effect. A Lua closure is never re-run here: it may already have done work
+  outside the database.
+- **The exception SQLite creates is detected, not retried.** `SQLITE_BUSY_SNAPSHOT` (a write conflict
+  inside a transaction) *rolls the transaction back*; retrying the statement then would commit alone
+  what the caller meant as one unit. `is_autocommit` before/after catches it, and the answer says to
+  retry the unit.
+- **A transaction retries its BEGIN and its COMMIT, never its body** (`lua/core/sqlite_busy.lua`,
+  `memory.in_transaction`). A `BEGIN IMMEDIATE` that failed took no lock; a `COMMIT` that returned busy
+  has not committed and the transaction is still open, so repeating `COMMIT` is what SQLite asks for
+  (`no transaction is active` afterwards means an earlier attempt landed). The body is repeated only
+  where the unit says it is safe: `memory.append_turn` is, because everything it does - the message
+  row, the search row, the session touch, the journal row - is inside that one transaction.
+- **A retry nested inside a retry inherits the outer deadline**, so two budgets cannot multiply into a
+  minute of waiting.
+- **A lock that cannot be had ends with a name:** `database_busy: <what> could not get the lock within
+  <n>ms (<k> attempt(s), last: <sqlite's sentence>) (retryable)`. Callers match the name; the placement
+  tick defers on it instead of failing the call (`lua/core/subagents.lua`); a run's failure carries it
+  instead of SQLite's sentence from three frames down.
+
+Writes are kept short so that waiting is never the answer: every transaction in the tree is database
+work only - no model call, no `host.exec`, no HTTP - so a hold is milliseconds and the retry rides it
+out. `scripts/test-sqlite-busy.lua` proves the four claims: the policy in one process, an append
+landing through a held lock, a lock held past the deadline ending as `database_busy` (and not as a dead
+process), and six processes - a `serve` lane, three relay lanes, two CLI readers - with zero
+`database is locked` failures.
+
 Migrations are process-wide and run **once**: `host.db_ready()` reports whether
 the schema has been migrated, and `host.mark_db_ready()` records that it has.
 Both return exactly one value (`nil` for the marker);

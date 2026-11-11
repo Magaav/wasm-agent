@@ -1002,9 +1002,21 @@ function wa_subagents(body, session)
 end
 
 local completions=dofile('lua/core/completions.lua')
+local sqlite_busy=dofile('lua/core/sqlite_busy.lua')
+-- One phase of the tick. A phase that meets a LOCK is deferred: the next tick is two seconds away, so
+-- losing this one is free, and raising would fail the call for weather (`[placement] lua/core/
+-- completions.lua:28: database is locked`, measured 2026-11-12 in serve.log). Any other failure keeps
+-- failing loudly - a bug must not become a quiet line.
+local function phase(name,fn)
+  local ok,problem=pcall(fn)
+  if ok then return end
+  local text=tostring(problem)
+  if not sqlite_busy.is_busy(text) then error(problem,0) end
+  if host.log then pcall(host.log,'tick '..name..' deferred: '..text) end
+end
 function wa_orchestrator_tick()
-  dofile("lua/core/orchestrator.lua").tick(M)
-  completions.tick(M)
+  phase('orchestrator',function() dofile("lua/core/orchestrator.lua").tick(M) end)
+  phase('completions',function() completions.tick(M) end)
   -- The model's own wakes (docs/SELF-LOOP.md): due rows are handed to the same run scheduler, so a
   -- session no browser is watching still keeps a promise it made to itself. Eligibility and state are
   -- in Lua; this tick only gives the loop a heartbeat that outlives a single interpreter turn.
