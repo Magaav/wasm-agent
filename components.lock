@@ -14,10 +14,23 @@
 # **Installed is not enabled**: pinning a component here installs it, and leaves it off.
 #
 # WHAT IS NOT PINNED, and why. Test fixtures are built by the gate, never shipped: `svc-*`,
-# `memory-crash`, `memory-wedge`, `mcp-echo`. `wa-whatsapp` is installed by hand on the node that runs
-# it (its bytes carry the linked-device client and its credentials file is that node's), and
-# `mcp-whatsapp` is a registry definition an operator enables with `mcp put`/`enable`, not a core
-# component. A name is shipped by being pinned here; nothing else in the tree decides it.
+# `memory-crash`, `memory-wedge`, `mcp-echo`. `mcp-whatsapp` is a registry definition an operator
+# enables with `mcp put`/`enable`, not a core component. A name is shipped by being pinned here;
+# nothing else in the tree decides it.
+#
+# WHY `wa-whatsapp` IS PINNED (11/11). It used to be installed by hand on the one node that ran it,
+# which meant that node needed a wasi-sdk toolchain and a build of its own. Its bytes are
+# wasm32-wasip2, so they do not depend on the CPU - the same artifact runs on arm64 and x86_64 - and
+# building it once here is what makes every node's deploy one command (measured: two builds in this
+# tree gave the same sha256, 8,553,798 bytes).
+#
+# Pinning it means EVERY node installs it, so it has to stay inert where nobody wants it.
+# Installation writes `<name>.wasm`, its pin and its manifest, and nothing else. A service runs only
+# from an ENABLED definition in the services registry (lua/core/services.lua), which no deploy
+# creates: with no definition `services.autostart()` returns before it calls the supervisor at all,
+# so no instance exists and no WhatsApp connection is opened. Enabling it is an operator action
+# (docs/WHATSAPP-CUTOVER.md). A pin is not a policy either: `policy.json` still decides what a node
+# routes to, and `wa features` says which path is live.
 #
 # FORMAT: <name> <sha256> <bytes>. Regenerate a line on the machine that produces the release
 # artifacts, from the reviewed tree:
@@ -53,3 +66,4 @@ model-gateway 8685425bd2a2f6ba7e66ae72e8a0cc40064a530f1371ef9db807fc87bfc1c58d 4
 selfloop 2ac381ae62407256c0328d115b357125ada42357e4d088a4b08176a48ff4b699 246427
 telemetry-sink 48d5d52aba78d986e857da523e00801ddfa9f2c98503e912fe4c8172188cd707 153650
 wa-email 630f6fd0d9574db3f80457bfa24eb56cc9b62854ecd268e551c84eb9c103d1b4 569268
+wa-whatsapp 58cbaeccb63b82349533776c33b6d0a217ce655ae2ac21b48fbfb42b2609c252 8553798

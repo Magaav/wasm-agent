@@ -52,13 +52,22 @@ placed after it would still produce a plausible turn. The refusal instead:
 `/health` reports `model_less`, which can be `true` while `configured` is also `true` - that pair is
 precisely the node this exists for. `wa status` shows `model-less=yes (no turn can run here)`.
 
-## What is not done here
+## Follow-up (not implemented here)
 
-Routing a wake that belongs to *another* node away from a model-less node - so a Sentinel or
-deploy-return notice for a session owned elsewhere is delivered to the owning/requesting node rather
-than refused here - is **not implemented**. Today such a wake is refused visibly, which is strictly
-better than an empty turn, but it still costs the requester a failed wake instead of a delivery. The
-sentinel's notice path is where that belongs, and it is not in `lua/core/selfloop.lua`.
+**Deliver a wake to the node that owns the session, instead of refusing it here.** Routing is out of
+scope for this change and deliberately not attempted; the gap and its shape are recorded so the next
+piece has a starting point rather than a guess.
+
+- *Symptom today:* a Sentinel or deploy-return notice for a session owned by another node is refused
+  by the model-less node with `node_model_less`. That is visible and honest - strictly better than the
+  empty turn it replaces - but the requester still learns nothing, because nothing was delivered.
+- *Where it belongs:* the sentinel's notice delivery path, not `lua/core/selfloop.lua` (which has no
+  notice handling at all), and not the turn seam. `memory.session_owner` returns the owning *account*
+  (`id, user_id`), not a node, so the delivery path first needs a node to address.
+- *Done when:* a notice that cannot be served locally is forwarded to the requesting/owning node, the
+  requesting node's session receives it, and a test shows both the forward and the case where the
+  owning node is the model-less one itself (which must still refuse, visibly, rather than loop).
+- *Not claimed:* no part of this is implemented, and no test covers it.
 
 ## Verification
 
