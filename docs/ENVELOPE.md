@@ -61,6 +61,7 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `notes_write`: Replace your session notes (previous version archived)
 - `notes_append`: Append to your session notes
 - `notes_compact`: Keep the last lines of your notes and archive the rest
+- `done_criteria`: Record the acceptance checks a turn must pass, or close the gate on measured impossibility
 - `capabilities`: List the tools this account may use
 - `lessons`: Recall or add what this fleet learned the hard way (symptom, cause, fix, rule)
 - `fleetview`: One read-only view of the whole fleet: liveness, version, health, disk, components, work, incidents
@@ -139,6 +140,7 @@ runs on the client too, while `bash` runs on this node.
 | `notes_write` | `text` | Replace your session notes (previous version archived) |
 | `notes_append` | `text` | Append to your session notes |
 | `notes_compact` | `keep_lines?` | Keep the last lines of your notes and archive the rest |
+| `done_criteria` | `action` `checks?` `id?` `operator_quote?` `probes?` `reason?` `request?` `why?` | Record the acceptance checks a turn must pass, or close the gate on measured impossibility |
 | `skill` | `limit?` `name?` `offset?` `query?` `snapshot?` | Discover procedures by query or load a full skill by name |
 | `capabilities` | - | List the tools this account may use |
 | `lessons` | `action` `cause?` `fix?` `id?` `limit?` `query?` `rule?` `source?` `symptom?` `tags?` | Recall or add what this fleet learned the hard way (symptom, cause, fix, rule) |
@@ -206,7 +208,7 @@ runs on the client too, while `bash` runs on this node.
 | `web_read` | `limit?` `offset?` `pending_ref?` `ref?` `refresh?` `url?` | Read a public source or page an immutable cache ref |
 | `node_update` | `node` `action?` `commit?` `follow_up_seconds?` `id?` `reason?` `rendezvous?` | Ask another node to update itself, and read its outcome |
 
-A guest's catalogue is `time`, `remember`, `recall`, `memories`, `wake`, `wake_list`, `wake_cancel`, `notes_read`, `notes_write`, `notes_append`, `notes_compact`, `skill`, `capabilities`, `lessons`, `fleetview`, `tool_search`, `tool_call`, `subagent`, `sessions`, `session`, `search_messages`, `resume_session`.
+A guest's catalogue is `time`, `remember`, `recall`, `memories`, `wake`, `wake_list`, `wake_cancel`, `notes_read`, `notes_write`, `notes_append`, `notes_compact`, `done_criteria`, `skill`, `capabilities`, `lessons`, `fleetview`, `tool_search`, `tool_call`, `subagent`, `sessions`, `session`, `search_messages`, `resume_session`.
 <!-- /generated -->
 
 ## What the model does **not** get

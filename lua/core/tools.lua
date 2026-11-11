@@ -266,6 +266,30 @@ M.shared = {
     text = { type = "string", maxLength = 65536 } }, { "text" }),
   schema("notes_compact", "Keep only the last `keep_lines` lines of your notes and archive the full previous document. The model decides what to drop; the archive is retrievable with notes_read {version}.", {
     keep_lines = { type = "integer", minimum = 1, maximum = 1000, description = "Lines to keep (default 40)." } }),
+  -- The done gate (docs/DONE-GATE.md): the acceptance checks the harness runs at each turn end.
+  schema("done_criteria", "The acceptance checks for the operator's request, next to their verbatim words. On a request that asks for a change in the world, `capture` BEFORE the first effect: a command check is run by the harness at every turn end, a written criterion is judged by a fresh verifier. While one fails the harness continues the run with the operator's words and the failing output; it does not end the turn. `add` records another check at any time. Removing or weakening a check needs the operator's own instruction, quoted verbatim from this session's transcript (`operator_quote`), because a check the model can quietly drop is not a check. `impossible` ends the turn on evidence: `reason` plus `probes` the harness reruns (each must meet its own expect/expect_exit now), or a quoted operator instruction to stop. `exempt` records why a request needs no state change. `status` reads the gate and its history.", {
+    action = { type = "string", enum = { "capture", "add", "remove", "weaken", "exempt", "impossible", "status" },
+      description = "capture: record the request's checks; add: one more; remove/weaken: operator words required; exempt: no state change requested; impossible: measured blocker; status: read." },
+    request = { type = "string", maxLength = 20000, description = "capture: the operator's words, verbatim (default: the newest user turn). A paraphrase is refused." },
+    checks = { type = "array", minItems = 1, maxItems = 24, items = { type = "object", properties = {
+      command = { type = "string", maxLength = 4000, description = "A command the harness runs in the session workdir; exit code must be 0 unless expect_exit says otherwise." },
+      expect = { type = "string", maxLength = 500, description = "Optional literal substring the output must contain." },
+      expect_exit = { type = "integer", minimum = -255, maximum = 255, description = "Required exit code (default 0)." },
+      text = { type = "string", maxLength = 2000, description = "A written criterion instead of a command; a fresh verifier judges it against the evidence." },
+      why = { type = "string", maxLength = 400, description = "What this proves." },
+      timeout_seconds = { type = "number", minimum = 1, maximum = 3600 } } },
+      description = "capture/add: the checks. A check is a command, or a written criterion." },
+    id = { type = "string", description = "remove/weaken: the check id from capture/status (default: every live check)." },
+    operator_quote = { type = "string", maxLength = 4000, description = "remove/weaken/impossible: the operator's instruction, verbatim, as it appears in a user turn of this session." },
+    reason = { type = "string", maxLength = 4000, description = "impossible: the named blocker." },
+    probes = { type = "array", minItems = 1, maxItems = 8, items = { type = "object", properties = {
+      command = { type = "string", maxLength = 4000 },
+      expect = { type = "string", maxLength = 500 },
+      expect_exit = { type = "integer", minimum = -255, maximum = 255 },
+      why = { type = "string", maxLength = 400 } }, required = { "command" } },
+      description = "impossible: commands the harness reruns to measure the blocker." },
+    why = { type = "string", maxLength = 1000, description = "exempt: why this request needs no change in the world." } },
+  { "action" }),
   schema("skill", "Find procedures by `query`, or load one skill's full instructions by `name` (not both). Load a matching skill before specialized work.", {
     name = { type = "string", description = "Exact skill name to load." },
     query = { type = "string", maxLength = 256, description = "Task keywords; * lists all visible metadata." },
@@ -667,6 +691,7 @@ M.tier_of = {
   mcp='mcp', web_search='mcp', web_read='mcp', services='mcp',
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   notes_read = "memory", notes_write = "memory", notes_append = "memory", notes_compact = "memory",
+  done_criteria = "memory",
   wake = "sessions", wake_list = "sessions", wake_cancel = "sessions",
   skill = "skills",
   capabilities = "capabilities", tool_search='capabilities', tool_call='capabilities',
@@ -742,6 +767,7 @@ local CUES = {
   notes_write = "Replace your session notes (previous version archived)",
   notes_append = "Append to your session notes",
   notes_compact = "Keep the last lines of your notes and archive the rest",
+  done_criteria = "Record the acceptance checks a turn must pass, or close the gate on measured impossibility",
   wake = "Schedule your own next turn (time, event or repeating)",
   wake_list = "List your pending self-wakes",
   wake_cancel = "Cancel a pending self-wake by id",
@@ -1587,6 +1613,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if name == "notes_write" then return selfloop.notes_write(args, ctx) end
     if name == "notes_append" then return selfloop.notes_append(args, ctx) end
     return selfloop.notes_compact(args, ctx)
+  end
+  -- The done gate (docs/DONE-GATE.md). Master/admin only: the acceptance checks for a request are the
+  -- operator's business, and the gate can run commands.
+  if name == "done_criteria" then
+    if not is_master(role) then return { error = "forbidden_for_role:" .. tostring(role) } end
+    return dofile("lua/core/done_gate.lua").tool(args, ctx)
   end
 
   -- A guest's memory is its own: it writes and reads only `user:<id>`, never `global` (which a

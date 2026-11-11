@@ -18,6 +18,7 @@ local tool_output = dofile("lua/core/tool_output.lua")
 local json_contract = dofile("lua/core/json_contract.lua")
 local selfloop = dofile("lua/core/selfloop.lua")
 local hooks = dofile("lua/core/hooks.lua")
+local done_gate = dofile("lua/core/done_gate.lua")
 
 -- One place that tells a hook what it is being told about. Ids, names, lengths and bounded views
 -- only: a hook never receives the transcript, a credential or a whole tool result unless the node
@@ -552,6 +553,18 @@ local function guidelines_for(tool_list, envelope_mode)
   end
   if have.read or have.write or have.edit then
     add("Show file paths clearly when working with files")
+  end
+  -- The operator's rule for a "do X" request: the acceptance checks are recorded with the words, and
+  -- the harness runs them at every turn end. It is stated once, as a way to work, because it is not a
+  -- reminder about the current turn - the loop below enforces it either way (lua/core/done_gate.lua).
+  if have.done_criteria then
+    add("When a request asks for a change in the world (fix, build, send, deploy, land, clean - not a "
+      .. "question or an explanation), record its acceptance checks with `done_criteria` before the "
+      .. "first effect: a command the harness can run, or a criterion a fresh verifier can judge. The "
+      .. "harness runs them at every turn end and continues the run while one fails, so a check you "
+      .. "cannot make pass is a check you should not record. A check can only be removed with the "
+      .. "operator's own words quoted from the transcript; a measured impossibility (a probe the "
+      .. "harness can rerun) ends the turn instead of finishing it")
   end
   return list
 end
@@ -1852,6 +1865,65 @@ function M:run_body(text, images)
   -- context from the transcript. Each round checks; nothing is cut off.
   -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
   -- against a long task: it should never fire in practice.
+
+  -- The done gate (lua/core/done_gate.lua). A "do X" request gets its acceptance checks recorded next
+  -- to the operator's words, and at every turn end the harness runs them. A failing check re-enters
+  -- this same loop with the verbatim request and the failing output instead of letting the turn end on
+  -- a natural break point; a passing gate, a measured impossibility, operator input or a stall (the
+  -- same failing output N times with no state change) ends it. No round is counted and nothing here
+  -- asks the model to try harder: the message it sends is the machine's own output.
+  local gate = done_gate.new({ session_id = self.session_id, owner = self.user, request = text,
+    disabled = (self.subagent and true or false)
+      or (self.role ~= "master" and self.role ~= "admin") })
+  gate.effects = 0
+  local function gate_changes()
+    local summary = changeset.summary(self.changes)
+    if not summary then return "", {} end
+    local lines = {}
+    for _, file in ipairs(summary.files or {}) do
+      lines[#lines + 1] = tostring(file.path) .. "+" .. tostring(file.added) .. "-" .. tostring(file.removed)
+    end
+    table.sort(lines)
+    return host.sha256(table.concat(lines, "\n")), lines
+  end
+  -- The turn-end gate, called with the candidate answer. Returns the message that continues the run,
+  -- or nil to let the turn end. The verifier is a fresh one-shot request: it sees the request, the
+  -- criteria and the evidence, never this run's reasoning, and it cannot answer the task.
+  local function gate_turn_end(candidate)
+    if gate.disabled then return nil, { action = "disabled" } end
+    gate.called_tools = (self.run_counts.tool_calls or 0) > 0
+    gate.effected = (gate.effects or 0) > 0 or not changeset.empty(self.changes)
+    local changes_digest, changed_files = gate_changes()
+    local evidence = table.concat({
+      "The working agent's candidate answer to this turn:", "", tostring(candidate or ""), "",
+      "Files it changed in this run:",
+      #changed_files > 0 and table.concat(changed_files, "\n") or "(none)", "",
+      "Tool calls this run made: " .. tostring(self.run_counts.tool_calls or 0),
+    }, "\n")
+    local message, outcome = done_gate.turn_end(gate, {
+      cwd = M.workdir(self.session_id),
+      changes = changes_digest,
+      message_id = reply_message_id,
+      evidence = evidence,
+      emit = function(event) self.emit(event) end,
+      verify = function(prompt)
+        local result = provider.complete_with(self:summary_model(), {
+          { role = "system", content = done_gate.VERIFIER_SYSTEM },
+          { role = "user", content = prompt },
+        }, nil, false, { cache = false, session_id = self.session_id, run_id = self.run_id,
+          kind = "done_gate_verifier", max_output = 1500 })
+        return type(result) == "table" and tostring(result.content or "") or ""
+      end,
+    })
+    outcome = outcome or { action = "none" }
+    outcome.changes = changes_digest
+    if outcome.action ~= "none" and outcome.action ~= "no_tools" then
+      telemetry.event(self.session_id, self.run_id, "", "done_gate", outcome.action,
+        { gate_id = outcome.gate_id, failing = outcome.failing, total = outcome.total,
+          repeats = outcome.repeats, unjudged = outcome.unjudged })
+    end
+    return message, outcome
+  end
   local function consume_steering()
     local rows=steering.consume(self.user,self.session_id,self.steering_run_id)
     for _,row in ipairs(rows) do
@@ -2433,8 +2505,22 @@ function M:run_body(text, images)
         end
         -- The final assistant message is recorded once, after the loop, with the
         -- message's trace. Recording it here as well would duplicate it in context.
-        if steering.pending(self.user,self.session_id,self.steering_run_id) then
+        --
+        -- The done gate runs on the candidate, before the Stop hook: a turn whose recorded acceptance
+        -- checks still fail is not a candidate to stop at. Operator input wins over it (the pending
+        -- check just below), and the gate is silent when the run recorded nothing and the request was
+        -- not a request to change something.
+        local steering_waiting = steering.pending(self.user,self.session_id,self.steering_run_id)
+        local gate_message, gate_outcome = nil, { action = "none" }
+        if not steering_waiting then gate_message, gate_outcome = gate_turn_end(reply) end
+        if steering_waiting then
           reply='' -- A late continuation invalidates this candidate, not its retained queue receipt.
+        elseif gate_message then
+          messages[#messages+1]={role="user",content=gate_message}
+          reply=''
+          self.emit({type='status',text=string.format(
+            'done gate: %d recorded check(s) still failing - continuing',
+            tonumber(gate_outcome.failing) or 0)})
         else
           -- `Stop`: the candidate is identified. A hook may ask the run to continue (Claude Code's
           -- Stop semantics); the count is bounded, so a hook that always says "keep going" cannot
@@ -2588,6 +2674,17 @@ function M:run_body(text, images)
       local execution_timing=tool_output.execution_timing(function_.name,output)
       local tool_images=take_tool_images(function_.name,output)
       local ok_tool = tool_output.outcome(function_.name,output)
+      -- What the done gate counts as an effect: something outside this run may have changed. A read-only
+      -- tool, or a bash command an operator could have asked for as a read (`git status`, `rg`, `ls`), is
+      -- not one - that distinction is what keeps an explanation request ungated.
+      if ok_tool and not gate.disabled then
+        local effect = tools.has_effect(function_.name)
+        if function_.name == "bash" or function_.name == "shell" then
+          local command = type(args) == "table" and tostring(args.command or "") or ""
+          effect = command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
+        end
+        if effect then gate.effects = gate.effects + 1 end
+      end
       if ok_tool and function_.name=="read" and type(args.path)=="string" then
         self.reviewed_paths[args.path]=true
       elseif ok_tool and function_.name=="read_many" then

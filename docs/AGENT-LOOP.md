@@ -30,3 +30,14 @@ Focused checks: `scripts/test-prompt-tool-names.lua` (every role and envelope ca
 name the rules mention), `scripts/test-prompt-cache.lua` and `scripts/test-prefix-stability.lua`
 (the prefix stays frozen), and `scripts/test-skill-wasm-agent-dev.lua` (the skill behind rule 1
 still agrees with the tree).
+
+## What ends a turn
+
+Rules 1-3 are about how to work; they never said when a turn is *finished*, and that gap is what made
+sessions stop at natural break points and wait for a human "go/continue". The done gate closes it, and
+it is enforced by the harness rather than asked for in the prompt: a "do X" request records its
+acceptance checks with `done_criteria`, and at every turn end the harness runs them and continues the
+run with the operator's words and the failing output while one fails. A passing check, a measured
+impossibility, operator input or a stall ends the turn - there is no round count, and a repeated
+failing output becomes one named record and one wake. `docs/DONE-GATE.md` is the whole contract;
+`scripts/test-done-gate.lua` pins it.
