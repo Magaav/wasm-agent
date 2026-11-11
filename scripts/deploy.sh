@@ -1604,6 +1604,14 @@ ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-bi
 # ...and the rule that retires a script this release no longer ships: it runs at the end of THIS deploy, from
 # the copy beside deploy.sh, so an installed `request deploy` prunes exactly as the checkout deploy does.
 ship_file "$ROOT/scripts/lib/retire-unshipped.sh" "$INSTALL_DIR/scripts/lib/retire-unshipped.sh" "scripts/lib/retire-unshipped.sh beside deploy.sh"
+# The disk-reclaim job's own files. The job is installed below, and a run step is only useful if the install
+# has the pass AND the floor it is compared with: measured 2026-11-11, the install held a `reclaim-disk.sh`
+# from an older era and no `reclaim-disk.mjs` at all, so enabling the job would have run a script that could
+# not start - a job that is on and never works, which reads exactly like a disk with nothing to report.
+ship_file "$ROOT/scripts/reclaim-disk.sh" "$INSTALL_DIR/scripts/reclaim-disk.sh" "disk-reclaim job entry point"
+ship_file "$ROOT/scripts/reclaim-disk.mjs" "$INSTALL_DIR/scripts/reclaim-disk.mjs" "the disk reclaim report pass"
+ship_file "$ROOT/scripts/check-disk-floor.sh" "$INSTALL_DIR/scripts/check-disk-floor.sh" "the build floor the reclaim report compares against"
+ship_file "$ROOT/scripts/lib/proc-use.mjs" "$INSTALL_DIR/scripts/lib/proc-use.mjs" "the reclaim pass's process evidence"
 ship_file "$ROOT/components.lock" "$INSTALL_DIR/components.lock" "components.lock beside deploy.sh (the pins this install verified)"
 ship_file "$ROOT/scripts/codemode-build.mjs" "$INSTALL_DIR/scripts/codemode-build.mjs" "offline native shipping build contract"
 ship_file "$ROOT/scripts/check-graph-component.lua" "$INSTALL_DIR/scripts/check-graph-component.lua" "the graph component proof the deploy runs"
@@ -1715,7 +1723,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
       || fail "node installed, but could not ship $(basename "$source")"
     PIPELINE=$((PIPELINE + 1))
   done
-  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json "$ROOT"/jobs/on-stale.json; do
+  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json "$ROOT"/jobs/on-stale.json "$ROOT"/jobs/disk-reclaim.json; do
     [ -f "$source" ] || continue
     JOB_NAME="$(basename "$source" .json)"
     # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from
