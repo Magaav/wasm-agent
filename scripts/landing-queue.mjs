@@ -148,6 +148,59 @@ const describeRelease = release => `${release.state} (${
   RELEASE_TARGETS.map(target => `${target}=${(release.targets && release.targets[target] || {}).state || 'unknown'}`).join(', ')
 }): ${release.detail}${release.tag ? ` [${release.tag}]` : ''}`;
 
+// ---- the previous landing's release, and the row that says it is not covered ---------------------
+//
+// MEASURED 2026-11-11: the aarch64 publish for db0ec1f9 failed silently - the landing recorded it and
+// nothing read it - and only the NEXT landing exposed it, after a commit with no installable binary had
+// been on main for an hour. A landing is the moment a commit becomes installable, so an uncovered landed
+// commit is a standing fact the next lander (and any person reading `status`) has to see BEFORE it acts.
+//
+// It is a named warning row, never a refusal: the merge is pushed and read back by the time the publisher
+// runs, and an uncovered release is a fact about the release, not a reason to unland a commit or to stop
+// the next landing. `status` therefore still exits 0; the row is what fails loudly.
+function normalizeRelease(release) {
+  if (!release || typeof release !== 'object') return null;
+  if (release.targets && typeof release.targets === 'object') return release;
+  // A row recorded before the queue published both targets: one target, one verdict. Normalized here so
+  // an old row is read as what it says instead of being reported as "no release at all".
+  if (!release.target) return {...release, targets: {}};
+  return {...release,
+    targets: {[release.target]: {state: release.state, tag: release.tag || '', detail: release.detail || ''}}};
+}
+
+function previousLanding(db) {
+  const row = db.prepare("SELECT id, owner, branch, ended_at, result FROM queue WHERE state='landed' ORDER BY id DESC LIMIT 1").get();
+  if (!row || !row.result) return null;
+  let result;
+  try { result = JSON.parse(row.result); } catch { return null; }
+  return {id: row.id, owner: row.owner, branch: row.branch, landed_at: row.ended_at,
+    commit: result.merged || '', release: normalizeRelease(result.release)};
+}
+
+// The verdict per target, then a WARNING row for every target that is not published or covered.
+function releaseVerdict(landing) {
+  if (!landing) return {lines: [], warnings: []};
+  const sha = String(landing.commit || '').slice(0, 12) || 'unknown';
+  const release = landing.release;
+  const states = release
+    ? RELEASE_TARGETS.map(target => `${target}=${(release.targets[target] || {}).state || 'unknown'}`).join(', ')
+    : 'none recorded';
+  const lines = [`release for ${sha} (landed by ${landing.branch} #${landing.id}, ${age(landing.landed_at)} ago): ${states}`];
+  const warnings = [];
+  if (!release) {
+    warnings.push(`WARNING release_uncovered ${sha}: the landing recorded no release verdict at all`);
+    return {lines, warnings};
+  }
+  for (const target of RELEASE_TARGETS) {
+    const state = (release.targets[target] || {}).state || 'unknown';
+    if (RELEASE_OK.has(state)) continue;
+    const detail = (release.targets[target] || {}).detail || release.detail || '';
+    warnings.push(`WARNING release_uncovered ${sha} ${target}: ${state}${detail ? ` - ${detail}` : ''}`
+      + `${release.log ? ` (log ${release.log})` : ''}`);
+  }
+  return {lines, warnings};
+}
+
 // ---- status -------------------------------------------------------------------------------------
 function commandStatus(options) {
   const {repo, canonical, dir, db} = open(options);
@@ -164,6 +217,8 @@ function commandStatus(options) {
   // too: the next red candidate measures one baseline and pays for it once.
   const upstream = resolveCommit(repo, 'origin/main');
   const command = options.command || 'bash scripts/fast.sh';
+  const previous = previousLanding(db);
+  const verdict = releaseVerdict(previous);
   const baseline = upstream ? baselineOf(db, {digest: treeDigest(canonical, upstream).retest, command}) : null;
   const state = {
     canonical,
@@ -185,6 +240,11 @@ function commandStatus(options) {
     verdict: holder ? 'busy' : 'free',
     baseline: baseline && {command: checkCommandKey(command), names: baseline.names || [],
       source: baseline.source || '', measured_on: baseline.commit || '', recorded_by: baseline.recorded_by || ''},
+    // The commit before this one, read at the START of every look at the queue: a landing whose release is
+    // not covered must not wait for the next landing to be visible.
+    previous_release: previous && {id: previous.id, branch: previous.branch, commit: previous.commit,
+      landed_at: previous.landed_at, release: previous.release},
+    release_warnings: verdict.warnings,
   };
   if (options.json) return emit(state, options);
   const lines = [];
@@ -200,6 +260,7 @@ function commandStatus(options) {
   lines.push(baseline
     ? `baseline for ${String(upstream).slice(0, 12)} with \`${checkCommandKey(command)}\`: ${(baseline.names || []).length} known failure(s) (${baseline.source || 'recorded'}, measured on ${String(baseline.commit || '').slice(0, 12)} by ${baseline.recorded_by || 'an earlier landing'}) - a landing is refused only for a failure this list does not have`
     : `baseline for ${String(upstream).slice(0, 12)} with \`${checkCommandKey(command)}\`: none recorded - the next red candidate measures one, once, and records it`);
+  for (const line of [...verdict.lines, ...verdict.warnings]) lines.push(line);
   for (const entry of reclaimed) lines.push(`reclaimed #${entry.id} (${entry.owner}): ${entry.reason}`);
   if (recovery.action !== 'none') {
     lines.push(recovery.action === 'refused'
@@ -713,6 +774,11 @@ async function commandLand(options) {
   if (!options.branch) throw new QueueError('land needs --branch <name>', 75, 'usage');
   const {repo, canonical, dir, db} = open(options);
   const owner = resolveOwner(options);
+  // Before this lander touches anything: what did the LAST landing publish? Printed per target, with a
+  // named warning row for each target it left uncovered - a lander that is about to make a commit
+  // installable reads the standing fact first, and the row never blocks it.
+  const previous = previousLanding(db);
+  for (const line of [...releaseVerdict(previous).lines, ...releaseVerdict(previous).warnings]) say(line);
   const acquired = await enqueueAndWait(options);
   if (!acquired.granted) return acquired;
   const id = acquired.id;
@@ -928,6 +994,7 @@ async function commandLand(options) {
     heartbeat(db, id, lease);
     const release = publishNodeRelease(canonical, merged, dir);
     say(`#${id} release ${describeRelease(release)} in ${release.seconds}s`);
+    for (const warning of releaseVerdict({id, branch: options.branch, landed_at: now(), commit: merged, release}).warnings) say(warning);
     finish('landed', `${options.branch} landed at ${merged.slice(0, 12)} in ${now() - acquired.row.created_at}s (${rerun ? 'retested' : 'no retest'}; upstream ${delta.retest.why})`,
       {result: JSON.stringify({merged, upstream, rerun, delta: delta.counts, release})});
     return {id, granted: true, merged, pushed: true, rerun, release};
