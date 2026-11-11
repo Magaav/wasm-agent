@@ -113,7 +113,9 @@ local fine = tools.dispatch(memory, 'bash', { command = 'echo path-guard-ok' }, 
 check(fine.ok == true and tostring(fine.stdout or ''):find('path-guard-ok', 1, true) ~= nil, 'an ordinary command is untouched')
 
 -- ---- the cause: the test that deleted a home ----------------------------------------------------
-local repo = dofile('lua/core/platform.lua').cwd()
+-- Read the tree under test, not the process's working directory: a run started inside another checkout
+-- would otherwise inspect the wrong copy of the file and pass while the fixed one goes unread.
+local repo = envor('WASM_AGENT_LUA_ROOT', dofile('lua/core/platform.lua').cwd())
 local source = host.read_file(repo .. '/scripts/test-update-banner.lua') or ''
 check(source ~= '', 'the banner test was read')
 check(source:find('host.getenv("WASM_AGENT_HOME")', 1, true) == nil,
