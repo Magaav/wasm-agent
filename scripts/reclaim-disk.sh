@@ -7,31 +7,33 @@
 # (`scripts/delivery-trigger.sh` and friends). The pass itself is
 # Node, where the walks, the session store and the JSON live.
 #
-# No arguments are needed: a job's run step has no argument list, and none is wanted. `--apply` is *not*
-# passed from here: the job's script is the report, and the removal is a decision a runner makes with
-# `--apply` in front of it. (A reclaim that quietly deletes on its first scheduled tick is how a tree
-# somebody still wanted disappears.) The free space and the armed mode are named on every run.
+# ACTIVE BY DEFAULT (2026-11-11). This script removed nothing on its first scheduled tick when it was
+# written (wave 5): the only way to reclaim was `WA_RECLAIM_MODE=apply`, which nothing set, so the job
+# reported a plan every hour while the disk filled. Disk-full then froze this node twice in one night
+# (00:47 and ~01:18 on 11/11) and killed it for ~1h44. The operator approved active reclaim for the
+# named safe categories, so the job is the pass and the pass removes - see
+# `scripts/reclaim-disk.mjs` for the never-touch list and each category's rule.
 #
-# THE THRESHOLDS ARE THE CLEAN-DISK SKILL'S (skills/clean-disk/SKILL.md §6), and they are printed on every
-# run because a report whose reader has to compare numbers by hand is a report nobody acts on:
+#   bash scripts/reclaim-disk.sh              # the job: active, on the safe categories
+#   bash scripts/reclaim-disk.sh --dry-run    # the operator: the plan, nothing removed
+#   WA_RECLAIM_MODE=report bash scripts/...   # the same dry run, for a caller that sets the variable
 #
-#   * 3.71 GiB (3,987,386,368 B) is what one gate needs; below it a build refuses (scripts/test.sh), and a
-#     deploy with no published binary refuses too (`refused(no_prebuilt_binary_and_disk_floor)`);
-#   * 7.4 GiB free is "one gate away": the device is at 95 %+ used, and the next build/deploy is the one
-#     that will fail;
-#   * 1 GiB is the running node's own floor (`WASM_AGENT_DISK_FLOOR_BYTES`), where a session says so.
-#
-# Measured 2026-11-11: openclaw at 2.10 GiB free of 96 GiB was already below the build floor. Nothing here
-# deletes anything: WA_RECLAIM_MODE=apply is the only switch, it is not set by the job, and the operator
-# makes that decision.
+# Nothing here decides a category: the categories, their keep rules and the never-touch list live in one
+# place (`NEVER_TOUCH` and the `*Pass` functions in reclaim-disk.mjs), so a reading of this file cannot
+# disagree with what the pass does.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODE="${WA_RECLAIM_MODE:-report}"
-if [ "$MODE" = "apply" ]; then
-  node "$HERE/reclaim-disk.mjs" --apply "$@"
-else
-  node "$HERE/reclaim-disk.mjs" "$@"
-fi
+MODE="${WA_RECLAIM_MODE:-apply}"
+case "$MODE" in
+  apply)  node "$HERE/reclaim-disk.mjs" --apply "$@" ;;
+  report|dry-run|dry) node "$HERE/reclaim-disk.mjs" --dry-run "$@" ;;
+  *)
+    # An unrecognised mode is refused, not defaulted: a typo must not silently turn the active pass
+    # back into a report (the failure this file exists to stop) or into an unexpected removal.
+    printf 'disk-reclaim: WA_RECLAIM_MODE=%s is not one of apply, report, dry-run\n' "$MODE" >&2
+    exit 2
+    ;;
+esac
 rc=$?
 
 # The same measurement the gate and the deploy refuse on, not a second opinion.
@@ -41,7 +43,7 @@ if [ -f "$FLOOR_CHECK" ]; then
   printf '%s\n' "$floor_out" | sed 's/^/disk-reclaim: /'
   case "$floor_rc" in
     0) printf 'disk-reclaim: thresholds ok (>= 3.71 GiB free; 7.4 GiB is the one-gate-away warning, 1 GiB the running node floor)\n' ;;
-    1) printf 'disk-reclaim: ALERT below the 3.71 GiB build floor - a build and a publish-less deploy will refuse; the report above is what can be freed, and removal is the operator decision (WA_RECLAIM_MODE=apply)\n' ;;
+    1) printf 'disk-reclaim: ALERT below the 3.71 GiB build floor - a build and a publish-less deploy will refuse; the pass above freed what the safe categories hold\n' ;;
     *) printf 'disk-reclaim: ALERT the free space could not be measured (exit %s) - an unmeasurable disk is not a healthy one\n' "$floor_rc" ;;
   esac
 fi

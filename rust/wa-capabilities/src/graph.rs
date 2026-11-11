@@ -141,6 +141,21 @@ const RETRY_LIMIT: u32 = 8;
 /// A database is quarantined at most this many times in a row: a disk that keeps producing a
 /// malformed database is reported, not rewritten in a loop.
 const QUARANTINE_LIMIT: u32 = 3;
+/// Free space below which a malformed database is NOT quarantined and NOT rebuilt.
+///
+/// WHY. A rebuild writes a whole index onto the same filesystem that is already full, and when the
+/// write fails the store is malformed again - so each cycle leaves another `graph.db.malformed-*`
+/// behind. Measured on `openclaw`, 11/11 05:45: ~20 quarantine copies (~2.5 GB) created between
+/// 10/11 22:16 and 11/11 05:03, on a disk with 2.7 GB free of 96 GB - and disk-full froze this node
+/// twice the same day. The deferral is therefore decided *before* the rename, because the rename is
+/// what makes the copy. `WA_GRAPH_MIN_FREE_BYTES` overrides the floor; the state's
+/// `min_free_bytes` overrides it for a test.
+const REBUILD_FREE_FLOOR: u64 = 5 * 1024 * 1024 * 1024;
+/// Failed rebuilds inside `REBUILD_WINDOW` after which automatic rebuild stops.
+const REBUILD_LIMIT: usize = 3;
+/// The window `REBUILD_LIMIT` counts over. "in 24 h" is the operator's rule: a store that has failed
+/// to rebuild three times in a day is not going to be fixed by a fourth copy.
+const REBUILD_WINDOW: Duration = Duration::from_secs(24 * 3600);
 
 /// Delay before attempt `attempts + 1`: 2 s, 4 s, 8 s ... capped at `RETRY_MAX`.
 fn retry_delay(attempts: u32) -> Duration {
@@ -151,6 +166,40 @@ fn retry_delay(attempts: u32) -> Duration {
 /// Whether another automatic attempt is allowed after `attempts` consecutive failures.
 fn retry_allowed(attempts: u32) -> bool {
     attempts < RETRY_LIMIT
+}
+
+/// Seconds since the Unix epoch; the clock the 24 h rebuild budget counts on.
+fn epoch_seconds() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0)
+}
+
+/// The floor a rebuild needs, with the environment's override. Read at the moment of the decision, not
+/// cached: an operator who lowers it to let one rebuild through does not restart the node to be heard.
+fn rebuild_free_floor() -> u64 {
+    std::env::var("WA_GRAPH_MIN_FREE_BYTES").ok().and_then(|text| text.trim().parse::<u64>().ok()).unwrap_or(REBUILD_FREE_FLOOR)
+}
+
+/// The free-space decision for one database directory.
+///
+/// `Measured(free)` below the floor is a deferral. `Unmeasurable` is NOT: a probe that cannot answer
+/// must not permanently disable the one repair the indexer has, so the rebuild proceeds and the 24 h
+/// budget (`REBUILD_LIMIT`) still bounds how many copies it can leave. The distinction is named in the
+/// log line either way, because "the disk is fine" and "nobody looked" must not read the same.
+enum DiskAnswer { Enough(u64), Low(u64), Unmeasurable }
+
+fn disk_answer(dir: &Path, floor: u64) -> DiskAnswer {
+    match wa_host_support::system_resources::free_space(dir) {
+        Some((free, _total)) if free < floor => DiskAnswer::Low(free),
+        Some((free, _total)) => DiskAnswer::Enough(free),
+        None => DiskAnswer::Unmeasurable,
+    }
+}
+
+/// Drop the rebuild timestamps that have left the window, and answer how many are inside it.
+fn rebuilds_in_window(rebuilds: &mut Vec<u64>, now: u64) -> usize {
+    let window = REBUILD_WINDOW.as_secs();
+    rebuilds.retain(|at| now.saturating_sub(*at) < window);
+    rebuilds.len()
 }
 
 /// One failing streak prints one line: only a new error text is worth another line.
@@ -206,6 +255,13 @@ struct State {
     quarantined: Vec<PathBuf>,
     /// Consecutive quarantines, bounding a disk that keeps corrupting.
     corruptions: u32,
+    /// When the automatic rebuilds that did not succeed happened, epoch seconds, newest last. This is
+    /// the 24 h budget: it survives a recovery (which clears it) and an `attempts` reset (a quarantine
+    /// does that), because the copies a loop leaves behind are not about one streak.
+    rebuilds: Vec<u64>,
+    /// The free-space floor in bytes; 0 means `REBUILD_FREE_FLOOR` (or `WA_GRAPH_MIN_FREE_BYTES`). Set
+    /// here so a test can force the low-disk path without filling the machine's disk.
+    min_free_bytes: u64,
 }
 
 struct Entry {
@@ -349,7 +405,8 @@ impl Scheduler {
         }
     }
 
-    /// A success ends the streak, so the next failure starts again at the first delay.
+    /// A success ends the streak, so the next failure starts again at the first delay - and it ends the
+    /// 24 h rebuild budget, because a rebuild that worked is not one of the copies a loop leaves behind.
     fn recovered(&self, entry: &Arc<Entry>) {
         let mut state = entry.state.lock().unwrap();
         let attempts = std::mem::take(&mut state.attempts);
@@ -358,35 +415,91 @@ impl Scheduler {
         state.failure = None;
         state.reported = None;
         state.corruptions = 0;
+        state.rebuilds.clear();
         drop(state);
         if attempts > 0 {eprintln!("graph_index_recovered root={} after_failures={attempts}", entry.root.display());}
     }
 
-    /// One failure, one decision and at most one log line: quarantine a malformed database, else
-    /// back off, and stop after `RETRY_LIMIT` consecutive failures.
+    /// One failure, one decision and at most one log line.
+    ///
+    /// A malformed database has two more gates before it is moved aside, and both exist because moving
+    /// it aside IS the copy:
+    ///
+    ///   1. **the disk.** Below the floor there is no room for the rebuild, so the rebuild is deferred
+    ///      and reported once as `graph_rebuild_deferred: low_disk` - the store is left where it is and
+    ///      no new `graph.db.malformed-*` is created;
+    ///   2. **the 24 h budget.** `REBUILD_LIMIT` failed rebuilds in `REBUILD_WINDOW` and automatic
+    ///      rebuild stops outright (`graph_rebuild_stopped: failed_rebuilds`), which is the rule that
+    ///      bounds a disk whose every rebuild goes malformed again.
     fn failed(&self, entry: &Arc<Entry>, error: String) {
         let mut state = entry.state.lock().unwrap();
         state.attempts = state.attempts.saturating_add(1);
         state.failure = Some(error.clone());
         let attempts = state.attempts;
-        let quarantine = malformed(&error) && state.corruptions < QUARANTINE_LIMIT && entry.db.exists();
+        let corrupt = malformed(&error);
+        let now = epoch_seconds();
+        let recent = rebuilds_in_window(&mut state.rebuilds, now);
+        let floor = if state.min_free_bytes > 0 {state.min_free_bytes} else {rebuild_free_floor()};
+        let disk = if corrupt {
+            let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+            Some(disk_answer(&dir, floor))
+        } else {None};
+        let low = matches!(disk, Some(DiskAnswer::Low(_)));
+        let over_budget = corrupt && recent >= REBUILD_LIMIT;
+        let quarantine = corrupt && !low && !over_budget && state.corruptions < QUARANTINE_LIMIT && entry.db.exists();
         drop(state);
+
+        // 1. Low disk: neither rename nor rebuild. `stopped` is the honest state - nothing further will
+        //    be tried automatically until an explicit index, and that is the point: the loop must stop
+        //    spending the disk it does not have.
+        if low {
+            let free = match disk {Some(DiskAnswer::Low(free)) => free, _ => 0};
+            let line = format!("graph_rebuild_deferred: low_disk root={} free_bytes={free} floor_bytes={floor}", entry.root.display());
+            let mut state = entry.state.lock().unwrap();
+            state.stopped = true;
+            state.retry_at = None;
+            let report = report_needed(state.reported.as_deref(), &line);
+            if report {state.reported = Some(line.clone());}
+            drop(state);
+            if report {eprintln!("{line}");}
+            return;
+        }
+
+        // 2. The budget is spent: stop, and say how many rebuilds failed inside the window.
+        if over_budget {
+            let line = format!("graph_rebuild_stopped: failed_rebuilds root={} rebuilds={recent} window_hours={} use=graph_index_force",
+                entry.root.display(), REBUILD_WINDOW.as_secs() / 3600);
+            let mut state = entry.state.lock().unwrap();
+            state.stopped = true;
+            state.retry_at = None;
+            let report = report_needed(state.reported.as_deref(), &line);
+            if report {state.reported = Some(line.clone());}
+            drop(state);
+            if report {eprintln!("{line}");}
+            return;
+        }
+
         if quarantine {
-            let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0);
+            let seconds = now;
             match quarantine_database(entry, &utc_stamp(seconds)) {
                 Ok(moved) if !moved.is_empty() => {
                     let names: Vec<String> = moved.iter().map(|path| path.display().to_string()).collect();
                     let mut state = entry.state.lock().unwrap();
                     state.corruptions = state.corruptions.saturating_add(1);
                     state.quarantined.extend(moved);
+                    // One copy is now on the disk and one rebuild is about to be attempted: count it
+                    // against the 24 h budget before the attempt, so a rebuild that never returns still
+                    // costs its copy. A success clears the budget in `recovered`.
+                    state.rebuilds.push(now);
                     // The rebuild is the fix: a fresh database, attempted at once, is not a retry of
-                    // the broken one. `corruptions` bounds a disk that keeps producing garbage.
+                    // the broken one. `rebuilds` bounds a disk that keeps producing garbage.
                     state.attempts = 0;
                     state.stopped = false;
                     state.retry_at = None;
                     state.reported = Some(error.clone());
                     drop(state);
-                    eprintln!("graph_db_quarantined root={} moved={} next=rebuild", entry.root.display(), names.join(","));
+                    let disk_note = match disk {Some(DiskAnswer::Enough(free)) => format!(" free_bytes={free} floor_bytes={floor}"), Some(DiskAnswer::Unmeasurable) => " free_bytes=unknown".to_string(), _ => String::new()};
+                    eprintln!("graph_db_quarantined root={} moved={} next=rebuild{disk_note}", entry.root.display(), names.join(","));
                     self.enqueue(&entry);
                     return;
                 }
@@ -407,13 +520,19 @@ impl Scheduler {
     }
 
     /// An explicit index is a deliberate retry: clear the streak so the policy starts from the
-    /// first delay again, and let queued hints run.
+    /// first delay again, and let queued hints run. The 24 h rebuild budget is not cleared - it is about
+    /// copies on the disk, not about intent - but one entry is retired so the explicit retry it was asked
+    /// for can happen exactly once. Three more copies still need three more explicit decisions.
     fn resume(&self, entry: &Arc<Entry>) {
         let mut state = entry.state.lock().unwrap();
         state.attempts = 0;
         state.stopped = false;
         state.retry_at = None;
         state.corruptions = 0;
+        state.reported = None;
+        let now = epoch_seconds();
+        rebuilds_in_window(&mut state.rebuilds, now);
+        if state.rebuilds.len() >= REBUILD_LIMIT {state.rebuilds.remove(0);}
         let queued = state.dirty && !state.queued && !state.active;
         if queued {state.queued = true;}
         drop(state);

@@ -167,6 +167,62 @@ fn queue_is_bounded_and_not_silently_dropped() {
         .is_err());
 }
 #[test]
+fn a_disk_trigger_fires_once_per_window_and_not_at_all_above_its_threshold() {
+    // The immediate reclaim run: a condition, not a clock. `below_bytes` is set above any real free
+    // space so the fixture proves the firing path on this machine without filling its disk.
+    let s = store();
+    let mut job = definition();
+    job["trigger"] = json!({"kind":"disk","below_bytes": u64::MAX, "below_percent": 0.0, "cooldown_seconds": 900});
+    s.put(&job).unwrap();
+    s.enable("messages", true).unwrap();
+    assert_eq!(s.schedule(1000).unwrap(), 1, "a disk below its threshold runs now");
+    // The bucket is `now / cooldown`: 1000..1799 is one window, 1800 starts the next.
+    assert_eq!(s.schedule(1001).unwrap(), 0, "a second tick inside one cooldown is a no-op");
+    assert_eq!(s.schedule(1799).unwrap(), 0, "still the same bucket");
+    assert_eq!(s.schedule(1800).unwrap(), 1, "the next cooldown runs again");
+    let status: String = s.db().unwrap().query_row("SELECT source_status FROM jobs WHERE id='messages'", [], |r| r.get(0)).unwrap();
+    assert!(status.starts_with("low disk:"), "the status carries the measured number: {status}");
+    // The payload is what the run is told: the numbers the decision used, not a bare "disk low".
+    let payload: String = s.db().unwrap().query_row(
+        "SELECT payload FROM deliveries ORDER BY rowid DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    let value: Value = serde_json::from_str(&payload).unwrap();
+    assert!(value["free_bytes"].as_u64().unwrap() > 0, "{payload}");
+    assert_eq!(value["below_bytes"].as_u64().unwrap(), u64::MAX);
+    assert_eq!(value["why"], json!("below_bytes"));
+    assert!(value["subject"].as_str().unwrap().len() > 0, "the payload names the filesystem it judged");
+
+    // Above the threshold: no delivery, and the status says the number rather than staying silent.
+    // Above the threshold: no delivery, and the status says the number rather than staying silent.
+    // The thresholds are small but positive - the validator refuses a trigger that can never fire, so
+    // "never fires here" is a real threshold this disk does not meet, not a disabled trigger. (Measured
+    // on wasm_the_first while writing this: `$TMPDIR` held 453 MB free of 512 GB, i.e. 0.09 % - which is
+    // why a 0.1 % threshold fired here and why the number in this fixture is smaller than it looks.)
+    let s2 = store();
+    let mut quiet = definition();
+    quiet["trigger"] = json!({"kind":"disk","below_bytes": 1, "below_percent": 0.001, "cooldown_seconds": 900});
+    s2.put(&quiet).unwrap();
+    s2.enable("messages", true).unwrap();
+    assert_eq!(s2.schedule(1000).unwrap(), 0, "a threshold this disk does not meet runs nothing");
+    let status: String = s2.db().unwrap().query_row("SELECT source_status FROM jobs WHERE id='messages'", [], |r| r.get(0)).unwrap();
+    assert!(status.starts_with("above threshold:"), "{status}");
+}
+
+#[test]
+fn a_disk_trigger_names_an_unmeasurable_filesystem() {
+    // An unmeasurable disk is not a healthy one and not a reason to fire either: the status says which,
+    // so the next reader does not mistake silence for plenty.
+    let s = store();
+    let mut job = definition();
+    let missing = std::env::temp_dir().join("wa-jobs-disk-trigger-no-such-filesystem");
+    job["trigger"] = json!({"kind":"disk","path": missing.display().to_string(),"below_bytes": u64::MAX});
+    s.put(&job).unwrap();
+    s.enable("messages", true).unwrap();
+    assert_eq!(s.schedule(1000).unwrap(), 0, "no answer is not a licence to run");
+    let status: String = s.db().unwrap().query_row("SELECT source_status FROM jobs WHERE id='messages'", [], |r| r.get(0)).unwrap();
+    assert!(status.starts_with("unmeasurable:"), "{status}");
+}
+
+#[test]
 fn schedules_prime_without_storm_and_persist() {
     let s = store();
     let mut job = definition();

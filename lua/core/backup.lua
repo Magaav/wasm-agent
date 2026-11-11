@@ -266,10 +266,13 @@ function M.run(label)
   end)
 end
 
--- A newer snapshot does not prove an older recovery source obsolete. Keep all
--- snapshots; evidence-aware, explicitly scoped maintenance owns retirement.
+-- Starting 11/11 this module preserves every snapshot and the *retention* belongs to the automatic
+-- reclaim pass: `scripts/reclaim-disk.mjs` keeps the newest 3 `*-pre-update` snapshots plus any a pending
+-- rollback names, and removes the rest. Two owners of one rule is how 48 snapshots (6.8 GB) accumulated
+-- on openclaw while each side believed the other was bounding them, so the rule lives there and this
+-- function keeps saying what it does: nothing.
 function M.prune()
-  return { skipped = 'recovery_evidence_preserved' }
+  return { skipped = 'retention_is_the_reclaim_pass' }
 end
 
 return M

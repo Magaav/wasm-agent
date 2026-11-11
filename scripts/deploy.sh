@@ -1786,7 +1786,7 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
       || fail "node installed, but could not ship $(basename "$source")"
     PIPELINE=$((PIPELINE + 1))
   done
-  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json "$ROOT"/jobs/on-stale.json "$ROOT"/jobs/disk-reclaim.json; do
+  for source in "$ROOT"/jobs/whatsapp-*.json "$ROOT"/jobs/on-subagent-return.json "$ROOT"/jobs/subagent-return-observe.json "$ROOT"/jobs/on-sentinel-return.json "$ROOT"/jobs/sentinel-return-observe.json "$ROOT"/jobs/on-stale.json "$ROOT"/jobs/disk-reclaim.json "$ROOT"/jobs/disk-reclaim-live.json; do
     [ -f "$source" ] || continue
     JOB_NAME="$(basename "$source" .json)"
     # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from

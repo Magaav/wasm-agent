@@ -184,6 +184,18 @@ keep that surface from becoming a second, weaker way to edit a job:
   observer threads, never on the control loop. A blocked OS read remains visibly
   `reading directory since ...` and consumes a source slot; safely replacing that
   thread requires an executor-process boundary not implemented here.
+* **disk**: a condition on free space, evaluated on every tick and fired when it
+  holds - no clock to wait for, which is the point (`jobs/disk-reclaim-live.json`).
+  `below_bytes` (default 5368709120) OR `below_percent` (default 5) triggers; at
+  least one must be positive, or the definition is refused as a trigger that could
+  never fire. `cooldown_seconds` (60–604800, default 900) bounds how often it may
+  fire: the event id is `disk:<now / cooldown>`, so the store's own
+  `UNIQUE(job_id, revision, event_id)` makes a second tick in one window a no-op
+  and a restart cannot produce a duplicate immediate run. `path` (absolute,
+  optional) names the filesystem to judge and defaults to the jobs store's
+  directory. A filesystem that cannot be measured fires nothing and sets
+  `source_status` to `unmeasurable: ...`; a healthy one sets `above threshold: ...`
+  with the measured numbers, so silence and health never read the same.
 
 ## Inference as a profile-scoped child run
 

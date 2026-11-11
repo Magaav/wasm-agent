@@ -201,12 +201,15 @@ fn a_malformed_failure_quarantines_and_queues_the_rebuild_at_once() {
     std::fs::write(dir.join(DB_FILE), b"not a database").unwrap();
     let scheduler = test_scheduler();
     let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    // The disk answer is pinned so the test asserts the quarantine, not this machine's free space.
+    entry.state.lock().unwrap().min_free_bytes = 1;
     scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
     let state = entry.state.lock().unwrap();
     assert_eq!(state.corruptions, 1);
     assert_eq!(state.quarantined.len(), 1);
     assert_eq!(state.attempts, 0, "a rebuild is a fresh start, not a retry");
     assert!(!state.stopped);
+    assert_eq!(state.rebuilds.len(), 1, "the rebuild is counted against the 24 h budget before it runs");
     let quarantined = state.quarantined[0].clone();
     drop(state);
     assert!(quarantined.exists() && !dir.join(DB_FILE).exists(), "the path is free for the rebuild");
@@ -214,3 +217,168 @@ fn a_malformed_failure_quarantines_and_queues_the_rebuild_at_once() {
     assert_eq!(ready.len(), 1);
     assert!(ready[0].0.is_none(), "the rebuild runs at once, not after a delay");
 }
+
+// ---- the disk-eating loop is stopped, not outrun -------------------------------------------------
+
+#[test]
+fn a_low_disk_defers_the_rebuild_and_makes_no_copy() {
+    // The openclaw case, 11/11: 2.7 GB free of 96 GB and ~20 `graph.db.malformed-*` copies in seven
+    // hours. With a floor above the free space, the decision must be "defer", and the decisive part is
+    // that NOTHING is renamed: the copy is the rename.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(DB_FILE), b"not a database").unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    entry.state.lock().unwrap().min_free_bytes = u64::MAX;
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let state = entry.state.lock().unwrap();
+    assert_eq!(state.corruptions, 0, "no quarantine happened");
+    assert!(state.quarantined.is_empty());
+    assert!(state.rebuilds.is_empty(), "no rebuild was attempted, so none is counted");
+    assert!(state.stopped, "nothing further is tried automatically");
+    assert!(state.retry_at.is_none());
+    let reported = state.reported.clone().unwrap_or_default();
+    assert!(reported.starts_with("graph_rebuild_deferred: low_disk"), "the reason is the measured one: {reported}");
+    assert!(reported.contains(&format!("floor_bytes={}", u64::MAX)), "the line carries the floor it judged against: {reported}");
+    drop(state);
+    assert!(dir.join(DB_FILE).exists(), "the store stays exactly where it was");
+    let malformed_copies = std::fs::read_dir(&dir).unwrap().filter(|entry| {
+        entry.as_ref().map(|e| e.file_name().to_string_lossy().contains(".malformed-")).unwrap_or(false)
+    }).count();
+    assert_eq!(malformed_copies, 0, "a deferred rebuild creates no quarantine copy");
+    assert!(scheduler.ready.lock().unwrap().is_empty(), "and queues no work");
+}
+
+#[test]
+fn the_low_disk_deferral_is_reported_once_not_per_attempt() {
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(DB_FILE), b"not a database").unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    entry.state.lock().unwrap().min_free_bytes = u64::MAX;
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let first = entry.state.lock().unwrap().reported.clone().unwrap_or_default();
+    // A second failure of the same shape must find the line already reported and stay quiet.
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let second = entry.state.lock().unwrap().reported.clone().unwrap_or_default();
+    assert_eq!(first, second, "one line per deferred streak, not one per attempt");
+    assert!(report_needed(Some(&first), &first) == false, "the reporter agrees: nothing new to say");
+}
+
+#[test]
+fn three_failed_rebuilds_in_a_day_stop_the_loop() {
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(DB_FILE), b"not a database").unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    entry.state.lock().unwrap().min_free_bytes = 1;
+    // Three rebuilds already failed inside the window - the state a real loop reaches after ~3 attempts.
+    let now = epoch_seconds();
+    {
+        let mut state = entry.state.lock().unwrap();
+        state.rebuilds = vec![now.saturating_sub(3600), now.saturating_sub(1800), now.saturating_sub(60)];
+    }
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let state = entry.state.lock().unwrap();
+    assert_eq!(state.corruptions, 0, "the fourth copy is never made");
+    assert!(state.quarantined.is_empty());
+    assert!(state.stopped, "automatic rebuild stops");
+    assert!(state.retry_at.is_none());
+    let reported = state.reported.clone().unwrap_or_default();
+    assert!(reported.starts_with("graph_rebuild_stopped: failed_rebuilds"), "the stop is reported: {reported}");
+    assert!(reported.contains("rebuilds=3") && reported.contains("window_hours=24"), "with the count and the window: {reported}");
+    drop(state);
+    assert!(dir.join(DB_FILE).exists(), "the store is left alone");
+    assert!(scheduler.ready.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_rebuild_budget_from_another_day_does_not_stop_this_one() {
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(DB_FILE), b"not a database").unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    entry.state.lock().unwrap().min_free_bytes = 1;
+    let now = epoch_seconds();
+    {
+        let mut state = entry.state.lock().unwrap();
+        state.rebuilds = vec![now.saturating_sub(30 * 3600), now.saturating_sub(26 * 3600), now.saturating_sub(25 * 3600)];
+    }
+    scheduler.failed(&entry, "graph_index_failed: database disk image is malformed".into());
+    let state = entry.state.lock().unwrap();
+    assert_eq!(state.corruptions, 1, "yesterday's rebuilds do not spend today's budget");
+    assert_eq!(state.rebuilds.len(), 1, "the window is pruned to this rebuild");
+    assert!(!state.stopped);
+}
+
+#[test]
+fn a_recovered_index_clears_the_rebuild_budget() {
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    let now = epoch_seconds();
+    {
+        let mut state = entry.state.lock().unwrap();
+        state.rebuilds = vec![now - 10, now - 5, now];
+        state.stopped = true;
+    }
+    scheduler.recovered(&entry);
+    let state = entry.state.lock().unwrap();
+    assert!(state.rebuilds.is_empty(), "a rebuild that worked is not one of the copies a loop leaves");
+    assert!(!state.stopped);
+}
+
+#[test]
+fn an_explicit_index_retires_one_rebuild_from_the_budget() {
+    // `graph_index_force` is a deliberate retry, and it must be able to happen - exactly once per
+    // explicit decision, with the rest of the budget intact so the disk is still protected.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    let now = epoch_seconds();
+    {
+        let mut state = entry.state.lock().unwrap();
+        state.rebuilds = vec![now - 30, now - 20, now - 10];
+        state.stopped = true;
+        state.dirty = true;
+    }
+    scheduler.resume(&entry);
+    let state = entry.state.lock().unwrap();
+    assert_eq!(state.rebuilds.len(), 2, "one rebuild is retired, not the whole budget");
+    assert!(!state.stopped, "and the retry it was asked for can run");
+}
+
+#[test]
+fn an_unmeasurable_disk_reports_itself_and_still_bounds_the_copies() {
+    // A probe that cannot answer must not permanently disable the one repair the indexer has, so the
+    // rebuild proceeds - and the 24 h budget is what keeps that from being unbounded.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let scheduler = test_scheduler();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    entry.state.lock().unwrap().min_free_bytes = 1;
+    let answer = disk_answer(&dir, 1);
+    assert!(matches!(answer, DiskAnswer::Enough(_)), "this machine can answer, so the shape under test is Enough");
+    let now = epoch_seconds();
+    {
+        let mut state = entry.state.lock().unwrap();
+        state.rebuilds = vec![now - 30, now - 20, now - 10];
+    }
+    std::fs::write(dir.join(DB_FILE), b"not a database").unwrap();
+    scheduler.failed(&entry, "graph_index_failed: file is not a database".into());
+    assert_eq!(entry.state.lock().unwrap().corruptions, 0, "the budget alone stops the copy when the disk cannot be judged");
+}
+
