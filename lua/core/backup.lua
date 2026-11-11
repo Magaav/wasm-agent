@@ -197,6 +197,16 @@ local function snapshot(source, copy, is_main)
   for attempt = 1, ATTEMPTS do
     attempts = attempt
     local retry = false
+    -- A retry must not meet the copy the previous attempt left behind. `VACUUM INTO` refuses a
+    -- destination that exists and is not empty ("output file already exists"), and an attempt that
+    -- copied a store but then failed the copy's `integrity_check` leaves exactly that - a written,
+    -- unsound destination. Before this, the retry reported SQLite's "output file already exists" as
+    -- the failure and the real cause was never seen: measured 2026-11-11, `wa update openclaw` and
+    -- `wa update work` both refused with `backup_failed: .../graph.db.d/graph.db: output file already
+    -- exists`, so neither peer could be installed. The path is inside the directory this run just
+    -- created and the only file that can be there is this module's own copy, so emptying it is what
+    -- SQLite accepts - the same reason an empty destination from a failed VACUUM is accepted.
+    if attempt > 1 and host.write_file then pcall(host.write_file, copy, "") end
     local copied, failure = pcall(copy_store, source, copy, is_main)
     if copied then
       local checked, check = pcall(check_store, copy, "integrity_check", false)
