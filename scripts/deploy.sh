@@ -888,6 +888,25 @@ for qf in "$QUEUE_DIR"/*.json; do
 done
 [ "$UPGRADE_ACTIVE" = "0" ] || fail "an upgrade request is active; refusing a second install"
 
+# Where the compile writes. The pin above is a fresh worktree per commit, so a target dir inside it is
+# cold on every deploy: measured 336 s of a 481 s deploy on wasm_the_first (2026-11-11) for a landing
+# that changed no Rust at all. The target dir is build output, not state, so it lives in the data dir
+# and is reused: a deploy whose Rust did not change recompiles only what its source path moved.
+# WA_DEPLOY_BUILD_TARGET names another directory; a directory that cannot be created or written falls
+# back to the pin's own target, which is the old (cold) behaviour and never a failed deploy.
+DEPLOY_DATA="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
+DEPLOY_BUILD_TARGET="${WA_DEPLOY_BUILD_TARGET:-$DEPLOY_DATA/build-cache/target}"
+if mkdir -p "$DEPLOY_BUILD_TARGET" 2>/dev/null && [ -w "$DEPLOY_BUILD_TARGET" ]; then
+  DEPLOY_BUILD_TARGET="$(cd "$DEPLOY_BUILD_TARGET" && pwd)"
+  export WA_CODEMODE_TARGET_DIR="$DEPLOY_BUILD_TARGET"
+  printf 'deploy: compiling into the reusable target %s (%s)\n' "$DEPLOY_BUILD_TARGET" \
+    "${WA_DEPLOY_BUILD_TARGET:+named by WA_DEPLOY_BUILD_TARGET}" | sed 's/ ()$//'
+else
+  DEPLOY_BUILD_TARGET="$ROOT/rust/target"
+  unset WA_CODEMODE_TARGET_DIR
+  note "the reusable build target is not writable ($WA_DEPLOY_BUILD_TARGET); compiling into the pin's own cold target"
+fi
+
 # The builds below are --offline --locked on purpose: exactly the lockfile, no network while building. A
 # machine that never built these crates has nothing in its cargo cache for them, so the lockfile's exact
 # crates are fetched first (--locked: no resolution, no newer version). No network is not fatal here: the
@@ -924,12 +943,12 @@ WA_STATUS_DONE="$(wa_status_compiled "$BUILD_LOGS/wa-host.log")"
 # specification did not match any packages" - and that is how it came to be installed by hand at all.
 : > "$BUILD_LOGS/wa-sentinel.log"
 wa_status_follow "$BUILD_LOGS/wa-sentinel.log" compiling
-( cd rust && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) 2> "$BUILD_LOGS/wa-sentinel.log" \
+( cd rust && CARGO_TARGET_DIR="$DEPLOY_BUILD_TARGET" cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) 2> "$BUILD_LOGS/wa-sentinel.log" \
   || { tail -25 "$BUILD_LOGS/wa-sentinel.log" 2>/dev/null | sed 's/^/  cargo: /' >&2; fail "the sentinel build failed"; }
 wa_status_unfollow
 echo "deploy: compiled $WA_STATUS_DONE + $(wa_status_compiled "$BUILD_LOGS/wa-sentinel.log") crate(s) (logs in $BUILD_LOGS)"
-NEW="rust/target/release/wa.exe"
-[ -f "$NEW" ] || NEW="rust/target/release/wa"
+NEW="$DEPLOY_BUILD_TARGET/release/wa.exe"
+[ -f "$NEW" ] || NEW="$DEPLOY_BUILD_TARGET/release/wa"
 [ -x "$NEW" ] || fail "no built binary at $NEW"
 
 # The supervisor is part of what this installs, and leaving it out is how the node and the thing that
@@ -938,8 +957,8 @@ NEW="rust/target/release/wa.exe"
 # e2e test refused to run - "the installed sentinel is the one just built" is a check the test makes
 # and the gate did not. The sentinel is the only process that can replace the node; shipping the node
 # without shipping it is shipping half a node.
-NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel.exe"
-[ -f "$NEW_SENTINEL" ] || NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel"
+NEW_SENTINEL="$DEPLOY_BUILD_TARGET/release/wa-sentinel.exe"
+[ -f "$NEW_SENTINEL" ] || NEW_SENTINEL="$DEPLOY_BUILD_TARGET/release/wa-sentinel"
 [ -x "$NEW_SENTINEL" ] || fail "no built sentinel at $NEW_SENTINEL"
 NEW_SENTINEL_LOWER="$(echo "$NEW_SENTINEL" | tr '[:upper:]' '[:lower:]')"
 case "$NEW_SENTINEL_LOWER" in

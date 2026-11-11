@@ -13,6 +13,12 @@ const packages=[
 ];
 function requireValue(v,label){if(!v)throw Error('codemode_build:'+label);return v;}
 function git(root,...args){const r=cp.spawnSync('git',['-C',root,...args],{encoding:'utf8',windowsHide:true});requireValue(r.status===0,'git_failed:'+JSON.stringify({status:r.status,error:r.error?{code:r.error.code,message:r.error.message}:null,stderr:r.stderr}));return r.stdout.trim();}
+// Where cargo writes. The tree's own `rust/target` by default; an installer that deploys repeatedly points
+// this at a reusable cache instead (WA_CODEMODE_TARGET_DIR), because a deploy pins a fresh worktree per
+// commit and a target inside it is cold every time - measured 272 s of compiling for a landing that changed
+// no Rust (wasm_the_first, 2026-11-11). The directory is build output, never source: the pinned tree is
+// still what gets compiled, and the receipt keeps source_commit/source_tree for the exact bytes.
+const targetDir=root=>{const v=process.env.WA_CODEMODE_TARGET_DIR;return v?path.resolve(v):path.join(root,'rust/target')};
 export function assetPath(root){return path.join(git(root,'rev-parse','--path-format=absolute','--git-common-dir'),'codemode-assets','pi-1.2.0-quickjs-3.6.2');}
 export function verifyAssets(root,dir){
  const receipt=JSON.parse(fs.readFileSync(path.join(dir,'receipt.json')));
@@ -82,7 +88,7 @@ export function build(root,dir=assetPath(root),waveGeneration=null,target=null){
  try{
   for(const f of before.assets.files)fs.copyFileSync(path.join(dir,f.name),path.join(snapshot,f.name),fs.constants.COPYFILE_EXCL);
   receipt.snapshot=verifyAssets(root,snapshot);
-  const env={...process.env,WA_CODEMODE_BUILD_ASSETS:fs.realpathSync(snapshot),CARGO_TARGET_DIR:path.join(root,'rust/target'),WA_BUILD_SOURCE_COMMIT:before.source_commit,WA_BUILD_SOURCE_TREE:before.source_tree,WA_BUILD_WAVE_GENERATION:waveGeneration||''};
+  const env={...process.env,WA_CODEMODE_BUILD_ASSETS:fs.realpathSync(snapshot),CARGO_TARGET_DIR:targetDir(root),WA_BUILD_SOURCE_COMMIT:before.source_commit,WA_BUILD_SOURCE_TREE:before.source_tree,WA_BUILD_WAVE_GENERATION:waveGeneration||''};
   const args=target?['zigbuild','--release','--offline','--locked','-p','wa-host','--target',target]:['build','--release','--offline','--locked','-p','wa-host'];
   receipt.target=target;receipt.cargo_args=args;receipt.cargo_env={WA_CODEMODE_BUILD_ASSETS:env.WA_CODEMODE_BUILD_ASSETS,CARGO_TARGET_DIR:env.CARGO_TARGET_DIR};
   // WA_BUILD_CARGO_LOG (29/10): cargo's stderr goes to that file as it is written, so deploy.sh can draw
@@ -92,7 +98,7 @@ export function build(root,dir=assetPath(root),waveGeneration=null,target=null){
   if(liveFd!==null){fs.closeSync(liveFd);result.stderr=fs.readFileSync(live,'utf8');}
   for(const stream of ['stdout','stderr'])fs.writeFileSync(path.join(evidence,'cargo.'+stream),result[stream]||'');
   requireValue(result.status===0,'cargo_failed:'+String(result.error||result.stderr));
-  const binary=target?path.join(root,'rust/target',target,'release','wa'):path.join(root,'rust/target/release',process.platform==='win32'?'wa.exe':'wa');
+  const binary=target?path.join(targetDir(root),target,'release','wa'):path.join(targetDir(root),'release',process.platform==='win32'?'wa.exe':'wa');
   if(target){
    const head=fs.readFileSync(binary).subarray(0,20);
    requireValue(head.subarray(0,4).equals(Buffer.from([127,69,76,70]))&&head.readUInt16LE(18)===CROSS_TARGETS[target],'cross_candidate_wrong_machine:'+target);
@@ -155,7 +161,7 @@ export function qualifyWave(root,receiptFile,generation,openedAt,installedBinary
  requireValue(same(root,r.root)&&same(r.source_common,git(root,'rev-parse','--path-format=absolute','--git-common-dir')),'wave_build_repository_mismatch');
  requireValue(git(root,'status','--porcelain')===''&&git(root,'branch','--show-current')==='main','wave_build_clean_main_required');
  requireValue(r.source_commit===git(root,'rev-parse','HEAD')&&r.source_tree===git(root,'rev-parse','HEAD^{tree}')&&r.source_commit===git(root,'rev-parse','origin/main')&&r.source_commit===git(root,'ls-remote','origin','refs/heads/main').split(/\s+/)[0],'wave_build_source_mismatch');
- const binary=path.join(root,'rust/target/release',process.platform==='win32'?'wa.exe':'wa');
+ const binary=path.join(targetDir(root),'release',process.platform==='win32'?'wa.exe':'wa');
  requireValue(same(binary,r.binary),'wave_candidate_path_mismatch');
  const bytes=fs.readFileSync(binary),digest=sha(bytes),installed=sha(fs.readFileSync(installedBinary));
  requireValue(digest===r.binary_sha256&&digest!==installed,'wave_candidate_missing_corrupt_or_unchanged');
