@@ -110,13 +110,16 @@ function fixture() {
   // answer, without a compiler or a network. WA_TEST_PUBLISH_FAIL makes it fail on purpose.
   fs.writeFileSync(path.join(CANONICAL, 'scripts/publish-node-binaries.sh'), [
     '#!/usr/bin/env bash',
-    `printf '%s\n' "$*" >> "${WORK}/publisher-args"`,
+    `printf '%s\\n' "$*" >> "${WORK}/publisher-args"`,
     'if [ "${WA_TEST_PUBLISH_FAIL:-}" = 1 ]; then echo "publish-node-binaries: publish_tool_missing: gh is not on PATH" >&2; exit 2; fi',
-    'echo "publish-node-binaries: covered: node-fixture covers the compiled inputs of $6 for aarch64-unknown-linux-gnu; nothing to build or publish"',
+    // Answer for exactly the targets it was given, the way the real publisher's --ensure does, so a queue
+    // that names one target and a queue that names both are told apart by this fixture.
+    'targets=""; commit=""',
+    'while [ "$#" -gt 0 ]; do case "$1" in --target) targets="$targets $2"; shift 2 ;; --commit) commit="$2"; shift 2 ;; *) shift ;; esac; done',
+    'echo "publish-node-binaries: covered: node-fixture covers the compiled inputs of $commit for ${targets# } (source_commit fixture); nothing to build or publish"',
     'echo "publish-node-binaries ok: node-fixture"',
     '',
   ].join('\n'));
-  fs.chmodSync(path.join(CANONICAL, 'scripts/publish-node-binaries.sh'), 0o755);
   git(CANONICAL, 'add', '-A');
   git(CANONICAL, 'commit', '-q', '-m', 'base');
   git(CANONICAL, 'remote', 'add', 'origin', ORIGIN);
@@ -248,14 +251,16 @@ async function deltaClassification() {
   const originMain = git(ORIGIN, 'rev-parse', 'refs/heads/main').trim();
   const canonicalHead = git(CANONICAL, 'rev-parse', 'HEAD').trim();
   check('the landing is on origin/main and read back', originMain === canonicalHead && /readback origin refs\/heads\/main/.test(landed.stdout), landed.stdout);
-  // A landing is the moment a commit becomes installable, so it publishes the aarch64 release for what
-  // it just pushed - or says why not. Measured 2026-11-10: neither of that day's landings published one,
+  // A landing is the moment a commit becomes installable, so it publishes the prebuilt binaries for what
+  // it just pushed - or says why not - for EVERY target the channel serves. Measured 2026-11-11: work is
+  // x86_64 Linux and compiled each update in ~100 s incremental (19 min bootstrap, 2 cores), because the
+  // queue only ever published aarch64. Measured 2026-11-10: neither of that day's landings published one,
   // and the release had to be made by hand afterwards.
   const publisherArgs = fs.existsSync(path.join(WORK, 'publisher-args')) ? fs.readFileSync(path.join(WORK, 'publisher-args'), 'utf8').trim() : '';
-  check('the landing publishes the aarch64 release for the landed commit',
-    publisherArgs.includes('--ensure --publish --target aarch64-unknown-linux-gnu --commit ' + originMain), publisherArgs);
-  check('and records the publisher answer in its own line',
-    /release covered \(aarch64-unknown-linux-gnu\)/.test(landed.stdout), landed.stdout);
+  check('the landing publishes both Linux targets in one publisher run (one manifest, two rows)',
+    publisherArgs.includes('--ensure --publish --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-gnu --commit ' + originMain), publisherArgs);
+  check('and records the publisher answer per target',
+    /release covered \(aarch64-unknown-linux-gnu=covered, x86_64-unknown-linux-gnu=covered\)/.test(landed.stdout), landed.stdout);
 
   const after = q(['classify', '--from', 'HEAD~1', '--to', 'HEAD', '--json']);
   const delta = JSON.parse(after.stdout);
@@ -270,8 +275,8 @@ async function deltaClassification() {
   const unreleased = q(['land', '--branch', 'change/no-release', '--owner', SESSION, '--checks', 'echo fixture-checks-ran'],
     {env: {WA_TEST_PUBLISH_FAIL: '1'}});
   check('a landing whose release could not be published still lands', unreleased.status === 0, unreleased.stdout + unreleased.stderr);
-  check('and the row records why the release was not published',
-    /release failed \(aarch64-unknown-linux-gnu\): .*publish_tool_missing/.test(unreleased.stdout), unreleased.stdout);
+  check('and the row records why the release was not published, for every target',
+    /release failed \(aarch64-unknown-linux-gnu=failed, x86_64-unknown-linux-gnu=failed\): .*publish_tool_missing/.test(unreleased.stdout), unreleased.stdout);
   check('main is the same commit the landing pushed',
     git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === git(CANONICAL, 'rev-parse', 'HEAD').trim());
 }

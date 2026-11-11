@@ -84,34 +84,67 @@ const age = seconds => (seconds === null || seconds === undefined ? 'now' : `${M
 // fact about the release, not about main. The outcome - published, covered by an earlier release, or
 // why not - is recorded in the queue row and printed, and the publisher's own log is kept beside the
 // queue so an operator can read what happened without re-running it.
-const RELEASE_TARGET = 'aarch64-unknown-linux-gnu';
+// Every target the channel publishes, named together in ONE publisher run. The release tag is the
+// commit (`node-<sha12>`) and it carries ONE manifest whose rows are the targets that build covered, and
+// a re-publish replaces that manifest (`gh release upload --clobber`). Measured 2026-11-11: a second run
+// per target would leave the second target's one-row manifest as the release's only manifest, and a node
+// of the first target would then find no row for its triple and fall back to compiling - which is the
+// cost this step exists to remove (work: x86_64, 2 cores, ~100 s incremental, 19 min bootstrap). So the
+// publisher does both in one invocation; the queue reads its answer per target.
+const RELEASE_TARGETS = ['aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu'];
+const RELEASE_OK = new Set(['published', 'covered']);
 const RELEASE_TIMEOUT_MS = 45 * 60 * 1000;
 
 const lastLine = text => String(text || '').trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || '';
 
+// Which target a failure line is about (`build_failed: wa for x86_64-unknown-linux-gnu.2.31`,
+// `binary_missing: .../wa-x86_64-unknown-linux-gnu-abc123`), or '' when the line names none.
+const releaseTargetOf = line => RELEASE_TARGETS.find(target => String(line).includes(target)) || '';
+
 function publishNodeRelease(canonical, commit, dir) {
   const started = Date.now();
-  const run = spawnSync('bash', ['scripts/publish-node-binaries.sh', '--ensure', '--publish',
-    '--target', RELEASE_TARGET, '--commit', commit],
-  {cwd: canonical, encoding: 'utf8', timeout: RELEASE_TIMEOUT_MS, env: process.env});
+  const args = ['scripts/publish-node-binaries.sh', '--ensure', '--publish'];
+  for (const target of RELEASE_TARGETS) args.push('--target', target);
+  args.push('--commit', commit);
+  const run = spawnSync('bash', args, {cwd: canonical, encoding: 'utf8', timeout: RELEASE_TIMEOUT_MS, env: process.env});
   const output = `${run.stdout || ''}${run.stderr || ''}`.trim();
   const seconds = Math.round((Date.now() - started) / 1000);
   const log = path.join(dir, `release-${commit.slice(0, 12)}.log`);
   try { fs.writeFileSync(log, `${output}\n`, 'utf8'); } catch { /* the row still carries the reason */ }
-  if (run.error && run.error.code === 'ETIMEDOUT') {
-    return {state: 'failed', target: RELEASE_TARGET, seconds, detail: `the publisher did not finish within ${RELEASE_TIMEOUT_MS / 60000} min`, log};
+  const targets = Object.fromEntries(RELEASE_TARGETS.map(target =>
+    [target, {state: 'unknown', detail: 'the publisher reported nothing for this target'}]));
+  const timedOut = Boolean(run.error && run.error.code === 'ETIMEDOUT');
+  if (timedOut || run.status !== 0) {
+    // Name the target the run stopped at, and never call the other one covered: a run that died between
+    // the two builds verified neither. Both states are read by `status` on the next landing.
+    const tail = lastLine(output);
+    const failed = releaseTargetOf(tail);
+    const why = timedOut ? `the publisher did not finish within ${RELEASE_TIMEOUT_MS / 60000} min` : (tail || `the publisher exited ${run.status}`);
+    for (const target of RELEASE_TARGETS) {
+      targets[target] = !failed || target === failed
+        ? {state: 'failed', detail: why}
+        : {state: 'unverified', detail: `the publish run stopped at ${failed}: ${why}`};
+    }
+    return {state: 'failed', tag: '', targets, seconds, log, detail: why,
+      failed: RELEASE_TARGETS.filter(target => !RELEASE_OK.has(targets[target].state))};
   }
-  if (run.status !== 0) {
-    return {state: 'failed', target: RELEASE_TARGET, seconds, detail: lastLine(output) || `the publisher exited ${run.status}`, log};
+  const covered = output.match(/covered: (\S+) covers the compiled inputs of \S+ for ([^(\n]+)/);
+  const tag = (output.match(/publish-node-binaries ok: (\S+)/) || [])[1] || (covered ? covered[1] : '');
+  const coveredFor = covered ? covered[2].split(/\s+/).filter(Boolean) : [];
+  for (const target of RELEASE_TARGETS) {
+    targets[target] = coveredFor.includes(target)
+      ? {state: 'covered', tag, detail: `covered by ${covered[1]}`}
+      : {state: 'published', tag, detail: `published ${tag}`};
   }
-  const covered = /covered: \S+ covers the compiled inputs/.test(output);
-  const tag = (output.match(/publish-node-binaries ok: (\S+)/) || [])[1]
-    || (output.match(/covered: (\S+) covers/) || [])[1] || '';
-  return {
-    state: covered ? 'covered' : 'published', tag, target: RELEASE_TARGET, seconds, log,
-    detail: lastLine(output) || (covered ? `covered by ${tag}` : `published ${tag}`),
-  };
+  const state = coveredFor.length === RELEASE_TARGETS.length ? 'covered' : 'published';
+  return {state, tag, targets, seconds, log, failed: [],
+    detail: lastLine(output) || (state === 'covered' ? `covered by ${tag}` : `published ${tag}`)};
 }
+
+// One line an operator reads: every target's own verdict, never an aggregate that hides one of them.
+const describeRelease = release => `${release.state} (${
+  RELEASE_TARGETS.map(target => `${target}=${(release.targets && release.targets[target] || {}).state || 'unknown'}`).join(', ')
+}): ${release.detail}${release.tag ? ` [${release.tag}]` : ''}`;
 
 // ---- status -------------------------------------------------------------------------------------
 function commandStatus(options) {
@@ -780,7 +813,7 @@ async function commandLand(options) {
     // failure is recorded, never rolled back into a refusal of a landing that already happened.
     heartbeat(db, id, lease);
     const release = publishNodeRelease(canonical, merged, dir);
-    say(`#${id} release ${release.state} (${release.target}): ${release.detail}${release.tag ? ` [${release.tag}]` : ''} in ${release.seconds}s`);
+    say(`#${id} release ${describeRelease(release)} in ${release.seconds}s`);
     finish('landed', `${options.branch} landed at ${merged.slice(0, 12)} in ${now() - acquired.row.created_at}s (${rerun ? 'retested' : 'no retest'}; upstream ${delta.retest.why})`,
       {result: JSON.stringify({merged, upstream, rerun, delta: delta.counts, release})});
     return {id, granted: true, merged, pushed: true, rerun, release};
