@@ -1,4 +1,9 @@
 -- Actual native graph facade, oversized diagnostics, private source only.
+-- The graph is a WASI component: install the pinned one built from this tree into this test's own home,
+-- or skip by name on a machine that cannot build it (scripts/lib/test-components.lua).
+local components = dofile('scripts/lib/test-components.lua')
+local seeded, why = components.require('graph')
+if not seeded then components.skip('graph-impact-paging', why); return end
 local json=dofile('lua/vendor/json.lua')
 local graph=dofile('lua/core/graph.lua')
 local paths=dofile('lua/core/paths.lua')

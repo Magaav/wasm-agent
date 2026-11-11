@@ -464,6 +464,31 @@ enters a record. `kernel.record()` / `kernel.save_replay()` / `kernel.replay_fro
 (new instance healthy, then the old one stops). Design, the refusal rules and the timings are in
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md), "Iterating on a component".
 
+## A Lua test that needs a real component
+
+`host.graph_*` is served by the `graph` component, so a test that asserts a graph *answer* needs one
+installed in the directory its node reads (`WA_COMPONENTS_DIR`, else `$HOME/.wasm-agent/components`).
+A test declares that with `scripts/lib/test-components.lua`:
+
+```lua
+local components = dofile('scripts/lib/test-components.lua')
+local seeded, why = components.require('graph')
+if not seeded then components.skip('test-graph-freshness', why); return end
+```
+
+`require` copies the component, with its pin and manifest, from the set the runner built
+(`WA_FAST_COMPONENT_SOURCE`) into the test's *own* component directory, and re-checks the pin the
+loader would check. Absent - no wasi-sdk, the docker fast path, a checkout that never built one - it
+returns the reason and the test prints `SKIP <test>: <reason>`: a named hole, never a silent pass.
+
+`scripts/fast.sh` builds that set once from this tree with `scripts/build-components.sh` (so it
+carries the pin a deploy would install) and caches it under the worktree's own git dir; a row that
+needs no component pays nothing, and a test that asserts what an *absent* component does keeps
+seeing an absent one. The full gate exports a single `WA_COMPONENTS_DIR` for its whole run
+(`scripts/test.sh`) because its home is shared; the fast path's rows are hermetic and parallel, so
+each installs into its own home - which is also the only directory `scripts/test-features-gate.lua`
+will write its stubs into ("never a node's component directory").
+
 ## Components so far
 
 Shipping: what `components.lock` pins, i.e. what every deploy installs.

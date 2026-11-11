@@ -99,8 +99,18 @@ policy.pin(memory, 'master', ctx)
 check(policy.enforced(ctx), 'code mode is pinned for this run')
 local probe = component.run(memory, { code = 'return 1' }, 'master', ctx, catalog, current_catalog, dispatch, execution)
 policy.pin(memory, 'master', ctx)
-if not (type(probe) == 'table' and probe.ok == true and probe.backend) then
-  skip('parity', 'the component answered no script: ' .. text(probe))
+-- IS A COMPONENT ANSWERING? A component that is not installed falls back to the native loop and logs it
+-- (that is the line appended to `logged`), and the native answer carries no `sandbox_calls`: the field is
+-- the component loop's own cost count (`lua/core/codemode.lua`'s component path). Testing `probe.ok` and
+-- `probe.backend` alone accepted the fallback - both paths set `backend` - so the comparisons below ran
+-- native against native, compared nothing, and failed on "the component reports the sandbox crossings it
+-- cost" for a component that had never been loaded. The capability is declared, not assumed: absent, the
+-- suite skips by name and says which command builds it; present, every comparison runs as before.
+local answering = type(probe) == 'table' and probe.ok == true and type(probe.sandbox_calls) == 'number'
+if not answering then
+  skip('parity', 'the codemode component answered no script (' .. text(probe)
+    .. (#logged > 0 and ('; the node logged: ' .. table.concat(logged, '; ')) or '')
+    .. '); scripts/test-codemode-component.sh builds it and passes WA_CODEMODE_COMPONENT_WASM')
   print(string.format('codemode seam: %d checks, %d parity comparisons, %d skipped', checks, comparisons, skipped))
   return
 end

@@ -1,4 +1,9 @@
 -- Queries automatically capture/wait for committed source revisions; full rebuild remains explicit.
+-- The graph is a WASI component: install the pinned one built from this tree into this test's own home,
+-- or skip by name on a machine that cannot build it (scripts/lib/test-components.lua).
+local components = dofile('scripts/lib/test-components.lua')
+local seeded, why = components.require('graph')
+if not seeded then components.skip('graph-freshness', why); return end
 local json = dofile("lua/vendor/json.lua")
 local root = dofile("lua/core/paths.lua").data() .. "/graph-freshness-fixture"
 local db = root .. "/graph.db"

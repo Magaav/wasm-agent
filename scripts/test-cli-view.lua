@@ -869,6 +869,12 @@ do
   boxed_view:prompt("wa> ")
   local status_row = boxed_view.screen.status
   local content_row = boxed_view.screen.content
+  -- Where the session-status-content line is drawn in the boxed layout: its own row between the box and
+  -- the footer (`screen.session`, the same row `wa-term`'s `session_row` names), not the fallback's
+  -- `content`, which is the region's last row. Those are the same row only in the fallback, so reading
+  -- `session` first is the difference between asserting the notice's own row and passing by accident
+  -- because the status line happened to be written on `content` too.
+  local notice_row = boxed_view.screen.session or content_row
   local steps = "\240\159\145\163" -- `👣`, the boxed status line's step count: on it the whole run
 
   local mark = #boxed_written + 1
@@ -920,14 +926,15 @@ do
   local notice_mark = #boxed_written + 1
   boxed_view:event({ type = "round", n = 11 })
   local noticed = since(boxed_written, notice_mark)
-  ok(has(noticed, "\27[" .. content_row .. ";1H"), "the notice is drawn on the sscontent row, not the status row")
+  ok(has(noticed, "\27[" .. notice_row .. ";1H"), "the notice is drawn on the sscontent row, not the status row")
+  ok(notice_row ~= status_row, "and that row is not the status line's: " .. notice_row .. " vs " .. status_row)
   eq(count_erases(noticed, status_row), 0, "and the status row is still not erased")
   ok(has(noticed, "\27[1;" .. (content_row - 1) .. "r"), "the output region still shrinks to leave it that row")
   local clear_mark = #boxed_written + 1
   boxed_view.session_notice = nil
   boxed_view:session_draw()
   local cleared_notice = since(boxed_written, clear_mark)
-  ok(has(cleared_notice, "\27[" .. content_row .. ";1H\27[2K"),
+  ok(has(cleared_notice, "\27[" .. notice_row .. ";1H\27[2K"),
     "a notice that goes away takes its own row with it: sscontent is unaffected")
   eq(count_erases(cleared_notice, status_row), 0, "and the status row is untouched by it")
   boxed_view:screen_off()
