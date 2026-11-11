@@ -107,8 +107,15 @@ export WA_SENTINEL_SCRIPTS="${WA_SENTINEL_SCRIPTS:-$WA_SCRIPTS_DIR}"
 # Explicit operator-selected privilege only for the verified installed sentinel's
 # manager restart. Never infer sudo from a polkit failure or run the deploy as root.
 sentinel_restart() {
+  # The watcher this deploy starts inherits this process's environment, and this process has exported the
+  # tree it builds from (WA_DEPLOY_ROOT) plus the pin and build-target names. A watcher that inherits them
+  # hands them to the NEXT deploy, which then resolves its source tree to this deploy's detached build pin -
+  # a worktree no landing ever fast-forwards, so that deploy waits its whole tree-wait bound and then
+  # refuses `canonical_busy` naming the pin (measured on wasm_the_first 2026-11-11: 600 s, nothing built).
+  # The supervisor is long-lived and must start from the machine's own answer, not from one deploy's.
   case "${WA_DEPLOY_SENTINEL_SUDO:-0}" in
-    0) "$INSTALL_DIR/$SENTINEL_NAME" restart ;;
+    0) env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET \
+         -u WA_CODEMODE_TARGET_DIR "$INSTALL_DIR/$SENTINEL_NAME" restart ;;
     1)
       case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) echo 'sentinel sudo restart is POSIX-only' >&2; return 1 ;; esac
       sudo -n env "WASM_AGENT_HOME=$(wa_home_dir)" "WA_INSTALL_DIR=$INSTALL_DIR" \
@@ -351,6 +358,12 @@ while :; do
   HEAD_NOW="$(git rev-parse HEAD 2>/dev/null || true)"
   MAIN_NOW="$(git rev-parse origin/main 2>/dev/null || true)"
   DIRT_NOW="$(git status --porcelain | wc -l | tr -d ' ')"
+  # A detached worktree is a build pin, and no landing ever moves one. Waiting the whole bound for it to
+  # become origin/main was 600 s spent on an answer that cannot change (wasm_the_first 2026-11-11, where
+  # the cause was WA_DEPLOY_ROOT inherited by the watcher from the deploy that started it). Say it once.
+  if [ "$HEAD_NOW" != "$MAIN_NOW" ] && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "HEAD" ]; then
+    fail "refused(source_pin_stale): $SOURCE_ROOT is a detached worktree at ${HEAD_NOW:0:12} and origin/main is ${MAIN_NOW:0:12}; a landing never fast-forwards a detached tree, so this wait could only time out after ${WA_TREE_WAIT}s. Unset WA_DEPLOY_ROOT (a deploy exports it for the processes it starts and a watcher started by one inherits it), or point it at the canonical checkout. Nothing was built."
+  fi
   [ "$HEAD_NOW" = "$MAIN_NOW" ] && [ "$DIRT_NOW" = "0" ] && break
   if [ "$TREE_WAITED" -ge "$WA_TREE_WAIT" ]; then
     fail "refused(canonical_busy): $SOURCE_ROOT is not exactly origin/main after waiting ${WA_TREE_WAIT}s (HEAD ${HEAD_NOW:0:12}, origin/main ${MAIN_NOW:0:12}, ${DIRT_NOW} uncommitted change(s)); a landing is in progress or the tree owns edits nobody has committed. Nothing was built. The queue's status names its holder."
@@ -888,6 +901,25 @@ for qf in "$QUEUE_DIR"/*.json; do
 done
 [ "$UPGRADE_ACTIVE" = "0" ] || fail "an upgrade request is active; refusing a second install"
 
+# Where the compile writes. The pin above is a fresh worktree per commit, so a target dir inside it is
+# cold on every deploy: measured 336 s of a 481 s deploy on wasm_the_first (2026-11-11) for a landing
+# that changed no Rust at all. The target dir is build output, not state, so it lives in the data dir
+# and is reused: a deploy whose Rust did not change recompiles only what its source path moved.
+# WA_DEPLOY_BUILD_TARGET names another directory; a directory that cannot be created or written falls
+# back to the pin's own target, which is the old (cold) behaviour and never a failed deploy.
+DEPLOY_DATA="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
+DEPLOY_BUILD_TARGET="${WA_DEPLOY_BUILD_TARGET:-$DEPLOY_DATA/build-cache/target}"
+if mkdir -p "$DEPLOY_BUILD_TARGET" 2>/dev/null && [ -w "$DEPLOY_BUILD_TARGET" ]; then
+  DEPLOY_BUILD_TARGET="$(cd "$DEPLOY_BUILD_TARGET" && pwd)"
+  export WA_CODEMODE_TARGET_DIR="$DEPLOY_BUILD_TARGET"
+  printf 'deploy: compiling into the reusable target %s (%s)\n' "$DEPLOY_BUILD_TARGET" \
+    "${WA_DEPLOY_BUILD_TARGET:+named by WA_DEPLOY_BUILD_TARGET}" | sed 's/ ()$//'
+else
+  DEPLOY_BUILD_TARGET="$ROOT/rust/target"
+  unset WA_CODEMODE_TARGET_DIR
+  note "the reusable build target is not writable ($WA_DEPLOY_BUILD_TARGET); compiling into the pin's own cold target"
+fi
+
 # The builds below are --offline --locked on purpose: exactly the lockfile, no network while building. A
 # machine that never built these crates has nothing in its cargo cache for them, so the lockfile's exact
 # crates are fetched first (--locked: no resolution, no newer version). No network is not fatal here: the
@@ -924,12 +956,12 @@ WA_STATUS_DONE="$(wa_status_compiled "$BUILD_LOGS/wa-host.log")"
 # specification did not match any packages" - and that is how it came to be installed by hand at all.
 : > "$BUILD_LOGS/wa-sentinel.log"
 wa_status_follow "$BUILD_LOGS/wa-sentinel.log" compiling
-( cd rust && cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) 2> "$BUILD_LOGS/wa-sentinel.log" \
+( cd rust && CARGO_TARGET_DIR="$DEPLOY_BUILD_TARGET" cargo build --release --offline --locked --manifest-path wa-sentinel/Cargo.toml ) 2> "$BUILD_LOGS/wa-sentinel.log" \
   || { tail -25 "$BUILD_LOGS/wa-sentinel.log" 2>/dev/null | sed 's/^/  cargo: /' >&2; fail "the sentinel build failed"; }
 wa_status_unfollow
 echo "deploy: compiled $WA_STATUS_DONE + $(wa_status_compiled "$BUILD_LOGS/wa-sentinel.log") crate(s) (logs in $BUILD_LOGS)"
-NEW="rust/target/release/wa.exe"
-[ -f "$NEW" ] || NEW="rust/target/release/wa"
+NEW="$DEPLOY_BUILD_TARGET/release/wa.exe"
+[ -f "$NEW" ] || NEW="$DEPLOY_BUILD_TARGET/release/wa"
 [ -x "$NEW" ] || fail "no built binary at $NEW"
 
 # The supervisor is part of what this installs, and leaving it out is how the node and the thing that
@@ -938,8 +970,8 @@ NEW="rust/target/release/wa.exe"
 # e2e test refused to run - "the installed sentinel is the one just built" is a check the test makes
 # and the gate did not. The sentinel is the only process that can replace the node; shipping the node
 # without shipping it is shipping half a node.
-NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel.exe"
-[ -f "$NEW_SENTINEL" ] || NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel"
+NEW_SENTINEL="$DEPLOY_BUILD_TARGET/release/wa-sentinel.exe"
+[ -f "$NEW_SENTINEL" ] || NEW_SENTINEL="$DEPLOY_BUILD_TARGET/release/wa-sentinel"
 [ -x "$NEW_SENTINEL" ] || fail "no built sentinel at $NEW_SENTINEL"
 NEW_SENTINEL_LOWER="$(echo "$NEW_SENTINEL" | tr '[:upper:]' '[:lower:]')"
 case "$NEW_SENTINEL_LOWER" in
@@ -1543,7 +1575,8 @@ elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
   # reboot, or a watcher that died. Start one. The stop file is what `wa-sentinel stop` writes, so an
   # intentional stop is respected: this only fixes the case where there was never one, or it crashed.
   echo "deploy: no sentinel watching - starting one"
-  "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+  env -u WA_DEPLOY_ROOT -u WA_DEPLOY_PIN -u WA_DEPLOY_PIN_DIR -u WA_DEPLOY_BUILD_TARGET \
+    -u WA_CODEMODE_TARGET_DIR "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
   SENTINEL_NEW_PID=""
   for _ in $(seq 1 50); do
     SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
