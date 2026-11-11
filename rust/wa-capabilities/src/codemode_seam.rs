@@ -307,15 +307,16 @@ fn events_of(answer: &Value) -> Vec<sandbox::Event> {
             }
             // A finished script reports its value; a FAILED one reports its message in `error`
             // (`rust/wa-capabilities/src/quickjs.rs`, the `done` event: `ok` selects which field the
-            // guest fills). The seam's `done-event` has one payload field, `value`, and the component
-            // reads it as the error when `ok` is false - so the failure message has to travel in it.
-            // Without this the component answered `{ok: false}` with no reason at all, which is the
-            // one thing a code-mode failure may never be (`scripts/test-codemode-component.lua`,
-            // "a script that throws": the same script through both loops, compared field for field).
+            // guest fills). The seam's record carries both: `error` is the reason the component reads
+            // (it had no field to read before, so every failed script reached the agent through the
+            // component with no reason at all), and `value` keeps the legacy spelling - the error, when
+            // there is no value - so a component built against the older record still learns why its
+            // script failed.
             "done" => events.push(sandbox::Event::Done(sandbox::DoneEvent {
                 ok: event.get("ok").and_then(Value::as_bool).unwrap_or(false),
                 value: event.get("value").or_else(|| event.get("error"))
                     .and_then(Value::as_str).map(str::to_string),
+                error: event.get("error").and_then(Value::as_str).map(str::to_string),
                 writes: event.get("writes").and_then(Value::as_str).map(str::to_string),
             })),
             other => events.push(sandbox::Event::Output(sandbox::OutputEvent {
@@ -464,7 +465,7 @@ impl StubState {
             }))
             .collect();
         if calls.is_empty() {
-            events.push(sandbox::Event::Done(sandbox::DoneEvent { ok: true, value: Some("1".to_string()), writes: None }));
+            events.push(sandbox::Event::Done(sandbox::DoneEvent { ok: true, value: Some("1".to_string()), writes: None, error: None }));
         }
         self.scripts.insert(id.clone(), StubScript { owner: spec.owner.clone(), calls, delivered: 0, echo });
         (events, Some(id), None)
@@ -485,6 +486,7 @@ impl StubState {
             return vec![sandbox::Event::Done(sandbox::DoneEvent {
                 ok: false,
                 value: Some("codemode_sandbox: sandbox unavailable".to_string()),
+                error: Some("codemode_sandbox: sandbox unavailable".to_string()),
                 writes: None,
             })];
         };
@@ -492,6 +494,7 @@ impl StubState {
             return vec![sandbox::Event::Done(sandbox::DoneEvent {
                 ok: false,
                 value: Some("codemode_sandbox: sandbox owner mismatch".to_string()),
+                error: Some("codemode_sandbox: sandbox owner mismatch".to_string()),
                 writes: None,
             })];
         }
@@ -503,7 +506,7 @@ impl StubState {
             return Vec::new();
         }
         let value = if script.echo { payload.to_string() } else { "ok".to_string() };
-        vec![sandbox::Event::Done(sandbox::DoneEvent { ok: true, value: Some(value), writes: None })]
+        vec![sandbox::Event::Done(sandbox::DoneEvent { ok: true, value: Some(value), error: None, writes: None })]
     }
 
     fn close(&mut self, id: &str) -> Result<(), sandbox::Failure> {
@@ -830,7 +833,23 @@ fn opened_json(opened: &seam::Opened) -> Value {
 }
 
 fn progress_json(progress: &seam::Progress) -> Value {
-    json!({"items": output_json(&progress.items), "step": step_json(&progress.step)})
+    // `answered` is the seam's journal row for a global it answered inside the guest: the loop writes
+    // one attempt per guest call exactly as the native path does, so dropping it here would put the two
+    // journals back out of step (and the parity suite exists to catch that).
+    let answered: Vec<Value> = progress
+        .answered
+        .iter()
+        .map(|answer| {
+            json!({
+                "id": answer.id,
+                "name": answer.name,
+                "ok": answer.ok,
+                "args_json": answer.args_json,
+                "result_json": answer.result_json,
+            })
+        })
+        .collect();
+    json!({"items": output_json(&progress.items), "answered": answered, "step": step_json(&progress.step)})
 }
 
 fn report_json(report: &seam::Report) -> Value {

@@ -117,19 +117,22 @@ local answering = type(probe) == 'table' and probe.ok == true and type(probe.san
 if not answering then
   skip('parity', 'the codemode component answered no script (' .. text(probe)
     .. (#logged > 0 and ('; the node logged: ' .. table.concat(logged, '; ')) or '')
-    .. '); scripts/test-codemode-component.sh builds it and passes WA_CODEMODE_COMPONENT_WASM')
+    .. '). A component and the node that hosts it share `wit/codemode`, so a node built before this '
+    .. 'tree\'s WIT refuses a component built from it: install the node from this tree, or run '
+    .. 'scripts/test-codemode-component.sh with WA_BIN pointing at a build of it')
   print(string.format('codemode seam: %d checks, %d parity comparisons, %d skipped', checks, comparisons, skipped))
   return
 end
 check(probe.sandbox_calls and probe.sandbox_calls > 0, 'the component reports the sandbox crossings it cost')
 check(#logged == 0, 'the component path did not fall back: ' .. table.concat(logged, '; '))
 
--- Does the component JOURNAL the globals it answers itself? The native loop records every guest call it
--- answers - `searchTools`, `describeTool`, `capabilities` included - as an attempt with `admitted:false`
--- (measured). The component answers those in place (`Guest::Answered`, no crossing back to the loop), so
--- the loop has nothing to record and its journal is shorter. Measured with one probe rather than assumed,
--- and named: while the two journals differ this way, the attempt comparison below keeps the TOOL calls
--- (the ones a model or a trace actually reads) and drops the global rows on both sides.
+-- Does the component JOURNAL the globals it answers itself? It must: the native loop records every guest
+-- call it answers - `searchTools`, `describeTool`, `capabilities` included - as an attempt with
+-- `target: "global"`, `admitted: false` and the argument/result references. The component answers those
+-- inside the guest, so it reports each one to the loop (`progress.answered`, journaled by
+-- `lua/core/codemode.lua`); a seam that answered silently would leave the two journals disagreeing about
+-- which calls happened. Asserted, not skipped: the comparison below is field for field, global rows
+-- included.
 local journals_globals = (function()
   policy.pin(memory, 'master', ctx)
   local answer = component.run(memory,
@@ -138,11 +141,7 @@ local journals_globals = (function()
   dispatched = {}
   return type(answer) == 'table' and answer.ok == true and #((answer.attempts) or {}) >= 1
 end)()
-if not journals_globals then
-  skip('the journal row of an in-place global', 'this component answers searchTools/describeTool in the guest and does not '
-    .. 'cross back to the loop, which is what records an attempt (`lua/core/codemode.lua`); the native loop '
-    .. 'records one per call. Tool-call attempts are still compared field for field')
-end
+check(journals_globals, 'the component journals the global it answers in place, as the native loop does')
 
 -- The comparison: everything the model and the journal can see, minus the one field each path owns
 -- (`backend` is the same on both; `sandbox_calls` is the component's own cost number).
@@ -184,12 +183,15 @@ local scripts = {
   { label = 'a fenced tool called from a script', code = 'return await tools.subagent({task:"x"});' },
 }
 
--- Does THIS binary carry a failed script's reason across the component boundary? The node maps the
--- guest's `done` event - `value` when the script finished, `error` when it failed - onto the seam's one
--- payload field (`rust/wa-capabilities/src/codemode_seam.rs`). A host built before that mapping read
--- `value` only, so every failed script through the component answered `{ok: false}` with no reason at
--- all. The capability is detected once, from the component itself, and named; the comparison of that
--- field returns by itself as soon as the installed node carries it, and nothing else is skipped.
+-- Can THIS binary carry a failed script's reason across the component boundary? The node maps the guest's
+-- `done` event - `value` when the script finished, `error` when it failed - onto the seam's record
+-- (`rust/wa-capabilities/src/codemode_seam.rs`, `done-event.error`). A host built before that record had
+-- the field answers a failed script with `{ok: false}` and no reason at all, so there is nothing to
+-- compare the native message WITH.
+--
+-- That is a missing capability, not a reason to compare less: the suite names it and returns, and the
+-- field-for-field comparison below runs in full the moment the installed node is built from a tree that
+-- carries the field. Nothing else is skipped.
 local carries = (function()
   policy.pin(memory, 'master', ctx)
   local probe = component.run(memory, { code = 'throw new Error("seam probe");' }, 'master', ctx, catalog,
@@ -198,9 +200,11 @@ local carries = (function()
   return type(probe) == 'table' and probe.ok == false and probe.error ~= nil and tostring(probe.error) ~= ''
 end)()
 if not carries then
-  skip("a failed script's reason", 'this binary drops it across the seam (rust/wa-capabilities/src/codemode_seam.rs, '
-    .. 'the done event payload); the node\'s next install from this tree carries it and the comparison '
-    .. 'returns. The native loop still names every failure, and that is asserted per script below')
+  skip('parity', 'this binary drops a failed script\'s reason at the seam (rust/wa-capabilities/src/codemode_seam.rs, '
+    .. 'done-event.error); a node installed from this tree carries it, and then this suite compares every '
+    .. 'field including that one. The native loop still names every failure, and that is asserted per script')
+  print(string.format('codemode seam: %d checks, %d parity comparisons, %d skipped', checks, comparisons, skipped))
+  return
 end
 
 -- Every tool call the guest asked for over the whole run, for the probe at the end: it asks whether the
@@ -218,25 +222,6 @@ for _, script in ipairs(scripts) do
   local component_calls = #dispatched
   comparisons = comparisons + 1
   local left, right = fields(first), fields(second)
-  -- A failed script must NAME its failure on both paths, and this binary decides whether the component
-  -- half can: the node maps the guest's `done` event onto the seam's one payload field, and a host built
-  -- before that mapping carried `error` answers `{ok: false}` with no reason at all. The capability is
-  -- detected once, from the component itself (`carries`), and named - the native side is asserted either
-  -- way, so a host that loses the reason cannot take the native reason with it.
-  if first.ok == false and not carries then
-    check(left.error ~= nil, script.label .. ': the native loop names the failure: ' .. text(left))
-    -- The field is dropped on BOTH sides, after the native one was asserted: what cannot be compared is
-    -- "the component repeats it", not "the failure has a reason".
-    left.error, right.error = nil, nil
-  end
-  if not journals_globals then
-    local function tool_rows(rows)
-      local kept = {}
-      for _, row in ipairs(rows or {}) do if row.target ~= 'global' then kept[#kept + 1] = row end end
-      return kept
-    end
-    left.attempts, right.attempts = tool_rows(left.attempts), tool_rows(right.attempts)
-  end
   check(text(left) == text(right), script.label .. ': native ' .. text(left) .. ' vs component ' .. text(right))
   check(native_calls == component_calls, script.label .. ': the same number of tools was dispatched on both paths')
 end

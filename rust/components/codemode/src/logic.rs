@@ -34,7 +34,18 @@ pub const FORBIDDEN: &[&str] = &[
 pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe"];
 
 /// The guest globals this seam answers, with the prelude's `spread` flag.
-pub const GUEST_GLOBALS: &[(&str, bool)] = &[("searchTools", true), ("describeTool", false)];
+///
+/// The list is the native loop's, name for name and flag for flag (`lua/core/codemode.lua`: `searchTools`
+/// spread, then `describeTool`, `showCall`, `capabilities`, `describe`). A shorter list here means a
+/// script that calls `capabilities()` runs natively and fails with `ReferenceError: capabilities is not
+/// defined` through the component - the parity suite compared the two and said so.
+pub const GUEST_GLOBALS: &[(&str, bool)] = &[
+    ("searchTools", true),
+    ("describeTool", false),
+    ("showCall", false),
+    ("capabilities", false),
+    ("describe", false),
+];
 
 /// The node's pre-flight view of a tool (`tools.discovery_execution`), pinned at `open`.
 #[derive(Clone, Debug, Default, PartialEq)]

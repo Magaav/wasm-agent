@@ -27,8 +27,8 @@ mod logic;
 
 use crate::exports::wa::codemode::codemode::Guest as CodemodeGuest;
 use crate::wa::codemode::types::{
-    CallStep, Execution as WitExecution, GlobalStep, OpenRequest, Opened, Outcome, OutputItem,
-    Progress, Refusal, Reply, Report, Step, StoreEntry, TargetRefusal, UnexecutedCall,
+    AnsweredCall, CallStep, Execution as WitExecution, GlobalStep, OpenRequest, Opened, Outcome,
+    OutputItem, Progress, Refusal, Reply, Report, Step, StoreEntry, TargetRefusal, UnexecutedCall,
 };
 use crate::wa::kernel::quickjs::{self, Event, Failure};
 
@@ -50,6 +50,11 @@ struct Script {
     /// The first named protocol failure this seam issued, kept so `finish` can still say why.
     aborted: Option<String>,
     sandbox_calls: u64,
+    /// The globals this seam answered inside the guest, oldest first, in the order the guest made
+    /// them. The loop journals one `attempt` per guest call (`lua/core/codemode.lua`), so a seam that
+    /// answered in place without reporting it left the two paths disagreeing about which calls
+    /// happened. Drained by every `Progress`.
+    answered: Vec<AnsweredCall>,
 }
 
 thread_local! {
@@ -85,10 +90,15 @@ fn output(event: quickjs::OutputEvent) -> OutputItem {
 /// The prelude's tool list: what the guest's `tools` object is built from. Descriptions are bounded by
 /// the node's own schema, and the guest never sees a name the fence refused.
 fn tools_json(catalogue: &Catalogue) -> String {
+    // The guest's ABI for a descriptor is the native loop's, field for field: `name` is the tool's own
+    // name and `jsName` the identifier the guest's `tools` proxy exposes (`lua/core/codemode.lua`,
+    // `descriptors[#descriptors+1]`). Sending the js name AS `name` and no `jsName` made the guest's
+    // lookup compare `undefined`, so the same script failed on the component path with a different
+    // TypeError than the native one - `scripts/test-codemode-component.lua` caught exactly that.
     let tools: Vec<Value> = catalogue
         .tools
         .iter()
-        .map(|tool| json!({"name": tool.js_name, "description": tool.description}))
+        .map(|tool| json!({"name": tool.name, "jsName": tool.js_name, "description": tool.description}))
         .collect();
     Value::Array(tools).to_string()
 }
@@ -129,6 +139,18 @@ impl Script {
         std::mem::take(&mut self.items)
     }
 
+    /// The journal rows this seam owes the loop for the globals it answered in place, oldest first.
+    fn take_answered(&mut self) -> Vec<AnsweredCall> {
+        std::mem::take(&mut self.answered)
+    }
+
+    /// One `Progress`: what the script printed, the in-place answers the loop has not been told about,
+    /// and the step it must act on. Every return from [`advance_script`] goes through here, so no
+    /// journal row can be dropped on an early return (an abort is a step too).
+    fn emit(&mut self, step: Step) -> Progress {
+        Progress { items: self.take_items(), answered: self.take_answered(), step }
+    }
+
     fn sandbox_call(&mut self) {
         self.sandbox_calls += 1;
     }
@@ -149,10 +171,16 @@ impl Script {
                     // A failed script's error is the guest's own message; the sandbox reports it as the
                     // terminal event's `value` when `ok` is false (the prelude sends both through one
                     // field), so the loop reads it there.
+                    // A failed script's error is the guest's own message. It arrives in `error` now (the
+                    // seam's record carries it), and in `value` from a host built before that field
+                    // existed - the two hold the same text, so either answers the model. `value` is the
+                    // script's VALUE and a failed script has none: the legacy spelling must not leak
+                    // into it, or the same script would answer `{ok: false, value: <error>}` here and
+                    // `{ok: false}` natively.
                     Ok(writes) => Outcome {
                         ok: done.ok,
-                        value: done.value.clone(),
-                        error: if done.ok { None } else { done.value },
+                        value: if done.ok { done.value.clone() } else { None },
+                        error: if done.ok { None } else { done.error.clone().or(done.value.clone()) },
                         writes,
                     },
                     Err(reason) => {
@@ -250,6 +278,7 @@ impl CodemodeGuest for CodemodeComponent {
             outcome: None,
             aborted: None,
             sandbox_calls: 1,
+            answered: Vec::new(),
         };
         let _ = script.consume(started.events);
         let backend = if started.backend.is_empty() { None } else { Some(started.backend.clone()) };
@@ -274,6 +303,7 @@ impl CodemodeGuest for CodemodeComponent {
         let Some(mut script) = SCRIPTS.with(|scripts| scripts.borrow_mut().remove(&session)) else {
             return Progress {
                 items: Vec::new(),
+                answered: Vec::new(),
                 step: Step::Aborted("codemode_session_unknown".to_string()),
             };
         };
@@ -328,38 +358,38 @@ fn advance_script(script: &mut Script, reply: Option<Reply>) -> Progress {
         script.sandbox_call();
         if script.consume(delivered.events).is_err() {
             script.aborted = Some("codemode_protocol_unknown_event".to_string());
-            return Progress { items: script.take_items(), step: Step::Aborted("codemode_protocol_unknown_event".to_string()) };
+            return script.emit(Step::Aborted("codemode_protocol_unknown_event".to_string()));
         }
         if let Some(failure) = delivered.failure {
             script.aborted = Some(failure.clone());
-            return Progress { items: script.take_items(), step: Step::Aborted(failure) };
+            return script.emit(Step::Aborted(failure));
         }
     }
     loop {
         if script.done.is_some() {
             let outcome = script.finish_outcome();
-            return Progress { items: script.take_items(), step: Step::Finished(outcome) };
+            return script.emit(Step::Finished(outcome));
         }
         // A loop that asks again after the script finished gets the same answer rather than a stall:
         // the verdict is already known and asking twice is not a protocol error.
         if let Some(outcome) = script.outcome.clone() {
-            return Progress { items: script.take_items(), step: Step::Finished(outcome) };
+            return script.emit(Step::Finished(outcome));
         }
         if let Err(failure) = quickjs::admit(&script.sandbox, &script.owner) {
             script.sandbox_call();
             let detail = failure_detail(failure);
             script.aborted = Some(detail.clone());
-            return Progress { items: script.take_items(), step: Step::Aborted(detail) };
+            return script.emit(Step::Aborted(detail));
         }
         script.sandbox_call();
         let Some(call) = script.queued.pop_front() else {
             // The guest stopped without a `done` and nothing is queued: the script can never finish.
             script.aborted = Some("codemode_stalled".to_string());
-            return Progress { items: script.take_items(), step: Step::Aborted("codemode_stalled".to_string()) };
+            return script.emit(Step::Aborted("codemode_stalled".to_string()));
         };
         if !script.seen.insert(call.id) {
             script.aborted = Some("codemode_duplicate_call".to_string());
-            return Progress { items: script.take_items(), step: Step::Aborted("codemode_duplicate_call".to_string()) };
+            return script.emit(Step::Aborted("codemode_duplicate_call".to_string()));
         }
         match interpret(&script.catalogue, &call.target, &call.name, call.args_json.as_deref()) {
             Guest::Tool(target) => {
@@ -370,7 +400,7 @@ fn advance_script(script: &mut Script, reply: Option<Reply>) -> Progress {
                     args_json: target.args.clone(),
                     refusal: refusal(&target),
                 });
-                return Progress { items: script.take_items(), step };
+                return script.emit(step);
             }
             Guest::Host => {
                 let step = Step::HostGlobal(GlobalStep {
@@ -378,20 +408,29 @@ fn advance_script(script: &mut Script, reply: Option<Reply>) -> Progress {
                     name: call.name.clone(),
                     args_json: call.args_json.clone(),
                 });
-                return Progress { items: script.take_items(), step };
+                return script.emit(step);
             }
             Guest::Answered(value, ok) => {
-                // The seam's own answer, delivered without a crossing back to the loop (the native loop
-                // answers these in place too).
+                // The seam's own answer, handed back to the guest at once (the native loop answers these
+                // in place too) - and reported to the loop in this `Progress`, because the journal is the
+                // loop's: the native loop writes one `attempt` per guest call, `searchTools` included, and
+                // a seam that answered silently left the two records disagreeing about which calls ran.
+                script.answered.push(AnsweredCall {
+                    id: call.id,
+                    name: call.name.clone(),
+                    ok,
+                    args_json: call.args_json.clone(),
+                    result_json: value.to_string(),
+                });
                 let delivered = quickjs::deliver(&script.sandbox, &script.owner, call.id, ok, &value.to_string());
                 script.sandbox_call();
                 if script.consume(delivered.events).is_err() {
                     script.aborted = Some("codemode_protocol_unknown_event".to_string());
-                    return Progress { items: script.take_items(), step: Step::Aborted("codemode_protocol_unknown_event".to_string()) };
+                    return script.emit(Step::Aborted("codemode_protocol_unknown_event".to_string()));
                 }
                 if let Some(failure) = delivered.failure {
                     script.aborted = Some(failure.clone());
-                    return Progress { items: script.take_items(), step: Step::Aborted(failure) };
+                    return script.emit(Step::Aborted(failure));
                 }
             }
         }
@@ -405,7 +444,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guest_sees_only_the_callable_names_and_the_two_globals_it_can_count_on() {
+    fn the_guest_sees_only_the_callable_names_and_the_globals_the_native_loop_gives_it() {
         let catalogue = plan(vec![
             Fact {
                 name: "read".into(),
@@ -423,10 +462,18 @@ mod tests {
         .expect("no collision");
         let tools: Value = serde_json::from_str(&tools_json(&catalogue)).unwrap();
         assert_eq!(tools.as_array().unwrap().len(), 1, "the fence is not in the guest's tool list");
+        // The descriptor is the native loop's ABI: the tool's own name AND the js identifier the guest
+        // proxy exposes. Sending the js name as `name` and no `jsName` made the guest compare `undefined`,
+        // so one script failed differently here than natively (caught by the parity suite).
         assert_eq!(tools[0]["name"], "read");
+        assert_eq!(tools[0]["jsName"], "read");
         let globals: Value = serde_json::from_str(&globals_json()).unwrap();
-        assert_eq!(globals.as_array().unwrap().len(), 2);
+        assert_eq!(globals.as_array().unwrap().len(), 5, "the native loop's five globals, name for name");
         assert_eq!(globals[0], json!({"name": "searchTools", "spread": true}));
+        assert_eq!(globals[1], json!({"name": "describeTool", "spread": false}));
+        assert_eq!(globals[2], json!({"name": "showCall", "spread": false}));
+        assert_eq!(globals[3], json!({"name": "capabilities", "spread": false}));
+        assert_eq!(globals[4], json!({"name": "describe", "spread": false}));
     }
 
     #[test]

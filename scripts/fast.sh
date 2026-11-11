@@ -109,13 +109,12 @@ fails=0; envfails=0; skipped=0; ran=0
 #    print `SKIP <test>: <reason>` and the reason names the command that would build it. A skip is counted
 #    as a skip, never as a pass.
 #
-# `codemode` is deliberately NOT in the set: its parity suite runs (it is a row) and finds three real
-# divergences between the two loops - a failed script's reason dropped at the host seam (fixed in this tree,
-# active at the next install), no journal row for the globals the component answers in place, and
-# `capabilities()` failing only on the component path. Each is named where it is measured; provisioning it
-# here would turn them into red rows before they are fixed. `scripts/test-codemode-component.sh` is the
-# runner that drives all of it.
-FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh}
+# `codemode` is in the set, and its parity suite is the one row that can still be held back by the
+# BINARY rather than the tree: the two loops are compared field for field, including a failed script's
+# reason, which crosses the seam in `done-event.error` - a host-side record field. A node whose binary
+# predates it answers the suite with one named SKIP and returns in full once that node is installed;
+# nothing about the comparison is narrowed while it waits (scripts/test-codemode-component.lua).
+FAST_COMPONENT_NAMES=${WA_FAST_COMPONENTS:-graph hooks memory selfloop mesh codemode}
 # The rows read this list from their own process (see `lua_run`): a shell variable that is not exported is
 # simply absent in the `bash -c` worker each row runs in, and the install loop then finds nothing to do
 # while every check still passes - a run that promises components and delivers none. Exported here, once.

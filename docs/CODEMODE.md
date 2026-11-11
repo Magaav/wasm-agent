@@ -108,6 +108,24 @@ they *are* JSON: `tool-facts.schema-json` (the model's own parameter schema, opa
 `args-json`/`payload-json`/`outcome.value` (the user's own JavaScript values) and `output-item.text` (a
 rendering). The guest ABI documents inside `wa:kernel/quickjs` are the prelude's, unchanged.
 
+**A failed script names its failure on both paths.** The guest reports a script's value and its
+failure in two different fields, chosen by `ok` (`wa-capabilities/src/quickjs.rs`, the `done` event);
+the seam's `done-event` carries both, `value` and `error`, and the component reads `error` (falling back
+to `value` for a host built before the field existed). Reading only `value` left every failed script
+through the component answering `{ok: false}` with no reason at all while the native loop still named
+it - one script, two different answers to the model.
+
+**The journal is the loop's, on both paths.** A guest call the seam answers itself (`searchTools`,
+`describeTool`, `capabilities`, `showCall`, `describe`) is reported to the loop (`progress.answered`) and
+written there as one `attempt` with `target: "global"`, `admitted: false` and the argument/result
+references - exactly the row the native loop writes for the same call. A seam that answered silently
+left the two journals disagreeing about which calls happened.
+
+**The guest ABI is the native loop's.** `tools-json` carries `{name, jsName, description}` per callable
+tool - the tool's own name AND the identifier the guest's `tools` proxy exposes - and `globals-json`
+carries the five globals with their `spread` flag. A shorter globals list is not a smaller surface: it
+is a `ReferenceError` for a script that runs natively, which is how the parity suite found it.
+
 ### Cost (measured)
 
 `bash scripts/bench-codemode.sh` on this machine (Windows, release build, median and p95 of 30
@@ -167,6 +185,10 @@ native path and again routed through the component, then runs `scripts/test-code
 which compares the two loops field for field (value, output items, calls, attempts, unexecuted) over 15
 scripts: the trivial one, one call, ten parallel calls, the fence, discovery, a batch with a miss, a
 keyword search, a 200 KB result, a script that throws, `showCall`, the capability registry, an unknown
-global and a fenced call. All of it needs the pinned assets, because both paths run the real guest; in
-an unprovisioned checkout the wrapper reports SKIPPED with the reason and exits 0 — a skip is never a
-pass. The Rust tests above cover the same seam without a guest (see the note in their header).
+global and a fenced call. Every field is compared, including a failed script's `error` and the journal
+row of a global the seam answered in place: there is no field this suite agrees not to look at. All of
+it needs the pinned assets, because both paths run the real guest; in an unprovisioned checkout the
+wrapper reports SKIPPED with the reason and exits 0 — a skip is never a pass. A node whose binary
+predates `done-event.error` gets one named SKIP from the fast path for the same reason, and the suite
+returns in full as soon as that binary is installed. The Rust tests above cover the same seam without a
+guest (see the note in their header).

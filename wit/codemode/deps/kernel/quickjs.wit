@@ -46,6 +46,16 @@ interface quickjs {
     record done-event {
         ok: bool,
         value: option<string>,
+        /// The failure's own text, when `ok` is false.
+        ///
+        /// The guest reports a script's value and its failure through two different fields, chosen by
+        /// `ok` (`rust/wa-capabilities/src/quickjs.rs`, the `done` event). This record used to carry
+        /// only `value`, so a failed script that crossed the seam arrived at the agent with no reason at
+        /// all while the native loop still named it - `scripts/test-codemode-component.lua` compared the
+        /// two and could not: the component had nothing to compare. A host older than this field leaves
+        /// it empty and puts the error in `value` (the compatibility the component keeps by reading
+        /// `error` first and falling back to `value`).
+        error: option<string>,
         /// The guest's `store` writes, as the prelude emits them (an array of `[key, value]` pairs).
         writes: option<string>,
     }

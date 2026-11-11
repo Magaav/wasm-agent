@@ -43,15 +43,22 @@ be self-contained it belongs in the nightly gate, and that is a named reason, no
 Component-backed Lua tests (graph, mail, selfloop, ...) do not share one component directory:
 
 - `scripts/fast.sh` builds the components **from this tree** with `scripts/build-components.sh`, pinned
-  the way a deploy installs them, into a digest-named set under the git common dir;
-- each row gets its **own copy** inside its own `WASM_AGENT_HOME`, and a test asks
-  `scripts/lib/test-components.lua` to install only the component it needs;
+  the way a deploy installs them, into a set under the worktree's own git dir (`<git-dir>/wa-fast-components/set`,
+  cargo's fingerprints decide what to rebuild: 53 s cold, ~6 s for five when nothing changed);
+- each row gets its **own copy** inside its own `WASM_AGENT_HOME`, and gets the component it *names*:
+  a test whose text says `WA_<NAME>_COMPONENT_WASM` (the variable its skip message prints) has that
+  artifact installed, pinned, and the override and switch handed to the host. `graph` is the other
+  contract: those tests ask `scripts/lib/test-components.lua` to install it;
 - a machine that cannot build one reports `SKIP <test>: <reason>` - it never passes a row whose
   component was absent (a test that writes into the component directory would otherwise be "tested"
   against another row's state).
 
-So: a test names its components through that helper, never by assuming a global `WA_COMPONENTS_DIR`;
-and a missing toolchain is a SKIP with the reason, not a green row.
+So: a test names its components either by the host variable it reads or through that helper, never by
+assuming a global `WA_COMPONENTS_DIR`; a missing toolchain is a SKIP with the reason, not a green row;
+and the runner enforces both ends - a row that names a component and still reports it missing is a
+`FAIL component-provisioning`, and `scripts/test-fast-row-environment.lua` (a real row) fails naming
+any variable the node did not receive, because a variable the shell has and the node does not has cost
+this fleet three separate investigations.
 
 ## 3. The full gate is nightly, and for releases
 
