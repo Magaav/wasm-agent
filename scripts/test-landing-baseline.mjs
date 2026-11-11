@@ -212,6 +212,10 @@ check('a second landing on the same main lands too', second.status === 0, second
 check('it reused the recorded baseline instead of measuring a pristine tree', /baseline reused/.test(second.stdout || '') && !/baseline measured on [0-9a-f]{12}/.test(second.stdout || ''), second.stdout);
 check('so exactly one check run happened: the candidate\'s own', runCount() === before + 1, `${runCount() - before} run(s) for the second landing`);
 check('and it recorded the baseline for the main it landed', /baseline recorded for the new main/.test(second.stdout || ''), second.stdout);
+const status = JSON.parse(q(['status', '--json', '--command', baselineCommand]).stdout || '{}');
+check('status answers "what would a landing tolerate here?" without landing once',
+  status.baseline && status.baseline.names.includes('lua scripts/test-known-on-main.lua'), JSON.stringify(status.baseline));
+check('the status answer says where it came from', status.baseline.source === 'candidate' && status.baseline.measured_on === originMain(), JSON.stringify(status.baseline));
 
 // ---- 4. a failure this machine has for ANY tree is not charged to the branch ----------------------
 // The measured 2026-11-10 case: the suite's red set moves between two runs minutes apart. The check

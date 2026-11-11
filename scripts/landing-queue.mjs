@@ -115,11 +115,18 @@ function publishNodeRelease(canonical, commit, dir) {
 
 // ---- status -------------------------------------------------------------------------------------
 function commandStatus(options) {
-  const {canonical, dir, db} = open(options);
+  const {repo, canonical, dir, db} = open(options);
   const reclaimed = reclaimPass(db, dir);
   const holder = holderOf(db, dir);
   const waiting = waitingRows(db);
   const dirt = canonicalDirt(canonical);
+  // What a landing here would tolerate, before anyone queues: the recorded known-failures baseline of
+  // the main that is checked out. A session should be able to read it without landing once (it is the
+  // question every improvised judge on 2026-11-10 was really asking), and an empty answer is a fact
+  // too: the next red candidate measures one baseline and pays for it once.
+  const upstream = resolveCommit(repo, 'origin/main');
+  const command = options.command || 'bash scripts/fast.sh';
+  const baseline = upstream ? baselineOf(db, {digest: treeDigest(canonical, upstream).retest, command}) : null;
   const state = {
     canonical,
     queue_dir: dir,
@@ -136,6 +143,8 @@ function commandStatus(options) {
     reclaimed,
     canonical_dirt: {dirty: dirt.dirty, count: dirt.count, files: dirt.files},
     verdict: holder ? 'busy' : 'free',
+    baseline: baseline && {command: checkCommandKey(command), names: baseline.names || [],
+      source: baseline.source || '', measured_on: baseline.commit || '', recorded_by: baseline.recorded_by || ''},
   };
   if (options.json) return emit(state, options);
   const lines = [];
@@ -148,6 +157,9 @@ function commandStatus(options) {
   lines.push(dirt.dirty
     ? `canonical ${canonical}: DIRTY ${dirt.count} file(s) - ${describeDirt(dirt)}${holder ? ' (the holder is landing, so this may be its merge)' : ' - belongs to nobody holding the lease; a landing is refused until it is clean'}`
     : `canonical ${canonical}: clean`);
+  lines.push(baseline
+    ? `baseline for ${String(upstream).slice(0, 12)} with \`${checkCommandKey(command)}\`: ${(baseline.names || []).length} known failure(s) (${baseline.source || 'recorded'}, measured on ${String(baseline.commit || '').slice(0, 12)} by ${baseline.recorded_by || 'an earlier landing'}) - a landing is refused only for a failure this list does not have`
+    : `baseline for ${String(upstream).slice(0, 12)} with \`${checkCommandKey(command)}\`: none recorded - the next red candidate measures one, once, and records it`);
   for (const entry of reclaimed) lines.push(`reclaimed #${entry.id} (${entry.owner}): ${entry.reason}`);
   say(lines.join('\nlanding-queue: '));
   return state;
