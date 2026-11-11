@@ -8,7 +8,7 @@
 //!   (`docs/KERNEL.md`, "Revocable registrations").
 //! - `imports` / `supervisor`: what an artifact imports and whether it is served, and the
 //!   start-by-imports reconcile (`docs/KERNEL.md`, lesson 3).
-//! - `install`: the transactional install/upgrade - stage, verify, start beside, health, switch, stop.
+//! - `install`: the transactional install/upgrade - stage, verify, retire, start, health, switch.
 //! - `profiles` / `limits`: the layered effective configuration (lesson 4) and the per-component CPU
 //!   and memory limits the runners enforce.
 //! - `dev`: the dev-loop hot swap (`wa dev`): a new instance beside the old one, health first, then

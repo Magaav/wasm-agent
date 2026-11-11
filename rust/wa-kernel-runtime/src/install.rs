@@ -1,31 +1,41 @@
 //! Transactional install and upgrade of a service component (`docs/KERNEL.md`, lesson 5).
 //!
-//! One order, and every failure leaves the node exactly as it was found:
+//! One order, and every failure leaves the node as it was found - with **one** instance of the name
+//! at every point (`services::claim`, 11/11):
 //!
 //! ```text
 //! stage the files        -> <components>/.stage-<name>-<pid>/ (nothing installed yet)
 //! verify the pin         -> the staged bytes must match a declared sha256, exactly
 //! check imported versions-> every interface it imports must be served (kernel or a running provider)
+//! retire the running one -> drain (a component that opted in), stop, join, hand its queue jobs back
 //! migrate state          -> wa-state migration on a *snapshot copy* (services::spawn_instance does it)
-//! start the new instance -> beside the old one, same name, same grants, same state
+//! start the candidate    -> same name, same grants, same state, the name now free
 //! health                 -> lifecycle.report(ready) or a running instance that never reports
 //! switch                 -> the staged files replace the installed ones, pin file last
-//! stop the old instance  -> per generation, so the new instance's registrations survive
 //! ```
 //!
 //! Two properties are the point of the order, and both are tested:
 //!
 //! * a candidate that cannot start, does not become healthy, or imports an interface nobody serves
-//!   costs nothing: the old instance keeps running, the installed files are untouched, and the
-//!   staging directory is removed;
+//!   costs the installed files nothing - and, because the running instance was already retired, the
+//!   previous pin is **put back** (`restore_previous`): the service ends up, alone, on the pair that
+//!   was running. A refusal costs a restart, never an outage and never two instances;
 //! * a candidate that does take over has its files committed **before** the switch, so a crash between
 //!   the switch and the next start still finds a consistent installation on disk.
 //!
+//! WHY NOT "START BESIDE, THEN STOP THE OLD ONE" (the order before 11/11). It is the nicer order for a
+//! stateless component, and it is wrong for one that owns a device session, a port or a lock: the
+//! 09-11 `wa-whatsapp` cutover had the running instance and the candidate both restore the same device
+//! and authenticate, WhatsApp replaced one of them (`conflict=replaced`), and the replaced one's
+//! outbox kept claiming sends it could not deliver. The dev loop keeps its start-beside shape only
+//! where two instances can coexist (`dev::swap`), which is why the kernel refuses the second instance
+//! centrally instead of relying on every caller to order them correctly.
+//!
 //! What this reuses rather than reimplements: `services::spawn_instance` (grants, state migration,
 //! contract detection, log, supervision), `dev::wait_ready` (the health rule the dev loop already
-//! proved), `services::replace` (per-generation revocation), `imports` (what the artifact needs) and
-//! `supervisor` (what is served). A second copy of any of those is how two paths come to disagree
-//! about what "healthy" or "served" means.
+//! proved), `services::retire` (drain, join, queue handover, per-generation revocation), `services::replace`
+//! (the switch) and `supervisor` (what is served). A second copy of any of those is how two paths come
+//! to disagree about what "healthy" or "served" means.
 
 use crate::components::{self, load, Grant, Installed};
 use crate::imports;
@@ -122,20 +132,29 @@ pub fn upgrade(request: &Value) -> Value {
         Err(error) => return json!({"ok": false, "name": name, "mode": mode, "stage": "grant", "error": error.to_string()}),
     };
     let installed = Installed { name: name.to_string(), sha256: staged.sha256.clone(), bytes: staged.bytes.clone(), manifest: staged.manifest.clone() };
-    // 5. Start the candidate beside the old instance: same name, same grants, same state directory -
-    //    and the state migration (on a snapshot copy) inside, before anything runs.
+    // 5. ONE INSTANCE PER NAME (`services::claim`). The running instance is retired **before** the
+    //    candidate is compiled, so the same device, port or lock is never held by two instances - the
+    //    09-11 `wa-whatsapp` cutover had the old instance and the candidate both restore the same device
+    //    and authenticate, WhatsApp replaced one of them, and the replaced one's outbox kept claiming
+    //    jobs it could not send. A swap of a running service is therefore stop-then-start, and `retired`
+    //    records what went and how its work was handed over.
+    let retired = services::retire(name);
+    let previous_sha256 = previous.as_ref().map(|installed| installed.sha256.clone());
+    // 5b. Start the candidate: same name, same grants, same state directory - and the state migration
+    //     (on a snapshot copy) inside, before anything runs.
     let spawned = match services::spawn_instance(installed, grant) {
         Ok(spawned) => spawned,
         Err(mut error) => {
             if let Some(object) = error.as_object_mut() {
                 object.insert("mode".into(), json!(mode));
                 object.insert("stage".into(), json!("started"));
+                object.insert("retired".into(), retired.clone());
+                object.insert("restored".into(), restore_previous(name, request, &retired));
             }
             return error;
         }
     };
     let instance = spawned.instance.clone();
-    let previous_sha256 = previous.as_ref().map(|installed| installed.sha256.clone());
     // 6. Health. The rule is `dev::wait_ready`'s: a report of `ready`/`degraded` is health, an exit is a
     //    failure, and an instance that runs for the whole window without reporting is accepted *and
     //    said to be unreported* - `lifecycle.report` is optional in the WIT and absent in a wasip1
@@ -156,6 +175,8 @@ pub fn upgrade(request: &Value) -> Value {
                 "error": format!("candidate_not_healthy:{why:?}"),
                 "last_exit": last_exit,
                 "previous": previous_sha256,
+                "retired": retired,
+                "restored": restore_previous(name, request, &retired),
                 "elapsed_ms": started.elapsed().as_millis() as u64,
             });
         }
@@ -171,6 +192,8 @@ pub fn upgrade(request: &Value) -> Value {
             "error": error,
             "last_exit": last_exit,
             "previous": previous_sha256,
+            "retired": retired,
+            "restored": restore_previous(name, request, &retired),
         });
     }
     let switched = services::replace(name, spawned);
@@ -184,8 +207,43 @@ pub fn upgrade(request: &Value) -> Value {
         "contract": interfaces.contract.as_str(),
         "imports": interfaces.imports.iter().cloned().collect::<Vec<_>>(),
         "instance": instance.to_json(),
+        "retired": retired,
         "switch": switched,
         "elapsed_ms": started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Put the previous pin back after a refused candidate.
+///
+/// The candidate was retired before it started, so a refusal would otherwise leave the service down.
+/// The installed bytes were never committed over (`stage` failed first), so this starts exactly the
+/// pair that was running a moment ago, through the supervisor - which also makes the definition wanted
+/// again (`retire` forgot it so a kick could not start the old pin during the swap).
+fn restore_previous(name: &str, request: &Value, retired: &Value) -> Value {
+    if retired.is_null() {
+        return json!({"restored": false, "reason": "nothing_was_running"});
+    }
+    // The definition the running instance was started with: the caller's own request, minus everything
+    // that is not part of a definition.
+    let mut definition = serde_json::Map::new();
+    definition.insert("name".into(), json!(name));
+    for field in ["env", "file_env", "net", "config"] {
+        if let Some(value) = request.get(field) {
+            if !value.is_null() {
+                definition.insert(field.into(), value.clone());
+            }
+        }
+    }
+    let answer = crate::supervisor::reconcile(&json!({"definitions": [Value::Object(definition)]}));
+    // `restored` only when the name is actually up again: `started`, `already_running`, or a reconcile
+    // that deferred to a pass already running (the definitions are registered, so that pass starts it).
+    let up = answer["started"].get(name).map(|row| row["ok"] == json!(true)).unwrap_or(false)
+        || answer["already_running"].as_array().map(|rows| rows.iter().any(|row| row["name"] == json!(name))).unwrap_or(false)
+        || answer["deferred"] == json!(true);
+    json!({
+        "restored": up,
+        "generation": retired["generation"],
+        "supervise": answer,
     })
 }
 
@@ -356,8 +414,8 @@ mod tests {
         assert_eq!(load(name).unwrap().sha256, pin_a);
         assert_eq!(services::status(Some(name))["instance"], format!("{name}#2"), "the old instance was not stopped");
 
-        // The good candidate: staged, verified, started beside, then switched, and the old instance
-        // retired with its registrations revoked - the new one's are untouched.
+        // The good candidate: staged, verified, the old instance retired first, then the candidate
+        // switched in with its registrations; the retired generation's rows are gone.
         let registrations_before = crate::registrations::node().count_owner(name);
         let upgraded = upgrade(&json!({
             "name": name,
@@ -383,8 +441,123 @@ mod tests {
         assert_eq!(crate::bus_host::node().instances(name), vec![format!("{name}#3")], "the old bus token was detached");
         assert_eq!(crate::queue_host::node().instance_count(name), 1, "the old queue grant was revoked");
         assert_eq!(crate::registrations::node().count_owner(name), registrations_before, "one instance's worth of rows");
-        assert_eq!(upgraded["switch"]["retired"]["generation"], 2, "{upgraded}");
+        assert_eq!(upgraded["retired"]["generation"], 2, "the running instance was retired before the candidate started: {upgraded}");
+        assert_eq!(upgraded["restored"], json!(null), "a good candidate restores nothing");
+        let live = services::status(None);
+        assert_eq!(live.as_array().unwrap().iter().filter(|row| row["name"] == name).count(), 1, "one instance, never two: {live}");
+        services::stop(name);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One service name, one instance - the invariant the 09-11 WhatsApp cutover needed.
+    ///
+    /// Each half is a property the cutover violated:
+    ///
+    /// * a second `start` of the same pin is `already_running` (an autostart that runs twice does not
+    ///   stack);
+    /// * a second instance through the entry point the upgrade uses (`services::spawn_instance`) is
+    ///   refused **by name** - the negative control. Before the claim this returned a second running
+    ///   instance, which is how one process came to hold two of `wa-whatsapp`: both restored the same
+    ///   device, WhatsApp replaced one, and its outbox kept claiming jobs it could not send;
+    /// * a refused upgrade leaves exactly the instance that was running; a good one retires it first and
+    ///   leaves exactly the new one. There is no moment with two.
+    #[test]
+    fn one_service_name_never_runs_two_instances() {
+        let _dir = TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("wa-one-instance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let installed_dir = root.join("components");
+        let work = root.join("candidates");
+        std::fs::create_dir_all(&installed_dir).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::env::set_var("WA_COMPONENTS_DIR", &installed_dir);
+        let name = "one-instance-svc";
+        let (wasm_a, pin_a) = write(&work, 1);
+        let first = upgrade(&json!({
+            "name": name,
+            "source": {"wasm": wasm_a.to_string_lossy(), "manifest": manifest(), "pin": pin_a},
+            "ready_ms": 150,
+        }));
+        assert_eq!(first["ok"], true, "{first}");
+
+        // An autostart that runs twice: the same pin answers `already_running`, it does not stack.
+        let again = services::start(&json!({"name": name}));
+        assert_eq!(again["ok"], true, "{again}");
+        assert_eq!(again["already_running"], true, "{again}");
+        assert_eq!(services::status(Some(name))["generation"], 1, "still one instance");
+
+        // The negative control: a second instance through the same entry point is refused, by name.
+        let installed = load(name).unwrap();
+        let grant = Grant::from_request(&json!({"name": name})).unwrap();
+        match services::spawn_instance(installed, grant) {
+            Ok(_) => panic!("a second instance of {name} was started; one name must hold one instance"),
+            Err(error) => {
+                assert_eq!(error["error"], "service_already_running", "{error}");
+                assert_eq!(error["name"], name, "{error}");
+            }
+        }
+
+        // A refused upgrade (the pin does not match the bytes) costs nothing at all: the same instance,
+        // the same generation, the same installed files.
+        let (wasm_b, pin_b) = write(&work, 2);
+        let wrong = upgrade(&json!({
+            "name": name,
+            "source": {"wasm": wasm_b.to_string_lossy(), "manifest": manifest(), "pin": pin_a},
+            "ready_ms": 100,
+        }));
+        assert_eq!(wrong["ok"], false, "{wrong}");
+        assert_eq!(services::status(Some(name))["instance"], format!("{name}#1"), "the running instance was not touched");
+
+        // A good upgrade retires the running instance before the candidate exists, so the node goes from
+        // one instance to one instance - never through two.
+        let good = upgrade(&json!({
+            "name": name,
+            "source": {"wasm": wasm_b.to_string_lossy(), "manifest": manifest(), "pin": pin_b},
+            "ready_ms": 150,
+        }));
+        assert_eq!(good["ok"], true, "{good}");
+        assert_eq!(good["retired"]["generation"], 1, "the running instance was retired first: {good}");
+        let live = services::status(None);
+        let rows: Vec<&Value> = live.as_array().unwrap().iter().filter(|row| row["name"] == name).collect();
+        assert_eq!(rows.len(), 1, "exactly one instance after the upgrade: {live}");
+        assert_eq!(rows[0]["sha256"], pin_b.as_str(), "and it is the new pin: {live}");
+        assert_eq!(services::claimed(name), true, "the name is held by the instance that is up");
+        services::stop(name);
+        assert_eq!(services::claimed(name), false, "a stopped instance releases the name");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The rollback half of `install::upgrade`: a candidate that never starts must not leave the service
+    /// down. The previous pin is put back through the supervisor, and the name is held again.
+    #[test]
+    fn a_retired_instance_is_put_back_when_the_candidate_never_starts() {
+        let _dir = TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("wa-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let installed_dir = root.join("components");
+        let work = root.join("candidates");
+        std::fs::create_dir_all(&installed_dir).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::env::set_var("WA_COMPONENTS_DIR", &installed_dir);
+        let name = "restore-svc";
+        let (wasm_a, pin_a) = write(&work, 1);
+        let first = upgrade(&json!({
+            "name": name,
+            "source": {"wasm": wasm_a.to_string_lossy(), "manifest": manifest(), "pin": pin_a},
+            "ready_ms": 150,
+        }));
+        assert_eq!(first["ok"], true, "{first}");
+        let retired = services::retire(name);
+        assert_eq!(retired["generation"], 1, "{retired}");
+        assert_eq!(services::claimed(name), false, "the retired instance released the name");
+        let restored = restore_previous(name, &json!({"name": name}), &retired);
+        assert_eq!(restored["restored"], true, "{restored}");
+        let after = services::status(Some(name));
+        assert_eq!(after["sha256"], pin_a.as_str(), "the previous pin is running again: {after}");
+        assert_eq!(after["generation"], 2, "a restart is a new instance of the same name");
+        assert_eq!(services::claimed(name), true, "and it holds the name again");
         services::stop(name);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+

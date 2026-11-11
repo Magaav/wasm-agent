@@ -19,7 +19,7 @@
 use crate::components::{load, Grant, Installed};
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -95,11 +95,66 @@ struct Handle {
     /// The instance's drain hook (`Spawned::drain_aware`): what `replace` reads to decide whether
     /// waiting for the work in flight is meaningful.
     drain_aware: bool,
+    /// The name this instance holds. Dropped when the handle is dropped - after the thread has been
+    /// joined - which is what frees the name for the next instance (see [`claim`]).
+    _claim: Claim,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Handle>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Handle>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ---- one instance per service name ------------------------------------------------------------
+
+/// A service name may have **one** live instance on a node, and this is the thing that makes it true.
+///
+/// The registry alone could not: it is only consulted by `start`, while the two other callers of
+/// [`spawn_instance`] - the transactional upgrade (`install::upgrade`) and the dev loop (`dev::swap`) -
+/// deliberately start an instance *outside* it. Two instances of one name in one process is what the
+/// 09-11 WhatsApp cutover produced: both restored the same device, both authenticated, WhatsApp
+/// replaced one of them (`conflict=replaced`), and the replaced one's outbox kept claiming jobs it
+/// could not send while its replacement was `CONNECTED` (jobs 73 and 74 died that way).
+///
+/// So the claim is taken in `spawn_instance`, the one function every path goes through, and it is held
+/// by the instance itself: the `Spawned` value owns it until the upgrade adopts it, the `Handle` owns
+/// it while it runs, and dropping the handle (after the thread was joined) frees the name. A name is
+/// therefore occupied from *before* the guest is compiled until *after* its thread has stopped - which
+/// is exactly the window in which two instances would contend.
+fn claims() -> &'static Mutex<HashSet<String>> {
+    static CLAIMS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CLAIMS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// The name a running (or starting) instance holds.
+pub(crate) struct Claim {
+    name: String,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        claims().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.name);
+    }
+}
+
+/// Take the name, or say who already has it.
+fn claim(name: &str) -> std::result::Result<Claim, Value> {
+    let mut taken = claims().lock().unwrap_or_else(|e| e.into_inner());
+    if !taken.insert(name.to_string()) {
+        return Err(json!({
+            "ok": false,
+            "name": name,
+            "error": "service_already_running",
+            "observed": format!("another instance of {name} is already live on this node; one service name runs one instance"),
+            "next": "stop or upgrade the running instance instead of starting a second one",
+        }));
+    }
+    Ok(Claim { name: name.to_string() })
+}
+
+/// Is an instance of this name live (starting, running, draining or stopping)?
+pub(crate) fn claimed(name: &str) -> bool {
+    claims().lock().unwrap_or_else(|e| e.into_inner()).contains(name)
 }
 
 struct State {
@@ -581,6 +636,7 @@ pub fn start(request: &Value) -> Value {
             thread: spawned.thread,
             generation: instance.generation,
             drain_aware: spawned.drain_aware,
+            _claim: spawned.claim,
         },
     );
     // A provider that just came up can let something that was waiting for it start. The supervisor
@@ -595,8 +651,9 @@ pub fn start(request: &Value) -> Value {
     answer
 }
 
-/// One supervised instance, not in the registry: the dev-loop hook below starts two of these at
-/// once (the new pin beside the old one) and stops whichever loses.
+/// One supervised candidate, not in the registry: `install::upgrade` and `dev::swap` hold it between
+/// `spawn_instance` and the moment it is adopted (or refused and stopped). It carries the name's claim,
+/// so a second instance of the same name cannot exist while this one does.
 pub(crate) struct Spawned {
     pub(crate) name: String,
     pub(crate) shared: Arc<Shared>,
@@ -610,6 +667,9 @@ pub(crate) struct Spawned {
     /// Does this artifact implement `wa:kernel/drain@0.2.0` (read from its own imports)? A swap only
     /// waits for an instance that said it would finish its work (`drain::retire`).
     pub(crate) drain_aware: bool,
+    /// The name this instance holds for as long as it lives (`claim`). Moved into the registry by
+    /// `start`/`replace`, and dropped - freeing the name - when the instance is stopped.
+    pub(crate) claim: Claim,
 }
 
 /// The instance token a runner's guest calls carry (`name#generation`), or the plain name for a store
@@ -625,6 +685,9 @@ pub(crate) fn instance_token(shared: &Arc<Shared>, name: &str) -> String {
 /// Everything that identifies *which* instance to stop later stays with the caller.
 pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result::Result<Spawned, Value> {
     let name = installed.name.clone();
+    // One instance per service name, taken before anything is compiled or started: every caller goes
+    // through here (`start`, `install::upgrade`, `dev::swap`), so this is where the invariant lives.
+    let claim = claim(&name)?;
     // The transactional install (docs/STATE.md): before anything is compiled or started, a
     // manifest that declares `state_version` must find its namespace at that version. The migration
     // runs on a snapshot copy and is swapped in only if it succeeds; a refusal here leaves the
@@ -794,6 +857,7 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
             thread: Some(thread),
             instance,
             drain_aware,
+            claim,
             report: json!({
                 "state": state.to_json(),
                 "grants": {
@@ -814,33 +878,44 @@ pub(crate) fn spawn_instance(installed: Installed, grant: Grant) -> std::result:
 }
 
 /// Stop a service and wait for it (grace for a clean exit, then the epoch traps it).
+///
+/// Jobs the instance still held go back to the queue before its grants are forgotten: a claimed job
+/// whose instance died must be claimable again *now*, not when its lease lapses - and it must never be
+/// failed by an instance that no longer exists (the 09-11 jobs 73/74 failure).
 pub fn stop(name: &str) -> Value {
     let handle = registry().lock().unwrap().remove(name);
-    // Revocable registrations (`docs/BUS.md`, "Revocation"; `docs/QUEUE.md`, item 4): a stopped
-    // component is never handed one more event, and its queue grant stops applying. This runs for a
-    // component that was not running too - a grant without a process is exactly what must not
-    // linger - and it is cheap and idempotent.
-    let bus_revoked = crate::bus_host::unregister(name);
-    crate::queue_host::node().unregister(name);
-    // The ledger's own rows: every generation of this name, so a stop that follows a swap cannot leave
-    // the loser's registrations behind.
-    let registrations_revoked = crate::registrations::node().revoke_owner(name);
     // A stopped definition is not wanted any more: without this, the next reconcile would start it
     // again (an operator's `stop` is not a hint). `enable`/`autostart`/`supervise` re-register it.
     crate::supervisor::forget(name);
     let Some(mut handle) = handle else {
+        // Revocable registrations (`docs/BUS.md`, "Revocation"; `docs/QUEUE.md`, item 4): a grant
+        // without a process is exactly what must not linger - this runs for a component that was not
+        // running too, and it is cheap and idempotent.
+        let bus_revoked = crate::bus_host::unregister(name);
+        crate::queue_host::node().unregister(name);
+        let registrations_revoked = crate::registrations::node().revoke_owner(name);
         crate::supervisor::note_stopped(name);
         crate::supervisor::kick();
         return json!({
             "ok": true, "name": name, "was_running": false,
             "bus_subscriptions_revoked": bus_revoked,
             "registrations_revoked": registrations_revoked,
+            "queue_handed_over": 0,
         });
     };
     handle.shared.stop.store(true, Ordering::Relaxed);
     if let Some(thread) = handle.thread.take() {
         let _ = thread.join();
     }
+    // Read the leases **after** the join, so nothing of this instance is still running the work that
+    // is handed back, and **before** `unregister`, which forgets the token the leases are keyed by.
+    let token = instance_token(&handle.shared, name);
+    let handed_over = crate::queue_host::node().handover_instance(&token);
+    let bus_revoked = crate::bus_host::unregister(name);
+    crate::queue_host::node().unregister(name);
+    // The ledger's own rows: every generation of this name, so a stop that follows a swap cannot leave
+    // the loser's registrations behind.
+    let registrations_revoked = crate::registrations::node().revoke_owner(name);
     // The supervisor sets this itself when it returns; repeating it here covers a stop that raced
     // with a start and never reached the loop's stop branch.
     wa_governance::node_telemetry::record_service_health(name, false);
@@ -853,7 +928,47 @@ pub fn stop(name: &str) -> Value {
         "last_exit": *handle.shared.last_exit.lock().unwrap(),
         "bus_subscriptions_revoked": bus_revoked,
         "registrations_revoked": registrations_revoked,
+        "queue_handed_over": handed_over,
     })
+}
+
+/// Retire the running instance of `name` for a swap: ask it to drain (a component that imported
+/// `wa:kernel/drain`), stop it, join it, hand its queue leases over and revoke exactly its generation.
+///
+/// This is `services::replace`'s retirement half, factored out because the transactional upgrade now
+/// retires **before** it starts the candidate (`install::upgrade`, one instance per name). Returns the
+/// same answer `replace` reports under `retired`, or `null` when nothing was running.
+pub(crate) fn retire(name: &str) -> Value {
+    let previous = registry().lock().unwrap().remove(name);
+    // Not wanted by the supervisor while the swap runs: a kick in the middle would try to start the
+    // pin we just retired. `install::upgrade` re-registers it by name if the candidate is refused.
+    crate::supervisor::forget(name);
+    let Some(old) = previous else { return Value::Null };
+    let token = format!("{name}#{}", old.generation);
+    let queue = crate::queue_host::node();
+    let token_for_count = token.clone();
+    let draining = crate::drain::retire(&old.shared, old.drain_aware, move || queue.in_flight_instance(&token_for_count), crate::drain::deadline());
+    let mut old = old;
+    old.shared.stop.store(true, Ordering::Relaxed);
+    if let Some(thread) = old.thread.take() {
+        let _ = thread.join();
+    }
+    let handed_over = crate::queue_host::node().handover_instance(&token);
+    let revoked = crate::registrations::node().revoke_generation(name, old.generation);
+    crate::bus_host::node().detach(&token);
+    crate::queue_host::node().unregister_instance(&token);
+    append_log(name, &draining.log_line(handed_over));
+    wa_governance::node_telemetry::record_service_health(name, false);
+    crate::supervisor::note_stopped(name);
+    let answer = json!({
+        "generation": old.generation,
+        "last_exit": *old.shared.last_exit.lock().unwrap(),
+        "registrations_revoked": revoked,
+        "queue_handed_over": handed_over,
+        "drain": draining.to_json(),
+    });
+    // `old` (and the name's claim) is dropped here: the name is free for the candidate, and only now.
+    answer
 }
 
 /// Stop an instance that never entered the registry (a candidate an upgrade refused), and revoke
@@ -868,9 +983,11 @@ pub(crate) fn stop_spawned(mut spawned: Spawned) -> String {
     last
 }
 
-/// Replace the registry's instance for `name` with one that was started beside it, revoke exactly the
-/// instance that lost, and stop it. The caller (`install::upgrade`, `dev::swap`) has already proved the
-/// candidate healthy; this is the switch.
+/// Replace the registry's instance for `name` with one that is already running and healthy, revoking
+/// exactly the instance that lost. The caller (`install::upgrade`, `dev::swap`) has already proved the
+/// candidate healthy and - since one name holds one claim (`services::claim`) - has normally already
+/// retired the previous instance, so `previous` is `None`; the retirement half is kept here for any
+/// caller that still has an old handle to give up.
 ///
 /// The revocation is per **generation**, not per name: the old instance's bus subscriptions and queue
 /// grants go (its `cancel`s in the ledger run), the new instance's rows - registered under its own
@@ -896,6 +1013,7 @@ pub(crate) fn replace(name: &str, candidate: Spawned) -> Value {
             thread: candidate.thread,
             generation: candidate.instance.generation,
             drain_aware: candidate.drain_aware,
+            _claim: candidate.claim,
         },
     );
     let retired = match previous {
@@ -1028,8 +1146,9 @@ pub extern "C-unwind" fn service(l: *mut wa_host_support::lua::LuaState) -> std:
                     .map(|n| logs(n, request.get("bytes").and_then(Value::as_u64).unwrap_or(16 << 10)))
                     .unwrap_or_else(|| json!({"ok": false, "error": "service_name_required"})),
                 // The transactional install (`docs/KERNEL.md`, lesson 5): stage, verify, check imports,
-                // migrate, start beside, health, switch, stop. Any failure leaves the old instance
-                // running and its files untouched (`install::upgrade`).
+                // retire the running instance, start the candidate, health, switch. One instance per
+                // name at every step (`services::claim`, 11/11); any failure before the switch puts the
+                // previous pin back (`install::upgrade`).
                 "upgrade" => crate::install::upgrade(&request),
                 // Profiles as layers (`docs/KERNEL.md`, lesson 4): the effective configuration after
                 // base -> node -> user -> patch, rows by id.
@@ -1359,6 +1478,40 @@ mod tests {
         assert!(log.contains("INFO drain: drained in"), "the host line says what the swap did: {log}");
         assert!(log.contains(&format!("settled {tag}")), "{log}");
         stop(name);
+    }
+
+    /// A claimed job whose instance stopped goes back to the queue **now**, not when its lease lapses.
+    ///
+    /// A plain `stop` does not drain (only a swap does), so the job is in flight in the guest's handle
+    /// when the instance is stopped. Before this change `stop` revoked the queue grants and left the
+    /// lease to expire: the send waited out `OUTBOX_LEASE_MS` (60 s) or was failed by nobody, and a node
+    /// that had just lost an instance looked like a node with work in progress. The negative control is
+    /// the job state itself: `Leased` is what this asserted before the handover was added.
+    #[test]
+    fn a_stopped_instance_hands_its_claimed_job_back_to_the_queue() {
+        let _dir = crate::components::TEST_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(fixtures) = support::install("drain-stop", &["svc-drain"]) else { return };
+        let name = "svc-drain-stop";
+        install_as(&fixtures, "svc-drain", name);
+        stop(name);
+        let id = enqueue(name, b"one send");
+        let tag = format!("job={}", id.0);
+        // The handle is longer than the stop grace on purpose: the guest is mid-send when the stop
+        // arrives - the instance that "died with a job claimed" - and it must not settle it.
+        let request = json!({"name": name, "config": {"handle_ms": 60000, "never_idle": true, "tick_ms": 20}});
+        assert_eq!(start(&request)["ok"], true);
+        let log = support::wait_for_log(name, &format!("handling {tag}"), Duration::from_secs(20));
+        assert!(log.contains(&format!("handling {tag}")), "the job is in hand: {log}");
+        let before = queue_of(name).job(id).expect("load").expect("the job exists");
+        assert_eq!(before.state, wa_queue::JobState::Leased, "the instance holds the lease: {before:?}");
+
+        let stopped = stop(name);
+        let after = queue_of(name).job(id).expect("load").expect("the job exists");
+        assert_eq!(stopped["was_running"], true, "{stopped}");
+        assert_eq!(after.state, wa_queue::JobState::Ready, "claimable again at once: {after:?} (stop answer: {stopped})");
+        assert_eq!(stopped["queue_handed_over"], 1, "the lease came back with the stop: {stopped}");
+        assert_eq!(after.lease_expiries, 0, "and it never had to wait for the lease to lapse: {after:?}");
+        assert_eq!(after.attempts, before.attempts, "a stop is not a failed attempt: {after:?}");
     }
 
     /// The deadline path: a guest that ignores the hook. After `WA_SERVICE_DRAIN_MS` the swap does
