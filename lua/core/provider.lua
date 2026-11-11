@@ -128,6 +128,76 @@ function M.configured()
   return settings.base_url ~= "" and settings.api_key ~= "" and settings.model ~= ""
 end
 
+-- A **model-less node** (docs/MODEL-LESS.md): the operator has declared that this node has no model
+-- at all. It still hosts the fabric, the services, the connectors and the work other nodes hand it;
+-- what it must never do is start an agent turn it cannot serve.
+--
+-- Why a declaration and not just "unconfigured": a node whose provider answers 401 *is* configured -
+-- base URL, key and model are all present - so `M.configured()` is true, the turn starts, the request
+-- fails, and the turn ends with an empty reply. That reads exactly like a model with nothing to say.
+-- Measured on openclaw, 4-11 Nov: three turns in seven days, all empty. A declaration is a fact the
+-- operator states, not an inference from a missing key, so it can be said before the first failure.
+--
+-- Persisted so it survives a restart; the environment may also force it
+-- (`WASM_AGENT_MODEL_LESS=1`) for a node that must not be talked out of it.
+local MODEL_LESS_ENV = "WASM_AGENT_MODEL_LESS"
+
+-- nil means "not declared"; only an explicit yes/no counts, so a typo is not silently a "no".
+local function declared_flag(value)
+  if value == nil then return nil end
+  local v = tostring(value):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if v == "1" or v == "true" or v == "yes" or v == "on" then return true end
+  if v == "0" or v == "false" or v == "no" or v == "off" or v == "" then return false end
+  return nil
+end
+
+-- Returns (model_less, source). `source` names where the declaration came from so a refusal can say
+-- it; it is not authority, only provenance. The persisted declaration wins over the environment, so
+-- an operator who clears the file is not overruled by an old unit file.
+function M.model_less()
+  local declared = declared_flag(read_state("model-less"))
+  if declared ~= nil then return declared, "state" end
+  local forced = declared_flag(env(MODEL_LESS_ENV))
+  if forced ~= nil then return forced, "env" end
+  return false, "default"
+end
+
+-- The refusal a model-less node gives instead of a turn. One shape, so the caller, the transcript
+-- and `/health` cannot disagree about why nothing ran.
+function M.model_less_refusal()
+  local _, source = M.model_less()
+  return {
+    error = "node_model_less",
+    reason = "this node is declared model-less (" .. tostring(source) .. ")",
+    detail = "No agent turn can run here: this node hosts the fabric, the services and other nodes' "
+      .. "work, but it has no model. Deliver the turn to the node that owns the session, or declare "
+      .. "a model on this node.",
+  }
+end
+
+-- Declare or clear the declaration. `revision` is the usual optimistic-concurrency value: a caller
+-- that read a different selection must be refused rather than overwrite a newer decision.
+function M.set_model_less(on, revision)
+  local want
+  if on == nil then
+    want = false
+  elseif type(on) == "boolean" then
+    want = on
+  else
+    -- A string from a route, a JSON body or a unit file: the same words the environment accepts,
+    -- and a typo is refused rather than read as "no". "0" is a clear, not a truthy string.
+    want = declared_flag(on)
+    if want == nil then return { ok = false, error = "model_less_requires_an_explicit_value" } end
+  end
+  local result = state.mutate(function()
+    -- Clearing writes "0" rather than removing the key: "not declared" and "declared false" are
+    -- different answers, and only the second one survives a restart with the same meaning.
+    write_state("model-less", want and "1" or "0")
+    return { ok = true, model_less = want }
+  end, revision)
+  return result
+end
+
 function M.set_provider(id, revision)
   local result = state.mutate(function()
   id = trim(id)
