@@ -2588,6 +2588,10 @@ function M:run_body(text, images)
         if steering_waiting then
           reply='' -- A late continuation invalidates this candidate, not its retained queue receipt.
         elseif gate_message then
+          -- The re-entry is a durable row, not only a transient message: a reader who opens this
+          -- session later must see why the run continued past its own stop, and a quote from this row
+          -- must never count as the operator's words (`phase = done_gate` is what marks it).
+          record_turn(self, { role = "user", content = gate_message, phase = "done_gate" })
           messages[#messages+1]={role="user",content=gate_message}
           reply=''
           self.emit({type='status',text=string.format(
