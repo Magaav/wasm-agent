@@ -138,7 +138,12 @@ repository for the host's bookkeeping. `lua/core/command_output.lua` and
 `lua/core/git_repository.lua` are the shared helpers for both rules.
 ## Bounded image reads
 
-`host.read_file` remains UTF-8 text only. `host.read_image_base64(path,max_bytes)` first
+`host.read_file(path)` answers the file's text, or `nil` **and a named reason**:
+`read_file_missing:<path>`, `read_file_unreadable:<error>`, `read_file_is_a_directory:<path>`,
+`read_file_too_large:<bytes>><limit>` (limit `WASM_AGENT_READ_FILE_MAX_BYTES`, default 8 MiB) and
+`read_file_not_text:<bytes>`. Before 10/11 every one of those was a bare nil, so a reader could not
+tell an 8 MB file from a missing one; `file_tools.lua`'s `read` carries the name to the model.
+`host.read_image_base64(path,max_bytes)` first
 sniffs PNG, JPEG, WebP and GIF magic bytes, then reads at most the caller's explicit
 bound and returns a JSON envelope with MIME, byte count and base64. `not_image` tells Lua
 to continue through the text reader; missing, unsupported and oversized inputs are

@@ -336,7 +336,18 @@ fn http_timeouts() -> (u64, u64, u64) {
 }
 
 fn build_config(read: u64) -> ureq::config::Config {
-    let (connect, _, respond) = http_timeouts();
+    let (_, _, respond) = http_timeouts();
+    build_config_with(read, respond)
+}
+
+/// The same shape, with the response deadline named by the caller.
+///
+/// A provider call is where a deadline earns its keep: a gateway that accepts the connection and
+/// then says nothing used to hold the run for the global response timeout, three times over, before
+/// anything was reported (measured 10/11: 12 minutes, session a073ee85). `first_response_seconds`
+/// lets that call bound itself in tens of seconds and name the outcome (`provider_stalled`).
+fn build_config_with(read: u64, respond: u64) -> ureq::config::Config {
+    let (connect, _, _) = http_timeouts();
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(std::time::Duration::from_secs(connect)))
@@ -373,6 +384,22 @@ fn agent_for_call() -> ureq::Agent {
         None => read,
     };
     crate::http_transport::agent(build_config(body))
+}
+
+/// The agent for one provider stream, with the caller's own deadline on the wait for a response
+/// and on the silence between body reads. A child still runs under its shutdown-aware transport.
+fn agent_for_stream(first_response_seconds: u64) -> ureq::Agent {
+    let (_, read, respond) = http_timeouts();
+    let read = read.min(first_response_seconds.max(1));
+    let respond = respond.min(first_response_seconds.max(1));
+    if !crate::subagents::in_task() {
+        return build_config_with(read, respond).into();
+    }
+    let body = match crate::subagents::remaining_budget() {
+        Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
+        None => read,
+    };
+    crate::http_transport::agent(build_config_with(body, respond))
 }
 
 /// Unified cancellation for the Lua loop: true when the current run or the
@@ -656,16 +683,54 @@ pub extern "C-unwind" fn uuid(l: *mut LuaState) -> c_int {
     1
 }
 
-/// host.read_file(path) -> string | nil
+/// `host.read_file(path) -> string | nil, reason`
+///
+/// The second answer says why there is no text, by name, because a bare nil cannot tell a reader
+/// which of four different things happened (measured 10/11: an 8 MB file answered nil, so "too
+/// large", "missing", "binary" and "the OS refused" were the same answer). A limit exists so one
+/// file cannot dwarf an interpreter's memory, and it is *named* rather than silently applied:
+/// `read_file_too_large:<bytes>><limit>` carries both numbers. `WASM_AGENT_READ_FILE_MAX_BYTES`
+/// changes the limit; a caller that only reads the first value keeps working exactly as before.
+const READ_FILE_MAX_BYTES_DEFAULT: u64 = 8 * 1024 * 1024;
+
+fn read_file_max_bytes() -> u64 {
+    std::env::var("WASM_AGENT_READ_FILE_MAX_BYTES").ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(READ_FILE_MAX_BYTES_DEFAULT)
+}
+
+/// The decision `read_file` makes, split out so the named answers can be tested without a Lua state:
+/// the file's text, or the reason there is none (`read_file_missing`, `read_file_unreadable`,
+/// `read_file_is_a_directory`, `read_file_too_large:<bytes>><limit>`, `read_file_not_text:<bytes>`).
+fn read_text_file(path: &str, limit: u64) -> Result<String, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("read_file_missing:{path}")
+        } else {
+            format!("read_file_unreadable:{error}")
+        }
+    })?;
+    if metadata.is_dir() { return Err(format!("read_file_is_a_directory:{path}")); }
+    if metadata.len() > limit {
+        return Err(format!("read_file_too_large:{}>{}", metadata.len(), limit));
+    }
+    std::fs::read_to_string(path).map_err(|_| format!("read_file_not_text:{} bytes", metadata.len()))
+}
+
 pub extern "C-unwind" fn read_file(l: *mut LuaState) -> c_int {
-    match arg_string(l, 1).and_then(|path| std::fs::read_to_string(path).ok()) {
-        Some(text) => {
+    let path = arg_string(l, 1).unwrap_or_default();
+    match read_text_file(&path, read_file_max_bytes()) {
+        Ok(text) => {
             unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
             1
         }
-        None => {
+        // Two values: nil, and the reason by name. A caller that reads one value sees exactly what
+        // it saw before; a caller that wants to know can ask (file_tools.lua's `read` does).
+        Err(reason) => {
             unsafe { wa_host_support::lua::lua_pushnil(l) };
-            1
+            unsafe { lua_pushlstring(l, reason.as_ptr() as *const c_char, reason.len()) };
+            2
         }
     }
 }
@@ -2000,7 +2065,14 @@ pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
     let body = arg_string(l, 4).unwrap_or_default();
     let headers = parse_headers(&headers_json);
-    let outcome = stream_completion(&method, &url, &headers, &body);
+    // An optional fifth argument names this call's own deadline: `{"first_response_seconds": N}`.
+    // Absent (the default for every other caller) keeps the process-wide timeouts exactly as they
+    // were, so a long streaming answer is never capped by a provider's choice to bound itself.
+    let first = arg_string(l, 5).and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|options| options.get("first_response_seconds").and_then(|value| value.as_u64()))
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .unwrap_or(0);
+    let outcome = stream_completion(&method, &url, &headers, &body, first);
     match outcome {
         Ok(value) => push_json(l, &value),
         Err(error) => push_json(l, &json!({"error": error})),
@@ -2377,7 +2449,7 @@ fn complete_decisions(decisions: &mut [ToolDecision], tool_calls: &[Value]) {
     }
 }
 
-fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str) -> Result<Value, String> {
+fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
     let mut ttft_ms: Option<u128> = None;
@@ -2392,11 +2464,20 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         crate::subagents::clear_active_socket();
         return Err("run_cancelled".into());
     }
-    let mut request = agent_for_call().post(url);
+    let agent = if first_response_seconds > 0 { agent_for_stream(first_response_seconds) } else { agent_for_call() };
+    let mut request = agent.post(url);
     for (key, value) in headers {
         request = request.header(key, value);
     }
-    let response = request.send(body.as_bytes()).map_err(|error| error.to_string())?;
+    let response = request.send(body.as_bytes()).map_err(|error| {
+        // Keep the transport's own words (the retry predicates match on them), and add the one fact
+        // they cannot carry: this call had a deadline of its own, and it expired.
+        if first_response_seconds > 0 {
+            format!("{error} (provider_stalled: no response within {first_response_seconds}s)")
+        } else {
+            error.to_string()
+        }
+    })?;
     let status = response.status().as_u16();
     if status != 200 {
         let retry_after = retry_after_ms(response.headers());
@@ -3912,7 +3993,7 @@ mod decision_stream_tests {
         // The events the reader emits are captured in this call's own sink, which is why the
         // assertion below sees them and an outer sink would not.
         let events = crate::serve::capture_events(|| {
-            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}").unwrap();
+            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
         });
         server.join().unwrap();
         (result.into_inner(), events)
@@ -4178,7 +4259,7 @@ mod stream_tests {
         });
         let result = std::cell::RefCell::new(Value::Null);
         let events = crate::serve::capture_events(|| {
-            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}").unwrap();
+            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}", 0).unwrap();
         });
         server.join().unwrap();
         (result.into_inner(), events)
@@ -4448,5 +4529,70 @@ mod retry_after_tests {
         headers.insert("retry-after", "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap());
         headers.remove("retry-after-ms");
         assert_eq!(retry_after_ms(&headers), None, "an HTTP-date is ignored, not guessed");
+    }
+}
+
+/// `host.read_file` answers a *named* reason, not a bare nil (measured 10/11: an 8 MB file answered
+/// nil, so "too large", "missing", "binary" and "the OS refused" were indistinguishable, and the
+/// size cap itself was never named). These pin each name and the numbers it carries.
+#[cfg(test)]
+mod read_file_answers {
+    use super::*;
+
+    fn scratch() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("wa-read-file-{}", crate::host::new_uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_missing_file_is_named() {
+        let root = scratch();
+        let missing = root.join("absent.txt");
+        let why = read_text_file(missing.to_str().unwrap(), 1024).unwrap_err();
+        assert!(why.starts_with("read_file_missing:"), "{why}");
+        assert!(why.contains("absent.txt"), "the name carries the path: {why}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_directory_is_named_not_reported_as_missing() {
+        let root = scratch();
+        let why = read_text_file(root.to_str().unwrap(), 1024).unwrap_err();
+        assert!(why.starts_with("read_file_is_a_directory:"), "{why}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_named_with_both_numbers() {
+        let root = scratch();
+        let path = root.join("big.txt");
+        std::fs::write(&path, "0123456789").unwrap();
+        let why = read_text_file(path.to_str().unwrap(), 4).unwrap_err();
+        assert_eq!(why, "read_file_too_large:10>4");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_named_with_its_size() {
+        let root = scratch();
+        let path = root.join("binary.dat");
+        std::fs::write(&path, [0xffu8, 0xfe, 0x00, 0x01]).unwrap();
+        let why = read_text_file(path.to_str().unwrap(), 1024).unwrap_err();
+        assert_eq!(why, "read_file_not_text:4 bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn text_within_the_limit_is_returned_unchanged() {
+        let root = scratch();
+        let path = root.join("ok.txt");
+        std::fs::write(&path, "hello\nwörld\n").unwrap();
+        assert_eq!(read_text_file(path.to_str().unwrap(), 1024).unwrap(), "hello\nwörld\n");
+        // Exactly at the limit is allowed: the limit is a ceiling, not a margin. (The text is 13
+        // bytes: `ö` is two of them, which is why the limit is a byte count and the reason says so.)
+        assert_eq!(read_text_file(path.to_str().unwrap(), 13).unwrap(), "hello\nwörld\n");
+        assert_eq!(read_text_file(path.to_str().unwrap(), 12).unwrap_err(), "read_file_too_large:13>12");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

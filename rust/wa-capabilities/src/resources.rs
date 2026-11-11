@@ -42,6 +42,26 @@ fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 fn valid_boot(boot: &str) -> bool {
     boot.len() == 36 && boot.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
+
+/// Whether the process that owns `boot` is gone.
+///
+/// `Store::open` opens `<root>/<boot>.lease.sqlite` and holds `BEGIN EXCLUSIVE` on it for the whole
+/// life of the process, so a lock this caller can take is the owner's own statement that it has
+/// exited - and a held lock is its statement that it has not. A missing lease is death too: the
+/// file is created at startup, only its owner's exit leaves it unlocked, and nothing removes a
+/// referenced one.
+///
+/// Anything unreadable is *not* evidence of death. A claim is only reclaimed when the owner is
+/// provably gone (`resource_busy` is the answer otherwise): a live run's session must never be
+/// taken from it, and "I could not tell" is not "nobody is here".
+fn lease_released(root: &std::path::Path, boot: &str) -> bool {
+    if !valid_boot(boot) { return false; }
+    let path = root.join(format!("{boot}.lease.sqlite"));
+    if !path.exists() { return true; }
+    let Ok(lease) = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) else { return false };
+    if lease.busy_timeout(Duration::ZERO).is_err() { return false; }
+    lease.execute_batch("BEGIN EXCLUSIVE; ROLLBACK").is_ok()
+}
 fn target_scope(args: &Value) -> Result<(Value, String)> {
     let common = std::fs::canonicalize(field(args, "git_common_dir")?).map_err(err)?;
     if !common.is_dir() { return Err("target_directory_required".into()); }
@@ -430,6 +450,10 @@ impl Store {
                         .ok_or_else(|| "invalid_resource_key".to_string())
                 })
                 .collect::<Result<Vec<_>>>()?;
+            // Liveness is read before the transaction borrows the connection: `state.live` is this
+            // process's own set of runs, and a snapshot of it is the evidence the reclaim decision
+            // needs (a run that starts inside this very call is inserted after the commit anyway).
+            let live_runs = state.live.clone();
             let tx = state
                 .db
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -449,13 +473,46 @@ impl Store {
                     .optional()
                     .map_err(err)?;
                 if let Some(previous) = previous {
-                    if previous["run"] != run
-                        || previous["principal"] != principal
-                        || previous["boot"] != self.boot
-                        || previous["uncertain"] == true
-                    {
+                    // The claim is already this exact run's, and it is not marked uncertain: there is
+                    // nothing to take and nothing to refuse (a retried call inside one run).
+                    let same_owner = previous["run"] == run && previous["principal"] == principal;
+                    if same_owner && previous["boot"] == self.boot && previous["uncertain"] != true {
+                        continue;
+                    }
+                    // Only the session claim is reclaimed automatically. It is the thread's admission
+                    // to a run, and a run that ended is not using it; a named or target claim is a
+                    // real resource whose holder may have left an effect behind, so it stays until an
+                    // operator reconciles it with evidence (the `reconcile` action). This is the narrow
+                    // half of "a dead holder is reclaimed with evidence": the evidence is the lease,
+                    // and the claim is one this process can prove nobody is running.
+                    if *key != format!("session:{session}") {
                         return Ok(json!({"ok":false,"error":"resource_busy","claim":previous}));
                     }
+                    let (stale, why) = if previous["boot"] == self.boot {
+                        (!live_runs.contains(field(&previous, "run")?),
+                         "the run that held it is not live in this process")
+                    } else {
+                        (lease_released(&self.root, field(&previous, "boot")?),
+                         "the process that held it is gone (its lease can be locked)")
+                    };
+                    if !stale {
+                        return Ok(json!({"ok":false,"error":"resource_busy","claim":previous}));
+                    }
+                    // Evidence before the deletion: the archived claim is what an operator reads
+                    // when they ask who held this and why it was taken - a dead holder is reclaimed
+                    // with evidence, never silently.
+                    tx.execute(
+                        "INSERT INTO history(action,evidence,claim) VALUES('reclaim_dead_holder',?,?)",
+                        params![why, previous.to_string()],
+                    )
+                    .map_err(err)?;
+                    tx.execute(
+                        "DELETE FROM claims WHERE key=? AND run=? AND principal=? AND boot=?",
+                        params![key, field(&previous, "run")?, field(&previous, "principal")?, field(&previous, "boot")?],
+                    )
+                    .map_err(err)?;
+                    tx.execute("DELETE FROM claim_identity WHERE key=? AND boot=?",
+                        params![key, field(&previous, "boot")?]).map_err(err)?;
                 }
             }
             for key in &keys {
@@ -547,6 +604,10 @@ impl Store {
             return Ok(json!({"ok":true,"recovered":claim}));
         }
         if action == "finish" {
+            // A held target is an effect with its own receipts; finishing a run that still holds one
+            // is refused before anything is written, exactly as before. (The alternative - releasing
+            // the session claim and leaving the target - would make an error return have a side
+            // effect, which is how a refusal starts looking like a success.)
             if state.targets.values().any(|held| held.receipt["run"] == run && held.receipt["principal"] == principal) {
                 return Err("target_release_or_reconciliation_required".into());
             }
@@ -554,15 +615,22 @@ impl Store {
                 .db
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(err)?;
+            // A run that has ended holds nothing. Uncertainty is a fact about the effects, not a
+            // lock on the session: it is archived on the claim's history and the claim is deleted,
+            // so `wa resume` never needs the process killed (measured 10/11: after a provider
+            // timeout the session kept an uncertain claim and every resume was refused
+            // `resource_busy` until the process was killed).
             tx.execute(
-                "INSERT INTO history(action,evidence,claim) SELECT 'finish','run settled',
-                json_object('key',key,'principal',principal,'session',session,'run',run,'boot',boot)
-                FROM claims WHERE run=? AND principal=? AND boot=? AND uncertain=0",
+                "INSERT INTO history(action,evidence,claim) SELECT CASE WHEN uncertain=1 THEN 'finish_uncertain' ELSE 'finish' END,
+                'run settled', json_object('key',key,'principal',principal,'session',session,'run',run,'boot',boot,'uncertain',uncertain)
+                FROM claims WHERE run=? AND principal=? AND boot=?",
                 params![run, principal, self.boot],
             )
             .map_err(err)?;
+            // The session claim is this run's admission to the thread, and it is always released;
+            // a named claim of the run goes with it, because the run that held it has ended.
             tx.execute(
-                "DELETE FROM claims WHERE run=? AND principal=? AND boot=? AND uncertain=0",
+                "DELETE FROM claims WHERE run=? AND principal=? AND boot=?",
                 params![run, principal, self.boot],
             )
             .map_err(err)?;
@@ -901,14 +969,21 @@ mod tests {
         assert_eq!(second.control("claim", &b).unwrap()["ok"], true);
         second.control("uncertain", &b).unwrap();
         second.control("finish", &b).unwrap();
+        // 10/11: a run that ended kept its `uncertain` claims, and every `wa resume` was then refused
+        // `resource_busy` until the process was killed. The uncertainty is not a lock - it is a fact
+        // about the effects, archived on the claim's history - and the claims go with the run.
         assert_eq!(
             second.control("list", &json!({})).unwrap()["claims"]
                 .as_array()
                 .unwrap()
                 .len(),
-            2,
-            "uncertain effects retain their claims"
+            0,
+            "a finished run releases its claims, uncertain or not"
         );
+        let archived: i64 = second.state.lock().unwrap().db
+            .query_row("SELECT COUNT(*) FROM history WHERE action='finish_uncertain'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 2, "both uncertainty facts are kept as evidence");
         drop(second);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -963,6 +1038,77 @@ mod tests {
         );
         drop(owner);
         drop(other);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run that ended holds nothing (measured 10/11): after a provider timeout the session kept an
+    /// `uncertain` claim and every `wa resume` was refused `resource_busy` until the process was
+    /// killed. `finish` archives the uncertainty on the claim's history and releases the claim, so
+    /// the next run for the same session is admitted without touching the process.
+    #[test]
+    fn an_uncertain_claim_is_released_with_its_uncertainty_archived() {
+        let root = std::env::temp_dir().join(format!("wa-claim-release-{}", crate::host::new_uuid()));
+        let store = Store::open(&root).unwrap();
+        OWNER.with(|slot| *slot.borrow_mut() = None);
+        let session = "s-release";
+        let first = json!({"principal":"alice","session":session,"run":"run-1","keys":[format!("session:{session}")]});
+        assert_eq!(store.control("claim", &first).unwrap()["ok"], true);
+        assert_eq!(store.control("uncertain", &json!({"principal":"alice","run":"run-1"})).unwrap()["ok"], true);
+        assert_eq!(store.control("finish", &json!({"principal":"alice","run":"run-1"})).unwrap()["ok"], true,
+            "a run that ended releases its claim, uncertain or not");
+        assert_eq!(store.control("list", &json!({})).unwrap()["claims"].as_array().unwrap().len(), 0,
+            "no claim survives the run");
+        let archived: String = store.state.lock().unwrap().db
+            .query_row("SELECT action FROM history WHERE action='finish_uncertain' ORDER BY id DESC LIMIT 1", [], |row| row.get(0))
+            .expect("the uncertainty is kept as history, not as a lock");
+        assert_eq!(archived, "finish_uncertain");
+        let second = json!({"principal":"alice","session":session,"run":"run-2","keys":[format!("session:{session}")]});
+        assert_eq!(store.control("claim", &second).unwrap()["ok"], true, "the next run is admitted");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A dead holder is reclaimed with evidence; a live one is never taken from it.
+    #[test]
+    fn a_dead_holder_is_reclaimed_with_evidence_and_a_live_one_is_not() {
+        let root = std::env::temp_dir().join(format!("wa-claim-reclaim-{}", crate::host::new_uuid()));
+        let first = Store::open(&root).unwrap();
+        OWNER.with(|slot| *slot.borrow_mut() = None);
+        let session = "s-dead";
+        let keys = [format!("session:{session}")];
+        assert_eq!(first.control("claim", &json!({"principal":"alice","session":session,"run":"run-1","keys":keys})).unwrap()["ok"], true);
+        // A second Store is what another process looks like: its own boot and its own lease.
+        let second = Store::open(&root).unwrap();
+        let next = json!({"principal":"alice","session":session,"run":"run-2","keys":keys});
+        assert_eq!(second.control("claim", &next).unwrap()["error"], "resource_busy",
+            "a live holder's claim is never taken");
+        drop(first);
+        assert_eq!(second.control("claim", &next).unwrap()["ok"], true,
+            "a holder whose lease can be locked is gone, and its claim is reclaimable");
+        let evidence: String = second.state.lock().unwrap().db
+            .query_row("SELECT evidence FROM history WHERE action='reclaim_dead_holder' ORDER BY id DESC LIMIT 1", [], |row| row.get(0))
+            .expect("the reclaim is recorded, never silent");
+        assert!(evidence.contains("lease can be locked"), "evidence names the proof: {evidence}");
+        drop(second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run that stops inside the process without reaching `finish` (the guard's error path, a
+    /// failed release) leaves a claim this process knows is not live - and the next run takes it.
+    #[test]
+    fn a_stale_claim_of_this_process_is_reclaimed() {
+        let root = std::env::temp_dir().join(format!("wa-claim-stale-{}", crate::host::new_uuid()));
+        let store = Store::open(&root).unwrap();
+        OWNER.with(|slot| *slot.borrow_mut() = None);
+        let session = "s-stale";
+        let keys = [format!("session:{session}")];
+        assert_eq!(store.control("claim", &json!({"principal":"alice","session":session,"run":"run-1","keys":keys})).unwrap()["ok"], true);
+        assert_eq!(store.control("uncertain", &json!({"principal":"alice","run":"run-1"})).unwrap()["ok"], true);
+        // No `finish`: the run stopped without releasing. This process's live set does not contain
+        // it, which is the evidence that nothing is running it.
+        store.state.lock().unwrap().live.remove("run-1");
+        assert_eq!(store.control("claim", &json!({"principal":"alice","session":session,"run":"run-2","keys":keys})).unwrap()["ok"], true);
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

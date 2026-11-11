@@ -304,13 +304,17 @@ if command -v node >/dev/null 2>&1; then
   # Seconds, self-contained (a fixture repository and a fixture ledger), so it belongs here and not
   # only in the nightly gate.
   check landing-queue node scripts/test-landing-queue.mjs
+  # Session liveness comes from the running process, never from a ledger row another process can
+  # close: the 10/11 `owner_ended` refusal of a live session, pinned against a real ledger and a
+  # real pid.
+  check session-liveness node scripts/test-session-liveness.mjs
   # The known-failures baseline the landing queue judges a candidate against: same failures pass, a new
   # failure refuses, a fixed failure is tolerated, an environment-only failure is a retry (not a
   # verdict), and a recorded baseline is reused instead of a pristine run when the tree's check inputs
   # are unchanged.
   check landing-baseline node scripts/test-landing-baseline.mjs
 else
-  echo "fast: instructions, direct-workflow, landing-queue, landing-baseline SKIPPED (node not on PATH)"; skipped=$((skipped + 4))
+  echo "fast: instructions, direct-workflow, landing-queue, session-liveness, landing-baseline SKIPPED (node not on PATH)"; skipped=$((skipped + 5))
 fi
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).

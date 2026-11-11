@@ -895,10 +895,116 @@ function M.set_session_summary(session_id, until_seq, summary)
   M.journal("session", session_id, M.session(session_id))
 end
 
+-- ---------------------------------------------------------------- presence
+--
+-- Who is running a session *now*, as a process. A session row's `ended_at` says a conversation was
+-- ended; it never said a process was gone, and readers treated it as if it did: the landing queue
+-- refused a live session whose row a node restart had closed, and a piped `wa chat` closed its
+-- caller's own row on the way out (`M:close`). This is the fact those readers actually need, kept
+-- beside the transcript and owned by the process that serves the session:
+--
+--   begin  the process claims the session (one row; a second process replaces it, which is honest -
+--          the last process to start serving the thread is the one a reader should find)
+--   beat   refreshed while the process works, so a row is only live while its owner is
+--   end    the process lets go: deleted, and only by the owner (same pid and boot)
+--
+-- A reader treats it as evidence, never as proof on its own: `scripts/lib/landing-queue.mjs` asks
+-- the operating system whether the pid is alive before it believes the row.
+local presence_identity = nil
+-- Whether this ledger has the presence table. The table ships in lua/core/schema.sql, and a binary
+-- built before it embeds an older schema, so the first read decides once for the process: a missing
+-- table means "no presence signal here" (the callers fall back to the row's own evidence), never an
+-- error on a path - a run ending, a beat - that has nothing to do with presence.
+local presence_ready = nil
+local function presence_table()
+  if presence_ready ~= nil then return presence_ready end
+  local found = false
+  local ok, rows = pcall(query, "SELECT name FROM sqlite_master WHERE type='table' AND name='session_presence'", {})
+  if ok and type(rows) == "table" then found = rows[1] ~= nil end
+  presence_ready = found
+  return found
+end
+M.presence_table = presence_table
+local function process_identity()
+  if presence_identity then return presence_identity end
+  local identity = { pid = 0, boot = "" }
+  local ok, raw = pcall(host.runtime_info)
+  local info = ok and type(raw) == "string" and (json.decode(raw) or {}) or {}
+  identity.pid = tonumber(info.process_id) or 0
+  identity.boot = tostring(info.boot_id or "")
+  presence_identity = identity
+  return identity
+end
+
+function M.process_identity() return process_identity() end
+
+function M.presence_begin(session_id, opts)
+  opts = opts or {}
+  if type(session_id) ~= "string" or session_id == "" then return nil, "presence_requires_session" end
+  if not presence_table() then return nil, "no_presence_table" end
+  local who = process_identity()
+  if who.pid == 0 then return nil, "presence_requires_process_id" end
+  local now = host.now()
+  exec("INSERT INTO session_presence(session_id,pid,boot,role,started_at,heartbeat_at) VALUES(?,?,?,?,?,?) "
+    .. "ON CONFLICT(session_id) DO UPDATE SET pid=excluded.pid,boot=excluded.boot,role=excluded.role,"
+    .. "started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at",
+    {session_id, who.pid, who.boot, tostring(opts.role or ""), now, now})
+  return { pid = who.pid, boot = who.boot, at = now }
+end
+
+function M.presence_beat(session_id)
+  if type(session_id) ~= "string" or session_id == "" then return false end
+  if not presence_table() then return false end
+  local who = process_identity()
+  if who.pid == 0 then return false end
+  exec("UPDATE session_presence SET heartbeat_at=? WHERE session_id=? AND pid=? AND boot=?",
+    {host.now(), session_id, who.pid, who.boot})
+  return true
+end
+
+function M.presence_end(session_id)
+  if type(session_id) ~= "string" or session_id == "" then return false end
+  if not presence_table() then return false end
+  local who = process_identity()
+  exec("DELETE FROM session_presence WHERE session_id=? AND pid=? AND boot=?",
+    {session_id, who.pid, who.boot})
+  return true
+end
+
+function M.presence(session_id)
+  if not presence_table() then return nil end
+  local rows = query("SELECT session_id,pid,boot,role,started_at,heartbeat_at FROM session_presence WHERE session_id=?",
+    {session_id})
+  return rows[1]
+end
+
+-- The row when it is recent enough to believe and belongs to a process this node has not declared
+-- dead. `max_age` is the caller's tolerance: a heartbeat is cheap, so a live worker is never older
+-- than one round; a row that stopped beating is reported as stale, never as live.
+function M.presence_live(session_id, max_age)
+  if not presence_table() then return nil, "no_presence_table" end
+  local row = M.presence(session_id)
+  if not row then return nil, "no_presence" end
+  local age = math.max(0, host.now() - (tonumber(row.heartbeat_at) or 0))
+  if max_age and age > max_age then return nil, "stale_presence", row end
+  return row
+end
+
 function M.finish_session(session_id)
+  -- A row is closed by the conversation, not by a process saying goodbye. Another live process
+  -- serving this session is the one fact that must win: its presence row and its run claim are
+  -- what "this session is live" means now, and closing the row under it is exactly what made a
+  -- live session look ended to the landing queue (10/11). Returns false and the pid, so a caller
+  -- can say why instead of pretending.
+  local live = M.presence_live(session_id, 900)
+  local who = process_identity()
+  if live and tonumber(live.pid) ~= who.pid then
+    return false, "session_live_in_process:" .. tostring(live.pid)
+  end
   exec("UPDATE sessions SET ended_at=?, updated_at=? WHERE id=? AND ended_at IS NULL",
        {host.now(), host.now(), session_id})
   M.journal("session", session_id, M.session(session_id))
+  return true
 end
 
 -- ---------------------------------------------------------------- messages
