@@ -150,18 +150,18 @@ function M.refusal(path)
   if resolved:find('%.%.$') then return 'path_guard: refusing a delete of a relative path that leaves its root: ' .. tostring(path) end
   if profile_shaped(resolved) then
     return 'path_guard: refusing to delete ' .. tostring(path) .. ': it is a Windows user profile (' .. resolved
-      .. '), which is somebody\'s home. Never delete what you did not create in this run.'
+      .. '), which is somebody\'s home.'
   end
   for _, root in ipairs(M.protected()) do
     if resolved == root then
       return 'path_guard: refusing to delete ' .. tostring(path) .. ': it resolves to protected path ' .. root
-        .. '. Never delete what you did not create in this run; a test uses its own mktemp scratch, never a path from the environment.'
+        .. '.'
     end
   end
   for _, root in ipairs(M.state_roots()) do
     if resolved:sub(1, #root + 1) == root .. '/' then
       return 'path_guard: refusing to delete ' .. tostring(path) .. ': it is inside the node state ' .. root
-        .. '. Never delete what you did not create in this run.'
+        .. '.'
     end
   end
   return nil
@@ -304,7 +304,7 @@ function M.prelude()
       .. 'else ' .. Z .. '_r() { case "$1" in /*) printf "%s" "$1";; *) printf "%s/%s" "$PWD" "$1";; esac; }; fi',
     Z .. '_p() { ' .. Z .. '_t="$1"; ' .. Z .. '_v=$(' .. Z .. '_r "$' .. Z .. '_t"); '
       .. 'case "$' .. Z .. '_v" in ' .. case_patterns .. ') '
-      .. 'printf "path_guard: refusing to delete %s: it is or contains a protected path. Never delete what you did not create in this run.\\n" "$' .. Z .. '_t" >&2; return 1;; esac; return 0; }',
+      .. 'printf "path_guard: refusing to delete %s: it is or contains a protected path.\\n" "$' .. Z .. '_t" >&2; return 1;; esac; return 0; }',
     Z .. '_rm() { ' .. Z .. '_c=0; for ' .. Z .. '_a in "$@"; do case "$' .. Z .. '_a" in -*) case "$' .. Z .. '_a" in *[rR]*) ' .. Z .. '_c=1;; esac;; esac; done; '
       .. 'if [ "$' .. Z .. '_c" = 1 ]; then for ' .. Z .. '_a in "$@"; do case "$' .. Z .. '_a" in -*) ;; *) ' .. Z .. '_p "$' .. Z .. '_a" || return 1;; esac; done; fi; '
       .. Z .. '_x rm "$@"; }',
