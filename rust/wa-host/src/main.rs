@@ -519,6 +519,18 @@ fn main() {
             eprintln!("lua root unset: using embedded modules; edits under lua/ are NOT under test");
         }
         let source = std::fs::read_to_string(&script).unwrap_or_else(|e| panic!("read {script}: {e}"));
+        // Every Lua entry point gets the path guard before its first command, and this is the one that
+        // had none: a `WA_SCRIPT` run executes the file directly - no `lua/core/init.lua`, so no
+        // wrapper around `host.exec` - which is exactly how a test wiped the operator's home on 11/11.
+        // Installed from the same module the CLI uses, so there is one rule and not two. `pcall` keeps
+        // a binary whose tree predates the module running its scripts (the guard is then simply absent,
+        // and `scripts/test-path-guard-canary.lua` names that gap) instead of failing every script.
+        if let Err(error) = lua.do_string(
+            "pcall(function() dofile('lua/core/path_guard.lua').install(host) end)",
+            "lua/core/path_guard.lua",
+        ) {
+            eprintln!("lua error: {error}");
+        }
         if let Err(error) = lua.do_string(&source, &script) {
             host::restore_input();
             eprintln!("lua error: {error}");
