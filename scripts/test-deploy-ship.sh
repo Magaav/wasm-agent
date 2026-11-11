@@ -54,6 +54,7 @@ run_block() { # root install_dir -> the block's output, refusal in it when it re
     echo "INSTALL_DIR=\"$install\""
     echo 'PIPELINE=0'
     echo 'fail() { echo "REFUSED: $*" >&2; exit 3; }'
+    echo ". \"$ROOT/scripts/lib/retire-unshipped.sh\""
     printf '%s\n' "$BLOCK"
     echo 'echo "PIPELINE=$PIPELINE"'
   } > "$wrapper"
@@ -131,7 +132,7 @@ STALE_STATUS=$?
   || fail "the script this tree no longer ships was left in the install and only escaped the closure check by luck"
 [ -f "$STALE_INSTALL/scripts/whatsapp-kept-by-tree.mjs" ] \
   || fail "pruning removed a script the tree does ship"
-echo "$STALE_OUT" | grep -q 'pruned 1 installed script' \
+echo "$STALE_OUT" | grep -q 'retired 1 shipped script' \
   || fail "the deploy did not say what it pruned: $STALE_OUT"
 echo "ok   a script the tree no longer ships is pruned, and one it ships is kept"
 

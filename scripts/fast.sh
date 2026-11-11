@@ -402,6 +402,9 @@ if command -v node >/dev/null 2>&1; then
 else
   echo "fast: instructions, direct-workflow, landing-queue, session-liveness, landing-baseline SKIPPED (node not on PATH)"; skipped=$((skipped + 5))
 fi
+# The deploy's retirement rule: a shipped script main deleted must not survive in the install (measured
+# 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
+check deploy-prune bash scripts/test-deploy-prune.sh
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
 check fast-environment bash scripts/test-fast-environment.sh
