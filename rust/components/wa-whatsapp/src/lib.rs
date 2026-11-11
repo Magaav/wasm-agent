@@ -50,6 +50,10 @@ pub mod privacy;
 pub mod queue;
 pub mod recognize;
 pub mod telemetry;
+/// The cutover import contract (`scripts/whatsapp-adopt.mjs`): native proof that the exported record
+/// is the device the client reads (`docs/WHATSAPP-CUTOVER.md`).
+#[cfg(test)]
+mod adoption;
 
 #[cfg(target_arch = "wasm32")]
 mod store;

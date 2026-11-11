@@ -399,6 +399,9 @@ if command -v node >/dev/null 2>&1; then
   # verdict), and a recorded baseline is reused instead of a pristine run when the tree's check inputs
   # are unchanged.
   check landing-baseline node scripts/test-landing-baseline.mjs
+  # The cutover exporter (docs/WHATSAPP-CUTOVER.md): a synthetic whatsmeow store in, the wacore
+  # device record out, plus the guard rails around a live state directory. Seconds, no phone.
+  check whatsapp-adopt node --test scripts/test-whatsapp-adopt.mjs
   # The JavaScript tests no harness named (measured 2026-11-11: 45 of 237) were audited: the ones that are
   # self-contained and test live code run here, and scripts/test-orphans.json carries the reason for every
   # one that cannot. The ledger check fails on a new orphan, a stale entry or a declared one gone wired.
