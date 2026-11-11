@@ -50,9 +50,10 @@ which is why an import can work at all.
 1. The node runs a binary built from a tree that contains Phase 2 (the `whatsapp_message` capability,
    `lua/core/whatsapp_operator.lua`) and this document. Deploy through Sentinel, not by hand
    (`skills/self-update/SKILL.md`).
-2. The `wa-whatsapp` component installed from the same tree (`scripts/build-whatsapp.sh` on the node
-   that builds components, `services upgrade` with a pin). `wa-whatsapp` is not in `components.lock`;
-   it is installed by hand on the account's node.
+2. The `wa-whatsapp` component built from the same tree
+   (`cargo build --release --target wasm32-wasip2` in `rust/components/wa-whatsapp`,
+   `docs/COMPONENTS.md`) and installed with `services upgrade` and a pin. It is not in
+   `components.lock`; it is installed by hand on the account's node.
 3. The operator is present. Option A needs him for the first connect; option B needs the phone for the
    pairing code.
 4. Disk: the Go state is ~135 MB; keep it. The component state is small.
