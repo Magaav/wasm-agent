@@ -477,6 +477,40 @@ LUA_FAST=0
 INSTALLED_BINARY_COMMIT="$(sed -n 's/^binary_commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
 [ -n "$INSTALLED_BINARY_COMMIT" ] || INSTALLED_BINARY_COMMIT="$INSTALLED_COMMIT"
 INSTALLED_BIN="$INSTALL_DIR/wa"; [ -f "$INSTALLED_BIN.exe" ] && INSTALLED_BIN="$INSTALLED_BIN.exe"
+# The fast path needs a binary that *runs* a staged Lua tree, not one that only verifies it. `--lua-tree`
+# proves the bytes are complete and compatible; the property the fast path depends on is that the runtime
+# then prefers those bytes over its compiled-in copy, because the deploy's own embedded check compares
+# `EMBEDDED` against the tree. Measured 10/11 on wasm_the_first: the installed `a408c11b` verified a staged
+# `67724745` tree with `--lua-tree` and then ran its own copy, so the check failed on the first differing
+# module (`stale embedded module: lua/core/server.lua`) and the fast path could never install a Lua change
+# there - the deploy refused, correctly, and the node stayed behind. This probe makes that decision in the
+# one place it can still change the outcome: before the binary is chosen. Read-only, a throwaway tree.
+lua_tree_mode() { # <binary> -> 0 when it runs the Lua tree it is given
+  local binary="$1" dir home name out digest
+  dir="$(mktemp -d)" || return 1
+  home="$(mktemp -d)" || { rm -rf "$dir"; return 1; }
+  mkdir -p "$dir/lua/core" "$dir/lua/vendor" 2>/dev/null || { rm -rf "$dir" "$home"; return 1; }
+  cp "$ROOT/lua/core/init.lua" "$dir/lua/core/init.lua" 2>/dev/null || { rm -rf "$dir" "$home"; return 1; }
+  name="lua/vendor/json.lua"
+  { cat "$ROOT/$name" 2>/dev/null; printf '\n-- wa-lua-tree-mode-probe\n'; } > "$dir/$name" || { rm -rf "$dir" "$home"; return 1; }
+  digest="$("$binary" --capability-digest 2>/dev/null | tr -d '[:space:]')"
+  {
+    printf 'capabilities %s\ncommit probe\n' "$digest"
+    for name in lua/core/init.lua lua/vendor/json.lua; do
+      printf '%s  %s\n' "$(sha256sum < "$dir/$name" | awk '{print $1}')" "$name"
+    done
+  } > "$dir/manifest.txt" || { rm -rf "$dir" "$home"; return 1; }
+  local dir_arg="$dir" home_arg="$home" script_arg="$ROOT/scripts/probe-lua-tree-mode.lua"
+  if command -v cygpath >/dev/null 2>&1; then
+    dir_arg="$(cygpath -w "$dir")"; home_arg="$(cygpath -w "$home")"; script_arg="$(cygpath -w "$script_arg")"
+  fi
+  out="$(WA_LUA_TREE="$dir_arg" WASM_AGENT_LUA_ROOT='' WASM_AGENT_HOME="$home_arg" WA_SCRIPT="$script_arg" \
+    timeout 60 "$binary" --db "$home_arg/probe.db" 2>&1)"
+  rm -rf "$dir" "$home"
+  case "$out" in *"lua tree mode ok"*) return 0 ;; esac
+  return 1
+}
+
 if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_COMMIT" ] && [ -x "$INSTALLED_BIN" ] \
    && git merge-base --is-ancestor "$INSTALLED_COMMIT" HEAD 2>/dev/null; then
   CHANGED="$(git diff --name-only "$INSTALLED_COMMIT" HEAD)"
@@ -500,6 +534,10 @@ if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_COMMIT" ] && [ -x "$INSTA
   if [ -n "$CHANGED" ] && [ -z "$(printf '%s' "$COMPILED" | tr -d '[:space:]')" ] && printf '%s' "$INSTALLED_DIGEST" | grep -qE '^[0-9a-f]{64}$'; then
     LUA_FAST=1
     echo "deploy: Lua fast path - $(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ') changed file(s) since $INSTALLED_COMMIT, none compiled; keeping the installed binary"
+    if ! lua_tree_mode "$INSTALLED_BIN"; then
+      LUA_FAST=0
+      echo "deploy: the installed binary does not run a staged Lua tree (it predates that mode, so its own copy would answer); building $COMMIT instead of reusing it"
+    fi
   fi
 fi
 
