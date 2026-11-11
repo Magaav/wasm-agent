@@ -909,6 +909,10 @@ done
 # back to the pin's own target, which is the old (cold) behaviour and never a failed deploy.
 DEPLOY_DATA="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
 DEPLOY_BUILD_TARGET="${WA_DEPLOY_BUILD_TARGET:-$DEPLOY_DATA/build-cache/target}"
+# A POSIX path handed to a native Windows process is silently unusable (AGENTS.md): cargo would write to
+# C:\c\Users\... and this deploy would then look for the binary where it is not. Measured 2026-11-11: a
+# build under /c/... created a stray C:\c tree. Convert once, here, and hand every consumer the same string.
+if command -v cygpath >/dev/null 2>&1; then DEPLOY_BUILD_TARGET="$(cygpath -m "$DEPLOY_BUILD_TARGET" 2>/dev/null || printf '%s' "$DEPLOY_BUILD_TARGET")"; fi
 if mkdir -p "$DEPLOY_BUILD_TARGET" 2>/dev/null && [ -w "$DEPLOY_BUILD_TARGET" ]; then
   DEPLOY_BUILD_TARGET="$(cd "$DEPLOY_BUILD_TARGET" && pwd)"
   export WA_CODEMODE_TARGET_DIR="$DEPLOY_BUILD_TARGET"
