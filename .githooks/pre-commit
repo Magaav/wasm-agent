@@ -151,6 +151,23 @@ MESSAGE
   rm -f "$errors"
 fi
 
+# A frozen real task is somebody's own work - a prompt, message text, mail, machine names and paths. It
+# lives under the node's evaluator state directory (docs/HARNESS-EVALUATOR.md, "Privacy") and never in a
+# repository that gets pushed. `.gitignore` covers the default paths; this is the check on the STAGED
+# paths, which is the one a forced `git add -f` (or a global ignore file that disagrees) would still hit.
+frozen="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '(^|/)\.wasm-agent/evaluator/|^harness-evaluator/(tasks|state)/' || true)"
+if [ -n "$frozen" ]; then
+  cat >&2 <<MESSAGE
+pre-commit: refusing to commit a frozen evaluation task.
+
+  $(printf '%s\n  ' $frozen)
+
+Those files are real operator work and belong to the node that captured them, never to a repository
+that gets pushed. Unstage them and leave them under <config>/evaluator (docs/HARNESS-EVALUATOR.md).
+MESSAGE
+  exit 1
+fi
+
 offenders="$(git grep --cached -I -l "$(printf '\r')" 2>/dev/null || true)"
 if [ -z "$offenders" ]; then
   exit 0

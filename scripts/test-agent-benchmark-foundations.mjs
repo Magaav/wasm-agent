@@ -1,9 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {isolatedEnvironment} from './agent-benchmark-environment.mjs';
-import {accounting,readiness,report,rubric,cleanupPlan,qualityNotes,anonymizedOutputId} from './agent-benchmark-foundations.mjs';
-import {normalizeUsage,nativeTrace,piTrace,preparedRequests,digest,observationTimeline} from './agent-benchmark-telemetry.mjs';
+import {isolatedEnvironment} from '../harness-evaluator/scripts/agent-benchmark-environment.mjs';
+import {accounting,readiness,report,rubric,cleanupPlan,qualityNotes,anonymizedOutputId} from '../harness-evaluator/scripts/agent-benchmark-foundations.mjs';
+import {normalizeUsage,nativeTrace,piTrace,preparedRequests,digest,observationTimeline} from '../harness-evaluator/scripts/agent-benchmark-telemetry.mjs';
 const native={known:true,cache_known:true,cost_known:false,prompt:100,input:20,cacheRead:70,cacheWrite:10,output:5,reasoning:2};
 const pi={input:20,cacheRead:70,cacheWrite:10,output:5,reasoning:2,cost:{total:0}};
 test('preparation subprocess environment does not copy caller credentials or home configuration',()=>{
@@ -70,7 +70,7 @@ test('realistic Pi JSONL shapes preserve abort/compaction/unpriced/lost evidence
  assert.equal(piTrace(rows.slice(0,1)).unfinished_tool_calls,1);
 });
 test('candidate runner refuses before credentials or Docker',()=>{
- const r=spawnSync(process.execPath,['scripts/agent-benchmark.mjs','--check','fixtures/benchmarks/binding-discovery/v1/provenance.candidate.json'],{encoding:'utf8',env:{PATH:process.env.PATH}});
+ const r=spawnSync(process.execPath,['harness-evaluator/scripts/agent-benchmark.mjs','--check','harness-evaluator/fixtures/benchmarks/binding-discovery/v1/provenance.candidate.json'],{encoding:'utf8',env:{PATH:process.env.PATH}});
  assert.equal(r.status,1);assert.match(r.stderr,/benchmark readiness refused/);
 });
 test('actual observed timelines and evidence-backed subjective grading remain separate',()=>{

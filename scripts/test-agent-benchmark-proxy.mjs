@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { createProxyServer, DUMMY_KEY } from './agent-benchmark-proxy.mjs';
+import { createProxyServer, DUMMY_KEY } from '../harness-evaluator/scripts/agent-benchmark-proxy.mjs';
 
 const realKey = 'only-the-forwarder-knows-this-test-key';
 let observed;

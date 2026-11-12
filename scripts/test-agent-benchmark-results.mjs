@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import {createGeneration,record,disposable,seal,verifyBundle,cleanup,cleanupDocker,dockerResource,reconcileDocker,reconcileFilesystem,registerSnapshotGit,requiredRecords,ownedProcess,containedProcess} from './agent-benchmark-results.mjs';
+import {createGeneration,record,disposable,seal,verifyBundle,cleanup,cleanupDocker,dockerResource,reconcileDocker,reconcileFilesystem,registerSnapshotGit,requiredRecords,ownedProcess,containedProcess} from '../harness-evaluator/scripts/agent-benchmark-results.mjs';
 const evidence=process.env.WA_BENCHMARK_TEST_ROOT;
 assert(evidence && path.isAbsolute(evidence),'explicit fresh evidence root required');fs.mkdirSync(evidence);
 let n=0;

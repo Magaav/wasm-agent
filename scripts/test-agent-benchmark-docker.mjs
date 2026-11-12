@@ -1,5 +1,5 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import {spawnSync} from 'node:child_process';
-import {createGeneration,record,requiredRecords,seal,verifyBundle,cleanup,dockerResource,cleanupDocker} from './agent-benchmark-results.mjs';import {realDockerAdapter} from './agent-benchmark-docker.mjs';
+import {createGeneration,record,requiredRecords,seal,verifyBundle,cleanup,dockerResource,cleanupDocker} from '../harness-evaluator/scripts/agent-benchmark-results.mjs';import {realDockerAdapter} from '../harness-evaluator/scripts/agent-benchmark-docker.mjs';
 const out=process.env.WA_BENCHMARK_DOCKER_ROOT;assert(out&&path.isAbsolute(out));fs.mkdirSync(out);
 test('actual hermetic Docker container/network/volume drain, seal and exact cleanup without shared-image deletion',()=>{
  const root=path.join(out,'g');createGeneration(root,'docker-model-free');for(const k of requiredRecords)record(root,k,{id:k,measurement:'model-free Docker proof',benchmark_solver_inference:0});

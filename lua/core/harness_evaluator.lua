@@ -246,6 +246,11 @@ function M.metrics(window)
   local input, output, cache_read, cache_write, prompt_tokens = 0, 0, 0, 0, 0
   local saw_input, saw_output, saw_cache, saw_prompt = false, false, false, false
   local effects, connectors = 0, 0
+  -- A tool is visible twice in a ledger: as a transcript row and as a telemetry span. Counting both would
+  -- double every error and every effect, so one source wins: the spans when the run recorded any (they are
+  -- the richer record), the transcript rows otherwise. `source` says which one a number came from.
+  local errors_events, effects_events, connectors_events = 0, 0, 0
+  local saw_tool_events = false
   local files, seen_file = {}, {}
   local refusals = 0
   local first_at, last_at = nil, nil
@@ -308,10 +313,11 @@ function M.metrics(window)
         out.usage_unknown = out.usage_unknown + 1
       end
     elseif kind == "tool" then
+      saw_tool_events = true
       out.tool_calls = out.tool_calls + 1
-      if payload.ok == false then out.tool_errors = out.tool_errors + 1 end
-      if M.is_effect(payload.name) then effects = effects + 1 end
-      if M.is_connector(payload.name) then connectors = connectors + 1 end
+      if payload.ok == false then errors_events = errors_events + 1 end
+      if M.is_effect(payload.name) then effects_events = effects_events + 1 end
+      if M.is_connector(payload.name) then connectors_events = connectors_events + 1 end
     end
   end
 
@@ -323,8 +329,10 @@ function M.metrics(window)
   if saw_input and saw_cache and (cache_read + input) > 0 then
     out.cache_hit = cache_read / (cache_read + input)
   end
-  out.effects_attempted = effects
-  out.connector_reads = connectors
+  out.tool_errors = saw_tool_events and errors_events or out.tool_errors
+  out.effects_attempted = saw_tool_events and effects_events or effects
+  out.connector_reads = saw_tool_events and connectors_events or connectors
+  out.tool_source = saw_tool_events and "telemetry spans" or "transcript rows"
   -- The sink's denials are exact and are added by the replay (M.metrics cannot see them); the prefix
   -- rule is what a capture has. Both are named in the run record's `rules`.
   out.refusals = refusals
@@ -505,6 +513,7 @@ function M.capture(session_id, opts)
       rounds = metrics.rounds,
       model_calls = metrics.model_calls,
       tool_calls = metrics.tool_calls,
+      tool_source = metrics.tool_source,
       tool_errors = metrics.tool_errors,
       refusals = metrics.refusals,
       effects_attempted = metrics.effects_attempted,

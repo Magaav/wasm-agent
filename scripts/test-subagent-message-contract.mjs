@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
-import {isolatedEnvironment} from './agent-benchmark-environment.mjs';
+import {isolatedEnvironment} from '../harness-evaluator/scripts/agent-benchmark-environment.mjs';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2), post = argv[0] === '--post';
 if (post) argv.shift();
