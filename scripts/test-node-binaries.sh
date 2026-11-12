@@ -55,6 +55,12 @@ SHIM
 chmod +x "$WORK/bin/gh" 2>/dev/null || true
 PATH="$WORK/bin:$PATH"
 export PATH
+# A fixture is an ELF header and a few bytes: it cannot be executed, and the publisher PROVES a candidate
+# by running it. Its own --runner knob (WA_PUBLISH_RUNNER) names a prefix it trusts for that step, so the
+# artifact cases below are host-independent; `true` answers for the fixture. The run gate's own decision
+# (run what this host can, SKIP what it cannot) is proved separately, on a real ELF, further down.
+WA_PUBLISH_RUNNER=true
+export WA_PUBLISH_RUNNER
 
 mkelf() { # FILE MACHINE_HEX [EXTRA]
   { printf '\177ELF\002\001\001'; printf '\000\000\000\000\000\000\000\000\000'; printf '\003\000'; printf "\x$2"; printf 'fixture-binary%s' "${3:-}"; } > "$1"
@@ -295,6 +301,57 @@ ok
 out="$(bash "$PUBLISH" --from "$built" --out "$WORK/bundle-pub-local" --target "$TRIPLE" --local --publish 2>&1)"
 expect_status 2 "$?" "--publish with --local"
 contains "$out" "publish_local_refused:" "a test artifact is never published"
+
+# ---- the run gate asks about THIS triple, not about the target set -------------------------------
+# Measured 2026-11-11 on wa-desktop (Ubuntu x86_64), the first Linux host to publish BOTH rows: the
+# publisher read its "can this host execute it" answer off the SET of targets, which holds x86_64
+# somewhere, so it executed the aarch64 binary too and a 481s verified build ended in
+# `run_failed: wa-aarch64-unknown-linux-gnu-<sha12> --version did not answer on this host`. The gate has to
+# answer for the row in front of it: the native one is RUN and proved, the other is SKIPPED and said so.
+native_triple=""
+case "$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)" in
+  Linux/x86_64|Linux/amd64) native_triple=x86_64-unknown-linux-gnu ;;
+  Linux/aarch64|Linux/arm64) native_triple=aarch64-unknown-linux-gnu ;;
+esac
+if [ -z "$native_triple" ] || [ ! -x /bin/true ]; then
+  # The case needs a REAL ELF of this machine (a fixture cannot be executed, and a host that can execute
+  # neither Linux row is the case the gate already handled). Reported, never counted as a pass.
+  echo "run gate (per triple): SKIPPED (this host $(uname -s)/$(uname -m) cannot execute a Linux ELF)"
+else
+  case "$native_triple" in
+    x86_64-*) other_triple=aarch64-unknown-linux-gnu; other_hex=b7 ;;
+    *) other_triple=x86_64-unknown-linux-gnu; other_hex=3e ;;
+  esac
+  built_n="$WORK/built-native"; mkdir -p "$built_n"
+  cp /bin/true "$built_n/wa-$native_triple-$SHORT"
+  cp /bin/true "$built_n/wa-sentinel-$native_triple-$SHORT"
+  mkelf "$built_n/wa-$other_triple-$SHORT" "$other_hex"
+  mkelf "$built_n/wa-sentinel-$other_triple-$SHORT" "$other_hex"
+  # The host's own /bin/true needs this host's glibc, so the floor is named as the value the check is given
+  # (a fixture is not a release: a release's floor is 2.31, linked by zig).
+  floor="$(grep -a -o 'GLIBC_2\.[0-9]\+' /bin/true 2>/dev/null | sed 's/^GLIBC_//' | sort -uV | tail -1)"
+  [ -n "$floor" ] || floor=2.31
+  cat > "$built_n/node-$SHORT.manifest" <<MANIFEST
+schema=wasm-agent-node-binaries/1
+source_commit=$HEAD_SHA
+source_tree=$(git -C "$ROOT" rev-parse "$HEAD_SHA^{tree}")
+rustc_version=fixture
+zig_version=fixture
+glibc_floor=$floor
+codemode=embedded
+built_utc=2026-11-11T00:00:00Z
+# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes
+$native_triple $(sha "$built_n/wa-$native_triple-$SHORT") $(bytes "$built_n/wa-$native_triple-$SHORT") $(sha "$built_n/wa-sentinel-$native_triple-$SHORT") $(bytes "$built_n/wa-sentinel-$native_triple-$SHORT")
+$other_triple $(sha "$built_n/wa-$other_triple-$SHORT") $(bytes "$built_n/wa-$other_triple-$SHORT") $(sha "$built_n/wa-sentinel-$other_triple-$SHORT") $(bytes "$built_n/wa-sentinel-$other_triple-$SHORT")
+MANIFEST
+  out="$(env -u WA_PUBLISH_RUNNER bash "$PUBLISH" --from "$built_n" --out "$WORK/bundle-native" \
+    --glibc "$floor" --target "$native_triple" --target "$other_triple" 2>&1)"
+  expect_status 0 "$?" "a run publishing one row this host can execute and one it cannot"
+  contains "$out" "ran $native_triple natively" "the row this host can execute is RUN and proved"
+  contains "$out" "run: SKIPPED for $other_triple" "the row it cannot execute is SKIPPED, and the build is not refused"
+  absent "$out" "run_failed" "and neither row reports a failed run"
+  contains "$out" "gh release create node-$SHORT -R" "the release command is still printed for both rows"
+fi
 
 echo "node binaries (publish) ok ($checks checks)"
 

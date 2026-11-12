@@ -473,7 +473,12 @@ for triple in $MANIFEST_TRIPLES; do
     else
       fail "run_failed: $RUNNER could not execute wa-$triple-$SHORT --version (or wa-sentinel --help)" 8
     fi
-  elif [ -n "$native_arch" ] && printf '%s\n' $TARGETS | grep -q "^$native_arch"; then
+  # The question is per TRIPLE: can THIS host execute THIS row? Asking it about the SET of targets is a
+  # different question, and a wrong one - measured 2026-11-11 on wa-desktop (Ubuntu x86_64), the first
+  # Linux host to publish both rows: `$TARGETS` holds x86_64 somewhere, so the aarch64 row was executed
+  # too and a 481s verified build ended in `run_failed: wa-aarch64-... --version did not answer on this
+  # host`. A host that can run one row must still report SKIPPED for the other.
+  elif [ -n "$native_arch" ] && printf '%s\n' "$triple" | grep -q "^$native_arch"; then
     if "$OUT/wa-$triple-$SHORT" --version >/dev/null 2>&1; then
       say "ran $triple natively: wa --version answered"
       RUN_DONE="$RUN_DONE $triple"
