@@ -644,7 +644,7 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
       -- pays for - that catalogue was ~37% of the envelope (5,686 B, ~1,400 tokens) while telling the
       -- model nothing about how to work.
       lines[#lines+1]='More than one call, or any filtering or looping, is ONE codemode script that returns only what you need. A single trivial call, or an effect that needs approval or a receipt (a send, a deploy), is a direct call. If code mode refuses a name, fall back to the direct call.'
-      lines[#lines+1]='Every tool is a member of `tools`; `ALL_TOOLS` lists them, `capabilities()` is the grant list with each tool\'s workspace status, and `searchTools(query)`/`describeTool(name)` give a schema. Example: `const [a,b]=await Promise.all([tools.read({path:"a"}),tools.read({path:"b"})]); return {a:a.content.length,b:b.content.length};`'
+      lines[#lines+1]='Every tool is a member of `tools`; `ALL_TOOLS` lists them, `capabilities()` is the grant list with each tool\'s workspace status; `searchTools(query)` returns an array of {name, description, callable, route}; `searchTools("select:a,b")` adds each one\'s full schema. Example: `const [a,b]=await Promise.all([tools.read({path:"a"}),tools.read({path:"b"})]); return {a:a.content.length,b:b.content.length};`'
       if #deferred>0 then
         lines[#lines+1]='The '..#deferred..' other tools this role may call are found with `capabilities()` or `searchTools(query)`; any of them is also callable directly.'
       end

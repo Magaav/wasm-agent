@@ -668,6 +668,23 @@ fn open(config: &Config, request: &Value) -> Result<Value, String> {
                 .collect()
         })
         .unwrap_or_default();
+    // The guest's own names as discovery entries, composed by the loop: this bridge copies them through
+    // unchanged (`builtin-fact` in wit/codemode), because their text is the node's.
+    let builtins: Vec<seam::BuiltinFact> = request
+        .get("builtins")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| seam::BuiltinFact {
+                    name: text_field(item, "name"),
+                    description: text_field(item, "description"),
+                    execution: execution(item.get("execution")),
+                    entry_json: text_field(item, "entry_json"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let store_entries: Vec<seam::StoreEntry> = request
         .get("store")
         .and_then(Value::as_object)
@@ -684,6 +701,7 @@ fn open(config: &Config, request: &Value) -> Result<Value, String> {
         code: text_field(request, "code"),
         timeout_ms: request.get("timeout_ms").and_then(Value::as_u64),
         catalogue,
+        builtins,
         store: store_entries,
         wasm_path: optional(request, "wasm_path"),
         prelude_path: optional(request, "prelude_path"),

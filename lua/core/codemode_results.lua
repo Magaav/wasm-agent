@@ -265,7 +265,7 @@ function M.answer(request, ctx, journal)
   return { error = "results_unknown_op:" .. op, effect = "none", ops = { "get", "last", "diff", "reuse" } }, false
 end
 
--- `describeTool("results")` answers this: the shape a script should expect, in one place.
+-- `searchTools("select:results")[0]` answers this: the shape a script should expect, in one place.
 M.HELP = {
   name = "results",
   description = "Read this session's earlier code-mode results. results.get(sha256) returns {ok,hash,value} - the full prior result under value - for a hash from attempts[].result.sha256 or results.last; a result too large to decode answers {hash,text,next_offset,bytes,truncated} instead. results.last(n, {tool}) lists the newest n journal rows {call,tool,age_s,ok,read,arguments,result}. results.diff(a,b) compares two result hashes and answers {same,count,changed:[{path,before,after}]}. Nothing here dispatches a call: every tool call is always fresh, and reuse happens only when a script asks for it explicitly - results.get/results.last by hash, or tools.x(args,{reuse:\"60s\"}) which returns the newest identical read younger than that age marked {reused_from,age_s} and otherwise runs fresh. A fresh read-only call that repeats an identical earlier one carries prior:{call,age_s,same}.",

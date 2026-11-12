@@ -42,10 +42,16 @@ script's own line 1 is line 2 of the compiled source.
 * Deliberate concurrency is unchanged and measurable: `Promise.all([...])` and `parallel([...])` hand
   every call to the loop in one round (asserted from the sandbox's own event stream in
   `scripts/test-codemode-promises.lua`), where two `await`s hand one each.
-* `searchTools(...)` answers a plain ARRAY of `{name, description, callable, route, execution}`
-  (+`schema` for an exact batch or a keyword hit), paged with `{limit, offset}`; an unknown name in a
-  batch is a member of that array marked `missing` with its nearest permitted names. The shape is
-  documented where the model asks for it: `describeTool("searchTools")`.
+* `searchTools(...)` is ONE tool with one answer shape: every form returns a plain ARRAY of
+  `{name, description, parameters, schema, execution, callable, route}` - the catalogue listing
+  (`"*"`, `""` or nothing) paged with `{limit, offset}` and without `schema`,
+  the keyword hits, and an exact batch (`{names:[...]}` or `"select:a,b"`) which adds each one's full
+  `schema`. The guest's own names (`searchTools`, `results`, `showCall`) are selectable the same way and
+  carry their help as the entry's `schema`. A name that is not there is a MEMBER of that array
+  (`found:false`, its reason, the nearest permitted names), never a throw, so `.map` works on every
+  form. The shape is documented where the model asks for it: `searchTools("select:searchTools")`.
+  `describeTool(name)` survives only as a hidden compatibility alias for `searchTools("select:"..name)[0]`
+  and is in no catalogue or guidance text.
 
 ## Always fresh, explicit reuse (11/11, #120)
 

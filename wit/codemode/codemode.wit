@@ -22,10 +22,12 @@
 /// * **the store's durability**: writes are returned as records and the loop commits them to the
 ///   session's `meta` row, which is the core's.
 ///
-/// **Nothing here is a JSON document**, with three exceptions, each JSON by nature and each named so:
+/// **Nothing here is a JSON document**, with four exceptions, each JSON by nature and each named so:
 /// `tool-facts.schema-json` is the model's own parameter schema (opaque to the seam), `args-json` /
-/// `payload-json` / `outcome.value` are the user's own JavaScript values, and `output-item.text` is a
-/// rendering. A refusal is a case of `refusal`, not a string the caller has to parse.
+/// `payload-json` / `outcome.value` are the user's own JavaScript values, `output-item.text` is a
+/// rendering, and `builtin-facts.entry-json` is the loop's own discovery entry for one of the guest's
+/// own names (the seam copies it verbatim, so the help text has one copy and one rendering). A refusal
+/// is a case of `refusal`, not a string the caller has to parse.
 package wa:codemode@0.1.0;
 
 interface types {
@@ -63,6 +65,17 @@ interface types {
         route: string,
     }
 
+    /// A name the guest itself provides rather than the catalogue: `searchTools`, `results`, `showCall`.
+    /// Discovery answers it like any other name (`searchTools("select:results")`, a keyword hit, a
+    /// listing row, and the compatibility alias `describeTool`), and the object it answers is the loop's
+    /// own `entry-json`, byte for byte: the help text and its rendering exist once, in the node.
+    record builtin-fact {
+        name: string,
+        description: string,
+        execution: execution,
+        entry-json: string,
+    }
+
     record store-entry {
         key: string,
         value: option<string>,
@@ -78,6 +91,9 @@ interface types {
         /// The script's own deadline, handed to the sandbox; the node's default is 30 000 ms.
         timeout-ms: option<u64>,
         catalogue: list<tool-facts>,
+        /// The guest's own names as discovery entries, composed by the loop. Not tools: nothing here is
+        /// dispatchable, and a missing list leaves those names to the loop (an old host).
+        builtins: list<builtin-fact>,
         store: list<store-entry>,
         wasm-path: option<string>,
         prelude-path: option<string>,
