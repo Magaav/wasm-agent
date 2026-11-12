@@ -128,6 +128,14 @@ function M.new(opts)
     deps = opts.deps or {},
     read_line = opts.read_line or function() return io.read("*l") end,
   }
+  -- `read = false`: the caller owns stdin. A scripted `wa chat --once` gets its prompt from the command
+  -- line (or reads stdin itself, in order), and a host reader thread on a stream nobody closes is the
+  -- leak that mode exists to remove - so there is no reader, and `poll` answers "the input has ended"
+  -- rather than falling through to the blocking read below.
+  if opts.read == false then
+    self.reader_off = true
+    return setmetatable(self, { __index = METHODS })
+  end
   self.supported, self.editor = M.start(self.deps, opts.editor)
   return setmetatable(self, { __index = METHODS })
 end
@@ -141,6 +149,10 @@ function METHODS:poll(timeout_ms)
     return line, self.eof
   end
   if self.eof then return nil, true end
+  -- No reader at all (the caller owns stdin, `M.new` `read = false`): the input has ended as far as this
+  -- object is concerned, and returning that is what keeps a scripted run from waiting on a stream that
+  -- is not going to close.
+  if self.reader_off then return nil, true end
   if not self.supported then
     -- No reader thread: the blocking read this module replaced, so an older binary is exactly
     -- the CLI it was rather than a CLI that hangs waiting for a capability it does not have.

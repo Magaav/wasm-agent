@@ -410,6 +410,11 @@ if command -v node >/dev/null 2>&1; then
   # arguments the core is handed, the installer pin, and install -> re-run -> update -> rollback against
   # file: fixtures. No network, no systemd, no built binary - seconds.
   check install-front-door bash scripts/test-install.sh
+  # A scripted `wa chat` (`wa chat "<prompt>"` from a script, `x | wa chat`, or `--once`) must run its
+  # turn(s), release the session and EXIT with the run's status - and a session whose run is in flight
+  # must be steerable with `wa steer` instead of killed (docs/SCRIPTED-RUNS.md). It drives the real
+  # binary, because the failure it covers is a process that never exits: a Lua-only test cannot see it.
+  WA_BIN="$bin" check cli-scripted node scripts/test-cli-scripted.mjs
   # The cutover exporter (docs/WHATSAPP-CUTOVER.md): a synthetic whatsmeow store in, the wacore
   # device record out, plus the guard rails around a live state directory. Seconds, no phone.
   check whatsapp-adopt node --test scripts/test-whatsapp-adopt.mjs

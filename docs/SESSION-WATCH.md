@@ -193,9 +193,9 @@ allowlist and the guest refusal are proved in `scripts/test-session-watch.lua` a
 * Not a streaming transport: `wa watch` long-polls the peer (bounded at 10 s per call). If the fleet
   ever wants sub-second delivery, the seam is `nodes.remote_call`'s SSE path (`/node/chat`), and the
   capability's cursor contract would not change.
-* No steering, by design: watching cannot send input to or alter the session. Steering already exists
-  (`lua/core/steering.lua`, the `subagent` capability's `steer`), and it is a separate, effectful
-  capability - not something a read-only follower should be able to reach.
+* No steering, by design: watching cannot send input to or alter the session. Steering is its own
+  command with its own authority (`wa steer <session> "<note>"`, docs/SCRIPTED-RUNS.md) and stays out of
+  reach of a read-only follower, which is the point of keeping the two apart.
 * The started run's execution budget is the operation's (`timeout_seconds`, 1-86400, default 3600);
   a session that runs longer is ended by that budget, visibly.
 * `wa session start` and `wa watch` are added to the CLI next to `call`; the prompt-doc blocks are

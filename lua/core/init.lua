@@ -303,6 +303,15 @@ elseif command == "session" and args[2] == "start" then
   -- The operator's half of `session_start`: start a session on another node, print its id at once.
   local code = dofile("lua/core/session_watch.lua").start_cli(args)
   if code then os.exit(code) end
+elseif command == "steer" then
+  -- `wa steer <session> "<note>"`: a note for a session whose run is in flight, into its durable inbox
+  -- (lua/core/steer_cli.lua). The answer to "how do I steer a running session without killing it".
+  local code = dofile("lua/core/steer_cli.lua").run((function()
+    local rest = {}
+    for i = 2, #args do rest[#rest + 1] = args[i] end
+    return rest
+  end)())
+  if code and code ~= 0 then os.exit(code) end
 elseif command == 'bind' or command == 'unbind' or command == 'accept' or command == 'promote' or command == 'demote' or command == 'revoke' then
   -- The whole remainder, not args[2]: `wa bind permanent renew <service>` is one intent, and keeping
   -- only the second word made the one-shot CLI unable to express it (it fell back to the service
@@ -356,6 +365,8 @@ elseif command == "help" then
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
+  print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
+  print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")
   print("    paths  where this node keeps its files, and the config file it would read")
   print('    bind [service|status|renew|run] | unbind | nodes pending | accept <pairing-code>')
   print('    promote <node> | demote <node> | revoke <node>  confirmed network controls')
