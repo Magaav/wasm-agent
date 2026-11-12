@@ -161,8 +161,18 @@ The baseline itself is a record per (check command, machine, retest digest of ma
 
 ```
 node scripts/landing-queue.mjs baseline [--command "bash scripts/fast.sh"] [--commit <rev>] [--show]
+node scripts/landing-queue.mjs baseline --measure        # measure it now, in the canonical checkout
 node scripts/landing-queue.mjs baseline --record <log> [--exit-code <n>]   # prime it from a saved run
 ```
+
+`--measure` is for the question a session asks before it queues anything: *what does main already fail
+here, under my check command?* Without it the command could only read a record, so a session with no
+record either landed once (paying a pristine run it did not want) or improvised its own judge - which
+is what five sessions did on 2026-11-10. It runs the same measurement a landing runs, by the same code,
+with the same two refusals a person can act on: `baseline_busy` when a landing holds the queue (the
+canonical checkout is not ours to move) and `baseline_dirty_canonical` when the checkout has
+uncommitted work (a baseline measured over it is not main's). A record that already exists is reused,
+so asking twice costs one run, not two.
 
 Reuse is the point, and so is measuring where the candidate runs. A landing with no record for main's
 check inputs measures **one** baseline - main's own commit, detached in the **canonical checkout**,

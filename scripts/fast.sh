@@ -85,6 +85,80 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-XXXXXX")
 trap 'rm -rf "$work"' EXIT
 fails=0; envfails=0; skipped=0; ran=0
 
+# ---- the environment this verdict belongs to ---------------------------------------------------------
+# A red row is a fact about the TREE only if the machine is named with it. Measured 11/12 on wa-desktop:
+# main was red there, four sessions each paid an extra full run to prove the failure was main's own, and
+# nothing in the output could have told them - no node version, no cargo, no wasi-sdk, and no
+# machine-readable list of WHICH checks failed. Both are stated here, before the first check runs, and
+# both travel in the JSON result (scripts/fast-result.mjs), so a reader never has to re-run the suite to
+# attribute a failure to a machine.
+version_of() { local out; out=$("$@" 2>&1 | head -1) || true; printf '%s' "${out:-absent}"; }
+wasi_sdk_version() {
+  local sdk="${WASI_SDK_PATH:-}" candidate
+  if [ -z "$sdk" ]; then
+    for candidate in "$HOME"/wasi-sdk* /opt/wasi-sdk*; do
+      [ -d "$candidate/share/wasi-sysroot" ] && sdk="$candidate"
+    done
+  fi
+  [ -n "$sdk" ] || { printf 'absent'; return; }
+  if [ -f "$sdk/VERSION" ]; then head -1 "$sdk/VERSION" | tr -d '[:space:]'
+  else basename "$sdk" | sed 's/^wasi-sdk-//'; fi
+}
+node_version=absent; node_sqlite=absent
+if command -v node >/dev/null 2>&1; then
+  node_version=$(version_of node --version)
+  # `require("node:sqlite")` is the real question: a Node without it turns the ledger rows into skips,
+  # and a reader must be able to see that here instead of inferring it from a row's absence later.
+  if node -e 'require("node:sqlite")' >/dev/null 2>&1; then node_sqlite=yes; else node_sqlite=no; fi
+fi
+cargo_version=$(command -v cargo >/dev/null 2>&1 && version_of cargo --version || printf 'absent')
+if command -v lua5.4 >/dev/null 2>&1; then lua_version=$(version_of lua5.4 -v)
+elif command -v lua >/dev/null 2>&1; then lua_version=$(version_of lua -v)
+else lua_version=absent; fi
+wasi_sdk=$(wasi_sdk_version)
+commit=$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')
+if command -v sha256sum >/dev/null 2>&1; then bin_sha=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
+elif command -v shasum >/dev/null 2>&1; then bin_sha=$(shasum -a 256 "$bin" 2>/dev/null | cut -d' ' -f1)
+else bin_sha=unknown; fi
+echo "fast: env: node $node_version (node:sqlite $node_sqlite), cargo $cargo_version, wasi-sdk $wasi_sdk, lua $lua_version"
+echo "fast: env: root $ROOT at $commit on $branch; binary $bin (sha256 ${bin_sha:-unknown})"
+# What a row is promised, so a green row that could not check something is read against the contract it
+# was run under rather than against what the reader assumed. A row sets its own variables for anything
+# this line does not name.
+echo "fast: env contract: every row gets its own scratch WASM_AGENT_HOME, WA_COMPONENTS_DIR inside it, WASM_AGENT_LUA_ROOT=$ROOT, no rendezvous or relay, WASM_AGENT_MANAGED=0"
+
+# ---- the machine-readable result ---------------------------------------------------------------------
+# One row per check, written as the check finishes (parallel workers write their own file, so no two
+# rows can interleave), plus the named skips a passing row reports and the environment above. The
+# assembly is scripts/fast-result.mjs; the file lives in the worktree's own git dir unless WA_FAST_RESULT
+# names another path, so a run never writes into the tree it is judging.
+result_rows="$work/result"; mkdir -p "$result_rows" 2>/dev/null || true
+export RESULT_ROWS="$result_rows"
+named_skips="$work/named-skips.tsv"; : > "$named_skips" 2>/dev/null || true
+printf 'node\t%s\nnode_sqlite\t%s\ncargo\t%s\nwasi_sdk\t%s\nlua\t%s\nroot\t%s\ncommit\t%s\nbranch\t%s\nbin\t%s\nbin_sha256\t%s\n' \
+  "$node_version" "$node_sqlite" "$cargo_version" "$wasi_sdk" "$lua_version" "$ROOT" "$commit" "$branch" "$bin" "${bin_sha:-unknown}" \
+  > "$work/env.tsv" 2>/dev/null || true
+record_row() { # <status: pass|fail|skip> <section> <name> <exit> <ms> <environment 0|1> <first error or reason>
+  local file
+  # `run_lua` runs in a `bash -c` worker, so the directory travels as an exported variable: a variable
+  # that is merely set here is absent there, and every row would be written to `/` and lost.
+  file="${RESULT_ROWS:-/nonexistent}/$(printf '%s' "$3" | sed 's#[^A-Za-z0-9._-]#_#g').row"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$(printf '%s' "$7" | tr '\t\n' '  ' | cut -c1-300)" \
+    > "$file" 2>/dev/null || true
+}
+# The FIRST line that looks like the failure, not the last line of the log: a suite's last line is often
+# its own summary of the failure (measured on this very suite: "the fence is not in the guest tool
+# table" came first and the whole comparison came after). Falls back to the last line.
+first_error_of() { # <log>
+  local strong
+  [ -s "$1" ] || return 0
+  strong=$(grep -m1 -iE 'lua error|panicked at|(^|: )error|assertion|assert failed|refus' "$1" 2>/dev/null | tr '\t' ' ')
+  [ -n "$strong" ] || strong=$(last_line_of "$1")
+  printf '%s' "$strong" | cut -c1-300
+}
+export -f record_row first_error_of
+
 # ---- the components the Lua rows need ---------------------------------------------------------------
 # A test's node reads its components from `WA_COMPONENTS_DIR`, else `$HOME/.wasm-agent/components`
 # (rust/wa-host-support/src/paths.rs), and a row's HOME is its own scratch home - so the graph tests found
@@ -163,7 +237,7 @@ if [ -n "$timings" ] && [ -s "$timings" ]; then
   awk -F'\t' 'NR==FNR{ms[$3]=$2; next} {print (($0 in ms)?ms[$0]:999999) "\t" $0}' "$timings" "$work/lua.list" | sort -rn | cut -f2 > "$work/lua.sorted" \
     && mv "$work/lua.sorted" "$work/lua.list"
 fi
-export FAST_BIN="$bin" FAST_ROOT="$(native "$ROOT")" FAST_WORK="$work"
+export FAST_BIN="$bin" FAST_ROOT="$(native "$ROOT")" FAST_WORK="$work" NAMED_SKIPS="$named_skips"
 mkdir -p "$FAST_WORK/logs"
 # One definition of "run this test hermetically", used by the parallel batch AND by the serial retry,
 # so the retry measures exactly what the first attempt measured. WA_COMPONENTS_DIR is inside the row's own
@@ -236,6 +310,7 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   # named rather than vanishing into a failed redirection.
   if ! h=$(mktemp -d "$FAST_WORK/h.XXXXXX" 2>/dev/null); then
     printf '1\t0\t%s\t%s\tenvironment\n' "$f" 'a scratch home could not be made (mkdir -> nil)'
+    record_row fail lua "$f" 1 0 1 'a scratch home could not be made (mkdir -> nil)'
     return
   fi
   # The row's output is kept OUTSIDE its home: a home is scratch, and one row in five deleted its own
@@ -250,11 +325,25 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
   # runner's own output - the log is only kept for a failure - so the lines are collected here and printed
   # under the counts. A skip is never a pass; it is a pass with a named hole, and the hole is spoken.
   grep -h '^SKIP ' "$out" 2>/dev/null | sed "s|^SKIP |$f: |" >> "$FAST_WORK/skips" 2>/dev/null || true
+  # The same holes, as a table the JSON result can carry (check<TAB>reason): the printed summary above
+  # groups them per suite and keeps only the first reason, which is right for a reader and not enough
+  # for a consumer that wants every one.
+  if grep -q '^SKIP ' "$out" 2>/dev/null; then
+    grep -h '^SKIP ' "$out" 2>/dev/null | sed 's/^SKIP //' | while IFS= read -r reason; do
+      printf '%s\t%s\n' "$f" "$reason" >> "$NAMED_SKIPS" 2>/dev/null || true
+    done
+  fi
   if [ "$c" != 0 ]; then
     kind=$(wa_environment_kind "$c" "$last")
     cp "$out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$(( ($(date +%s%N)-s)/1000000 ))" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
+  ms=$(( ($(date +%s%N)-s)/1000000 ))
+  if [ "$c" = 0 ]; then
+    record_row pass lua "$f" "$c" "$ms" 0 ''
+  else
+    record_row fail lua "$f" "$c" "$ms" "$([ "$kind" = environment ] && echo 1 || echo 0)" "$(first_error_of "$out")"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$ms" "$f" "$(printf '%s' "$last" | tr '\t' ' ' | cut -c1-160)" "$kind"
 }
 export -f lua_run run_lua native
 xargs -P "$jobs" -I{} bash -c 'run_lua "$1"' _ {} < "$work/lua.list" > "$work/lua.tsv"
@@ -276,6 +365,10 @@ if [ -n "$envrows" ]; then
     esac
     awk -F'\t' -v f="$f" -v c="$c" -v k="$kind" -v ms="$(( ($(date +%s%N)-s)/1000000 ))" -v l="$(last_line_of "$log" | tr '\t' ' ' | cut -c1-160)" \
       'BEGIN{OFS="\t"} $3==f {print c,ms,$3,l,k; next} {print}' "$work/lua.tsv" > "$work/lua.new" && mv "$work/lua.new" "$work/lua.tsv"
+    # The JSON row follows the retry: a row that passed alone is a pass, and one that still cannot run is
+    # the machine refusing, never a verdict on the code.
+    if [ "$c" = 0 ]; then record_row pass lua "$f" "$c" "$(( ($(date +%s%N)-s)/1000000 ))" 0 ''
+    else record_row fail lua "$f" "$c" "$(( ($(date +%s%N)-s)/1000000 ))" "$([ "$kind" = environment ] && echo 1 || echo 0)" "$(first_error_of "$log")"; fi
   done <<< "$envrows"
 fi
 lua_total=$(wc -l < "$work/lua.list"); lua_fail=$(awk -F'\t' '$1!=0' "$work/lua.tsv" | wc -l)
@@ -336,8 +429,10 @@ fi
 # ---- 2. Rust: the crates this change touches ----------------------------------------------------------
 if [ "${WA_FAST_IN_DOCKER:-}" = 1 ]; then
   echo "fast: rust SKIPPED (inside the sandbox image: no toolchain; run on a node with cargo)"; skipped=$((skipped + 1))
+  record_row skip rust 'rust (all crates)' 0 0 0 'inside the sandbox image: no toolchain; run on a node with cargo'
 elif ! command -v cargo >/dev/null 2>&1; then
   echo "fast: rust SKIPPED (cargo not on PATH)"; skipped=$((skipped + 1))
+  record_row skip rust 'rust (all crates)' 0 0 0 'cargo is not on PATH'
 else
   # Test builds, not shippable ones: the same switch the gate sets (scripts/test.sh) so the build script
   # that embeds the code-mode assets (wa-capabilities/build.rs) does not demand one only a shipping build
@@ -383,20 +478,23 @@ else
     else
       cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
     fi
-    c=$?; ran=$((ran + 1))
-    if [ "$c" = 0 ]; then echo "fast: rust $crate ok ($(( $(date +%s) - s ))s)"
-    else fails=$((fails + 1)); echo "FAIL rust $crate (exit $c):"; { grep -E "^test .* FAILED|panicked at|^error" "$work/rust-$crate.log" || tail -5 "$work/rust-$crate.log"; } | head -8; fi
+    c=$?; ran=$((ran + 1)); ms=$(( ($(date +%s) - s) * 1000 ))
+    if [ "$c" = 0 ]; then echo "fast: rust $crate ok ($(( $(date +%s) - s ))s)"; record_row pass rust "rust $crate" "$c" "$ms" 0 ''
+    else fails=$((fails + 1)); echo "FAIL rust $crate (exit $c):"; { grep -E "^test .* FAILED|panicked at|^error" "$work/rust-$crate.log" || tail -5 "$work/rust-$crate.log"; } | head -8
+      record_row fail rust "rust $crate" "$c" "$ms" 0 "$(first_error_of "$work/rust-$crate.log")"; fi
   done
 fi
 
 # ---- 3. contract checks -------------------------------------------------------------------------------
 check() { name=$1; shift; s=$(date +%s%N)
   wa_environment_retry "$name" "$work/check-$name.log" "$@"; c=$?
-  ran=$((ran + 1))
-  if [ "$c" = 0 ]; then echo "fast: $name ok ($(( ($(date +%s%N)-s)/1000000 ))ms)"; return 0; fi
+  ran=$((ran + 1)); ms=$(( ($(date +%s%N)-s)/1000000 ))
+  if [ "$c" = 0 ]; then echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0; fi
   fails=$((fails + 1))
-  case "$WA_FAST_RETRY" in environment) envfails=$((envfails + 1)); echo "FAIL $name (exit $c, environment): $(last_line_of "$work/check-$name.log")" ;;
-    *) echo "FAIL $name (exit $c): $(tail -3 "$work/check-$name.log" | tr '\n' ' ')" ;; esac
+  case "$WA_FAST_RETRY" in environment) envfails=$((envfails + 1)); echo "FAIL $name (exit $c, environment): $(last_line_of "$work/check-$name.log")"
+      record_row fail checks "$name" "$c" "$ms" 1 "$(first_error_of "$work/check-$name.log")" ;;
+    *) echo "FAIL $name (exit $c): $(tail -3 "$work/check-$name.log" | tr '\n' ' ')"
+      record_row fail checks "$name" "$c" "$ms" 0 "$(first_error_of "$work/check-$name.log")" ;; esac
 }
 WA_BIN="$bin" check prompt-docs bash scripts/sync-prompt-docs.sh --check
 if command -v node >/dev/null 2>&1; then
@@ -420,6 +518,11 @@ if command -v node >/dev/null 2>&1; then
   # verdict), and a recorded baseline is reused instead of a pristine run when the tree's check inputs
   # are unchanged.
   check landing-baseline node scripts/test-landing-baseline.mjs
+  # The machine-readable result a red run leaves behind (scripts/fast-result.mjs): every check by name,
+  # its verdict, the FIRST error line it printed, and the environment (node/cargo/wasi-sdk/lua,
+  # node:sqlite, the binary and its hash) the verdict belongs to. Measured 11/12: four sessions paid an
+  # extra full run each to establish facts this file states.
+  check fast-result node scripts/test-fast-result.mjs
   # The front door (scripts/install.sh): the platform matrix, which channel each OS gets, the exact
   # arguments the core is handed, the installer pin, and install -> re-run -> update -> rollback against
   # file: fixtures. No network, no systemd, no built binary - seconds.
@@ -446,6 +549,7 @@ if command -v node >/dev/null 2>&1; then
   check wave-ship-mutation node scripts/test-wave-ship-mutation.mjs
 else
   echo "fast: instructions, direct-workflow, landing-queue, session-liveness, landing-baseline, orphan-tests and the JS test rows SKIPPED (node not on PATH)"; skipped=$((skipped + 5))
+  record_row skip checks 'node checks' 0 0 0 'node is not on PATH: instructions, direct-workflow, landing-queue, session-liveness, landing-baseline, orphan-tests and the JS rows could not run'
 fi
 # The deploy's retirement rule: a shipped script main deleted must not survive in the install (measured
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
@@ -460,13 +564,34 @@ check whatsapp-go-retired bash scripts/test-whatsapp-go-retired.sh
 check fast-environment bash scripts/test-fast-environment.sh
 
 elapsed=$(( $(date +%s) - started ))
+# The exit code is decided first so the JSON result and the printed verdict can never disagree.
 if [ "$fails" = 0 ]; then
-  echo "fast path ok ($ran checks, $skipped skipped, ${elapsed}s)"
+  exit_code=0
+  verdict_line="fast path ok ($ran checks, $skipped skipped, ${elapsed}s)"
 elif [ "${envfails:-0}" -gt 0 ] && [ "${envfails:-0}" = "$fails" ]; then
   # Every failure was the machine refusing to start a process. That is not a verdict on the tree, and
   # the landing queue reads exit 3 as "retry", never as "this branch is worse than main".
-  echo "fast path could not run: $fails check(s) were the machine (fork/spawn, retried serially once), ${skipped} skipped, ${elapsed}s"
-  exit 3
+  exit_code=3
+  verdict_line="fast path could not run: $fails check(s) were the machine (fork/spawn, retried serially once), ${skipped} skipped, ${elapsed}s"
 else
-  echo "fast path FAILED ($fails of $ran checks, $skipped skipped, ${elapsed}s)"; exit 1
+  exit_code=1
+  verdict_line="fast path FAILED ($fails of $ran checks, $skipped skipped, ${elapsed}s)"
 fi
+
+# ---- the machine-readable result ---------------------------------------------------------------------
+# The JSON is written even when the run failed: that is the whole point of it (a red run is the one a
+# reader has to attribute). It goes into the worktree's own git dir, never into the tree under test.
+cat "$result_rows"/*.row > "$work/results.tsv" 2>/dev/null || : > "$work/results.tsv"
+printf 'ok\t%s\nexit_code\t%s\nelapsed_seconds\t%s\nverdict\t%s\n' \
+  "$([ "$exit_code" = 0 ] && echo 1 || echo 0)" "$exit_code" "$elapsed" "$verdict_line" > "$work/summary.tsv"
+result_file="${WA_FAST_RESULT:-$(git rev-parse --git-path wa-fast-result.json 2>/dev/null || printf '%s' "$ROOT/wa-fast-result.json")}"
+if command -v node >/dev/null 2>&1; then
+  node scripts/fast-result.mjs --results "$work/results.tsv" --env "$work/env.tsv" \
+    --skips "$NAMED_SKIPS" --summary "$work/summary.tsv" --out "$result_file" \
+    || echo "fast: result NOT written (scripts/fast-result.mjs exited $?); the verdict below still stands"
+else
+  echo "fast: result SKIPPED (node is not on PATH, so scripts/fast-result.mjs cannot write the JSON)"
+  skipped=$((skipped + 1))
+fi
+echo "$verdict_line"
+exit "$exit_code"
