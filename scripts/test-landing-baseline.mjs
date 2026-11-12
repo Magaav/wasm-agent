@@ -276,5 +276,30 @@ check('the record says where it came from', shown.baseline.source === 'recorded'
 const human = q(['baseline', '--command', baselineCommand]);
 check('the human view names each known failure', /known: lua scripts\/test-known-on-main\.lua/.test(human.stdout || ''), human.stdout);
 
+// ---- 8. `baseline --measure` answers the question on demand --------------------------------------
+//
+// The command string is the record's key, so a different spelling is a different question - which is
+// exactly the position a session is in when it wants to know what main already fails under ITS check
+// command. Before this, the command could only read a record: a session with no record either landed
+// once (paying for a pristine run it did not want) or improvised its own judge.
+const measureCommand = `${baselineCommand} --on-demand`;
+const beforeMeasure = runCount();
+const measured = q(['baseline', '--command', measureCommand, '--measure', '--json']);
+check('baseline --measure measures when nobody has recorded one', measured.status === 0, measured.stdout + measured.stderr);
+check('it ran the check command exactly once', runCount() === beforeMeasure + 1, `${runCount() - beforeMeasure} run(s)`);
+const measuredJson = JSON.parse(measured.stdout || '{}');
+check('and recorded what main itself fails',
+  (measuredJson.baseline && measuredJson.baseline.names || []).includes('lua scripts/test-known-on-main.lua'),
+  JSON.stringify(measuredJson.baseline));
+check('the canonical checkout is back on main afterwards', git(CANONICAL, 'rev-parse', '--abbrev-ref', 'HEAD').trim() === 'main');
+const reread = q(['baseline', '--command', measureCommand, '--measure', '--json']);
+check('a second call reuses the record and measures nothing',
+  reread.status === 0 && runCount() === beforeMeasure + 1, `${runCount() - beforeMeasure} run(s): ${reread.stdout}`);
+const humanMeasured = q(['baseline', '--command', `${baselineCommand} --human`, '--measure']);
+check('the human view says the answer was measured now, and names what main fails',
+  humanMeasured.status === 0 && /known failure\(s\) MEASURED now/.test(humanMeasured.stdout || '')
+  && /  known: lua scripts\/test-known-on-main\.lua/.test(humanMeasured.stdout || ''), humanMeasured.stdout);
+check('and that measurement ran the command once too', runCount() === beforeMeasure + 2, `${runCount() - beforeMeasure} run(s)`);
+
 console.log(`landing-baseline: ${passed} checks passed in ${Math.round((Date.now() - started) / 1000)}s`);
 try { fs.rmSync(WORK, {recursive: true, force: true}); } catch { /* windows may still hold a lock */ }

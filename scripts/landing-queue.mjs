@@ -17,7 +17,7 @@
 //   node scripts/landing-queue.mjs reconcile --id <n> --evidence <text> [--force]
 //   node scripts/landing-queue.mjs classify --from <rev> --to <rev> [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs baseline [--command "<cmd>"] [--commit <rev>] [--record <log>] [--exit-code <n>]
-//                                          [--source <label>] [--repo <dir>] [--json]
+//                                          [--measure] [--source <label>] [--repo <dir>] [--json]
 //   node scripts/landing-queue.mjs history [--limit <n>] [--json] [--repo <dir>]
 //
 // Exit codes: 0 the command's own success; 75 refused (named, terminal - a refusal is never retried
@@ -42,7 +42,7 @@ const say = line => console.log(`landing-queue: ${line}`);
 
 function parseArgs(argv) {
   const options = {json: false};
-  const flags = new Set(['--json', '--no-wait', '--dry-run', '--no-push', '--force']);
+  const flags = new Set(['--json', '--no-wait', '--dry-run', '--no-push', '--force', '--measure']);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new QueueError(`unexpected argument '${arg}'`, 75, 'usage');
@@ -608,7 +608,7 @@ function judgedRun(captured, what) {
 // So the baseline is main's own commit, detached, in the canonical checkout, under the lease; the tree
 // is put back on `main` before anything else happens. A record whose `source` is `pristine` (the older
 // worktree measurement) is never reused: it is not the same environment.
-async function ensureBaseline({id, canonical, upstream, command, dir, db, say}) {
+async function ensureBaseline({id, canonical, upstream, command, dir, db, say, by = 'queue'}) {
   const digest = treeDigest(canonical, upstream).retest;
   const cached = baselineOf(db, {digest, command});
   if (cached && cached.source !== 'pristine') {
@@ -640,7 +640,7 @@ async function ensureBaseline({id, canonical, upstream, command, dir, db, say}) 
       75, 'baseline_unavailable');
   }
   const record = baselineRecord({run, command: checkCommandKey(command), commit: upstream, digest, host: hostName(), source: 'canonical'});
-  recordBaseline(db, {digest, command, commit: upstream, record, by: 'queue'});
+  recordBaseline(db, {digest, command, commit: upstream, record, by});
   logRow(db, 0, 'baseline', `measured on ${upstream.slice(0, 12)} in ${canonical} (check inputs ${digest.slice(0, 12)}) with '${checkCommandKey(command)}': ${record.names.length} known failure(s), exit ${captured.code}`);
   say(`#${id} baseline measured on ${upstream.slice(0, 12)}: ${record.names.length} known failure(s)${record.names.length ? ` (${record.names.slice(0, 4).join(', ')}${record.names.length > 4 ? ', ...' : ''})` : ''}; recorded for check inputs ${digest.slice(0, 12)}`);
   return record;
@@ -1057,7 +1057,7 @@ function commandReconcile(options) {
 // and recording a measurement that was made outside the queue (a session that ran the checks on a
 // pristine checkout itself). The record is keyed by the check command, this machine and main's retest
 // digest, so a log recorded for a different tree is refused rather than trusted.
-function commandBaseline(options) {
+async function commandBaseline(options) {
   const {repo, canonical, dir, db} = open(options);
   const command = options.command || 'bash scripts/fast.sh';
   const commit = resolveCommit(repo, options.commit || 'origin/main');
@@ -1079,8 +1079,36 @@ function commandBaseline(options) {
     return emit({recorded: record, digest, commit, command: checkCommandKey(command)}, options, line);
   }
   const record = baselineOf(db, {digest, command});
+  if (!record && options.measure) {
+    // Measured on demand, by the same code a landing uses: one run of the check command on main's own
+    // commit in the CANONICAL checkout, under the queue's own rule that nobody else is moving it. This
+    // is the question every improvised judge asked on 11/10 - "what does main already fail here?" - and
+    // until now this command could only read a record, so a session that needed the answer had to land
+    // once (or improvise its own judge) to get it.
+    const holder = holderOf(db, dir);
+    if (holder) {
+      throw new QueueError(`baseline --measure: #${holder.id} ${holder.owner} holds the queue on ${holder.branch}, so the canonical checkout is not ours to move. Nothing was measured; retry when it is free.`,
+        75, 'baseline_busy');
+    }
+    const dirt = canonicalDirt(canonical);
+    if (dirt.dirty) {
+      throw new QueueError(`baseline --measure: ${canonical} is DIRTY (${dirt.count} file(s): ${describeDirt(dirt)}), and a baseline measured over somebody's uncommitted work is not main's. Nothing was measured.`,
+        75, 'baseline_dirty_canonical');
+    }
+    // `--json` promises that stdout is the object and nothing else, so the measurement's own narration
+    // is silenced there and carried in the record instead.
+    const measured = await ensureBaseline({id: 0, canonical, upstream: commit, command, dir, db, by: resolveOwner(options).id,
+      say: options.json ? () => {} : line => say(line.replace(/^#0 /, ''))});
+    const line = `${commit.slice(0, 12)} with \`${checkCommandKey(command)}\`: ${(measured.names || []).length} known failure(s) MEASURED now`
+      + `${(measured.names || []).length ? ` (${(measured.names || []).slice(0, 6).join(', ')}${measured.names.length > 6 ? ', ...' : ''})` : ''}`
+      + ` (check inputs ${digest.slice(0, 12)}, source ${measured.source || 'canonical'})`;
+    if (options.json) return emit({commit, digest, command: checkCommandKey(command), baseline: measured}, options, line);
+    say(line);
+    for (const name of measured.names || []) say(`  known: ${name}${(measured.environment_names || []).includes(name) ? '  [environment]' : ''}`);
+    return measured;
+  }
   if (options.json) return emit({commit, digest, command: checkCommandKey(command), baseline: record}, options);
-  if (!record) { say(`no baseline recorded for ${commit.slice(0, 12)} with \`${checkCommandKey(command)}\` (check inputs ${digest.slice(0, 12)}): the next landing that needs one will measure a pristine tree once`); return null; }
+  if (!record) { say(`no baseline recorded for ${commit.slice(0, 12)} with \`${checkCommandKey(command)}\` (check inputs ${digest.slice(0, 12)}): the next landing that needs one will measure a pristine tree once. Pass --measure to measure it now, in the canonical checkout`); return null; }
   say(`${commit.slice(0, 12)} with \`${checkCommandKey(command)}\`: ${record.names.length} known failure(s) recorded by ${record.recorded_by} (${record.source}, check inputs ${digest.slice(0, 12)}, measured on ${String(record.commit || '').slice(0, 12)})`);
   for (const name of record.names) say(`  known: ${name}${(record.environment_names || []).includes(name) ? '  [environment]' : ''}`);
   return record;
