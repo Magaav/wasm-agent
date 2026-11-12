@@ -208,7 +208,21 @@ lua_run() { # <script> <home>
     for name in "${overrides[@]}"; do printf '%s\n' "$name"; done
     printf 'WA_FAST_ROW_ENV=%s\n' "$env_file"
   } > "$env_file" 2>/dev/null || true
-  env "${overrides[@]}" \
+  # A row is hermetic, and that has to be enforced here rather than trusted in each test: this node's
+  # ambient environment exports the operator's real vault (`WASM_AGENT_VAULT_URL=http://192.168.1.27:8765`,
+  # `WASM_AGENT_VAULT_DIR=...`), and a row that merely *pins the provider* reaches it. The chain was
+  # measured 11/12 on this machine with host.http wrapped: `agent.lua` -> `provider.pin`
+  # (`lua/core/provider.lua`) -> `vault.base` -> `vault.status` (`lua/core/vault.lua`, a GET
+  # `<url>/status`) - a real HTTP request inside a row whose own header promises "no node, no network".
+  # Three rows failed because of it and went green with these variables removed and nothing else
+  # changed: test-vault-routing (1 of 6), test-context-usage (line 23: "no actual summary, and no
+  # attempted request, at threshold equality") and test-done-gate (20 of 58). A row that needs a vault
+  # sets its own (`scripts/test-vault-routing.lua` points WASM_AGENT_VAULT_URL at a stub it starts).
+  # The whole credential lane goes, not just the URL: the per-route override and the local store are two
+  # more ways for a test to read the machine it happens to run on.
+  env -u WASM_AGENT_VAULT_URL -u WASM_AGENT_VAULT_DIR -u WASM_AGENT_VAULT_KEYSTORE \
+    -u WASM_AGENT_VAULT_PASSPHRASE -u WASM_AGENT_VAULT_OPERATOR_URL -u WASM_AGENT_OPENCODE_GO_VAULT_URL \
+    "${overrides[@]}" \
     WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
     WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
     WA_FAST_ROW_ENV="$env_file" \

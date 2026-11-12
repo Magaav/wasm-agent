@@ -410,6 +410,12 @@ end
 -- dispatch is `dispatch`, and the arguments are validated against the schema the node holds now.
 local function component_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
  local session=host.uuid()
+ -- The lookup the guest's host globals are answered through (`describeTool(name)` for a known name and
+ -- `capabilities()`), built here for THIS path: the native loop builds its own inside `native_run`, so
+ -- the component path used to reach `host_global` with a nil one and fail with "attempt to index a nil
+ -- value (local 'lookup')" the first time a script asked `describeTool("showCall")` or `capabilities()`
+ -- (measured 11/12 by scripts/test-codemode-component.lua, which then fell back to the native path).
+ local lookup=tool_lookup(catalog,execution,dispatch)
  -- The catalogue as typed records: the node's own pre-flight status per tool is pinned here (the
  -- component decides the fence from it), and the schema hash is kept for the per-call recheck.
  local entries,hashes,selected={},{},{}
