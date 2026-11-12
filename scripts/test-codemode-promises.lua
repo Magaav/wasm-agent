@@ -102,10 +102,11 @@ local property=run('const r=tools.read({path:'..a('a.txt')..'}); return r.conten
 local property_message=tostring(property.error or '')
 check(not property.ok and property_message:find('tools.read(',1,true)~=nil and property_message:find('content',1,true)~=nil,'the same is true for a tool call: '..property_message:sub(1,200))
 
--- 5. The shape is documented where the model asks for it: describeTool.
-local help,help_value=run('return describeTool("searchTools");')
-check(help.ok and type(help_value)=='table','describeTool("searchTools") answers instead of unknown_tool: '..tostring(help.value):sub(1,160))
-check(tostring(help_value.description):find('plain ARRAY',1,true)~=nil,'the searchTools help says the answer is a plain array: '..tostring(help_value.description):sub(1,200))
+-- 5. The shapes are documented where the model asks: describeTool.
+local help,help_value=run('return [describeTool("searchTools"),describeTool("results")];')
+check(help.ok and type(help_value)=='table','describeTool("searchTools")/("results") answer instead of unknown_tool: '..tostring(help.value):sub(1,160))
+check(tostring(help_value[1].description):find('plain ARRAY',1,true)~=nil,'the searchTools help says the answer is a plain array: '..tostring(help_value[1].description):sub(1,200))
+check(tostring(help_value[2].description):find('results.get',1,true)~=nil,'the results help documents the reuse door: '..tostring(help_value[2].description):sub(1,200))
 
 -- 6. Concurrency: both calls are handed to the loop in one round, and both results come back.
 start_calls={}

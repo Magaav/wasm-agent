@@ -485,12 +485,13 @@ mod tests {
         assert_eq!(tools[0]["name"], "read");
         assert_eq!(tools[0]["jsName"], "read");
         let globals: Value = serde_json::from_str(&globals_json()).unwrap();
-        assert_eq!(globals.as_array().unwrap().len(), 5, "the native loop's five globals, name for name");
+        assert_eq!(globals.as_array().unwrap().len(), 6, "the native loop's six globals, name for name");
         assert_eq!(globals[0], json!({"name": "searchTools", "spread": true}));
-        assert_eq!(globals[1], json!({"name": "describeTool", "spread": false}));
-        assert_eq!(globals[2], json!({"name": "showCall", "spread": false}));
-        assert_eq!(globals[3], json!({"name": "capabilities", "spread": false}));
-        assert_eq!(globals[4], json!({"name": "describe", "spread": false}));
+        assert_eq!(globals[1], json!({"name": "results", "spread": true}), "the retained results and the session journal");
+        assert_eq!(globals[2], json!({"name": "describeTool", "spread": false}));
+        assert_eq!(globals[3], json!({"name": "showCall", "spread": false}));
+        assert_eq!(globals[4], json!({"name": "capabilities", "spread": false}));
+        assert_eq!(globals[5], json!({"name": "describe", "spread": false}));
     }
 
     #[test]
