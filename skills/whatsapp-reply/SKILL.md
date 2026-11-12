@@ -17,19 +17,34 @@ it means it lives on a peer. Before answering that you cannot read or send:
    (the "verified operator route" in docs/WHATSAPP-OPERABILITY.md). Credentials stay on the peer.
 3. Only if no peer holds it, say so - naming the nodes you checked.
 
-One WhatsApp surface, the same nine names on every node (#118, `lua/core/whatsapp.lua`):
+One WhatsApp surface, the same eight names on every node (#118, `lua/core/whatsapp.lua`):
 `mcp_whatsapp_contacts` (a name to a chat, with the candidates when it is ambiguous),
 `mcp_whatsapp_search`, `mcp_whatsapp_read` (a chat JID **or a name**), `mcp_whatsapp_reactions`,
-`mcp_whatsapp_media`, `mcp_whatsapp_download`, `mcp_whatsapp_backfill`, `mcp_whatsapp_send`,
-`mcp_whatsapp_send_status`. There is no `peer_<peer>__whatsapp_*` family any more: a call on a
+`mcp_whatsapp_media`, `mcp_whatsapp_download`, `mcp_whatsapp_backfill`, `mcp_whatsapp_send`. There is no
+`peer_<peer>__whatsapp_*` family any more: a call on a
 node that runs no component is *routed* to the node that holds the account and the answer says
-`served_by` - reads and effects alike, so `send`, `download`, `backfill` and `send_status` work from
+`served_by` - reads and effects alike, so `send`, `download` and `backfill` work from
 any node. The effect happens there, under that node's own `whatsapp.send` policy, and a refusal it
 makes comes back unchanged. Nothing is refused except what routing cannot answer: no node known to
 hold the account, or two of them. Connector tools run only inside code mode: one `codemode` script calls
 `await tools.mcp_whatsapp_read({chat: "Laura"})` (`searchTools("whatsapp")` lists them); `tool_call`
 refuses them. Where a peer has operator configs, `peer_<peer>__whatsapp_operator` is still the
 operator-directed send.
+
+`mcp_whatsapp_send` waits for WhatsApp's own answer and returns it in the same step:
+`{state: "done", id, message_id, served_by}` once the message left, or
+`{state: "failed", id, reason, served_by}` with the reason it did not. It waits `wait_s` seconds (default
+60, at most 300, never past what the script has left), so a phone that is slow to answer is not an
+error: it answers `{state: "pending", id, waited_s, resume: "mcp_whatsapp_send({id:<id>, wait_s:<n>})"}`
+and the same tool resumes the wait with that id, without ever sending a second message. Do not re-send
+to "check": the id is the handle, and the same chat+text+reply is one job anyway.
+
+Several jobs in one call: `{ids: [<id>, …]}` (1..20) waits for all of them and answers one entry per id in
+the order asked - each `done`, `failed` or `pending` - and `until: "any"` returns as soon as one is.
+Several sends stay one at a time (each is an effect), so a script queues them with `wait_s: 0` and
+collects the outcomes with ONE `{ids}` resume. Resuming is a read, not an effect: it waits beside other
+calls instead of queueing behind them.
+
 To send a text the human asked for:
 
 1. Resolve the exact chat id with the reads. Several matches ("Laura" can be a person, a group and a

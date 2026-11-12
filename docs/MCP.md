@@ -131,7 +131,9 @@ names and no namespace hash or peer prefix:
 
 `mcp_whatsapp_contacts`, `mcp_whatsapp_search`, `mcp_whatsapp_read`,
 `mcp_whatsapp_reactions`, `mcp_whatsapp_media`, `mcp_whatsapp_download`,
-`mcp_whatsapp_backfill`, `mcp_whatsapp_send`, `mcp_whatsapp_send_status`.
+`mcp_whatsapp_backfill`, `mcp_whatsapp_send`. The eight are what the model is offered;
+`mcp_whatsapp_send_status` survives only as a hidden compatibility alias of
+`mcp_whatsapp_send({id, wait_s:0})` - callable, in no catalogue and no guidance.
 
 `lua/core/whatsapp.lua` owns them: the schema the model reads and the call that runs live
 in one file, so they cannot drift apart. They are called from code mode like every other
@@ -144,7 +146,7 @@ tool from any node):
 
 | tools | on a node without the component |
 | --- | --- |
-| all nine, reads and effects | asked of the node that holds the account, under the same name, and the answer says `served_by` / `asked_owner`. The effect happens where the worker is and under the owner's own guards (`whatsapp.send`: rate limit, daily cap, audit) - a refusal the owner makes travels back unchanged. `send` is queued on the owner's durable queue, `send_status` asks the owner that allocated the id, and `download` answers a file path ON the owner node, which `served_by` names |
+| all eight, reads and effects | asked of the node that holds the account, under the same name, and the answer says `served_by` / `asked_owner`. The effect happens where the worker is and under the owner's own guards (`whatsapp.send`: rate limit, daily cap, audit) - a refusal the owner makes travels back unchanged. `send` is queued on the owner's durable queue with `wait_s:0` and the wait after it is a loop of short state reads of that job, never one long call; `download` answers a file path ON the owner node, which `served_by` names |
 
 What is still refused - `whatsapp_component_absent`, with the next step in the note - is what
 routing cannot answer: no node known to hold the account, or an ambiguous fleet (two holders

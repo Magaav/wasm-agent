@@ -80,6 +80,15 @@ local flight=run('const r=tools.read({path:'..a('a.txt')..'}); return "body fini
 check(flight.ok and json.decode(flight.value)=='body finished with object','a script may end with a call in flight')
 check(#flight.calls==1 and #flight.unexecuted==0,'a call in flight at the end of the body is admitted, never reported unexecuted: '..json.encode(flight.unexecuted))
 check(flight.attempts[1] and flight.attempts[1].admitted==true,'that call was really dispatched: '..json.encode(flight.attempts[1] or {}):sub(1,200))
+-- `codemode`'s description now promises exactly this: "Calls are always fresh and run even if not
+-- awaited". A READ being admitted is not enough evidence - a write is the case where it matters, so the
+-- file the script never awaited is read back from outside the sandbox after the run returned. Measured
+-- on this tree: calls=1, unexecuted=0, the file holds what the unawaited call wrote.
+local fire_path=root..'/unawaited-effect.txt'
+local fired=run('tools.write({path:'..a('unawaited-effect.txt')..',content:"written without await"}); return "body finished";')
+check(fired.ok and json.decode(fired.value)=='body finished','a script may end with an unawaited write: '..tostring(fired.error))
+check(#fired.calls==1 and #fired.unexecuted==0,'the unawaited call is admitted, never script_finished_before_admission: '..json.encode(fired.unexecuted))
+check(host.read_file(fire_path)=='written without await','the unawaited call RAN and finished before the script returned: the file holds what it wrote')
 
 -- 3. `text`/`store` settle a pending value themselves and keep the script's order.
 local printed=run('const r=tools.read({path:'..a('b.txt')..'}); text("before"); text(r); return null;')

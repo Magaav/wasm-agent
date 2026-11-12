@@ -3,10 +3,12 @@
 --
 -- What it pins:
 --
---   * the family is `mcp_whatsapp_<verb>`, nine exact names, and it is the ONLY WhatsApp surface in
---     every catalogue this node publishes - the tools the model is offered (`tools.catalog`), the tools
---     it exports to a master (`federation.exported`) and the rows `/mcp` shows. A `peer_*` spelling, a
---     namespace hash (`..._47452e4e`) or a bare `whatsapp_*` name appearing again fails here;
+--   * the family is `mcp_whatsapp_<verb>`, eight names the model is offered and one hidden compatibility
+--     alias (`mcp_whatsapp_send_status`, the resume `mcp_whatsapp_send({id, wait_s:0})`), and it is the
+--     ONLY WhatsApp surface in every catalogue this node publishes - the tools the model is offered
+--     (`tools.catalog`), the tools it exports to a master (`federation.exported`) and the rows `/mcp`
+--     shows. A `peer_*` spelling, a namespace hash (`..._47452e4e`) or a bare `whatsapp_*` name appearing
+--     again fails here, and so does the hidden alias reappearing in a catalogue or a `/mcp` row;
 --   * a read on a node that runs no `wa-whatsapp` component is asked of the node that holds the account,
 --     named by the deploy when it said so and found in the fleet when it did not - never hard-coded;
 --   * every verb - the five reads and the four that leave this node - is answered by the node that
@@ -32,11 +34,26 @@ local function ok(value, label)
 end
 
 -- ---- the family, and nothing else ----------------------------------------------------------------
-local VERBS = { "contacts", "search", "read", "reactions", "media", "download", "backfill", "send", "send_status" }
-ok(#whatsapp.TOOLS == #VERBS, "nine questions, one surface")
+-- Offered to the model (operator decision, 11/11: one send that answers its own outcome).
+local VERBS = { "contacts", "search", "read", "reactions", "media", "download", "backfill", "send" }
+-- Callable but never offered: the resume form of `send`, kept for a script written before it existed.
+local HIDDEN = { "send_status" }
+ok(#whatsapp.TOOLS == #VERBS + #HIDDEN, "eight questions offered and one hidden alias, one surface")
 for _, verb in ipairs(VERBS) do
   ok(whatsapp.name(verb) == "mcp_whatsapp_" .. verb, "the exact name of " .. verb)
   ok(whatsapp.tool("mcp_whatsapp_" .. verb) ~= nil, "the exact name is the one the facade answers")
+  ok(whatsapp.hidden("mcp_whatsapp_" .. verb) == false, verb .. " is offered, not hidden")
+end
+for _, verb in ipairs(HIDDEN) do
+  ok(whatsapp.name(verb) == "mcp_whatsapp_" .. verb, "the exact name of " .. verb)
+  ok(whatsapp.tool("mcp_whatsapp_" .. verb) ~= nil, verb .. " is still callable, so an old script keeps working")
+  ok(whatsapp.hidden("mcp_whatsapp_" .. verb) == true, verb .. " is the hidden alias")
+end
+local offered_names = {}
+for _, schema in ipairs(whatsapp.schemas()) do offered_names[schema["function"].name] = true end
+for _, verb in ipairs(VERBS) do ok(offered_names["mcp_whatsapp_" .. verb] == true, verb .. " is offered") end
+for _, verb in ipairs(HIDDEN) do
+  ok(offered_names["mcp_whatsapp_" .. verb] == nil, verb .. " is in no catalogue the model reads")
 end
 ok(whatsapp.tool("mcp_whatsapp_read_snapshot_deadbeef") == nil, "a hashed name is not this surface")
 ok(whatsapp.tool("peer_openclaw__whatsapp_read") == nil, "a peer-prefixed name is not this surface")
@@ -142,20 +159,29 @@ local EFFECTS = {
 for _, case in ipairs(EFFECTS) do
   local verb = case.verb
   stub(whatsapp.by_verb[verb].capability, absent)
-  local asked_effect = nil
+  local asked = {}
   local answered = whatsapp.call("mcp_whatsapp_" .. verb, case.args, {
     remote_call = function(node, name, args)
-      asked_effect = { node = node, name = name, args = args }
-      return { ok = true, id = 7, path = "/var/lib/wa/whatsapp-media/x.bin" }
+      asked[#asked + 1] = { node = node, name = name, args = args }
+      return { ok = true, id = 7, state = "done", message_id = "MSG-7",
+        path = "/var/lib/wa/whatsapp-media/x.bin" }
     end,
   })
-  ok(asked_effect ~= nil and asked_effect.node == "openclaw",
+  ok(#asked >= 1 and asked[1].node == "openclaw",
     verb .. " is asked of the node that holds the account")
-  ok(asked_effect.name == "mcp_whatsapp_" .. verb, verb .. " travels under the same name, one answer shape")
-  ok(asked_effect.args[case.key] == case.value, verb .. " travels with the arguments the caller gave")
+  ok(asked[1].name == "mcp_whatsapp_" .. verb, verb .. " travels under the same name, one answer shape")
+  ok(asked[1].args[case.key] == case.value, verb .. " travels with the arguments the caller gave")
   ok(answered.ok == true and answered.served_by == "openclaw" and answered.asked_owner == "openclaw",
     verb .. " is answered by the owner and says which node answered: " .. json.encode(answered))
+  -- A send that answers its own outcome adds ONE wait, and that wait is state reads of the same job:
+  -- every further hop asks the owner what it knows, never to send the message a second time.
+  for index = 2, #asked do
+    ok(asked[index].name == "mcp_whatsapp_send_status" and asked[index].args.id == 7,
+      verb .. " waits on the account node by reading the job state, hop " .. tostring(index))
+    ok(asked[index].args.wait_s == nil, "a state read carries no wait of its own")
+  end
 end
+ok(#EFFECTS == 4, "the four effects of the surface are covered")
 
 -- A decrypted file is written on the owner node: the path that comes back is that node's, and
 -- `served_by` is how the caller learns where it is - nobody is told the file is local.
@@ -182,8 +208,12 @@ local send_unreachable = whatsapp.call("mcp_whatsapp_send", { chat = "5519994939
 })
 ok(send_unreachable.error == "whatsapp_owner_unreachable" and send_unreachable.owner == "openclaw",
   "a send whose owner is unreachable is a named refusal")
-ok(send_unreachable.effect == "none" and send_unreachable.id == nil and send_unreachable.queue == nil,
+ok(send_unreachable.id == nil and send_unreachable.queue == nil,
   "and it queues nothing here (#99)")
+-- The effect is `unknown`, not `none`: the owner may have queued the message before the answer was
+-- lost, and saying "nothing happened" would be a claim this node cannot observe (11/11).
+ok(send_unreachable.effect == "unknown" and tostring(send_unreachable.note):find("same job", 1, true) ~= nil,
+  "a lost answer is an unknown effect with the retry that is safe: " .. json.encode(send_unreachable))
 
 -- Nobody named, nobody found: the refusal says how to fix it instead of queueing.
 env_with("")
@@ -262,7 +292,7 @@ ok(holds("disabled") == false, "a stopped component does not")
 local surface = nil
 for _, entry in ipairs(federation.connectors()) do if entry.whatsapp_account ~= nil then surface = entry end end
 ok(surface ~= nil, "the /mcp view reports the WhatsApp surface as a row")
-ok(surface.tool_count == #VERBS, "with the nine tools it gives the model")
+ok(surface.tool_count == #VERBS, "with the eight tools it gives the model, and not the hidden alias")
 ok(holds("running") == true and whatsapp.holds_account() ~= nil, "the check is read from the services registry")
 
 host.getenv = real_getenv

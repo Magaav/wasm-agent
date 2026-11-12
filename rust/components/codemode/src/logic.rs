@@ -37,8 +37,9 @@ pub const FORBIDDEN: &[&str] = &[
     "wave_autoflush",
     // a deployment, not a script step
     "node_update",
-    // outbound messages are operator-gated effects with a durable message id
-    "whatsapp_send",
+    // `mcp_whatsapp_send` is deliberately absent: it is callable inside a script, its send form is an
+    // effect the dispatcher runs one at a time and its resume form ({id}/{ids}) only waits on a job and
+    // is a read (`lua/core/whatsapp.lua`, `M.effect`).
     "email_send",
 ];
 
@@ -229,7 +230,6 @@ pub const DIRECT_ONLY: &[(&str, &str)] = &[
     ("session_fixture", "it exports this session as a fixture while the script is still writing that session"),
     ("wave_autoflush", "it installs a durable wave-end obligation for the coordinator; installation is a direct receipted action"),
     ("node_update", "it updates and restarts a node: a deployment, not a script step"),
-    ("whatsapp_send", "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call"),
     ("email_send", "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call"),
 ];
 

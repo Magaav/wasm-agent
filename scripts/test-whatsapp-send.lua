@@ -3,8 +3,12 @@
 --
 -- What it pins (`docs/HOST.md`, `docs/SERVICE-COMPONENTS.md`):
 --
---   * the two tools exist as master tools, with the shape the docs promise: `chat`/`text` required,
---     `reply_to`/`mentions` optional, and `mcp_whatsapp_send_status` read-only (an id argument only);
+--   * ONE tool answers its own outcome (operator decision, 11/11): `mcp_whatsapp_send` takes
+--     chat/text (with `reply_to`/`mentions` optional) and waits for the job's terminal state - `done`
+--     with the message id, `failed` with the reason, or `pending` with the id and the resume - and the
+--     same tool resumes with `{id}` (or `{ids:[...]}`, 1..20) without ever sending again;
+--   * `mcp_whatsapp_send_status` is that resume with `wait_s:0`: callable, read-only, master-only, and
+--     in NO catalogue the model is offered;
 --   * both have a discovery cue (`scripts/test-tool-cues.lua` also checks the registry-wide rule);
 --   * a guest may not send: the tool is master-only;
 --   * a refusal is a word, not a silent success - a bare phone number is `whatsapp_send_bad_chat`, a
@@ -73,10 +77,14 @@ ok((manifest.capabilities or {}).ocr == true, "the OCR grant the vision call is 
 -- ---- the tool shape -----------------------------------------------------------------------------
 local schemas = {}
 for _, item in ipairs(tools.catalog("master")) do schemas[item["function"].name] = item["function"] end
-for _, name in ipairs({ "mcp_whatsapp_send", "mcp_whatsapp_send_status" }) do
-  ok(schemas[name] ~= nil, name .. " is a catalogued master tool")
-  ok(tools.snippet(name) ~= nil, name .. " has a discovery cue")
-end
+ok(schemas.mcp_whatsapp_send ~= nil, "mcp_whatsapp_send is a catalogued master tool")
+ok(tools.snippet("mcp_whatsapp_send") ~= nil, "the send has a discovery cue")
+-- The hidden compatibility alias: callable, and in no catalogue the model is offered.
+ok(schemas.mcp_whatsapp_send_status == nil, "mcp_whatsapp_send_status is not in the model's catalogue")
+ok(tools.snippet("mcp_whatsapp_send_status") == nil, "and it has no discovery cue")
+local whatsapp_lib = dofile("lua/core/whatsapp.lua")
+ok(whatsapp_lib.hidden("mcp_whatsapp_send_status") == true, "it is the surface's hidden alias")
+ok(whatsapp_lib.tool("mcp_whatsapp_send_status") ~= nil, "and it is still callable, so an old script works")
 local send = schemas.mcp_whatsapp_send
 local params = send.parameters
 ok(params.type == "object", "mcp_whatsapp_send takes an object")
@@ -84,16 +92,25 @@ ok(params.properties.chat ~= nil and params.properties.text ~= nil, "mcp_whatsap
 ok(params.properties.reply_to ~= nil and params.properties.mentions ~= nil, "mcp_whatsapp_send takes reply_to and mentions")
 ok(params.properties.mentions.type == "array" and params.properties.mentions.maxItems == 64, "mentions are a bounded array")
 ok(params.properties.text.maxLength == 65536, "text has the same bound the queue enforces")
-ok(#params.required == 2 and params.required[1] == "chat" and params.required[2] == "text",
-  "chat and text are the required arguments")
+-- One tool, two calls: no shape is "required", and the description says which is which.
+ok(params.required == nil, "neither shape is required: chat+text sends, id/ids resumes")
+ok(params.properties.id ~= nil and params.properties.ids ~= nil, "the resume arguments are in the schema")
+ok(params.properties.ids.minItems == 1 and params.properties.ids.maxItems == 20, "ids is bounded 1..20")
+ok(params.properties["until"] ~= nil and params.properties["until"].enum[1] == "all", "until says all or any")
+ok(params.properties.wait_s.minimum == 0 and params.properties.wait_s.maximum == 300, "wait_s is bounded 0..300")
 ok(send.description:find("exact chat", 1, true) ~= nil, "the description says chat is exact")
-ok(send.description:find("mcp_whatsapp_send_status", 1, true) ~= nil, "the description points at the status read")
-ok(schemas.mcp_whatsapp_send_status.parameters.properties.id ~= nil, "the status tool takes an id")
-ok(#schemas.mcp_whatsapp_send_status.parameters.required == 1, "the id is required for a status read")
+ok(send.description:find('state:"done"', 1, true) ~= nil, "the description names the done answer")
+ok(send.description:find('state:"pending"', 1, true) ~= nil, "and the pending answer with its resume")
+ok(send.description:find("mcp_whatsapp_send_status", 1, true) == nil,
+  "the description never sends the model to a second tool")
 
--- An effect that is not a read, and a read that is: this is what keeps a status poll out of the
--- "did the agent change something" question and keeps a send inside it.
-ok(tools.has_effect("mcp_whatsapp_send") == true, "mcp_whatsapp_send is an effect")
+-- An effect that is not a read, and a read that is: what keeps a wait out of the "did the agent change
+-- something" question, and keeps a send inside it. The args decide, because it is one tool.
+ok(tools.has_effect("mcp_whatsapp_send") == true, "mcp_whatsapp_send with no arguments is the effect")
+ok(tools.has_effect("mcp_whatsapp_send", { chat = "5511999999999@lid", text = "oi" }) == true,
+  "a send is an effect, so it stays serialized under whatsapp.send")
+ok(tools.has_effect("mcp_whatsapp_send", { id = 1 }) == false, "a resume with an id is a read")
+ok(tools.has_effect("mcp_whatsapp_send", { ids = { 1, 2 } }) == false, "a batched resume is a read")
 ok(tools.has_effect("mcp_whatsapp_send_status") == false, "mcp_whatsapp_send_status is a read")
 
 -- The tool is master-only, and a refusal never becomes a quiet nothing.
@@ -121,31 +138,63 @@ else
   local empty = call("mcp_whatsapp_send", { chat = "5511999999999@lid", text = "" })
   ok(empty.error == "whatsapp_send_empty_text", "an empty body is refused")
 
-  -- The real enqueue: one valid request, into this run's private home.
-  local queued = call("mcp_whatsapp_send", { chat = "5511999999999@lid", text = "outbox fixture" })
+  -- The real enqueue: one valid request, into this run's private home. `wait_s:0` is what answers at
+  -- once here - this hermetic home runs no component, so nothing would ever settle the job and a real
+  -- wait would only spend the row's own timeout to learn that.
+  local queued = call("mcp_whatsapp_send", { chat = "5511999999999@lid", text = "outbox fixture", wait_s = 0 })
   if queued.ok ~= true then
     -- No node policy file here (manifest mode), so a refusal would be a store failure: report it
     -- rather than passing silently.
     error("the send was not queued: " .. json.encode(queued))
   end
-  ok(type(queued.id) == "number" and queued.id > 0, "the send answers a job id")
-  ok(queued.state == "queued", "the send answers the job state, not a delivery claim")
-  ok(queued.queue == "whatsapp.outbox", "the queue name is the one the component consumes")
-  ok(queued.fresh_for_ms == 300000, "freshness is the five-minute window the brief fixes")
+  ok(type(queued.id) == "number" and queued.id > 0, "the send answers the job the queue allocated")
+  ok(queued.state == "pending", "with no component here it answers pending, not a delivery claim: " .. json.encode(queued))
+  ok(queued.queue_state == "queued", "and it says the queue holds the job as queued")
+  ok(type(queued.waited_s) == "number", "a pending answer says how long it waited")
+  ok(tostring(queued.resume):find("mcp_whatsapp_send({id:" .. tostring(queued.id), 1, true) ~= nil,
+    "and how to resume: " .. tostring(queued.resume))
+  ok(queued.message_id == nil, "pending claims no message id")
+
+  -- The producer's own answer, read straight from the capability: the queue name and the freshness
+  -- window are facts about the queue, not about the wait.
+  local producer = json.decode(host.whatsapp_send(json.encode({ chat = "5511999999999@lid", text = "producer fixture" })))
+  ok(producer.queue == "whatsapp.outbox", "the queue name is the one the component consumes")
+  ok(producer.fresh_for_ms == 300000, "freshness is the five-minute window the brief fixes")
 
   -- The same request is the same job: no double send from a repeated tool call.
-  local again = call("mcp_whatsapp_send", { chat = "5511999999999@lid", text = "outbox fixture" })
-  ok(again.id == queued.id and again.deduped == true, "the same chat+text+reply_to is one job")
+  local again = call("mcp_whatsapp_send", { chat = "5511999999999@lid", text = "outbox fixture", wait_s = 0 })
+  ok(again.id == queued.id and again.state == "pending", "the same chat+text+reply_to is one job")
 
-  -- The status read answers the job's state and never the text.
+  -- The status read (the hidden alias, = resume with wait_s:0) answers the job's state and never the text.
   local status = call("mcp_whatsapp_send_status", { id = queued.id })
-  ok(status.ok == true and status.id == queued.id, "the status read answers the job")
-  ok(status.state == "queued" or status.state == "leased" or status.state == "done",
+  ok(status.ok == true and status.id == queued.id and status.state == "pending",
+    "the status read answers the job: " .. json.encode(status))
+  ok(status.queue_state == "queued" or status.queue_state == "leased" or status.queue_state == "done",
     "the state is one of the words the docs promise: " .. json.encode(status))
   ok(json.encode(status):find("outbox fixture", 1, true) == nil, "the status read never returns the message text")
 
+  -- The pattern the operator asked for, against the REAL queue: three sends stay serialized (effects),
+  -- each answers at once with wait_s:0, and ONE batched resume collects the three outcomes in the order
+  -- asked - and queues nothing again.
+  local batch_ids = {}
+  for index, text in ipairs({ "batch one", "batch two", "batch three" }) do
+    local answer = call("mcp_whatsapp_send", { chat = "5511999999999@lid", text = text, wait_s = 0 })
+    ok(answer.state == "pending" and type(answer.id) == "number", text .. " is queued and answered at once")
+    batch_ids[index] = answer.id
+  end
+  ok(batch_ids[1] ~= batch_ids[2] and batch_ids[2] ~= batch_ids[3], "three different messages are three jobs")
+  local batched = call("mcp_whatsapp_send", { ids = batch_ids, wait_s = 0 })
+  ok(type(batched.results) == "table" and #batched.results == 3,
+    "one batched resume answers three outcomes: " .. json.encode(batched))
+  for index, id in ipairs(batch_ids) do
+    ok(batched.results[index].id == id, "entry " .. index .. " is the id asked for, in the order asked")
+    ok(batched.results[index].state == "pending", "and it carries that job's state")
+  end
+  ok(tostring(batched.resume):find("ids", 1, true) ~= nil, "the rest can be resumed in one call again")
+
   local unknown = call("mcp_whatsapp_send_status", { id = 999999999 })
-  ok(unknown.error == "whatsapp_send_unknown_id", "an id this node never allocated is refused")
+  ok(unknown.state == "failed" and unknown.error == "whatsapp_send_unknown_id",
+    "an id this node never allocated is a failed answer, not a guess: " .. json.encode(unknown))
 end
 
 print("whatsapp send ok (" .. checks .. " checks, " .. skipped .. " skipped)")

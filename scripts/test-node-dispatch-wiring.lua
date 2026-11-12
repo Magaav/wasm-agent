@@ -89,11 +89,19 @@ local function audit(text, toolNames)
   return violations, names
 end
 
--- The tools the fallthrough really has, from the catalogue itself (not from a list in this file).
+-- The tools the fallthrough really has, from the catalogue itself (not from a list in this file), plus
+-- the one shape a catalogue cannot show: a HIDDEN tool of a surface - callable, dispatched by the same
+-- library, and in no catalogue because a model is never offered it (`mcp_whatsapp_send_status` is the
+-- resume form of `mcp_whatsapp_send`, `lua/core/whatsapp.lua`). Without this the rule would call a
+-- reachable tool unreachable, which is the opposite of what it exists to catch.
 local toolNames = {}
 for _, entry in ipairs(tools.catalog('master')) do
   local name = type(entry) == 'table' and entry['function'] and entry['function'].name
   if type(name) == 'string' then toolNames[name] = true end
+end
+local whatsapp_lib = dofile('lua/core/whatsapp.lua')
+for _, tool in ipairs(whatsapp_lib.TOOLS) do
+  if tool.hidden then toolNames[tool.name] = true end
 end
 ok(next(toolNames) ~= nil, 'the tool catalogue is readable, so "no branch" can be checked against it')
 

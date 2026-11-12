@@ -36,7 +36,7 @@ end
 
 -- 1. The direct-call list is exact and every entry says why. A silent addition fails here.
 local expected={'codemode','email_send','integrate','node_update','resume_session','session_debug',
- 'session_fixture','session_worktree','subagent','tool_call','tool_search','wave_autoflush','whatsapp_send'}
+ 'session_fixture','session_worktree','subagent','tool_call','tool_search','wave_autoflush'}
 local actual={};for name in pairs(codemode.DIRECT_ONLY or {})do actual[#actual+1]=name end;table.sort(actual)
 check(table.concat(actual,',')==table.concat(expected,','),
  'direct-call list is exactly the reviewed set, got: '..table.concat(actual,','))

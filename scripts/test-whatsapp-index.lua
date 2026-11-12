@@ -65,20 +65,34 @@ ok(component.capabilities["whatsapp.send"] ~= nil, "the send rule is untouched")
 -- no peer prefix. The names are computed here rather than copied, so a rename in the facade fails this
 -- row instead of drifting away from it.
 local whatsapp = dofile("lua/core/whatsapp.lua")
-local VERBS = { "contacts", "search", "read", "reactions", "media", "download", "backfill", "send", "send_status" }
+-- Eight verbs are offered to the model and one is hidden: `mcp_whatsapp_send_status` is the resume form
+-- of `mcp_whatsapp_send` ({id, wait_s:0}), callable so an old script keeps working and in no catalogue.
+local VERBS = { "contacts", "search", "read", "reactions", "media", "download", "backfill", "send" }
+local HIDDEN = { "send_status" }
 local schemas = {}
 for _, item in ipairs(tools.catalog("master")) do schemas[item["function"].name] = item["function"] end
-ok(#whatsapp.TOOLS == #VERBS, "the surface offers one tool per verb")
+ok(#whatsapp.TOOLS == #VERBS + #HIDDEN, "the surface offers one tool per verb, plus its hidden alias")
 for _, verb in ipairs(VERBS) do
   local name = "mcp_whatsapp_" .. verb
   ok(whatsapp.name(verb) == name, "the " .. verb .. " tool is named exactly " .. name)
   ok(schemas[name] ~= nil, name .. " is a catalogued master tool")
   ok(tools.snippet(name) ~= nil, name .. " has a discovery cue")
   ok(schemas[name].parameters.type == "object", name .. " takes an object")
-  local read = (verb == "contacts" or verb == "search" or verb == "read" or verb == "reactions"
-    or verb == "media" or verb == "send_status")
+end
+for _, verb in ipairs(HIDDEN) do
+  local name = "mcp_whatsapp_" .. verb
+  ok(whatsapp.name(verb) == name, "the " .. verb .. " tool is named exactly " .. name)
+  ok(whatsapp.tool(name) ~= nil, name .. " is still callable, so an old script keeps working")
+  ok(whatsapp.hidden(name) == true, name .. " is the surface's hidden alias")
+  ok(schemas[name] == nil, name .. " is in no catalogue the model is offered")
+  ok(tools.snippet(name) == nil, name .. " has no discovery cue")
+end
+for _, verb in ipairs(VERBS) do
+  local name = "mcp_whatsapp_" .. verb
+  local read = (verb == "contacts" or verb == "search" or verb == "read" or verb == "reactions" or verb == "media")
   ok(tools.has_effect(name) == not read, name .. (read and " is a read" or " is an effect"))
 end
+ok(tools.has_effect("mcp_whatsapp_send_status") == false, "mcp_whatsapp_send_status is a read")
 -- The spellings this change retired are not in the catalogue at all: no `peer_*` WhatsApp family, no
 -- namespace hash, and no bare `whatsapp_*` tool.
 for name in pairs(schemas) do

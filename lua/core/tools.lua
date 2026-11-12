@@ -799,8 +799,7 @@ local CUES = {
   mcp_whatsapp_media = "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration",
   mcp_whatsapp_download = "Decrypt one WhatsApp message's media on the account node and return its file path there",
   mcp_whatsapp_backfill = "Ask the phone for older WhatsApp messages so search covers the account's past",
-  mcp_whatsapp_send = "Send one WhatsApp message to an exact chat through the durable outbox",
-  mcp_whatsapp_send_status = "Read the state of a queued WhatsApp send, with its message id when sent",
+  mcp_whatsapp_send = "Send one WhatsApp message to an exact chat and answer WhatsApp's message id or its reason",
   email_send = "Send one email through the durable outbox, with the message id readable afterwards",
   email_send_status = "Read the state of a queued email send, with its message id when delivered",
   email_search = "Search every indexed email by text, sender, subject, mailbox or time window",
@@ -1322,7 +1321,7 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not allowed[name] then return { error = "capability_not_in_profile:" .. tostring(name) } end
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
-  if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  if not is_master(role) and (admin_names()[name] or whatsapp_lib.hidden(name)) then return { error = "forbidden_for_role:" .. role } end
   -- A WhatsApp name from an older build (`whatsapp_read`, `peer_openclaw__whatsapp_read`,
   -- `mcp_whatsapp_native_read_newest_47452e4e`) is refused with the name to use instead - and this check
   -- comes BEFORE the code-mode fence, because that fence would gladly tell the model to call the retired
@@ -2112,12 +2111,13 @@ local READ_ONLY = {
   email_search = true, email_read = true, email_media = true,
 }
 
-function M.has_effect(name)
+function M.has_effect(name, args)
   if type(name)~='string' then return true end
   -- The one WhatsApp surface knows its own effects: `mcp_whatsapp_read` is a read on a node whose
   -- account it may ask a peer for, and the generic `mcp_` rule below would look it up in a registry it
-  -- is no longer part of.
-  local whatsapp_effect = whatsapp_lib.effect(name)
+  -- is no longer part of. One of them is two calls: a send queues a message (an effect) and a resume with
+  -- a job id only waits on the queue (a read), so the args decide which - see `lua/core/whatsapp.lua`.
+  local whatsapp_effect = whatsapp_lib.effect(name, args)
   if whatsapp_effect then return whatsapp_effect ~= 'read' end
   if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end
 
@@ -2143,10 +2143,14 @@ function M.start_parallel_bash(calls, memory, role, ctx)
   local pending, count = {}, 0
   for _, call in ipairs(calls) do
     local fn = type(call) == "table" and call["function"] or nil
-    if type(fn) ~= "table" or (fn.name ~= "bash" and M.has_effect(fn.name)) then return nil end
+    -- The args decide an effect for one tool (`mcp_whatsapp_send` resumes with a job id and only
+    -- waits), so the batch gate reads them before it asks: a resume may ride with a batch of reads.
+    local args_ok, call_args = pcall(json.decode, type(fn) == "table" and fn.arguments or "")
+    if not args_ok or type(call_args) ~= "table" then call_args = nil end
+    if type(fn) ~= "table" or (fn.name ~= "bash" and M.has_effect(fn.name, call_args)) then return nil end
     if fn.name == "bash" and type(call.id) == "string" and call.id ~= "" then
-      local ok, args = pcall(json.decode, fn.arguments or "")
-      if ok and type(args) == "table" and type(args.command) == "string" and args.command ~= "" then
+      local args = call_args
+      if args and type(args.command) == "string" and args.command ~= "" then
         pending[#pending + 1] = { id = call.id, args = args }
         count = count + 1
       end

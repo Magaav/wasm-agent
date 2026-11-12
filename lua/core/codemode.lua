@@ -46,7 +46,11 @@ local DIRECT_ONLY={
  session_fixture='it exports this session as a fixture while the script is still writing that session',
  wave_autoflush='it installs a durable wave-end obligation for the coordinator; installation is a direct receipted action',
  node_update='it updates and restarts a node: a deployment, not a script step',
- whatsapp_send='an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call',
+ -- `mcp_whatsapp_send` is NOT here (11/12): it is one callable tool with two shapes, and both belong
+ -- inside a script - the send form is an effect the dispatcher runs one at a time (operator decision,
+ -- 11/11: several sends stay serialized), and the resume form waits on a job and is classified a read
+ -- (`lua/core/whatsapp.lua`, `M.effect`), so a script can queue three sends with wait_s:0 and collect
+ -- them with ONE `{ids}` resume.
  email_send='an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call',
 }
 local forbidden={}
@@ -664,7 +668,7 @@ end
 -- The router: the run's authority, its scope and its workspace are decided once, then one of the two
 -- loops runs. A component that cannot answer *before the first step* falls back; after that it is a
 -- failure with `effect: unknown`, because the calls it already handed out may have had effects.
-function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
+local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
  if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
  if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
@@ -702,4 +706,23 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  end
  return finish(native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts))
 end
+-- The script's own clock, stamped where the sandbox's own `timeout_ms` is decided, so both ends of a
+-- script agree on when it ends. One nested effect reads it today: a WhatsApp send waits for the answer
+-- only until this deadline minus a margin (`lua/core/whatsapp.lua`, `M.wait_budget`), because the
+-- sandbox refuses an admission after the same instant - a wait that spent it would turn a queued message
+-- into a dead script, the one outcome worse than `pending`. Restored afterwards, so a ctx shared by
+-- later calls carries no stale deadline.
+function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
+  local budget_ms=tonumber(args and args.timeout_ms) or 30000
+  budget_ms=math.max(1,math.min(300000,budget_ms))
+  local previous=type(ctx)=='table' and ctx.codemode_deadline or nil
+  if type(ctx)=='table' then
+    ctx.codemode_deadline=(tonumber(host.now()) or 0)+budget_ms/1000
+  end
+  local ok,answer=pcall(run_script,memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
+  if type(ctx)=='table' then ctx.codemode_deadline=previous end
+  if not ok then error(answer,0) end
+  return answer
+end
+
 return M
