@@ -246,6 +246,33 @@ Chromium, checks password/cancel/single-flight/no-persistence/error and a causal
 Then run `scripts/test-ui.ps1` once after focused UI passes and inspect screenshots.
 No paid provider call, actual account login, live migration or release gate is implied.
 
+### A test fixture is never answered by the operator's vault
+
+The vault wins over `WASM_AGENT_LLM_BASE_URL` and every other provider variable on purpose (see
+"Credential sources" above), so a test process that inherits `WASM_AGENT_VAULT_URL` is routed to the
+operator's real provider no matter what endpoint its fixture named. Measured on a node (11/11,
+speed.log): a fixture set a dead port as its base URL, the child inherited the session's vault URL, and
+the call went to the operator's provider with their credentials - `reasoning text looks like a real
+model` was the only clue.
+
+Three rules, each with the row that enforces it:
+
+- **The runner removes the variables.** `scripts/fast.sh` unsets `WASM_AGENT_VAULT_URL`,
+  `WASM_AGENT_VAULT_DIR`, `WASM_AGENT_VAULT_KEYSTORE` and `WASM_AGENT_VAULT_PASSPHRASE` before any row,
+  cargo test or node check is spawned, and hands the names to each Lua row as `WA_FAST_CLEARED`.
+  `scripts/test-fast-row-environment.lua` fails by name if a row still sees one - the promise is checked
+  from inside the node, not trusted in the runner.
+- **A fixture clears them itself.** `scripts/lib/test-provider.lua` installs a getenv that always answers
+  nil for every vault variable, then the fixture's own values, then the real environment; in JavaScript,
+  `delete ENV.WASM_AGENT_VAULT_URL` (and the sibling names) on the child's environment, as
+  `scripts/test-cli-scripted.mjs` does.
+- **A row reached by hand refuses.** Run inside a node session, a fixture row sees a vault; then
+  `test-provider.lua`'s `refuse_vault` fails it with `fixture_provider_vault_url` naming the variable and
+  the runner, instead of passing quietly on the operator's provider.
+
+`scripts/test-fixture-provider-isolation.lua` proves the precedence itself through the real provider and
+vault modules - the leak with a passthrough getenv, the cure with the fixture getenv, the refusal by name.
+
 ## The vault as a component: `wa vault` and the kernel keystore
 
 The rest of this document is the *provider* vault (`wa-vault`, a separate service behind fixed proxy

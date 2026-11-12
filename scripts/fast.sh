@@ -67,6 +67,22 @@ if [ -z "$jobs" ]; then
   [ "$jobs" -gt "$cap" ] 2>/dev/null && jobs=$cap
 fi
 . "$ROOT/scripts/lib/fast-environment.sh"
+# ---- the environment a row must never inherit --------------------------------------------------------
+# Measured, speed.log: a fixture set WASM_AGENT_LLM_BASE_URL to a dead port and was answered by the
+# operator's REAL provider, because the child inherited WASM_AGENT_VAULT_URL from the session and
+# `provider.providers()` prefers the vault's route over any base-URL variable on purpose (docs/VAULT.md).
+# A test made a model call with the operator's credentials and nothing said so.
+#
+# So this run starts by removing every variable that can point a process at a vault, before any row, any
+# cargo test and any node check is spawned. The names travel to each Lua row as `WA_FAST_CLEARED`, and
+# `scripts/test-fast-row-environment.lua` fails by name if a row still sees one - the runner's promise,
+# checked from inside the node instead of trusted here. `scripts/lib/test-provider.lua` is the other
+# half for a fixture reached by hand.
+WA_FAST_CLEARED_VARS="WASM_AGENT_VAULT_URL WASM_AGENT_VAULT_DIR WASM_AGENT_VAULT_KEYSTORE WASM_AGENT_VAULT_PASSPHRASE"
+for name in $WA_FAST_CLEARED_VARS; do unset "$name"; done
+WA_FAST_CLEARED=$(printf '%s' "$WA_FAST_CLEARED_VARS" | tr ' ' ',')
+export WA_FAST_CLEARED
+
 # The parallel rows run in `bash -c` workers, so the classifier they use has to travel with them.
 export WA_FAST_ENVIRONMENT_SIGNATURES
 export -f wa_environment_reason wa_environment_kind last_line_of 2>/dev/null || true
@@ -312,6 +328,7 @@ lua_run() { # <script> <home>
     printf 'WASM_AGENT_MANAGED=0\n'
     printf 'WA_SCRIPT=%s\n' "$1"
     for name in "${overrides[@]}"; do printf '%s\n' "$name"; done
+    printf 'WA_FAST_CLEARED=%s\n' "$WA_FAST_CLEARED"
     printf 'WA_FAST_ROW_ENV=%s\n' "$env_file"
   } > "$env_file" 2>/dev/null || true
   # A row is hermetic, and that has to be enforced here rather than trusted in each test: this node's
@@ -331,7 +348,7 @@ lua_run() { # <script> <home>
     "${overrides[@]}" \
     WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
     WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
-    WA_FAST_ROW_ENV="$env_file" \
+    WA_FAST_ROW_ENV="$env_file" WA_FAST_CLEARED="$WA_FAST_CLEARED" \
     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$1" \
     timeout 120 "$FAST_BIN" --db "$2/t.db"
 }
