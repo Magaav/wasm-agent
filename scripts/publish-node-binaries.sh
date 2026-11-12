@@ -490,6 +490,18 @@ say "bundle: $OUT"
 say "release tag: $TAG (source_commit $COMMIT)"
 say "pins: $OUT/node-$SHORT.manifest"
 assets="$(asset_list) node-$SHORT.manifest"
+# SHA256SUMS for the node release, built from the bytes about to be uploaded: the manifest is the pin a
+# deploy verifies (source_commit + sha256/size per triple), and this is the same set in the flat form every
+# other release of this project publishes, so a mirror, an audit or a human with `sha256sum -c` needs no
+# knowledge of the manifest's shape. It lies beside the manifest, never instead of it.
+{
+  for asset in $assets; do
+    [ -f "$OUT/$asset" ] || fail "binary_missing: $OUT/$asset" 2
+    ( cd "$OUT" && sha256sum "$asset" ) || fail 'sha256_tool_missing: no sha256sum or shasum' 7
+  done
+} > "$OUT/.SHA256SUMS.$$" && mv -f "$OUT/.SHA256SUMS.$$" "$OUT/SHA256SUMS" || fail "bundle_unwritable: $OUT/SHA256SUMS" 2
+assets="$assets SHA256SUMS"
+say "checksums $OUT/SHA256SUMS ($(wc -l < "$OUT/SHA256SUMS" | tr -d '[:space:]') asset(s))"
 # gh is a native process: a /c/... path is not one it can open (AGENTS.md's oldest trap). Converted here,
 # in the line a human pastes, so the printed command works from this shell.
 asset_paths=""

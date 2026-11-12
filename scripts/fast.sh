@@ -406,6 +406,10 @@ if command -v node >/dev/null 2>&1; then
   # verdict), and a recorded baseline is reused instead of a pristine run when the tree's check inputs
   # are unchanged.
   check landing-baseline node scripts/test-landing-baseline.mjs
+  # The front door (scripts/install.sh): the platform matrix, which channel each OS gets, the exact
+  # arguments the core is handed, the installer pin, and install -> re-run -> update -> rollback against
+  # file: fixtures. No network, no systemd, no built binary - seconds.
+  check install-front-door bash scripts/test-install.sh
   # The cutover exporter (docs/WHATSAPP-CUTOVER.md): a synthetic whatsmeow store in, the wacore
   # device record out, plus the guard rails around a live state directory. Seconds, no phone.
   check whatsapp-adopt node --test scripts/test-whatsapp-adopt.mjs

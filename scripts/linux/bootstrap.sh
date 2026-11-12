@@ -37,13 +37,15 @@
 #   --no-service            do not install or touch the systemd unit (tests, containers)
 #   --adopt                 take over an install this script did not make (it is backed up first)
 #   --force                 update even while the node reports a running turn
+#   --rollback               put back the binary pair the last install replaced (from <prefix>/.prev;
+#                           no network, no index: rolling back must work when an update went wrong)
 set -euo pipefail
 
 REPO="Magaav/wasm-agent"
 DEFAULT_INDEX="https://raw.githubusercontent.com/$REPO/main/releases/index-linux.json"
 index="${WA_LINUX_RELEASE_INDEX_URL:-$DEFAULT_INDEX}"
 prefix="$HOME/.local/bin"; port=8799; cport=8800
-rendezvous="https://rendezvous.colmeio.com"; masters=; check=0; service=1; adopt=0; force=0
+rendezvous="https://rendezvous.colmeio.com"; masters=; check=0; service=1; adopt=0; force=0; rollback=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check) check=1; shift ;;
@@ -56,6 +58,7 @@ while [ "$#" -gt 0 ]; do
     --no-service) service=0; shift ;;
     --adopt) adopt=1; shift ;;
     --force) force=1; shift ;;
+    --rollback) rollback=1; shift ;;
     -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "bootstrap: unknown_option: $1" >&2; exit 2 ;;
   esac
@@ -64,6 +67,47 @@ case "$port$cport" in *[!0-9]*) echo 'bootstrap: port_invalid' >&2; exit 2 ;; es
 
 say()  { printf 'bootstrap: %s\n' "$*"; }
 fail() { printf 'bootstrap: %s\n' "$*" >&2; exit 1; }
+
+# ---- 0a. rollback: the one action that must work with no network and no index --------------------
+#
+# An update that installed a binary this machine cannot run needs an answer that is not "paste the line
+# again". Every install keeps the pair it replaced in <prefix>/.prev, so the previous release is a fact
+# on disk, not a release feed to be re-read. What it restores is exactly named: the two binaries and the
+# record - not ui/ (the window is served by the tree the node runs, and a mixed pair is a worse answer
+# than an honest, narrow one).
+if [ "$rollback" = 1 ]; then
+  prev="$prefix/.prev"
+  [ -d "$prev" ] || fail "rollback_unavailable: $prev does not exist; this install recorded no previous release (an install from before rollback existed cannot be rolled back)"
+  for f in wa wa-sentinel; do [ -f "$prev/$f" ] || fail "rollback_incomplete: $prev/$f is missing"; done
+  was=$(sed -n 's/^release=//p' "$prefix/installed.txt" 2>/dev/null | head -1 || true)
+  to=$(sed -n 's/^release=//p' "$prev/installed.txt" 2>/dev/null | head -1 || true)
+  say "rollback: restoring ${to:-the previous binary pair} (replacing ${was:-the installed one})"
+  if [ "$service" = 1 ] && systemctl --user is-active -q wa-sentinel.service 2>/dev/null; then
+    systemctl --user stop wa-sentinel.service || true
+  fi
+  # Rename, not overwrite: the new file is complete before it becomes the one the path names.
+  for f in wa wa-sentinel; do
+    cp -p "$prev/$f" "$prefix/.$f.rollback" 2>/dev/null || cp -p "$prev/$f" "$prefix/.$f.rollback" \
+      || fail "rollback_failed: could not copy $prev/$f"
+    mv -f "$prefix/.$f.rollback" "$prefix/$f" || fail "rollback_failed: could not put $prev/$f in place"
+    chmod 755 "$prefix/$f" 2>/dev/null || true
+  done
+  [ -x "$prefix/wa" ] || fail "rollback_does_not_run: $prefix/wa is not executable after the restore"
+  "$prefix/wa" --version >/dev/null 2>&1 \
+    || fail "rollback_does_not_run: $prefix/wa --version failed; the previous pair is still in $prev and nothing else was touched"
+  if [ -f "$prev/installed.txt" ]; then
+    { cat "$prev/installed.txt"
+      printf 'rolled_back_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'rollback_of=%s\n' "${was:-unknown}"; } > "$prefix/installed.txt.tmp" \
+      && mv -f "$prefix/installed.txt.tmp" "$prefix/installed.txt" || say 'installed.txt was not rewritten; the binaries were restored'
+  fi
+  say "rolled back: $("$prefix/wa" --version 2>/dev/null | head -1)"
+  if [ "$service" = 1 ] && systemctl --user show-environment >/dev/null 2>&1; then
+    systemctl --user start wa-sentinel.service 2>/dev/null || say 'the sentinel service did not start; start it: systemctl --user start wa-sentinel.service'
+  fi
+  say 'rollback ok'
+  exit 0
+fi
 
 # ---- 0. prerequisites ----------------------------------------------------------------------------
 [ "$(uname -s)" = Linux ] || fail "not_linux: $(uname -s) (Android/Termux: scripts/termux/bootstrap.sh; Windows: scripts/install.ps1)"
@@ -203,7 +247,12 @@ if [ "$state" != current ]; then
   if [ "$service" = 1 ] && systemctl --user is-active -q wa-sentinel.service 2>/dev/null; then
     systemctl --user stop wa-sentinel.service || true
   fi
-  [ -f "$prefix/wa" ] && cp -p "$prefix/wa" "$prefix/wa.prev"
+  # The pair this install replaces, kept whole so `--rollback` restores a release rather than a file:
+  # the two binaries AND the record that says which release they are. Small, bounded, one generation.
+  rm -rf "$prefix/.prev" && mkdir -p "$prefix/.prev"
+  for f in wa wa-sentinel installed.txt; do
+    [ -f "$prefix/$f" ] && cp -p "$prefix/$f" "$prefix/.prev/$f" 2>/dev/null || true
+  done
   for f in wa wa-sentinel; do install -m755 "$bundle/$f" "$prefix/$f.new" && mv -f "$prefix/$f.new" "$prefix/$f"; done
   for d in ui scripts; do
     rm -rf "$prefix/$d.new" "$prefix/$d.old"
@@ -211,7 +260,11 @@ if [ "$state" != current ]; then
     if [ "$d" = scripts ] && [ -d "$prefix/scripts" ]; then
       # Keep what a later sentinel deploy shipped beside the runtime (deploy.sh, lib/, jobs); refresh the runtime.
       cp -rn "$prefix/scripts/." "$prefix/scripts.new/" 2>/dev/null || true
-      cp -f "$bundle/scripts/"* "$prefix/scripts.new/"
+      # Recursive, not `cp -f *`: since 11/11 the bundle's scripts/ holds a DIRECTORY (`linux/`, the installer
+      # core beside install.sh), and `cp -f` on a directory fails with 'omitting directory' -> exit 1 under
+      # `set -e`, which refused the whole update on every node. Caught by scripts/test-install.sh's update
+      # fixture, which is why that fixture now installs a bundle shaped like the published one.
+      cp -Rf "$bundle/scripts/." "$prefix/scripts.new/"
     fi
     [ -d "$prefix/$d" ] && mv "$prefix/$d" "$prefix/$d.old"
     mv "$prefix/$d.new" "$prefix/$d" && rm -rf "$prefix/$d.old"
@@ -229,6 +282,10 @@ if [ "$state" != current ]; then
     echo "install_dir=$prefix"
     echo "source_provenance=release-bundle"
     echo "via=linux-bootstrap"
+    # The updater that ships WITH the bundle (scripts/install.sh, pinned by files.sha256 like every other
+    # member). `wa update` runs this neighbour of the binary, so an update needs no checkout, no clone and
+    # no toolchain - install and update are one command, and the command is the bytes the bundle carried.
+    if [ -f "$prefix/scripts/install.sh" ]; then echo 'updater=scripts/install.sh'; fi
     echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$record.tmp" && mv -f "$record.tmp" "$record"
   say "installed $tag into $prefix"
@@ -345,6 +402,12 @@ if [ "$on_path" = 0 ]; then
   say "note: this shell started before the install - for now: export PATH=\"$prefix:\$PATH\""
 fi
 
+# A node that carries the bundled updater updates itself; one that does not is told the truth about how.
+if [ -f "$prefix/scripts/install.sh" ]; then
+  UPDATE_HINT="$prefix/scripts/install.sh --update   (or: wa update)"
+else
+  UPDATE_HINT="paste the same install line again."
+fi
 node_id=$("$prefix/wa" node 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("node_id",""))' 2>/dev/null || true)
 cat <<NEXT
 
@@ -357,5 +420,5 @@ cat <<NEXT
          to $env_file, then: systemctl --user restart wa-sentinel
          (unset, the rendezvous's network admins are the authority - docs/RENDEZVOUS.md, Guest nodes);
        - from a master: the nodes tool lists it; remote {node:"<name>", capability:"ls", path:"/"} reaches it.
-  4. Update later: paste the same install line again.
+  4. Update later: ${UPDATE_HINT:-paste the same install line again.}
 NEXT
