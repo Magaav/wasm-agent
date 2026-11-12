@@ -17,11 +17,17 @@ it means it lives on a peer. Before answering that you cannot read or send:
    (the "verified operator route" in docs/WHATSAPP-OPERABILITY.md). Credentials stay on the peer.
 3. Only if no peer holds it, say so - naming the nodes you checked.
 
-Federation (lua/core/federation.lua) lists a peer's connector tools as `peer_<peer>__<tool>`: the reads
-(`..._mcp_whatsapp_list_chats_...`, `read_newest`, `inspect_chat`, ...) and, where the peer has operator
-configs, `peer_<peer>__whatsapp_operator` - the operator-directed send. Connector tools (`mcp_whatsapp_*`
-on this node, `peer_*` on a peer) run only inside code mode: one `codemode` script calls
-`await tools.<name>(args)` (`searchTools("whatsapp")` gives the exact names); `tool_call` refuses them.
+One WhatsApp surface, the same nine names on every node (#118, `lua/core/whatsapp.lua`):
+`mcp_whatsapp_contacts` (a name to a chat, with the candidates when it is ambiguous),
+`mcp_whatsapp_search`, `mcp_whatsapp_read` (a chat JID **or a name**), `mcp_whatsapp_reactions`,
+`mcp_whatsapp_media`, `mcp_whatsapp_download`, `mcp_whatsapp_backfill`, `mcp_whatsapp_send`,
+`mcp_whatsapp_send_status`. There is no `peer_<peer>__whatsapp_*` family any more: a read asked on a
+node that runs no component is *routed* to the node that holds the account and the answer says
+`served_by`; a send, a download or a backfill there is refused with the owner named, because the effect
+belongs where the account is. Connector tools run only inside code mode: one `codemode` script calls
+`await tools.mcp_whatsapp_read({chat: "Laura"})` (`searchTools("whatsapp")` lists them); `tool_call`
+refuses them. Where a peer has operator configs, `peer_<peer>__whatsapp_operator` is still the
+operator-directed send.
 To send a text the human asked for:
 
 1. Resolve the exact chat id with the reads. Several matches ("Laura" can be a person, a group and a

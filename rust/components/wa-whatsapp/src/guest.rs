@@ -523,7 +523,13 @@ async fn send(client: &whatsapp_rust::Client, chat: &whatsapp_rust::Jid, body: S
 /// and never the push name, which in a group is the sender's), a direct chat's push name.
 async fn alert_title(client: &whatsapp_rust::Client, job: &AudioJob) -> String {
     if job.title.is_empty() && job.chat.is_group() {
-        return client.groups().get_metadata(&job.chat).await.map(|meta| meta.subject).unwrap_or_default();
+        let subject = client.groups().get_metadata(&job.chat).await.map(|meta| meta.subject).unwrap_or_default();
+        // The one name a group honestly has, written beside the index so `whatsapp_contacts` can answer
+        // with it later without another protocol call (index.rs, `set_subject`).
+        if !subject.is_empty() {
+            let _ = index::set_subject(&IndexKv, &job.chat.to_string(), &subject).await;
+        }
+        return subject;
     }
     job.title.clone()
 }
@@ -1425,6 +1431,8 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
         seam::Op::Media => index::media(&IndexKv, &request).await,
         seam::Op::Download => download(&request, id, cfg).await,
         seam::Op::Backfill => backfill(&request).await,
+        // Which chat a name means (`whatsapp_contacts`), and the same resolution `read` uses.
+        seam::Op::Contacts => index::contacts(&IndexKv, &request).await,
     };
     match answer {
         Ok(answer) => {

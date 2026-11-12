@@ -81,12 +81,21 @@ end
 -- guessing before the real names were dumped). The group label stays, the name is exact.
 function M.connector_index(catalog)
  local groups,order={},{}
+ -- The one surface's *exact* names (#118), loaded once: only the nine `mcp_whatsapp_<verb>` tools are the
+ -- family. A connector whose namespace merely begins with `mcp_whatsapp` is still a connector, and is
+ -- still listed under its own label.
+ local whatsapp=nil
+ local loaded,module=pcall(dofile,'lua/core/whatsapp.lua')
+ if loaded and type(module)=='table' and module.tool then whatsapp=module end
  for _,item in ipairs(catalog or {})do
   local f=item['function'] or {};local name=f.name
   if M.connector(name) then
    local text=tostring(f.description or '')
    local server=text:match('^MCP (%S+) / ([^:]+):')
    if not server then server=text:match('^%[on peer ([^%]]+)%]');if server then server='peer '..server end end
+   -- One surface, one line per name: the nine `mcp_whatsapp_<verb>` tools are the same family on every
+   -- node (#118), so they are grouped under the surface rather than listed as nine unrelated connectors.
+   if not server and whatsapp and whatsapp.tool(name) then server='whatsapp' end
    server=server or name
    if not groups[server] then groups[server]={};order[#order+1]=server end
    local list=groups[server];list[#list+1]=name
@@ -97,9 +106,25 @@ function M.connector_index(catalog)
  local lines={}
  for _,server in ipairs(order)do
   local list=groups[server];table.sort(list)
-  local shown=table.concat(list,', ',1,math.min(#list,8))
-  if #list>8 then shown=shown..', +'..(#list-8)..' more' end
-  lines[#lines+1]='- '..server..': '..shown
+  -- The one WhatsApp surface is nine names and no connector of its own (#118): it is listed one name
+  -- per line, like a built-in, because the index's own contract is one callable name per `- name` line
+  -- (`scripts/test-prompt-tool-names.lua`) - and because hiding the ninth behind "+N more" is how a
+  -- model concludes `mcp_whatsapp_send_status` does not exist.
+  -- The group is the one surface only when every name in it is one of its nine (#118). A connector whose
+  -- own id happens to be `whatsapp` (an older registry row, a fixture) keeps the ordinary grouped line.
+  local family=whatsapp~=nil
+  if family then
+   for _,name in ipairs(list) do if not whatsapp.tool(name) then family=false end end
+  end
+  if family then
+   for _,name in ipairs(list) do
+    lines[#lines+1]='- '..name..': the one WhatsApp surface, answered here or by the node that holds the account'
+   end
+  else
+   local shown=table.concat(list,', ',1,math.min(#list,8))
+   if #list>8 then shown=shown..', +'..(#list-8)..' more' end
+   lines[#lines+1]='- '..server..': '..shown
+  end
  end
  return 'Connectors on this node (code mode only; these are the exact callable names, and searchTools("<connector>") inside a script gives their schemas):\n'..table.concat(lines,'\n')
 end

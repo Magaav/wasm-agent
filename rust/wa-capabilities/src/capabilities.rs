@@ -222,7 +222,8 @@ pub const REGISTRY: &[Capability] = &[
     // The message index the component keeps: one capability per question, all of them a job on
     // `whatsapp.query` (read-only, so no policy rule and no rate limit of their own).
     plain!("whatsapp_search", ReadOnly, crate::whatsapp_query::search, "Search indexed WhatsApp messages by text (accent-folded), chat, kind, sender or time window; returns matching records with snippets"),
-    plain!("whatsapp_read", ReadOnly, crate::whatsapp_query::read, "Read one WhatsApp chat newest-first, with reactions folded onto the messages they answer"),
+    plain!("whatsapp_read", ReadOnly, crate::whatsapp_query::read, "Read one WhatsApp chat newest-first (an exact JID or a name), with reactions folded onto the messages they answer, a header naming the chat and a cursor for the older page"),
+    plain!("whatsapp_contacts", ReadOnly, crate::whatsapp_query::contacts, "Which chats this index knows, by the name it observed: push names, group subjects and the chat's own digits, best match first, with the candidates when a name is ambiguous"),
     plain!("whatsapp_message", ReadOnly, crate::whatsapp_query::message, "One exact WhatsApp message by chat and id, with its full stored text - what an exact reply source and a sent-message echo are compared against"),
     plain!("whatsapp_reactions", ReadOnly, crate::whatsapp_query::reactions, "Who reacted to one WhatsApp message, with which emoji"),
     plain!("whatsapp_media", ReadOnly, crate::whatsapp_query::media, "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration, pages"),

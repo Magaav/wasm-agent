@@ -182,7 +182,9 @@ fn a_bad_argument_is_refused_before_the_queue() {
     let (_host, queue) = queue("refusal");
     for (op, args, code) in [
         (seam::Op::Search, serde_json::json!({}), "whatsapp_search_empty_query"),
-        (seam::Op::Read, serde_json::json!({"chat": "5511999999999"}), "whatsapp_read_bad_chat"),
+        // An address-shaped chat keeps the exact-JID rule and is refused before anything is queued.
+        (seam::Op::Read, serde_json::json!({"chat": "9999999999999-9999999999999@s.whatsapp.net"}), "whatsapp_read_bad_chat"),
+        (seam::Op::Read, serde_json::json!({"chat": "1-2-3@g.us"}), "whatsapp_read_bad_chat"),
         (seam::Op::Reactions, serde_json::json!({"chat": "5511999999999@lid"}), "whatsapp_reactions_chat_and_id_required"),
         (seam::Op::Download, serde_json::json!({"chat": "5511999999999@lid", "id": "3EB0 X"}), "whatsapp_download_bad_id"),
     ] {
@@ -192,6 +194,12 @@ fn a_bad_argument_is_refused_before_the_queue() {
     }
     // Nothing was written for a request that never validated.
     assert_eq!(queue.stats(seam::QUEUE).unwrap().ready, 0);
+    // A *name* is a question, not a bad argument: it is queued for the index to resolve and the answer
+    // here is "still running" (no component in a test), never a refusal (#117).
+    let named = ask_in(&queue, seam::Op::Read, &serde_json::json!({"chat": "Laura"}), 50);
+    assert_eq!(named["error"], "whatsapp_read_slow", "{named}");
+    assert_eq!(named["retry"], true, "a name was queued, not refused: {named}");
+    assert_eq!(queue.stats(seam::QUEUE).unwrap().ready, 1, "the question is one job for the component");
 }
 
 #[test]

@@ -98,6 +98,17 @@ pub const KINDS: [&str; 14] = [
     "other",
 ];
 
+/// Longest "name" a caller may type where a chat is expected (`whatsapp_read("Laura")`).
+///
+/// A name is not an identity: it is what the index *observed* (a push name, a group subject when one
+/// was fetched, or the digits of a JID). The resolution below answers candidates and never picks one
+/// on its own when more than one chat matches.
+pub const MAX_NAME_CHARS: usize = 80;
+
+/// Most candidate chats one `contacts` answer lists. A name that matches more than this is not a
+/// question the index can answer better by listing more: the answer says `truncated: true`.
+pub const CONTACTS_MAX: u32 = 20;
+
 /// How far back one `whatsapp_backfill` reaches when the caller does not say.
 pub const BACKFILL_DEFAULT: u32 = 50;
 /// Most messages one `whatsapp_backfill` asks the primary phone for, per chat.
@@ -128,6 +139,10 @@ pub enum Op {
     /// `whatsapp_backfill {chat?, count}` - ask the primary phone for messages *older* than what the
     /// index already holds, so a search covers the account's past and not only the live stream.
     Backfill,
+    /// `whatsapp_contacts {q?}` - which chats the index knows, by the name it observed, so a caller
+    /// that was told "Laura" can find out which Laura (2026-11-11: a model asked to send a message to
+    /// a person by name had no way to turn the name into a chat, and guessed numbers instead).
+    Contacts,
 }
 
 impl Op {
@@ -140,6 +155,7 @@ impl Op {
             Op::Media => "media",
             Op::Download => "download",
             Op::Backfill => "backfill",
+            Op::Contacts => "contacts",
         }
     }
 
@@ -152,6 +168,7 @@ impl Op {
             "media" => Some(Op::Media),
             "download" => Some(Op::Download),
             "backfill" => Some(Op::Backfill),
+            "contacts" => Some(Op::Contacts),
             _ => None,
         }
     }
@@ -166,6 +183,7 @@ impl Op {
             Op::Media => "whatsapp_media",
             Op::Download => "whatsapp_download",
             Op::Backfill => "whatsapp_backfill",
+            Op::Contacts => "whatsapp_contacts",
         }
     }
 
@@ -178,6 +196,7 @@ impl Op {
             "whatsapp_media" => Some(Op::Media),
             "whatsapp_download" => Some(Op::Download),
             "whatsapp_backfill" => Some(Op::Backfill),
+            "whatsapp_contacts" => Some(Op::Contacts),
             _ => None,
         }
     }
@@ -232,6 +251,11 @@ pub struct Verified {
     pub op: Op,
     pub q: Option<String>,
     pub chat: Option<Chat>,
+    /// The chat as the caller named it when it was **not** an exact JID: a name to resolve against the
+    /// index (`read` only). Exactly one of `chat`/`chat_name` can be set, never both: a caller that
+    /// typed a JID gets that chat, and a caller that typed a name gets an answer about which chat it
+    /// is - the index never silently prefers one reading of the same string.
+    pub chat_name: Option<String>,
     pub id: Option<String>,
     pub kind: Option<String>,
     pub from: Option<Chat>,
@@ -249,12 +273,21 @@ impl Request {
         let op = Op::parse(self.op.trim()).ok_or_else(|| {
             Refusal::new("bad_op", "op must be search, read, message, reactions, media, download or backfill")
         })?;
-        let chat = match self.chat.as_deref().map(str::trim) {
-            None | Some("") => None,
-            Some(text) => Some(parse_chat(text)?),
+        // A chat typed as a name is a question about *which* chat, not an address: `read` may answer
+        // it and `contacts` exists to answer it. Every other op keeps the exact-JID rule and its own
+        // refusal word, because a send must never be able to guess where it is going.
+        let (chat, chat_name) = match self.chat.as_deref().map(str::trim) {
+            None | Some("") => (None, None),
+            Some(text) => match parse_chat(text) {
+                Ok(chat) => (Some(chat), None),
+                // An address-shaped string keeps the exact-JID rule's own word - `bad_chat` for a
+                // malformed one, `unsupported_chat` for a server this component cannot address - and
+                // is never re-read as a name. Only a string a human wrote ("Laura", a number) is.
+                Err(refusal) if !accepts_a_name(op) || text.contains('@') => return Err(refusal),
+                Err(_) => (None, Some(parse_name(text)?)),
+            },
         };
-        let from = match self.from.as_deref().map(str::trim) {
-            None | Some("") => None,
+        let from = match self.from.as_deref().map(str::trim) {            None | Some("") => None,
             Some(text) => Some(parse_chat(text)?),
         };
         let id = match self.id.as_deref().map(str::trim) {
@@ -318,8 +351,8 @@ impl Request {
                 (limit, 0)
             }
             Op::Read => {
-                if chat.is_none() {
-                    return Err(Refusal::new("chat_required", "read needs the exact chat JID"));
+                if chat.is_none() && chat_name.is_none() {
+                    return Err(Refusal::new("chat_required", "read needs the exact chat JID, or a name to resolve"));
                 }
                 (clamp_limit(self.limit, READ_DEFAULT, READ_MAX), 0)
             }
@@ -341,8 +374,9 @@ impl Request {
                 // knows, newest first, which is the useful reading of "bring me the past".
                 (clamp_limit(self.limit, BACKFILL_DEFAULT, BACKFILL_MAX), 0)
             }
+            Op::Contacts => (clamp_limit(self.limit, CONTACTS_MAX, CONTACTS_MAX), 0),
         };
-        Ok(Verified { op, q, chat, id, kind, from, since, until, before, limit, max_bytes })
+        Ok(Verified { op, q, chat, chat_name, id, kind, from, since, until, before, limit, max_bytes })
     }
 
     /// The payload bytes for the queue.
@@ -373,10 +407,11 @@ impl Verified {
     /// The dedupe material, in a fixed order so the same query always hashes the same.
     pub fn dedupe_key(&self) -> String {
         let material = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.op.as_str(),
             self.q.as_deref().unwrap_or(""),
             self.chat.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
+            self.chat_name.as_deref().unwrap_or(""),
             self.id.as_deref().unwrap_or(""),
             self.kind.as_deref().unwrap_or(""),
             self.from.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
@@ -395,7 +430,9 @@ impl Verified {
         Request {
             op: self.op.as_str().to_string(),
             q: self.q.clone(),
-            chat: self.chat.as_ref().map(|chat| chat.jid()),
+            // A name goes back on the wire as it was typed: the component re-validates the payload
+            // it took, and resolving it there is what keeps one answer for one string.
+            chat: self.chat.as_ref().map(|chat| chat.jid()).or_else(|| self.chat_name.clone()),
             id: self.id.clone(),
             kind: self.kind.clone(),
             from: self.from.as_ref().map(|chat| chat.jid()),
@@ -440,6 +477,42 @@ pub fn backfill_answer(chats: Vec<BackfillChat>, note: &str) -> serde_json::Valu
 /// The exact-JID rule, with the outbox's refusal turned into this crate's: one code, one shape.
 fn parse_chat(text: &str) -> Result<Chat, Refusal> {
     Chat::parse(text).map_err(|refusal| Refusal::new(refusal.code, refusal.detail))
+}
+
+/// Does this op accept a chat *name* where a chat is expected?
+///
+/// Only the two questions that cannot move anything: reading a thread and asking which chats a name
+/// means. `search`'s `chat` filter, `message`, `reactions`, `media`, `download` and `backfill` all
+/// address one exact chat, and `send` (which never reaches this crate) must not be able to name its
+/// target loosely either.
+fn accepts_a_name(op: Op) -> bool {
+    matches!(op, Op::Read | Op::Contacts)
+}
+
+/// A chat as a human wrote it, for the ops that resolve names: bounded, one line, never empty, and
+/// **never address-shaped**.
+///
+/// The `@` is the line the two rules keep: a string that carries one is an address, so the exact-JID
+/// rule in [`parse_chat`] decides it and its refusal stands (`bad_chat`, `unsupported_chat`) - a
+/// newsletter id or a malformed group JID must not become a name that happens to match something. A
+/// string without one is what a human calls a chat ("Laura", a phone number), and resolving it to a
+/// chat this index already holds cannot invent an address, because every chat it can answer with
+/// arrived through the protocol and was validated then.
+fn parse_name(text: &str) -> Result<String, Refusal> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Refusal::new("bad_chat", "empty chat: pass an exact JID or a name"));
+    }
+    if text.contains('@') {
+        return Err(Refusal::new("bad_chat", "an address is judged by the exact-JID rule, not resolved as a name"));
+    }
+    if text.chars().count() > MAX_NAME_CHARS {
+        return Err(Refusal::new("bad_chat", "chat name is longer than 80 characters"));
+    }
+    if text.chars().any(char::is_control) {
+        return Err(Refusal::new("bad_chat", "chat name contains a control character"));
+    }
+    Ok(text.to_string())
 }
 
 /// One epoch as milliseconds: seconds (any value a human would type for a date) are scaled.
@@ -726,8 +799,17 @@ mod tests {
 
     #[test]
     fn chats_ids_kinds_and_windows_are_bounded_with_stable_codes() {
-        let bad_chat = Request { chat: Some("5511999999999".into()), ..request("read") };
-        assert_eq!(bad_chat.validate().unwrap_err().code, "bad_chat");
+        // An address-shaped chat is judged by the exact-JID rule, in every op.
+        for op in ["read", "search", "message", "contacts", "backfill", "media"] {
+            let bad_chat = Request { chat: Some("1-2-3@g.us".into()), ..request(op) };
+            assert_eq!(bad_chat.validate().unwrap_err().code, "bad_chat", "{op}");
+        }
+        // A bare number has no `@`: it is a *name* `read` resolves, and the same string is refused as
+        // an address by every op that addresses one chat (and by the send path's own JID rule).
+        let numeric = Request { chat: Some("5511999999999".into()), ..request("read") };
+        assert_eq!(numeric.validate().expect("a name to resolve").chat_name.as_deref(), Some("5511999999999"));
+        let numeric_search = Request { chat: Some("5511999999999".into()), q: Some("x".into()), ..request("search") };
+        assert_eq!(numeric_search.validate().unwrap_err().code, "bad_chat");
         let bad_id = Request {
             chat: Some("5511999999999@lid".into()),
             id: Some("3EB0 ABC".into()),

@@ -100,14 +100,15 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `session_many`: Read bounded ranges from several sessions
 - `symbol_source_many`: Retrieve several selected symbol implementations
 - `write_many`: Preflight independent writes, retaining diff and undo evidence
-- `whatsapp_send`: Send one WhatsApp message to an exact chat through the durable outbox
-- `whatsapp_send_status`: Read the state of a queued WhatsApp send, with its message id when sent
-- `whatsapp_search`: Search every indexed WhatsApp message by text, chat, kind, sender or time window
-- `whatsapp_read`: Read one WhatsApp chat newest first, with reactions folded onto their messages
-- `whatsapp_reactions`: Who reacted to one WhatsApp message, with which emoji
-- `whatsapp_media`: The media metadata of one WhatsApp message: mime, filename, size, sha256, duration
-- `whatsapp_download`: Decrypt one WhatsApp message's media to this node and return the file path
-- `whatsapp_backfill`: Ask the phone for older WhatsApp messages so search covers the account's past
+- `mcp_whatsapp_contacts`: Which WhatsApp chat a name means, with the candidates when a name is ambiguous
+- `mcp_whatsapp_search`: Search every indexed WhatsApp message by text, chat, kind, sender or time window
+- `mcp_whatsapp_read`: Read one WhatsApp chat by JID or name, newest first, with a header and a cursor
+- `mcp_whatsapp_reactions`: Who reacted to one WhatsApp message, with which emoji
+- `mcp_whatsapp_media`: The media metadata of one WhatsApp message: mime, filename, size, sha256, duration
+- `mcp_whatsapp_download`: Decrypt one WhatsApp message's media on the account node and return its file path
+- `mcp_whatsapp_backfill`: Ask the phone for older WhatsApp messages so search covers the account's past
+- `mcp_whatsapp_send`: Send one WhatsApp message to an exact chat through the durable outbox
+- `mcp_whatsapp_send_status`: Read the state of a queued WhatsApp send, with its message id when sent
 - `email_send`: Send one email through the durable outbox, with the message id readable afterwards
 - `email_send_status`: Read the state of a queued email send, with its message id when delivered
 - `email_search`: Search every indexed email by text, sender, subject, mailbox or time window
@@ -188,14 +189,15 @@ runs on the client too, while `bash` runs on this node.
 | `session_many` | `requests` | Read bounded ranges from several sessions |
 | `symbol_source_many` | `requests` | Retrieve several selected symbol implementations |
 | `write_many` | `requests` | Preflight independent writes, retaining diff and undo evidence |
-| `whatsapp_send` | `chat` `text` `mentions?` `reply_to?` | Send one WhatsApp message to an exact chat through the durable outbox |
-| `whatsapp_send_status` | `id` | Read the state of a queued WhatsApp send, with its message id when sent |
-| `whatsapp_search` | `chat?` `from?` `kind?` `limit?` `q?` `since?` `until?` | Search every indexed WhatsApp message by text, chat, kind, sender or time window |
-| `whatsapp_read` | `chat` `before?` `limit?` | Read one WhatsApp chat newest first, with reactions folded onto their messages |
-| `whatsapp_reactions` | `chat` `id` | Who reacted to one WhatsApp message, with which emoji |
-| `whatsapp_media` | `chat` `id` | The media metadata of one WhatsApp message: mime, filename, size, sha256, duration |
-| `whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media to this node and return the file path |
-| `whatsapp_backfill` | `chat?` `count?` | Ask the phone for older WhatsApp messages so search covers the account's past |
+| `mcp_whatsapp_contacts` | `limit?` `q?` | Which WhatsApp chat a name means, with the candidates when a name is ambiguous |
+| `mcp_whatsapp_search` | `chat?` `from?` `kind?` `limit?` `q?` `since?` `until?` | Search every indexed WhatsApp message by text, chat, kind, sender or time window |
+| `mcp_whatsapp_read` | `chat` `before?` `limit?` | Read one WhatsApp chat by JID or name, newest first, with a header and a cursor |
+| `mcp_whatsapp_reactions` | `chat` `id` | Who reacted to one WhatsApp message, with which emoji |
+| `mcp_whatsapp_media` | `chat` `id` | The media metadata of one WhatsApp message: mime, filename, size, sha256, duration |
+| `mcp_whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media on the account node and return its file path |
+| `mcp_whatsapp_backfill` | `chat?` `count?` | Ask the phone for older WhatsApp messages so search covers the account's past |
+| `mcp_whatsapp_send` | `chat` `text` `mentions?` `reply_to?` | Send one WhatsApp message to an exact chat through the durable outbox |
+| `mcp_whatsapp_send_status` | `id` | Read the state of a queued WhatsApp send, with its message id when sent |
 | `email_send` | `body` `subject` `to` `attachments?` `cc?` `in_reply_to?` | Send one email through the durable outbox, with the message id readable afterwards |
 | `email_send_status` | `id` | Read the state of a queued email send, with its message id when delivered |
 | `email_search` | `from?` `has_attachment?` `limit?` `mailbox?` `q?` `since?` `subject?` `until?` | Search every indexed email by text, sender, subject, mailbox or time window |
