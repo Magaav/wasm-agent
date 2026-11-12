@@ -355,6 +355,14 @@ elseif command == "services" then
   -- node. Every verb goes through the registry's own master gate (lua/core/services.lua).
   local code = dofile("lua/core/services_cli.lua").run({ table.unpack(args, 2) })
   if code and code ~= 0 then os.exit(code) end
+elseif command == "eval" then
+  -- The harness evaluator (lua/core/harness_evaluator_cli.lua, docs/HARNESS-EVALUATOR.md): freeze a real
+  -- task, replay it against a candidate binary in an isolated home, and print metrics. It gathers
+  -- evidence about the harness; it does not gate a release and it does not decide anything. Dispatched
+  -- like every other verb, so the engine exists in the binary an operator runs.
+  local code = dofile("lua/core/harness_evaluator_cli.lua").run(args)
+  if code and code ~= 0 then os.exit(code) end
+
 elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
