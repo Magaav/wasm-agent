@@ -74,6 +74,14 @@
 set -eu
 WA_INSTALL_FRONT_DOOR=1
 
+# THE NODE PIN, and its one home. The MCP runtime (web_search/web_read, mail, the WhatsApp bridges) runs on
+# Node; the installer core downloads exactly this version for the node it installs, the publisher stamps it
+# into the bundle manifest and the index entry (`scripts/release-linux.sh`), and the toolchain provisioner
+# installs it (`scripts/lib/build-requirements.sh`). Both read THIS line, which is why it is still here after
+# this file stopped downloading Node itself: two answers to "the Node we ship" is how a node ends up running
+# a runtime nobody tested.
+NODE_VERSION="24.22.1"
+
 REPO_SLUG="Magaav/wasm-agent"
 BASE="${WA_INSTALL_BASE:-https://raw.githubusercontent.com/$REPO_SLUG}"
 REF="${WA_INSTALL_REF:-main}"
@@ -157,7 +165,9 @@ case "$os" in
   Darwin) os=macos ;;
   MSYS*|MINGW*|CYGWIN*) os=windows ;;
 esac
-[ "$termux" = 1 ] && os=android
+# `if`, not `[ ... ] && os=android`: this file runs under `set -e`, and a false test as the last status of a
+# statement is how an installer exits silently instead of continuing.
+if [ "$termux" = 1 ]; then os=android; fi
 case "$arch" in
   x86_64|amd64) arch=x86_64 ;;
   aarch64|arm64) arch=aarch64 ;;
@@ -276,18 +286,18 @@ fi
 case "$os" in
   linux)
     push "--prefix"; push "$PREFIX_DIR"
-    [ "$JOIN_GIVEN" = 1 ] && { push "--rendezvous"; push "$JOIN"; }
-    [ "$ROLLBACK" = 1 ] && push "--rollback"
+    if [ "$JOIN_GIVEN" = 1 ]; then push "--rendezvous"; push "$JOIN"; fi
+    if [ "$ROLLBACK" = 1 ]; then push "--rollback"; fi
     ;;
   android)
-    [ "$JOIN_GIVEN" = 1 ] && die "join_unsupported_on_android: the fleet registry key this writes is Linux-side; on the phone pair with 'wa bind <fabric-url>' after the install"
-    [ "$ROLLBACK" = 1 ] && die "rollback_unsupported_on_android: run 'wa update --rollback' after the install (the phone updater owns its own switch)"
-    [ "$PREFIX_DIR" != "$HOME/.local/bin" ] && die "prefix_unsupported_on_android: Termux installs under \$PREFIX/opt (WA_TERMUX_INSTALL overrides it)"
-    [ -n "$CORE_ARGS" ] && say "android_ignores: the phone channel takes no service/port options"
+    if [ "$JOIN_GIVEN" = 1 ]; then die "join_unsupported_on_android: the fleet registry key this writes is Linux-side; on the phone pair with 'wa bind <fabric-url>' after the install"; fi
+    if [ "$ROLLBACK" = 1 ]; then die "rollback_unsupported_on_android: run 'wa update --rollback' after the install (the phone updater owns its own switch)"; fi
+    if [ "$PREFIX_DIR" != "$HOME/.local/bin" ]; then die "prefix_unsupported_on_android: Termux installs under \$PREFIX/opt (WA_TERMUX_INSTALL overrides it)"; fi
+    if [ -n "$CORE_ARGS" ]; then say "android_ignores: the phone channel takes no service/port options"; fi
     CORE_ARGS=
     ;;
 esac
-[ "$ACTION" = check ] && push "--check"
+if [ "$ACTION" = check ]; then push "--check"; fi
 
 # POSIX sh has no arrays: the list is newline-separated and split on newline only, so a path with a space
 # survives. No value this script accepts contains a newline.
@@ -330,6 +340,11 @@ if [ "$os" = linux ] && [ "$ACTION" != check ] && [ "${WA_INSTALL_TEST:-0}" != 1
 fi
 
 printf '\n'
+if [ "$ACTION" = check ]; then
+  # A check installs nothing, so it must not hand out an "update with this" line for files it did not place.
+  say "check only: nothing was installed and nothing was replaced."
+  exit 0
+fi
 say "done. This node updates with the same command that installed it:"
 say "  $PREFIX_DIR/scripts/install.sh --update"
 case ":$PATH:" in

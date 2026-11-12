@@ -115,6 +115,24 @@ The refusal is a feature: the failure mode it replaces is a download that 404s h
 installer that download an asset for the wrong libc. The front door asks the channel question before any
 download, and answers it in the operator's words.
 
+## What this replaced, and what went away with it
+
+Before 12/11 `scripts/install.sh` installed a **client**: an `ssh -t <host> wasm-agent "$@"` wrapper named
+`wa`, aimed at a laptop that talks to somebody else's node, plus a copy of the MCP runtime, a pinned Node,
+`mail-mcp` and the self-update skill in `~/.local/bin`. It never installed a node, and the measured cost of
+actually bringing one up by hand was ~40 minutes - which is what an operator following the front door
+experienced.
+
+That client behaviour is **gone from this file**, on purpose, and nothing else in the tree depended on it
+(no test, script or doc pinned the wrapper). A laptop that used it wants one of two things instead:
+
+- a node of its own: the one command above;
+- a client for a node elsewhere: `ssh <host> wa …` directly, or a published release's `wa` with
+  `WA_REMOTE`-style configuration - the wrapper only ever saved typing.
+
+Windows keeps `scripts/install.ps1` as the legacy SSH-client installer until a Windows node bundle is
+published; the front door says so in its refusal rather than pretending to install a node there.
+
 ## The trust chain, end to end
 
 ```
@@ -166,7 +184,7 @@ mismatches, `elf_machine_mismatch`, `candidate_does_not_run`, `node_busy`, `exis
 ## Tests
 
 ```sh
-bash scripts/test-install.sh                 # 51 checks, no network, no systemd - in the fast path and the gate
+bash scripts/test-install.sh                 # 56 checks, no network, no systemd - in the fast path and the gate
 scripts/fast.sh                              # the row: `check install-front-door`
 ```
 

@@ -147,6 +147,14 @@ grep -qF "$README_LINE" "$FRONT" && ok 'and the installer header documents the s
 grep -qF 'docs/INSTALL.md' "$ROOT/README.md" && ok 'the README points at the design and research notes' \
   || bad 'README does not point at docs/INSTALL.md'
 
+# The Node pin: this file stopped downloading Node itself, and two other files read the pin OUT of it
+# (release-linux.sh stamps the bundle manifest and the index entry; build-requirements.sh provisions the
+# toolchain). Dropping the line with the rewrite broke both - so the line, and its readers, are pinned here.
+PIN=$(sed -n 's/^NODE_VERSION="\([0-9.]*\)"/\1/p' "$FRONT" | head -1)
+[ -n "$PIN" ] && ok "the Node pin is still in install.sh ($PIN)" || bad 'install.sh lost NODE_VERSION'
+grep -q 'NODE_VERSION=' "$ROOT/scripts/release-linux.sh" && grep -q 'NODE_VERSION=' "$ROOT/scripts/lib/build-requirements.sh" \
+  && ok 'and both readers still name it' || bad 'the Node pin readers are not both present'
+
 # ====================================================================================================
 # 1. the platform matrix: which channel, or which named refusal
 # ====================================================================================================
