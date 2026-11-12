@@ -2225,6 +2225,11 @@ gate_run bash scripts/test-termux.sh
 # ELF refusals, Node choice, idempotent re-run - fixtures only, no network. Linux only: it installs ELF files.
 if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-linux-release-fetch.sh
 else echo 'SKIP: Linux release channel fixture (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
+# The one-command installer (scripts/install.sh): the platform matrix, the channel per platform, the
+# installer pin, and install -> update -> rollback through the front door against file: fixtures.
+# Same fixtures as above, so it is Linux-only for the same reason.
+if [ "$(uname -s)" = Linux ]; then gate_run bash scripts/test-install.sh
+else echo 'SKIP: installer front door fixture (needs a Linux host)'; SKIPPED=$((SKIPPED + 1)); fi
 case "$(uname -o 2>/dev/null || true)" in
   Android) ;;
   *) SKIPPED=$((SKIPPED + 1)) ;;

@@ -1,387 +1,353 @@
-#!/usr/bin/env bash
-# wasm-agent installer for Linux/macOS.
+#!/bin/sh
+# wasm-agent: ONE command installs a node, and the same command updates it.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.sh | sh
+#   curl -fsSL .../install.sh | sh -s -- --join https://rendezvous.colmeio.com
+#   curl -fsSL .../install.sh | sh -s -- --check          # resolve and verify; change nothing
 #
-# Installs a `wa` command that talks to your wasm-agent host over SSH.
-set -euo pipefail
-
-HOST_ALIAS="${WASM_AGENT_HOST:-openclaw.ohana}"
-DIR="${WASM_AGENT_BIN_DIR:-$HOME/.local/bin}"
-
-# Where does this machine run its node from? The same file the deploy gate reads, so "where the node lives"
-# has one answer here too - and so this installer can tell whether the supervisor it is placing is the one the
-# sentinel service will start. Measured on the cloud node: `~/.local/bin/wa-sentinel` (user-owned) and
-# `/usr/local/bin/wa-sentinel` (root-owned) were the same binary at two paths and `$PATH` quietly preferred
-# the first, which is the same class of failure as the node that looped 61,117 times.
-WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
-HAVE_LIB=0
-if [ -f "$WA_LIB" ]; then . "$WA_LIB"; HAVE_LIB=1; fi
-die() { printf "     ${yellow}!${reset}  %s\n" "$1" >&2; exit 1; }
-
-node_service_dir() { # -> the directory the sentinel service runs its supervisor from, empty when unknowable
-  # Explicitly, not `[ ... ] && cmd`: this file runs under `set -e`, and a false test as the last status of a
-  # function called in a command substitution would end the installer silently.
-  if [ "$HAVE_LIB" = "1" ]; then wa_sentinel_service_dir; fi
-}
-
-cyan="\033[36m"; green="\033[32m"; grey="\033[90m"; yellow="\033[33m"; reset="\033[0m"
-step() { printf "   ${cyan}*${reset} %s\n" "$1"; }
-ok()   { printf "     ${green}ok${reset} ${grey}%s${reset}\n" "$1"; }
-warn() { printf "     ${yellow}!${reset}  ${grey}%s${reset}\n" "$1"; }
-
-printf "\n   ${cyan}wasm-agent${reset}\n   ${grey}a portable agent with organized memory${reset}\n\n"
-
-step "installing the wa command"
-mkdir -p "$DIR"
-cat > "$DIR/wa" <<EOF
-#!/usr/bin/env bash
-exec ssh -t ${HOST_ALIAS} wasm-agent "\$@"
-EOF
-chmod +x "$DIR/wa"
-ok "$DIR/wa -> ssh -t ${HOST_ALIAS} wasm-agent"
-
-step "checking the connection to ${HOST_ALIAS}"
-if command -v ssh >/dev/null 2>&1; then
-  if version="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST_ALIAS" "wasm-agent --version" 2>/dev/null | head -1)" && [ -n "$version" ]; then
-    ok "connected: $version"
-  else
-    warn "not reachable yet - check ~/.ssh/config, then run: wa"
-  fi
-else
-  warn "ssh not found; install OpenSSH, then run: wa"
-fi
-
-# Can this node build itself? The toolchains are ordinary packages, so a node can install them
-# on its own machine and stop depending on whichever machine happened to have them. Reported
-# always; installed only when asked, because a fresh install is not the moment to start a 1.5GB
-# download behind somebody's back.
-if command -v wa >/dev/null 2>&1; then
-  TOOLCHAIN_LINE="$(wa toolchain check 2>/dev/null | tail -1)"
-  ok "toolchains: ${TOOLCHAIN_LINE:-unknown}"
-  case "$TOOLCHAIN_LINE" in
-    *"every one resolves"*) ;;
-    *)
-      warn "this node cannot build itself yet. See: wa toolchain plan"
-      if [ "${WA_INSTALL_TOOLCHAIN:-0}" = "1" ]; then
-        wa toolchain ensure --yes
-      else
-        warn "run: wa toolchain ensure --yes   (or re-run this installer with WA_INSTALL_TOOLCHAIN=1)"
-      fi
-      ;;
-  esac
-fi
-
-# The sentinel: the process outside the node, for restarts, upgrades, and waking the model on an
-# event. A node cannot restart itself, so this is what does it - and a supervisor that has to be
-# remembered is a supervisor that is not there when it is needed.
+# WHAT THIS FILE IS, AND WHAT IT IS NOT. It is the FRONT DOOR: it says which platform this is, which
+# release channel that platform has, fetches that channel's installer core at ONE reviewed path, and
+# hands every option to it. It is not a second installer. The core is the reviewed script that already
+# owns the verifying install (`scripts/linux/bootstrap.sh`: index entry -> size -> sha256(bundle.manifest)
+# -> manifest commit/target -> sha256(files.sha256) -> every member -> ELF machine -> run the candidate
+# -> install -> record). This file adds no second copy of that chain to drift away from it.
 #
-# Piped from the network there is no checkout, so the binary is fetched from the host that runs the
-# node - the same place the rest of this installer's knowledge comes from. Only when *that* fails is
-# the absence reported, because "you have no supervisor" is a fact the operator must not have to
-# infer from a warning about a missing repository.
-ROOT="${WASM_AGENT_REPO:-}"
-SENTINEL_GOT=0
-if command -v scp >/dev/null 2>&1; then
-  step "fetching the sentinel from ${HOST_ALIAS}"
-  if scp -q -o BatchMode=yes "${HOST_ALIAS}:~/.local/bin/wa-sentinel" "$DIR/wa-sentinel" 2>/dev/null \
-     || scp -q -o BatchMode=yes "${HOST_ALIAS}:~/.local/bin/wa-sentinel.exe" "$DIR/wa-sentinel" 2>/dev/null; then
-    chmod +x "$DIR/wa-sentinel" 2>/dev/null || true
-    [ -x "$DIR/wa-sentinel" ] && SENTINEL_GOT=1
-  fi
-fi
-if [ "$SENTINEL_GOT" = "0" ] && [ -n "$ROOT" ] && [ -d "$ROOT/rust/wa-sentinel" ]; then
-  step "building the sentinel from $ROOT"
-  if command -v cargo >/dev/null 2>&1; then
-    (cd "$ROOT" && cargo build --release --locked --manifest-path rust/wa-sentinel/Cargo.toml 2>&1 | tail -1) || true
-    for built in "$ROOT/rust/wa-sentinel/target/release/wa-sentinel" "$ROOT/rust/wa-sentinel/target/release/wa-sentinel.exe"; do
-      if [ -x "$built" ]; then
-        cp -f "$built" "$DIR/" && SENTINEL_GOT=1
-        break
-      fi
-    done
-  else
-    warn "cargo not found, so the sentinel could not be built - see: wa toolchain plan"
-  fi
-fi
-if [ "$SENTINEL_GOT" = "1" ]; then
-  ok "$DIR/wa-sentinel"
-  # ...but a supervisor is only installed where the service starts it. `wa-sentinel` in the wrong directory is
-  # the same defect as a node in the wrong directory: the service keeps running the old copy, and everything
-  # that reports success is reading the one nobody runs. Name both paths, place it where the service looks
-  # when that directory is writable, and refuse to claim success when it is not.
-  #
-  # This comes first: the restart below asks the manager to bring the unit up, and the unit's `ExecStart=` is
-  # the path this puts the new binary at. Restarting before placing would start the copy nobody replaced.
-  SENTINEL_SERVICE_DIR="$(node_service_dir)"
-  if [ -n "$SENTINEL_SERVICE_DIR" ] && ! wa_same_dir "$SENTINEL_SERVICE_DIR" "$DIR"; then
-    warn "the sentinel service runs $SENTINEL_SERVICE_DIR/wa-sentinel, not $DIR/wa-sentinel"
-    if [ -w "$SENTINEL_SERVICE_DIR" ]; then
-      cp -f "$DIR/wa-sentinel" "$SENTINEL_SERVICE_DIR/wa-sentinel" \
-        && ok "$SENTINEL_SERVICE_DIR/wa-sentinel (the path the service starts)" \
-        || die "could not place the supervisor at $SENTINEL_SERVICE_DIR/wa-sentinel; the service would keep starting the old one"
-    else
-      die "$SENTINEL_SERVICE_DIR is not writable by $(id -un): install it with sudo (install -m 755 $DIR/wa-sentinel $SENTINEL_SERVICE_DIR/wa-sentinel), or point the unit at $DIR/wa-sentinel; this installer will not report success while the service and the installed supervisor disagree"
-    fi
-  fi
-  # The supervisor has to *start*, and its refusal must not be swallowed: `|| true` here printed a
-  # successful install while the manager refused to bring the unit up - `Interactive authentication
-  # required` for a system unit from an unprivileged shell, a unit that no longer exists, a control group
-  # it cannot create - and the operator found out when nothing could restart their node. The sentinel's own
-  # words are where the manager's reason is, so they are printed, not discarded.
-  if SENTINEL_START="$("$DIR/wa-sentinel" restart 2>&1)"; then
-    SENTINEL_SAID="$(printf '%s\n' "$SENTINEL_START" | sed 's/^  *//' | sed -n '/./p')"
-    ok "sentinel: $(printf '%s\n' "$SENTINEL_SAID" | head -1)"
-    printf '%s\n' "$SENTINEL_SAID" | tail -n +2 | sed 's/^/     /'
-  else
-    printf '\n   the sentinel did not start, and nothing else here can restart or upgrade this node:\n' >&2
-    printf '%s\n' "$SENTINEL_START" | sed 's/^/     /' >&2
-    printf '   fix the cause, then run: %s restart\n\n' "$DIR/wa-sentinel" >&2
-    exit 1
-  fi
-else
-  warn "no sentinel: this node cannot restart or upgrade itself. Set WASM_AGENT_REPO to a checkout, or install wa-sentinel by hand."
-fi
-
-# `scripts/upgrade.sh` beside the binary, which is where the sentinel looks for it. A supervisor that
-# can restart but not upgrade is half a supervisor, and the failure is silent: the request is
-# accepted, the script is not found, and the node simply does not change.
-SCRIPTS_DIR="$DIR/scripts"
-mkdir -p "$SCRIPTS_DIR"
-UPGRADE_GOT=0
-if [ -n "$ROOT" ] && [ -f "$ROOT/scripts/upgrade.sh" ]; then
-  cp -f "$ROOT/scripts/upgrade.sh" "$SCRIPTS_DIR/upgrade.sh" && UPGRADE_GOT=1
-elif command -v curl >/dev/null 2>&1; then
-  curl -fsSL "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/upgrade.sh" \
-    -o "$SCRIPTS_DIR/upgrade.sh" 2>/dev/null && UPGRADE_GOT=1
-fi
-if [ "$UPGRADE_GOT" = "1" ]; then
-  chmod +x "$SCRIPTS_DIR/upgrade.sh" 2>/dev/null || true
-  ok "$SCRIPTS_DIR/upgrade.sh"
-else
-  warn "scripts/upgrade.sh was not installed - the sentinel can restart but not upgrade until it is"
-fi
-
-# The MCP runtime: `lua/core/mcp.lua` and `lua/core/web.lua` spawn these Node scripts for every
-# `web_search`/`web_read` call and for the WhatsApp connector. `deploy.sh` ships them when it upgrades a
-# running install; a *fresh* install shipped only `upgrade.sh`, so on a brand-new node every web tool
-# answered `web_adapter_not_installed` and the connector answered `mcp_script_directory_unbound`. The Lua
-# core is compiled into the binary - these files are not, and nothing put them on disk.
+# WHY A FRONT DOOR AT ALL. Measured 11/11: bringing up a Linux node by hand took ~5 steps and ~40 min
+# (apt toolchain, rustup, clone, provision the code-mode assets, prepare, cold release build), because the
+# old `scripts/install.sh` installed an SSH wrapper that talks to somebody else's node - it never
+# installed a node. The published bundle channel (`releases/index-linux.json` + a prebuilt bundle: no
+# compiler, no clone) existed, but reaching it needed a git clone launcher. This is the one line a new
+# machine needs: no git, no cargo, no checkout, no toolchain - only `curl` + `tar` + `sha256sum` +
+# `python3`, which are checked and named before anything is downloaded.
 #
-# Two destinations, on purpose. `<install>/scripts` is where `WA_INSTALL_DIR` points when the sentinel
-# starts the service; `<home>/.wasm-agent/scripts` is the node's own data directory, the one path
-# `host.paths()` always reports with no environment variable and no install layout involved. A node
-# started by hand, or a node in a brand-new cluster, therefore finds the runtime too.
-if [ "$HAVE_LIB" = "1" ]; then
-  MCP_DATA_DIR="$(wa_config_dir)"
-else
-  MCP_DATA_DIR="${WASM_AGENT_HOME:-$HOME}/.wasm-agent"
-fi
-MCP_RUNTIME="mcp-client.mjs mcp-client-core.mjs mcp-server-core.mjs mcp-session.mjs mcp-web.mjs mcp-mail.mjs web-core.mjs web-http-outcomes.mjs"
-MCP_MISSING=""
-for MCP_TARGET in "$SCRIPTS_DIR" "$MCP_DATA_DIR/scripts"; do
-  mkdir -p "$MCP_TARGET" || { MCP_MISSING="$MCP_MISSING $MCP_TARGET"; continue; }
-  for MCP_FILE in $MCP_RUNTIME; do
-    if [ -n "$ROOT" ] && [ -f "$ROOT/scripts/$MCP_FILE" ]; then
-      if cp -f "$ROOT/scripts/$MCP_FILE" "$MCP_TARGET/$MCP_FILE"; then continue; fi
-    elif command -v curl >/dev/null 2>&1; then
-      if curl -fsSL "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/$MCP_FILE" \
-        -o "$MCP_TARGET/$MCP_FILE" 2>/dev/null; then continue; fi
-    fi
-    MCP_MISSING="$MCP_MISSING $MCP_TARGET/$MCP_FILE"
-  done
-done
-if [ -z "$MCP_MISSING" ]; then
-  ok "MCP runtime: mcp-web.mjs, mcp-mail.mjs and their imports"
-else
-  warn "MCP runtime incomplete (missing:$MCP_MISSING) - web_search, web_read and mail refuse until it is installed"
-fi
-
-# Node is the runtime those scripts need. Shipping the scripts without it is the same half-fix one level
-# down: the Lua core is in the binary, the `.mjs` files are on disk, and both are inert if nothing can
-# execute them, which is what a device with no Node on its PATH produced.
+# THE CHANNELS, because "install from GitHub" is only true where a channel is published:
 #
-# Pinned, not "latest": an installer that silently changes a runtime under a working node is a worse
-# surprise than an old one. The build is verified against the checksums Node publishes for that release,
-# extracted beside the binary, and named in `<config>/env` as WA_NODE - the file the host reads at startup
-# - so the node's tools never depend on the PATH a service happened to inherit.
+#   Linux (glibc or musl, x86_64 or aarch64)  releases/index-linux.json -> scripts/linux/bootstrap.sh
+#   Android / Termux (aarch64)                the phone updater track    -> scripts/termux/bootstrap.sh
+#   macOS                                     NO published bundle yet; says so, and what to run instead
+#   Windows                                   NO published bundle yet; says so, and points at install.ps1
+#
+# A platform with no published bundle is a NAMED REFUSAL here, before anything is downloaded - never a
+# failed download of an asset that was never published.
+#
+# THE PIN. The index entry that names the bundle also names the commit it was built from, and the core is
+# fetched from THAT commit, not from `main`: the installer a node runs is the installer of the release it
+# is installing. When the entry carries `installer_sha256` the fetched core is checked against it and a
+# mismatch installs nothing (`installer_hash_mismatch`). Entries published before that field existed are
+# still installable; the front door then prints `installer_pin=absent` and the commit it fetched from,
+# rather than pretending to a check it did not make.
+#
+# AFTER THE INSTALL, `wa update` IS THIS FILE. A release bundle carries `scripts/install.sh` (these bytes,
+# pinned by the bundle's own files.sha256) and the core installs it into `<prefix>/scripts/`, so a node
+# updates with no checkout and no clone: `wa update` runs the neighbour of its own binary. Install and
+# update are one path because they are one command here; `--update` is the default action, spelled out so
+# an operator can say what they mean.
+#
+# Options (after `sh -s --`):
+#   --check                 resolve the channel and verify the published bundle; install nothing
+#   --update                install the newest published bundle (the default; identical path)
+#   --rollback              put back the binary pair the last install replaced (Linux; named refusal when
+#                           there is no recorded previous release)
+#   --join URL|none         announce this node to a fleet registry (Linux: WASM_AGENT_RENDEZVOUS). `none`
+#                           keeps it standalone. This is the FLEET JOIN, not a binding: binding operators
+#                           to a device is an interactive consent (`wa bind <fabric-url>`, type BIND), and
+#                           an installer must never type consent on the operator's behalf.
+#   --prefix DIR            install directory (default ~/.local/bin; Linux only)
+#   --port N                node UI port (default 8799; Linux only)
+#   --client-port N         client bridge port (default 8800; Linux only)
+#   --no-service            do not install or touch the systemd --user unit (Linux only)
+#   --adopt                 replace an install this channel did not make (backed up first; Linux only)
+#   --force                 install even while the node reports a running turn (Linux only)
+#   --trusted-masters IDS   node ids allowed to act as master on this node (Linux only)
+#   --ref REF               ref the core is fetched from (default main; WA_INSTALL_REF overrides)
+#   --base URL              repository endpoint the core is fetched from, without the ref (default
+#                           https://raw.githubusercontent.com/Magaav/wasm-agent; WA_INSTALL_BASE
+#                           overrides; `file://` needs WA_INSTALL_ALLOW_LOCAL=1)
+#   --repo DIR              use the core from this checkout instead of the network (dev/test path)
+#   -h, --help              this text
+#
+# Knobs: WA_INSTALL_BASE, WA_INSTALL_REF, WA_INSTALL_DIR, WA_INSTALL_ALLOW_LOCAL=1 (file:// fixtures),
+# WA_OFFLINE=1 (never touch the network; the core must then come from --repo).
+#
+# Exit codes: 0 done or nothing to do; 2 usage/unknown option; 1 a named refusal (the core's own word is
+# printed as the core printed it). Nothing is installed on any non-zero exit.
+set -eu
+WA_INSTALL_FRONT_DOOR=1
+
+# THE NODE PIN, and its one home. The MCP runtime (web_search/web_read, mail, the WhatsApp bridges) runs on
+# Node; the installer core downloads exactly this version for the node it installs, the publisher stamps it
+# into the bundle manifest and the index entry (`scripts/release-linux.sh`), and the toolchain provisioner
+# installs it (`scripts/lib/build-requirements.sh`). Both read THIS line, which is why it is still here after
+# this file stopped downloading Node itself: two answers to "the Node we ship" is how a node ends up running
+# a runtime nobody tested.
 NODE_VERSION="24.22.1"
-NODE_MIN_MAJOR="18"
-NODE_BIN=""
-node_major() { "$1" --version 2>/dev/null | sed 's/^v//' | cut -d. -f1; }
-node_sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-node_platform() {
-  node_os="$(uname -s 2>/dev/null)"; node_arch="$(uname -m 2>/dev/null)"
-  case "$node_os" in Linux) node_os=linux ;; Darwin) node_os=darwin ;; *) return 1 ;; esac
-  case "$node_arch" in x86_64|amd64) node_arch=x64 ;; arm64|aarch64) node_arch=arm64 ;; *) return 1 ;; esac
-  printf '%s-%s' "$node_os" "$node_arch"
-}
-ensure_node() {
-  if [ -n "${WA_NODE:-}" ] && [ -x "${WA_NODE}" ]; then
-    NODE_BIN="$WA_NODE"; ok "node: $NODE_BIN (WA_NODE)"
-  elif [ -x "$DIR/node/bin/node" ]; then
-    # Re-running the installer must not re-download a runtime that is already there and working.
-    NODE_BIN="$DIR/node/bin/node"; ok "node: $NODE_BIN ($("$NODE_BIN" --version 2>/dev/null), already installed)"
-  else
-    node_existing="$(command -v node 2>/dev/null || true)"
-    node_existing_major=""
-    if [ -n "$node_existing" ]; then node_existing_major="$(node_major "$node_existing")"; fi
-    if [ -n "$node_existing" ] && [ -n "$node_existing_major" ] && [ "$node_existing_major" -ge "$NODE_MIN_MAJOR" ]; then
-      NODE_BIN="$node_existing"
-      ok "node: $NODE_BIN ($("$NODE_BIN" --version 2>/dev/null))"
-    else
-      node_pair="$(node_platform)" || {
-        warn "node: no pinned build for this platform - install Node $NODE_MIN_MAJOR+ and set WA_NODE"
-        return 1
-      }
-      node_archive="node-v$NODE_VERSION-$node_pair.tar.gz"
-      node_tmp="$(mktemp -d)"
-      if command -v curl >/dev/null 2>&1 \
-        && curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/$node_archive" -o "$node_tmp/$node_archive" 2>/dev/null \
-        && curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/SHASUMS256.txt" -o "$node_tmp/SHASUMS256.txt" 2>/dev/null; then
-        node_expected="$(awk -v f="$node_archive" '$2==f {print $1}' "$node_tmp/SHASUMS256.txt")"
-        node_actual="$(node_sha256 "$node_tmp/$node_archive")"
-        if [ -z "$node_expected" ] || [ "$node_expected" != "$node_actual" ]; then
-          warn "node: checksum mismatch for $node_archive - refusing to install an unverified runtime"
-          rm -rf "$node_tmp"; return 1
-        fi
-        rm -rf "$DIR/node"; mkdir -p "$DIR/node"
-        if tar -xzf "$node_tmp/$node_archive" -C "$DIR/node" --strip-components=1 2>/dev/null; then
-          NODE_BIN="$DIR/node/bin/node"
-          ok "node: $NODE_BIN (v$NODE_VERSION, checksum verified)"
-        else
-          warn "node: could not extract $node_archive"; rm -rf "$node_tmp"; return 1
-        fi
-      else
-        warn "node: could not download v$NODE_VERSION from nodejs.org - install Node $NODE_MIN_MAJOR+ and set WA_NODE"
-        rm -rf "$node_tmp"; return 1
-      fi
-      rm -rf "$node_tmp"
-    fi
-  fi
-  if [ "$HAVE_LIB" = "1" ]; then NODE_ENV_FILE="$(wa_config_dir)/env"; else NODE_ENV_FILE="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/env"; fi
-  if [ -f "$NODE_ENV_FILE" ] && grep -q '^WA_NODE=' "$NODE_ENV_FILE" 2>/dev/null; then
-    node_recorded="$(sed -n 's/^WA_NODE=//p' "$NODE_ENV_FILE" | tail -1)"
-    if [ ! -x "$node_recorded" ]; then
-      warn "node: $NODE_ENV_FILE names WA_NODE=$node_recorded, which is not executable - fix or remove that line"
-    fi
-  else
-    mkdir -p "$(dirname "$NODE_ENV_FILE")"
-    printf 'WA_NODE=%s\n' "$NODE_BIN" >> "$NODE_ENV_FILE"
-    ok "node: WA_NODE=$NODE_BIN in $NODE_ENV_FILE"
-  fi
-  if [ -f "$SCRIPTS_DIR/mcp-web.mjs" ] && "$NODE_BIN" --check "$SCRIPTS_DIR/mcp-web.mjs" 2>/dev/null; then
-    ok "node: parses the MCP runtime"
-  else
-    warn "node: $NODE_BIN cannot parse $SCRIPTS_DIR/mcp-web.mjs - web_search, web_read and the WhatsApp connector will refuse"
-  fi
-}
-ensure_node || true
 
-# mail-mcp is the server that speaks Gmail over IMAP/SMTP. It is a Rust binary, so it ships as a pinned,
-# checksum-verified release asset rather than needing a toolchain on the device - except on a platform
-# upstream publishes nothing for (linux aarch64 today), where this says so instead of installing a binary
-# for the wrong architecture.
-MAIL_MCP_VERSION="0.6.1"
-MAIL_MCP_BIN=""
-mail_mcp_extract() { # <archive> <dir> -> 0 when the tree was unpacked
-  archive="$1"; into="$2"
-  if tar -xJf "$archive" -C "$into" 2>/dev/null; then return 0; fi
-  if command -v xz >/dev/null 2>&1 && xz -dc "$archive" 2>/dev/null | tar -xf - -C "$into" 2>/dev/null; then return 0; fi
-  if command -v python3 >/dev/null 2>&1 \
-    && python3 -c 'import lzma,sys;sys.stdout.buffer.write(lzma.open(sys.argv[1]).read())' "$archive" 2>/dev/null \
-    | tar -xf - -C "$into" 2>/dev/null; then return 0; fi
-  return 1
+REPO_SLUG="Magaav/wasm-agent"
+BASE="${WA_INSTALL_BASE:-https://raw.githubusercontent.com/$REPO_SLUG}"
+REF="${WA_INSTALL_REF:-main}"
+PREFIX_DIR="${WA_INSTALL_DIR:-$HOME/.local/bin}"
+REPO_DIR="${WA_INSTALL_REPO:-}"
+ACTION=install
+JOIN=
+JOIN_GIVEN=0
+ROLLBACK=0
+CORE_ARGS=
+CORE_REF=
+WANT_PIN=absent
+
+say()  { printf 'install: %s\n' "$*"; }
+die()  { printf 'install: %s\n' "$*" >&2; exit 1; }
+usage() {
+  cat <<'TEXT'
+wasm-agent installer - one command, then the same command to update.
+
+  curl -fsSL https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.sh | sh
+  curl -fsSL .../install.sh | sh -s -- --join https://rendezvous.colmeio.com
+
+  --check                 resolve the channel and verify the published bundle; install nothing
+  --update                install the newest published bundle (the default)
+  --rollback              put back the binary pair the last install replaced (Linux)
+  --join URL|none         announce this node to a fleet registry / keep it standalone (Linux)
+  --prefix DIR            install directory (default ~/.local/bin; Linux)
+  --port N                node UI port (default 8799; Linux)
+  --client-port N         client bridge port (default 8800; Linux)
+  --no-service            do not install or touch the systemd --user unit (Linux)
+  --adopt                 replace an install this channel did not make (backed up first; Linux)
+  --force                 install even while the node reports a running turn (Linux)
+  --trusted-masters IDS   node ids allowed to act as master on this node (Linux)
+  --ref REF               ref the core is fetched from (default main)
+  --base URL              repository endpoint, without the ref
+  --repo DIR              use the core from this checkout instead of the network
+  -h, --help              this text
+TEXT
 }
-ensure_mail_mcp() {
-  exe="$DIR/bin/mail-mcp"
-  if [ -n "${WA_MAIL_MCP_BIN:-}" ] && [ -x "${WA_MAIL_MCP_BIN}" ]; then
-    MAIL_MCP_BIN="$WA_MAIL_MCP_BIN"; ok "mail-mcp: $MAIL_MCP_BIN (WA_MAIL_MCP_BIN)"; return 0
-  fi
-  if [ -x "$exe" ] && "$exe" --help >/dev/null 2>&1; then
-    MAIL_MCP_BIN="$exe"; ok "mail-mcp: $exe (already installed)"; return 0
-  fi
-  mail_pair="$(node_platform)" || {
-    warn "mail-mcp: cannot tell this platform's architecture - install it by hand and set WA_MAIL_MCP_BIN"
-    return 1
-  }
-  case "$mail_pair" in
-    linux-x64) mail_asset="mail-mcp-x86_64-unknown-linux-gnu.tar.xz" ;;
-    linux-arm64) warn "mail-mcp: upstream publishes no linux aarch64 build (v$MAIL_MCP_VERSION ships x86_64 Linux, x86_64/aarch64 macOS, x86_64 Windows) - build it with cargo on this host, or run mail on an x86_64 node, then set WA_MAIL_MCP_BIN"; return 1 ;;
-    darwin-x64) mail_asset="mail-mcp-x86_64-apple-darwin.tar.xz" ;;
-    darwin-arm64) mail_asset="mail-mcp-aarch64-apple-darwin.tar.xz" ;;
-    *) warn "mail-mcp: no release asset for $mail_pair - install it by hand and set WA_MAIL_MCP_BIN"; return 1 ;;
+
+# One argument per line, so a value containing a space (a path) survives: the list is split on newline only.
+push() {
+  if [ -z "$CORE_ARGS" ]; then CORE_ARGS="$1"; else CORE_ARGS="$CORE_ARGS
+$1"; fi
+}
+need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1_value_required"; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) ACTION=check; shift ;;
+    --update) ACTION=install; shift ;;
+    --rollback) ROLLBACK=1; shift ;;
+    --join) need_value --join "$@"; JOIN="$2"; JOIN_GIVEN=1; shift 2 ;;
+    --join=*) JOIN="${1#--join=}"; JOIN_GIVEN=1; shift ;;
+    --rendezvous) need_value --rendezvous "$@"; JOIN="$2"; JOIN_GIVEN=1; shift 2 ;;
+    --prefix) need_value --prefix "$@"; PREFIX_DIR="$2"; shift 2 ;;
+    --prefix=*) PREFIX_DIR="${1#--prefix=}"; shift ;;
+    --port|--client-port|--trusted-masters) need_value "$1" "$@"; push "$1"; push "$2"; shift 2 ;;
+    --no-service|--adopt|--force) push "$1"; shift ;;
+    --ref) need_value --ref "$@"; REF="$2"; shift 2 ;;
+    --base) need_value --base "$@"; BASE="${2%/}"; shift 2 ;;
+    --base=*) BASE="${1#--base=}"; BASE="${BASE%/}"; shift ;;
+    --repo) need_value --repo "$@"; REPO_DIR="$2"; shift 2 ;;
+    --repo=*) REPO_DIR="${1#--repo=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown_option: $1 (see --help)" ;;
   esac
-  mail_base="https://github.com/tecnologicachile/mail-mcp/releases/download/v$MAIL_MCP_VERSION"
-  mail_tmp="$(mktemp -d)"
-  if ! curl -fsSL "$mail_base/$mail_asset" -o "$mail_tmp/$mail_asset" 2>/dev/null \
-    || ! curl -fsSL "$mail_base/$mail_asset.sha256" -o "$mail_tmp/$mail_asset.sha256" 2>/dev/null; then
-    warn "mail-mcp: could not download v$MAIL_MCP_VERSION from GitHub"; rm -rf "$mail_tmp"; return 1
-  fi
-  mail_expected="$(awk '{print $1}' "$mail_tmp/$mail_asset.sha256")"
-  mail_actual="$(node_sha256 "$mail_tmp/$mail_asset")"
-  if [ -z "$mail_expected" ] || [ "$mail_expected" != "$mail_actual" ]; then
-    warn "mail-mcp: checksum mismatch for $mail_asset - refusing to install an unverified binary"
-    rm -rf "$mail_tmp"; return 1
-  fi
-  if ! mail_mcp_extract "$mail_tmp/$mail_asset" "$mail_tmp"; then
-    warn "mail-mcp: cannot decompress $mail_asset - install xz-utils (or python3) and re-run the installer"
-    rm -rf "$mail_tmp"; return 1
-  fi
-  mail_found="$(find "$mail_tmp" -type f -name mail-mcp | head -1)"
-  if [ -z "$mail_found" ]; then
-    warn "mail-mcp: $mail_asset did not contain a mail-mcp executable"; rm -rf "$mail_tmp"; return 1
-  fi
-  mkdir -p "$DIR/bin"
-  cp -f "$mail_found" "$exe" && chmod 755 "$exe"
-  rm -rf "$mail_tmp"
-  if ! "$exe" --help >/dev/null 2>&1; then
-    warn "mail-mcp: $exe does not run on this machine - wrong architecture?"; return 1
-  fi
-  MAIL_MCP_BIN="$exe"
-  ok "mail-mcp: $exe (v$MAIL_MCP_VERSION, checksum verified)"
-  if [ "$HAVE_LIB" = "1" ]; then MAIL_ENV_FILE="$(wa_config_dir)/env"; else MAIL_ENV_FILE="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/env"; fi
-  if [ -f "$MAIL_ENV_FILE" ] && grep -q '^MAIL_MCP_BIN=' "$MAIL_ENV_FILE" 2>/dev/null; then
-    :
-  else
-    mkdir -p "$(dirname "$MAIL_ENV_FILE")"
-    printf 'MAIL_MCP_BIN=%s\n' "$MAIL_MCP_BIN" >> "$MAIL_ENV_FILE"
-    ok "mail-mcp: MAIL_MCP_BIN=$MAIL_MCP_BIN in $MAIL_ENV_FILE"
-  fi
+done
+case "$PREFIX_DIR" in /*) ;; *) die "prefix_not_absolute: $PREFIX_DIR" ;; esac
+
+# ---- 1. what is this machine ---------------------------------------------------------------------
+# `uname` is taken from PATH (not a hardcoded command) because the platform matrix is tested by putting
+# fixture answers on PATH (scripts/test-install.sh) - the only way to prove the mapping on one host.
+os=$(uname -s 2>/dev/null || echo unknown)
+arch=$(uname -m 2>/dev/null || echo unknown)
+termux=0
+case "${PREFIX:-}" in *com.termux*) termux=1 ;; esac
+case "$os" in
+  Linux) os=linux ;;
+  Android) os=android; termux=1 ;;
+  Darwin) os=macos ;;
+  MSYS*|MINGW*|CYGWIN*) os=windows ;;
+esac
+# `if`, not `[ ... ] && os=android`: this file runs under `set -e`, and a false test as the last status of a
+# statement is how an installer exits silently instead of continuing.
+if [ "$termux" = 1 ]; then os=android; fi
+case "$arch" in
+  x86_64|amd64) arch=x86_64 ;;
+  aarch64|arm64) arch=aarch64 ;;
+esac
+
+case "$os" in
+  linux) CORE_PATH=scripts/linux/bootstrap.sh; CHANNEL='linux bundle (releases/index-linux.json)' ;;
+  android) CORE_PATH=scripts/termux/bootstrap.sh; CHANNEL='Termux preview (the phone updater track)' ;;
+  macos) die "no_published_bundle_for_macos: the release channel publishes Linux (static musl and glibc, x86_64 and aarch64) and Android/Termux bundles; there is no Apple bundle to download and this installer will not build one.
+This Mac can still run a node - build it here, which needs Rust and a checkout:
+  git clone https://github.com/$REPO_SLUG.git ~/wasm-agent && bash ~/wasm-agent/scripts/deploy.sh
+Then this same command installs published bundles from that checkout: bash scripts/install.sh --repo ~/wasm-agent" ;;
+  windows) die "no_published_bundle_for_windows: the Windows release is installed by scripts/install.ps1, not by this POSIX script. In PowerShell:
+  irm https://raw.githubusercontent.com/$REPO_SLUG/main/scripts/install.ps1 | iex" ;;
+  *) die "os_unsupported: $(uname -s 2>/dev/null || echo unknown) (published channels: Linux, Android/Termux, and Windows through install.ps1)" ;;
+esac
+case "$arch" in
+  x86_64|aarch64) ;;
+  *) die "arch_unsupported: $arch (published: x86_64, aarch64)" ;;
+esac
+
+# ---- 2. the prerequisites the core needs, named before anything is downloaded ---------------------
+missing=
+if [ -z "$REPO_DIR" ]; then
+  for tool in curl tar sha256sum python3; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+  done
+fi
+if [ -n "$missing" ]; then
+  hint=
+  if command -v apt-get >/dev/null 2>&1; then hint='sudo apt-get install -y curl ca-certificates tar coreutils python3'
+  elif command -v apk >/dev/null 2>&1; then hint='apk add bash curl ca-certificates tar coreutils python3'
+  elif command -v dnf >/dev/null 2>&1; then hint='sudo dnf install -y curl ca-certificates tar coreutils python3'
+  else hint='install curl, ca-certificates, tar, coreutils and python3'; fi
+  die "prerequisites_missing:$missing - $hint"
+fi
+
+# One fetcher for every file this script takes from the network, so the scheme rules are in one place.
+fetch() { # URL DEST
+  case "$1" in
+    https://*|http://*) curl -fsSL --retry 2 --connect-timeout 20 -o "$2" "$1" ;;
+    file://*)
+      [ "${WA_INSTALL_ALLOW_LOCAL:-0}" = 1 ] || die "local_url_refused: $1 (set WA_INSTALL_ALLOW_LOCAL=1 for a fixture)"
+      cp -f -- "${1#file://}" "$2" ;;
+    *) die "url_scheme_refused: $1" ;;
+  esac
 }
-ensure_mail_mcp || true
 
-# The skills the node needs to know how to update itself. Delivered as a skill rather than a
-# paragraph in AGENTS.md: only `name` and `description` enter the prompt, and the body loads when the
-# task matches, so the procedure costs nothing per turn and can be as long as it needs to be.
-#
-# The directory is the node's own scan root - `<home>/.wasm-agent/skills`, the same expression
-# `lua/core/paths.lua` uses for `paths.config()` and `scripts/verify-install.sh` uses to check it - and not
-# `$DIR`, which is where the *command* lives and which no node ever reads. The comment here used to claim the
-# install directory and the config directory were the same place; on this project they are not, and a skill
-# written into $DIR/skills is a skill the node never loads.
-if [ "$HAVE_LIB" = "1" ]; then
-  SKILLS_DIR="$(wa_config_dir)/skills/self-update"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/wa-install.XXXXXX") || die 'scratch_unwritable'
+trap 'rm -rf "$tmp"' EXIT
+
+# ---- 3. the core: this checkout, or the commit the published release was built from ----------------
+CORE=
+CORE_ORIGIN=
+if [ -n "$REPO_DIR" ]; then
+  [ -f "$REPO_DIR/$CORE_PATH" ] || die "not_a_checkout: $REPO_DIR/$CORE_PATH is missing"
+  CORE="$REPO_DIR/$CORE_PATH"
+  CORE_ORIGIN="checkout $REPO_DIR"
+  CORE_REF=$REF
+  say "channel: $CHANNEL"
+  say "core: $CORE_PATH from $CORE_ORIGIN"
 else
-  SKILLS_DIR="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/skills/self-update"
-fi
-mkdir -p "$SKILLS_DIR"
-SKILL_GOT=0
-if [ -n "$ROOT" ] && [ -f "$ROOT/skills/self-update/SKILL.md" ]; then
-  cp -f "$ROOT/skills/self-update/SKILL.md" "$SKILLS_DIR/SKILL.md" && SKILL_GOT=1
-elif command -v curl >/dev/null 2>&1; then
-  curl -fsSL "https://raw.githubusercontent.com/Magaav/wasm-agent/main/skills/self-update/SKILL.md" \
-    -o "$SKILLS_DIR/SKILL.md" 2>/dev/null && SKILL_GOT=1
-fi
-if [ "$SKILL_GOT" = "1" ]; then
-  ok "$SKILLS_DIR/SKILL.md"
-else
-  warn "skills/self-update was not installed - this node will not know how to update itself"
+  case "${WA_OFFLINE:-0}" in
+    1|true|yes) die "offline: WA_OFFLINE=1 and no --repo; there is no local core to install from and an offline install downloads nothing" ;;
+  esac
+  say "channel: $CHANNEL"
+  if [ "$os" = linux ]; then
+    # Ask the index which commit this machine's bundle was built from, and take the core from exactly
+    # that commit: one extra request buys an installer that matches its release instead of one from an
+    # unrelated day.
+    index_url="$BASE/$REF/releases/index-linux.json"
+    fetch "$index_url" "$tmp/index.json" || die "index_unreachable: $index_url"
+    row=$(python3 - "$tmp/index.json" "$arch" <<'PY'
+import json,sys,re
+try: doc=json.load(open(sys.argv[1]))
+except Exception: print("ERR index_invalid: not JSON"); sys.exit()
+if doc.get("schema")!="wasm-agent-linux-release-index" or doc.get("schema_version")!=1:
+    print("ERR index_invalid: schema %r v%r is not wasm-agent-linux-release-index v1"%(doc.get("schema"),doc.get("schema_version"))); sys.exit()
+arch=sys.argv[2]
+wanted=[arch+"-unknown-linux-musl", arch+"-unknown-linux-gnu"]
+for want in wanted:
+    for r in doc.get("releases") or []:
+        if r.get("target")!=want: continue
+        commit=r.get("commit") or ""
+        if not re.fullmatch(r"[0-9a-f]{40}", commit): continue
+        pin=r.get("installer_sha256") or ""
+        print("\t".join([want, commit, pin if re.fullmatch(r"[0-9a-f]{64}", pin) else "absent"])); sys.exit()
+print("ERR no_release_for_target: the index has no entry for %s" % " or ".join(wanted))
+PY
+)
+    case "$row" in ERR*) die "${row#ERR }" ;; esac
+    want_target=$(printf '%s' "$row" | cut -f1)
+    CORE_REF=$(printf '%s' "$row" | cut -f2)
+    WANT_PIN=$(printf '%s' "$row" | cut -f3)
+    say "platform: $os $arch -> bundle $want_target at $CORE_REF (index entry)"
+  else
+    CORE_REF=$REF
+    say "platform: $os $arch"
+  fi
+  core_url="$BASE/$CORE_REF/$CORE_PATH"
+  fetch "$core_url" "$tmp/core" || die "core_unreachable: $core_url"
+  got_sha=$(sha256sum "$tmp/core" | cut -d' ' -f1)
+  if [ "$WANT_PIN" != absent ]; then
+    [ "$got_sha" = "$WANT_PIN" ] || die "installer_hash_mismatch: $CORE_PATH at $CORE_REF is $got_sha, the index entry pins $WANT_PIN; nothing was installed"
+    say "core: $CORE_PATH at $CORE_REF (sha256 $got_sha, pinned by the index entry)"
+  else
+    say "core: $CORE_PATH at $CORE_REF (sha256 $got_sha, installer_pin=absent: the entry predates the pin)"
+  fi
+  CORE="$tmp/core"
+  CORE_ORIGIN="release $CORE_REF"
 fi
 
-printf "\n   ${green}ready.${reset}\n\n"
-printf "   ${grey}start chatting:${reset}\n     wa\n\n"
+# ---- 4. what the core is asked to do -------------------------------------------------------------
+# The channels take different words for the same intent, so the mapping lives here, once, and a request a
+# channel cannot honour is refused by name instead of being dropped silently.
+case "$os" in
+  linux)
+    push "--prefix"; push "$PREFIX_DIR"
+    if [ "$JOIN_GIVEN" = 1 ]; then push "--rendezvous"; push "$JOIN"; fi
+    if [ "$ROLLBACK" = 1 ]; then push "--rollback"; fi
+    ;;
+  android)
+    if [ "$JOIN_GIVEN" = 1 ]; then die "join_unsupported_on_android: the fleet registry key this writes is Linux-side; on the phone pair with 'wa bind <fabric-url>' after the install"; fi
+    if [ "$ROLLBACK" = 1 ]; then die "rollback_unsupported_on_android: run 'wa update --rollback' after the install (the phone updater owns its own switch)"; fi
+    if [ "$PREFIX_DIR" != "$HOME/.local/bin" ]; then die "prefix_unsupported_on_android: Termux installs under \$PREFIX/opt (WA_TERMUX_INSTALL overrides it)"; fi
+    if [ -n "$CORE_ARGS" ]; then say "android_ignores: the phone channel takes no service/port options"; fi
+    CORE_ARGS=
+    ;;
+esac
+if [ "$ACTION" = check ]; then push "--check"; fi
+
+# POSIX sh has no arrays: the list is newline-separated and split on newline only, so a path with a space
+# survives. No value this script accepts contains a newline.
+IFS='
+'
+# shellcheck disable=SC2086
+set -- $CORE_ARGS
+unset IFS
+
+say "running: $CORE_PATH ($CORE_ORIGIN)$( [ "$#" -gt 0 ] && printf ' %s' "$@" )"
+rc=0
+bash "$CORE" "$@" || rc=$?
+if [ "$rc" != 0 ]; then
+  printf 'install: the %s core refused (exit %s); nothing was installed\n' "$CORE_PATH" "$rc" >&2
+  exit "$rc"
+fi
+
+# ---- 5. the updater, beside the binary -----------------------------------------------------------
+# A release bundle carries scripts/install.sh (these bytes, pinned by the bundle's files.sha256) and the core
+# installs it into <prefix>/scripts/, so `wa update` runs the neighbour of its own binary: no checkout, no
+# clone, no toolchain, install and update one path. A bundle published BEFORE that carries no updater - and
+# the rule here is that nothing is invented for it: this script will not fetch a file called install.sh from
+# an older ref, because before 11/11 that name held an SSH client wrapper, and "the updater" turning out to
+# be something that replaces `wa` with a wrapper is exactly the class of silent replacement this project
+# refuses. Such a node keeps the update path it already had (the bootstrap clone), says so, and gets the
+# bundled updater with its next release.
+if [ "$os" = linux ] && [ "$ACTION" != check ] && [ "${WA_INSTALL_TEST:-0}" != 1 ]; then
+  updater="$PREFIX_DIR/scripts/install.sh"
+  if [ -f "$updater" ] && grep -q '^WA_INSTALL_FRONT_DOOR=1' "$updater" 2>/dev/null; then
+    say "updater: $updater (came with the bundle, verified with it)"
+  elif [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/scripts/install.sh" ] \
+       && grep -q '^WA_INSTALL_FRONT_DOOR=1' "$REPO_DIR/scripts/install.sh" 2>/dev/null; then
+    mkdir -p "$PREFIX_DIR/scripts" 2>/dev/null || true
+    cp -f "$REPO_DIR/scripts/install.sh" "$updater" && chmod 755 "$updater" \
+      && say "updater: $updater (from the checkout; this bundle predates it)"
+  else
+    say "updater=absent: this bundle predates the bundled updater, so \`wa update\` uses its existing"
+    say "  bootstrap path until the next release installs one beside the binary"
+  fi
+fi
+
+printf '\n'
+if [ "$ACTION" = check ]; then
+  # A check installs nothing, so it must not hand out an "update with this" line for files it did not place.
+  say "check only: nothing was installed and nothing was replaced."
+  exit 0
+fi
+say "done. This node updates with the same command that installed it:"
+say "  $PREFIX_DIR/scripts/install.sh --update"
 case ":$PATH:" in
-  *":$DIR:"*) ;;
-  *) warn "add $DIR to PATH, then run: wa" ;;
+  *":$PREFIX_DIR:"*) ;;
+  *) say "  export PATH=\"$PREFIX_DIR:\$PATH\"   (or open a new shell)" ;;
 esac

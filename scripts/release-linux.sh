@@ -168,6 +168,18 @@ for file in $runtime; do
   [ -f "$ROOT/scripts/$file" ] || fail "runtime_file_missing: scripts/$file"
   install -m644 "$ROOT/scripts/$file" "$stage/scripts/$file"
 done
+# THE UPDATER SHIPS WITH THE RELEASE. `scripts/install.sh` is the one-command front door, and
+# `scripts/linux/bootstrap.sh` is the core it runs; both go into the bundle, so the command that updates
+# this node travels WITH the bytes it installs, pinned by files.sha256 and by the index entry that names
+# this bundle - never fetched from `main` at update time. Without them a node installed from a bundle can
+# only be updated by a person re-pasting a line (docs/RELEASE-UPDATE.md, "a node installed from a
+# published bundle").
+mkdir -p "$stage/scripts/linux"
+for file in install.sh; do
+  [ -f "$ROOT/scripts/$file" ] || fail "installer_missing: scripts/$file"
+  install -m755 "$ROOT/scripts/$file" "$stage/scripts/$file"
+done
+install -m755 "$ROOT/scripts/linux/bootstrap.sh" "$stage/scripts/linux/bootstrap.sh"
 # Nothing that could carry a secret or a machine's state belongs in a public bundle.
 if find "$stage" \( -name 'env' -o -name '*.env' -o -name '*.db' -o -name '*.db-*' -o -name '*.key' -o -name '*.pem' \
      -o -name 'node.key' -o -name '.git' \) | grep -q .; then
@@ -216,14 +228,37 @@ fi
 
 # ---- publish ------------------------------------------------------------------------------------
 command -v gh >/dev/null || fail 'gh_missing: install the GitHub CLI to publish'
+
+# SHA256SUMS: one file a human (and any script that is not this one) can check the release with -
+# `sha256sum -c SHA256SUMS`. It is built here, from the bytes about to be uploaded, and it ACCUMULATES
+# across targets: publishing x86_64 after aarch64 into the same tag keeps both rows instead of the last
+# one winning. The bundle's own chain (index -> bundle.manifest -> files.sha256 -> every member) stays the
+# trust root the installer verifies; this file is the flat, conventional view of the same bytes.
+sums="$out/SHA256SUMS"
+sums_new="$out/.SHA256SUMS.$$"
+: > "$sums_new"
 if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
-  gh release upload "$tag" "$out/$asset" --repo "$REPO" --clobber || fail 'publish_failed: gh release upload'
+  mkdir -p "$out/sums-prev"
+  if gh release download "$tag" --repo "$REPO" --pattern SHA256SUMS --dir "$out/sums-prev" >/dev/null 2>&1 \
+     && [ -f "$out/sums-prev/SHA256SUMS" ]; then
+    grep -v "[ *]$asset\$" "$out/sums-prev/SHA256SUMS" >> "$sums_new" 2>/dev/null || true
+  fi
+  rm -rf "$out/sums-prev"
+fi
+( cd "$out" && sha256sum "$asset" ) >> "$sums_new" || { rm -f "$sums_new"; fail 'checksums_failed: sha256sum'; }
+LC_ALL=C sort -k2 "$sums_new" > "$sums" && rm -f "$sums_new" || fail 'checksums_failed: could not write SHA256SUMS'
+say "checksums $sums ($(wc -l < "$sums" | tr -d ' ') asset(s))"
+
+if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+  gh release upload "$tag" "$out/$asset" "$sums" --repo "$REPO" --clobber || fail 'publish_failed: gh release upload'
 else
   notes="Linux prebuilt node bundle(s) for $commit.
-Install on a fresh Linux machine (see README, \"Linux node\"):
-d=~/wasm-agent-bootstrap; if [ -d \"\$d/.git\" ]; then git -C \"\$d\" fetch -q --depth 1 origin main && git -C \"\$d\" reset -q --hard FETCH_HEAD; else git clone -q --depth 1 https://github.com/$REPO.git \"\$d\"; fi && bash \"\$d/scripts/linux/bootstrap.sh\"
+Install a node on a fresh Linux machine - one command, no checkout and no toolchain:
+  curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | sh
+The same command updates it. Verification: ./SHA256SUMS, and inside the bundle bundle.manifest ->
+files.sha256 -> every member (the installer checks all of it before anything is installed).
 reason: ${reason:-none stated}"
-  gh release create "$tag" "$out/$asset" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
+  gh release create "$tag" "$out/$asset" "$sums" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
     || fail 'publish_failed: gh release create'
 fi
 url="https://github.com/$REPO/releases/download/$tag/$asset"
@@ -238,14 +273,25 @@ say "published $url"
   "releases": []
 }
 JSON
+# The installer pin: `scripts/install.sh` fetches its core (`scripts/linux/bootstrap.sh`) from the commit
+# this entry names and refuses bytes that are not this - so the installer a node runs is the installer of
+# the release it is installing. Read from the BUNDLE when the bundle carries it (that is the copy a node
+# will install), else from this tree; a prebuilt bundle published before the updater existed records none,
+# and the front door then says installer_pin=absent rather than pretending to a check it did not make.
+installer_sha=
+for candidate in "$stage/scripts/linux/bootstrap.sh" "$ROOT/scripts/linux/bootstrap.sh"; do
+  if [ -f "$candidate" ]; then installer_sha=$(sha256sum "$candidate" | cut -d' ' -f1); break; fi
+done
+[ -n "$installer_sha" ] || say 'installer_sha256: none (no scripts/linux/bootstrap.sh in the bundle or the tree)'
 # Node, not python3: the index is also written from the Windows tree (--publish-bundle), where python3 is
 # not a given and Node is (the repository already needs it).
 index_file=$INDEX; command -v cygpath >/dev/null 2>&1 && index_file=$(cygpath -m "$INDEX")
-node - "$index_file" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" <<'JS' || fail 'index_update_failed'
+node - "$index_file" "$commit" "$short" "$manifest_sha" "$url" "$size" "$triple" "$arch" "$tag" "$built_utc" "$node_version" "$installer_sha" <<'JS' || fail 'index_update_failed'
 const fs=require('fs');
-const [file,commit,short,sha,url,size,triple,arch,tag,built,node]=process.argv.slice(2);
+const [file,commit,short,sha,url,size,triple,arch,tag,built,node,installer]=process.argv.slice(2);
 const doc=JSON.parse(fs.readFileSync(file,'utf8'));
 const entry={tag,commit,commit_short:short,target:triple,arch,manifest_sha256:sha,url,size:Number(size),node_version:node,built_utc:built};
+if(installer) entry.installer_sha256=installer;
 doc.releases=[entry,...(doc.releases||[]).filter(r=>!(r.commit===commit&&r.target===triple))];
 doc.generated_utc=built;
 fs.writeFileSync(file,JSON.stringify(doc,null,2)+'\n');

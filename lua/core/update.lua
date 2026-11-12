@@ -479,10 +479,28 @@ end
 -- idempotent, verifying updater (same bundle: nothing replaced), so `/update` runs it - first as a
 -- read-only `--check` (which bundle, current or not), then for real in a transient systemd unit, because
 -- the update stops `wa-sentinel.service` and must not be a child of the processes it replaces.
+--
+-- THE UPDATER IS A NEIGHBOUR OF THE BINARY (11/11). A Linux bundle now carries `scripts/install.sh` (the
+-- one-command front door) and `scripts/linux/bootstrap.sh` (the core it runs) as ordinary verified
+-- members - files.sha256 covers them and the index entry pins the core - and the core installs them into
+-- `<install>/scripts/`. So a node installed that way is updated by the bytes it was installed with: no
+-- clone, no git, no fetch of `main`, and no second answer to "what is published" that can disagree with
+-- the one that installed it. An install from before that (a bootstrap clone in <home>) keeps the clone
+-- path below, unchanged, because that is where its updater is.
 M.BOOTSTRAP_DIR_NAME = "wasm-agent-bootstrap"
 
 function M.release_install(record)
   return type(record) == "table" and record.via == "linux-bootstrap"
+end
+
+-- The installed front door, when this node has one. Presence, not a version test: the bundle either
+-- shipped it (and files.sha256 verified it with every other member) or it did not.
+function M.installed_updater(install)
+  if type(install) ~= "string" or install == "" then return nil end
+  local path = slashes(install) .. "/scripts/install.sh"
+  local probe = shell("test -f " .. quote(path) .. " 2>/dev/null")
+  if probe and probe.code == 0 then return path end
+  return nil
 end
 
 local function bootstrap_launcher(dir)
@@ -492,11 +510,60 @@ local function bootstrap_launcher(dir)
     "git -C \"$d\" reset -q --hard FETCH_HEAD; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git \"$d\"; fi"
 end
 
+-- One command, one path: the check is `install.sh --check`, the install is `install.sh --update` (the
+-- same code path as a first install), and both are the neighbour process - never the running node
+-- replacing its own image.
+function M.run_release_updater(options, facts, record, updater)
+  local base = { install = facts.install, installed_commit = facts.installed_commit, installed_release = record.release,
+                 channel = "release-bundle", updater = "installed" }
+  local function with(fields) for k, v in pairs(base) do if fields[k] == nil then fields[k] = v end end; return fields end
+  local cmd = "sh " .. quote(updater)
+  local checked = shell(cmd .. " --check --prefix " .. quote(facts.install) .. " 2>&1")
+  local plan = trim(checked and checked.stdout or "")
+  if not checked or checked.code ~= 0 then
+    return with({ ok = false, status = "release_check_failed", error = "release_check_failed", observed = plan,
+      message = "the installed updater could not verify the published bundle, so nothing was installed." })
+  end
+  local state = plan:match("bootstrap: install [^\r\n]-: (%a+)")
+  local target = plan:match("would install ([^%s]+)")
+  base.target_release = target
+  if state == "current" then
+    return with({ ok = true, status = "current", observed = plan,
+      message = "this node already runs the newest published bundle" .. (target and (" (" .. target .. ")") or "") .. "; nothing to do." })
+  end
+  if options.check then
+    return with({ ok = true, status = "behind", observed = plan,
+      message = "a newer published bundle is available" .. (target and (": " .. target) or "") .. "; `wa update` installs it." })
+  end
+  local has_systemd_run = shell("command -v systemd-run >/dev/null 2>&1")
+  if not has_systemd_run or has_systemd_run.code ~= 0 then
+    return with({ ok = false, status = "release_update_unsupervised", error = "release_update_unsupervised",
+      message = "systemd-run is not available, so the update cannot run outside this node.",
+      next = "run it from a shell: " .. cmd .. " --update --prefix " .. facts.install })
+  end
+  local unit = "wa-release-update-" .. tostring(math.floor(host.now()))
+  local log = slashes(paths.config()) .. "/release-update.log"
+  local bus = "export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; "
+  local started = shell(bus .. "systemd-run --user --collect --quiet --unit " .. quote(unit) ..
+    " --property=StandardOutput=append:" .. quote(log) .. " --property=StandardError=append:" .. quote(log) ..
+    " " .. cmd .. " --update --prefix " .. quote(facts.install) .. " 2>&1")
+  if not started or started.code ~= 0 then
+    return with({ ok = false, status = "release_update_not_started", error = "release_update_not_started",
+      observed = trim(started and started.stdout or "no result"), message = "the update unit could not be started; nothing was changed." })
+  end
+  return with({ ok = true, queued = true, status = "queue", unit = unit, log = log, observed = plan,
+    message = "queued: installing " .. tostring(target or "the newest bundle") .. " in the transient unit " .. unit ..
+      ". It stops this node, installs, verifies and restarts it. This is not done yet.",
+    next = "follow it with `journalctl --user -u " .. unit .. "` or " .. log .. "; installed.txt names the release once it is done." })
+end
+
 function M.run_release(options, facts, record)
+  local installed = M.installed_updater(facts.install)
+  if installed then return M.run_release_updater(options, facts, record, installed) end
   local home = slashes(paths.home())
   local dir = home .. "/" .. M.BOOTSTRAP_DIR_NAME
   local base = { install = facts.install, installed_commit = facts.installed_commit, installed_release = record.release,
-                 channel = "release-bundle" }
+                 channel = "release-bundle", updater = "bootstrap-clone" }
   local function with(fields) for k, v in pairs(base) do if fields[k] == nil then fields[k] = v end end; return fields end
   if platform.os() ~= "linux" then
     return with({ ok = false, status = "release_update_unsupported", error = "release_update_unsupported",

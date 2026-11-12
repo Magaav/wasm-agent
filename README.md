@@ -107,12 +107,30 @@ Alpine, a container or a small VPS) becomes a node from the published prebuilt b
 in one command:
 
 ```sh
-d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d"; fi && bash "$d/scripts/linux/bootstrap.sh"
+curl -fsSL https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.sh | sh
 ```
 
-Prerequisites: `git curl ca-certificates tar python3` (present on Ubuntu server/cloud images; Alpine:
-`apk add bash git curl ca-certificates tar coreutils python3 libstdc++`) and, for the service, a systemd
-user session (an SSH login; `--no-service` otherwise). `wa` and `wa-sentinel` are fully static (musl), so
+No compiler, no checkout, no `git`: `scripts/install.sh` is the front door. It detects the platform
+(Linux glibc or musl, x86_64 or aarch64), reads the release index for this machine's bundle, fetches the
+installer core from the very commit that bundle was built from, and hands it the options. The core is the
+verifying installer: size, `sha256(bundle.manifest)` against the index, every member against
+`files.sha256`, the ELF machine, one run of the candidate - and only then does anything get written.
+`--check` verifies without changing anything; `--join <url>` announces the node to a fleet registry;
+`--prefix DIR`, `--port N`, `--no-service` and `--adopt` are passed through; `--help` lists them all.
+The same command updates the node: from release to release the bundle carries the updater beside the
+binary, so `wa update` runs the neighbour of its own `wa` with no clone and no toolchain. The research
+behind this shape, the channel per platform and the measurements: `docs/INSTALL.md`.
+
+Prerequisites: `curl ca-certificates tar sha256sum python3` (present on Ubuntu server/cloud images;
+Alpine: `apk add bash curl ca-certificates tar coreutils python3 libstdc++`) and, for the service, a
+systemd user session (an SSH login; `--no-service` otherwise).
+
+A machine that already has `git` can also run the installer out of a shallow clone, which is what a
+development host and an air-gapped mirror use - the same core, fetched by `git` instead of `curl`:
+
+```sh
+d=~/wasm-agent-bootstrap; if [ -d "$d/.git" ]; then git -C "$d" fetch -q --depth 1 origin main && git -C "$d" reset -q --hard FETCH_HEAD; else git clone -q --depth 1 https://github.com/Magaav/wasm-agent.git "$d"; fi && bash "$d/scripts/linux/bootstrap.sh"
+``` `wa` and `wa-sentinel` are fully static (musl), so
 they run whatever the C library is. `scripts/linux/bootstrap.sh` prints what it detected (architecture,
 libc and its version) and what it chose, reads `releases/index-linux.json`, verifies the bundle (size,
 `sha256(bundle.manifest)` against the index, every member, the ELF machine, one run of the candidate),
@@ -140,10 +158,10 @@ clone (no network).
 ## Running the developer preview
 
 Published assets are the Linux bundles above, the Android bundles (`releases/index.json`) and the
-Windows pilot. `scripts/install.ps1` and
-`scripts/install.sh` are **legacy operator provisioning scripts** tied to the
-maintainers' infrastructure; they are not public installation instructions.
-Do not use them to onboard customers.
+Windows pilot. `scripts/install.sh` is the public installer for Linux and Termux (the section above);
+`scripts/install.ps1` is a **legacy operator provisioning script**: it installs a `wa` that talks to the
+maintainers' host over SSH, and it is not the way to install a node on Windows (`docs/INSTALL.md` says
+what Windows has today).
 
 From a source checkout with the Rust/C build prerequisites and cached crates:
 

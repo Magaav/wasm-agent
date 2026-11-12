@@ -237,10 +237,16 @@ second. If a future editor moves this onto a hot route, that measurement is the 
 
 - **tree install** (`runtime-worktree.txt` names a checkout): fast-forward the tree to `origin/main`, then
   queue a Sentinel deploy, which builds, proves on a scratch port, installs and restarts once idle;
-- **release install** (`installed.txt` says `via=linux-bootstrap`, no tree): refresh the bootstrap clone,
-  run `scripts/linux/bootstrap.sh --check` (which bundle, verified, current or not), then run the
-  bootstrap for real in a transient `systemd-run --user` unit - it stops `wa-sentinel.service`, so it must
-  not be a child of the node it replaces. Its log is `<config>/release-update.log`.
+- **release install** (`installed.txt` says `via=linux-bootstrap`, no tree): if the bundle brought its
+  updater - `<install>/scripts/install.sh`, the same one-command front door that installed the node,
+  verified with the bundle's own `files.sha256` - run THAT: `--check` first (read-only), then `--update` in
+  a transient `systemd-run --user` unit, because it stops `wa-sentinel.service` and must not be a child of
+  the processes it replaces (`docs/INSTALL.md`, "the updater is a neighbour of the binary"). An install
+  from before the bundled updater has none, so for it the old path below is still the answer - refresh the
+  bootstrap clone, run `scripts/linux/bootstrap.sh --check` (which bundle, verified, current or not), then
+  run the bootstrap for real in the same kind of transient unit. A bundle published before 12/11 carries
+  no updater and the front door says `updater=absent` rather than fetching a file called `install.sh`
+  from an older ref, where that name held an SSH client wrapper.
 
 `wa update --check` is read-only: a tree install fetches origin and compares the installed commit
 with `origin/main`; a release install runs the bootstrap's verified `--check`. It writes no request
