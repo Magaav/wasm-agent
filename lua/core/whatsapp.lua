@@ -201,7 +201,10 @@ function M.renamed(name)
     read_snapshot = 'search', read_newest = 'read', inspect_chat = 'read', lookup_self = 'contacts',
     list_chats = 'contacts', search = 'search', read = 'read', contacts = 'contacts',
     reactions = 'reactions', media = 'media', download = 'download', backfill = 'backfill',
-    send = 'send', send_status = 'send_status',
+    send = 'send',
+    -- A retired spelling of the status read recovers to the ONE tool that answers now, never to the
+    -- hidden alias: `mcp_whatsapp_send({id})` is the resume, and no guidance names the alias any more.
+    send_status = 'send',
   })[verb]
   if not mapped then return nil end
   return 'mcp_whatsapp_' .. mapped

@@ -208,7 +208,7 @@ pub fn js_name(name: &str) -> String {
 pub const DIRECT_ONLY: &[(&str, &str)] = &[
     ("codemode", "a script does not nest: a second sandbox inside the first would hide one effect stream behind another"),
     ("tool_call", "the outer facade pins definitions into this session's loadout; a script calls await tools.<name>(args) directly instead"),
-    ("tool_search", "the outer facade pins definitions into this session's loadout; searchTools/describeTool answer the same question inside without changing it"),
+    ("tool_search", "the outer facade pins definitions into this session's loadout; searchTools answers the same question inside without changing it"),
     ("subagent", "delegation spends model calls and creates a child session: one reviewable call, never a step inside a script"),
     ("integrate", "landing a worker tip is a single receipted integration action, never a script step"),
     ("session_worktree", "it allocates and owns this session's worktree; a bound root that re-points mid-script would change what every later call means"),
@@ -235,7 +235,7 @@ pub fn route_of(name: &str, execution: &Execution) -> String {
         return format!("Direct call only: {reason}. End the script, then call {name} as an ordinary tool.");
     }
     if name == "tool_search" || name == "tool_call" {
-        return "Outer facade: inside a script use searchTools/describeTool and call await tools.<name>(args) directly.".to_string();
+        return "Outer facade: inside a script use searchTools and call await tools.<name>(args) directly.".to_string();
     }
     if execution.blocked() {
         let reason = execution.reason.clone().unwrap_or_else(|| execution.status.clone());

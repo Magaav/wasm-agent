@@ -264,6 +264,10 @@ local renamed = {
   ["whatsapp_read"] = "mcp_whatsapp_read",
   ["whatsapp_search"] = "mcp_whatsapp_search",
   ["whatsapp_send"] = "mcp_whatsapp_send",
+  -- A retired spelling of the status read points at the one tool that answers now, not at the hidden
+  -- alias: send_status is the resume form of send (operator decision, 11/11).
+  ["whatsapp_send_status"] = "mcp_whatsapp_send",
+  ["peer_openclaw__whatsapp_send_status"] = "mcp_whatsapp_send",
   ["peer_openclaw__whatsapp_read"] = "mcp_whatsapp_read",
   ["peer_openclaw__mcp_whatsapp_native_read_newest_47452e4e"] = "mcp_whatsapp_read",
   ["mcp_whatsapp_native_read_snapshot_47452e4e"] = "mcp_whatsapp_search",
