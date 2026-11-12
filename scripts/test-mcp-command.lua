@@ -31,9 +31,9 @@ local SCHEMA_INSPECT = '{"type":"object","properties":{"conversation_id":{"type"
 local SCHEMA_LOOKUP = '{"type":"object","properties":{}}'
 local SCHEMA_SEARCH = '{"type":"object","properties":{"conversation_id":{"type":"string"},"query":{"type":"string"}}}'
 local registry = { schema = 1, revision = 7, servers = {
-  whatsapp_native = {
+  native_reads = {
     enabled = false, revision = 1,
-    definition = { id = 'whatsapp_native', name = 'WhatsApp (native)', transport = 'native',
+    definition = { id = 'native_reads', name = 'Native reads', transport = 'native',
       native = { read_newest = 'whatsapp_read', inspect_chat = 'whatsapp_read',
         read_snapshot = 'whatsapp_search', lookup_self = 'identity' },
       tools = { read_newest = 'read', inspect_chat = 'read', read_snapshot = 'read', lookup_self = 'read' } },
@@ -56,14 +56,14 @@ meta_set('mcp.extensions.v1', json.encode(registry))
 -- them. The connector is enabled there and publishes one tool of the four it discovered. `revision` is the
 -- peer's registry revision at the time of the answer, so this is written again after a local change moved
 -- the seeded registry: a catalog is a snapshot, and the peer's own CAS is what refuses a stale one.
-local peer_tool = mcp.namespace('whatsapp_native', 'read_newest')
+local peer_tool = mcp.namespace('native_reads', 'read_newest')
 local function seed_peer_cache()
   local revision = mcp.inventory().revision
   local peer_connectors = { {
-    key = 'whatsapp_native', id = 'whatsapp_native', name = 'WhatsApp (native)', where = 'this node',
+    key = 'native_reads', id = 'native_reads', name = 'Native reads', where = 'this node',
     scope = 'local', transport = 'native', state = 'enabled', enabled = true,
     tool_count = 1, approved = 4, discovered = 4, revision = revision,
-    tools = { { name = peer_tool, tool = 'read_newest', description = 'MCP whatsapp_native / read_newest: Read one chat',
+    tools = { { name = peer_tool, tool = 'read_newest', description = 'MCP native_reads / read_newest: Read one chat',
       schema = SCHEMA_READ_NEWEST, approval = 'read', published = true } },
     policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write' },
   } }
@@ -85,7 +85,7 @@ check(view.ok == true, 'list answers')
 check(view.read_only == false, 'a master may change connectors')
 check(view.counts.here == 2, 'two connectors registered on this node, found ' .. tostring(view.counts.here))
 check(view.counts.from_peers == 1, 'one connector federated from a peer, found ' .. tostring(view.counts.from_peers))
-local native = command.find(view, 'whatsapp_native')
+local native = command.find(view, 'native_reads')
 check(native and native.where == 'this node' and native.scope == 'local', 'the local connector says where it runs')
 check(native.transport == 'native', 'the local connector reports its transport')
 check(native.state == 'disabled' and native.error == nil, 'a probed but disabled connector is disabled, not failing')
@@ -94,26 +94,26 @@ check(native.approved == 4 and native.discovered == 4, 'approved and discovered 
 local broken = command.find(view, 'broken')
 check(broken and broken.state == 'failing', 'a failed probe is failing, not merely disabled')
 check(broken.error == 'mcp_operation_failed', 'the failure carries its last error')
-local peer = command.find(view, 'openclaw:whatsapp_native')
+local peer = command.find(view, 'openclaw:native_reads')
 check(peer and peer.scope == 'peer' and peer.where == 'openclaw', 'the peer connector says which node runs it')
 check(peer.transport == 'native', 'the peer connector reports its transport')
 check(peer.state == 'enabled' and peer.tool_count == 1, 'the peer connector reports its state and tool count')
 
 -- ---------------------------------------------------------------- 2. one connector, verbatim
-local detail = command.inspect(ctx, 'whatsapp_native')
+local detail = command.inspect(ctx, 'native_reads')
 check(detail.ok, 'a connector opens by its key')
 local names = {}
 for _, tool in ipairs(detail.connector.tools) do names[tool.name] = tool end
-local verbatim = mcp.namespace('whatsapp_native', 'read_newest')
+local verbatim = mcp.namespace('native_reads', 'read_newest')
 check(names[verbatim] ~= nil, 'the detail lists the exact model-visible name ' .. verbatim)
-check(verbatim:match('^mcp_whatsapp_native_read_newest_%x+$') ~= nil,
+check(verbatim:match('^mcp_native_reads_read_newest_%x+$') ~= nil,
   'the name is the registry\'s own namespace, underscores intact: ' .. verbatim)
 check(names[verbatim].schema == SCHEMA_READ_NEWEST, 'the input schema is the exact probed JSON')
 check(contains(names[verbatim].description, 'Read one WhatsApp chat newest-first'), 'the tool keeps its description')
 check(names[verbatim].approval == 'read', 'the approval tier is the local one')
 check(names[verbatim].published == false, 'a disabled connector publishes nothing')
 check(detail.connector.policy and detail.connector.policy.tier == 'mcp', 'the policy tier is reported')
-local peer_detail = command.inspect(ctx, 'openclaw:whatsapp_native')
+local peer_detail = command.inspect(ctx, 'openclaw:native_reads')
 local peer_name = federation.local_name('openclaw', peer_tool)
 check(peer_name == 'peer_openclaw__' .. peer_tool, 'a peer tool is named peer_<peer>__<tool>')
 check(peer_detail.connector.tools[1].name == peer_name, 'the detail lists the peer name verbatim')
@@ -123,19 +123,19 @@ check(peer_detail.connector.tools[1].published == true, 'a published peer tool i
 -- The text the terminal prints: the list and the detail carry the same names.
 local text = command.text(view)
 check(contains(text, 'MCP connectors: 3'), 'the list says how many connectors there are')
-check(contains(text, 'openclaw:whatsapp_native'), 'the list prints the key to open')
+check(contains(text, 'openclaw:native_reads'), 'the list prints the key to open')
 check(contains(text, '/mcp <key> on|off'), 'the list says how to change one')
 local detail_text = command.detail_text(detail.connector)
 check(contains(detail_text, verbatim), 'the detail text carries the verbatim name')
 check(contains(detail_text, 'schema: ' .. SCHEMA_READ_NEWEST), 'the detail text carries the exact schema')
 
 -- ---------------------------------------------------------------- 3. toggle a local connector
-local enabled = command.toggle(ctx, 'whatsapp_native', true)
+local enabled = command.toggle(ctx, 'native_reads', true)
 check(enabled.ok, 'enabling a probed connector succeeds: ' .. tostring(enabled.error))
 check(enabled.enabled == true and enabled.where == 'this node', 'the answer says what changed')
 check(#mcp.schemas() == 4, 'the four approved tools are in the catalogue now')
-check(command.find(command.list(ctx), 'whatsapp_native').tool_count == 4, 'the list counts them')
-local disabled = command.toggle(ctx, 'whatsapp_native', false)
+check(command.find(command.list(ctx), 'native_reads').tool_count == 4, 'the list counts them')
+local disabled = command.toggle(ctx, 'native_reads', false)
 check(disabled.ok and disabled.enabled == false, 'disabling it succeeds')
 check(#mcp.schemas() == 0, 'and the catalogue is empty again')
 check(command.toggle(ctx, 'nope', true).error == 'unknown_connector', 'an unknown key refuses')
@@ -144,7 +144,7 @@ local audit = json.decode(host.sql_query("SELECT count(*) AS n FROM harness_even
 check(audit[1] and tonumber(audit[1].n) >= 2, 'each change is recorded on the node that owns the registry')
 
 -- ---------------------------------------------------------------- 4. toggle a peer connector, as master
-command.toggle(ctx, 'whatsapp_native', true) -- the peer's registry must hold something to turn off
+command.toggle(ctx, 'native_reads', true) -- the peer's registry must hold something to turn off
 seed_peer_cache() -- the peer's answer after that change: a catalog is a snapshot, not a live view
 local served = {}
 local function peer_transport(node_id, capability, payload)
@@ -153,14 +153,14 @@ local function peer_transport(node_id, capability, payload)
   return federation.serve(payload, { role = 'master', node_id = 'master-node' },
     function(name) return { ok = false, error = 'not_dispatchable_here', name = name } end)
 end
-local stale = command.toggle(ctx, 'openclaw:whatsapp_native', false, {
+local stale = command.toggle(ctx, 'openclaw:native_reads', false, {
   call = function(node_id, capability, payload)
     payload.control.expected_revision = 999
     return peer_transport(node_id, capability, payload)
   end })
 check(stale.ok == false and stale.error == 'mcp_store_revision_changed', 'a stale revision refuses on the peer')
-check(command.find(command.list(ctx), 'openclaw:whatsapp_native').state == 'enabled', 'and nothing changed')
-local peer_off = command.toggle(ctx, 'openclaw:whatsapp_native', false, { call = peer_transport })
+check(command.find(command.list(ctx), 'openclaw:native_reads').state == 'enabled', 'and nothing changed')
+local peer_off = command.toggle(ctx, 'openclaw:native_reads', false, { call = peer_transport })
 check(peer_off.ok, 'a master turns a peer connector off: ' .. tostring(peer_off.error))
 check(peer_off.where == 'openclaw' and peer_off.enabled == false, 'the answer names the peer and the new state')
 check(#served == 2 and served[2].capability == 'federation', 'the change went through the federation capability')
@@ -168,10 +168,10 @@ local function federated(name)
   for _, item in ipairs(federation.schemas()) do if item['function'].name == name then return true end end
   return false
 end
-local after = command.find(command.list(ctx), 'openclaw:whatsapp_native')
+local after = command.find(command.list(ctx), 'openclaw:native_reads')
 check(after.state == 'disabled' and after.tool_count == 0, 'this node\'s view of the peer changed at once')
 check(federated(peer_name) == false, 'and the peer connector\'s tool left this node\'s catalogue')
-check(command.toggle(ctx, 'openclaw:whatsapp_native', true, { call = peer_transport }).ok, 'and back on again')
+check(command.toggle(ctx, 'openclaw:native_reads', true, { call = peer_transport }).ok, 'and back on again')
 check(federated(peer_name) == true, 'the peer tool is callable here again')
 
 -- ---------------------------------------------------------------- 5. a guest, and a child
@@ -179,8 +179,8 @@ local guest_view = command.list({ role = 'guest' })
 check(guest_view.read_only == true, 'a guest sees the list read-only')
 check(guest_view.counts.connectors == command.list(ctx).counts.connectors, 'a guest sees the same connectors')
 check(contains(command.text(guest_view), 'read-only'), 'and the list says so')
-check(command.toggle({ role = 'guest' }, 'whatsapp_native', false).error == 'forbidden', 'a guest cannot change one')
-check(command.toggle({ role = 'master', subagent = {} }, 'whatsapp_native', false).error
+check(command.toggle({ role = 'guest' }, 'native_reads', false).error == 'forbidden', 'a guest cannot change one')
+check(command.toggle({ role = 'master', subagent = {} }, 'native_reads', false).error
   == 'mcp_management_forbidden_for_subagent', 'a child cannot change one')
 
 -- ---------------------------------------------------------------- 5b. a peer on an older build
@@ -213,7 +213,7 @@ seed_peer_cache() -- back to the peer that does report its registry, for the sec
 -- A session freezes its prefix (system prompt + tool list) on its first turn, so a catalogue change is
 -- delivered as the existing `[session update]` note rather than by editing the prefix. This proves a
 -- connector change takes that path: the note is owed, appended once, and names the tool that appeared.
-command.toggle(ctx, 'whatsapp_native', false)
+command.toggle(ctx, 'native_reads', false)
 local session = memory.start_session('fixture', 'chat', { user_id = 'master', node_id = '', title = 'mcp' })
 local session_ctx = { session_id = session, user_id = 'master', role = 'master' }
 local function catalogue()
@@ -224,19 +224,19 @@ end
 local frozen, report = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
 check(report and report.created, 'the session freezes its prefix')
 local baseline = #catalogue()
-check(command.toggle(session_ctx, 'whatsapp_native', true).ok, 'a master enables the connector mid-session')
+check(command.toggle(session_ctx, 'native_reads', true).ok, 'a master enables the connector mid-session')
 check(#catalogue() == baseline + 4, 'the catalogue gained the connector\'s four tools')
 local frozen2, report2 = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
 check(report2.changed == true, 'the running session sees a different catalogue')
 check(report2.note_required == true, 'and owes it a note')
 local added = (report2.detail or {}).tools_added or {}
 local saw_name = false
-for _, name in ipairs(added) do if name == mcp.namespace('whatsapp_native', 'read_newest') then saw_name = true end end
+for _, name in ipairs(added) do if name == mcp.namespace('native_reads', 'read_newest') then saw_name = true end end
 check(saw_name, 'the added tool is the connector\'s own verbatim name')
 local notes = prompt_cache.notes(session_ctx, frozen2, report2, {})
 check(#notes == 1, 'the note is appended once')
 check(contains(notes[1], '[session update]'), 'it is the existing session update')
-check(contains(notes[1], mcp.namespace('whatsapp_native', 'read_newest')), 'and it names the tool that appeared')
+check(contains(notes[1], mcp.namespace('native_reads', 'read_newest')), 'and it names the tool that appeared')
 check(contains(notes[1], 'added:'), 'the note says what was added, not that everything was removed')
 local _, report2b = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
 check(report2b.note_required == false, 'the session is not owed the note again')
@@ -244,7 +244,7 @@ check(#prompt_cache.notes(session_ctx, frozen2, report2b, {}) == 0, 'and it is n
 check(frozen2 ~= nil, 'the frozen prefix is kept')
 -- Turning it back off returns the catalogue to the bytes the session froze in: not `changed`, but the
 -- last note in the transcript says the tools are there, so a note is still owed.
-command.toggle(session_ctx, 'whatsapp_native', false)
+command.toggle(session_ctx, 'native_reads', false)
 local frozen3, report3 = prompt_cache.enforce(session_ctx, { system = 'frozen system', tools = catalogue(), parts = {} })
 check(report3.changed == false, 'the catalogue is back to the frozen bytes')
 check(report3.note_required == true, 'and the session is still owed the note that says so')

@@ -187,12 +187,12 @@ Consequences to keep in mind:
 
 - **Every bound node is "managed"** (`enrollment.managed()` is true with a binding). Its peer-call
   allowlist, not only the pins, decides what another node may run on it. The read-only WhatsApp
-  questions (`whatsapp_search`, `whatsapp_read`, `whatsapp_reactions`, `whatsapp_media`) are in that
+  questions (`mcp_whatsapp_search`, `mcp_whatsapp_read`, `mcp_whatsapp_reactions`, `mcp_whatsapp_media`) are in that
   list since 2026-11-10; `whatsapp_send` and the phone backfill are not.
 - **A question about the message index is answered by the node that runs `wa-whatsapp`.** A caller
   without the component answers `whatsapp_component_absent` naming the owner
   (`WASM_AGENT_WHATSAPP_OWNER`), and the tool layer asks that node and stamps the answer
-  `served_by`. `whatsapp_search` from any master therefore reads the same index, through the relay.
+  `served_by`. `mcp_whatsapp_search` from any master therefore reads the same index, through the relay.
 
 
 ## Caller-side refusal reporting

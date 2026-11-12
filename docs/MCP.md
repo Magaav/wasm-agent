@@ -124,10 +124,55 @@ marking or chat opening. Remote access requires authenticated trusted-CA HTTPS;
 numeric loopback HTTP is allowed locally. Redirects, insecure TLS and credential
 URLs refuse. Protocol probing does not prove app identity or authorize effects.
 
-The nine read/refusal tool names are read_snapshot, read_newest, list_chats,
-posting_status, read_field, lookup_self, inspect_chat, download_audio and send_message.
-The agent sees them as `mcp_whatsapp_*` (or `peer_<node>__*` where another node holds
-the connector) and calls them only inside code mode: `await tools.<name>(args)`. Page-v2
+### One surface, since 11/11 (#118)
+
+WhatsApp has exactly one model-facing surface on every node, nine tools with exact
+names and no namespace hash or peer prefix:
+
+`mcp_whatsapp_contacts`, `mcp_whatsapp_search`, `mcp_whatsapp_read`,
+`mcp_whatsapp_reactions`, `mcp_whatsapp_media`, `mcp_whatsapp_download`,
+`mcp_whatsapp_backfill`, `mcp_whatsapp_send`, `mcp_whatsapp_send_status`.
+
+`lua/core/whatsapp.lua` owns them: the schema the model reads and the call that runs live
+in one file, so they cannot drift apart. They are called from code mode like every other
+connector (`await tools.mcp_whatsapp_read({chat: "Laura"})`).
+
+The account lives on exactly one node, so a call on a node that runs no `wa-whatsapp`
+component does not queue a job nothing can settle (#99). It is **routed**, or **refused**
+with the owner named, and the split is about effects, not names:
+
+| tools | on a node without the component |
+| --- | --- |
+| `contacts`, `search`, `read`, `reactions`, `media` (reads) | asked of the node that holds the account, under the same name, and the answer says `served_by` / `asked_owner` |
+| `download` (writes a file), `backfill` (asks the phone), `send` / `send_status` (effects on the account) | refused with `mcp_whatsapp_<verb>_on_the_account_node` and the owner named - never forwarded, because the effect would land on a machine the caller cannot see |
+
+The owner is the node the deploy declared (`WASM_AGENT_WHATSAPP_OWNER`) or, when that is
+unset, the one node whose federation catalog says it runs the component
+(`federation.connectors`, `whatsapp_account: true`). Zero or two such nodes is an honest
+refusal, not a guess.
+
+**What was retired, and why.** The same questions used to exist under three spellings:
+`whatsapp_*` (the local tools), `peer_<node>__whatsapp_*` (the same four tools federated) and
+`mcp_whatsapp_native_*_<hash8>` / its peer-prefixed form (the same questions again, through an
+MCP connector and its namespace hash). A session asked to "send a nice message to Laura" spent
+six calls guessing those spellings and then guessed a phone number (session 570a0da0, 11/11).
+Since then:
+
+* `federation.exported()` exports no WhatsApp tool: the account node answers the surface's own
+  capability instead (`lua/core/server.lua`, the five reads);
+* `mcp.schemas()` publishes no tool of a connector in the WhatsApp family (`whatsapp`,
+  `whatsapp_*`); such a connector stays in the registry, is still probed and toggled, and `/mcp`
+  reports it as `superseded_by_mcp_whatsapp`;
+* a call to a retired name answers `whatsapp_tool_renamed` with the `use:` field naming the tool
+  to call, so a session that remembers the old spelling recovers in one step;
+* `scripts/test-whatsapp-one.lua` fails if any of those spellings reappears in the catalogue the
+  model is offered, the tools this node exports, or the rows `/mcp` shows.
+
+The nine read/refusal tool names of the **MCP component** (`rust/components/mcp-whatsapp`,
+which answers the old Go connector's loopback API) are still read_snapshot, read_newest,
+list_chats, posting_status, read_field, lookup_self, inspect_chat, download_audio and
+send_message - but that component is the dead bridge the cutover retires
+(`docs/WHATSAPP-MCP-QUEUE.md`), and its tools are no longer offered to the model. Page-v2
 responses have an incremental4MiB JSON budget and explicit ordered oversized
 references, not silent text clipping. Exact field reads are16KiB base64 chunks with
 optimistic versions; cursors are live scoped keyset windows, not pinned snapshots

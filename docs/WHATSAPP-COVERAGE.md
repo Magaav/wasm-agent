@@ -180,8 +180,8 @@ Use the existing authorized native peer and SERVER-private profile, NOT SSH from
 worker/model tool or a new public port. After supported coordinator-only deployment/
 source/readback, examples executed on server through that existing approved route:
 
-Reads run through the native index tools from code mode - `whatsapp_search`,
-`whatsapp_read` or, where another node holds the account, `peer_<node>__whatsapp_*`
+Reads run through the native index tools from code mode - `mcp_whatsapp_search`,
+`mcp_whatsapp_read` or, where another node holds the account, the same names asked of that node
 (`scripts/whatsapp-read.mjs` went with the Node MCP bridge, 10/11). The readiness check
 survives:
 

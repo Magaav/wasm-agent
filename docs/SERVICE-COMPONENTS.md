@@ -700,7 +700,7 @@ media key and the direct path never leave the component: they are how it decrypt
 request/answer shape; the node's seven capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):
 
 ```text
-tool whatsapp_search | read | message | reactions | media | download | backfill
+tool whatsapp_contacts | search | read | message | reactions | media | download | backfill
   -> validate + bound the request            wa-whatsapp-index
   -> enqueue `whatsapp.query` (fresh 2 min, 2 attempts, dedupe = the request itself)
 component wa-whatsapp (queue worker on `whatsapp.query`, one lease at a time)
@@ -712,7 +712,9 @@ The node waits up to two seconds (`wa_whatsapp_index::WAIT_MS`) and heartbeats t
 waits, so a search answers in the same turn; a slower one answers `whatsapp_<op>_slow` with the job id
 and `retry: true`, and the same call reads the same job (the dedupe key *is* the request). A refusal at
 the producer writes nothing: `whatsapp_search_empty_query`, `whatsapp_read_bad_chat`,
-`whatsapp_search_bad_kind`, `whatsapp_reactions_chat_and_id_required`, …
+`whatsapp_search_bad_kind`, `whatsapp_reactions_chat_and_id_required`, … and a chat given as a *name*
+is queued rather than refused, because resolving it is the index's answer (`whatsapp_read_chat_ambiguous`
+lists the candidates, `whatsapp_read_chat_not_found` says nobody carries that name).
 
 **Backfill.** `whatsapp_backfill` is the one query that reaches out: `{chat?, count?}` asks the
 primary phone for messages **older** than the index holds, so a search covers the account's past and
