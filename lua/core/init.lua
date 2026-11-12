@@ -91,7 +91,18 @@ end
 -- `wa update <node> [...]` is the fabric form (lua/core/remote_update.lua, docs/REMOTE-UPDATE.md): a
 -- master asks another node to update ITSELF, under that node's own Sentinel and rules. It is checked
 -- first and falls through to this node's own update when the second word is not a node name.
+-- `wa update --all` is the read-only table of every node this node can see (lua/core/update_all.lua).
 if command == "update" or command == "--update" then
+  -- `wa update --all`: one read-only table over the fabric (lua/core/update_all.lua). Parsed BEFORE the
+  -- fabric form below, because that one reads its first word as a node name and falls through on a flag -
+  -- and `--all` must never be mistaken for a node called `--all` on the path that installs things.
+  for i = 2, #args do
+    if args[i] == "--all" then
+      local table_report = dofile("lua/core/update_all.lua").run({})
+      print(dofile("lua/core/redact.lua").text(table_report))
+      return
+    end
+  end
   local remote = dofile("lua/core/remote_update.lua").cli(args)
   if remote ~= nil then os.exit(remote) end
   local check = false
@@ -353,6 +364,8 @@ elseif command == "help" then
   print("    fleet push-roster <node> [--replace-key <hex>]  install this fleet's roster on a node that already accepts this one, then verify it with a mesh call")
   print("    access [log]  managed-access status or recent local audit events (no model)")
   print("    update [--check] | --update  update this node (tree: Sentinel deploy; release: verified bundle)")
+  print("    update --all                 read-only table: what an update would install, per node this node can see")
+  print("    update <node> [--status]      ask another node to update itself, then read what it installed")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)

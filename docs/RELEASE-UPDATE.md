@@ -275,6 +275,47 @@ name instead of half-installing.
 enabled, source, active path and reason. A rollback restores the previous component set along with the
 previous Lua tree, so "the node we were running an hour ago" includes its components.
 
+## Ring 1 of the torus: the binary decision is content-addressed, and every record says where its minutes went
+
+[TORUS.md](TORUS.md) is the topology (nothing is the core; every segment is replaced by a neighbour) and
+its ring 1 is the update path. Two pieces of that ring landed with this section, and both replace an
+answer that was true only for whoever was watching.
+
+**Does this commit need a new binary?** The deploy answered it by classifying every path that changed
+since the installed commit, which needs the installed commit to be an ancestor of this tree and re-derives
+the same question the release manifest already answers. It is now `wa_node_binary_reuse`
+(`scripts/lib/node-binaries.sh`), and it answers content-addressed first: `installed.txt` records
+`binary_inputs=<sha256 of the commit's compiled inputs>` (written by `record_installed`), and a commit
+whose compiled inputs hash to that digest keeps the installed binary **without** a diff, without ancestry,
+and without fetching a build of it. Only a record that carries no digest (an install from before this
+change) falls back to the path classification, and says so in its own line. The reuse path is the reason a
+Lua-only release transfers no binary: `scripts/test-update-ring.sh` reads that path out of `deploy.sh` by
+its own markers and fails if a resolver, a download or a verification appears in it, and the same test
+fails if the *binary* path stops resolving a release (so it cannot be passed by deleting the download
+step).
+
+**Where did the deploy's minutes go?** `wa_phase` already printed `deploy: [phase] compiling 32.8s` as it
+went; the number existed only in the stdout of whoever watched. The same measurement is now kept in
+`WA_PHASE_TRACE` and written into `deploy-result.json` as `phases: [{"name":…,"ms":…}]`, and the copy the
+sentinel keeps at `sentinel/deploy-protocol/<id>/result.json` is the same bytes. `[]` means no phase had
+finished when the record was written (a refusal before the first phase), never "no data" - a reader can
+tell the two apart. `wa update --all` (below) is the first reader of that field.
+
+**`wa update --all` is a table, and it installs nothing.** `lua/core/update_all.lua` prints one row per
+node this node can see: `node · where · installed · candidate · state · detail`, the local row first. The
+local state is the verdict this node's own tree proves (`update.check`); a peer's is `current` (the same
+commit), `differs`, or `unknown` with the reason (offline, a refusal, no installed commit named) - never
+`behind`, because this node does not hold that node's history, and the row says exactly that
+(`peer_history_unavailable`). The peer half is one signed read per node (`remote_update.inspect`, the
+peer's own `check`, which writes nothing). `wa update <node>` is still the call that installs, one node at
+a time, under that node's own Sentinel.
+
+Tests: `bash scripts/test-update-ring.sh` (26 checks, gate) and
+`WASM_AGENT_LUA_ROOT=$PWD WA_SCRIPT=scripts/test-update-all.lua wa --db <scratch>/t.db` (43 checks, fast
+path). Full deploy behaviour is unchanged except where these two decisions are read: the candidate is still
+proved on a scratch port under a throwaway identity, the install is still `upgrade.sh`'s backup plus one
+rename, and a refusal still installs nothing.
+
 ## What this does not do
 
 - **Channels are two, and inferred.** `stable` follows releases; a node that runs a pre-release follows

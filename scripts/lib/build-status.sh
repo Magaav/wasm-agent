@@ -78,15 +78,37 @@ wa_status_compiled() { grep -c 'Compiling .* v' "$1" 2>/dev/null || true; }
 
 # wa_phase NAME: a new phase - drawn, and the previous one's wall time said on the deploy's own output
 # (`deploy: [phase] compiling 41.2s`), so "where did the minutes go" is read, not guessed.
-WA_PHASE_NAME="" WA_PHASE_AT=""
+#
+# It also KEEPS the same measurement in WA_PHASE_TRACE, because a line on stdout is only read by whoever
+# watched the deploy: `write_result` (scripts/deploy.sh) puts the same phases into deploy-result.json, so
+# every deploy record says where its minutes went and `wa update --all` can show them afterwards. The
+# trace is `name ms;` entries in order; a phase closed with `wa_phase ""` ends the list.
+WA_PHASE_NAME="" WA_PHASE_AT="" WA_PHASE_TRACE=""
 wa_phase_ms() { local t="${EPOCHREALTIME:-}"; [ -n "$t" ] && { t="${t/[.,]/}"; printf '%s' "${t:0:${#t}-3}"; } || printf '%s000' "$(date +%s)"; }
 wa_phase() {
   local now; now="$(wa_phase_ms)"
   if [ -n "$WA_PHASE_NAME" ]; then
     local ms=$((now - WA_PHASE_AT))
     printf 'deploy: [phase] %s %d.%01ds\n' "$WA_PHASE_NAME" $((ms / 1000)) $((ms % 1000 / 100))
+    WA_PHASE_TRACE="${WA_PHASE_TRACE}${WA_PHASE_NAME} ${ms};"
   fi
   WA_PHASE_NAME="$1" WA_PHASE_AT="$now"
   [ -n "$1" ] && wa_status building "$1" "" "${2:-}"
   return 0
+}
+# The phases recorded so far as a JSON array: `[{"name":"compiling","ms":32800},...]`, `[]` when none.
+# A name that is not a bare word is dropped rather than escaped into the record (a phase is a label this
+# script chose, never input), and a non-numeric measurement is dropped for the same reason.
+wa_phases_json() {
+  local trace="${WA_PHASE_TRACE:-}" entry name ms out=""
+  local IFS=';'
+  for entry in $trace; do
+    [ -n "$entry" ] || continue
+    name="${entry% *}"; ms="${entry##* }"
+    [ -n "$name" ] || continue
+    case "$name" in *[!a-zA-Z0-9_.-]*) continue ;; esac
+    case "$ms" in ''|*[!0-9]*) continue ;; esac
+    out="$out${out:+,}{\"name\":\"$name\",\"ms\":$ms}"
+  done
+  printf '[%s]' "$out"
 }

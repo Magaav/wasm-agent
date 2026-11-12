@@ -74,6 +74,9 @@ for wa_lib_part in build-status build-requirements deploy-components node-binari
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
+# A deploy without the lib still writes a usable record: no phases is `[]`, never an absent field a reader
+# has to distinguish from an old record's.
+command -v wa_phases_json >/dev/null 2>&1 || wa_phases_json() { printf '[]'; }
 EXPLICIT_INSTALL="${WA_INSTALL_DIR:-}"
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
@@ -132,10 +135,14 @@ sentinel_restart() {
 write_result() { # ok detail
   case "$REQUEST_ID" in *[!a-zA-Z0-9-]*) REQUEST_ID="" ;; esac
   _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
-  printf '{"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s"}\n' \
+  # `phases` is the same measurement the deploy's own output printed (`deploy: [phase] <name> <s>`), read
+  # from `wa_phase`'s trace: a record that says what the deploy DID without saying where its minutes went
+  # is the half a reader cannot act on. `[]` when the lib recorded none (an old deploy script, a refusal
+  # before the first phase) - never a missing field, and never a number this script invented.
+  printf '{"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s","request_id":"%s","expected_sha":"%s","phases":%s}\n' \
     "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
     "${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-}}" "$(_esc "$2")" "$(_esc "$REASON")" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_esc "$REQUEST_ID")" "$(_esc "$EXPECTED_SHA")" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_esc "$REQUEST_ID")" "$(_esc "$EXPECTED_SHA")" "$(wa_phases_json)" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
   if [ -n "$REQUEST_ID" ]; then
     mkdir -p "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID"
     cp "$INSTALL_DIR/deploy-result.json" "$SENTINEL_CONFIG/sentinel/deploy-protocol/$REQUEST_ID/result.json" 2>/dev/null || true
@@ -554,33 +561,27 @@ lua_tree_mode() { # <binary> -> 0 when it runs the Lua tree it is given
   return 1
 }
 
-if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_COMMIT" ] && [ -x "$INSTALLED_BIN" ] \
-   && git merge-base --is-ancestor "$INSTALLED_COMMIT" HEAD 2>/dev/null; then
-  CHANGED="$(git diff --name-only "$INSTALLED_COMMIT" HEAD)"
-  COMPILED="$(printf '%s\n' "$CHANGED" | while IFS= read -r changed_path; do
-    [ -n "$changed_path" ] || continue
-    if command -v wa_compiled_input >/dev/null 2>&1; then
-      wa_compiled_input "$changed_path" && printf '%s\n' "$changed_path"
-    else
-      # No node-binaries lib beside this deploy: fall back to the spelling this section used to carry, so a
-      # missing helper costs the digest fallback and not the fast path.
-      case "$changed_path" in
-        lua/*|docs/*|tests/*|ui/*|modules/*|skills/*|jobs/*|benchmarks/*|review/*|reviews/*|review-evidence/*|fixtures/*|vault/*|scripts/*)
-          case "$changed_path" in scripts/codemode*|scripts/build-*|scripts/provision-codemode*) printf '%s\n' "$changed_path" ;; esac ;;
-        */*) printf '%s\n' "$changed_path" ;;
-        *.md) ;;
-        *) printf '%s\n' "$changed_path" ;;
-      esac
-    fi
-  done)"
+# THE DECISION IS NOT SPELLED HERE. `wa_node_binary_reuse` (scripts/lib/node-binaries.sh) answers it,
+# content-addressed first: the record's `binary_inputs=` digest against this commit's compiled-inputs
+# digest, and only for a record that carries none, the changed-path diff this block used to compute
+# itself. One definition of "compiled input" (wa_compiled_input) feeds the fast path, the release's
+# digest fallback and the publisher, so "this change needs no new binary" and "that release IS this
+# commit's binary" cannot disagree about the same file. A deploy that no longer holds the lib still
+# builds: no decision, no reuse.
+LUA_FAST=0
+if [ "${WA_DEPLOY_FULL:-0}" != 1 ] && [ -n "$INSTALLED_BIN" ] && [ -x "$INSTALLED_BIN" ] && command -v wa_node_binary_reuse >/dev/null 2>&1; then
   INSTALLED_DIGEST="$("$INSTALLED_BIN" --capability-digest 2>/dev/null | tr -d '[:space:]')"
-  if [ -n "$CHANGED" ] && [ -z "$(printf '%s' "$COMPILED" | tr -d '[:space:]')" ] && printf '%s' "$INSTALLED_DIGEST" | grep -qE '^[0-9a-f]{64}$'; then
+  if ! printf '%s' "$INSTALLED_DIGEST" | grep -qE '^[0-9a-f]{64}$'; then
+    echo "deploy: the installed binary answers no capability digest, so it cannot verify a staged Lua tree; installing a binary"
+  elif BINARY_REUSE_REASON="$(wa_node_binary_reuse "$ROOT" "$(git rev-parse HEAD)" "$INSTALL_DIR" 2>&1)"; then
     LUA_FAST=1
-    echo "deploy: Lua fast path - $(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ') changed file(s) since $INSTALLED_COMMIT, none compiled; keeping the installed binary"
+    echo "deploy: Lua fast path - $BINARY_REUSE_REASON; keeping the installed binary"
     if ! lua_tree_mode "$INSTALLED_BIN"; then
       LUA_FAST=0
-      echo "deploy: the installed binary does not run a staged Lua tree (it predates that mode, so its own copy would answer); building $COMMIT instead of reusing it"
+      echo "deploy: the installed binary does not run a staged Lua tree (it predates that mode, so its own copy would answer); installing a binary instead of reusing it"
     fi
+  else
+    echo "deploy: $BINARY_REUSE_REASON"
   fi
 fi
 
@@ -1476,6 +1477,21 @@ record_installed() {
   # The Lua tree this install runs (lua-core/), and for a fast-path deploy the commit whose build the
   # binary is: the binary was clean-built by that earlier deploy; this one installed only the tree.
   printf 'lua_tree=%s\nlua_fast_path=%s\n' "$COMMIT" "$LUA_FAST" >> "$record_tmp" || fail "node installed, but the Lua tree line could not be written"
+  # The digest of the compiled inputs the installed binary is built from - the identity the NEXT deploy
+  # compares against (wa_node_binary_reuse, scripts/lib/node-binaries.sh). It is the commit's own digest
+  # (`record_commit`: this commit for a build, the release's source commit for a prebuilt), so a fast-path
+  # deploy writes the digest that justified reusing the binary, and the next one reads the same number
+  # instead of re-deriving a diff. A tree that cannot digest it writes no line: an absent record is a known
+  # gap the caller falls back from, never a wrong digest.
+  if command -v wa_compiled_inputs_digest >/dev/null 2>&1; then
+    BINARY_INPUTS="$(wa_compiled_inputs_digest "${SOURCE_ROOT:-${ROOT:-}}" "$record_commit" 2>/dev/null | tr -d '[:space:]')"
+    case "$BINARY_INPUTS" in
+      *[!0-9a-f]*|"") BINARY_INPUTS="" ;;
+    esac
+    if [ "${#BINARY_INPUTS}" = 64 ]; then
+      printf 'binary_inputs=%s\n' "$BINARY_INPUTS" >> "$record_tmp" || fail "node installed, but the binary inputs line could not be written"
+    fi
+  fi
 
   # Which component bytes this install placed, and where: the core answers every `host.graph_*` call
   # from them, so "what is running" includes them (a node whose graph component is missing answers
