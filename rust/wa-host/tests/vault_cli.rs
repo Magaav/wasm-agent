@@ -74,6 +74,13 @@ impl Home {
             .env("WASM_AGENT_VAULT_PASSPHRASE", PASSPHRASE)
             .env_remove("WA_SCRIPT")
             .env_remove("WASM_AGENT_LUA_ROOT")
+            // `WASM_AGENT_VAULT_URL` too: this harness promises "no test here can reach a real node's
+            // vault", and without this line a test spawned from a vaulted session inherits the
+            // operator's vault URL - `provider.providers()` prefers that route over every other
+            // setting on purpose (lua/core/provider.lua, docs/VAULT.md), so a fixture provider would
+            // be answered by the real one. Measured on a node in 11/11 (speed.log): a test call went
+            // to the operator's provider and nothing said so.
+            .env_remove("WASM_AGENT_VAULT_URL")
             .env_remove("WASM_AGENT_VAULT_DIR")
             .env_remove("WASM_AGENT_VAULT_KEYSTORE");
         for (key, value) in envs {
