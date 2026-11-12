@@ -50,6 +50,8 @@ pub mod privacy;
 pub mod queue;
 pub mod recognize;
 pub mod telemetry;
+/// One message as a tool answer carries it: the shape a model reads, in one place (`view.rs`).
+pub mod view;
 /// The cutover import contract (`scripts/whatsapp-adopt.mjs`): native proof that the exported record
 /// is the device the client reads (`docs/WHATSAPP-CUTOVER.md`).
 #[cfg(test)]

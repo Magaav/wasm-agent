@@ -52,6 +52,8 @@ const LOAD_BUDGET: usize = 400;
 const PAGE: usize = 200;
 /// Most reactions folded onto one message in an answer.
 const MAX_FOLDED: usize = seam::MAX_LISTED;
+/// How many chat cards (chats this node has seen) one name question may read.
+const CARD_BUDGET: usize = 2_000;
 
 // ---- the store seam ------------------------------------------------------------------------------
 
@@ -195,6 +197,112 @@ fn key_ocr_seen(chat: &str, id: &str) -> String {
     format!("{PREFIX}ocr/{chat}/{id}")
 }
 
+// ---- the chats, by the name this node observed ---------------------------------------------------
+
+/// `ix/ct/<chat>` -> one [`ChatCard`].
+///
+/// It exists because a name is a question the message index can answer without a second store: every
+/// inbound message carries the sender's push name, and a group's subject is fetched for an alert
+/// anyway. Keeping the answer beside the index (one small row per chat, rewritten on each message)
+/// makes `whatsapp_contacts` one bounded scan, instead of one record load per chat the account has
+/// ever talked in.
+fn key_card(chat: &str) -> String {
+    format!("{PREFIX}ct/{chat}")
+}
+
+/// Most names one card keeps: enough for a person's rename history and a group's active members,
+/// few enough that the row stays small.
+const CARD_NAMES: usize = 12;
+
+/// One name this node has seen, with how often and how recently.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CardName {
+    /// As it was written on the wire (the push name, or the group subject).
+    pub name: String,
+    /// [`record::fold`] of it: what a query is compared against.
+    pub folded: String,
+    pub rows: u32,
+    pub first: i64,
+    pub last: i64,
+    /// True when this name was seen on the chat's *own* messages (a direct chat's contact), never on
+    /// a group member's.
+    pub sender: bool,
+}
+
+/// One chat as the index knows it: its address, what kind it is, and every name seen there.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ChatCard {
+    pub chat: String,
+    pub group: bool,
+    /// A group's subject, when this node fetched it (alerts, or a metadata lookup). Empty until then:
+    /// a group is not named after its members, and a guess here would point a reader at a wrong chat.
+    pub subject: String,
+    pub names: Vec<CardName>,
+    pub first: i64,
+    pub last: i64,
+    pub rows: u32,
+}
+
+impl ChatCard {
+    /// The name a reader should see for this chat, and where it came from.
+    pub fn best_name(&self) -> (&str, &'static str) {
+        if self.group {
+            if !self.subject.is_empty() {
+                return (&self.subject, "group_subject");
+            }
+        } else if let Some(name) = self.names.iter().filter(|name| name.sender && !name.name.is_empty()).max_by_key(|name| name.last) {
+            return (&name.name, "push_name");
+        }
+        ("", "jid")
+    }
+
+    /// How a query of `folded` (already folded) matches this chat: 3 exact, 2 prefix, 1 substring, 0 no
+    /// match, with the name that matched.
+    ///
+    /// The chat's own address is matched too: a caller with a phone number and no name gets the one
+    /// chat that number belongs to, which is not a guess when exactly one chat carries those digits.
+    pub fn match_score(&self, folded: &str) -> Option<(u8, String)> {
+        if folded.is_empty() {
+            return Some((1, self.best_name().0.to_string()));
+        }
+        let mut best: Option<(u8, String)> = None;
+        let mut consider = |text: &str, shown: &str| {
+            let candidate = record::fold(text);
+            if candidate.is_empty() {
+                return;
+            }
+            let score = if candidate == folded {
+                3
+            } else if candidate.starts_with(folded) {
+                2
+            } else if candidate.contains(folded) {
+                1
+            } else {
+                0
+            };
+            if score > 0 && best.as_ref().is_none_or(|(current, _)| score > *current) {
+                best = Some((score, shown.to_string()));
+            }
+        };
+        for name in &self.names {
+            consider(&name.name, &name.name);
+        }
+        if !self.subject.is_empty() {
+            consider(&self.subject, &self.subject);
+        }
+        // The address itself: `5519994939204@s.whatsapp.net` matches on its digits, and so does a
+        // group's `<creator>-<epoch>@g.us` id on its first half.
+        let user = self.chat.split('@').next().unwrap_or("");
+        consider(user, user);
+        if let Some((creator, _)) = user.split_once('-') {
+            consider(creator, user);
+        }
+        best
+    }
+}
+
 /// The word a record's age entry carries: `history` for a backfilled record, empty for a live one.
 ///
 /// The age index (`ix/all`) was written with an empty value until history sync existed, and nothing
@@ -260,7 +368,10 @@ async fn put_message<S: Store>(store: &S, record: &Record) -> Result<(), String>
         }
         store.del(key_pending(&record.chat, &record.id).as_bytes()).await?;
     }
-    write(store, &record).await
+    write(store, &record).await?;
+    // The chat's card is the name side of the index (`key_card`): kept beside the message it came
+    // from, so "who is Laura" is one scan and not one record load per chat.
+    card_touch(store, &record).await
 }
 
 /// Write (or rewrite) a record and every key that points at it.
@@ -290,6 +401,218 @@ async fn remove<S: Store>(store: &S, record: &Record) -> Result<(), String> {
         store.del(key_token(&token, record.ts, &record.id, &record.chat).as_bytes()).await?;
     }
     Ok(())
+}
+
+// ---- the names this node observed: the card, and the two questions it answers --------------------
+
+/// Read one chat's card. A card this build never wrote is `None`, which is not an error: the index of
+/// an older build has messages and no names, and a query over it answers with what it has.
+async fn card_of<S: Store>(store: &S, chat: &str) -> Result<Option<ChatCard>, String> {
+    let Some(value) = store.get(key_card(chat).as_bytes()).await? else { return Ok(None) };
+    Ok(serde_json::from_slice::<ChatCard>(&value).ok().filter(|card| !card.chat.is_empty()))
+}
+
+/// Every card the index holds, bounded by [`CARD_BUDGET`].
+async fn cards<S: Store>(store: &S) -> Result<Vec<ChatCard>, String> {
+    let mut cursor: Option<Vec<u8>> = None;
+    let mut out = Vec::new();
+    loop {
+        let page = store.scan(format!("{PREFIX}ct/").as_bytes(), cursor.clone(), PAGE).await?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        let short = page.len() < PAGE;
+        for (_, value) in page {
+            if out.len() >= CARD_BUDGET {
+                return Ok(out);
+            }
+            if let Ok(card) = serde_json::from_slice::<ChatCard>(&value) {
+                if !card.chat.is_empty() {
+                    out.push(card);
+                }
+            }
+        }
+        if short {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Keep one chat's card current. Called on every indexed message: one row per chat, rewritten.
+///
+/// It records the sender's push name - never the account's own - and marks whether the name was seen
+/// on the chat's own messages (`sender`), which is what makes a direct chat's name *that contact's*
+/// name instead of the name of whoever happened to talk. A group's subject is not on a message: it is
+/// written by [`set_subject`] when this node fetches it, and until then a group has no name and says
+/// so (`name_source: "jid"`).
+async fn card_touch<S: Store>(store: &S, record: &Record) -> Result<(), String> {
+    let mut card = card_of(store, &record.chat).await?.unwrap_or_default();
+    card.chat = record.chat.clone();
+    card.group = record.group || record.chat.ends_with("@g.us");
+    if card.first == 0 || (record.ts > 0 && record.ts < card.first) {
+        card.first = record.ts;
+    }
+    if record.ts > card.last {
+        card.last = record.ts;
+    }
+    card.rows = card.rows.saturating_add(1);
+    let name = record.push_name.trim();
+    if !name.is_empty() {
+        let folded = record::fold(name);
+        // The chat's own contact: their message in a direct chat. An own message carries the account's
+        // push name, which is a name this node has seen but is not the chat's.
+        let own_contact = !record.own && record.sender == record.chat;
+        match card.names.iter_mut().find(|entry| entry.folded == folded) {
+            Some(entry) => {
+                entry.rows = entry.rows.saturating_add(1);
+                entry.sender = entry.sender || own_contact;
+                if entry.first == 0 || record.ts < entry.first {
+                    entry.first = record.ts;
+                }
+                if record.ts > entry.last {
+                    entry.last = record.ts;
+                }
+            }
+            None => card.names.push(CardName {
+                name: name.chars().take(seam::MAX_NAME_CHARS).collect(),
+                folded,
+                rows: 1,
+                first: record.ts,
+                last: record.ts,
+                sender: own_contact,
+            }),
+        }
+        // Most recent first, then by name so two equally recent names have a stable order, and
+        // bounded: a busy group does not grow a card without limit.
+        card.names.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.folded.cmp(&b.folded)));
+        card.names.truncate(CARD_NAMES);
+    }
+    let json = serde_json::to_vec(&card).map_err(|error| format!("card encode: {error}"))?;
+    store.set(key_card(&record.chat).as_bytes(), &json).await
+}
+
+/// Record a group's subject, when this node fetched it (the alert line, or a metadata lookup).
+///
+/// A subject is the only honest name a group has: the envelope's push name in a group is the *sender's*,
+/// and naming a group after one of its members would point a reader at the wrong chat. It is written
+/// beside the card so `whatsapp_contacts` can answer with it later without a protocol call.
+pub async fn set_subject<S: Store>(store: &S, chat: &str, subject: &str) -> Result<(), String> {
+    let subject = subject.replace(['\n', '\r'], " ").trim().to_string();
+    if subject.is_empty() {
+        return Ok(());
+    }
+    let mut card = card_of(store, chat).await?.unwrap_or_default();
+    card.chat = chat.to_string();
+    card.group = true;
+    card.subject = subject.chars().take(120).collect();
+    let json = serde_json::to_vec(&card).map_err(|error| format!("card encode: {error}"))?;
+    store.set(key_card(chat).as_bytes(), &json).await
+}
+
+/// One candidate chat, as `whatsapp_contacts` lists it.
+fn candidate_json(score: u8, card: &ChatCard, matched: &str) -> serde_json::Value {
+    let (name, source) = card.best_name();
+    let mut out = serde_json::json!({
+        "chat": card.chat,
+        "type": if card.group { "group" } else { "person" },
+        "name": name,
+        "name_source": source,
+        "matched": matched,
+        "confidence": match score { 3 => "exact", 2 => "prefix", _ => "partial" },
+        "messages": card.rows,
+        "last_at": card.last,
+        "at_local": crate::view::local(card.last),
+        "at_iso": crate::view::iso(card.last),
+        "names": card.names.iter().take(seam::MAX_LISTED).map(|entry| serde_json::json!({
+            "name": entry.name, "messages": entry.rows, "last_at": entry.last,
+        })).collect::<Vec<_>>(),
+    });
+    if !card.group && !name.is_empty() {
+        out["jid"] = serde_json::Value::String(card.chat.clone());
+    }
+    out
+}
+
+/// Every chat whose observed name matches, best first: the one ranking both `whatsapp_contacts` and a
+/// `whatsapp_read` by name use, so the two can never disagree about which chat "Laura" is.
+async fn ranked<S: Store>(store: &S, query: &str) -> Result<Vec<(u8, ChatCard, String)>, String> {
+    let folded = record::fold(query);
+    let mut matches: Vec<(u8, ChatCard, String)> = Vec::new();
+    for card in cards(store).await? {
+        if let Some((score, matched)) = card.match_score(&folded) {
+            matches.push((score, card, matched));
+        }
+    }
+    // Best score first; between equals the chat heard from most recently; then the address, so one
+    // query answered twice lists the same order.
+    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.last.cmp(&a.1.last)).then_with(|| a.1.chat.cmp(&b.1.chat)));
+    Ok(matches)
+}
+
+/// What a name resolved to: one chat, several, or none. Never a guess.
+pub enum Resolved {
+    One(String, u8, String),
+    Many(Vec<serde_json::Value>),
+    None,
+}
+
+/// Resolve a name to a chat: the top-scoring matches only, and several of them is an answer with the
+/// candidates, not a pick.
+async fn resolve_chat<S: Store>(store: &S, name: &str) -> Result<Resolved, String> {
+    let matches = ranked(store, name).await?;
+    let Some(top) = matches.first().map(|(score, _, _)| *score) else { return Ok(Resolved::None) };
+    let best: Vec<&(u8, ChatCard, String)> = matches.iter().filter(|(score, _, _)| *score == top).collect();
+    if best.len() == 1 {
+        let (score, card, matched) = best[0];
+        return Ok(Resolved::One(card.chat.clone(), *score, matched.clone()));
+    }
+    Ok(Resolved::Many(
+        best.iter()
+            .take(seam::CONTACTS_MAX as usize)
+            .map(|(score, card, matched)| candidate_json(*score, card, matched))
+            .collect(),
+    ))
+}
+
+/// `whatsapp_contacts`: which chats the index knows, by the name it observed.
+///
+/// The answer is a list, never a decision. One exact match also fills `chat`, so a caller holding one
+/// name can go straight to a read; more than one match leaves `chat` empty and says `ambiguous: true`,
+/// because picking the wrong Laura is exactly the mistake this question exists to prevent.
+pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<serde_json::Value, String> {
+    let query = request.q.clone().unwrap_or_default();
+    let matches = ranked(store, &query).await?;
+    let total = matches.len();
+    let kept: Vec<(u8, ChatCard, String)> = matches.into_iter().take(request.limit as usize).collect();
+    let top = kept.first().map(|(score, _, _)| *score).unwrap_or(0);
+    let top_count = kept.iter().filter(|(score, _, _)| *score == top).count();
+    let candidates: Vec<serde_json::Value> = kept.iter().map(|(score, card, matched)| candidate_json(*score, card, matched)).collect();
+    let mut answer = serde_json::json!({
+        "q": query,
+        "candidates": candidates,
+        "count": candidates.len(),
+        "matched": total,
+        "truncated": total > candidates.len(),
+        "ambiguous": top_count > 1,
+    });
+    if top_count == 1 {
+        if let Some(first) = answer["candidates"].as_array().and_then(|list| list.first()).cloned() {
+            answer["chat"] = first["chat"].clone();
+            if total > 1 {
+                // One clear best, with weaker names beside it: the chat is still the answer, and
+                // `others` says how many chats matched only partly.
+                answer["others"] = serde_json::Value::from(total - 1);
+            }
+        }
+    }
+    if total == 0 {
+        answer["note"] = serde_json::Value::String(
+            "no chat in this index carries that name; the index only knows names it has seen on messages".to_string(),
+        );
+    }
+    Ok(seam::answer(seam::Op::Contacts, answer))
 }
 
 /// A reaction: the event row (so `kind=reaction` finds it) and the fold onto its target.
@@ -772,13 +1095,23 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
     list.truncate(LOAD_BUDGET);
 
     let mut hits: Vec<(i64, serde_json::Value)> = Vec::new();
+    // One card read per chat, not per hit: a page of twenty messages is usually three chats.
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for candidate in list {
         let Some(record) = load(store, &candidate.chat, &candidate.id).await? else { continue };
         if !matches(&record, request) {
             continue;
         }
         let score = score(&record, &tokens, request.q.as_deref());
-        hits.push((score, hit_json(&record, score)));
+        let chat_name = match names.get(&record.chat) {
+            Some(name) => name.clone(),
+            None => {
+                let name = card_of(store, &record.chat).await?.map(|card| card.best_name().0.to_string()).unwrap_or_default();
+                names.insert(record.chat.clone(), name.clone());
+                name
+            }
+        };
+        hits.push((score, hit_json(&record, score, &chat_name)));
     }
     // Best first; between equals, the newest first; between those, a stable id order so one query
     // answered twice returns the same order.
@@ -804,11 +1137,50 @@ pub async fn search<S: Store>(store: &S, request: &seam::Verified) -> Result<ser
 }
 
 /// `whatsapp_read`: one thread, newest first, reactions folded onto the messages they answer.
+///
+/// The chat is an exact JID **or** a name: a name is resolved through the same ranking
+/// `whatsapp_contacts` uses, and an ambiguous one answers with the candidates instead of reading
+/// whichever chat sorted first (2026-11-11: a model asked to write to "Laura" had no way to find out
+/// which Laura the operator meant, and guessed a number).
+///
+/// The answer is a header plus a page of messages: `chat` (name, type, participants, unread), the
+/// messages in [`crate::view::message`]'s shape, and `next_before` as the cursor for the older page.
 pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde_json::Value, String> {
-    let Some(chat) = &request.chat else {
-        return Ok(seam::refusal(seam::Op::Read, "chat_required", "read needs the exact chat JID"));
+    let mut resolved: serde_json::Value = serde_json::Value::Null;
+    let chat = match (&request.chat, &request.chat_name) {
+        (Some(chat), _) => chat.jid(),
+        (None, Some(name)) => match resolve_chat(store, name).await? {
+            Resolved::One(chat, score, matched) => {
+                resolved = serde_json::json!({
+                    "from": name, "to": chat, "matched": matched,
+                    "confidence": match score { 3 => "exact", 2 => "prefix", _ => "partial" },
+                });
+                chat
+            }
+            Resolved::Many(candidates) => {
+                let mut answer = seam::refusal(
+                    seam::Op::Read,
+                    "chat_ambiguous",
+                    "more than one chat carries that name; read one of the candidates by its exact JID",
+                );
+                answer["q"] = serde_json::Value::String(name.clone());
+                answer["candidates"] = serde_json::Value::Array(candidates);
+                return Ok(answer);
+            }
+            Resolved::None => {
+                let mut answer = seam::refusal(
+                    seam::Op::Read,
+                    "chat_not_found",
+                    "no chat in this index carries that name; ask whatsapp_contacts for what it knows",
+                );
+                answer["q"] = serde_json::Value::String(name.clone());
+                return Ok(answer);
+            }
+        },
+        (None, None) => {
+            return Ok(seam::refusal(seam::Op::Read, "chat_required", "read needs the exact chat JID, or a name to resolve"))
+        }
     };
-    let chat = chat.jid();
     let mut cursor = match &request.before {
         None => None,
         Some(before) => Some(before_cursor(store, &chat, before).await?),
@@ -836,7 +1208,8 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
                 has_more = true;
                 break 'pages;
             }
-            let mut message = hit_json(&record, 0);
+            let quote = quoted_snippet(store, &chat, &record).await?;
+            let mut message = crate::view::message(&record, quote.as_deref());
             let folded = fold_reactions(store, &chat, &record.id).await?;
             if !folded.is_empty() {
                 message["reactions"] = serde_json::Value::Array(folded);
@@ -848,10 +1221,29 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
         }
     }
     let next_before = messages.last().and_then(|message| message["id"].as_str()).map(str::to_string);
+    // The header: which chat this is, in words. A card is what the index observed; an index written
+    // before the card existed answers with the address and says so.
+    let card = card_of(store, &chat).await?;
+    let (name, source, group) = match &card {
+        Some(card) => (card.best_name().0.to_string(), card.best_name().1, card.group),
+        None => (String::new(), "jid", chat.ends_with("@g.us")),
+    };
+    let participants: Vec<serde_json::Value> = match &card {
+        Some(card) if group => card
+            .names
+            .iter()
+            .take(seam::MAX_LISTED)
+            .map(|entry| serde_json::json!({ "name": entry.name, "jid": if entry.sender { chat.as_str() } else { "" }, "messages": entry.rows }))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let header = crate::view::chat_header(&chat, group, &name, source, participants, messages.len() as u32);
     Ok(seam::answer(
         seam::Op::Read,
         serde_json::json!({
             "chat": chat,
+            "header": header,
+            "resolved": resolved,
             "messages": messages,
             "count": messages.len(),
             "has_more": has_more,
@@ -859,6 +1251,17 @@ pub async fn read<S: Store>(store: &S, request: &seam::Verified) -> Result<serde
             "limit": request.limit,
         }),
     ))
+}
+
+/// The snippet a reply quotes, when the quoted message is in this chat's index.
+///
+/// `None` is "the index does not have it", which the view writes as an empty quote: a partial
+/// history must not look like a message that quoted nothing.
+async fn quoted_snippet<S: Store>(store: &S, chat: &str, record: &Record) -> Result<Option<String>, String> {
+    if record.quoted.is_empty() {
+        return Ok(None);
+    }
+    Ok(load(store, chat, &record.quoted).await?.map(|quoted| quoted.snippet(seam::MAX_TEXT_CHARS)))
 }
 
 /// `whatsapp_message`: one exact message by `(chat, id)`, with its full stored text.
@@ -1176,51 +1579,29 @@ fn score(record: &Record, tokens: &[String], q: Option<&str>) -> i64 {
 }
 
 /// The answer's shape for one record: enough to recognise the message, never the whole of it.
-fn hit_json(record: &Record, score: i64) -> serde_json::Value {
-    let mut hit = serde_json::json!({
-        "chat": record.chat,
-        "id": record.id,
-        "ts": record.ts,
-        "sender": record.sender,
-        "sender_name": record.push_name,
-        "kind": record.kind,
-        "text": record.snippet(seam::MAX_TEXT_CHARS),
-        "own": record.own,
-    });
+///
+/// It is [`crate::view::message`] - the same object a thread read carries, so a hit and a bubble cannot
+/// describe one message two ways - plus the two things only a search knows: the score, and the name of
+/// the chat it was found in (a hit that says `5519…@s.whatsapp.net` makes a reader ask who that is).
+fn hit_json(record: &Record, score: i64, chat_name: &str) -> serde_json::Value {
+    let mut hit = crate::view::message(record, None);
+    hit["own"] = serde_json::Value::Bool(record.own);
+    if !chat_name.is_empty() {
+        hit["chat_name"] = serde_json::Value::String(chat_name.to_string());
+    }
     if score != 0 {
         hit["score"] = serde_json::Value::from(score);
     }
+    // The keys the earlier shape carried and a reader may still hold.
     if !record.quoted.is_empty() {
         hit["quoted"] = serde_json::Value::String(record.quoted.clone());
     }
-    if !record.mentions.is_empty() {
-        hit["mentions"] = serde_json::Value::Array(
-            record.mentions.iter().take(seam::MAX_LISTED).map(|jid| serde_json::Value::String(jid.clone())).collect(),
-        );
-    }
     if let Some(media) = &record.media {
-        hit["media"] = media_json(media);
-    }
-    if record.kind == "reaction" && !record.emoji.is_empty() {
-        hit["emoji"] = serde_json::Value::String(record.emoji.clone());
-        hit["target"] = serde_json::Value::String(record.target.clone());
-    }
-    if record.kind == "edit" || record.kind == "delete" {
-        hit["target"] = serde_json::Value::String(record.target.clone());
-    }
-    if record.edited {
-        hit["edited"] = serde_json::Value::Bool(true);
-    }
-    if record.deleted {
-        hit["deleted"] = serde_json::Value::Bool(true);
-    }
-    if !record.unsupported.is_empty() {
-        hit["unsupported"] = serde_json::Value::String(record.unsupported.clone());
-    }
-    // Where the record came from: a backfilled message answers a query exactly like a live one, and
-    // this is the one field that says it came out of a history sync (`docs/WHATSAPP-TRANSCRIPTION.md`).
-    if record.from_history() {
-        hit["source"] = serde_json::Value::String(record::SOURCE_HISTORY.to_string());
+        // A hit keeps the plaintext hash a caller quotes to a download; the view is metadata only.
+        let mut meta = media_json(media);
+        meta["name"] = serde_json::Value::String(media.filename.clone());
+        meta["caption"] = serde_json::Value::String(record.text.clone());
+        hit["media"] = meta;
     }
     if !record.transcript.is_empty() {
         hit["transcript"] = serde_json::Value::String(record::one_line(&record.transcript, seam::MAX_TEXT_CHARS));
