@@ -484,6 +484,10 @@ gate_run bash scripts/test-deploy-components-shipped.sh
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
 gate_run bash scripts/test-node-binaries.sh
+# Ring 1 of docs/TORUS.md: the binary decision (content-addressed first), the phases a deploy record
+# carries, and the structure that keeps the reuse path free of a download. Shell, so it runs here and
+# not in the fast path's Lua rows; it is hermetic and takes about 2 seconds.
+gate_run bash scripts/test-update-ring.sh
 gate_phase_begin cli
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the

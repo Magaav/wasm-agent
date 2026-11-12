@@ -122,6 +122,88 @@ wa_compiled_inputs_digest() {
   } | wa_node_sha256_stdin
 }
 
+# <install> -> the digest of the compiled inputs the INSTALLED binary was built from, or nothing.
+#
+# `installed.txt` records it as `binary_inputs=` (record_installed in scripts/deploy.sh), and an install
+# from before that line answers nothing - which is a named gap, not a guess: the caller falls back to the
+# path diff, and a record without the digest is never read as "the same build".
+wa_node_installed_inputs() {
+  local install="${1:-}" digest
+  [ -n "$install" ] || return 1
+  digest="$(sed -n 's/^binary_inputs=//p' "$install/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  case "$digest" in
+    "") return 1 ;;
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#digest}" = 64 ] || return 1
+  printf '%s\n' "$digest"
+}
+
+# <repo> <commit> <install> -> 0 when the installed binary IS this commit's build (reuse it), 1 when a
+# binary is needed. Prints one reason line either way, so a deploy log and a test read the same sentence.
+#
+# WHY THIS IS A FUNCTION AND NOT A BLOCK IN deploy.sh. The deploy's Lua fast path ("this change compiled
+# nothing, keep the installed binary") and the release's digest fallback ("this release IS this commit's
+# binary" - wa_node_release_digest_search) are the same question asked from two ends, and they must not
+# answer it differently about the same file. Both now read the SAME digest, from the same definition
+# (wa_compiled_input), and this is the one place that compares them.
+#
+# Rule 1, content-addressed and preferred: the record names the digest the installed binary was built
+# from; if this commit's compiled inputs hash to that digest, nothing compiled changed, and the binary is
+# the right one regardless of WHICH commits stand between them, of git ancestry, or of how many paths a
+# diff would list. This is what makes a Lua-only release skip the binary instead of fetching a build of it.
+# Rule 2, the fallback for an install that records no digest: classify every path changed since the
+# installed commit (needs that commit as an ancestor of this tree, which is why it is asked first).
+wa_node_binary_reuse() {
+  local repo="${1:-}" commit="${2:-}" install="${3:-}" installed_commit installed_inputs digest changed compiled path
+  [ -n "$repo" ] && [ -n "$commit" ] && [ -n "$install" ] || {
+    printf 'binary: needed (no tree, commit or install named)\n'
+    return 1
+  }
+  installed_commit="$(sed -n 's/^commit=//p' "$install/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  # Rule 1.
+  if installed_inputs="$(wa_node_installed_inputs "$install")"; then
+    digest="$(wa_compiled_inputs_digest "$repo" "$commit" 2>/dev/null)"
+    case "$digest" in
+      *[!0-9a-f]*|"") printf 'binary: needed (this commit compiled inputs cannot be digested, so it is not read as unchanged)\n'; return 1 ;;
+    esac
+    if [ "$digest" = "$installed_inputs" ]; then
+      printf 'binary: unchanged (compiled_inputs=%s, the installed binary is this build)\n' "$digest"
+      return 0
+    fi
+    printf 'binary: needed (compiled_inputs=%s, the installed binary was built from %s)\n' "$digest" "$installed_inputs"
+    return 1
+  fi
+  # Rule 2.
+  if [ -z "$installed_commit" ]; then
+    printf 'binary: needed (the install records no commit and no compiled-inputs digest, so nothing says what its binary is)\n'
+    return 1
+  fi
+  git -C "$repo" merge-base --is-ancestor "$installed_commit" "$commit" 2>/dev/null || {
+    printf 'binary: needed (installed commit %s is not an ancestor of %s, so no change can be called non-compiled)\n' "${installed_commit:0:12}" "${commit:0:12}"
+    return 1
+  }
+  changed="$(git -C "$repo" diff --name-only "$installed_commit" "$commit" 2>/dev/null)"
+  if [ -z "$(printf '%s' "$changed" | tr -d '[:space:]')" ]; then
+    printf 'binary: unchanged (no path differs from the installed commit %s)\n' "${installed_commit:0:12}"
+    return 0
+  fi
+  compiled="" count=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    wa_compiled_input "$path" && { compiled="$compiled$path
+"; count=$((count + 1)); }
+  done <<CHANGED
+$changed
+CHANGED
+  if [ "$count" -gt 0 ]; then
+    printf 'binary: needed (%s compiled input(s) changed since the installed commit %s)\n' "$count" "${installed_commit:0:12}"
+    return 1
+  fi
+  printf 'binary: unchanged (no compiled input changed since the installed commit %s; the record carried no digest, so paths were classified)\n' "${installed_commit:0:12}"
+  return 0
+}
+
 # [uname -s] [uname -m] -> the target triple a release publishes for this machine, or non-zero when this
 # machine is not one of the published targets (Windows: the deploy builds, exactly as before).
 # WA_NODE_TARGET overrides the detection (a cross-built node, or a test naming a triple); WA_NODE_UNAME_S /
