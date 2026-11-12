@@ -60,7 +60,34 @@ and the runner enforces both ends - a row that names a component and still repor
 any variable the node did not receive, because a variable the shell has and the node does not has cost
 this fleet three separate investigations.
 
-## 3. The full gate is nightly, and for releases
+## 3. Which `wa` the rows run
+
+The first line of every fast run names the binary, its build commit, this tree's commit and the verdict
+(`fresh`, `stale`, `unknown`) - `bash scripts/fast.sh --binary` prints just that and exits:
+
+```
+fast: binary /home/wa/wt-x/rust/target/release/wa (build 47ece9281234, tree d735fe0d5e15, fresh: built from this tree) sha256=...
+```
+
+- The **tree's own** binary wins over `command -v wa` and `~/.local/bin/wa`. On this node
+  `~/.local/bin/wa` is a symlink into the canonical checkout, and three sessions (11/11) ran green rows
+  against *that* commit while their worktree's edits were never loaded - the reason the lookup order is
+  now tree-first and the choice is printed.
+- A missing or stale tree binary is **built** (`cargo build --release --offline`, stamped with this
+  commit, with the prepared code-mode assets when `.git/codemode-assets` holds any), so the rows test
+  this tree. When it cannot be built, the run stops with `stale_binary` and the exact command.
+- `WA_BIN=<path>` is authoritative (a human named it), `WA_FAST_SKIP_BUILD=1` forbids building,
+  `WA_FAST_ALLOW_STALE_BINARY=1` runs the stale one with the fact printed on the first line. Rows that
+  need more than a working node - the code-mode ones - are named when the binary has no assets.
+- The Rust rows establish `WA_CODEMODE_BUILD_ASSETS` instead of `WA_CODEMODE_ALLOW_EMPTY=1` whenever the
+  assets exist: the empty switch rebuilds `target/release/wa` without code mode (72 598 376 B vs
+  73 904 880 B, measured), so a test run replaced a capable node with an incapable one.
+
+`scripts/test-fast-binary.mjs` (in the fast path) drives the resolver against fixture checkouts and stub
+binaries - fresh, stale, missing, `WA_BIN`, the override - and asserts that the real script's first line
+is the resolution.
+
+## 4. The full gate is nightly, and for releases
 
 ```bash
 bash scripts/test.sh                 # ~50 min; via scripts/wave-release.mjs
@@ -70,7 +97,7 @@ The full gate runs nightly and on an explicit release request. **Never gate a ro
 (landings report `gate_verified:false`, `release_verified:false` - `lane-policy.json`). A landing's
 evidence is the fast path on the merged tree plus the readback of `origin/main`.
 
-## 4. A Lua test only tested the tree when a Lua root is in use
+## 5. A Lua test only tested the tree when a Lua root is in use
 
 Without `WASM_AGENT_LUA_ROOT`, `WA_SCRIPT` runs the modules **embedded in the binary**, not `lua/` -
 so a test can pass against a binary from another commit. Set the root when the subject is the tree's
