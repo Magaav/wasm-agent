@@ -9,8 +9,11 @@
 --     namespace hash (`..._47452e4e`) or a bare `whatsapp_*` name appearing again fails here;
 --   * a read on a node that runs no `wa-whatsapp` component is asked of the node that holds the account,
 --     named by the deploy when it said so and found in the fleet when it did not - never hard-coded;
---   * an effect (`download`, `backfill`, `send`) on such a node is refused with the owner named, and is
---     never forwarded: routing it would move the effect to a machine the caller cannot see;
+--   * every verb - the five reads and the four that leave this node - is answered by the node that
+--     holds the account (operator decision, 11/11: a master uses every tool from any node), and the
+--     answer says which node served it (`served_by`); a refusal the owner makes travels back unchanged;
+--   * a decrypted file is written ON the owner node and the result says so (`served_by`), never
+--     pretending the path is local;
 --   * nothing is queued on a node that cannot settle it (#99): the answer of an absent component carries
 --     no job id, no queue and `effect: none`;
 --   * a retired spelling is refused with the name to use instead, so a session that remembers
@@ -126,23 +129,61 @@ ok(unreachable.error == "whatsapp_owner_unreachable" and unreachable.owner == "o
   "an unreachable owner is a named refusal")
 ok(unreachable.effect == "none" and unreachable.id == nil, "and it queues nothing")
 
--- An effect belongs to the node that holds the account: refused there, never forwarded.
-local forwarded = 0
-stub("whatsapp_send", absent)
-local send = whatsapp.call("mcp_whatsapp_send", { chat = "5519994939204@s.whatsapp.net", text = "oi" }, {
-  remote_call = function() forwarded = forwarded + 1; return { ok = true } end,
-})
-ok(send.error == "mcp_whatsapp_send_on_the_account_node", "a send away from the account is refused: " .. json.encode(send))
-ok(send.owner == "openclaw" and send.effect == "none", "the refusal names the owner and changes nothing")
-ok(send.note:find("openclaw", 1, true) ~= nil, "and says where it must be run")
-ok(forwarded == 0, "nothing was forwarded: the effect would land on a machine the caller cannot see")
-ok(send.id == nil and send.queue == nil, "and nothing was queued on this node (#99)")
-for _, verb in ipairs({ "download", "backfill" }) do
+-- Every verb is the account node's question to answer, effects included (operator decision, 11/11):
+-- the effect happens where the worker is, under the owner's own guards, and the answer keeps its shape
+-- plus `served_by` - so a master anywhere uses every tool, and a send is still queued on the durable
+-- queue of the node that can settle it (#99).
+local EFFECTS = {
+  { verb = "download", args = { chat = "5511999999999@lid", id = "3EB0" }, key = "id", value = "3EB0" },
+  { verb = "backfill", args = { chat = "5511999999999@lid", count = 5 }, key = "count", value = 5 },
+  { verb = "send", args = { chat = "5519994939204@s.whatsapp.net", text = "oi" }, key = "text", value = "oi" },
+  { verb = "send_status", args = { id = 7 }, key = "id", value = 7 },
+}
+for _, case in ipairs(EFFECTS) do
+  local verb = case.verb
   stub(whatsapp.by_verb[verb].capability, absent)
-  local refused = whatsapp.call("mcp_whatsapp_" .. verb, { chat = "5511999999999@lid", id = "3EB0", count = 5 }, {})
-  ok(refused.error == "mcp_whatsapp_" .. verb .. "_on_the_account_node", verb .. " is refused away from the account")
-  ok(refused.id == nil, verb .. " queues nothing here")
+  local asked_effect = nil
+  local answered = whatsapp.call("mcp_whatsapp_" .. verb, case.args, {
+    remote_call = function(node, name, args)
+      asked_effect = { node = node, name = name, args = args }
+      return { ok = true, id = 7, path = "/var/lib/wa/whatsapp-media/x.bin" }
+    end,
+  })
+  ok(asked_effect ~= nil and asked_effect.node == "openclaw",
+    verb .. " is asked of the node that holds the account")
+  ok(asked_effect.name == "mcp_whatsapp_" .. verb, verb .. " travels under the same name, one answer shape")
+  ok(asked_effect.args[case.key] == case.value, verb .. " travels with the arguments the caller gave")
+  ok(answered.ok == true and answered.served_by == "openclaw" and answered.asked_owner == "openclaw",
+    verb .. " is answered by the owner and says which node answered: " .. json.encode(answered))
 end
+
+-- A decrypted file is written on the owner node: the path that comes back is that node's, and
+-- `served_by` is how the caller learns where it is - nobody is told the file is local.
+stub("whatsapp_download", absent)
+local file = whatsapp.call("mcp_whatsapp_download", { chat = "5511999999999@lid", id = "3EB0" }, {
+  remote_call = function() return { ok = true, path = "/home/wa/.wasm-agent/data/whatsapp-media/x.jpg", mime = "image/jpeg" } end,
+})
+ok(file.path == "/home/wa/.wasm-agent/data/whatsapp-media/x.jpg", "the owner's file path is passed through")
+ok(file.served_by == "openclaw", "and the result says the file is on openclaw, not here")
+
+-- The owner's own guards stay where the account is (`whatsapp.send`: rate limit, daily cap, audit): its
+-- refusal is the answer, unchanged and not relabelled.
+local refused_by_owner = whatsapp.call("mcp_whatsapp_send", { chat = "5519994939204@s.whatsapp.net", text = "oi" }, {
+  remote_call = function() return { ok = false, error = "whatsapp_send_rate_limited", effect = "none", retry_after_s = 60 } end,
+})
+ok(refused_by_owner.error == "whatsapp_send_rate_limited" and refused_by_owner.retry_after_s == 60,
+  "the owner's refusal arrives as it was: " .. json.encode(refused_by_owner))
+ok(refused_by_owner.served_by == nil and refused_by_owner.effect == "none",
+  "and a refusal is not relabelled as an answer from another node")
+
+-- An owner that cannot be reached is a named refusal, and nothing is queued on this node (#99).
+local send_unreachable = whatsapp.call("mcp_whatsapp_send", { chat = "5519994939204@s.whatsapp.net", text = "oi" }, {
+  remote_call = function() error("no route to openclaw") end,
+})
+ok(send_unreachable.error == "whatsapp_owner_unreachable" and send_unreachable.owner == "openclaw",
+  "a send whose owner is unreachable is a named refusal")
+ok(send_unreachable.effect == "none" and send_unreachable.id == nil and send_unreachable.queue == nil,
+  "and it queues nothing here (#99)")
 
 -- Nobody named, nobody found: the refusal says how to fix it instead of queueing.
 env_with("")
@@ -151,6 +192,24 @@ local orphan = whatsapp.call("mcp_whatsapp_read", { chat = "Laura" }, { owner_ca
 ok(orphan.error == "whatsapp_component_absent", "no component and no owner is still one honest word")
 ok(orphan.owner == nil and orphan.effect == "none", "with no owner invented")
 ok(orphan.note:find("WASM_AGENT_WHATSAPP_OWNER", 1, true) ~= nil, "and the next step in the note")
+
+-- Routing cannot answer without an owner, or with two (an ambiguous fleet is never resolved by picking
+-- the first): the same honest refusal, for an effect exactly as for a read, and nothing is forwarded.
+stub("whatsapp_send", { ok = false, error = "whatsapp_component_absent", state = "disabled", effect = "none" })
+for _, named in ipairs({ "none", "two" }) do
+  local catalog = named == "none" and catalog_with({})
+    or catalog_with({ peer_holding("a"), peer_holding("b") })
+  local hops = 0
+  local unowned = whatsapp.call("mcp_whatsapp_send", { chat = "5519994939204@s.whatsapp.net", text = "oi" }, {
+    owner_catalog = catalog,
+    remote_call = function() hops = hops + 1; return { ok = true } end,
+  })
+  ok(unowned.error == "whatsapp_component_absent", "with no single owner a send refuses (" .. named .. "): " .. json.encode(unowned))
+  ok(unowned.owner == nil and unowned.effect == "none" and unowned.id == nil,
+    "and invents no owner and queues nothing (" .. named .. ")")
+  ok(unowned.note:find("WASM_AGENT_WHATSAPP_OWNER", 1, true) ~= nil, "with the next step in the note (" .. named .. ")")
+  ok(hops == 0, "nothing was forwarded (" .. named .. ")")
+end
 
 -- ---- a retired spelling recovers in one step ------------------------------------------------------
 local renamed = {

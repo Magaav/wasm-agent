@@ -105,7 +105,7 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `mcp_whatsapp_read`: Read one WhatsApp chat by JID or name, newest first, with a header and a cursor
 - `mcp_whatsapp_reactions`: Who reacted to one WhatsApp message, with which emoji
 - `mcp_whatsapp_media`: The media metadata of one WhatsApp message: mime, filename, size, sha256, duration
-- `mcp_whatsapp_download`: Decrypt one WhatsApp message's media on the account node and return its file path
+- `mcp_whatsapp_download`: Decrypt one WhatsApp message's media on the account node and return its file path there
 - `mcp_whatsapp_backfill`: Ask the phone for older WhatsApp messages so search covers the account's past
 - `mcp_whatsapp_send`: Send one WhatsApp message to an exact chat through the durable outbox
 - `mcp_whatsapp_send_status`: Read the state of a queued WhatsApp send, with its message id when sent
@@ -194,7 +194,7 @@ runs on the client too, while `bash` runs on this node.
 | `mcp_whatsapp_read` | `chat` `before?` `limit?` | Read one WhatsApp chat by JID or name, newest first, with a header and a cursor |
 | `mcp_whatsapp_reactions` | `chat` `id` | Who reacted to one WhatsApp message, with which emoji |
 | `mcp_whatsapp_media` | `chat` `id` | The media metadata of one WhatsApp message: mime, filename, size, sha256, duration |
-| `mcp_whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media on the account node and return its file path |
+| `mcp_whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media on the account node and return its file path there |
 | `mcp_whatsapp_backfill` | `chat?` `count?` | Ask the phone for older WhatsApp messages so search covers the account's past |
 | `mcp_whatsapp_send` | `chat` `text` `mentions?` `reply_to?` | Send one WhatsApp message to an exact chat through the durable outbox |
 | `mcp_whatsapp_send_status` | `id` | Read the state of a queued WhatsApp send, with its message id when sent |

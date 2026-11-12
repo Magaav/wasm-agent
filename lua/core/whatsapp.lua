@@ -16,14 +16,18 @@
 -- `mcp_whatsapp_search`, `mcp_whatsapp_read`, `mcp_whatsapp_reactions`, `mcp_whatsapp_media`,
 -- `mcp_whatsapp_download`, `mcp_whatsapp_backfill`, `mcp_whatsapp_send`, `mcp_whatsapp_send_status`.
 --
--- Where each one may run is a decision about effects, not about names:
---   * the five reads (`contacts`, `search`, `read`, `reactions`, `media`) may be answered by the node
---     that holds the account, so a master anywhere can read the account;
---   * `download` writes a file, `backfill` asks the phone and `send`/`send_status` are effects on the
---     account: each belongs to the node that holds the component and is refused, naming that node,
---     anywhere else. Refusing is the point - a send queued on a node with no worker is an inert
---     artifact nobody can cancel, and a decrypted file written on a machine the caller cannot read
---     is not the file it asked for.
+-- Every one of the nine is answered by the node that holds the account, from any node (operator
+-- decision, 11/11: a master uses every tool from wherever it runs). A call on a node that runs no
+-- `wa-whatsapp` component is forwarded to the account node through the ordinary `remote_call` path,
+-- so the effect happens where the worker is and under the owner's own guards: the `whatsapp.send`
+-- policy (rate limit, daily cap, audit) still runs on the node that holds the account, a refusal it
+-- makes travels back unchanged with `served_by`, `send` is queued on the owner's durable queue (never
+-- this node's, which has no worker to settle it) and `send_status` asks the same owner that allocated
+-- the id. `download` answers the file path ON the owner node and says so with `served_by` - the path
+-- is real there, not here.
+--
+-- What still refuses is what routing cannot answer, and it names the next step: no node known to hold
+-- the account, or an ambiguous fleet (two holders are not resolved by picking the first).
 local json = dofile('lua/vendor/json.lua')
 local M = {}
 
@@ -43,7 +47,7 @@ local function bounded(minimum, maximum) return { type = 'integer', minimum = mi
 -- wire shape the capability reads back.
 M.TOOLS = {
   {
-    verb = 'contacts', capability = 'whatsapp_contacts', effect = 'read', route = 'account',
+    verb = 'contacts', capability = 'whatsapp_contacts', effect = 'read',
     description = 'Which WhatsApp chat a name means. Answers from the names this node has actually seen on messages (push names, a group subject when one was fetched, and the chat\'s own digits), best match first, each candidate with its exact JID, whether it is a person or a group, how many messages, when it was last heard from and a confidence (exact, prefix, partial). One exact match also fills chat; several matches are listed as candidates and marked ambiguous, never resolved, because picking the wrong Laura is the mistake this exists to prevent. No query lists the chats the index knows, newest first.',
     parameters = { type = 'object', properties = {
       q = { type = 'string', maxLength = 80, description = 'The name to resolve: a name, part of one, or a phone number. Omit it to list the chats the index knows.' },
@@ -52,7 +56,7 @@ M.TOOLS = {
     request = function(args) return { q = args.q, limit = args.limit } end,
   },
   {
-    verb = 'search', capability = 'whatsapp_search', effect = 'read', route = 'account',
+    verb = 'search', capability = 'whatsapp_search', effect = 'read',
     description = 'Search every WhatsApp message this account has indexed: text, captions, document filenames and voice-note transcripts, accent-folded, so "acao" finds "Ação" and "relatorio" finds "Relatório.pdf". Messages of every kind are indexed (text, image, video, audio, voice note, document, sticker, location, contact card, poll) and so are edits and deletions. Narrow with at least one of q, chat, kind or from; the filters combine (since/until is a time window in epoch milliseconds, seconds accepted). Every hit carries the chat name, the sender name, the time three ways (at, at_local, at_iso) and the message shape, and a long body is a pointer to whatsapp_message. The best match comes first; a search that matched more than it could return says truncated=true and matched=N.',
     parameters = { type = 'object', properties = {
       q = { type = 'string', maxLength = 200, description = 'Literal text, accent-folded.' },
@@ -69,7 +73,7 @@ M.TOOLS = {
     end,
   },
   {
-    verb = 'read', capability = 'whatsapp_read', effect = 'read', route = 'account',
+    verb = 'read', capability = 'whatsapp_read', effect = 'read',
     description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 80, description = 'An exact chat JID, or a name to resolve (ambiguous names answer with candidates).' },
@@ -79,19 +83,19 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, before = args.before, limit = args.limit } end,
   },
   {
-    verb = 'reactions', capability = 'whatsapp_reactions', effect = 'read', route = 'account',
+    verb = 'reactions', capability = 'whatsapp_reactions', effect = 'read',
     description = 'Who reacted to one WhatsApp message, with which emoji. A reaction that was taken back is not listed; by_emoji counts what is left.',
     parameters = { type = 'object', properties = { chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 } }, required = { 'chat', 'id' }, additionalProperties = false },
     request = function(args) return { chat = args.chat, id = args.id } end,
   },
   {
-    verb = 'media', capability = 'whatsapp_media', effect = 'read', route = 'account',
+    verb = 'media', capability = 'whatsapp_media', effect = 'read',
     description = 'The media metadata of one indexed WhatsApp message: kind, mime, filename, size, sha256, duration, page count - or the location, contact card or poll it carries. No bytes and no media key; use whatsapp_download for the file.',
     parameters = { type = 'object', properties = { chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 } }, required = { 'chat', 'id' }, additionalProperties = false },
     request = function(args) return { chat = args.chat, id = args.id } end,
   },
   {
-    verb = 'download', capability = 'whatsapp_download', effect = 'write', route = 'here',
+    verb = 'download', capability = 'whatsapp_download', effect = 'write',
     description = 'Decrypt the media of one indexed WhatsApp message on the node that holds the account and answer with the file path there (mime, filename, bytes and sha256 included). The decrypted file lands in the bounded download folder of the node that holds the account, and the decrypt is bounded by max_bytes (524288 at most): a video larger than the bound answers download_too_large with its size instead of pretending; view-once and revoked media is never downloadable. Feed the path to OCR or transcription tools.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160 }, id = { type = 'string', maxLength = 128 }, max_bytes = { type = 'integer', minimum = 1, maximum = 524288 },
@@ -99,7 +103,7 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, id = args.id, max_bytes = args.max_bytes } end,
   },
   {
-    verb = 'backfill', capability = 'whatsapp_backfill', effect = 'write', route = 'here',
+    verb = 'backfill', capability = 'whatsapp_backfill', effect = 'write',
     description = 'Ask the primary phone for older WhatsApp messages, so the index covers the account history and not only the live stream. Name one exact chat JID to reach back into that conversation, or name none to ask for the chats the index already knows (at most 20, newest first). The messages arrive through the normal protocol and are indexed as history, so a later whatsapp_search finds them. This is a request to the phone, not an answer: the result is the ids and counts that were asked for, plus a note when it stopped early.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160 }, count = { type = 'integer', minimum = 1, maximum = 500 },
@@ -107,7 +111,7 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, count = args.count } end,
   },
   {
-    verb = 'send', capability = 'whatsapp_send', effect = 'write', route = 'here',
+    verb = 'send', capability = 'whatsapp_send', effect = 'write',
     description = 'Send one WhatsApp message yourself, on this account, to one exact chat. It is queued on the account node\'s durable queue and sent by the wa-whatsapp component, so the answer is a job id, not a delivery: read the outcome with mcp_whatsapp_send_status. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group) - a name is not accepted here, use mcp_whatsapp_contacts to turn a name into a chat first. The same chat+text+reply_to is one job, so a repeated call does not send twice.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160, description = 'Exact chat JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us. A bare phone number is refused.' },
@@ -118,8 +122,8 @@ M.TOOLS = {
     request = function(args) return { chat = args.chat, text = args.text, reply_to = args.reply_to, mentions = args.mentions } end,
   },
   {
-    verb = 'send_status', capability = 'whatsapp_send_status', effect = 'read', route = 'here',
-    description = 'State of a message you asked mcp_whatsapp_send to send: queued, done with the message id WhatsApp gave it, or failed with a reason. An id this node never allocated is refused, not guessed.',
+    verb = 'send_status', capability = 'whatsapp_send_status', effect = 'read',
+    description = 'State of a message you asked mcp_whatsapp_send to send: queued, done with the message id WhatsApp gave it, or failed with a reason. The question is put to the node that holds the account, the node that allocated the id; an id that node never allocated is refused, not guessed.',
     parameters = { type = 'object', properties = { id = { type = 'integer', minimum = 1, description = 'The job id whatsapp_send returned.' } }, required = { 'id' }, additionalProperties = false },
     request = function(args) return { id = tonumber(args.id) or args.id } end,
   },
@@ -234,8 +238,10 @@ function M.forward(owner, name, args, call)
   return served
 end
 
---- The refusal a node without the account gives: never a queue, and always with the next step.
-local function absent_answer(tool, answer, owner)
+--- The refusal a node without the account gives when routing cannot answer: never a queue, always with
+-- the next step. Two cases reach it - nobody in the fleet holds the account (or this node was told
+-- none does), and an ambiguous fleet where two nodes do - and both name the fix instead of guessing.
+local function absent_answer(answer, owner)
   local where = owner and ('the WhatsApp account is served by ' .. owner)
     or 'no node in this fleet says it runs ' .. M.COMPONENT .. ' (set WASM_AGENT_WHATSAPP_OWNER on this node, or enable the component where the account is)'
   local refusal = {
@@ -243,16 +249,7 @@ local function absent_answer(tool, answer, owner)
     component = M.COMPONENT, state = answer and answer.state, where = 'this node',
     note = 'this node runs no ' .. M.COMPONENT .. ' component; ' .. where,
   }
-  if owner then
-    refusal.owner = owner
-    if tool.route ~= 'account' then
-      -- The effect belongs to the node holding the account, so this is the whole answer: routing it
-      -- would move the effect (a send, a decrypted file, a request to the phone) to a machine the
-      -- caller cannot see, which is not what was asked for.
-      refusal.error = 'mcp_whatsapp_' .. tool.verb .. '_on_the_account_node'
-      refusal.note = 'mcp_whatsapp_' .. tool.verb .. ' runs on the node that holds the account: ' .. owner
-    end
-  end
+  if owner then refusal.owner = owner end
   return refusal
 end
 
@@ -284,14 +281,17 @@ function M.call(name, args, ctx)
   if decoded.error == 'whatsapp_component_absent' then
     local owner = (type(decoded.owner) == 'string' and decoded.owner ~= '' and decoded.owner)
       or M.owner(ctx and ctx.owner_catalog or nil)
-    if owner and tool.route == 'account' then
+    if owner then
+      -- Every verb, read or effect, is the account node's question to answer: the effect happens where
+      -- the worker is, under the owner's own guards, and the answer that comes back keeps its shape
+      -- plus `served_by` (a refusal from the owner travels unchanged).
       local routed = M.forward(owner, tool.name, args, ctx and ctx.remote_call or nil)
-      -- Say who answered, and that this node asked them: a read served by another node is still this
+      -- Say who answered, and that this node asked them: an answer served by another node is still this
       -- tool's answer, and the caller should not have to guess why it took a hop.
       if type(routed) == 'table' then routed.asked_owner = owner end
       return routed
     end
-    return absent(tool, decoded, owner)
+    return absent(decoded, owner)
   end
   return decoded
 end

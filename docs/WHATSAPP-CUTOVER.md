@@ -84,13 +84,16 @@ is the device now, and the phone's entry for it is what keeps the account workin
 
 ## A send queued on a node without the component (#99) - fixed 11/11
 
-`host.whatsapp_send` now refuses before it writes anything when this node runs no
+`host.whatsapp_send` refuses before it writes anything when this node runs no
 `wa-whatsapp` component (`rust/wa-capabilities/src/whatsapp_send.rs`,
 `whatsapp_query::component_missing`): the answer is `whatsapp_component_absent` with the owner
-named and `effect: none`, and the one surface refuses an effect away from the account node with
-`mcp_whatsapp_send_on_the_account_node` (`lua/core/whatsapp.lua`). A job nobody can cancel can no
-longer be created. The record below is what the defect looked like; the job it names is still in
-that node's queue and is left as it was (never hand-edited, never replayed).
+named and `effect: none`, and the one surface then asks that owner instead of queueing here
+(`lua/core/whatsapp.lua`, 11/11: every verb, effects included, is routed to the node that holds
+the account). The job is therefore created on the **owner's** durable queue, where a worker
+consumes it; a job nobody can cancel can no longer be created, and the refusal survives only for
+what routing cannot answer (no owner, or two). The record below is what the defect looked like; the
+job it names is still in that node's queue and is left as it was (never hand-edited, never
+replayed).
 
 `host.whatsapp_send` enqueues on the **calling node's** queue (`whatsapp.outbox`), and only a
 `wa-whatsapp` component running on that same node consumes it (`worker::take`). A send issued from a

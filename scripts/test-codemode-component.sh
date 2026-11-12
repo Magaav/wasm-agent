@@ -91,10 +91,24 @@ echo "== scripts/test-codemode-boundary.lua (component path: the same suite, unc
 boundary_seam="$home/boundary-seam.log"
 run scripts/test-codemode-boundary.lua "WA_CODEMODE_COMPONENT=1" "WA_CODEMODE_COMPONENT_WASM=$(native "$artifact")" 2>&1 | tee "$boundary_seam"
 check "boundary component" "$boundary_seam" "${PIPESTATUS[0]}"
-# A silent fallback would make this suite pass while proving nothing, so a fallback line is a failure.
-if grep -q 'served natively' "$boundary_seam"; then
-  echo "  FAILED the component path fell back to native:"; grep 'served natively' "$boundary_seam" | head -3
+# A silent fallback would make this suite pass while proving nothing, so a fallback line from THE CODEMODE
+# SEAM is a failure. The pattern names the seam: every seam logs the same words about its own fallback
+# (`memory: sessions served natively: component_missing` is what a node with no memory component prints),
+# so an unqualified `grep 'served natively'` reported a codemode fallback that never happened - measured
+# on cf866fb5, 11/11, with both codemode paths green and the memory row saying it ran natively.
+codemode_fallback() { grep -qE '(\]|^) ?codemode: .*served natively' "$1"; }
+if codemode_fallback "$boundary_seam"; then
+  echo "  FAILED the component path fell back to native:"; grep -E '(\]|^) ?codemode: .*served natively' "$boundary_seam" | head -3
   failed=$((failed + 1))
+fi
+# ...and the check can still fail: the line it looks for is the one the seam really prints.
+printf '[lua] codemode: script served natively: component_missing\n' > "$home/fallback.fixture"
+if ! codemode_fallback "$home/fallback.fixture"; then
+  echo "  FAILED this check cannot see a codemode fallback even when one is printed"; failed=$((failed + 1))
+fi
+printf '[lua] memory: sessions served natively: component_missing\n' > "$home/fallback.other"
+if codemode_fallback "$home/fallback.other"; then
+  echo "  FAILED another component's native fallback is read as codemode's"; failed=$((failed + 1))
 fi
 
 echo "== scripts/test-codemode-component.lua (parity suite) =="

@@ -1110,12 +1110,15 @@ local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true
   ls=true, grep=true, bash=true, shell=true, client=true,
   -- The one WhatsApp surface (#118, 11/11). The account lives on the one node that runs wa-whatsapp,
   -- and a master must be able to ask it from anywhere - that is what "one surface on every node" means:
-  -- the master's own `mcp_whatsapp_*` tool asks this node, which is where the account is. Reads only:
-  -- `download` writes a file on the node that runs it, `backfill` asks the phone and `send` is an
-  -- effect on the account, so each of those stays behind the owning node's own tool (the facade refuses
-  -- them elsewhere, naming the owner, instead of queueing a job nothing here can consume - #99).
+  -- the master's own `mcp_whatsapp_*` tool asks this node, which is where the account is. All nine verbs
+  -- are admitted, reads and effects alike (operator decision, 11/11: a master uses every tool from any
+  -- node): the effect runs HERE, under this node's own `whatsapp.send` policy (rate limit, daily cap,
+  -- audit), `send` is queued on this node's durable queue where this node's worker settles it, and the
+  -- answer - or this node's refusal - travels back unchanged. Unclassified in MESH_VERBS on purpose:
+  -- they are graded `call`, the strongest grant, which is the right price for sending a message.
   mcp_whatsapp_contacts=true, mcp_whatsapp_search=true, mcp_whatsapp_read=true,
-  mcp_whatsapp_reactions=true, mcp_whatsapp_media=true,
+  mcp_whatsapp_reactions=true, mcp_whatsapp_media=true, mcp_whatsapp_download=true,
+  mcp_whatsapp_backfill=true, mcp_whatsapp_send=true, mcp_whatsapp_send_status=true,
   -- Connector federation (lua/core/federation.lua): a master uses every peer's connectors as its
   -- own, run where they live. The handler itself refuses any caller whose role is not master, so
   -- admitting the capability admits masters only - and each tool still runs under the peer's own

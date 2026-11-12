@@ -797,7 +797,7 @@ local CUES = {
   mcp_whatsapp_read = "Read one WhatsApp chat by JID or name, newest first, with a header and a cursor",
   mcp_whatsapp_reactions = "Who reacted to one WhatsApp message, with which emoji",
   mcp_whatsapp_media = "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration",
-  mcp_whatsapp_download = "Decrypt one WhatsApp message's media on the account node and return its file path",
+  mcp_whatsapp_download = "Decrypt one WhatsApp message's media on the account node and return its file path there",
   mcp_whatsapp_backfill = "Ask the phone for older WhatsApp messages so search covers the account's past",
   mcp_whatsapp_send = "Send one WhatsApp message to an exact chat through the durable outbox",
   mcp_whatsapp_send_status = "Read the state of a queued WhatsApp send, with its message id when sent",
@@ -855,7 +855,7 @@ function M.catalog(role)
     },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
-      list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") and describeTool find tools. Await every call; effectful calls run serially. No filesystem, network or Node APIs.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+      list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") and describeTool find tools. Calls are always fresh; await one only where its value is used in an expression; effectful calls run serially. No filesystem, network or Node APIs.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     -- Every online peer's connectors, run on that peer (lua/core/federation.lua). Masters only.
@@ -1448,9 +1448,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   end
   local whatsapp_tool = whatsapp_lib.tool(name)
   if whatsapp_tool then
-    -- #118: the one WhatsApp surface. It answers here when this node holds the account, asks the node
-    -- that does when it is a read, and refuses an effect anywhere else - it never queues a job nothing
-    -- on this node can consume (`lua/core/whatsapp.lua`).
+    -- #118: the one WhatsApp surface. It answers here when this node holds the account, and asks the
+    -- node that does when this node runs no component - every verb, reads and effects alike (11/11).
+    -- The effect happens on the account node under its own guards; nothing is queued on a node that
+    -- cannot settle it (`lua/core/whatsapp.lua`, #99).
     return whatsapp_lib.call(name, args, ctx)
   end
   if name=='email_send' or name=='email_send_status' then

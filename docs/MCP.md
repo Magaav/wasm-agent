@@ -138,18 +138,17 @@ in one file, so they cannot drift apart. They are called from code mode like eve
 connector (`await tools.mcp_whatsapp_read({chat: "Laura"})`).
 
 The account lives on exactly one node, so a call on a node that runs no `wa-whatsapp`
-component does not queue a job nothing can settle (#99). It is **routed**, or **refused**
-with the owner named, and the split is about effects, not names:
+component does not queue a job nothing can settle (#99). It is **routed to the node that
+holds the account**, reads and effects alike (operator decision, 11/11: a master uses every
+tool from any node):
 
 | tools | on a node without the component |
 | --- | --- |
-| `contacts`, `search`, `read`, `reactions`, `media` (reads) | asked of the node that holds the account, under the same name, and the answer says `served_by` / `asked_owner` |
-| `download` (writes a file), `backfill` (asks the phone), `send` / `send_status` (effects on the account) | refused with `mcp_whatsapp_<verb>_on_the_account_node` and the owner named - never forwarded, because the effect would land on a machine the caller cannot see |
+| all nine, reads and effects | asked of the node that holds the account, under the same name, and the answer says `served_by` / `asked_owner`. The effect happens where the worker is and under the owner's own guards (`whatsapp.send`: rate limit, daily cap, audit) - a refusal the owner makes travels back unchanged. `send` is queued on the owner's durable queue, `send_status` asks the owner that allocated the id, and `download` answers a file path ON the owner node, which `served_by` names |
 
-The owner is the node the deploy declared (`WASM_AGENT_WHATSAPP_OWNER`) or, when that is
-unset, the one node whose federation catalog says it runs the component
-(`federation.connectors`, `whatsapp_account: true`). Zero or two such nodes is an honest
-refusal, not a guess.
+What is still refused - `whatsapp_component_absent`, with the next step in the note - is what
+routing cannot answer: no node known to hold the account, or an ambiguous fleet (two holders
+are never resolved by picking the first).
 
 **What was retired, and why.** The same questions used to exist under three spellings:
 `whatsapp_*` (the local tools), `peer_<node>__whatsapp_*` (the same four tools federated) and
@@ -159,7 +158,7 @@ six calls guessing those spellings and then guessed a phone number (session 570a
 Since then:
 
 * `federation.exported()` exports no WhatsApp tool: the account node answers the surface's own
-  capability instead (`lua/core/server.lua`, the five reads);
+  capability instead (`lua/core/server.lua`, all nine verbs);
 * `mcp.schemas()` publishes no tool of a connector in the WhatsApp family (`whatsapp`,
   `whatsapp_*`); such a connector stays in the registry, is still probed and toggled, and `/mcp`
   reports it as `superseded_by_mcp_whatsapp`;
