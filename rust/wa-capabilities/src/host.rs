@@ -3076,7 +3076,17 @@ fn copy_selection(state: &mut ConsoleInput) -> bool {
 static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = OnceLock::new();
 
 fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
-    CONSOLE_INPUT.get_or_init(|| (Mutex::new(ConsoleInput::default()), std::sync::Condvar::new()))
+    CONSOLE_INPUT.get_or_init(|| {
+        let mut state = ConsoleInput::default();
+        // The inline transcript's scrollbar obeys the same knob as the fullscreen console's
+        // (`WA_TUI_SCROLLBAR`, docs/TERMINAL.md, #115): one setting, one meaning, in both layouts.
+        if let Some(bar) = std::env::var("WA_TUI_SCROLLBAR").ok()
+            .and_then(|value| wa_term::scroll::settings::Scrollbar::parse(&value))
+        {
+            state.transcript.scrollbar = bar;
+        }
+        (Mutex::new(state), std::sync::Condvar::new())
+    })
 }
 
 /// A saved cursor can move when ConPTY scrolls output. Finish every view/ticker

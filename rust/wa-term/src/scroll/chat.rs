@@ -269,7 +269,7 @@ fn wrap_block(block: &Block, width: usize, fold: Option<usize>) -> Vec<String> {
 
 /// A row cut or padded to exactly `width` cells - what a row must be for the scrollbar and the marker
 /// to land in the last column. Escape sequences take no cells and are kept.
-fn fit(text: &str, width: usize) -> String {
+pub(crate) fn fit(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut cells = 0usize;
     let mut chars = text.chars().peekable();

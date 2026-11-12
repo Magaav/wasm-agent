@@ -487,6 +487,9 @@ round-boundary steering, not per-keystroke interruption.
   under its heading, replaced in place as its facts change (`""` takes it away);
   `transcript_head(text)` rewrites the current block's first line, which is how a heading printed
   when the call started gets its outcome dot when the result lands.
+  `transcript_copy(markers)` marks lines of the NEXT write as copyable - `[{at, text}]`, the line of
+  that write and the text a click on its copy icon puts on the clipboard (OSC 52): a fenced block in
+  the chat copies itself, and a press anywhere but the icon is still a selection (#114).
   `transcript_hold(on)` keeps writes undrawn until it is released, then draws once (a resumed
   session's replay); while the chat follows the bottom only the rows on screen are wrapped.
   `status_snapshot(spec)` stores the `/status` panel; `/status` submitted while a run is in
@@ -803,6 +806,7 @@ terminal_size        device
 terminal_write       device
 ticker               device
 transcript_block     device
+transcript_copy      device
 transcript_head      device
 transcript_hold      device
 transcript_live      device

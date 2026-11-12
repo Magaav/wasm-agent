@@ -317,8 +317,14 @@ ok(cli:find("function METHODS:session_draw()", 1, true) ~= nil,
    "and has one place that draws that line")
 ok(cli:find("region_bottom", 1, true) ~= nil, "the line is reserved out of the output region")
 ok(chat:find("banner.check({ refresh = true })", 1, true) ~= nil, "the chat asks at session start")
-ok(chat:find("view.session_notice = seen.line", 1, true) ~= nil, "and puts the line in session-status-content")
-ok(chat:find("print(redact.text(seen.line))", 1, true) ~= nil, "and prints it once, outside the transcript")
+ok(chat:find("start_notice(view, { banner = banner, seen = seen })", 1, true) ~= nil,
+   "and hands it to the one function that draws that row")
+ok(chat:find("view.session_notice = redact.text(line)", 1, true) ~= nil, "which sets session-status-content")
+-- The other half of the same rule (#106, operator 11/11): the notice is NOT printed. It used to be,
+-- on top of being in the footer, so the reader got the sentence twice and the transcript copy looked
+-- like something the agent said.
+ok(chat:find("print(redact.text(seen.line)", 1, true) == nil,
+   "and prints it nowhere: a notice is the footer's line, never a transcript line")
 ok(server:find("update_banner.status", 1, true) ~= nil, "the /update check route answers with the banner")
 ok(server:find("pcall(update_banner.tick)", 1, true) ~= nil, "the served node refreshes it on the housekeeping tick")
 ok(server:find('host.getenv("WA_SCRIPT") == nil', 1, true) ~= nil,
@@ -662,7 +668,7 @@ ok(log:find("\27[", 1, true) == nil, "with no escape sequences in it")
 -- The evidence that the whole file list is wired: the CLI keeps the sentence for the new area, and
 -- the chat puts it there.
 ok(cli:find("session_notice", 1, true) ~= nil, "the CLI view keeps the notice for session-status-content")
-ok(chat:find("view.session_notice = seen.line", 1, true) ~= nil, "and the chat puts the line there")
+ok(chat:find("view.session_notice = redact.text(line)", 1, true) ~= nil, "and the chat puts the line there")
 
 -- A cache written for a different repository is not a fact about this node.
 local other_repo_cache = scratch .. "/cache/other-repo.json"
