@@ -44,7 +44,7 @@ pub const FORBIDDEN: &[&str] = &[
 
 /// The guest globals that come from the node rather than from this seam: the retained evidence behind
 /// `showCall`, and the live capability registry behind `capabilities()`/`describe()`.
-pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe"];
+pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe", "results"];
 
 /// The guest globals this seam answers, with the prelude's `spread` flag.
 ///
@@ -54,6 +54,7 @@ pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe"];
 /// defined` through the component - the parity suite compared the two and said so.
 pub const GUEST_GLOBALS: &[(&str, bool)] = &[
     ("searchTools", true),
+    ("results", true),
     ("describeTool", false),
     ("showCall", false),
     ("capabilities", false),
@@ -446,7 +447,7 @@ pub fn describe_tool(catalogue: &Catalogue, params: &Value) -> Option<Value> {
     // The guest's own built-ins (`searchTools`, `results`) document their shapes in the node's own
     // words (`lua/core/codemode_results.lua`), so this seam hands them to the loop instead of keeping a
     // second copy of that text here.
-    if name == "searchTools" {
+    if name == "searchTools" || name == "results" {
         return None;
     }
     if let Some(tool) = catalogue.callable(&name) {
@@ -763,6 +764,7 @@ mod tests {
         assert!(outside["route"].as_str().unwrap().starts_with("Direct call only: delegation spends model calls"), "{}", outside["route"]);
         assert!(describe_tool(&catalogue, &json!("showCall")).is_none(), "presentation is the loop's");
         assert!(describe_tool(&catalogue, &json!(["searchTools"])).is_none(), "searchTools' shape is the loop's one text");
+        assert!(describe_tool(&catalogue, &json!(["results"])).is_none(), "results' shape is the loop's one text");
         assert!(describe_tool(&catalogue, &json!(["nope"])).is_none(), "an unknown name is the loop's answer, not a null here");
         assert!(describe_tool(&catalogue, &json!([42])).is_none(), "a non-string argument is the loop's answer too");
     }
@@ -799,6 +801,7 @@ mod tests {
             }
             other => panic!("searchTools is answered here: {other:?}"),
         }
+        assert!(matches!(interpret(&catalogue, "global", "results", Some("[{\"op\":\"last\"}]")), Guest::Host), "the retained results belong to the node");
         match interpret(&catalogue, "global", "nope", None) {
             Guest::Answered(value, ok) => {
                 assert!(!ok);

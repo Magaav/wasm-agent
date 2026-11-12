@@ -10,7 +10,7 @@
 -- *text* the node sends, which is how this layer reaches both loops (native and the `codemode`
 -- component) without touching a pinned asset or the host ABI.
 --
--- What the layer guarantees (docs/CODEMODE.md, "Natural promises"):
+-- What the layer guarantees (docs/CODEMODE.md):
 --   * a returned Promise, or an array/object containing Promises, is settled before the value is
 --     reported - `return searchTools("*")` answers the list, not `undefined`;
 --   * calls still in flight when the script body ends are awaited, never reported `unexecuted`;
@@ -38,7 +38,7 @@ var inflight=new Set();
 var chain=resolveP();
 var busy=0;
 /* A host built before this layer has no results global: scripts then get one named error instead of "undefined is not a function". */
-
+var rawResults=typeof G.results==='function'?G.results:function(){ throw new TypeError('results is unavailable on this node: its code-mode host predates explicit reuse and the retained-result reader'); };
 function isThenable(value){ return value!==null&&(typeof value==='object'||typeof value==='function')&&typeof value.then==='function'; }
 function preview(value){ try{ var text=typeof value==='string'?value:JSON.stringify(value); if(text===undefined||text===null){ return ''; } text=String(text); return text.length>72?text.slice(0,69)+'...':text; }catch(error){ return ''; } }
 function pendingMessage(label,property){ return new TypeError(label+' has not resolved yet, so '+label+'.'+property+' is unavailable. Write await '+label+' (or return the call: the harness settles it), then use the value. A call settles only while the script waits for it; Promise.all([...]) or parallel([...]) waits for several at once.'); }
@@ -121,9 +121,35 @@ function parseAge(spec){
  if(unit==='h'){ return size*3600; }
  return size;
 }
+function reuseResult(label,hit){
+ var value=hit.value;
+ if(value!==null&&typeof value==='object'&&!arrayIsArray(value)){
+  var keys=objectKeys(value);
+  var copy={};
+  for(var index=0;index<keys.length;index++){ copy[keys[index]]=value[keys[index]]; }
+  copy.reused_from=hit.reused_from;
+  copy.age_s=hit.age_s;
+  return copy;
+ }
+ return { reused_from:hit.reused_from, age_s:hit.age_s, value:value };
+}
 function callLabel(kind,name,args){ return kind+'.'+name+'('+preview(args)+')'; }
+function withReuse(label,raw,args,reuse,name){
+ return (async function(){
+  var seconds=parseAge(reuse);
+  if(seconds===null){ throw new TypeError(label+' reuse expects a duration such as "60s", "5m", "1h" or a number of seconds'); }
+  var hit=await rawResults({ op:'reuse', tool:name, args:args===undefined?{}:args, max_age_s:seconds });
+  if(hit&&hit.reused_from!==undefined&&hit.reused_from!==null){ return reuseResult(label,hit); }
+  return await raw(args);
+ })();
+}
 function makeTool(name,raw){
- return function(args){ return track(callLabel('tools',name,args),raw(args)); };
+ return function(args,options){
+  var label=callLabel('tools',name,args);
+  var reuse=options&&options.reuse;
+  if(reuse!==undefined&&reuse!==null&&reuse!==false){ return track(label,withReuse(label,raw,args,reuse,name)); }
+  return track(label,raw(args));
+ };
 }
 function makeGlobal(name,raw){ return function(){ var args=[].slice.call(arguments); return track(name+'('+preview(args[0])+')',raw.apply(null,args)); }; }
 function wrapTools(raw){ var out=Object.create(null); var keys=Reflect.ownKeys(raw); for(var index=0;index<keys.length;index++){ var key=keys[index]; if(typeof key==='string'){ out[key]=makeTool(key,raw[key]); } } return Object.freeze(out); }
@@ -145,9 +171,14 @@ function parallel(items){
  for(var index=0;index<items.length;index++){ var item=items[index]; list.push(typeof item==='function'?item():item); }
  return track('parallel([...])',allP(list));
 }
+var results=Object.freeze({
+ get:function(hash){ return track('results.get('+preview(hash)+')',rawResults({ op:'get', hash:hash })); },
+ last:function(count,options){ return track('results.last('+preview(count)+')',rawResults({ op:'last', n:count, tool:options&&options.tool })); },
+ diff:function(before,after){ return track('results.diff('+preview(before)+', '+preview(after)+')',rawResults({ op:'diff', a:before, b:after })); }
+});
 return {
  enter:async function(body){
-  var value=await body(wrapTools(G.tools),makeConsole(G.console),makeGlobal('searchTools',G.searchTools),makeGlobal('describeTool',G.describeTool),makeGlobal('showCall',G.showCall),makeGlobal('capabilities',G.capabilities),makeGlobal('describe',G.describe),parallel,text,store,load,image,G.exit,G.ALL_TOOLS);
+  var value=await body(wrapTools(G.tools),makeConsole(G.console),makeGlobal('searchTools',G.searchTools),makeGlobal('describeTool',G.describeTool),makeGlobal('showCall',G.showCall),makeGlobal('capabilities',G.capabilities),makeGlobal('describe',G.describe),results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS);
   return await settleAll(value);
  }
 };
@@ -175,7 +206,7 @@ local ONE = join(SOURCE)
 -- The user's own code keeps its shape: it is the body of ONE function, whose parameters are the
 -- wrapped values, so no global has to be reassigned (the prelude's globals are non-writable) and a
 -- script that declares its own `const` still sees the wrapped `tools`/`text`/`store`.
-M.prologue = ONE .. ";return await __h.enter(async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, parallel, text, store, load, image, exit, ALL_TOOLS){"
+M.prologue = ONE .. ";return await __h.enter(async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS){"
 M.epilogue = "\n});"
 
 -- The script the node sends: the harness on line 1, the model's code from line 2.
