@@ -9,12 +9,14 @@
 --
 -- Two halves, because the bug has two faces:
 --
---   (a) from OUTSIDE the process: a real `wa chat`, started behind a release that is behind, with
---       its stdin already at end-of-file. The transcript (`stdout`) must carry no notice. This is
---       the operator's own observation, and it goes red on the tree before the fix (`print`).
+--   (a) from OUTSIDE the process: a real `wa chat` on a terminal, started behind a release that is
+--       behind. The transcript (`stdout`) must carry no notice. This is the operator's own
+--       observation, and it goes red on the tree before the fix (`print`). The terminal is not a
+--       detail: a stdin that is not a tty is a scripted run (`docs/SCRIPTED-RUNS.md`), which prints
+--       no banner and checks for no update, so this half runs the child behind a pseudo-terminal.
 --   (b) from INSIDE the process: the same start decision against a live, terminal-shaped view -
 --       the transcript receives nothing and the notice is the line the session-status-content row
---       draws. That is the half (a) cannot see, because a piped `wa chat` has no row to draw on.
+--       draws. That is the half (a) cannot see, because a pty's captured screen is not a row.
 --
 --   WASM_AGENT_LUA_ROOT=$PWD WA_SCRIPT=scripts/test-cli-notice.lua wa --db <scratch>/t.db
 --
@@ -112,25 +114,61 @@ else
   local env = "WASM_AGENT_HOME='" .. scratch .. "/home' WA_INSTALL_DIR='" .. install
     .. "' WA_UPDATE_CHECK_FIXTURE='" .. feed .. "' WA_UPDATE_CHECK_CACHE='" .. scratch .. "/cache.json'"
     .. " WASM_AGENT_LUA_ROOT='" .. root .. "'"
-  local child = shell("printf '/exit\\n' | timeout 60 env -u WA_SCRIPT -u WA_FAST_ROW_ENV " .. env
-    .. " '" .. bin .. "' chat 2>&1", scratch)
-  ok(child.code == 0, "a piped `wa chat` starts and exits cleanly (code " .. tostring(child.code) .. ")")
-  ok(has(child.stdout, "Welcome to wasm-agent"), "and it is the CLI's own transcript: "
-    .. child.stdout:sub(1, 120))
-  -- Not vacuous: the fixture and the record the child was given really do compare as "behind", read
-  -- through the same two decisions the check makes (`fetch` then `compare`). Without this, a
-  -- transcript with no notice could just be a fixture that never fired.
-  local banner = dofile("lua/core/update_banner.lua")
-  local list, reason, transport = banner.fetch({ fixture = feed })
-  ok(reason == nil and type(list) == "table" and #list == 2,
-    "the fixture feed parses (" .. tostring(reason) .. " via " .. tostring(transport) .. ")")
-  local prebuilt = banner.identity({ commit = string.rep("1", 40), binary_source = "prebuilt-release",
-    binary_release = "node-111111111111" })
-  ok(prebuilt ~= nil and banner.compare(prebuilt, list, nil, true) == "older",
-    "and the install record the child was given is behind it, so a notice really was due")
-  ok(string.format(banner.LINE, list[1].sha12) == NOTICE, "in the sentence the test then looks for")
-  ok(not has(child.stdout, "Update available"), "the started CLI prints no notice into its transcript")
-  ok(not has(child.stdout, "run wa update or /update"), "in either wording: nothing about an update")
+  -- The child's command, in a file rather than nested in the pty tool's own quoting: the tool below is
+  -- handed one string, and `sh -c '<cmd>'` inside a Lua string inside a shell string is where a test
+  -- like this stops being readable. The scratch is this run's (marked), so the file goes with it.
+  local child_sh = scratch .. "/child.sh"
+  assert(host.write_file(child_sh,
+    "#!/bin/sh\nexec env -u WA_SCRIPT -u WA_FAST_ROW_ENV " .. env .. " '" .. bin .. "' chat\n"),
+    "cli notice: could not write the child's command")
+  shell("chmod +x '" .. child_sh .. "'")
+  -- A READER'S START IS A TERMINAL, and #107 made that load-bearing: a stdin that is not a tty is a
+  -- SCRIPTED run - no banner, no prompt row and no update check (docs/SCRIPTED-RUNS.md). So piping
+  -- `/exit` into the child stopped being the start this half is about, and its witness with it
+  -- (measured: no banner, and `/exit` answered with a model turn instead of exiting). The child is
+  -- given a pseudo-terminal instead: util-linux `script -qefc "<cmd>" /dev/null`, which also returns
+  -- the child's exit code; BSD/macOS `script -q /dev/null sh -c "<cmd>"`, which does not - there the
+  -- two content assertions carry the meaning, not the code. `stty rows 24 cols 80` first: a reader
+  -- has a terminal with a size, and a pty a parent pipe created has none. Where no pty tool exists
+  -- this half is a NAMED SKIP, never a pass.
+  local function pty(command)
+    if shell("command -v script >/dev/null 2>&1").code ~= 0 then return nil end
+    -- util-linux answers `--version`; BSD/macOS `script` has no such option and prints its usage.
+    if shell("script --version 2>&1").stdout:find("util%-linux") then
+      return "script -qefc \"stty rows 24 cols 80 2>/dev/null; exec '" .. command .. "'\" /dev/null"
+    end
+    return "script -q /dev/null sh -c \"stty rows 24 cols 80 2>/dev/null; exec '" .. command .. "'\""
+  end
+  local on_a_terminal = pty(child_sh)
+  if not on_a_terminal then
+    print("SKIP cli notice: no pty tool (`script`) to give the child a terminal, so the "
+      .. "outside-the-process half cannot start an interactive CLI here")
+  else
+    local child = shell("printf '/exit\\n' | timeout 60 " .. on_a_terminal .. " 2>&1", scratch)
+    ok(child.code == 0, "a `wa chat` on a terminal starts and exits cleanly (code "
+      .. tostring(child.code) .. ")")
+    -- The banner is the interactive start itself: a scripted run prints none, so this assertion is
+    -- also what says the child above really was given a terminal.
+    ok(has(child.stdout, "Welcome to wasm-agent"), "and it is the CLI's own transcript: "
+      .. child.stdout:sub(1, 120))
+    -- Not vacuous: the fixture and the record the child was given really do compare as "behind", read
+    -- through the same two decisions the check makes (`fetch` then `compare`). Without this, a
+    -- transcript with no notice could just be a fixture that never fired.
+    local banner = dofile("lua/core/update_banner.lua")
+    local list, reason, transport = banner.fetch({ fixture = feed })
+    ok(reason == nil and type(list) == "table" and #list == 2,
+      "the fixture feed parses (" .. tostring(reason) .. " via " .. tostring(transport) .. ")")
+    local prebuilt = banner.identity({ commit = string.rep("1", 40), binary_source = "prebuilt-release",
+      binary_release = "node-111111111111" })
+    ok(prebuilt ~= nil and banner.compare(prebuilt, list, nil, true) == "older",
+      "and the install record the child was given is behind it, so a notice really was due")
+    ok(string.format(banner.LINE, list[1].sha12) == NOTICE, "in the sentence the test then looks for")
+    -- The bug, from outside the process: on the tree before #106 this line was a `print`, and it
+    -- appears in the capture (`Update available (cccccccccccc): run wa update or /update`). After it,
+    -- the notice is the footer's session row and nothing of it reaches the transcript.
+    ok(not has(child.stdout, "Update available"), "the started CLI prints no notice into its transcript")
+    ok(not has(child.stdout, "run wa update or /update"), "in either wording: nothing about an update")
+  end
 end
 
 -- ---- (b) the same decision, on a live view -------------------------------------------------------
