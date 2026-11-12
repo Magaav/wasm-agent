@@ -99,6 +99,51 @@ local function printer(view)
   end
 end
 
+-- The update notice at start, and where it lands: the session-status-content line, ONE row above the
+-- session status bar, and NOWHERE else (#106).
+--
+-- Reported twice by the operator (09/11, and again 11/11: "at CLI start ... 'Update available (...)'
+-- also lands in the transcript under the welcome block"). The earlier fix moved the notice into that
+-- row and then still printed it, so the reader got the same sentence twice: once in the footer, where
+-- it belongs, and once in the transcript above the first prompt, where it became part of the chat and
+-- scrolled away with it. A transcript line also looks like something the *agent* said, which is the
+-- real cost: the notice is the node's, not the conversation's.
+--
+-- So this returns the line it put in the footer and prints nothing. It is one function instead of an
+-- inline block for one reason: `wa chat` cannot be driven to its start in a test (it opens memory, a
+-- provider, a binding and a terminal first), and the operator's finding has to be pinned by a test that
+-- goes red when a `print` comes back. `scripts/test-cli-notice.lua` is that test - it calls this with a
+-- live view and a stubbed host and asserts the transcript receives nothing, and it also starts a real
+-- `wa chat` behind it to check the same thing from outside the process.
+--
+-- `options.banner`, `options.seen` and `options.released` are the seams the test uses; on a real start
+-- the banner is read once here, from the same module the footer's session line delegates to.
+local function start_notice(view, options)
+  local o = options or {}
+  if not o.forced and host.getenv("WA_SKIP_UPDATE_CHECK") then return nil end
+  local banner = o.banner or dofile("lua/core/update_banner.lua")
+  local seen = o.seen or banner.check({ refresh = true })
+  local line = seen and seen.line or nil
+  if not line and seen and seen.state == "unknown" and seen.reason ~= "checks_disabled" then
+    -- The second check, unchanged in what it decides: an install that records a version tag rather
+    -- than a published binary release (`release.lua`) still gets told. It used to print; it is the same
+    -- one line in the same one row now, because a notice that is worth showing is worth showing once.
+    local release_module = dofile("lua/core/release.lua")
+    local released = o.released or release_module.check({
+      installed = release_module.installed(updater.installed_record()),
+    })
+    if released and released.state == "behind" then
+      line = "update available: " .. (released.message or "a newer release is published") .. " - /update installs it"
+    end
+  end
+  if type(line) ~= "string" or line == "" then return nil end
+  -- The row's own text, and the draw that puts it there. `session_notice` is what
+  -- `METHODS:session_content` falls back to when no rebuild is claiming the row.
+  view.session_notice = redact.text(line)
+  if view.session_draw then view:session_draw() end
+  return view.session_notice
+end
+
 -- Where this chat is running, and on which branch: pi shows both in front of the
 -- reader, and a chat in the wrong worktree is otherwise a mistake that costs an hour to
 -- notice. Both live in `cli_view` because both are what the banner prints.
@@ -500,23 +545,10 @@ function M.run(argv)
   if not host.getenv("WA_SKIP_UPDATE_CHECK") then
     banner = dofile("lua/core/update_banner.lua")
     seen = banner.check({ refresh = true })
-    if seen.line then
-      -- The notice is the standing text of the CLI's session-status-content area: ONE line directly
-      -- above the session status bar, in yellow, so it stops shortening the status bar's own content
-      -- (`lua/core/cli_view.lua`, `docs/RELEASE-UPDATE.md`). What the line says is decided by
-      -- `update_banner.session_content`, because a rebuild in flight REPLACES the notice on the same
-      -- line and hands it back afterwards.
-      view.session_notice = seen.line
-      view:session_draw()
-      print(redact.text(seen.line))
-    elseif seen.state == "unknown" and seen.reason ~= "checks_disabled" then
-      local released = dofile("lua/core/release.lua").check({
-        installed = dofile("lua/core/release.lua").installed(updater.installed_record()),
-      })
-      if released.state == "behind" then
-        print(redact.text("update available: " .. (released.message or "a newer release is published") .. " - /update installs it"))
-      end
-    end
+    -- No print: the notice is the session-status-content row's line (`start_notice`, #106). What the
+    -- line says is still `update_banner.session_content`'s decision through `view.session_status`, because
+    -- a rebuild in flight REPLACES the notice on the same row and hands it back afterwards.
+    start_notice(view, { banner = banner, seen = seen })
   end
 
   while true do
@@ -799,5 +831,9 @@ function M.run(argv)
   -- process - but this is the one place that knows the REPL is finished rather than blocked.
   return 0
 end
+
+-- The seam `scripts/test-cli-notice.lua` drives: "start a chat with an update available" without
+-- memory, a provider, a binding or a terminal (#106).
+M.start_notice = start_notice
 
 return M
