@@ -1849,6 +1849,38 @@ function M:run_body(text, images)
     audit_time_before=telemetry.clock()
   end
   local tool_list = self.tool_list or tools.all(self.role)
+  -- A run that cannot dispatch anything refuses to start, by name (11/11). A tool list is frozen with
+  -- the session's prompt prefix, so ONE turn that resolved nothing freezes "no tools" for that thread,
+  -- and every later `--resume` of it is a run whose every call is answered `plugin_not_found:` - the
+  -- model asks, the harness cannot run it, and the reader sees a dead agent with no reason given. The
+  -- refusal is written as a failed turn, like a model-less node's, so "nothing ran" can never be read
+  -- as "the model had nothing to say".
+  --
+  -- A CHILD is deliberately out of scope: its loadout is its own profile's decision, a profile that
+  -- names no tool is a legitimate "answer without tools" child, and a call it should not make is
+  -- answered `capability_not_in_profile` - corrective, not a dead end. Measured: an ordinary run with no
+  -- tools is the shape that failed in gate.log, and a blanket refusal also refused the tool-less child
+  -- `scripts/test-provider-connection-abort-recovery.lua` runs (self-review, on this branch).
+  if not self.subagent and #tool_list == 0 then
+    local reason
+    if self.prefix and self.prefix.frozen then
+      reason = "this session's prompt prefix was frozen with an empty tool list "
+        .. "(lua/core/prompt_cache.lua), so every run of this thread resolves no tools"
+    else
+      reason = "this node's catalogue resolved no tools for role " .. tostring(self.role)
+    end
+    local reply = "no_dispatchable_tools: " .. reason .. ". A run that cannot call a tool is not "
+      .. "started, because its every request would be answered plugin_not_found. Start a new session "
+      .. "(`wa chat`) so the prefix is built from this node's catalogue; if the catalogue itself is "
+      .. "empty, `wa capabilities --json` names what this node actually registered."
+    local message_id = host.uuid()
+    record_turn(self, { id = message_id, role = "assistant", content = reply, debug = self.debug, ok = false })
+    self.emit({ type = "status", text = "turn refused: no_dispatchable_tools" })
+    self.emit({ type = "reply", text = reply, message_id = message_id })
+    telemetry.event(self.session_id, self.run_id, "", "step", "refused",
+      { reason = "no_dispatchable_tools", tools = 0 })
+    return reply
+  end
   -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
   -- Identical across runs unless instructions or tools change, which is what a
   -- provider needs in order to serve the prefix from its KV/context cache.

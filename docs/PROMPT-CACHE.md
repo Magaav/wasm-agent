@@ -65,6 +65,14 @@ told the model the mode was on.
   (`read`, `skill(query="*")`, `capabilities`, `tool_search`) read the current state.
 - A frozen tool list is not a grant. Permission, workspace binding and effect class are rechecked at
   every call, and a tool the node no longer offers fails visibly with `tool_not_available`.
+- A run whose tool list resolves to nothing is refused, not started: `no_dispatchable_tools`. The
+  freeze is why this needs saying. One turn that resolved no tools freezes *no tools* for that thread,
+  so every later `--resume` of it is a run whose every call is answered `plugin_not_found:` - the model
+  asks, the harness cannot run anything, and the reader sees a dead agent with no reason given (11/11,
+  gate.log: a resumed run spent the night on exactly that). The refusal is recorded as a failed turn
+  that names the cause - a subagent profile with no dispatchable tool, a prefix frozen empty, or an
+  empty catalogue - and points at `wa chat` for a new session and `wa capabilities --json` for what the
+  node actually registered. Proved by `scripts/test-resume-tool-registry.lua`.
 
 ## Where the record is read
 
