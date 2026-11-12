@@ -1199,6 +1199,53 @@ do
 end
 
 
+-- The host's transcript as a small model of the four calls the view makes (`transcript_block`,
+-- `transcript_write`, `transcript_live`, `transcript_head`): a block, a write, the live line, and the
+-- heading rewritten when a result lands. Shared by the two sections below, because the record and the
+-- status row are one screen and have to be asserted together.
+local function fake_transcript()
+  local blocks = { { topic = false, lines = {} } }
+  local api = { blocks = blocks }
+  local function last() return blocks[#blocks] end
+  api.block = function(topic)
+    api.live_at = nil
+    if #last().lines == 0 then last().topic = topic
+    else blocks[#blocks + 1] = { topic = topic, lines = {} } end
+    return true
+  end
+  api.write = function(text)
+    -- The Rust rule the view relies on: the first real write takes the live row away, so a result
+    -- never lands under a progress row that outlived its call.
+    if api.live_at and last().lines[api.live_at] then table.remove(last().lines, api.live_at) end
+    api.live_at = nil
+    for line in (tostring(text):gsub("\n$", "") .. "\n"):gmatch("([^\n]*)\n") do
+      last().lines[#last().lines + 1] = line
+    end
+    return true
+  end
+  api.live = function(text)
+    local body = tostring(text or "")
+    if body == "" then
+      if api.live_at and last().lines[api.live_at] then table.remove(last().lines, api.live_at) end
+      api.live_at = nil
+      return true
+    end
+    if api.live_at and last().lines[api.live_at] then
+      last().lines[api.live_at] = body
+    else
+      last().lines[#last().lines + 1] = body
+      api.live_at = #last().lines
+    end
+    return true
+  end
+  api.head = function(text)
+    if #last().lines == 0 then return false end
+    last().lines[1] = tostring(text or "")
+    return true
+  end
+  return api
+end
+
 -- ---- a running tool call owns its own block, and never this row --------------------------------
 -- Victor, 2026-11-10: "this bash description should be printed in the bash toolcall not at the
 -- footer. that place belongs to update message and update launcher seeker, not info about tools,
@@ -1208,52 +1255,6 @@ end
 -- only painter awake (`wa_term::transcript::Transcript::live`, pinned in that crate's own tests).
 do
   local notice = "Update available (cccccccccccc): run wa update or /update"
-  -- The host's transcript as a small model of the four calls the view makes: a block, a write, the
-  -- live line, and the heading rewritten when the result lands. `live` follows the rules the view
-  -- relies on: replace the row it already wrote, append it inside the current block otherwise, and
-  -- let the next real write take it away.
-  local function fake_transcript()
-    local blocks = { { topic = false, lines = {} } }
-    local api = { blocks = blocks }
-    local function last() return blocks[#blocks] end
-    api.block = function(topic)
-      api.live_at = nil
-      if #last().lines == 0 then last().topic = topic
-      else blocks[#blocks + 1] = { topic = topic, lines = {} } end
-      return true
-    end
-    api.write = function(text)
-      -- The Rust rule the view relies on: the first real write takes the live row away, so a result
-      -- never lands under a progress row that outlived its call.
-      if api.live_at and last().lines[api.live_at] then table.remove(last().lines, api.live_at) end
-      api.live_at = nil
-      for line in (tostring(text):gsub("\n$", "") .. "\n"):gmatch("([^\n]*)\n") do
-        last().lines[#last().lines + 1] = line
-      end
-      return true
-    end
-    api.live = function(text)
-      local body = tostring(text or "")
-      if body == "" then
-        if api.live_at and last().lines[api.live_at] then table.remove(last().lines, api.live_at) end
-        api.live_at = nil
-        return true
-      end
-      if api.live_at and last().lines[api.live_at] then
-        last().lines[api.live_at] = body
-      else
-        last().lines[#last().lines + 1] = body
-        api.live_at = #last().lines
-      end
-      return true
-    end
-    api.head = function(text)
-      if #last().lines == 0 then return false end
-      last().lines[1] = tostring(text or "")
-      return true
-    end
-    return api
-  end
   local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head }
   local fake = fake_transcript()
   host.transcript_block, host.transcript_write = fake.block, fake.write
@@ -1322,6 +1323,117 @@ do
   eq(plain:session_content(), nil, "and its row says nothing about it either")
   host.transcript_write, host.transcript_block = saved[1], saved[2]
   host.transcript_live, host.transcript_head = saved[3], saved[4]
+end
+
+
+-- ---- #109: the run-status row keeps the run status, through tool start and finish ---------------
+-- Operator, 11/11 ~10:00 on `work` (screenshots): while a bash tool ran, the row directly above the
+-- prompt - the run-status row, `Thinking \u{b7} \u2026 \u{b7} run N \u{b7} step N` - was replaced by
+-- `\u{2699} bash \u{b7} 7s`; when the tool finished the row went blank and the run status never came back,
+-- though the run continued. The cause was routing (`93ba144c`): the call's line was a claimant on the
+-- session-status-content row. It is the call's own block now, and this section pins the operator's
+-- sequence one frame at a time - start, a ticker update, finish - with the run status on its row in
+-- every frame and the call's line nowhere but inside the call.
+do
+  local PROGRESS = "\u{2699} bash \u{b7} 7s"
+  local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head }
+  local fake = fake_transcript()
+  host.transcript_block, host.transcript_write = fake.block, fake.write
+  host.transcript_live, host.transcript_head = fake.live, fake.head
+  local clock = { now = 500 }
+  local view, written = capture({ live = true, stdout = true, limit = 100, rows = function() return 24 end,
+    now = function() return clock.now end })
+  local real_editor = host.input_editor
+  host.input_editor = function() return true end
+  view.editor = true
+  view:prompt("wa> ")
+  -- The row is named by the view itself: with the host's editor owning the bottom of the screen it
+  -- is a token the host fills in (`{S}`), and outside it a number. Reading it from `view:row` is
+  -- what makes this assertion about the row a reader sees rather than about one layout's spelling.
+  local address = "\27[" .. tostring(view:row("S")) .. ";1H"
+  local function row_held(body)
+    local at, held = body:find(address, 1, true), nil
+    while at do
+      local rest = body:sub(at + #address)
+      if rest:sub(1, 4) == "\27[2K" then held = ""
+      else
+        local stop = rest:find("\27[u", 1, true) or (#rest + 1)
+        held = (rest:sub(1, stop - 1):gsub("\27%[[%d;]*[A-Za-z]", ""))
+      end
+      at = body:find(address, at + #address, true)
+    end
+    return held
+  end
+  -- The long call's line as the view reads it. The module is stubbed because what is under test is
+  -- WHERE the line goes, not how the clock or the tail is written (`scripts/test-tool-progress.lua`
+  -- and `rust/wa-tool-progress` own that).
+  view.tool_progress = { begin = function() end, finish = function() end,
+    status = function() return { text = PROGRESS, kind = "tool" } end }
+  view:run_started()
+  view:event({ type = "round", n = 6 })
+  local mark = #written + 1
+  local held = row_held(table.concat(written, "", 1, mark - 1)) or ""
+  view:event({ type = "tool", name = "bash", arguments = { command = "cargo test" } })
+  -- The call's block while the call runs, exactly as the view left it: heading, then whatever row the
+  -- view decided the call's line belongs in. Nothing is injected here - a line the test wrote itself
+  -- would prove nothing about where the view puts it.
+  local during = visible(table.concat(fake.blocks[#fake.blocks].lines, "\n"))
+  clock.now = 512
+  view:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "test result: ok\n" } })
+  local run = since(written, mark)
+  local bodies = frame_bodies(run)
+  ok(#bodies >= 2, "the start and the finish are drawn as frames: " .. #bodies)
+
+  -- (1) The call's line is only ever inside the call's own block.
+  ok(has(during, "bash \u{b7} 7s"), "the call's progress moved inside its own block: " .. during)
+  local in_block = visible(table.concat(fake.blocks[1] and fake.blocks[1].lines or {}, "\n"))
+  ok(has(in_block, "test result: ok"), "the result landed under the call's heading: " .. in_block)
+  local leaked = 0
+  for _, body in ipairs(bodies) do
+    local text = row_held(body)
+    if text and (has(text, "bash \u{b7}") or has(text, PROGRESS)) then leaked = leaked + 1 end
+  end
+  eq(leaked, 0, "and it is never written on the run-status row")
+
+  -- (2) The run status is what that row holds at the end of EVERY frame of the pair. A frame that
+  -- does not touch the row leaves it as it was, which is why `held` carries over rather than being
+  -- reset per frame: this is the operator's "the row goes blank and never comes back".
+  local steps = "\240\159\145\163" -- the step count `\U0001f463`, the run-status line's own mark
+  local blanked, first_blank = 0, nil
+  for index, body in ipairs(bodies) do
+    local drawn = row_held(body)
+    if drawn then held = (drawn:gsub("%s+$", "")) end
+    if not has(held, steps) then
+      blanked = blanked + 1
+      first_blank = first_blank or (index .. ": [" .. held .. "]")
+    end
+  end
+  eq(blanked, 0, "the run status is on its row at the end of every frame, while the call runs and after it")
+  if first_blank then print("  first frame without the run status: " .. first_blank) end
+
+  -- (3) After the tool, the row is the run's again: the call's phase is gone from it and the step
+  -- count is still there - the run status came back, it never went away.
+  ok(has(held, steps), "after the tool the row still carries the run's step: [" .. held .. "]")
+  ok(not has(held, "Running bash"), "and the call's phase is gone from it: [" .. held .. "]")
+  ok(not has(in_block, "\u{2699} bash"), "and the call's clock row is not left behind: " .. in_block)
+
+  -- (4) The plain layout (no host transcript) has no live row at all: nothing to route, nothing lost.
+  local plain, plain_written = capture({ live = true, limit = 100, now = function() return 600 end })
+  plain:prompt("wa> ")
+  plain.tool_progress = view.tool_progress
+  plain:run_started()
+  plain:event({ type = "round", n = 2 })
+  local plain_mark = #plain_written + 1
+  plain:event({ type = "tool", name = "bash", arguments = { command = "cargo test" } })
+  plain:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "ok\n" } })
+  local plain_run = visible(since(plain_written, plain_mark))
+  ok(not has(plain_run, PROGRESS), "without a transcript the call's line is not printed on the row: "
+    .. plain_run)
+  ok(has(plain_run, "Running bash") and has(plain_run, "Thinking"),
+    "the run status is what that row says there: the call, then the next step")
+  host.transcript_write, host.transcript_block = saved[1], saved[2]
+  host.transcript_live, host.transcript_head = saved[3], saved[4]
+  host.input_editor = real_editor
 end
 
 if failed > 0 then
