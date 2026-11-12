@@ -14,7 +14,7 @@ await showCall({version:1,call:1});
 ```
 
 `call` is the one-based admitted native-tool call index, not a discovery/helper
-attempt ID. `await describeTool('showCall')` gives the helper contract. Do not also
+attempt ID. `(await searchTools('select:showCall'))[0]` gives the helper contract. Do not also
 `text`/return the same large result: that adds escaped copies. Small counters or
 explicitly selected diagnostics remain suitable for `text`.
 

@@ -32,7 +32,7 @@ local M={}
 local DIRECT_ONLY={
  codemode='a script does not nest: a second sandbox inside the first would hide one effect stream behind another',
  tool_call='the outer facade pins definitions into this session\'s loadout; a script calls await tools.<name>(args) directly instead',
- tool_search='the outer facade pins definitions into this session\'s loadout; searchTools/describeTool answer the same question inside without changing it',
+ tool_search='the outer facade pins definitions into this session\'s loadout; searchTools answers the same question inside without changing it',
  subagent='delegation spends model calls and creates a child session: one reviewable call, never a step inside a script',
  integrate='landing a worker tip is a single receipted integration action, never a script step',
  session_worktree='it allocates and owns this session\'s worktree; a bound root that re-points mid-script would change what every later call means',
@@ -50,7 +50,7 @@ M.DIRECT_ONLY=DIRECT_ONLY
 -- What a tool that is not callable here is for, so discovery never reads as "does not exist" (29/10).
 local function route_of(name,status)
  if DIRECT_ONLY[name] then return 'Direct call only: '..DIRECT_ONLY[name]..'. End the script, then call '..name..' as an ordinary tool.' end
- if name=='tool_search' or name=='tool_call' then return 'Outer facade: inside a script use searchTools/describeTool and call await tools.<name>(args) directly.' end
+ if name=='tool_search' or name=='tool_call' then return 'Outer facade: inside a script use searchTools and call await tools.<name>(args) directly.' end
  if status and (status.status=='blocked' or status.status=='unknown') then return 'Not callable in this run: '..tostring(status.reason or status.status)..'. '..tostring(status.next or '') end
  return 'Control plane: call '..name..' as an ordinary tool, outside codemode (end the script, then call it directly). Inside a script it is refused.'
 end
@@ -144,15 +144,14 @@ end
 -- `describeTool("showCall")` are the presentation's.
 local function host_global(name, params, calls, selected, lookup, ctx, journal)
   if name == 'showCall' then return presentation.select(calls, selected, params) end
-  -- `describeTool(name)` is the definition the catalogue holds for that name - callable, or outside
-  -- with its route. It answered `presentation.help` for every argument, so a component-path script
-  -- that asked about a tool was told about showCall instead (measured 11/11). The native path is
-  -- corrected too, so one lookup answers both.
+  -- `describeTool(name)` is the hidden alias of `searchTools("select:"..name)[0]`, and `searchTools`
+  -- itself is answered here as well when the component hands a call back: one implementation of every
+  -- discovery form (`tool_lookup`) for both loops, so the two paths cannot answer differently.
   if name == 'describeTool' then
     local asked = type(params) == 'string' and params or (type(params) == 'table' and params[1]) or nil
-    if asked == nil or asked == 'showCall' then return presentation.help, true end
     return lookup.describe(asked), true
   end
+  if name == 'searchTools' then return lookup.discover(params) end
   -- `capabilities()` inside is the tool grant list: the same object the outer `capabilities` tool
   -- returns, and it is answered by dispatching that tool. It used to return the host inventory
   -- (`wa capabilities --json`: audio, disk, http), which is a different question under the same name
@@ -164,35 +163,129 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal)
   return value, success
 end
 
+-- The guest's own names - `searchTools`, `results`, `showCall` - are discovery entries like any other,
+-- and their help is both the entry's `schema` and the entry's own fields (name, description,
+-- parameters, code). That keeps `searchTools("select:showCall")[0]` and the compatibility alias
+-- `describeTool("showCall")` the same object, and keeps the help text in one place.
+local function builtin_entries()
+ local entries={}
+ local function add(help)
+  local entry={}
+  for key,value in pairs(help)do entry[key]=value end
+  entry.schema=help
+  entry.execution={status='available',scope='codemode',workspace_binding='none'}
+  entry.callable=true
+  entry.builtin=true
+  entries[#entries+1]=entry
+ end
+ add(presentation.searchtools_help)
+ add(session_results.HELP)
+ add(presentation.help)
+ table.sort(entries,function(a,b)return a.name<b.name end)
+ return entries
+end
+
 -- One lookup for both seams: the definition a name has - callable, or fenced with the route that says
--- where it runs - or the nearest permitted names when the catalogue has none. `capabilities()` is the
+-- where it runs - or a `found:false` entry that says the name is not here. `capabilities()` is the
 -- outer `capabilities` tool dispatched, so the two views of the grant list cannot drift.
+--
+-- It is also the ONE implementation of discovery: a batch entry, a keyword match, a listing row and
+-- `describeTool(name)` are all `entry(name)`, so the one tool cannot answer four shapes. The operator's
+-- decision (11/11): `searchTools` always answers an ARRAY; `describeTool` stays only as a hidden
+-- compatibility alias for element 0 of a one-name batch.
 local function tool_lookup(catalog,execution,dispatch)
- local function described(name)
+ local builtins=builtin_entries()
+ local function copy(value) local out={} for key,item in pairs(value)do out[key]=item end return out end
+ local function names()
+  local list={}
+  for _,schema in ipairs(catalog)do list[#list+1]=schema['function'].name end
+  for _,builtin in ipairs(builtins)do list[#list+1]=builtin.name end
+  table.sort(list)
+  return list
+ end
+ local function unknown(name,list)
+  local echo=envelope.echo_name(tostring(name))
+  local set={}for _,known in ipairs(list or names())do set[known]=true end
+  return {name=echo,found=false,missing=true,error='unknown_tool',
+   reason="no name like '"..echo.."' in this script's catalogue",
+   suggestions=envelope.nearest(echo,set,3)}
+ end
+ -- One name, one object: {name, description, parameters, schema, execution, callable, route} - the
+ -- shape `describeTool(name)` has always answered, plus the `schema` a batch entry carries. A name the
+ -- script cannot see is a MEMBER of the answer (found:false, the reason, the nearest permitted names),
+ -- never a throw and never a second envelope, so `.map` works on every form.
+ local function entry(name,list)
   local wanted=tostring(name)
-  -- `describeTool("showCall")` is the presentation's help, as it always was; only the other names come
-  -- from the catalogue. Without this the native path answered `unknown_tool` for it (measured 11/11 by
-  -- scripts/test-codemode-presentation.lua).
-  if wanted=='showCall' then return presentation.help end
-  -- The guest's own built-ins answer through the same door: a model that has just been handed a plain
-  -- array or a `results` object asks `describeTool("searchTools")`/`describeTool("results")` for its
-  -- shape, and used to be told `unknown_tool` because neither is a tool in the catalogue (11/11).
-  if wanted=='searchTools' then return presentation.searchtools_help end
-  if wanted=='results' then return session_results.HELP end
   for _,schema in ipairs(catalog)do
    local f=schema['function']
    if f.name==wanted then
     local status=execution(f.name)
     local fenced=forbidden[f.name] or status.status=='blocked' or status.status=='unknown'
-    return {name=f.name,description=f.description,parameters=f.parameters,execution=status,
-      callable=not fenced,route=fenced and route_of(f.name,status) or nil}
+    local out={name=f.name,description=tostring(f.description or ''),parameters=f.parameters,
+      schema=schema,execution=status,callable=not fenced}
+    if fenced then out.route=route_of(f.name,status) end
+    return out
    end
   end
-  local catalogue={};for _,schema in ipairs(catalog)do catalogue[schema['function'].name]=true end
-  local echo=envelope.echo_name(wanted)
-  return {error='unknown_tool',name=echo,suggestions=envelope.nearest(echo,catalogue,3)}
+  for _,builtin in ipairs(builtins)do if builtin.name==wanted then return copy(builtin) end end
+  return unknown(wanted,list)
  end
- return {describe=described,codemode_only=function(name) return codemode_only(name,{}) end,
+ -- `searchTools(args)`: the batch (`{names}`/`"select:a,b"`), the listing (`"*"`, `""` or nothing) and
+ -- the keyword form, in that order - the same branches as the outer `tool_search`, over the guest's own
+ -- ceiling. Every branch answers a plain ARRAY.
+ local function discover(params)
+  params=type(params)=='table' and params or {}
+  local query=params[1];local options=params[2]
+  if type(query)=='table' then options=query;query=options.query end
+  options=type(options)=='table' and options or {}
+  local wanted,batch_error=envelope.requested_names({query=query,names=options.names})
+  local list=names()
+  local listing=not wanted and (query==nil or query=='*' or (type(query)=='string' and not query:find('%S')))
+  local limit=options.limit or (listing and 50 or 8)
+  local offset=options.offset or 0
+  if batch_error then return {error=batch_error},false end
+  if wanted then
+   if options.limit~=nil and (type(options.limit)~='number' or options.limit%1~=0 or options.limit<1 or options.limit>8) then
+    return {error='invalid_tool_search_limit'},false
+   end
+   local tools={}
+   for _,name in ipairs(wanted)do tools[#tools+1]=entry(name,list) end
+   return tools,true
+  end
+  if listing then
+   if type(limit)~='number' or limit%1~=0 or limit<1 or limit>200 or type(offset)~='number' or offset%1~=0 or offset<0 then
+    return {error='invalid_tool_search_limit'},false
+   end
+   local page={}
+   for index=offset+1,math.min(#list,offset+limit)do
+    local found=entry(list[index],list)
+    page[#page+1]={name=found.name,description=tostring(found.description or ''):match('^[^\n]*'):sub(1,200),
+      execution=found.execution,callable=found.callable}
+    if found.route then page[#page].route=found.route end
+   end
+   return page,true
+  end
+  if type(query)~='string' or #query>256 then return {error='tool_search_query_required'},false end
+  if type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then return {error='invalid_tool_search_limit'},false end
+  local matches={}
+  for _,name in ipairs(list)do
+   local found=entry(name,list)
+   local hay=(found.name..' '..tostring(found.description or '')):lower()
+   local score=0
+   for term in query:lower():gmatch('[%w_]+')do if hay:find(term,1,true)then score=score+1 end end
+   if score>0 then found.score=score;matches[#matches+1]=found end
+  end
+  table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
+  local found={}
+  for index=1,math.min(limit,#matches)do found[index]=matches[index];found[index].score=nil end
+  return found,true
+ end
+ -- `describeTool(name)` - the hidden compatibility alias
+ -- (`searchTools("select:"..name)[0]`, same object): a script written against the old one name keeps
+ -- working, and no catalogue or guidance list offers it any more. No argument is the presentation help
+ -- it has always answered.
+ return {describe=function(name) return entry(name==nil and 'showCall' or name) end,discover=discover,
+  codemode_only=function(name) return codemode_only(name,{}) end,
   capabilities=function(params)
    local ok,value=pcall(dispatch,'capabilities',type(params)=='table' and params or {})
    if ok and type(value)=='table' then return value end
@@ -280,78 +373,13 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
     if call.name=='showCall' then
      value,success=presentation.select(calls,selected,params)
     elseif call.name=='searchTools' then
-     -- Both shapes the model knows: searchTools("text", {limit}) and the tool_search shape
-     -- searchTools({query, limit}). The object form used to be refused (`tool_search_query_required`),
-     -- and "" or "*" could not list anything, so the guest could not see its own catalogue (28/10).
-     local query=params[1];local options=params[2]
-     if type(query)=='table' then options=query;query=options.query end
-     options=type(options)=='table' and options or {}
-     -- An exact batch (names=[...] or "select:a,b,c") is the same request as tool_search's: the same
-     -- 1-8 names, the same mutual exclusion, and the same `missing` with nearest permitted names. This
-     -- route returns metadata over the guest's own ceiling; it never loads or admits anything.
-     local wanted,batch_error=envelope.requested_names({query=query,names=options.names})
-     local catalogue={}
-     for _,descriptor in ipairs(descriptors)do catalogue[descriptor.name]=true end
-     for name in pairs(outside)do catalogue[name]=true end
-     local function searchable(name)
-      local def=definitions[name]
-      if def then return {name=def.name,schema=def.schema,execution=execution(def.name),callable=true} end
-      local out=outside[name]
-      if out then return {name=out.name,schema=out.schema,execution=execution(out.name),callable=false,route=out.route} end
-     end
-     local listing=not wanted and (query==nil or query=='*' or (type(query)=='string' and not query:find('%S')))
-     local limit=options.limit or (listing and 50 or 8)
-     local offset=options.offset or 0
-     if batch_error then value={error=batch_error};success=false
-     elseif wanted then
-      if options.limit~=nil and (type(options.limit)~='number' or options.limit%1~=0 or options.limit<1 or options.limit>8) then value={error='invalid_tool_search_limit'};success=false
-      else
-       -- A plain ARRAY, in the order asked for: a script that listed the catalogue asked for a list,
-       -- and `searchTools({names=...}).map(...)` answered "not a function" on the old envelope
-       -- ({tools=...,matches=...}). An unknown name is a member of that array, marked `missing` with
-       -- the nearest permitted names, so one shape answers every spelling.
-       local tools={}
-       for _,name in ipairs(wanted)do
-        local entry=searchable(name)
-        if entry then tools[#tools+1]=entry
-        else local echo=envelope.echo_name(name);tools[#tools+1]={name=echo,missing=true,suggestions=envelope.nearest(echo,catalogue,3)} end
-       end
-       value=tools;success=true
-      end
-     elseif listing then
-      if type(limit)~='number' or limit%1~=0 or limit<1 or limit>200 or type(offset)~='number' or offset%1~=0 or offset<0 then value={error='invalid_tool_search_limit'};success=false
-      else
-       -- The whole guest catalogue, names and one-line descriptions only; describeTool(name) gives a schema.
-       local names,listed={},{}
-       for _,descriptor in ipairs(descriptors)do if not listed[descriptor.name] then listed[descriptor.name]=true;names[#names+1]=descriptor.name end end
-       for name in pairs(outside)do if not listed[name] then listed[name]=true;names[#names+1]=name end end
-       table.sort(names)
-       local page={};for i=offset+1,math.min(#names,offset+limit)do
-        local def=definitions[names[i]] or outside[names[i]];local text=tostring(def.schema['function'].description or '')
-        page[#page+1]={name=def.name,description=text:match('^[^\n]*'):sub(1,200),execution=execution(def.name),callable=outside[def.name]==nil,route=outside[def.name] and outside[def.name].route or nil}
-       end
-       value=page;success=true
-      end
-     elseif type(query)~='string' or #query>256 then value={error='tool_search_query_required'};success=false
-     elseif type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then value={error='invalid_tool_search_limit'};success=false
-     else
-      -- Guest discovery is metadata over its own exact ceiling, never an envelope
-      -- facade invocation or a new delegation/load authority.
-      local matches={}
-      local function consider(def,route)
-       local hay=(def.name..' '..tostring(def.schema['function'].description)):lower();local score=0
-       for term in query:lower():gmatch('[%w_]+')do if hay:find(term,1,true)then score=score+1 end end
-       if score>0 then matches[#matches+1]={name=def.name,schema=def.schema,execution=execution(def.name),score=score,callable=route==nil,route=route} end
-      end
-      for _,descriptor in ipairs(descriptors)do local def=definitions[descriptor.name];if def then consider(def) end end
-      for _,def in pairs(outside)do consider(def,def.route) end
-      table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
-      local found={};for i=1,math.min(limit,#matches)do found[i]=matches[i];found[i].score=nil end
-      value=found;success=true
-     end
+     -- One implementation, shared with the component path (`tool_lookup`): the batch, the listing and
+     -- the keyword form all answer a plain ARRAY here, so `.map` works on whatever was asked for.
+     value,success=lookup.discover(params)
     elseif call.name=='describeTool' then
+     -- The hidden compatibility alias of `searchTools("select:"..name)[0]`, same object.
      local name=type(params)=='string' and params or (type(params)=='table' and params[1]) or nil
-     value=name==nil and presentation.help or lookup.describe(name);success=true
+     value=lookup.describe(name);success=true
     elseif call.name=='results' then
      -- The retained results and this session's journal: `results.get`/`last`/`diff`/`reuse`. Read-only
      -- over records the node already keeps; it dispatches nothing and admits nothing.
@@ -437,11 +465,9 @@ end
 -- dispatch is `dispatch`, and the arguments are validated against the schema the node holds now.
 local function component_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
  local session=host.uuid()
- -- The lookup the guest's host globals are answered through (`describeTool(name)` for a known name and
- -- `capabilities()`), built here for THIS path: the native loop builds its own inside `native_run`, so
- -- the component path used to reach `host_global` with a nil one and fail with "attempt to index a nil
- -- value (local 'lookup')" the first time a script asked `describeTool("showCall")` or `capabilities()`
- -- (measured 11/12 by scripts/test-codemode-component.lua, which then fell back to the native path).
+ -- The lookup the globals this loop owns are answered through, exactly as the native loop builds it:
+ -- `capabilities()`, a `searchTools` call the seam hands back, and `describeTool` all dispatch through
+ -- here, so the two paths answer one implementation.
  local lookup=tool_lookup(catalog,execution,dispatch)
  -- The catalogue as typed records: the node's own pre-flight status per tool is pinned here (the
  -- component decides the fence from it), and the schema hash is kept for the per-call recheck.
@@ -456,13 +482,16 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
  local cache
  do local ok,value=pcall(function()return dofile('lua/core/paths.lua').cache()end);if ok and type(value)=='string' then cache=value..'/codemode' end end
- -- The lookup the globals this loop owns are answered through, exactly as the native loop builds it:
- -- `describeTool` for a name the component does not answer (the guest's own built-ins, an unknown
- -- name) and `capabilities()` dispatch through here. Without it those answers were looked up in a nil
- -- local and the script fell back to the native path (measured by the parity suite).
- local lookup=tool_lookup(catalog,execution,dispatch)
+ -- The guest's own names travel as discovery entries, composed HERE and copied verbatim by the seam:
+ -- the help text (`searchTools`, `results`, `showCall`) has one copy, and the component's batch,
+ -- listing, keyword and alias answers are the node's bytes, not a second rendering of them.
+ local builtins={}
+ for _,entry in ipairs(builtin_entries())do
+  builtins[#builtins+1]={name=entry.name,description=tostring(entry.description or ''),
+   execution=entry.execution,entry_json=json.encode(entry)}
+ end
  local opened,open_reason=seam({op='open',session=session,owner=scope,code=args.code,
-  timeout_ms=args.timeout_ms or 30000,catalogue=entries,store=store,
+  timeout_ms=args.timeout_ms or 30000,catalogue=entries,builtins=builtins,store=store,
   wasm_path=policy.wasm_path,prelude_path=policy.prelude_path,module_cache=cache})
  -- Nothing has run yet: the native path is still a valid answer, and the router logs the reason.
  if not opened then return nil,open_reason end

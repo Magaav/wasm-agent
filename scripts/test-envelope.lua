@@ -36,8 +36,10 @@ local first=agent.new(sid,function()end,'master','master',''):build_context()[1]
 -- Code mode is the rule now (11/11): with it admitted, the prompt states it and points discovery at the
 -- guest's own globals instead of restating a seventy-line catalogue every request.
 check(first:find('is ONE codemode script',1,true)~=nil and first:find('capabilities()',1,true)~=nil
-  and first:find('searchTools(query)',1,true)~=nil and first:find('describeTool(name)',1,true)~=nil,
-  'model instructed about code mode and in-guest discovery')
+  and first:find('`searchTools(query)` returns an array of {name, description, callable, route}',1,true)~=nil
+  and first:find('`searchTools("select:a,b")` adds each one\'s full schema',1,true)~=nil
+  and first:find('describeTool',1,true)==nil,
+  'model instructed about code mode and the one discovery tool, with no second name')
 check(first:find('\n- memories: ',1,true)==nil,'the on-demand catalogue is not restated under code mode')
 -- Without code mode there is no in-guest discovery to point at, so the on-demand index returns intact.
 local without=agent.system_prompt('master',nil,nil,tools.envelope('master',ctx),'progressive',

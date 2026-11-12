@@ -18,7 +18,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use logic::{interpret, plan, Catalogue, Execution, Fact, Guest, ToolAdmittance};
+use logic::{interpret, plan, Builtin, Catalogue, Execution, Fact, Guest, ToolAdmittance};
 use serde_json::{json, Map, Value};
 
 wit_bindgen::generate!({ path: "../../../wit/codemode", world: "codemode-component", generate_all });
@@ -269,7 +269,7 @@ impl CodemodeGuest for CodemodeComponent {
                 execution: execution(tool.execution),
             })
             .collect();
-        let Some(catalogue) = plan(facts) else {
+        let Some(mut catalogue) = plan(facts) else {
             // Two tools spell the same name inside the guest: refuse rather than let one shadow the
             // other. The native path returns the same name.
             return Opened {
@@ -281,6 +281,19 @@ impl CodemodeGuest for CodemodeComponent {
                 aborted: Some("codemode_identifier_collision".to_string()),
             };
         };
+        // The guest's own names (`searchTools`, `results`, `showCall`) as discovery entries, exactly as
+        // the loop composed them (`lua/core/codemode.lua`, `builtin_entries`): the help text and its
+        // rendering stay in the node, and this seam copies the entry it was handed.
+        catalogue.builtins = request
+            .builtins
+            .into_iter()
+            .map(|builtin| Builtin {
+                name: builtin.name,
+                description: builtin.description,
+                execution: execution(builtin.execution),
+                entry: serde_json::from_str(&builtin.entry_json).unwrap_or(Value::Null),
+            })
+            .collect();
         let started = quickjs::start(&quickjs::Spec {
             owner: request.owner.clone(),
             code: request.code,

@@ -20,14 +20,14 @@ end
 local transport=real_ready and 'real' or 'stub'
 -- Stub transport: it delivers exactly the guest call the prelude would (the argument list as JSON),
 -- and records the value the script received. It neither evaluates JavaScript nor adds authority.
-local pending_args,captured=nil,nil
+local pending_args,pending_name,captured=nil,nil,nil
 if not real_ready then
  host.quickjs=function(action,payload)
   local args=json.decode(payload or '{}')
   if action=='ready' then return json.encode({ok=true,backend='stub-transport'})
   elseif action=='start' then
    return json.encode({ok=true,id='stub-sandbox',backend='stub-transport',
-    events={{type='call',id='stub-call-1',name='searchTools',target='global',args=json.encode(pending_args)}}})
+    events={{type='call',id='stub-call-1',name=pending_name,target='global',args=json.encode(pending_args)}}})
   elseif action=='admit' then return json.encode({ok=true})
   elseif action=='deliver' then
    captured=json.decode(json.decode(payload).payload)
@@ -41,20 +41,23 @@ local ctx={session_id=sid,user_id='master'}
 local all=tools.all('master',ctx,memory)
 local execution=tools.discovery_execution(memory,ctx)
 local function dispatch(name,params,raw)return tools.dispatch(memory,name,params,'master',ctx) end
--- One guest call per script: argument = the single argument the model passed to searchTools.
-local function run(arg,catalog)
+-- One guest call per script: argument = the single argument the model passed to `searchTools`, or the
+-- one name it passed to the compatibility alias `describeTool`.
+local function call(name,arg,catalog)
  catalog=catalog or all
  if real_ready then
-  local code='const v=await searchTools('..json.encode(arg)..'); return JSON.stringify(v);'
+  local code='const v=await '..name..'('..json.encode(arg)..'); return JSON.stringify(v);'
   local result=codemode.run(memory,{code=code},'master',ctx,catalog,function()return catalog end,dispatch,execution)
   local value=result and result.value
   for _=1,2 do if type(value)=='string' then value=json.decode(value) end end
   return type(value)=='table' and value or {},result
  end
- pending_args={arg};captured=nil
+ pending_args={arg};pending_name=name;captured=nil
  local result=codemode.run(memory,{code='stub'},'master',ctx,catalog,function()return catalog end,dispatch,execution)
  return captured or {},result
 end
+local function run(arg,catalog) return call('searchTools',arg,catalog) end
+local function alias(name,catalog) return call('describeTool',name,catalog) end
 -- The answer is a plain array (11/11, #119): a script that asked for names got a list, and
 -- `.map` on `{tools=…}` answered "not a function". An unknown name is a member of the same array,
 -- marked `missing`, so one shape answers every spelling.
@@ -130,5 +133,66 @@ local keywords=run({query='read',limit=2})
 check(#keywords==2,'keyword search still honours its limit')
 local listing=run('*')
 check(#listing>0 and listing[1].name~=nil,'the catalogue listing still works, as a plain array')
+
+-- 8. One tool, one answer shape (operator's decision, 11/11): `.map` works on EVERY form of
+-- `searchTools`, because every form is a plain ARRAY. With the real guest the check is the JavaScript
+-- method itself; without one the same fact is asserted on the decoded array.
+local forms={
+ {'the listing','*'},
+ {'an empty query (the listing)',''},
+ {'a keyword search',{query='read',limit=2}},
+ {'a batch of names',{names={'read','grep'}}},
+ {'the select: spelling','select:read,grep'},
+}
+if real_ready then
+ local probe='const forms=[await searchTools("*"),await searchTools(""),await searchTools({query:"read",limit:2}),'
+  ..'await searchTools({names:["read","grep"]}),await searchTools("select:read,grep")];'
+  ..' const mapped=forms.map(v=>v.map(t=>t.name)); const miss=(await searchTools({names:["read","nope_tool"]}))[1];'
+  ..' return JSON.stringify({arrays:forms.every(v=>Array.isArray(v)),names:mapped.map(m=>m.length),'
+  ..'miss:{found:miss.found,reason:typeof miss.reason},mapped:mapped[1].length>0});'
+ local result=codemode.run(memory,{code=probe},'master',ctx,all,function()return all end,dispatch,execution)
+ local value=result and result.value
+ for _=1,2 do if type(value)=='string' then value=json.decode(value) end end
+ check(type(value)=='table' and value.arrays==true and value.mapped==true
+  and type(value.names)=='table' and #value.names==5 and (value.names[3]==2 or value.names[3]==0)
+  and type(value.miss)=='table' and value.miss.found==false and value.miss.reason=='string',
+  'every searchTools form is an Array in the guest, so .map works on all of them: '..json.encode(value):sub(1,240))
+else
+ for _,case in ipairs(forms)do
+  local value=run(case[2])
+  check(type(value)=='table' and value.error==nil and value[1]~=nil and value[1].name~=nil,
+   case[1]..' answers an array a script can map over: '..json.encode(value):sub(1,200))
+ end
+end
+
+-- 9. The guest's own names are selectable the same way, and carry their help as the entry's schema and
+-- description (so there is one place to read a shape, including this one's).
+local builtins=run('select:searchTools,results,showCall')
+check(#builtins==3 and builtins[1].name=='searchTools' and builtins[2].name=='results' and builtins[3].name=='showCall',
+ 'the guest built-ins are selectable, in the order asked for: '..json.encode(builtins):sub(1,200))
+for _,entry in ipairs(builtins)do
+ check(entry.callable==true and entry.builtin==true and type(entry.schema)=='table'
+  and type(entry.description)=='string' and #entry.description>0,
+  'a built-in entry is callable, marked builtin, and carries its help: '..json.encode(entry):sub(1,200))
+end
+check(tostring(builtins[1].description):find('plain ARRAY',1,true)~=nil and builtins[1].schema.name=='searchTools',
+ 'the searchTools help is the entry and its schema: '..json.encode(builtins[1]):sub(1,200))
+check(builtins[2].schema.name=='results','results carries its own help')
+check(builtins[3].version==1 and builtins[3].schema.version==1,'showCall still answers the presentation help, as it always did')
+
+-- 10. `describeTool(name)` is only the hidden compatibility alias of `searchTools("select:"..name)[0]`:
+-- the same object, for a callable tool, a fenced one, a built-in, and a name that is not there.
+for _,name in ipairs({'read','subagent','searchTools','results','showCall','nope_tool'})do
+ local one=alias(name)
+ local batch=run('select:'..name)
+ check(type(batch)=='table' and type(batch[1])=='table' and json.encode(one)==json.encode(batch[1]),
+  'describeTool("'..name..'") is searchTools("select:'..name..'")[0]: '..json.encode(one):sub(1,200))
+end
+
+-- A miss says so in the entry itself: `found:false`, the reason, and the nearest permitted names - not
+-- a throw, so `.map` still works over the answer.
+local miss=missing_of(mixed)[1]
+check(miss.found==false and type(miss.reason)=='string' and miss.reason:find('reed',1,true)~=nil,
+ 'a missing entry says found:false and why: '..json.encode(miss))
 
 print('tool_search names codemode ok ('..checks..' checks; transport='..transport..')')

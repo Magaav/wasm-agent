@@ -92,8 +92,11 @@ boundary_seam="$home/boundary-seam.log"
 run scripts/test-codemode-boundary.lua "WA_CODEMODE_COMPONENT=1" "WA_CODEMODE_COMPONENT_WASM=$(native "$artifact")" 2>&1 | tee "$boundary_seam"
 check "boundary component" "$boundary_seam" "${PIPESTATUS[0]}"
 # A silent fallback would make this suite pass while proving nothing, so a fallback line is a failure.
-if grep -q 'served natively' "$boundary_seam"; then
-  echo "  FAILED the component path fell back to native:"; grep 'served natively' "$boundary_seam" | head -3
+# Named seam first: every other component logs its own `<name>: <op> served natively` line into the same
+# run (the memory component is not installed in this wrapper's temp home), and a bare grep on 'served
+# natively' failed on that line while the code-mode component had answered every script.
+if grep -q 'codemode: .*served natively' "$boundary_seam"; then
+  echo "  FAILED the component path fell back to native:"; grep 'codemode: .*served natively' "$boundary_seam" | head -3
   failed=$((failed + 1))
 fi
 
