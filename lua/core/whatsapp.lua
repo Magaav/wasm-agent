@@ -70,7 +70,7 @@ M.TOOLS = {
   },
   {
     verb = 'read', capability = 'whatsapp_read', effect = 'read', route = 'account',
-    description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking whatsapp_contacts uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page.',
+    description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 80, description = 'An exact chat JID, or a name to resolve (ambiguous names answer with candidates).' },
       before = { type = 'string', maxLength = 128, description = 'The next_before cursor from the previous page.' },
@@ -108,7 +108,7 @@ M.TOOLS = {
   },
   {
     verb = 'send', capability = 'whatsapp_send', effect = 'write', route = 'here',
-    description = 'Send one WhatsApp message yourself, on this account, to one exact chat. It is queued on the account node\'s durable queue and sent by the wa-whatsapp component, so the answer is a job id, not a delivery: read the outcome with whatsapp_send_status. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group) - a name is not accepted here, use whatsapp_contacts to turn a name into a chat first. The same chat+text+reply_to is one job, so a repeated call does not send twice.',
+    description = 'Send one WhatsApp message yourself, on this account, to one exact chat. It is queued on the account node\'s durable queue and sent by the wa-whatsapp component, so the answer is a job id, not a delivery: read the outcome with mcp_whatsapp_send_status. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group) - a name is not accepted here, use mcp_whatsapp_contacts to turn a name into a chat first. The same chat+text+reply_to is one job, so a repeated call does not send twice.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160, description = 'Exact chat JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us. A bare phone number is refused.' },
       text = { type = 'string', maxLength = 65536, description = 'The message body, exactly as it should appear.' },
@@ -119,7 +119,7 @@ M.TOOLS = {
   },
   {
     verb = 'send_status', capability = 'whatsapp_send_status', effect = 'read', route = 'here',
-    description = 'State of a message you asked whatsapp_send to send: queued, done with the message id WhatsApp gave it, or failed with a reason. An id this node never allocated is refused, not guessed.',
+    description = 'State of a message you asked mcp_whatsapp_send to send: queued, done with the message id WhatsApp gave it, or failed with a reason. An id this node never allocated is refused, not guessed.',
     parameters = { type = 'object', properties = { id = { type = 'integer', minimum = 1, description = 'The job id whatsapp_send returned.' } }, required = { 'id' }, additionalProperties = false },
     request = function(args) return { id = tonumber(args.id) or args.id } end,
   },

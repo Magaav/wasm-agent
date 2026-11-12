@@ -127,7 +127,10 @@ ok(not has(spaced.text(), "abc"), "and two words are never glued into one")
 -- every pair in a tool name and printed `peeropenclawmcp...`; these are the exact identifiers
 -- from the operator's screenshot (`work`, 10/11), plus the namespaces and column names beside
 -- them. Nothing here may lose a byte, and no piece of them may be styled as emphasis.
-local IDENT = "peer_openclaw__mcp_whatsapp_native_read_newest_662289dd"
+-- A peer connector's exact callable name: double underscores, an 8-hex suffix. It is a mail
+-- connector on purpose - WhatsApp has one surface now (#118) and a WhatsApp spelling in a fixture
+-- would read like a leftover in every grep.
+local IDENT = "peer_openclaw__mcp_mail_list_messages_662289dd"
 local _, ident = render("call " .. IDENT .. " with conversation_id and scan_days")
 ok(has(ident.text(), IDENT), "a tool identifier with double underscores renders verbatim")
 ok(has(ident.text(), "conversation_id"), "and a single intra-word underscore survives")

@@ -100,9 +100,19 @@ function M.connector_index(catalog)
  local lines={}
  for _,server in ipairs(order)do
   local list=groups[server];table.sort(list)
-  local shown=table.concat(list,', ',1,math.min(#list,8))
-  if #list>8 then shown=shown..', +'..(#list-8)..' more' end
-  lines[#lines+1]='- '..server..': '..shown
+  -- The one WhatsApp surface is nine names and no connector of its own (#118): it is listed one name
+  -- per line, like a built-in, because the index's own contract is one callable name per `- name` line
+  -- (`scripts/test-prompt-tool-names.lua`) - and because hiding the ninth behind "+N more" is how a
+  -- model concludes `mcp_whatsapp_send_status` does not exist.
+  if server=='whatsapp' then
+   for _,name in ipairs(list) do
+    lines[#lines+1]='- '..name..': the one WhatsApp surface, answered here or by the node that holds the account'
+   end
+  else
+   local shown=table.concat(list,', ',1,math.min(#list,8))
+   if #list>8 then shown=shown..', +'..(#list-8)..' more' end
+   lines[#lines+1]='- '..server..': '..shown
+  end
  end
  return 'Connectors on this node (code mode only; these are the exact callable names, and searchTools("<connector>") inside a script gives their schemas):\n'..table.concat(lines,'\n')
 end
