@@ -66,9 +66,12 @@ systemctl --user disable --now wa-whatsapp.service || true
 rm -f "$HOME/.config/systemd/user/wa-whatsapp.service"
 systemctl --user daemon-reload
 
-# 2. The Go release directory and the Python venv it provisioned.
+# 2. The Go release directory.
 rm -rf "$HOME/.local/lib/wa-whatsapp"
-rm -rf "$HOME/.local/wa-stt"           # only if the node's own recognizer venv is provisioned elsewhere
+# DO NOT delete ~/.local/wa-stt or ~/.local/wa-ocr-rapid: those venvs belong to the RECOGNIZER and the
+# OCR worker, which the Rust path still runs (wa-kernel-runtime's service_stt/service_ocr). Check where
+# they point first (WA_STT_PYTHON / WA_OCR_PYTHON, or the documented defaults) and only remove a venv
+# that is no longer referenced.
 
 # 3. The Go state, ONLY after the operator confirms: keep it as the last copy of the un-migrated
 #    journal/sessions, move it aside rather than deleting it, and only when the Rust component is
