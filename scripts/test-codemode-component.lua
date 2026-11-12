@@ -136,7 +136,7 @@ check(#logged == 0, 'the component path did not fall back: ' .. table.concat(log
 local journals_globals = (function()
   policy.pin(memory, 'master', ctx)
   local answer = component.run(memory,
-    { code = 'const found = await searchTools("*", {limit: 1}); return found.matches ? found.matches.length : 0;' },
+    { code = 'const found = await searchTools("*", {limit: 1}); return found.length;' },
     'master', ctx, catalog, current_catalog, dispatch, execution)
   dispatched = {}
   return type(answer) == 'table' and answer.ok == true and #((answer.attempts) or {}) >= 1
@@ -170,11 +170,11 @@ local scripts = {
   { label = 'one tool call', code = 'const r = await tools.sessions({limit:2}); return r;' },
   { label = 'ten parallel calls', code = 'const rs = await Promise.all([1,2,3,4,5,6,7,8,9,10].map(i=>tools.sessions({limit:i}))); return rs.length;' },
   { label = 'the fence is not in the guest tool table', code = 'return JSON.stringify({subagent:typeof tools.subagent,codemode:typeof tools.codemode,tool_call:typeof tools.tool_call,sessions:typeof tools.sessions});' },
-  { label = 'discovery lists what cannot be called', code = 'const all = await searchTools("*",{limit:200}); return JSON.stringify(all.tools.filter(t=>t.callable===false).map(t=>t.name));' },
-  { label = 'discovery gives an outside tool its route', code = 'const all = await searchTools("*",{limit:200}); const s=all.tools.find(t=>t.name==="subagent"); return JSON.stringify({callable:s.callable,route:s.route,schema:typeof s.schema});' },
+  { label = 'discovery lists what cannot be called', code = 'const all = await searchTools("*",{limit:200}); return JSON.stringify(all.filter(t=>t.callable===false).map(t=>t.name));' },
+  { label = 'discovery gives an outside tool its route', code = 'const all = await searchTools("*",{limit:200}); const s=all.find(t=>t.name==="subagent"); return JSON.stringify({callable:s.callable,route:s.route,schema:typeof s.schema});' },
   { label = 'describeTool gives a schema', code = 'const d = await describeTool("operation"); return JSON.stringify({callable:d.callable,route:typeof d.route,parameters:typeof d.parameters});' },
-  { label = 'a keyword search', code = 'const one = await searchTools("sessions"); return one.matches;' },
-  { label = 'a batch with a miss', code = 'const b = await searchTools({names:["sessions","nope_tool"]}); return JSON.stringify({m:b.matches,missing:b.missing.map(x=>x.name)});' },
+  { label = 'a keyword search', code = 'const one = await searchTools("sessions"); return one.length;' },
+  { label = 'a batch with a miss', code = 'const b = await searchTools({names:["sessions","nope_tool"]}); return JSON.stringify({m:b.length,missing:b.filter(x=>x.missing).map(x=>x.name)});' },
   { label = 'a 200 KB result', code = 'const big = await tools.read({path:"big"}); return big.text.length;' },
   { label = 'a script that throws', code = 'throw new Error("boom");' },
   { label = 'showCall help', code = 'const help = await describeTool("showCall"); return typeof help;' },
@@ -210,15 +210,26 @@ end
 -- Every tool call the guest asked for over the whole run, for the probe at the end: it asks whether the
 -- guest can reach the real dispatcher AT ALL, and it used to read whatever the last iteration left (a
 -- fenced call, which must dispatch nothing) - so it failed the moment this suite actually ran.
+-- One session per run. `prior` (docs/CODEMODE.md, "Always fresh, explicit reuse") is session
+-- history - a repeat of an identical read carries {call, age_s, same} - so if both halves shared one
+-- session, the second half would be a repeat of the first and the comparison would measure history
+-- instead of the loops. Both directions of `prior` are asserted by scripts/test-codemode-reuse.lua.
+local function run_context(where)
+  local id = memory.start_session('local', 'chat', { user_id = 'master', title = 'code mode seam: ' .. where })
+  return { session_id = id, user_id = 'master' }
+end
+local pair = 0
 for _, script in ipairs(scripts) do
+  pair = pair + 1
+  local left_ctx, right_ctx = run_context('native ' .. pair), run_context('component ' .. pair)
   dispatched = {}
-  policy.pin(memory, 'master', ctx)
-  local first = native.run(memory, { code = script.code }, 'master', ctx, catalog, current_catalog, dispatch, execution)
+  policy.pin(memory, 'master', left_ctx)
+  local first = native.run(memory, { code = script.code }, 'master', left_ctx, catalog, current_catalog, dispatch, execution)
   local native_calls = #dispatched
   suite_dispatched = suite_dispatched + native_calls
   dispatched = {}
-  policy.pin(memory, 'master', ctx)
-  local second = component.run(memory, { code = script.code }, 'master', ctx, catalog, current_catalog, dispatch, execution)
+  policy.pin(memory, 'master', right_ctx)
+  local second = component.run(memory, { code = script.code }, 'master', right_ctx, catalog, current_catalog, dispatch, execution)
   local component_calls = #dispatched
   comparisons = comparisons + 1
   local left, right = fields(first), fields(second)
@@ -228,7 +239,7 @@ end
 
 -- Refusals unchanged, read the way the model reads them: the discovery view still marks the fenced
 -- names `callable:false` with their route, and the guest's own tool table still does not contain them.
-local listing = component.run(memory, { code = 'const all = await searchTools("select:subagent,tool_call,sessions"); return JSON.stringify(all.tools.map(t=>({n:t.name,c:t.callable})));' },
+local listing = component.run(memory, { code = 'const all = await searchTools("select:subagent,tool_call,sessions"); return JSON.stringify(all.map(t=>({n:t.name,c:t.callable})));' },
   'master', ctx, catalog, current_catalog, dispatch, execution)
 local rows = decode(decode(listing.value))
 local seen = {}

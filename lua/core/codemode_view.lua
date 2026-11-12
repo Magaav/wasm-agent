@@ -97,4 +97,12 @@ function M.finish(result,selected)
  end
  return sanitized(result,key_redacted)
 end
+-- `describeTool("searchTools")` answers this: the shape of the guest's own discovery, in one place so
+-- the prompt example and the answer cannot disagree (#119). It is a plain ARRAY of entries.
+M.searchtools_help = {
+  name = "searchTools",
+  description = "Discovery over this script's own catalogue. searchTools(\"*\") (or no argument, or \"\") lists the catalogue as a plain ARRAY of {name, description, callable, route, execution}, paged with {limit, offset} (default 50, max 200). searchTools(query, {limit}) returns a plain array of the best keyword matches (default 8, max 8). searchTools({names=[...]}) or searchTools(\"select:a,b,c\") is an exact batch of 1-8 names and answers the same plain array, with an unknown name returned as {name, missing:true, suggestions:[...]} instead of a definition, and a definition as {name, schema, execution, callable, route}. describeTool(name) gives one full schema. Every call is metadata only: it loads and admits nothing.",
+  shape = { { name = "<tool name>", description = "<one line>", callable = true, route = "<only when callable is false: where it runs instead>", execution = { status = "available" }, schema = { ["function"] = { name = "<tool name>" } } } },
+}
+
 return M

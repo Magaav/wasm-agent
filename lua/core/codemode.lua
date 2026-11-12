@@ -5,6 +5,10 @@ local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local presentation=dofile('lua/core/codemode_view.lua')
+-- The ergonomics layer the model's script is wrapped in (natural promises). It is this node's own code,
+-- so it is testable from this tree (`scripts/test-codemode-promises.lua`), on the transport this node
+-- actually has.
+local harness=dofile('lua/core/codemode_harness.lua')
 -- Discovery spellings are parsed in one place: searchTools({names={...}}) and searchTools("select:a,b") are
 -- the same request as tool_search, so the guest cannot drift from the outer facade (07/11).
 local envelope=dofile('lua/core/envelope.lua')
@@ -168,6 +172,10 @@ local function tool_lookup(catalog,execution,dispatch)
   -- from the catalogue. Without this the native path answered `unknown_tool` for it (measured 11/11 by
   -- scripts/test-codemode-presentation.lua).
   if wanted=='showCall' then return presentation.help end
+  -- `describeTool("searchTools")` documents the shape of the guest's own discovery, which is not a tool
+  -- in the catalogue and used to answer `unknown_tool` (11/11): a model handed a plain array is told
+  -- what it holds by the one answer that already describes shapes.
+  if wanted=='searchTools' then return presentation.searchtools_help end
   for _,schema in ipairs(catalog)do
    local f=schema['function']
    if f.name==wanted then
@@ -292,13 +300,17 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
      elseif wanted then
       if options.limit~=nil and (type(options.limit)~='number' or options.limit%1~=0 or options.limit<1 or options.limit>8) then value={error='invalid_tool_search_limit'};success=false
       else
-       local tools,missing={},{}
+       -- A plain ARRAY, in the order asked for: a script that listed the catalogue asked for a list,
+       -- and `searchTools({names=...}).map(...)` answered "not a function" on the old envelope
+       -- ({tools=...,matches=...}). An unknown name is a member of that array, marked `missing` with
+       -- the nearest permitted names, so one shape answers every spelling.
+       local tools={}
        for _,name in ipairs(wanted)do
         local entry=searchable(name)
-        if entry then tools[#tools+1]=entry else local echo=envelope.echo_name(name);missing[#missing+1]={name=echo,suggestions=envelope.nearest(echo,catalogue,3)} end
+        if entry then tools[#tools+1]=entry
+        else local echo=envelope.echo_name(name);tools[#tools+1]={name=echo,missing=true,suggestions=envelope.nearest(echo,catalogue,3)} end
        end
-       value={tools=tools,matches=#tools,missing=missing,requested=#wanted,
-        invocation='Guest-local metadata only; every entry listed here is callable in this script (callable:false entries run outside, see route). Native current-catalog/profile/type/effect checks apply to each call.'};success=true
+       value=tools;success=true
       end
      elseif listing then
       if type(limit)~='number' or limit%1~=0 or limit<1 or limit>200 or type(offset)~='number' or offset%1~=0 or offset<0 then value={error='invalid_tool_search_limit'};success=false
@@ -312,8 +324,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
         local def=definitions[names[i]] or outside[names[i]];local text=tostring(def.schema['function'].description or '')
         page[#page+1]={name=def.name,description=text:match('^[^\n]*'):sub(1,200),execution=execution(def.name),callable=outside[def.name]==nil,route=outside[def.name] and outside[def.name].route or nil}
        end
-       value={tools=page,matches=#names,offset=offset,has_more=offset+limit<#names,
-        invocation='The whole catalogue, paged; describeTool(name) gives the full schema. callable:false entries run outside the script: their route says how. Native checks apply to each call.'};success=true
+       value=page;success=true
       end
      elseif type(query)~='string' or #query>256 then value={error='tool_search_query_required'};success=false
      elseif type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then value={error='invalid_tool_search_limit'};success=false
@@ -330,7 +341,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
       for _,def in pairs(outside)do consider(def,def.route) end
       table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
       local found={};for i=1,math.min(limit,#matches)do found[i]=matches[i];found[i].score=nil end
-      value={tools=found,matches=#matches,invocation='Guest-local metadata only; callable:false entries run outside the script (see route). Native current-catalog/profile/type/effect checks apply to each call.'};success=true
+      value=found;success=true
      end
     elseif call.name=='describeTool' then
      local name=type(params)=='string' and params or (type(params)=='table' and params[1]) or nil
@@ -423,6 +434,11 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
  local cache
  do local ok,value=pcall(function()return dofile('lua/core/paths.lua').cache()end);if ok and type(value)=='string' then cache=value..'/codemode' end end
+ -- The lookup the globals this loop owns are answered through, exactly as the native loop builds it:
+ -- `describeTool` for a name the component does not answer (the guest's own built-ins, an unknown
+ -- name) and `capabilities()` dispatch through here. Without it those answers were looked up in a nil
+ -- local and the script fell back to the native path (measured by the parity suite).
+ local lookup=tool_lookup(catalog,execution,dispatch)
  local opened,open_reason=seam({op='open',session=session,owner=scope,code=args.code,
   timeout_ms=args.timeout_ms or 30000,catalogue=entries,store=store,
   wasm_path=policy.wasm_path,prelude_path=policy.prelude_path,module_cache=cache})
@@ -551,6 +567,11 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
  if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
  if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
+ -- The model's source is wrapped in this node's ergonomics layer before either loop sees it: the
+ -- harness is prepended and appended as TEXT, so it reaches the native guest and the component's guest
+ -- alike, and the script's own line 1 is line 2 of what the interpreter compiles
+ -- (lua/core/codemode_harness.lua). A copy, so the decorated source never becomes the tool's args.
+ args={code=harness.decorate(args.code),timeout_ms=args.timeout_ms}
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
  if seam_component() then
