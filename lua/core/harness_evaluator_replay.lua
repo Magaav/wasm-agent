@@ -312,36 +312,34 @@ local function child_env(scratch, opts, bindir)
 end
 
 local function read_sink(scratch)
-  -- The sink is read through what it recorded, not through what it was asked to do: one event file per
-  -- blocked call, and one `served.log` line per block naming the decision that was served (a tool name,
-  -- or `-` when the call had no recording and was refused by default).
-  local record = { attempts = {}, effects = {}, connectors = {}, commands = {}, unrecorded = 0 }
-  local n = 0
+  -- The sink is read through what it RECORDED, not through what it was asked to do: `served.log` has one
+  -- line per blocked call naming the decision that was served (a tool name, or `-` when the call had no
+  -- recording and was refused by default), and the raw event files stay beside it as evidence.
+  local record = { attempts = {}, effects = {}, connectors = {}, commands = {}, unrecorded = 0, events = 0 }
   for _, entry in ipairs(core.entries(scratch .. "/sink")) do
-    if entry.kind == "file" and entry.name:match("^event%-") then n = n + 1 end
+    if entry.kind == "file" and entry.name:match("^event%-") then record.events = record.events + 1 end
   end
-  local served = {}
   local log = host.read_file(scratch .. "/sink/served.log")
+  local blocked = 0
   if log and log ~= "" then
-    for line in log:gmatch("[^\n]+") do served[#served + 1] = line end
-  end
-  for index = 1, n do
-    local name = served[index]
-    if name == nil or name == "-" or name == "" then
-      record.unrecorded = record.unrecorded + 1
-      record.attempts[#record.attempts + 1] = { tool = nil, decision = "blocked (no recording)" }
-    elseif core.is_connector(name) then
-      record.connectors[#record.connectors + 1] = { tool = name, decision = "blocked, answered from the recording" }
-    elseif core.is_effect(name) then
-      record.effects[#record.effects + 1] = { tool = name, decision = "blocked, would have done" }
-    else
-      record.attempts[#record.attempts + 1] = { tool = name, decision = "blocked" }
+    for name in log:gmatch("[^\n]+") do
+      blocked = blocked + 1
+      if name == "-" or name == "" then
+        record.unrecorded = record.unrecorded + 1
+        record.attempts[#record.attempts + 1] = { decision = "blocked, no recording for it" }
+      elseif core.is_connector(name) then
+        record.connectors[#record.connectors + 1] = { tool = name, decision = "blocked, answered from the recording" }
+      elseif core.is_effect(name) then
+        record.effects[#record.effects + 1] = { tool = name, decision = "blocked, would have done" }
+      else
+        record.attempts[#record.attempts + 1] = { tool = name, decision = "blocked" }
+      end
     end
   end
-  record.blocked = n
+  record.blocked = blocked
   local commands = host.read_file(scratch .. "/sink/commands.log")
   if commands and commands ~= "" then
-    for line in commands:gmatch("[^\r\n]+") do record.commands[#record.commands + 1] = line end
+    for line in commands:gmatch("[^\n]+") do record.commands[#record.commands + 1] = line end
   end
   return record
 end

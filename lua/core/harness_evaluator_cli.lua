@@ -160,7 +160,16 @@ local function run(args)
 end
 
 local function report(args)
-  local compare_a, compare_b = flag(args, "--compare")
+  -- `--compare` takes TWO values (the two runs), so it is read here rather than through the single-value
+  -- `flag` helper: `flag` answers the value and its index, and using the index as the second run id was a
+  -- real bug for one commit.
+  local compare_a, compare_b
+  for index = 2, #args do
+    if args[index] == "--compare" then
+      compare_a, compare_b = args[index + 1], args[index + 2]
+      break
+    end
+  end
   if compare_a then
     local text, problem = core.compare(compare_a, compare_b or "")
     if not text then return refused(problem or "the comparison failed") end

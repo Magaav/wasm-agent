@@ -11,6 +11,10 @@
       "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
     },
     {
+      "file": "scripts/test-agent-benchmark-docker.mjs",
+      "reason": "needs an exact cached Docker image and an owned generation: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
       "file": "scripts/test-agent-benchmark-forced-policy.mjs",
       "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
     },
@@ -19,12 +23,40 @@
       "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
     },
     {
+      "file": "scripts/test-agent-benchmark-foundations.mjs",
+      "reason": "declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
+      "file": "scripts/test-agent-benchmark-model-route.mjs",
+      "reason": "needs a model route journal and a fresh evidence root: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
+      "file": "scripts/test-agent-benchmark-native.mjs",
+      "reason": "needs a pinned native binary plus prepared code-mode assets: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
       "file": "scripts/test-agent-benchmark-pi-route.mjs",
       "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
     },
     {
+      "file": "scripts/test-agent-benchmark-pilot-grade.mjs",
+      "reason": "needs a fresh grade proof and an exact tool image: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
       "file": "scripts/test-agent-benchmark-pilot-policy.mjs",
       "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
+    },
+    {
+      "file": "scripts/test-agent-benchmark-report.mjs",
+      "reason": "needs WA_BENCHMARK_REPORT_ROOT and a native ledger: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
+      "file": "scripts/test-agent-benchmark-results.mjs",
+      "reason": "needs WA_BENCHMARK_TEST_ROOT and WA_BENCHMARK_BINARY: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
+      "file": "scripts/test-agent-benchmark-runtime-route.mjs",
+      "reason": "needs a binary, prepared assets and the Pi package: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
     },
     {
       "file": "scripts/test-agent-benchmark-sandbox-lifecycle.mjs",
@@ -71,8 +103,20 @@
       "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
     },
     {
+      "file": "scripts/test-codemode-native.mjs",
+      "reason": "needs a binary, prepared code-mode assets and a fresh evidence root: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
       "file": "scripts/test-codemode-presentation.mjs",
       "reason": "argument driver: takes a candidate binary and a fresh evidence directory (its own usage assertion), so it is run by the release/proof procedure, not by a harness that has no binary"
+    },
+    {
+      "file": "scripts/test-codemode-reference-native.mjs",
+      "reason": "needs a binary and the prepared assets: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
+    },
+    {
+      "file": "scripts/test-codemode-reference.mjs",
+      "reason": "needs the prepared QuickJS assets and a fresh evidence root: declared by the evaluation engine: the benchmark procedure runs it with a fresh evidence root (and sometimes a pinned binary or an exact Docker image), never on a landing. It used to be 'wired' only by the prose of skills/agent-benchmark/SKILL.md, which now lives at harness-evaluator/skills - outside this ledger's scan - so the requirement is stated here instead of being implied by a doc."
     },
     {
       "file": "scripts/test-envelope-report.cjs",

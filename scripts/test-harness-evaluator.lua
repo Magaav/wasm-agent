@@ -201,10 +201,12 @@ check(no_compare == nil and tostring(no_compare_why):find('no such run', 1, true
 -- The verb exists in the binary an operator runs, not only as a module.
 local bin = host.getenv('FAST_BIN')
 if bin and bin ~= '' then
-  local ran = json.decode(host.exec('"' .. bin .. '" eval help', '', 120))
+  -- `env -u WA_SCRIPT`: this row is itself run through the script seam, and a child that inherited it would
+  -- execute this test again instead of the verb under test (found here, by the row failing on itself).
+  local ran = json.decode(host.exec('env -u WA_SCRIPT "' .. bin .. '" eval help', '', 120))
   check((tonumber(ran.code) or 1) == 0, 'the binary dispatches `wa eval help`')
   check((ran.stdout or ''):find('wa eval', 1, true) ~= nil, 'the help text is the engine’s own')
-  local listed = json.decode(host.exec('"' .. bin .. '" eval list', '', 120))
+  local listed = json.decode(host.exec('env -u WA_SCRIPT "' .. bin .. '" eval list', '', 120))
   check((listed.stdout or ''):find('fixture-fix', 1, true) ~= nil, 'the binary lists the frozen task')
 else
   print('SKIP harness evaluator binary dispatch: no FAST_BIN in this row')
