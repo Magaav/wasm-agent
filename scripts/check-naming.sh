@@ -70,10 +70,6 @@ for (const file of files) {
   }
   scanned++;
   for (const name of names) {
-    // A connector is its own program: the WhatsApp connector's `worker` is its speech-to-text worker
-    // process, not a node-thread, and `stt_exhausted_worker_stalled` is a reason already persisted in its
-    // journal (30/10). The node-thread spellings are wa's vocabulary; they are not checked there.
-    if (file.startsWith('connectors/') && /worker|WORKER/.test(name)) continue;
     const found = visible.filter(line => line.text.includes(name));
     if (found.length) {
       hits++;

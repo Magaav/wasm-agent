@@ -41,9 +41,9 @@ test('real Streamable HTTP SSE, pagination, negotiated headers and explicit sess
  try{const result=await invoke({transport:'http',url:`http://127.0.0.1:${server.address().port}/mcp`,headers:{Authorization:'MCP_TEST_TOKEN'},timeout_seconds:2});assert.equal(result.ok,true);assert.equal(result.protocol_version,'2025-06-18');assert.equal(seen.at(-1).method,'DELETE');for(const request of seen.slice(1)){assert.equal(request.headers['mcp-session-id'],'private-session');assert.equal(request.headers['mcp-protocol-version'],'2025-06-18');assert.equal(request.headers.authorization,'fixture-secret');}}
  finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
 });
-// The linked-device adapter and the Node bridge it lived in were deleted 10/11; the connected send path
-// is covered by the operator process test (scripts/test-whatsapp-operator-process.mjs) and the component
-// by rust/components/wa-whatsapp.
+// The linked-device adapter and the Node bridge it lived in were deleted 10/11; the Go connector's own
+// process test went with the connector in Phase 4 (11/11). What a connected send needs is covered by
+// rust/components/wa-whatsapp and by lua/core/whatsapp_operator.lua's tests (scripts/test-whatsapp-operator.lua).
 test('configured credentials never enter probe metadata or returned data',async()=>{
  process.env.MCP_TEST_TOKEN='private-fixture-credential';
  const leaked=await requestMCP({action:'probe',server:stdio('leak_meta',{TOKEN:'MCP_TEST_TOKEN'})});assert.equal(leaked.ok,false);assert.equal(leaked.tool_call_issued,false);assert.equal(leaked.error,'mcp_metadata_contains_configured_credential');assert.equal(JSON.stringify(leaked).includes(process.env.MCP_TEST_TOKEN),false);

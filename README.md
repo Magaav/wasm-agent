@@ -64,14 +64,14 @@ for the implementation boundary.
 | Multiple machines | Node keys, signed peer calls, rendezvous discovery and an outbound relay for NAT'd nodes. |
 | Guest execution | Managed guests pin operator keys, require expiring local consent, reject unrelated callers and support local revocation. The managed registry—not a node's claimed role—controls promotion. Public rollout remains gated. |
 | Reusable procedures | Skills for on-demand instructions; spells for repeatable procedures with postconditions; WASM tool plugins. |
-| WhatsApp audio | Persistent linked-device journal and opt-in incoming + own-outgoing original-chat transcription; EN default/PT per-account. [Setup](docs/WHATSAPP-CONNECTOR.md). |
+| WhatsApp audio | Persistent linked-device journal and opt-in incoming + own-outgoing original-chat transcription; EN default/PT per-account. [Pipeline](docs/WHATSAPP-TRANSCRIPTION.md). |
 | Supervision | A separate sentinel handles requested restarts/upgrades and budgeted event-triggered wakes. |
 | Worker pool | On-demand interpreters keep reads responsive and route chat work across workers. Conversation ownership and overlapping streams still need release-level isolation verification. |
 | Components (WASI) | Request components (MCP servers, the graph indexer) and long-lived service components (the WhatsApp client) run as pinned `.wasm` on WASI 0.2/0.3, each with a manifest of declared capabilities that the kernel grants. Same bytes on every node; distributed as release assets checked by sha256. [Components](docs/COMPONENTS.md), [services](docs/SERVICE-COMPONENTS.md). |
 | Kernel interface | `wa:kernel@0.2` on WASI 0.3 (native async: streams/futures for websocket, HTTP, kv, speech) beside the 0.1 interface; both runners live, so old components keep working. [Kernel](docs/KERNEL.md). |
 | Governance | Node grant policy (rate limits, allowlists, approvals, default-deny for sensitive capabilities once a policy file exists; manifest-only otherwise), audit without message text, fixed-size per-component telemetry, per-component disk quotas, record/replay buffer saved on failure. [Grant policy](docs/GRANT-POLICY.md), [telemetry](docs/TELEMETRY.md), [replay](docs/REPLAY.md). |
 | Queue, bus, state | Durable fresh-only job queue (`wa:queue`), in-node event bus (`wa:bus`), versioned component state with crash-safe migrations and snapshots, all served to components by the kernel. [Queue](docs/QUEUE.md), [bus](docs/BUS.md), [state](docs/STATE.md). |
-| WhatsApp (component) | The `wa-whatsapp` service component is the linked-device client on the node: shadow transcription with a warm speech worker, `whatsapp_send` through the durable outbox (rate-limited and audited), and an index of every message kind — text, reactions, all media, edits, deletions — queryable with `whatsapp_search` / `whatsapp_read` / `whatsapp_download`. The Go connector still posts transcripts until the cutover. |
+| WhatsApp (component) | The `wa-whatsapp` service component is the linked-device client on the node: shadow transcription with a warm speech worker, `whatsapp_send` through the durable outbox (rate-limited and audited), and an index of every message kind — text, reactions, all media, edits, deletions — queryable with `whatsapp_search` / `whatsapp_read` / `whatsapp_download`. This is the only WhatsApp client in the tree: the Go/whatsmeow connector was removed on 11/11. |
 | Lua core as a component | The agent core can run inside the `agent-core` wasm component (`wa --core-component`), with an instance pool and a pre-initialised snapshot; the native interpreter remains the default. |
 | Fast evolution | Lua-only changes deploy in ~30 s without compiling; the host is split into crates (capability-layer edits rebuild in ~45 s); `wa dev` rebuilds a component and hot-swaps it; a fake kernel runs component tests without a node. |
 | Releases | Linux binaries (arm64/x86_64, glibc ≥ 2.31) are cross-built once and published per commit; nodes install the prebuilt, sha-checked binary instead of compiling. Components ship the same way. The CLI and web UI show “Update available”. |
@@ -344,8 +344,8 @@ next to itself). None of the phone's memory knobs are set - `CARGO_BUILD_JOBS`,
 build host, so it builds with cargo's own defaults exactly like any non-phone host in the
 ladder. `--locked` is used because a bundle must be the tree, not the tree plus whatever
 dependency resolution felt like that day. Nothing is downloaded implicitly: if the local
-rustc has no Android std the script refuses and names `rustup target add`, the Rust form of
-this repository's `GOTOOLCHAIN=local` rule.
+rustc has no Android std the script refuses and names `rustup target add`, in keeping with
+this repository's local-toolchain rule (nothing is resolved or downloaded implicitly).
 
 What comes out (nothing of it is versioned):
 

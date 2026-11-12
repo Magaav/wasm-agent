@@ -1,6 +1,12 @@
 # WhatsApp original-language audio transcription
 
-Canonical service/setup: [WHATSAPP-CONNECTOR.md](WHATSAPP-CONNECTOR.md).
+Canonical service/setup: [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) and, for the recognizer's own
+venv, ["Provisioning the recognizer's venv"](#provisioning-the-recognizers-venv) below.
+
+The Go connector that used to own this pipeline was removed in Phase 4 (11/11): `connectors/whatsapp`,
+its build/install entry points and its systemd unit are gone, and the transcription path is the
+`wa-whatsapp` component plus the node's own worker. What remains of that connector's provisioning here
+is the venv the **kept** worker needs; nothing below pair, serves or posts through a Go binary.
 
 **Explicit requested sends are a different feature, with a different gate.** This page is the
 automatic pipeline: a voice note arrives, it is transcribed, and (only when `post_transcripts` and
@@ -196,6 +202,37 @@ indexes - and it logs no text.
 message (the live row keeps its own source); the total, per-chat and per-sync budgets; an off budget;
 a failed write stopping the drain with its reason; the anchor an on-demand request names, including a
 chat the index has never seen; and the attribution of a group/DM/own message.
+
+## Provisioning the recognizer's venv
+
+The worker is `scripts/whatsapp-stt-local.py`, and the node's text service spawns it
+(`rust/wa-kernel-runtime/src/service_stt.rs`, `WA_STT_WORKER` overrides the path). It never downloads
+anything: the model must already be in `WA_WHATSAPP_STT_MODELS`, and it opens it with
+`local_files_only=True`. So the venv and the model are **human, setup-time, network** work:
+
+```sh
+umask 077
+python3 -m venv "$HOME/.local/wa-stt"
+PY="$HOME/.local/wa-stt/bin/python"
+mkdir -p "$HOME/.cache/wa-stt-bootstrap" "$HOME/.local/share/wa-stt/models"
+"$PY" -m pip download --no-deps faster-whisper==1.2.1 --dest "$HOME/.cache/wa-stt-bootstrap"
+WHEEL="$HOME/.cache/wa-stt-bootstrap/faster_whisper-1.2.1-py3-none-any.whl"
+printf '79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7  %s\n' "$WHEEL" | sha256sum -c -
+"$PY" -m pip install "$WHEEL"
+export WA_WHATSAPP_STT_MODELS="$HOME/.local/share/wa-stt/models"
+"$PY" -c 'import os; from faster_whisper import WhisperModel; WhisperModel("small", device="cpu", compute_type="int8", download_root=os.environ["WA_WHATSAPP_STT_MODELS"])'
+HF_HUB_OFFLINE=1 "$PY" scripts/whatsapp-stt-local.py --check
+```
+
+On CPython 3.12 / Linux aarch64 use the complete hash-pinned closure instead of the one-wheel download:
+`stt/python-stt-linux-arm64.requirements.txt` (23 packages, every line hashed) with
+`stt/python-stt-linux-arm64.lock.json` as its structured form, and `stt/python-stt-dependency.json` as
+the PyPI metadata pin. Those three files describe the venv, not any Go program; they were moved out of
+`connectors/whatsapp/` when the Go connector was removed so the pins the kept worker depends on stayed
+in the tree.
+
+The OCR side has its own venv and its own worker (`scripts/whatsapp-ocr-local.py`, `WA_OCR_WORKER`);
+[WHATSAPP-OCR.md](WHATSAPP-OCR.md) carries it.
 
 ## Remote workers: the strong node decodes for the small one (queue phase 2)
 

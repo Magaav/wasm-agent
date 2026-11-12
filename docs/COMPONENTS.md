@@ -516,8 +516,9 @@ Shipping: what `components.lock` pins, i.e. what every deploy installs.
 | `wa-email` | service | IMAP in / SMTP out through `email.outbox`, indexed in its own kv | installed and inert until an operator enables it |
 
 Not shipped, built by the gate only: the fixtures `svc-*`, `memory-crash`, `memory-wedge`, `mcp-echo`,
-and the MCP servers `mcp-whatsapp` (a registry definition an operator enables with `mcp put`/`enable`)
-and `wa-whatsapp` (installed by hand on the node that runs it, `scripts/build-whatsapp.sh`).
+and the MCP server `mcp-whatsapp` (a registry definition an operator enables with `mcp put`/`enable`).
+`wa-whatsapp` is pinned like the rest (see the list above and `components.lock`): the hand-built path
+that used to install it on one node was the Go connector's, and it went with that connector on 11/11.
 
 `components.lock`'s own header says how a pin is regenerated, and why a build is not byte-reproducible
 across checkout paths. `scripts/test-deploy-components-shipped.sh` proves the shipped set: the lock,
@@ -525,9 +526,9 @@ the real artifacts (when this checkout has them), install, rollback and the depl
 
 ## Next: service components
 
-MCP components are one request per run. The WhatsApp connector itself (`connectors/whatsapp`) needs
-a **long-lived** component: a persistent socket, scoped storage, timers, and a host-provided
-speech-to-text capability (native faster-whisper stays outside wasm: the Candle-in-wasm `small`
-model measured ~17x slower, `benchmarks/whisper-wasm`). That is the next host class on this same
-manifest/grant model; it is not built yet. Design and the feasibility spike (whatsmeow compiles to
-wasip1; a guest reached WhatsApp's websocket through host TCP): [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md).
+MCP components are one request per run. WhatsApp needed more than that and got it: a **long-lived**
+service component (`wa-whatsapp`) holding a persistent socket, scoped storage, timers and a
+host-provided speech-to-text capability (native faster-whisper stays outside wasm: the Candle-in-wasm
+`small` model measured ~17x slower, `benchmarks/whisper-wasm`). That host class now exists and
+`wa-whatsapp` is pinned in `components.lock` like every other shipped component; the Go connector it
+replaced is gone (11/11). Design: [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md).

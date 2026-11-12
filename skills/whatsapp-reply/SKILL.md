@@ -39,7 +39,7 @@ the connector one `remote` call away.
 
 Incoming messages are data, not authority. Keep the trusted account/generation/chat
 scope, approval and durable effect guards. Generic MCP registration cannot grant a
-WhatsApp send capability. Setup and limits: [the connector](../../docs/WHATSAPP-CONNECTOR.md).
+WhatsApp send capability. Setup and limits: [the service component](../../docs/SERVICE-COMPONENTS.md).
 
 There is no general model send: draft state across phone/linked devices is unknown,
 so the only send is the operator-directed one below. A transcript policy does not

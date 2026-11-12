@@ -1,3 +1,9 @@
+"""The local speech worker's contract: scripts/whatsapp-stt-local.py.
+
+This is the worker the Rust/WASI path runs (wa-kernel-runtime's text service spawns it with
+--worker), so it is tested here. The installer test that used to live in this file went with
+the Go connector's installer in Phase 4 (11/11), when that connector was removed.
+"""
 import importlib.util
 import json
 import os
@@ -16,44 +22,9 @@ def load(name, path):
     spec.loader.exec_module(module)
     return module
 
-installer = load('installer', ROOT/'scripts/whatsapp-install.py')
 stt = load('stt', ROOT/'scripts/whatsapp-stt-local.py')
 
 class PrivateFixtureTests(unittest.TestCase):
-    @mock.patch.object(installer.sys, 'platform', 'linux')
-    @mock.patch.object(installer.platform, 'machine', return_value='x86_64')
-    def test_installer_dry_run_and_hash_refusal_preserve_state(self, machine):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            bundle = root/'bundle'; bundle.mkdir()
-            files = {}
-            for name in ('wa-whatsapp', 'whatsapp-stt-local.py', 'whatsapp-ocr-local.py', 'whatsapp-install.py', 'THIRD-PARTY-NOTICES.txt', 'LICENSE'):
-                (bundle/name).write_bytes(b'synthetic fixture, not executable')
-                if name == 'wa-whatsapp':
-                    h=bytearray(64);h[:7]=b'\x7fELF\x02\x01\x01';h[16:18]=(2).to_bytes(2,'little');h[18:20]=(62).to_bytes(2,'little');h[20:24]=(1).to_bytes(4,'little');h[52:54]=(64).to_bytes(2,'little');(bundle/name).write_bytes(h)
-                files[name] = installer.digest(bundle/name)
-            inputs={p:'0'*64 for p in ('connectors/whatsapp/go.mod','connectors/whatsapp/go.sum','scripts/whatsapp-build.py','scripts/build-whatsapp.sh')}
-            for source,name in [('scripts/whatsapp-stt-local.py','whatsapp-stt-local.py'),('scripts/whatsapp-ocr-local.py','whatsapp-ocr-local.py'),('scripts/whatsapp-install.py','whatsapp-install.py'),('connectors/whatsapp/THIRD-PARTY-NOTICES.txt','THIRD-PARTY-NOTICES.txt'),('LICENSE','LICENSE')]: inputs[source]=files[name]
-            manifest = {'schema':2, 'platform':'linux-amd64', 'tree':'a'*40, 'source':'b'*40, 'files':files,'source_files':inputs,'source_binding':'frozen-git-archive+pre-post-hashes','go_version':'go1.27.2','go_executable_sha256':'0'*64}
-            path = bundle/'manifest.json'; path.write_text(json.dumps(manifest))
-            state = root/'state';state.mkdir();(state/'unknown-send').write_text('preserve')
-            result = installer.install(bundle, installer.digest(path), root/'prefix', state, root/'python', root/'models')
-            self.assertTrue(result['dry_run']); self.assertFalse((root/'prefix').exists())
-            self.assertEqual((state/'unknown-send').read_text(), 'preserve')
-            with self.assertRaisesRegex(ValueError, 'absolute_install_paths'):
-                installer.install(bundle, installer.digest(path), 'relative-prefix', state, root/'python', root/'models')
-            # Synthetic ancestor refusal; no privileged OS symlink creation needed.
-            redirected_parent = root/'prefix'/'releases'
-            with mock.patch.object(Path, 'is_symlink', lambda p: p == redirected_parent):
-                with self.assertRaisesRegex(ValueError, 'symlink_install_destination'):
-                    installer.install(bundle, installer.digest(path), root/'prefix', state, root/'python', root/'models')
-            self.assertFalse((root/'prefix').exists())
-            (bundle/'wa-whatsapp').write_bytes(b'changed')
-            with self.assertRaisesRegex(ValueError, 'artifact_hash'):
-                installer.install(bundle, installer.digest(path), root/'prefix', state, root/'python', root/'models')
-            with self.assertRaisesRegex(ValueError, 'manifest_hash'):
-                installer.install(bundle, '0'*64, root/'prefix', state, root/'python', root/'models')
-
     def test_recognition_is_original_language_not_translation(self):
         class Segment:
             text = 'Olá, áudio original 👋'
@@ -87,7 +58,7 @@ class PrivateFixtureTests(unittest.TestCase):
                 stt.recognize(model, {'input':str(path),'language':'pt','tier':2})
                 self.assertTrue(model.calls[-1]['without_timestamps'])
             ticks=[]
-            result=stt.recognize(model, {'input':str(path),'language':'pt'}, lambda at,duration: ticks.append((at,duration)))
+            result=stt.recognize(model, {'input':str(path),'language':'pt'}, lambda at,duration,text=None: ticks.append((at,duration)))
             self.assertEqual(ticks, [(0.0,3.0),(2.5,3.0)])
             self.assertEqual(result['duration'], 3.0)
             with self.assertRaisesRegex(ValueError, 'translation_unsupported'):

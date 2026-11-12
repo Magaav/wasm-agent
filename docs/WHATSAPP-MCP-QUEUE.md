@@ -1,4 +1,4 @@
-# The WhatsApp MCP on the Rust stack (measured 2026-11-10)
+# The WhatsApp MCP on the Rust stack (measured 2026-11-10, updated 11/11)
 
 One MCP connector is left on openclaw, and it is an **HTTP client of the loopback connector
 API**, not of the `wa-whatsapp` component. The stdio Node bridge (`scripts/mcp-whatsapp.mjs`,
@@ -9,12 +9,14 @@ id `whatsapp`) was deleted on 10/11/2026 and its disabled registry entry removed
 | `whatsapp` | ~~`stdio`, `scripts/mcp-whatsapp.mjs`~~ | **deleted 10/11** |
 | `whatsapp_wasm` | `component`, `mcp-whatsapp` (WASI) | `connector_url` + `/method`, Bearer token |
 
-`connector_url` is `http://127.0.0.1:28787`. Re-measured 10/11/2026: the Go connector **is**
-running there on openclaw (`wa-whatsapp serve --listen 127.0.0.1:28787`, pid 3848966, release
-`4777c387…-linux-arm64`), so the earlier "nothing listens on that port" is stale - it
-described a window before that release started. While it was down every call answered
-`connector_transport_failed` (the `.mjs`) or `connector_response_failed` (the component, once
-a reverse tunnel created a loop). The API itself is the Go connector (`connectors/whatsapp`).
+`connector_url` is `http://127.0.0.1:28787`, and **nothing in this tree serves that API any more.**
+It was the Go connector's (`wa-whatsapp serve --listen 127.0.0.1:28787`, measured 10/11/2026, pid
+3848966, release `4777c387…-linux-arm64`); that program was retired on 11/11 and its tree removed in
+Phase 4, so the endpoint is now answered by nobody. Expect
+`connector_transport_failed` (the `.mjs`, gone) or `connector_response_failed`/a transport error (the
+component) from every MCP tool call until the queue port below lands. The component was never a client
+of that API and never will be: `mcp-whatsapp` is kept because it is the Rust component's own MCP
+surface, not because its upstream still exists.
 
 The `wa-whatsapp` component (whatsapp-rust) does **not** serve that API. It answers the
 `whatsapp.query` queue, and that is the path the native capabilities use

@@ -427,6 +427,11 @@ fi
 # The deploy's retirement rule: a shipped script main deleted must not survive in the install (measured
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
 check deploy-prune bash scripts/test-deploy-prune.sh
+# The Go WhatsApp connector was removed in Phase 4 (11/11) and must not come back: no Go source, no
+# build/install entry point, no unit that starts it - while the Rust component, its MCP, the operator
+# client and the STT/OCR workers stay. The scan is proved on fixtures, so it is a gate and not a grep
+# nobody tests.
+check whatsapp-go-retired bash scripts/test-whatsapp-go-retired.sh
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
 check fast-environment bash scripts/test-fast-environment.sh

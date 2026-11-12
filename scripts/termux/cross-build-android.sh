@@ -24,8 +24,8 @@
 # candidate check - which is the only place a cross-built Android binary is actually proven
 # to execute. Nothing in this script claims the bundle runs.
 #
-# The toolchain is used as it is found. Nothing is downloaded implicitly (the Rust analogue
-# of the repository's `GOTOOLCHAIN=local` rule): a missing Android std in the local rustc is
+# The toolchain is used as it is found. Nothing is downloaded implicitly (the repository's local-
+# toolchain rule): a missing Android std in the local rustc is
 # a named refusal with the exact command, never an automatic install.
 #
 # Usage:

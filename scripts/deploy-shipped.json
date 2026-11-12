@@ -7,12 +7,10 @@
     "lua/",
     "skills/",
     "jobs/",
-    "deploy/",
-    "connectors/whatsapp/"
+    "deploy/"
   ],
   "files": [
     "scripts/deploy.sh",
-    "scripts/build-whatsapp.sh",
     "scripts/codemode-build.mjs",
     "scripts/check-embedded-runtime.lua",
     "scripts/upgrade.sh",
@@ -48,7 +46,6 @@
     "scripts/ship-wave.mjs"
   ],
   "over_included": {
-    "connectors/whatsapp/": "Separate human-run cloud artifact path (scripts/build-whatsapp.sh + whatsapp-install.py), not installed by node deploy.sh. Conservative impact classification; no automatic cloud installation or activation.",
     "jobs/": "deploy.sh installs the job definitions it names (jobs/whatsapp-*.json, jobs/on-subagent-return.json, jobs/subagent-return-observe.json) into the sentinel's job store, and every definition in jobs/ changes what the node runs. The whole directory is therefore treated as shipped: over-inclusion costs a needless deploy decision, under-inclusion is a node running a job nobody decided about.",
     "scripts/lib/*": "deploy.sh ships the scripts/lib modules the shipped scripts import, found by grepping `./lib/<name>` out of each shipped script. The whole flat directory is treated as shipped for the same reason (the glob is flat, matching that grep: scripts/lib/nested/x is NOT covered).",
     "deploy/": "install.sh installs deploy/*.service, deploy/caddy and deploy/env.example on a fresh install. Neither deploy.sh nor upgrade.sh copies them, so this entry is deliberately conservative rather than derived: a child editing the install path is not reported as having no install impact."

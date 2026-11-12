@@ -7,7 +7,7 @@ receipts remain historical evidence; they are not silently upgraded to byte proo
 This is the follow-up to the coordinator's seven findings against fdc79bfc/e1361075.
 The older [delivery checkpoint](WHATSAPP-DELIVERY.md) and all of its artifact/log
 receipts are preserved, not relabelled as activation proof. Current operating steps
-are in [WHATSAPP-CONNECTOR.md](WHATSAPP-CONNECTOR.md). No live activation is claimed.
+are in [WHATSAPP-OPERABILITY.md](WHATSAPP-OPERABILITY.md). No live activation is claimed.
 
 ## Findings addressed
 

@@ -80,7 +80,7 @@ CDP document-start script (`Page.addScriptToEvaluateOnNewDocument`) when a persi
 Only for explicitly approved web applications, under the authority/verification rules above. Keep any
 target-specific code reviewed, scoped, idempotent and fail-open; retain setup identifiers for removal,
 never infer send success from a click/ack alone. WhatsApp is not a web app here: it is the
-[linked-device connector](../../docs/WHATSAPP-CONNECTOR.md), reached through code mode.
+[linked-device service component](../../docs/SERVICE-COMPONENTS.md), reached through code mode.
 
 ## Deterministic first: a rule for every job you write
 

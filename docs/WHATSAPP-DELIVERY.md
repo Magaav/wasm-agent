@@ -74,9 +74,9 @@ fully locked or production-installed by this worker.
 
 ## Remaining work and exact operator path
 
-Complete human commands, private QR precautions, PT configuration, warm-cache
-provisioning, user service setup, backup and rollback:
-[WHATSAPP-CONNECTOR.md](WHATSAPP-CONNECTOR.md).
+The Go connector's build/install/pairing commands this page once pointed at are gone with it
+(Phase 4, 11/11); the live path is [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md), and the
+recognizer venv is in [WHATSAPP-TRANSCRIPTION.md](WHATSAPP-TRANSCRIPTION.md).
 
 The worker still has no supported cloud execution context. Human authorized terminal
 installation, private phone QR, exact account/chat binding, HTTPS proxy/authorized-device

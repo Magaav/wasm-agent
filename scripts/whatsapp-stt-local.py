@@ -110,7 +110,7 @@ def recognize(model, request, progress=None):
         parts.append(text)
         if progress:
             # Segment text only when the caller asked to stream it ("segments": true, the wasm
-            # kernel's recognizer); the Go connector never asks, so its lines stay timings-only.
+            # kernel's recognizer); a caller that does not ask gets timings only.
             progress(float(getattr(segment, "end", 0) or 0), duration, text if request.get("segments") is True else None)
     transcript = " ".join(filter(None, parts)).strip()
     if not transcript:

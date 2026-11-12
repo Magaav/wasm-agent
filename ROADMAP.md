@@ -311,7 +311,7 @@ error cause is unknown. The worker's subsequent bounded on-demand SDK name enric
 future mutation header/order/alias proofs and aggregate warnings are SOURCE/fixture
 work, not a claim that new code is deployed or those36 historical holds are resolved.
 See [coverage/status/handoff](docs/WHATSAPP-COVERAGE.md)
-and [connector setup](docs/WHATSAPP-CONNECTOR.md). EN remains
+and [the service component](docs/SERVICE-COMPONENTS.md). EN remains
 the product recognition default; PT is explicit per account. General AI sends remain
 refused. Earlier installation/pairing/MCP evidence below is historical, not new-runtime
 or real transcript delivery acceptance.

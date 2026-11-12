@@ -21,10 +21,14 @@ meanings and HUMAN-only phase-specific recovery, follow
 [WHATSAPP-LIFECYCLE.md](WHATSAPP-LIFECYCLE.md). Do not replay the original setup or
 remove its receipt guard. Local pair exit0 alone is not continuing readiness.
 
-**Architecture correction:** the authorized target is Linux/aarch64, not AMD64.
-Use [WHATSAPP-ARM64.md](WHATSAPP-ARM64.md) and its NEW ARM64 bundle/schema3/locked
-Python provisioning before the sequence below. The original AMD64 bundle and its
-Windows dry-run receipt remain historical, unchanged—not ARM64 readiness.
+**Phase 4 (11/11) retired everything this page used to instruct.** The operator's decision
+retired the Go connector: `connectors/whatsapp/`, the `scripts/` entry points that built and
+installed it, its `wa-whatsapp.service` unit template and the ARM64 deployment page are gone from
+the tree. So the setup sequence below is a **historical record of what was executed then**, never a
+command to run now, and the "fresh preflight / install bundle / pause" steps it describes no longer
+have a binary to act on. The live path is the `wa-whatsapp` service component
+([SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md)), started and stopped through the node's own service
+registry, and the cutover record in [WHATSAPP-CUTOVER.md](WHATSAPP-CUTOVER.md).
 
 ## Local tunnel keepalive (Windows)
 
@@ -46,10 +50,11 @@ this setup are the reproducible part. Overrides in the generated `.cmd`:
 
 ## Architecture and worker result
 
-One Go whatsmeow linked-device service (`connectors/whatsapp`), its private SQLite
-journal/outbox, one warm offline Python faster-whisper worker, and the existing
-read-only MCP/CLI boundary. This is NOT the formatter plugin, a second sender,
-or a WASI rewrite. No arbitrary model replies are authorized.
+One Go whatsmeow linked-device service (the `connectors/whatsapp` tree, **retired 11/11**), its
+private SQLite journal/outbox, one warm offline Python faster-whisper worker, and the existing
+read-only MCP/CLI boundary. This is NOT the formatter plugin, a second sender, or a WASI rewrite. No
+arbitrary model replies are authorized. The worker survives that retirement
+([WHATSAPP-TRANSCRIPTION.md](WHATSAPP-TRANSCRIPTION.md)); the Go service does not.
 
 The pre-existing implementation already covered all-chat/current/future direct,
 group and LID ingestion, independent durable incoming AND own synchronized outgoing
@@ -111,102 +116,31 @@ release_verified:false. Production E2E is **not yet complete**.
 Self-review caught a narrowed owner binding's oversized descriptor validation and
 stale-history title overwrite; both now fail/behave explicitly.
 
-## Coordinator execution sequence (source is owned/delivered by worker)
+## What replaced the coordinator execution sequence
 
-Remote execution is NOT categorically blocked: coordinator's fresh native peer
-preflight succeeded on openclaw at `/local/projects/wasm-agent` (observed then-clean
-7b8be4a601fc428af0f3c8c04d8d1e7a44f586df). That is an earlier observation, not current
-installed-source or service health. Worker has no remote authority. Coordinator owns
-all following production effects; do not ask another worker to finish this source.
+The seven-step sequence that stood here (verified Go SDK, frozen bundle build, source-bound
+installer, `serve`/`pause` on a `wa-whatsapp` **binary**) described the Go connector's installation.
+Phase 4 removed that program, so the steps are gone rather than rewritten: there is nothing to build,
+nothing to install and no unit to enable. What an operator does now is the Rust path:
 
-1. **Fresh read-only host preflight.** Via the authorized native peer, inspect Git
-   status/HEAD/origin; fetch and fast-forward only if clean to the delivered revision.
-   Do not touch the unrelated research worker. Record `uname -sm`, `python3 --version`,
-   `go version` if Go will be used, `systemctl --user status wa-whatsapp.service`,
-   `systemctl --user show wa-whatsapp.service -p FragmentPath -p MainPID -p ExecStart`,
-   `systemctl --user is-enabled wa-whatsapp.service`, `loginctl show-user "$USER" -p Linger`.
-   Nonexistence is a result, not a reason for broad process termination. Inspect exact
-   owned process/service metadata, NOT keys, raw media or chat databases via shell.
-2. **Install immutable bundle, still OFF.** Independently check the delivered manifest
-   digest and reviewed installer against the recorded source. Transfer only the
-   synthetic-free Linux release bundle, not `target` caches/evidence/state. Existing
-   [frozen build and installer commands](WHATSAPP-CONNECTOR.md#human-build-and-installation-linux-cloud-operator-terminal)
-   are authoritative; default dry run then explicit coordinator `--apply`. Do NOT
-   run Windows executable on Linux. `sha256sum "$BUNDLE/wa-whatsapp"` and
-   `"$BUNDLE/wa-whatsapp" --help` (CLI may return nonzero for help) establish executable
-   readback separately from service readiness. Installer registers/starts nothing.
-   Record `"$GO" version -m "$BUNDLE/wa-whatsapp"` when a verified Go toolchain exists.
-   The manifest's source_files binds Go/module closure, worker, notices and installer.
-3. **Provision offline STT.** Follow the pinned Python wheel/cache setup in connector
-   docs in a private virtualenv; audit/freeze platform-specific transitive packages.
-   Setup-time model download is explicit; runtime remains offline. Record package
-   versions, model inventory/hashes and host CPU/RAM. Run:
-   ```sh
-   HF_HUB_OFFLINE=1 WA_WHATSAPP_STT_MODELS="$MODELS" "$PY" "$RELEASE/whatsapp-stt-local.py" --check
-   ```
-   `--check` actually loads the local model, but does not prove service worker warmth,
-   language accuracy or audio transport. Missing model/library must remain a refusal.
-4. **Explicit account policy and PRIVATE human pairing.** Initialize OFF with the
-   exact operator PN JID, `--all-chats --language pt` as documented. For existing state,
-   stop only its exact service; inspect config; use supported offline scope/language
-   commands, never re-init/wipe or reset unknowns. State/owners directories must exist
-   privately before systemd ReadWritePaths admission. Only the human opens an ordinary
-   private local terminal to the server (for example human-run `ssh -t openclaw`, not
-   a model SSH tool). Turn OFF terminal/session recording and do not share the window.
-   INSIDE THAT HUMAN TERMINAL ONLY, set nonsecret release/state paths and run:
-   ```sh
-   "$RELEASE/wa-whatsapp" pair --state "$STATE" --owners "$OWNERS"
-   ```
-   **Human-only scan checkpoint:** phone → Linked devices → scan terminal QR. Never
-   relay QR/session data through model/tool stdout, logs, screenshots, artifacts, MCP,
-   public endpoints or a synthesized TTY. Coordinator must not execute/capture pair.
-   Stop pair before serve; both share the same state/account locks. Confirm paired
-   account via supported read-only lookup, not key-store inspection.
-5. **Observe OFF, then activate/start once.** Serve OFF and inspect partial history,
-   account/generation/PT, sticky gaps and exclusions. Stop foreground serve, activate with explicit transcript-posting approval, inspect
-   cutoff, then register/start only the reviewed exact systemd user unit. No initial
-   history flood, ten-minute expiry or historical unknown-send reset. Read back unit,
-   MainPID/ExecStart/artifact hashes, config and authenticated status. Verify lingering
-   if boot persistence is required; neither worker nor installer changes it.
-6. **Expose only approved authenticated reads.** Keep Go listening on127.0.0.1:8787.
-   Use the existing authorized private HTTPS gateway/trusted CA; do not expose8787
-   or disable TLS checks. A dedicated approved Caddy host template is:
-   ```caddy
-   whatsapp.<approved-private-domain> {
-       @reads {
-           method POST
-           path /status /lookup_self /inspect_chat /read_snapshot /list_chats /posting_status /read_field
-       }
-       handle @reads {
-           request_body {
-               max_size 128KB
-           }
-           reverse_proxy 127.0.0.1:8787
-       }
-       handle {
-           respond 404
-       }
-   }
-   ```
-   This is a TEMPLATE, not an applied/tested host configuration or permission to make
-   a public host. Coordinator must constrain ingress to approved devices/private
-   network, validate DNS/certificate/config and apply through the supported gateway
-   owner. Preserve Authorization header for Go's mandatory token check; disable body/
-   credential logging. No token-bearing URL/header value appears in tool arguments.
-   Provision the private token/CA files to the authorized local device via the human's
-   approved private secret channel, never chat output. No credential-free native peer
-   integration is claimed by this worker. Without gateway/credentials, local on-demand
-   reads are genuinely pending, not satisfied by a hidden cloud journal.
-7. **Approve local operator read binding, no delegated widening.** Use the private
-   profile shape in connector docs with exact account/generation, BOTH owner-read
-   flags, HTTPS URL and token/CA FILE paths. Do not modify shipped narrow profiles.
-   The read-only stdio MCP definition this step used to register is gone with the Node bridge
-   (`scripts/mcp-whatsapp.mjs`, deleted 10/11/2026): there is nothing left to put, probe or
-   enable for WhatsApp reads. They answer from the native index (`whatsapp_native`, the tool
-   names `peer_<node>__whatsapp_*`) and, for the queue-backed surface, from the `wa-whatsapp`
-   component. Keep the revision-fenced UI for other connectors; no generic send/media
-   registration exists, and WhatsApp sends go through the operator path alone. Registry
-   changes belong to coordinator.
+* **The component is installed by deploy, not by hand.** `wa-whatsapp` is pinned in `components.lock`
+  and every node's deploy writes the artifact, its pin and its manifest. Installed is not enabled: a
+  service runs only from an ENABLED definition in the services registry, which no deploy creates.
+* **Start/stop/status is the service registry**, the same door as every other service component:
+  `wa services start wa-whatsapp`, `wa services status wa-whatsapp` (or the `services` tool). The
+  component's log is `<install>/components/wa-whatsapp.service.log`.
+* **Reads** answer from the native index and the queue seam (`whatsapp_search`, `whatsapp_read`,
+  `whatsapp_download`, `peer_<node>__whatsapp_*`); the MCP surface is `mcp-whatsapp`
+  ([WHATSAPP-MCP-QUEUE.md](WHATSAPP-MCP-QUEUE.md) records exactly what it can reach today).
+* **Explicit sends** are the operator path, prepare -> approve -> send -> status
+  ([WHATSAPP-OPERATOR-MANAGEMENT.md](WHATSAPP-OPERATOR-MANAGEMENT.md)), and they are dispatched by the
+  component's outbox.
+* **The recognizer venv** is still a human, setup-time step: its commands and pins are in
+  [WHATSAPP-TRANSCRIPTION.md](WHATSAPP-TRANSCRIPTION.md) ("Provisioning the recognizer's venv") and
+  `stt/`.
+
+The preflight facts below are kept as what they are - observations made before the cutover - and the
+"nonexistence is a result" rule still holds for any process you inspect.
 
 ## Practical bounded navigation after authorized setup
 
@@ -262,26 +196,25 @@ Missing upstream audio/history cannot be measured as successful transcription.
 
 ## Pause, stopped backup and rollback (coordinator only)
 
+The Go connector's pause commands (`"$RELEASE/wa-whatsapp" pause --state ...`, a user unit, a journal
+with two SQLite databases) went with the program. On the Rust path the equivalent is the component's
+own state, and the rule that matters is unchanged: **stop first, then copy, and never run two clients
+on one linked device.**
+
 ```sh
-systemctl --user stop wa-whatsapp.service
-systemctl --user is-active wa-whatsapp.service   # must be inactive; inspect exact MainPID settlement
-"$RELEASE/wa-whatsapp" pause --state "$STATE"
-# After stopped settlement ONLY, private encrypted/restricted backup of entire state
-# (both SQLite DBs plus WAL/SHM, config/token/gap evidence), no model/media/key relay:
+# 1. Stop the component through the service registry (the supported door), then confirm it is down.
+wa services stop wa-whatsapp
+wa services status wa-whatsapp          # must not report running
+# 2. Only after it has settled: a private copy of the component state, keys included, 0600/0700.
 umask 077
 mkdir -m 700 "$FRESH_PRIVATE_BACKUP"
-cp -a -- "$STATE/." "$FRESH_PRIVATE_BACKUP/"
-"$RELEASE/wa-whatsapp" status --state "$STATE"
+cp -a -- "$HOME/.wasm-agent/components/wa-whatsapp.state/." "$FRESH_PRIVATE_BACKUP/"
 ```
 
-Never copy active device keys or start a backup as a second owner. Preserve the
-original volume and historical drafts/transcripts. Repoint only the exact
-reviewed unit to a compatible immutable older executable after a stopped-state
-backup and unit diff. This directory migration is additive, not permission to drop
-columns. **Pre-directory connector releases use positional INSERTs into chats and
-are NOT compatible with this migrated journal. Do not roll those executables back
-against it.** Retain the newer stopped state read-only and deploy a compatible fixed
-release; never swap in an old ready-outbox backup to bypass this incompatibility.
-Never restore an older ready outbox over a later unknown dispatch; retain
-newer unknown effects for reconciliation and keep posting OFF if compatibility or
-settlement is uncertain. No blind reset/replay.
+Never copy active device keys into a shared location, and never start a second component on the same
+account to "keep serving" during a backup: the server sees one linked device with two connections and
+the ratchets race. Preserve the original state and every historical draft/transcript; restore by
+moving a copy back while the component is stopped, exactly as the cutover did
+([WHATSAPP-CUTOVER.md](WHATSAPP-CUTOVER.md)). Never restore an older ready outbox over a later unknown
+dispatch; retain newer unknown effects for reconciliation and keep posting OFF if compatibility or
+settlement is uncertain. No blind reset, no replay.

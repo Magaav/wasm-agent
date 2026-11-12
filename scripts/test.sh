@@ -2206,19 +2206,10 @@ run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN
 # `python3` that is only the Microsoft Store stub - present on PATH, failing when run (wasm_the_first, 30/10).
 GATE_PYTHON="$(for p in python3 python; do command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys' >/dev/null 2>&1 && { echo "$p"; break; }; done)"
 gate_run "${GATE_PYTHON:-python3}" scripts/test-whatsapp-local.py
-# The connector pins its Go in go.mod and GOTOOLCHAIN=local never downloads one: a host Go older than the
-# pin cannot build it at all, which says nothing about the connector, so it is the same SKIP as no Go.
-GO_WANT="$(sed -n 's/^go //p' connectors/whatsapp/go.mod)"
-GO_HAVE="$(command -v go >/dev/null 2>&1 && GOTOOLCHAIN=local go env GOVERSION 2>/dev/null | sed 's/^go//')"
-if [ -n "$GO_HAVE" ] && [ "$(printf '%s\n%s\n' "$GO_WANT" "$GO_HAVE" | sort -V | head -1)" = "$GO_WANT" ]; then
-  (cd connectors/whatsapp && GOTOOLCHAIN=local go test ./...) || exit 1
-elif [ -n "$GO_HAVE" ]; then
-  echo "SKIP WhatsApp Go connector: local Go $GO_HAVE is older than go.mod's $GO_WANT (docs/WHATSAPP-CONNECTOR.md)"
-  SKIPPED=$((SKIPPED + 1))
-else
-  echo 'SKIP WhatsApp Go connector: provision pinned Go SDK (docs/WHATSAPP-CONNECTOR.md)'
-  SKIPPED=$((SKIPPED + 1))
-fi
+gate_run bash scripts/test-whatsapp-go-retired.sh
+# The Go connector's `./...` test block stood here. It went with the connector tree in Phase 4
+# (11/11): the tree holds no Go module, so there is no toolchain to pin and nothing to SKIP. The gate
+# row that refuses a Go build/start path coming back is `scripts/test-whatsapp-go-retired.sh`.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
 gate_run bash scripts/test-deploy-ship.sh
 

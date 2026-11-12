@@ -1,7 +1,7 @@
 # Jobs: events to deliberate automation
 
-**WhatsApp:** [wa-whatsapp](WHATSAPP-CONNECTOR.md) owns persistent linked-device
-ingestion, audio tasks and deterministic transcripts; Jobs does not.
+**WhatsApp:** the [wa-whatsapp service component](SERVICE-COMPONENTS.md) owns persistent
+linked-device ingestion, audio tasks and deterministic transcripts; Jobs does not.
 
 A **job** is a durable automation definition: trigger + action + enabled state.
 A **trigger** matches an event or schedule. A **delivery** is one queued occurrence,
@@ -400,7 +400,8 @@ both incoming/own-outgoing audio without inference. First activation suppresses 
 history posting; post-activation downtime backlog remains queued without transcript
 age expiry. EN is the shipped language; this operator must explicitly persist PT.
 GENERAL model replies remain disabled and fail closed on unsupported draft visibility.
-See [setup](WHATSAPP-CONNECTOR.md). No production pairing is claimed.
+See [the service component](SERVICE-COMPONENTS.md) and
+[the transcription pipeline](WHATSAPP-TRANSCRIPTION.md). No production pairing is claimed.
 
 ## Proof
 

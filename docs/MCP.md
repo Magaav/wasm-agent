@@ -159,8 +159,9 @@ send authority. Product recognition default is EN; configure this operator PT pe
 account. No initial-history posting, hosted fallback or fake translation. Jobs
 does not run this connector/STT or enable a responder.
 
-See [connector/setup](WHATSAPP-CONNECTOR.md). Production pairing and real posting
-are separate unperformed operator proofs.
+See [the service component](SERVICE-COMPONENTS.md) and
+[WHATSAPP-MCP-QUEUE.md](WHATSAPP-MCP-QUEUE.md) for what the MCP can reach today. Production
+pairing and real posting are separate unperformed operator proofs.
 
 
 ## Web research
@@ -177,9 +178,9 @@ for exact cache, permission, paging and shadow-benchmark limits.
 - `node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs`
   uses private stdio/HTTP peers, credentials, malformed output, schema change and
   timeout/no replay. The operator send path's negatives are covered by
-  `scripts/test-whatsapp-operator-process.mjs` against the real unpaired connector binary.
-  Go connector fixtures separately cover fake transport/STT/posting against real SQLite.
-  No real WhatsApp messages or paid model.
+  `scripts/test-whatsapp-operator.lua` (the state machine, `lua/core/whatsapp_operator.lua`); the Go
+  connector's own process test went with that connector in Phase 4 (11/11). No real WhatsApp messages
+  or paid model.
 - `node scripts/test-mcp-native.cjs <built-wa> <fresh-evidence>` and `--post`
   verify private native SQL/operation source plus standalone embedded paths.
 - `node scripts/test-mcp-ui.cjs <fresh-evidence>` and `--post` verify real Chromium
