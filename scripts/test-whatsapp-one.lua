@@ -211,6 +211,24 @@ for _, named in ipairs({ "none", "two" }) do
   ok(hops == 0, "nothing was forwarded (" .. named .. ")")
 end
 
+-- A question is never routed to the node asking it: when the account node named in the deploy is this
+-- node and its component is stopped, one hop would ask the same unanswered question again for ever.
+-- That is the third case routing cannot answer, and it names the fix.
+local my_name = whatsapp.self_name()
+ok(type(my_name) == "string" and my_name ~= "", "this node can name itself")
+env_with(my_name)
+local self_hops = 0
+local on_itself = whatsapp.call("mcp_whatsapp_send", { chat = "5519994939204@s.whatsapp.net", text = "oi" }, {
+  remote_call = function() self_hops = self_hops + 1; return { ok = true } end,
+})
+ok(on_itself.error == "whatsapp_component_absent",
+  "an effect on the account node itself with no component is refused: " .. json.encode(on_itself))
+ok(on_itself.owner == my_name and on_itself.effect == "none" and on_itself.id == nil,
+  "the refusal names this node and queues nothing")
+ok(on_itself.note:find("wa services start", 1, true) ~= nil, "and says how to start it here")
+ok(self_hops == 0, "nothing was routed to itself")
+env_with("")
+
 -- ---- a retired spelling recovers in one step ------------------------------------------------------
 local renamed = {
   ["whatsapp_read"] = "mcp_whatsapp_read",

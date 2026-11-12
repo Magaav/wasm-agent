@@ -220,6 +220,14 @@ function M.owner(catalog_fn)
   return nil
 end
 
+--- This node's own name, or nil when it cannot be read. Used only to refuse routing a question to
+-- itself; a guess here can only make this answer nil, which keeps the routing (the safe direction).
+function M.self_name()
+  local ok, name = pcall(function() return dofile('lua/core/nodes.lua').node_name() end)
+  if ok and type(name) == 'string' and name ~= '' then return name end
+  return nil
+end
+
 --- Ask the account node the same question, under its own guards.
 --
 -- `call` is `nodes.remote_call` unless a test passes its own; the answer keeps the same shape, gains
@@ -239,8 +247,9 @@ function M.forward(owner, name, args, call)
 end
 
 --- The refusal a node without the account gives when routing cannot answer: never a queue, always with
--- the next step. Two cases reach it - nobody in the fleet holds the account (or this node was told
--- none does), and an ambiguous fleet where two nodes do - and both name the fix instead of guessing.
+-- the next step. Three cases reach it - nobody in the fleet holds the account (or this node was told
+-- none does), an ambiguous fleet where two nodes do, and this node being the account node itself while
+-- its component is stopped - and each names the fix instead of guessing.
 local function absent_answer(answer, owner)
   local where = owner and ('the WhatsApp account is served by ' .. owner)
     or 'no node in this fleet says it runs ' .. M.COMPONENT .. ' (set WASM_AGENT_WHATSAPP_OWNER on this node, or enable the component where the account is)'
@@ -282,6 +291,16 @@ function M.call(name, args, ctx)
     local owner = (type(decoded.owner) == 'string' and decoded.owner ~= '' and decoded.owner)
       or M.owner(ctx and ctx.owner_catalog or nil)
     if owner then
+      -- This node cannot route a question to itself: if the name that is supposed to hold the account
+      -- is the name of THIS node, the component simply is not running here, and another hop would ask
+      -- the same unanswered question again for ever. That is one of the two cases routing cannot
+      -- answer, and it says what to do instead.
+      if owner == M.self_name() then
+        local mine = absent(decoded, owner)
+        mine.note = 'this node is the WhatsApp account node (' .. owner .. ') but runs no ' .. M.COMPONENT
+          .. ' component: start it here (wa services start ' .. M.COMPONENT .. ')'
+        return mine
+      end
       -- Every verb, read or effect, is the account node's question to answer: the effect happens where
       -- the worker is, under the owner's own guards, and the answer that comes back keeps its shape
       -- plus `served_by` (a refusal from the owner travels unchanged).
