@@ -23,6 +23,8 @@ const KEY_SPEC_USER_KEYRING: i32 = -4;
 const KEYCTL_SEARCH: i32 = 10;
 /// `KEYCTL_READ`.
 const KEYCTL_READ: i32 = 11;
+/// `KEYCTL_INVALIDATE`.
+const KEYCTL_INVALIDATE: i32 = 21;
 
 #[cfg(target_arch = "x86_64")]
 const SYS_ADD_KEY: libc::c_long = 248;
@@ -147,11 +149,59 @@ fn add_key(name: &str, payload: &[u8]) -> Result<()> {
     }
 }
 
-/// Whether opening a keystore should use this protection. A search that answers ENOKEY before the
-/// entry is created means the keyring is reachable; any other refusal means it is not.
+/// Whether opening a keystore should use this protection.
+///
+/// The question is not "can I reach a keyring" but "does a full write-and-read-back work", because
+/// that is what the keystore does with its wrapping key on every open (`wrapping_key`). Measured on
+/// WSL2 (6.6.87.2-microsoft-standard, 11/11): `add_key` answers a serial and `keyctl READ` answers
+/// EACCES, so a search-only probe said "keyring" and the first `wa vault` command on the machine died
+/// `keystore_keyring_bad_payload` instead of taking the passphrase fallback this function exists to
+/// choose. A probe entry under its own name (never the wrapping key's) is written, read back and
+/// invalidated, so answering true costs nothing that outlives the call.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn available(dir: &std::path::Path) -> bool {
-    search(&description(dir)).is_ok()
+    let name = probe_description(dir);
+    if search(&name).is_err() {
+        return false;
+    }
+    let mut payload = Zeroizing::new([0u8; 32]);
+    if ring::rand::SystemRandom::new().fill(payload.as_mut()).is_err() {
+        return false;
+    }
+    if add_key(&name, payload.as_ref()).is_err() {
+        return false;
+    }
+    let readable = matches!(read_key(&name), Ok(Some(_)));
+    invalidate(&name);
+    readable
+}
+
+/// The name of the availability probe. Never the wrapping key's name: a probe that reused it would
+/// create the very key it is asking about, and `wa vault status` would have a side effect.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn probe_description(dir: &std::path::Path) -> String {
+    format!("wa-keystore-probe-v1:{}", description(dir).rsplit(':').next().unwrap_or("0"))
+}
+
+/// Drop the probe entry so a status check leaves the keyring as it found it. A refusal here is not a
+/// failure: the entry is 32 random bytes this process never uses again.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn invalidate(name: &str) {
+    let Ok(Some(serial)) = search(name) else {
+        return;
+    };
+    // SAFETY: `keyctl(INVALIDATE, serial, 0, 0, 0)` takes the serial found by the search above and no
+    // pointers at all.
+    unsafe {
+        libc::syscall(
+            SYS_KEYCTL,
+            KEYCTL_INVALIDATE as libc::c_long,
+            serial as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        );
+    }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

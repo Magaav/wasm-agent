@@ -91,6 +91,12 @@ if [ "$FAST_BIN_ACTION" = refuse ]; then fast_binary_refuse; fi
   const result = run("bash", ["-c", script], {
     env: {
       ...process.env,
+      // A chosen binary is authoritative by design (`fast_binary_plan`: an explicit WA_BIN is always
+      // `use`), so a scenario that is not about choosing one must not inherit the caller's: running
+      // this row from a shell that sets WA_BIN - which is how the landers run `scripts/fast.sh`, and
+      // what fast.sh's own docs recommend on a machine that cannot build - turned every `refused`
+      // expectation into `use` (measured 11/11). Scenario 4 passes WA_BIN back in explicitly.
+      WA_BIN: "",
       PATH: extraEnv.PATH ?? process.env.PATH,
       WA_FAST_SKIP_BUILD: "1",
       ...extraEnv,
