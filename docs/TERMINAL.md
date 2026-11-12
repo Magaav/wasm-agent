@@ -17,6 +17,23 @@ chooses it: `scroll::Console::frame` returns an empty string in `Mode::Inline`, 
 nothing at all, and `feed` hands every byte back to the caller. A pipe, a dumb terminal or an old
 binary therefore behaves exactly as it did before this existed.
 
+## The inline transcript's scrollbar and copy icons
+
+The inline transcript has the same bar as the fullscreen console, from the same code: the last column
+of the output region, `auto` (shown when the chat is taller than the region) / `always` / `hidden`
+through `WA_TUI_SCROLLBAR`, and `scroll::chat`'s `thumb`/`fit` arithmetic rather than a second
+implementation of it (#115). It costs one column - the text wraps one column narrower while it is
+shown - and the decision is kept between frames, because re-deciding it per frame would re-wrap the
+whole chat twice on every keystroke. The total the thumb is sized from is cached per block: a write
+dirties one block's count, never the chat's.
+
+A fenced block in the transcript carries a copy icon in front of its title row, `⧉` (#114).
+`lua/core/markdown.lua` returns where each fence's title landed and what the block holds;
+`cli_view`'s `markdown` hands those markers to `host.transcript_copy` immediately before the write
+that draws them, and `wa_term::transcript` answers a mouse press in the icon's cells with the content
+(OSC 52, `wa_term::selection::osc52`) - a press anywhere else starts a selection, so one gesture has
+one meaning. The rows are the drawn frame's, so a scrolled or folded-away icon is not clickable.
+
 ## Layout
 
 Bottom up on a screen of `H` rows (`Console::frame` pins the editor and takes the rest):

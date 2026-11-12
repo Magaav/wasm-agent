@@ -3019,6 +3019,19 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
         Mouse::Press(row, col) => {
             clear_selection(state);
             if row > rows || state.nav.is_some() { return; }
+            // The copy icon of a fenced block (#114): the transcript knows which cell it drew the
+            // affordance on, so a press there is a copy and a press anywhere else is a selection -
+            // one gesture, one meaning, no mode to learn.
+            if let Some(text) = state.transcript.copy_at(row, col) {
+                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                let count = text.chars().count();
+                if let Some(editor) = state.editor.as_mut() {
+                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+                }
+                let frame = layout_frame(state);
+                let _ = wa_term::terminal_editor::write(&frame);
+                return;
+            }
             let following = state.transcript.following();
             state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
             let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| wa_term::selection::plain(r)).collect();
@@ -3063,7 +3076,17 @@ fn copy_selection(state: &mut ConsoleInput) -> bool {
 static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = OnceLock::new();
 
 fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
-    CONSOLE_INPUT.get_or_init(|| (Mutex::new(ConsoleInput::default()), std::sync::Condvar::new()))
+    CONSOLE_INPUT.get_or_init(|| {
+        let mut state = ConsoleInput::default();
+        // The inline transcript's scrollbar obeys the same knob as the fullscreen console's
+        // (`WA_TUI_SCROLLBAR`, docs/TERMINAL.md, #115): one setting, one meaning, in both layouts.
+        if let Some(bar) = std::env::var("WA_TUI_SCROLLBAR").ok()
+            .and_then(|value| wa_term::scroll::settings::Scrollbar::parse(&value))
+        {
+            state.transcript.scrollbar = bar;
+        }
+        (Mutex::new(state), std::sync::Condvar::new())
+    })
 }
 
 /// A saved cursor can move when ConPTY scrolls output. Finish every view/ticker
@@ -3607,6 +3630,29 @@ pub extern "C-unwind" fn transcript_live(l: *mut LuaState) -> c_int {
         wa_term::terminal_editor::write(&frame).is_ok()
     } else { true };
     unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.transcript_copy(markers_json)`: the lines of the NEXT `transcript_write` that can be copied
+/// (#114) - `[{"at": <line of that write>, "text": "<the block's content>"}]`. The transcript draws
+/// the affordance in front of each of them and answers a click on it with that content (OSC 52),
+/// which is how a fenced block in the chat reaches the reader's clipboard without a selection.
+pub extern "C-unwind" fn transcript_copy(l: *mut LuaState) -> c_int {
+    let markers: Vec<(usize, String)> = arg_string(l, 1)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| {
+            let at = item.get("at")?.as_u64()? as usize;
+            let text = item.get("text")?.as_str()?.to_string();
+            Some((at, text))
+        })
+        .collect();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.transcript.copyable(&markers);
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if markers.is_empty() { 0 } else { 1 }) };
     1
 }
 
