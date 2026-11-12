@@ -126,17 +126,24 @@ pub struct Tool {
 #[derive(Clone, Debug)]
 pub struct Outside {
     pub name: String,
+    pub js_name: String,
+    pub description: String,
     pub schema: Value,
     pub execution: Execution,
     pub route: String,
 }
 
-/// What one script's catalogue is: the callable set (the guest's `tools`) and the fenced set (what
-/// discovery still shows). `None` from [`plan`] is the identifier collision the loop refuses.
+/// What one script's catalogue is: the callable set, the fenced set (what discovery still shows and the
+/// guest's table still carries, answering with its route), and the order the node sent them in.
+/// `None` from [`plan`] is the identifier collision the loop refuses.
 #[derive(Clone, Debug, Default)]
 pub struct Catalogue {
     pub tools: Vec<Tool>,
     pub outside: Vec<Outside>,
+    /// Every catalogue name, in the order the node sent it. The guest's `tools` object is built from the
+    /// descriptors in this order on both paths, and the proxy's "Available: a, b, c" message reads it
+    /// back - so an order that differs is a message that differs (`lua/core/codemode.lua`, `descriptors`).
+    pub order: Vec<String>,
 }
 
 impl Catalogue {
@@ -162,18 +169,42 @@ pub fn js_name(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
 }
 
-/// Why a tool is not callable here, in the words the model already knows. The same three sentences and
-/// the same fallbacks as `route_of` in `lua/core/codemode.lua`.
+/// Every direct-call-only tool's reason, verbatim from `DIRECT_ONLY` in `lua/core/codemode.lua`.
+///
+/// The fence itself is [`FORBIDDEN`]; this table is the sentence a refusal carries, and it is copied
+/// character for character because discovery's answer is compared field for field across the seam
+/// (`scripts/test-codemode-component.lua`): a reworded sentence here is a different fact on the two
+/// paths, and the model reads whichever path ran. `scripts/test-codemode-parity.lua` asserts the keys
+/// are exactly `codemode.DIRECT_ONLY`'s.
+pub fn direct_only_reason(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "codemode" => "a script does not nest: a second sandbox inside the first would hide one effect stream behind another",
+        "tool_call" => "the outer facade pins definitions into this session's loadout; a script calls await tools.<name>(args) directly instead",
+        "tool_search" => "the outer facade pins definitions into this session's loadout; searchTools/describeTool answer the same question inside without changing it",
+        "subagent" => "delegation spends model calls and creates a child session: one reviewable call, never a step inside a script",
+        "integrate" => "landing a worker tip is a single receipted integration action, never a script step",
+        "session_worktree" => "it allocates and owns this session's worktree; a bound root that re-points mid-script would change what every later call means",
+        "resume_session" => "it folds another session into the conversation the script is already running in",
+        "session_debug" => "it sets this session's recording mode: changing what is recorded mid-script makes the script its own unrecorded effect",
+        "session_fixture" => "it exports this session as a fixture while the script is still writing that session",
+        "wave_autoflush" => "it installs a durable wave-end obligation for the coordinator; installation is a direct receipted action",
+        "node_update" => "it updates and restarts a node: a deployment, not a script step",
+        "whatsapp_send" => "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call",
+        "email_send" => "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call",
+        _ => return None,
+    })
+}
+
+/// Why a tool is not callable here, in the words the model already knows: a verbatim port of `route_of`
+/// in `lua/core/codemode.lua`, in the same order and with the same sentences. The direct-call list comes
+/// first (as it does natively, which is why that branch also covers `tool_call`/`tool_search`), then the
+/// outer facades, then the node's own refusal, then the generic control-plane sentence.
 pub fn route_of(name: &str, execution: &Execution) -> String {
-    if name == "codemode" {
-        return "You are inside codemode; scripts do not nest.".to_string();
+    if let Some(reason) = direct_only_reason(name) {
+        return format!("Direct call only: {reason}. End the script, then call {name} as an ordinary tool.");
     }
     if name == "tool_search" || name == "tool_call" {
-        return "Outer facade: inside a script use searchTools/describeTool and call await tools.<name>(args) directly."
-            .to_string();
-    }
-    if name == "capabilities" {
-        return "Outer tool; inside a script call the capabilities() global.".to_string();
+        return "Outer facade: inside a script use searchTools/describeTool and call await tools.<name>(args) directly.".to_string();
     }
     if execution.blocked() {
         let reason = execution.reason.clone().unwrap_or_else(|| execution.status.clone());
@@ -190,10 +221,13 @@ pub fn route_of(name: &str, execution: &Execution) -> String {
 pub fn plan(facts: Vec<Fact>) -> Option<Catalogue> {
     let mut catalogue = Catalogue::default();
     for fact in facts {
+        catalogue.order.push(fact.name.clone());
         if FORBIDDEN.iter().any(|forbidden| *forbidden == fact.name) || fact.execution.blocked() {
             let route = route_of(&fact.name, &fact.execution);
             catalogue.outside.push(Outside {
-                name: fact.name,
+                name: fact.name.clone(),
+                js_name: js_name(&fact.name),
+                description: fact.description,
                 schema: fact.schema,
                 execution: fact.execution,
                 route,
@@ -441,8 +475,7 @@ pub fn describe_tool(catalogue: &Catalogue, params: &Value) -> Option<Value> {
     };
     if name == "showCall" {
         return None;
-    }
-    if let Some(tool) = catalogue.callable(&name) {
+    }    if let Some(tool) = catalogue.callable(&name) {
         return Some(json!({
             "name": tool.name,
             "description": schema_description(&tool.schema),
@@ -456,11 +489,22 @@ pub fn describe_tool(catalogue: &Catalogue, params: &Value) -> Option<Value> {
             "name": outside.name,
             "description": schema_description(&outside.schema),
             "parameters": outside.schema.get("function").and_then(|f| f.get("parameters")).cloned().unwrap_or(Value::Null),
+            // The node's pre-flight view travels with a fenced entry too: `describeTool` is how the model
+            // learns *why* a name it can see is not callable here, and the native loop's `described()`
+            // returns `execution` for both views. Omitting it here made the two answers differ by one
+            // field - which the parity suite compares as a hash and reported (`describeTool gives a
+            // schema`).
+            "execution": outside.execution.json(),
             "callable": false,
             "route": outside.route,
         }));
     }
-    Some(Value::Null)
+    // A name this seam does not know is answered by the node, not here: the loop's `describeTool` returns
+    // the `unknown_tool` record with the nearest permitted names (`lua/core/codemode.lua`,
+    // `tool_lookup.described`), which is what the native path has always answered. Returning `null` here
+    // made the two paths disagree on `describeTool("no_such_tool")` - the parity suite compares the
+    // answer, not only its shape - and the loop's answer is the one the model already knows.
+    None
 }
 
 const BATCH_INVOCATION: &str = "Guest-local metadata only; every entry listed here is callable in this script (callable:false entries run outside, see route). Native current-catalog/profile/type/effect checks apply to each call.";
@@ -666,8 +710,10 @@ mod tests {
         assert!(catalogue.callable("sessions").is_some(), "a read tool is callable");
         assert!(catalogue.callable("subagent").is_none(), "delegation is fenced");
         assert!(catalogue.callable("operation").is_none(), "a blocked target is fenced by status");
-        assert_eq!(catalogue.fenced("codemode").unwrap().route, "You are inside codemode; scripts do not nest.");
-        assert!(catalogue.fenced("tool_call").unwrap().route.contains("Outer facade"));
+        assert_eq!(catalogue.fenced("codemode").unwrap().route,
+            "Direct call only: a script does not nest: a second sandbox inside the first would hide one effect stream behind another. End the script, then call codemode as an ordinary tool.");
+        assert!(catalogue.fenced("tool_call").unwrap().route
+            .starts_with("Direct call only: the outer facade pins definitions"));
         assert!(catalogue.fenced("operation").unwrap().route.starts_with("Not callable in this run: blocked"));
         assert_eq!(catalogue.fenced("tool_call").unwrap().route, route_of("tool_call", &execution("not_blocked")));
     }
@@ -695,7 +741,7 @@ mod tests {
         assert_eq!(value["tools"].as_array().unwrap().len(), 3);
         assert_eq!(value["tools"][0]["name"], "codemode");
         assert_eq!(value["tools"][0]["callable"], false);
-        assert!(value["tools"][0]["route"].as_str().unwrap().contains("scripts do not nest"));
+        assert!(value["tools"][0]["route"].as_str().unwrap().contains("a script does not nest"));
         assert_eq!(value["tools"][2]["name"], "read");
         assert_eq!(value["tools"][2]["callable"], true);
     }
@@ -743,9 +789,11 @@ mod tests {
         assert!(described["parameters"]["type"] == "object");
         let outside = describe_tool(&catalogue, &json!(["subagent"])).unwrap();
         assert_eq!(outside["callable"], false);
-        assert!(outside["route"].as_str().unwrap().contains("Control plane"));
+        assert!(outside["route"].as_str().unwrap()
+            .starts_with("Direct call only: delegation spends model calls"));
         assert!(describe_tool(&catalogue, &json!("showCall")).is_none(), "presentation is the loop's");
-        assert_eq!(describe_tool(&catalogue, &json!(["nope"])).unwrap(), Value::Null);
+        assert!(describe_tool(&catalogue, &json!(["nope"])).is_none(),
+            "an unknown name is the node's answer (`unknown_tool` with suggestions), as it is natively");
     }
 
     #[test]
@@ -758,7 +806,7 @@ mod tests {
         match interpret(&catalogue, "tool", "subagent", None) {
             Guest::Tool(call) => match call.admittance {
                 ToolAdmittance::Fenced(Some(route)) => {
-                    assert!(route.contains("Control plane"), "the fence says where it runs: {route}")
+                    assert!(route.starts_with("Direct call only: delegation"), "the fence says where it runs: {route}")
                 }
                 other => panic!("subagent is fenced: {other:?}"),
             },

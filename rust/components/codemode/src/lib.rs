@@ -87,18 +87,35 @@ fn output(event: quickjs::OutputEvent) -> OutputItem {
     OutputItem { text: event.text, console: event.console }
 }
 
-/// The prelude's tool list: what the guest's `tools` object is built from. Descriptions are bounded by
-/// the node's own schema, and the guest never sees a name the fence refused.
+/// The prelude's tool list: what the guest's `tools` object is built from.
+///
+/// Every catalogue name is a member, fenced or not: the native loop decided this on 11/11 and the
+/// sentence it was decided by is in `lua/core/codemode.lua` (`descriptors[#descriptors+1]`) - "every
+/// name the model can see outside is a member inside, so *reading* one is never a TypeError that reads
+/// as 'does not exist'". A fenced member answers with its route (the loop refuses the call, see
+/// `ToolAdmittance::Fenced`); it is never dispatched. Omitting it here made the component's table
+/// disagree with the node's on the same script - which is exactly what
+/// `scripts/test-codemode-component.lua` compares, field for field.
 fn tools_json(catalogue: &Catalogue) -> String {
     // The guest's ABI for a descriptor is the native loop's, field for field: `name` is the tool's own
     // name and `jsName` the identifier the guest's `tools` proxy exposes (`lua/core/codemode.lua`,
     // `descriptors[#descriptors+1]`). Sending the js name AS `name` and no `jsName` made the guest's
     // lookup compare `undefined`, so the same script failed on the component path with a different
     // TypeError than the native one - `scripts/test-codemode-component.lua` caught exactly that.
+    //
+    // The order is the node's (`catalogue.order`): the proxy builds its table in descriptor order and
+    // lists it back in its "Available: ..." message, so a different order is a different message.
     let tools: Vec<Value> = catalogue
-        .tools
+        .order
         .iter()
-        .map(|tool| json!({"name": tool.name, "jsName": tool.js_name, "description": tool.description}))
+        .map(|name| match (catalogue.callable(name), catalogue.fenced(name)) {
+            (Some(tool), _) => json!({"name": tool.name, "jsName": tool.js_name, "description": tool.description}),
+            (None, Some(outside)) => {
+                json!({"name": outside.name, "jsName": outside.js_name, "description": outside.description})
+            }
+            (None, None) => Value::Null,
+        })
+        .filter(|descriptor| !descriptor.is_null())
         .collect();
     Value::Array(tools).to_string()
 }
@@ -444,7 +461,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guest_sees_only_the_callable_names_and_the_globals_the_native_loop_gives_it() {
+    fn the_guest_sees_every_catalogue_name_in_the_node_s_order_and_its_globals() {
         let catalogue = plan(vec![
             Fact {
                 name: "read".into(),
@@ -461,12 +478,21 @@ mod tests {
         ])
         .expect("no collision");
         let tools: Value = serde_json::from_str(&tools_json(&catalogue)).unwrap();
-        assert_eq!(tools.as_array().unwrap().len(), 1, "the fence is not in the guest's tool list");
+        // The fenced tool is a member too (it answers with its route), exactly as the native loop's
+        // `descriptors` table has it - the parity suite compares the guest's table field for field.
+        assert_eq!(tools.as_array().unwrap().len(), 2, "every catalogue name is in the guest's tool list");
         // The descriptor is the native loop's ABI: the tool's own name AND the js identifier the guest
         // proxy exposes. Sending the js name as `name` and no `jsName` made the guest compare `undefined`,
         // so one script failed differently here than natively (caught by the parity suite).
         assert_eq!(tools[0]["name"], "read");
         assert_eq!(tools[0]["jsName"], "read");
+        assert_eq!(tools[0]["description"], "Read a file");
+        assert_eq!(tools[1]["name"], "subagent");
+        assert_eq!(tools[1]["jsName"], "subagent");
+        assert_eq!(tools[1]["description"], "Delegate");
+        assert_eq!(catalogue.fenced("subagent").map(|tool| tool.route.clone()),
+            Some("Direct call only: delegation spends model calls and creates a child session: one reviewable call, never a step inside a script. End the script, then call subagent as an ordinary tool.".to_string()),
+            "the fenced entry keeps the sentence that says where it runs, verbatim from lua/core/codemode.lua");
         let globals: Value = serde_json::from_str(&globals_json()).unwrap();
         assert_eq!(globals.as_array().unwrap().len(), 5, "the native loop's five globals, name for name");
         assert_eq!(globals[0], json!({"name": "searchTools", "spread": true}));
