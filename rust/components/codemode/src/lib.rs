@@ -95,11 +95,22 @@ fn tools_json(catalogue: &Catalogue) -> String {
     // `descriptors[#descriptors+1]`). Sending the js name AS `name` and no `jsName` made the guest's
     // lookup compare `undefined`, so the same script failed on the component path with a different
     // TypeError than the native one - `scripts/test-codemode-component.lua` caught exactly that.
-    let tools: Vec<Value> = catalogue
+    let mut tools: Vec<Value> = catalogue
         .tools
         .iter()
         .map(|tool| json!({"name": tool.name, "jsName": tool.js_name, "description": tool.description}))
         .collect();
+    // Every name the model can see outside is a member inside (11/11): a fenced tool answers with its
+    // route when it is *called*, so reading it is never a TypeError that reads as "does not exist".
+    // The native loop's guest has always had these; this side did not, and the parity suite - which now
+    // runs this far - compared the two guests and said so.
+    for outside in &catalogue.outside {
+        tools.push(json!({
+            "name": outside.name,
+            "jsName": logic::js_name(&outside.name),
+            "description": logic::schema_description(&outside.schema),
+        }));
+    }
     Value::Array(tools).to_string()
 }
 
@@ -444,7 +455,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guest_sees_only_the_callable_names_and_the_globals_the_native_loop_gives_it() {
+    fn the_guest_sees_every_name_the_model_can_and_the_globals_the_native_loop_gives_it() {
         let catalogue = plan(vec![
             Fact {
                 name: "read".into(),
@@ -461,7 +472,13 @@ mod tests {
         ])
         .expect("no collision");
         let tools: Value = serde_json::from_str(&tools_json(&catalogue)).unwrap();
-        assert_eq!(tools.as_array().unwrap().len(), 1, "the fence is not in the guest's tool list");
+        // Every name the model can see outside is a member inside, exactly as the native loop's guest
+        // has it: a fenced tool answers with its route when it is CALLED, so reading it is not a
+        // TypeError that reads as "does not exist". The two guests diverged here and the parity suite
+        // (which now runs past its old skip) compared them field for field.
+        assert_eq!(tools.as_array().unwrap().len(), 2, "the fence is a member inside, as it is natively: {tools}");
+        assert_eq!(tools[1]["name"], "subagent");
+        assert_eq!(tools[1]["jsName"], "subagent");
         // The descriptor is the native loop's ABI: the tool's own name AND the js identifier the guest
         // proxy exposes. Sending the js name as `name` and no `jsName` made the guest compare `undefined`,
         // so one script failed differently here than natively (caught by the parity suite).
