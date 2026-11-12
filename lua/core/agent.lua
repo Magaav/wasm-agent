@@ -1083,6 +1083,11 @@ function M:build_context()
   -- boundary, but this keeps a rebuilt context valid regardless.
   local started = false
   local replay_reasoning = provider.reasoning(self.model).replay
+  -- A row written before the repair above existed: an assistant call with no name, and a tool result
+  -- with an empty name. The provider refuses that with a 400 on *every* later request, so the thread
+  -- could only be resumed by fixing the view it is sent. Renamed here, not dropped: the arguments and
+  -- the error it got are the model's own history, and losing them would lose what it learned.
+  local unnamed_calls, unnamed_results = 0, 0
   for _, row in ipairs(rows) do
     if not started and row.role == "tool" then
       -- skip the orphan
@@ -1096,13 +1101,19 @@ function M:build_context()
       -- "window") is a cache-hostile change to a message already sent, not an option.
       if replay_reasoning then message.reasoning_content = row.reasoning or "" end
       if type(row.tool_calls) == "table" and #row.tool_calls > 0 then
-        message.tool_calls = row.tool_calls
+        local repaired_calls, call_repairs = provider.repair_calls(row.tool_calls)
+        message.tool_calls = repaired_calls
+        for _ in pairs(call_repairs) do unnamed_calls = unnamed_calls + 1 end
       end
       messages[#messages + 1] = message
     elseif row.role == "tool" then
+      local tool_name = row.tool_name or ""
+      if not provider.call_name_valid(tool_name) then
+        tool_name, unnamed_results = provider.UNNAMED_CALL, unnamed_results + 1
+      end
       messages[#messages + 1] = {
         role = "tool", tool_call_id = row.tool_call_id or "",
-        name = row.tool_name or "", content = tool_output.context_view(row.tool_name, row.content),
+        name = tool_name, content = tool_output.context_view(row.tool_name, row.content),
         _images = row.images,
       }
     end
@@ -1192,13 +1203,13 @@ function M:build_context()
       dropped_results = dropped_results + 1
     end
   end
-  if dropped_calls > 0 or dropped_results > 0 or moved_results > 0 then
+  if dropped_calls > 0 or dropped_results > 0 or moved_results > 0 or unnamed_calls > 0 or unnamed_results > 0 then
     self.repaired = (self.repaired or 0) + 1
     self.emit({
       type = "status",
       text = string.format(
-        "repaired the transcript for the provider (%d call(s) dropped, %d result(s) dropped, %d result(s) moved back to their call)",
-        dropped_calls, dropped_results, moved_results),
+        "repaired the transcript for the provider (%d call(s) dropped, %d result(s) dropped, %d result(s) moved back to their call, %d call(s) given a legal name or id, %d result(s) renamed to match)",
+        dropped_calls, dropped_results, moved_results, unnamed_calls, unnamed_results),
     })
   end
   local built = materialize_tool_images(messages)
@@ -2447,7 +2458,19 @@ function M:run_body(text, images)
       end
     end
 
-    local calls = result.tool_calls or {}
+    local calls, call_repairs = provider.repair_calls(result.tool_calls or {})
+    local repaired_calls = 0
+    for _ in pairs(call_repairs) do repaired_calls = repaired_calls + 1 end
+    if repaired_calls > 0 then
+      -- Nothing ran, and the model is told which call and why (below, per call). Said once here so the
+      -- reader sees the harness catch it instead of a silent `plugin_not_found:` on their screen.
+      local first_id = next(call_repairs)
+      self.emit({ type = "status", text = string.format(
+        "the model sent %d tool call(s) with no usable name; each is answered with an error it can correct",
+        repaired_calls) })
+      telemetry.event(self.session_id, self.run_id, "", "tool_call", "repaired",
+        { calls = repaired_calls, arrived_name = tostring((call_repairs[first_id] or {}).arrived or "") })
+    end
     local assistant = { role = "assistant", content = result.content or "" }
     reply_phase = result.final_phase or ""
     -- A step that ends by asking for a tool did not answer: the text it wrote before choosing is a
@@ -2724,6 +2747,11 @@ function M:run_body(text, images)
 
     for tool_index, call in ipairs(calls) do
       local function_ = call["function"] or {}
+      -- A call the harness repaired was not a call the model can make: nothing runs, and the answer is a
+      -- tool error that names the fault and hands its own arguments back (11/11, gate.log 50f2c555).
+      local call_repair = call_repairs[call.id]
+      local name_error = call_repair and call_repair.name_missing
+        and provider.malformed_call_error(call_repair) or nil
       if function_.name=="bash" then shell_used=true end
       local args,argument_error,argument_repair = {},nil,nil
       local arguments_text = function_.arguments
@@ -2760,7 +2788,8 @@ function M:run_body(text, images)
           batching_guidance=batching_mode,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
       pcall(memory.presence_beat, self.session_id)
-      local handled, output = pcall(function() if argument_error then return argument_error end
+      local handled, output = pcall(function() if name_error then return name_error end
+        if argument_error then return argument_error end
         if parallel_op then
           if parallel_op.operation_id then
             return tools.await_parallel_bash(parallel_op.operation_id, self.role, dispatch_ctx)
