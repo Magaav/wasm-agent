@@ -76,6 +76,46 @@ awareness" (the operator's decision, 11/11). Reuse happens only when a script as
   with `hit`), so the value of explicit reuse is measurable rather than asserted
   (`scripts/test-codemode-reuse.lua`).
 
+## Pending calls (12/11)
+
+A call that can outlive its wait is the general case, not an exception: a build, `scripts/fast.sh`, a
+deploy, a download, a remote call, a long `bash`, an outbound message. The operator's decision (Victor,
+12/11) is **one pattern for every code-mode call**, so a script is never asked to guess a timeout and
+never told "still running" with nothing it can do about it.
+
+* Any `tools.<name>(args)` still running after its wait answers
+  `{state:"pending", op, tool, waited_s, progress}` - one shape, whatever the tool. A call that finishes
+  inside its wait answers exactly what it always answered; a script that names no `wait_s` and whose call
+  finishes in time sees no change at all.
+* `wait_s` is a property of the call's *wait*, taken out of the arguments before the tool's own schema
+  sees them: default 60 s, 0..300 s, and effectively `min(wait_s, 300, the script's remaining time minus
+  a margin)`. A wait never outlives the script that started it.
+* `wait(op | [ops], {wait_s, until:"all"|"any"})` is the one resume: 1..20 ops, one entry per op in the
+  order asked (`done` with the call's normal result, `failed` with `reason`, `pending` with `progress`).
+  It is a **read** - it dispatches nothing, holds no lock or lease - so the guest batches it with
+  anything: `Promise.all([wait(a), tools.read({path}), wait(b)])`. `cancel(op)` is the one stop; where
+  the effect cannot be stopped it answers `not_cancellable` with the reason, because a sent message
+  stays sent.
+* Handles outlive the script. The work is a **managed operation** (`docs/OPERATIONS.md`), so the handle
+  *is* the operation id: the record is on disk per scope, `operation read`/`/operations` already answer
+  it, and the next step, next turn or a resumed session of the same scope can `wait(op)`. At most 16
+  pending calls per session, refused by name past that. A settled result stays in `results`, so
+  `results.get(op)` re-reads it without re-running anything.
+* Nothing holds a lock: every wait is a bounded `operation wait` slice (<= 1 s) plus a status read, so a
+  stop/steer aborts it at once with `pending` and a reason, an unreachable supervisor answers `pending`
+  with the reason rather than hanging or claiming `failed`, and a resume never re-runs an effect.
+* No orphans: an op nobody resumed still settles, and is reported **once**, on the next script of that
+  scope (`pending_settled`), the same exactly-once idea the Sentinel's deploy outcome uses.
+
+**The limitation, named.** Work that runs *inside* this interpreter cannot be moved off it, so a call
+becomes pending only where the node has a detached executor (`M.EXECUTORS` in
+`lua/core/codemode_pending.lua`): today `bash` (started through the tool's own serial path, path guard
+included) and `operation` (`start` registers the receipt; `await` becomes a bounded wait on the same
+id). Every other tool answers as it did before this pattern existed - it is never turned into a handle
+that cannot settle. `scripts/test-codemode-pending.lua` asserts all of the above on both loops, and
+`scripts/test-codemode-component.sh` runs that same suite through the component and compares the check
+counts.
+
 ## Peers and discovery (29/10)
 
 Where that policy lives - keep these four in step, and `scripts/test-codemode-boundary.lua` asserts both the

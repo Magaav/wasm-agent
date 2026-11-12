@@ -520,13 +520,15 @@ mod tests {
             Some("Direct call only: delegation spends model calls and creates a child session: one reviewable call, never a step inside a script. End the script, then call subagent as an ordinary tool.".to_string()),
             "the fenced entry keeps the sentence that says where it runs, verbatim from lua/core/codemode.lua");
         let globals: Value = serde_json::from_str(&globals_json()).unwrap();
-        assert_eq!(globals.as_array().unwrap().len(), 6, "the native loop's six globals, name for name");
+        assert_eq!(globals.as_array().unwrap().len(), 8, "the native loop's eight globals, name for name");
         assert_eq!(globals[0], json!({"name": "searchTools", "spread": true}));
         assert_eq!(globals[1], json!({"name": "results", "spread": true}), "the retained results and the session journal");
-        assert_eq!(globals[2], json!({"name": "describeTool", "spread": false}));
-        assert_eq!(globals[3], json!({"name": "showCall", "spread": false}));
-        assert_eq!(globals[4], json!({"name": "capabilities", "spread": false}));
-        assert_eq!(globals[5], json!({"name": "describe", "spread": false}));
+        assert_eq!(globals[2], json!({"name": "wait", "spread": true}), "the one resume of a pending call, spread so its options arrive with the op");
+        assert_eq!(globals[3], json!({"name": "cancel", "spread": true}), "the one stop of a pending call");
+        assert_eq!(globals[4], json!({"name": "describeTool", "spread": false}));
+        assert_eq!(globals[5], json!({"name": "showCall", "spread": false}));
+        assert_eq!(globals[6], json!({"name": "capabilities", "spread": false}));
+        assert_eq!(globals[7], json!({"name": "describe", "spread": false}));
     }
 
     #[test]

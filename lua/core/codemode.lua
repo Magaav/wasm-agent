@@ -10,6 +10,11 @@ local presentation=dofile('lua/core/codemode_view.lua')
 -- are testable from this tree (`scripts/test-codemode-promises.lua`, `scripts/test-codemode-reuse.lua`).
 local harness=dofile('lua/core/codemode_harness.lua')
 local session_results=dofile('lua/core/codemode_results.lua')
+-- One pending-call handle for every call (docs/CODEMODE.md, "Pending calls"): a call still running
+-- after its wait answers {state:"pending", op}, and `wait(op)`/`cancel(op)` resume or stop it. Built
+-- on the managed operations the node already supervises - this file only names which tool call an
+-- operation is (`lua/core/codemode_pending.lua`).
+local pending_calls=dofile('lua/core/codemode_pending.lua')
 -- Discovery spellings are parsed in one place: searchTools({names={...}}) and searchTools("select:a,b") are
 -- the same request as tool_search, so the guest cannot drift from the outer facade (07/11).
 local envelope=dofile('lua/core/envelope.lua')
@@ -142,8 +147,23 @@ end
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
-local function host_global(name, params, calls, selected, lookup, ctx, journal)
+local function host_global(name, params, calls, selected, lookup, ctx, journal, popts)
   if name == 'showCall' then return presentation.select(calls, selected, params) end
+  -- `wait(op|[ops], {wait_s, until})` and `cancel(op|[ops])`: the one resume and the one stop for a
+  -- call that answered a handle. A READ and an effect-stopper, both over managed operations, both
+  -- answered by the same module for this loop and the component's.
+  if name == 'wait' or name == 'cancel' then
+    if not popts then return { error = 'codemode_global_not_available' }, false end
+    local asked = type(params) == 'table' and params[1] or nil
+    local value
+    if name == 'wait' then
+      value = pending_calls.wait(popts.dispatch, popts, asked, type(params) == 'table' and params[2] or nil)
+    else
+      value = pending_calls.cancel(popts.dispatch, popts, asked)
+    end
+    if type(value) ~= 'table' then return { error = 'codemode_global_not_available' }, false end
+    return value, value.error == nil
+  end
   -- `describeTool(name)` is the hidden alias of `searchTools("select:"..name)[0]`, and `searchTools`
   -- itself is answered here as well when the component hands a call back: one implementation of every
   -- discovery form (`tool_lookup`) for both loops, so the two paths cannot answer differently.
@@ -180,6 +200,8 @@ local function builtin_entries()
  end
  add(presentation.searchtools_help)
  add(session_results.HELP)
+ add(pending_calls.WAIT_HELP)
+ add(pending_calls.CANCEL_HELP)
  add(presentation.help)
  table.sort(entries,function(a,b)return a.name<b.name end)
  return entries
@@ -295,7 +317,7 @@ end
 
 -- The native path: byte for byte the loop this file has always run. `workspace` and `scope` are the
 -- run's, computed once by `M.run` so both paths agree on them.
-local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
+local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts)
  local descriptors,definitions,outside={},{},{}
  for _,schema in ipairs(catalog)do
   local f=schema['function'];local status=execution(f.name);local js=f.name:gsub('[^%w_]','_')
@@ -316,7 +338,12 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
  -- One lookup for both paths: the definition a name has, callable or fenced-with-route, or the
  -- nearest permitted names when there is none.
  local lookup=tool_lookup(catalog,execution,dispatch)
- local globals={{name='searchTools',spread=true},{name='results',spread=true},{name='describeTool',spread=false},{name='showCall',spread=false},
+ local globals={{name='searchTools',spread=true},{name='results',spread=true},
+  -- A call that outlives its wait answers {state:"pending", op}; these two are how a script resumes
+  -- or stops it. Both are registered with `spread` so `wait(op, {wait_s:120})` arrives with both
+  -- arguments (`lua/core/codemode_pending.lua`).
+  {name='wait',spread=true},{name='cancel',spread=true},
+  {name='describeTool',spread=false},{name='showCall',spread=false},
   -- Introspection of what this node can do, for a workflow that would otherwise guess. They read
   -- the host capability registry and nothing else: no authority moves, no effect is admitted.
   {name='capabilities',spread=false},{name='describe',spread=false}}
@@ -384,6 +411,11 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
      -- The retained results and this session's journal: `results.get`/`last`/`diff`/`reuse`. Read-only
      -- over records the node already keeps; it dispatches nothing and admits nothing.
      value,success=session_results.answer(type(params)=='table' and params[1] or nil,ctx,journal)
+    elseif call.name=='wait' or call.name=='cancel' then
+     -- The one resume and the one stop, answered by the same module the component's loop answers them
+     -- through (`host_global` above): a pending call is a managed operation, and reading it takes no
+     -- lock, so a wait never blocks the script that asked.
+     value,success=host_global(call.name,params,calls,selected,lookup,ctx,journal,popts)
     elseif call.name=='capabilities' then
      value,success=lookup.capabilities(params),true
     elseif call.name=='describe' then
@@ -404,14 +436,20 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
      for _,schema in ipairs(current_catalog())do if schema['function'].name==def.name then current=schema;break end end
      if not current or host.sha256(json.encode(current))~=def.hash then value={error='tool_definition_changed'};success=false
      else
-      local _,err=contract.validate(current['function'].parameters,call.args or '{}')
+      -- `wait_s` on any call: taken out of the arguments before the tool's own schema sees them,
+      -- because it is a property of this call's *wait* and not an argument of the tool. A call that
+      -- names none keeps its original text and its original answer.
+      local stripped,wait_s,wait_error=pending_calls.strip(call.args)
+      if wait_error then value={error=wait_error,effect='none'};success=false
+      else
+      local _,err=contract.validate(current['function'].parameters,stripped or '{}')
       if err then value={error=err};success=false
       else
-       local params=json.decode(call.args or '{}')
+       local params=json.decode(stripped or '{}')
        local fenced=action_refusal(def.name,params)
        if fenced then value=fenced;success=false else
        local span=telemetry.start(ctx,'tool',{name=def.name,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
-       local called,result=pcall(dispatch,def.name,params,call.args);admitted=true
+       local called,result=pcall(pending_calls.invoke,dispatch,popts,def.name,params,stripped,wait_s);admitted=true
        if called then
         value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
         -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one
@@ -424,6 +462,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
        calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference}
        telemetry.finish(span,{ok=success,name=def.name,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
        end
+      end
       end
      end
     end
@@ -463,7 +502,7 @@ end
 -- are the component's decisions; the answers are this loop's, with the same checks the native path
 -- makes. Nothing here changes what a script may do: the fence comes back as a `refusal` record, the
 -- dispatch is `dispatch`, and the arguments are validated against the schema the node holds now.
-local function component_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
+local function component_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts)
  local session=host.uuid()
  -- The lookup the globals this loop owns are answered through, exactly as the native loop builds it:
  -- `capabilities()`, a `searchTools` call the seam hands back, and `describeTool` all dispatch through
@@ -547,7 +586,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
      if step.kind=='host_global' then
       local called,params=pcall(global_params,argument_text)
       if not called then error(params) end
-      value,success=host_global(step.name,params,calls,selected,lookup,ctx,journal)
+      value,success=host_global(step.name,params,calls,selected,lookup,ctx,journal,popts)
      elseif step.refusal then
       value,success=refusal_value(step.refusal),false
      else
@@ -556,15 +595,18 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
       if not current or host.sha256(json.encode(current))~=hashes[step.name] then
        value,success={error='tool_definition_changed'},false
       else
-       local _,err=contract.validate(current['function'].parameters,argument_text or '{}')
+       local stripped,wait_s,wait_error=pending_calls.strip(argument_text)
+       if wait_error then value,success={error=wait_error,effect='none'},false
+       else
+       local _,err=contract.validate(current['function'].parameters,stripped or '{}')
        if err then value,success={error=err},false
        else
-        local params=json.decode(argument_text or '{}')
+        local params=json.decode(stripped or '{}')
         local fenced=action_refusal(step.name,params)
         if fenced then value,success=fenced,false
         else
          local span=telemetry.start(ctx,'tool',{name=step.name,nested=true,codemode_call=step.id,arguments_hash=host.sha256(argument_text or '{}')})
-         local called,result=pcall(dispatch,step.name,params,argument_text)
+         local called,result=pcall(pending_calls.invoke,dispatch,popts,step.name,params,stripped,wait_s)
          admitted=true
          if called then value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
           value=session_results.record(ctx,journal,{id=step.id,tool=step.name,args=host.sha256(argument_text or '{}'),
@@ -576,6 +618,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
          telemetry.finish(span,{ok=success,name=step.name,nested=true,codemode_call=step.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
         end
        end
+      end
       end
      end
      attempts[#attempts+1]={id=step.id,name=step.name,
@@ -632,14 +675,31 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  args={code=harness.decorate(args.code),timeout_ms=args.timeout_ms}
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+ -- One handle table for this script, on either loop: a call that outlives its wait answers
+ -- {state:"pending", op}, `wait(op)`/`cancel(op)` answer it, and every wait is bounded by what is
+ -- left of the script (a wait never outlives the script that started it).
+ local started_at=host.now()
+ local popts={ctx=ctx,scope=scope,session=ctx.session_id,dispatch=dispatch}
+ local budget=tonumber(args.timeout_ms) or 30000
+ popts.remaining_ms=budget
+ popts.remaining=function() return budget-math.floor(((tonumber(host.now()) or started_at)-started_at)*1000) end
+ -- Handles outlive the script, so an operation that finished while nobody waited is settled here
+ -- (a status read each, never a wait) and reported once, on the next script of this scope.
+ pending_calls.begin(dispatch,popts)
+ local function finish(result)
+  if type(result)~='table' then return result end
+  local settled=pending_calls.announce(scope)
+  if settled then result.pending_settled=settled end
+  return result
+ end
  if seam_component() then
-  local called,result,reason=pcall(component_run,policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
+  local called,result,reason=pcall(component_run,policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts)
   -- A table is the component's answer (including its refusals and its sandbox failures). `nil, reason`
   -- means it could not answer *before a step was handed out*: only then is the native path run.
-  if called and type(result)=='table' then return result end
+  if called and type(result)=='table' then return finish(result) end
   if not called then note_fallback('run',tostring(result))
   else note_fallback('run',tostring(reason or 'component_no_answer')) end
  end
- return native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope)
+ return finish(native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts))
 end
 return M

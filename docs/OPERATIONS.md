@@ -169,7 +169,10 @@ at native admission; unbound/direct legacy host calls retain the existing fallba
 No historical operation is rewritten.
 
 Code-mode Bash reaches the same dispatcher and operation manager, serial effects
-and current role/profile/schema/workspace checks. Explicit `operation` remains a
+and current role/profile/schema/workspace checks. That is also what a code-mode handle names: a call still
+running after its `wait_s` answers `{state:"pending", op}` and the op is this manager's operation id, so
+`wait(op)`, `cancel(op)` and `operation read`/`/operations` all observe the same supervised work
+(docs/CODEMODE.md, "Pending calls"). Explicit `operation` remains a
 control-plane tool excluded from the VM catalog; code mode does not grant it.
 
 Focused model-free proof: `node scripts/test-workspace-cwd.mjs <absolute-wa>
