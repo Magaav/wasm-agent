@@ -20,6 +20,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 import {compiledInput, treeDigest, CHECK_INPUTS, testRelevant} from './lib/landing-queue.mjs';
+import {DEPLOY_WORKSPACES} from './lib/deploy-gate.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(REPO, 'scripts', 'landing-queue.mjs');
@@ -451,6 +452,181 @@ function classifierParity() {
   check('the digest resolves to a tree', /^[0-9a-f]{40,64}$/.test(docsOnly.after.tree), docsOnly.after.tree);
 }
 
+// ---- 8. the deploy gate: a tree no deploy can install is refused before the push ----------------
+//
+// The failure this covers, measured 2026-11-11: `rust/wa-sentinel` is its own cargo workspace with its
+// own lock, a crate it builds gained an edge, the sentinel's lock was not updated in the landing, and
+// `scripts/deploy.sh`'s `cargo build --release --offline --locked --manifest-path
+// wa-sentinel/Cargo.toml` then refused every deploy of main. The fix was a second landing. This fixture
+// is that tree: a coherent base, then one branch that adds the edge without the lock, then the same
+// branch with the lock updated.
+const cargoAvailable = spawnSync('cargo', ['--version'], {encoding: 'utf8'}).status === 0;
+function rustWorkspace(staleSentinelLock) {
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(CANONICAL, file)), {recursive: true});
+    fs.writeFileSync(path.join(CANONICAL, file), text);
+  };
+  write('rust/Cargo.toml', '[workspace]\nmembers = ["wa-host", "nothing"]\nresolver = "2"\n');
+  write('rust/wa-host/Cargo.toml', '[package]\nname = "wa-host"\nversion = "0.1.0"\nedition = "2021"\n');
+  write('rust/wa-host/src/lib.rs', 'pub fn nothing() {}\n');
+  write('rust/nothing/Cargo.toml', '[package]\nname = "nothing"\nversion = "0.1.0"\nedition = "2021"\n');
+  write('rust/nothing/src/lib.rs', '');
+  // The sentinel's own workspace: the deploy builds it with --locked exactly like this.
+  write('rust/wa-sentinel/Cargo.toml', '[package]\nname = "wa-sentinel"\nversion = "0.1.0"\nedition = "2021"\n\n'
+    + `[workspace]\n\n[dependencies]\n${staleSentinelLock ? '' : 'nothing = { path = "../nothing" }\n'}`);
+  write('rust/wa-sentinel/src/main.rs', 'fn main() {}\n');
+  write('components.lock', 'graph = 1\nhooks = 1\n');
+  for (const dir of ['rust', 'rust/wa-sentinel']) {
+    const lock = spawnSync('cargo', ['generate-lockfile', '--offline'], {cwd: path.join(CANONICAL, dir), encoding: 'utf8'});
+    if (lock.status !== 0) return false;
+  }
+  if (staleSentinelLock) {
+    // The incident: the edge arrives, the sentinel's lock stays as it was.
+    write('rust/wa-sentinel/Cargo.toml', '[package]\nname = "wa-sentinel"\nversion = "0.1.0"\nedition = "2021"\n\n'
+      + '[workspace]\n\n[dependencies]\nnothing = { path = "../nothing" }\n');
+  }
+  return true;
+}
+function branchWith(name, prepare) {
+  git(CANONICAL, 'checkout', '-q', '-b', name, 'main');
+  const ok = prepare();
+  git(CANONICAL, 'add', '-A');
+  git(CANONICAL, 'commit', '-q', '-m', `${name}: a change`);
+  git(CANONICAL, 'checkout', '-q', 'main');
+  return ok;
+}
+function deployGateRefusals() {
+  // Components first: no cargo, no clock, and it is one of the deploy's own refusals
+  // (`component_lock_incomplete` - every host.graph_* call runs the pinned component).
+  branchWith('change/no-graph', () => {
+    fs.writeFileSync(path.join(CANONICAL, 'components.lock'), 'hooks = 1\n');
+  });
+  const before = git(ORIGIN, 'rev-parse', 'refs/heads/main').trim();
+  const refused = q(['land', '--branch', 'change/no-graph', '--owner', SESSION, '--checks', 'echo fixture-checks-ran']);
+  check('a landing whose components.lock drops graph is refused', refused.status === 75, refused.stdout + refused.stderr);
+  check('the refusal is named undeployable and quotes the deploy rule it breaks',
+    /undeployable/.test(refused.stderr) && /component_lock_incomplete/.test(refused.stderr), refused.stderr);
+  check('the deploy gate names what it refused, check by check',
+    /deploy gate REFUSED \(.*components=refused/.test(refused.stdout), refused.stdout);
+  check('an undeployable merge is rolled back and nothing is pushed',
+    git(CANONICAL, 'rev-parse', 'HEAD').trim() === before && git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === before,
+    `${git(CANONICAL, 'rev-parse', 'HEAD').trim()} vs ${before}`);
+  check('the deploy-gate refusal is in the durable log',
+    /undeployable: .*component_lock_incomplete/.test(q(['history', '--limit', '20']).stdout), q(['history', '--limit', '20']).stdout);
+
+  if (!cargoAvailable) {
+    console.log('SKIP deploy gate: no cargo on this machine, so the lock the deploy builds --locked cannot be checked here');
+    return;
+  }
+  // The sentinel's lock: the measured 2026-11-11 failure.
+  const made = branchWith('change/stale-sentinel-lock', () => rustWorkspace(true));  if (!made) {
+    console.log('SKIP deploy gate: cargo could not generate a fixture lock offline here');
+    return;
+  }
+  const stale = q(['land', '--branch', 'change/stale-sentinel-lock', '--owner', SESSION, '--checks', 'echo fixture-checks-ran']);
+  check('a landing that leaves the sentinel lock stale is refused before the push', stale.status === 75, stale.stdout + stale.stderr);
+  check('the refusal names the workspace whose --locked build would fail',
+    /undeployable/.test(stale.stderr) && /rust\/wa-sentinel\/Cargo\.toml/.test(stale.stderr), stale.stderr);
+  check('it says why a deploy of this tree cannot work, in the deploy\'s own words',
+    /--locked/.test(stale.stderr) && /lock/.test(stale.stderr), stale.stderr);
+  check('the lock refusal is rolled back too, and main did not move',
+    git(ORIGIN, 'rev-parse', 'refs/heads/main').trim() === before);
+
+  // The same branch with the lock updated lands, and the gate's own line is in the log.
+  branchWith('change/fresh-sentinel-lock', () => rustWorkspace(false));
+  const landed = q(['land', '--branch', 'change/fresh-sentinel-lock', '--owner', SESSION, '--checks', 'echo fixture-checks-ran']);
+  check('the same tree lands once the lock is coherent', landed.status === 0, landed.stdout + landed.stderr);
+  check('a landing reports the deploy gate per check',
+    /deploy gate ok \(.*lockfile rust\/wa-sentinel\/Cargo\.toml=ok.*pin=ok/.test(landed.stdout), landed.stdout);
+  check('the gate result is recorded, not only printed',
+    /#\d+ deploy-gate: deploy gate ok/.test(q(['history', '--limit', '20']).stdout), q(['history', '--limit', '20']).stdout);
+  check('the pinned worktree the pin check made is gone again', !fs.existsSync(path.join(CANONICAL, '.git', 'wa-landing-queue', 'pin-check'))
+    || fs.readdirSync(path.join(CANONICAL, '.git', 'wa-landing-queue', 'pin-check')).length === 0);
+
+  // The compiled-inputs classification: the deploy's shell function decides what a release's
+  // `compiled_inputs=` digest covers, so a tree whose two classifiers disagree is refused by name
+  // (a release could otherwise cover a commit that is not its build).
+  branchWith('change/classifier-drift', () => {
+    fs.mkdirSync(path.join(CANONICAL, 'scripts', 'lib'), {recursive: true});
+    fs.writeFileSync(path.join(CANONICAL, 'scripts', 'lib', 'node-binaries.sh'),
+      'wa_compiled_input() { case "$1" in docs/*) return 1 ;; *) return 0 ;; esac; }\n'
+      + 'wa_compiled_inputs_digest() { printf "fixture-digest\\n"; }\n');
+  });
+  const drift = q(['land', '--branch', 'change/classifier-drift', '--owner', SESSION, '--checks', 'echo fixture-checks-ran']);
+  check('a tree whose compiled-input classifiers disagree is refused', drift.status === 75, drift.stdout + drift.stderr);
+  check('and the refusal names the paths they disagree about',
+    /undeployable/.test(drift.stderr) && /deploy-only lua\/core\/x\.lua|queue-only/.test(drift.stderr), drift.stderr);
+}
+
+// ---- 9. the preflight lane: a branch's checks, proved without the landing lease -----------------
+function preflightLane() {
+  const worktree = path.join(WORK, 'preflight-wt');
+  git(CANONICAL, 'worktree', 'add', '-q', '-b', 'change/preflight', worktree, 'main');
+  fs.writeFileSync(path.join(worktree, 'lua/core/preflight.lua'), 'return 2\n');
+  git(worktree, 'add', '-A');
+  git(worktree, 'commit', '-q', '-m', 'change/preflight: a change');
+  const tip = git(worktree, 'rev-parse', 'HEAD').trim();
+  const queueBefore = qJson(['status']);
+  const run = q(['preflight', '--branch', 'change/preflight', '--owner', SESSION, '--checks', 'echo fixture-preflight-ran', '--lane', 'none', '--json']);
+  check('a preflight runs the branch\'s checks on the branch\'s own tree', run.status === 0, run.stdout + run.stderr);
+  const receipt = JSON.parse(run.stdout);
+  check('the preflight names the tree it proved and the digest it recorded',
+    receipt.tree === tip && /^[0-9a-f]{64}$/.test(receipt.digest) && receipt.recorded === true, JSON.stringify(receipt));
+  check('it holds no landing lease while it runs or after it',
+    queueBefore.holder === null && qJson(['status']).holder === null, JSON.stringify(qJson(['status']).holder));
+  const db = new DatabaseSync(path.join(CANONICAL, '.git', 'wa-landing-queue', 'queue.sqlite'), {readOnly: true});
+  const proof = db.prepare('SELECT * FROM proofs WHERE tree=?').get(tip);
+  const granted = db.prepare("SELECT COUNT(*) AS n FROM queue WHERE state='granted'").get();
+  db.close();
+  check('the proof is recorded for the tree the preflight ran on', proof && proof.verified_by === SESSION, JSON.stringify(proof));
+  check('no landing row was made or held by a preflight', granted.n === 0, JSON.stringify(granted));
+  // And the landing it was for now pays no rerun.
+  const land = q(['land', '--branch', 'change/preflight', '--owner', SESSION, '--dry-run']);
+  check('a landing of that branch reuses the preflight proof instead of rerunning the suite',
+    land.status === 0 && /candidate tree [0-9a-f]{12} already proven .* by 11111111-2222-3333-4444-555555555555/.test(land.stdout)
+      && /with no retest/.test(land.stdout), land.stdout + land.stderr);
+  // A red preflight is the check's own result: exit 1, nothing recorded, and the landing pays for its own run.
+  fs.writeFileSync(path.join(worktree, 'lua/core/preflight.lua'), 'return 3\n');
+  git(worktree, 'add', '-A');
+  git(worktree, 'commit', '-q', '-m', 'change/preflight: a second change');
+  const red = q(['preflight', '--branch', 'change/preflight', '--owner', SESSION, '--lane', 'none',
+    '--checks', 'echo "FAIL lua scripts/test-x.lua (exit 1): a real failure"; exit 1']);
+  check('a preflight whose checks fail exits 1 (the check\'s result, not a refusal)', red.status === 1, `${red.status} ${red.stdout}${red.stderr}`);
+  check('and records no proof for a tree it could not verify',
+    /nothing was recorded/.test(red.stdout), red.stdout);
+  const db2 = new DatabaseSync(path.join(CANONICAL, '.git', 'wa-landing-queue', 'queue.sqlite'), {readOnly: true});
+  const failed = db2.prepare('SELECT * FROM proofs WHERE tree=?').get(git(worktree, 'rev-parse', 'HEAD').trim());
+  db2.close();
+  check('a failed preflight left no proof behind', failed === undefined, JSON.stringify(failed));
+  // A branch nobody has checked out: refusal, named, with the command that would make a worktree.
+  const homeless = q(['preflight', '--branch', 'change/proven', '--owner', SESSION, '--lane', 'none']);
+  check('a branch with no worktree is refused by name, not silently checked elsewhere',
+    homeless.status === 75 && /preflight_worktree_required/.test(homeless.stderr), homeless.stderr);
+  check('the refusal says how to make the worktree',
+    /git -C .* worktree add/.test(homeless.stderr), homeless.stderr);
+  git(CANONICAL, 'worktree', 'remove', '--force', worktree);
+}
+
+// ---- drift guard: every --locked workspace a deploy builds is in the deploy gate --------------
+function deployWorkspaceGuard() {
+  const deploy = fs.readFileSync(path.join(REPO, 'scripts/deploy.sh'), 'utf8');
+  const built = new Set();
+  for (const match of deploy.matchAll(/cargo build[^\n]*--locked[^\n]*--manifest-path[=\s]+([^\s)"']+)/g)) {
+    built.add(match[1]);
+  }
+  // deploy.sh builds the sentinel from `rust/` (`cd rust && cargo build ... --manifest-path
+  // wa-sentinel/Cargo.toml`), so a manifest it names is relative to that directory: try both spellings
+  // before saying the gate does not cover it.
+  const covered = manifest => DEPLOY_WORKSPACES.includes(manifest)
+    || DEPLOY_WORKSPACES.includes(manifest.replace(/^\.\//, ''))
+    || DEPLOY_WORKSPACES.includes(`rust/${manifest.replace(/^\.\//, '')}`);
+  check('the guard found the deploy\'s --locked builds to compare against', built.size > 0,
+    'no `cargo build ... --locked ... --manifest-path` in scripts/deploy.sh: the guard would pass vacuously');
+  const missing = [...built].filter(manifest => !covered(manifest));
+  check('the deploy gate covers every workspace scripts/deploy.sh builds --locked',
+    missing.length === 0, `not in DEPLOY_WORKSPACES: ${missing.join(', ')} (built: ${[...built].join(', ')})`);
+}
+
 // ---- run ---------------------------------------------------------------------------------------
 try {
   fixture();
@@ -460,6 +636,9 @@ try {
   dirtyCanonical();
   deadMergeRecovery();
   await deployPin();
+  deployGateRefusals();
+  preflightLane();
+  deployWorkspaceGuard();
   ownerIdentity();
   classifierParity();
   console.log(`landing queue: ${passed} checks passed in ${Math.round((Date.now() - started) / 1000)}s`);
