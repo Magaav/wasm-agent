@@ -139,12 +139,36 @@ bytes a machine with the toolchain built, and its deploy runs the same prove/ins
 **Build machine** (any host with cargo; a Linux binary from Windows or macOS is a cross build):
 
 ```
-pip install ziglang                      # or unpack a zig tarball; zig is the C compiler and the linker
-cargo install cargo-zigbuild
+bash scripts/provision-publish-toolchain.sh --check  # what this host is missing; installs nothing
+bash scripts/provision-publish-toolchain.sh         # zig 0.17.1 (checksum-verified) + cargo-zigbuild
+                                                    # 0.24.1 + each target's rust-std, into ~/.local
+                                                    # and ~/.cargo; idempotent, no root
 bash scripts/publish-node-binaries.sh    # build both Linux targets, verify, print the gh command
 bash scripts/publish-node-binaries.sh --from <dir>   # verify artifacts a CI built, pin them
 bash scripts/publish-node-binaries.sh --check        # the plan; build nothing
 ```
+
+Measured 2026-11-12 on wa-desktop (Ubuntu 24.04, x86_64, 16 vCPU, cold cross target, rustc 1.99.1):
+`aarch64-unknown-linux-gnu` 279 s and `x86_64-unknown-linux-gnu` 201 s (481 s together), the x86_64 pair
+then executed on the host (`wa --version`) and the aarch64 pair reported `run: SKIPPED`. The provisioning
+step is what a new build host lacked: the two tools were "pip install" and "cargo install" in prose, at no
+pinned version, and a host without them could not produce the release a landing installs.
+
+**Who publishes when the builder has no GitHub credential.** `work` (a laptop container) and wa-desktop
+can build but hold no token; the coordinator has `gh`. The publisher prints its command and never runs it,
+so the artifact set travels over git instead:
+
+```
+bash scripts/publish-artifacts-branch.sh --remote <drop-box>            # build both targets, then ship
+bash scripts/publish-artifacts-branch.sh --remote <drop-box> --from DIR # ship artifacts built already
+bash scripts/publish-artifacts-branch.sh --remote <drop-box> --dry-run  # everything but the commit+push
+```
+
+It verifies every payload against the manifest, makes ONE orphan commit on `artifacts/node-<sha12>` holding
+exactly `node-<sha12>.manifest`, the four payloads and a `PUBLISH.sh` (the publisher's own `gh release
+create` line, paths relative to that commit's root), pushes it, and reads the ref back. Publishing is then
+`git fetch <drop-box> refs/heads/artifacts/node-<sha12>:…`, a worktree or `git archive` of that ref, and
+`bash PUBLISH.sh` on the host with the credential - the bytes published are the bytes verified here.
 
 The build is `cargo zigbuild --release --offline --locked -p wa-host --target
 <triple>.2.31` (and the same for `wa-sentinel`). `.2.31` is zig's glibc floor: it links against no
