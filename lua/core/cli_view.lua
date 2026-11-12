@@ -1696,6 +1696,17 @@ function METHODS:code_block(name, args, count, marker)
   return #rows
 end
 
+-- Markdown rendered into the transcript, with the copy affordance on each of its fenced blocks
+-- (#114). The markers have to reach the host immediately before the write that draws them: the host
+-- marks lines of the NEXT write, so a marker that met another write would land on the wrong row.
+function METHODS:markdown(text, options)
+  local rendered, copies = markdown.render(text, options)
+  if rendered ~= "" and copies and #copies > 0 and self:transcript() and host.transcript_copy then
+    pcall(host.transcript_copy, json.encode(copies))
+  end
+  return rendered
+end
+
 -- The call's heading rewritten once its result is in, so that row's dot can say how it went.
 function METHODS:tool_head(text)
   if not (self:transcript() and host and host.transcript_head) then return end
@@ -1752,7 +1763,7 @@ function METHODS:answered(reply)
     local text = tostring(reply)
     -- Markdown, because that is what the model wrote: a heading is a heading, a fence is a
     -- block, and the width is the terminal's rather than the line's.
-    local rendered = markdown.render(text, {
+    local rendered = self:markdown(text, {
       paint = function(plain, style) return paint(plain, style, self.live) end,
       width = self.limit - 2,
       indent = "", reflow = self:transcript(),
@@ -1839,7 +1850,7 @@ function METHODS:topic_block(heading, heading_style, text, body_style)
   self:clear()
   self:topic(true)
   self:write(paint(heading, heading_style, self.live) .. "\n")
-  self:write(markdown.render(body, {
+  self:write(self:markdown(body, {
     paint = function(plain, style) return paint(plain, style, self.live) end,
     -- Two columns narrower: a focused topic is drawn inside a border, and text wrapped here must
     -- not be wrapped a second time there.
@@ -2097,7 +2108,7 @@ function METHODS:replay(rows, opts)
       if #calls > 0 or row.phase == "commentary" then
         if content ~= "" then self:commentary_block(text_of(content)) end
       elseif content ~= "" then
-        local rendered = markdown.render(text_of(content), {
+        local rendered = self:markdown(text_of(content), {
           paint = function(plain, style) return paint(plain, style, self.live) end,
           width = self.limit - 2, indent = "", reflow = self:transcript(),
         })

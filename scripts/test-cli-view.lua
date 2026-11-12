@@ -1528,6 +1528,72 @@ do
     "with no value, what it did is what it says: " .. table.concat(calls_preview, " | "))
 end
 
+
+-- ---- #114: a fenced block gets a copy affordance, and a click copies it ---------------------------
+-- Operator, 11/11 ~11:25: fenced blocks in the CLI transcript (a ``` block, drawn as a card with its
+-- language on the title) get a copy icon in front of the title, and clicking it puts the block's
+-- content on the clipboard. pi has this; what it needs here is three facts the two ends must agree
+-- about, and they are what this section pins: WHICH row the card's title is (`markdown.render`'s
+-- offset), WHAT the block holds (the fenced text, not the drawn rows with their border), and that
+-- the marker reaches the host immediately before the write that draws that row - the host marks
+-- lines of the NEXT write, so a marker separated from its write lands on the wrong line.
+-- `rust/wa-term/src/transcript.rs` pins the other half: the icon in front of the title, the click
+-- resolved to that content, and the OSC 52 write the host makes of it.
+do
+  local markdown = dofile("lua/core/markdown.lua")
+  local SOURCE = "Before.\n\n```lua\nprint('hi')\nreturn 1\n```\n\nAfter.\n"
+  local rendered, copies = markdown.render(SOURCE, { paint = function(plain) return plain end,
+    width = 60, indent = "" })
+  eq(#copies, 1, "one fenced block, one copy affordance")
+  local rows = {}
+  for line in (rendered .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = line end
+  local title_at = copies[1] and copies[1].at or -1
+  ok(title_at >= 0 and rows[title_at + 1] and has(rows[title_at + 1], "\226\148\140\226\148\128"),
+    "the offset names the card's title row: " .. tostring(rows[title_at + 1]))
+  eq(copies[1].text, "print('hi')\nreturn 1", "and the content is the block's own text, not the drawn rows")
+  local plain_rows, none = markdown.render("no fence here\n", { paint = function(p) return p end })
+  eq(#none, 0, "prose alone marks nothing copyable")
+  ok(has(plain_rows, "no fence"), "and renders as before")
+
+  -- The marker has to arrive immediately before the write that draws the rows it names.
+  local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head,
+    host.transcript_copy }
+  local order = {}
+  host.transcript_block = function() return true end
+  host.transcript_write = function(text) order[#order + 1] = { "write", text } return true end
+  host.transcript_live, host.transcript_head = function() return true end, function() return true end
+  host.transcript_copy = function(text) order[#order + 1] = { "copy", text } return true end
+  local view = view_lib.new({ live = true, stdout = true, limit = 100,
+    rows = function() return 24 end, out = function() end })
+  view.editor, view.editor_ready = true, true
+  view:screen_on()
+  view:event({ type = "round", n = 1 })
+  view:answered(SOURCE)
+  local at_copy
+  for index, item in ipairs(order) do
+    if item[1] == "copy" then at_copy = index end
+  end
+  ok(at_copy ~= nil, "the view marks the fenced block copyable")
+  if at_copy then
+    ok(order[at_copy + 1] and order[at_copy + 1][1] == "write"
+      and has(visible(order[at_copy + 1][2]), "print") and has(visible(order[at_copy + 1][2]), "lua"),
+      "and the write that draws that row follows immediately")
+    local markers = json.decode(order[at_copy][2])
+    ok(type(markers) == "table" and #markers == 1 and markers[1].text == "print('hi')\nreturn 1",
+      "with the content the card holds: " .. tostring(order[at_copy][2]))
+    ok(type(markers[1].at) == "number", "and the row it is drawn on")
+  end
+  -- An older host with no `transcript_copy` renders the same answer, unmarked: a missing affordance
+  -- must not cost the answer.
+  host.transcript_copy = nil
+  local unmarked = view:markdown(SOURCE, { paint = function(plain) return plain end, width = 60, indent = "" })
+  ok(has(unmarked, "print('hi')") and has(unmarked, "\226\148\140\226\148\128"),
+    "an older host still draws the card: " .. unmarked:sub(1, 60))
+  host.transcript_write, host.transcript_block = saved[1], saved[2]
+  host.transcript_live, host.transcript_head = saved[3], saved[4]
+  host.transcript_copy = saved[5]
+end
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)

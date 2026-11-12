@@ -7,15 +7,24 @@
 //! `FOLDED_ROWS` rows until it is expanded. Ctrl+Up (from the draft) focuses the latest topic; Up and
 //! Down move between topics, Right expands, Left folds, Esc goes back to typing.
 use crate::terminal_editor::cell_width_of;
+use std::collections::HashMap;
 
 pub const FOLDED_ROWS: usize = 3;
+/// The copy affordance shown in front of a block that can be copied (#114): one glyph and a space,
+/// what pi and Claude Code put before a fenced block's title. A mouse press on it copies the block's
+/// content through OSC 52 (the terminal's clipboard), which is the only clipboard that works over
+/// ssh and inside a container without a display.
+pub const COPY_PREFIX: &str = "\u{29c9} ";
 const MAX_LINES: usize = 20_000;
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[38;2;119;119;119m";
 const FOCUS: &str = "\x1b[38;2;255;255;255m";
 
 #[derive(Default, Clone)]
-pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool }
+pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool,
+    /// Lines that can be copied, by line index: `{line: content}`. The content is the block's own
+    /// text (a fenced block's body), not the drawn rows - the rows carry the border and the icon.
+    pub copies: HashMap<usize, String> }
 
 #[derive(Default)]
 pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub dirty: bool,
@@ -32,7 +41,13 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     pub nav: bool,
     /// Where the live line sits while a tool call runs: `(block, line)` of the row the host rewrites
     /// in place. `None` = there is no such line. It is never a committed line - see `live`.
-    live_row: Option<(usize, usize)> }
+    live_row: Option<(usize, usize)>,
+    /// Copies waiting for the next `write` (`copyable`): offsets are lines of that write.
+    pending_copy: Vec<(usize, String)>,
+    /// Where the icon of each copyable line was drawn in the last `view`: screen row -> content.
+    /// A mouse press asks this before it asks anything else, so a click on the icon copies and a
+    /// click anywhere else starts a selection - one gesture, one meaning.
+    copy_rows: HashMap<usize, String> }
 
 /// One PageUp/PageDown step for a chat that occupies `area` screen rows: a third of it, at least one
 /// row. A whole screen jumped past what the reader was following; a third keeps two thirds in view.
@@ -42,6 +57,7 @@ impl Transcript {
     /// Start a new block (`topic` = collapsible). An empty current block is reused.
     pub fn block(&mut self, topic: bool) {
         self.clear_live();
+        self.pending_copy.clear();
         if let Some(last) = self.blocks.last_mut() {
             if last.lines.is_empty() { last.topic = topic; last.expanded = false; return; }
         }
@@ -77,6 +93,21 @@ impl Transcript {
         }
     }
 
+    /// Mark lines of the NEXT `write` as copyable (#114): `(offset, content)`, where the offset is
+    /// the line of that write (0 = its first line). The rows are drawn by `write`, so the marker has
+    /// to arrive just before it; a marker that never meets a write is dropped by the next `block`.
+    pub fn copyable(&mut self, markers: &[(usize, String)]) {
+        self.pending_copy = markers.iter().map(|(at, text)| (*at, text.clone())).collect();
+    }
+
+    /// The content a mouse press at `(row, col)` copies: the icon cell of a copyable row, and
+    /// nothing else. Rows and columns are the ones the last `view` drew (1-based, screen cells), so
+    /// a caller reads its own coordinates without translating anything.
+    pub fn copy_at(&self, row: usize, col: usize) -> Option<String> {
+        if col > visible(COPY_PREFIX) { return None }
+        self.copy_rows.get(&row).cloned()
+    }
+
     /// Take the live line away (its call finished, or real output is about to land under it).
     pub fn clear_live(&mut self) {
         let Some((block, line)) = self.live_row.take() else { return };
@@ -92,7 +123,11 @@ impl Transcript {
         let live_here = matches!(self.live_row, Some((at, 0)) if at == block);
         let found = &mut self.blocks[block];
         if live_here || found.lines.is_empty() { return false }
-        if found.lines[0] != text { found.lines[0] = text.to_string(); self.dirty = true; }
+        if found.lines[0] != text {
+            found.lines[0] = text.to_string();
+            found.copies.remove(&0);
+            self.dirty = true;
+        }
         true
     }
 
@@ -100,13 +135,26 @@ impl Transcript {
     /// open for the next write.
     pub fn write(&mut self, text: &str) {
         self.clear_live();
+        let markers = std::mem::take(&mut self.pending_copy);
         if self.blocks.is_empty() { self.blocks.push(Block::default()); }
         let block = self.blocks.last_mut().unwrap();
         let text = text.replace('\r', "");
         let (body, closed) = match text.strip_suffix('\n') { Some(b) => (b.to_string(), true), None => (text.clone(), false) };
+        // Where this write's first line lands: an open last line is *continued*, so the write's own
+        // line zero is that line - which is what `copyable`'s offsets are counted from.
+        let was_open = block.open;
+        let first = block.lines.len().saturating_sub(usize::from(was_open));
+        let mut produced = 0usize;
         for (index, segment) in body.split('\n').enumerate() {
-            if index == 0 && block.open { block.lines.last_mut().unwrap().push_str(segment); }
+            if index == 0 && was_open { block.lines.last_mut().unwrap().push_str(segment); }
             else { block.lines.push(segment.to_string()); }
+            produced = index + 1;
+        }
+        // The copy markers of this write, now that its lines have indices of their own.
+        for (at, content) in markers {
+            if at < produced.max(1) && first + at < block.lines.len() {
+                block.copies.insert(first + at, content);
+            }
         }
         block.open = !closed;
         self.dirty = true;
@@ -151,59 +199,103 @@ impl Transcript {
     pub fn following(&self) -> bool { self.top.is_none() && !self.freeze && !self.nav }
 
     /// The screen rows of one block at `width`: folded, or boxed in a heavy white border when focused.
-    fn rows_of(&self, index: usize, width: usize) -> Vec<String> {
+    fn rows_of(&self, index: usize, width: usize) -> Vec<String> { self.rows_with_copies(index, width).0 }
+
+    /// The same rows, plus where each copyable line's icon was drawn (`(row offset in this block,
+    /// content)`): the index a mouse press turns into a clipboard write (#114).
+    fn rows_with_copies(&self, index: usize, width: usize) -> (Vec<String>, Vec<(usize, String)>) {
         let block = &self.blocks[index];
         let focused = self.focus == Some(index);
         let inner = if focused { width.saturating_sub(2).max(1) } else { width.max(1) };
-        let mut rows: Vec<String> = block.lines.iter().flat_map(|line| wrap_rows(line, inner)).collect();
+        let mut rows: Vec<String> = Vec::new();
+        let mut copies: Vec<(usize, String)> = Vec::new();
+        for (line_index, line) in block.lines.iter().enumerate() {
+            let content = block.copies.get(&line_index);
+            let start = rows.len();
+            if content.is_some() {
+                // The affordance is part of the row, so the wrap and the click agree about where it
+                // ends: the icon takes its columns from the text and the header wraps two columns
+                // narrower, which is what a reader sees either way.
+                rows.extend(wrap_rows(&format!("{COPY_PREFIX}{line}"), inner));
+                copies.push((start, content.expect("checked").clone()));
+            } else {
+                rows.extend(wrap_rows(line, inner));
+            }
+        }
         while block.topic && rows.last().is_some_and(|r| visible(r) == 0) { rows.pop(); }
         // Folded: the topic's title row, then its first FOLDED_ROWS rows of content - blank rows
         // skipped, so three rows are three lines of text - then how much is hidden.
         if block.topic && !block.expanded && rows.len() > 1 + FOLDED_ROWS {
             let title = rows[0].clone();
-            let body: Vec<String> = rows[1..].iter().filter(|r| visible(r) > 0).cloned().collect();
-            if body.len() > FOLDED_ROWS {
-                let hidden = body.len() - FOLDED_ROWS;
-                rows = std::iter::once(title).chain(body.into_iter().take(FOLDED_ROWS)).collect();
-                rows.push(format!("{DIM}\u{2026} +{hidden} lines{}{RESET}", if focused { " (\u{2192} to expand)" } else { "" }));
+            let kept: Vec<usize> = (1..rows.len()).filter(|&i| visible(&rows[i]) > 0).collect();
+            if kept.len() > FOLDED_ROWS {
+                let hidden = kept.len() - FOLDED_ROWS;
+                let keep = &kept[..FOLDED_ROWS];
+                // A copyable line that the fold hides is not drawn, so its icon is not there to be
+                // clicked: the marker goes with the row.
+                copies.retain(|(at, _)| *at == 0 || keep.contains(at));
+                let mut folded: Vec<String> = vec![title];
+                for (position, &from) in keep.iter().enumerate() {
+                    folded.push(rows[from].clone());
+                    for (at, _) in copies.iter_mut() { if *at == from { *at = position + 1; } }
+                }
+                folded.push(format!("{DIM}\u{2026} +{hidden} lines{}{RESET}", if focused { " (\u{2192} to expand)" } else { "" }));
+                rows = folded;
             }
         }
-        if !focused { return rows; }
-        // A thin (light) white border around the focused topic.
+        if !focused { return (rows, copies); }
+        // A thin (light) white border around the focused topic: one row above, so every copy moves
+        // down by it.
         let mut out = vec![format!("{FOCUS}\u{250c}{}\u{2510}{RESET}", "\u{2500}".repeat(width.saturating_sub(2)))];
         for row in rows {
             let pad = inner.saturating_sub(visible(&row));
             out.push(format!("{FOCUS}\u{2502}{RESET}{row}{RESET}{}{FOCUS}\u{2502}{RESET}", " ".repeat(pad)));
         }
         out.push(format!("{FOCUS}\u{2514}{}\u{2518}{RESET}", "\u{2500}".repeat(width.saturating_sub(2))));
-        out
+        for (at, _) in copies.iter_mut() { *at += 1; }
+        (out, copies)
     }
 
     /// The rows `1..=height` show: bottom-anchored while following, fixed while frozen, and always
     /// keeping a focused topic on screen.
     pub fn view(&mut self, width: usize, height: usize) -> Vec<String> {
+        self.copy_rows.clear();
         // Following the bottom with nothing focused (the usual case, and every write of a replay):
         // only the blocks that reach the screen are wrapped, newest first. Wrapping the whole chat
         // on every frame made each write cost the length of the chat - a resumed session of a few
         // thousand rows drew for over a minute.
         if self.focus.is_none() && self.top.is_none() && !self.freeze && self.page_delta == 0 {
             let mut tail: Vec<String> = Vec::new();
+            // Copies seen so far, as offsets into `tail`: a block is prepended, so its own offsets
+            // are already the right ones.
+            let mut copies: Vec<(usize, String)> = Vec::new();
             for index in (0..self.blocks.len()).rev() {
-                let mut rows = self.rows_of(index, width);
+                let (mut rows, block_copies) = self.rows_with_copies(index, width);
+                if !block_copies.is_empty() {
+                    let before = tail.len();
+                    for (at, content) in block_copies { copies.push((at, content)); if before > 0 { let _ = before; } }
+                }
                 rows.extend(tail);
                 tail = rows;
                 if tail.len() >= height { break; }
             }
             let skip = tail.len().saturating_sub(height);
-            let mut shown = vec![String::new(); height.saturating_sub(tail.len())];
+            let blank = height.saturating_sub(tail.len());
+            for (at, content) in copies {
+                if at >= skip { self.copy_rows.insert(blank + at - skip + 1, content); }
+            }
+            let mut shown = vec![String::new(); blank];
             shown.extend(tail.into_iter().skip(skip));
             return shown;
         }
         let mut rows = Vec::new();
+        let mut copies: Vec<(usize, String)> = Vec::new();
         let mut focus_range = None;
         for index in 0..self.blocks.len() {
             let start = rows.len();
-            rows.extend(self.rows_of(index, width));
+            let (block_rows, block_copies) = self.rows_with_copies(index, width);
+            rows.extend(block_rows);
+            for (at, content) in block_copies { copies.push((start + at, content)); }
             if self.focus == Some(index) { focus_range = Some((start, rows.len())); }
         }
         let (total, h) = (rows.len() as isize, height as isize);
@@ -229,6 +321,11 @@ impl Transcript {
         }
         let mut shown: Vec<String> = (start..start + h)
             .map(|i| if i < 0 || i >= total { String::new() } else { rows[i as usize].clone() }).collect();
+        // Where the icons are on the screen: row 1 is the region's first row, as `render` draws it.
+        for (at, content) in copies {
+            let row = at as isize - start;
+            if row >= 0 && row < h { self.copy_rows.insert(row as usize + 1, content); }
+        }
         let below = total - (start + h);
         if below > 0 {
             if let Some(last) = shown.last_mut() {
@@ -419,6 +516,88 @@ mod tests {
     /// collapsed, and the whole of it once the reader selects and expands it. The view writes what
     /// `cli_view.code_block` gives it - the heading, three rows of the script, then the result - and
     /// the fold here is what turns that into "three rows, then how much is behind them".
+    // ---- a fenced block can be copied from the transcript (#114) -------------------------------
+    // The operator's ask (11/11 ~11:25): a fenced block in the CLI transcript gets a copy icon in
+    // front of its title, and clicking it puts the block's content on the clipboard. pi does this;
+    // the mouse reports were already here for selection (`wa_term::selection`), so the icon is a
+    // cell a click can be resolved against, and the copy itself is OSC 52 - the clipboard that
+    // works over ssh and in a container with no display.
+    fn fenced(t: &mut Transcript) {
+        t.box_block("```lua\nprint('hi')\nreturn 1\n```");
+    }
+    trait Fence {
+        fn box_block(&mut self, body: &str);
+    }
+    impl Fence for Transcript {
+        /// The shape `lua/core/markdown.lua` renders for a fence (a card with its language on the
+        /// border) and the marker `lua/core/cli_view.lua` sends for it: the title row, the body.
+        fn box_block(&mut self, body: &str) {
+            let lines: Vec<&str> = body.lines().collect();
+            let language = lines[0].trim_start_matches('`');
+            let code = lines[1..lines.len() - 1].join("\n");
+            self.copyable(&[(1, code.to_string())]);
+            self.write(&format!("intro\n\u{256d}\u{2500} {language}\n\u{2502} print('hi')\n\u{2502} return 1\n\u{2570}\u{2500}\n"));
+        }
+    }
+    #[test]
+    fn a_copy_icon_is_drawn_before_the_block_it_copies_and_a_click_on_it_finds_the_content() {
+        let mut t = Transcript::default();
+        fenced(&mut t);
+        let view = t.view(60, 10);
+        let header = view.iter().find(|row| row.contains("\u{256d}")).expect("the fence header is drawn").clone();
+        assert!(header.contains(COPY_PREFIX.trim_end()), "the icon is before the title: {header:?}");
+        assert!(!view.iter().any(|row| row.contains("\u{2502} print") && row.contains(COPY_PREFIX.trim_end())),
+            "and only the title carries it, not the body rows: {view:?}");
+        let row = view.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).unwrap() + 1;
+        assert_eq!(t.copy_at(row, 1).as_deref(), Some("print('hi')\nreturn 1"),
+            "a click on the icon row, in its first cells, copies the block's content");
+        assert_eq!(t.copy_at(row, visible(COPY_PREFIX) + 1), None,
+            "past the icon it is text: a press there starts a selection");
+        assert_eq!(t.copy_at(row + 1, 1), None, "and the body rows are not a copy target");
+        assert_eq!(t.copy_at(row - 1, 1), None, "nor is the prose above it");
+        // The clipboard write itself: OSC 52, the same encoder the selection uses.
+        assert!(crate::selection::osc52("print('hi')\nreturn 1").starts_with("\x1b]52;c;"));
+    }
+    #[test]
+    fn the_icon_follows_its_row_when_the_chat_scrolls_and_a_folded_copy_is_not_clickable() {
+        let mut t = Transcript::default();
+        for n in 0..20 { t.write(&format!("line {n}\n")); }
+        fenced(&mut t);
+        let bottom = t.view(60, 10);
+        let row = bottom.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).unwrap() + 1;
+        assert_eq!(t.copy_at(row, 1).as_deref(), Some("print('hi')\nreturn 1"), "following: the icon's row");
+        // Scrolled up past it: the icon is below the view, so nothing on the screen copies anything.
+        t.page(4);
+        let up = t.view(60, 10);
+        assert!(!up.iter().any(|row| row.contains(COPY_PREFIX.trim_end())),
+            "scrolled up, the fence is below the view: {up:?}");
+        assert_eq!(t.copy_at(row, 1), None, "and the row it was on copies nothing");
+        for at in 1..=10 { assert_eq!(t.copy_at(at, 1), None, "nothing else on the screen copies"); }
+        // Back at the bottom the icon is where it was: the mapping is the drawn frame's, not a cache
+        // of what once was drawn.
+        t.page(-4);
+        let back = t.view(60, 10);
+        assert_eq!(back.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).map(|at| at + 1), Some(row));
+        assert_eq!(t.copy_at(row, 1).as_deref(), Some("print('hi')\nreturn 1"));
+        // A copy whose rows the fold hides is not drawn, so there is nothing to click until the
+        // topic is expanded - and then the icon is there, on the row it belongs to.
+        let mut folded = Transcript::default();
+        folded.block(true);
+        folded.write("\u{23fa} Bash(cat)\none\ntwo\nthree\n");
+        folded.copyable(&[(0, "print('hi')".to_string())]);
+        folded.write("\u{256d}\u{2500} lua\n\u{2502} print('hi')\n\u{2570}\u{2500}\n");
+        let hidden = folded.view(60, 12);
+        assert!(!hidden.iter().any(|row| row.contains(COPY_PREFIX.trim_end())),
+            "the fold keeps the first three rows, and the fence is the fourth: {hidden:?}");
+        assert_eq!(folded.copy_at(2, 1), None, "so a click where it would have been copies nothing");
+        assert!(folded.focus_prev(), "the call is a topic");
+        folded.set_expanded(true);
+        let open = folded.view(60, 20);
+        assert!(open.iter().any(|row| row.contains(COPY_PREFIX.trim_end())),
+            "expanded, the copy is drawn: {open:?}");
+        let row = open.iter().position(|row| row.contains(COPY_PREFIX.trim_end())).unwrap() + 1;
+        assert_eq!(folded.copy_at(row, 1).as_deref(), Some("print('hi')"));
+    }
     #[test]
     fn a_code_mode_call_folds_to_three_rows_of_its_script_and_expands_to_all_of_it() {
         let mut t = Transcript::default();
