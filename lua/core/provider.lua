@@ -1403,6 +1403,84 @@ function M.visible_text(text)
   return (out:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- A tool call the model got wrong, made safe before it reaches the provider (11/11).
+--
+-- Measured, gate.log session 50f2c555: a step emitted a call whose `function.name` was the empty
+-- string. Dispatch answered it `plugin_not_found:` (there was no name to look up), the assistant
+-- message was stored exactly as it arrived, and *every* later request of that session came back
+-- `provider_http_400 ... [invalid_parameter]`: an OpenAI-compatible API refuses an empty function
+-- name, so one wrong call bricked the thread and ended the run. A resumed run then kept imitating
+-- its own unusable call shape, and every dispatch answered `plugin_not_found:` again.
+--
+-- The name and the id are the two fields the API validates; the model's intent is in the arguments.
+-- So the call is repaired once, at the boundary: a legal placeholder name, a synthesized id when it
+-- is missing, the arguments kept verbatim. The model is answered with a tool error that says what
+-- was wrong (`M.malformed_call_error`) and can re-issue the call correctly, and the transcript it
+-- is stored in is one the provider accepts.
+M.UNNAMED_CALL = "unnamed_tool_call"
+-- The API's own rule, `^[a-zA-Z0-9_-]{1,64}$`: anything else is the invalid_parameter above.
+function M.call_name_valid(name)
+  return type(name) == "string" and #name > 0 and #name <= 64 and name:match("^[%w_%-]+$") ~= nil
+end
+
+-- How much of the model's own arguments an error echoes back. Enough to re-issue the call, bounded
+-- because it is a tool result that is re-sent in every later request of the session.
+M.MALFORMED_ARGUMENT_ECHO = 400
+
+-- `calls, repairs = provider.repair_calls(raw)` -> the calls a provider accepts, and what was
+-- repaired about each, keyed by call id (`{name_missing, id_missing, arguments_repaired, arrived,
+-- arguments, index}`). Nothing else on a call is touched, and no marker is stored *on* the call: an
+-- extra field would be sent back to the API and be exactly the invalid parameter this removes.
+function M.repair_calls(raw)
+  local calls, repairs = {}, {}
+  if type(raw) ~= "table" then return calls, repairs end
+  for index, entry in ipairs(raw) do
+    local call = type(entry) == "table" and entry or {}
+    local function_ = type(call["function"]) == "table" and call["function"] or {}
+    local id = type(call.id) == "string" and call.id or ""
+    local name = function_.name
+    local arguments = function_.arguments
+    local echoed = type(arguments) == "string" and arguments:sub(1, M.MALFORMED_ARGUMENT_ECHO) or ""
+    local repair
+    if not M.call_name_valid(name) then
+      repair = { name_missing = true, arrived = tostring(name == nil and "" or name), arguments = echoed }
+      name = M.UNNAMED_CALL
+    end
+    if id == "" then
+      repair = repair or { arguments = echoed }
+      repair.id_missing = true
+      id = "call_repaired_" .. tostring(index)
+    end
+    if type(arguments) ~= "string" then
+      repair = repair or { arguments = echoed }
+      repair.arguments_repaired = true
+      arguments = type(arguments) == "table" and json.encode(arguments) or "{}"
+    end
+    calls[#calls + 1] = { id = id, type = "function", ["function"] = { name = name, arguments = arguments } }
+    if repair then
+      repair.index = index
+      repairs[id] = repair
+    end
+  end
+  return calls, repairs
+end
+
+-- What the model is told when one of its own calls was unusable. It names the fault, says nothing
+-- ran, and echoes the arguments it sent so it can re-issue the call without repeating itself.
+function M.malformed_call_error(repair)
+  repair = repair or {}
+  local parts = {}
+  if repair.name_missing then parts[#parts + 1] = "this tool call arrived with no tool name" end
+  if repair.id_missing then parts[#parts + 1] = "it also arrived with no call id, so this node gave it one" end
+  if repair.arguments_repaired then parts[#parts + 1] = "its arguments were not JSON text and were re-encoded" end
+  local note = "tool_call_name_missing: " .. table.concat(parts, "; ") .. ", so nothing ran. "
+    .. "Call a tool by its exact name from the tool list, with its arguments as a JSON object."
+  if type(repair.arguments) == "string" and repair.arguments ~= "" then
+    note = note .. " The arguments that arrived were: " .. repair.arguments
+  end
+  return { error = "tool_call_name_missing", effect = "none", retryable = true, note = note }
+end
+
 -- Why an empty assistant message is not an answer, in words a reader can act on.
 function M.empty_reply_reason(result)
   local reasoning = tostring(result and result.reasoning or "")
