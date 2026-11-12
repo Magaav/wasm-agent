@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The fast path: the day-to-day check before landing a change. Minutes, not the gate's ~50.
 #
-#   bash scripts/fast.sh [--jobs N] [--all-rust] [--docker]
+#   bash scripts/fast.sh [--jobs N] [--all-rust] [--docker] [--binary]
 #
 # What it runs, in parallel where it can:
 #   1. every scripts/test-*.lua not listed in scripts/fast-path.exclude, each with its own scratch home and
@@ -22,6 +22,13 @@
 # the node - that the variables this runner sets arrived. Why each row cannot share one directory is in the
 # block itself.
 #
+# WHICH BINARY. Every run's first line names the `wa` the rows will run, its build commit, this tree's
+# commit and the verdict (`fresh`, `stale`, `unknown`), and the tree's own binary wins over anything on
+# PATH - three sessions were green against the canonical checkout's binary while their own tree was
+# never loaded (scripts/lib/fast-binary.sh has the measurements). A missing or stale tree binary is
+# built, stamped with this commit and with the prepared code-mode assets; when it cannot be, the run
+# stops with `stale_binary` and the command that builds it. `--binary` prints that resolution and exits.
+#
 # A check that cannot run here (no node, no cargo) is reported SKIPPED and counted, never passed.
 # The full gate (scripts/test.sh) is the nightly job, not a landing requirement (AGENTS.md).
 # --docker runs the whole fast path inside the sandbox image (a laptop with no wa binary).
@@ -37,12 +44,13 @@
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
-jobs=${WA_FAST_JOBS:-}; all_rust=0; docker_mode=0
+jobs=${WA_FAST_JOBS:-}; all_rust=0; docker_mode=0; binary_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jobs) jobs=${2:?}; shift 2 ;;
     --all-rust) all_rust=1; shift ;;
     --docker) docker_mode=1; shift ;;
+    --binary) binary_only=1; shift ;;
     -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "fast: unknown option $1" >&2; exit 2 ;;
   esac
@@ -64,21 +72,45 @@ export WA_FAST_ENVIRONMENT_SIGNATURES
 export -f wa_environment_reason wa_environment_kind last_line_of 2>/dev/null || true
 
 # ---- the binary -------------------------------------------------------------------------------------
-bin="${WA_BIN:-}"
-for c in "$(command -v wa 2>/dev/null)" "$HOME/.local/bin/wa" "$ROOT/rust/target/release/wa" "$ROOT/rust/target/release/wa.exe"; do
-  [ -n "$bin" ] && break; [ -n "$c" ] && [ -x "$c" ] && bin="$c"
-done
-if [ "$docker_mode" = 1 ] || [ -z "$bin" ]; then
+# Which `wa` the rows run is a fact about the verdicts, not a detail: see scripts/lib/fast-binary.sh for
+# the measured failure (three sessions green against the canonical checkout's binary while their own
+# tree was never loaded). The FIRST line of every run names the binary, its build commit, this tree's
+# commit and the verdict; the tree's own binary wins over anything on PATH, and when it is missing or
+# stale it is built, or the run stops by name - it never grades another commit silently.
+. "$ROOT/scripts/lib/fast-binary.sh"
+fast_binary_plan
+if [ "$docker_mode" = 1 ] || [ "${FAST_BIN_ACTION:-}" = docker ]; then
   [ -z "${DOCKER_HOST:-}" ] && [ -S "/run/user/$(id -u)/docker.sock" ] && export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
   image=${WA_FAST_IMAGE:-wasm-agent-sandbox:local}
   if command -v docker >/dev/null 2>&1 && docker image inspect "$image" >/dev/null 2>&1; then
-    echo "fast: no wa binary here; running inside $image"
+    # Still one named first line: inside the image the rows run that node, so the image is the binary.
+    printf 'fast: binary %s (docker: %s)\n' "$image" "${FAST_BIN_WHY:---docker asked for the sandbox image}"
     host_timings=$(git rev-parse --absolute-git-dir)/wa-fast-timings.tsv; touch "$host_timings"
     exec docker run --rm --user 0 -v "$ROOT:/t:ro" -v "$host_timings:/t/.git/wa-fast-timings.tsv" -w /t -e WA_FAST_IN_DOCKER=1 "$image" bash scripts/fast.sh --jobs "$jobs" $([ "$all_rust" = 1 ] && echo --all-rust)
+  fi
+  if [ "$docker_mode" = 1 ]; then
+    echo "fast: --docker asked for the sandbox image and it is not here; cannot run" >&2
+    exit 2
   fi
   echo "fast: no wa binary (WA_BIN, PATH, ~/.local/bin, rust/target/release) and no sandbox image; cannot run" >&2
   exit 2
 fi
+if [ "$binary_only" = 1 ]; then fast_binary_banner; exit 0; fi
+# The banner first, then the build it announces: one line that says which binary this run is about,
+# and only then the minutes of work.
+fast_binary_banner
+if [ "${FAST_BIN_ACTION:-}" = build ]; then
+  if ! fast_binary_build; then
+    fast_binary_refuse
+  fi
+  fast_binary_banner
+fi
+if [ "${FAST_BIN_ACTION:-}" = refuse ]; then fast_binary_refuse; fi
+case "${FAST_BIN_CODEMODE:-unknown}" in
+  no) echo "fast: this binary has no code-mode assets; the rows that need them: $(fast_binary_rows_needing_assets)" ;;
+  unknown) echo "fast: this binary does not report code-mode assets; a row that needs them says so by name" ;;
+esac
+bin="$FAST_BIN"
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 started=$(date +%s)
 work=$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-XXXXXX")
@@ -434,10 +466,18 @@ elif ! command -v cargo >/dev/null 2>&1; then
   echo "fast: rust SKIPPED (cargo not on PATH)"; skipped=$((skipped + 1))
   record_row skip rust 'rust (all crates)' 0 0 0 'cargo is not on PATH'
 else
-  # Test builds, not shippable ones: the same switch the gate sets (scripts/test.sh) so the build script
-  # that embeds the code-mode assets (wa-capabilities/build.rs) does not demand one only a shipping build
-  # prepares.
-  export WA_CODEMODE_ALLOW_EMPTY=1
+  # Test builds, not shippable ones - but NOT empty ones when a prepared asset directory is here. The
+  # empty switch (WA_CODEMODE_ALLOW_EMPTY=1) is what the gate sets, and it does not only relax the build
+  # script: `cargo test --release` rebuilds `target/release/wa` with NO code-mode assets, so a later row
+  # - or a later run of this script - finds a node that cannot run code mode at all (measured: 72 598 376
+  # B empty vs 73 904 880 B with assets). With the assets, the test build is the same artifact shape as
+  # the shipping one, so a test run cannot replace a capable node with an incapable one.
+  if [ -n "${FAST_CODEMODE_ASSETS:-}" ] && [ -d "$FAST_CODEMODE_ASSETS" ]; then
+    export WA_CODEMODE_BUILD_ASSETS="$FAST_CODEMODE_ASSETS"
+    unset WA_CODEMODE_ALLOW_EMPTY
+  else
+    export WA_CODEMODE_ALLOW_EMPTY=1
+  fi
   base=$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD)
   changed=$( { git diff --name-only "$base" -- rust; git diff --name-only -- rust; git diff --name-only --cached -- rust; } | sort -u)
   crates=""
@@ -498,6 +538,9 @@ check() { name=$1; shift; s=$(date +%s%N)
 }
 WA_BIN="$bin" check prompt-docs bash scripts/sync-prompt-docs.sh --check
 if command -v node >/dev/null 2>&1; then
+  # Which binary the rows run (11/11): the tree's own and named in the first line, or a named refusal.
+  # A lane whose rows graded the canonical checkout's node instead of its own tree was green and wrong.
+  check fast-binary node scripts/test-fast-binary.mjs
   check instructions node scripts/check-instructions.mjs
   check direct-workflow node scripts/test-direct-workflow-instructions.mjs
   # The landing queue's own evidence: one lander at a time, FIFO, reclaim of a dead holder, the
