@@ -214,19 +214,107 @@ classify  --from <rev> --to <rev> [--json]  what moved and whether it forces a r
 baseline  [--command <cmd>] [--commit <rev>] what main already fails, by name (the landing baseline)
           [--record <log>] [--exit-code <n>] [--json]
 land      --branch <name> [--checks <cmd>] [--dry-run] [--no-push]
+preflight --branch <name> [--checks <cmd>]   run a branch's checks on its own worktree WITHOUT the
+          [--worktree <dir>] [--lane gate|none] lease, and record the proof a landing will reuse
 release   --id <n> [--result landed|abandoned] [--evidence <text>]
 reconcile --id <n> --evidence <text> [--force]
 history   [--limit <n>] [--json]
 ```
 
 `--owner <id>` wherever a lander acts. Exit codes: 0 success; 75 refused (named, terminal - a refusal
-is never retried by itself); 76 the queue or the repository could not answer.
+is never retried by itself); 76 the queue or the repository could not answer. `preflight` adds one: 1,
+the checks ran and failed (the check's own result, not a refusal - nothing is recorded).
+
+## The deploy gate: a landing must be installable
+
+A landing is the moment a commit becomes main, and main is what every node installs - so `land` now asks
+the deploy's own preconditions on the merged tree, **before the push**, and rolls the merge back when a
+deploy of that tree cannot work (`scripts/lib/deploy-gate.mjs`).
+
+Measured 2026-11-11: `rust/wa-sentinel` is its own cargo workspace with its own lock (its header says
+why), a crate it builds gained a workspace-internal edge, and the sentinel's lock was not updated in the
+same landing. `bash scripts/fast.sh` saw nothing - it tests the crates a change touches inside
+`rust/Cargo.toml`, and the sentinel's workspace is only built when its own paths change - while
+`scripts/deploy.sh` builds it with `cargo build --release --offline --locked --manifest-path
+wa-sentinel/Cargo.toml`, which refuses a lock that needs an update. Main was undeployable, the fix was a
+second landing (`abe54c90`), and each miss costs a full cycle on the node that finds it.
+
+| check | what it decides | the deploy refusal it covers |
+| --- | --- | --- |
+| `lockfile` | `cargo metadata --locked --offline` for every workspace `deploy.sh` builds `--locked` (`DEPLOY_WORKSPACES`) | the `--locked` build refusing a lock that needs an update |
+| `components` | `components.lock` pins components and `graph` among them | `component_lock_empty` / `component_lock_incomplete` (a deploy that would install nothing) |
+| `pin` | the merged commit is materialised as a detached worktree and read back | `pin_failed` / `pin_mismatch` (a tree a deploy cannot check out) |
+| `compiled-inputs` | the deploy's own `wa_compiled_input` classifier against the queue's `compiledInput`, over the tree's real paths | a release manifest whose `compiled_inputs=` digest would cover a commit that is not its build |
+
+```
+landing-queue: #20 deploy gate ok (lockfile rust/Cargo.toml=ok, lockfile rust/wa-sentinel/Cargo.toml=ok,
+               components=ok, pin=ok, compiled-inputs=ok)
+landing-queue: #21 deploy gate REFUSED: ... undeployable: a deploy of this tree cannot work ...
+               lockfile rust/wa-sentinel/Cargo.toml=refused
+```
+
+The refusal is one name (`undeployable`, exit 75), the merge is reset to the base it started from,
+nothing is pushed, and every check is named with what it decided. It is recorded in the durable log as a
+`deploy-gate` row, so a lander that inherits the tree can read what was proved.
+
+Three properties are deliberate:
+
+- **It costs seconds.** 1.1 s for all five rows on this tree (0.3 s of it `cargo metadata`, 0.4 s the
+  pinned worktree): nothing next to a landed-then-undeployable cycle.
+- **A check that cannot run is a SKIP, not a pass.** No cargo on PATH, no registry cache for an
+  `--offline` resolve, no `sha256` tool: the row says `skip` with the reason and the gate says so in its
+  line. `cargo metadata --locked --offline` needs a warmed registry (`cargo fetch --locked` on the
+  machine that builds), and a machine without one prints SKIP and has no opinion - it never claims the
+  lock is fine.
+- **The two classifiers are compared as sets, not as digests.** `wa_compiled_inputs_digest` and
+  `treeDigest().compiled` use different schemas on purpose (`wasm-agent-compiled-inputs/1` vs
+  `wasm-agent-retest-inputs/1`), so equal values were never the question; equal classification is.
+
+What it still does not cover, said out loud: whether a *release* exists (that is the post-push publish
+step, and `status`'s `release_uncovered` rows), whether the tree compiles for every target (that is the
+publisher's build), and any check whose result depends on a machine this gate is not running on.
+
+## The preflight lane: test a branch while someone else lands
+
+`land` runs the checks on the merged tree in the canonical checkout, under the one landing lease. A
+session that wants to know whether its branch is good therefore has had two bad options: wait for the
+lease, or run the suite by hand and have nobody able to point at the result. Measured 2026-11-11: three
+sessions ran the fast path in their own worktrees while one landed, the lander's retest hit `cannot fork`
+and was refused `environment_blocked`, and two of the three results were thrown away because there was no
+record to attach them to.
+
+```
+node scripts/landing-queue.mjs preflight --branch change/x --owner <session id>
+landing-queue: preflight change/x (a1b2c3d4e5f6) in /home/wa/wt-x: bash scripts/fast.sh - no landing
+               lease, admitted by the gate lane
+landing-queue: preflight change/x (a1b2c3d4e5f6) passed in 214s and recorded a proof for retest digest
+               77aa11bb22cc: `land --branch change/x` reuses it instead of running `bash scripts/fast.sh` again
+```
+
+- **No lease.** It never enqueues, never holds the canonical checkout and never merges or pushes: `queue`
+  rows are untouched, so it cannot block a lander and a lander cannot block it.
+- **On the branch's own tree.** `git worktree list --porcelain` finds the worktree whose HEAD is the
+  branch tip; a branch nobody has checked out is refused by name (`preflight_worktree_required`) with the
+  command that would make one, and `--worktree <dir>` names an existing clean tree explicitly. A tree
+  that has moved off the tip is refused (`preflight_worktree_moved`) rather than checked under the
+  branch's name.
+- **Admitted by the gate lane** (`scripts/gate-lane.mjs`), so N preflights and a landing do not contend
+  for the cores - which is the failure that made the lander's retest unjudgeable. A lane that will not
+grant a slot is a refusal (`preflight_lane_blocked`) that names the holder; `--lane none` runs
+  unadmitted on purpose and says so.
+- **The proof is the same evidence table `record` writes** (`proofs`, keyed by the tree's retest digest),
+  so the next `land --branch` of that tree finds it: `candidate tree ... already proven ... with no
+  retest`. A red run records nothing, exits 1 and leaves the landing to run its own checks.
+- **A skip is reported.** The fast path's own `N skipped` count is printed with the proof, because a
+  proof recorded over a skipped check is not a proof of that check.
 
 ## What it is not
 
 - It is not the merge lane (`scripts/merge-lane.mjs` builds and gates a candidate in a disposable
   clone), not the gate lane (`scripts/gate-lane.mjs` serializes the CPU-heavy gate), and not the
   release gate. It serializes **the canonical checkout**, which none of those own.
+- The deploy gate decides whether a deploy of the merged tree can work; it does not build, publish or
+  install anything, and it never replaces the deploy's own refusal when a real deploy runs.
 - It does not review a branch, resolve a conflict (`merge_tree` conflict is a named blocked input) or
   push anything but `main` (`.githooks/pre-push` and `lane-policy.json` remain the boundary).
 - It does not replace the audit: `skills/git-orchestrator/scripts/audit.mjs verify` still answers

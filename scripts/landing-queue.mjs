@@ -13,6 +13,8 @@
 //   node scripts/landing-queue.mjs record --tree <ref> [--command "<what ran>"] [--owner <id>]
 //   node scripts/landing-queue.mjs land --branch <name> [--checks "<cmd>"] [--dry-run] [--no-push]
 //                                       [--owner <session id>] [--lease-seconds <s>] [--repo <dir>]
+//   node scripts/landing-queue.mjs preflight --branch <name> [--checks "<cmd>"] [--worktree <dir>]
+//                                           [--lane gate|none] [--owner <session id>] [--repo <dir>]
 //   node scripts/landing-queue.mjs release --id <n> [--result landed|abandoned] [--evidence <text>]
 //   node scripts/landing-queue.mjs reconcile --id <n> --evidence <text> [--force]
 //   node scripts/landing-queue.mjs classify --from <rev> --to <rev> [--repo <dir>] [--json]
@@ -27,6 +29,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {
   QueueError, classifyDelta, treeDigest, candidateTree, canonicalDirt, describeDirt, git, gitOk,
   mainWorktree, openQueue, queueDir, logRow, resolveOwner, holderOf, reclaimPass, grantNext,
@@ -34,6 +37,7 @@ import {
   baselineOf, recordBaseline, checkCommandKey, recoverUnpushed, writeHolder, clearHolder,
 } from './lib/landing-queue.mjs';
 import {parseCheckLog, baselineRecord, judgeRun, describeRun} from './lib/landing-baseline.mjs';
+import {deployGate} from './lib/deploy-gate.mjs';
 import {holdLease, releaseLease} from './lib/sqlite-lease.mjs';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -964,9 +968,37 @@ async function commandLand(options) {
       say(`#${id} checks passed in ${took}s on ${merged.slice(0, 12)}: ${outcome.why}`);
       recordProof(db, {digest: digest.retest, tree, by: owner.id, command: options.checks, log: `merged ${merged}; ${outcome.why}`});
     }
+    // 4. The deploy gate: the preconditions a deploy of this tree would refuse, decided HERE, on the
+    //    merged tree, before the push. A landing is the moment a commit becomes installable, and a
+    //    commit no deploy can install is not a landing - it is a second landing, minutes later, on the
+    //    node that discovered it (2026-11-11: a stale `rust/wa-sentinel/Cargo.lock`). See
+    //    scripts/lib/deploy-gate.mjs for which deploy refusals each check covers, and for the two it
+    //    honestly does not (a machine without cargo or a sha256 tool prints a named skip, never a pass).
+    //
+    //    It runs after the retest (a tree whose checks fail is refused before its deployability is
+    //    asked about) and before `--no-push`, because "would this tree install" is worth knowing even
+    //    for a local merge.
+    let gate = null;
+    if (merged === headAt) {
+      say(`#${id} deploy gate skipped: main did not move (${merged.slice(0, 12)} is already origin/main)`);
+    } else {
+      gate = deployGate({root: canonical, commit: merged, dir, say: line => say(`#${id} ${line}`)});
+      for (const check of gate.checks) {
+        say(`#${id} deploy gate ${check.state === 'ok' ? 'ok' : check.state.toUpperCase()}: ${check.name} - ${check.detail}`);
+      }
+      if (!gate.ok) {
+        const rollback = git(canonical, ['reset', '--hard', headAt]);
+        finish('refused', `undeployable: ${gate.why}; rolled back to ${headAt.slice(0, 12)}`);
+        throw new QueueError(`undeployable: a deploy of this tree cannot work, and a landing is what makes a commit installable.\n${gate.why}\n`
+          + `  These are the deploy's own preconditions (scripts/lib/deploy-gate.mjs): ${gate.checks.map(check => `${check.name}=${check.state}`).join(', ')}.\n`
+          + `  The merge was rolled back to ${headAt.slice(0, 12)} (reset ${rollback.status === 0 ? 'ok' : 'FAILED'}) and nothing was pushed. Fix it in ${options.branch} and land again.`,
+        75, 'undeployable');
+      }
+      logRow(db, id, 'deploy-gate', gate.line);
+    }
     if (options.noPush) {
       finish('abandoned', `no-push: merged ${merged.slice(0, 12)} locally, not pushed`);
-      return {id, granted: true, merged, pushed: false};
+      return {id, granted: true, merged, pushed: false, gate};
     }
     heartbeat(db, id, lease);
     const push = git(canonical, ['push', 'origin', 'main']);
@@ -1006,6 +1038,120 @@ async function commandLand(options) {
     if (row && row.state === 'granted') finish('abandoned', `error: ${error.code || 'failed'}: ${String(error.message).split('\n')[0]}`);
     throw error;
   }
+}
+
+// ---- preflight ----------------------------------------------------------------------------------
+//
+// THE PREFLIGHT LANE: run a branch's checks on its own tree, without the landing lease, and record what
+// they proved for the landing that will reuse it.
+//
+// WHY IT EXISTS. `land` runs the checks on the MERGED tree inside the canonical checkout, under the
+// one landing lease. That is correct and it is also why a session that wants to know whether its branch
+// is good has had two bad options: wait for the lease (a queue of landings behind it) or run the suite
+// by hand and have nobody be able to point at the result. Measured 2026-11-11: three sessions ran the
+// fast path in their own worktrees while one landed, the lander's retest hit `cannot fork` and was
+// refused `environment_blocked`, and two of the three results were thrown away because there was no
+// record to attach them to.
+//
+// WHAT IT IS. The same check command, on the branch's OWN worktree, at the branch's OWN tip, admitted by
+// the gate lane (scripts/gate-lane.mjs) so N preflights and a landing do not contend for the cores, and
+// on success `recordProof` for the tree's retest digest - the same evidence table `record` writes, so
+// `land --branch <name>` finds it and skips the retest it would otherwise have to run.
+//
+// WHAT IT IS NOT. It does not take the landing lease, touch the canonical checkout, merge anything or
+// push anything: it cannot block a lander, and it cannot publish. `queue` rows are untouched (the one
+// proof row IS the record). A red run records nothing and exits 1 - the check's own result, never a
+// refusal.
+const GATE_LANE = fileURLToPath(new URL('./gate-lane.mjs', import.meta.url));
+const lastLines = (text, count = 2) => String(text || '').trim().split('\n').slice(-count).join(' | ').slice(0, 300);
+
+// The worktree that holds this branch - the tree the preflight runs in. `git worktree list --porcelain`
+// is the only answer to "where is this branch checked out": a branch that is not checked out anywhere
+// can be checked by `--worktree <dir>` pointing at a clean tree already at that tip, and otherwise the
+// refusal names the command that would make one.
+function worktreeFor(repo, branch, expected) {
+  const out = gitOk(repo, ['worktree', 'list', '--porcelain']);
+  let current = null;
+  const found = [];
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) current = {path: line.slice('worktree '.length).trim(), branch: '', head: ''};
+    else if (current && line.startsWith('HEAD ')) current.head = line.slice(5).trim();
+    else if (current && line.startsWith('branch ')) current.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
+    else if (current && line.trim() === '') { found.push(current); current = null; }
+  }
+  if (current) found.push(current);
+  return found.find(entry => entry.branch === branch && entry.head === expected)
+    || found.find(entry => entry.head === expected)
+    || null;
+}
+
+async function commandPreflight(options) {
+  if (!options.branch) throw new QueueError('preflight needs --branch <name> (the branch whose tree is checked)', 75, 'usage');
+  const {repo, canonical, dir, db} = open(options);
+  // An owner is required for the proof (it is evidence: who ran what, on which tree), and it is the same
+  // harness-session check every other command makes - but no lease is taken and no queue row is made.
+  const owner = resolveOwner(options);
+  const branch = options.branch.replace(/^refs\/heads\//, '').replace(/^origin\//, '');
+  const tip = resolveCommit(canonical, options.branch) || resolveCommit(canonical, `origin/${branch}`);
+  if (!tip) throw new QueueError(`preflight: cannot resolve ${options.branch} in ${canonical}`, 75, 'preflight_branch_unknown');
+  const explicit = options.worktree ? path.resolve(options.worktree) : null;
+  let worktree = explicit ? {path: explicit, head: gitOk(explicit, ['rev-parse', 'HEAD']).trim(), branch} : worktreeFor(canonical, branch, tip);
+  if (!worktree) {
+    throw new QueueError(`preflight_worktree_required: ${branch} (${tip.slice(0, 12)}) is not checked out in a worktree of ${canonical}, so there is no tree to run its checks on.\n`
+      + `  Make one: git -C ${canonical} worktree add ../wt-${branch.replace(/[^a-z0-9]+/gi, '-')} ${branch}\n`
+      + `  Or name an existing clean tree at that tip: --worktree <dir>`, 75, 'preflight_worktree_required');
+  }
+  if (worktree.head !== tip) {
+    throw new QueueError(`preflight_worktree_moved: ${worktree.path} is at ${String(worktree.head).slice(0, 12)} and ${branch} is at ${tip.slice(0, 12)}; a preflight records a proof for the tree it ran on, so it refuses a tree that is not the branch's tip (commit, or check out the tip first)`, 75, 'preflight_worktree_moved');
+  }
+  const command = options.checks || 'bash scripts/fast.sh';
+  const log = path.resolve(options.log || path.join(dir, `preflight-${branch.replace(/[^a-z0-9]+/gi, '-')}-${tip.slice(0, 12)}.log`));
+  fs.mkdirSync(path.dirname(log), {recursive: true});
+  const quiet = options.json ? () => {} : say;
+  quiet(`preflight ${branch} (${tip.slice(0, 12)}) in ${worktree.path}: ${command} - no landing lease, admitted by the gate lane`);
+  const lane = options.lane === 'none' ? null : GATE_LANE;
+  let status;
+  let captured = '';
+  const started = Date.now();
+  if (lane && fs.existsSync(lane)) {
+    const args = [lane, 'run', '--cwd', worktree.path, '--label', `preflight:${branch}`,
+      '--log', log, '--wait-seconds', String(options.waitSeconds || 3600), '--', 'bash', '-c', command];
+    const result = spawnSync(process.execPath, args, {encoding: 'utf8', windowsHide: true,
+      env: {...process.env, WA_PREFLIGHT: '1'}});
+    status = result.status === null ? -1 : result.status;
+    captured = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+    if (status === 75 || status === 76) {
+      throw new QueueError(`preflight_lane_blocked: the gate lane refused a slot for this preflight (exit ${status}): ${lastLines(String(result.stderr || '')) || 'no reason printed'}.\n`
+        + `  The lane serializes CPU-heavy gates on this node so a landing's retest is not starved; the slot it is waiting behind is named by \`node scripts/gate-lane.mjs status\`.\n`
+        + `  To run outside the lane on purpose: --lane none (and say so in the report).`, 75, 'preflight_lane_blocked');
+    }
+  } else {
+    if (!lane && options.lane !== 'none') quiet('preflight: the gate lane is not beside this command, so the checks run unadmitted (what --lane none does)');
+    const result = spawnSync('bash', ['-c', command], {cwd: worktree.path, encoding: 'utf8', windowsHide: true,
+      env: {...process.env, WA_PREFLIGHT: '1'}});
+    status = result.status === null ? -1 : result.status;
+    captured = `${result.stdout || ''}${result.stderr || ''}`;
+    fs.writeFileSync(log, captured);
+  }
+  const took = Math.round((Date.now() - started) / 1000);
+  const run = parseCheckLog(captured, {exitCode: status});
+  // The runner's own skip count, from its summary line: a skip is not a pass, and a proof recorded
+  // over one says so rather than reading as a fully covered tree.
+  const skipped = Number((/fast path (?:ok|FAILED) \([^)]*?,\s*(\d+)\s+skipped/.exec(captured) || [])[1] || 0);
+  const digest = treeDigest(canonical, tip);
+  if (status !== 0) {
+    logRow(db, 0, 'preflight', `${owner.id} ran \`${command}\` on ${branch}@${tip.slice(0, 12)} and it FAILED (exit ${status}, ${took}s); nothing recorded. Log ${log}`);
+    const detail = describeRun(run);
+    quiet(`preflight ${branch} FAILED in ${took}s (exit ${status}); nothing was recorded, so the landing will run its own checks.${detail ? `\n${detail}` : ''}\n  log ${log}`);
+    return {id: 0, branch, tree: tip, ok: false, exit_code: status, log, seconds: took, run};
+  }
+  recordProof(db, {digest: digest.retest, tree: tip, by: owner.id, command, log: `preflight ${log}; exit 0 in ${took}s`});
+  logRow(db, 0, 'preflight', `${owner.id} proved ${branch}@${tip.slice(0, 12)} with \`${command}\` in ${took}s (retest digest ${digest.retest.slice(0, 12)}); a landing of ${branch} on this base needs no rerun. Log ${log}`);
+  const line = `preflight ${branch} (${tip.slice(0, 12)}) passed in ${took}s and recorded a proof for retest digest ${digest.retest.slice(0, 12)}: \`land --branch ${branch}\` reuses it instead of running \`${command}\` again`;
+  quiet(line);
+  quiet(`  log ${log}${skipped ? `; the run SKIPPED ${skipped} check(s) - a skip is not a pass` : ''}`);
+  return emit({id: 0, branch, tree: tip, ok: true, exit_code: 0, log, seconds: took, digest: digest.retest,
+    command, skipped, recorded: true}, options);
 }
 
 // ---- release / reconcile ------------------------------------------------------------------------
@@ -1110,13 +1256,17 @@ async function main() {
   else if (command === 'pin') result = await commandPin(options);
   else if (command === 'record') result = commandRecord(options);
   else if (command === 'land') result = await commandLand(options);
+  else if (command === 'preflight') result = await commandPreflight(options);
   else if (command === 'release') result = commandRelease(options);
   else if (command === 'reconcile') result = commandReconcile(options);
   else if (command === 'classify') result = commandClassify(options);
   else if (command === 'baseline') result = commandBaseline(options);
   else if (command === 'history') result = commandHistory(options);
-  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|record|land|release|reconcile|classify|baseline|history [options]', 75, 'usage');
+  else throw new QueueError('usage: landing-queue.mjs status|acquire|pin|record|land|preflight|release|reconcile|classify|baseline|history [options]', 75, 'usage');
   if (result && result.exit) process.exitCode = result.exit;
+  // A preflight that ran the checks and found them red is the check's own result, not a refusal: exit 1
+  // so a caller can tell it from `0 recorded` and from the named refusals (75) and lane errors (76).
+  if (command === 'preflight' && result && result.ok === false) process.exitCode = 1;
   return result;
 }
 
