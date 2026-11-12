@@ -368,11 +368,25 @@ function M.control(args,ctx)
  end
  return fail('unknown_mcp_action')
 end
+-- The connector ids whose tools are the WhatsApp surface, and are therefore NOT published through a
+-- namespace.
+--
+-- Since 11/11 (#118) WhatsApp has exactly one surface on every node, `mcp_whatsapp_<verb>`
+-- (`lua/core/whatsapp.lua`), with the same names everywhere and no hash suffix. A registry connector
+-- in this family - `whatsapp_native`, `whatsapp_wasm`, `whatsapp` - would publish the same questions a
+-- second time as `mcp_whatsapp_native_read_newest_47452e4e`, which is the spelling a model burned six
+-- calls on before guessing a phone number (session 570a0da0). It stays in the registry, it can still be
+-- probed and its rows can still be disabled by the operator, but its tools are not offered to the model
+-- and a call to one is refused with the name to use instead. The half that `mcp_command.lua` shows is
+-- the `/mcp` view, which says `superseded_by_mcp_whatsapp` rather than pretending they are callable.
+function M.whatsapp_family(id)
+ return type(id)=='string' and (id=='whatsapp' or id:sub(1,9)=='whatsapp_')
+end
 function M.schemas()
  local ready=query("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'",{})
  if #ready==0 then return {} end -- schema-only bootstrap, not a cached empty store
  local store=load_store();local schemas,seen={},{}
- for id,row in pairs(store.servers)do if row.enabled and row.probe and row.probe.ok then
+ for id,row in pairs(store.servers)do if row.enabled and row.probe and row.probe.ok and not M.whatsapp_family(id) then
   for _,tool in ipairs(row.probe.tools or {})do if row.definition.tools[tool.name] then
    local name=M.namespace(id,tool.name);if seen[name]then error('mcp_namespace_collision') end;seen[name]=true
    if type(tool.input_schema_json)~='string' then error('mcp_cached_schema_invalid') end
@@ -384,8 +398,21 @@ function M.schemas()
 end
 function M.resolve_tool(name)
  local store=load_store()
- for id,row in pairs(store.servers)do if row.enabled and row.probe and row.probe.ok then
+ for id,row in pairs(store.servers)do if row.enabled and row.probe and row.probe.ok and not M.whatsapp_family(id) then
   for _,tool in ipairs(row.probe.tools or {})do if M.namespace(id,tool.name)==name and row.definition.tools[tool.name] then return id,row,tool,store end end
+ end end
+end
+-- The one-surface replacement for a name this module no longer publishes: nil when the name is not a
+-- WhatsApp connector's tool, and the `mcp_whatsapp_<verb>` to use when it is (`lua/core/whatsapp.lua`
+-- owns the mapping, so the two cannot disagree).
+function M.whatsapp_replacement(name)
+ if type(name)~='string' or name:sub(1,4)~='mcp_' then return nil end
+ local store=load_store()
+ for id,row in pairs(store.servers)do if M.whatsapp_family(id) and row.probe then
+  for _,tool in ipairs(row.probe.tools or {})do if M.namespace(id,tool.name)==name then
+   local ok,replacement=pcall(function() return dofile('lua/core/whatsapp.lua').renamed(name) end)
+   return ok and replacement or nil
+  end end
  end end
 end
 function M.is_read(name)local id,row,tool=M.resolve_tool(name);return id~=nil and row.definition.tools[tool.name]=='read' end

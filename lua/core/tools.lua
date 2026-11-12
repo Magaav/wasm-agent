@@ -2,6 +2,8 @@
 -- masters get everything; guests get on-demand memory plus a way to list
 -- what they may do. "spells" means deterministic, verified executions only (spells.lua).
 local json = dofile("lua/vendor/json.lua")
+-- The one WhatsApp surface (#118): the nine `mcp_whatsapp_*` tools, and which node answers them.
+local whatsapp_lib = dofile("lua/core/whatsapp.lua")
 local platform = dofile("lua/core/platform.lua")
 local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
@@ -593,39 +595,14 @@ local function add_batches(list)
 end
 -- Operator batches only: guest surfaces and artifact access do not expand.
 add_batches(M.admin)
-M.admin[#M.admin+1]=schema('whatsapp_send','Send one WhatsApp message yourself, on this account, to one exact chat - any chat, as the old connector did. It is queued on the shared durable queue and sent by the wa-whatsapp component, so the answer is a job id, not a delivery: read the outcome with whatsapp_send_status. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group). The same chat+text+reply_to is one job, so a repeated call does not send twice.',{
- chat={type='string',maxLength=160,description='Exact chat JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us. A bare phone number is refused.'},
- text={type='string',maxLength=65536,description='The message body, exactly as it should appear.'},
- reply_to={type='string',maxLength=128,description='Optional message id to quote. The quoted body is not fetched, so the client shows a reference-only quote.'},
- mentions={type='array',maxItems=64,items={type='string'},description='Optional mention targets as exact user JIDs (@s.whatsapp.net or @lid); meaningful in a group.'}},{'chat','text'})
-M.admin[#M.admin+1]=schema('whatsapp_send_status','State of a message you asked whatsapp_send to send: queued, done with the message id WhatsApp gave it, or failed with a reason. An id this node never allocated is refused, not guessed.',{
- id={type='integer',minimum=1,description='The job id whatsapp_send returned.'}},{'id'})
-M.admin[#M.admin+1]=schema('whatsapp_search','Search every WhatsApp message this node has indexed: text, captions, document filenames and voice-note transcripts, accent-folded, so "acao" finds "Ação" and "relatorio" finds "Relatório.pdf". Messages of every kind are indexed (text, image, video, audio, voice note, document, sticker, location, contact card, poll) and so are edits and deletions. Narrow with at least one of q, chat, kind or from; the filters combine (since/until is a time window in epoch milliseconds, seconds accepted). The best match comes first (an exact phrase beats scattered words, a transcript or filename hit is called out), and the answer is bounded: a search that matched more than it could return says truncated=true and matched=N. Reactions are on the message they answer, not separate hits.',{
- q={type='string',maxLength=200,description='Words to look for (all of them must match). Accents and case are folded on both sides.'},
- chat={type='string',maxLength=160,description='Only this chat, as an exact JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us.'},
- kind={type='string',enum={'text','image','video','audio','voice','document','sticker','location','contact','poll','reaction','edit','delete','other'},description='Only this message kind. voice is a push-to-talk note; audio is a music file.'},
- from={type='string',maxLength=160,description='Only messages from this sender, as an exact user JID.'},
- since={type='integer',description='Earliest message time, epoch milliseconds (seconds accepted).'},
- ['until']={type='integer',description='Latest message time, epoch milliseconds (seconds accepted).'},
- limit={type='integer',minimum=1,maximum=50,description='Most hits to return (default 20).'}},nil)
-M.admin[#M.admin+1]=schema('whatsapp_read','Read one WhatsApp chat, newest message first, with reactions folded onto the messages they answer and edits/deletions visible on the message they changed. Returns has_more and next_before: pass next_before back as before to read the next older page. A message that was revoked shows deleted=true and no text.',{
- chat={type='string',maxLength=160,description='The exact chat JID to read.'},
- before={type='string',maxLength=128,description='Optional: a message id (or epoch) to read older than. Use next_before from the previous answer.'},
- limit={type='integer',minimum=1,maximum=100,description='Most messages to return (default 30).'}},{'chat'})
-M.admin[#M.admin+1]=schema('whatsapp_reactions','Who reacted to one WhatsApp message, with which emoji. A reaction that was taken back is not listed; by_emoji counts what is left.',{
- chat={type='string',maxLength=160,description='The exact chat JID of the message.'},
- id={type='string',maxLength=128,description='The message id.'}},{'chat','id'})
-M.admin[#M.admin+1]=schema('whatsapp_media','The media metadata of one indexed WhatsApp message: kind, mime, filename, size, sha256, duration, page count - or the location, contact card or poll it carries. No bytes and no media key; use whatsapp_download for the file.',{
- chat={type='string',maxLength=160,description='The exact chat JID of the message.'},
- id={type='string',maxLength=128,description='The message id.'}},{'chat','id'})
-M.admin[#M.admin+1]=schema('whatsapp_download','Decrypt the media of one indexed WhatsApp message to this node and answer with the file path (mime, filename, bytes and sha256 included). The bytes land in a bounded folder in the node components directory, not in the chat. A video larger than the decrypt bound answers download_too_large with its size instead of pretending; view-once and revoked media is never downloadable. Feed the path to OCR or transcription tools.',{
- chat={type='string',maxLength=160,description='The exact chat JID of the message.'},
- id={type='string',maxLength=128,description='The message id.'},
- max_bytes={type='integer',minimum=1,maximum=524288,description='Most plaintext bytes to fetch (default and maximum 524288).'}},{'chat','id'})
-M.admin[#M.admin+1]=schema('whatsapp_backfill','Ask the primary phone for older WhatsApp messages, so the index covers the account history and not only the live stream. Name one exact chat JID to reach back into that conversation, or name none to ask for the chats the index already knows (at most 20, newest first). The messages arrive through the normal protocol and are indexed as history, so a later whatsapp_search finds them. This is a request to the phone, not an answer: the result is the ids and counts that were asked for, plus a note when it stopped early (client offline, chat unknown, phone cannot be asked).',{
-
- chat={type='string',maxLength=160,description='Optional: one exact chat JID to reach back into. Omit to ask for the chats the index already knows.'},
- count={type='integer',minimum=1,maximum=500,description='Messages to ask for per chat (default 50, at most 500).'}},nil)
+-- WhatsApp (#118): ONE surface on every node - nine exact names, no namespace hash and no peer prefix.
+-- The schemas live in `lua/core/whatsapp.lua`, beside the routing that answers them, so the description
+-- a model reads and the call that runs cannot drift apart; this file only registers the family, the way
+-- it registers every other built-in.
+do
+  local whatsapp = dofile('lua/core/whatsapp.lua')
+  for _, entry in ipairs(whatsapp.schemas()) do M.admin[#M.admin+1] = entry end
+end
 -- Email (docs/EMAIL-CONNECTOR.md): the same two shapes as WhatsApp - an effect through the durable
 -- outbox, questions through the query queue - with the connector as the only owner of the mailbox.
 M.admin[#M.admin+1]=schema('email_send','Send one email yourself, through the durable email.outbox queue: the wa-email component submits it over SMTP and the answer here is a job id, not a delivery - read the outcome with email_send_status. Governance applies (the node policy email.send rule: rate limits, daily cap, audit), and a refusal comes back as an error word with nothing sent. Addresses are exact addr-specs (ana@example.com); a display name is refused. Attachments are small (a few KiB) and travel in the job payload as base64; bigger files are not supported yet. The same to+cc+subject+body+in_reply_to is one job, so a repeated call does not send twice.',{
@@ -815,14 +792,15 @@ local CUES = {
   integrate = "Land an orchestration worker's tested tip; never deploy",
   mcp = "List and manage MCP connectors; new or edited ones stay disabled until enabled",
   services = "List and manage long-lived WASI service components: start, stop, logs",
-  whatsapp_send = "Send one WhatsApp message to an exact chat through the durable outbox",
-  whatsapp_send_status = "Read the state of a queued WhatsApp send, with its message id when sent",
-  whatsapp_search = "Search every indexed WhatsApp message by text, chat, kind, sender or time window",
-  whatsapp_read = "Read one WhatsApp chat newest first, with reactions folded onto their messages",
-  whatsapp_reactions = "Who reacted to one WhatsApp message, with which emoji",
-  whatsapp_media = "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration",
-  whatsapp_download = "Decrypt one WhatsApp message's media to this node and return the file path",
-  whatsapp_backfill = "Ask the phone for older WhatsApp messages so search covers the account's past",
+  mcp_whatsapp_contacts = "Which WhatsApp chat a name means, with the candidates when a name is ambiguous",
+  mcp_whatsapp_search = "Search every indexed WhatsApp message by text, chat, kind, sender or time window",
+  mcp_whatsapp_read = "Read one WhatsApp chat by JID or name, newest first, with a header and a cursor",
+  mcp_whatsapp_reactions = "Who reacted to one WhatsApp message, with which emoji",
+  mcp_whatsapp_media = "The media metadata of one WhatsApp message: mime, filename, size, sha256, duration",
+  mcp_whatsapp_download = "Decrypt one WhatsApp message's media on the account node and return its file path",
+  mcp_whatsapp_backfill = "Ask the phone for older WhatsApp messages so search covers the account's past",
+  mcp_whatsapp_send = "Send one WhatsApp message to an exact chat through the durable outbox",
+  mcp_whatsapp_send_status = "Read the state of a queued WhatsApp send, with its message id when sent",
   email_send = "Send one email through the durable outbox, with the message id readable afterwards",
   email_send_status = "Read the state of a queued email send, with its message id when delivered",
   email_search = "Search every indexed email by text, sender, subject, mailbox or time window",
@@ -1345,6 +1323,13 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  -- A WhatsApp name from an older build (`whatsapp_read`, `peer_openclaw__whatsapp_read`,
+  -- `mcp_whatsapp_native_read_newest_47452e4e`) is refused with the name to use instead - and this check
+  -- comes BEFORE the code-mode fence, because that fence would gladly tell the model to call the retired
+  -- name inside a script (`#118`, `lua/core/whatsapp.lua`).
+  if whatsapp_lib.renamed(name) and not whatsapp_lib.tool(name) then
+    return whatsapp_lib.call(name, args, ctx)
+  end
   -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.
   if codemode_policy.connector(name) and codemode_policy.enforced(ctx) and not ctx.codemode_nested then
     return codemode_policy.connector_refusal(name)
@@ -1461,57 +1446,12 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   if name=='services' then
     return dofile('lua/core/services.lua').control(args,{role=role,subagent=ctx.subagent,session_id=ctx.session_id})
   end
-  if name=='whatsapp_send' or name=='whatsapp_send_status' then
-    -- The explicit WhatsApp send (docs/HOST.md, docs/SERVICE-COMPONENTS.md): the host capability
-    -- validates the JID, asks the `whatsapp.send` policy and enqueues on `wa:queue`; the component
-    -- sends it. A binary without the capability is told apart from a refusal, because "this node
-    -- cannot send" and "this send was refused" are different answers.
-    if type(host[name])~='function' then return {error=name..'_unavailable',effect='none'} end
-    local request
-    if name=='whatsapp_send' then
-      request={chat=args.chat,text=args.text,reply_to=args.reply_to,mentions=args.mentions}
-    else
-      request={id=tonumber(args.id) or args.id}
-    end
-    local ok,answer=pcall(host[name],json.encode(request))
-    if not ok then return {error=name..'_failed',detail=tostring(answer):sub(1,160),effect='none'} end
-    local decoded=json.decode(tostring(answer or ''))
-    if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
-    return decoded
-  end
-  if name=='whatsapp_search' or name=='whatsapp_read' or name=='whatsapp_reactions'
-     or name=='whatsapp_media' or name=='whatsapp_download' or name=='whatsapp_backfill' then
-    -- The message index (docs/HOST.md, docs/SERVICE-COMPONENTS.md): a question is a job on
-    -- `whatsapp.query`, answered by the wa-whatsapp component out of its own kv. A binary without the
-    -- capability is told apart from a refusal, and a slow answer comes back with its job id and
-    -- `retry` set, which the same call reads again.
-    if type(host[name])~='function' then return {error=name..'_unavailable',effect='none'} end
-    local request
-    if name=='whatsapp_search' then
-      request={q=args.q,chat=args.chat,kind=args.kind,['from']=args['from'],['since']=args['since'],['until']=args['until'],limit=args.limit}
-    elseif name=='whatsapp_read' then
-      request={chat=args.chat,before=args.before,limit=args.limit}
-    elseif name=='whatsapp_download' then
-      request={chat=args.chat,id=args.id,max_bytes=args.max_bytes}
-    elseif name=='whatsapp_backfill' then
-      -- The tool calls the per-chat count `count`; the wire carries one count field (`limit`), so the
-      -- host capability maps the name and the seam keeps one shape.
-      request={chat=args.chat,count=args.count}
-    else
-      request={chat=args.chat,id=args.id}
-    end
-    local ok,answer=pcall(host[name],json.encode(request))
-    if not ok then return {error=name..'_failed',detail=tostring(answer):sub(1,160),effect='none'} end
-    local decoded=json.decode(tostring(answer or ''))
-    if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
-    -- The account lives on exactly one node. When this one runs no component it says so and names
-    -- the owner; ask the owner here, so a caller on any node reads one answer instead of a queue
-    -- that will never settle, and the answer carries which node served it.
-    if type(decoded.error)=='string' and decoded.error:find('whatsapp_component_absent',1,true)
-       and type(decoded.owner)=='string' and decoded.owner~='' then
-      return M.whatsapp_forward(decoded,name,args)
-    end
-    return decoded
+  local whatsapp_tool = whatsapp_lib.tool(name)
+  if whatsapp_tool then
+    -- #118: the one WhatsApp surface. It answers here when this node holds the account, asks the node
+    -- that does when it is a read, and refuses an effect anywhere else - it never queues a job nothing
+    -- on this node can consume (`lua/core/whatsapp.lua`).
+    return whatsapp_lib.call(name, args, ctx)
   end
   if name=='email_send' or name=='email_send_status' then
     -- The explicit email send (docs/EMAIL-CONNECTOR.md): the host capability validates the addresses,
@@ -2164,13 +2104,21 @@ local READ_ONLY = {
   search_messages = true,
   notes_read = true, wake_list = true,
   spell_list = true, spell_get = true,
-  whatsapp_send_status = true,
-  whatsapp_search = true, whatsapp_read = true, whatsapp_reactions = true, whatsapp_media = true,
+  -- The WhatsApp reads (and a send's status) cannot undo an executed effect, so they need no fence.
+  mcp_whatsapp_contacts = true, mcp_whatsapp_search = true, mcp_whatsapp_read = true,
+  mcp_whatsapp_reactions = true, mcp_whatsapp_media = true, mcp_whatsapp_send_status = true,
   email_send_status = true,
   email_search = true, email_read = true, email_media = true,
 }
 
-function M.has_effect(name) if type(name)~='string' then return true end;if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end
+function M.has_effect(name)
+  if type(name)~='string' then return true end
+  -- The one WhatsApp surface knows its own effects: `mcp_whatsapp_read` is a read on a node whose
+  -- account it may ask a peer for, and the generic `mcp_` rule below would look it up in a registry it
+  -- is no longer part of.
+  local whatsapp_effect = whatsapp_lib.effect(name)
+  if whatsapp_effect then return whatsapp_effect ~= 'read' end
+  if name:sub(1,4)=='mcp_' then return not mcp.is_read(name) end;if name:sub(1,5)=='peer_' then return not dofile('lua/core/federation.lua').is_read(name) end;return READ_ONLY[name] ~= true end
 
 function M.start_parallel_bash(calls, memory, role, ctx)
   -- A hook layer that must see every call cannot be skipped by the parallel path: while hooks are
@@ -2371,23 +2319,6 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
   end
   if not ok then error(result) end
   return result
-end
-
-
--- The WhatsApp account lives on exactly one node. A node that runs no wa-whatsapp component answers
--- `whatsapp_component_absent` with the owner, and the question is asked there instead of queued
--- where the component will never settle. `call` is injected so the shape is tested without a peer.
-function M.whatsapp_forward(decoded, name, args, call)
-  call = call or nodeslib.remote_call
-  local ok, served = pcall(call, decoded.owner, name, args)
-  if not ok then
-    return { error = 'whatsapp_owner_unreachable', owner = decoded.owner, detail = tostring(served):sub(1, 160), effect = 'none' }
-  end
-  if type(served) ~= 'table' then
-    return { error = 'whatsapp_owner_unreachable', owner = decoded.owner, effect = 'none' }
-  end
-  if served.error == nil then served.served_by = decoded.owner end
-  return served
 end
 
 return M

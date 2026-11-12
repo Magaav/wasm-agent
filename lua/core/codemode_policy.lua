@@ -87,6 +87,9 @@ function M.connector_index(catalog)
    local text=tostring(f.description or '')
    local server=text:match('^MCP (%S+) / ([^:]+):')
    if not server then server=text:match('^%[on peer ([^%]]+)%]');if server then server='peer '..server end end
+   -- One surface, one line: the nine `mcp_whatsapp_*` names are the same family on every node (#118), so
+   -- they are grouped under the surface rather than listed as nine unrelated connectors.
+   if not server and name:sub(1,12)=='mcp_whatsapp' then server='whatsapp' end
    server=server or name
    if not groups[server] then groups[server]={};order[#order+1]=server end
    local list=groups[server];list[#list+1]=name
