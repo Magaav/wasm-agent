@@ -487,6 +487,9 @@ round-boundary steering, not per-keystroke interruption.
   under its heading, replaced in place as its facts change (`""` takes it away);
   `transcript_head(text)` rewrites the current block's first line, which is how a heading printed
   when the call started gets its outcome dot when the result lands.
+  `transcript_copy(markers)` marks lines of the NEXT write as copyable - `[{at, text}]`, the line of
+  that write and the text a click on its copy icon puts on the clipboard (OSC 52): a fenced block in
+  the chat copies itself, and a press anywhere but the icon is still a selection (#114).
   `transcript_hold(on)` keeps writes undrawn until it is released, then draws once (a resumed
   session's replay); while the chat follows the bottom only the rows on screen are wrapped.
   `status_snapshot(spec)` stores the `/status` panel; `/status` submitted while a run is in
@@ -803,6 +806,7 @@ terminal_size        device
 terminal_write       device
 ticker               device
 transcript_block     device
+transcript_copy      device
 transcript_head      device
 transcript_hold      device
 transcript_live      device
@@ -818,6 +822,7 @@ whatsapp_read        read-only
 whatsapp_message     read-only
 whatsapp_search      read-only
 whatsapp_backfill    network
+whatsapp_contacts    read-only
 email_send           network
 email_send_status    read-only
 email_search         read-only
@@ -983,7 +988,7 @@ the component writes still passes the kernel's opaque-send cap, so an explicit s
 [GRANT-POLICY.md](GRANT-POLICY.md#the-shipped-default) has the rule, and
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) has the component side.
 
-## WhatsApp message index (`host.whatsapp_search`, `read`, `message`, `reactions`, `media`, `download`)
+## WhatsApp message index (`host.whatsapp_contacts`, `search`, `read`, `message`, `reactions`, `media`, `download`)
 
 Six read-shaped capabilities over the index the `wa-whatsapp` component keeps of **every** message it
 receives (text, image, video, audio and voice notes, documents, stickers, locations, contact cards,
@@ -995,8 +1000,9 @@ consumes as a `worker` and settles with `done(answer)` - see
 
 | capability | arguments | answers |
 | --- | --- | --- |
-| `whatsapp_search` | `q?, chat?, kind?, from?, since?, until?, limit` (one of the four narrowings is required) | `hits[{chat, id, ts, sender, kind, text, score, media?}], count, matched, candidates, truncated` |
-| `whatsapp_read` | `chat, before?, limit` | `messages[...]` newest first, `has_more`, `next_before`; reactions folded onto what they answer |
+| `whatsapp_contacts` | `q?, limit` | `candidates[{chat, type, name, name_source, matched, confidence, messages, last_at, at_local, at_iso, names[], jid?}], count, matched, ambiguous, truncated`, and `chat` when one match is clear |
+| `whatsapp_search` | `q?, chat?, kind?, from?, since?, until?, limit` (one of the four narrowings is required) | `hits[{chat, chat_name, id, at, at_local, at_iso, from{jid,name,own}, kind, text, text_truncated, full?, reply_to?, media?, score}], count, matched, candidates, truncated` |
+| `whatsapp_read` | `chat (an exact JID **or a name**), before?, limit` | `header{chat, type, name, name_source, messages, unread:null, participants?}`, `resolved?` (how a name became a chat), `messages[...]` newest first in the shape above, `has_more`, `next_before`; reactions folded onto what they answer |
 | `whatsapp_message` | `chat, id` | `message{chat, id, ts, sender, sender_name, kind, text, own, edited?, deleted?, unsupported?, source?}` with the **full stored text** - the exact value an operator reply source and a sent-message echo are compared against |
 | `whatsapp_reactions` | `chat, id` | `reactions[{sender, emoji, ts}], count, by_emoji` |
 | `whatsapp_media` | `chat, id` | the media metadata: `mime, filename, size, sha256, duration_s, pages`, plus place/contact/poll |
@@ -1018,7 +1024,8 @@ and the direct path never appear in an answer, only in the component's own names
 The wait is bounded. If the component has not answered within two seconds the call returns
 `whatsapp_<op>_slow` with the job `id` and `retry: true`; the same call again reads the same job
 (the dedupe key is the request), so a slow answer is never a lost one. A refusal names itself
-(`whatsapp_search_empty_query`, `whatsapp_read_bad_chat`, `whatsapp_download_not_indexed`,
+(`whatsapp_search_empty_query`, `whatsapp_read_bad_chat`, `whatsapp_read_chat_ambiguous`,
+`whatsapp_read_chat_not_found`, `whatsapp_download_not_indexed`,
 `whatsapp_download_too_large` with `size` and `max_bytes`, …) and every one of them has `effect:
 "none"`. No capability here logs a message or a chat: the component's lines carry ids, kinds and
 counts.

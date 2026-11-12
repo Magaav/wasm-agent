@@ -62,9 +62,17 @@ local function check_case(label, role, sections, declared, catalog, mode)
     ok(role_catalog[name], label .. ": instructions name `" .. name .. "`, which is not a " .. role .. " tool")
   end
   if mode == "progressive" then
+    local policy = dofile("lua/core/codemode_policy.lua")
     for name in pairs(permitted) do
       if not declared[name] and name ~= "tool_call" and name ~= "tool_search" and tools.snippet(name) then
-        ok(indexed[name], label .. ": permitted tool `" .. name .. "` is missing from the on-demand index")
+        -- A connector tool (`mcp_*`, `peer_*`, and the one WhatsApp surface `mcp_whatsapp_*`) is named
+        -- in the code-mode connector index, which a run carries when code mode is pinned - and it is
+        -- deliberately left out of this built-in index (`agent.deferred_index`), because a connector is
+        -- found through `tool_search` and called from a script. The item here is that no *built-in* is
+        -- unreachable; the connector index completeness is `scripts/test-codemode-boundary.lua` and
+        -- `scripts/test-whatsapp-one.lua`.
+        ok(indexed[name] or policy.connector(name),
+          label .. ": permitted tool `" .. name .. "` is missing from the on-demand index")
       end
     end
   end

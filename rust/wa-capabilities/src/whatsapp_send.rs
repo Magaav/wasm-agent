@@ -27,6 +27,10 @@
 //! What this module must never do: put message text in an answer it logs, or in a queue alert reason.
 //! The payload is the text's only home (the queue's kv, until the job is settled and reaped), and every
 //! answer here is an id, a state, a count or a stable word.
+//!
+//! The one refusal that comes before the policy check is the absent component: a node that runs no
+//! `wa-whatsapp` writes no job, because the queue it would write to has no worker and a `queued` job
+//! nobody can cancel is an inert artifact rather than a send (#99).
 use serde_json::{json, Value};
 use wa_queue::{EnqueueRequest, JobId, Queue};
 use wa_whatsapp_outbox as outbox;
@@ -89,6 +93,32 @@ fn send(request: &Value) -> Value {
             return json!({"ok": false, "error": refusal.error(), "detail": refusal.detail, "effect": "none"})
         }
     };
+
+    // A node that runs no `wa-whatsapp` component sends nothing, and must not queue anything either:
+    // the queue it would write to has no worker on it, so the job would sit `queued` for ever (#99,
+    // `docs/WHATSAPP-CUTOVER.md`). The answer is the same word the read path uses, with the owner the
+    // deploy named, so a caller can take the question - and the send - to the node that holds the
+    // account instead of leaving an inert artifact behind on this one.
+    if let Some((state, owner)) = crate::whatsapp_query::component_missing() {
+        let detail = match &owner {
+            Some(owner) => format!(
+                "this node runs no {COMPONENT} component, so it cannot send; the WhatsApp account is served by {owner}"
+            ),
+            None => format!("this node runs no {COMPONENT} component, so it cannot send"),
+        };
+        let mut answer = json!({
+            "ok": false,
+            "error": "whatsapp_component_absent",
+            "detail": detail,
+            "effect": "none",
+            "component": COMPONENT,
+            "state": state,
+        });
+        if let Some(owner) = owner {
+            answer["owner"] = json!(owner);
+        }
+        return answer;
+    }
 
     // Governance first: nothing is written to the queue for a request the node refuses, so a spent
     // budget does not leave a job behind for the component to discover.

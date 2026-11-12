@@ -563,6 +563,10 @@ function M.render(text, opts)
   local base = opts.style
   local lines = split_lines(text)
   local out = {}
+  -- Every fenced block, where its title row lands in `out` and what the block holds (#114): the
+  -- transcript draws a copy affordance there and a click puts this text on the clipboard. `at` is
+  -- 0-based within the rendered rows, which is what the host counts in the write that draws it.
+  local copies = {}
 
   local function push(segments, prefix, prefix_style)
     local body = layout(tokens_of(segments), prose_width, prefix)
@@ -617,6 +621,7 @@ function M.render(text, opts)
       if #out > 0 and out[#out] ~= "" then out[#out + 1] = "" end
       local label = lang ~= "" and (" " .. lang) or ""
       out[#out + 1] = paint(indent .. "\226\148\140\226\148\128" .. label, "mdCodeBlockBorder")
+      copies[#copies + 1] = { at = #out - 1, text = table.concat(body, "\n") }
       local bar = paint(indent .. "\226\148\130 ", "mdCodeBlockBorder")
       for _, code_line in ipairs(body) do
         local parts = { bar }
@@ -693,7 +698,7 @@ function M.render(text, opts)
   end
 
   while #out > 0 and out[#out] == "" do out[#out] = nil end
-  return table.concat(out, "\n")
+  return table.concat(out, "\n"), copies
 end
 
 -- Plain text, wrapped to a width, with an indent. For text that is not markdown (a model's

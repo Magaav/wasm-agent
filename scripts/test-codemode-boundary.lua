@@ -39,7 +39,7 @@ check(grants.ok and granted:find('"role":"master"',1,true)~=nil,'capabilities ex
 local widened=run('return JSON.stringify(["shell","client","spell_save","spell_run","operation","resource"].map(n=>n in tools));')
 check(widened.ok and tostring(widened.value):find('[true,true,true,true,true,true]',1,true),'effects, shell/client, spells and multi-action tools are callable inside: '..json.encode(widened):sub(1,300))
 -- ...but discoverable, with its route (29/10): never indistinguishable from "does not exist".
-local found=run('const s=await searchTools("subagent"); const d=await describeTool("session_worktree"); const all=await searchTools("*",{limit:200}); return JSON.stringify({s:s.tools.find(t=>t.name==="subagent"),d,listed:all.tools.filter(t=>t.callable===false).map(t=>t.name)});')
+local found=run('const s=await searchTools("subagent"); const d=await describeTool("session_worktree"); const all=await searchTools("*",{limit:200}); return JSON.stringify({s:s.find(t=>t.name==="subagent"),d,listed:all.filter(t=>t.callable===false).map(t=>t.name)});')
 local fv=found.value;for _=1,2 do if type(fv)=='string' then fv=json.decode(fv) end end;fv=type(fv)=='table' and fv or {}
 check(fv.s and fv.s.callable==false and tostring(fv.s.route):find('Direct call only',1,true) and fv.s.schema,'searchTools finds an outside tool with schema and route: '..json.encode(found):sub(1,400))
 check(fv.d and fv.d.callable==false and fv.d.parameters and tostring(fv.d.route):find('Direct call only',1,true),'describeTool gives an outside tool its schema and route')

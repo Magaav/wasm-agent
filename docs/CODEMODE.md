@@ -16,9 +16,59 @@ VMs/handles stay interpreter-thread local and require a scope hash for every act
 
 ## Tool behavior
 
-`await tools.<name>(args)`, `text`, return, console, store/load, searchTools and describeTool are available. No classifiers/image generation, implicit paid models, arbitrary native host objects, Node or ambient network/filesystem are injected. Guest-local searchTools/describeTool describe only that guest's approved targets; discovery never calls or loads the ordinary envelope facade. Control-plane operations remain ordinary outside the guest. Guest profile/catalogue excludes recursion/delegation/integration/worktree-control facades. Image output is not yet enabled. All admitted effects are serial; simultaneous independent read execution is not claimed. Unawaited pending calls at completion are explicitly not admitted; completed earlier native effects are never rolled back/replayed after script failure.
+`tools.<name>(args)`, `text`, return, console, store/load, searchTools, describeTool, `results` and `parallel` are available. No classifiers/image generation, implicit paid models, arbitrary native host objects, Node or ambient network/filesystem are injected. Guest-local searchTools/describeTool describe only that guest's approved targets; discovery never calls or loads the ordinary envelope facade. Control-plane operations remain ordinary outside the guest. Guest profile/catalogue excludes recursion/delegation/integration/worktree-control facades. Image output is not yet enabled. All admitted effects are serial; simultaneous independent read execution is not claimed. A call still in flight when the script body ends is admitted and awaited (see *Natural promises*); a call queued by a script that **fails** is still reported unexecuted and never admitted, and completed earlier native effects are never rolled back/replayed after script failure.
 
 Admission rechecks deadline/cancellation before every queued native call, including after a slow prior tool. A native dispatcher exception has an explicitly unknown effect and forbids replay. All call attempts, including refusals, retain raw argument/result references and a separate journal; admitted native tool spans remain distinguishable from attempts. Nested full originals are hash-addressed and nested tool start/end events are durable. Only selected script output enters the model-facing result; ordinary50KiB output projection remains. Filtering is an opt-in awareness risk, not lossless compression; hidden acceptance and late-caveat fixtures must demonstrate task outcomes. Stores are snapshot/scoped derived state and commit only on successful script completion.
+
+## Natural promises (11/11, #119)
+
+A script is one async function, and the node wraps the model's text in a small ergonomics layer before
+either loop sees it (`lua/core/codemode_harness.lua`: a prologue and an epilogue of **text**, prepended and
+appended, so the native guest and the component's guest get the same behaviour without touching the
+checksum-pinned Pi prelude or the host ABI). The layer costs one line of offset in a stack frame: a
+script's own line 1 is line 2 of the compiled source.
+
+* A returned Promise - and Promises inside arrays and objects, to a bounded depth - is settled before
+  the script's value is reported. `return searchTools("*")` answers the list.
+* Calls still in flight when the body ends are awaited, never reported
+  `script_finished_before_admission`. This replaces the earlier rule that an unawaited call was simply
+  not admitted: the calls a script has already made are the calls it meant to make.
+* `text`, `store`, `console` and the returned value settle a pending value themselves, and keep the
+  order the script wrote them in.
+* A pending value used as if it had settled (`.map`, a property, `for…of`) throws a `TypeError` that
+  names the call and what was used on it, instead of answering `undefined`. A call settles only while
+  the script waits for it, so JavaScript's own rule still applies: to *use* a value in an expression,
+  `await` it.
+* Deliberate concurrency is unchanged and measurable: `Promise.all([...])` and `parallel([...])` hand
+  every call to the loop in one round (asserted from the sandbox's own event stream in
+  `scripts/test-codemode-promises.lua`), where two `await`s hand one each.
+* `searchTools(...)` answers a plain ARRAY of `{name, description, callable, route, execution}`
+  (+`schema` for an exact batch or a keyword hit), paged with `{limit, offset}`; an unknown name in a
+  batch is a member of that array marked `missing` with its nearest permitted names. The shape is
+  documented where the model asks for it: `describeTool("searchTools")`.
+
+## Always fresh, explicit reuse (11/11, #120)
+
+Every call executes, every time - within a turn and across turns. There is no implicit cache anywhere,
+because "sometimes models want to recheck if something turned out differently, so caching risks breaking
+awareness" (the operator's decision, 11/11). Reuse happens only when a script asks for it:
+
+* `results.get(sha256)` returns `{ok,hash,value}` with the full prior result behind a hash from
+  `calls[]`/`attempts[]`, `results.last(n,{tool})` lists the newest journal rows, and
+  `results.diff(a,b)` answers `{same,count,changed:[{path,before,after}]}` for two result hashes.
+* `tools.x(args,{reuse:"60s"})` returns the newest identical prior **read** younger than that age,
+  marked `{reused_from, age_s}`, and otherwise runs fresh - nothing is dispatched when it hits.
+* A fresh **read-only** call that repeats an identical earlier one carries `prior:{call, age_s, same}`,
+  where `same` compares the result hashes: the answer a model needs in order to decide whether the
+  world moved. "Read-only" is the node's own classifier (`orchestration_mode.effectful`), so an effect
+  is never compared or reused - "the same result" would be a claim about the world.
+* Both are backed by one bounded, per-scope journal in `memory.meta`
+  (`lua/core/codemode_results.lua`, 200 rows of name + two hashes + time + verdict); the result bytes
+  themselves are already retained by hash in the node's tool-results directory, so nothing here is a
+  second copy of a result.
+* Repeated identical reads are counted in telemetry (`codemode_repeat` with `same`, and `codemode_reuse`
+  with `hit`), so the value of explicit reuse is measurable rather than asserted
+  (`scripts/test-codemode-reuse.lua`).
 
 ## Peers and discovery (29/10)
 

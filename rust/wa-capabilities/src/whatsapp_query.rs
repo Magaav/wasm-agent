@@ -61,9 +61,17 @@ pub extern "C-unwind" fn search(l: *mut wa_host_support::lua::LuaState) -> std::
     answer(l, seam::Op::Search)
 }
 
-/// `host.whatsapp_read({chat, before?, limit})`.
+/// `host.whatsapp_read({chat, before?, limit})` - `chat` is an exact JID or a name to resolve.
 pub extern "C-unwind" fn read(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
     answer(l, seam::Op::Read)
+}
+
+/// `host.whatsapp_contacts({q?, limit?})` - which chats the index knows, by the name it observed.
+///
+/// The question that turns "Laura" into a chat (or into the several chats it could be), so a caller
+/// never has to guess a number from a name.
+pub extern "C-unwind" fn contacts(l: *mut wa_host_support::lua::LuaState) -> std::os::raw::c_int {
+    answer(l, seam::Op::Contacts)
 }
 
 /// `host.whatsapp_message({chat, id})` - one exact message, full stored text.
@@ -106,14 +114,20 @@ pub extern "C-unwind" fn backfill(l: *mut wa_host_support::lua::LuaState) -> std
 
 // ---- one query ---------------------------------------------------------------------------------
 
-/// The honest answer when this node runs no `wa-whatsapp` component.
+/// Why this node cannot answer a WhatsApp question at all, when it cannot: `Some((state, owner))`
+/// means the `wa-whatsapp` component - the only thing that reads the index, sends from the outbox
+/// and asks the phone - is not running here, so nothing on this node can settle the work.
 ///
-/// A question whose worker does not exist anywhere on this node is not slow: queueing it can only
-/// end in `..._slow` and a retry that reads the same idle job. The account lives on exactly one
-/// node, so the answer names it when the node was told (`WASM_AGENT_WHATSAPP_OWNER`) instead of
-/// pretending the job is in flight. A CLI or `WA_SCRIPT` process has no registry of its own and is
-/// skipped: only the serving node may call its own absent component absent.
-fn component_absent(op: seam::Op) -> Option<Value> {
+/// `owner` is the node that was *told* it holds the account (`WASM_AGENT_WHATSAPP_OWNER`), which is
+/// the deploy's own statement, never a guess from a name. `None` for the state means a CLI or
+/// `WA_SCRIPT` process, which has no registry of its own and is skipped: only the serving node may
+/// call its own absent component absent.
+///
+/// This is shared with `whatsapp_send` on purpose. A send issued on a node that runs no component
+/// used to enqueue on that node's queue, where no worker exists: durable, never delivered, and
+/// impossible to cancel once the tool had answered (#99). A node that cannot answer must not write
+/// a job at all.
+pub(crate) fn component_missing() -> Option<(String, Option<String>)> {
     if !crate::serve::serving() {
         return None;
     }
@@ -122,13 +136,25 @@ fn component_absent(op: seam::Op) -> Option<Value> {
         return None;
     }
     let owner = std::env::var("WASM_AGENT_WHATSAPP_OWNER").ok().filter(|value| !value.trim().is_empty());
+    Some((status["state"].as_str().unwrap_or_default().to_string(), owner))
+}
+
+/// The honest answer when this node runs no `wa-whatsapp` component.
+///
+/// A question whose worker does not exist anywhere on this node is not slow: queueing it can only
+/// end in `..._slow` and a retry that reads the same idle job. The account lives on exactly one
+/// node, so the answer names it when the node was told (`WASM_AGENT_WHATSAPP_OWNER`) instead of
+/// pretending the job is in flight. A CLI or `WA_SCRIPT` process has no registry of its own and is
+/// skipped: only the serving node may call its own absent component absent.
+fn component_absent(op: seam::Op) -> Option<Value> {
+    let (state, owner) = component_missing()?;
     let detail = match &owner {
         Some(owner) => format!("this node runs no {COMPONENT} component; the WhatsApp account is served by {owner}"),
         None => format!("this node runs no {COMPONENT} component"),
     };
     let mut answer = seam::refusal(op, "whatsapp_component_absent", detail);
     answer["component"] = json!(COMPONENT);
-    answer["state"] = status["state"].clone();
+    answer["state"] = json!(state);
     if let Some(owner) = owner {
         answer["owner"] = json!(owner);
     }

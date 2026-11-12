@@ -5,6 +5,11 @@ local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local presentation=dofile('lua/core/codemode_view.lua')
+-- The ergonomics layer the model's script is wrapped in (natural promises, explicit reuse) and the
+-- per-scope journal that `results`/`{reuse}`/`prior` read. Both are this node's own code, so both
+-- are testable from this tree (`scripts/test-codemode-promises.lua`, `scripts/test-codemode-reuse.lua`).
+local harness=dofile('lua/core/codemode_harness.lua')
+local session_results=dofile('lua/core/codemode_results.lua')
 -- Discovery spellings are parsed in one place: searchTools({names={...}}) and searchTools("select:a,b") are
 -- the same request as tool_search, so the guest cannot drift from the outer facade (07/11).
 local envelope=dofile('lua/core/envelope.lua')
@@ -137,7 +142,7 @@ end
 -- The node's own globals, answered here because they read the living registry and the retained
 -- evidence: `capabilities()`/`describe()` are the host capability inventory, `showCall` and
 -- `describeTool("showCall")` are the presentation's.
-local function host_global(name, params, calls, selected, lookup)
+local function host_global(name, params, calls, selected, lookup, ctx, journal)
   if name == 'showCall' then return presentation.select(calls, selected, params) end
   -- `describeTool(name)` is the definition the catalogue holds for that name - callable, or outside
   -- with its route. It answered `presentation.help` for every argument, so a component-path script
@@ -153,6 +158,7 @@ local function host_global(name, params, calls, selected, lookup)
   -- (`wa capabilities --json`: audio, disk, http), which is a different question under the same name
   -- (measured 11/11). `describe()` keeps the inventory.
   if name == 'capabilities' then return lookup.capabilities(params), true end
+  if name == 'results' then return session_results.answer(type(params) == 'table' and params[1] or nil, ctx, journal) end
   local value, success = inventory.global(name, params)
   if value == nil then return { error = 'codemode_global_not_available' }, false end
   return value, success
@@ -168,6 +174,11 @@ local function tool_lookup(catalog,execution,dispatch)
   -- from the catalogue. Without this the native path answered `unknown_tool` for it (measured 11/11 by
   -- scripts/test-codemode-presentation.lua).
   if wanted=='showCall' then return presentation.help end
+  -- The guest's own built-ins answer through the same door: a model that has just been handed a plain
+  -- array or a `results` object asks `describeTool("searchTools")`/`describeTool("results")` for its
+  -- shape, and used to be told `unknown_tool` because neither is a tool in the catalogue (11/11).
+  if wanted=='searchTools' then return presentation.searchtools_help end
+  if wanted=='results' then return session_results.HELP end
   for _,schema in ipairs(catalog)do
    local f=schema['function']
    if f.name==wanted then
@@ -212,11 +223,14 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
  -- One lookup for both paths: the definition a name has, callable or fenced-with-route, or the
  -- nearest permitted names when there is none.
  local lookup=tool_lookup(catalog,execution,dispatch)
- local globals={{name='searchTools',spread=true},{name='describeTool',spread=false},{name='showCall',spread=false},
+ local globals={{name='searchTools',spread=true},{name='results',spread=true},{name='describeTool',spread=false},{name='showCall',spread=false},
   -- Introspection of what this node can do, for a workflow that would otherwise guess. They read
   -- the host capability registry and nothing else: no authority moves, no effect is admitted.
   {name='capabilities',spread=false},{name='describe',spread=false}}
  local selected={}
+ -- One journal per script, loaded from the scope's own metadata and written back once the script is
+ -- over - success or failure, because a call that *ran* is what `prior`/`{reuse}` ask about later.
+ local journal=session_results.load(memory,scope)
  local store_key='codemode-store.v1:'..scope
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
  local spec={owner=scope,tools=descriptors,globals=globals,store=store,code=args.code,timeout_ms=args.timeout_ms or 30000}
@@ -292,13 +306,17 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
      elseif wanted then
       if options.limit~=nil and (type(options.limit)~='number' or options.limit%1~=0 or options.limit<1 or options.limit>8) then value={error='invalid_tool_search_limit'};success=false
       else
-       local tools,missing={},{}
+       -- A plain ARRAY, in the order asked for: a script that listed the catalogue asked for a list,
+       -- and `searchTools({names=...}).map(...)` answered "not a function" on the old envelope
+       -- ({tools=...,matches=...}). An unknown name is a member of that array, marked `missing` with
+       -- the nearest permitted names, so one shape answers every spelling.
+       local tools={}
        for _,name in ipairs(wanted)do
         local entry=searchable(name)
-        if entry then tools[#tools+1]=entry else local echo=envelope.echo_name(name);missing[#missing+1]={name=echo,suggestions=envelope.nearest(echo,catalogue,3)} end
+        if entry then tools[#tools+1]=entry
+        else local echo=envelope.echo_name(name);tools[#tools+1]={name=echo,missing=true,suggestions=envelope.nearest(echo,catalogue,3)} end
        end
-       value={tools=tools,matches=#tools,missing=missing,requested=#wanted,
-        invocation='Guest-local metadata only; every entry listed here is callable in this script (callable:false entries run outside, see route). Native current-catalog/profile/type/effect checks apply to each call.'};success=true
+       value=tools;success=true
       end
      elseif listing then
       if type(limit)~='number' or limit%1~=0 or limit<1 or limit>200 or type(offset)~='number' or offset%1~=0 or offset<0 then value={error='invalid_tool_search_limit'};success=false
@@ -312,8 +330,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
         local def=definitions[names[i]] or outside[names[i]];local text=tostring(def.schema['function'].description or '')
         page[#page+1]={name=def.name,description=text:match('^[^\n]*'):sub(1,200),execution=execution(def.name),callable=outside[def.name]==nil,route=outside[def.name] and outside[def.name].route or nil}
        end
-       value={tools=page,matches=#names,offset=offset,has_more=offset+limit<#names,
-        invocation='The whole catalogue, paged; describeTool(name) gives the full schema. callable:false entries run outside the script: their route says how. Native checks apply to each call.'};success=true
+       value=page;success=true
       end
      elseif type(query)~='string' or #query>256 then value={error='tool_search_query_required'};success=false
      elseif type(limit)~='number' or limit%1~=0 or limit<1 or limit>8 then value={error='invalid_tool_search_limit'};success=false
@@ -330,11 +347,15 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
       for _,def in pairs(outside)do consider(def,def.route) end
       table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
       local found={};for i=1,math.min(limit,#matches)do found[i]=matches[i];found[i].score=nil end
-      value={tools=found,matches=#matches,invocation='Guest-local metadata only; callable:false entries run outside the script (see route). Native current-catalog/profile/type/effect checks apply to each call.'};success=true
+      value=found;success=true
      end
     elseif call.name=='describeTool' then
      local name=type(params)=='string' and params or (type(params)=='table' and params[1]) or nil
      value=name==nil and presentation.help or lookup.describe(name);success=true
+    elseif call.name=='results' then
+     -- The retained results and this session's journal: `results.get`/`last`/`diff`/`reuse`. Read-only
+     -- over records the node already keeps; it dispatches nothing and admits nothing.
+     value,success=session_results.answer(type(params)=='table' and params[1] or nil,ctx,journal)
     elseif call.name=='capabilities' then
      value,success=lookup.capabilities(params),true
     elseif call.name=='describe' then
@@ -365,6 +386,11 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
        local called,result=pcall(dispatch,def.name,params,call.args);admitted=true
        if called then
         value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
+        -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one
+        -- comes back with `prior:{call, age_s, same}`, and the repeat is counted in telemetry.
+        value=session_results.record(ctx,journal,{id=call.id,tool=def.name,args=host.sha256(call.args or '{}'),
+         args_value=params,result=host.sha256(json.encode(value)),ok=success},value)
+        success=type(value)~='table' or (not value.error and value.ok~=false)
        else value={error=tostring(result),effect='unknown',replay_allowed=false};success=false end
        local encoded=json.encode(value);local reference=output.store(encoded)
        calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference}
@@ -390,6 +416,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
    memory.meta_set(store_key,json.encode(store))
   end
  end)
+ session_results.save(memory,scope,journal)
  local closed=json.decode(host.quickjs('close',json.encode({id=sandbox,owner=scope})))
  if not closed.ok then return {ok=false,error='codemode_close_failed',detail=closed.error,items=items,calls=calls}end
  local skipped={};for _,call in ipairs(pending)do skipped[#skipped+1]={id=call.id,name=call.name,executed=false,effect='none',reason='script_finished_before_admission'}end
@@ -429,6 +456,11 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
  local cache
  do local ok,value=pcall(function()return dofile('lua/core/paths.lua').cache()end);if ok and type(value)=='string' then cache=value..'/codemode' end end
+ -- The lookup the globals this loop owns are answered through, exactly as the native loop builds it:
+ -- `describeTool` for a name the component does not answer (the guest's own built-ins, an unknown
+ -- name) and `capabilities()` dispatch through here. Without it those answers were looked up in a nil
+ -- local and the script fell back to the native path (measured by the parity suite).
+ local lookup=tool_lookup(catalog,execution,dispatch)
  local opened,open_reason=seam({op='open',session=session,owner=scope,code=args.code,
   timeout_ms=args.timeout_ms or 30000,catalogue=entries,store=store,
   wasm_path=policy.wasm_path,prelude_path=policy.prelude_path,module_cache=cache})
@@ -443,6 +475,9 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
  end
  -- Live from here on: a failure is reported, never replayed.
  local items,calls,attempts={},{},{}
+ -- The same journal the native loop keeps, for the same scope: `prior`/`{reuse}`/`results` answer
+ -- identically whichever loop drove the script (scripts/test-codemode-parity.lua compares the two).
+ local journal=session_results.load(memory,scope)
  local function failed(message)
   -- A live script whose component stopped answering: the calls already dispatched may have had
   -- effects, so this is `unknown` and it is never replayed (docs/CODEMODE.md).
@@ -483,7 +518,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
      if step.kind=='host_global' then
       local called,params=pcall(global_params,argument_text)
       if not called then error(params) end
-      value,success=host_global(step.name,params,calls,selected,lookup)
+      value,success=host_global(step.name,params,calls,selected,lookup,ctx,journal)
      elseif step.refusal then
       value,success=refusal_value(step.refusal),false
      else
@@ -503,6 +538,9 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
          local called,result=pcall(dispatch,step.name,params,argument_text)
          admitted=true
          if called then value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
+          value=session_results.record(ctx,journal,{id=step.id,tool=step.name,args=host.sha256(argument_text or '{}'),
+           args_value=params,result=host.sha256(json.encode(value)),ok=success},value)
+          success=type(value)~='table' or (not value.error and value.ok~=false)
          else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
          local encoded=json.encode(value);local reference=output.store(encoded)
          calls[#calls+1]={id=step.id,name=step.name,ok=success,evidence=reference}
@@ -543,6 +581,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
   unexecuted=report.unexecuted or {},backend=opened.backend or 'rust-wasip2-wa:codemode',
   sandbox_calls=report.sandbox_calls,
   context_policy='only script output is model-facing; complete nested originals are retained by hash'}
+ session_results.save(memory,scope,journal)
  local presented,view=pcall(presentation.finish,result,selected)
  if presented then return view end
  result.ok=false;result.presentation_partial=true;result.presentation_error=tostring(view)
@@ -557,6 +596,11 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
  if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
  if type(args.code)~='string' or args.code=='' then return {error='codemode_source_required'} end
+ -- The model's source is wrapped in this node's ergonomics layer before either loop sees it: the
+ -- harness is prepended and appended as TEXT, so it reaches the native guest and the component's guest
+ -- alike, and the script's own line 1 is line 2 of what the interpreter compiles
+ -- (lua/core/codemode_harness.lua). A copy, so the decorated source never becomes the tool's args.
+ args={code=harness.decorate(args.code),timeout_ms=args.timeout_ms}
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
  if seam_component() then

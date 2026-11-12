@@ -1108,11 +1108,14 @@ end
 -- that returns (or a real tool behind the fallthrough) fails the fast path.
 local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true, edit=true,
   ls=true, grep=true, bash=true, shell=true, client=true,
-  -- The message index (2026-11-10). The account lives on the one node that runs wa-whatsapp,
-  -- and a master must be able to ask it from anywhere - that is what "reach the WhatsApp
-  -- connector from any master" means. Read-only questions only: the send path and the phone
-  -- backfill stay behind the owning node's own tools.
-  whatsapp_search=true, whatsapp_read=true, whatsapp_reactions=true, whatsapp_media=true,
+  -- The one WhatsApp surface (#118, 11/11). The account lives on the one node that runs wa-whatsapp,
+  -- and a master must be able to ask it from anywhere - that is what "one surface on every node" means:
+  -- the master's own `mcp_whatsapp_*` tool asks this node, which is where the account is. Reads only:
+  -- `download` writes a file on the node that runs it, `backfill` asks the phone and `send` is an
+  -- effect on the account, so each of those stays behind the owning node's own tool (the facade refuses
+  -- them elsewhere, naming the owner, instead of queueing a job nothing here can consume - #99).
+  mcp_whatsapp_contacts=true, mcp_whatsapp_search=true, mcp_whatsapp_read=true,
+  mcp_whatsapp_reactions=true, mcp_whatsapp_media=true,
   -- Connector federation (lua/core/federation.lua): a master uses every peer's connectors as its
   -- own, run where they live. The handler itself refuses any caller whose role is not master, so
   -- admitting the capability admits masters only - and each tool still runs under the peer's own

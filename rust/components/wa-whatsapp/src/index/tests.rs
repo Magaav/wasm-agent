@@ -982,21 +982,222 @@ fn a_legacy_group_chat_a_search_hit_names_is_a_chat_every_question_accepts() {
     let cold = block_on(history::anchors(&store, Some(LEGACY), 50)).unwrap();
     assert_eq!(cold[0].chat, LEGACY);
 
-    // 7. The refusals did not move: a bare number, a hyphen on a person's server, two hyphens, an empty
-    //    half and an unsendable server are still refused, with the same word the seam uses.
+    // 7. The refusals did not move: an address-shaped string is judged by the exact-JID rule and
+    //    nothing else, so a hyphen on a person's server, two hyphens, an empty half and an unsendable
+    //    server are still refused with the same word the seam and `chat::jid` use - in every op.
     for (bad, code) in [
-        ("5511999999999", "bad_chat"),
         ("9999999999999-9999999999999@s.whatsapp.net", "bad_chat"),
         ("1-2-3@g.us", "bad_chat"),
         ("-1@g.us", "bad_chat"),
         ("1-@g.us", "bad_chat"),
         ("120363000000000001@newsletter", "unsupported_chat"),
     ] {
-        let request = seam::Request { op: "read".into(), chat: Some(bad.into()), ..Default::default() };
-        assert_eq!(request.validate().unwrap_err().code, code, "{bad}");
+        for op in ["read", "contacts", "message", "backfill"] {
+            let request = seam::Request { op: op.into(), chat: Some(bad.into()), ..Default::default() };
+            assert_eq!(request.validate().unwrap_err().code, code, "{op} {bad}");
+        }
         assert_eq!(chat::jid(bad).unwrap_err(), code, "{bad}");
     }
+    // A bare number has no `@`, so it is a *name* to resolve, never an address to invent: `read` and
+    // `contacts` accept it as a question (`chat_name`), and the one JID conversion still refuses to
+    // turn it into a chat, which is what keeps a send from guessing a recipient.
+    let numeric = seam::Request { op: "read".into(), chat: Some("5511999999999".into()), ..Default::default() };
+    assert_eq!(numeric.validate().expect("a name to resolve").chat_name.as_deref(), Some("5511999999999"));
+    assert_eq!(chat::jid("5511999999999").unwrap_err(), "bad_chat");
+    let send = seam::Request { op: "search".into(), chat: Some("5511999999999".into()), q: Some("x".into()), ..Default::default() };
+    assert_eq!(send.validate().unwrap_err().code, "bad_chat", "a search filter is an exact chat");
     // Nothing was written for a refused request, and the thread is still the one message.
     let answer = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some(LEGACY.into()), ..Default::default() }))).unwrap();
     assert_eq!(answer["count"], 1, "{answer}");
+}
+
+// ---- names: the question #117 was opened for -----------------------------------------------------
+
+const LAURA: &str = "5511977777777@s.whatsapp.net";
+const BRUNO: &str = "5511966666666@s.whatsapp.net";
+const LAURA_TWO: &str = "5511955555555@s.whatsapp.net";
+const FAMILY: &str = "120363000000000777@g.us";
+
+/// One message from `name` in a direct chat: the shape a contact's own message arrives in (the sender
+/// is the chat, and the envelope carries their push name).
+fn direct(chat: &str, name: &str, id: &str, ts: i64, body: &str) -> Record {
+    let envelope = Envelope {
+        chat: chat.into(),
+        id: id.into(),
+        sender: chat.into(),
+        own: false,
+        group: false,
+        ts,
+        received: ts + 5,
+        push_name: name.into(),
+        ..Default::default()
+    };
+    let message = wap::Message { conversation: Some(body.to_string()), ..Default::default() };
+    record::from_message(&envelope, &message)
+}
+
+fn base() -> i64 {
+    1_760_000_000_000
+}
+
+#[test]
+fn a_name_resolves_to_the_one_chat_that_carries_it() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+    block_on(put(&store, &direct(BRUNO, "Bruno", "B1", base() + 1, "oi"))).unwrap();
+
+    // Case and accents do not matter: the name is folded the same way a token index folds it.
+    let answer = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), q: Some("LAURA".into()), ..Default::default() }))).unwrap();
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["chat"], LAURA, "one exact match is also the chat");
+    assert_eq!(answer["ambiguous"], false);
+    let candidate = &answer["candidates"][0];
+    assert_eq!(candidate["chat"], LAURA);
+    assert_eq!(candidate["type"], "person");
+    assert_eq!(candidate["name"], "Laura");
+    assert_eq!(candidate["name_source"], "push_name");
+    assert_eq!(candidate["confidence"], "exact");
+    assert_eq!(candidate["jid"], LAURA);
+    assert!(candidate["at_iso"].as_str().unwrap().ends_with('Z'), "a time a reader can place: {candidate}");
+
+    // A partial spelling is a different confidence, and says so instead of pretending to be exact.
+    let partial = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), q: Some("lau".into()), ..Default::default() }))).unwrap();
+    assert_eq!(partial["count"], 1, "{partial}");
+    assert_eq!(partial["candidates"][0]["confidence"], "prefix");
+    assert_eq!(partial["candidates"][0]["matched"], "Laura");
+
+    // With no query at all the answer is the chats the index knows, most recently heard from first.
+    let all = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), ..Default::default() }))).unwrap();
+    assert_eq!(all["count"], 2, "{all}");
+    assert_eq!(all["candidates"][0]["chat"], BRUNO, "the newest chat first");
+}
+
+#[test]
+fn two_chats_with_the_same_name_are_candidates_and_never_a_pick() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+    block_on(put(&store, &direct(LAURA_TWO, "Laura", "L2", base() + 1, "oi"))).unwrap();
+
+    let answer = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), q: Some("Laura".into()), ..Default::default() }))).unwrap();
+    assert_eq!(answer["count"], 2, "{answer}");
+    assert_eq!(answer["ambiguous"], true);
+    assert!(answer.get("chat").is_none(), "two Lauras: no chat is picked for the caller");
+
+    // A read by that name refuses with the candidates rather than reading whichever sorted first.
+    let ambiguous = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some("Laura".into()), ..Default::default() }))).unwrap();
+    assert_eq!(ambiguous["ok"], false, "{ambiguous}");
+    assert_eq!(ambiguous["error"], "whatsapp_read_chat_ambiguous");
+    let candidates = ambiguous["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    // Reading one of them by its exact JID is the way on, and it works.
+    let one = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some(LAURA.into()), ..Default::default() }))).unwrap();
+    assert_eq!(one["count"], 1, "{one}");
+}
+
+#[test]
+fn a_name_nobody_carries_is_an_honest_none() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+
+    let answer = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), q: Some("Zeca".into()), ..Default::default() }))).unwrap();
+    assert_eq!(answer["count"], 0, "{answer}");
+    assert!(answer.get("chat").is_none());
+    assert!(answer["note"].as_str().unwrap().contains("no chat in this index"), "{answer}");
+
+    let missing = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some("Zeca".into()), ..Default::default() }))).unwrap();
+    assert_eq!(missing["error"], "whatsapp_read_chat_not_found");
+}
+
+#[test]
+fn a_group_is_named_by_the_subject_this_node_fetched_and_by_nothing_else() {
+    let store = Memory::new();
+    // A group message carries the *sender's* push name; a group is never named after a member.
+    block_on(put(&store, &text("G1", base(), "bom dia a todos"))).unwrap();
+    let unnamed = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), q: Some("Ana".into()), ..Default::default() }))).unwrap();
+    assert_eq!(unnamed["candidates"][0]["chat"], CHAT);
+    assert_eq!(unnamed["candidates"][0]["name"], "", "a group has no name until its subject is fetched");
+    assert_eq!(unnamed["candidates"][0]["name_source"], "jid");
+    assert_eq!(unnamed["candidates"][0]["type"], "group");
+
+    // Once the subject is known (the alert path fetches it), it is the name - and a query finds it.
+    block_on(set_subject(&store, CHAT, "Família")).unwrap();
+    let named = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), q: Some("familia".into()), ..Default::default() }))).unwrap();
+    assert_eq!(named["count"], 1, "{named}");
+    assert_eq!(named["candidates"][0]["name"], "Família");
+    assert_eq!(named["candidates"][0]["name_source"], "group_subject");
+    assert_eq!(named["candidates"][0]["chat"], CHAT);
+}
+
+#[test]
+fn read_by_name_answers_with_the_header_and_the_message_shape() {
+    let store = Memory::new();
+    let mut reply = direct(LAURA, "Laura", "L2", base() + 60_000, "claro, pode ligar");
+    reply.quoted = "L1".into();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia, tudo bem?"))).unwrap();
+    block_on(put(&store, &reply)).unwrap();
+
+    let answer = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some("Laura".into()), ..Default::default() }))).unwrap();
+    assert_eq!(answer["ok"], true, "{answer}");
+    // The header names the chat, in words, and says what kind of chat it is.
+    assert_eq!(answer["header"]["chat"], LAURA);
+    assert_eq!(answer["header"]["name"], "Laura");
+    assert_eq!(answer["header"]["name_source"], "push_name");
+    assert_eq!(answer["header"]["type"], "person");
+    assert_eq!(answer["header"]["unread"], serde_json::Value::Null, "no receipt is indexed, so no count is invented");
+    // How the name became a chat is in the answer, so the caller can see it was not a guess.
+    assert_eq!(answer["resolved"]["from"], "Laura");
+    assert_eq!(answer["resolved"]["to"], LAURA);
+    assert_eq!(answer["resolved"]["confidence"], "exact");
+    // Newest first, and every message carries who/when/what in the one shape.
+    let messages = answer["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["id"], "L2");
+    assert_eq!(messages[0]["from"]["name"], "Laura");
+    assert_eq!(messages[0]["from"]["jid"], LAURA);
+    assert_eq!(messages[0]["from"]["own"], false);
+    assert!(messages[0]["at_local"].as_str().unwrap().len() == 16, "YYYY-MM-DD HH:MM: {messages:?}");
+    assert!(messages[0]["at_iso"].as_str().unwrap().ends_with('Z'));
+    // The reply quotes the message it answers, and the quote is the stored snippet.
+    assert_eq!(messages[0]["reply_to"]["id"], "L1");
+    assert_eq!(messages[0]["reply_to"]["quote"], "bom dia, tudo bem?");
+    // No protobuf noise and no key material in an answer.
+    assert!(messages[0].get("media_key").is_none());
+    assert!(messages[0].get("direct_path").is_none());
+}
+
+#[test]
+fn paging_walks_a_thread_once_with_the_cursor_the_answer_gives() {
+    let store = Memory::new();
+    for (index, body) in ["um", "dois", "tres"].iter().enumerate() {
+        let id = format!("P{index}");
+        block_on(put(&store, &direct(LAURA, "Laura", &id, base() + index as i64 * 1000, body))).unwrap();
+    }
+    let first = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some(LAURA.into()), limit: Some(2), ..Default::default() }))).unwrap();
+    assert_eq!(first["count"], 2, "{first}");
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["messages"][0]["id"], "P2", "newest first");
+    let cursor = first["next_before"].as_str().unwrap().to_string();
+    assert_eq!(cursor, "P1");
+
+    let second = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some(LAURA.into()), limit: Some(2), before: Some(cursor), ..Default::default() }))).unwrap();
+    assert_eq!(second["count"], 1, "{second}");
+    assert_eq!(second["has_more"], false);
+    assert_eq!(second["messages"][0]["id"], "P0");
+    // The pages do not overlap: every message is read exactly once.
+    assert!(second["messages"].as_array().unwrap().iter().all(|message| message["id"] != "P2"));
+}
+
+#[test]
+fn a_search_hit_names_the_chat_and_the_sender() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "S1", base(), "o boleto vence amanha"))).unwrap();
+    let answer = block_on(search(&store, &search_request("boleto"))).unwrap();
+    let hit = &answer["hits"][0];
+    assert_eq!(hit["chat"], LAURA);
+    assert_eq!(hit["chat_name"], "Laura", "a hit that only carried the JID made a reader ask who that is");
+    assert_eq!(hit["sender_name"], "Laura");
+    assert_eq!(hit["from"]["name"], "Laura");
+    assert!(hit["at_iso"].as_str().unwrap().ends_with('Z'));
+    assert!(hit.get("quoted").is_none(), "not a reply, so no reply key");
 }

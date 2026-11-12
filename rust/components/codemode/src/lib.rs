@@ -105,6 +105,14 @@ fn tools_json(catalogue: &Catalogue) -> String {
     //
     // The order is the node's (`catalogue.order`): the proxy builds its table in descriptor order and
     // lists it back in its "Available: ..." message, so a different order is a different message.
+    //
+    // Every name the model can see outside is a member inside (11/11), and the one-order-driven pass
+    // below is what delivers it: a fenced entry carries its own js name and description, so *reading* it
+    // is never a TypeError that reads as "does not exist", while *calling* it answers with its route
+    // (`ToolAdmittance::Fenced`) and is never dispatched. #120's side of this merge had the same fact as
+    // a second loop appending `catalogue.outside` after the callables - which is the node's list in a
+    // different order, and, once both sides ran together, every fenced name in the table twice. One pass
+    // over the node's order is the whole table on both paths.
     let tools: Vec<Value> = catalogue
         .order
         .iter()
@@ -478,9 +486,14 @@ mod tests {
         ])
         .expect("no collision");
         let tools: Value = serde_json::from_str(&tools_json(&catalogue)).unwrap();
-        // The fenced tool is a member too (it answers with its route), exactly as the native loop's
-        // `descriptors` table has it - the parity suite compares the guest's table field for field.
-        assert_eq!(tools.as_array().unwrap().len(), 2, "every catalogue name is in the guest's tool list");
+        // Every name the model can see outside is a member inside (11/11), exactly as the native loop's
+        // guest has it, and in the node's order: `read` first because the node sent it first, the fenced
+        // `subagent` second. A fenced tool answers with its route when it is CALLED, so reading it is not
+        // a TypeError that reads as "does not exist". The two guests diverged on both facts - the member
+        // and its place - and the parity suite compared them field for field.
+        assert_eq!(tools.as_array().unwrap().len(), 2, "every catalogue name is in the guest's tool list, once: {tools}");
+        assert_eq!(tools[1]["name"], "subagent");
+        assert_eq!(tools[1]["jsName"], "subagent");
         // The descriptor is the native loop's ABI: the tool's own name AND the js identifier the guest
         // proxy exposes. Sending the js name as `name` and no `jsName` made the guest compare `undefined`,
         // so one script failed differently here than natively (caught by the parity suite).
@@ -494,12 +507,13 @@ mod tests {
             Some("Direct call only: delegation spends model calls and creates a child session: one reviewable call, never a step inside a script. End the script, then call subagent as an ordinary tool.".to_string()),
             "the fenced entry keeps the sentence that says where it runs, verbatim from lua/core/codemode.lua");
         let globals: Value = serde_json::from_str(&globals_json()).unwrap();
-        assert_eq!(globals.as_array().unwrap().len(), 5, "the native loop's five globals, name for name");
+        assert_eq!(globals.as_array().unwrap().len(), 6, "the native loop's six globals, name for name");
         assert_eq!(globals[0], json!({"name": "searchTools", "spread": true}));
-        assert_eq!(globals[1], json!({"name": "describeTool", "spread": false}));
-        assert_eq!(globals[2], json!({"name": "showCall", "spread": false}));
-        assert_eq!(globals[3], json!({"name": "capabilities", "spread": false}));
-        assert_eq!(globals[4], json!({"name": "describe", "spread": false}));
+        assert_eq!(globals[1], json!({"name": "results", "spread": true}), "the retained results and the session journal");
+        assert_eq!(globals[2], json!({"name": "describeTool", "spread": false}));
+        assert_eq!(globals[3], json!({"name": "showCall", "spread": false}));
+        assert_eq!(globals[4], json!({"name": "capabilities", "spread": false}));
+        assert_eq!(globals[5], json!({"name": "describe", "spread": false}));
     }
 
     #[test]

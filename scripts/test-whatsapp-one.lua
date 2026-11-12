@@ -1,0 +1,192 @@
+-- One WhatsApp surface, routed to the account node (#118). Hermetic: the host capability, the fleet
+-- catalog and the remote call are injected, so nothing here touches WhatsApp, a peer or the network.
+--
+-- What it pins:
+--
+--   * the family is `mcp_whatsapp_<verb>`, nine exact names, and it is the ONLY WhatsApp surface in
+--     every catalogue this node publishes - the tools the model is offered (`tools.catalog`), the tools
+--     it exports to a master (`federation.exported`) and the rows `/mcp` shows. A `peer_*` spelling, a
+--     namespace hash (`..._47452e4e`) or a bare `whatsapp_*` name appearing again fails here;
+--   * a read on a node that runs no `wa-whatsapp` component is asked of the node that holds the account,
+--     named by the deploy when it said so and found in the fleet when it did not - never hard-coded;
+--   * an effect (`download`, `backfill`, `send`) on such a node is refused with the owner named, and is
+--     never forwarded: routing it would move the effect to a machine the caller cannot see;
+--   * nothing is queued on a node that cannot settle it (#99): the answer of an absent component carries
+--     no job id, no queue and `effect: none`;
+--   * a retired spelling is refused with the name to use instead, so a session that remembers
+--     `whatsapp_read` or `peer_openclaw__whatsapp_read` recovers in one step.
+local json = dofile("lua/vendor/json.lua")
+local whatsapp = dofile("lua/core/whatsapp.lua")
+local tools = dofile("lua/core/tools.lua")
+local federation = dofile("lua/core/federation.lua")
+local command = dofile("lua/core/mcp_command.lua")
+local mcp = dofile("lua/core/mcp.lua")
+
+local checks = 0
+local function ok(value, label)
+  checks = checks + 1
+  if not value then error(label .. " - whatsapp one surface", 2) end
+end
+
+-- ---- the family, and nothing else ----------------------------------------------------------------
+local VERBS = { "contacts", "search", "read", "reactions", "media", "download", "backfill", "send", "send_status" }
+ok(#whatsapp.TOOLS == #VERBS, "nine questions, one surface")
+for _, verb in ipairs(VERBS) do
+  ok(whatsapp.name(verb) == "mcp_whatsapp_" .. verb, "the exact name of " .. verb)
+  ok(whatsapp.tool("mcp_whatsapp_" .. verb) ~= nil, "the exact name is the one the facade answers")
+end
+ok(whatsapp.tool("mcp_whatsapp_read_snapshot_deadbeef") == nil, "a hashed name is not this surface")
+ok(whatsapp.tool("peer_openclaw__whatsapp_read") == nil, "a peer-prefixed name is not this surface")
+
+-- Every catalogue this node publishes, scanned for the retired spellings. The three views are the ones
+-- a model or an operator can be handed, so a leftover in any of them is the regression this guards.
+local function retired(name)
+  name = tostring(name)
+  if name:match("^peer_[%w%-]+__whatsapp") or name:match("^peer_[%w%-]+__mcp_whatsapp") then return true end
+  if name:match("^mcp_whatsapp_%a+_%x%x%x%x%x%x%x%x$") then return true end
+  if name:match("^mcp_whatsapp_%a+_%a+_%x%x%x%x%x%x%x%x$") then return true end
+  if name:match("^whatsapp_") then return true end
+  return false
+end
+for _, item in ipairs(tools.catalog("master")) do
+  local name = item["function"].name
+  ok(not retired(name), "the model catalogue holds no retired WhatsApp spelling: " .. name)
+end
+for _, tool in ipairs(federation.exported()) do
+  ok(not retired(tool.name), "this node exports no WhatsApp tool under a second spelling: " .. tool.name)
+end
+for _, entry in ipairs(command.local_connectors({})) do
+  for _, tool in ipairs(entry.tools or {}) do
+    if entry.id ~= nil and mcp.whatsapp_family(entry.id) then
+      ok(tool.published ~= true, "a WhatsApp connector's tool is not published as callable: " .. tostring(tool.name))
+      ok(tool.note == "superseded_by_mcp_whatsapp" or entry.note == "superseded_by_mcp_whatsapp",
+        "and says why: " .. tostring(tool.name))
+    end
+  end
+end
+-- The mechanism that would recreate a hashed name for a WhatsApp connector is not called anywhere.
+ok(mcp.whatsapp_family("whatsapp_native") and mcp.whatsapp_family("whatsapp")
+  and mcp.whatsapp_family("whatsapp_wasm") and not mcp.whatsapp_family("mail")
+  and not mcp.whatsapp_family("whatsappx"), "the family rule names the WhatsApp connectors and nobody else")
+
+-- ---- who answers: the deployment's word first, the fleet second ----------------------------------
+local real_getenv = host.getenv
+local function env_with(value)
+  host.getenv = function(key)
+    if key == "WASM_AGENT_WHATSAPP_OWNER" then return value end
+    return real_getenv(key)
+  end
+end
+local function catalog_with(peers) return function() return { peers = peers } end end
+local function peer_holding(name) return { name = name, node_id = "id-" .. name, connectors = {
+  { id = "whatsapp", whatsapp_account = true } } } end
+local function peer_without(name) return { name = name, node_id = "id-" .. name, connectors = {
+  { id = "whatsapp", whatsapp_account = false } } } end
+
+env_with("openclaw")
+ok(whatsapp.owner(catalog_with({ peer_holding("other") })) == "openclaw",
+  "the owner the deploy named wins over anything the fleet says")
+env_with("")
+ok(whatsapp.owner(catalog_with({ peer_holding("openclaw"), peer_without("work") })) == "openclaw",
+  "with nothing declared, the one node that runs the component is the owner")
+ok(whatsapp.owner(catalog_with({ peer_without("work") })) == nil, "nobody holding the account is nobody")
+ok(whatsapp.owner(catalog_with({ peer_holding("a"), peer_holding("b") })) == nil,
+  "two holders are not resolved by picking the first")
+ok(whatsapp.owner(catalog_with(nil)) == nil, "an unreadable fleet is not a guess")
+env_with("")
+
+-- ---- one call: answered here, asked there, or refused with the owner -----------------------------
+local function stub(capability, answer)
+  host[capability] = function(request)
+    local decoded = json.decode(request) or {}
+    return json.encode(type(answer) == "function" and answer(decoded) or answer)
+  end
+end
+local absent = { ok = false, error = "whatsapp_component_absent", state = "disabled", owner = "openclaw", effect = "none" }
+
+stub("whatsapp_read", absent)
+local asked = nil
+local routed = whatsapp.call("mcp_whatsapp_read", { chat = "Laura" }, {
+  remote_call = function(node, name, args)
+    asked = { node = node, name = name, args = args }
+    return { ok = true, header = { name = "Laura" }, messages = {} }
+  end,
+})
+ok(asked ~= nil and asked.node == "openclaw", "a read is asked of the node that holds the account")
+ok(asked.name == "mcp_whatsapp_read", "and is asked under the same name, so one answer shape serves both")
+ok(asked.args.chat == "Laura", "the same question travels, including the name to resolve")
+ok(routed.ok == true and routed.header.name == "Laura", "the answer is passed through")
+ok(routed.served_by == "openclaw" and routed.asked_owner == "openclaw",
+  "and says which node answered it")
+
+local unreachable = whatsapp.call("mcp_whatsapp_read", { chat = "Laura" }, {
+  remote_call = function() error("no route to openclaw") end,
+})
+ok(unreachable.error == "whatsapp_owner_unreachable" and unreachable.owner == "openclaw",
+  "an unreachable owner is a named refusal")
+ok(unreachable.effect == "none" and unreachable.id == nil, "and it queues nothing")
+
+-- An effect belongs to the node that holds the account: refused there, never forwarded.
+local forwarded = 0
+stub("whatsapp_send", absent)
+local send = whatsapp.call("mcp_whatsapp_send", { chat = "5519994939204@s.whatsapp.net", text = "oi" }, {
+  remote_call = function() forwarded = forwarded + 1; return { ok = true } end,
+})
+ok(send.error == "mcp_whatsapp_send_on_the_account_node", "a send away from the account is refused: " .. json.encode(send))
+ok(send.owner == "openclaw" and send.effect == "none", "the refusal names the owner and changes nothing")
+ok(send.note:find("openclaw", 1, true) ~= nil, "and says where it must be run")
+ok(forwarded == 0, "nothing was forwarded: the effect would land on a machine the caller cannot see")
+ok(send.id == nil and send.queue == nil, "and nothing was queued on this node (#99)")
+for _, verb in ipairs({ "download", "backfill" }) do
+  stub(whatsapp.by_verb[verb].capability, absent)
+  local refused = whatsapp.call("mcp_whatsapp_" .. verb, { chat = "5511999999999@lid", id = "3EB0", count = 5 }, {})
+  ok(refused.error == "mcp_whatsapp_" .. verb .. "_on_the_account_node", verb .. " is refused away from the account")
+  ok(refused.id == nil, verb .. " queues nothing here")
+end
+
+-- Nobody named, nobody found: the refusal says how to fix it instead of queueing.
+env_with("")
+stub("whatsapp_read", { ok = false, error = "whatsapp_component_absent", state = "disabled", effect = "none" })
+local orphan = whatsapp.call("mcp_whatsapp_read", { chat = "Laura" }, { owner_catalog = catalog_with({}) })
+ok(orphan.error == "whatsapp_component_absent", "no component and no owner is still one honest word")
+ok(orphan.owner == nil and orphan.effect == "none", "with no owner invented")
+ok(orphan.note:find("WASM_AGENT_WHATSAPP_OWNER", 1, true) ~= nil, "and the next step in the note")
+
+-- ---- a retired spelling recovers in one step ------------------------------------------------------
+local renamed = {
+  ["whatsapp_read"] = "mcp_whatsapp_read",
+  ["whatsapp_search"] = "mcp_whatsapp_search",
+  ["whatsapp_send"] = "mcp_whatsapp_send",
+  ["peer_openclaw__whatsapp_read"] = "mcp_whatsapp_read",
+  ["peer_openclaw__mcp_whatsapp_native_read_newest_47452e4e"] = "mcp_whatsapp_read",
+  ["mcp_whatsapp_native_read_snapshot_47452e4e"] = "mcp_whatsapp_search",
+  ["mcp_whatsapp_native_inspect_chat_47452e4e"] = "mcp_whatsapp_read",
+  ["mcp_whatsapp_native_lookup_self_47452e4e"] = "mcp_whatsapp_contacts",
+}
+for old, expected in pairs(renamed) do
+  ok(whatsapp.renamed(old) == expected, old .. " maps to " .. expected)
+  local refusal = tools.dispatch(dofile("lua/core/memory.lua"), old, {}, "master", { user_id = "master", role = "master" })
+  ok(refusal.error == "whatsapp_tool_renamed", old .. " is refused as renamed: " .. json.encode(refusal))
+  ok(refusal.use == expected and refusal.effect == "none", old .. " names the tool to call instead")
+end
+ok(whatsapp.renamed("read") == nil and whatsapp.renamed("mcp_mail_read_deadbeef") == nil,
+  "a name from another tool is not claimed by this one")
+
+-- ---- the /mcp view says which node holds the account ----------------------------------------------
+local function holds(value)
+  local real = host.service
+  host.service = function() return json.encode({ { name = "wa-whatsapp", state = value } }) end
+  local result = whatsapp.holds_account()
+  host.service = real
+  return result
+end
+ok(holds("running") == true, "a running component means this node holds the account")
+ok(holds("disabled") == false, "a stopped component does not")
+local surface = nil
+for _, entry in ipairs(federation.connectors()) do if entry.whatsapp_account ~= nil then surface = entry end end
+ok(surface ~= nil, "the /mcp view reports the WhatsApp surface as a row")
+ok(surface.tool_count == #VERBS, "with the nine tools it gives the model")
+ok(holds("running") == true and whatsapp.holds_account() ~= nil, "the check is read from the services registry")
+
+host.getenv = real_getenv
+print("whatsapp one surface: " .. checks .. " checks passed")

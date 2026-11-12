@@ -55,8 +55,14 @@ local function run(arg,catalog)
  local result=codemode.run(memory,{code='stub'},'master',ctx,catalog,function()return catalog end,dispatch,execution)
  return captured or {},result
 end
+-- The answer is a plain array (11/11, #119): a script that asked for names got a list, and
+-- `.map` on `{tools=…}` answered "not a function". An unknown name is a member of the same array,
+-- marked `missing`, so one shape answers every spelling.
 local function names_of(value)
- local list={};for _,entry in ipairs(value.tools or {})do list[#list+1]=entry.name end;return list
+ local list={};for _,entry in ipairs(value)do if not entry.missing then list[#list+1]=entry.name end end;return list
+end
+local function missing_of(value)
+ local list={};for _,entry in ipairs(value)do if entry.missing then list[#list+1]=entry end end;return list
 end
 -- A refusal is a value on the stub transport and a thrown Error on the real one: `settle` rejects the
 -- guest promise when the tool answers success=false, and the Error's message carries the refusal JSON.
@@ -79,16 +85,15 @@ end
 local batch,batch_result=run({names={'read','grep','ls','write'}})
 check(batch.error==nil,'a guest named batch is accepted: '..json.encode(batch):sub(1,240))
 check(table.concat(names_of(batch),',')=='read,grep,ls,write','the guest batch returns the named definitions in order')
-check(batch.matches==4 and batch.requested==4,'the guest batch reports all four as matched')
-check(batch.missing and #batch.missing==0,'the guest batch has nothing missing')
-for _,entry in ipairs(batch.tools)do check(entry.callable==true and entry.schema and entry.schema['function'],'each guest entry carries its schema and is callable') end
+check(#batch==4 and #missing_of(batch)==0,'the guest batch answers exactly the four names, and nothing is missing')
+for _,entry in ipairs(batch)do check(entry.callable==true and entry.schema and entry.schema['function'],'each guest entry carries its schema and is callable') end
 check(#(batch_result.calls or {})==0,'a guest batch admits no tool call: it is metadata only')
 
 -- 2. Mixed known and unknown: the known name is there, the unknown one is in missing with suggestions.
 local mixed=run({names={'read','reed'}})
 check(table.concat(names_of(mixed),',')=='read','the known half of a guest batch is returned')
-check(#mixed.missing==1 and mixed.missing[1].name=='reed','the unknown name is reported in missing')
-check(table.concat(mixed.missing[1].suggestions,','):find('read',1,true)~=nil,'missing carries the nearest permitted names')
+check(#missing_of(mixed)==1 and missing_of(mixed)[1].name=='reed','the unknown name is reported as a missing entry')
+check(table.concat(missing_of(mixed)[1].suggestions,','):find('read',1,true)~=nil,'a missing entry carries the nearest permitted names')
 
 -- 3. The one-string spelling is the same batch.
 local selected=run('select:read, grep')
@@ -106,8 +111,8 @@ check(refusal(empty_value,empty_result)=='invalid_tool_search_names','an empty g
 -- 5. Inside the guest, "not callable here" is disclosed with its route, not hidden: parity with the
 -- existing searchTools contract, and different from a name outside the ceiling.
 local outside=run({names={'subagent'}})
-check(outside.tools[1] and outside.tools[1].name=='subagent' and outside.tools[1].callable==false,'an outside tool is returned with callable:false')
-check(tostring(outside.tools[1].route):find('Direct call only',1,true)~=nil and #(outside.missing or {})==0,'an outside tool keeps its route instead of reading as missing')
+check(outside[1] and outside[1].name=='subagent' and outside[1].callable==false,'an outside tool is returned with callable:false')
+check(tostring(outside[1].route):find('Direct call only',1,true)~=nil and #missing_of(outside)==0,'an outside tool keeps its route instead of reading as missing')
 
 -- 6. A name outside the caller's ceiling is never disclosed as a suggestion.
 local narrow={};for _,item in ipairs(all)do
@@ -115,15 +120,15 @@ local narrow={};for _,item in ipairs(all)do
  if name~='web_search' and name~='web_read' then narrow[#narrow+1]=item end
 end
 local hidden=run({names={'web_search'}},narrow)
-check(#(hidden.missing or {})==1 and hidden.missing[1].name=='web_search','a name outside the guest catalogue is reported as missing')
+check(#missing_of(hidden)==1 and missing_of(hidden)[1].name=='web_search','a name outside the guest catalogue is reported as missing')
 local leaked=false
-for _,name in ipairs(hidden.missing[1].suggestions)do if name=='web_search' or name=='web_read' then leaked=true end end
+for _,name in ipairs(missing_of(hidden)[1].suggestions)do if name=='web_search' or name=='web_read' then leaked=true end end
 check(not leaked,'a name outside the guest catalogue is never suggested back')
 
 -- 7. Keyword discovery and the paged listing are unchanged.
 local keywords=run({query='read',limit=2})
-check(#(keywords.tools or {})==2 and type(keywords.matches)=='number','keyword search still honours its limit')
+check(#keywords==2,'keyword search still honours its limit')
 local listing=run('*')
-check((listing.matches or 0)>0 and #(listing.tools or {})>0,'the catalogue listing still works')
+check(#listing>0 and listing[1].name~=nil,'the catalogue listing still works, as a plain array')
 
 print('tool_search names codemode ok ('..checks..' checks; transport='..transport..')')

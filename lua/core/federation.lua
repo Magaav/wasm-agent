@@ -37,37 +37,19 @@ end
 
 -- ---------------------------------------------------------------- peer side
 
--- The connector tools this node exports: its enabled MCP tools and its WhatsApp facade, with the tier
--- each was approved at. Exactly the names `call` accepts; nothing else is reachable through it.
--- The node's own read-only WhatsApp questions, exported beside the connector tools.
+-- The tools this node exports to a master: its enabled MCP tools and, where an operator profile is
+-- installed, the operator route - with the tier each was approved at. Exactly the names `call` accepts.
 --
--- The account lives on exactly one node, and these are the questions that path answers natively
--- (wa-whatsapp's queue), not through the MCP bridge. Measured 2026-11-10: the bridge answered
--- `connector_transport_failed` even on the machine that holds it, so a master whose only door was
--- the connector had no working WhatsApp at all. Same names the agent calls locally, so the answer
--- shape is identical whichever door a master uses.
-local NATIVE = {
-  { name = 'whatsapp_search', description = 'Search the message index this node holds (text, chat, kind, sender, time window)',
-    parameters = { type = 'object', properties = { q = { type = 'string' }, chat = { type = 'string' },
-      kind = { type = 'string' }, ['from'] = { type = 'string' }, ['since'] = { type = 'integer' },
-      ['until'] = { type = 'integer' }, limit = { type = 'integer' } } } },
-  { name = 'whatsapp_read', description = 'Read one chat newest-first from the index this node holds',
-    parameters = { type = 'object', properties = { chat = { type = 'string' }, before = { type = 'string' },
-      limit = { type = 'integer' } }, required = { 'chat' } } },
-  { name = 'whatsapp_reactions', description = 'Who reacted to one message, with which emoji',
-    parameters = { type = 'object', properties = { chat = { type = 'string' }, id = { type = 'string' } },
-      required = { 'chat', 'id' } } },
-  { name = 'whatsapp_media', description = 'Media metadata of one message (mime, filename, size, sha256)',
-    parameters = { type = 'object', properties = { chat = { type = 'string' }, id = { type = 'string' } },
-      required = { 'chat', 'id' } } },
-}
-
+-- WhatsApp is deliberately NOT here since 11/11 (#118). It used to be exported twice - as
+-- `whatsapp_search`/`read`/`reactions`/`media` under a `peer_<node>__` prefix and, through the MCP
+-- half, as `peer_<node>__mcp_whatsapp_native_read_newest_<hash8>` - and both spellings were the same
+-- four questions as the account node's own tools. A master now has ONE WhatsApp surface on its own
+-- node, `mcp_whatsapp_<verb>` (`lua/core/whatsapp.lua`), which asks the account node itself; the
+-- account node answers that capability (it is admitted in `lua/core/server.lua`) and exports nothing.
+-- `M.connectors` still reports which node holds the account, so the surface can find it without a name
+-- being hard-coded anywhere.
 function M.exported()
   local tools = {}
-  for _, tool in ipairs(NATIVE) do
-    tools[#tools + 1] = { name = tool.name, description = '[native] ' .. tool.description,
-      parameters = tool.parameters, effect = 'read' }
-  end
   local mcp = dofile('lua/core/mcp.lua')
   local ok, schemas = pcall(mcp.schemas)
   for _, schema in ipairs(ok and schemas or {}) do
@@ -92,16 +74,23 @@ function M.connectors()
     local connectors = command.local_connectors({})
     for _, entry in ipairs(connectors or {}) do list[#list + 1] = entry end
   end
-  local native = { id = 'native', name = 'WhatsApp read path (native)', transport = 'native', enabled = true,
-    state = 'enabled', tools = {}, approved = #NATIVE, discovered = #NATIVE,
-    note = 'The node\'s own WhatsApp reads, answered by its capabilities - not a registry entry, so always on.' }
-  for _, tool in ipairs(NATIVE) do
-    native.tools[#native.tools + 1] = { name = tool.name, description = '[native] ' .. tool.description,
-      schema = json.encode(tool.parameters), approval = 'read', published = true }
+  -- The one WhatsApp surface, and the one fact a peer needs about it: does this node hold the account?
+  -- It is not a registry entry and has no toggle - the component is what runs, not this row.
+  local whatsapp = dofile('lua/core/whatsapp.lua')
+  local holds = whatsapp.holds_account()
+  local surface = { id = 'whatsapp', name = 'WhatsApp (' .. #whatsapp.TOOLS .. ' tools, one surface)',
+    transport = 'native', enabled = true, state = 'enabled', tools = {}, approved = #whatsapp.TOOLS,
+    discovered = #whatsapp.TOOLS, whatsapp_account = holds,
+    note = holds
+      and 'This node runs wa-whatsapp, so it holds the account: its reads answer here and any master may ask it.'
+      or 'This node runs no wa-whatsapp component: its reads are answered by the node that holds the account.' }
+  for _, tool in ipairs(whatsapp.TOOLS) do
+    surface.tools[#surface.tools + 1] = { name = tool.name, description = tool.description,
+      schema = json.encode(tool.parameters), approval = tool.effect, published = true }
   end
-  table.sort(native.tools, function(a, b) return a.name < b.name end)
-  native.tool_count = #native.tools
-  list[#list + 1] = native
+  table.sort(surface.tools, function(a, b) return a.name < b.name end)
+  surface.tool_count = #surface.tools
+  list[#list + 1] = surface
   local profiles = M.operator_profiles()
   if next(profiles) then
     local schema = M.operator_schema(profiles)

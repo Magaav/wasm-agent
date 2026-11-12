@@ -44,7 +44,7 @@ pub const FORBIDDEN: &[&str] = &[
 
 /// The guest globals that come from the node rather than from this seam: the retained evidence behind
 /// `showCall`, and the live capability registry behind `capabilities()`/`describe()`.
-pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe"];
+pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe", "results"];
 
 /// The guest globals this seam answers, with the prelude's `spread` flag.
 ///
@@ -54,6 +54,7 @@ pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe"];
 /// defined` through the component - the parity suite compared the two and said so.
 pub const GUEST_GLOBALS: &[(&str, bool)] = &[
     ("searchTools", true),
+    ("results", true),
     ("describeTool", false),
     ("showCall", false),
     ("capabilities", false),
@@ -169,30 +170,39 @@ pub fn js_name(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
 }
 
-/// Every direct-call-only tool's reason, verbatim from `DIRECT_ONLY` in `lua/core/codemode.lua`.
+/// The reasons a tool is direct-only, sentence for sentence from `DIRECT_ONLY` in
+/// `lua/core/codemode.lua`. The fence's sentence is part of what the model reads, and the parity suite
+/// compares the two loops field for field: a second wording here is a divergence, not a variation (the
+/// suite caught exactly that once it stopped skipping this comparison - `subagent` read
+/// "Control plane: call subagent as an ordinary tool..." on this side and "Direct call only: ..." on
+/// the other).
 ///
 /// The fence itself is [`FORBIDDEN`]; this table is the sentence a refusal carries, and it is copied
 /// character for character because discovery's answer is compared field for field across the seam
 /// (`scripts/test-codemode-component.lua`): a reworded sentence here is a different fact on the two
-/// paths, and the model reads whichever path ran. `scripts/test-codemode-parity.lua` asserts the keys
-/// are exactly `codemode.DIRECT_ONLY`'s.
+/// paths, and the model reads whichever path ran. The keys are exactly `codemode.DIRECT_ONLY`'s, which
+/// `scripts/test-codemode-parity.lua` asserts on the node's side and the fence test below asserts on
+/// this one. The sentences exist once: `direct_only_reason` is a lookup in this table.
+pub const DIRECT_ONLY: &[(&str, &str)] = &[
+    ("codemode", "a script does not nest: a second sandbox inside the first would hide one effect stream behind another"),
+    ("tool_call", "the outer facade pins definitions into this session's loadout; a script calls await tools.<name>(args) directly instead"),
+    ("tool_search", "the outer facade pins definitions into this session's loadout; searchTools/describeTool answer the same question inside without changing it"),
+    ("subagent", "delegation spends model calls and creates a child session: one reviewable call, never a step inside a script"),
+    ("integrate", "landing a worker tip is a single receipted integration action, never a script step"),
+    ("session_worktree", "it allocates and owns this session's worktree; a bound root that re-points mid-script would change what every later call means"),
+    ("resume_session", "it folds another session into the conversation the script is already running in"),
+    ("session_debug", "it sets this session's recording mode: changing what is recorded mid-script makes the script its own unrecorded effect"),
+    ("session_fixture", "it exports this session as a fixture while the script is still writing that session"),
+    ("wave_autoflush", "it installs a durable wave-end obligation for the coordinator; installation is a direct receipted action"),
+    ("node_update", "it updates and restarts a node: a deployment, not a script step"),
+    ("whatsapp_send", "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call"),
+    ("email_send", "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call"),
+];
+
+/// One direct-call-only tool's reason, looked up in [`DIRECT_ONLY`] so the sentence has one copy on
+/// this side of the seam.
 pub fn direct_only_reason(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "codemode" => "a script does not nest: a second sandbox inside the first would hide one effect stream behind another",
-        "tool_call" => "the outer facade pins definitions into this session's loadout; a script calls await tools.<name>(args) directly instead",
-        "tool_search" => "the outer facade pins definitions into this session's loadout; searchTools/describeTool answer the same question inside without changing it",
-        "subagent" => "delegation spends model calls and creates a child session: one reviewable call, never a step inside a script",
-        "integrate" => "landing a worker tip is a single receipted integration action, never a script step",
-        "session_worktree" => "it allocates and owns this session's worktree; a bound root that re-points mid-script would change what every later call means",
-        "resume_session" => "it folds another session into the conversation the script is already running in",
-        "session_debug" => "it sets this session's recording mode: changing what is recorded mid-script makes the script its own unrecorded effect",
-        "session_fixture" => "it exports this session as a fixture while the script is still writing that session",
-        "wave_autoflush" => "it installs a durable wave-end obligation for the coordinator; installation is a direct receipted action",
-        "node_update" => "it updates and restarts a node: a deployment, not a script step",
-        "whatsapp_send" => "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call",
-        "email_send" => "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call",
-        _ => return None,
-    })
+    DIRECT_ONLY.iter().find(|(tool, _)| *tool == name).map(|(_, reason)| *reason)
 }
 
 /// Why a tool is not callable here, in the words the model already knows: a verbatim port of `route_of`
@@ -358,8 +368,11 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
         if options.get("limit").is_some() && !bounded(&limit, 1, 8) {
             return (json!({"error": "invalid_tool_search_limit"}), false);
         }
+        // One shape for every spelling: a plain ARRAY in the order asked for, with an unknown name a
+        // member of it rather than a second envelope. `searchTools({names:[…]}).map(…)` answered "not a
+        // function" on the old `{tools,missing,requested}` object (11/11); the shape is documented in
+        // the same place the native loop documents it (`describeTool("searchTools")`).
         let mut tools = Vec::new();
-        let mut missing = Vec::new();
         for name in &wanted {
             match (catalogue.callable(name), catalogue.fenced(name)) {
                 (Some(tool), _) => tools.push(entry(&tool.name, &tool.schema, &tool.execution, None)),
@@ -368,18 +381,11 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
                 }
                 (None, None) => {
                     let echo = echo_name(name);
-                    missing.push(json!({"name": echo, "suggestions": nearest(&echo, &catalogue.names(), 3)}));
+                    tools.push(json!({"name": echo, "missing": true, "suggestions": nearest(&echo, &catalogue.names(), 3)}));
                 }
             }
         }
-        let value = json!({
-            "tools": tools,
-            "matches": tools.len(),
-            "missing": missing,
-            "requested": wanted.len(),
-            "invocation": BATCH_INVOCATION,
-        });
-        return (value, true);
+        return (Value::Array(tools), true);
     }
 
     if listing {
@@ -409,16 +415,7 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
                 (None, None) => {}
             }
         }
-        return (
-            json!({
-                "tools": page,
-                "matches": names.len(),
-                "offset": offset,
-                "has_more": offset.saturating_add(limit) < names.len(),
-                "invocation": LISTING_INVOCATION,
-            }),
-            true,
-        );
+        return (Value::Array(page), true);
     }
 
     let query_text = match query_text {
@@ -450,32 +447,31 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
         consider(&outside.name, &outside.schema, &outside.execution, Some(&outside.route));
     }
     matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let count = matches.len();
     let found: Vec<Value> = matches.into_iter().take(limit.as_f64().unwrap_or(8.0) as usize).map(|(_, _, value)| value).collect();
-    (
-        json!({
-            "tools": found,
-            "matches": count,
-            "invocation": KEYWORD_INVOCATION,
-        }),
-        true,
-    )
+    (Value::Array(found), true)
 }
 
-/// `describeTool(name)`: `None` when the node owns the answer (`showCall`), the schema view otherwise —
-/// including the `null` an unknown name produces, which is what the native path delivers.
+/// `describeTool(name)`: `None` when the node owns the answer (a built-in, an unknown name or a
+/// missing argument - all answered by `lua/core/codemode.lua`), the schema view for a catalogue entry.
 pub fn describe_tool(catalogue: &Catalogue, params: &Value) -> Option<Value> {
     let name = match params {
         Value::String(text) => text.clone(),
         Value::Array(items) => match items.first() {
             Some(Value::String(text)) => text.clone(),
-            _ => return Some(Value::Null),
+            _ => return None,
         },
-        _ => return Some(Value::Null),
+        _ => return None,
     };
     if name == "showCall" {
         return None;
-    }    if let Some(tool) = catalogue.callable(&name) {
+    }
+    // The guest's own built-ins (`searchTools`, `results`) document their shapes in the node's own
+    // words (`lua/core/codemode_results.lua`), so this seam hands them to the loop instead of keeping a
+    // second copy of that text here.
+    if name == "searchTools" || name == "results" {
+        return None;
+    }
+    if let Some(tool) = catalogue.callable(&name) {
         return Some(json!({
             "name": tool.name,
             "description": schema_description(&tool.schema),
@@ -485,6 +481,10 @@ pub fn describe_tool(catalogue: &Catalogue, params: &Value) -> Option<Value> {
         }));
     }
     if let Some(outside) = catalogue.fenced(&name) {
+        // `execution` is the node's pre-flight status, and the native loop's `describeTool` answers it
+        // for a fenced tool as well as a callable one. Leaving it out here made the two loops answer
+        // different bytes for the same question - caught by the parity suite the moment it stopped
+        // skipping this comparison.
         return Some(json!({
             "name": outside.name,
             "description": schema_description(&outside.schema),
@@ -493,23 +493,21 @@ pub fn describe_tool(catalogue: &Catalogue, params: &Value) -> Option<Value> {
             // learns *why* a name it can see is not callable here, and the native loop's `described()`
             // returns `execution` for both views. Omitting it here made the two answers differ by one
             // field - which the parity suite compares as a hash and reported (`describeTool gives a
-            // schema`).
+            // schema`). #120 said the same thing in the assertion that reads it
+            // (`outside["execution"]["status"]`), so the two intents are this one field.
             "execution": outside.execution.json(),
             "callable": false,
             "route": outside.route,
         }));
     }
-    // A name this seam does not know is answered by the node, not here: the loop's `describeTool` returns
-    // the `unknown_tool` record with the nearest permitted names (`lua/core/codemode.lua`,
-    // `tool_lookup.described`), which is what the native path has always answered. Returning `null` here
-    // made the two paths disagree on `describeTool("no_such_tool")` - the parity suite compares the
-    // answer, not only its shape - and the loop's answer is the one the model already knows.
+    // Every other answer is the loop's, not this seam's: an unknown name (where the node answers
+    // `{error:"unknown_tool", suggestions:[…]}` from `tool_lookup.described`), no argument at all (the
+    // presentation's help), and the guest's own built-ins. This seam used to answer `null` for an
+    // unknown name while the native loop answered the error object - two answers to one question, which
+    // is what the parity suite compares and what it caught. One implementation of those answers, in
+    // `lua/core/codemode.lua`, is the only way they cannot drift.
     None
 }
-
-const BATCH_INVOCATION: &str = "Guest-local metadata only; every entry listed here is callable in this script (callable:false entries run outside, see route). Native current-catalog/profile/type/effect checks apply to each call.";
-const LISTING_INVOCATION: &str = "The whole catalogue, paged; describeTool(name) gives the full schema. callable:false entries run outside the script: their route says how. Native checks apply to each call.";
-const KEYWORD_INVOCATION: &str = "Guest-local metadata only; callable:false entries run outside the script (see route). Native current-catalog/profile/type/effect checks apply to each call.";
 
 // ----------------------------------------------------------------------------------- small pieces
 
@@ -710,10 +708,17 @@ mod tests {
         assert!(catalogue.callable("sessions").is_some(), "a read tool is callable");
         assert!(catalogue.callable("subagent").is_none(), "delegation is fenced");
         assert!(catalogue.callable("operation").is_none(), "a blocked target is fenced by status");
+        // The fence sentence is the loop's own (`lua/core/codemode.lua` DIRECT_ONLY), word for word, and
+        // the sentence table names exactly the tools the fence refuses.
         assert_eq!(catalogue.fenced("codemode").unwrap().route,
             "Direct call only: a script does not nest: a second sandbox inside the first would hide one effect stream behind another. End the script, then call codemode as an ordinary tool.");
         assert!(catalogue.fenced("tool_call").unwrap().route
             .starts_with("Direct call only: the outer facade pins definitions"));
+        let mut sentences: Vec<&str> = DIRECT_ONLY.iter().map(|(name, _)| *name).collect();
+        let mut fence: Vec<&str> = FORBIDDEN.to_vec();
+        sentences.sort();
+        fence.sort();
+        assert_eq!(sentences, fence, "the sentence table and the fence name the same tools");
         assert!(catalogue.fenced("operation").unwrap().route.starts_with("Not callable in this run: blocked"));
         assert_eq!(catalogue.fenced("tool_call").unwrap().route, route_of("tool_call", &execution("not_blocked")));
     }
@@ -736,29 +741,34 @@ mod tests {
     fn the_listing_marks_the_fence_and_pages() {
         let (value, ok) = search_tools(&catalogue(), &json!(["*", {"limit": 3}]));
         assert!(ok);
-        assert_eq!(value["matches"], 7);
-        assert_eq!(value["has_more"], true);
-        assert_eq!(value["tools"].as_array().unwrap().len(), 3);
-        assert_eq!(value["tools"][0]["name"], "codemode");
-        assert_eq!(value["tools"][0]["callable"], false);
-        assert!(value["tools"][0]["route"].as_str().unwrap().contains("a script does not nest"));
-        assert_eq!(value["tools"][2]["name"], "read");
-        assert_eq!(value["tools"][2]["callable"], true);
+        let page = value.as_array().expect("the listing is a plain array, not an envelope");
+        assert_eq!(page.len(), 3);
+        assert_eq!(page[0]["name"], "codemode");
+        assert_eq!(page[0]["callable"], false);
+        assert!(page[0]["route"].as_str().unwrap().contains("a script does not nest"), "the fence sentence is the loop's own: {page:?}");
+        assert_eq!(page[2]["name"], "read");
+        assert_eq!(page[2]["callable"], true);
+        // The page is a window on the whole catalogue, not the whole of it: all seven names are listed.
+        let (everything, listed) = search_tools(&catalogue(), &json!(["*", {"limit": 200}]));
+        assert!(listed);
+        assert_eq!(everything.as_array().unwrap().len(), 7);
+        assert_eq!(everything.as_array().unwrap().len(), catalogue().names().len());
     }
 
     #[test]
     fn a_batch_keeps_the_asked_order_and_suggests_a_correction_for_a_miss() {
         let (value, ok) = search_tools(&catalogue(), &json!([{"names": ["remote", "sesions"]}]));
         assert!(ok);
-        assert_eq!(value["requested"], 2);
-        assert_eq!(value["matches"], 1);
-        assert_eq!(value["tools"][0]["name"], "remote");
-        assert_eq!(value["missing"][0]["name"], "sesions");
-        assert!(value["missing"][0]["suggestions"].as_array().unwrap().iter().any(|s| s == "sessions"));
+        let rows = value.as_array().expect("a batch is a plain array too");
+        assert_eq!(rows.len(), 2, "the miss is a member of the same array: {value}");
+        assert_eq!(rows[0]["name"], "remote");
+        assert_eq!(rows[1]["name"], "sesions");
+        assert_eq!(rows[1]["missing"], true);
+        assert!(rows[1]["suggestions"].as_array().unwrap().iter().any(|s| s == "sessions"));
         // The string spelling is the same request.
         let (select, ok) = search_tools(&catalogue(), &json!(["select:remote,sessions"]));
         assert!(ok);
-        assert_eq!(select["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(select.as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -776,9 +786,10 @@ mod tests {
     fn a_keyword_search_ranks_a_name_hit_above_a_description_hit() {
         let (value, ok) = search_tools(&catalogue(), &json!(["session"]));
         assert!(ok);
-        assert_eq!(value["tools"][0]["name"], "sessions");
-        assert_eq!(value["matches"], 1);
-        assert_eq!(value["tools"][0]["callable"], true);
+        let rows = value.as_array().expect("a keyword search is a plain array");
+        assert_eq!(rows[0]["name"], "sessions");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["callable"], true);
     }
 
     #[test]
@@ -789,11 +800,14 @@ mod tests {
         assert!(described["parameters"]["type"] == "object");
         let outside = describe_tool(&catalogue, &json!(["subagent"])).unwrap();
         assert_eq!(outside["callable"], false);
-        assert!(outside["route"].as_str().unwrap()
-            .starts_with("Direct call only: delegation spends model calls"));
+        assert!(outside["execution"]["status"].is_string(), "a fenced tool answers the node's pre-flight status, as natively: {outside}");
+        assert!(outside["route"].as_str().unwrap().starts_with("Direct call only: delegation spends model calls"), "{}", outside["route"]);
         assert!(describe_tool(&catalogue, &json!("showCall")).is_none(), "presentation is the loop's");
+        assert!(describe_tool(&catalogue, &json!(["searchTools"])).is_none(), "searchTools' shape is the loop's one text");
+        assert!(describe_tool(&catalogue, &json!(["results"])).is_none(), "results' shape is the loop's one text");
         assert!(describe_tool(&catalogue, &json!(["nope"])).is_none(),
             "an unknown name is the node's answer (`unknown_tool` with suggestions), as it is natively");
+        assert!(describe_tool(&catalogue, &json!([42])).is_none(), "a non-string argument is the loop's answer too");
     }
 
     #[test]
@@ -824,10 +838,11 @@ mod tests {
         match interpret(&catalogue, "global", "searchTools", Some("[\"*\"]")) {
             Guest::Answered(value, ok) => {
                 assert!(ok);
-                assert_eq!(value["matches"], 7);
+                assert_eq!(value.as_array().map(|rows| rows.len()), Some(7));
             }
             other => panic!("searchTools is answered here: {other:?}"),
         }
+        assert!(matches!(interpret(&catalogue, "global", "results", Some("[{\"op\":\"last\"}]")), Guest::Host), "the retained results belong to the node");
         match interpret(&catalogue, "global", "nope", None) {
             Guest::Answered(value, ok) => {
                 assert!(!ok);

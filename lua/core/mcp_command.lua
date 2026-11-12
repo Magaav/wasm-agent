@@ -55,9 +55,15 @@ local function local_connector(mcp, server, revision)
   local definition = server.definition or {}
   local approved = definition.tools or {}
   local tools, published, seen = {}, 0, {}
+  -- A connector in the WhatsApp family is shown and still toggled by the operator, but its tools are not
+  -- offered to the model any more: since 11/11 the one WhatsApp surface is `mcp_whatsapp_<verb>`
+  -- (`lua/core/whatsapp.lua`, one exact name per question on every node). Saying so here is what keeps
+  -- `/mcp` from listing a row as "callable now" when the callable name is a different one.
+  local superseded = mcp.whatsapp_family ~= nil and mcp.whatsapp_family(server.id)
+  if superseded then published = 0 end
   local function add(tool_name, description, schema, note)
     local tier = approved[tool_name]
-    local is_published = server.enabled == true and tier ~= nil and note == nil
+    local is_published = server.enabled == true and tier ~= nil and note == nil and not superseded
     if is_published then published = published + 1 end
     tools[#tools + 1] = {
       name = mcp.namespace(server.id, tool_name), tool = tool_name,
@@ -78,12 +84,24 @@ local function local_connector(mcp, server, revision)
     end
   end
   table.sort(tools, function(a, b) return a.name < b.name end)
+  if superseded then
+    -- The reason, on every row, so an operator who wondered why the tools vanished from the catalogue
+    -- finds the answer where the connector is listed instead of guessing.
+    -- The reason is a note, never the `error` a failing probe carries: a connector the operator turned
+    -- off is still `disabled` (that is the truth about it), and one that is on but whose tools are offered
+    -- elsewhere says why next to its state.
+    for _, tool in ipairs(tools) do tool.note = tool.note or 'superseded_by_mcp_whatsapp' end
+    if server.enabled == true then
+      error = error or 'its tools are offered as mcp_whatsapp_* instead (one WhatsApp surface, #118)'
+    end
+  end
   return {
     key = server.id, id = server.id, name = server.name or server.id,
     where = 'this node', scope = 'local', transport = definition.transport or 'unknown',
     state = state, error = error, enabled = server.enabled == true,
     tool_count = published, approved = #sorted_keys(approved), discovered = #(server.probe and server.probe.tools or {}),
     revision = revision, observed = server.observed_status, last_call = server.last_call, probe = server.probe,
+    note = superseded and 'superseded_by_mcp_whatsapp' or nil,
     tools = tools,
     policy = { tier = 'mcp', managed_by = 'lua/core/mcp.lua',
       approval = 'each tool is approved locally as read or write; a connector stays disabled until a probe passed',
