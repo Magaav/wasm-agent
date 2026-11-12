@@ -343,6 +343,28 @@ function M.refusal_json(reason)
     stdout = '', stderr = reason, effect = 'none' })
 end
 
+-- A refusal from wall two is the guard talking too, and it must answer in the same shape as wall one.
+-- Wall one refuses the text it can read and returns `blocked_by=path_guard`; wall two refuses inside the
+-- shell, so what comes back is an ordinary failed command whose stderr names the guard. A caller that
+-- reads `blocked_by` (the bash tool, a test, an agent deciding whether to retry) then had to parse a
+-- message for the one wall and not the other - and the shipped canary failed on exactly that: the delete
+-- WAS refused, and the result did not say so. Naming it here, once, is what makes both walls one answer.
+--
+-- Narrowed to a command that deletes something, so a command that merely prints the prefix is not
+-- relabelled; the real code, stderr and effect are kept, because part of a command may well have run.
+local RUNTIME_REFUSAL = 'path_guard: refusing'
+
+function M.blocked(command, result)
+  if type(result) ~= 'string' or not M.deletes(command) then return result end
+  if not result:find(RUNTIME_REFUSAL, 1, true) then return result end
+  local json = dofile('lua/vendor/json.lua')
+  local decoded_ok, decoded = pcall(json.decode, result)
+  if not decoded_ok or type(decoded) ~= 'table' or decoded.blocked_by then return result end
+  decoded.blocked_by = 'path_guard'
+  decoded.blocked_reason = tostring(decoded.stderr or ''):match('path_guard:[^\n]*') or RUNTIME_REFUSAL
+  return json.encode(decoded)
+end
+
 -- Wrap `host.exec` once: wall one on the text, wall two on the resolved targets.
 function M.install(target)
   local host_table = target or host
@@ -352,7 +374,7 @@ function M.install(target)
   host_table.exec = function(command, cwd, ...)
     local ok, reason = M.command(command, cwd)
     if not ok then return M.refusal_json(reason) end
-    return raw(M.wrap(command), cwd, ...)
+    return M.blocked(command, raw(M.wrap(command), cwd, ...))
   end
   host_table.__path_guard_installed = true
   return true
