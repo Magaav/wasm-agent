@@ -48,6 +48,20 @@ end
 local function answer(name, text)
   return script(name, "printf '%s' " .. string.format('%q', text))
 end
+-- A fixture that is NOT node state, made by this test and by nobody else. Since P0b the path guard
+-- refuses `rm -rf` anywhere inside `<HOME>/.wasm-agent` (lua/core/path_guard.lua, `state_roots`), and a
+-- fast-path row's HOME is its own scratch home - so a fixture built under `paths.config()` is refused,
+-- correctly: the node's state is not a working tree. The project source a hook reads is exactly
+-- `<workdir>/.wasm-agent/hooks.json`, so the directory can live anywhere; it gets its own `mktemp -d`
+-- and a marker file, and the removal below can only ever name the directory this function returned.
+local function scratch(tag)
+  local result = decode(host.exec('mktemp -d "${TMPDIR:-/tmp}/' .. tag .. '-XXXXXX"', '', 30))
+  assert(type(result) == 'table' and result.code == 0, 'mktemp -d -> ' .. tostring(result and result.stderr))
+  local dir = tostring(result.stdout or ''):gsub('%s+$', '')
+  assert(dir ~= '' and host.write_file(dir .. '/.wa-test-scratch', 'test-hooks-component\n') ~= nil,
+    'mark the scratch directory ' .. dir)
+  return dir
+end
 
 sh("mkdir -p '" .. config .. "'")
 
@@ -449,7 +463,7 @@ if bare then
 end
 
 -- ---- 10. two sources, in order, and Claude Code behind the opt-in -------------------------------
-local project = config .. '/project-fixture'
+local project = scratch('wa-hooks-project')
 sh("mkdir -p '" .. project .. "/.wasm-agent'")
 write(project .. '/.wasm-agent/hooks.json', hooks_json({
   PreToolUse = { { name = 'project-deny', matcher = 'bash', command = answer('projectdeny', json.encode({
