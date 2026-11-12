@@ -1316,6 +1316,7 @@ do
   -- The plain layout has no host transcript to hold a live row: the heading keeps the old order.
   host.transcript_block, host.transcript_write = saved[2], saved[1]
   host.transcript_live, host.transcript_head = saved[3], saved[4]
+  host.input_editor = real_editor
   local plain, plain_written = capture({ live = false, limit = 100 })
   plain:event({ type = "tool", name = "bash", arguments = { command = "echo hi" } })
   plain:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
@@ -1434,6 +1435,97 @@ do
   host.transcript_write, host.transcript_block = saved[1], saved[2]
   host.transcript_live, host.transcript_head = saved[3], saved[4]
   host.input_editor = real_editor
+end
+
+
+-- ---- #121: a code-mode call shows its script, and what the model got back ------------------------
+-- Operator, 11/11 ~11:45: a code-mode call in the transcript showed ONE row of its script (the whole
+-- program clipped into `code=...`, `lua/core/cli_view.lua`'s unknown-tool path) and nothing of what
+-- it returned, so a call that rewrote three files read as one truncated line and its answer was only
+-- available through `/console`. Three rows now, the rest behind the transcript's fold (Right expands
+-- the topic), and under them the value the model received.
+do
+  local SCRIPT = "const files = await tools.ls({path: 'lua/core'});\n"
+    .. "const hits = files.filter(f => f.endsWith('.lua'));\n"
+    .. "await tools.read({path: 'lua/core/chat.lua'});\n"
+    .. "return {count: hits.length, first: hits[0]};\n"
+    .. "// the rest of a longer script\n"
+    .. "// and one more line"
+
+  -- The transcript: the block is the heading, then the script's three rows (the fold's three), and
+  -- the result under them - which is what `wa_term::transcript` then folds and expands.
+  local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head }
+  local fake = fake_transcript()
+  host.transcript_block, host.transcript_write = fake.block, fake.write
+  host.transcript_live, host.transcript_head = fake.live, fake.head
+  local view, written = capture({ live = true, stdout = true, limit = 120,
+    rows = function() return 24 end, now = function() return 700 end })
+  local real_editor = host.input_editor
+  host.input_editor = function() return true end
+  view.editor = true
+  view:prompt("wa> ")
+  view:event({ type = "tool", name = "codemode", arguments = { code = SCRIPT } })
+  local block = fake.blocks[#fake.blocks]
+  eq(#block.lines, 4, "the call's block is the heading and three script rows: " .. #block.lines)
+  ok(has(visible(block.lines[1]), "Codemode("), "the heading is the call: " .. visible(block.lines[1]))
+  ok(has(visible(block.lines[2]), "tools.ls") and has(visible(block.lines[4]), "chat.lua"),
+    "and the three rows are the script's own first three: "
+      .. visible(table.concat(block.lines, " | ")))
+  ok(not has(visible(table.concat(block.lines, "\n")), "one more line"),
+    "the rest is not written: the fold names it, so it is expanded, not lost")
+  view:event({ type = "tool_result", name = "codemode",
+    result = { ok = true, value = { count = 2, first = "chat.lua" } } })
+  local shown = visible(table.concat(fake.blocks[1].lines, "\n"))
+  ok(has(shown, '"count":2'), "the value the model received is under the script: " .. shown)
+  ok(has(shown, "exit") or has(shown, "1ms") or has(shown, "ms"), "beside the call's elapsed time")
+  eq(#fake.blocks[1].lines, 4 + 2, "heading, three script rows, the value and the summary: "
+    .. #fake.blocks[1].lines)
+  host.transcript_block, host.transcript_write = saved[2], saved[1]
+  host.transcript_live, host.transcript_head = saved[3], saved[4]
+  host.input_editor = real_editor
+
+  -- The plain layout has no fold: three rows, then how many it left out.
+  local plain, plain_written = capture({ live = false, limit = 120 })
+  plain:event({ type = "tool", name = "codemode", arguments = { code = SCRIPT } })
+  plain:event({ type = "tool_result", name = "codemode", result = { ok = true, value = { count = 2 } } })
+  local text = visible(table.concat(plain_written))
+  ok(has(text, "Codemode(") and has(text, "tools.ls") and has(text, "chat.lua"),
+    "a captured transcript shows the script too: " .. text)
+  ok(has(text, "\226\128\166 +3 lines"), "and names the three rows it did not print")
+  ok(has(text, '"count":2'), "with the value under them")
+
+  -- What the rows are: the first `count`, and how many were left for the fold/marker.
+  local rows, hidden = view_lib.code_rows({ code = SCRIPT }, 3)
+  eq(#rows, 3, "a six-line script is three rows in the block")
+  eq(hidden, 3, "and three left for the fold to name")
+  ok(has(rows[1], "tools.ls") and has(rows[3], "chat.lua"),
+    "in the order the model wrote them: " .. table.concat(rows, " | "))
+  eq(#select(1, view_lib.code_rows({ code = "one line" }, 3)), 1, "a one-line script is one row")
+  eq(#select(1, view_lib.code_rows({ code = "" }, 3)), 0, "an empty script adds no row at all")
+  eq(#select(1, view_lib.code_rows({ code = "a\n\n\n" }, 3)), 1,
+    "trailing blank lines are not rows: a script's last newline is not a line")
+  local encoded = view_lib.code_rows({ code = { "a", "b" } }, 3)
+  ok(#encoded == 1 and has(encoded[1], '"a"'), "a script that is not text is still shown: "
+    .. tostring(encoded[1]))
+  -- The heading: the script's first line, not `code=const files = await tools.ls(...) ...`.
+  local label, inside = view_lib.tool_title("codemode", { code = SCRIPT }, 96)
+  eq(label, "Codemode", "a code-mode call is titled Codemode")
+  ok(has(inside, "tools.ls") and not has(inside, "code="),
+    "and named by the script's first line: " .. tostring(inside))
+
+  -- What the model received: the script's value first (it is the one fact the tool returns to the
+  -- model), then its error, then its nested calls - never the journal beside them.
+  local preview = view_lib.preview("codemode", { value = { count = 2, first = "a.lua" },
+    calls = { { name = "ls" }, { name = "read" } } }, 3)
+  eq(#preview, 1, "a value is one row")
+  ok(has(preview[1], '"count":2'), "as the JSON the model was given: " .. tostring(preview[1]))
+  local failed_preview = view_lib.preview("codemode", { error = "codemode_stalled" }, 3)
+  ok(#failed_preview == 1 and has(failed_preview[1], "codemode_stalled"),
+    "a failed script says why: " .. tostring(failed_preview[1]))
+  local calls_preview = view_lib.preview("codemode", { calls = { { name = "read", ok = true },
+    { name = "bash", ok = false } } }, 3)
+  ok(#calls_preview >= 2 and has(calls_preview[1], "2 calls") and has(calls_preview[3], "bash (failed)"),
+    "with no value, what it did is what it says: " .. table.concat(calls_preview, " | "))
 end
 
 if failed > 0 then

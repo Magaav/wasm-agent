@@ -296,6 +296,10 @@ function M.call_line(name, args, limit)
     return clip(a.id or "", limit)
   elseif name == "remote" or name == "client" or name == "operation" then
     return clip((a.action or a.capability or "") .. (a.node and (" " .. a.node) or ""), limit)
+  elseif name == "codemode" then
+    -- A script is not an argument to summarise: its first line names it, and the rows under the
+    -- heading are the script itself (`M.code_rows`, #121).
+    return clip(M.code_rows(a, 1)[1] or "", limit)
   end
   -- Unknown tool (a plugin, a new capability): show its first scalar arguments rather
   -- than nothing, because a name alone does not say what was asked for.
@@ -310,12 +314,38 @@ function M.call_line(name, args, limit)
   return clip(table.concat(parts, " "), limit)
 end
 
+-- A code-mode call's script, as rows (#121). The reader saw ONE row of it - the whole script clipped
+-- into `code=...` - so a call that rewrote three files read as a single truncated line, and the
+-- script itself was only available through `/console`. The block gets the first `count` lines (three
+-- in the transcript, where the fold shows three rows and `->` expands the rest), and the count of
+-- what it left out for the caller's `... +N lines` marker.
+--
+-- `json.encode` is the fallback for a script that arrives as anything but text: a model that sent
+-- `arguments` in another shape still gets its call shown rather than an empty block.
+function M.code_rows(args, count)
+  local a = (type(args) == "table") and args or {}
+  local code = a.code
+  if code == nil and type(a.script) == "string" then code = a.script end
+  if code == nil then return {}, 0 end
+  if type(code) ~= "string" then code = json.encode(code) end
+  local lines = {}
+  for line in (tostring(code):gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = (line:gsub("%s+$", ""))
+  end
+  while #lines > 0 and lines[#lines] == "" do table.remove(lines) end
+  local rows, hidden = {}, 0
+  for index, line in ipairs(lines) do
+    if index <= (count or 3) then rows[#rows + 1] = line else hidden = hidden + 1 end
+  end
+  return rows, hidden
+end
+
 -- The call as a heading, the way Claude Code writes one: a capitalised tool name and what it was
 -- given in parentheses - `Bash(npm test)`, `Read(src/main.rs)`, `Search(pattern: "foo")`.
 local TITLE = {
   bash = "Bash", shell = "Bash", read = "Read", write = "Write", edit = "Update", grep = "Search",
   ls = "List", subagent = "Task", skill = "Skill", recall = "Recall", remember = "Remember",
-  search_messages = "Search", remote = "Remote", client = "Client",
+  search_messages = "Search", remote = "Remote", client = "Client", codemode = "Codemode",
 }
 
 -- The tool that actually ran. `tool_call` routes a call to another tool by name, and `remote` runs
@@ -489,7 +519,23 @@ function M.preview(name, result, lines, args)
   end
   local r = (type(result) == "table") and result or {}
   local text = ""
-  if name == "bash" or name == "shell" then
+  if name == "codemode" then
+    -- What the MODEL received (#121): the script's value - the one fact the tool returned to it -
+    -- then its error, then how many nested calls it made. The model never sees the journal this
+    -- result also carries (`calls`, `items`, `attempts`), so the CLI shows the model's own view of
+    -- the call rather than a summary of it.
+    local value = r.value
+    if value ~= nil then text = (type(value) == "string") and value or json.encode(value) end
+    if tostring(text):gsub("%s", "") == "" and r.error ~= nil then text = tostring(r.error) end
+    if tostring(text):gsub("%s", "") == "" and type(r.calls) == "table" and #r.calls > 0 then
+      text = string.format("%d call%s", #r.calls, #r.calls == 1 and "" or "s")
+      for _, call in ipairs(r.calls) do
+        if type(call) == "table" and call.name then
+          text = text .. "\n" .. tostring(call.name) .. (call.ok == false and " (failed)" or "")
+        end
+      end
+    end
+  elseif name == "bash" or name == "shell" then
     text = tostring(r.stdout or "")
     if text:gsub("%s", "") == "" then text = tostring(r.stderr or "") end
   elseif r.error then
@@ -1634,6 +1680,22 @@ function METHODS:tool_live(text)
   pcall(host.transcript_live, tostring(text or ""))
 end
 
+-- A code-mode call's script, written into the call's own block (#121): the first `count` rows under
+-- the heading - three, which is what the transcript's fold shows - and, where nothing folds (the
+-- plain layout), a `\u{2026} +N lines` marker for the rest. The colour is the code block's own, so a
+-- script reads as one thing rather than as prose with a basename in front of it.
+function METHODS:code_block(name, args, count, marker)
+  if M.target(name, args) ~= "codemode" then return 0 end
+  local rows, hidden = M.code_rows(args, count or 3)
+  for _, line in ipairs(rows) do
+    self:write(paint("  " .. M.clip(line, math.max(8, self.limit - 2)), "mdCodeBlock", self.live) .. "\n")
+  end
+  if marker and hidden > 0 then
+    self:write(paint("\226\128\166 +" .. hidden .. " lines (/console shows all)", "dim", self.live) .. "\n")
+  end
+  return #rows
+end
+
 -- The call's heading rewritten once its result is in, so that row's dot can say how it went.
 function METHODS:tool_head(text)
   if not (self:transcript() and host and host.transcript_head) then return end
@@ -1884,6 +1946,8 @@ function METHODS:event(event)
       self:topic(true)
       self.pending.block, self.pending.shown = true, true
       self:line(paint(DOT, "muted", self.live) .. " " .. self:call_heading(label, inside))
+      -- A code-mode call's script, under its heading: three rows, the rest folded (#121).
+      self:code_block(self.pending.name, event.arguments, 3, false)
       local live = self:tool_line()
       if live then self:tool_live(live.text) end
     end
@@ -1919,6 +1983,10 @@ function METHODS:event(event)
       self:topic(true)
       self:line(paint(DOT, ok and "success" or "error", self.live) .. " " .. self:call_heading(pending.label, pending.inside))
     end
+    -- The script of a code-mode call, where the block was not opened when the call started (the plain
+    -- layout, and a transcript with no live row): the heading is on screen now, the script goes under
+    -- it, and the result follows (#121).
+    if not pending.block then self:code_block(name, pending.arguments, 3, true) end
     -- In the transcript a tool call is a topic that folds to three rows, so it keeps more of the
     -- output for when it is expanded.
     local preview, hidden = M.preview(name, event.result, self:transcript() and 200 or 3, pending.arguments)

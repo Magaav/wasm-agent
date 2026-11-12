@@ -415,6 +415,32 @@ mod tests {
         assert!(open.contains("four") && open.contains("answer"), "{open}");
         assert!(!t.focus_next() && t.focus.is_none(), "Down past the newest topic leaves the transcript");
     }
+    /// #121 (operator, 11/11 ~11:45): a code-mode call shows three rows of its script while it is
+    /// collapsed, and the whole of it once the reader selects and expands it. The view writes what
+    /// `cli_view.code_block` gives it - the heading, three rows of the script, then the result - and
+    /// the fold here is what turns that into "three rows, then how much is behind them".
+    #[test]
+    fn a_code_mode_call_folds_to_three_rows_of_its_script_and_expands_to_all_of_it() {
+        let mut t = Transcript::default();
+        t.block(true);
+        t.write("\u{23fa} Codemode(const files = await tools.ls({path: 'lua/core'});)\n");
+        t.write("  const files = await tools.ls({path: 'lua/core'});\n");
+        t.write("  const hits = files.filter(f => f.endsWith('.lua'));\n");
+        t.write("  await tools.read({path: 'lua/core/chat.lua'});\n");
+        t.write("\u{23bf} {\"count\":2}\nexit 0 \u{b7} 812ms\n");
+        let folded = t.view(100, 10).join("\n");
+        assert!(folded.contains("tools.ls") && folded.contains("endsWith") && folded.contains("chat.lua"),
+            "the three script rows are what a collapsed call shows: {folded}");
+        assert!(!folded.contains("count") && folded.contains("+2 lines"),
+            "the rest is counted, not lost: {folded}");
+        assert!(t.focus_prev(), "the call is a topic: Ctrl+Up selects it");
+        t.set_expanded(true);
+        let open = t.view(100, 14).join("\n");
+        assert!(open.contains("const files") && open.contains("endsWith")
+            && open.contains("chat.lua") && open.contains("\"count\":2"),
+            "expanded: the whole script and the value the model received: {open}");
+        assert!(!open.contains("+2 lines"), "and nothing left hidden: {open}");
+    }
     #[test]
     fn the_view_is_bottom_anchored_and_keeps_a_focused_topic_on_screen() {
         let mut t = Transcript::default();
