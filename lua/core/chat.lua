@@ -112,7 +112,7 @@ function M.run(argv)
   -- Session selection. A new thread is the default; `--continue` resumes the
   -- most recent one; `--session <id>` picks exactly that one. A bare word is the
   -- first prompt, so a launcher can start the agent with work already queued.
-  local session_id, resume_last, prompt = nil, false, {}
+  local session_id, resume_last, prompt, once = nil, false, {}, false
   local index = 2
   while argv[index] do
     local arg = argv[index]
@@ -121,6 +121,11 @@ function M.run(argv)
       index = index + 2
     elseif arg == "--continue" or arg == "-c" then
       resume_last = true
+      index = index + 1
+    elseif arg == "--once" or arg == "-p" or arg == "--print" then
+      -- The explicit form of what a non-terminal stdin already means: run the turn(s), let go of the
+      -- session and exit with the run's status. `-p` is the same letter `pi -p` uses.
+      once = true
       index = index + 1
     elseif arg == "--help" or arg == "-h" then
       print(HELP)
@@ -131,6 +136,27 @@ function M.run(argv)
     end
   end
   prompt = table.concat(prompt, " ")
+
+  -- SCRIPTED, OR INTERACTIVE. `wa chat "<prompt>"` launched from a script, a scheduled task or an
+  -- orchestrator has no terminal on its stdin, and until now it ran its turn and then sat at the
+  -- prompt for ever, holding the session: measured 2026-11-11, orchestrators killed `wa` five or more
+  -- times in one night and the sessions stayed on `resource_busy` after each kill because nothing
+  -- released them in an orderly way. So the mode is decided from the one fact that describes it -
+  -- `host.isatty("stdin")` - and an explicit `--once`/`-p` says the same thing for a caller piping a
+  -- prompt into a terminal.
+  --
+  -- A reader at a terminal gets exactly what they had. A scripted caller gets: the turn(s) run, the
+  -- session's claim released (each run releases its own, `lua/core/agent.lua`), the process exits with
+  -- the run's status, and stdin is never waited on when a prompt came from the command line. A binary
+  -- that cannot answer `host.isatty` (an older one) is treated as interactive: this must not change
+  -- what an unknown binary does.
+  local function stdin_is_a_terminal()
+    if type(host) ~= "table" or type(host.isatty) ~= "function" then return nil end
+    local ok, value = pcall(host.isatty, "stdin")
+    if not ok then return nil end
+    return value and true or false
+  end
+  local scripted = once or stdin_is_a_terminal() == false
 
   -- Which thread this process runs in. Conversational history is the transcript
   -- of that thread; remembered facts live in memory and are deliberately
@@ -173,7 +199,14 @@ function M.run(argv)
     local selected = value.selected or ""
     return selected == "provider" and "" or selected
   end)()
+  -- A scripted run has no reader: the plain view (no frame, no status line, no escape sequences), so its
+  -- stdout is the transcript and not a screen. `nil` means "decide from the terminal", which is what an
+  -- interactive run keeps.
+  local view_live = nil
+  if scripted then view_live = false end
   local view = cli_view.new({
+    -- A scripted run has no reader: the plain view, whatever the terminal looks like.
+    live = view_live,
     -- The terminal title names the worktree, the way pi names the workspace it is
     -- running in; while a run is in flight it carries the phase instead.
     title = "wa - " .. (workspace:match("([^/]+)$") or "chat"),
@@ -217,8 +250,12 @@ function M.run(argv)
   -- Give the next model round any waiting messages; slash commands still belong to
   -- the REPL and remain queued for after the run.
   local height = view.rows()
-  local input = cli_input.new({ editor = view.live and view.stdout and height and height >= 7
-    and host.getenv("WASM_AGENT_CLI_FRAME") ~= "off" })
+  local input = cli_input.new({
+    -- A scripted run reads no stdin of its own. The host's reader thread would sit on a stream nobody
+    -- is going to close - which is precisely the leak this mode removes - and the REPL never polls it.
+    read = not scripted,
+    editor = view.live and view.stdout and height and height >= 7
+      and host.getenv("WASM_AGENT_CLI_FRAME") ~= "off" })
   view.editor = input.editor
   -- The slash menu: typing `/` lists these under the box, the way Claude Code does.
   if input.editor and host.input_commands then pcall(host.input_commands, json.encode(commands.menu())) end
@@ -256,31 +293,37 @@ function M.run(argv)
   end
 
   -- The screen first, so the welcome block is output like any other and sits right above the input.
-  view:screen_on()
-  print(cli_view.banner({
-    live = view.live,
-    limit = (view.live and cli_view.terminal_columns()) or view.limit,
-    version = "0.1.0",
-    model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
-    database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
-    session = agent.session_id,
-    continued = resume_last or session_id ~= nil,
-    workspace = view.workspace,
-    branch = view.branch,
-    -- The banner is the last place a user can be told before they type: a thread
-    -- that was cut off mid-answer looks like one that is simply quiet, and the
-    -- recovery below (the model is told in its context) is invisible from here.
-    unfinished = (function()
-      local session_state = memory.session_state(agent.session_id)
-      if session_state and session_state.state == "unfinished" then return session_state.detail end
-      return nil
-    end)(),
-  }))
+  -- A scripted run has neither: its stdout is a transcript a program reads, and a banner (version,
+  -- workspace, branch, database path, the session id and the model) in the middle of it is noise that
+  -- would also make `$(wa chat --once ...)` unusable. The session id is said on stderr instead, below.
+  if not scripted then
+    view:screen_on()
+    print(cli_view.banner({
+      live = view.live,
+      limit = (view.live and cli_view.terminal_columns()) or view.limit,
+      version = "0.1.0",
+      model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
+      database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
+      session = agent.session_id,
+      continued = resume_last or session_id ~= nil,
+      workspace = view.workspace,
+      branch = view.branch,
+      -- The banner is the last place a user can be told before they type: a thread
+      -- that was cut off mid-answer looks like one that is simply quiet, and the
+      -- recovery below (the model is told in its context) is invisible from here.
+      unfinished = (function()
+        local session_state = memory.session_state(agent.session_id)
+        if session_state and session_state.state == "unfinished" then return session_state.detail end
+        return nil
+      end)(),
+    }))
+  end
 
   -- A continued thread (`--continue`, `--resume <id>`) is drawn again under the banner, so the reader
   -- picks up where the window was closed instead of in front of an empty screen. The newest messages
   -- only: a day-long thread is hundreds of rows, and the window or `wa conversation` has the rest.
-  if resume_last or session_id then
+  -- A scripted run draws nothing: replaying 400 rows into a log is not the answer the caller asked for.
+  if not scripted and (resume_last or session_id) then
     local REPLAY = tonumber(host.getenv("WASM_AGENT_CLI_REPLAY")) or 400
     if REPLAY > 0 then
       local rows = memory.session_messages(agent.session_id, { all = true }) or {}
@@ -342,9 +385,17 @@ function M.run(argv)
       view:answered(reply)
     end
     if wake_if_due then wake_if_due() end
+    -- The turn's status, for the caller that exits with it (`wa chat --once`, or any scripted run).
+    return ok
   end
 
-  if prompt ~= "" then view:prompt(); turn(prompt) end
+  local ran_ok = true
+  if prompt ~= "" then
+    -- A scripted run has no reader, so there is nothing to prompt: the prompt is a row of a screen the
+    -- caller does not have (in plain output it would prefix the transcript with `> `).
+    if not scripted then view:prompt() end
+    ran_ok = turn(prompt)
+  end
 
   -- 29/10: a continued thread whose last run stopped without an answer (the CLI was killed mid-run, or
   -- the provider cut the stream past its retries) is re-driven now, from the recorded state, instead
@@ -354,8 +405,44 @@ function M.run(argv)
     local found, recovery = pcall(function() return dofile("lua/core/run_recovery.lua").due(agent.session_id) end)
     if found and recovery then
       print(cli_view.paint("  \226\134\187 resuming the interrupted run: " .. redact.text(recovery.reason), "dim", view.live))
-      view:prompt(); turn(recovery.prompt)
+      if not scripted then view:prompt() end
+      ran_ok = turn(recovery.prompt)
     end
+  end
+
+  -- SCRIPTED: run the turn(s), let go of the session, exit with the run's status.
+  --
+  -- Measured 2026-11-11: an orchestrator ran `wa chat "<prompt>" > log` five times in one night and had
+  -- to kill the process five times, because after the turn the REPL sat at its prompt on a stdin that
+  -- was not a terminal; the sessions were left claimed until each kill. The exit below is the orderly
+  -- version of that kill: `agent:close()` releases the session presence and ends the thread exactly as
+  -- `/exit` does, and the process returns the last turn's status (0 answered, 1 failed) so a script can
+  -- act on it.
+  --
+  -- Lines still waiting on stdin become turns, but only when nothing was given on the command line: a
+  -- caller that passed its prompt as an argument is never made to wait on a stream it may not close.
+  if scripted then
+    if prompt == "" then
+      while true do
+        local line = io.read("*l")
+        if line == nil then break end
+        line = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if line ~= "" then
+          -- What was asked, in the transcript: a scripted run's log is read by a person later, and a
+          -- reply with no question in front of it is a log nobody can check.
+          print(cli_view.paint("> " .. line, "dim", view.live))
+          ran_ok = turn(line)
+        end
+      end
+    end
+    -- The session id goes to stderr, so stdout stays the run's own output for a caller capturing it,
+    -- and the id is still there to resume the thread or steer a later run of it.
+    io.stderr:write(string.format("wa: session %s %s\n", tostring(agent.session_id),
+      ran_ok and "ok" or "failed"))
+    agent:close()
+    input:stop()
+    view:screen_off()
+    return ran_ok and 0 or 1
   end
 
   -- The input, and where the prompt is drawn. Both matter to the same thing: a reader who can see
@@ -497,7 +584,7 @@ function M.run(argv)
     if banner then return banner.session_content({ notice = seen and seen.line }) end
     return nil
   end
-  if not host.getenv("WA_SKIP_UPDATE_CHECK") then
+  if not scripted and not host.getenv("WA_SKIP_UPDATE_CHECK") then
     banner = dofile("lua/core/update_banner.lua")
     seen = banner.check({ refresh = true })
     if seen.line then

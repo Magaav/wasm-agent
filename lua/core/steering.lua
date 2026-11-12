@@ -10,6 +10,11 @@ end
 local function query(s,p) return sql('sql_query',s,p) end
 local function exec(s,p) return sql('sql_exec',s,p) end
 local function boot() return assert(json.decode(host.runtime_info()).boot_id,'steering_requires_boot_identity') end
+-- How old a presence heartbeat may be and still mean "a process is serving this session". A run beats at
+-- every context boundary, but a single tool call can legitimately occupy a run for many minutes
+-- (`bash`, an `operation`, a subagent), so the tolerance is a tool call's, not a round's: too tight a
+-- window would call a working run interrupted and defer notes that were about to be delivered.
+local RECOVER_LIVE_SECONDS = 900
 -- A steering message carries the same attachments a normal turn does. Text files are inlined by the
 -- UI before submission; pictures are stored here through the one attachment store and the inbox
 -- keeps only their references, exactly like `messages.images`.
@@ -45,9 +50,26 @@ end
 local function recover(owner,sid)
   local r=query('SELECT * FROM steering_runs WHERE owner=? AND session_id=?',{owner,sid})[1]
   if r and r.state=='active' and r.boot~=boot() then
-    exec("UPDATE steering_runs SET state='unknown' WHERE session_id=? AND boot=?",{sid,r.boot})
-    exec("UPDATE steering_inbox SET state='deferred',detail='run interrupted; reconcile before resubmitting' WHERE owner=? AND session_id=? AND run_id=? AND state='queued'",{owner,sid,r.run_id})
-    r.state='unknown'
+    -- ANOTHER PROCESS IS SERVING THIS RUN - which is the ordinary case, not an interruption: every
+    -- process has its own boot identity (`host.runtime_info().boot_id`), so a `wa steer` from a shell,
+    -- a sentinel wake, or the window's node always sees a foreign boot. Treating that as "interrupted"
+    -- made steering from outside the run's own process impossible (`no_active_steering_target` on a
+    -- session that is plainly running, measured 2026-11-11).
+    --
+    -- So the question asked here is the one the project already asks before believing a claim: is the
+    -- process that served this run still serving this session? `session_presence` is that fact (pid,
+    -- boot and a heartbeat refreshed at every model request and every tool call,
+    -- `lua/core/agent.lua`), and it is written by the SAME process that wrote the run row - so its
+    -- `boot` must equal the run's. Only then, and only while the heartbeat is within a tool call's
+    -- tolerance, is the run still active. A row from another process, no row at all, or a stale one is
+    -- an interruption: the run is marked `unknown` and its queued notes are `deferred`, never replayed.
+    local live = memory.presence_live and memory.presence_live(sid, RECOVER_LIVE_SECONDS)
+    local same_owner = live and tostring(live.boot or '') == tostring(r.boot or '')
+    if not same_owner then
+      exec("UPDATE steering_runs SET state='unknown' WHERE session_id=? AND boot=?",{sid,r.boot})
+      exec("UPDATE steering_inbox SET state='deferred',detail='run interrupted; reconcile before resubmitting' WHERE owner=? AND session_id=? AND run_id=? AND state='queued'",{owner,sid,r.run_id})
+      r.state='unknown'
+    end
   end
   return r
 end

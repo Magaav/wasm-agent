@@ -25,12 +25,13 @@ local M = {}
 -- The session-selecting flags, and the usage line above them. Kept here with the commands so
 -- `M.help()` aligns the whole block once; the parser for them is in `chat.lua`, and the parity check
 -- asserts every flag named below is a flag `chat.lua` actually accepts.
-M.usage = "usage: wa [chat] [--continue | --resume <id> | --session <id>] [prompt]"
+M.usage = "usage: wa [chat] [--continue | --resume <id> | --session <id>] [--once] [prompt]"
 M.sessions = {
   { "(default)", "start a new session" },
   { "--continue, -c", "continue the most recent thread with messages, its transcript printed again" },
   { "--resume <id>", "continue exactly that session, its transcript printed again (see: wa sessions)" },
   { "--session <id>", "the same as --resume" },
+  { "--once, -p", "run this turn (and any lines on stdin) then exit with the run's status - what a stdin that is not a terminal already means, for a caller whose stdin is one" },
 }
 
 -- Input modes: what the first character of a line does. Not `/` commands, so not in the slash menu or
