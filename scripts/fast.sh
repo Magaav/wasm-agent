@@ -134,13 +134,16 @@ echo "fast: env contract: every row gets its own scratch WASM_AGENT_HOME, WA_COM
 # assembly is scripts/fast-result.mjs; the file lives in the worktree's own git dir unless WA_FAST_RESULT
 # names another path, so a run never writes into the tree it is judging.
 result_rows="$work/result"; mkdir -p "$result_rows" 2>/dev/null || true
+export RESULT_ROWS="$result_rows"
 named_skips="$work/named-skips.tsv"; : > "$named_skips" 2>/dev/null || true
 printf 'node\t%s\nnode_sqlite\t%s\ncargo\t%s\nwasi_sdk\t%s\nlua\t%s\nroot\t%s\ncommit\t%s\nbranch\t%s\nbin\t%s\nbin_sha256\t%s\n' \
   "$node_version" "$node_sqlite" "$cargo_version" "$wasi_sdk" "$lua_version" "$ROOT" "$commit" "$branch" "$bin" "${bin_sha:-unknown}" \
   > "$work/env.tsv" 2>/dev/null || true
 record_row() { # <status: pass|fail|skip> <section> <name> <exit> <ms> <environment 0|1> <first error or reason>
   local file
-  file="$result_rows/$(printf '%s' "$3" | sed 's#[^A-Za-z0-9._-]#_#g').row"
+  # `run_lua` runs in a `bash -c` worker, so the directory travels as an exported variable: a variable
+  # that is merely set here is absent there, and every row would be written to `/` and lost.
+  file="${RESULT_ROWS:-/nonexistent}/$(printf '%s' "$3" | sed 's#[^A-Za-z0-9._-]#_#g').row"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$(printf '%s' "$7" | tr '\t\n' '  ' | cut -c1-300)" \
     > "$file" 2>/dev/null || true
 }
