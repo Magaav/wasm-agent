@@ -132,7 +132,9 @@ nothing to install and no unit to enable. What an operator does now is the Rust 
 * **Reads and effects** answer from the native index and the queue seam through the one surface,
   `mcp_whatsapp_*` (`lua/core/whatsapp.lua`): `mcp_whatsapp_contacts`, `mcp_whatsapp_search`,
   `mcp_whatsapp_read`, `mcp_whatsapp_reactions`, `mcp_whatsapp_media`, `mcp_whatsapp_download`,
-  `mcp_whatsapp_backfill`, `mcp_whatsapp_send`, `mcp_whatsapp_send_status`. Any of them on a node
+  `mcp_whatsapp_backfill`, `mcp_whatsapp_send` (one call that waits for the job's terminal state and
+  answers `done`/`failed`/`pending`, resumable with `{id}` or `{ids}`; `mcp_whatsapp_send_status` is
+  its hidden compatibility alias and is in no catalogue). Any of them on a node
   that runs no component is asked of the node that holds the account, under that node's own guards,
   and the answer says `served_by`; the dead `mcp-whatsapp` bridge is
   [WHATSAPP-MCP-QUEUE.md](WHATSAPP-MCP-QUEUE.md)

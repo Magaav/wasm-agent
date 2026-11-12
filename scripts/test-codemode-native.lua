@@ -38,8 +38,11 @@ check(r.ok and r.value=='7','store commits on success')
 r=call('return load("cursor").id;');check(r.ok and r.value=='7','scoped store persists across native instances')
 r=call('store("cursor",{id:8}); throw new Error("fixture failure");');check(not r.ok,'failed script retains failure')
 r=call('return load("cursor").id;');check(r.ok and r.value=='7','failed store does not overwrite prior state')
-r=call('tools.write({path:'..json.encode(root..'/never.txt')..',content:"must not dispatch"}); return 1;')
-check(r.ok and host.read_file(root..'/never.txt')==nil and #r.unexecuted==1,'unawaited effect is not admitted')
+-- The rule changed with natural promises (docs/CODEMODE.md, "Natural promises"): a call still in
+-- flight when the body ends is admitted and awaited, effects included. Measured on this tree with a
+-- write no script awaited: calls=1, unexecuted=0, and the file holds what it wrote.
+r=call('tools.write({path:'..json.encode(root..'/unawaited.txt')..',content:"admitted"}); return 1;')
+check(r.ok and host.read_file(root..'/unawaited.txt')=="admitted" and #r.unexecuted==0,'an unawaited effect is admitted and awaited')
 local other=memory.start_session('','other code scope',{user_id='master'})
 r=call('return load("cursor");',{session_id=other,user_id='master',role='master'})
 check(r.ok and r.value=='undefined','store cannot cross session scope')

@@ -174,12 +174,18 @@ local scripts = {
   { label = 'discovery gives an outside tool its route', code = 'const all = await searchTools("*",{limit:200}); const s=all.find(t=>t.name==="subagent"); return JSON.stringify({callable:s.callable,route:s.route,schema:typeof s.schema});' },
   { label = 'describeTool gives a schema', code = 'const d = await describeTool("operation"); return JSON.stringify({callable:d.callable,route:typeof d.route,parameters:typeof d.parameters});' },
   { label = 'a keyword search', code = 'const one = await searchTools("sessions"); return one.length;' },
-  { label = 'a batch with a miss', code = 'const b = await searchTools({names:["sessions","nope_tool"]}); return JSON.stringify({m:b.length,missing:b.filter(x=>x.missing).map(x=>x.name)});' },
+  { label = 'a batch with a miss', code = 'const b = await searchTools({names:["sessions","nope_tool"]}); return JSON.stringify({m:b.length,missing:b.filter(x=>x.missing).map(x=>x.name),found:b[1].found,reason:typeof b[1].reason});' },
+  -- The guest's own names are discovery entries like any other (operator's decision, 11/11): one tool,
+  -- one answer shape, and the help text is the entry. Compared field for field across the two loops.
+  { label = 'the guest built-ins are selectable', code = 'const b = await searchTools("select:searchTools,results,showCall"); return JSON.stringify(b.map(t=>({n:t.name,c:t.callable,b:t.builtin,s:typeof t.schema,d:typeof t.description,v:t.version})));' },
+  { label = 'a listing row and a keyword hit for a built-in', code = 'const all = await searchTools("*",{limit:200}); const row = all.find(t=>t.name==="searchTools"); const hit = (await searchTools("showCall"))[0]; return JSON.stringify({row:{c:row.callable,s:typeof row.schema},hit:hit&&hit.name});' },
+  { label = 'the alias is the batch element', code = 'const a = await describeTool("read"); const b = (await searchTools("select:read"))[0]; const miss = await describeTool("nope_tool"); return JSON.stringify({same:JSON.stringify(a)===JSON.stringify(b),s:typeof a.schema,p:typeof a.parameters,f:miss.found,e:miss.error});' },
+  { label = '.map on every form', code = 'const forms=[await searchTools("*"),await searchTools(""),await searchTools({query:"sessions",limit:2}),await searchTools({names:["sessions","read"]}),await searchTools("select:sessions,read")]; return JSON.stringify(forms.map(v=>[Array.isArray(v),v.map(t=>t.name).length]));' },
   { label = 'a 200 KB result', code = 'const big = await tools.read({path:"big"}); return big.text.length;' },
   { label = 'a script that throws', code = 'throw new Error("boom");' },
   { label = 'showCall help', code = 'const help = await describeTool("showCall"); return typeof help;' },
   { label = 'the node capability registry', code = 'const caps = await capabilities(); return typeof caps;' },
-  { label = 'an unknown global is refused', code = 'const nope = await describeTool("no_such_tool"); return nope===null;' },
+  { label = 'an unknown global is refused', code = 'const nope = await describeTool("no_such_tool"); return JSON.stringify({null:nope===null,found:nope.found,error:nope.error,reason:typeof nope.reason,suggest:nope.suggestions.length});' },
   { label = 'a fenced tool called from a script', code = 'return await tools.subagent({task:"x"});' },
 }
 

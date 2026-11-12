@@ -37,8 +37,9 @@ pub const FORBIDDEN: &[&str] = &[
     "wave_autoflush",
     // a deployment, not a script step
     "node_update",
-    // outbound messages are operator-gated effects with a durable message id
-    "whatsapp_send",
+    // `mcp_whatsapp_send` is deliberately absent: it is callable inside a script, its send form is an
+    // effect the dispatcher runs one at a time and its resume form ({id}/{ids}) only waits on a job and
+    // is a read (`lua/core/whatsapp.lua`, `M.effect`).
     "email_send",
 ];
 
@@ -134,6 +135,18 @@ pub struct Outside {
     pub route: String,
 }
 
+/// One of the guest's own names (`searchTools`, `results`, `showCall`) as a discovery entry. The entry
+/// itself is the loop's
+/// (`lua/core/codemode.lua`, `builtin_entries`), copied verbatim: its help text is model-facing prose
+/// that lives in the node, and a second rendering here is a second answer to one question.
+#[derive(Clone, Debug)]
+pub struct Builtin {
+    pub name: String,
+    pub description: String,
+    pub execution: Execution,
+    pub entry: Value,
+}
+
 /// What one script's catalogue is: the callable set, the fenced set (what discovery still shows and the
 /// guest's table still carries, answering with its route), and the order the node sent them in.
 /// `None` from [`plan`] is the identifier collision the loop refuses.
@@ -141,6 +154,8 @@ pub struct Outside {
 pub struct Catalogue {
     pub tools: Vec<Tool>,
     pub outside: Vec<Outside>,
+    /// The guest's own names, as entries the loop composed. Not tools: nothing here is dispatchable.
+    pub builtins: Vec<Builtin>,
     /// Every catalogue name, in the order the node sent it. The guest's `tools` object is built from the
     /// descriptors in this order on both paths, and the proxy's "Available: a, b, c" message reads it
     /// back - so an order that differs is a message that differs (`lua/core/codemode.lua`, `descriptors`).
@@ -156,10 +171,17 @@ impl Catalogue {
         self.outside.iter().find(|tool| tool.name == name)
     }
 
+    /// One of the guest's own names (`searchTools`, `results`, `showCall`).
+    pub fn builtin(&self, name: &str) -> Option<&Builtin> {
+        self.builtins.iter().find(|builtin| builtin.name == name)
+    }
+
     /// Every name discovery can mention, sorted: the listing's order and the pool suggestions draw from.
+    /// The guest's own names are part of that catalogue, so one list answers every form.
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tools.iter().map(|tool| tool.name.clone()).collect();
         names.extend(self.outside.iter().map(|tool| tool.name.clone()));
+        names.extend(self.builtins.iter().map(|builtin| builtin.name.clone()));
         names.sort();
         names
     }
@@ -195,7 +217,6 @@ pub const DIRECT_ONLY: &[(&str, &str)] = &[
     ("session_fixture", "it exports this session as a fixture while the script is still writing that session"),
     ("wave_autoflush", "it installs a durable wave-end obligation for the coordinator; installation is a direct receipted action"),
     ("node_update", "it updates and restarts a node: a deployment, not a script step"),
-    ("whatsapp_send", "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call"),
     ("email_send", "an outbound message is one operator-gated effect with a durable message id and a documented status; it stays a direct call"),
 ];
 
@@ -330,7 +351,8 @@ fn parse_params(args: Option<&str>) -> Value {
 }
 
 /// `searchTools(args)`: the batch form (`{names:[…]}`, `"select:a,b"`), the listing (`"*"` or nothing)
-/// and the keyword form, in that order — exactly the branches the native loop takes.
+/// and the keyword form, in that order — exactly the branches the native loop takes, and every one of
+/// them answers a plain ARRAY, so `.map` works on whatever a script asked for.
 pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
     // (1) the two argument shapes the model knows: `searchTools("text", {limit})` and
     // `searchTools({query, limit})`.
@@ -363,6 +385,7 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
         };
     let limit = options.get("limit").cloned().unwrap_or(if listing { json!(50) } else { json!(8) });
     let offset = options.get("offset").cloned().unwrap_or(json!(0));
+    let names = catalogue.names();
 
     if let Some(wanted) = wanted {
         if options.get("limit").is_some() && !bounded(&limit, 1, 8) {
@@ -371,19 +394,10 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
         // One shape for every spelling: a plain ARRAY in the order asked for, with an unknown name a
         // member of it rather than a second envelope. `searchTools({names:[…]}).map(…)` answered "not a
         // function" on the old `{tools,missing,requested}` object (11/11); the shape is documented in
-        // the same place the native loop documents it (`describeTool("searchTools")`).
+        // the same place the native loop documents it (`searchTools("select:searchTools")`).
         let mut tools = Vec::new();
         for name in &wanted {
-            match (catalogue.callable(name), catalogue.fenced(name)) {
-                (Some(tool), _) => tools.push(entry(&tool.name, &tool.schema, &tool.execution, None)),
-                (None, Some(outside)) => {
-                    tools.push(entry(&outside.name, &outside.schema, &outside.execution, Some(&outside.route)))
-                }
-                (None, None) => {
-                    let echo = echo_name(name);
-                    tools.push(json!({"name": echo, "missing": true, "suggestions": nearest(&echo, &catalogue.names(), 3)}));
-                }
-            }
+            tools.push(select_one(catalogue, name).unwrap_or_else(|| unknown(name, &names)));
         }
         return (Value::Array(tools), true);
     }
@@ -392,27 +406,16 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
         if !bounded(&limit, 1, 200) || !integer(&offset, 0) {
             return (json!({"error": "invalid_tool_search_limit"}), false);
         }
-        let names = catalogue.names();
         let limit = limit.as_f64().unwrap_or(50.0) as usize;
         let offset = offset.as_f64().unwrap_or(0.0) as usize;
         let mut page = Vec::new();
-        for index in offset..names.len().min(offset.saturating_add(limit)) {
-            let name = &names[index];
-            match (catalogue.callable(name), catalogue.fenced(name)) {
-                (Some(tool), _) => page.push(json!({
-                    "name": tool.name,
-                    "description": first_line(&tool.description),
-                    "execution": tool.execution.json(),
-                    "callable": true,
-                })),
-                (None, Some(outside)) => page.push(json!({
-                    "name": outside.name,
-                    "description": first_line(&schema_description(&outside.schema)),
-                    "execution": outside.execution.json(),
-                    "callable": false,
-                    "route": outside.route,
-                })),
-                (None, None) => {}
+        for name in names.iter().take(names.len().min(offset.saturating_add(limit))).skip(offset) {
+            if let Some(tool) = catalogue.callable(name) {
+                page.push(listing_row(&tool.name, &schema_description(&tool.schema), &tool.execution, None));
+            } else if let Some(outside) = catalogue.fenced(name) {
+                page.push(listing_row(&outside.name, &schema_description(&outside.schema), &outside.execution, Some(&outside.route)));
+            } else if let Some(builtin) = catalogue.builtin(name) {
+                page.push(listing_row(&builtin.name, &builtin.description, &builtin.execution, None));
             }
         }
         return (Value::Array(page), true);
@@ -427,94 +430,108 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
     }
     let lowered = query_text.to_lowercase();
     let terms: Vec<String> = lowered.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).filter(|term| !term.is_empty()).map(str::to_string).collect();
+    let score = |text: &str| terms.iter().filter(|term| text.contains(term.as_str())).count() as u32;
     let mut matches: Vec<(u32, String, Value)> = Vec::new();
-    let mut consider = |name: &str, schema: &Value, execution: &Execution, route: Option<&str>| {
-        let hay = format!("{} {}", name, schema_description(schema)).to_lowercase();
-        let mut score = 0u32;
-        for term in &terms {
-            if hay.contains(term.as_str()) {
-                score += 1;
-            }
+    for name in &names {
+        // The catalogue's entry, the fenced entry, or the loop's own: one object per name, however it
+        // was found.
+        let Some(value) = select_one(catalogue, name) else { continue };
+        let hay = format!("{name} {}", value.get("description").and_then(Value::as_str).unwrap_or_default()).to_lowercase();
+        let hit = score(&hay);
+        if hit > 0 {
+            matches.push((hit, name.clone(), value));
         }
-        if score > 0 {
-            matches.push((score, name.to_string(), entry(name, schema, execution, route)));
-        }
-    };
-    for tool in &catalogue.tools {
-        consider(&tool.name, &tool.schema, &tool.execution, None);
-    }
-    for outside in &catalogue.outside {
-        consider(&outside.name, &outside.schema, &outside.execution, Some(&outside.route));
     }
     matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let found: Vec<Value> = matches.into_iter().take(limit.as_f64().unwrap_or(8.0) as usize).map(|(_, _, value)| value).collect();
     (Value::Array(found), true)
 }
 
-/// `describeTool(name)`: `None` when the node owns the answer (a built-in, an unknown name or a
-/// missing argument - all answered by `lua/core/codemode.lua`), the schema view for a catalogue entry.
+/// One name, one object: what the batch answers for it and what the compatibility alias
+/// `describeTool(name)` answers — `{name, description, parameters, schema, execution, callable, route}`
+/// for a catalogue name, the loop's own entry for a built-in, and `found:false` for a name this script
+/// cannot see. `None` only when the built-ins were not handed over (an old host): the loop then owns the
+/// answer, exactly as it did before they travelled.
+pub fn select_one(catalogue: &Catalogue, name: &str) -> Option<Value> {
+    if let Some(tool) = catalogue.callable(name) {
+        return Some(entry(&tool.name, &tool.schema, &tool.execution, None));
+    }
+    if let Some(outside) = catalogue.fenced(name) {
+        // `execution` is the node's pre-flight status, and the native loop's `describeTool` answers it
+        // for a fenced tool as well as a callable one. Leaving it out here made the two loops answer
+        // different bytes for the same question - caught by the parity suite the moment it stopped
+        // skipping this comparison. #120 said the same thing in the assertion that reads it
+        // (`outside["execution"]["status"]`), so the two intents are this one field.
+        return Some(entry(&outside.name, &outside.schema, &outside.execution, Some(&outside.route)));
+    }
+    if let Some(builtin) = catalogue.builtin(name) {
+        return Some(builtin.entry.clone());
+    }
+    if catalogue.builtins.is_empty() {
+        return None;
+    }
+    Some(unknown(name, &catalogue.names()))
+}
+
+/// A miss: a member of the same array that says so — `found:false`, the reason, and the nearest
+/// permitted names — never a throw and never a second envelope.
+fn unknown(name: &str, available: &[String]) -> Value {
+    let echo = echo_name(name);
+    json!({
+        "name": echo,
+        "found": false,
+        "missing": true,
+        "error": "unknown_tool",
+        "reason": format!("no name like '{echo}' in this script's catalogue"),
+        "suggestions": nearest(&echo, available, 3),
+    })
+}
+
+/// `describeTool(name)`: the hidden compatibility alias of `searchTools("select:"..name)[0]`, the same
+/// object the batch answers. No argument is the `showCall` entry, which is the presentation help it has
+/// always returned. No catalogue or guidance list offers this name any more.
 pub fn describe_tool(catalogue: &Catalogue, params: &Value) -> Option<Value> {
     let name = match params {
         Value::String(text) => text.clone(),
         Value::Array(items) => match items.first() {
             Some(Value::String(text)) => text.clone(),
+            None => "showCall".to_string(),
             _ => return None,
         },
         _ => return None,
     };
-    if name == "showCall" {
-        return None;
-    }
-    // The guest's own built-ins (`searchTools`, `results`) document their shapes in the node's own
-    // words (`lua/core/codemode_results.lua`), so this seam hands them to the loop instead of keeping a
-    // second copy of that text here.
-    if name == "searchTools" || name == "results" {
-        return None;
-    }
-    if let Some(tool) = catalogue.callable(&name) {
-        return Some(json!({
-            "name": tool.name,
-            "description": schema_description(&tool.schema),
-            "parameters": tool.schema.get("function").and_then(|f| f.get("parameters")).cloned().unwrap_or(Value::Null),
-            "execution": tool.execution.json(),
-            "callable": true,
-        }));
-    }
-    if let Some(outside) = catalogue.fenced(&name) {
-        // `execution` is the node's pre-flight status, and the native loop's `describeTool` answers it
-        // for a fenced tool as well as a callable one. Leaving it out here made the two loops answer
-        // different bytes for the same question - caught by the parity suite the moment it stopped
-        // skipping this comparison.
-        return Some(json!({
-            "name": outside.name,
-            "description": schema_description(&outside.schema),
-            "parameters": outside.schema.get("function").and_then(|f| f.get("parameters")).cloned().unwrap_or(Value::Null),
-            // The node's pre-flight view travels with a fenced entry too: `describeTool` is how the model
-            // learns *why* a name it can see is not callable here, and the native loop's `described()`
-            // returns `execution` for both views. Omitting it here made the two answers differ by one
-            // field - which the parity suite compares as a hash and reported (`describeTool gives a
-            // schema`). #120 said the same thing in the assertion that reads it
-            // (`outside["execution"]["status"]`), so the two intents are this one field.
-            "execution": outside.execution.json(),
-            "callable": false,
-            "route": outside.route,
-        }));
-    }
-    // Every other answer is the loop's, not this seam's: an unknown name (where the node answers
-    // `{error:"unknown_tool", suggestions:[…]}` from `tool_lookup.described`), no argument at all (the
-    // presentation's help), and the guest's own built-ins. This seam used to answer `null` for an
-    // unknown name while the native loop answered the error object - two answers to one question, which
-    // is what the parity suite compares and what it caught. One implementation of those answers, in
-    // `lua/core/codemode.lua`, is the only way they cannot drift.
-    None
+    select_one(catalogue, &name)
 }
 
 // ----------------------------------------------------------------------------------- small pieces
 
+/// One name, one object — the batch's element, the keyword hit and the listing's source: `{name,
+/// description, parameters, schema, execution, callable, route}`. The native loop's `entry` has these
+/// fields and no others (`lua/core/codemode.lua`, `tool_lookup.entry`), because a script may `.map` any
+/// form and read the same keys.
 fn entry(name: &str, schema: &Value, execution: &Execution, route: Option<&str>) -> Value {
     let mut out = Map::new();
     out.insert("name".into(), json!(name));
+    out.insert("description".into(), json!(schema_description(schema)));
+    if let Some(parameters) = schema.get("function").and_then(|f| f.get("parameters")) {
+        out.insert("parameters".into(), parameters.clone());
+    }
     out.insert("schema".into(), schema.clone());
+    out.insert("execution".into(), execution.json());
+    out.insert("callable".into(), json!(route.is_none()));
+    if let Some(route) = route {
+        out.insert("route".into(), json!(route));
+    }
+    Value::Object(out)
+}
+
+/// One listing row (`searchTools("*")`): the name, its first description line and the node's pre-flight
+/// status — no schema, so a page of 200 stays cheap. The built-ins' rows are composed from the loop's
+/// entry the same way.
+fn listing_row(name: &str, description: &str, execution: &Execution, route: Option<&str>) -> Value {
+    let mut out = Map::new();
+    out.insert("name".into(), json!(name));
+    out.insert("description".into(), json!(first_line(description)));
     out.insert("execution".into(), execution.json());
     out.insert("callable".into(), json!(route.is_none()));
     if let Some(route) = route {
@@ -702,6 +719,31 @@ mod tests {
         .expect("no collision")
     }
 
+    /// The guest's own names, exactly as the loop hands them over (`lua/core/codemode.lua`,
+    /// `builtin_entries`): the entry is the loop's bytes, reproduced here without the prose.
+    fn builtin(name: &str) -> Builtin {
+        let live = Execution { status: "available".into(), scope: "codemode".into(), binding: "none".into(), ..Execution::default() };
+        Builtin {
+            name: name.to_string(),
+            description: format!("{name} is the guest's own"),
+            entry: json!({
+                "name": name,
+                "description": format!("{name} is the guest's own"),
+                "schema": {"name": name, "description": format!("{name} is the guest's own")},
+                "execution": {"status": "available", "scope": "codemode", "workspace_binding": "none"},
+                "callable": true,
+                "builtin": true,
+            }),
+            execution: live,
+        }
+    }
+
+    fn catalogue_with_builtins() -> Catalogue {
+        let mut catalogue = catalogue();
+        catalogue.builtins = vec![builtin("searchTools"), builtin("results"), builtin("showCall")];
+        catalogue
+    }
+
     #[test]
     fn the_fence_keeps_delegation_and_the_facades_out_and_names_their_route() {
         let catalogue = catalogue();
@@ -808,6 +850,60 @@ mod tests {
         assert!(describe_tool(&catalogue, &json!(["nope"])).is_none(),
             "an unknown name is the node's answer (`unknown_tool` with suggestions), as it is natively");
         assert!(describe_tool(&catalogue, &json!([42])).is_none(), "a non-string argument is the loop's answer too");
+    }
+
+    #[test]
+    fn the_one_tool_answers_one_shape_and_the_alias_is_its_element_zero() {
+        let catalogue = catalogue_with_builtins();
+        // The listing is the whole catalogue, the guest's own names included, sorted.
+        let (everything, ok) = search_tools(&catalogue, &json!(["*", {"limit": 200}]));
+        assert!(ok);
+        let names: Vec<&str> = everything.as_array().unwrap().iter().map(|row| row["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["codemode", "operation", "read", "remote", "results", "searchTools", "sessions", "showCall", "subagent", "tool_call"]);
+        let search = everything.as_array().unwrap().iter().find(|row| row["name"] == "searchTools").unwrap();
+        assert_eq!(search["callable"], true, "a built-in is callable: it is a global, not a dispatched tool");
+        assert!(search["schema"].is_null(), "a listing row carries no schema: {search}");
+        // The batch answers the loop's entry for a built-in, byte for byte.
+        let (selected, ok) = search_tools(&catalogue, &json!(["select:results,read"]));
+        assert!(ok);
+        let rows = selected.as_array().expect("a batch is a plain array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], builtin("results").entry, "a built-in answers its own entry");
+        assert_eq!(rows[1]["name"], "read");
+        assert!(rows[1]["schema"]["function"]["name"] == "read", "a catalogue entry carries its full schema");
+        assert_eq!(rows[1]["parameters"]["type"], "object", "and the parameters the alias has always answered");
+        // A keyword hit reaches a built-in too, and is that same entry.
+        let (keyword, ok) = search_tools(&catalogue, &json!(["showCall", {"limit": 8}]));
+        assert!(ok);
+        let hits = keyword.as_array().unwrap();
+        assert!(hits.iter().any(|row| row["name"] == "showCall"), "a built-in is found by keyword: {keyword}");
+        assert_eq!(hits.iter().find(|row| row["name"] == "showCall").unwrap(), &builtin("showCall").entry);
+        // The hidden alias is element 0 of a one-name batch - same object, every kind of name.
+        for name in ["read", "session_worktree", "subagent", "searchTools", "results"] {
+            let (batch, ok) = search_tools(&catalogue, &json!([{"names": [name]}]));
+            assert!(ok);
+            let alias = describe_tool(&catalogue, &json!([name])).expect("the alias answers what the batch answers");
+            assert_eq!(alias, batch.as_array().unwrap()[0], "describeTool({name}) is select:{name}[0]");
+        }
+        // No argument is the presentation help it has always answered.
+        assert_eq!(describe_tool(&catalogue, &json!([])), Some(builtin("showCall").entry));
+    }
+
+    #[test]
+    fn an_unknown_name_is_a_member_of_the_array_that_says_so() {
+        let catalogue = catalogue_with_builtins();
+        let (value, ok) = search_tools(&catalogue, &json!([{"names": ["searchtools_"]}]));
+        assert!(ok, "an unknown name never fails the call");
+        let rows = value.as_array().expect(".map always works");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["found"], false);
+        assert_eq!(rows[0]["missing"], true, "the old marker stays, so an older script keeps reading it");
+        assert_eq!(rows[0]["error"], "unknown_tool");
+        assert!(rows[0]["reason"].as_str().unwrap().contains("searchtools_"), "the entry says why: {value}");
+        assert!(rows[0]["suggestions"].as_array().unwrap().iter().any(|name| name == "searchTools"),
+            "a built-in is a permitted name for the correction: {value}");
+        assert_eq!(describe_tool(&catalogue, &json!(["searchtools_"])), Some(rows[0].clone()),
+            "the alias answers the same member, never a throw");
     }
 
     #[test]

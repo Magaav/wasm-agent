@@ -78,15 +78,21 @@ function M.connectors()
   -- It is not a registry entry and has no toggle - the component is what runs, not this row.
   local whatsapp = dofile('lua/core/whatsapp.lua')
   local holds = whatsapp.holds_account()
-  local surface = { id = 'whatsapp', name = 'WhatsApp (' .. #whatsapp.TOOLS .. ' tools, one surface)',
-    transport = 'native', enabled = true, state = 'enabled', tools = {}, approved = #whatsapp.TOOLS,
-    discovered = #whatsapp.TOOLS, whatsapp_account = holds,
+  -- The tools this row publishes are the ones the model is offered: the hidden compatibility alias
+  -- (`mcp_whatsapp_send_status`) is callable and is in no catalogue, so it is not a tool of the surface
+  -- an operator is told about either.
+  local offered = whatsapp.schemas()
+  local surface = { id = 'whatsapp', name = 'WhatsApp (' .. #offered .. ' tools, one surface)',
+    transport = 'native', enabled = true, state = 'enabled', tools = {}, approved = #offered,
+    discovered = #offered, whatsapp_account = holds,
     note = holds
       and 'This node runs wa-whatsapp, so it holds the account: its reads answer here and any master may ask it.'
       or 'This node runs no wa-whatsapp component: its reads are answered by the node that holds the account.' }
-  for _, tool in ipairs(whatsapp.TOOLS) do
-    surface.tools[#surface.tools + 1] = { name = tool.name, description = tool.description,
-      schema = json.encode(tool.parameters), approval = tool.effect, published = true }
+  for _, schema in ipairs(offered) do
+    local fn = schema['function']
+    local verb = whatsapp.by_verb[fn.name:sub(14)]
+    surface.tools[#surface.tools + 1] = { name = fn.name, description = fn.description,
+      schema = json.encode(fn.parameters), approval = verb and verb.effect or 'write', published = true }
   end
   table.sort(surface.tools, function(a, b) return a.name < b.name end)
   surface.tool_count = #surface.tools

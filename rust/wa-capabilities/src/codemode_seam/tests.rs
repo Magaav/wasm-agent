@@ -56,19 +56,26 @@ struct Seam {
 
 impl Seam {
     fn open(&self, session: &str, code: &str) -> Value {
-        call_with(
-            &self.config,
-            &json!({
-                "op": "open",
-                "session": session,
-                "owner": "0".repeat(64),
-                "code": code,
-                "timeout_ms": 30_000,
-                "catalogue": catalogue(),
-                "store": {"remembered": "1"},
-                "module_cache": "",
-            }),
-        )
+        self.open_with(session, code, Value::Null)
+    }
+
+    /// The same request with the loop's own discovery entries (`builtins`). A request without them is an
+    /// old host: the seam then hands those names to the loop, exactly as it did before they travelled.
+    fn open_with(&self, session: &str, code: &str, builtins: Value) -> Value {
+        let mut request = json!({
+            "op": "open",
+            "session": session,
+            "owner": "0".repeat(64),
+            "code": code,
+            "timeout_ms": 30_000,
+            "catalogue": catalogue(),
+            "store": {"remembered": "1"},
+            "module_cache": "",
+        });
+        if !builtins.is_null() {
+            request["builtins"] = builtins;
+        }
+        call_with(&self.config, &request)
     }
 
     fn advance(&self, session: &str, reply: Option<Value>) -> Value {
@@ -85,8 +92,12 @@ impl Seam {
 
     /// The whole loop, the way `lua/core/codemode.lua` drives it: open, step, answer, repeat.
     fn run(&self, session: &str, code: &str) -> (Value, Vec<Value>) {
+        self.run_with(session, code, Value::Null)
+    }
+
+    fn run_with(&self, session: &str, code: &str, builtins: Value) -> (Value, Vec<Value>) {
         let mut steps = Vec::new();
-        let opened = self.open(session, code);
+        let opened = self.open_with(session, code, builtins);
         assert_eq!(opened["ok"], true, "open: {opened}");
         if !opened["sandbox_failure"].is_null() {
             return (opened, steps);
@@ -136,6 +147,27 @@ fn catalogue() -> Value {
 fn schema(name: &str, description: &str) -> String {
     json!({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": {}}}})
         .to_string()
+}
+
+/// The guest's own names exactly as the loop composes them (`lua/core/codemode.lua`, `builtin_entries`):
+/// `entry_json` is the loop's own object, so the seam copies it and never writes the prose itself.
+fn builtins() -> Value {
+    let execution = json!({"status": "available", "scope": "codemode", "workspace_binding": "none"});
+    let entry = |name: &str, description: &str| {
+        json!({
+            "name": name,
+            "description": description,
+            "schema": {"name": name, "description": description},
+            "execution": {"status": "available", "scope": "codemode", "workspace_binding": "none"},
+            "callable": true,
+            "builtin": true,
+        })
+        .to_string()
+    };
+    json!([
+        {"name": "searchTools", "description": "Discovery over this script's own catalogue.", "execution": execution, "entry_json": entry("searchTools", "Discovery over this script's own catalogue.")},
+        {"name": "showCall", "description": "Structured view of an admitted call.", "execution": execution, "entry_json": entry("showCall", "Structured view of an admitted call.")},
+    ])
 }
 
 #[test]
@@ -198,8 +230,11 @@ fn a_fenced_tool_is_handed_out_with_the_sentence_that_says_where_it_runs() {
     let refusal = &steps[0]["refusal"];
     assert_eq!(refusal["kind"], "target_not_available");
     assert_eq!(refusal["name"], "subagent");
+    // `subagent` is on the direct-call list, so its sentence is the reviewed one from `DIRECT_ONLY` (a
+    // generic "control plane" line here would be a second wording for the same refusal, and the parity
+    // suite compares the two seams' answers).
     assert!(
-        refusal["route"].as_str().unwrap().starts_with("Control plane: call subagent as an ordinary tool"),
+        refusal["route"].as_str().unwrap().starts_with("Direct call only: delegation spends model calls"),
         "the fence says where it runs: {refusal}"
     );
     // The node's own blocked status wins over the generic sentence.
@@ -228,14 +263,38 @@ fn search_tools_is_answered_inside_the_seam_and_the_guest_gets_the_catalogue() {
     assert_eq!(steps.len(), 1, "the global costs the loop no step: {steps:?}");
     assert_eq!(steps[0]["kind"], "finished");
     let value: Value = serde_json::from_str(steps[0]["outcome"]["value"].as_str().unwrap()).unwrap();
-    assert_eq!(value["matches"], 5, "all five names are discoverable: {value}");
-    assert_eq!(value["tools"][0]["name"], "codemode");
-    assert_eq!(value["tools"][0]["callable"], false);
-    assert_eq!(value["tools"][1]["name"], "operation");
-    assert_eq!(value["tools"][1]["callable"], false);
-    assert!(value["tools"][1]["route"].as_str().unwrap().contains("Not callable in this run"));
-    assert_eq!(value["tools"][2]["name"], "read");
-    assert_eq!(value["tools"][2]["callable"], true);
+    // A plain ARRAY, in the catalogue's order: `searchTools` answers one shape for one tool (11/11).
+    let rows = value.as_array().expect("the listing is a plain array, not an envelope: {value}");
+    assert_eq!(rows.len(), 5, "all five names are discoverable: {value}");
+    assert_eq!(rows[0]["name"], "codemode");
+    assert_eq!(rows[0]["callable"], false);
+    assert!(rows[0]["route"].as_str().unwrap().starts_with("Direct call only: a script does not nest"));
+    assert_eq!(rows[1]["name"], "operation");
+    assert_eq!(rows[1]["callable"], false);
+    assert!(rows[1]["route"].as_str().unwrap().contains("Not callable in this run"));
+    assert_eq!(rows[2]["name"], "read");
+    assert_eq!(rows[2]["callable"], true);
+    assert!(rows[2]["schema"].is_null(), "a listing row carries no schema: {value}");
+    assert_eq!(rows[2]["description"], "Read a file", "and one line of what it is for");
+}
+
+#[test]
+fn a_guest_builtin_is_a_discovery_entry_the_seam_copies_from_the_loop() {
+    let Some(config) = config() else { return };
+    let seam = Seam { config };
+    let (_, steps) = seam.run_with("s5b", "const all = await searchTools(\"*\"); return all;", builtins());
+    // Still answered in place: a discovery call costs the loop no step.
+    assert_eq!(steps.len(), 1, "the global costs the loop no step: {steps:?}");
+    assert_eq!(steps[0]["kind"], "finished");
+    let value: Value = serde_json::from_str(steps[0]["outcome"]["value"].as_str().unwrap()).unwrap();
+    let rows = value.as_array().expect("a plain array");
+    let names: Vec<&str> = rows.iter().map(|row| row["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["codemode", "operation", "read", "searchTools", "sessions", "showCall", "subagent"],
+        "the guest's own names are in the one catalogue, sorted with it: {value}");
+    let search = rows.iter().find(|row| row["name"] == "searchTools").unwrap();
+    assert_eq!(search["callable"], true, "a built-in is a callable global, not a dispatched tool");
+    assert!(search["schema"].is_null(), "a listing row still carries no schema");
+    seam.finish("s5b");
 }
 
 #[test]

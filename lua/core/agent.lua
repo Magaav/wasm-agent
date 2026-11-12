@@ -644,7 +644,7 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
       -- pays for - that catalogue was ~37% of the envelope (5,686 B, ~1,400 tokens) while telling the
       -- model nothing about how to work.
       lines[#lines+1]='More than one call, or any filtering or looping, is ONE codemode script that returns only what you need. A single trivial call, or an effect that needs approval or a receipt (a send, a deploy), is a direct call. If code mode refuses a name, fall back to the direct call.'
-      lines[#lines+1]='Every tool is a member of `tools`; `ALL_TOOLS` lists them, `capabilities()` is the grant list with each tool\'s workspace status, and `searchTools(query)`/`describeTool(name)` give a schema. Example: `const [a,b]=await Promise.all([tools.read({path:"a"}),tools.read({path:"b"})]); return {a:a.content.length,b:b.content.length};`'
+      lines[#lines+1]='Every tool is a member of `tools`; `ALL_TOOLS` lists them, `capabilities()` is the grant list with each tool\'s workspace status; `searchTools(query)` returns an array of {name, description, callable, route}; `searchTools("select:a,b")` adds each one\'s full schema. Example: `const [a,b]=await Promise.all([tools.read({path:"a"}),tools.read({path:"b"})]); return {a:a.content.length,b:b.content.length};`'
       if #deferred>0 then
         lines[#lines+1]='The '..#deferred..' other tools this role may call are found with `capabilities()` or `searchTools(query)`; any of them is also callable directly.'
       end
@@ -2832,7 +2832,7 @@ function M:run_body(text, images)
         -- calls it must stop are the effectful ones; a read has nothing to undo, and voiding one
         -- costs a whole model round - a batch of reads was re-issued verbatim a round later.
         -- An unknown tool counts as effectful (tools.has_effect defaults that way).
-        if tools.has_effect(function_.name) and not dispatch_ctx.steering_admit() then
+        if tools.has_effect(function_.name, args) and not dispatch_ctx.steering_admit() then
           -- One actionable notice per batch: the protocol needs a result per call id, so the rows
           -- stay, but only the first says what to do with them.
           local first = not dispatch_ctx.steering_fenced
@@ -2881,7 +2881,7 @@ function M:run_body(text, images)
       -- tool, or a bash command an operator could have asked for as a read (`git status`, `rg`, `ls`), is
       -- not one - that distinction is what keeps an explanation request ungated.
       if ok_tool and not gate.disabled then
-        local effect = tools.has_effect(function_.name)
+        local effect = tools.has_effect(function_.name, args)
         if function_.name == "bash" or function_.name == "shell" then
           local command = type(args) == "table" and tostring(args.command or "") or ""
           effect = command ~= "" and not dofile("lua/core/orchestration_mode.lua").read_only_command(command)
@@ -2921,7 +2921,7 @@ function M:run_body(text, images)
       local cancelled = projected and tool_output.cancelled(output)
       -- The progress guard's facts about this call: did a real effect succeed, and what did it
       -- answer (a digest - the same bytes again is checkable without keeping them twice).
-      if ok_tool and not cancelled and tools.has_effect(function_.name) then round_effects = round_effects + 1 end
+      if ok_tool and not cancelled and tools.has_effect(function_.name, args) then round_effects = round_effects + 1 end
       round_results[#round_results + 1] = tostring(function_.name) .. ":" .. host.sha256(tostring(content))
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,cancelled=cancelled or nil,
         outcome=cancelled and 'cancelled_before_execution' or nil,code=type(output)=="table" and output.code or nil,
