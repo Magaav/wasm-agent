@@ -98,6 +98,15 @@ fi
 # Verify every artifact against the pin BEFORE anything is printed for upload. A bundle that is not the
 # pinned one must never reach a release: every node would then be asked to install bytes its lock
 # refuses (the deploy verifies again, so the failure would land on each node instead of here).
+#
+# EVERY component is measured, and every drifted line is printed before this fails. Stopping at the first
+# one is what left ten pins stale on 13/11: a run printed `artifact_not_pinned: agent-core`, a person
+# committed that one line, and the next run printed the next one - while `agent-core`, `codemode`,
+# `graph`, `hooks`, `memory`, `mesh`, `model-gateway`, `selfloop`, `telemetry-sink`, `wa-email` and
+# `wa-whatsapp` were all not the build of main. One run now names all of them.
+drift=""
+drift_sha=0
+drift_bytes=0
 for name in $names; do
   pin="$(wa_component_pin "$REPO_ROOT" "$name")" || fail "component_pin_missing: $name"
   pin_sha="${pin%% *}"
@@ -108,18 +117,31 @@ for name in $names; do
   actual="$(wa_component_sha256 "$wasm")" || fail 'sha256_tool_missing: no sha256sum or shasum'
   bytes="$(wc -c < "$wasm" | tr -d '[:space:]')"
   if [ "$actual" != "$pin_sha" ]; then
-    say "measured $name: sha256 $actual ($bytes bytes)"
-    say 'components.lock pins another build; commit this line with the component change that caused it:'
-    printf '%s %s %s\n' "$name" "$actual" "$bytes" >&2
-    fail "artifact_not_pinned: $name is $actual, components.lock pins $pin_sha" 5
+    say "measured $name: sha256 $actual ($bytes bytes); components.lock pins $pin_sha ($pin_bytes bytes)"
+    drift="$drift$name $actual $bytes"$'\n'
+    drift_sha=1
+    continue
   fi
   if [ "$pin_bytes" != "-" ] && [ "$bytes" != "$pin_bytes" ]; then
-    say "measured $name: sha256 $actual ($bytes bytes)"
-    printf '%s %s %s\n' "$name" "$actual" "$bytes" >&2
-    fail "artifact_not_pinned: $name is $bytes bytes, components.lock pins $pin_bytes" 6
+    say "measured $name: sha256 $actual ($bytes bytes); components.lock pins $pin_bytes bytes"
+    drift="$drift$name $actual $bytes"$'\n'
+    drift_bytes=1
+    continue
   fi
   say "verified $name: $actual ($bytes bytes)"
 done
+
+if [ -n "$drift" ]; then
+  drifted_names="$(printf '%s' "$drift" | awk '{printf "%s ", $1}')"
+  drifted_count="$(printf '%s' "$drift" | grep -c .)"
+  pinned_count="$(printf '%s\n' $names | grep -c .)"
+  say "$drifted_count of $pinned_count pinned component(s) are not the build of this tree. Commit these lines with the component change that caused each one:"
+  printf '%s' "$drift" >&2
+  if [ "$drift_sha" = 1 ]; then
+    fail "artifact_not_pinned: ${drifted_names% } - not the build this tree pins (sha256); the lines above are what to commit" 5
+  fi
+  fail "artifact_not_pinned: ${drifted_names% } - the pinned size, not the pinned bytes; the lines above are what to commit" 6
+fi
 
 # The lock travels with the artifacts: it is the bundle's identity (the deploy compares it to its own
 # before it caches or stages anything), and the tag is derived from it.

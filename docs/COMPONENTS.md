@@ -450,25 +450,42 @@ Components-Unchanged: <name> <what changed and why the bytes are the same>
 
 A trailer with no reason is refused, and the check is proved on fixture repositories (`--self-test`:
 the waroute shape, the repin, an unrelated change, a path dependency, a recorded trailer, a trailer
-without a reason, an uncommitted change - 7 fixtures, and exactly the first, fourth, sixth and
-seventh fail).
+without a reason, an uncommitted change, and a **non-whatsapp** component changed while another pinned
+component was repinned in the same commit - 14 fixtures, and exactly the ones that must fail do).
 
-**Half 2, pin vs bytes.** The pinned `wa-whatsapp.wasm` is verified against its own line (sha256 AND
-size), and every op the seam defines must be in those bytes: the op list is read from
-`rust/wa-whatsapp-index` (`Op::ALL`, `Op::as_str`, `Op::tool`), never copied into the test, and each
-tool name must appear in the module. Measured on the two builds: the one pinned before waroute
-(8,554,548 bytes) contains `whatsapp_contacts` 0 times, the build of this tree (8,557,078) 2 times.
-The bare word `contacts` is *not* discriminating - the old build carries it 3 times already - which is
-why the check keys on the tool names. The bytes come from the first candidate that matches the pin:
-`$WA_PINNED_COMPONENTS_DIR`, the component directory the core reads, `build/components-pinned/`, this
-worktree's git dir, or the public release `components-<lock sha12>` (fetched and verified the way a
-deploy verifies it). No candidate prints `SKIP wa-whatsapp-pin: <why>` with the command that builds
-them; `WA_PIN_CHECK_REQUIRE=1` turns that into a failure, which is what a release gate wants.
+**Half 2, pin vs bytes - every pinned component, not only `wa-whatsapp`.** This is where 13/11 bit
+again: half 1 judged all eleven components, half 2 judged `wa-whatsapp` alone, so `agent-core`,
+`codemode`, `graph`, `hooks`, `memory`, `mesh`, `model-gateway`, `selfloop`, `telemetry-sink` and
+`wa-email` could sit at pins no build of main produced and the gate stayed green (measured that day:
+`scripts/publish-components.sh` built all eleven and every one was `artifact_not_pinned`, starting with
+`agent-core` b24672b2 against the pinned 02be7eae). Now each pinned name is verified against its own
+line - sha256 AND size - and judged from a private copy of the file that was verified, because two rows
+of one gate share `<git-dir>/wa-pinned-components/`. One line per component; a name with no reachable
+copy prints `SKIP <name>-pin: <why>` with the command that builds it, and `WA_PIN_CHECK_REQUIRE=1`
+turns every skip into a failure, which is what a release gate wants.
+
+**The seam scan is `wa-whatsapp`'s extra.** Its bytes must carry every op the seam defines: the op list
+is read from `rust/wa-whatsapp-index` (`Op::ALL`, `Op::as_str`, `Op::tool`), never copied into the
+test, and each tool name must appear in the module. Measured on the two builds: the one pinned before
+waroute (8,554,548 bytes) contains `whatsapp_contacts` 0 times, the build of this tree (8,557,078) 2
+times. The bare word `contacts` is *not* discriminating - the old build carries it 3 times already -
+which is why the check keys on the tool names. The bytes come from the first candidate that matches the
+pin: `$WA_PINNED_COMPONENTS_DIR`, the component directory the core reads, `build/components-pinned/`,
+this worktree's git dir, or the public release `components-<lock sha12>` (fetched and verified the way a
+deploy verifies it).
 
 A rebuild is deliberately **not** part of this: with a `path =` dependency the bytes are not
 reproducible across checkout paths (previous section), so "does a rebuild match the pin" would be a
-check that fails for the right code. The pin names one build; half 2 proves that build is a build of
-the shipped seam.
+check that fails for the right code. The pin names one build; half 2 proves the bytes this node would
+install are that build, and - for `wa-whatsapp` - that those bytes are a build of the shipped seam.
+
+**When every line moves at once.** A repin of all eleven components is `scripts/publish-components.sh`
+from the reviewed tree (it prints every drifted line in one run, not one per run), the lock committed
+with them, and then the bundle the deploy fetches: `artifacts/components-<lock sha12>`, an orphan commit
+holding every `<name>.wasm`, its `<name>.json`, `components.lock`, `SHA256SUMS` and a `PUBLISH.sh` whose
+`gh release create` line makes the release the tag the lock derives. A node then fetches it with no
+credentials (`scripts/lib/deploy-components.sh`), and a machine that cannot rebuild the same bytes does
+not have to: `publish-components.sh --from <the bundle's files>` re-verifies and re-bundles them.
 
 Nothing is ambient: no filesystem, no network, no inherited environment. The manifest **declares**
 what the component may ever need; the registry definition **grants** a subset; the host refuses a

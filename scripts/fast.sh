@@ -663,12 +663,19 @@ check fast-environment bash scripts/test-fast-environment.sh
 # the `contacts` op to `rust/components/wa-whatsapp` and to the seam crate it shares with the node, and
 # `components.lock` kept pinning the artifact built before it - every deploy installed those bytes and
 # the tool answered `whatsapp_contacts_bad_op`; the component's tests were green because they ran
-# against the source). Two halves: the pin must move when anything under a pinned component's tree or a
-# crate it path-depends on moves (git only - it never skips, no toolchain, no network), and the pinned
-# `wa-whatsapp.wasm` must answer every op `rust/wa-whatsapp-index` defines. The artifact half says
-# `SKIP wa-whatsapp-pin: <why>` when no copy of the pinned bytes is reachable; `WA_PIN_CHECK_REQUIRE=1`
-# (a release gate) makes that a failure instead.
+# against the source). Two halves, both for EVERY pinned component: the pin must move when anything under
+# a pinned component's tree or a crate it path-depends on moves (git only - it never skips, no toolchain,
+# no network), and every pinned `<name>.wasm` must be the bytes its line names (sha256 and size) - with
+# `wa-whatsapp`'s own seam scan on top, because its op list is a crate of this tree. Half 2 says
+# `SKIP <name>-pin: <why>` per component when no copy of the pinned bytes is reachable;
+# `WA_PIN_CHECK_REQUIRE=1` (a release gate) makes every skip a failure instead.
 check component-pins bash scripts/test-component-pins.sh
+# The row above judges THIS tree; this one judges the CHECK, because a gate nobody proves is a gate that
+# can quietly judge less. Its fixtures are the shapes that shipped: a component changed without a repin -
+# including a non-whatsapp one, while another pinned component was repinned in the same commit - a copy
+# that is not its pin failing by name, a per-component SKIP, and eight parallel rows fetching two pinned
+# names from one cache at once (the 13/11 race). Seconds: no toolchain, no network, no build.
+check component-pins-selftest bash scripts/test-component-pins.sh --self-test
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.

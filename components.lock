@@ -48,6 +48,44 @@
 # (docs/WHATSAPP-CUTOVER.md). A pin is not a policy either: `policy.json` still decides what a node
 # routes to, and `wa features` says which path is live.
 #
+# WHERE THIS FILE STOOD ON 13/11, AND WHY ALL ELEVEN LINES MOVED AT ONCE.
+# `scripts/publish-components.sh` built every pinned component from main (e71e18b7) and stopped at the
+# first one: `artifact_not_pinned: agent-core is b24672b2…, components.lock pins 02be7eae…`. All eleven
+# had drifted and nothing in the gate could see it, because the only bytes check in
+# `scripts/test-component-pins.sh` judged `wa-whatsapp`: ten holes were green. The deploy could not work
+# either way - it asks for the release `components-495fcca901d7` (the first 12 hex of the sha256 of the
+# lock it holds) and no bundle had ever been published for that lock, so every node refused with
+# `component_release_unavailable`. `change/repinall` repins all eleven from one measured build, publishes
+# the bundle for the new lock, and makes that check judge every component instead of one.
+#
+# WHAT MOVED, per component, measured on wa-desktop (rustc 1.99.1, wasi-sdk 34): every pinned component
+# built twice, in two checkout paths, the two sha256 compared.
+#
+#   codemode       source: 13 commits since the pin, f2d2c3cc..99edd392 (one registry two views;
+#                  natural promises; always fresh and explicit reuse; the pending pool; the fence
+#                  sentences)
+#   graph          source: 8a7b2131 (one contention policy for every store, in `wa-sqlite`, a path
+#                  dependency) and f0e0f55b (the pins check itself, in `rust/components/graph`)
+#   mesh           source: d044891d (the `*_many` tools retired from `wa-grant-policy`, a path
+#                  dependency)
+#   agent-core, hooks, memory, model-gateway, selfloop, telemetry-sink, wa-email
+#                  NO source change. Rebuilding the tree that set those pins (441b8ea3) here gives
+#                  today's bytes - `agent-core` b24672b2… 392561 - and not the pin (02be7eae…, 396230),
+#                  so those pins are the output of another compiler, not of this source: a pin no
+#                  toolchain on this node reproduces is a pin this node cannot verify.
+#   wa-whatsapp    source unchanged since its pin (14bd0013); its bytes moved with the checkout path
+#                  alone (8584087 pinned against 8584349 and 8583921 measured in two worktrees) - the
+#                  `-C metadata` effect described above.
+#
+# The lines below are the build of main e71e18b7 (change/repinall changes no component source) in a
+# checkout at /home/wa/wt-repinall on wa-desktop, and the bundle `artifacts/components-<sha12 of this
+# file>` holds exactly these bytes, each verified against these lines before it was committed. A rebuild
+# in another checkout reproduces the five components without a `path =` dependency byte for byte, and
+# the six with one only sometimes (measured 13/11: `graph`, `mesh`, `wa-email` and `wa-whatsapp` differed
+# between two paths of one commit, `model-gateway` and `telemetry-sink` did not). That is why a repin is
+# `scripts/publish-components.sh --from <the bundle's artifacts>` and not a rebuild: the pin names bytes,
+# and the bundle is where those bytes are.
+#
 # FORMAT: <name> <sha256> <bytes>. Regenerate a line on the machine that produces the release
 # artifacts, from the reviewed tree:
 #
@@ -55,10 +93,11 @@
 #   sha256sum <artifact-dir>/<name>.wasm      # -> this line (the size too)
 #
 # and commit the changed line with the component change that caused it. A build is not
-# byte-reproducible across checkout paths (the guest embeds three panic-location paths - measured
-# 05/11: two checkouts of the same tree gave 8,185,719 and 8,185,720 bytes; the graph moved again
-# when this lock was regenerated from the shipping checkout, 8,216,373 -> 8,216,118 bytes), which is
-# why a node installs the pinned artifact instead of rebuilding it.
+# byte-reproducible across checkout paths (13/11 on this node: the five pinned components without a
+# `path =` dependency reproduced byte for byte from two paths, and of the six with one, `graph`, `mesh`,
+# `wa-email` and `wa-whatsapp` did not - the graph differs by 0 bytes and not the same ones, because
+# Cargo's `-C metadata` for a path package is a hash of its canonical absolute path), which is why a
+# node installs the pinned artifact instead of rebuilding it.
 #
 # Where that artifact comes from, in the order a deploy tries it (docs/COMPONENTS.md "Distributing
 # components"): the component already installed (when it is these bytes), this node's cache
@@ -72,14 +111,14 @@
 # A deploy that builds from the tree instead (no pinned bytes reachable and
 # WA_DEPLOY_COMPONENT_SOURCE unset) is a development deploy, and it must say so with
 # WA_DEPLOY_COMPONENT_REPIN=1 to install what it just built.
-agent-core 02be7eaeeab8521600e28c8d0e28aed8a917be5dfdb601f8c852fbacf44a3b26 396230
-codemode 9d49c2c72d0b9a3897a4e8374b39b11340e495e9f66d1dc4d49770ad43402175 212123
-graph 0dac51ac087fd2a944ccd0eaba4dff0f525f907e861a0e3a5aeaf35f72a0e75e 8216117
-hooks d1552e198eb7c00e86406f85d2ec3620284bf4d7aa2a94123f6296bb770c8d4f 217631
-memory d591fe3785d780e36313ba824bad14c5574c57b7fe0dde8f5c2de704e613e079 207328
-mesh 455570ba16d2de2cd407917a76e4b78e449d127347db46f0dbae3511f1626c7e 210650
-model-gateway 8685425bd2a2f6ba7e66ae72e8a0cc40064a530f1371ef9db807fc87bfc1c58d 405086
-selfloop 2ac381ae62407256c0328d115b357125ada42357e4d088a4b08176a48ff4b699 246427
-telemetry-sink 48d5d52aba78d986e857da523e00801ddfa9f2c98503e912fe4c8172188cd707 153650
-wa-email 630f6fd0d9574db3f80457bfa24eb56cc9b62854ecd268e551c84eb9c103d1b4 569268
-wa-whatsapp 0dc964a0b85375bc201c496e8246c07af72d4eed56122e1c39debc3bc18e134c 8584087
+agent-core b24672b26ae4585f53bb6d4f5d9ab3cde61a663148385099eba4951ce8b57d53 392561
+codemode 711eef370fa23d8b4ec2bcef0e2c8afa8924817ef5161809b1b4cdbe1303ca8b 210996
+graph 54779c7d61e163145c69ec4502397a4adf0d75c544c883639989affb6574288a 8186393
+hooks f5fef7083eedac3269aecb50590297935be53e522d282f70bfa97e4bfa7e3e30 215897
+memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
+mesh 42872bbcd609f2e835dbd8e4f7ccdc857f4f313d7dd8aab0020a998c6910bff7 209612
+model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 404558
+selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
+telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
+wa-email ddbe326a5d394a0dc50a0c947740a1364e4cdeda348286666a3ba21569893915 565827
+wa-whatsapp bfe0e90912e0091d2e1f43642ed74d4beb9803fc643d7b40fa4bb65702891a78 8584349
