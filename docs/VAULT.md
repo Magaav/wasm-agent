@@ -299,6 +299,27 @@ refusal rather than a silent downgrade. **TPM 2.0 is not wired**: no `tpm2`/`tss
 offline on this toolchain, and a TPM path that fell back to DPAPI without saying so would be worse than the
 gap. It is a later row, not a claim.
 
+Which protection is in use is a **fact about the file, not about the process that opens it**. The wrapped
+root is 89 bytes when the passphrase file wrote it (16-byte Argon2id salt in front) and 73 bytes when the
+kernel keyring did (`version || nonce || ciphertext+tag`), so `Keystore::open` reads the shape and uses
+that protection; the environment only decides the protection of a **new** root key, and when an explicit
+`WASM_AGENT_VAULT_KEYSTORE` disagrees with the file the file wins and one line says so
+(`vault: keystore_protection_from_file:passphrase, so WASM_AGENT_VAULT_KEYSTORE=keyring is ignored`).
+Choosing it per process instead was a real defect: the kernel keyring is mutable machine state, so one
+`wa vault` command could write a keyring-wrapped root and the next, on a host whose keyring had since become
+unusable, read it with the passphrase cipher and answer `sealed_blob_version_unknown` about a file nobody
+had touched (measured on wa-desktop, 13/11).
+
+The kernel keyring is **per uid with a hard, shared budget** — `kernel.keys.maxkeys` 200 and `maxbytes`
+20000 for a non-root user — and every entry costs, so this module's rule is that an entry it creates for a
+probe is released (`KEYCTL_UNLINK`), never merely invalidated: `KEYCTL_INVALIDATE` keeps the quota charged
+(the entry is listed as `I--Q---` for hours), and 199/200 charged keys is a machine where `add_key` answers
+EDQUOT. A real refusal is a value, not a dead end: with a passphrase configured the keystore takes the
+sealed file and says so once (`vault: keystore_keyring_refused:edquot, using the passphrase file`); with no
+passphrase the answer is the refusal it always was (`keystore_keyring_unavailable`). Tests do not spend the
+machine's keyring budget: a row pins `WASM_AGENT_VAULT_KEYSTORE=passphrase` when its subject is the
+sealed file, and the keyring's own decisions are proved in `wa-keystore`'s tests.
+
 A component is given `seal(context, plaintext)` and `open(context, sealed)` and nothing else: no key
 material crosses the seam in either direction, and the namespace is not an argument (the kernel binds it
 before the interface is linked). That is what makes "the root key never leaves the kernel" true at the
