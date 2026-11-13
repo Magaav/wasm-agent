@@ -144,9 +144,21 @@ check(record.command:find('chat --once ' .. shquote(prompt), 1, true) ~= nil,
 check(record.command:find('< /dev/null', 1, true) ~= nil, 'and stdin is closed, so nothing else is read')
 check(record.session_id == nil or record.session_id ~= '', 'a session id is never an empty string')
 
--- The checkout the child reads: the branch tip, and the diff the branch makes.
-local head = exec_git(record.checkout, 'rev-parse HEAD').stdout or ''
-check(head:gsub('%s+$', '') == sha, "the child's checkout is the branch tip")
+-- The checkout the child reads: an EXPORT of the branch tip - no git directory, no alternates, no remote,
+-- so nothing in it points at the operator's tree (a `--shared` clone does; second real review, finding 4).
+local target = read(record.isolation.scratch .. '/TARGET') or ''
+check(target:find('sha ' .. sha, 1, true) ~= nil, 'the scratch names the branch tip it exported')
+check(select(2, pcall(host.path_kind, record.checkout .. '/.git')) == 'missing',
+  'the checkout has no git directory for a bash call to walk back through')
+check(read(record.checkout .. '/feature.txt') ~= nil, 'the branch file is in the export')
+check(read(record.checkout .. '/README.md') ~= nil, 'and the base file it did not change is too')
+local diff_text = read(record.diff_path or '') or ''
+check(record.diff_path ~= nil and diff_text:find('feature.txt', 1, true) ~= nil,
+  'the diff the child reads is the branch' .. "'" .. 's own change, written by the engine')
+-- The diff is against the MERGE BASE: a branch cut before today's main must not read other people's
+-- landed work as its own reversions (both first reviews of this branch spent their opening on that).
+local merge_base = (exec_git(repo, 'merge-base ' .. shquote(base_sha) .. ' ' .. shquote(sha)).stdout or ''):gsub('%s+$', '')
+check(record.diff_base == merge_base, 'the diff base is the merge base of the base and the tip')
 local touched = table.concat(record.files_touched or {}, ',')
 check(touched:find('feature.txt', 1, true) ~= nil, 'the record names the file the diff touches')
 
@@ -187,10 +199,10 @@ check(gone == 'missing', 'a scratch root is removed when the review is done (' .
 -- ---------------------------------------------------------------- 5. marks, misses and the totals
 local marked, mark_why = reviewer.mark(record.id, 'accepted', 1)
 check(marked ~= nil, 'a finding can be marked: ' .. tostring(mark_why))
-check(marked.marks[1].state == 'accepted', 'the accepted mark is stored on the finding it names')
+check(marked.marks['1'].state == 'accepted', 'the accepted mark is stored on the finding it names')
 local inline = reviewer.mark(record.id .. '#2', 'rejected')
-check(inline ~= nil and inline.marks[2].state == 'rejected', '`<id>#2` marks the second finding alone')
-check(inline.marks[1].state == 'accepted', 'and leaves the first one as it was')
+check(inline ~= nil and inline.marks['2'].state == 'rejected', '`<id>#2` marks the second finding alone')
+check(inline.marks['1'].state == 'accepted', 'and leaves the first one as it was')
 local refused_mark, refused_why = reviewer.mark(record.id, 'accepted', 9)
 check(refused_mark == nil and tostring(refused_why):find('is not one', 1, true) ~= nil,
   'a finding number the review does not have is refused by name')
@@ -206,6 +218,17 @@ local no_findings, no_findings_why = reviewer.mark('nothing-001', 'accepted')
 check(no_findings == nil and tostring(no_findings_why):find('no findings', 1, true) ~= nil,
   'a review with no findings has nothing to mark, and says so')
 
+-- A LONE mark, on a review whose marks are empty, re-read from disk: `marks[2]` on its own is a sparse
+-- array and `lua/vendor/json.lua` refuses one, which crashed the door and dropped the mark (finding 1).
+local lone, lone_why = reviewer.mark(second.id, 'rejected', 2)
+check(lone ~= nil, 'a lone mark on the second finding is accepted: ' .. tostring(lone_why))
+local reread = reviewer.record(second.id)
+check(reread ~= nil and type(reread.marks) == 'table', 'the review is readable back from disk after a lone mark')
+check(type(reread.marks['2']) == 'table' and reread.marks['2'].state == 'rejected',
+  'and the mark is on the finding it names, in the stored record')
+local lone_counts = { reviewer.counts(reread) }
+check(lone_counts[2] == 1 and lone_counts[3] == 1, 'the counts read a lone mark as one rejected, one unmarked')
+
 local miss, miss_why = reviewer.miss('change/fixture', 'the reviewer missed the bypass', repo)
 check(miss ~= nil, 'a miss is recorded: ' .. tostring(miss_why))
 check(miss.sha == sha, 'the miss names the commit it was found on')
@@ -215,16 +238,16 @@ check(empty_miss == nil and tostring(empty_miss_why):find('note', 1, true) ~= ni
 
 local totals = reviewer.totals()
 check(totals.reviews == 3, 'the totals count every review in the store')
-check(totals.findings == 4 and totals.accepted == 1 and totals.rejected == 1 and totals.unmarked == 2,
-  'the totals count every finding and every mark (4 findings, 1 accepted, 1 rejected, 2 unmarked)')
-check(totals.accepted_rate ~= nil and math.abs(totals.accepted_rate - 0.5) < 0.001,
+check(totals.findings == 4 and totals.accepted == 1 and totals.rejected == 2 and totals.unmarked == 1,
+  'the totals count every finding and every mark (4 findings, 1 accepted, 2 rejected, 1 unmarked)')
+check(totals.accepted_rate ~= nil and math.abs(totals.accepted_rate - 1 / 3) < 0.001,
   'the accepted rate is over the findings that were marked')
 check(totals.misses == 1, 'the totals count the misses')
 
 local report_text = table.concat(core.report({ all = true, reviews = reviewer }), '\n')
 check(report_text:find('reviews (data only - a review never blocks a landing)', 1, true) ~= nil,
   'the report names the review store as data only')
-check(report_text:find('accepted rate 50%', 1, true) ~= nil, 'the report shows the accepted rate')
+check(report_text:find('accepted rate 33%', 1, true) ~= nil, 'the report shows the accepted rate')
 check(report_text:find('misses 1', 1, true) ~= nil, 'the report shows the misses')
 check(report_text:find('change/fixture', 1, true) ~= nil, 'the report names the branch, not its text')
 check(report_text:find('BYPASS-MARKER', 1, true) == nil, "the report never prints the review's text")
@@ -281,6 +304,12 @@ if queue then
 else
   print('SKIP the landing queue is not readable from this row, so "it does not read the reviewer" is unchecked')
 end
+
+-- A note that begins with a dash is a note, not an unknown option (finding 5).
+local dash_code, dash_text = door({ 'eval', 'reviewer', 'miss', 'change/fixture', '--note',
+  '--missed the bypass on line 12' })
+check(dash_code == 0, 'a note that starts with `--` is accepted (' .. tostring(dash_code) .. ')')
+check(dash_text:find('--missed the bypass on line 12', 1, true) ~= nil, 'and stored as written')
 
 -- The switch, through the door an operator uses: the env spelling, in a child process.
 local child_home = home .. '/door-home'

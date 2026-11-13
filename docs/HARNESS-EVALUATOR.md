@@ -41,8 +41,10 @@ diff against the base, and every file the diff touches. Its instruction text is 
 (`M.INSTRUCTION`) and its model is pinned (`deepseek-v4.1-flash`, with no `--model` on the door), because
 the text and the model are the two things whose change would invalidate every number in the store. The isolation is the replay's, reused:
 a scratch root outside the node home, `env -i` with an allowlist, the sink that refuses effects and
-connectors, the PATH guards, code mode on as in a replay. The review reads a discarded clone of the
-branch tip.
+connectors, the PATH guards, code mode on as in a replay. The review reads a discarded **export** of the
+branch tip (`git archive`: no git directory, no alternates, no remote, so nothing in it points at the
+operator's tree) and a diff the door wrote from the merge base of the base and the tip - a branch cut
+before today's main is not made of other people's landed work.
 
 It is **not a gate**. It prints the findings and the final `REVIEW <branch> <sha> findings=<n>` line, exits
 0 whatever the findings are, and `scripts/landing-queue.mjs` never reads its store. The operator marks each

@@ -176,6 +176,11 @@ end
 -- The instruction first, byte for byte, then the input the operator named: the branch and its sha, the
 -- base, the brief, and where the checkout is. Nothing else - a reviewer that is told what to expect is
 -- not reviewing the branch.
+--
+-- The diff is against the MERGE BASE of the base and the tip, which is what "the diff against main" means
+-- for a branch cut before today's main: both of this branch's first reviews spent their opening on a
+-- `git diff <base>..HEAD` that showed other people's landed work as reversions, because the branch did not
+-- contain the base. The prompt names both commits so nothing is read as one when it is the other.
 function M.prompt(record, brief_text)
   local lines = {
     M.INSTRUCTION,
@@ -184,9 +189,14 @@ function M.prompt(record, brief_text)
     "Branch: " .. tostring(record.branch),
     "Sha: " .. tostring(record.sha),
     "Base: " .. tostring(record.base_ref) .. " (" .. tostring(record.base_sha) .. ")",
-    "Checkout: " .. tostring(record.checkout) .. " - a clone at the branch tip. The diff against the",
-    "base is `git diff " .. tostring(record.base_sha) .. " HEAD`; every file it touches is in that clone.",
+    "Merge base: " .. tostring(record.diff_base) .. " - the diff against it is the branch's own change",
   }
+  if record.diff_path and record.diff_path ~= "" then
+    lines[#lines + 1] = "Diff: " .. tostring(record.diff_path) .. " (git diff " .. tostring(record.diff_base)
+      .. ".." .. tostring(record.sha) .. ", " .. tostring(record.diff_bytes or 0) .. " bytes)"
+  end
+  lines[#lines + 1] = "Checkout: " .. tostring(record.checkout)
+    .. " - an export of the branch tip (files only; there is no git history in it)"
   if brief_text and brief_text ~= "" then
     lines[#lines + 1] = "Brief (" .. tostring(record.brief.path) .. "):"
     lines[#lines + 1] = "--- begin brief ---"
@@ -321,6 +331,7 @@ function M.run(opts)
     sha = sha,
     base_ref = base_ref,
     base_sha = base_sha,
+    diff_base = base_sha,
     repo = repo,
     bin = bin,
     provider = M.DEFAULT_PROVIDER,
@@ -337,26 +348,51 @@ function M.run(opts)
       environment = "env -i with an allowlist (HOME, ledger, PATH, sink, the model route); no node env, no rendezvous, no relay",
       effects = "blocked by the review sink and the PATH guards; a review records what it would have done and does nothing. `bash` is not hooked (a review needs it to run `git diff`), so only its remote verbs are shimmed",
       code_mode = "on, as in a replay: every nested dispatch crosses the same sink, so a script cannot perform an unrecorded effect",
+      checkout = "an export of the branch tip (git archive): no git directory, no alternates, no remote - nothing in it points at the operator's tree",
     },
     files_touched = {},
     marks = {},
   }
 
+  -- The checkout is an EXPORT of the branch tip, not a clone: a `--shared` clone carries
+  -- `.git/objects/info/alternates` and `remote.origin.url` pointing at the operator's tree, and `bash` is
+  -- not a hooked tool, so one bash call could edit the operator's checkout with nothing in the record
+  -- saying so (the second real review of this branch, 13/11, finding 4). An export has no git directory at
+  -- all, and the diff is written here, by the parent, from the repository it already has.
   local ws = record.checkout
-  local cloned = exec("git clone --no-hardlinks --shared --no-checkout " .. shquote(repo) .. " " .. shquote(ws), "", 600)
-  if cloned.status ~= 0 then
-    exec("rm -rf " .. shquote(scratch), "", 60)
-    return nil, "the branch's repository could not be cloned for the review: " .. trim(cloned.stderr)
+  exec("mkdir -p " .. shquote(ws), "", 120)
+  local merge_base = trim(git(repo, "merge-base " .. shquote(base_sha) .. " " .. shquote(sha)) or "")
+  if merge_base ~= "" and #merge_base >= 7 then
+    record.diff_base = merge_base
   end
-  local checked_out = exec("git checkout --force --detach " .. shquote(sha), ws, 600)
-  if checked_out.status ~= 0 then
+  local exported = exec("git -C " .. shquote(repo) .. " archive --format=tar " .. shquote(sha)
+    .. " | tar -x -C " .. shquote(ws), "", 600)
+  if exported.status ~= 0 then
     exec("rm -rf " .. shquote(scratch), "", 60)
-    return nil, "the branch tip " .. sha .. " could not be checked out: " .. trim(checked_out.stderr)
+    return nil, "the branch tip " .. sha .. " could not be exported for the review: " .. trim(exported.stderr)
   end
-  local ok_diff, names = git(ws, "diff --name-only " .. shquote(base_sha) .. " HEAD")
+  replay.write_text(scratch .. "/TARGET",
+    "branch " .. branch .. "\nsha " .. sha .. "\nbase " .. base_ref .. " " .. base_sha .. "\nmerge_base "
+      .. tostring(record.diff_base) .. "\n")
+  local diff_path = scratch .. "/diff.patch"
+  local diff = exec("git -C " .. shquote(repo) .. " diff " .. shquote(tostring(record.diff_base))
+    .. " " .. shquote(sha), "", 600)
+  if diff.status ~= 0 then
+    exec("rm -rf " .. shquote(scratch), "", 60)
+    return nil, "the branch's diff could not be read: " .. trim(diff.stderr)
+  end
+  local diff_text = tostring(diff.stdout or "")
+  replay.write_text(diff_path, diff_text)
+  record.diff_path = diff_path
+  record.diff_bytes = #diff_text
+  local ok_diff, names = git(repo, "diff --name-only " .. shquote(tostring(record.diff_base)) .. " " .. shquote(sha))
   if ok_diff then
     for name in names:gmatch("[^\n]+") do record.files_touched[#record.files_touched + 1] = name end
   end
+  -- A manifest of the export, so "the review changed nothing in it" is a comparison of content rather
+  -- than `git status` in a directory that (rightly) has no git.
+  local manifest = exec("cd " .. shquote(ws) .. " && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum", "", 300)
+  record.checkout_manifest = tostring(manifest.stdout or "")
 
   exec("mkdir -p " .. shquote(scratch .. "/sink") .. " " .. shquote(scratch .. "/decisions")
     .. " " .. shquote(scratch .. "/home") .. " " .. shquote(scratch .. "/tmp"), "", 120)
@@ -432,13 +468,14 @@ function M.run(opts)
     record.findings = nil
     record.state = "no_review"
   end
-  -- What the review session itself changed, if anything: it is its own discarded clone, so this is
+  -- What the review session itself changed, if anything: it is its own discarded export, so this is
   -- evidence that the reviewer fixed nothing, not a warning about the operator's tree.
-  local ok_status, status = git(ws, "status --porcelain")
-  if ok_status and status ~= "" then
-    record.checkout_changed = {}
-    for name in status:gmatch("[^\n]+") do record.checkout_changed[#record.checkout_changed + 1] = name end
+  local after_manifest = exec("cd " .. shquote(ws) .. " && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum", "", 300)
+  if tostring(after_manifest.stdout or "") ~= tostring(record.checkout_manifest or "") then
+    record.checkout_changed = true
+    record.checkout_changed_note = "the export differs from what it was before the review"
   end
+  record.checkout_manifest = nil
 
   -- Evidence stays in the review's own directory under the state dir; the scratch tree goes away.
   local kept = scratch
@@ -478,7 +515,11 @@ function M.mark(id, word, finding)
   else
     for index = 1, count do wanted[#wanted + 1] = index end
   end
-  for _, index in ipairs(wanted) do record.marks[index] = { state = word, at = host.now() } end
+  -- Keyed by STRING index: `marks[2]` alone is a sparse array, and `lua/vendor/json.lua` refuses one
+  -- ("mixed or invalid key types"), which made marking any single finding but the first crash the door and
+  -- lose the mark (the second real review of this branch, 13/11, finding 1).
+  record.marks = type(record.marks) == "table" and record.marks or {}
+  for _, index in ipairs(wanted) do record.marks[tostring(index)] = { state = word, at = host.now() } end
   if not save(record) then return nil, "the mark could not be written" end
   return record
 end
@@ -519,16 +560,21 @@ local function sum(records, get)
   return seen and total or nil
 end
 
-local function counts_of(record)
+-- accepted, rejected, unmarked for one review. A mark is read by its string key (`"2"`), and a record
+-- written by the first version of this store (numeric keys) is read the same way, by its tostring.
+function M.counts(record)
   local accepted, rejected = 0, 0
-  for index = 1, tonumber(record.findings) or 0 do
-    local mark = (record.marks or {})[index]
+  local findings = tonumber(record.findings) or 0
+  local marks = type(record.marks) == "table" and record.marks or {}
+  for index = 1, findings do
+    local mark = marks[tostring(index)]
+    if type(mark) ~= "table" then mark = marks[index] end
     if type(mark) == "table" and mark.state == "accepted" then accepted = accepted + 1 end
     if type(mark) == "table" and mark.state == "rejected" then rejected = rejected + 1 end
   end
-  local findings = tonumber(record.findings) or 0
   return accepted, rejected, findings - accepted - rejected
 end
+local counts_of = M.counts
 
 function M.totals()
   local records = M.records()

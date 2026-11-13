@@ -227,12 +227,7 @@ local function reviewer_mark(args, valued, words)
   if not id or not word then return refused("reviewer mark needs a review id and `accepted` or `rejected`") end
   local record, problem = reviewer.mark(id, word, flag(args, "--finding"))
   if not record then return refused(problem or "the mark was refused") end
-  local accepted, rejected = 0, 0
-  for index = 1, tonumber(record.findings) or 0 do
-    local mark = (record.marks or {})[index]
-    if type(mark) == "table" and mark.state == "accepted" then accepted = accepted + 1 end
-    if type(mark) == "table" and mark.state == "rejected" then rejected = rejected + 1 end
-  end
+  local accepted, rejected = reviewer.counts(record)
   print(string.format("%s: accepted %d, rejected %d of %s finding(s)", record.id, accepted, rejected,
     tostring(record.findings or "-")))
   return 0
@@ -279,10 +274,15 @@ local function reviewer_run(args)
   -- pinned one (first real review, 13/11).
   local allowed = { ["--keep-scratch"] = true }
   for name in pairs(valued) do allowed[name] = true end
-  for index = 2, #args do
+  local index = 2
+  while index <= #args do
     local token = args[index]
-    if token:sub(1, 2) == "--" and not allowed[token] then
+    if valued[token] then
+      index = index + 2  -- an option's VALUE is not an option: `--note "--missed the bypass"` is a note
+    elseif token:sub(1, 2) == "--" and not allowed[token] then
       return refused("unknown option " .. token .. " for `wa eval reviewer` (wa eval help)")
+    else
+      index = index + 1
     end
   end
   -- The switch is read BEFORE a positional is demanded: with the reviewer off, the bare word answers that

@@ -36,9 +36,12 @@ read, tool errors, effects attempted, files changed, the final answer, wall time
 `run` replays it. `report` prints ids, categories and counts. `verdict` records a hand verdict.
 
 `reviewer` is the landing reviewer (below): it runs one review of one branch, and the operator's marks and
-misses are recorded against the same store. `reviewer run <run-id>` is the storage form that existed
-before the reviewer ran anything - a replay run still carries that shape, and `report` still prints it;
-nothing reads it as a decision.
+misses are recorded against the same store.
+
+That verb used to take a replay run id (`wa eval reviewer <run-id> --findings N ...`). That spelling is
+now `wa eval reviewer run <run-id> ...` - same storage, same output, kept under the same verb - because
+the positional is the branch a review runs on. A replay run still carries that `reviewer` shape and
+`report` still prints it; nothing reads it as a decision.
 
 ## The landing reviewer
 
@@ -68,8 +71,12 @@ refusing every effect and connector tool in the review's own words, and the PATH
 (`825ce08f`, `docs/HOOKS.md`) a call inside a script crosses the same sink, so it cannot perform an effect
 the record would not see. `bash` is not hooked - a review needs it to run `git diff` - so only its remote
 verbs are shimmed, and the model route travels without the sealed keystore's unseal credentials. The
-review reads a **discarded clone** of the branch tip, so a reviewer that edits cannot touch the operator's
-tree - and `checkout_changed` in the record says whether it did.
+review reads a **discarded export** of the branch tip (`git archive`, written by the door from the repository it
+already has): it has no git directory, no object alternates and no remote, so nothing in it points at the
+operator's tree - a `--shared` clone does, which is what the second real review of this feature found. The
+diff the review reads is `git diff <merge base>..<sha>`, because a branch cut before today's main is not
+made of other people's landed work. `checkout_changed` compares a sha256 manifest of the export before and
+after the review.
 
 One switch turns it off: `reviewer = off` in the node's config file (`<config>/env`), or `WA_REVIEWER=off`
 in the environment. The door then says it is off and exits 0.
