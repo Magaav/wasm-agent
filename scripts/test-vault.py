@@ -417,7 +417,34 @@ try:
             no_secret(result.stdout,'legacy scripted reader stdout')
             no_secret(result.stderr,'legacy scripted reader diagnostics')
 
-    # --- remove: gone, and refused again
+    # --- the release signing key is not a read path either -------------------------------------------
+    # Same rule as every credential above, on the routes that were added for signed releases: the proxy
+    # the agents use has no route for any of them, and the only time the seed leaves the process is the
+    # ONE backup - after which no answer carries it, which is what the SECRETS list now includes.
+    release_routes = (("GET", "/api/release-signing", None),
+                      ("POST", "/api/release-signing/key", {}),
+                      ("POST", "/api/release-signing/sign", {"sha256": "22" * 32}),
+                      ("POST", "/api/release-signing/backup", {}))
+    for method, path, body in release_routes:
+        status, payload = request(PROXY, method, path, body, {"Content-Type": "application/json"})
+        ok(status == 404, 'the proxy has no route for %s %s' % (method, path))
+    admin("POST", "/api/release-signing/key", {})
+    status, payload = admin("POST", "/api/release-signing/sign", {"sha256": "22" * 32})
+    ok(status == 200 and b"signature" in payload, 'the admin signs a digest')
+    no_secret(payload, 'the signing answer')
+    backup_path = os.path.join(data_dir, 'release-signing.backup')
+    status, payload = admin("POST", "/api/release-signing/backup", {"path": backup_path})
+    ok(status == 200, 'the one backup is written to the named file')
+    no_secret(payload, 'the backup answer (file form)')
+    with open(backup_path, encoding='ascii') as handle:
+        SECRETS.append(handle.read().strip())      # the seed: no answer may ever carry it again
+    status, payload = admin("POST", "/api/release-signing/backup", {})
+    ok(status == 409, 'a second backup is refused')
+    no_secret(payload, 'the refused second backup')
+    status, payload = admin("GET", "/api/release-signing")
+    ok(status == 200 and b"public_key" in payload, 'the status route answers the public half')
+    no_secret(payload, 'the release-signing status')
+
     admin("DELETE", "/api/opencode-go/key")
     status, _ = request(PROXY, "GET", "/opencode-go/v1/models")
     ok(status == 401, "a removed key is refused")

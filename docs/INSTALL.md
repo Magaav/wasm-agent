@@ -149,15 +149,62 @@ releases/index-linux.json          # reviewed and committed; the trust root
                                    # refuses a core that is not these bytes (installer_hash_mismatch)
 ```
 
-`SHA256SUMS` is now published beside the assets as well - one line per asset, `sha256sum -c`-able, merged
+`SHA256SUMS` is published beside the assets as well - one line per asset, `sha256sum -c`-able, merged
 across targets so publishing x86_64 after aarch64 keeps both rows (`scripts/release-linux.sh`,
-`scripts/publish-node-binaries.sh`). It is the flat, conventional view of the same bytes; it is not a
-second trust root, and nothing in the install path reads it in preference to the chain above.
+`scripts/publish-node-binaries.sh`). It is the flat, conventional view of the same bytes, and it is
+**signed** (`SHA256SUMS.sig`), see below. The index chain above is still what the installer reads first;
+the signature is what makes a checksum worth checking at all, because a checksum from the same release as
+the bytes proves only that the release agrees with itself.
 
-What is *not* done, said plainly: there are **no signatures** yet (Codex ships sigstore bundles; this
-publishes none), and the `gh` token that publishes is the publisher's, not a reviewer's. The chain above
-is what stands between a poisoned release and a node; it protects against a corrupted or swapped
-download, not against a compromised publisher account.
+## Signed releases
+
+Every release asset a node installs is covered by `SHA256SUMS`, and `SHA256SUMS` is signed by an ed25519
+key that **never leaves wa-vault** (`release-signing`). A node verifies that signature against a public
+key it already holds, so swapping a binary and its checksum together stops working: the attacker would
+need the key, and the key is behind an admin listener the agents cannot reach.
+
+```
+release-signing (wa-vault, admin listener only)  --signs-->  SHA256SUMS.sig
+                                                                 │ verified by
+config/release-keys.txt  (embedded in the wa binary)  ───────────┤ scripts/lib/release-signing.sh
+<home>/.wasm-agent/release-keys.txt  (the node's copy) ──────────┤ rust/wa-host/src/release.rs  (`wa release verify`)
+                                                                 └ the deploy, `wa update`, the binary-only updater
+```
+
+**Create the key** (operator, once, on the vault's admin page - never from a node):
+
+1. open the vault's admin origin, enter the admin token;
+2. *Release signing key* -> **Generate the key**. The vault makes the seed inside its own process, shows
+   the **public** key and its key id (`release-signing-<16 hex>`), and offers the backup below;
+3. take the ONE backup: either **write it to a file** on the vault's volume (`/data/backups/...`, mode
+   0600, an existing file is never overwritten) and copy that to offline media, or **show it once** and
+   write it down. After that call the seed is not readable by any route again - not by the admin API, not
+   by a page reload, not with the admin token. If it is lost, rotate;
+4. put the public key in `config/release-keys.txt` (`key release-signing-<id> <64 hex>`) and commit it.
+   That is the anchor: the value is compiled into the `wa` binary, and a node also reads its own
+   `<home>/.wasm-agent/release-keys.txt` so it can trust a rotation before it rebuilds.
+
+**Publish** - the publisher needs the admin token where the vault's operator tooling already reads it
+(`WA_VAULT_ADMIN_TOKEN`, or `WA_VAULT_ADMIN_TOKEN_FILE`, never on a command line): the release is signed
+between building the sums and printing the `gh` line, and **a release that could not be signed is not
+published** (`release_not_signed`, exit 6). Every signature is one line in the vault's log, with the key id
+and the manifest's sha256 - never key material.
+
+**Rotate** - a new key is trusted only when a release announces it:
+
+1. generate the new key on the page (rotation replaces the seed; the new key gets its own single backup);
+2. publish a release that carries `TRUSTED-KEYS` (the `wa-trusted-keys v1` list) and `TRUSTED-KEYS.sig`,
+   signed by a key that is trusted **now**, and sign that release's `SHA256SUMS` with either key;
+3. nodes accept the announced list for that release and can then be rebuilt/configured with it. A
+   `TRUSTED-KEYS` signed by an unknown key is refused (`release_signature_invalid`, exit 5).
+
+**What this does not do**: the signing host is the publishing host, so a compromised publisher account can
+ask the vault for one signature - the differences are that the key itself is not on that host and every
+signature is logged (key id + digest) where an operator can see it. The shell paths
+(`scripts/install.sh`, `scripts/linux/bootstrap.sh`) verify against the key list in the commit they run
+from, which is the same anchor the installer itself already rests on (`installer_sha256`); a node that has
+a `wa` binary verifies against the list embedded in it. Until `config/release-keys.txt` holds a key every
+release is refused **by name** and a node falls back to building its tree - that refusal is the feature.
 
 ## Choices, knobs, refusals
 

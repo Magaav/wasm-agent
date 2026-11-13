@@ -1,0 +1,2 @@
+wa-trusted-keys v1
+key release-signing-5465d9e84043b3d3 503bbfa1d9b78a22f10d7833440fc8ea6c919f315d530dd13f74cff232893ce2

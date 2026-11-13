@@ -1,0 +1,5 @@
+wa-release-signature v1
+key release-signing-3bbca47e92f53964
+alg ed25519
+sha256 d01a1984ae0d128c335fa5052e0e0428ab567f1b5e5adbafd4cf7f9eb2a29bd5
+sig 32080e093ea04c0310eede5d19d25e0c1a46501a7904156f2a479d6d2d1d3dccfdcaff281a5d576184cd953d3ffc0d21cc29a6274116cb9e0cdd1ce4ee46fa06
