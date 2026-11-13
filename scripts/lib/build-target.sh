@@ -328,9 +328,12 @@ wa_build_cap_enforce() { # <keep path|->
         [ "$candidate" = "$keep" ] && continue
         # A build output another process is writing to RIGHT NOW is not old, whatever its mtime says: a
         # successful `flock -n` means nobody holds this dir's build lock, and only then is it a candidate.
-        if [ -f "$candidate/.wa-build.lock" ] && command -v flock >/dev/null 2>&1; then
-          flock -n 9 2>/dev/null || continue
-        fi 9>>"$candidate/.wa-build.lock"
+        # The check is non-mutating on purpose - creating the lock file here would write into the very
+        # directory whose mtime and size decide the eviction (measured: it made two fresh fixtures look
+        # like the newest build in the root, and the cap then evicted the wrong one).
+        if command -v flock >/dev/null 2>&1 && [ -f "$candidate/.wa-build.lock" ]; then
+          flock -n "$candidate/.wa-build.lock" true 2>/dev/null || continue
+        fi
         printf '%s\t%s\n' "$(stat -c %Y "$candidate" 2>/dev/null || stat -f %m "$candidate" 2>/dev/null || echo 0)" "$candidate"
       done | sort -n | head -1 | cut -f2-
     )

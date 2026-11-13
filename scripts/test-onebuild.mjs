@@ -269,12 +269,25 @@ let TREE_A_MOVED = TREE_A;
   }
   spawnSync('touch', ['-d', '2020-01-01T00:00:00Z', oldest]);
   spawnSync('touch', ['-d', '2021-01-01T00:00:00Z', middle]);
+  // Everything else in the build root (the islands the rows above built) gets a date after both, so the
+  // eviction order is a fact this row states rather than a race with whatever the filesystem wrote last.
+  for (const name of children()) {
+    const dir = path.join(TARGET_ROOT, name);
+    if (dir === keep || dir === oldest || dir === middle) continue;
+    spawnSync('touch', ['-d', '2021-06-01T00:00:00Z', dir]);
+  }
   const mtime = (dir) => Number(String(spawnSync('stat', ['-c', '%Y', dir], {encoding: 'utf8'}).stdout || 0).trim());
-  check('the fixture ages are what the eviction order reads', mtime(oldest) < mtime(middle), `${mtime(oldest)} < ${mtime(middle)}`);
+  const otherAges = children()
+    .filter((name) => ![keep, oldest, middle].includes(path.join(TARGET_ROOT, name)))
+    .map((name) => mtime(path.join(TARGET_ROOT, name)));
+  check('the fixture ages are what the eviction order reads',
+    mtime(oldest) < mtime(middle) && otherAges.every((age) => age > mtime(middle)),
+    `${mtime(oldest)} < ${mtime(middle)} < ${otherAges.join(',')}`);
   const total = sizeOf(TARGET_ROOT);
   const cap = total - sizeOf(oldest);
   const r = bash(`. "${RESOLVER}"; wa_build_cap_enforce "${keep}"`, {WASM_AGENT_BUILD_CAP_BYTES: String(cap)});
-  check('the oldest build output went first', !fs.existsSync(oldest), String(r.stderr));
+  check('the oldest build output went first', !fs.existsSync(oldest),
+    `cap=${cap} total=${total} ages=${children().map((name) => `${name}@${mtime(path.join(TARGET_ROOT, name))}`).join(' ')} :: ${String(r.stderr)}`);
   check('the cap only takes what it has to', fs.existsSync(middle), String(r.stderr));
   check('the tree being built is never a candidate', fs.existsSync(keep), String(r.stderr));
   check('the cap run says what it deleted',
