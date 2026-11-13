@@ -3364,6 +3364,14 @@ fn console_reader() {
                     for event in mice { handle_mouse(&mut state, event); }
                     for &byte in &keys {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
+                        // Ctrl+O pins a block expanded, so the code-mode block that follows cannot
+                        // collapse it (and the same key lets it go). It is the transcript's key: the
+                        // draft has no binding for it, so it is taken here before the editor.
+                        if byte == 0x0f && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
+                            let frame = layout_frame(&mut state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            continue;
+                        }
                         // Ctrl+C with a selection copies it; any other key ends the selection first.
                         if state.selection.is_some() {
                             if byte == 3 && copy_selection(&mut state) { continue; }
@@ -3378,6 +3386,7 @@ fn console_reader() {
                                 NavKey::Down => { if !state.transcript.focus_next() { state.transcript.sync(); state.nav = None; } }
                                 NavKey::Right => state.transcript.set_expanded(true),
                                 NavKey::Left => state.transcript.set_expanded(false),
+                                NavKey::Pin => { state.transcript.pin_toggle(); }
                                 NavKey::PageUp | NavKey::PageDown => {
                                     let page = page_rows(&state);
                                     state.transcript.page(if matches!(key, NavKey::PageUp) { page } else { -page });
@@ -3667,13 +3676,51 @@ pub extern "C-unwind" fn transcript_hold(l: *mut LuaState) -> c_int {
     1
 }
 
-/// `host.transcript_block(topic)`: start a new block; `topic` = collapsible (thinking, a tool call).
+/// `host.transcript_block(topic, code)`: start a new block; `topic` = collapsible (thinking, a tool
+/// call). `code` = a code-mode block: drawn expanded while it is the running one and folded to its
+/// summary when the next one starts (`host.transcript_fold`).
 pub extern "C-unwind" fn transcript_block(l: *mut LuaState) -> c_int {
     let topic = unsafe { wa_host_support::lua::lua_toboolean(l, 1) } != 0;
+    let code = unsafe { wa_host_support::lua::lua_toboolean(l, 2) } != 0;
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    state.transcript.block(topic);
+    if code { state.transcript.code_block(); } else { state.transcript.block(topic); }
     unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
+    1
+}
+
+/// `host.transcript_fold(summary)`: collapse the newest code-mode block to ONE row - the summary the
+/// view built for it (`⏺ Code · bash ×3 ✓ · 1.2s → "a,b,c"`) - because a newer code-mode block has
+/// taken the screen. A block the reader pinned with Ctrl+O is not collapsed. Returns whether it
+/// folded.
+pub extern "C-unwind" fn transcript_fold(l: *mut LuaState) -> c_int {
+    let summary = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = state.transcript.fold_code(&summary);
+    if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
+        let frame = layout_frame(&mut state);
+        let _ = wa_term::terminal_editor::write(&frame);
+    }
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.transcript_rewrite(offset, text)`: replace a committed line of the current block, counted
+/// from its end (`-1` = the last row). A code-mode block draws one row per inner call as the call
+/// starts, and this is what flips that row's `⏳` to `✓` when it settles - in place, without drawing
+/// the block again. Returns false when there is no such row.
+pub extern "C-unwind" fn transcript_rewrite(l: *mut LuaState) -> c_int {
+    let offset = unsafe { wa_host_support::lua::lua_tointegerx(l, 1, std::ptr::null_mut()) } as isize;
+    let text = arg_string(l, 2).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = state.transcript.rewrite(offset, &text);
+    if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
+        let frame = layout_frame(&mut state);
+        let _ = wa_term::terminal_editor::write(&frame);
+    }
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 

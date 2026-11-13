@@ -44,6 +44,10 @@ local json = dofile("lua/vendor/json.lua")
 -- its wrapping rule - measure the plain text, paint last - is the whole of its design, and
 -- because that rule is worth a test that needs no terminal.
 local markdown = dofile("lua/core/markdown.lua")
+-- One code-mode call, as a block that reads: heading with the tools it called, the script once, a row
+-- per inner call, then the value. The rules (and why they are those rules) live there; this module
+-- owns where the rows go - the running block streams, the one before it collapses to a line.
+local codemode_block = dofile("lua/core/codemode_block.lua")
 
 local M = {}
 
@@ -191,6 +195,22 @@ local function clip(text, limit)
   return text:sub(1, index - 1) .. "\226\128\166"   -- …
 end
 M.clip = clip
+
+-- The same fit without collapsing runs of whitespace: a code row's indentation is part of what it
+-- says, and `clip` is a prose rule (`a  b` -> `a b`). Everything else about it is the same count.
+local function fit(text, limit)
+  text = tostring(text or "")
+  if not limit or limit <= 0 or columns(text) <= limit then return text end
+  local index, kept = 1, 0
+  while index <= #text do
+    local size, cells = markdown.char_at(text, index)
+    if kept + cells > limit - 1 then break end
+    index = index + size
+    kept = kept + cells
+  end
+  return text:sub(1, index - 1) .. "\226\128\166"
+end
+M.fit = fit
 
 function M.tokens(count)
   local n = tonumber(count) or 0
@@ -345,7 +365,7 @@ end
 local TITLE = {
   bash = "Bash", shell = "Bash", read = "Read", write = "Write", edit = "Update", grep = "Search",
   ls = "List", subagent = "Task", skill = "Skill", recall = "Recall", remember = "Remember",
-  search_messages = "Search", remote = "Remote", client = "Client", codemode = "Codemode",
+  search_messages = "Search", remote = "Remote", client = "Client", codemode = "Code",
 }
 
 -- The tool that actually ran. `tool_call` routes a call to another tool by name, and `remote` runs
@@ -392,6 +412,10 @@ function M.tool_title(name, args, limit)
     return peer .. label, inside
   end
   local label = TITLE[name] or (name:sub(1, 1):upper() .. name:sub(2))
+  -- A code-mode call's heading is `⏺ Code` and nothing else: its tools are named on the heading the
+  -- block draws (`lua/core/codemode_block.lua`), and the script is never in a heading (#121 put its
+  -- first line there, which made the heading a second copy of the body).
+  if name == "codemode" then return "Code", "" end
   limit = math.max(8, (limit or 96) - #label - 2)
   local inside
   if name == "bash" or name == "shell" then
@@ -524,8 +548,8 @@ function M.preview(name, result, lines, args)
     -- then its error, then how many nested calls it made. The model never sees the journal this
     -- result also carries (`calls`, `items`, `attempts`), so the CLI shows the model's own view of
     -- the call rather than a summary of it.
-    local value = r.value
-    if value ~= nil then text = (type(value) == "string") and value or json.encode(value) end
+    local value = codemode_block.hide_evidence(r.value)
+    if r.value ~= nil then text = (type(value) == "string") and value or json.encode(value) end
     if tostring(text):gsub("%s", "") == "" and r.error ~= nil then text = tostring(r.error) end
     if tostring(text):gsub("%s", "") == "" and type(r.calls) == "table" and #r.calls > 0 then
       text = string.format("%d call%s", #r.calls, #r.calls == 1 and "" or "s")
@@ -806,6 +830,9 @@ function M.new(opts)
     budget = opts.budget or 0,
     context = 0,
     frame = 0, phase = "", round = 0, runs = 0, total_rounds = 0, pending = nil,
+    -- The code-mode block that is running (`lua/core/codemode_block.lua`'s model), how many call rows
+    -- of it are on screen, and the one that settled last - the block a newer one collapses.
+    code = nil, code_rows = 0, code_done = nil,
     -- `shown_cols` is how many columns of the terminal the status line currently holds: the
     -- bound every in-place write is kept inside - see `METHODS:status_draw`. `screen` is the rows
     -- the view owns once it knows the console's height - see `METHODS:screen_on`. `framing` says a
@@ -1696,6 +1723,98 @@ function METHODS:code_block(name, args, count, marker)
   return #rows
 end
 
+-- ---- a code-mode block -------------------------------------------------------------
+
+-- A call is a code-mode call when the tool that runs is `codemode`, whatever wrapper named it
+-- (`tool_call name=codemode` unwraps through `M.target`).
+local function is_codemode(name, args)
+  return M.target(name, args) == "codemode"
+end
+M.is_codemode = is_codemode
+
+-- What `lua/core/codemode_block.lua` needs from this view: the colour decision, the width fitter that
+-- keeps a code row's indentation, the argument summariser the rest of the transcript uses, and the
+-- JSON the model was given - so the block reads the same wherever it is drawn.
+function METHODS:codemode_opts()
+  return {
+    live = self.live,
+    paint = paint,
+    clip = fit,
+    columns = columns,
+    summarise = function(name, args) return M.call_line(name, args, 32) end,
+    elapsed = function(ms) return M.elapsed(ms) end,
+    encode = function(value) return json.encode(value) end,
+    syntax = markdown.scan_code,
+  }
+end
+
+-- The running block, made to match its model: the heading (the tools it has called so far, and its
+-- clock once it has one) and one row per inner call, each rewritten in place as the call starts and
+-- settles. Rows only ever grow - a call appears once - so nothing is ever removed, and that is what
+-- lets the block stream instead of being redrawn.
+function METHODS:codemode_sync()
+  local model = self.code
+  if not model then return end
+  local o = self:codemode_opts()
+  local rows = codemode_block.call_lines(model, self.limit, o)
+  local old = self.code_rows or 0
+  if self:transcript() and host.transcript_rewrite then
+    for index = 1, math.min(old, #rows) do
+      pcall(host.transcript_rewrite, index - old - 1, rows[index])
+    end
+    for index = old + 1, #rows do self:write(rows[index] .. "\n") end
+    if host.transcript_head then pcall(host.transcript_head, codemode_block.heading(model, self.limit, o)) end
+  end
+  self.code_rows = #rows
+end
+
+-- A code-mode call starting. The block before it collapses to its summary line - the one that is
+-- running is the one that is open (operator, 13/11) - and this one opens expanded, with its script.
+-- In the plain layout (a captured run) nothing is drawn until the answer is in: a log cannot take a
+-- row back, and a `⏳` that never flips is worse than no row.
+function METHODS:codemode_start(event)
+  local previous = self.code_done
+  if previous and self:transcript() and host.transcript_fold then
+    pcall(host.transcript_fold, codemode_block.summary(previous, self.limit, self:codemode_opts()))
+  end
+  self.code_done = nil
+  self.code = codemode_block.new(event.arguments, self.now())
+  self.code_rows = 0
+  if not self:transcript() then return end
+  -- A code-mode block, not an ordinary topic: it is drawn expanded while it is the newest one and
+  -- folds to the summary a newer block leaves it with.
+  if host.transcript_block then pcall(host.transcript_block, true, true) else self:topic(true) end
+  self.pending.block, self.pending.shown = true, true
+  local o = self:codemode_opts()
+  for _, row in ipairs(codemode_block.rows(self.code, self.limit, o)) do self:write(row .. "\n") end
+  local live = self:tool_line()
+  if live then self:tool_live(live.text) end
+end
+
+-- The script's answer: the value under the calls, the heading rewritten with the call's whole time,
+-- and the block remembered as the one a newer block collapses.
+function METHODS:codemode_settle(event)
+  local pending = self.pending
+  local ms = pending and ((self.now() - pending.started) * 1000) or nil
+  local model = self.code or codemode_block.new(pending and pending.arguments or {}, self.now())
+  codemode_block.finish(model, event.result, ms and (ms / 1000) or nil)
+  self.code, self.code_done = model, model
+  local o = self:codemode_opts()
+  if self:transcript() then
+    self:codemode_sync()
+    for _, row in ipairs(codemode_block.tail_rows(model, self.limit, o)) do self:write(row .. "\n") end
+    if host.transcript_head then pcall(host.transcript_head, codemode_block.heading(model, self.limit, o)) end
+    self:topic(false)
+    self:write("\n")
+  else
+    for _, row in ipairs(codemode_block.lines(model, self.limit, o)) do self:line(row) end
+  end
+  self.pending = nil
+  if event.quiet then return end
+  self.phase = "Thinking"
+  self:paint(true)
+end
+
 -- Markdown rendered into the transcript, with the copy affordance on each of its fenced blocks
 -- (#114). The markers have to reach the host immediately before the write that draws them: the host
 -- marks lines of the NEXT write, so a marker that met another write would land on the wrong row.
@@ -1953,7 +2072,12 @@ function METHODS:event(event)
     -- hold a row its ticker rewrites while this process is blocked, so the plain layout keeps the old
     -- order (heading with the result) and prints no live line.
     self:progress("begin", event.name or "tool")
-    if self:transcript() then
+    if is_codemode(event.name, event.arguments) then
+      -- The heading is `⏺ Code · <the tools it calls>`: never the script (#121 put its first line in
+      -- the parentheses, so the heading was a second copy of the body).
+      self.pending.label, self.pending.inside = "Code", ""
+      self:codemode_start(event)
+    elseif self:transcript() then
       self:topic(true)
       self.pending.block, self.pending.shown = true, true
       self:line(paint(DOT, "muted", self.live) .. " " .. self:call_heading(label, inside))
@@ -1975,6 +2099,9 @@ function METHODS:event(event)
   elseif kind == "tool_result" then
     self:progress("finish")
     local name = event.name or (self.pending and self.pending.name) or "?"
+    -- A code-mode block owns its whole result: the value the script returned, the call rows flipped
+    -- in place, and the heading's clock. Nothing of the generic result path applies to it.
+    if is_codemode(name, self.pending and self.pending.arguments) then return self:codemode_settle(event) end
     local ms = self.pending and ((self.now() - self.pending.started) * 1000) or nil
     local pending = self.pending
     -- A call whose block was opened when it started keeps its own heading, its arguments and its
@@ -2029,6 +2156,22 @@ function METHODS:event(event)
     if event.quiet then return end
     self.phase = "Thinking"
     self:paint(true)
+  elseif kind == "codemode_call" then
+    -- One inner call of the script that is running: it appears as it starts (`⏳`), and its own row
+    -- is rewritten in place when it settles (`✓`/`✗`) - inside the block that is already open.
+    local model = self.code
+    if model then
+      local id = event.id or event.call_id
+      if event.state == "running" then
+        codemode_block.begin_call(model, id, event.name, event.arguments)
+      elseif event.state == "pending" then
+        codemode_block.pending(model, id, event.op)
+      else
+        codemode_block.settle(model, id, { ok = event.ok ~= false, ms = event.ms, error = event.error, code = event.code })
+      end
+      self:codemode_sync()
+      if self.pending then self:paint() end
+    end
   elseif kind == "reasoning" then
     self:reasoning_block(event.text)
   elseif kind == "commentary" then
