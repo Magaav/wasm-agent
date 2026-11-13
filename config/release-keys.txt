@@ -29,3 +29,4 @@
 # While this list is empty every release is refused - by name, with the path - and a node builds from its
 # tree instead. That refusal is the feature: an unverified release is not installable.
 wa-trusted-keys v1
+key release-signing-312805587de9606c 6b2a912acb3876236c40aceafffc46820212e4b437d5e13f0dd56dd2cc01a120
