@@ -15,11 +15,11 @@ function run(exe,args,cwd=repo) {
   if(r.error) throw r.error;
   return r;
 }
-const fixture=JSON.parse(fs.readFileSync(path.join(repo,'benchmarks/agent-benchmark/telemetry-empty-payload.json'),'utf8'));
+const fixture=JSON.parse(fs.readFileSync(path.join(repo,'harness-evaluator/benchmarks/agent-benchmark/telemetry-empty-payload.json'),'utf8'));
 assert.equal(fixture.status,'candidate-awaiting-pi-qualification');
 const base=run('git',['rev-parse',fixture.taskSource+'^{commit}']);assert.equal(base.status,0,base.stderr);
 const root=fs.mkdtempSync(path.join(scratch,'telemetry-oracle-check-'));
-const file='scripts/lib/token-audit.cjs',oracle=path.join(repo,'benchmarks/agent-benchmark',fixture.oracle);
+const file='scripts/lib/token-audit.cjs',oracle=path.join(repo,'harness-evaluator/benchmarks/agent-benchmark',fixture.oracle);
 try {
   for(const file of fixture.sourcePaths) {
     const original=run('git',['show',base.stdout.trim()+':'+file]);assert.equal(original.status,0,original.stderr);

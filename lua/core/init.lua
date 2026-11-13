@@ -355,6 +355,14 @@ elseif command == "services" then
   -- node. Every verb goes through the registry's own master gate (lua/core/services.lua).
   local code = dofile("lua/core/services_cli.lua").run({ table.unpack(args, 2) })
   if code and code ~= 0 then os.exit(code) end
+elseif command == "eval" then
+  -- The harness evaluator (lua/core/harness_evaluator_cli.lua, docs/HARNESS-EVALUATOR.md): freeze a real
+  -- task, replay it against a candidate binary in an isolated home, and print metrics. It gathers
+  -- evidence about the harness; it does not gate a release and it does not decide anything. Dispatched
+  -- like every other verb, so the engine exists in the binary an operator runs.
+  local code = dofile("lua/core/harness_evaluator_cli.lua").run(args)
+  if code and code ~= 0 then os.exit(code) end
+
 elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
@@ -364,6 +372,7 @@ elseif command == "help" then
   print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
+  print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, read metrics")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
   print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")

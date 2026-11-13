@@ -7,7 +7,7 @@ separate, not evidence that autonomous old trials used a VM.
 
 This is implementation/transport qualification, **not the requested autonomous comparison**.
 No completion-time, dollars/cache rankings or 0–100 final-quality scores exist here.
-The legacy paid entry in `scripts/agent-benchmark.mjs` remains refused. The new
+The legacy paid entry in `harness-evaluator/scripts/agent-benchmark.mjs` remains refused. The new
 explicit, source-bound pilot entry is described in
 [AGENT-BENCHMARK-PILOT.md](AGENT-BENCHMARK-PILOT.md); it does not launch before exact
 human limits approval. Direct preparation uses no inference workers. Benchmark
@@ -100,7 +100,7 @@ node scripts/test-agent-benchmark-model-route.mjs <fresh-evidence>
 node scripts/test-agent-benchmark-runtime-route.mjs <native-binary> <prepared-assets> <fresh-evidence> <pi-coding-agent-package>
 node scripts/test-agent-benchmark-pi-route.mjs <pi-ai-package> <fresh-evidence>
 node scripts/test-agent-benchmark-vault-route.mjs <fresh-evidence>
-node scripts/agent-benchmark.mjs --route-journal <retained-route-evidence>
+node harness-evaluator/scripts/agent-benchmark.mjs --route-journal <retained-route-evidence>
 node scripts/test-agent-benchmark-runtime-route.mjs <native-binary> <prepared-assets> <fresh-evidence> <pi-coding-agent-package> --vault-fixture
 node scripts/test-agent-benchmark-vault-container.mjs <fresh-evidence> <exact-cached-image-sha256>
 ```

@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {verifyVmJournal,forcedScope} from '../benchmarks/codemode/forced-contract.mjs';import {runParallelWave} from './agent-benchmark-parallel.mjs';import {preparePilot,parallelLimits,proposedLimits} from './agent-benchmark-pilot.mjs';
+import {verifyVmJournal,forcedScope} from '../benchmarks/codemode/forced-contract.mjs';import {runParallelWave} from '../harness-evaluator/scripts/agent-benchmark-parallel.mjs';import {preparePilot,parallelLimits,proposedLimits} from '../harness-evaluator/scripts/agent-benchmark-pilot.mjs';
 const binding='a'.repeat(64),arm='rust-v2';
 function trace(){const owner='b'.repeat(64),id='vm-1',args='{"path":"probe.txt"}',value={content:'real task result',typed:null};return [
  {type:'outer',invocation:1,session:'private-session',args:{code:'text(await tools.read({path:"probe.txt"}));'}},

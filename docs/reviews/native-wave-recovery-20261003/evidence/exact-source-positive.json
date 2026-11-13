@@ -2808,11 +2808,11 @@
         "sha256": "815cb6a01acaf5ce9285014142e04b4586a066f6787224d162a76d54a5c0edad"
       },
       {
-        "path": "scripts/agent-benchmark-proxy.mjs",
+        "path": "harness-evaluator/scripts/agent-benchmark-proxy.mjs",
         "sha256": "aefbeedad1c5110731ef53a04ab1561a21c25dc774184d4c1aa9ef85c58149c1"
       },
       {
-        "path": "scripts/agent-benchmark-report.py",
+        "path": "harness-evaluator/scripts/agent-benchmark-report.py",
         "sha256": "980fc74504aac49277741319387c6b647f8a394ed3c1aad4a696dacf7d8f177c"
       },
       {
@@ -2820,7 +2820,7 @@
         "sha256": "c7fab899969fb4fbb00d3e2d8d8accba2f1b9305096e9b3b2a4487487302dc92"
       },
       {
-        "path": "scripts/agent-benchmark.mjs",
+        "path": "harness-evaluator/scripts/agent-benchmark.mjs",
         "sha256": "f96f8ab23ace11a32762bc3f25bea9d454383cf150e25f93f40d25264024c9c2"
       },
       {

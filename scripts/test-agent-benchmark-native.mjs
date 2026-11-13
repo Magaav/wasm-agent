@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Actual source provider/serializer + mock HTTP + native prefix-audit parity proof.
 import fs from 'node:fs';import path from 'node:path';import {spawnSync} from 'node:child_process';
-import {isolatedEnvironment} from './agent-benchmark-environment.mjs';
-import {nativeTrace,preparedRequests,digest} from './agent-benchmark-telemetry.mjs';
+import {isolatedEnvironment} from '../harness-evaluator/scripts/agent-benchmark-environment.mjs';
+import {nativeTrace,preparedRequests,digest} from '../harness-evaluator/scripts/agent-benchmark-telemetry.mjs';
 const [binary,out]=process.argv.slice(2);if(!binary||!out||fs.existsSync(out))throw Error('<native-binary> <fresh-evidence>');fs.mkdirSync(out,{recursive:true});fs.mkdirSync(path.join(out,'.wasm-agent','operations'),{recursive:true});
 const root=process.cwd();const source=fs.readFileSync('scripts/test-observability.lua','utf8');
 const suffix="\nlocal prepared={};for i,body in ipairs(sent)do prepared[i]={id='actual-prepared-'..i,scope='hermetic-test',session=run,kind='model_call',routing={endpoint='mock-opencode',session=run},body=body}end;assert(host.write_file("+JSON.stringify(path.resolve(out,'prepared.json'))+",json.encode(prepared)));assert(host.write_file("+JSON.stringify(path.resolve(out,'events.json'))+",host.sql_query('SELECT id,session_id,run_id,span_id,seq,kind,phase,at,payload FROM harness_events ORDER BY seq','[]')))\n";

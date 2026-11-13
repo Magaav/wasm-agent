@@ -104,6 +104,10 @@ local function roots()
   while dir and dir ~= "" and depth < 12 do
     list[#list + 1] = dir .. "/skills"
     list[#list + 1] = dir .. "/.agents/skills"
+    -- The evaluation engine keeps its own skills beside its engine (harness-evaluator/skills): a
+    -- procedure about measuring the harness is evaluation material, but it is still a procedure the
+    -- model has to be able to find by name, so this root is scanned like the repository's own.
+    list[#list + 1] = dir .. "/harness-evaluator/skills"
     if is_repo_root(dir) then break end
     local parent = dir:match("^(.*)[/\\][^/\\]+$")
     if not parent or parent == dir then break end

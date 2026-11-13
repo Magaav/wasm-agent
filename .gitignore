@@ -52,3 +52,10 @@ tmp-*
 
 # wa-graph spike database (rust/wa-graph). A derived index, never source.
 .wa-graph/
+
+# The harness evaluator's frozen tasks are real operator work - prompts, message text, mail, machine
+# names - and live under the node's own state directory (<config>/evaluator), never here. These two
+# names are the shapes a mistaken copy or a redirected state directory would take, so they are ignored
+# before anything can stage them; .githooks/pre-commit refuses a forced add as well.
+harness-evaluator/tasks/
+harness-evaluator/state/

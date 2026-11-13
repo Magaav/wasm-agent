@@ -5,7 +5,7 @@ import cp from 'node:child_process';
 import {isolatedEnvironment} from '../agent-benchmark-environment.mjs';
 export async function startBenchmarkVault({repo, out, upstream}) {
   const python = process.env.WA_BENCHMARK_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-  const child = cp.spawn(python, ['-B', path.join(repo, 'scripts/fixtures/benchmark-vault.py'),
+  const child = cp.spawn(python, ['-B', path.join(repo, 'harness-evaluator/scripts/fixtures/benchmark-vault.py'),
     path.join(repo, 'vault/wa_vault.py'), path.join(out, 'synthetic-vault-data'), upstream], {
     env: isolatedEnvironment(out), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true});
   let stdout = '', stderr = '';

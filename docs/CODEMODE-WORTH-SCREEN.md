@@ -56,9 +56,9 @@ Recommendation can be narrow/no observed benefit/inconclusive; no promotion foll
 Use absolute paths and fresh evidence directories:
 
 ```
-node scripts/agent-benchmark-worth.mjs --qualify <artifact-config.json> <fresh-proof>
+node harness-evaluator/scripts/agent-benchmark-worth.mjs --qualify <artifact-config.json> <fresh-proof>
 # Set qualificationReceipt to that receipt in the private config.
-node scripts/agent-benchmark-worth.mjs --prepare <config.json> <fresh-plan>
+node harness-evaluator/scripts/agent-benchmark-worth.mjs --prepare <config.json> <fresh-plan>
 node scripts/test-agent-benchmark-worth-policy.mjs <plan/manifest.json> <fresh-negatives>
 ```
 
@@ -77,8 +77,8 @@ Coordinator alone checks the actual human approval and private credential route,
 then runs the single bounded screen (never use a synthetic checker reference):
 
 ```
-node scripts/agent-benchmark-worth.mjs --run-approved <plan/manifest.json> <fresh-live-results> <manifest-sha256> <actual-human-reference.json>
-node scripts/check-agent-benchmark-worth.mjs <config.json> <live-results> > <fresh-summary.json>
+node harness-evaluator/scripts/agent-benchmark-worth.mjs --run-approved <plan/manifest.json> <fresh-live-results> <manifest-sha256> <actual-human-reference.json>
+node harness-evaluator/scripts/check-agent-benchmark-worth.mjs <config.json> <live-results> > <fresh-summary.json>
 ```
 
 Reference fields: manifest_sha256, session_id, message_id. These are evidence

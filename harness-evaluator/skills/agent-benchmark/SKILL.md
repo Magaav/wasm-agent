@@ -8,7 +8,7 @@ description: Qualify isolated four-arm coding pilots, verify hidden acceptance a
 Read `<selected-repo>/docs/AGENT-BENCHMARK.md` and
 `docs/AGENT-BENCHMARK-FOUNDATIONS.md` completely, not relative to an installed skill
 root. STAGE A is model-free preparation, not a completed four-arm comparison.
-The final binding fixture is `fixtures/benchmarks/binding-discovery/v1/`; `solver/`
+The final binding fixture is `harness-evaluator/fixtures/benchmarks/binding-discovery/v1/`; `solver/`
 is the only committed solver input. Never export manifest/private evidence/old
 candidate, known repair, hidden oracle or solved Git history. Task/runtime sources
 are separate; no automatic memory injection or instruction trimming.
@@ -89,8 +89,8 @@ and a completed comparison remain unproven. Use this verified CLI sequence:
 
 ```
 node <repo>/scripts/agent-benchmark.mjs --pilot-qualify <artifact-config> <fresh-runtime-proof>
-node <repo>/scripts/test-agent-benchmark-pilot-grade.mjs <fresh-grade-proof> <exact-tool-image>
-node <repo>/scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config> <runtime-proof> <grade-proof>
+node <repo>/harness-evaluator/scripts/test-agent-benchmark-pilot-grade.mjs <fresh-grade-proof> <exact-tool-image>
+node <repo>/harness-evaluator/scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config> <runtime-proof> <grade-proof>
 node <repo>/scripts/agent-benchmark.mjs --pilot-prepare <preparation-config> <fresh-plan>
 ```
 
@@ -143,10 +143,10 @@ That normalization preflight is not Pi qualification or a code-mode result.
 ## Observation, accounting and quality
 
 ```
-node <repo>/scripts/agent-benchmark-observe.mjs native <complete-private-events.json>
-node <repo>/scripts/agent-benchmark-observe.mjs pi <private-session.jsonl>
-node <repo>/scripts/agent-benchmark-observe.mjs prepared <private-prepared-requests.json>
-python <repo>/scripts/agent-benchmark-report.py <private-trace-dir> <fixture.json>
+node <repo>/harness-evaluator/scripts/agent-benchmark-observe.mjs native <complete-private-events.json>
+node <repo>/harness-evaluator/scripts/agent-benchmark-observe.mjs pi <private-session.jsonl>
+node <repo>/harness-evaluator/scripts/agent-benchmark-observe.mjs prepared <private-prepared-requests.json>
+python <repo>/harness-evaluator/scripts/agent-benchmark-report.py <private-trace-dir> <fixture.json>
 ```
 
 The native adapter reuses the strict offline auditor. Keep raw/provider usage and
@@ -233,14 +233,14 @@ actual bundle verification AND cleanup receipts, not a boolean cleanup flag.
 ## Verified CLI/postchecks and artifact discovery
 
 ```
-node <repo>/scripts/test-agent-benchmark-native.mjs <native-binary> <fresh-evidence>
+node <repo>/harness-evaluator/scripts/test-agent-benchmark-native.mjs <native-binary> <fresh-evidence>
 # Explicit WA_BENCHMARK_TEST_ROOT + WA_BENCHMARK_BINARY for results tests;
 # WA_BENCHMARK_REPORT_ROOT + WA_BENCHMARK_NATIVE_DB for reporter tests;
 # WA_BENCHMARK_DOCKER_ROOT for the real model-free Docker proof.
-node --test --test-reporter=tap <repo>/scripts/test-agent-benchmark-foundations.mjs
-node --test --test-reporter=tap <repo>/scripts/test-agent-benchmark-results.mjs
-node --test --test-reporter=tap <repo>/scripts/test-agent-benchmark-report.mjs
-node --test --test-reporter=tap <repo>/scripts/test-agent-benchmark-docker.mjs
+node --test --test-reporter=tap <repo>/harness-evaluator/scripts/test-agent-benchmark-foundations.mjs
+node --test --test-reporter=tap <repo>/harness-evaluator/scripts/test-agent-benchmark-results.mjs
+node --test --test-reporter=tap <repo>/harness-evaluator/scripts/test-agent-benchmark-report.mjs
+node --test --test-reporter=tap <repo>/harness-evaluator/scripts/test-agent-benchmark-docker.mjs
 ```
 
 Keep full logs/counts/skips/receipts. Use equivalent verified CLI/postchecks when the

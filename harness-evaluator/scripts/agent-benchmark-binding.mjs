@@ -22,7 +22,7 @@ export function exportBinding(destination) {
   if(fs.existsSync(destination))throw Error('fresh solver export only');fs.mkdirSync(destination,{recursive:true});
   const task=path.join(destination,'work');snapshot(baseline,task);
   const context=path.join(destination,'context');fs.mkdirSync(context);
-  for(const name of ['input.json','native-declarations.json','native-bootstrap.json','envelope.html'])fs.copyFileSync(path.join(repo,'fixtures/benchmarks/binding-discovery/v1/solver',name),path.join(context,name));
+  for(const name of ['input.json','native-declarations.json','native-bootstrap.json','envelope.html'])fs.copyFileSync(path.join(repo,'harness-evaluator/fixtures/benchmarks/binding-discovery/v1/solver',name),path.join(context,name));
   const artifacts=path.join(destination,'artifacts');fs.mkdirSync(artifacts);fs.copyFileSync(path.join(context,'envelope.html'),path.join(artifacts,'envelope.html'));
   // No .git, remotes, oracle or repair are copied. Instructions are byte-identical.
   for(const name of ['AGENTS.md','AGENTS.guest.md','AGENTS.subagents.md','AGENTS.orchestrator.md','AGENTS.windows.md']) {
@@ -42,7 +42,7 @@ export function prepareGradeOracle(taskRoot,evidence,oracleFile=path.join(repo,'
   if(fs.existsSync(evidence))throw Error('fresh grader evidence only');fs.mkdirSync(evidence,{recursive:true});
   // Hide grader implementation outside taskRoot. The oracle mocks all client/http effects.
   const oracle=path.join(evidence,'hidden-oracle.lua');
-  const declarations=JSON.parse(fs.readFileSync(path.join(repo,'fixtures/benchmarks/binding-discovery/v1/solver/native-declarations.json'),'utf8'));
+  const declarations=JSON.parse(fs.readFileSync(path.join(repo,'harness-evaluator/fixtures/benchmarks/binding-discovery/v1/solver/native-declarations.json'),'utf8'));
   const expected=Object.fromEntries(declarations.map(x=>[x.function.name,x.function.parameters]));
   const original=fs.readFileSync(oracleFile,'utf8').replace("if phase=='restart' then", "if phase=='restart' then\n local persisted,err=envelope.resolve(tools.all('master'),'read',ctx);check(persisted and not err,'unblocked read definition survives actual native restart')");
   const effectFence="for _,name in ipairs({'client','exec','operation','http','http_stream','remote','shell'})do host[name]=function()error('grader prohibits external effects: '..name)end end\n";
@@ -121,7 +121,7 @@ export async function preflight(binary,out) {
   }
   const preflight={ok:true,benchmark_solver_inference_calls:0,provider_calls:0,real_client_calls:0,baseline,repair,results};
   record(out,'manifest',{id:'binding-discovery-preflight',task_source:baseline,runtime_binary_sha256:sha(fs.readFileSync(binary)),adapter_source_sha256:sha(fs.readFileSync(fileURLToPath(import.meta.url)))});
-  record(out,'task',{id:'binding-discovery-v1',source:baseline});record(out,'context',{id:'binding-discovery-v1-sanitized',input_sha256:sha(fs.readFileSync(path.join(repo,'fixtures/benchmarks/binding-discovery/v1/solver/input.json')))});
+  record(out,'task',{id:'binding-discovery-v1',source:baseline});record(out,'context',{id:'binding-discovery-v1-sanitized',input_sha256:sha(fs.readFileSync(path.join(repo,'harness-evaluator/fixtures/benchmarks/binding-discovery/v1/solver/input.json')))});
   record(out,'oracle',{id:results[0].oracle_sha256,results});record(out,'outputs',preflight);record(out,'patches',{control_mutations:cases.map(c=>c.name),candidate_modules_retained:true});record(out,'traces',{raw_directories:results.map(c=>c.name+'-grade'),native_tree_receipts_retained:true});record(out,'failed_attempts',results.filter(r=>!r.pass));record(out,'receipts',{behavioral_controls:results.length});record(out,'accounting',{benchmark_solver_inference_calls:0,real_provider_calls:0,preparation_assistant_usage:null});record(out,'cache',{backend_kv_contents:'opaque',measured_provider_cache:null});record(out,'quality',{scores:null});
   const sealStarted=performance.now();const bundle=seal(out);verifyBundle(out);const sealMs=performance.now()-sealStarted;
   const cleanupStarted=performance.now();const cleanupReceipt=cleanup(out);const cleanupMs=performance.now()-cleanupStarted;

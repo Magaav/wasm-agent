@@ -7,9 +7,9 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
-import {createGeneration, record, requiredRecords, dockerResource, seal, verifyBundle, cleanupDocker, cleanup} from './agent-benchmark-results.mjs';
-import {realDockerAdapter} from './agent-benchmark-docker.mjs';
-import {readModelRouteJournal} from './agent-benchmark-model-route.mjs';
+import {createGeneration, record, requiredRecords, dockerResource, seal, verifyBundle, cleanupDocker, cleanup} from '../harness-evaluator/scripts/agent-benchmark-results.mjs';
+import {realDockerAdapter} from '../harness-evaluator/scripts/agent-benchmark-docker.mjs';
+import {readModelRouteJournal} from '../harness-evaluator/scripts/agent-benchmark-model-route.mjs';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const [out, imageId] = process.argv.slice(2);
 assert(out && path.isAbsolute(out) && !fs.existsSync(out) && /^sha256:[a-f0-9]{64}$/.test(imageId), 'fresh evidence and exact cached image required');
@@ -23,7 +23,7 @@ const cli = args => {
 };
 const arms = ['pi', 'wasm-current', 'node-v1', 'rust-v2'].map(arm => ({arm, handle: crypto.randomBytes(32).toString('hex'),
   maxRequests: 2, maxPromptTotal: 1000, maxOutputTotal: 1000, maxMilliseconds: 30000}));
-const sources = Object.fromEntries(['scripts/agent-benchmark-model-route.mjs', 'vault/wa_vault.py', 'scripts/fixtures/benchmark-vault.py']
+const sources = Object.fromEntries(['harness-evaluator/scripts/agent-benchmark-model-route.mjs', 'vault/wa_vault.py', 'harness-evaluator/scripts/fixtures/benchmark-vault.py']
   .map(p => [path.basename(p), fs.readFileSync(path.join(repo, p), 'utf8')]));
 const packed = zlib.gzipSync(Buffer.from(JSON.stringify(sources))).toString('base64');
 // Runs only trusted transport/vault and fake provider. No secret is installed in

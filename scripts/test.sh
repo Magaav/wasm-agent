@@ -1903,7 +1903,7 @@ gate_run node skills/code-graph/scripts/test-discover-files.mjs "$WASM_AGENT_HOM
 # Repository surveys keep full source evidence while bounding all-candidate metadata pages.
 gate_run node skills/code-graph/scripts/test-repo-survey.mjs "$WASM_AGENT_HOME"
 # Benchmark evidence metadata never recurses into retained solver repositories.
-gate_run node skills/agent-benchmark/scripts/test-artifacts.mjs "$WASM_AGENT_HOME"
+gate_run node harness-evaluator/skills/agent-benchmark/scripts/test-artifacts.mjs "$WASM_AGENT_HOME"
 
 # Skills: on-demand instructions (the Agent Skills standard pi implements).
 # Only name and description are always in context; the body loads when a task

@@ -82,9 +82,9 @@ checker inputs only; their consumed clone is not this preparation and is not a g
 Coordinator, after checking actual human approval rows and the current source:
 
 ```
-node scripts/check-agent-benchmark-forced-proof.mjs <E>/forced-config.json <E>/q11
-node scripts/agent-benchmark.mjs --pilot-forced-run-approved <E>/plan3/manifest.json <fresh-results> e2364839a0120da5f02bb251ddbaf463849f276e156b13b4a5694b1a42892b3e <actual-human-reference.json>
-node scripts/check-agent-benchmark-forced-proof.mjs <E>/forced-config.json <results> --live
+node harness-evaluator/scripts/check-agent-benchmark-forced-proof.mjs <E>/forced-config.json <E>/q11
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-forced-run-approved <E>/plan3/manifest.json <fresh-results> e2364839a0120da5f02bb251ddbaf463849f276e156b13b4a5694b1a42892b3e <actual-human-reference.json>
+node harness-evaluator/scripts/check-agent-benchmark-forced-proof.mjs <E>/forced-config.json <results> --live
 ```
 
 If execution source/artifact pins change, requalify and prepare a new reservation;
