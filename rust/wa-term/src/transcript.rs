@@ -6,7 +6,7 @@
 //! A *topic* is a collapsible block - the model's thinking, a tool call - shown at most
 //! `FOLDED_ROWS` rows until it is expanded. Ctrl+Up (from the draft) focuses the latest topic; Up and
 //! Down move between topics, Right expands, Left folds, Esc goes back to typing.
-use crate::scroll::chat::{fit, thumb};
+use crate::scroll::bar::{fit, Bar};
 use crate::scroll::settings::Scrollbar;
 use crate::terminal_editor::cell_width_of;
 use std::collections::HashMap;
@@ -21,9 +21,6 @@ const MAX_LINES: usize = 20_000;
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[38;2;119;119;119m";
 const FOCUS: &str = "\x1b[38;2;255;255;255m";
-/// The scrollbar's colours, the fullscreen console's own (`scroll::chat`): one bar, one look.
-const BAR_TRACK: &str = "\x1b[38;2;80;80;80m";
-const BAR_THUMB: &str = "\x1b[38;2;136;136;136m";
 
 #[derive(Default, Clone)]
 pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool,
@@ -44,6 +41,14 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     count_width: usize,
     /// Whether the last view drew the bar (and so wrapped one column narrower).
     bar: bool,
+    /// The bar as the last view drew it: what a mouse report is measured against (`scroll::bar`).
+    /// `None` while no bar is shown.
+    bar_last: Option<Bar>,
+    /// The pointer is on the bar: the thumb is drawn thick while it is (`scroll::bar`).
+    bar_hovered: bool,
+    /// A press grabbed the thumb (or came down on the track): the pointer's offset on the thumb,
+    /// held for as long as the button is.
+    bar_grab: Option<usize>,
     /// The view's first row while it is frozen (the reader is navigating or has paged back): new
     /// output then lands below it without moving what they are reading. `None` = follow the bottom.
     /// Negative while the chat is shorter than the screen: the blank rows above it are part of
@@ -70,7 +75,7 @@ impl Default for Transcript {
         Transcript { blocks: Vec::new(), focus: None, dirty: false, top: None, freeze: false,
             page_delta: 0, nav: false, live_row: None, pending_copy: Vec::new(),
             copy_rows: HashMap::new(), scrollbar: Scrollbar::Auto, counts: Vec::new(),
-            count_width: 0, bar: false }
+            count_width: 0, bar: false, bar_last: None, bar_hovered: false, bar_grab: None }
     }
 }
 
@@ -365,7 +370,7 @@ impl Transcript {
             shown.extend(tail.into_iter().skip(skip));
             // Following the bottom: the first row shown is the one `height` above the end.
             let first = total.saturating_sub(shown.len());
-            Transcript::draw_bar(&mut shown, text_width, self.bar, total, first);
+            self.draw_bar(&mut shown, text_width, self.bar, total, first);
             return shown;
         }
         let mut rows = Vec::new();
@@ -415,7 +420,7 @@ impl Transcript {
         // The bar is sized from the rows this frame actually wrapped: in this path every block is
         // laid out, so that is the whole chat.
         let first = start.max(0) as usize;
-        Transcript::draw_bar(&mut shown, text_width, self.bar, rows.len(), first);
+        self.draw_bar(&mut shown, text_width, self.bar, rows.len(), first);
         shown
     }
 
@@ -423,24 +428,99 @@ impl Transcript {
     /// reader is. `scroll::chat`'s `thumb` and `fit` are borrowed rather than re-invented - the
     /// fullscreen console's bar and this one are the same bar, and its arithmetic is the part a
     /// second implementation would get subtly wrong.
-    fn draw_bar(rows: &mut [String], text_width: usize, bar: bool, total: usize, first: usize) {
-        if !bar || rows.is_empty() { return }
-        let (top, len) = thumb(rows.len(), total, first);
-        for (index, row) in rows.iter_mut().enumerate() {
-            let glyph = if index >= top && index < top + len {
-                format!("{BAR_THUMB}\u{2588}")
-            } else {
-                format!("{BAR_TRACK}\u{2502}")
-            };
-            *row = format!("{}{}{RESET}", fit(row, text_width), glyph);
+    fn draw_bar(&mut self, rows: &mut [String], text_width: usize, bar: bool, total: usize, first: usize) {
+        if !bar || rows.is_empty() { self.bar_last = None; return }
+        // One glyph per row, from the first row of the region to the last: a click is measured
+        // against exactly this (`scroll::bar`), so what is drawn and what is hit cannot drift apart.
+        let drawn = Bar { active: self.bar_active(), ..Bar::new(rows.len(), total, first) };
+        for (row, (glyph, colour)) in rows.iter_mut().zip(drawn.cells()) {
+            *row = format!("{}{colour}{glyph}{RESET}", fit(row, text_width));
         }
+        self.bar_last = Some(drawn);
+    }
+
+    /// The bar as the last `view` drew it: `None` while no bar is shown.
+    pub fn bar(&self) -> Option<Bar> { self.bar_last }
+
+    /// Whether a pointer at `(row, col)` of a `width`-wide screen is on the bar: its last column,
+    /// while the bar is shown. Rows and columns are screen rows and cells, 1-based, as the terminal
+    /// reports them.
+    pub fn on_bar(&self, row: usize, col: usize, width: usize) -> bool {
+        self.bar_last.is_some_and(|bar| width > 1 && col == width && row >= 1 && row <= bar.track)
+    }
+
+    /// A press on the bar: the thumb comes to the pointer (its middle, when the press was on the
+    /// track) and the drag starts there. Returns whether the press was the bar's - a press that is
+    /// not on the bar is the selection's, as it always was.
+    pub fn bar_press(&mut self, row: usize, col: usize, width: usize) -> bool {
+        if !self.on_bar(row, col, width) { return false }
+        let bar = self.bar_last.expect("on_bar checked it");
+        if !bar.scrolling() { return false }
+        let at = row.saturating_sub(1).min(bar.track - 1);
+        let grab = bar.grab(at);
+        self.bar_grab = Some(grab);
+        self.bar_to(bar.first_at(at, grab));
+        true
+    }
+
+    /// The button is down and the pointer moved: the bar scrolls with it. Only a press that grabbed
+    /// the bar drags it, and a drag that wandered off the bar still scrolls (as it does in pi).
+    pub fn bar_drag(&mut self, row: usize) -> bool {
+        let Some(grab) = self.bar_grab else { return false };
+        let Some(bar) = self.bar_last else { return false };
+        if bar.track == 0 { return false }
+        let at = row.saturating_sub(1).min(bar.track - 1);
+        self.bar_to(bar.first_at(at, grab));
+        true
+    }
+
+    /// The button came up: the thumb lets go.
+    pub fn bar_release(&mut self) -> bool {
+        let had = self.bar_grab.take().is_some() || self.bar_hovered;
+        self.bar_hovered = false;
+        had
+    }
+
+    /// The pointer is on the bar, or left it: the thumb thickens and thins. Returns whether the
+    /// frame changed - a pointer that stays on one side of the bar costs no redraw.
+    pub fn bar_hover(&mut self, row: usize, col: usize, width: usize) -> bool {
+        if self.bar_grab.is_some() { return false }
+        let hovered = self.on_bar(row, col, width);
+        if hovered == self.bar_hovered { return false }
+        self.bar_hovered = hovered;
+        self.dirty = true;
+        true
+    }
+
+    /// Whether the pointer is on the bar (or holding it): the thumb is drawn thick.
+    pub fn bar_active(&self) -> bool { self.bar_hovered || self.bar_grab.is_some() }
+
+    /// Put the view at content row `first`, frozen there: what the bar's click and drag are. At the
+    /// bottom the view follows again, which `view` decides from the same number.
+    fn bar_to(&mut self, first: usize) {
+        self.freeze = true;
+        self.page_delta = 0;
+        self.top = Some(first as isize);
+        self.dirty = true;
     }
 
     /// The frame that draws the output region (`rows` = its last row).
+    ///
+    /// The bar's cell is written a second time, at its own column, after the row. A row's text can
+    /// turn out one cell wider than `cell_width` believes - an emoji a terminal draws two cells wide
+    /// and this crate counts as one - and a terminal then wraps the rest of the row onto the next
+    /// line, which used to carry the bar's glyph with it and leave a break in the track (the
+    /// operator's screenshot, 13/11 ~06:50). An absolute cursor position cannot wrap: every row of
+    /// the track gets its glyph at the same column, whatever the text does.
     pub fn render(&mut self, width: usize, rows: usize) -> String {
+        let view = self.view(width, rows);
+        let bar = self.bar();
         let mut frame = String::new();
-        for (offset, row) in self.view(width, rows).iter().enumerate() {
+        for (offset, row) in view.iter().enumerate() {
             frame.push_str(&format!("\x1b[{};1H\x1b[2K{row}{RESET}", offset + 1));
+            if let Some((glyph, colour)) = bar.and_then(|bar| bar.cells().get(offset).copied()) {
+                frame.push_str(&format!("\x1b[{};{width}H{colour}{glyph}{RESET}", offset + 1));
+            }
         }
         frame
     }
@@ -627,11 +707,13 @@ mod tests {
     // the bar for the fullscreen console - the same thumb arithmetic, the same `auto`/`always`/
     // `hidden` knob - so this borrows it instead of inventing a second one, and the two transcripts
     // now answer the same question the same way.
+    /// The rows the thumb is on: at rest it is `┃` (`scroll::bar`), joined to the `│` track.
     fn thumb_rows(view: &[String]) -> Vec<usize> {
-        (0..view.len()).filter(|&at| view[at].ends_with("\u{2588}\u{1b}[0m")).collect()
+        (0..view.len()).filter(|&at| view[at].ends_with("\u{2503}\u{1b}[0m") || view[at].ends_with("\u{2588}\u{1b}[0m")).collect()
     }
     fn bar_rows(view: &[String]) -> usize {
-        view.iter().filter(|row| row.ends_with("\u{2588}\u{1b}[0m") || row.ends_with("\u{2502}\u{1b}[0m")).count()
+        view.iter().filter(|row| row.ends_with("\u{2503}\u{1b}[0m") || row.ends_with("\u{2588}\u{1b}[0m")
+            || row.ends_with("\u{2502}\u{1b}[0m")).count()
     }
     #[test]
     fn a_long_chat_draws_a_scrollbar_and_its_position_follows_the_reader() {
@@ -676,6 +758,85 @@ mod tests {
         t.scrollbar = Scrollbar::Hidden;
         assert_eq!(bar_rows(&t.view(40, 10)), 0, "hidden: nothing, whatever the length");
     }
+    // ---- the bar takes the mouse (operator, 13/11 ~06:50) ---------------------------------------
+    // The same bar, now a handle: a click on the track jumps there, a drag on the thumb scrolls,
+    // and the thumb is thick while the pointer is on it (`scroll::bar` has the arithmetic and the
+    // rules; this is the transcript's side of them). What must not change: a press that is not in
+    // the bar's column is still the start of a text selection.
+    /// A row's text, without the escapes and without the bar's column.
+    fn text_of(row: &str) -> String {
+        crate::selection::plain(row).trim_end()
+            .trim_end_matches(['\u{2502}', '\u{2503}', '\u{2588}']).trim_end().to_string()
+    }
+
+    #[test]
+    fn the_bars_column_takes_a_click_and_a_drag_and_nothing_else_is_the_bars() {
+        let mut t = Transcript::default();
+        for n in 0..100 { t.write(&format!("line {n}\n")); }
+        let bottom = t.view(40, 10);
+        assert_eq!(bar_rows(&bottom), 10, "a bar on every row of the region: {bottom:?}");
+        // A press in the text, or where there is no bar at all, is not the bar's: the host keeps it
+        // for the selection it has always started.
+        assert!(!t.bar_press(2, 20, 40), "a press in the chat's text is not the bar's");
+        assert!(!t.bar_press(2, 41, 40), "past the last column is not the bar's either");
+        assert!(!t.bar_press(2, 40, 1), "a screen one column wide has no bar");
+        // The bar's column, two rows down: the thumb's middle comes to the pointer, which is the
+        // top of the chat, and the press is held as a grab.
+        assert!(t.bar_press(2, 40, 40), "a press in the bar's column is the bar's");
+        let at_top = t.view(40, 10);
+        assert_eq!(text_of(&at_top[0]), "line 0", "the click jumped to the top: {at_top:?}");
+        // Still held, moved down to the last row: the newest output, and following again.
+        assert!(t.bar_drag(10), "a drag that began on the bar scrolls it");
+        let at_bottom = t.view(40, 10);
+        assert_eq!(text_of(&at_bottom[9]), "line 99", "the drag's end is the newest output: {at_bottom:?}");
+        assert!(t.following(), "at the bottom the transcript follows new output again");
+        assert!(t.bar_release(), "the button came up on the bar");
+        assert!(!t.bar_drag(5), "and a drag after the release does not belong to the bar");
+        // A chat that fits its region has no scroll position to move, so its bar takes nothing.
+        let mut short = Transcript::default();
+        short.write("one\ntwo\n");
+        short.scrollbar = Scrollbar::Always;
+        short.view(40, 10);
+        assert!(!short.bar_press(3, 40, 40), "nothing to scroll, nothing to press");
+    }
+
+    #[test]
+    fn the_thumb_is_thick_under_the_pointer_and_thin_when_it_leaves() {
+        let mut t = Transcript::default();
+        for n in 0..100 { t.write(&format!("line {n}\n")); }
+        let rest = t.view(40, 10);
+        assert!(thumb_rows(&rest).len() >= 2, "at rest: a thin thumb on the track: {rest:?}");
+        assert!(!rest.iter().any(|row| row.ends_with("\u{2588}\u{1b}[0m")), "and nothing thick: {rest:?}");
+        // The pointer arrives on the bar's column: a redraw, and the thumb is a block.
+        assert!(t.bar_hover(5, 40, 40), "the pointer arrived: redraw");
+        let hovered = t.view(40, 10);
+        assert_eq!(thumb_rows(&hovered), thumb_rows(&rest), "the same rows: the thumb did not move");
+        assert!(hovered.iter().any(|row| row.ends_with("\u{2588}\u{1b}[0m")), "thicker where it was: {hovered:?}");
+        assert!(!hovered.iter().any(|row| row.ends_with("\u{2503}\u{1b}[0m")), "and the thin glyph is gone");
+        // A pointer that stays on the bar costs no frame; one that leaves thins the thumb again.
+        assert!(!t.bar_hover(6, 40, 40), "still on the bar: nothing changed");
+        assert!(t.bar_hover(5, 20, 40), "the pointer left the column: redraw");
+        let thin = t.view(40, 10);
+        assert!(!thin.iter().any(|row| row.ends_with("\u{2588}\u{1b}[0m")), "thin again: {thin:?}");
+        assert_eq!(thumb_rows(&thin), thumb_rows(&rest), "in the same rows");
+    }
+
+    #[test]
+    fn every_row_of_the_track_writes_its_glyph_at_the_columns_own_position() {
+        // The operator's break in the track: a row whose text the terminal draws one cell wider than
+        // `cell_width` counts wraps, and a glyph that is part of the row's text wraps with it. The
+        // render writes the bar's cell again at an absolute column, so the column is one line.
+        let mut t = Transcript::default();
+        for n in 0..100 { t.write(&format!("line {n}\n")); }
+        t.write("done \u{2705} and more\n"); // U+2705: one cell here, two in most terminals
+        let frame = t.render(40, 10);
+        let bar = t.bar().expect("a long chat draws the bar");
+        for (row, (glyph, colour)) in bar.cells().iter().enumerate() {
+            let at = format!("\x1b[{};40H{colour}{glyph}", row + 1);
+            assert!(frame.contains(&at), "row {} writes its bar at column 40 and no other: {at:?} in {frame:?}", row + 1);
+        }
+    }
+
     // ---- a fenced block can be copied from the transcript (#114) -------------------------------
     // The operator's ask (11/11 ~11:25): a fenced block in the CLI transcript gets a copy icon in
     // front of its title, and clicking it puts the block's content on the clipboard. pi does this;

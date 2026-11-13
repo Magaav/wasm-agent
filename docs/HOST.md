@@ -536,8 +536,10 @@ unchanged and stays the fallback (`--inline`, a pipe, `WA_TUI=inline`).
 
 The chat is painted by this process into a scroll region (`crate::transcript`), so the terminal's own
 scrollback never holds it and its native selection only ever covered what was on screen. The editor
-therefore turns on SGR mouse reports (`?1002h ?1006h`, off again with the paste mode in
-`input_stop`): a drag over the chat area selects (reverse video, the view frozen while it lasts), and
+therefore turns on SGR mouse reports (`?1002h ?1003h ?1006h`, off again with the paste mode in
+`input_stop`): a drag over the chat area selects (reverse video, the view frozen while it lasts),
+**a click on the scrollbar's column jumps there and a drag on its thumb scrolls** (the thumb is thick
+while the pointer is on it, which is what `1003` - any motion - is for), and
 **Ctrl+C with a selection copies it** through OSC 52 - the terminal's clipboard, also over ssh and
 `docker exec`. Without a selection Ctrl+C is unchanged (interrupt; twice to quit). The wheel pages
 the chat. Shift+drag still makes the terminal's own selection where the terminal honours it (foot,

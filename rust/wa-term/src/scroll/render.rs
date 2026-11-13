@@ -77,10 +77,13 @@ fn lines(term: &mut Term, count: usize) {
     for n in 0..count { term.console.write(&format!("line {n}\n")); }
 }
 
-/// A row without the scrollbar column, trimmed: the reader's text.
+/// A row without the scrollbar column, trimmed: the reader's text. The bar's three glyphs are the
+/// model's (`scroll::bar`): `│` the track, `┃` the thumb, `█` the thumb under the pointer.
 fn strip_bar(row: &str) -> String {
     let text = plain(row).trim_end().to_string();
-    let stripped = text.strip_suffix('\u{2588}').or_else(|| text.strip_suffix('\u{2502}'));
+    let stripped = text.strip_suffix('\u{2588}')
+        .or_else(|| text.strip_suffix('\u{2503}'))
+        .or_else(|| text.strip_suffix('\u{2502}'));
     stripped.unwrap_or(&text).trim_end().to_string()
 }
 
@@ -227,17 +230,148 @@ fn the_scrollbar_is_shown_by_its_setting_in_the_last_column() {
     lines(&mut term, 100);
     term.draw();
     let drawn = term.row(19).chars().last().unwrap();
-    assert!(drawn == '\u{2588}' || drawn == '\u{2502}', "auto with 100 rows in 20: {:?}", term.row(19));
+    assert!(drawn == '\u{2588}' || drawn == '\u{2503}' || drawn == '\u{2502}', "auto with 100 rows in 20: {:?}", term.row(19));
     assert!(term.rows()[..20].iter().all(|row| plain(row).chars().count() == 80), "the bar owns the last column");
     let mut hidden = Term::new(&[("WA_TUI_SCROLLBAR", "hidden")], 80, 24);
     lines(&mut hidden, 100);
     hidden.draw();
-    assert!(!hidden.rows()[..20].iter().any(|row| row.contains('\u{2588}') || row.contains('\u{2502}')), "{:?}", &hidden.rows()[..3]);
+    assert!(!hidden.rows()[..20].iter().any(|row| row.contains('\u{2588}') || row.contains('\u{2503}') || row.contains('\u{2502}')), "{:?}", &hidden.rows()[..3]);
     assert_eq!(strip_bar(&hidden.row(19)), "line 99", "no bar, and the row is all text");
     let mut short = Term::new(&[("WA_TUI_SCROLLBAR", "always")], 80, 24);
     short.console.write("one\ntwo\n");
     short.draw();
-    assert!(short.rows()[..20].iter().all(|row| row.ends_with('\u{2588}') || row.ends_with('\u{2502}')), "always: {:?}", &short.rows()[..3]);
+    assert!(short.rows()[..20].iter().all(|row| row.ends_with('\u{2588}') || row.ends_with('\u{2503}') || row.ends_with('\u{2502}')), "always: {:?}", &short.rows()[..3]);
+}
+
+/// One SGR mouse report: `button` 0 = the left button, 32 = a drag with it down, 35 = motion with
+/// no button, and 64/65 the wheel. `press` false is the button coming up (lowercase `m`).
+fn sgr(button: u8, col: usize, row: usize, press: bool) -> Vec<u8> {
+    format!("\x1b[<{};{};{}{}", button, col, row, if press { 'M' } else { 'm' }).into_bytes()
+}
+
+/// The bar's glyphs, one per row of the chat region: the column a reader sees.
+fn bar_column(term: &Term) -> String {
+    (0..term.chat_rows()).map(|row| term.row(row).chars().last().unwrap_or(' ')).collect()
+}
+
+fn counts(term: &Term, glyph: char) -> usize {
+    (0..term.chat_rows()).filter(|&row| term.row(row).ends_with(glyph)).count()
+}
+
+#[test]
+fn the_track_is_one_continuous_line_at_every_height() {
+    // The operator's screenshot: the track was drawn as segments with air between them. Every row
+    // of the region carries a bar cell, and the column is the same column on every row.
+    for (width, height) in [(80usize, 24usize), (60, 14), (40, 8), (24, 6)] {
+        let mut term = Term::new(&[], width, height);
+        lines(&mut term, 300);
+        term.draw();
+        let region = term.chat_rows();
+        assert!(region >= 1, "{width}x{height}: the chat owns rows");
+        for row in 0..region {
+            let last = term.row(row).chars().last().unwrap();
+            assert!(matches!(last, '\u{2502}' | '\u{2503}' | '\u{2588}'),
+                "{width}x{height} row {row} has no bar cell: {:?}", term.row(row));
+            assert_eq!(term.row(row).chars().count(), width, "{width}x{height} row {row} is exactly the width");
+        }
+        assert!(counts(&term, '\u{2502}') + counts(&term, '\u{2503}') == region, "{width}x{height}: {bar_column:?}",
+            bar_column = bar_column(&term));
+        // A click on the track's last row is the bottom of the chat - where the track has room to
+        // move at all: a one- or two-row track is all thumb, and a click on it cannot go anywhere.
+        if region >= 3 {
+            term.feed(&sgr(0, width, region, true));
+            assert_eq!(term.row_text(region - 1), "line 299", "{width}x{height}: {bar_column:?}",
+                bar_column = bar_column(&term));
+            term.feed(&sgr(0, width, region, false));
+        }
+    }
+}
+
+#[test]
+fn a_click_on_the_track_jumps_there_and_a_drag_scrolls() {
+    let mut term = Term::new(&[], 80, 24);
+    lines(&mut term, 100);
+    term.draw();
+    assert_eq!(term.row_text(0), "line 80", "forty rows of chat: following, the newest at the bottom");
+    // Two rows below the top of the track: the chat's top, and the thumb thick while it is held.
+    term.feed(&sgr(0, 80, 2, true));
+    assert_eq!(term.row_text(0), "line 0", "the click jumped to the top: {:?}", term.text_rows());
+    assert!(counts(&term, '\u{2588}') >= 2, "the grabbed thumb is thick: {:?}", term.rows());
+    assert_eq!(counts(&term, '\u{2503}'), 0, "and no thin thumb is left: {:?}", term.rows());
+    // Dragged down the track: the view follows the pointer, and at the bottom it follows again.
+    term.feed(&sgr(32, 80, 15, true));
+    let mid = term.console.chat().scrolled();
+    assert!(mid > 0 && mid < 80, "a drag down scrolls toward the bottom: {mid}");
+    term.feed(&sgr(32, 80, 20, true));
+    assert_eq!(term.row_text(19), "line 99", "the drag's end is the newest output: {:?}", term.text_rows());
+    assert!(term.console.chat().following(), "and the chat follows again at the bottom");
+    // The button up: the thumb is thin again.
+    term.feed(&sgr(0, 80, 20, false));
+    assert_eq!(counts(&term, '\u{2588}'), 0, "no pointer, no thick thumb: {:?}", term.rows());
+    // Nothing the bar took was typed into the draft.
+    let forwarded: Vec<u8> = term.handoffs.iter().flat_map(|handled| handled.forwarded.clone()).collect();
+    assert!(forwarded.is_empty(), "no mouse report reached the draft: {forwarded:?}");
+}
+
+#[test]
+fn the_thumb_thickens_under_the_pointer_and_thins_when_it_leaves() {
+    let mut term = Term::new(&[], 80, 24);
+    lines(&mut term, 100);
+    term.draw();
+    let thin = counts(&term, '\u{2503}');
+    assert!(thin >= 2 && counts(&term, '\u{2588}') == 0, "at rest: a thin thumb: {bar:?}", bar = bar_column(&term));
+    // Motion with no button down, over the bar's column: thicker, in the same rows.
+    term.feed(&sgr(35, 80, 10, true));
+    assert_eq!(counts(&term, '\u{2588}'), thin, "hovering thickens the thumb: {bar:?}", bar = bar_column(&term));
+    assert_eq!(counts(&term, '\u{2503}'), 0, "and thins nothing else: {bar:?}", bar = bar_column(&term));
+    // The same motion over the chat's text: thin again - the bar is one column, not the screen.
+    term.feed(&sgr(35, 40, 10, true));
+    assert_eq!(counts(&term, '\u{2503}'), thin, "the pointer left: thin again: {bar:?}", bar = bar_column(&term));
+    assert_eq!(counts(&term, '\u{2588}'), 0);
+    // A pointer that stays where it is costs no frame: the third report changes nothing.
+    let before = term.console.chat().wraps();
+    term.feed(&sgr(35, 40, 11, true));
+    assert_eq!(term.console.chat().wraps(), before, "a hover that changed nothing re-wrapped nothing");
+}
+
+#[test]
+fn a_frame_of_the_bar_is_the_screen_a_reader_sees() {
+    // A snapshot: twenty-five rows in six, at forty columns. The bar is the last column of every
+    // row - the thumb where the reader is (the bottom, following), the track above it.
+    let mut term = Term::new(&[], 40, 10);
+    for n in 0..25 { term.console.write(&format!("row {n}\n")); }
+    term.draw();
+    let screen: Vec<String> = (0..term.chat_rows()).map(|row| term.row(row).trim_end().to_string()).collect();
+    assert_eq!(screen, vec![
+        "row 19                                 \u{2502}",
+        "row 20                                 \u{2502}",
+        "row 21                                 \u{2502}",
+        "row 22                                 \u{2502}",
+        "row 23                                 \u{2503}",
+        "row 24                                 \u{2503}",
+    ], "the frame: {screen:?}");
+    // And the same picture folded to its bar: one line, no gap between the thumb and the track.
+    assert_eq!(bar_column(&term), "\u{2502}\u{2502}\u{2502}\u{2502}\u{2503}\u{2503}");
+    // The editor keeps its rows under it, untouched.
+    assert!(term.row(6).starts_with('\u{2500}'), "the box is where it was: {:?}", term.row(6));
+    assert_eq!(strip_bar(&term.row(9)), "esc to interrupt                   model");
+}
+
+#[test]
+fn the_console_writes_the_bars_cell_at_its_own_column_on_every_row() {
+    // The same rule as the inline transcript: the bar's cell is written at an absolute column after
+    // the row, so an over-wide row cannot carry the glyph onto the next line and leave a break.
+    let mut console = Console::new(settings(&[]), Mode::Fullscreen);
+    console.write(&"word ".repeat(400));
+    let mut editor = Editor::default();
+    editor.height = 3;
+    let frame = console.frame(&mut editor, 40, 12);
+    let bar = console.chat().bar().expect("a long chat draws the bar");
+    assert_eq!(bar.track, Console::region(&editor), "the track is the chat's own height");
+    for (row, (glyph, colour)) in bar.cells().iter().enumerate() {
+        let at = format!("\x1b[{};40H{colour}{glyph}", row + 1);
+        assert!(frame.contains(&at), "row {} writes its bar at column 40: {at:?} in {frame:?}", row + 1);
+    }
 }
 
 #[test]

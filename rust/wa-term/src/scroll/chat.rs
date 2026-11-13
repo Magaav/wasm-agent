@@ -16,8 +16,15 @@
 //! Blocks are wrapped once and cached (`rows`), because a session's transcript is thousands of rows
 //! and re-wrapping all of it on every keystroke is the one thing this design cannot afford. A block
 //! is re-wrapped when it changes, when the width changes, or when a fold moves - nothing else.
+use crate::scroll::bar::Bar;
 use crate::scroll::settings::Scrollbar;
 use crate::transcript::{visible, wrap_rows};
+
+/// A row cut or padded to exactly the bar's width: `bar::fit`, kept here because that is where the
+/// rows and the bar are put together (and what `transcript` imports).
+pub use crate::scroll::bar::fit;
+/// The thumb's arithmetic: `bar::thumb`, one implementation for both transcripts.
+pub use crate::scroll::bar::thumb;
 
 /// How many rows a collapsed tool block keeps: its summary row (the tool's own line) and two rows of
 /// what it did. `… +N lines` follows when there is more.
@@ -31,8 +38,6 @@ const MAX_LINES: usize = 20_000;
 const DIM: &str = "\x1b[38;2;119;119;119m";
 /// The marker is an event, not a state: it gets the console's accent, so it is seen.
 const ACCENT: &str = "\x1b[38;2;215;119;87m";
-const BAR_TRACK: &str = "\x1b[38;2;80;80;80m";
-const BAR_THUMB: &str = "\x1b[38;2;136;136;136m";
 const RESET: &str = "\x1b[0m";
 
 /// What a block is. Prose is what the reader came for and never folds; thinking and tool output are
@@ -61,6 +66,14 @@ pub struct Chat {
     lines_total: usize,
     /// Whether the last view drew the scrollbar (it takes a column from the text).
     bar: bool,
+    /// The bar as the last view drew it: what a mouse report is measured against. `None` while no
+    /// bar is shown.
+    drawn_bar: Option<Bar>,
+    /// A press grabbed the thumb (or came down on the track): the pointer's offset on the thumb,
+    /// held for as long as the button is.
+    grab: Option<usize>,
+    /// The pointer is on the bar: the thumb is drawn thick while it is.
+    hovered: bool,
     /// Blocks wrapped so far: a test asserts that drawing an unchanged screen wraps nothing.
     wraps: usize,
 }
@@ -70,7 +83,8 @@ impl Default for Chat {
     /// thinking has buried the answer it is for.
     fn default() -> Self {
         Chat { blocks: Vec::new(), tools_collapsed: true, thinking_collapsed: true, collapse: (true, true),
-            width: 0, height: 0, scrolled: 0, unseen: 0, total: 0, lines_total: 0, bar: false, wraps: 0 }
+            width: 0, height: 0, scrolled: 0, unseen: 0, total: 0, lines_total: 0, bar: false,
+            drawn_bar: None, grab: None, hovered: false, wraps: 0 }
     }
 }
 
@@ -223,15 +237,82 @@ impl Chat {
         if let Some(marker) = self.marker() {
             if let Some(last) = rows.last_mut() { *last = fit(&format!("{ACCENT}{marker}{RESET}"), text_width); }
         }
-        if bar {
-            let (top, len) = thumb(height, self.total, first);
-            for (index, row) in rows.iter_mut().enumerate() {
-                let glyph = if index >= top && index < top + len { format!("{BAR_THUMB}\u{2588}") } else { format!("{BAR_TRACK}\u{2502}") };
-                let row_width = visible(row);
-                *row = format!("{row}{}{glyph}{RESET}", " ".repeat(text_width.saturating_sub(row_width)));
+        self.drawn_bar = bar.then(|| Bar { active: self.grab.is_some() || self.hovered, ..Bar::new(height, self.total, first) });
+        if let Some(drawn) = self.drawn_bar {
+            // One glyph per row of the track, from the first to the last: the bar is a line, not
+            // segments (`scroll::bar`). The text beside it is fitted first, so the glyph lands in
+            // the last column on every row however long the row's text is.
+            for (row, (glyph, colour)) in rows.iter_mut().zip(drawn.cells()) {
+                let padding = " ".repeat(text_width.saturating_sub(visible(row)));
+                *row = format!("{row}{padding}{colour}{glyph}{RESET}");
             }
         }
         rows
+    }
+
+    /// The bar as the last `view` drew it: `None` while no bar is shown. A mouse report is measured
+    /// against this - its track, its thumb and where the reader is - so a click means what the
+    /// reader sees.
+    pub fn bar(&self) -> Option<Bar> { self.drawn_bar }
+
+    /// Whether a pointer at `(row, col)` of a `width`-wide screen is on the bar: the last column,
+    /// while the bar is shown. Rows are screen rows, 1-based, as the terminal reports them.
+    pub fn on_bar(&self, row: usize, col: usize, width: usize) -> bool {
+        self.drawn_bar.is_some_and(|bar| width > 1 && col == width && row >= 1 && row <= bar.track)
+    }
+
+    /// A press on the bar: the thumb is put under the pointer (the middle of it, when the press was
+    /// on the track) and the drag starts there. Returns whether it was the bar's press.
+    pub fn bar_press(&mut self, row: usize, col: usize, width: usize) -> bool {
+        if !self.on_bar(row, col, width) { return false }
+        let bar = self.drawn_bar.expect("on_bar checked it");
+        if !bar.scrolling() { return false }
+        let at = row.saturating_sub(1).min(bar.track - 1);
+        let grab = bar.grab(at);
+        self.grab = Some(grab);
+        self.bar_to(bar.first_at(at, grab));
+        true
+    }
+
+    /// The button is still down and the pointer moved: the same mapping, with the grab the press
+    /// took. Only a press that grabbed the bar drags it, and the pointer may leave the column (a
+    /// drag that wandered off the bar still scrolls, as it does in pi).
+    pub fn bar_drag(&mut self, row: usize) -> bool {
+        let Some(grab) = self.grab else { return false };
+        let Some(bar) = self.drawn_bar else { return false };
+        if bar.track == 0 { return false }
+        let at = row.saturating_sub(1).min(bar.track - 1);
+        self.bar_to(bar.first_at(at, grab));
+        true
+    }
+
+    /// The pointer is on the bar (or left it): the thumb thickens and thins. Returns whether that
+    /// changed what is drawn - the caller redraws only then, so a moving pointer costs nothing.
+    pub fn bar_hover(&mut self, row: usize, col: usize, width: usize) -> bool {
+        if self.grab.is_some() { return false }
+        let hovered = self.on_bar(row, col, width);
+        if hovered == self.hovered { return false }
+        self.hovered = hovered;
+        true
+    }
+
+    /// The button came up: the thumb lets go (and is thin again until the pointer is on it).
+    pub fn bar_release(&mut self) -> bool {
+        let had = self.grab.take().is_some() | self.hovered;
+        self.hovered = false;
+        had
+    }
+
+    /// Whether the pointer is on the bar and the thumb is drawn thick.
+    pub fn bar_active(&self) -> bool { self.hovered || self.grab.is_some() }
+
+    /// Put the chat's view at content row `first`: what the bar's click and drag are. Following the
+    /// bottom again when that is where `first` is.
+    fn bar_to(&mut self, first: usize) {
+        let Some(bar) = self.drawn_bar else { return };
+        let max = bar.total.saturating_sub(bar.track);
+        self.scrolled = max.saturating_sub(first.min(max));
+        if self.scrolled == 0 { self.unseen = 0; }
     }
 
     /// Row `index` of the whole chat, escape sequences and all.
@@ -265,37 +346,6 @@ fn wrap_block(block: &Block, width: usize, fold: Option<usize>) -> Vec<String> {
     let mut out: Vec<String> = rows.into_iter().take(preview).collect();
     out.push(format!("{DIM}\u{2026} +{hidden} lines{RESET}"));
     out
-}
-
-/// A row cut or padded to exactly `width` cells - what a row must be for the scrollbar and the marker
-/// to land in the last column. Escape sequences take no cells and are kept.
-pub(crate) fn fit(text: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut cells = 0usize;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            out.push(ch);
-            if chars.peek() == Some(&'[') { out.push(chars.next().unwrap()); for c in chars.by_ref() { out.push(c); if ('@'..='~').contains(&c) { break; } } }
-            continue;
-        }
-        let cell = crate::terminal_editor::cell_width_of(ch);
-        if cells + cell > width { break; }
-        out.push(ch);
-        cells += cell;
-    }
-    out.push_str(&" ".repeat(width.saturating_sub(cells)));
-    out
-}
-
-/// The scrollbar's thumb for a track of `track` rows over `total` rows whose first visible row is
-/// `first`: (first row of the thumb, how many rows it is). At least one row, never off the track.
-pub fn thumb(track: usize, total: usize, first: usize) -> (usize, usize) {
-    if track == 0 { return (0, 0); }
-    let thumb = ((track * track) / total.max(1)).clamp(1, track);
-    let max_first = total.saturating_sub(track);
-    let top = (first * (track - thumb) + max_first / 2).checked_div(max_first).unwrap_or(0);
-    (top.min(track - thumb), thumb)
 }
 
 #[cfg(test)]
@@ -409,9 +459,11 @@ mod tests {
     }
 
     #[test]
-    fn the_thumb_is_at_least_one_row_and_sits_on_its_track() {
-        assert_eq!(thumb(10, 100, 0), (0, 1));
-        assert_eq!(thumb(10, 100, 90), (9, 1));
+    fn the_thumb_is_a_two_row_handle_that_sits_on_its_track() {
+        // The arithmetic itself is `scroll::bar`'s (and tested there at every height); this is the
+        // console's side of it: the same `thumb`, reached through the console's own draw.
+        assert_eq!(thumb(10, 100, 0), (0, 2), "a hundred rows in ten: a two-row handle at the top");
+        assert_eq!(thumb(10, 100, 90), (8, 2), "at the bottom, at the track's end");
         assert_eq!(thumb(50, 100, 0), (0, 25));
         assert_eq!(thumb(50, 100, 50), (25, 25));
         assert_eq!(thumb(10, 5, 0), (0, 10), "no overflow: the whole track");
@@ -425,10 +477,10 @@ mod tests {
         assert_eq!(plain(&hidden[0]).trim_end(), "line 25", "no bar: the whole width is text: {hidden:?}");
         assert!(!hidden.iter().any(|row| plain(row).contains(BAR)), "{hidden:?}");
         let always = chat.view(10, 5, Scrollbar::Always);
-        assert!(always.iter().all(|row| plain(row).ends_with('\u{2588}') || plain(row).ends_with('\u{2502}')), "{always:?}");
-        assert!(always[4].contains('\u{2588}'), "following: the thumb is at the bottom: {always:?}");
+        assert!(always.iter().all(|row| plain(row).ends_with('\u{2588}') || plain(row).ends_with('\u{2503}') || plain(row).ends_with('\u{2502}')), "{always:?}");
+        assert!(always[4].contains('\u{2503}') || always[4].contains('\u{2588}'), "following: the thumb is at the bottom: {always:?}");
         let mut short = chat_fn(2);
         assert!(short.view(20, 5, Scrollbar::Auto).iter().all(|row| !plain(row).contains(BAR)), "no overflow, no bar");
-        assert!(short.view(20, 5, Scrollbar::Always).iter().all(|row| plain(row).ends_with('\u{2588}')));
+        assert!(short.view(20, 5, Scrollbar::Always).iter().all(|row| plain(row).ends_with('\u{2588}') || plain(row).ends_with('\u{2503}')));
     }
 }

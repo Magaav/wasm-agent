@@ -81,11 +81,23 @@ impl Console {
         let (keys, mice, pending) = crate::selection::take(&data);
         self.mouse_pending = pending;
         let mut handled = Handled::default();
+        // The bar is the last column of the frame the console last drew, so the width a report is
+        // measured against is the frame's own - not a guess from the settings.
+        let width = self.drawn.0;
         for event in mice {
+            use crate::selection::Mouse;
             match event {
-                crate::selection::Mouse::WheelUp => { self.wheel(true); handled.changed = true; }
-                crate::selection::Mouse::WheelDown => { self.wheel(false); handled.changed = true; }
-                _ => {}
+                Mouse::WheelUp => { self.wheel(true); handled.changed = true; }
+                Mouse::WheelDown => { self.wheel(false); handled.changed = true; }
+                // A press on the bar jumps there and grabs the thumb; a drag with the button down
+                // scrolls; the button coming up lets go. A press anywhere else is not the bar's.
+                Mouse::Press(row, col) => { handled.changed |= self.chat.bar_press(row, col, width); }
+                Mouse::Drag(row, _) => { handled.changed |= self.chat.bar_drag(row); }
+                Mouse::Release(..) => { handled.changed |= self.chat.bar_release(); }
+                // Hover: thickens the thumb while the pointer is on the bar, and thins it when it
+                // leaves. Redrawn only when that changed, so a moving pointer costs no frame.
+                Mouse::Motion(row, col) => { handled.changed |= self.chat.bar_hover(row, col, width); }
+                Mouse::Other => {}
             }
         }
         for byte in keys {
@@ -145,6 +157,7 @@ impl Console {
         editor.row = height - 1;
         let region = Self::region(editor).clamp(1, height);
         let rows = self.chat.view(width, region, self.settings.scrollbar);
+        let bar_cells: Vec<(char, &'static str)> = self.chat.bar().map(|bar| bar.cells()).unwrap_or_default();
         let mut out = String::new();
         if self.drawn != (width, height) {
             out.push_str("\x1b[2J");
@@ -154,6 +167,12 @@ impl Console {
         for (index, row) in rows.iter().enumerate() {
             if self.last.get(index) == Some(row) { continue; }
             out.push_str(&format!("\x1b[{};1H\x1b[2K{row}\x1b[0m", index + 1));
+            // The bar's cell again, at its own column: a row whose text the terminal draws wider
+            // than this crate counts it would otherwise wrap the glyph onto the next line and leave
+            // a break in the track (`transcript::render` does the same, for the same reason).
+            if let Some((glyph, colour)) = bar_cells.get(index).copied() {
+                out.push_str(&format!("\x1b[{};{width}H{colour}{glyph}\x1b[0m", index + 1));
+            }
             if index >= self.last.len() { self.last.resize(index + 1, String::new()); }
             self.last[index] = row.clone();
         }
