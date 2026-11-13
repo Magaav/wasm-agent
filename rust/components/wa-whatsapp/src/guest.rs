@@ -226,8 +226,10 @@ thread_local! {
     /// Audio messages handed over by the (Send) message handler, admitted by the main loop.
     static AUDIO_INBOX: RefCell<Vec<AudioJob>> = const { RefCell::new(Vec::new()) };
     /// Every message and event the handler turned into a record, indexed by the pipeline's own loop
-    /// (`index.rs`): the handler must not wait on a store write, so it hands the record over.
-    static INDEX_INBOX: RefCell<Vec<Record>> = const { RefCell::new(Vec::new()) };
+    /// (`index.rs`): the handler must not wait on a store write, so it hands the record over. The
+    /// count beside it is how many times a refused write has handed this record back.
+    static INDEX_INBOX: RefCell<std::collections::VecDeque<(Record, u8)>> =
+        RefCell::new(std::collections::VecDeque::new());
     /// Images the index lane wrote and the OCR lane has not read yet (`ocr.rs`). An [`OcrJob`] is the
     /// record's identity plus its attempt count, never its bytes: the image is fetched when the lane
     /// gets to it, under the same media limits the query lane's download uses, so a burst of photos
@@ -1105,6 +1107,11 @@ const QUERY_LEASE_MS: u64 = 30_000;
 const QUERY_EVERY: Duration = Duration::from_millis(200);
 /// Most records indexed per pipeline tick, so a history sync cannot starve the audio queue.
 const INDEX_PER_TICK: usize = 200;
+/// Most records one tick may fold into chat cards (`index::backfill_cards`), which is what gives an
+/// index that arrived without its name side (`ix/ct/`) its chats back. The records are keyed by chat,
+/// so a page this size names a handful of chats and costs a handful of writes - far inside the same
+/// kv grant the live lane is spending.
+const CARDS_PER_TICK: usize = 400;
 /// Most images waiting for an OCR pass. A burst of screenshots is read in order; beyond this the
 /// oldest id is dropped, and the backlog pass (`index::ocr_backlog`) still finds it later - a dropped
 /// id costs a scan, never an image that is silently never read.
@@ -1215,10 +1222,13 @@ fn queue_ocr(record: &Record) {
     });
 }
 
-/// Index what the message handler handed over. Bounded per tick; a failed write is reported, never
-/// treated as done (a silent loss here is a message the agent will never find).
+/// Index what the message handler handed over. Bounded per tick, and a refused write is handed back
+/// to the inbox instead of being lost: the store's refusal the index actually meets is the kv grant's
+/// token bucket, which refills - so a record it refused a second ago is writable a tick later, while a
+/// record dropped here is a message the agent will never find again (13/11: the account node's index
+/// answered `count: 0` while messages kept arriving, and nothing had retried them).
 async fn index_inbox(enabled: bool) -> usize {
-    let batch: Vec<Record> = INDEX_INBOX.with(|inbox| {
+    let batch: Vec<(Record, u8)> = INDEX_INBOX.with(|inbox| {
         let mut inbox = inbox.borrow_mut();
         let take = inbox.len().min(INDEX_PER_TICK);
         inbox.drain(..take).collect()
@@ -1232,22 +1242,87 @@ async fn index_inbox(enabled: bool) -> usize {
         say!("index: off; {} record(s) dropped", batch.len());
         return 0;
     }
+    let total = batch.len();
     let mut indexed = 0usize;
-    for record in &batch {
-        match index::put(&IndexKv, record).await {
+    let mut retried = 0usize;
+    let mut lost = 0usize;
+    let mut again: Vec<(Record, u8)> = Vec::new();
+    for (record, attempts) in batch {
+        match index::put(&IndexKv, &record).await {
             Ok(()) => indexed += 1,
-            Err(reason) => say!("index: write failed {} reason={reason}", privacy::at(&record.chat, &record.id)),
+            Err(reason) => {
+                if index::refused(attempts) == index::Refused::Retry {
+                    again.push((record, attempts + 1));
+                    retried += 1;
+                } else {
+                    lost += 1;
+                    say!(
+                        "index: dropped {} after {} attempt(s) reason={reason}",
+                        privacy::at(&record.chat, &record.id),
+                        attempts as u32 + 1
+                    );
+                }
+                // The OCR lane is queued only for a record that was written: a text attached to a
+                // record that does not exist yet is `attach_text`'s "not_found", and the backlog pass
+                // finds the record on its own once it lands.
+                continue;
+            }
         }
         // After the write, never before: the OCR lane attaches the text to this record, and a text
         // attached to a record that does not exist yet is a message the agent will never find.
         // `wanted` is the cheap policy (kind, media keys, the declared size) - no bytes are fetched
         // here, and the real decision is taken again when the lane gets to it.
-        if crate::ocr::wanted(record).is_ok() {
-            queue_ocr(record);
+        if crate::ocr::wanted(&record).is_ok() {
+            queue_ocr(&record);
         }
     }
-    say!("index: {indexed}/{} records written", batch.len());
+    // Back to the FRONT, oldest first: the message whose write was refused is older than anything
+    // that arrived while it was being retried, and a retry that queues behind fresh traffic is a
+    // retry a busy account never runs.
+    if !again.is_empty() {
+        INDEX_INBOX.with(|inbox| {
+            let mut inbox = inbox.borrow_mut();
+            for item in again.into_iter().rev() {
+                inbox.push_front(item);
+            }
+        });
+    }
+    say!("index: {indexed}/{total} records written, retried {retried}, lost {lost}");
     indexed
+}
+
+/// The name side of an index that already holds messages (`index::backfill_cards`).
+///
+/// `whatsapp_contacts` reads one small row per chat (`ix/ct/`), and until this ran those rows existed
+/// only as a side effect of indexing a message. So an index whose records arrived without their cards -
+/// restored on its own, written by a build that came before them, or written while the kv grant was
+/// refusing the tail of every message - answers `count: 0` for every query, including the one that
+/// names no chat, and its answer was indistinguishable from an account nobody had ever talked to.
+/// One bounded, resumable pass per tick, and a line when the walk finishes.
+async fn backfill_names(announced: &mut bool) {
+    match index::backfill_cards(&IndexKv, CARDS_PER_TICK).await {
+        Ok(pass) if pass.done => {
+            if pass.visited > 0 || *announced {
+                say!("index: names ready ({} record(s), {} chat(s) folded this pass)", pass.visited, pass.chats);
+            }
+            *announced = false;
+        }
+        Ok(pass) => {
+            if !*announced {
+                *announced = true;
+                say!("index: names rebuilding from {} record(s) ({} chat(s) folded this pass)", pass.visited, pass.chats);
+            }
+        }
+        Err(reason) => {
+            // One line per attempt is noise on a node whose kv grant is refusing writes; the state it
+            // leaves is visible in every `whatsapp_contacts` answer (`index.names`), so the first line
+            // is the alarm and the rest would be a tick-by-tick echo of it.
+            if !*announced {
+                *announced = true;
+                say!("index: names rebuild failed reason={reason}");
+            }
+        }
+    }
 }
 
 // ---- OCR lane ---------------------------------------------------------------------------------
@@ -2041,7 +2116,7 @@ async fn serve(config: serde_json::Value) {
                         push_name: ctx.info.push_name.clone(),
                     };
                     let entry = record::from_message(&envelope, &ctx.message);
-                    INDEX_INBOX.with(|q| q.borrow_mut().push(entry));
+                    INDEX_INBOX.with(|q| q.borrow_mut().push_back((entry, 0)));
                 }
                 if let (Some(audio), false) = (base.audio_message.as_option(), skip) {
                     AUDIO_INBOX.with(|q| {
@@ -2094,6 +2169,9 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut last_query = Instant::now();
     let mut last_prune = Instant::now();
     let mut last_ocr = Instant::now();
+    // Whether the name-side walk has already said it is rebuilding, so a multi-minute rebuild is two
+    // lines (start, done) and not one per tick.
+    let mut names_announced = false;
     loop {
         for mutation in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_mutation(mutation).await;
@@ -2104,6 +2182,11 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // The index first, so a message that just arrived is already findable when the query lane is
         // asked about it: the same tick's order, not a race between two independent loops.
         index_inbox(index.enabled).await;
+        // Then the name side of the same index, from the records already stored: an index that
+        // arrived without its cards answers `whatsapp_contacts` with no chat at all until this ran.
+        if index.enabled {
+            backfill_names(&mut names_announced).await;
+        }
         // Then the past: one history sync per tick, bounded by its budget (`history.rs`), so a relink
         // cannot starve the pipeline it arrived in.
         history_tick(index).await;

@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! tool whatsapp_search {q, chat?, kind?, from?, since?, until?, limit}
-//!   -> validate the request here, enqueue `whatsapp.query` (dedupe = the request itself)
+//!   -> validate the request here, enqueue `whatsapp.query` (dedupe = the request + the answering build)
 //! component wa-whatsapp (granted queue worker on `whatsapp.query`)
 //!   -> read the index in its own kv, settle done(answer) | fail(reason)
 //! tool answer <- the job's result (bounded, text-carrying, never logged)
@@ -16,8 +16,9 @@
 //! This crate is the part both ends must agree on, and it is deliberately small:
 //!
 //! * [`Request`] - the five operations the agent may ask for ([`Op`]), the bounds on each argument,
-//!   and the dedupe key: a repeated identical query is *the same job*, so a caller that retried
-//!   after a timeout reads the answer the first call already produced.
+//!   and the dedupe key: a repeated identical query is *the same job* **within one component build**
+//!   ([`Verified::dedupe_key_in`]), so a caller that retried after a timeout reads the answer the
+//!   first call already produced, and a job that died on an older build is not replayed forever.
 //! * [`refusal`]/[`answer`] - the shape of both answers, so a tool answer and a documented answer
 //!   cannot drift.
 //! * [`bound`] - the result is carried in a queue job, and a job's result has a hard size (`wa:queue`
@@ -428,9 +429,29 @@ impl Request {
 
 impl Verified {
     /// The dedupe material, in a fixed order so the same query always hashes the same.
+    ///
+    /// **The build that answers is part of the key** ([`Verified::dedupe_key_in`]): `wa:queue` hands
+    /// back an existing job for a repeated key whatever state it is in, including `dead`, so a key that
+    /// outlives the component build replays a refusal forever - exactly what the account node reported
+    /// on 13/11: `whatsapp_contacts {limit:1}` kept answering `whatsapp_contacts_bad_op`, `state: dead`,
+    /// from a job that died on the build installed BEFORE `contacts` existed, while every new call was
+    /// answered by a component that accepts it (the queue's dedupe hit is
+    /// `rust/wa-queue/src/queue.rs`, "Returns the existing id ... when `dedupe_key` already names a live
+    /// job", where `live` only means the record still exists).
+    ///
+    /// So dedupe is scoped to one build: a retried call reads the same job, an upgraded component
+    /// starts from a new one. The key of an older build is simply never asked for again (the queue's
+    /// own retention ages it out), which is why no migration is needed to drop the stale claims.
     pub fn dedupe_key(&self) -> String {
+        self.dedupe_key_in("")
+    }
+
+    /// The same key, scoped to the component build that will answer it: the artifact's sha256 as the
+    /// node's registry reports it (`services::status`'s `sha256`). Empty means "this caller cannot say
+    /// which build answers" - a CLI with no registry - and it is still a stable key for that caller.
+    pub fn dedupe_key_in(&self, build: &str) -> String {
         let material = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.op.as_str(),
             self.q.as_deref().unwrap_or(""),
             self.chat.as_ref().map(|chat| chat.jid()).unwrap_or_default(),
@@ -443,6 +464,7 @@ impl Verified {
             self.before.as_deref().unwrap_or(""),
             self.limit,
             self.max_bytes,
+            build,
         );
         hex(&Sha256::digest(material.as_bytes()))
     }
@@ -1113,6 +1135,23 @@ mod tests {
         let quiet = answer(Op::Backfill, backfill_answer(chats, ""));
         assert!(quiet.get("note").is_none());
         assert_eq!(quiet["count"], 2);
+    }
+
+    #[test]
+    fn the_dedupe_key_is_scoped_to_the_build_that_answers_it() {
+        // A retried call reads the same job only while the same build answers it. The key carried the
+        // request alone until 13/11, so a job that died on the previous component build was replayed to
+        // every later call (`whatsapp_contacts_bad_op`, `state: dead`) long after the component that
+        // knows the op was installed - `wa:queue` answers a repeated key with the job that carries it,
+        // whatever state that job is in.
+        let laura = || Request { op: "contacts".into(), q: Some("Laura".into()), ..Default::default() };
+        let one = laura().validate().expect("a contacts question");
+        assert_eq!(one.dedupe_key_in("build-a"), one.dedupe_key_in("build-a"), "stable inside one build");
+        assert_ne!(one.dedupe_key_in("build-a"), one.dedupe_key_in("build-b"), "a new build is a new job");
+        assert_eq!(one.dedupe_key(), one.dedupe_key_in(""), "the unscoped key is the empty build's");
+        // And the request still discriminates: two questions are two keys in the same build.
+        let bruno = Request { op: "contacts".into(), q: Some("Bruno".into()), ..Default::default() }.validate().unwrap();
+        assert_ne!(one.dedupe_key_in("build-a"), bruno.dedupe_key_in("build-a"));
     }
 
     #[test]

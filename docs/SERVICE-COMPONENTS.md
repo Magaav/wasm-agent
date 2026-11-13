@@ -661,6 +661,8 @@ ix/w/<token>/<inv(ts)>/<id>/<chat>    empty                       (normalized-to
 ix/x/<chat>/<id>/<reactor>/<emoji>    reaction, JSON              (folded onto its target)
 ix/all/<ts>/<chat>/<id>               empty                       (age order: retention walks it)
 ix/pend/<chat>/<id>                   a mutation for a message not indexed yet
+ix/ct/<chat>                          one chat's card, JSON       (the name side: names observed there)
+ix/bf/cards, ix/bf/cards/done         the name walk's cursor and its done mark
 ```
 
 `inv(ts)` is `u64::MAX - ts` in fixed-width hex, so an ascending scan is newest-first and `before` is
@@ -694,7 +696,36 @@ media key and the direct path never leave the component: they are how it decrypt
   a pass walks `ix/all` from the oldest, deletes at most `index_prune_budget` records (default 200)
   and stops at the first record inside the window, so it costs what it deletes. There is no record
   count and no counter: a counter that drifts is a counter that deletes live data. The index is bounded
-  by the component's storage grant; a write that fails is logged, never treated as done.
+  by the component's storage grant; a write that fails is handed back to the ingest lane and retried
+  (`index::RETRY_LIMIT`), never treated as done.
+
+**The name side (`ix/ct/`).** `whatsapp_contacts` answers from one small row per chat, not from the
+records: every indexed message folds its sender's push name into that chat's card (`index::card_touch`),
+and `contact`/`contact_array` messages name the chats their phone numbers belong to
+(`index::contact_cards`, only for a chat the index already holds, and always weaker than the name a
+person writes on their own messages). A group is named by its subject and by nothing else.
+
+Two things this side had to learn the hard way, both measured on the account node (13/11: 57310 stored
+entries, messages arriving, and every `whatsapp_contacts` query answering `count: 0`):
+
+* **The card is the FIRST write of a message, not the last.** A message costs five keys plus one per
+  token plus its card, and the component's `kv.write` grant is a token bucket (`rate` in
+  `policies/default.json`, 240/min with a burst of 480). A bucket that runs out part-way through a
+  message therefore always runs out at the end of the sequence, and the card used to be that end: the
+  one row the name question reads was the first thing a busy account lost. The record cannot be
+  rebuilt from anything; the card can, so the name is written first.
+* **The name side is derived, and it rebuilds itself.** `index::backfill_cards` walks `ix/m/` (keyed by
+  chat, so a page is a handful of chats), folds each chat's records and writes one card per chat -
+  bounded per pass, resumable through `ix/bf/cards`, and it writes `ix/bf/cards/done` so a later tick
+  costs one read. The pipeline runs one pass per tick (`guest::backfill_names`). So an index restored
+  without its cards, written by a build that came before them, or written while the grant was refusing
+  the tail of every message, fills its names back in instead of answering "no chat carries that name"
+  forever.
+* **The answer says which half it has.** `whatsapp_contacts` carries `index: {chats, messages,
+  messages_capped, names}` beside its candidates, where `names` is `ready` / `rebuilding` / `pending`,
+  so an index of messages whose names are still being derived can never be read as an account nobody
+  has ever talked to. `messages` is a bounded count (`index::COUNT_CAP`, 5000) and `messages_capped`
+  says when it stopped there.
 
 **The query lane.** `wa:queue`, queue name `whatsapp.query` (`rust/wa-whatsapp-index` is the shared
 request/answer shape; the node's seven capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):
@@ -702,7 +733,7 @@ request/answer shape; the node's seven capabilities are `rust/wa-capabilities/sr
 ```text
 tool whatsapp_contacts | search | read | message | reactions | media | download | backfill
   -> validate + bound the request            wa-whatsapp-index
-  -> enqueue `whatsapp.query` (fresh 2 min, 2 attempts, dedupe = the request itself)
+  -> enqueue `whatsapp.query` (fresh 2 min, 2 attempts, dedupe = the request + the answering build)
 component wa-whatsapp (queue worker on `whatsapp.query`, one lease at a time)
   -> read its own kv index, settle done(answer) | fail(reason)
 tool answer <- the settled result (bounded below the queue's 64 KiB result cap)
@@ -710,7 +741,13 @@ tool answer <- the settled result (bounded below the queue's 64 KiB result cap)
 
 The node waits up to two seconds (`wa_whatsapp_index::WAIT_MS`) and heartbeats the node while it
 waits, so a search answers in the same turn; a slower one answers `whatsapp_<op>_slow` with the job id
-and `retry: true`, and the same call reads the same job (the dedupe key *is* the request). A refusal at
+and `retry: true`, and the same call reads the same job - **within one component build**:
+`Verified::dedupe_key_in` puts the answering artifact's sha256 (`services::status`) into the key, and
+`wa:queue` answers a repeated key with the job that already carries it whatever state that job is in,
+so a key that outlived the component would replay an old refusal forever. That is what the account node
+reported on 13/11: `whatsapp_contacts {limit:1}` kept answering `whatsapp_contacts_bad_op state: dead`
+from a job that died on the build installed before `contacts` existed, while the component actually
+running accepted the op. A refusal at
 the producer writes nothing: `whatsapp_search_empty_query`, `whatsapp_read_bad_chat`,
 `whatsapp_search_bad_kind`, `whatsapp_reactions_chat_and_id_required`, … and a chat given as a *name*
 is queued rather than refused, because resolving it is the index's answer (`whatsapp_read_chat_ambiguous`

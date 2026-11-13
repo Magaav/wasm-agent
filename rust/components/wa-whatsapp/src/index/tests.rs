@@ -1201,3 +1201,222 @@ fn a_search_hit_names_the_chat_and_the_sender() {
     assert!(hit["at_iso"].as_str().unwrap().ends_with('Z'));
     assert!(hit.get("quoted").is_none(), "not a reply, so no reply key");
 }
+
+// ---- an index that holds messages and no names: the 13/11 account node ---------------------------
+
+/// Every chat the index knows, asked the way a model asks it with no name to resolve.
+fn every_chat() -> seam::Verified {
+    verified(seam::Request { op: "contacts".into(), ..Default::default() })
+}
+
+fn named(q: &str) -> seam::Verified {
+    verified(seam::Request { op: "contacts".into(), q: Some(q.into()), ..Default::default() })
+}
+
+/// A store with a write budget, and a count of what it allowed: the component's kv grant is a token
+/// bucket (`kv.write`'s `rate` in `policies/default.json`, which answers `capability_rate_limited`),
+/// and this is the part of it an index write meets. Deletes are charged too - the host gates them
+/// with the same capability.
+struct Budgeted {
+    inner: Memory,
+    left: std::cell::Cell<usize>,
+    writes: std::cell::Cell<usize>,
+}
+
+impl Budgeted {
+    fn new(writes: usize) -> Budgeted {
+        Budgeted { inner: Memory::new(), left: std::cell::Cell::new(writes), writes: std::cell::Cell::new(0) }
+    }
+
+    fn charge(&self) -> Result<(), String> {
+        if self.left.get() == 0 {
+            return Err("capability_rate_limited".to_string());
+        }
+        self.left.set(self.left.get() - 1);
+        self.writes.set(self.writes.get() + 1);
+        Ok(())
+    }
+}
+
+impl Store for Budgeted {
+    fn get<'a>(&'a self, key: &'a [u8]) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, String>> + 'a {
+        self.inner.get(key)
+    }
+
+    fn set<'a>(&'a self, key: &'a [u8], value: &'a [u8]) -> impl std::future::Future<Output = Result<(), String>> + 'a {
+        let charged = self.charge();
+        async move {
+            charged?;
+            self.inner.set(key, value).await
+        }
+    }
+
+    fn del<'a>(&'a self, key: &'a [u8]) -> impl std::future::Future<Output = Result<(), String>> + 'a {
+        let charged = self.charge();
+        async move {
+            charged?;
+            self.inner.del(key).await
+        }
+    }
+
+    fn scan<'a>(
+        &'a self,
+        prefix: &'a [u8],
+        cursor: Option<Vec<u8>>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Page, String>> + 'a {
+        self.inner.scan(prefix, cursor, limit)
+    }
+}
+
+/// The records of a chat whose name side is missing, the way the account node's index arrived: the
+/// messages are all there and not one `ix/ct/` row exists.
+fn delete_names(store: &Memory) -> usize {
+    let names: Vec<String> = store.keys().into_iter().filter(|key| key.starts_with("ix/ct/")).collect();
+    for key in &names {
+        block_on(store.del(key.as_bytes())).unwrap();
+    }
+    names.len()
+}
+
+#[test]
+fn an_index_of_messages_with_no_names_says_which_half_is_missing_and_rebuilds_it() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+    block_on(put(&store, &direct(BRUNO, "Bruno", "B1", base() + 60_000, "oi"))).unwrap();
+    // The control: the live path names both chats.
+    assert_eq!(block_on(contacts(&store, &every_chat())).unwrap()["count"], 2);
+
+    // The shape the account node reported on 13/11: 57310 stored entries, messages arriving, and
+    // `contacts` answering `count: 0` to every query - including the one that names no chat.
+    assert_eq!(delete_names(&store), 2);
+    let empty = block_on(contacts(&store, &every_chat())).unwrap();
+    assert_eq!(empty["count"], 0, "{empty}");
+    assert_eq!(empty["index"]["chats"], 0);
+    assert_eq!(empty["index"]["messages"], 2, "the messages are there, and the answer says so: {empty}");
+    assert_eq!(empty["index"]["names"], "pending", "and names the missing half: {empty}");
+    let note = empty["note"].as_str().unwrap();
+    assert!(note.contains("2 message(s) are indexed"), "{note}");
+    assert!(!note.contains("the index only knows names it has seen on messages"), "{note}");
+
+    // One bounded walk over the records already stored is all it takes.
+    let pass = block_on(backfill_cards(&store, 10)).unwrap();
+    assert!(pass.done);
+    assert_eq!((pass.visited, pass.chats), (2, 2));
+    let rebuilt = block_on(contacts(&store, &every_chat())).unwrap();
+    assert_eq!(rebuilt["count"], 2, "{rebuilt}");
+    assert_eq!(rebuilt["candidates"][0]["chat"], BRUNO, "newest first, the same order the live path gives");
+    assert_eq!(rebuilt["candidates"][0]["name"], "Bruno");
+    assert_eq!(rebuilt["index"]["names"], "ready");
+    // And the name resolves again, to the chat it always meant.
+    let laura = block_on(contacts(&store, &named("Laura"))).unwrap();
+    assert_eq!(laura["chat"], LAURA, "{laura}");
+    assert_eq!(laura["count"], 1);
+    // A walk that already finished costs one read, not another scan.
+    let again = block_on(backfill_cards(&store, 10)).unwrap();
+    assert_eq!((again.visited, again.chats, again.done), (0, 0, true));
+}
+
+#[test]
+fn a_write_budget_that_runs_out_costs_the_record_and_never_the_name() {
+    // One write allowed, so exactly one of a message's writes can land. It has to be the chat's card:
+    // the name is what `whatsapp_contacts` reads, and the record is what `backfill_cards` can rebuild
+    // nothing of - so the budget is spent on the name, and the record's refusal is a line, not a
+    // silent hole in the index's answers.
+    let store = Budgeted::new(1);
+    let refused = block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap_err();
+    assert!(refused.contains("capability_rate_limited"), "{refused}");
+    assert_eq!(store.writes.get(), 1);
+    assert!(!store.inner.keys().iter().any(|key| key.starts_with("ix/m/")), "the record was refused");
+    let answer = block_on(contacts(&store, &named("Laura"))).unwrap();
+    assert_eq!(answer["count"], 1, "the chat is still a chat the index knows: {answer}");
+    assert_eq!(answer["chat"], LAURA);
+
+    // The same message with the budget it actually costs lands whole, and the count is the number the
+    // component's grant (`per_minute: 240`) is spent against.
+    let roomy = Budgeted::new(100);
+    block_on(put(&roomy, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+    assert_eq!(roomy.writes.get(), 8, "{:?}", roomy.inner.keys());
+}
+
+#[test]
+fn the_name_walk_is_bounded_and_resumes_where_it_stopped() {
+    let store = Memory::new();
+    for (i, chat) in [LAURA, BRUNO].iter().enumerate() {
+        for step in 0..2 {
+            let id = format!("{i}{step}");
+            block_on(put(&store, &direct(chat, "Nome", &id, base() + (i as i64 * 10 + step) * 1_000, "oi"))).unwrap();
+        }
+    }
+    delete_names(&store);
+    assert_eq!(block_on(backfill_state(&store)).unwrap(), "pending");
+
+    // One record per pass: a restored index of fifty thousand messages must not be folded in one
+    // tick, because every card it writes is charged to the same grant the live lane is spending.
+    let first = block_on(backfill_cards(&store, 1)).unwrap();
+    assert_eq!(first.visited, 1);
+    assert_eq!(first.chats, 1);
+    assert!(!first.done);
+    assert_eq!(block_on(backfill_state(&store)).unwrap(), "rebuilding");
+
+    let mut passes = 1;
+    let mut visited = first.visited;
+    loop {
+        let pass = block_on(backfill_cards(&store, 1)).unwrap();
+        passes += 1;
+        visited += pass.visited;
+        if pass.done {
+            break;
+        }
+        assert!(passes < 20, "the walk must end: {passes} passes");
+    }
+    assert_eq!(visited, 4, "every record folded exactly once");
+    assert_eq!(passes, 5, "four records and the pass that finds the end");
+    assert_eq!(block_on(backfill_state(&store)).unwrap(), "ready");
+    // A subject this node fetched survives the walk: both paths read-modify-write the same row.
+    block_on(set_subject(&store, CHAT, "Família")).unwrap();
+    let named_group = block_on(contacts(&store, &named("familia"))).unwrap();
+    assert_eq!(named_group["chat"], CHAT, "{named_group}");
+}
+
+#[test]
+fn a_shared_contact_card_names_the_chat_its_number_belongs_to() {
+    let store = Memory::new();
+    // A chat whose person never wrote a push name: the index holds the message and no name at all.
+    block_on(put(&store, &direct(LAURA, "", "L1", base(), "oi"))).unwrap();
+    let before = block_on(contacts(&store, &named("Laura"))).unwrap();
+    assert_eq!(before["count"], 0, "{before}");
+
+    // Somebody shares that person's card in the group: a name and the number it belongs to.
+    let mut card = text("C1", base() + 1_000, "contato da Laura");
+    card.contacts = vec![record::Contact { name: "Laura".into(), phones: vec!["5511977777777".into()] }];
+    block_on(put(&store, &card)).unwrap();
+    let after = block_on(contacts(&store, &named("Laura"))).unwrap();
+    assert_eq!(after["count"], 1, "{after}");
+    assert_eq!(after["chat"], LAURA);
+    assert_eq!(after["candidates"][0]["name_source"], "contact_card", "{after}");
+    assert_eq!(after["candidates"][0]["name"], "Laura");
+
+    // The name the person writes on their own messages still outranks it.
+    block_on(put(&store, &direct(LAURA, "Laura Souza", "L2", base() + 2_000, "bom dia"))).unwrap();
+    let own = block_on(contacts(&store, &named("Laura"))).unwrap();
+    assert_eq!(own["candidates"][0]["name"], "Laura Souza", "{own}");
+    assert_eq!(own["candidates"][0]["name_source"], "push_name");
+    // A card naming a number this index has no chat for does not invent one.
+    let mut stranger = text("C2", base() + 3_000, "outro contato");
+    stranger.contacts = vec![record::Contact { name: "Zeca".into(), phones: vec!["5511900000000".into()] }];
+    block_on(put(&store, &stranger)).unwrap();
+    let zeca = block_on(contacts(&store, &named("Zeca"))).unwrap();
+    assert_eq!(zeca["count"], 0, "{zeca}");
+}
+
+#[test]
+fn a_refused_write_is_retried_a_bounded_number_of_times_and_then_said() {
+    // The lane that uses this (`guest::index_inbox`) is wasm-only, so the decision is here where
+    // `cargo test` reaches it: the refusal is the kv grant's bucket, which refills in a minute.
+    assert_eq!(refused(0), Refused::Retry);
+    assert_eq!(refused(RETRY_LIMIT - 1), Refused::Retry);
+    assert_eq!(refused(RETRY_LIMIT), Refused::Drop);
+    assert_eq!(refused(u8::MAX), Refused::Drop);
+    assert_eq!(RETRY_LIMIT, 8);
+}

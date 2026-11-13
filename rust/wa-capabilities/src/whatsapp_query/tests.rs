@@ -7,6 +7,11 @@ use super::*;
 use std::path::PathBuf;
 use wa_queue::{EnqueueRequest, Policy};
 
+/// The build that answers in these tests. The dedupe key is scoped to it
+/// (`seam::Verified::dedupe_key_in`), so a test can change it and watch a new job appear - which is
+/// the whole point of the scope.
+const BUILD: &str = "0bf8762a-live-build";
+
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("wa-query-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -39,7 +44,7 @@ fn a_search_enqueues_one_job_and_the_same_question_reads_it_again() {
     let (_host, queue) = queue("search");
     let args = serde_json::json!({"q": "boleto", "chat": "5511999999999@lid", "limit": 5});
     // Nothing has answered yet: the answer says "still running" with the id, and says it is retryable.
-    let slow = ask_in(&queue, seam::Op::Search, &args, 1);
+    let slow = ask_in(&queue, seam::Op::Search, &args, 1, BUILD);
     assert_eq!(slow["ok"], false);
     assert_eq!(slow["error"], "whatsapp_search_slow");
     assert_eq!(slow["retry"], true);
@@ -51,7 +56,7 @@ fn a_search_enqueues_one_job_and_the_same_question_reads_it_again() {
     let verified = request.validate().unwrap();
     assert_eq!((verified.op, verified.q.as_deref(), verified.limit), (seam::Op::Search, Some("boleto"), 5));
     // The same question is the same job: asking again does not queue a second scan.
-    let again = ask_in(&queue, seam::Op::Search, &args, 1);
+    let again = ask_in(&queue, seam::Op::Search, &args, 1, BUILD);
     assert_eq!(again["id"].as_u64(), Some(id));
 }
 
@@ -59,7 +64,7 @@ fn a_search_enqueues_one_job_and_the_same_question_reads_it_again() {
 fn the_answer_the_component_settled_is_the_tool_answer() {
     let (_host, queue) = queue("settled");
     let args = serde_json::json!({"chat": "5511999999999@lid", "limit": 3});
-    let slow = ask_in(&queue, seam::Op::Read, &args, 1);
+    let slow = ask_in(&queue, seam::Op::Read, &args, 1, BUILD);
     assert_eq!(slow["error"], "whatsapp_read_slow");
     // The component's side: take the job, answer it, settle.
     let wa_queue::TakeOutcome::Job(taken) = queue.take(seam::QUEUE, "wa-whatsapp", None).unwrap() else {
@@ -71,7 +76,7 @@ fn the_answer_the_component_settled_is_the_tool_answer() {
     );
     queue.done_by(taken.id, "wa-whatsapp", &serde_json::to_vec(&answer).unwrap()).unwrap();
     // Now the same call reads the answer instead of the queue.
-    let answer = ask_in(&queue, seam::Op::Read, &args, 2_000);
+    let answer = ask_in(&queue, seam::Op::Read, &args, 2_000, BUILD);
     assert_eq!(answer["ok"], true);
     assert_eq!(answer["op"], "read");
     assert_eq!(answer["messages"][0]["id"], "3EB01");
@@ -84,13 +89,13 @@ fn a_dead_job_answers_with_its_reason_and_not_with_a_success() {
     let verified = request.validate().unwrap();
     // One attempt only, so a failure is final and the tool's answer is the refusal.
     queue
-        .enqueue(EnqueueRequest::new(seam::QUEUE, verified.to_request().encode()).fresh_for(seam::FRESH_MS).max_attempts(1).dedupe(verified.dedupe_key()))
+        .enqueue(EnqueueRequest::new(seam::QUEUE, verified.to_request().encode()).fresh_for(seam::FRESH_MS).max_attempts(1).dedupe(verified.dedupe_key_in(BUILD)))
         .unwrap();
     let wa_queue::TakeOutcome::Job(taken) = queue.take(seam::QUEUE, "wa-whatsapp", None).unwrap() else {
         panic!("the job must be takeable");
     };
     queue.fail_by(taken.id, "wa-whatsapp", "permanent:not_indexed").unwrap();
-    let answer = ask_in(&queue, seam::Op::Media, &serde_json::json!({"chat": "5511999999999@lid", "id": "3EB01"}), 1);
+    let answer = ask_in(&queue, seam::Op::Media, &serde_json::json!({"chat": "5511999999999@lid", "id": "3EB01"}), 1, BUILD);
     assert_eq!(answer["ok"], false);
     // A refusal the caller can act on keeps its own code, and the tool names it: `not_indexed` is not a
     // slow query and not a generic failure (13/11: `contacts` answered `_failed state=dead` here).
@@ -104,7 +109,7 @@ fn a_backfill_takes_count_as_its_limit_and_needs_no_chat() {
     let (_host, queue) = queue("backfill");
     // No chat, an explicit count: one job, and the count travels as the wire's one count field.
     let args = serde_json::json!({"count": 120});
-    let slow = ask_in(&queue, seam::Op::Backfill, &args, 1);
+    let slow = ask_in(&queue, seam::Op::Backfill, &args, 1, BUILD);
     assert_eq!(slow["error"], "whatsapp_backfill_slow");
     assert_eq!(slow["retry"], true);
     let id = slow["id"].as_u64().expect("the job id");
@@ -123,7 +128,7 @@ fn a_backfill_takes_count_as_its_limit_and_needs_no_chat() {
     assert_eq!(huge.limit, seam::BACKFILL_MAX);
 
     // A chat that is not an exact JID is refused before the queue, like every other query.
-    let bare = ask_in(&queue, seam::Op::Backfill, &serde_json::json!({"chat": "5511999999999"}), 50);
+    let bare = ask_in(&queue, seam::Op::Backfill, &serde_json::json!({"chat": "5511999999999"}), 50, BUILD);
     assert_eq!(bare["error"], "whatsapp_backfill_bad_chat");
     assert_eq!(bare["effect"], "none");
 
@@ -142,7 +147,7 @@ fn a_backfill_takes_count_as_its_limit_and_needs_no_chat() {
     );
     let answer = seam::answer(seam::Op::Backfill, body);
     queue.done_by(taken.id, "wa-whatsapp", &serde_json::to_vec(&answer).unwrap()).unwrap();
-    let answer = ask_in(&queue, seam::Op::Backfill, &args, 2_000);
+    let answer = ask_in(&queue, seam::Op::Backfill, &args, 2_000, BUILD);
     assert_eq!(answer["ok"], true);
     assert_eq!(answer["op"], "backfill");
     assert_eq!(answer["count"], 1);
@@ -168,7 +173,7 @@ fn a_legacy_group_id_from_a_search_hit_is_a_chat_every_question_accepts() {
         (seam::Op::Search, serde_json::json!({"from": chat, "q": "oi"})),
         (seam::Op::Backfill, serde_json::json!({"chat": chat, "count": 10})),
     ] {
-        let slow = ask_in(&queue, op, &args, 1);
+        let slow = ask_in(&queue, op, &args, 1, BUILD);
         assert_eq!(slow["error"], format!("{}_slow", op.tool()), "{} {args}", op.tool());
         let id = slow["id"].as_u64().expect("the job id");
         let job = queue.job(wa_queue::JobId(id)).unwrap().unwrap();
@@ -190,7 +195,7 @@ fn a_bad_argument_is_refused_before_the_queue() {
         (seam::Op::Reactions, serde_json::json!({"chat": "5511999999999@lid"}), "whatsapp_reactions_chat_and_id_required"),
         (seam::Op::Download, serde_json::json!({"chat": "5511999999999@lid", "id": "3EB0 X"}), "whatsapp_download_bad_id"),
     ] {
-        let answer = ask_in(&queue, op, &args, 50);
+        let answer = ask_in(&queue, op, &args, 50, BUILD);
         assert_eq!(answer["error"], code, "{op:?} {args}");
         assert_eq!(answer["effect"], "none");
     }
@@ -198,7 +203,7 @@ fn a_bad_argument_is_refused_before_the_queue() {
     assert_eq!(queue.stats(seam::QUEUE).unwrap().ready, 0);
     // A *name* is a question, not a bad argument: it is queued for the index to resolve and the answer
     // here is "still running" (no component in a test), never a refusal (#117).
-    let named = ask_in(&queue, seam::Op::Read, &serde_json::json!({"chat": "Laura"}), 50);
+    let named = ask_in(&queue, seam::Op::Read, &serde_json::json!({"chat": "Laura"}), 50, BUILD);
     assert_eq!(named["error"], "whatsapp_read_slow", "{named}");
     assert_eq!(named["retry"], true, "a name was queued, not refused: {named}");
     assert_eq!(queue.stats(seam::QUEUE).unwrap().ready, 1, "the question is one job for the component");
@@ -323,7 +328,7 @@ fn a_settled_refusal_is_the_tools_own_error_and_not_a_dead_letter() {
     // `done`, and the tool names the refusal by its own code at once.
     let (_host, queue) = queue("settled-refusal");
     let args = serde_json::json!({});
-    let first = ask_in(&queue, seam::Op::Contacts, &args, 1);
+    let first = ask_in(&queue, seam::Op::Contacts, &args, 1, BUILD);
     let id = first["id"].as_u64().unwrap_or_else(|| panic!("a job was queued: {first}"));
     // The worker takes it and answers the refusal.
     let _ = queue.take(seam::QUEUE, COMPONENT, None).expect("take");
@@ -331,7 +336,7 @@ fn a_settled_refusal_is_the_tools_own_error_and_not_a_dead_letter() {
     let body = serde_json::to_vec(&seam::terminal_refusal("contacts", &refusal)).unwrap();
     queue.done_by(wa_queue::JobId(id), COMPONENT, &body).expect("settle the refusal");
     // The same call reads the same job (the request is the dedupe key) and answers its own word.
-    let answer = ask_in(&queue, seam::Op::Contacts, &args, 50);
+    let answer = ask_in(&queue, seam::Op::Contacts, &args, 50, BUILD);
     assert_eq!(answer["error"], "whatsapp_contacts_bad_op", "{answer}");
     assert_eq!(answer["state"], "refused");
     assert_eq!(answer["ok"], false);
@@ -360,15 +365,53 @@ fn a_dead_permanent_refusal_from_an_older_component_still_names_its_code() {
             EnqueueRequest::new(seam::QUEUE, verified.to_request().encode())
                 .fresh_for(seam::FRESH_MS)
                 .max_attempts(1)
-                .dedupe(verified.dedupe_key()),
+                .dedupe(verified.dedupe_key_in(BUILD)),
         )
         .expect("enqueue")
         .id
         .0;
     let _ = queue.take(seam::QUEUE, COMPONENT, None).expect("take");
     queue.fail_by(wa_queue::JobId(id), COMPONENT, "permanent:bad_op").expect("record the refusal");
-    let answer = ask_in(&queue, seam::Op::Contacts, &args, 50);
+    let answer = ask_in(&queue, seam::Op::Contacts, &args, 50, BUILD);
     assert_eq!(answer["error"], "whatsapp_contacts_bad_op", "{answer}");
     assert_eq!(answer["state"], "dead", "the queue's own word for how it ended: {answer}");
     assert_eq!(queue.stats(seam::QUEUE).expect("stats").ready, 0, "nothing is retried");
+}
+
+#[test]
+fn a_job_that_died_on_an_older_component_is_not_the_answer_a_new_call_reads() {
+    // Measured on the account node, 13/11: `whatsapp_contacts {limit:1}` answered
+    // `whatsapp_contacts_bad_op state=dead` for hours after the component that accepts `contacts` was
+    // installed, because the dedupe key was the request alone and `wa:queue` answers a repeated key
+    // with the job that already carries it - whatever state that job is in.
+    let (_host, queue) = queue("stale-build");
+    let args = serde_json::json!({ "q": "Laura", "limit": 1 });
+    let verified = seam::Request { op: "contacts".into(), q: Some("Laura".into()), limit: Some(1), ..Default::default() }
+        .validate()
+        .expect("a contacts question validates");
+    // The job the previous component build was given, dead-lettered with its refusal.
+    let stale = queue
+        .enqueue(
+            EnqueueRequest::new(seam::QUEUE, verified.to_request().encode())
+                .fresh_for(seam::FRESH_MS)
+                .max_attempts(1)
+                .dedupe(verified.dedupe_key_in("build-before-contacts")),
+        )
+        .expect("enqueue")
+        .id
+        .0;
+    let _ = queue.take(seam::QUEUE, COMPONENT, None).expect("take");
+    queue.fail_by(wa_queue::JobId(stale), COMPONENT, "permanent:bad_op").expect("record the refusal");
+    // The same call, now answered by the build that knows the op: a NEW job, never that refusal.
+    let answer = ask_in(&queue, seam::Op::Contacts, &args, 1, BUILD);
+    assert_eq!(answer["error"], "whatsapp_contacts_slow", "{answer}");
+    let fresh = answer["id"].as_u64().expect("the new job's id");
+    assert_ne!(fresh, stale, "the dead job of another build is not read again");
+    let job = queue.job(wa_queue::JobId(fresh)).unwrap().unwrap();
+    assert_eq!(job.state.as_str(), "ready", "a job the current build can answer");
+    assert_eq!(seam::Request::decode(&job.payload).unwrap().op, "contacts");
+
+    // Within ONE build the promise still holds: a repeated call reads the same job.
+    let again = ask_in(&queue, seam::Op::Contacts, &args, 1, BUILD);
+    assert_eq!(again["id"].as_u64(), Some(fresh));
 }

@@ -9,7 +9,7 @@
 //! ```text
 //! tool whatsapp_search {q, chat?, kind?, from?, since?, until?, limit}
 //!   -> validate + bound the request                 wa-whatsapp-index (shared crate)
-//!   -> enqueue `whatsapp.query`, dedupe = the request itself        wa:queue
+//!   -> enqueue `whatsapp.query`, dedupe = request + answering build     wa:queue
 //! sfx component wa-whatsapp (granted queue worker on `whatsapp.query`)
 //!   -> read its own kv index, settle done(answer) | fail(reason)
 //! tool answer <- the settled result, inside MAX_RESULT_BYTES
@@ -203,31 +203,48 @@ fn request_of(op: seam::Op, args: &Value) -> Result<seam::Verified, seam::Refusa
 
 /// Validate, enqueue and wait for the component's answer.
 fn ask(op: seam::Op, args: &Value, wait_ms: u64) -> Value {
-    ask_in(&queue(), op, args, wait_ms)
+    ask_in(&queue(), op, args, wait_ms, &component_build())
+}
+
+/// Which build of the component will answer, as the node's own registry names it: the installed
+/// artifact's sha256 (`services::status`), or empty when nothing here can say (a CLI process has no
+/// registry of its own).
+///
+/// It is the dedupe scope. `wa:queue` answers a repeated dedupe key with the job that already carries
+/// it, whatever state that job is in - including `dead` - so a key that outlives the component build
+/// replays an old refusal forever. That is what the account node measured on 13/11: every
+/// `whatsapp_contacts {limit:1}` read the job that had died `bad_op` on the build installed BEFORE
+/// `contacts` existed, while the component actually running accepted the op. Scoping the key to the
+/// build makes "the same call reads the same job" true within one version, which is all it ever
+/// promised, and gives an upgraded component a fresh job.
+fn component_build() -> String {
+    let status = wa_kernel_runtime::services::status(Some(COMPONENT));
+    status["sha256"].as_str().unwrap_or_default().to_string()
 }
 
 /// The same, against a queue the caller owns: what the tests drive without touching the node's own
-/// component directory.
-fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64) -> Value {
+/// component directory. `build` is the answering component's identity (see [`component_build`]).
+fn ask_in(q: &wa_queue::Queue, op: seam::Op, args: &Value, wait_ms: u64, build: &str) -> Value {
     let verified = match request_of(op, args) {
         Ok(verified) => verified,
         Err(refusal) => return seam::refusal(op, refusal.code, refusal.detail),
     };
-    let id = match enqueue(q, &verified) {
+    let id = match enqueue(q, &verified, build) {
         Ok(id) => id,
         Err(answer) => return answer,
     };
     settle(q, op, id, wait_ms)
 }
 
-fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified) -> Result<u64, Value> {
+fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified, build: &str) -> Result<u64, Value> {
     let op = verified.op;
     let request = verified.to_request();
     match q.enqueue(
         EnqueueRequest::new(seam::QUEUE, request.encode())
             .fresh_for(seam::FRESH_MS)
             .max_attempts(seam::MAX_ATTEMPTS)
-            .dedupe(verified.dedupe_key()),
+            // The build is part of the key (`seam::Verified::dedupe_key_in`), never the request alone.
+            .dedupe(verified.dedupe_key_in(build)),
     ) {
         Ok(enqueued) => Ok(enqueued.id.0),
         Err(error) => Err(seam::refusal(op, "queue_failed", one_line(&error.to_string()))),
@@ -312,15 +329,15 @@ fn refused(op: seam::Op, code: &str, detail: &str, asked_op: Option<&str>) -> Va
 // ---- download ----------------------------------------------------------------------------------
 
 fn ask_download(args: &Value) -> Value {
-    ask_download_in(&queue(), args, DOWNLOAD_WAIT_MS)
+    ask_download_in(&queue(), args, DOWNLOAD_WAIT_MS, &component_build())
 }
 
-fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64) -> Value {
+fn ask_download_in(q: &wa_queue::Queue, args: &Value, wait_ms: u64, build: &str) -> Value {
     let verified = match request_of(seam::Op::Download, args) {
         Ok(verified) => verified,
         Err(refusal) => return seam::refusal(seam::Op::Download, refusal.code, refusal.detail),
     };
-    let id = match enqueue(q, &verified) {
+    let id = match enqueue(q, &verified, build) {
         Ok(id) => id,
         Err(answer) => return answer,
     };

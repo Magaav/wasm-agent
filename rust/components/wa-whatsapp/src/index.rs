@@ -37,7 +37,7 @@
 //!   counter that deletes live data); [`prune`] walks `ix/all` from the oldest and stops at the first
 //!   record inside the window or at its budget, and the caller runs it again next tick.
 use crate::record::{self, Record};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use wa_whatsapp_index as seam;
 
 /// Every key this module owns starts here (the component's `kv.write` policy rules it as `ix/*`).
@@ -54,6 +54,37 @@ const PAGE: usize = 200;
 const MAX_FOLDED: usize = seam::MAX_LISTED;
 /// How many chat cards (chats this node has seen) one name question may read.
 const CARD_BUDGET: usize = 2_000;
+
+/// How many times a record whose write was refused is handed back to the ingest lane before it is
+/// reported and dropped.
+///
+/// This is a decision and not a host call, so it is here, beside the keys it protects, and measured by
+/// `cargo test` - the lane that uses it (`guest::index_inbox`) is wasm-only. The refusal a record
+/// actually meets is the component's kv grant running out of tokens for the minute
+/// (`capability_rate_limited`, `policies/default.json`); a bucket refills in 60 s, so a handful of the
+/// lane's one-second ticks is enough, and a store that refuses one record for any other reason forever
+/// must not become a stuck inbox.
+pub const RETRY_LIMIT: u8 = 8;
+
+/// What the ingest lane does with a record whose write was refused, given how many times it already
+/// has been.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Hand it back: the refusal is (almost always) the write budget, which refills.
+    Retry,
+    /// Report it and let it go: a record that has been refused this many times is not going to be
+    /// written by trying once more, and a line is better than an inbox that never drains.
+    Drop,
+}
+
+/// The policy of [`Refused`], in one place.
+pub fn refused(attempts: u8) -> Refused {
+    if attempts < RETRY_LIMIT {
+        Refused::Retry
+    } else {
+        Refused::Drop
+    }
+}
 
 // ---- the store seam ------------------------------------------------------------------------------
 
@@ -213,6 +244,9 @@ fn key_card(chat: &str) -> String {
 /// Most names one card keeps: enough for a person's rename history and a group's active members,
 /// few enough that the row stays small.
 const CARD_NAMES: usize = 12;
+/// Most chats one shared contact card may name: a contact array can be long, and every entry it
+/// points at costs a read and (when it lands) a write against the component's kv grant.
+const CONTACT_CARDS: usize = 8;
 
 /// One name this node has seen, with how often and how recently.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -228,6 +262,10 @@ pub struct CardName {
     /// True when this name was seen on the chat's *own* messages (a direct chat's contact), never on
     /// a group member's.
     pub sender: bool,
+    /// True when the name came from a contact card somebody shared, naming this chat's phone number.
+    /// It is evidence about that number and not a guess - but it is weaker than the name the person
+    /// writes on their own messages, so [`ChatCard::best_name`] only falls back to it.
+    pub card: bool,
 }
 
 /// One chat as the index knows it: its address, what kind it is, and every name seen there.
@@ -254,6 +292,10 @@ impl ChatCard {
             }
         } else if let Some(name) = self.names.iter().filter(|name| name.sender && !name.name.is_empty()).max_by_key(|name| name.last) {
             return (&name.name, "push_name");
+        } else if let Some(name) = self.names.iter().filter(|name| name.card && !name.name.is_empty()).max_by_key(|name| name.last) {
+            // The second source a direct chat has: a contact card that names this number. Weaker than
+            // the name its owner writes, which is why it is only reached when there is none.
+            return (&name.name, "contact_card");
         }
         ("", "jid")
     }
@@ -368,10 +410,64 @@ async fn put_message<S: Store>(store: &S, record: &Record) -> Result<(), String>
         }
         store.del(key_pending(&record.chat, &record.id).as_bytes()).await?;
     }
+    // The name side first, the record second, and the difference matters: the index's writes are
+    // charged to the component's `kv.write` grant (a token bucket, `policies/default.json`), a
+    // message costs five keys plus one per token, and a bucket that runs out part-way through a
+    // message therefore always runs out at the END of the sequence. The card used to be that end, so
+    // the one row `whatsapp_contacts` reads was the first thing a busy account lost - and the record,
+    // which nothing can rebuild, must not be the price of the name, which `backfill_cards` can.
+    let named = card_touch(store, &record).await;
+    let named = contact_cards(store, &record).await.and(named);
     write(store, &record).await?;
-    // The chat's card is the name side of the index (`key_card`): kept beside the message it came
-    // from, so "who is Laura" is one scan and not one record load per chat.
-    card_touch(store, &record).await
+    named
+}
+
+/// Name the chats a shared contact card points at: `record.contacts` carries vCard names and the
+/// phone numbers they belong to, and a direct chat's address is a phone number.
+///
+/// Only a chat the index already holds is named: a card somebody shared is not a conversation, and
+/// writing one here would make `whatsapp_contacts` (which lists the chats the index knows) claim a
+/// chat no message ever came from. The name is marked [`CardName::card`], so it never outranks the
+/// name the person writes on their own messages.
+///
+/// Bounded by [`CONTACT_CARDS`] per message: a contact array can be long, and each entry costs a
+/// read and (when it lands) a write against the same grant as everything else.
+async fn contact_cards<S: Store>(store: &S, record: &Record) -> Result<(), String> {
+    let mut named = 0usize;
+    for contact in &record.contacts {
+        if named >= CONTACT_CARDS {
+            break;
+        }
+        let name = contact.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let folded = record::fold(name);
+        if folded.is_empty() {
+            continue;
+        }
+        for phone in &contact.phones {
+            let chat = format!("{phone}@s.whatsapp.net");
+            let Some(mut card) = card_of(store, &chat).await? else { continue };
+            if card.group || card.names.iter().any(|entry| entry.folded == folded) {
+                continue;
+            }
+            card.names.push(CardName {
+                name: name.chars().take(seam::MAX_NAME_CHARS).collect(),
+                folded: folded.clone(),
+                rows: 1,
+                first: record.ts,
+                last: record.ts,
+                sender: false,
+                card: true,
+            });
+            card.names.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.folded.cmp(&b.folded)));
+            card.names.truncate(CARD_NAMES);
+            put_card(store, &card).await?;
+            named += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Write (or rewrite) a record and every key that points at it.
@@ -440,15 +536,20 @@ async fn cards<S: Store>(store: &S) -> Result<Vec<ChatCard>, String> {
     Ok(out)
 }
 
-/// Keep one chat's card current. Called on every indexed message: one row per chat, rewritten.
+/// How many entries one count walks before it answers "at least this many".
 ///
-/// It records the sender's push name - never the account's own - and marks whether the name was seen
-/// on the chat's own messages (`sender`), which is what makes a direct chat's name *that contact's*
-/// name instead of the name of whoever happened to talk. A group's subject is not on a message: it is
-/// written by [`set_subject`] when this node fetches it, and until then a group has no name and says
-/// so (`name_source: "jid"`).
-async fn card_touch<S: Store>(store: &S, record: &Record) -> Result<(), String> {
-    let mut card = card_of(store, &record.chat).await?.unwrap_or_default();
+/// A count is context for an answer, not a report: `contacts` says how much of the index the name
+/// side covers, and a scan that walks fifty thousand age keys to say it exactly is a scan nobody
+/// asked for. The answer carries the bound it stopped at (`messages_capped`).
+pub const COUNT_CAP: usize = 5_000;
+
+/// Fold one record into a chat's card, in memory: the whole of the name bookkeeping, without a store.
+///
+/// Split from [`card_touch`] so a backfill can fold every record of one chat and write the card
+/// once: the index's keys are ordered by chat, so a page of records is a handful of chats, and one
+/// write per chat instead of one per message is what keeps a rebuild of a restored index inside the
+/// kv's write budget.
+fn card_fold(card: &mut ChatCard, record: &Record) {
     card.chat = record.chat.clone();
     card.group = record.group || record.chat.ends_with("@g.us");
     if card.first == 0 || (record.ts > 0 && record.ts < card.first) {
@@ -482,6 +583,7 @@ async fn card_touch<S: Store>(store: &S, record: &Record) -> Result<(), String> 
                 first: record.ts,
                 last: record.ts,
                 sender: own_contact,
+                card: false,
             }),
         }
         // Most recent first, then by name so two equally recent names have a stable order, and
@@ -489,8 +591,169 @@ async fn card_touch<S: Store>(store: &S, record: &Record) -> Result<(), String> 
         card.names.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.folded.cmp(&b.folded)));
         card.names.truncate(CARD_NAMES);
     }
-    let json = serde_json::to_vec(&card).map_err(|error| format!("card encode: {error}"))?;
-    store.set(key_card(&record.chat).as_bytes(), &json).await
+}
+
+/// One card as the bytes the index keeps: the encode that can fail, in one place for the writers.
+fn card_json(card: &ChatCard) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(card).map_err(|error| format!("card encode: {}", error))
+}
+
+/// Write one chat's card: one small row, rewritten in place.
+async fn put_card<S: Store>(store: &S, card: &ChatCard) -> Result<(), String> {
+    if card.chat.is_empty() {
+        return Ok(());
+    }
+    let json = card_json(card)?;
+    store.set(key_card(&card.chat).as_bytes(), &json).await
+}
+
+/// Keep one chat's card current. Called on every indexed message: one row per chat, rewritten.
+///
+/// It records the sender's push name - never the account's own - and marks whether the name was seen
+/// on the chat's own messages (`sender`), which is what makes a direct chat's name *that contact's*
+/// name instead of the name of whoever happened to talk. A group's subject is not on a message: it is
+/// written by [`set_subject`] when this node fetches it, and until then a group has no name and says
+/// so (`name_source: "jid"`).
+async fn card_touch<S: Store>(store: &S, record: &Record) -> Result<(), String> {
+    let mut card = card_of(store, &record.chat).await?.unwrap_or_default();
+    card_fold(&mut card, record);
+    put_card(store, &card).await
+}
+
+// ---- the name side of an index that already holds messages ---------------------------------------
+
+/// Where the card backfill got to: the last `ix/m` key it folded, under the index's own prefix.
+fn key_backfill() -> String {
+    format!("{PREFIX}bf/cards")
+}
+
+/// The mark that says the backfill finished, so a later tick costs one read.
+fn key_backfill_done() -> String {
+    format!("{PREFIX}bf/cards/done")
+}
+
+/// What one backfill pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CardsBackfilled {
+    /// Records folded this pass.
+    pub visited: usize,
+    /// Cards written this pass: one per chat the pass touched.
+    pub chats: usize,
+    /// True when there was nothing left to fold, so the name side is complete.
+    pub done: bool,
+}
+
+/// Derive the chat cards from the records the index already holds.
+///
+/// The name side of the index (`ix/ct/`) is written as a side effect of indexing a *message*
+/// ([`card_touch`]), and until this existed nothing could build it out of records already stored. So
+/// an index whose records arrived before `ix/ct` did (384b2b4d, 11/11) - or from a build whose card
+/// write failed, or alongside a component store restored on its own (the account node reports
+/// `store: 57310 entries restored`) - answers `whatsapp_contacts` with `count: 0` for **every**
+/// query, including the one that names no chat and asks what the index knows. The messages are
+/// there, the names are not, and from the answer the two states are indistinguishable (13/11, the
+/// account node: every contacts query empty while the index was full).
+///
+/// The records are the source, then: walk `ix/m` (keyed by chat, so one page is a handful of chats),
+/// fold each chat's records into its card once and write it. Bounded and resumable - the cursor lives
+/// under the index's own prefix, one pass costs at most `budget` records and one write per chat it
+/// touched, and the pass that reaches the end writes a done mark so every later tick costs one read.
+/// A message that arrives while the walk runs is folded by [`card_touch`] as usual, and a subject
+/// this node fetched survives, because both paths read-modify-write the same row.
+pub async fn backfill_cards<S: Store>(store: &S, budget: usize) -> Result<CardsBackfilled, String> {
+    let mut out = CardsBackfilled::default();
+    if store.get(key_backfill_done().as_bytes()).await?.is_some() {
+        out.done = true;
+        return Ok(out);
+    }
+    let budget = budget.max(1);
+    let page_size = PAGE.min(budget);
+    let mut cursor = store.get(key_backfill().as_bytes()).await?;
+    loop {
+        let page = store.scan(format!("{PREFIX}m/").as_bytes(), cursor.clone(), page_size).await?;
+        if page.is_empty() {
+            store.del(key_backfill().as_bytes()).await?;
+            store.set(key_backfill_done().as_bytes(), b"1").await?;
+            out.done = true;
+            return Ok(out);
+        }
+        let short = page.len() < page_size;
+        // One card per chat, in the order the page names them. A reaction, an edit or a revoke is an
+        // event about another message, not a message: the live path does not fold one into a card
+        // either (`put` sends it elsewhere), so the walk does not either.
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: HashMap<String, Vec<Record>> = HashMap::new();
+        for (_, value) in &page {
+            let Ok(record) = serde_json::from_slice::<Record>(value) else { continue };
+            if record.chat.is_empty() || record.is_event() {
+                continue;
+            }
+            if !groups.contains_key(&record.chat) {
+                order.push(record.chat.clone());
+            }
+            groups.entry(record.chat.clone()).or_default().push(record);
+        }
+        for chat in order {
+            let rows = groups.remove(&chat).unwrap_or_default();
+            if rows.is_empty() {
+                continue;
+            }
+            let mut card = card_of(store, &chat).await?.unwrap_or_default();
+            for record in &rows {
+                card_fold(&mut card, record);
+            }
+            out.visited += rows.len();
+            put_card(store, &card).await?;
+            out.chats += 1;
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        if let Some(key) = &cursor {
+            store.set(key_backfill().as_bytes(), key).await?;
+        }
+        if short {
+            store.del(key_backfill().as_bytes()).await?;
+            store.set(key_backfill_done().as_bytes(), b"1").await?;
+            out.done = true;
+            return Ok(out);
+        }
+        if out.visited >= budget {
+            return Ok(out);
+        }
+    }
+}
+
+/// Where the card backfill stands: `ready` (done), `rebuilding` (a walk is in progress) or
+/// `pending` (it has not run yet). The word an answer carries, never a guess.
+pub async fn backfill_state<S: Store>(store: &S) -> Result<&'static str, String> {
+    if store.get(key_backfill_done().as_bytes()).await?.is_some() {
+        return Ok("ready");
+    }
+    if store.get(key_backfill().as_bytes()).await?.is_some() {
+        return Ok("rebuilding");
+    }
+    Ok("pending")
+}
+
+/// How many records the index holds, bounded by `cap`: `(count, capped)`.
+pub async fn record_count<S: Store>(store: &S, cap: usize) -> Result<(usize, bool), String> {
+    let prefix = format!("{PREFIX}all/");
+    let cap = cap.max(1);
+    let mut cursor: Option<Vec<u8>> = None;
+    let mut count = 0usize;
+    loop {
+        let page = store.scan(prefix.as_bytes(), cursor.clone(), PAGE).await?;
+        if page.is_empty() {
+            return Ok((count, false));
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        count += page.len();
+        if page.len() < PAGE {
+            return Ok((count, false));
+        }
+        if count >= cap {
+            return Ok((count, true));
+        }
+    }
 }
 
 /// Record a group's subject, when this node fetched it (the alert line, or a metadata lookup).
@@ -538,17 +801,24 @@ fn candidate_json(score: u8, card: &ChatCard, matched: &str) -> serde_json::Valu
 /// Every chat whose observed name matches, best first: the one ranking both `whatsapp_contacts` and a
 /// `whatsapp_read` by name use, so the two can never disagree about which chat "Laura" is.
 async fn ranked<S: Store>(store: &S, query: &str) -> Result<Vec<(u8, ChatCard, String)>, String> {
+    Ok(rank(&cards(store).await?, query))
+}
+
+/// The same ranking over cards already in hand: `contacts` reads them once, so the count it reports
+/// and the list it answers come from one scan, not two.
+fn rank(list: &[ChatCard], query: &str) -> Vec<(u8, ChatCard, String)> {
     let folded = record::fold(query);
     let mut matches: Vec<(u8, ChatCard, String)> = Vec::new();
-    for card in cards(store).await? {
+    for card in list {
         if let Some((score, matched)) = card.match_score(&folded) {
-            matches.push((score, card, matched));
+            matches.push((score, card.clone(), matched));
         }
     }
     // Best score first; between equals the chat heard from most recently; then the address, so one
-    // query answered twice lists the same order.
+    // query answered twice lists the same order. A question with no name ("what chats does the index
+    // know") scores every chat alike, so the order it gets is the one a reader wants: newest first.
     matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.last.cmp(&a.1.last)).then_with(|| a.1.chat.cmp(&b.1.chat)));
-    Ok(matches)
+    matches
 }
 
 /// What a name resolved to: one chat, several, or none. Never a guess.
@@ -601,7 +871,11 @@ pub const OPS: [seam::Op; 8] = [
 /// because picking the wrong Laura is exactly the mistake this question exists to prevent.
 pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<serde_json::Value, String> {
     let query = request.q.clone().unwrap_or_default();
-    let matches = ranked(store, &query).await?;
+    // One scan of the name side, then rank in memory: the count the answer reports and the list it
+    // carries have to come from the same read.
+    let all = cards(store).await?;
+    let chats = all.len();
+    let matches = rank(&all, &query);
     let total = matches.len();
     let kept: Vec<(u8, ChatCard, String)> = matches.into_iter().take(request.limit as usize).collect();
     let top = kept.first().map(|(score, _, _)| *score).unwrap_or(0);
@@ -625,10 +899,30 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
             }
         }
     }
+    // What the name side covers, in numbers, so "no chat carries that name" is a fact about the index
+    // and not a guess about the account. An index full of messages whose names were never derived and
+    // an account nobody has ever talked to used to answer the same sentence (13/11): the counts and
+    // the backfill's state are what tell them apart.
+    let (messages, capped) = record_count(store, COUNT_CAP).await.unwrap_or((0, false));
+    let names = backfill_state(store).await.unwrap_or("pending");
+    answer["index"] = serde_json::json!({
+        "chats": chats,
+        "messages": messages,
+        "messages_capped": capped,
+        "names": names,
+    });
     if total == 0 {
-        answer["note"] = serde_json::Value::String(
-            "no chat in this index carries that name; the index only knows names it has seen on messages".to_string(),
-        );
+        let note = match (chats, messages) {
+            (0, 0) => "no chat in this index carries that name; the index holds no message yet, so it knows no name"
+                .to_string(),
+            (0, _) => format!(
+                "no chat in this index carries that name yet: {messages} message(s) are indexed and the chat names are still being derived from them (names: {names})"
+            ),
+            (_, _) => format!(
+                "no chat in this index carries that name; the index knows {chats} chat(s) - ask with no q to list them, newest first"
+            ),
+        };
+        answer["note"] = serde_json::Value::String(note);
     }
     Ok(seam::answer(seam::Op::Contacts, answer))
 }
