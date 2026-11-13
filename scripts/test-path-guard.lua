@@ -83,6 +83,24 @@ if scratch and scratch ~= '' then
   check(host.read_file(marked) == nil, 'the allowed delete removed the marked scratch')
 end
 
+-- ---- the one root's scratch: `<node state>/tmp/` is deletable, the rest of the state is not -----
+-- Every child process the node spawns gets TMPDIR = `<node state>/tmp` (`docs/ONEROOT.md`), so this is
+-- where `mktemp -d` lands now. A scratch directory there must be creatable AND removable - the state
+-- root itself, and everything else under it, must not be.
+do
+  local state = (home ~= '' and home or '.') .. '/.wasm-agent'
+  local inside = state .. '/tmp/wa-path-guard-scratch'
+  shell('mkdir -p "' .. inside .. '" && printf x > "' .. inside .. '/keep.txt"')
+  local allowed, why = guard.command("rm -rf '" .. inside .. "'")
+  check(allowed, 'a scratch directory inside the node state\'s tmp/ is allowed (' .. tostring(why) .. ')')
+  shell("rm -rf '" .. inside .. "'")
+  check(host.read_file(inside .. '/keep.txt') == nil, 'and the allowed delete removed it')
+  local scratch_root, root_why = guard.command("rm -rf '" .. state .. "/tmp'")
+  check(not scratch_root, 'the scratch root itself is still refused (' .. tostring(root_why) .. ')')
+  local sessions, state_why = guard.command("rm -rf '" .. state .. "/sessions'")
+  check(not sessions, 'the rest of the node state is still refused (' .. tostring(state_why) .. ')')
+end
+
 -- ---- wall one: host.exec, wrapped once ----------------------------------------------------------
 check(guard.install(host), 'the wrapper is installed')
 check(guard.install(host), 'and installing it twice is a no-op')

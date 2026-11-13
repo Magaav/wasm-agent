@@ -44,6 +44,54 @@ pub fn private_dir(path: &std::path::Path) {
     let _ = existed;
 }
 
+/// The one root everything an agent creates lives under: `<home>/.wasm-agent` (`docs/ONEROOT.md`).
+///
+/// It is the state root the node already had (the ledger, sessions, memory, `operations/`, `cache/`),
+/// so this adds a *layout* inside one directory rather than a second root concept. Every new thing an
+/// agent or a landing script creates — scratch files, worktrees, build output, logs — goes under it,
+/// which is what makes one `wa clean` and one disk cap possible at all.
+///
+/// Measured 12/11 on wa-desktop after one morning of agents: ~100 GB, of which worktrees were ~45 GB
+/// (`~/wt-*`, 42 of them, scattered beside the home) and per-mission build dirs ~25 GB
+/// (`rust/target-*`), while this root held 0.4 GB. Nothing cleaned up after the agents.
+pub fn state_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(resolve_home()).join(".wasm-agent")
+}
+
+/// A named directory inside [`state_root`], created if it is not there.
+///
+/// The layout is flat and obvious on purpose (`docs/ONEROOT.md`): `tmp/`, `worktrees/`, `build/`,
+/// `cache/`, `logs/`, `operations/`. A caller asks for the name, never builds the path, so `wa clean`
+/// and the thing it cleans cannot drift apart.
+pub fn root_dir(name: &str) -> std::path::PathBuf {
+    let path = state_root().join(name);
+    let _ = std::fs::create_dir_all(&path);
+    path
+}
+
+/// The scratch root every child process the node spawns gets as `TMPDIR`/`TEMP`/`TMP`.
+///
+/// `host.paths().temp` and this must be the same directory: a build that writes to `/tmp` is exactly
+/// the kind of thing one root exists to stop, and `/tmp` was 98 % full on the `work` node on 12/11.
+pub fn tmp_dir() -> std::path::PathBuf {
+    root_dir("tmp")
+}
+
+/// The one shared cargo target directory (`CARGO_TARGET_DIR`) for every mission and worktree on this
+/// node, unless the caller set its own.
+///
+/// It is the *parent* of the per-tree islands, not a target dir itself: see
+/// [`crate::disk::build_island`] for why one target dir for every tree on a node is wrong, with the
+/// measurement that showed it.
+pub fn build_cache_dir() -> std::path::PathBuf {
+    root_dir("build")
+}
+
+/// Where agent and landing worktrees are created (`docs/ONEROOT.md`).
+pub fn worktrees_dir() -> std::path::PathBuf {
+    root_dir("worktrees")
+}
+
 /// Where installed WASI components live (`WA_COMPONENTS_DIR`, else `~/.wasm-agent/components`).
 ///
 /// It is here rather than in `components.rs` because the bound queue and the graph store ask for it

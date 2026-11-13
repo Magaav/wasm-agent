@@ -721,6 +721,7 @@ codemode             runs a process
 component_mcp        runs a process
 components           read-only
 db_ready             read-only
+disk                 writes files
 editor_footer        device
 editor_status        device
 enqueue_completion   writes files
