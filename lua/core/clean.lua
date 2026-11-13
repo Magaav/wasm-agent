@@ -61,6 +61,10 @@ function M.status_line()
   else
     parts[#parts + 1] = "disk unmeasured (" .. tostring(answer.disk_reason or "no reason given") .. ")"
   end
+  if tonumber(answer.build_bytes) then
+    parts[#parts + 1] = string.format("build %s of %s cap%s", bytes(answer.build_bytes),
+      bytes(answer.build_cap_bytes), answer.build_over_cap and ", OVER" or "")
+  end
   local last = answer.last_clean
   if type(last) == "table" then
     parts[#parts + 1] = string.format("last clean %s, freed %s", when_epoch(last.at), bytes(last.freed_bytes))
@@ -100,6 +104,38 @@ function M.set_cap(percent)
   return file
 end
 
+-- ---- the build-space cap ----------------------------------------------------------------------
+--
+-- The second cap, and the one the operator asked for on 13/11: build output has a HARD limit of its own
+-- (default 30 GB, `WASM_AGENT_BUILD_CAP_GB`), enforced by `scripts/lib/build-target.sh` before every
+-- heavy build - over it, the OLDEST build output goes first. It is a separate number from the disk cap
+-- because "the disk is 85% full" and "this node is holding 40 GB of compiled artifacts" are different
+-- facts, and only the second one has an eviction order that does not touch anything but build output.
+local BUILD_CAP_KEY = "WASM_AGENT_BUILD_CAP_GB"
+
+function M.set_build_cap(gb)
+  local paths = dofile("lua/core/paths.lua")
+  local file = paths.config_file()
+  local text = (host.read_file and host.read_file(file)) or ""
+  local lines, found = {}, false
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    if line == "" and not found and text == "" then
+      -- nothing to carry over
+    elseif line:match("^%s*" .. BUILD_CAP_KEY .. "%s*=") then
+      lines[#lines + 1] = BUILD_CAP_KEY .. "=" .. tostring(gb)
+      found = true
+    else
+      lines[#lines + 1] = line
+    end
+  end
+  while #lines > 0 and lines[#lines] == "" do table.remove(lines) end
+  if not found then lines[#lines + 1] = BUILD_CAP_KEY .. "=" .. tostring(gb) end
+  local written = table.concat(lines, "\n") .. "\n"
+  local ok, err = pcall(host.write_file, file, written)
+  if not ok then return nil, "cannot write " .. file .. ": " .. tostring(err) end
+  return file
+end
+
 -- ---- the session guard ------------------------------------------------------------------------
 --
 -- A new session is new work (`docs/ONEROOT.md`, rule 4). Called from `wa` before a chat starts: under
@@ -131,6 +167,10 @@ local function print_status(answer)
       tonumber(answer.cap_percent) or 0, answer.over_cap and ", OVER the cap" or ""))
   else
     print("disk        unmeasured: " .. tostring(answer.disk_reason or "no reason given"))
+  end
+  if answer.build_target then
+    print(string.format("build       %s of a %s cap  in %s%s", bytes(answer.build_bytes), bytes(answer.build_cap_bytes),
+      tostring(answer.build_target), answer.build_over_cap and "  (OVER the cap: the oldest build output goes first)" or ""))
   end
   local groups = answer.groups or {}
   local names = {}
@@ -204,7 +244,7 @@ end
 
 function M.run(argv)
   local args = argv or {}
-  local dry_run, status_only, as_json, days, pin, unpin, cap = false, false, false, nil, nil, nil, nil
+  local dry_run, status_only, as_json, days, pin, unpin, cap, build_cap = false, false, false, nil, nil, nil, nil, nil
   local index = 2
   while args[index] do
     local word = args[index]
@@ -215,13 +255,16 @@ function M.run(argv)
     elseif word == "--pin" then pin = args[index + 1]; index = index + 2
     elseif word == "--unpin" then unpin = args[index + 1]; index = index + 2
     elseif word == "--cap" then cap = tonumber(args[index + 1]); index = index + 2
+    elseif word == "--build-cap" then build_cap = tonumber(args[index + 1]); index = index + 2
     elseif word == "-h" or word == "--help" then
-      print("wa clean [--dry-run] [--days N] [--pin <path>|--unpin <path>] [--cap <percent>] [--status] [--json]")
+      print("wa clean [--dry-run] [--days N] [--pin <path>|--unpin <path>] [--cap <percent>] [--build-cap <GB>] [--status] [--json]")
       print("  reclaims the node's one root: landed worktrees, and operations/logs/temp older than N days")
       print("  --dry-run  print what would go and how many bytes, grouped; delete nothing")
       print("  --days N   retention for operations, logs and temp (default 7, or WASM_AGENT_CLEAN_DAYS)")
       print("  --pin      never delete this path (or anything inside it); --unpin to release it")
       print("  --cap N    the disk cap: refuse new heavy work past N% (default 85); written to <config>/env")
+      print("  --build-cap N  the build-space cap in GB (default 30): over it a build deletes the OLDEST")
+      print("             build output first, before it uses new space; written to <config>/env")
       print("  --status   the same facts `wa status` prints, without deleting anything")
       print("  Nothing outside the root is ever deleted: the scattered pre-existing dirs are reported, not moved.")
       return 0
@@ -239,6 +282,18 @@ function M.run(argv)
     local file, err = M.set_cap(cap)
     if not file then print("wa clean: " .. tostring(err)); return 1 end
     print(string.format("cap written: %s=%d in %s (read at startup: it applies from the next node start)", CAP_KEY, cap, file))
+  end
+  if build_cap then
+    if build_cap <= 0 then
+      print("wa clean: --build-cap takes a positive number of GB")
+      return 2
+    end
+    local file, err = M.set_build_cap(build_cap)
+    if not file then print("wa clean: " .. tostring(err)); return 1 end
+    print(string.format("build cap written: %s=%d in %s (a build reads it before it starts)", BUILD_CAP_KEY, build_cap, file))
+    -- Writing the cap was the whole command: a `--build-cap` that then deleted files would be a
+    -- configuration change that also reclaimed, and the operator reads one line per intention.
+    if not dry_run and not status_only and not days then return 0 end
   end
   if pin or unpin then
     local action = pin and "pin" or "unpin"
