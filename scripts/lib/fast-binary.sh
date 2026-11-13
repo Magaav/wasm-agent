@@ -78,12 +78,25 @@ fast_binary_newer_than_tree() {
 # The prepared code-mode assets, if this checkout has them: the shipping build embeds them, so a build
 # this script makes must too, or the node it installs cannot run code mode at all.
 fast_binary_assets() {
+  local common
   if [ -n "${WA_CODEMODE_BUILD_ASSETS:-}" ] && [ -d "$WA_CODEMODE_BUILD_ASSETS" ]; then
     FAST_CODEMODE_ASSETS=$WA_CODEMODE_BUILD_ASSETS
-  elif [ -d "$ROOT/.git/codemode-assets" ]; then
-    FAST_CODEMODE_ASSETS=$(find "$ROOT/.git/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
   else
-    FAST_CODEMODE_ASSETS=''
+    # MEASURED 13/11 in a worktree: `$ROOT/.git` is a FILE there (`gitdir: ...`), so the assets that the
+    # canonical checkout prepared were never found, the build failed with `code-mode assets required` and
+    # the run stopped as `stale_binary` - 193 rows unrun, and the reason three layers from the cause. The
+    # assets belong to the CLONE, so the common git directory is where to look for them.
+    common="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)"
+    case "$common" in
+      '') common="$ROOT/.git" ;;
+      /*) ;;
+      *) common="$ROOT/$common" ;;
+    esac
+    if [ -d "$common/codemode-assets" ]; then
+      FAST_CODEMODE_ASSETS=$(find "$common/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
+    else
+      FAST_CODEMODE_ASSETS=''
+    fi
   fi
 }
 
