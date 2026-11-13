@@ -92,7 +92,8 @@ check(not replay.inside(record.isolation.scratch, home), 'the scratch root is no
 check(record.isolation.marker == '.wasm-agent-eval-scratch', 'the scratch root carries the engine marker')
 check(record.isolation.model_route:find('none', 1, true) ~= nil, 'without --model the child gets no provider')
 check(record.command:find('env %-i') ~= nil, 'the child is started with env -i and an allowlist')
-check(record.command:find('WASM_AGENT_CODEMODE=.off.') ~= nil, 'code mode is off in the replay, and the command says so')
+check(record.command:find('WASM_AGENT_CODEMODE=.native.') ~= nil,
+  'code mode is on in the replay, and the command says so (a nested dispatch is a hook boundary now)')
 check(record.kept_scratch == false, 'a scratch root is removed after the run')
 check(#core.entries(record.isolation.scratch) == 0, 'and it is gone from the filesystem')
 check(record.outcome.state == 'pass', 'the task’s own check decides success (' .. tostring(record.outcome.state) .. ')')
@@ -157,7 +158,7 @@ local probe_cmd = 'env -i PATH=' .. core.shquote(scratch .. '/bin:/usr/local/bin
   .. ' WASM_AGENT_DB=' .. core.shquote(scratch .. '/home/.wasm-agent/memory.db')
   .. ' WA_EVAL_SINK_DIR=' .. core.shquote(scratch .. '/sink')
   .. ' WA_EVAL_DECISIONS=' .. core.shquote(scratch .. '/decisions')
-  .. ' WASM_AGENT_CODEMODE=off'
+  .. ' WASM_AGENT_CODEMODE=native'
   .. ' WA_SCRIPT=' .. core.shquote(probe) .. ' timeout 120 ' .. core.shquote(bin)
   .. ' --db ' .. core.shquote(scratch .. '/home/.wasm-agent/memory.db')
 local probed = core.exec(probe_cmd, scratch, 180)
@@ -174,6 +175,64 @@ check(tostring(answer.note or ''):find('recorded with the task', 1, true) ~= nil
 local served = read(scratch .. '/sink/served.log') or ''
 check(served:find('whatsapp_read', 1, true) ~= nil, 'the sink records which decision it served')
 check(#core.entries(scratch .. '/sink') > 0, 'the sink keeps the event as evidence')
+
+-- ---------------------------------------------------------------- nested effects reach the sink
+-- The reason code mode used to be forced off here: a tool call inside a script did not cross the hook
+-- boundary, so a replay could perform an effect and report none. With the boundary fixed, a script's
+-- call reaches the sink under its OWN name - the whole point of the row above.
+local nested_probe = scratch .. '/probe-nested.lua'
+host.write_file(nested_probe, [[
+local json = dofile('lua/vendor/json.lua')
+local memory = dofile('lua/core/memory.lua')
+memory.setup()
+local tools = dofile('lua/core/tools.lua')
+local sid = memory.start_session('', 'replay nested sink probe', { user_id = 'master' })
+local code = 'let out; try { const r = await tools.remote({node: "fixture-peer-nested", capability: "read", '
+  .. 'args: {path: "/etc/hostname"}}); out = "REACHED:" + JSON.stringify(r).slice(0, 200); } '
+  .. 'catch (e) { out = "REFUSED:" + String((e && e.message) || e); } text(out);'
+local r = tools.dispatch(memory, 'codemode', { code = code }, 'master',
+  { session_id = sid, user_id = 'master', role = 'master', cwd = '/' })
+local shown = type(r.items) == 'table' and type(r.items[1]) == 'table' and tostring(r.items[1].text or '') or ''
+print(json.encode({ ok = r.ok, error = r.error, shown = shown }))
+]])
+local nested_cmd = 'env -i PATH=' .. core.shquote(scratch .. '/bin:/usr/local/bin:/usr/bin:/bin')
+  .. ' HOME=' .. core.shquote(scratch .. '/home')
+  .. ' WASM_AGENT_HOME=' .. core.shquote(scratch .. '/home')
+  .. ' WASM_AGENT_DB=' .. core.shquote(scratch .. '/home/.wasm-agent/memory.db')
+  .. ' WA_EVAL_SINK_DIR=' .. core.shquote(scratch .. '/sink')
+  .. ' WA_EVAL_DECISIONS=' .. core.shquote(scratch .. '/decisions')
+  .. ' WASM_AGENT_CODEMODE=native'
+  .. ' WA_SCRIPT=' .. core.shquote(nested_probe) .. ' timeout 180 ' .. core.shquote(bin)
+  .. ' --db ' .. core.shquote(scratch .. '/home/.wasm-agent/memory.db')
+local nested_run = core.exec(nested_cmd, scratch, 240)
+local nested = nil
+for line in tostring(nested_run.stdout or ''):gmatch('[^\n]+') do
+  local decoded_ok, value = pcall(json.decode, line)
+  if decoded_ok and type(value) == 'table' and (value.shown ~= nil or value.error ~= nil) then nested = value end
+end
+check(nested ~= nil, 'the child can run a code-mode script in the replay: ' .. tostring(nested_run.stderr):sub(-200))
+check(tostring(nested.error or '') ~= 'codemode_not_enabled',
+  'code mode really is available in the replay (a binary without the embedded code-mode assets cannot prove this)')
+check(nested.ok == true and tostring(nested.shown):find('^REFUSED:', 1) ~= nil,
+  'an effect tool called inside a script is refused, and the script catches it (' .. tostring(nested.shown):sub(1, 160) .. ')')
+check(tostring(nested.shown):find('hook_denied', 1, true) ~= nil
+  and tostring(nested.shown):find('eval-sink', 1, true) ~= nil,
+  'the refusal inside the script is the replay sink\'s own (' .. tostring(nested.shown):sub(1, 300) .. ')')
+-- The evidence, from what the sink RECORDED: an event naming the inner tool and the script's own
+-- arguments, which an outer name could not carry.
+local nested_events, nested_payloads = 0, 0
+for _, entry in ipairs(core.entries(scratch .. '/sink')) do
+  if entry.kind == 'file' and tostring(entry.name):match('^event%-') then
+    local body = read(scratch .. '/sink/' .. entry.name) or ''
+    if body:find('fixture-peer-nested', 1, true) ~= nil then
+      nested_events = nested_events + 1
+      if body:find('"tool_name":"remote"', 1, true) ~= nil
+        or body:find('"tool_name": "remote"', 1, true) ~= nil then nested_payloads = nested_payloads + 1 end
+    end
+  end
+end
+check(nested_events > 0, 'the sink saw the call made inside the script (its arguments are in the event)')
+check(nested_payloads > 0, 'and it saw it under the inner tool\'s own name, not the outer one')
 
 -- The PATH guards refuse a remote command and record it.
 local pushed = core.exec('env -i PATH=' .. core.shquote(scratch .. '/bin:/usr/local/bin:/usr/bin:/bin')

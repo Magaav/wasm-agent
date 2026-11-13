@@ -1350,7 +1350,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local target=nodeslib.find(args.node)
     local forwarded={};for key,value in pairs(args)do if key~='node' then forwarded[key]=value end end
     if not target or not target.local_node then
-      local result=M.dispatch(memory,'remote',{node=args.node,capability=name,args=forwarded},role,ctx)
+      -- The same logical call, one hop away: the hook that saw `sessions {node=…}` is the one that
+      -- decides it, so the forwarded `remote` does not ask again.
+      local result=M.dispatch(memory,'remote',{node=args.node,capability=name,args=forwarded},role,ctx,nil,true)
       -- An older peer ignores the filters it does not know and answers with only the caller's own rows.
       if name=='sessions' and type(result)=='table' and not result.error and result.filter==nil and (forwarded.path or forwarded.all_owners) then
         result.filter_ignored=true
@@ -1696,8 +1698,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if ctx.parallel_start then
       -- Start independent shell calls through the existing supervised operation manager. The
       -- model chose this call group; policy, session cwd and the commit review still run here.
+      -- The `operation` start is this same bash call, not a second one: `same_call`.
       return M.dispatch(memory, "operation", { action = "start", command = args.command,
-        cwd = cwd, timeout_seconds = timeout }, role, ctx, launch_cwd(memory,ctx,requested_cwd))
+        cwd = cwd, timeout_seconds = timeout }, role, ctx, launch_cwd(memory,ctx,requested_cwd), true)
     end
     local provenance = launch_cwd(memory,ctx,requested_cwd)
     -- The name the reader knows this call by, for the session-status-content row while the command
@@ -2190,12 +2193,13 @@ function M.start_parallel_bash(calls, memory, role, ctx)
 end
 
 function M.await_parallel_bash(operation_id, role, ctx)
-  local state = M.dispatch(nil, "operation", { action = "await", id = operation_id, tool = "bash" }, role, ctx)
+  -- Reading back the batch this tool started is the same call's plumbing, not a new one.
+  local state = M.dispatch(nil, "operation", { action = "await", id = operation_id, tool = "bash" }, role, ctx, nil, true)
   if type(state) ~= "table" then return { error = "parallel_operation_await_failed" } end
   if state.error == "await_interrupted" then
-    M.dispatch(nil, "operation", { action = "cancel", id = operation_id }, role, ctx)
+    M.dispatch(nil, "operation", { action = "cancel", id = operation_id }, role, ctx, nil, true)
     for _ = 1, 10 do
-      state = M.dispatch(nil, "operation", { action = "wait", id = operation_id, wait_ms = 500 }, role, ctx)
+      state = M.dispatch(nil, "operation", { action = "wait", id = operation_id, wait_ms = 500 }, role, ctx, nil, true)
       if type(state) == "table" and state.settled == true then break end
     end
     if type(state) ~= "table" or state.settled ~= true then
@@ -2204,9 +2208,9 @@ function M.await_parallel_bash(operation_id, role, ctx)
     state.error = state.error or "run_cancelled"
   end
   local stdout = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stdout", offset = 0, limit = 24576 }, role, ctx)
+    stream = "stdout", offset = 0, limit = 24576 }, role, ctx, nil, true)
   local stderr = M.dispatch(nil, "operation", { action = "read", id = operation_id,
-    stream = "stderr", offset = 0, limit = 8192 }, role, ctx)
+    stream = "stderr", offset = 0, limit = 8192 }, role, ctx, nil, true)
   local code = tonumber(state.process_exit_code) or -1
   return { operation_id = operation_id, code = code, ok = code == 0,
     stdout = type(stdout) == "table" and stdout.content or "",
@@ -2223,9 +2227,13 @@ function M.await_parallel_bash(operation_id, role, ctx)
 end
 
 -- Hook points around one tool call (docs/HOOKS.md). This wrapper is the one funnel every tool call
--- passes - the model's, a subagent's, a probe's - so `PreToolUse` cannot be bypassed by calling a
--- tool a second way. It is inert with no hooks configured: `hooks.active` is a cached lookup and the
--- two `fire` calls answer an empty verdict without reading a file or starting a process.
+-- passes - the model's, a subagent's, a probe's, and one made *inside* another call: code mode's
+-- `await tools.bash(...)`, `tool_call {name=...}`, a `read_many` item. A nested dispatch is a hook
+-- boundary of its own, so `PreToolUse` cannot be bypassed by calling a tool a second way (11/11: the
+-- engine fired only for the outermost call, so a script - the way this node is normally worked -
+-- reached any tool and no hook ever saw it). It is inert with no hooks configured: `hooks.active` is
+-- a cached lookup and the two `fire` calls answer an empty verdict without reading a file or starting
+-- a process.
 local function hook_ctx(ctx)
   return { session_id = ctx.session_id, run_id = ctx.run_id or ctx.steering_run_id, node_id = ctx.node_id,
     user_id = ctx.user_id, role = ctx.role or ctx.subagent and "subagent" or nil, cwd = ctx.cwd,
@@ -2254,16 +2262,34 @@ local function hook_result_view(output)
   return decoded_ok and type(decoded) == "table" and decoded or { view = encoded }, bytes
 end
 
+-- A hook that itself runs a tool is running *inside* the engine: that dispatch does not fire the
+-- engine again, or one hook would re-enter itself for as long as its own call lasts. The count is
+-- also why there is no recursion loop to bound elsewhere - it never grows past the one live firing.
+local hook_depth = 0
+local function hook_fire(event, payload, ctx)
+  hook_depth = hook_depth + 1
+  local ok, verdict = pcall(hookslib.fire, event, payload, ctx)
+  hook_depth = hook_depth - 1
+  if not ok then error(verdict) end
+  return verdict
+end
+
 local dispatch = M.dispatch
-function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
+-- `same_call` means this dispatch is the tool *continuing* the call it was handed, not a second
+-- logical call: `bash` starting its own supervised operation, a history read forwarded to the peer
+-- that holds it, the operation read that collects a batch's output. Those do not fire again - a deny
+-- answered for the plumbing of a call that already ran is the "deny after the effect" this wrapper
+-- exists to prevent. Every other nested dispatch is a boundary, and it is an argument rather than
+-- ambient state on `ctx`, so a nested *different* call cannot inherit a suppression it was never
+-- granted.
+function M.dispatch(memory,name,args,role,ctx,cwd_provenance,same_call)
   ctx=ctx or {}
   local generation=ctx.resource_effect_generation or 0
-  -- One firing per outermost call: a tool that forwards to itself (`remote`, a batch) would
-  -- otherwise report the same call twice and let a deny be answered after the effect.
-  local outermost = not ctx.hook_nested and hookslib.active()
+  local boundary = not same_call and hook_depth == 0 and hookslib.active()
   local call_args = args
-  if outermost then
-    local pre = hookslib.fire('PreToolUse', { tool_name = name, tool_input = args or {},
+  local pre
+  if boundary then
+    pre = hook_fire('PreToolUse', { tool_name = name, tool_input = args or {},
       tool_call_id = ctx.tool_call_id, cwd = ctx.cwd or platform.cwd() }, hook_ctx(ctx))
     if pre.blocked then
       return { error = 'hook_denied', denied_by = pre.blocked_by, permission = pre.permission,
@@ -2276,22 +2302,13 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
       for key, value in pairs(pre.updated_input) do merged[key] = value end
       call_args = merged
     end
-    ctx.hook_pre = pre
-    ctx.hook_nested = true
   end
   -- The canonical checkout is one shared resource (lua/core/canonical_guard.lua): a session that does not
   -- hold the landing lease may not write into it. Refused HERE, before the tool runs, because a check after
   -- the write is a report about damage, not a boundary. Reads stay allowed.
   local protected = canonical_guard.guard(name, call_args, ctx)
-  if protected then
-    if outermost then ctx.hook_nested = nil end
-    ctx.hook_pre = nil
-    return protected
-  end
+  if protected then return protected end
   local ok,result=pcall(dispatch,memory,name,call_args,role,ctx,cwd_provenance)
-  if outermost then ctx.hook_nested = nil end
-  local pre = ctx.hook_pre
-  ctx.hook_pre = nil
   -- Uncertainty is for unknown *effects*, not for refusals. A result the node marked
   -- `effect:"none"` never reached the client, so it cannot have changed anything, and
   -- branding the run's claims for it would take the client away from the run that had
@@ -2303,7 +2320,7 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
     local marked=resources.uncertain(ctx)
     if not marked.ok then error("resource_uncertainty_record_failed: "..json.encode(marked)) end
   end
-  if outermost then
+  if boundary then
     -- The post-event payload costs a JSON encode of the whole result, so it is built only for the
     -- events that have somewhere to go: configured hooks, or the shipped guard's own verdict. With no
     -- configured hooks the guard is the entire post-processing and this path stays as cheap as it was.
@@ -2319,7 +2336,7 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance)
       else
         payload.tool_response, payload.tool_response_bytes = hook_result_view(result)
       end
-      post = hookslib.fire(failed and 'PostToolUseFailure' or 'PostToolUse', payload, hook_ctx(ctx))
+      post = hook_fire(failed and 'PostToolUseFailure' or 'PostToolUse', payload, hook_ctx(ctx))
     end
     local extra = {}
     if pre and pre.additional_context then extra[#extra + 1] = pre.additional_context end
