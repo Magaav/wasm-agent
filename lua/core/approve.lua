@@ -26,13 +26,12 @@ local json = dofile('lua/vendor/json.lua')
 
 local M = {}
 
--- The one overlay (`lua/core/balloon.lua`), loaded once: every page this file draws is a balloon
--- page, and a pipe gets the same pages as text from the same renderer.
-local balloon_module
-local function balloon()
-  balloon_module = balloon_module or dofile('lua/core/balloon.lua')
-  return balloon_module
-end
+-- The one overlay (`lua/core/balloon.lua`): every page this file draws is a balloon page, and a pipe
+-- gets the same pages as text from the same renderer. Read once at load, like every other command
+-- module (`lua/core/mcp_cli.lua` has the same line): under live reload (`docs/HOTRELOAD.md`) this file
+-- is compiled into a fresh environment whose `dofile` is routed, so a reloaded `/approve` draws with
+-- the reload tree's balloon, and this module keeps no state of its own that a swap would drop.
+local balloon = dofile('lua/core/balloon.lua')
 
 -- The one routed door. `whatsapp.route` names the node that holds the account (nil = this one), and
 -- `whatsapp.forward` is the ordinary remote call with the answer kept as it is. A test injects
@@ -492,7 +491,7 @@ end
 local function show(io, pages)
   if type(io.show) == 'function' then return io.show(pages) end
   local say = io.say or print
-  say(balloon().text(pages, balloon().width()))
+  say(balloon.text(pages, balloon.width()))
   return { action = 'printed' }
 end
 
@@ -575,7 +574,7 @@ function M.run(line, io, ctx)
       'gates     ' .. M.rule_line(policy),
       'waiting   ' .. tostring(waiting) .. ' draft' .. (tonumber(waiting) == 1 and '' or 's'),
     }
-    show(io, balloon().paged('Approve', lines, { per = 12, nowrap = true }))
+    show(io, balloon.paged('Approve', lines, { per = 12, nowrap = true }))
     return { ok = true, policy = policy, waiting = waiting }
   end
 
@@ -591,7 +590,7 @@ function M.run(line, io, ctx)
         tostring(draft.chat or ''), tostring(draft.text or ''):gsub('\n', ' '))
     end
     if #lines == 0 then lines[1] = 'no drafts: nothing is waiting for a decision' end
-    show(io, balloon().paged('Drafts', lines, { per = 12, nowrap = true }))
+    show(io, balloon.paged('Drafts', lines, { per = 12, nowrap = true }))
     return answer
   end
 
@@ -654,6 +653,29 @@ function M.run(line, io, ctx)
 
   -- send / edit / reject / cancel / show
   return M.act(io, ctx, parsed.action, parsed.handle, parsed.text)
+end
+
+--- The reload self-check (`docs/HOTRELOAD.md`): `reload.lua` calls this when a new copy of this file is
+--- loaded, and refuses the swap if it does not pass. It RUNS the code - a page built from a fixture
+--- draft, the three keys, the distance - because "it parsed" is not "the balloon renders". It touches
+--- no host capability and no file: a self-check that could fail because a node is busy would refuse a
+--- good module.
+function M.selfcheck()
+  local draft = { handle = 'd-probe', chat = '5511999999999@lid', text = 'bom dia', created_at = 0 }
+  local page = M.page(draft, 1, 1, 1)
+  assert(type(page.title) == 'string' and #page.title > 0, 'page title')
+  assert(#page.lines >= 3 and page.lines[2]:find('bom dia', 1, true) ~= nil, 'the draft is on the page')
+  assert(page.options[1].run == '/approve send d-probe', 'Enter sends as it is')
+  assert(page.options[2].run == '/approve edit d-probe' and page.keys.e == 2, '[e] edits')
+  assert(page.options[3].run == '/approve reject d-probe' and page.keys.r == 3, '[r] rejects')
+  assert(M.edit_page(draft).value == 'bom dia' and M.edit_page(draft).input == 'line', 'the edit field')
+  assert(M.reject_page(draft).input == 'line', 'the note field')
+  assert(M.edit_distance('abc', 'abd') == 1 and M.edit_distance('abc', 'abc') == 0, 'the distance')
+  assert(M.link('veja https://exemplo.com/a?b=1 agora') == 'https://exemplo.com/a?b=1', 'the link')
+  assert(M.parse('reject d-probe muito formal').note == nil and M.parse('reject d-probe').text == nil, 'the parser')
+  assert(M.parse('on only 5511999999999@lid').mode == 'only', 'the switch')
+  assert(M.rule_line({ on = true, mode = 'only', chats = { '1@lid' } }):find('only these chats', 1, true) ~= nil, 'the rule line')
+  return true
 end
 
 --- One sentence for a policy: what is gated and what is not.

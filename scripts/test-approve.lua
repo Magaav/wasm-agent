@@ -372,6 +372,12 @@ local page_text = table.concat(io.shown[1][1].lines, "\n")
 ok(page_text:find("approval is OFF", 1, true) ~= nil, "which starts with the switch: " .. page_text)
 ok(page_text:find("off: every send goes out as written", 1, true) ~= nil, "and says what off means")
 
+-- ---- the reload self-check: a swap of /approve is RUN, not merely parsed -------------------------
+-- `docs/HOTRELOAD.md`: reload.lua calls `M.selfcheck` when a new copy of the module is loaded and
+-- refuses the swap when it does not pass. This is that check, run here so a page that stopped
+-- rendering fails this row instead of a live session.
+ok(approve.selfcheck() == true, "the reload self-check runs the page, the keys and the distance")
+
 -- ---- the CLI's writer has no screen: the same pages come out as text ------------------------------
 local said = {}
 local cli = { say = function(text) said[#said + 1] = tostring(text) end }
