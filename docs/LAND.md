@@ -59,9 +59,7 @@ nothing exits 0 and proves nothing, and that is refused as `gate_vacuous`.
 
 **Weight.** Concurrent agents are what made checks flaky - a fork that fails under load reads as a red
 check. The gate therefore runs under the highest weight this machine actually grants, probed rather than
-assumed because `nice -n -19` needs a privilege an ordinary user does not have:
-
-```
+assumed because `nice -n -19` needs a privilege an ordinary user does not have:```
 systemd-run --user --scope --quiet -p CPUWeight=10000 -p IOWeight=10000 -- bash -lc <check>
 nice -n -19 ionice -c 1 -n 0 bash -lc <check>
 nice -n -19 bash -lc <check>
@@ -71,6 +69,13 @@ ionice -c 1 -n 0 bash -lc <check>
 
 The decorator that was used is recorded (`gate_weight`), because "weighted" that silently fell back to
 nothing is not a measurement.
+
+`fast.sh` builds the binary of the tree it is run in, and build output is one island per worktree
+(`docs/ONEROOT.md`), so the FIRST landing of a run pays a cold build there and `--resume` - which reuses
+the same worktree - is incremental. That is the same cost the hand-run pipeline paid with its
+`target-land`, `target-land2`, ... directories; naming one `CARGO_TARGET_DIR` for every landing would be
+cheaper and is deliberately not done (a shared target dir made cargo reuse another tree's library,
+measured 12/11).
 
 **A failing check is re-run once, alone.** If it passes alone the landing still STOPS and the journal
 records `flaky under load: <name>`; a human decides. Nothing here turns a flaky check green.

@@ -231,18 +231,28 @@ fast_binary_banner() {
 # empty one (72 598 376 B vs 73 904 880 B, measured) and the code-mode rows then fail for a reason that
 # has nothing to do with the branch.
 fast_binary_build() {
-  local assets=${FAST_CODEMODE_ASSETS:-} log
+  local assets=${FAST_CODEMODE_ASSETS:-} log target
   command -v cargo >/dev/null 2>&1 || { FAST_BIN_WHY="$FAST_BIN_WHY; cargo is not on PATH"; return 1; }
+  # The build must land where the probe below looks for it. `fast_binary_target_dir` names this tree's own
+  # island (`<root>/build/<tree>-<hash>/target`, the same one `rust/wa-capabilities/src/disk.rs` computes),
+  # and cargo resolves a RELATIVE CARGO_TARGET_DIR against ITS cwd - so it is exported absolute, here, once.
+  # MEASURED 13/11 on wa-desktop: without this line cargo wrote to `rust/target`, the probe looked in the
+  # island, and the run stopped with `stale_binary: the binary it just built cannot report its identity`
+  # while a perfectly good binary sat in the tree.
+  target="$(fast_binary_target_dir)"
+  mkdir -p "$target" 2>/dev/null || true
   log=$(mktemp "${TMPDIR:-/tmp}/wa-fast-build-XXXXXX" 2>/dev/null) || log=/dev/null
-  echo "fast: building this tree's binary (cargo build --release --offline)${assets:+ with code-mode assets}"
+  echo "fast: building this tree's binary (cargo build --release --offline)${assets:+ with code-mode assets} -> $target"
   (
     cd "$ROOT" || exit 1
     if [ -n "$assets" ]; then
+      CARGO_TARGET_DIR="$target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_BUILD_ASSETS="$assets" \
         cargo build --release --offline --manifest-path rust/Cargo.toml
     else
+      CARGO_TARGET_DIR="$target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_ALLOW_EMPTY=1 \
