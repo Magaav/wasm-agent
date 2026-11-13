@@ -7,6 +7,10 @@ and a retest decided by what the upstream move actually changed.
 scheduler, no recurring wake. Wired into `scripts/fast.sh` and `scripts/test.sh` by
 `scripts/test-landing-queue.mjs` (43 checks, ~13 s, self-contained).
 
+The queue lands ONE branch through canonical main. The pipeline around it - every READY branch, the
+gate, the incoming push, main, the release artifacts, the publish and the node ring - is `wa land`
+([LAND.md](LAND.md)): the same idea one level up, one resumable run with a journal.
+
 ## Why it exists
 
 Measured on wasm_the_first, 2026-11-10, in one session (`883ffeda`):

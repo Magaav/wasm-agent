@@ -10,6 +10,7 @@
 #
 #   ref      artifacts/node-<sha12>            (an orphan commit: no parent, no tree of the project)
 #   contents node-<sha12>.manifest             the pins the publisher wrote
+#            SHA256SUMS                        the same pins in the flat form `sha256sum -c` reads
 #            wa-<triple>-<sha12>               one payload per published triple
 #            wa-sentinel-<triple>-<sha12>
 #            PUBLISH.sh                        the exact `gh release create` line, paths relative to the
@@ -117,6 +118,31 @@ ASSETS="$ASSETS node-$SHORT.manifest"
 [ -f "$MANIFEST" ] || fail "manifest_missing: $MANIFEST" 2
 ROWS="$ROWS$(wa_node_sha256 "$MANIFEST")  $(wc -c < "$MANIFEST" | tr -d '[:space:]')  node-$SHORT.manifest"$'\n'
 say "verified $MANIFEST against every payload (source_commit $COMMIT)"
+
+# ---- 1b. SHA256SUMS belongs INSIDE the ref -----------------------------------------------------------
+# The publisher writes SHA256SUMS beside the manifest and names it in the `gh release create` line it
+# prints, so the PUBLISH.sh shipped here asks for that file - and this script did not carry it. Measured
+# 13/11 on `artifacts/node-0d4ccca2213d`: the ref held PUBLISH.sh, the manifest and four payloads, no
+# SHA256SUMS, while PUBLISH.sh's last argument was `SHA256SUMS`. Publishing it would have failed on a
+# missing file, after the human was told to paste exactly that line.
+#
+# Two checks, both before the commit exists: the file is there, and every pin in it is the pin in the
+# manifest. Then it becomes an asset like the others - copied into the commit and verified again out of
+# git - so `sha256sum -c SHA256SUMS` works from a `git archive` of the ref, with no knowledge of the
+# manifest's shape.
+SUMS="$OUT/SHA256SUMS"
+[ -f "$SUMS" ] \
+  || fail "checksums_missing: $SUMS (scripts/publish-node-binaries.sh writes it beside the manifest, and the shipped PUBLISH.sh names it; a ref without it publishes to a missing file)" 2
+unpinned=""
+while IFS=$' \t' read -r want_sha want_bytes name; do
+  [ -n "${name:-}" ] || continue
+  grep -qx "$want_sha  $name" "$SUMS" || unpinned="$unpinned $name"
+done <<< "$ROWS"
+[ -z "$unpinned" ] || fail "checksums_mismatch: SHA256SUMS does not carry the manifest's pin for:$unpinned" 5
+SUMS_SHA="$(wa_node_sha256 "$SUMS")" || fail 'sha256_tool_missing' 7
+ASSETS="$ASSETS SHA256SUMS"
+ROWS="$ROWS$SUMS_SHA  $(wc -c < "$SUMS" | tr -d '[:space:]')  SHA256SUMS"$'\n'
+say "checksums verified: $SUMS ($(wc -l < "$SUMS" | tr -d '[:space:]') row(s), every pin the manifest's)"
 
 # ---- 2. PUBLISH.sh: the publisher's own gh line, with the paths made relative to the commit root -----
 # The publisher prints both forms (create, then the clobber upload). They are taken from ITS output rather

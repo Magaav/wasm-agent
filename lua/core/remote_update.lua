@@ -290,34 +290,36 @@ local function request_node(record)
   }
 end
 
--- The rendezvous: `request run` is the door `scripts/deploy-rendezvous.sh` was written for (it
--- refuses to run inside a run, and it requires HEAD == origin/main == the full commit it is given).
--- `request run` takes a script path and no arguments, so the arguments live in a one-line wrapper
--- written into a directory the peer's sentinel is already allowed to execute from. That directory is
--- the operator's own `WA_SENTINEL_SCRIPTS`; this refuses by name when none of them is writable.
-local function rendezvous_script(record)
+-- The `request run` door: `request run` takes a script path and no arguments, so the arguments live in a
+-- short wrapper written into a directory the peer's sentinel is already allowed to execute from. That
+-- directory is the operator's own `WA_SENTINEL_SCRIPTS`; this refuses by name when none of them can be
+-- written.
+--
+-- Three callers share it, and each wrapper is a path plus an `exec`, never a sentence of shell the master
+-- composed: the rendezvous deploy (`scripts/deploy-rendezvous.sh`), the binary-only node install
+-- (`scripts/deploy.sh` with WA_DEPLOY_PREBUILT_ONLY=1) and the rollback
+-- (`scripts/rollback-node.sh`). A master request is admitted or refused; it is never a relayed child shell.
+local function run_wrapper(label, body, record)
   local scripts = tostring(host.getenv('WA_SENTINEL_SCRIPTS') or '')
   if scripts == '' then
     return nil, { error = 'rendezvous_scripts_unconfigured',
       observed = 'WA_SENTINEL_SCRIPTS is empty on this node, so `request run` cannot execute anything' }
   end
   local stamp = tostring(math.floor(host.now())) .. '-' .. record.id:sub(1, 8)
-  local body = table.concat({
+  local lines = {
     '#!/usr/bin/env bash',
-    '# written by lua/core/remote_update.lua for remote request ' .. record.id,
+    '# written by lua/core/remote_update.lua for remote request ' .. record.id .. ' (' .. label .. ')',
     'set -euo pipefail',
-    -- `exec bash <script>`: the script is mode 100644 in git, so `exec <script>` answers EACCES
-    -- (`code=126 Permission denied`, measured on openclaw 2026-11-10).
-    'exec bash ' .. quote(slashes(record.server.tree) .. '/scripts/deploy-rendezvous.sh') .. ' '
-      .. quote(record.target_commit) .. ' ' .. quote(record.reason ~= '' and record.reason or 'remote update'),
-    '',
-  }, '\n')
+  }
+  for _, line in ipairs(body) do lines[#lines + 1] = line end
+  lines[#lines + 1] = ''
+  local text = table.concat(lines, '\n')
   local tried = {}
   for dir in scripts:gmatch('[^;]+') do
     dir = trim(dir)
     if dir ~= '' then
-      local path = slashes(dir) .. '/remote-rendezvous-' .. stamp .. '.sh'
-      local ok, wrote = pcall(host.write_file, path, body)
+      local path = slashes(dir) .. '/remote-' .. label .. '-' .. stamp .. '.sh'
+      local ok, wrote = pcall(host.write_file, path, text)
       if ok and wrote == true then
         shell('chmod +x ' .. quote(path) .. ' 2>/dev/null')
         return path, nil
@@ -329,25 +331,24 @@ local function rendezvous_script(record)
     observed = 'no directory in WA_SENTINEL_SCRIPTS could be written: ' .. table.concat(tried, ', ') }
 end
 
-local function request_rendezvous(record)
+local function request_run(record, label, body, what)
   local facts = M.facts()
   local blocked = update.preconditions(facts)
   if blocked then
     return nil, { error = tostring(blocked.error or blocked.status), message = tostring(blocked.message or ''),
       observed = tostring(blocked.observed or ''), next = blocked.next }
   end
-  local script, problem = rendezvous_script(record)
+  local script, problem = run_wrapper(label, body, record)
   if not script then return nil, problem end
+  local reason = 'remote update from ' .. (record.requester.name ~= '' and record.requester.name or record.requester.node_id)
+    .. ': ' .. (record.reason ~= '' and record.reason or what)
   -- The same authority the deploy door uses: this request was admitted as a signed master request by
-  -- `serve`, and the node stamps `child` on shells it runs for a peer call. Cleared for this command
-  -- only (see `update.run`'s `signed_request`).
+  -- `serve`, and the node stamps `child` on shells it runs for a peer call. Cleared for this command only.
   local command = 'WASM_AGENT_PROVENANCE= ' .. table.concat({
-    quote(facts.sentinel), 'request', 'run', '--script', quote(script),
-    '--reason', quote('remote update from ' .. (record.requester.name ~= '' and record.requester.name or record.requester.node_id)
-      .. ': ' .. (record.reason ~= '' and record.reason or 'rendezvous deploy')),
+    quote(facts.sentinel), 'request', 'run', '--script', quote(script), '--reason', quote(reason),
   }, ' ')
-  -- The box before the call: a request file that appears during it is this call's, even when the
-  -- sentinel prints nothing (the node door proves the same thing, `update.M.new_requests`).
+  -- The box before the call: a request file that appears during it is this call's, even when the sentinel
+  -- prints nothing (the node door proves the same thing, `update.M.new_requests`).
   local box_before = update.request_box(facts)
   local result = shell(command)
   if not result then return nil, { error = 'sentinel_unreachable', observed = 'calling ' .. tostring(facts.sentinel) .. ' produced no answer' } end
@@ -357,9 +358,6 @@ local function request_rendezvous(record)
   end
   local requested = tostring(result.stdout or ''):match('requested run:%s*([^\r\n]+)')
   if not requested then
-    -- No line: the box is the evidence. A `run` request that appeared during the call is this call's,
-    -- and the refusal (when nothing appeared) carries the sentinel's own words - the node door does the
-    -- same, for the same reason (`update.M.new_requests`).
     local fresh = update.new_requests(box_before)
     if #fresh == 1 then
       local text = read(fresh[1])
@@ -375,6 +373,44 @@ local function request_rendezvous(record)
       evidence = { code = result.code, sentinel_dir = box_before.root, appeared = #fresh } }
   end
   return { door = 'run', request = trim(requested), script = script, sentinel = trim(first_line(result.stdout)), commit = record.target_commit }
+end
+
+-- The rendezvous: the registry where this node runs one, moved to the same landed commit and restarted by
+-- `scripts/deploy-rendezvous.sh` (which refuses to run inside a run, and requires HEAD == origin/main ==
+-- the full commit it is given).
+local function request_rendezvous(record)
+  local body = {
+    -- `exec bash <script>`: the script is mode 100644 in git, so `exec <script>` answers EACCES
+    -- (`code=126 Permission denied`, measured on openclaw 2026-11-10).
+    'exec bash ' .. quote(slashes(record.server.tree) .. '/scripts/deploy-rendezvous.sh') .. ' '
+      .. quote(record.target_commit) .. ' ' .. quote(record.reason ~= '' and record.reason or 'remote update'),
+  }
+  return request_run(record, 'rendezvous', body, 'rendezvous deploy')
+end
+
+-- The binary-only node: the same installer every other node uses, with the one variable that says "install
+-- the published release, never build here". Its refusal is a named one
+-- (`refused(no_prebuilt_binary)`), so a node with no toolchain is told what is missing instead of spending
+-- an hour failing a build - which is what the hand-run upnode procedure was for.
+local function request_binary(record)
+  local body = {
+    'export WA_DEPLOY_PREBUILT_ONLY=1',
+    'exec bash ' .. quote(slashes(record.server.tree) .. '/scripts/deploy.sh'),
+  }
+  return request_run(record, 'binary', body, 'binary install')
+end
+
+-- The rollback: the pair the last install replaced, put back by the copy the install shipped beside it.
+-- Deliberately independent of the tree and of a release feed: the node this is about may be the reason it
+-- is needed.
+local function request_rollback(record)
+  local install = slashes(record.server.install or '')
+  if install == '' then return nil, { error = 'no_install_dir', observed = 'this node reported no install directory' } end
+  local body = {
+    'exec bash ' .. quote(install .. '/scripts/rollback-node.sh') .. ' --install ' .. quote(install)
+      .. ' --reason ' .. quote(record.reason ~= '' and record.reason or 'remote rollback'),
+  }
+  return request_run(record, 'rollback', body, 'rollback')
 end
 
 -- The sentinel names a request id in the path it prints; that id is what its own `done/`,
@@ -413,17 +449,68 @@ function M.admit(args, caller)
     return { error = 'commit_invalid', effect = 'none', observed = 'a commit id is hex; ' .. tostring(args.commit):sub(1, 20) .. ' is not' }
   end
   local rendezvous = args.rendezvous == true or args.rendezvous == 'true'
-  local kind = rendezvous and 'rendezvous' or 'node'
+  -- The four modes of one verb (`wa update <node>`): a tree deploy, a binary-only install, a rollback, and
+  -- the rendezvous where the node runs one. `mode` is refused by name rather than ignored, so a typo cannot
+  -- silently perform the default install.
+  local mode = trim(args.mode)
+  local rollback = args.rollback == true or args.rollback == 'true' or mode == 'rollback'
+  if mode ~= '' and mode ~= 'tree' and mode ~= 'binary' and mode ~= 'rollback' then
+    return { error = 'mode_unknown', effect = 'none', mode = mode, allowed = { 'tree', 'binary', 'rollback', 'rendezvous' } }
+  end
+  local kind = rollback and 'rollback' or (rendezvous and 'rendezvous' or (mode == 'binary' and 'binary' or 'node'))
   local reason = trim(args.reason)
   if #reason > 400 then return { error = 'reason_too_long', effect = 'none', limit = 400 } end
   local facts = M.facts()
-  if not facts.tree then
+  -- A rollback is the one action that must work on a node whose tree is behind or broken (the install
+  -- shipped scripts/rollback-node.sh beside the binary for exactly that), so it does not require a tree and
+  -- never moves one.
+  if not facts.tree and not rollback then
     return { error = 'no_runtime_tree', effect = 'none',
       observed = 'this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit' }
   end
   local record = new_record(kind, '', reason, caller, args)
   record.server.install = facts.install
-  record.server.tree = slashes(facts.tree)
+  record.server.tree = facts.tree and slashes(facts.tree) or nil
+  if rollback then
+    -- The commit a rollback is about is the one being replaced, and it is read (not guessed) from the
+    -- install record: an operator asking later needs to know what was undone.
+    local installed = update.installed_record(facts.install)
+    record.replaced_commit = tostring(installed.commit or '')
+    record.target_commit = tostring(installed.commit or '')
+    local done, error = request_rollback(record)
+    if not done then
+      error.effect = 'none'
+      error.capability = M.CAPABILITY
+      audit('refused', record, tostring(error.error))
+      record.state, record.outcome = 'refused', 'refused'
+      record.detail = tostring(error.error) .. (error.observed and (' - ' .. tostring(error.observed)) or '')
+      write_record(record)
+      error.audit_id = record.id
+      return error
+    end
+    record.state = 'queued'
+    record.door = done.door
+    record.request_path = done.request
+    record.sentinel_request_id = request_id_of(done.request)
+    record.sentinel = done.sentinel
+    if done.script then record.script = done.script end
+    audit('admitted', record, done.request)
+    if not write_record(record) then
+      return { error = 'audit_record_not_written', effect = 'unknown', capability = M.CAPABILITY, record = record.id,
+        request = done.request, note = 'the rollback was queued but this node could not write the record that names who asked for it' }
+    end
+    local identity = nodes.identity() or {}
+    return {
+      ok = true, status = 'queued', record = record.id, kind = kind,
+      commit = record.target_commit, door = done.door, request = done.request,
+      sentinel_request_id = record.sentinel_request_id,
+      target_node = { node_id = tostring(identity.node_id or ''), name = tostring(nodes.node_name() or '') },
+      requester = record.requester.name ~= '' and record.requester.name or record.requester.node_id,
+      requested_at = record.requested_at,
+      message = 'queued: this node\'s own Sentinel will restore the pair the last install replaced and restart the node under it. Nothing is restored yet.',
+      next = 'ask again with {action="status", id="' .. record.id .. '"}; the record lands in ' .. M.dir(),
+    }
+  end
   local prepared, refusal = prepare_tree(facts.tree, commit)
   if not prepared then
     refusal.effect = 'none'
@@ -442,7 +529,9 @@ function M.admit(args, caller)
   record.server.origin_main = prepared.origin_main
   record.server.tree = prepared.tree
   local done, error = nil, nil
-  if kind == 'rendezvous' then done, error = request_rendezvous(record) else done, error = request_node(record) end
+  if kind == 'rendezvous' then done, error = request_rendezvous(record)
+  elseif kind == 'binary' then done, error = request_binary(record)
+  else done, error = request_node(record) end
   if not done then
     error.effect = 'none'
     error.capability = M.CAPABILITY
@@ -478,7 +567,8 @@ function M.admit(args, caller)
     target_node = { node_id = tostring(identity.node_id or ''), name = tostring(nodes.node_name() or '') },
     requester = record.requester.name ~= '' and record.requester.name or record.requester.node_id,
     requested_at = record.requested_at,
-    message = 'queued: this node\'s own Sentinel will perform the ' .. (kind == 'rendezvous' and 'rendezvous deploy' or 'deploy') ..
+    message = 'queued: this node\'s own Sentinel will perform the ' ..
+      (kind == 'rendezvous' and 'rendezvous deploy' or (kind == 'binary' and 'binary-only install (published release, no build here)' or 'deploy')) ..
       ' under its existing rules. This is not installed yet.',
     next = 'ask again with {action="status", id="' .. record.id .. '"}; the record lands in ' .. M.dir(),
   }
@@ -501,7 +591,8 @@ local function outcome_of(record)
   if result and tostring(result.request_id or '') == id and id ~= '' then
     outcome.installer = { ok = result.ok == true, commit = result.commit, at = result.at, detail = result.detail }
   end
-  if record.kind == 'rendezvous' then
+  if record.kind == 'rendezvous' or record.kind == 'rollback' then
+    local what = record.kind == 'rollback' and 'the rollback' or 'the rendezvous deploy'
     local done = decode(read(sentinel_dir .. '/done/' .. id .. '.json'))
     local failed = decode(read(sentinel_dir .. '/failed/' .. id .. '.json'))
     if failed then
@@ -509,9 +600,13 @@ local function outcome_of(record)
     end
     if done then
       if done.ok == true and tostring(done.phase or '') ~= 'failed' then
-        return settled('installed', tostring(done.detail or 'the rendezvous deploy settled'))
+        -- A rollback's own record is the install record it rewrote: report what is installed now, so
+        -- "installed" is a commit an operator can compare, not just the word.
+        local restored = update.installed_record(facts.install)
+        return settled('installed', tostring(done.detail or (what .. ' settled')),
+          { installed_commit = restored.commit })
       end
-      return settled('failed', tostring(done.detail or 'the rendezvous deploy did not settle'))
+      return settled('failed', tostring(done.detail or (what .. ' did not settle')))
     end
     return outcome
   end
@@ -675,6 +770,10 @@ function M.request(call, selector, options)
   local args = { action = 'request', reason = trim(options.reason), session = trim(options.session) }
   if trim(options.commit) ~= '' then args.commit = trim(options.commit) end
   if options.rendezvous == true then args.rendezvous = true end
+  -- One verb, four modes: a tree deploy (default), a binary-only install, a rollback, or the rendezvous.
+  local mode = trim(options.mode)
+  if mode ~= '' and mode ~= 'tree' then args.mode = mode end
+  if options.rollback == true then args.rollback = true end
   local reply = call(selector, M.CAPABILITY, args)
   if type(reply) ~= 'table' then return { ok = false, error = 'remote_answer_unreadable', node = tostring(selector) } end
   local record_id = tostring(reply.record or reply.audit_id or '')
@@ -683,7 +782,7 @@ function M.request(call, selector, options)
       node = tostring(reply.target_node and reply.target_node.name or selector),
       node_id = tostring(reply.target_node and reply.target_node.node_id or ''),
       selector = tostring(selector), commit = tostring(reply.commit or args.commit or ''),
-      kind = tostring(reply.kind or (args.rendezvous and 'rendezvous' or 'node')),
+      kind = tostring(reply.kind or (args.rollback and 'rollback' or (args.rendezvous and 'rendezvous' or (mode == 'binary' and 'binary' or 'node')))),
       requested_at = tonumber(reply.requested_at) or math.floor(host.now()),
       session = trim(options.session), state = tostring(reply.state or reply.status or 'unknown'),
       request = tostring(reply.request or ''), refused = reply.error ~= nil,
@@ -783,6 +882,9 @@ function M.cli(argv)
     local flag = tostring(argv[index])
     if flag == '--json' then as_json = true; index = index + 1
     elseif flag == '--rendezvous' then options.rendezvous = true; index = index + 1
+    elseif flag == '--binary' then options.mode = 'binary'; index = index + 1
+    elseif flag == '--tree' then options.mode = 'tree'; index = index + 1
+    elseif flag == '--rollback' then options.rollback = true; index = index + 1
     elseif flag == '--status' or flag == '--watch' then options.status = true; index = index + 1
     elseif flag == '--commit' or flag == '--id' or flag == '--reason' or flag == '--session' or flag == '--node' then
       local key = flag:sub(3)
@@ -794,9 +896,12 @@ function M.cli(argv)
       options[key] = value
       index = index + 2
     elseif flag == '--help' or flag == '-h' then
-      print('wa update <node> [--commit <sha>] [--rendezvous] [--reason <text>] [--session <id>] [--json]')
+      print('wa update <node> [--commit <sha>] [--binary|--tree] [--rendezvous] [--reason <text>] [--session <id>] [--json]')
       print('wa update <node> --status [--id <record>] [--json]')
+      print('wa update <node> --rollback   put back the pair that node\'s last install replaced')
       print('wa update                 update this node (the local deploy request)')
+      print('  --binary   install the published release only (a node with no toolchain; never builds there)')
+      print('  --tree     the default: the node\'s own Sentinel deploys its tree (build or published binary)')
       return 0
     else
       print('wa update: unknown option ' .. flag .. '; nothing was asked')

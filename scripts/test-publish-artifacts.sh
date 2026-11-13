@@ -174,9 +174,18 @@ parents="$(git --git-dir="$WORK/dropbox.git" rev-list --parents -n1 "$readback" 
 [ "$parents" = 1 ] || fail "the artifacts commit is not an orphan (rev-list --parents lists $parents ids)"
 ok
 files="$(git --git-dir="$WORK/dropbox.git" ls-tree -r --name-only "$readback" | sort | tr '\n' ' ')"
-want="PUBLISH.sh node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT "
+# SHA256SUMS is part of the set, not beside it: the shipped PUBLISH.sh names it (the publisher does), and
+# measured 13/11 the ref carried PUBLISH.sh, the manifest and the payloads while that line asked for a file
+# the commit did not hold - a publish that fails on a missing file, after a human was told to paste it.
+want="PUBLISH.sh SHA256SUMS node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT "
 [ "$files" = "$want" ] || fail "the commit holds '$files', expected exactly '$want'"
 ok
+contains "$(cat "$P")" "SHA256SUMS" "PUBLISH.sh names SHA256SUMS (which is why the commit must carry it)"
+sums="$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS")"
+contains "$sums" "$wa_sha  wa-$TRIPLE-$SHORT" "SHA256SUMS pins the payload the manifest pins"
+contains "$sums" "$sen_sha  wa-sentinel-$TRIPLE-$SHORT" "SHA256SUMS pins the supervisor too"
+contains "$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS" | grep -c .)" "3" \
+  "SHA256SUMS holds one row per payload and the manifest"
 shipped_sha="$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:wa-$TRIPLE-$SHORT" | sha256sum | awk '{print $1}')"
 [ "$shipped_sha" = "$wa_sha" ] || fail "the shipped payload is $shipped_sha, the pin is $wa_sha"
 ok

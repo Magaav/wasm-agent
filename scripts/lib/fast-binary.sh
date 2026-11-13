@@ -78,10 +78,18 @@ fast_binary_newer_than_tree() {
 # The prepared code-mode assets, if this checkout has them: the shipping build embeds them, so a build
 # this script makes must too, or the node it installs cannot run code mode at all.
 fast_binary_assets() {
+  local assets_root
+  # `$ROOT/.git` is a DIRECTORY in the canonical checkout and a FILE in a linked worktree, so a worktree
+  # lane found no prepared assets, built without them, and every row failed at the build
+  # (`code-mode assets required`), or worse: a build succeeded with WA_CODEMODE_ALLOW_EMPTY and installed a
+  # node that cannot run code mode. The assets live in the repository's COMMON git directory, which is what
+  # both shapes name (`docs/ONEROOT.md`: one root, one prepared set).
+  assets_root="$ROOT/.git/codemode-assets"
+  [ -d "$assets_root" ] || assets_root="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)/codemode-assets"
   if [ -n "${WA_CODEMODE_BUILD_ASSETS:-}" ] && [ -d "$WA_CODEMODE_BUILD_ASSETS" ]; then
     FAST_CODEMODE_ASSETS=$WA_CODEMODE_BUILD_ASSETS
-  elif [ -d "$ROOT/.git/codemode-assets" ]; then
-    FAST_CODEMODE_ASSETS=$(find "$ROOT/.git/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
+  elif [ -d "$assets_root" ]; then
+    FAST_CODEMODE_ASSETS=$(find "$assets_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
   else
     FAST_CODEMODE_ASSETS=''
   fi

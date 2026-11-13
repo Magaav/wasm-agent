@@ -128,6 +128,16 @@ if command == "update" or command == "--update" then
   return
 end
 
+-- `wa land`: the whole landing pipeline as one command (lua/core/land.lua, docs/LAND.md). READY
+-- branches -> a merged tree -> the weighted gate -> the incoming push -> main -> the verified artifacts ->
+-- the release -> every node in ring order. A state machine with a journal: `--resume` continues at the step
+-- that failed, and a push, a main fast-forward or a publish recorded done is never repeated.
+if command == "land" then
+  local code = dofile("lua/core/land.lua").cli(args)
+  if code and code ~= 0 then os.exit(code) end
+  return
+end
+
 if command == "init" then
   print(json.encode({ schema = "ok" }))
 elseif command == "remember" then
@@ -395,6 +405,11 @@ elseif command == "help" then
   print("    update [--check] | --update  update this node (tree: Sentinel deploy; release: verified bundle)")
   print("    update --all                 read-only table: what an update would install, per node this node can see")
   print("    update <node> [--status]      ask another node to update itself, then read what it installed")
+  print("    update <node> [--binary|--tree] [--commit <sha>]  one deploy verb: a tree deploy, a binary-only")
+  print("                                 install, or --rollback to put back the pair the last install replaced")
+  print("    land --ready | --branches a,b [--dry-run] [--no-deploy]  the whole landing pipeline as one")
+  print("                                 resumable machine: merge, gate, push, main, artifacts, publish, deploy")
+  print("    land --resume | status [--run <id>] | ready <branch> <sha>  continue, read, or record a READY line")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)
