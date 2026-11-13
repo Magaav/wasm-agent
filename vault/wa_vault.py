@@ -37,11 +37,15 @@ Rules this file is built around:
 Standard library only, so the image is the interpreter and this file.
 """
 
+import base64
+import binascii
+import hashlib
 import hmac
 import uuid
 import http.client
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -235,6 +239,290 @@ def public_status(store, operator=False):
             status['operation'] = item.get('operation')
         out[provider] = status
     return out
+
+
+# --- ed25519 (RFC 8032), pure standard library ----------------------------------------------------
+#
+# The vault signs a release manifest and never returns the key, so it needs an ed25519 signer - and this
+# image is `python:3.13-alpine` with nothing installed (the premise of this file: the image is the
+# interpreter and this file). The curve arithmetic therefore lives here, written from RFC 8032 §5.1 in
+# extended twisted-Edwards coordinates (dbl-2008-hwcd). It is checked against the RFC's own test vectors
+# (§7.1) in `scripts/test-vault-sign.py`, and every signature it makes is verified by the node's ring on
+# the other side of the seam, so an error in it cannot pass unseen by both.
+_E_P = 2 ** 255 - 19
+_E_L = 2 ** 252 + 27742317777372353535851937790883648493
+_E_D = -121665 * pow(121666, _E_P - 2, _E_P) % _E_P
+# The base point: y = 4/5, x the even root (RFC 8032 §5.1). Spelled out so this file needs no decoder.
+_E_BX = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+_E_BY = 46316835694926478169428394003475163141307993866256225615783033603165251855960
+_E_BASE = (_E_BX, _E_BY, 1, _E_BX * _E_BY % _E_P)
+
+
+def _e_add(one, two):
+    x1, y1, z1, t1 = one
+    x2, y2, z2, t2 = two
+    a = (y1 - x1) * (y2 - x2) % _E_P
+    b = (y1 + x1) * (y2 + x2) % _E_P
+    c = t1 * 2 * _E_D * t2 % _E_P
+    d = z1 * 2 * z2 % _E_P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _E_P, g * h % _E_P, f * g % _E_P, e * h % _E_P)
+
+
+def _e_double(one):
+    x1, y1, z1, _ = one
+    a = x1 * x1 % _E_P
+    b = y1 * y1 % _E_P
+    c = 2 * z1 * z1 % _E_P
+    h = a + b
+    e = h - (x1 + y1) * (x1 + y1)
+    g = a - b
+    f = c + g
+    return (e * f % _E_P, g * h % _E_P, f * g % _E_P, e * h % _E_P)
+
+
+def _e_mult(scalar, point):
+    result = (0, 1, 1, 0)          # the neutral element
+    addend = point
+    while scalar > 0:
+        if scalar & 1:
+            result = _e_add(result, addend)
+        addend = _e_double(addend)
+        scalar >>= 1
+    return result
+
+
+def _e_encode(point):
+    x, y, z, _ = point
+    inverse = pow(z, _E_P - 2, _E_P)
+    x, y = x * inverse % _E_P, y * inverse % _E_P
+    return int.to_bytes(y | ((x & 1) << 255), 32, "little")
+
+
+def _e_clamp(digest):
+    scalar = int.from_bytes(digest[:32], "little") & ((1 << 254) - 8)
+    return scalar | (1 << 254)
+
+
+def ed25519_public(seed):
+    """The 32-byte public key of a 32-byte seed (RFC 8032 §5.1.5)."""
+    return _e_encode(_e_mult(_e_clamp(hashlib.sha512(seed).digest()), _E_BASE))
+
+
+def ed25519_sign(seed, message):
+    """RFC 8032 §5.1.6: the 64-byte signature of `message` under this seed."""
+    digest = hashlib.sha512(seed).digest()
+    scalar = _e_clamp(digest)
+    public = _e_encode(_e_mult(scalar, _E_BASE))
+    nonce = int.from_bytes(hashlib.sha512(digest[32:] + message).digest(), "little") % _E_L
+    point = _e_encode(_e_mult(nonce, _E_BASE))
+    challenge = int.from_bytes(hashlib.sha512(point + public + message).digest(), "little") % _E_L
+    return point + int.to_bytes((nonce + challenge * scalar) % _E_L, 32, "little")
+
+
+# --- the release signing key ----------------------------------------------------------------------
+#
+# One ed25519 key, `release-signing`, that exists so a node can trust a download: a release ships
+# `SHA256SUMS` and `SHA256SUMS.sig`, the signature is made here, and a node verifies it against a public
+# key it already holds (embedded in its binary, or listed in its config). That closes the hole this key
+# was asked for: a node that checks a download against a checksum from the SAME release trusts whoever
+# can publish that release with both halves at once.
+#
+# What holds, and is tested (`scripts/test-vault-sign.py`):
+#
+#   1. **Admin only.** Every release-signing route is under the admin listener. The proxy the nodes use
+#      answers 404 for all of them, so an agent that can reach the proxy cannot make a signature.
+#   2. **The seed never comes back.** `sign` answers a signature and a key id. The one exception is the
+#      BACKUP: exactly one export, offered at creation time, by the page or to a file the operator names
+#      - and after it, no route returns the seed, ever (`store[release-signing].backup_taken`).
+#   3. **One line per signature**, naming the key id and the manifest's sha256 - never key material.
+RELEASE_KEY = "release-signing"
+RELEASE_SEED_PATH = os.path.join(KEYS_DIR, RELEASE_KEY + ".ed25519")
+
+
+def read_release_seed():
+    """The 32-byte seed, for the two operations that may hold it: sign, and the one backup."""
+    try:
+        with open(RELEASE_SEED_PATH, "rb") as handle:
+            value = handle.read(32)
+    except FileNotFoundError:
+        return None
+    return value if len(value) == 32 else None
+
+
+def write_release_seed(seed):
+    # Same discipline as a key file: a private temp file in the same directory, fsync, then a rename.
+    os.makedirs(KEYS_DIR, mode=0o700, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".signing-", dir=KEYS_DIR)
+    try:
+        os.chmod(temp, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(seed)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, RELEASE_SEED_PATH)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def release_key_id(public_hex):
+    """A key id a person can compare: `sha256(public key)`'s first 16 hex, prefixed with the name."""
+    return RELEASE_KEY + "-" + hashlib.sha256(bytes.fromhex(public_hex)).hexdigest()[:16]
+
+
+def release_entry(store):
+    value = store.get(RELEASE_KEY)
+    return value if isinstance(value, dict) else {}
+
+
+def release_status(store):
+    """What may be said about the signing key: its id and its PUBLIC half. Never the seed."""
+    seed = read_release_seed()
+    item = release_entry(store)
+    if seed is None:
+        return {"configured": False, "key_id": None, "public_key": None, "created_at": None,
+                "backup_taken": True, "signatures": item.get("signatures", 0)}
+    public = item.get("public_key") or ed25519_public(seed).hex()
+    return {"configured": True, "key_id": item.get("key_id") or release_key_id(public),
+            "public_key": public, "created_at": item.get("created_at"),
+            "backup_taken": bool(item.get("backup_taken")), "signatures": item.get("signatures", 0)}
+
+
+def release_generate(replace=False):
+    """Generate the key INSIDE the vault. Answers the public half; the seed stays in its file."""
+    def put(store):
+        if read_release_seed() is not None and not replace:
+            raise VaultError(409, "vault_key_exists",
+                             "wa-vault already holds the release-signing key; rotate it only if you mean to "
+                             "sign releases with a new key (POST /api/release-signing/key {\"replace\": true})")
+        seed = os.urandom(32)
+        public = ed25519_public(seed).hex()
+        write_release_seed(seed)
+        store[RELEASE_KEY] = {"created_at": now_ms(), "public_key": public,
+            "key_id": release_key_id(public), "generation": str(uuid.uuid4()),
+            # False until the one backup is produced: this flag IS the one-shot budget.
+            "backup_taken": False, "signatures": 0}
+    update_store(put)
+    status = release_status(read_store())
+    log("release-signing key generated: key=%s (public key only; no value logged)" % status["key_id"])
+    return status
+
+
+def release_backup_file(path):
+    """Write the seed to an operator-named path: 0600, never overwritten, never printed."""
+    if not isinstance(path, str) or not path.strip() or any(ord(c) < 32 for c in path):
+        raise VaultError(400, "backup_path_invalid", "name the file to write the backup to")
+    path = path.strip()
+    if not os.path.isabs(path):
+        raise VaultError(400, "backup_path_invalid",
+                         "the backup path must be absolute - a path inside a volume the vault can write")
+    if os.path.isdir(path):
+        raise VaultError(400, "backup_path_invalid", "the backup path is a directory; name a file")
+    directory = os.path.dirname(path)
+    if not os.path.isdir(directory):
+        raise VaultError(400, "backup_path_missing", "the backup file's directory does not exist here: " + directory)
+    try:
+        # O_EXCL is the no-overwrite rule: an existing file is refused, not truncated, so a second
+        # export can never land on top of the first copy the operator already wrote down.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise VaultError(409, "vault_backup_exists", "refusing to overwrite an existing file: " + path)
+    except OSError as error:
+        raise VaultError(409, "vault_backup_unwritable",
+                         "the backup file could not be created (%s): %s" % (type(error).__name__, path))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(read_release_seed().hex() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as error:
+        raise VaultError(409, "vault_backup_unwritable",
+                         "the backup file could not be written (%s): %s" % (type(error).__name__, path))
+    return path
+
+
+def release_backup(path=None):
+    """The ONE offline backup: at creation time, once, then never again.
+
+    Two shapes, one budget. With `path`, the seed is written straight to the file the operator names
+    (mode 0600, never overwritten, never printed) - the copy that goes to a USB stick. Without it, the
+    seed is answered to the operator's page so it can be written down. Either way this marks the backup
+    as taken in the same locked write, and every later call is refused: after this, no route in this
+    file returns the seed. Named risk: with the admin token, this route writes one file at a path of the
+    operator's choosing. It refuses to overwrite, it refuses a relative path, and it exists once per key.
+    """
+    if read_release_seed() is None:
+        raise VaultError(404, "vault_key_absent", "wa-vault holds no release-signing key - create it first")
+    written = None
+
+    def take(store):
+        nonlocal written
+        item = release_entry(store)
+        if item.get("backup_taken"):
+            raise VaultError(409, "vault_backup_taken",
+                             "the one offline backup of the release-signing key was already taken; no route "
+                             "returns the seed again (rotate the key if the backup was lost)")
+        if path is not None:
+            written = release_backup_file(path)
+        item["backup_taken"] = True
+        item["backup_taken_at"] = now_ms()
+        store[RELEASE_KEY] = item
+    update_store(take)
+    status = release_status(read_store())
+    log("release-signing key backed up once (%s): key=%s" % ("file" if written else "page", status["key_id"]))
+    answer = {"key_id": status["key_id"], "public_key": status["public_key"], "backup_taken": True}
+    if written is not None:
+        answer["path"] = written
+    else:
+        # The single exception in this file, and it is spent: `backup_taken` is already written.
+        answer["seed_hex"] = read_release_seed().hex()
+    return answer
+
+
+def release_sign(payload):
+    """Sign a manifest's sha256 (or its bytes). Answers the signature and the key id - nothing else."""
+    seed = read_release_seed()
+    if seed is None:
+        raise VaultError(404, "vault_key_absent", "wa-vault holds no release-signing key - create it on the vault page")
+    if "sha256" in payload:
+        digest_hex = payload.get("sha256")
+        if not isinstance(digest_hex, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest_hex.strip()):
+            raise VaultError(400, "bad_sha256", "sha256 must be the 64-character hex digest of the manifest")
+        digest = bytes.fromhex(digest_hex.strip())
+    elif "bytes" in payload:
+        try:
+            raw = base64.b64decode(payload.get("bytes") or "", validate=True)
+        except (ValueError, binascii.Error):
+            raise VaultError(400, "bad_bytes", "bytes must be the manifest, base64-encoded")
+        if len(raw) > MAX_BODY:
+            raise VaultError(413, "vault_body_too_large", "manifest over %d bytes" % MAX_BODY)
+        if not raw:
+            raise VaultError(400, "bad_bytes", "there is nothing to sign")
+        digest = hashlib.sha256(raw).digest()
+    else:
+        raise VaultError(400, "bad_request", "send the manifest bytes (\"bytes\", base64) or their sha256")
+    # What is signed is the DIGEST, on both paths: a node recomputes sha256(SHA256SUMS) and verifies this
+    # signature over those 32 bytes, so the vault never has to agree with a node about a file's framing.
+    signature = ed25519_sign(seed, digest)
+
+    def count(store):
+        item = release_entry(store)
+        item["signatures"] = int(item.get("signatures") or 0) + 1
+        store[RELEASE_KEY] = item
+    update_store(count)
+    status = release_status(read_store())
+    # One line per signature: the key id and what was signed. The key itself is never logged.
+    log("release-signing signature: key=%s sha256=%s" % (status["key_id"], digest.hex()))
+    return {"key_id": status["key_id"], "alg": "ed25519", "sha256": digest.hex(), "signature": signature.hex()}
 
 
 # --- upstream ------------------------------------------------------------------------------------
@@ -608,7 +896,12 @@ class AdminHandler(Handler):
         if not self.authorized():
             return self.send_error_json(401, "vault_admin_token", "the admin token is missing or wrong")
         if path == "/api/status":
-            return self.send_json(200, {"providers": public_status(read_store(), operator=True)})
+            return self.send_json(200, {"providers": public_status(read_store(), operator=True),
+                                        "release_signing": release_status(read_store())})
+        # The signing key's own view: id and public half. Admin listener only - the proxy has no route
+        # for it (`ProxyHandler` answers 404), which is what keeps a signature the operator's to make.
+        if path == "/api/release-signing":
+            return self.send_json(200, release_status(read_store()))
         return self.send_error_json(404, "not_found", path)
 
     def do_POST(self):
@@ -643,6 +936,17 @@ class AdminHandler(Handler):
                 if self.path != path:
                     raise VaultError(400, 'vault_embed_query', 'query parameters are not accepted')
                 return self.send_json(200, embedded_go(path.rsplit('/', 1)[-1], payload))
+            # The release-signing operations: generate, sign, and the one backup. None of them answers
+            # with the seed except the backup, and the backup does so once (release_backup).
+            if path == '/api/release-signing/key' and method == 'POST':
+                return self.send_json(200, release_generate(replace=payload.get('replace') is True))
+            if path == '/api/release-signing/sign' and method == 'POST':
+                return self.send_json(200, release_sign(payload))
+            if path == '/api/release-signing/backup' and method == 'POST':
+                named = payload.get('path')
+                if named is not None and not isinstance(named, str):
+                    raise VaultError(400, 'backup_path_invalid', 'name the file to write the backup to')
+                return self.send_json(200, release_backup(named))
             if path == "/api/opencode-go/key" and method == "POST":
                 set_opencode_key(payload.get("key"), expected=payload.get("expected_generation"), operation=payload.get("operation"))
             elif path == "/api/opencode-go/key" and method == "DELETE":

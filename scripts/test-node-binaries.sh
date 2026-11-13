@@ -23,7 +23,12 @@ PUBLISH="$ROOT/scripts/publish-node-binaries.sh"
 . "$ROOT/scripts/lib/node-binaries.sh"
 
 WORK="$(mktemp -d)"
-trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap 'test_release_vault_stop; chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# The publisher signs every release with wa-vault's `release-signing` key and refuses to publish without a
+# signature, so this suite runs a SCRATCH vault and signs with it (never the operator's running vault).
+. "$ROOT/scripts/lib/test-release-vault.sh"
+test_release_vault_start || { echo "SKIP test-node-binaries: python3/curl or vault/wa_vault.py is missing, so nothing can be signed"; exit 0; }
 checks=0
 ok() { checks=$((checks + 1)); }
 fail() { echo "node binaries (publish) FAILED: $*" >&2; exit 1; }
@@ -77,6 +82,12 @@ OTHER_TRIPLE=aarch64-unknown-linux-gnu
 fixture="$WORK/fixture"
 mkdir -p "$fixture/scripts/lib"
 cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh" "$fixture/scripts/lib/"
+# The signature gate lives beside it, and the fixture stands in for a checkout: both files, or a release
+# could not be verified at all (which the lib refuses by name, correctly).
+cp "$ROOT/scripts/lib/release-signing.sh" "$fixture/scripts/lib/"
+mkdir -p "$fixture/scripts/lib" "$fixture/config"
+cp "$ROOT/scripts/lib/release_verify.py" "$fixture/scripts/lib/"
+cp "$ROOT/config/release-keys.txt" "$fixture/config/"
 cp "$ROOT/scripts/check-disk-floor.sh" "$fixture/scripts/"
 ( cd "$fixture" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t \
   && git add -A && git commit -qm one && git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1 \
@@ -263,6 +274,9 @@ compiled_inputs=$(wa_compiled_inputs_digest "$fixture" "$FIXTURE_SHA")
 codemode=embedded
 $TRIPLE $(sha "$releases/wa-$TRIPLE-$FIXTURE_SHORT") $(bytes "$releases/wa-$TRIPLE-$FIXTURE_SHORT") $(sha "$releases/wa-sentinel-$TRIPLE-$FIXTURE_SHORT") $(bytes "$releases/wa-sentinel-$TRIPLE-$FIXTURE_SHORT")
 MANIFEST
+# Signed, because every release asset a node accepts now carries `SHA256SUMS` + its signature; the tag
+# directory IS this release's base (it holds releases.txt and the payloads flat), so they live there.
+test_release_sign_dir "$releases" || fail "could not sign the fixture release"
 rm -f "$WORK/gh-called"
 out="$(WA_NODE_BINARIES_URL="$releases" bash "$PUBLISH" --repo "$fixture" --out "$WORK/ensure" --ensure --target "$TRIPLE" --allow-empty-codemode 2>&1)"
 expect_status 0 "$?" "--ensure where a release covers the commit"

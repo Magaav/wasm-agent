@@ -13,6 +13,11 @@ use wa_capabilities::host::Host;
 use rusqlite::Connection;
 // `wa dev` (docs/SERVICE-COMPONENTS.md): build a component crate and swap the running instance.
 mod dev;
+// `wa release verify` (rust/wa-host/src/release.rs): signed releases, checked before this node installs
+// any release asset. Dispatched before the interpreter for the same reason `wa vault` is - a node whose
+// tree is broken must still be able to answer whether a release it was handed is signed by a key it
+// trusts.
+mod release;
 // The floor of the split: the Lua ABI, the host's paths and the shared JSON answer (docs/KERNEL.md).
 use wa_host_support::lua::Lua;
 use wa_host_support::paths::{private_dir, resolve_home};
@@ -269,6 +274,14 @@ fn main() {
             host::restore_input();
             std::process::exit(code);
         }
+    }
+    // `wa release verify --sums <dir> [--key <file>]`: is this release signed by a key this node trusts?
+    // It answers before the database, the interpreter and the network are touched, because the callers are
+    // the deploy paths that are about to install the bytes it is about (scripts/lib/release-signing.sh,
+    // scripts/lib/node-binaries.sh, scripts/upgrade.sh).
+    if args.first().is_some_and(|arg| arg == "release") {
+        host::restore_input();
+        std::process::exit(release::run(&args[1..]));
     }
     // A detached launcher must not change the node's worktree/branch identity.
     // The deployment gate writes this explicit location; CLI one-shot commands

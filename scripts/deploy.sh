@@ -1687,6 +1687,11 @@ ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/dep
 # node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2
 # cores, no disk for ~600 crates) cannot do. Measured 06/11: the prebuilt path was reached only from the tree.
 ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-binaries.sh" "scripts/lib/node-binaries.sh beside deploy.sh"
+# ...and the release-signature gate it now sources: without it an installed deploy cannot verify a release and
+# refuses every prebuilt binary by name (fail closed), which would leave a node that cannot compile with
+# nothing to install.
+ship_file "$ROOT/scripts/lib/release-signing.sh" "$INSTALL_DIR/scripts/lib/release-signing.sh" "scripts/lib/release-signing.sh beside deploy.sh (signed releases)"
+ship_file "$ROOT/scripts/lib/release_verify.py" "$INSTALL_DIR/scripts/lib/release_verify.py" "scripts/lib/release_verify.py beside deploy.sh (the verifier the shell paths run)"
 # ...and the rule that retires a script this release no longer ships: it runs at the end of THIS deploy, from
 # the copy beside deploy.sh, so an installed `request deploy` prunes exactly as the checkout deploy does.
 ship_file "$ROOT/scripts/lib/retire-unshipped.sh" "$INSTALL_DIR/scripts/lib/retire-unshipped.sh" "scripts/lib/retire-unshipped.sh beside deploy.sh"

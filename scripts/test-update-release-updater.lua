@@ -71,5 +71,21 @@ ok(refused.status == "release_check_failed", "and is named release_check_failed 
 ok(type(refused.observed) == "string" and refused.observed:find("index_unreachable", 1, true) ~= nil,
   "with the core's own words as the observation")
 
+-- ---- an UNSIGNED release is refused by the core, and `wa update` says so --------------------------
+-- A node installs no asset of a release whose `SHA256SUMS` is not signed by a key it trusts
+-- (scripts/lib/release-signing.sh), so the updater refuses before anything is replaced. What this pins is
+-- that the refusal is not swallowed here: `/update` reports the core's own sentence, names the file, and
+-- claims nothing was installed.
+host.write_file(install .. "/scripts/install.sh",
+  "#!/bin/sh\necho 'bootstrap: release_unsigned: v0.1.0-alpha.13 publishes no SHA256SUMS.sig - refusing to install bundle.tar.gz'\nexit 1\n")
+shell_ok("chmod 755 '" .. install .. "/scripts/install.sh'")
+local unsigned = update.run_release({ check = true }, facts, record)
+ok(unsigned.ok == false, "an unsigned release is not a success")
+ok(unsigned.status == "release_check_failed", "and is named release_check_failed (got " .. tostring(unsigned.status) .. ")")
+ok(type(unsigned.observed) == "string" and unsigned.observed:find("release_unsigned", 1, true) ~= nil,
+  "with the signature refusal as the observation")
+ok(type(unsigned.observed) == "string" and unsigned.observed:find("SHA256SUMS.sig", 1, true) ~= nil,
+  "naming the file the operator has to look at")
+
 if failed > 0 then print("update release updater: " .. failed .. " failed of " .. checks .. " checks"); os.exit(1) end
 print("update release updater ok (" .. checks .. " checks)")

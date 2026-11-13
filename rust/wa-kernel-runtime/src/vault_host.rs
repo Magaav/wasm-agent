@@ -40,6 +40,11 @@ pub struct VaultService {
     vault: Mutex<Vault>,
     dir: PathBuf,
     protection: &'static str,
+    /// The one named note the keystore owes: `keystore_keyring_refused:<errno>, using the passphrase file`
+    /// when the uid's kernel-keyring quota is spent, `keystore_protection_from_file:<p>` when the root file
+    /// decided instead of the environment. Recorded beside `protection` for the same reason — a downgrade
+    /// the node cannot name is one an operator cannot fix (`docs/VAULT.md`); `wa vault status` prints it.
+    note: Option<String>,
 }
 
 impl VaultService {
@@ -59,6 +64,7 @@ impl VaultService {
             wa_keystore::Keystore::open(&options).map_err(|error| error.reason().to_string())?;
         keystore.ensure_root().map_err(|error| error.reason().to_string())?;
         let protection = keystore.protection().as_str();
+        let note = keystore.note().map(str::to_string);
         let keystore = std::sync::Arc::new(keystore);
         let vault = Vault::open(
             Box::new(keystore.for_namespace("vault")),
@@ -66,7 +72,8 @@ impl VaultService {
             VaultOptions { policy, owner: "kernel".to_string(), ..VaultOptions::default() },
         )
         .map_err(|error| error.to_string())?;
-        let service = VaultService { vault: Mutex::new(vault), dir: dir.to_path_buf(), protection };
+        let service =
+            VaultService { vault: Mutex::new(vault), dir: dir.to_path_buf(), protection, note };
         // The rotation window's other half: a node that never rotates again still destroys the material
         // whose window has ended (`docs/VAULT.md`).
         let now = std::time::SystemTime::now()
@@ -96,6 +103,11 @@ impl VaultService {
     /// `dpapi`, `keyring` or `passphrase`: reported in the audit line of a start and in `wa vault status`.
     pub fn protection(&self) -> &'static str {
         self.protection
+    }
+
+    /// The one named note the keystore owes this node (`docs/VAULT.md`), printed by `wa vault status`.
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 
     /// The kernel's own door: a credential for an outbound request. There is no actor argument because

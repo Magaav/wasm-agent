@@ -81,18 +81,22 @@ fast_binary_assets() {
   local common
   if [ -n "${WA_CODEMODE_BUILD_ASSETS:-}" ] && [ -d "$WA_CODEMODE_BUILD_ASSETS" ]; then
     FAST_CODEMODE_ASSETS=$WA_CODEMODE_BUILD_ASSETS
-  elif [ -d "$ROOT/.git/codemode-assets" ]; then
-    FAST_CODEMODE_ASSETS=$(find "$ROOT/.git/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
   else
-    # A linked worktree has a `.git` FILE, not a directory, so the assets prepared once in the checkout's
-    # git dir are invisible to `$ROOT/.git/codemode-assets` - and this node prepares them exactly there.
-    # Measured on this branch: every code-mode row failed with "this node has no embedded code-mode
-    # assets" because a lane built its binary without them. The common git dir is the same directory for
-    # every worktree of the repo, and the assets are addressed by content (sha256-verified on use), so
-    # reading them from there is the same bytes the canonical checkout builds with.
-    common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    if [ -n "$common" ] && [ -d "$common/codemode-assets" ]; then
+    # MEASURED 13/11 in a worktree: `$ROOT/.git` is a FILE there (`gitdir: ...`), so the assets the
+    # canonical checkout prepared were never found, the build failed with `code-mode assets required` and
+    # the run stopped as `stale_binary` - 193 rows unrun, and the reason three layers from the cause. The
+    # assets belong to the CLONE, so the common git directory is where to look; they are addressed by
+    # content (sha256 verified on use), so every worktree of this repo builds with the same prepared bytes.
+    common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    case "$common" in
+      '') common="$ROOT/.git" ;;
+      /*) ;;
+      *) common="$ROOT/$common" ;;
+    esac
+    if [ -d "$common/codemode-assets" ]; then
       FAST_CODEMODE_ASSETS=$(find "$common/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
+    else
+      FAST_CODEMODE_ASSETS=''
     fi
   fi
   FAST_CODEMODE_ASSETS=${FAST_CODEMODE_ASSETS:-}
@@ -230,15 +234,20 @@ fast_binary_banner() {
 fast_binary_build() {
   local assets=${FAST_CODEMODE_ASSETS:-} log target
   command -v cargo >/dev/null 2>&1 || { FAST_BIN_WHY="$FAST_BIN_WHY; cargo is not on PATH"; return 1; }
-  # The build goes through the node's one build resolver (sweep, cap, lock, `tree` marker). It is
-  # sourced here rather than assumed: `fast_binary_build` runs before `scripts/fast.sh` sets the run's
-  # build root up, and a missing `wa_build_run` used to end the run as "cargo build failed".
+  # Through the node's ONE BUILD RESOLVER (`scripts/lib/build-target.sh`): it names this tree's directory
+  # under `<root>/build/target`, sweeps what older layouts left behind and prints the reclaim, holds the
+  # build lock and prints the wait, enforces the build cap, and writes the `tree` marker `wa clean` judges
+  # a build dir by - so this build is retired with the tree it belongs to. It is sourced here rather than
+  # assumed: this function runs before `scripts/fast.sh` sets the run's build root up, and a missing
+  # `wa_build_run` used to end the run as "cargo build failed".
+  #
+  # The directory is named by the resolver, never by cargo's default: measured 13/11 in a worktree, an
+  # earlier shape built into `rust/target` while this function read the node's build dir, so a build that
+  # SUCCEEDED was reported as "the binary it just built cannot report its identity" and every row went
+  # unrun. One expression decides it, and the banner below says which.
   . "$ROOT/scripts/lib/build-target.sh" || { FAST_BIN_WHY="$FAST_BIN_WHY; the node's build resolver (scripts/lib/build-target.sh) cannot be loaded"; return 1; }
   log=$(mktemp "${TMPDIR:-/tmp}/wa-fast-build-XXXXXX" 2>/dev/null) || log=/dev/null
-  echo "fast: building this tree's binary (cargo build --release --offline)${assets:+ with code-mode assets}"
-  # Through the node's one build resolver: it sweeps what other layouts left behind and prints the
-  # reclaim, holds the build lock and prints the wait, enforces the build cap, and writes the `tree`
-  # marker `wa clean` judges an island by - so this build is retired with the tree it belongs to.
+  echo "fast: building this tree's binary (cargo build --release --offline, target $(fast_binary_target_dir))${assets:+ with code-mode assets}"
   if [ -n "$assets" ]; then
     wa_build_run "$ROOT" env \
       WA_BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)" \

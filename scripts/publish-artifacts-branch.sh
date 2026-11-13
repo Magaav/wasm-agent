@@ -116,6 +116,15 @@ done
 ASSETS="$ASSETS node-$SHORT.manifest"
 [ -f "$MANIFEST" ] || fail "manifest_missing: $MANIFEST" 2
 ROWS="$ROWS$(wa_node_sha256 "$MANIFEST")  $(wc -c < "$MANIFEST" | tr -d '[:space:]')  node-$SHORT.manifest"$'\n'
+# The signed sums ship WITH the binaries they name. Both are release files like any other: the publisher
+# wrote them beside the payloads (scripts/publish-node-binaries.sh signs SHA256SUMS with wa-vault's
+# `release-signing` key), and a set without them is not a release this project will publish.
+for signed in SHA256SUMS SHA256SUMS.sig; do
+  [ -f "$OUT/$signed" ] || fail \
+    "release_not_signed: $OUT/$signed is missing - a node refuses a release without its signed sums, so it is not published" 6
+  ASSETS="$ASSETS $signed"
+  ROWS="$ROWS$(wa_node_sha256 "$OUT/$signed")  $(wc -c < "$OUT/$signed" | tr -d '[:space:]')  $signed"$'\n'
+done
 say "verified $MANIFEST against every payload (source_commit $COMMIT)"
 
 # ---- 2. PUBLISH.sh: the publisher's own gh line, with the paths made relative to the commit root -----
