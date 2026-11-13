@@ -380,7 +380,7 @@ elseif command == "help" then
   print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
-  print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, read metrics")
+  print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
   print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")

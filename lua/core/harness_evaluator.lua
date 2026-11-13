@@ -714,6 +714,17 @@ function M.report(opts)
     lines[#lines + 1] = "reviewer (storage only - no reviewer decided anything here):"
     for _, line in ipairs(reviewer_lines) do lines[#lines + 1] = "  " .. line end
   end
+  -- The landing reviewer's own store (lua/core/harness_evaluator_reviewer.lua): per review a row and
+  -- then the totals. It is handed in by the door that has the module, so this file keeps one dependency
+  -- and a caller that passes nothing gets the report it had before the reviewer existed.
+  if type(opts.reviews) == "table" and type(opts.reviews.report_lines) == "function" then
+    local ok, extra = pcall(opts.reviews.report_lines)
+    if ok and type(extra) == "table" then
+      for _, line in ipairs(extra) do lines[#lines + 1] = line end
+    else
+      lines[#lines + 1] = "reviews: the review store could not be read (" .. tostring(extra) .. ")"
+    end
+  end
   return lines
 end
 

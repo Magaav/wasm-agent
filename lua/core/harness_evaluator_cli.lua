@@ -10,6 +10,7 @@
 local json = dofile("lua/vendor/json.lua")
 local core = dofile("lua/core/harness_evaluator.lua")
 local replay = dofile("lua/core/harness_evaluator_replay.lua")
+local reviewer = dofile("lua/core/harness_evaluator_reviewer.lua")
 
 local M = {}
 
@@ -23,7 +24,11 @@ wa eval - freeze real tasks and replay them against a candidate binary
   wa eval run <task-id>|--all --bin <wa> [--model] [--timeout SECONDS] [--keep-scratch]
   wa eval report [--all] [--compare <run-a> <run-b>]
   wa eval verdict <run-id> pass|fail "<note>"
-  wa eval reviewer <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
+  wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
+                            [--model <name>] [--timeout SECONDS] [--keep-scratch]
+  wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
+  wa eval reviewer miss <branch> "<note>"
+  wa eval reviewer list
 
 A frozen task and every run live under <config>/evaluator (never in a repository, never printed whole).
 `run` is isolated: a mktemp scratch home with a marker, connectors and effects blocked and recorded as
@@ -176,7 +181,7 @@ local function report(args)
     print(text)
     return 0
   end
-  for _, line in ipairs(core.report({ all = has(args, "--all") })) do print(line) end
+  for _, line in ipairs(core.report({ all = has(args, "--all"), reviews = reviewer })) do print(line) end
   return 0
 end
 
@@ -197,20 +202,102 @@ local function verdict(args)
   return 0
 end
 
-local function reviewer(args)
-  local valued = { ["--findings"] = true, ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true }
-  local words = positionals(args, valued)
-  local run_id = words[1]
-  if not run_id then return refused("reviewer needs a run id") end
-  local record, problem = core.reviewer_record(run_id, {
-    findings = flag(args, "--findings"),
-    accepted = flag(args, "--accepted"),
-    misses = flag(args, "--misses"),
-    cost = flag(args, "--cost"),
-  })
-  if not record then return refused(problem or "the record was refused") end
-  print(json.encode({ ok = true, run = record.id, reviewer = record.reviewer }))
+-- `wa eval reviewer ...` - the landing reviewer (lua/core/harness_evaluator_reviewer.lua).
+--
+-- The verb that existed on main stored a reviewer's shape on a REPLAY run and ran nothing. This one runs
+-- the review: a fresh session (its own home and ledger), the branch, its base and the brief, and the
+-- findings back. It is not a gate - nothing in the landing queue reads it and it never blocks a landing.
+-- The operator's marks and the misses found after landing are recorded against the same store.
+local function reviewer_list()
+  local rows = reviewer.records()
+  if #rows == 0 then
+    print("(no reviews: `wa eval reviewer <branch> --brief <file>` runs one)")
+    return 0
+  end
+  for _, record in ipairs(rows) do
+    print(string.format("%-28s %-10s findings %-4s %-10s %s", tostring(record.id), tostring(record.sha):sub(1, 8),
+      tostring(record.findings or "-"), tostring(record.state or "-"), tostring(record.branch)))
+  end
   return 0
+end
+
+local function reviewer_mark(args, valued, words)
+  local id, word = words[2], words[3]
+  if not id or not word then return refused("reviewer mark needs a review id and `accepted` or `rejected`") end
+  local record, problem = reviewer.mark(id, word, flag(args, "--finding"))
+  if not record then return refused(problem or "the mark was refused") end
+  local accepted, rejected = 0, 0
+  for index = 1, tonumber(record.findings) or 0 do
+    local mark = (record.marks or {})[index]
+    if type(mark) == "table" and mark.state == "accepted" then accepted = accepted + 1 end
+    if type(mark) == "table" and mark.state == "rejected" then rejected = rejected + 1 end
+  end
+  print(string.format("%s: accepted %d, rejected %d of %s finding(s)", record.id, accepted, rejected,
+    tostring(record.findings or "-")))
+  return 0
+end
+
+local function reviewer_miss(args, words)
+  local branch = words[2]
+  if not branch then return refused("reviewer miss needs the branch the miss was found on") end
+  local rest = {}
+  for index = 3, #words do rest[#rest + 1] = words[index] end
+  local note = flag(args, "--note") or table.concat(rest, " ")
+  local entry, problem = reviewer.miss(branch, note, flag(args, "--repo") or "")
+  if not entry then return refused(problem or "the miss was refused") end
+  print(string.format("miss recorded for %s: %s", tostring(entry.branch), tostring(entry.note)))
+  return 0
+end
+
+local function reviewer_run(args)
+  local valued = { ["--brief"] = true, ["--base"] = true, ["--bin"] = true, ["--model"] = true,
+    ["--provider"] = true, ["--timeout"] = true, ["--finding"] = true, ["--note"] = true,
+    ["--repo"] = true }
+  local words = positionals(args, valued)
+  local what = words[1]
+  if what == nil then
+    return refused("reviewer needs a branch, or `mark`, `miss` or `list` (wa eval help)")
+  end
+  if what == "list" then return reviewer_list() end
+  if what == "mark" then return reviewer_mark(args, valued, words) end
+  if what == "miss" then return reviewer_miss(args, words) end
+  local switch = reviewer.switch()
+  if not switch.on then
+    print("wa eval: the reviewer is off (" .. tostring(switch.source) .. " = " .. tostring(switch.value)
+      .. "); nothing was run")
+    return 0
+  end
+  local record, problem = reviewer.run({
+    branch = what,
+    repo = flag(args, "--repo"),
+    brief = flag(args, "--brief"),
+    base = flag(args, "--base"),
+    bin = flag(args, "--bin"),
+    model = flag(args, "--model"),
+    provider = flag(args, "--provider"),
+    timeout = flag(args, "--timeout"),
+    keep_scratch = has(args, "--keep-scratch"),
+  })
+  if not record then return refused(problem or "the review could not run") end
+  local m = record.metrics or {}
+  print(string.format("review %s: %s @ %s (base %s) %s · rounds %s · tools %s · in %s out %s · %sms · %s",
+    tostring(record.id), tostring(record.branch), tostring(record.sha):sub(1, 8), tostring(record.base_ref),
+    tostring(record.model), tostring(m.rounds or "-"), tostring(m.tool_calls or "-"),
+    tostring(m.tokens_in or "-"), tostring(m.tokens_out or "-"), tostring(record.wall_ms),
+    tostring(record.state)))
+  if record.answer and record.answer ~= "" then
+    print("")
+    print(record.answer)
+  end
+  if record.review_line then
+    print(record.review_line)
+    return 0
+  end
+  print("wa eval: " .. tostring(problem or "the review session gave no REVIEW line"))
+  if record.stderr_tail and record.stderr_tail ~= "" then
+    print("wa eval: stderr tail: " .. tostring(record.stderr_tail):gsub("%s+$", ""))
+  end
+  return 1
 end
 
 function M.run(args)
@@ -228,7 +315,7 @@ function M.run(args)
   if verb == "run" then return run(rest) end
   if verb == "report" then return report(rest) end
   if verb == "verdict" then return verdict(rest) end
-  if verb == "reviewer" then return reviewer(rest) end
+  if verb == "reviewer" then return reviewer_run(rest) end
   return refused("unknown verb " .. tostring(verb) .. " (wa eval help)")
 end
 
