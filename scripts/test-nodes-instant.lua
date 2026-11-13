@@ -52,8 +52,8 @@ ok(has(commands.local_views(), "/nodes"), "the command registry declares /nodes 
 -- ---- what `/nodes` publishes -----------------------------------------------------------------------
 local count, problem = local_views.refresh({ max_age = 60 })
 ok(problem == nil, "the first publish reports no problem, got " .. tostring(problem))
-ok(count == #local_views.names() and #published == count,
-  "every published view went out, got " .. tostring(count) .. "/" .. tostring(#published))
+ok(count >= 1 and #published == count,
+  "every view that had something to show went out, got " .. tostring(count) .. "/" .. tostring(#published))
 -- `/nodes` is what this test is about: the other builders (`/mcp`, `/login`, `/help`) are read the same
 -- way by the same channel, and each has its own test.
 local first
@@ -87,7 +87,7 @@ ok(same_labels, "and the same options, label for label: the two surfaces cannot 
 clock = 1010
 ok(select(1, local_views.refresh({ max_age = 60 })) == 0, "a fresh snapshot is not rebuilt")
 clock = 1100
-ok(select(1, local_views.refresh({ max_age = 60 })) == #local_views.names(), "a snapshot older than its max age is")
+ok(select(1, local_views.refresh({ max_age = 60 })) == count, "a snapshot older than its max age is")
 local again
 for _, entry in ipairs(published) do if entry.name == "/nodes" then again = entry end end
 ok(again and again.spec.captured_at == 1100, "and it says when it was taken")
@@ -95,7 +95,7 @@ ok(again and again.spec.captured_at == 1100, "and it says when it was taken")
 -- ---- a round boundary never reaches for the network -------------------------------------------------
 host.http = function() error("a local view must never make the model wait on a network read") end
 local cached_ok, cached = pcall(local_views.refresh, { max_age = 0, cached = true })
-ok(cached_ok and cached == #local_views.names(), "a snapshot taken inside a run reads no network, got " .. tostring(cached))
+ok(cached_ok and cached == count, "a snapshot taken inside a run reads no network, got " .. tostring(cached))
 
 -- ---- a refused snapshot is reported, the old one keeps working --------------------------------------
 refuse = "spec_too_large"
@@ -104,7 +104,7 @@ ok(refused_count == 0 and type(refused_problem) == "string" and refused_problem:
   and refused_problem:find("spec_too_large", 1, true) ~= nil,
   "a refusal names the view it was for, got " .. tostring(refused_problem))
 refuse = nil
-ok(select(1, local_views.refresh({ max_age = 0 })) == #local_views.names(), "the next free moment publishes it again")
+ok(select(1, local_views.refresh({ max_age = 0 })) == count, "the next free moment publishes it again")
 
 -- ---- an older binary: no capability, no error, no change -------------------------------------------
 host.local_view = nil

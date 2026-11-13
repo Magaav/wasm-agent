@@ -52,6 +52,11 @@ local builders = {
     local pages = manager.login_views(manager.state("local-operator"), {})
     return { command = "/login", captured_at = host.now(), views = pages }
   end,
+  -- `/stats` and `/memories` are NOT here, and `/wakes`/`/hooks` are not either: their modules answer
+  -- through a pinned component and print a note into the transcript when it is absent - a snapshot taken for
+  -- a reader must never write into the chat it is drawing over. They keep their arm, and between runs they
+  -- are balloons like everything else; during a run they answer when the turn ends, and the host says so on
+  -- its queue row ("Queued - after the run: /stats").
   ["/help"] = function(opts)
     local balloon = dofile("lua/core/balloon.lua")
     local help = dofile("lua/core/commands.lua").help()
@@ -115,7 +120,8 @@ function M.refresh(opts)
         problem = problem or string.format("%s could not be built: %s", name, tostring(set))
         M.forget(name)
       elseif type(set) ~= "table" then
-        problem = problem or string.format("%s had nothing to show", name)
+        -- Nothing to show (no data yet, or a builder that declined): not a failure, and not worth a line on
+        -- the reader's screen. It is tried again at the next boundary.
         M.forget(name)
       else
         local done, why = M.publish(name, set)
