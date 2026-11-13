@@ -26,7 +26,10 @@
     "scripts/web-http-outcomes.mjs",
     "scripts/reclaim-disk.sh",
     "scripts/reclaim-disk.mjs",
-    "scripts/check-disk-floor.sh"
+    "scripts/check-disk-floor.sh",
+    "scripts/sign-release.sh",
+    "components.lock",
+    "scripts/check-graph-component.lua"
   ],
   "globs": [
     "scripts/mcp-*",

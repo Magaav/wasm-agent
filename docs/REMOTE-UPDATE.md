@@ -180,3 +180,24 @@ session's own words:
 Two facts worth keeping: the first attempt was refused `tree_dirty` (two uncommitted paths - another
 session's draft), and the refusal named the count but not the paths, so the fix took a second look. The
 draft was preserved with `git stash push -u` rather than discarded, and the install then queued.
+
+## One verb, four modes (13/11)
+
+`wa update <node>` is the one deploy verb, and what it does on the peer is decided by a mode rather than by
+a different command per node:
+
+| mode | door | what the peer performs |
+| --- | --- | --- |
+| `tree` (default) | `request deploy` | its own Sentinel deploys its tree - building it, or installing the published release when the commit is covered |
+| `--binary` | `request run` | the same `scripts/deploy.sh` with `WA_DEPLOY_PREBUILT_ONLY=1`: the published release only, and a named `refused(no_prebuilt_binary)` instead of a build a toolchain-less node can never finish |
+| `--rollback` | `request run` | `scripts/rollback-node.sh`: the pair the last install kept (`<install>/rollback/` for a tree install, `<install>/.prev` for a release install), restored and restarted |
+| `--rendezvous` | `request run` | `scripts/deploy-rendezvous.sh`, the registry where that node runs one |
+
+All four are the same admitted thing: a signed master request the peer's own node process executes, never a
+relayed child shell. `wa land` (docs/LAND.md) is the caller that walks the whole ring in order - `work`,
+`mail`, `nextcloud` in `binary` mode, `openclaw` last - stopping at the first node that is not installed.
+
+Why `--binary` exists as a mode and not as a separate script: a binary-only aarch64 node asked for a tree
+deploy used to fall through the prebuilt branch into a build whenever the release for that commit was
+missing, and spent an hour failing one. The mode makes that a refusal with the command that publishes the
+missing release (`bash scripts/publish-node-binaries.sh --ensure --publish`).

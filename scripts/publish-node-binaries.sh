@@ -521,11 +521,30 @@ say "checksums $OUT/SHA256SUMS ($(wc -l < "$OUT/SHA256SUMS" | tr -d '[:space:]')
 # so whoever can publish one can publish the other and every check still passes. The sums are signed by
 # wa-vault's `release-signing` key - which never leaves the vault - and the signature ships beside them.
 # A release WITHOUT a valid signature is not published: this is a refusal here, not a note.
-say "signing $OUT/SHA256SUMS (wa-vault release-signing; nothing is published unsigned)"
-wa_release_sign_sums "$OUT/SHA256SUMS" "$OUT/SHA256SUMS.sig" || fail \
-  "release_not_signed: the sums were not signed by wa-vault, so this release is not published (set WA_VAULT_ADMIN_URL/WA_VAULT_ADMIN_TOKEN where the vault's operator tooling reads them, and create the release-signing key on its admin page)" 6
-assets="$assets SHA256SUMS.sig"
-say "signature $OUT/SHA256SUMS.sig ($(sed -n 's/^key //p' "$OUT/SHA256SUMS.sig"))"
+if [ "${WA_RELEASE_SIGN_DEFER:-0}" = 1 ]; then
+  # THE SIGNING HOST IS NOT ALWAYS THE BUILD HOST. The vault's admin listener answers on the machine that runs
+  # the vault (measured 13/11: 127.0.0.1:8801 on the operator's laptop, loopback only), so `wa land` builds
+  # here with deferral, signs on the node whose WA_VAULT_ADMIN_URL is set (scripts/sign-release.sh) and brings
+  # the signature back. Deferral never weakens the rule, it moves the signer: a signature that arrived is
+  # VERIFIED here with the same trusted keys a node uses, a missing one is named, and `--publish` refuses -
+  # this script cannot publish an unsigned set even when asked.
+  if [ -f "$OUT/SHA256SUMS.sig" ]; then
+    wa_release_verify_sums "$OUT" || fail \
+      "release_signature_invalid: $OUT/SHA256SUMS.sig is not a trusted signature over $OUT/SHA256SUMS, so this release is not published (WA_RELEASE_SIGN_DEFER=1: the signature came from the signing host)" 6
+    assets="$assets SHA256SUMS.sig"
+    say "signature verified $OUT/SHA256SUMS.sig ($(sed -n 's/^key //p' "$OUT/SHA256SUMS.sig"); signed on the vault's host: WA_RELEASE_SIGN_DEFER=1)"
+  else
+    [ "${PUBLISH:-0}" != 1 ] || fail \
+      "release_not_signed: WA_RELEASE_SIGN_DEFER=1 and $OUT/SHA256SUMS.sig does not exist, so there is nothing to publish - sign $OUT/SHA256SUMS where the vault is (bash scripts/sign-release.sh $OUT/SHA256SUMS) and run this again" 6
+    say "signature deferred: WA_RELEASE_SIGN_DEFER=1, so $OUT/SHA256SUMS is not signed yet (scripts/sign-release.sh signs it on the vault's host; nothing publishes it unsigned)"
+  fi
+else
+  say "signing $OUT/SHA256SUMS (wa-vault release-signing; nothing is published unsigned)"
+  wa_release_sign_sums "$OUT/SHA256SUMS" "$OUT/SHA256SUMS.sig" || fail \
+    "release_not_signed: the sums were not signed by wa-vault, so this release is not published (set WA_VAULT_ADMIN_URL/WA_VAULT_ADMIN_TOKEN where the vault's operator tooling reads them, and create the release-signing key on its admin page)" 6
+  assets="$assets SHA256SUMS.sig"
+  say "signature $OUT/SHA256SUMS.sig ($(sed -n 's/^key //p' "$OUT/SHA256SUMS.sig"))"
+fi
 # gh is a native process: a /c/... path is not one it can open (AGENTS.md's oldest trap). Converted here,
 # in the line a human pastes, so the printed command works from this shell.
 asset_paths=""

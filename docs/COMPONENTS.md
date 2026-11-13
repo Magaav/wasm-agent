@@ -253,6 +253,7 @@ every candidate is verified against the manifest (sha256 **and** size, plus the 
 | --- | --- |
 | `WA_DEPLOY_BINARY_SOURCE=<dir>` | install binaries another machine built (the supported path for a node with no toolchain at all) |
 | `WA_DEPLOY_BUILD_ONLY=1` | build this tree, never install a published binary |
+| `WA_DEPLOY_PREBUILT_ONLY=1` | install a published binary only: no build ever, and a named `refused(no_prebuilt_binary)` when this commit is not covered (`wa update <node> --binary`, the binary-only node) |
 | `WA_DEPLOY_ALLOW_EMPTY_CODEMODE=1` | accept a published binary whose manifest records `codemode=empty` |
 | `WA_NODE_RELEASE_REPO=<owner/repo>` | read the release from another repository; default: origin's GitHub slug, else `Magaav/wasm-agent` |
 | `WA_NODE_BINARIES_URL=<dir>` / `file://<dir>` / `https://...` | read the assets from there instead of GitHub (a hand-copied release; what the tests use) |

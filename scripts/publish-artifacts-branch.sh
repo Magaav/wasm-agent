@@ -10,6 +10,7 @@
 #
 #   ref      artifacts/node-<sha12>            (an orphan commit: no parent, no tree of the project)
 #   contents node-<sha12>.manifest             the pins the publisher wrote
+#            SHA256SUMS                        the same pins in the flat form `sha256sum -c` reads
 #            wa-<triple>-<sha12>               one payload per published triple
 #            wa-sentinel-<triple>-<sha12>
 #            PUBLISH.sh                        the exact `gh release create` line, paths relative to the
@@ -116,9 +117,18 @@ done
 ASSETS="$ASSETS node-$SHORT.manifest"
 [ -f "$MANIFEST" ] || fail "manifest_missing: $MANIFEST" 2
 ROWS="$ROWS$(wa_node_sha256 "$MANIFEST")  $(wc -c < "$MANIFEST" | tr -d '[:space:]')  node-$SHORT.manifest"$'\n'
-# The signed sums ship WITH the binaries they name. Both are release files like any other: the publisher
-# wrote them beside the payloads (scripts/publish-node-binaries.sh signs SHA256SUMS with wa-vault's
-# `release-signing` key), and a set without them is not a release this project will publish.
+# ---- 1a. the pins, before the signed sums join the list ---------------------------------------------
+# `SHA256SUMS` is the flat form of THESE rows (`<sha>  <bytes>  <name>`, what `sha256sum -c` reads), so the
+# manifest's own pins are remembered here and checked against it in 1c - before SHA256SUMS and its
+# signature become rows themselves, which they can never be pins of (a file cannot name its own hash).
+MANIFEST_ROWS="$ROWS"
+
+# ---- 1b. the signed sums ship WITH the binaries they name -------------------------------------------
+# Both are release files like any other: the publisher wrote them beside the payloads
+# (scripts/publish-node-binaries.sh signs SHA256SUMS with wa-vault's `release-signing` key), and a set
+# without them is not a release this project will publish. Measured 13/11 on `artifacts/node-0d4ccca2213d`
+# from the other direction: the ref held the payloads and no SHA256SUMS at all while the PUBLISH.sh shipped
+# beside them named it - a publish that fails on a missing file, after a human was told to paste the line.
 for signed in SHA256SUMS SHA256SUMS.sig; do
   [ -f "$OUT/$signed" ] || fail \
     "release_not_signed: $OUT/$signed is missing - a node refuses a release without its signed sums, so it is not published" 6
@@ -126,6 +136,28 @@ for signed in SHA256SUMS SHA256SUMS.sig; do
   ROWS="$ROWS$(wa_node_sha256 "$OUT/$signed")  $(wc -c < "$OUT/$signed" | tr -d '[:space:]')  $signed"$'\n'
 done
 say "verified $MANIFEST against every payload (source_commit $COMMIT)"
+
+# ---- 1c. the sums name these bytes, and the signature is about THOSE sums ----------------------------
+# Three checks, all before the commit exists: every manifest pin is in SHA256SUMS; the signature is a real
+# one by a key this project trusts (not merely a file with the right name - `wa_release_verify_sums`, the
+# same rule a node applies before it installs, docs/INSTALL.md "Signed releases"); and the file goes into
+# the commit and is read back out of git, so `sha256sum -c SHA256SUMS` works from a `git archive` of the
+# ref with no knowledge of the manifest's shape.
+SUMS="$OUT/SHA256SUMS"
+unpinned=""
+while IFS=$' \t' read -r want_sha want_bytes name; do
+  [ -n "${name:-}" ] || continue
+  grep -qx "$want_sha  $name" "$SUMS" || unpinned="$unpinned $name"
+done <<< "$MANIFEST_ROWS"
+[ -z "$unpinned" ] || fail "checksums_mismatch: SHA256SUMS does not carry the manifest's pin for:$unpinned" 5
+if command -v wa_release_verify_sums >/dev/null 2>&1; then
+  wa_release_verify_sums "$OUT" || fail \
+    "release_signature_invalid: $OUT/SHA256SUMS.sig is not a trusted signature over $SUMS - this release is not published" 6
+  say "signature verified: $OUT/SHA256SUMS.sig ($(sed -n 's/^key //p' "$OUT/SHA256SUMS.sig"))"
+else
+  say "no scripts/lib/release-signing.sh beside this script, so the signature on $SUMS was not verified here"
+fi
+say "checksums verified: $SUMS ($(wc -l < "$SUMS" | tr -d '[:space:]') row(s), every pin the manifest's)"
 
 # ---- 2. PUBLISH.sh: the publisher's own gh line, with the paths made relative to the commit root -----
 # The publisher prints both forms (create, then the clobber upload). They are taken from ITS output rather

@@ -722,7 +722,13 @@ BINARY_LINES
       # Nothing published for this commit/target (or this host has no published target), and - since the
       # resolver also asks whether the newest release of the same compiled inputs exists - nothing published
       # matches this commit's compiled inputs either. Building is the answer only if the disk can pay for a
-      # run: the same floor scripts/test.sh refuses below.
+      # run: the same floor scripts/test.sh refuses below - and never at all when the caller installed
+      # WA_DEPLOY_PREBUILT_ONLY=1, which is how `wa update <node> --binary` says "this node has no
+      # toolchain; install the release or say why not" (a binary-only aarch64 node would otherwise spend
+      # an hour failing a build it can never finish).
+      if [ "${WA_DEPLOY_PREBUILT_ONLY:-0}" = 1 ]; then
+        fail "refused(no_prebuilt_binary): nothing is published for $(git rev-parse --short HEAD) on $(wa_node_target_triple 2>/dev/null || echo 'this host') and this deploy was asked for a published binary only (WA_DEPLOY_PREBUILT_ONLY=1); nothing was built and nothing installed. Publish it (bash scripts/publish-node-binaries.sh --ensure --publish on the building host) or run the deploy without that variable"
+      fi
       if command -v wa_node_disk_floor_ok >/dev/null 2>&1 && wa_node_disk_floor_ok "$ROOT"; then
         echo "deploy: no published binary for this commit; building this tree (disk floor ok)"
       else
@@ -1184,6 +1190,29 @@ chmod +x "$CANDIDATE" 2>/dev/null || true
 # The staged published binary has been copied to the hash-named candidate: the stage is not install state.
 [ "${PREBUILT_BINARIES:-0}" = 1 ] && rm -rf "$BINARY_STAGE"
 
+# 5e. Keep the pair this install replaces.
+#
+# `wa update <node> --rollback` has to be a fact on disk, not a release feed to be re-read: the node it
+# is about may be the reason it is needed. So the two binaries and the record that names them are copied
+# into <install>/rollback/ immediately before the install that replaces them, and
+# scripts/rollback-node.sh puts them back. Costs two file copies per install and one `cmp` when the copy
+# is already there; a first install keeps nothing, because there is nothing to keep.
+if [ -f "$INSTALL_DIR/wa" ]; then
+  WA_ROLLBACK_DIR="$INSTALL_DIR/rollback"
+  if mkdir -p "$WA_ROLLBACK_DIR" 2>/dev/null; then
+    for keep in wa wa-sentinel; do
+      [ -f "$INSTALL_DIR/$keep" ] || continue
+      cmp -s "$INSTALL_DIR/$keep" "$WA_ROLLBACK_DIR/$keep" || cp -p "$INSTALL_DIR/$keep" "$WA_ROLLBACK_DIR/$keep" \
+        || note "could not keep $keep for a rollback in $WA_ROLLBACK_DIR (the install continues; --rollback will say rollback_incomplete)"
+    done
+    [ ! -f "$INSTALL_DIR/installed.txt" ] || cp -p "$INSTALL_DIR/installed.txt" "$WA_ROLLBACK_DIR/installed.txt" 2>/dev/null || true
+    printf 'kept_utc=%s\nreplaced_by=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$COMMIT" > "$WA_ROLLBACK_DIR/kept.txt" 2>/dev/null || true
+    echo "deploy: kept the current pair for a rollback in $WA_ROLLBACK_DIR"
+  else
+    note "could not create $WA_ROLLBACK_DIR; this install keeps no rollback copy"
+  fi
+fi
+
 # 6. Install and restart, through the script that owns that job.
 UPGRADE="$ROOT/scripts/upgrade.sh"
 [ -f "$UPGRADE" ] || fail "no scripts/upgrade.sh to perform the install"
@@ -1566,6 +1595,16 @@ DEPLOY_SRC="$ROOT/scripts/deploy.sh"
 if [ -f "$DEPLOY_SRC" ]; then
   ship_file "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" "deploy.sh beside the binary"
 fi
+# The rollback the install above makes possible, beside the install: `wa update <node> --rollback` runs
+# THIS copy through the node's own sentinel, so the verb still works on a node whose tree is behind or
+# broken - which is the state a rollback is for.
+ROLLBACK_SRC="$ROOT/scripts/rollback-node.sh"
+[ -f "$ROLLBACK_SRC" ] || ROLLBACK_SRC="$(dirname "$0")/rollback-node.sh"
+if [ -f "$ROLLBACK_SRC" ]; then
+  ship_file "$ROLLBACK_SRC" "$INSTALL_DIR/scripts/rollback-node.sh" "rollback-node.sh beside the binary"
+else
+  note "no scripts/rollback-node.sh to ship; --rollback will refuse on this node by name"
+fi
 
 # Replacing an executable file does not replace the already-running process.
 # Even when the copy succeeds on Windows, a watcher can keep executing the old
@@ -1692,6 +1731,11 @@ ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-bi
 # nothing to install.
 ship_file "$ROOT/scripts/lib/release-signing.sh" "$INSTALL_DIR/scripts/lib/release-signing.sh" "scripts/lib/release-signing.sh beside deploy.sh (signed releases)"
 ship_file "$ROOT/scripts/lib/release_verify.py" "$INSTALL_DIR/scripts/lib/release_verify.py" "scripts/lib/release_verify.py beside deploy.sh (the verifier the shell paths run)"
+# The command that SIGNS a release, for the node whose vault listener is reachable: `wa land` asks that node
+# to sign the sums of a release built elsewhere and brings the signature back (`lua/core/land.lua`, the `sign`
+# step). A signing host without this file refuses by name (`signer_script_missing`), which is a deployment
+# gap and not a silent unsigned release.
+ship_file "$ROOT/scripts/sign-release.sh" "$INSTALL_DIR/scripts/sign-release.sh" "scripts/sign-release.sh beside the binary (release signing on the vault's host)"
 # ...and the rule that retires a script this release no longer ships: it runs at the end of THIS deploy, from
 # the copy beside deploy.sh, so an installed `request deploy` prunes exactly as the checkout deploy does.
 ship_file "$ROOT/scripts/lib/retire-unshipped.sh" "$INSTALL_DIR/scripts/lib/retire-unshipped.sh" "scripts/lib/retire-unshipped.sh beside deploy.sh"
