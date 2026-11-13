@@ -400,6 +400,14 @@ elseif command == "eval" then
   local code = dofile("lua/core/harness_evaluator_cli.lua").run(args)
   if code and code ~= 0 then os.exit(code) end
 
+elseif command == "turns" then
+  -- The turn feed (lua/core/turnfeed_cli.lua, docs/TURNS.md): the model's own `<turn>` notes, read out
+  -- of this node's ledger and every peer that answers, grouped into a ranked queue with a brief per
+  -- group. It reads; it changes nothing but its own report files, and it decides nothing - the fix
+  -- marker is an operator's statement, not this command's.
+  local code = dofile("lua/core/turnfeed_cli.lua").run(args)
+  if code and code ~= 0 then os.exit(code) end
+
 elseif command == "help" then
   print("wa [chat] [--continue|-c|--resume <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id>")
@@ -410,6 +418,8 @@ elseif command == "help" then
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
   print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
+  print("    turns [--since 24h] [--top N] [--json]  the model's own <turn> complaints, grouped and ranked")
+  print("    turns fixed <cluster> --sha <commit>     mark a cluster fixed; the report then says if it is still hurting")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
   print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")
