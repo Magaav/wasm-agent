@@ -42,6 +42,9 @@ linked worktree on its own branch that owns its tree. Lanes, the merge lane and 
 
 ## Rules
 
+- **One root.** Everything an agent creates lives under <home>/.wasm-agent (docs/ONEROOT.md):
+  worktrees via scripts/new-worktree.sh, scratch in tmp/, builds in build/<tree>-<hash>/. wa clean
+  [--dry-run] reclaims it; a full disk refuses new heavy work by name (disk_cap).
 - **Never touch the old plugin.** The v8 plugin is reference only.
 - **Keep LF.** `core.autocrlf=false`; the `pre-commit` hook is the contract. Hooks are armed by
   `bash scripts/setup-hooks.sh` (deploy runs it); run it once in a fresh clone.
