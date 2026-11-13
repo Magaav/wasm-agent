@@ -54,7 +54,9 @@ M.REPLAY_HOOK_MATCHERS = {
 }
 -- A bash tool call and `git push` are handled a step lower: replay puts shims on PATH that refuse the
 -- remote commands (`harness-evaluator/replay/sink.sh` explains why the hook cannot do that one).
-M.GUARDED_COMMANDS = { "git push", "git fetch", "git pull", "ssh", "scp", "sftp", "rsync", "gh" }
+-- The remote-verb guard's list, as the guard script implements it: the subcommands that leave the machine,
+-- an alias in any argument, a verb the guard does not know, and every non-read form of `remote`/`submodule`.
+M.GUARDED_COMMANDS = { "git push", "git fetch", "git pull", "git ls-remote", "git clone", "git remote <anything but -v/--verbose/get-url/show>", "git submodule <anything but status/summary>", "git <an argv that mentions alias>", "ssh", "scp", "sftp", "rsync", "gh" }
 
 -- The refusal rule, named so a count can be read as the rule that produced it: a tool result that
 -- begins with one of these is a refusal ("it refused", not "it failed" and not "it answered").
@@ -713,6 +715,17 @@ function M.report(opts)
     lines[#lines + 1] = ""
     lines[#lines + 1] = "reviewer (storage only - no reviewer decided anything here):"
     for _, line in ipairs(reviewer_lines) do lines[#lines + 1] = "  " .. line end
+  end
+  -- The landing reviewer's own store (lua/core/harness_evaluator_reviewer.lua): per review a row and
+  -- then the totals. It is handed in by the door that has the module, so this file keeps one dependency
+  -- and a caller that passes nothing gets the report it had before the reviewer existed.
+  if type(opts.reviews) == "table" and type(opts.reviews.report_lines) == "function" then
+    local ok, extra = pcall(opts.reviews.report_lines)
+    if ok and type(extra) == "table" then
+      for _, line in ipairs(extra) do lines[#lines + 1] = line end
+    else
+      lines[#lines + 1] = "reviews: the review store could not be read (" .. tostring(extra) .. ")"
+    end
   end
   return lines
 end
