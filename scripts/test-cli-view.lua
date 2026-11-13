@@ -1205,12 +1205,27 @@ end
 -- status row are one screen and have to be asserted together.
 local function fake_transcript()
   local blocks = { { topic = false, lines = {} } }
-  local api = { blocks = blocks }
+  local api = { blocks = blocks, folds = 0 }
   local function last() return blocks[#blocks] end
-  api.block = function(topic)
+  api.block = function(topic, code)
     api.live_at = nil
-    if #last().lines == 0 then last().topic = topic
-    else blocks[#blocks + 1] = { topic = topic, lines = {} } end
+    if #last().lines == 0 then last().topic, last().code = topic, code == true
+    else blocks[#blocks + 1] = { topic = topic, code = code == true, lines = {} } end
+    return true
+  end
+  -- `transcript_rewrite(offset, text)`: a committed row of the current block, counted from its end.
+  -- This is how a code-mode block flips a running call's row from ⏳ to ✓ without drawing it again.
+  api.rewrite = function(offset, text)
+    local index = #last().lines + offset + 1
+    if not last().lines[index] then return false end
+    last().lines[index] = tostring(text or "")
+    return true
+  end
+  -- `transcript_fold(summary)`: the newest code-mode block collapses to one row (the host decides
+  -- whether it may - a pinned block does not).
+  api.fold = function(summary)
+    api.folds = api.folds + 1
+    api.folded_summary = tostring(summary or "")
     return true
   end
   api.write = function(text)
@@ -1437,97 +1452,144 @@ do
   host.input_editor = real_editor
 end
 
-
--- ---- #121: a code-mode call shows its script, and what the model got back ------------------------
--- Operator, 11/11 ~11:45: a code-mode call in the transcript showed ONE row of its script (the whole
--- program clipped into `code=...`, `lua/core/cli_view.lua`'s unknown-tool path) and nothing of what
--- it returned, so a call that rewrote three files read as one truncated line and its answer was only
--- available through `/console`. Three rows now, the rest behind the transcript's fold (Right expands
--- the topic), and under them the value the model received.
+-- ---- a code-mode call is a block that reads (operator, 13/11 ~07:30) ------------------------------
+-- What was wrong: the heading repeated the script's first line in its parentheses AND the body printed
+-- the same code again; the result row showed the evidence envelope
+-- (`{"evidence":{"bytes":2473,"path":"/home/agent/.wasm-agent/mcp/requests/..."}}`) instead of the
+-- script's value; and nothing said which tools ran, whether they worked, or how long they took.
+--
+-- What it is now, and what this section pins: the heading names the TOOLS (`⏺ Code · bash ×3`, never
+-- code) with the total right-aligned; the script is shown once, six rows then `… +N lines`; one row
+-- per inner call (`✓`/`✗`/`⏳`, a fan-out collapsed to `bash ×10 ⏳4 ✓5 ✗1`); then the value, with the
+-- evidence envelope hidden and named once under it. The block that is RUNNING is open and streams - a
+-- call's row is written as it starts and rewritten in place when it settles - and the block before it
+-- collapses to ONE summary row. That fold is the host's (`rust/wa-term/src/transcript.rs`); this side
+-- owns the rows and asks for it with the summary it built.
 do
+  local blocks = dofile("lua/core/codemode_block.lua")
   local SCRIPT = "const files = await tools.ls({path: 'lua/core'});\n"
     .. "const hits = files.filter(f => f.endsWith('.lua'));\n"
     .. "await tools.read({path: 'lua/core/chat.lua'});\n"
-    .. "return {count: hits.length, first: hits[0]};\n"
-    .. "// the rest of a longer script\n"
-    .. "// and one more line"
+    .. "const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));\n"
+    .. "await tools.read({path: 'lua/core/agent.lua'});\n"
+    .. "await tools.read({path: 'lua/core/tools.lua'});\n"
+    .. "await tools.read({path: 'lua/core/server.lua'});\n"
+    .. "return {count: hits.length, first: hits[0]};"
 
-  -- The transcript: the block is the heading, then the script's three rows (the fold's three), and
-  -- the result under them - which is what `wa_term::transcript` then folds and expands.
-  local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head }
+  local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head,
+    host.transcript_rewrite, host.transcript_fold, host.input_editor }
   local fake = fake_transcript()
   host.transcript_block, host.transcript_write = fake.block, fake.write
   host.transcript_live, host.transcript_head = fake.live, fake.head
-  local view, written = capture({ live = true, stdout = true, limit = 120,
-    rows = function() return 24 end, now = function() return 700 end })
-  local real_editor = host.input_editor
+  host.transcript_rewrite, host.transcript_fold = fake.rewrite, fake.fold
   host.input_editor = function() return true end
-  view.editor = true
+  local clock = { now = 100 }
+  local view, written = capture({ live = true, stdout = true, limit = 80, rows = function() return 24 end,
+    now = function() return clock.now end })
+  view.screen = view_lib.screen_rows(24, true)
+  view.editor, view.editor_ready = true, true
   view:prompt("wa> ")
-  view:event({ type = "tool", name = "codemode", arguments = { code = SCRIPT } })
-  local block = fake.blocks[#fake.blocks]
-  eq(#block.lines, 4, "the call's block is the heading and three script rows: " .. #block.lines)
-  ok(has(visible(block.lines[1]), "Codemode("), "the heading is the call: " .. visible(block.lines[1]))
-  ok(has(visible(block.lines[2]), "tools.ls") and has(visible(block.lines[4]), "chat.lua"),
-    "and the three rows are the script's own first three: "
-      .. visible(table.concat(block.lines, " | ")))
-  ok(not has(visible(table.concat(block.lines, "\n")), "one more line"),
-    "the rest is not written: the fold names it, so it is expanded, not lost")
-  view:event({ type = "tool_result", name = "codemode",
-    result = { ok = true, value = { count = 2, first = "chat.lua" } } })
-  local shown = visible(table.concat(fake.blocks[1].lines, "\n"))
-  ok(has(shown, '"count":2'), "the value the model received is under the script: " .. shown)
-  ok(has(shown, "exit") or has(shown, "1ms") or has(shown, "ms"), "beside the call's elapsed time")
-  eq(#fake.blocks[1].lines, 4 + 2, "heading, three script rows, the value and the summary: "
-    .. #fake.blocks[1].lines)
-  host.transcript_block, host.transcript_write = saved[2], saved[1]
-  host.transcript_live, host.transcript_head = saved[3], saved[4]
-  host.input_editor = real_editor
+  view:event({ type = "tool", name = "codemode", arguments = { code = SCRIPT }, call_id = "c0" })
+  local first = fake.blocks[#fake.blocks]
+  eq(first and first.code, true, "the call opens a CODE-MODE block, the one the host draws expanded")
+  eq(visible(first.lines[1]), "⏺ Code", "its heading, before any inner call has run")
+  ok(not has(visible(table.concat(first.lines, "\n")), "code="), "the heading never carries the code")
 
-  -- The plain layout has no fold: three rows, then how many it left out.
+  -- The script, ONCE: six rows, then the count of what was kept back.
+  eq(#first.lines, 1 + 6 + 1, "the heading, six script rows and the `+N lines` marker")
+  ok(has(visible(first.lines[2]), "tools.ls"), "the first script row is the script's own")
+  ok(has(visible(first.lines[7]), "tools.lua"), "and the sixth is its sixth line")
+  ok(has(visible(first.lines[8]), "… +2 lines"), "the rest is named, not lost: " .. visible(first.lines[8]))
+  ok(not has(visible(table.concat(first.lines, "\n")), "server.lua"), "and it is not drawn a second time")
+
+  -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
+  -- second row, which is what "streams" has to mean in a transcript that can only append.
+  local base = #first.lines
+  view:event({ type = "codemode_call", id = "c1", name = "bash", arguments = { command = "wc -l lua/core/chat.lua" }, state = "running" })
+  local rows = first.lines
+  eq(#rows, base + 1, "a call that starts adds one row")
+  ok(has(visible(rows[#rows]), "⏳ bash"), "with the ⏳ mark: " .. visible(rows[#rows]))
+  ok(has(visible(rows[#rows]), "wc -l lua/core/chat.lua"), "and what it was given")
+  ok(has(visible(rows[1]), "Code · bash"), "the heading names the tool as soon as it is called: " .. visible(rows[1]))
+  view:event({ type = "codemode_call", id = "c1", name = "bash", state = "ok", ms = 250 })
+  rows = first.lines
+  eq(#rows, base + 1, "settling rewrites that row in place")
+  ok(has(visible(rows[#rows]), "✓ bash") and has(visible(rows[#rows]), "250ms"),
+    "to ✓ and its time: " .. visible(rows[#rows]))
+
+  -- A failure says WHY on its own row: the error code, never the word "failed".
+  view:event({ type = "codemode_call", id = "c2", name = "web_read", arguments = { url = "https://example.com" }, state = "running" })
+  view:event({ type = "codemode_call", id = "c2", name = "web_read", state = "failed", ms = 420,
+    error = "web_http_429", code = "web_http_429" })
+  rows = first.lines
+  ok(has(visible(rows[#rows]), "✗ web_read") and has(visible(rows[#rows]), "web_http_429"),
+    "a failure keeps its error code: " .. visible(rows[#rows]))
+
+  -- The answer: the value the script returned, the envelope hidden, the heading's clock right-aligned.
+  clock.now = 101.2
+  view:event({ type = "tool_result", name = "codemode", result = { ok = false,
+    value = { count = 2, first = "chat.lua" }, error = "web_http_429",
+    evidence = { bytes = 2473, path = "/home/agent/.wasm-agent/mcp/requests/op-1.json",
+      sha256 = "5f2a1c9d8e7b6a5f4e3d2c1b" } } })
+  rows = first.lines
+  local shown = visible(table.concat(rows, "\n"))
+  ok(has(shown, '{"count":2,"first":"chat.lua"}'), "the value the model received is the result row: " .. shown)
+  ok(not has(shown, "/home/agent/.wasm-agent/mcp/requests"), "the evidence envelope's path is not the answer")
+  ok(has(shown, "evidence: 2473 B · sha 5f2a1c9d"), "it is named once, under the value: " .. shown)
+  ok(has(visible(rows[1]), "Code · bash, web_read"),
+    "the heading names every tool the script called: " .. visible(rows[1]))
+  ok(has(visible(rows[1]), "1.2s"), "and the call's whole time, right-aligned: " .. visible(rows[1]))
+  eq(view_lib.columns(visible(rows[1])), 80, "on the width it was given")
+  ok(has(rows[1], view_lib.style("error")), "with its step mark in the failure's colour")
+
+  -- The next code-mode call collapses the one before it to its summary - the running block is the one
+  -- that is open (operator, 13/11) - and the host decides, so a pinned block is not folded.
+  local expected = blocks.summary(view.code_done, 80, view:codemode_opts())
+  view:event({ type = "tool", name = "codemode", arguments = { code = "return 1;" }, call_id = "c9" })
+  eq(fake.folds, 1, "the block before it is folded exactly once")
+  eq(fake.folded_summary, expected, "to the summary this side built")
+  ok(has(fake.folded_summary, "⏺ Code · bash, web_read ✗ web_http_429"),
+    "which names the tools and the failure: " .. tostring(fake.folded_summary))
+  ok(has(fake.folded_summary, "1.2s") and has(fake.folded_summary, '{"count":2,"first":"chat.lua"}'),
+    "with its time and the value's first line: " .. tostring(fake.folded_summary))
+  eq(fake.blocks[#fake.blocks].code, true, "and the new block is the open one")
+
+  -- A captured run has no fold and cannot take a row back: the block is written once, when the answer
+  -- is in, and never carries a ⏳ that nothing would ever flip.
   local plain, plain_written = capture({ live = false, limit = 120 })
   plain:event({ type = "tool", name = "codemode", arguments = { code = SCRIPT } })
+  ok(not has(visible(table.concat(plain_written)), "tools.ls"),
+    "a running script writes no block to a log (the status line is all): " .. visible(table.concat(plain_written)))
   plain:event({ type = "tool_result", name = "codemode", result = { ok = true, value = { count = 2 } } })
   local text = visible(table.concat(plain_written))
-  ok(has(text, "Codemode(") and has(text, "tools.ls") and has(text, "chat.lua"),
-    "a captured transcript shows the script too: " .. text)
-  ok(has(text, "\226\128\166 +3 lines"), "and names the three rows it did not print")
-  ok(has(text, '"count":2'), "with the value under them")
+  ok(has(text, "⏺ Code") and has(text, "tools.ls") and has(text, "… +2 lines"),
+    "the block is written once, with its script and the fold's count: " .. text)
+  ok(has(text, '{"count":2}'), "and the value under it")
+  ok(not has(text, "⏳"), "with no live mark in a log that cannot update it")
 
-  -- What the rows are: the first `count`, and how many were left for the fold/marker.
-  local rows, hidden = view_lib.code_rows({ code = SCRIPT }, 3)
-  eq(#rows, 3, "a six-line script is three rows in the block")
-  eq(hidden, 3, "and three left for the fold to name")
-  ok(has(rows[1], "tools.ls") and has(rows[3], "chat.lua"),
-    "in the order the model wrote them: " .. table.concat(rows, " | "))
-  eq(#select(1, view_lib.code_rows({ code = "one line" }, 3)), 1, "a one-line script is one row")
-  eq(#select(1, view_lib.code_rows({ code = "" }, 3)), 0, "an empty script adds no row at all")
-  eq(#select(1, view_lib.code_rows({ code = "a\n\n\n" }, 3)), 1,
-    "trailing blank lines are not rows: a script's last newline is not a line")
-  local encoded = view_lib.code_rows({ code = { "a", "b" } }, 3)
-  ok(#encoded == 1 and has(encoded[1], '"a"'), "a script that is not text is still shown: "
-    .. tostring(encoded[1]))
-  -- The heading: the script's first line, not `code=const files = await tools.ls(...) ...`.
-  local label, inside = view_lib.tool_title("codemode", { code = SCRIPT }, 96)
-  eq(label, "Codemode", "a code-mode call is titled Codemode")
-  ok(has(inside, "tools.ls") and not has(inside, "code="),
-    "and named by the script's first line: " .. tostring(inside))
+  host.transcript_block, host.transcript_write = saved[2], saved[1]
+  host.transcript_live, host.transcript_head = saved[3], saved[4]
+  host.transcript_rewrite, host.transcript_fold = saved[5], saved[6]
+  host.input_editor = saved[7]
 
-  -- What the model received: the script's value first (it is the one fact the tool returns to the
-  -- model), then its error, then its nested calls - never the journal beside them.
-  local preview = view_lib.preview("codemode", { value = { count = 2, first = "a.lua" },
-    calls = { { name = "ls" }, { name = "read" } } }, 3)
+  -- What the module itself promises, called directly: the value first (the one fact the tool returns
+  -- to the model), never the journal beside it, and never an evidence envelope where the value goes.
+  local preview = view_lib.preview("codemode", { value = { count = 2, first = "a.lua" } }, 3)
   eq(#preview, 1, "a value is one row")
   ok(has(preview[1], '"count":2'), "as the JSON the model was given: " .. tostring(preview[1]))
+  local envelope = view_lib.preview("codemode", { value = { evidence = { bytes = 9, path = "/tmp/x.json" } } }, 3)
+  ok(has(envelope[1], "…evidence") and not has(envelope[1], "/tmp/x.json"),
+    "an evidence envelope is not a value: " .. tostring(envelope[1]))
   local failed_preview = view_lib.preview("codemode", { error = "codemode_stalled" }, 3)
   ok(#failed_preview == 1 and has(failed_preview[1], "codemode_stalled"),
     "a failed script says why: " .. tostring(failed_preview[1]))
-  local calls_preview = view_lib.preview("codemode", { calls = { { name = "read", ok = true },
-    { name = "bash", ok = false } } }, 3)
-  ok(#calls_preview >= 2 and has(calls_preview[1], "2 calls") and has(calls_preview[3], "bash (failed)"),
-    "with no value, what it did is what it says: " .. table.concat(calls_preview, " | "))
+  local rows3, hidden = blocks.script_rows({ code = SCRIPT }, 3)
+  eq(#rows3, 3, "a three-row block shows three rows of an eight-line script")
+  eq(hidden, 5, "and names the five it did not")
+  eq(#select(1, blocks.script_rows({ code = "" }, 3)), 0, "an empty script adds no row at all")
+  eq(#select(1, blocks.script_rows({ code = "a\n\n\n" }, 3)), 1,
+    "trailing blank lines are not rows: a script's last newline is not a line")
 end
-
 
 -- ---- #114: a fenced block gets a copy affordance, and a click copies it ---------------------------
 -- Operator, 11/11 ~11:25: fenced blocks in the CLI transcript (a ``` block, drawn as a card with its

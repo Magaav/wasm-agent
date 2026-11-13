@@ -1911,6 +1911,19 @@ function M:run_body(text, images)
   -- reason, rather than being left to overrun its budget or its deadline; the
   -- runtime's native deadline is the second line of defence for provider I/O.
   local child_limits = self.subagent and (self.subagent.limits or {}) or nil
+  -- The session's schedule follows its run (operator, 13/11: "interrupting a session should be in sync
+  -- with the schedule, once interrupted, it stops, once it resumes, it resumes"). The moment this run
+  -- *observes* the user's cancel, every scheduled wake of the session is held, once per run - before
+  -- the run even unwinds, so no tick and no CLI idle prompt can start a wake turn under the interrupt.
+  -- Without this the cancel stopped one run and left the loop armed: the CLI's own interrupt flag stays
+  -- set until the next submitted line, so each re-armed wake claimed afterwards failed `run_cancelled`
+  -- at once and re-armed again - a failed turn and an error line per cadence, for ever.
+  local interrupt_noted = false
+  local function note_interrupt()
+    if interrupt_noted or self.subagent then return end
+    interrupt_noted = true
+    pcall(selfloop.pause, self.session_id, self.user, "run_cancelled")
+  end
   local function child_status()
     if not child_limits then return nil end
     local ok, raw = pcall(host.subagent, "self", "{}")
@@ -1924,7 +1937,9 @@ function M:run_body(text, images)
     local checked, raw = pcall(host.run_cancelled)
     if not checked then return false end
     local state = json.decode(raw)
-    return type(state) == "table" and state.cancelled == true
+    local cancelled = type(state) == "table" and state.cancelled == true
+    if cancelled then note_interrupt() end
+    return cancelled
   end
 
   -- Preflight a child call against the remaining token and cost budgets.
@@ -2773,7 +2788,12 @@ function M:run_body(text, images)
       run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
-      model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }
+      model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected,
+      -- The run's own event stream, for a tool that has something to say while it works: a code-mode
+      -- script reports each nested call as it starts and settles, which is what the CLI's block shows
+      -- (`lua/core/codemode.lua` -> `lua/core/codemode_block.lua`). Nothing on the result path reads
+      -- it, and a caller with no listener emits into `on_event`, which is a no-op.
+      emit = function(event) self.emit(event) end }
     dispatch_ctx.steering_admit=function() return steering.admit(self.user,self.session_id,self.steering_run_id) end
     local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
     -- The batching treatment was retired (04/11): every run now carries the default guidance, so

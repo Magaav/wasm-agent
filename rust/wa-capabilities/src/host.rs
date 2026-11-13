@@ -3083,6 +3083,11 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
         Mouse::WheelDown => { clear_selection(state); state.transcript.page(-3); }
         Mouse::Press(row, col) => {
             clear_selection(state);
+            // The scrollbar's own gesture, before the selection's: a press in the bar's column
+            // (the screen's last one, while the bar is drawn there) jumps the view there and grabs
+            // the thumb, and a press anywhere else is still a selection. `scroll::bar` holds the
+            // arithmetic; this is only the routing.
+            if state.transcript.bar_press(row, col, width) { return; }
             if row > rows || state.nav.is_some() { return; }
             // The copy icon of a fenced block (#114): the transcript knows which cell it drew the
             // affordance on, so a press there is a copy and a press anywhere else is a selection -
@@ -3103,8 +3108,18 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
             state.selection = Some(Selection { anchor: (row, col), head: (row, col), rows: shown, following });
             state.transcript.dirty = true;
         }
+        // Motion with no button down (`SGR` 35, which `1003` reports): the pointer is on the bar or
+        // it is not. Only that flip sets `dirty`, so a moving pointer costs no frame.
+        Mouse::Motion(row, col) => { state.transcript.bar_hover(row, col, width); }
         Mouse::Drag(row, col) | Mouse::Release(row, col) => {
-            let Some(selection) = state.selection.as_mut() else { return };
+            // A drag that began on the bar scrolls it, and the button coming up lets the thumb go;
+            // anything else is the selection it has always been.
+            if matches!(event, Mouse::Release(..)) {
+                if state.transcript.bar_release() { return; }
+            } else if state.transcript.bar_drag(row) {
+                return;
+            }
+            let Some(selection) = state.selection.as_mut() else { return; };
             selection.head = (row.clamp(1, selection.rows.len().max(1)), col);
             if matches!(event, Mouse::Release(..)) && selection.head == selection.anchor { clear_selection(state); return; }
             // Copy on release (29/10): Omarchy's Super+C sends Ctrl+Insert to a terminal, and foot keeps
@@ -3367,6 +3382,14 @@ fn console_reader() {
                     for event in mice { handle_mouse(&mut state, event); }
                     for &byte in &keys {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
+                        // Ctrl+O pins a block expanded, so the code-mode block that follows cannot
+                        // collapse it (and the same key lets it go). It is the transcript's key: the
+                        // draft has no binding for it, so it is taken here before the editor.
+                        if byte == 0x0f && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
+                            let frame = layout_frame(&mut state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            continue;
+                        }
                         // Ctrl+C with a selection copies it; any other key ends the selection first.
                         if state.selection.is_some() {
                             if byte == 3 && copy_selection(&mut state) { continue; }
@@ -3381,6 +3404,7 @@ fn console_reader() {
                                 NavKey::Down => { if !state.transcript.focus_next() { state.transcript.sync(); state.nav = None; } }
                                 NavKey::Right => state.transcript.set_expanded(true),
                                 NavKey::Left => state.transcript.set_expanded(false),
+                                NavKey::Pin => { state.transcript.pin_toggle(); }
                                 NavKey::PageUp | NavKey::PageDown => {
                                     let page = page_rows(&state);
                                     state.transcript.page(if matches!(key, NavKey::PageUp) { page } else { -page });
@@ -3765,13 +3789,51 @@ pub extern "C-unwind" fn transcript_hold(l: *mut LuaState) -> c_int {
     1
 }
 
-/// `host.transcript_block(topic)`: start a new block; `topic` = collapsible (thinking, a tool call).
+/// `host.transcript_block(topic, code)`: start a new block; `topic` = collapsible (thinking, a tool
+/// call). `code` = a code-mode block: drawn expanded while it is the running one and folded to its
+/// summary when the next one starts (`host.transcript_fold`).
 pub extern "C-unwind" fn transcript_block(l: *mut LuaState) -> c_int {
     let topic = unsafe { wa_host_support::lua::lua_toboolean(l, 1) } != 0;
+    let code = unsafe { wa_host_support::lua::lua_toboolean(l, 2) } != 0;
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    state.transcript.block(topic);
+    if code { state.transcript.code_block(); } else { state.transcript.block(topic); }
     unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
+    1
+}
+
+/// `host.transcript_fold(summary)`: collapse the newest code-mode block to ONE row - the summary the
+/// view built for it (`⏺ Code · bash ×3 ✓ · 1.2s → "a,b,c"`) - because a newer code-mode block has
+/// taken the screen. A block the reader pinned with Ctrl+O is not collapsed. Returns whether it
+/// folded.
+pub extern "C-unwind" fn transcript_fold(l: *mut LuaState) -> c_int {
+    let summary = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = state.transcript.fold_code(&summary);
+    if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
+        let frame = layout_frame(&mut state);
+        let _ = wa_term::terminal_editor::write(&frame);
+    }
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.transcript_rewrite(offset, text)`: replace a committed line of the current block, counted
+/// from its end (`-1` = the last row). A code-mode block draws one row per inner call as the call
+/// starts, and this is what flips that row's `⏳` to `✓` when it settles - in place, without drawing
+/// the block again. Returns false when there is no such row.
+pub extern "C-unwind" fn transcript_rewrite(l: *mut LuaState) -> c_int {
+    let offset = unsafe { wa_host_support::lua::lua_tointegerx(l, 1, std::ptr::null_mut()) } as isize;
+    let text = arg_string(l, 2).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = state.transcript.rewrite(offset, &text);
+    if ok && state.editor.as_ref().is_some_and(|e| e.row > 0) && state.panel.is_none() && !state.transcript_held {
+        let frame = layout_frame(&mut state);
+        let _ = wa_term::terminal_editor::write(&frame);
+    }
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -4082,6 +4144,7 @@ pub extern "C-unwind" fn input_stop(l: *mut LuaState) -> c_int {
 #[cfg(test)]
 mod terminal_tests {
     use super::usable_size;
+    use serde_json::json;
 
     /// A line sent during a run is listed above the status line until Lua takes it; a line Lua
     /// holds for after the run (`input_held`) stays listed; taking it hands the rows back to the chat.
@@ -4122,6 +4185,43 @@ mod terminal_tests {
         let small = state.editor.as_ref().unwrap().out_bottom();
         assert!(small < 6, "a 10-row terminal leaves under six chat rows: {small}");
         assert_eq!(super::page_rows(&state), 1, "and a page there is still one row, never zero");
+    }
+
+    /// The scrollbar's mouse (operator, 13/11 ~06:50). A press in the bar's column scrolls the chat
+    /// and starts no selection; a press in the text is still a selection; motion only thickens the
+    /// thumb while the pointer is on the bar; and an open panel - the balloon, the slash menu, a
+    /// `/status` - keeps the mouse to itself, as it did before the bar existed.
+    #[test]
+    fn a_press_on_the_bar_scrolls_it_and_starts_no_selection() {
+        use wa_term::selection::Mouse;
+        let mut state = super::ConsoleInput::default();
+        let mut editor = wa_term::terminal_editor::Editor::default();
+        editor.row = 39; editor.width = 80; editor.height = 3;
+        state.editor = Some(editor);
+        for n in 0..400 { state.transcript.write(&format!("line {n}\n")); }
+        let _ = super::layout_frame(&mut state); // one frame: the transcript knows its bar
+        let rows = super::output_rows(None, state.editor.as_ref().unwrap());
+        assert!(rows > 10, "forty rows of terminal, a chat of {rows}");
+        assert!(state.transcript.bar().is_some_and(|bar| bar.scrolling()), "a long chat draws a bar to scroll");
+        // A press on the bar's column (the screen's last one), three rows down.
+        super::handle_mouse(&mut state, Mouse::Press(3, 80));
+        assert!(state.selection.is_none(), "a click on the bar is not a text selection");
+        assert!(!state.transcript.following(), "and it moved the view away from the bottom");
+        // The button up, then the pointer: on the bar (thick), off it (thin).
+        super::handle_mouse(&mut state, Mouse::Release(3, 80));
+        super::handle_mouse(&mut state, Mouse::Motion(5, 80));
+        assert!(state.transcript.bar_active(), "the pointer is on the bar");
+        super::handle_mouse(&mut state, Mouse::Motion(5, 40));
+        assert!(!state.transcript.bar_active(), "and it left: the thumb is thin again");
+        // The chat's text is still selected with the mouse, exactly as before.
+        super::handle_mouse(&mut state, Mouse::Press(5, 10));
+        assert!(state.selection.is_some(), "text is still selected with the mouse");
+        // An open panel owns the screen's bottom, and its mouse.
+        state.selection = None;
+        state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&json!({"title": "balloon"}), 80, rows));
+        super::handle_mouse(&mut state, Mouse::Press(3, 80));
+        super::handle_mouse(&mut state, Mouse::Motion(5, 80));
+        assert!(state.selection.is_none() && !state.transcript.bar_active(), "the open panel kept the mouse");
     }
 
     /// The rule that keeps a detached console from blanking the screen, and the values a real

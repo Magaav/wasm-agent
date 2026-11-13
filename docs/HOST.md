@@ -480,9 +480,15 @@ round-boundary steering, not per-keystroke interruption.
   opens a Claude Code-style panel over the bottom of the screen - a list, a text or `secret`
   field, or a timed wait - and blocks until the reader answers or presses Esc; `panel()` closes
   it. A secret field draws bullets only and its text goes only to the caller, never to history.
-  The chat itself is a transcript the host draws (`transcript_block(topic)`,
+  The chat itself is a transcript the host draws (`transcript_block(topic, code)`,
   `transcript_write(text)`): topics (thinking, tool calls) fold to three rows; Ctrl+Up from the
   draft focuses them, Up/Down move, Right/Left expand/fold, Esc returns to the draft.
+  A **code-mode block** (`code = true`) is the exception: it is drawn expanded while it is the newest
+  one - so a running script streams - and collapses to ONE row when the next one starts
+  (`transcript_fold(summary)`, built by `lua/core/codemode_block.lua`); Ctrl+O pins a block expanded
+  so a newer one cannot collapse it, and the same key lets it go. `transcript_rewrite(offset, text)`
+  replaces a committed row counted from the block's end, which is how a running inner call's `⏳` row
+  becomes `✓` in place (docs/CODEMODE-VIEW.md).
   `transcript_live(text)` writes the row a *running* tool call owns, inside that call's own block
   under its heading, replaced in place as its facts change (`""` takes it away);
   `transcript_head(text)` rewrites the current block's first line, which is how a heading printed
@@ -545,8 +551,10 @@ unchanged and stays the fallback (`--inline`, a pipe, `WA_TUI=inline`).
 
 The chat is painted by this process into a scroll region (`crate::transcript`), so the terminal's own
 scrollback never holds it and its native selection only ever covered what was on screen. The editor
-therefore turns on SGR mouse reports (`?1002h ?1006h`, off again with the paste mode in
-`input_stop`): a drag over the chat area selects (reverse video, the view frozen while it lasts), and
+therefore turns on SGR mouse reports (`?1002h ?1003h ?1006h`, off again with the paste mode in
+`input_stop`): a drag over the chat area selects (reverse video, the view frozen while it lasts),
+**a click on the scrollbar's column jumps there and a drag on its thumb scrolls** (the thumb is thick
+while the pointer is on it, which is what `1003` - any motion - is for), and
 **Ctrl+C with a selection copies it** through OSC 52 - the terminal's clipboard, also over ssh and
 `docker exec`. Without a selection Ctrl+C is unchanged (interrupt; twice to quit). The wheel pages
 the chat. Shift+drag still makes the terminal's own selection where the terminal honours it (foot,
@@ -819,9 +827,11 @@ terminal_write       device
 ticker               device
 transcript_block     device
 transcript_copy      device
+transcript_fold      device
 transcript_head      device
 transcript_hold      device
 transcript_live      device
+transcript_rewrite   device
 transcript_write     device
 uuid                 read-only
 verify               read-only

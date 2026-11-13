@@ -21,8 +21,24 @@
 # WHY `wa-whatsapp` IS PINNED (11/11). It used to be installed by hand on the one node that ran it,
 # which meant that node needed a wasi-sdk toolchain and a build of its own. Its bytes are
 # wasm32-wasip2, so they do not depend on the CPU - the same artifact runs on arm64 and x86_64 - and
-# building it once here is what makes every node's deploy one command (measured: two builds in this
-# tree gave the same sha256, 8,553,798 bytes).
+# building it once here is what makes every node's deploy one command.
+#
+# Reproducible within one checkout, and not across two (measured 13/11 on the repin below): two builds
+# in one path gave the same sha256; the same commit in two paths gave 8,557,078 bytes / `0bf8762a…`
+# and 8,557,275 bytes / `67a9414f…`. The cause is measured too - this component path-depends on
+# `wa-whatsapp-outbox` and `wa-whatsapp-index`, and Cargo's `-C metadata` for a path package is a hash
+# of its canonical absolute path (`libwa_whatsapp_index-49271f4b…` in one tree, `-5caf7479…` in the
+# other) - so the pin names ONE build, the one whose bytes are published with this lock, and no check
+# on another machine can rebuild it (docs/COMPONENTS.md, "Reproducible builds").
+#
+# WHAT KEEPS THE PIN HONEST. `scripts/test-component-pins.sh` is in the fast path and fails when a
+# change under a pinned component's source tree - or under a crate it path-depends on - is committed
+# without this file's line for it moving. 13/11 is why: `change/waroute` added the `contacts` op to the
+# component and the pin did not move, so every deploy installed the bytes built before it and the tool
+# answered `whatsapp_contacts_bad_op`; the component's own tests were green because they ran against
+# the source. The same check verifies the pinned `wa-whatsapp.wasm` against its line and against the op
+# list in `rust/wa-whatsapp-index`, so "the bytes accept every op the seam defines" is a fact about the
+# artifact, not about the tree.
 #
 # Pinning it means EVERY node installs it, so it has to stay inert where nobody wants it.
 # Installation writes `<name>.wasm`, its pin and its manifest, and nothing else. A service runs only
@@ -66,4 +82,4 @@ model-gateway 8685425bd2a2f6ba7e66ae72e8a0cc40064a530f1371ef9db807fc87bfc1c58d 4
 selfloop 2ac381ae62407256c0328d115b357125ada42357e4d088a4b08176a48ff4b699 246427
 telemetry-sink 48d5d52aba78d986e857da523e00801ddfa9f2c98503e912fe4c8172188cd707 153650
 wa-email 630f6fd0d9574db3f80457bfa24eb56cc9b62854ecd268e551c84eb9c103d1b4 569268
-wa-whatsapp 3568b2d5a8260c9021902679fb8758e7f5f281e92af26efbcdf3262e11947760 8554548
+wa-whatsapp 0bf8762a2fb6d0db15df487b9c714d0fe77d8b895ef7e845d0b9e6853cc49ab1 8557078

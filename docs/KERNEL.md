@@ -1398,6 +1398,10 @@ stays the kernel's.
   `self_notes_archive` plus read on `sessions` (the authority checks). `setup()` in
   `lua/core/selfloop.lua` still creates the tables: a grant has no `CREATE TABLE`, and a store without
   them is a visible `store_failed`, not a component that silently invents a schema.
+- **The interrupt hold is the kernel's, on both paths.** Whether a session's schedule is held (an
+  interrupted run, `docs/SELF-LOOP.md`) is a row in `self_wake_pauses`, read and written by
+  `lua/core/selfloop.lua` itself, not asked of the component and not in its grant: it is one fact the
+  node decides at a claim, and `summary` adds it to the component's answer so both paths report it.
 - **A refusal is an answer, not a failure.** The capability answers `ok:true` with the refusal table,
   so a refused wake never reads as a broken component; only "the component could not answer" returns
   `ok:false`, and `lua/core/selfloop.lua` then runs the native path with one log line per (operation,

@@ -97,8 +97,9 @@ the tools it may call are still the read-only ones permitted for the session's o
 
 ## Durable state and dispatch
 
-Three tables in the memory database (`memory.db`): `self_wakes`, `self_notes`, `self_notes_archive`.
-They are created on first use (`selfloop.setup`), so no migration of an existing database is needed.
+Four tables in the memory database (`memory.db`): `self_wakes`, `self_notes`, `self_notes_archive` and
+`self_wake_pauses`. They are created on first use (`selfloop.setup`), so no migration of an existing
+database is needed.
 
 ```
 model calls wake
@@ -121,17 +122,44 @@ wa_completion_run → selfloop.run_wake → agent.run  →  selfloop.finish
 * Delivery failures at the scheduler (`not_started`, e.g. queue full) put the row back with a bounded
   backoff (5s, 10s, ... up to 60s), so a busy node defers a wake instead of losing it.
 
+## Interrupt and resume: the schedule follows the run
+
+An interrupt stops the **session**, not one run (operator, 13/11: *"interrupting a session should be in
+sync with the schedule, once interrupted, it stops, once it resumes, it resumes"*).
+
+* **Interrupt** (Esc, Ctrl+C, or `POST /runs cancel` from another node): the run that observes the
+  cancel pauses every scheduled wake of its session in the same observation (`agent.lua`,
+  `note_interrupt` → `selfloop.pause`), and a claim made while a cancel is requested starts no turn at
+  all (`selfloop.claim_due`). A CLI reactor keeps its own interrupt flag set until the next submitted
+  line, so a claim made under it used to start a turn that failed `run_cancelled`, re-arm for its
+  cadence and do it again: one failed turn and one error line per interval, for ever.
+* **While paused** nothing fires: the placement tick reports the rows as `paused` and the CLI claims
+  none of them. Nothing is lost either - the wakes were never touched, so they keep their `due_at`,
+  their order and their targets, and a wake whose time passed while the session was held fires **once**
+  after the resume, not once per missed interval.
+* **Resume** is the user coming back: the next message in the session
+  (`selfloop.on_user_message`), `wa resume --session <id>`, or `wa chat --resume <id>`. Closing `wa chat`
+  without continuing leaves the wakes held, and the footer says `⏰ 2 wakes paused`.
+* A run the user cancelled is **never retried** by the scheduler, and a wake whose turn was cancelled
+  settles `cancelled` with no next time, so it never schedules another wake. A repeating cadence that
+  was interrupted is the model's to re-schedule when it comes back, not the scheduler's to restore.
+
+The pause is kernel state (`self_wake_pauses`, one row per session) and not a status on a wake: a
+paused wake is still a *pending* wake - nothing about it was decided - so a failed rewrite on resume
+cannot lose one.
+
 ## Visibility
 
 * CLI: `⏰ 2 wakes · next 14:05` (count + next due) on a row of its OWN, directly above the session
-  status bar (`host.editor_wakes`, refreshed with the session numbers). It is not part of the bar's line:
-  putting it there squeezed the numbers and wrapped the bar on a narrow terminal. No wake scheduled = no
-  row at all.
+  status bar (`host.editor_wakes`, refreshed with the session numbers); a held session reads
+  `⏰ 2 wakes paused` there instead. It is not part of the bar's line: putting it there squeezed the
+  numbers and wrapped the bar on a narrow terminal. No wake scheduled = no row at all.
 * CLI: `/wakes` lists pending wakes (id, status, due or subscription, cadence, last error);
   `/wake cancel <id>` cancels one.
 * Window: the `/session` read carries a `wakes` block (pending, event_pending, next_at, rows); the
   composer footer shows the same count + next due.
-* Tool surface: `wake_list {all?}` shows history, including `unknown` and `failed` rows.
+* Tool surface: `wake_list {all?}` shows history, including `unknown` and `failed` rows, and says
+  `paused` when the session's schedule is held.
 
 ## Advice, not enforcement
 
@@ -168,6 +196,11 @@ The injected guidance (`AGENTS.md`, and the generic prompt's "Long missions" lin
 * After the WASI 0.3 / wasmtime 50 upgrade, a componentised scheduler could host this store and delivery
   directly (`wa:kernel` queue + bus). Until then the memory database and the placement tick are the
   durable path.
+* **A cancel of a run that never started is not observed from Lua.** A run queued behind another one is
+  settled `cancelled` by the serve layer's scheduler (`rust/wa-capabilities/src/serve/scheduler.rs`)
+  before any Lua code runs, so nothing on this side sees the interrupt and that session's wakes stay
+  armed; the next run of the session that observes a cancel holds them. The interrupt the user is
+  watching - the run in flight - is always observed, because it polls the flag itself.
 
 ## Tests
 
@@ -177,3 +210,10 @@ claimed-once, cancel, refusals, event wake via `publish` (identity stored, paylo
 dispatch going `unknown`, probe unchanged/changed/error paths, notes write/append/compact/archive,
 the wake turn's shape, the tool arms, the run half end to end against the local fallback (with the
 LLM environment hidden, so no model call), and the real QuickJS sandbox when this binary carries it.
+
+`scripts/test-selfloop-pause.lua` (self-contained, same runner, fake clock, counted scheduler stub):
+the interrupt/resume contract above - a claimed-under-cancel wake starts no turn, a held session
+dispatches nothing for minutes of fake clock with no error recorded, a resume fires each overdue wake
+once in its own order, an overdue repeating wake fires once rather than once per missed interval, a
+cancelled turn settles `cancelled` and is never retried, and a user message, an event wake, the footer
+fact and `selfloop.resume` all behave as the operator described.

@@ -124,6 +124,43 @@ The wheel scrolls `WA_TUI_WHEEL_LINES` rows per event: `auto` (three, the inline
 or a number. The scrollbar takes the right column: `auto` (only when the transcript overflows),
 `always`, or `hidden`; the text re-wraps one column narrower while it is shown.
 
+### The scrollbar is a bar, and the mouse works on it
+
+The operator, 13/11 ~06:50: the track was drawn with breaks instead of one line, and it ignored the
+mouse. It is now pi's TUI bar (`packages/tui`: `getScrollbarGeometry`, `paintScrollbar`,
+`handleScrollbarMouseEvent`), in `rust/wa-term/src/scroll/bar.rs`, and both transcripts draw from that
+one model:
+
+| row of the track | glyph | what it is |
+| --- | --- | --- |
+| the thumb, at rest | `┃` U+2503 | a heavy stroke that *joins* the light track it sits on |
+| the thumb, pointer on it | `█` U+2588 | a block: thicker, and brighter (204,204,204) |
+| everything else | `│` U+2502 | the track, dim (80,80,80), on **every** row of the region |
+
+- **Continuous.** One glyph per row, from the region's first row to its last (`Bar::cells` is total in
+  the track's height), and the render writes that cell again at an absolute column - `ESC [ row ;
+  width H` - after the row's text. A row whose text a terminal draws wider than `cell_width` counts it
+  used to wrap the glyph onto the next line, which is what left air in the column; an absolute write
+  cannot wrap.
+- **A click on the track jumps there**, with the thumb's middle under the pointer, and starts a drag;
+  **a drag on the thumb** moves it with the grab it took (pi's `Math.floor(thumbHeight / 2)` for a
+  press on the track, `y - thumbTop` for a press on the thumb). Rows of content per track row are
+  `(total - track) / (track - thumb)`, rounded to the nearest row and clamped at both ends. At the
+  bottom the transcript follows new output again.
+- **A press anywhere else is still a text selection**, and a press while a panel is open (the balloon,
+  the slash menu, `/status`) belongs to the panel: the bar is one column, not a mode.
+- **Hover thickens, leaving thins.** The thumb is `█` while the pointer is on the bar's column and
+  `┃` again when it leaves. Only the flip redraws: a pointer that stays on one side costs no frame.
+
+The terminal's mouse modes are on **only while `wa chat` owns the screen** and are restored on the way
+out: `host.input_editor` turns on `1002` (button events: press, drag, wheel), `1003` (any motion, which
+is what hover needs) and `1006` (SGR) when it takes the frame, `host.restore_input`/`scroll::Guard`
+turn them off in the reverse order, and the fullscreen console's `install_panic_restore` does the same
+before a panic prints. **Shift+drag is still the terminal's own selection** - no mode above takes it,
+because the terminal keeps a shift-modified drag for itself, which is how output text is copied.
+The `1003` reports cost one comparison each: a motion report that matches nothing reaches no redraw
+and no key (`a_press_on_the_bar_scrolls_it_and_starts_no_selection`).
+
 ## Settings, in the node's config
 
 The node's config file is `<config>/env`, `KEY=VALUE` per line, loaded into the process environment at
@@ -163,8 +200,13 @@ changes). The render tests drive the real seam - `Console::feed` with the bytes 
 `Console::write` with output, `Console::frame` with a real `Editor` - and read a fixed-size virtual
 terminal (`scroll/vt.rs`) instead of the escape bytes, so what is asserted is the screen a reader would
 see: scroll position, follow mode, the marker, both folds, a resize, the wheel, the scrollbar, the
-status row, the inline fallback and the restore. `scroll/settings.rs`, `scroll/keys.rs` and
-`scroll/chat.rs` carry the unit tests for the knobs, the decoder and the scroll arithmetic.
+status row, the inline fallback and the restore. `scroll/settings.rs`, `scroll/keys.rs`,
+`scroll/bar.rs` and `scroll/chat.rs` carry the unit tests for the knobs, the decoder, the bar (its
+continuity at every height, `click -> offset`, `drag -> offset`, the hover state) and the scroll
+arithmetic. The bar's own render snapshot is `a_frame_of_the_bar_is_the_screen_a_reader_sees`, and the
+inline transcript's side of the same bar is in `transcript.rs` (`the_bars_column_takes_a_click_and_a_drag_and_nothing_else_is_the_bars`,
+`every_row_of_the_track_writes_its_glyph_at_the_columns_own_position`) plus its routing test in
+`wa-capabilities/src/host.rs` (`a_press_on_the_bar_scrolls_it_and_starts_no_selection`).
 
 ## Wiring it to the process (not done yet)
 

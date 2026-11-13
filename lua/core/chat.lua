@@ -364,6 +364,24 @@ function M.run(argv)
     }))
   end
 
+  -- Continuing a thread is the resume (operator, 13/11: "interrupting a session should be in sync with
+  -- the schedule, once interrupted, it stops, once it resumes, it resumes"). `--continue`, `--resume
+  -- <id>` and `--session <id>` all open a thread the reader is coming back to, so a schedule an
+  -- interrupt held runs again from here; the wakes themselves were never touched, so an overdue one
+  -- fires once at its next claim. A reader who closes this without continuing leaves them held, and the
+  -- footer says `2 wakes paused`.
+  if resume_last or session_id then
+    local resumed_ok, resumed = pcall(function()
+      return dofile("lua/core/selfloop.lua").resume(agent.session_id)
+    end)
+    if resumed_ok and type(resumed) == "table" and resumed.resumed then
+      if not scripted then
+        print(cli_view.paint("  \226\143\176 wakes resumed: " .. tostring(resumed.pending or 0)
+          .. ((tonumber(resumed.overdue) or 0) > 0 and " (the overdue one fires once)" or ""), "dim", view.live))
+      end
+    end
+  end
+
   -- A continued thread (`--continue`, `--resume <id>`) is drawn again under the banner, so the reader
   -- picks up where the window was closed instead of in front of an empty screen. The newest messages
   -- only: a day-long thread is hundreds of rows, and the window or `wa conversation` has the rest.
@@ -567,8 +585,14 @@ function M.run(argv)
     agent.self_wake = trace
     local ok, reply = pcall(agent.run, agent, content)
     agent.self_wake = nil
+    -- Two things, and they are different halves of the same interrupt: what the READER sees (one line,
+    -- naming the wake, `lua/core/cli_view.lua`'s `failed`) and what happens to the SCHEDULE (the wake
+    -- settles `cancelled` and is never re-armed - settling it as a failure would re-arm a repeating wake
+    -- for its cadence, under a cancel flag the CLI keeps set until the next submitted line: one failed
+    -- turn and one error line per interval, 13/11). The line is a cancel, not a failure; the row is not.
     if not ok then view:failed(redact.text(tostring(reply)), { self_wake = true }) else view:answered(reply) end
-    selfloop.finish(row, ok, reply)
+    if not ok and selfloop.cancelled_stop(reply) then selfloop.settle_interrupted(row)
+    else selfloop.finish(row, ok, reply) end
     mark_seen()
   end
   wake_if_due = function()

@@ -211,6 +211,16 @@ elseif command == "resume" then
     end
     state.messages = memory.message_count(target)
     states, targeted = { state }, true
+    -- `wa resume --session <id>` is the operator's resume, so the session's held schedule re-arms with
+    -- it (operator, 13/11: once interrupted it stops, once it resumes it resumes). The wakes were never
+    -- touched by the pause, so what is due fires once rather than once per missed interval, and nothing
+    -- fires before this line. Nothing held, nothing said.
+    local resumed_ok, resumed = pcall(function() return dofile("lua/core/selfloop.lua").resume(target) end)
+    if resumed_ok and type(resumed) == "table" and resumed.resumed then
+      print(string.format("  wakes     %d re-armed (they were paused by an interrupt)%s",
+        tonumber(resumed.pending) or 0,
+        (tonumber(resumed.overdue) or 0) > 0 and ", the overdue one fires once" or ""))
+    end
   else
     states = memory.unfinished(nil, 40)
   end
