@@ -148,6 +148,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("graph_overview", ReadOnly, crate::graph::graph_overview, "A bounded structural overview of the indexed tree"),
     plain!("graph_impact", ReadOnly, crate::graph::graph_impact, "Resolved callers/dependencies of a symbol at a given depth"),
     plain!("graph_status", ReadOnly, crate::graph::graph_status, "Whether the graph index is present, current and complete"),
+    plain!("graph_snapshot", WritesFiles, crate::graph::graph_snapshot, "One consistent copy of a graph store, taken under the store's own lock so the component cannot be writing it"),
     plain!("graph_patch_audit", ReadOnly, crate::graph::graph_patch_audit, "Which symbols a changeset reaches, from the patch itself"),
     // ---- processes, operations and automation ------------------------------------------------
     plain!("exec", RunsProcess, crate::host::exec, "Run one foreground command as a supervised operation and return a bounded view of its output"),

@@ -382,3 +382,181 @@ fn an_unmeasurable_disk_reports_itself_and_still_bounds_the_copies() {
     assert_eq!(entry.state.lock().unwrap().corruptions, 0, "the budget alone stops the copy when the disk cannot be judged");
 }
 
+
+// ---- the store has one writer, and the backup is not it ------------------------------------------
+
+/// A graph store in the journal mode the guest actually runs: `delete` (rollback).
+///
+/// `wa_sqlite::tune` asks for WAL inside the component, but WAL needs a shared `-shm` mapping and
+/// POSIX locks, neither of which WASI provides, so the file the component writes is rollback-journal.
+/// A store created here without touching the journal mode is the same shape, and that is what makes
+/// the tests below faithful.
+fn guest_shaped_store(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let db = dir.join(DB_FILE);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS t(x TEXT);").unwrap();
+    conn.execute("INSERT INTO t VALUES ('first')", []).unwrap();
+    let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap();
+    assert_eq!(mode, "delete", "the guest's store is rollback-journal, not WAL");
+    db
+}
+
+fn rows(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn a_copy_of_the_graph_store_waits_for_the_store_lock() {
+    // The kernel holds this lock for the whole of every component call (`call`), so a reader that
+    // holds it cannot meet a writing guest. Deterministic: while the test holds the lock the snapshot
+    // cannot make progress at all.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    let db = guest_shaped_store(&dir);
+    let copy = fixture.0.join("copy.db");
+    let guard = lock_store(&dir, DB_FILE, Some(Instant::now())).unwrap().expect("the store's lock is free");
+    let worker = {
+        let (db, copy) = (db.clone(), copy.clone());
+        std::thread::spawn(move || snapshot_store(&db, &copy, Duration::from_secs(20)))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!copy.exists(), "the copy must not begin while a component call holds the store");
+    drop(guard);
+    let snapshot = worker.join().expect("the snapshot thread did not panic").expect("the snapshot succeeds once the lock is free");
+    assert_eq!(snapshot.check, "ok");
+    assert!(copy.exists());
+    assert_eq!(rows(&copy), 1, "and it is a working copy of the store");
+}
+
+#[test]
+fn a_store_held_by_a_running_index_is_reported_busy_and_creates_nothing() {
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    let db = guest_shaped_store(&dir);
+    let copy = fixture.0.join("copy.db");
+    let guard = lock_store(&dir, DB_FILE, Some(Instant::now())).unwrap().unwrap();
+    let started = Instant::now();
+    let answer = snapshot_store(&db, &copy, Duration::from_millis(200));
+    assert!(answer.is_err(), "a bounded wait must not hang a deploy behind an index");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(answer.unwrap_err().starts_with("graph_store_busy"), "the answer names the reason");
+    assert!(!copy.exists(), "a busy store leaves no destination behind");
+    drop(guard);
+}
+
+#[test]
+fn the_lockless_writer_a_wasi_guest_is_can_only_be_copied_under_the_store_lock() {
+    // THE REPRODUCTION. Two SQLite implementations on one rollback-journal store:
+    //
+    //  * the writer below uses the `unix-none` VFS, which takes no locks at all - which is what the
+    //    WASI guest's SQLite does, so its commits are page overwrites that exclude nobody;
+    //  * the reader below is the pre-update backup's, first as it was (no shared lock), then through
+    //    `snapshot_store` (the store's own lock).
+    //
+    // Measured on `wa-desktop` 13/11 against the real component: 3,653 `database disk image is
+    // malformed` reads and torn copies in 70 s, on a store that passed `PRAGMA integrity_check`
+    // immediately afterwards. That false verdict is what quarantined 77 copies and refused
+    // `wa update`.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    let db = guest_shaped_store(&dir);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (db, stop) = (db.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open_with_flags_and_vfs(
+                &db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                "unix-none",
+            )
+            .expect("the lock-free VFS is what a WASI guest's SQLite has");
+            let mut round = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                round += 1;
+                let _ = conn.execute("BEGIN IMMEDIATE", []);
+                for row in 0..2000 {
+                    let _ = conn.execute("INSERT INTO t VALUES (?)", [format!("{round}-{row}")]);
+                }
+                let _ = conn.execute("COMMIT", []);
+            }
+        })
+    };
+    // 1. The read the backup used to make: no shared lock, so it meets the writer mid-commit.
+    let mut torn = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut copy_index = 0;
+    while Instant::now() < deadline && torn.is_empty() {
+        copy_index += 1;
+        let copy = fixture.0.join(format!("unlocked-{copy_index}.db"));
+        let policy = wa_snapshot::Policy { busy_timeout: Duration::from_millis(0), attempts: 1,
+            page_batch: 64, backoff: Duration::from_millis(1) };
+        match wa_snapshot::snapshot_with(&db, &copy, &policy) {
+            Ok(snapshot) => {let _ = std::fs::remove_file(&snapshot.copy);}
+            Err(error) => torn.push(error.to_string()),
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().expect("the writer thread did not panic");
+    assert!(!torn.is_empty(), "an unlocked copy of a store a lockless writer is writing must tear or refuse; the reproduction did not reproduce");
+    // 2. A fresh store of the same shape, the same kind of writer, and the read this branch makes: the
+    //    store's lock. The writer holds it for 500 ms - as `call` holds it for a whole guest run - and
+    //    the copy can only start once it lets go, so it never meets a page mid-commit.
+    let safe_dir = db_dir(&fixture.0.join("second-graph.db"));
+    let db = guest_shaped_store(&safe_dir);
+    let dir = safe_dir;
+    let lock_holder = {
+        let (dir, db) = (dir.clone(), db.clone());
+        std::thread::spawn(move || {
+            let _guard = lock_store(&dir, DB_FILE, Some(Instant::now() + Duration::from_secs(20)))
+                .unwrap().expect("the writer takes the store's lock, as `call` does");
+            let conn = rusqlite::Connection::open_with_flags_and_vfs(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE, "unix-none").unwrap();
+            let until = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < until {
+                let _ = conn.execute("BEGIN IMMEDIATE", []);
+                for row in 0..200 {
+                    let _ = conn.execute("INSERT INTO t VALUES (?)", [format!("locked-{row}")]);
+                }
+                let _ = conn.execute("COMMIT", []);
+            }
+        })
+    };
+    std::thread::sleep(Duration::from_millis(150));
+    let copy = fixture.0.join("locked.db");
+    let started = Instant::now();
+    let snapshot = snapshot_store(&db, &copy, Duration::from_secs(20)).expect("a store whose lock can be had copies cleanly");
+    let waited = started.elapsed();
+    lock_holder.join().expect("the lock holder did not panic");
+    assert_eq!(snapshot.check, "ok");
+    assert!(waited >= Duration::from_millis(250), "the copy waited for the writer to finish ({waited:?}), so it never read a page mid-commit");
+    assert_eq!(wa_snapshot::integrity_check(&copy).unwrap(), "ok");
+    assert_eq!(wa_snapshot::integrity_check(&db).unwrap(), "ok", "and the store it read is still sound: no page was written while it was read");
+}
+
+#[test]
+fn one_quarantine_copy_per_store_not_one_per_detection() {
+    // 77 copies in `graph.db.d/` on node `work`, 30 on `openclaw`: each detection left its own. The
+    // newest is the evidence worth keeping, so the copy it replaces is removed - by name, and only
+    // for this store's own siblings.
+    let fixture = Fixture::new();
+    let dir = db_dir(&fixture.0.join("graph.db"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = test_entry(&fixture.0, &dir.join(DB_FILE));
+    for stamp in ["20261110T220000Z", "20261111T030000Z"] {
+        std::fs::write(dir.join(DB_FILE), format!("broken {stamp}")).unwrap();
+        let moved = quarantine_database(&entry, stamp).unwrap();
+        assert_eq!(moved.len(), 1, "{stamp}: the store is moved aside");
+        let copies: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("graph.db.malformed-")).collect();
+        assert_eq!(copies, vec![format!("graph.db.malformed-{stamp}")], "exactly one copy, the newest: {copies:?}");
+        assert_eq!(std::fs::read_to_string(dir.join(format!("graph.db.malformed-{stamp}"))).unwrap(), format!("broken {stamp}"));
+    }
+    // A sibling of ANOTHER store is not this store's business.
+    std::fs::write(dir.join("jobs.db.malformed-20261101T000000Z"), "other").unwrap();
+    std::fs::write(dir.join(DB_FILE), "broken again").unwrap();
+    quarantine_database(&entry, "20261111T040000Z").unwrap();
+    assert!(dir.join("jobs.db.malformed-20261101T000000Z").exists(), "another store's quarantine is left alone");
+}

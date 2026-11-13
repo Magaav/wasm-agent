@@ -21,6 +21,19 @@
 -- damage. A copy is never reported without passing `integrity_check`, so a torn copy cannot pass as a
 -- recovery source either. Knobs: `WA_BACKUP_ATTEMPTS`, `WA_BACKUP_BACKOFF_MS`,
 -- `WA_BACKUP_BUSY_TIMEOUT_MS`.
+--
+-- The graph store is read under its OWNER's lock (13/11). The retry above treats a symptom: the graph
+-- component writes its store from inside WASI, where SQLite has no POSIX locks and the journal mode
+-- is `delete`, so a commit there is a page overwrite that excludes nobody - and this module's native
+-- connection then reads the store mid-commit. Measured on `wa-desktop` 13/11: 3,653
+-- `database disk image is malformed` reads and torn copies in 70 s of concurrent index + backup,
+-- while the store passed `PRAGMA integrity_check` afterwards. Every `graph.db.malformed-*` copy the
+-- operator found (77 on `work`, 30 on `openclaw`) came from that false verdict. So a graph store is
+-- never attached here: `host.graph_snapshot` copies it under the same cross-process lock every graph
+-- call holds (`rust/wa-capabilities/src/graph.rs`), and no guest can be running during the read. If
+-- that still fails - a damaged store, or an index holding the lock past its wait - the store is
+-- SKIPPED with a named warning and the update proceeds: the graph is derived state, rebuilt from the
+-- tree, so it is never worth blocking a deploy. The ledger and every other store keep the rule above.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local M = {}
@@ -251,18 +264,63 @@ local function with_busy_timeout(work)
   return table.unpack(returned, 2, returned.n)
 end
 
+-- Is this store the code graph's? `rust/wa-capabilities/src/graph.rs` keeps it in `P.d/graph.db`
+-- (one directory per logical database, so a second root's store is `graph.db.roots/<sha>.db`), and
+-- the graph component is the only process that may write it. Named by path, because the same module
+-- snapshots stores this rule must not touch.
+function M.is_graph_store(path)
+  local parent, name = tostring(path or ""):gsub("\\", "/"):match("^(.*)/([^/]+)$")
+  if not parent then return false end
+  local directory = parent:match("([^/]+)$") or ""
+  if directory == "graph.db.d" then return name == "graph.db" end
+  -- A second indexed root gets its own store in `graph.db.roots/`, keyed by the root's digest.
+  if directory == "graph.db.roots" then return name:match("%.db$") ~= nil end
+  return false
+end
+
+-- One snapshot of a graph store, taken by its owner's lock (`host.graph_snapshot`). Returns
+-- `record, nil` on success and `nil, reason` when the store cannot be copied right now; the caller
+-- records a skip, never a refusal.
+local function graph_snapshot(source, copy)
+  if type(host.graph_snapshot) ~= "function" then
+    return nil, "this host has no graph_snapshot capability, so a graph store cannot be copied safely; rebuilt from source"
+  end
+  local ok, raw = pcall(host.graph_snapshot, json.encode({ db = source, copy = copy, wait_ms = BUSY_TIMEOUT_MS }))
+  if not ok then return nil, tostring(raw) end
+  local answer = type(raw) == "string" and json.decode(raw) or raw
+  if type(answer) ~= "table" then return nil, "graph_snapshot answered " .. tostring(raw) end
+  if answer.error then return nil, tostring(answer.error) end
+  if answer.check ~= "ok" then return nil, "the copy did not pass integrity_check: " .. tostring(answer.check) end
+  return { source = source, copy = copy, check = "ok", attempts = tonumber(answer.attempts) or 1,
+    locked = "graph_store", pages = answer.pages }, nil
+end
+
 function M.run(label)
   local stamp = os.date("!%Y%m%dT%H%M%SZ") .. '-' .. host.uuid() .. (label and label ~= "" and ("-" .. label:gsub("[^%w_-]", "")) or "")
   local dir = paths.config() .. "/backups/" .. stamp
   assert(host.write_file(dir .. "/.keep", ""),'backup_directory_write_failed')
   return with_busy_timeout(function()
-    local results, main = {}, main_db()
+    local results, skipped, main = {}, {}, main_db()
     for index, source in ipairs(M.stores()) do
       local copy = dir .. "/" .. source:gsub("^.*[/\\\\]", ""):gsub("^(.*)$", function(name) return index .. "-" .. name end)
-      results[#results + 1] = snapshot(source, copy, source == main)
+      if M.is_graph_store(source) then
+        -- Never ATTACH a store its component may be writing: the copy is taken under the store's own
+        -- lock, and a store that cannot be copied is skipped with one named line.
+        local record, reason = graph_snapshot(source, copy)
+        if record then
+          results[#results + 1] = record
+        else
+          local line = "backup_skipped: " .. source .. ": " .. tostring(reason)
+            .. " (derived: the code graph is rebuilt from its sources, so this backup steps over it)"
+          skipped[#skipped + 1] = { source = source, reason = tostring(reason), line = line }
+          print(line)
+        end
+      else
+        results[#results + 1] = snapshot(source, copy, source == main)
+      end
     end
     M.prune()
-    return { ok = true, dir = dir, stores = results }
+    return { ok = true, dir = dir, stores = results, skipped = skipped }
   end)
 end
 

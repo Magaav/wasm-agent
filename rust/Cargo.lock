@@ -2165,6 +2165,7 @@ dependencies = [
  "wa-operation",
  "wa-queue",
  "wa-rendezvous",
+ "wa-snapshot",
  "wa-sqlite",
  "wa-term",
  "wa-tool-progress",
