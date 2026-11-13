@@ -14,7 +14,14 @@ local redact = dofile("lua/core/redact.lua")
 local updater = dofile("lua/core/update.lua")
 -- What a run looks like while it is running. The view owns the status line, the tool
 -- lines and the footer; this file owns the session, the commands and the prompt.
-local cli_view = dofile("lua/core/cli_view.lua")
+--
+-- Live reload (docs/HOTRELOAD.md). Every module of the UI and command layer is reached through
+-- `reload.require`, which answers a stable proxy: an edit to one of them reaches this session at its next
+-- frame or command, and nothing below has to know that happened. The modules this file keeps as plain
+-- `dofile`s are the core - the agent, memory, the provider, the ledger, the (guarded) hooks engine and the
+-- input reader - which own the session and the in-flight run and are deliberately not reloadable.
+local reload = dofile("lua/core/reload.lua")
+local cli_view = reload.require("lua/core/cli_view.lua")
 -- The reader's input. It is the host that reads it, on a thread of its own, because this
 -- interpreter spends the run blocked inside the model call - see that module for why
 -- `io.read("*l")` here was the reason nothing could be typed while a run was in flight.
@@ -33,7 +40,7 @@ local bash_mode = dofile("lua/core/bash_mode.lua")
 -- Restarting into the same session when a new build is installed or a restart is asked for.
 local cli_restart = dofile("lua/core/cli_restart.lua")
 -- `/status`: the session, its usage and every provider's limits, as bars.
-local status = dofile("lua/core/status.lua")
+local status = reload.require("lua/core/status.lua")
 -- `/hooks` and the operator's own `/` commands and footer segments (docs/HOOKS.md, docs/MODS.md).
 local hooks = dofile("lua/core/hooks.lua")
 
@@ -46,9 +53,11 @@ local USER, NODE = "master", ""
 -- The commands, their help and the flags that select a session are one registry
 -- (`lua/core/commands.lua`), so the list a reader is shown and the arms below cannot drift apart, and
 -- `scripts/test-command-parity.cjs` can fail when this REPL is missing a command the window offers.
-local commands = dofile("lua/core/commands.lua")
+local commands = reload.require("lua/core/commands.lua")
 
-local HELP = commands.help()
+-- The help is asked for when it is drawn, not once at start: `/help` is part of the reloadable command
+-- layer, so a row added to `commands.lua` while a chat is running is in the next `/help` printed.
+local function help() return commands.help() end
 
 local function each(rows, render, output)
   output = output or print
@@ -158,6 +167,7 @@ function M.run(argv)
   -- most recent one; `--session <id>` picks exactly that one. A bare word is the
   -- first prompt, so a launcher can start the agent with work already queued.
   local session_id, resume_last, prompt, once = nil, false, {}, false
+  local dev = nil
   local index = 2
   while argv[index] do
     local arg = argv[index]
@@ -167,13 +177,20 @@ function M.run(argv)
     elseif arg == "--continue" or arg == "-c" then
       resume_last = true
       index = index + 1
+    elseif arg == "--dev" then
+      -- `wa chat --dev <dir>`: reload the UI and command layer from that working tree (docs/HOTRELOAD.md).
+      -- `<dir>` is the directory that CONTAINS `lua/` - a checkout's root - and the status bar says
+      -- `dev reload` for as long as it is in use, because a CLI running code that is not what it was
+      -- installed with has to say so.
+      dev = argv[index + 1] or ""
+      index = index + 2
     elseif arg == "--once" or arg == "-p" or arg == "--print" then
       -- The explicit form of what a non-terminal stdin already means: run the turn(s), let go of the
       -- session and exit with the run's status. `-p` is the same letter `pi -p` uses.
       once = true
       index = index + 1
     elseif arg == "--help" or arg == "-h" then
-      print(HELP)
+      print(help())
       return 0
     else
       prompt[#prompt + 1] = arg
@@ -181,6 +198,24 @@ function M.run(argv)
     end
   end
   prompt = table.concat(prompt, " ")
+
+  -- The reload source, named BEFORE the first module of the UI layer is read: `--dev` first (a person at a
+  -- keyboard means it), then `WASM_AGENT_HOTRELOAD_DEV`, then - with no flag at all - the payload this node
+  -- was deployed with, which is what makes a deploy of UI-only changes reach a session that is already
+  -- running (docs/HOTRELOAD.md).
+  local requested_dev = (type(dev) == "string" and dev ~= "") and dev or nil
+  if not requested_dev then
+    local from_env = host.getenv("WASM_AGENT_HOTRELOAD_DEV")
+    if type(from_env) == "string" and from_env ~= "" then requested_dev = from_env end
+  end
+  if requested_dev then
+    local kind_ok, kind = pcall(host.path_kind, requested_dev)
+    if not kind_ok or kind ~= "dir" then
+      print("--dev needs a directory (the one that contains lua/): " .. tostring(requested_dev))
+      return 2
+    end
+    reload.configure({ dev = requested_dev })
+  end
 
   -- SCRIPTED, OR INTERACTIVE. `wa chat "<prompt>"` launched from a script, a scheduled task or an
   -- orchestrator has no terminal on its stdin, and until now it ran its turn and then sat at the
@@ -275,6 +310,16 @@ function M.run(argv)
   -- hardware cursor (which now belongs to the native editor). The view writer is
   -- serialized with the input thread and the ticker by host.terminal_write.
   local function print(text) view:line(text or "") end
+  -- Live reload between two commands (docs/HOTRELOAD.md). The view ticks the watcher at every frame it
+  -- begins, which is what covers a streaming run - the interpreter runs event by event while a stream is
+  -- arriving - and this is the other boundary: before a command reads `commands`, a balloon builder or any
+  -- other member of the UI layer, so the command a reader types is the tree's newest one.
+  local function hot()
+    local notices = reload.tick(host.now())
+    for _, notice in ipairs(notices) do
+      view:line(cli_view.paint("  " .. tostring(notice.text), notice.ok and "dim" or "warning", view.live))
+    end
+  end
   -- The model in use, shown at the right of the footer under the input; read again after /login
   -- and /provider, which can change it.
   local function refresh_model()
@@ -302,6 +347,9 @@ function M.run(argv)
     editor = view.live and view.stdout and height and height >= 7
       and host.getenv("WASM_AGENT_CLI_FRAME") ~= "off" })
   view.editor = input.editor
+  -- The reader's input is session state: the store holds the object, so a reload of the module that made
+  -- it cannot lose a line typed while the run was working (docs/HOTRELOAD.md).
+  reload.store.input = input
   -- The slash menu: typing `/` lists these under the box, the way Claude Code does.
   if input.editor and host.input_commands then pcall(host.input_commands, json.encode(commands.menu())) end
   -- Set once the view is up (below): the `/status` snapshot refreshed at every round of a run.
@@ -309,7 +357,7 @@ function M.run(argv)
   -- The local views the client can draw while this interpreter is blocked
   -- (`lua/core/local_views.lua`, docs/HOST.md), declared here because `agent.steer` below - the round
   -- boundary - is where they are refreshed.
-  local local_views = dofile("lua/core/local_views.lua")
+  local local_views = reload.require("lua/core/local_views.lua")
   local views_reported = false
   -- Publish the views that are missing or older than `opts.max_age`. Never blocks on the network
   -- itself (`local_views.refresh`) and never waits for anything: it either hands the client a spec or
@@ -328,6 +376,9 @@ function M.run(argv)
   end
   agent.steer = function()
     if refresh_status then refresh_status() end
+    -- The round boundary: the model's call has returned, so this is a frame in the middle of a run - the
+    -- second place a reload takes effect without interrupting the turn (docs/HOTRELOAD.md).
+    hot()
     -- The round boundary: the only other moment at which this side runs during a run. `cached` keeps
     -- the rendezvous out of the turn's critical path - a snapshot is allowed to be a minute old and to
     -- say so, and is not allowed to make the model wait.
@@ -362,6 +413,12 @@ function M.run(argv)
         return nil
       end)(),
     }))
+    -- The reload source, said on the line under the banner as well as on the status bar: a reader who is
+    -- about to edit a command file needs to know that this session will pick the edit up, and from where.
+    if reload.status() then
+      print(cli_view.paint("  \194\183 " .. reload.status() .. ": the UI and commands come from "
+        .. tostring(reload.root()), "warning", view.live))
+    end
   end
 
   -- Continuing a thread is the resume (operator, 13/11: "interrupting a session should be in sync with
@@ -667,12 +724,15 @@ function M.run(argv)
   -- `ui.show` is the balloon - pages, arrow keys, Enter, Esc - and a pipe gets the same pages as text
   -- from the same renderer. No arm below calls `print`, `host.panel` or `io.write` itself, and
   -- `scripts/test-cli-balloon.lua` fails when one does.
-  local balloon = dofile("lua/core/balloon.lua")
+  local balloon = reload.require("lua/core/balloon.lua")
   local ui = balloon.for_view(view, { print = print, redact = redact })
 
   while true do
     -- Whatever the last command wrote (a turn, a `!` line, /new) is this CLI's own: already shown.
     mark_seen()
+    -- A save lands here as well as on the next frame: a reload source that only reaches the screen during
+    -- a run would miss the idle prompt, which is exactly where a reader is when they edit a command.
+    hot()
     local line = read_line()
     if line == nil then break end
     line = line:gsub("^%s+", ""):gsub("%s+$", "")
@@ -685,30 +745,30 @@ function M.run(argv)
       -- rows are not re-wrapped (`nowrap`): they are columns, and a hint that moved to its own line
       -- would stop being one.
       local rows = {}
-      for row in (HELP .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
+      for row in (help() .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
       ui.show(balloon.paged("Help", rows, { per = 14, nowrap = true }))
     elseif line == "/bind" or line:sub(1, 6) == "/bind " then
-      dofile('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,ui.print)
+      reload.require('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,ui.print)
     elseif line == "/unbind" then
-      dofile('lua/core/binding_cli.lua').run('unbind','',read_line,ui.print)
+      reload.require('lua/core/binding_cli.lua').run('unbind','',read_line,ui.print)
     elseif line == "/nodes" then
       -- The cluster as pages to move through (lua/core/nodes_cli.lua builds them; the walk is the
       -- balloon's). `/nodes pending` stays a binding command.
-      local done, problem = pcall(dofile('lua/core/nodes_cli.lua').run, {
+      local done, problem = pcall(reload.require('lua/core/nodes_cli.lua').run, {
         print = ui.print, show = ui.show,
         paint = function(text, role) return cli_view.paint(text, role, view.live) end,
       })
       if not done then ui.say(redact.text(tostring(problem))) end
     elseif line:sub(1, 7) == "/nodes " then
-      dofile('lua/core/binding_cli.lua').run('nodes',line:sub(8),read_line,ui.print)
+      reload.require('lua/core/binding_cli.lua').run('nodes',line:sub(8),read_line,ui.print)
     elseif line == "/accept" or line:sub(1, 8) == "/accept " then
-      dofile('lua/core/binding_cli.lua').run('accept',line:sub(9),read_line,ui.print)
+      reload.require('lua/core/binding_cli.lua').run('accept',line:sub(9),read_line,ui.print)
     elseif line == "/promote" or line:sub(1, 9) == "/promote " then
-      dofile('lua/core/binding_cli.lua').run('promote',line:sub(10),read_line,ui.print)
+      reload.require('lua/core/binding_cli.lua').run('promote',line:sub(10),read_line,ui.print)
     elseif line == "/demote" or line:sub(1, 8) == "/demote " then
-      dofile('lua/core/binding_cli.lua').run('demote',line:sub(9),read_line,ui.print)
+      reload.require('lua/core/binding_cli.lua').run('demote',line:sub(9),read_line,ui.print)
     elseif line == "/revoke" or line:sub(1, 8) == "/revoke " then
-      dofile('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,ui.print)
+      reload.require('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,ui.print)
     elseif line == "/session" then
       ui.say(agent.session_id)
     elseif line == "/wakes" or line == "/wake" or line:sub(1, 6) == "/wake " then
@@ -804,7 +864,7 @@ function M.run(argv)
       end
       ui.say(redact.text(notice))
     elseif line == "/model" or line == "/reasoning" or line == "/thinking" then
-      local picker = dofile('lua/core/model_cli.lua')
+      local picker = reload.require('lua/core/model_cli.lua')
       local done, problem = pcall(line == "/model" and picker.model or picker.reasoning, {
         print = ui.print, show = ui.show,
         paint = function(text, role) return cli_view.paint(text, role, view.live) end,
@@ -815,7 +875,7 @@ function M.run(argv)
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
       -- login is a device code entered in the browser, an API key is pasted in the balloon's secret
       -- field or on the vault page.
-      local manager = dofile('lua/core/provider_management.lua')
+      local manager = reload.require('lua/core/provider_management.lua')
       local flow = line == "/login" and manager.login_cli or manager.provider_cli
       local done, problem = pcall(flow, {
         print = ui.print, show = ui.show,
@@ -897,12 +957,17 @@ function M.run(argv)
         rows[#rows + 1] = row
       end
       ui.show(balloon.paged("Hooks", rows, { per = 14, nowrap = true }))
-    elseif line == "/mcp" or line:sub(1, 5) == "/mcp " then
-      -- Every connector this node can use - its own registry and each peer's - as one balloon
+    elseif line == "/reload" then
+      -- Live reload, stated (docs/HOTRELOAD.md): which tree the UI comes from, whether a deployed payload
+      -- verified, what has been swapped and what failed. The mechanism is invisible by design, so "is it
+      -- on, and is it reading the tree I am editing?" has to be a command and not an inference from a
+      -- screen that changed on its own.
+      ui.show(balloon.paged("Reload", reload.report(), { per = 14, nowrap = true }))
+    elseif line == "/mcp" or line:sub(1, 5) == "/mcp " then      -- Every connector this node can use - its own registry and each peer's - as one balloon
       -- (lua/core/mcp_command.lua builds the pages, lua/core/mcp_cli.lua drives them). A change goes
       -- through mcp.control here or the peer's own registry through the fabric; a running session is
       -- told by the existing [session update] note.
-      local done, problem = pcall(dofile("lua/core/mcp_cli.lua").run, line:sub(5), {
+      local done, problem = pcall(reload.require("lua/core/mcp_cli.lua").run, line:sub(5), {
         print = ui.print, io = ui,
         ctx = { user_id = USER, role = "master", session_id = agent.session_id },
       })

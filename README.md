@@ -567,7 +567,7 @@ binary or restart someone else's session. Public candidate packaging does not
 install or deploy anything.
 
 Further reading: [architecture](ARCHITECTURE.md), [UI contract](DESIGN.md),
-[host boundary](docs/HOST.md), [node fabric](docs/RENDEZVOUS.md),
+[host boundary](docs/HOST.md), [live reload](docs/HOTRELOAD.md), [node fabric](docs/RENDEZVOUS.md),
 [sentinel](docs/SENTINEL.md), [self-evolution](docs/EVOLUTION.md).
 
 ## License
