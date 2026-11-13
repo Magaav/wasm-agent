@@ -1,0 +1,10 @@
+Sign in to a provider
+
+Credentials go to wa-vault; this terminal never keeps them.
+Enter opens a provider · Esc or ← closes
+
+❯  1. OpenCode Go            ✔ signed in · wa-vault · in use
+   2. ChatGPT subscription   not signed in
+   3. Environment key        ✔ signed in
+
+↑↓ to move · Enter to open · Esc or ← to go back

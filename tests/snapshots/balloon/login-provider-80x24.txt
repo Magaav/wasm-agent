@@ -1,0 +1,11 @@
+OpenCode Go
+
+✔ signed in · wa-vault
+source: vault · keys: keys/opencode-go.key
+vault: https://vault.example/#vault=0f7d1b0a-0000-4000-8000-000000000000
+
+❯  1. Replace the key     wa-vault keys/opencode-go.key
+   2. Use for this chat   the next turns use it
+   3. Back                the provider list
+
+↑↓ to move · Enter to open · Esc or ← to go back

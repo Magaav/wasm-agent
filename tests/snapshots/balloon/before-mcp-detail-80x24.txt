@@ -1,0 +1,16 @@
+whatsapp - WhatsApp
+  where: this node (local)   transport: native   state: enabled
+  tools callable now: 3 (approved 3, discovered 3)
+  policy: tier mcp - each tool is approved locally as read or write
+  Trusted executable code, not a sandbox.
+  last observation: probe ok 4 min ago
+  controls it gives the model (names verbatim):
+    mcp_whatsapp_read  [read, callable now]
+      Read one WhatsApp chat newest-first, from the linked device journal.
+      schema: {"type":"object","properties":{"chat":{"type":"string"},"limit":{"type":"integer"}}}
+    mcp_whatsapp_search  [read, callable now]
+      Search the journal by text.
+      schema: {"type":"object","properties":{"query":{"type":"string"}}}
+    mcp_whatsapp_send  [write, callable now]
+      Send one message to one chat.
+      schema: {"type":"object","properties":{"chat":{},"text":{}}}

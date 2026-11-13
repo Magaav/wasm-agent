@@ -46,14 +46,18 @@ local cli_input = dofile("lua/core/cli_input.lua")
 
 -- ---- the channel and the registry -----------------------------------------------------------------
 ok(local_views.available(), "this binary offers the local-view channel (the stub above)")
-ok(#local_views.names() == 1 and local_views.names()[1] == "/nodes", "the published view is /nodes")
+ok(has(local_views.names(), "/nodes"), "the published views include /nodes: " .. table.concat(local_views.names(), ", "))
 ok(has(commands.local_views(), "/nodes"), "the command registry declares /nodes a read-only local view")
 
 -- ---- what `/nodes` publishes -----------------------------------------------------------------------
 local count, problem = local_views.refresh({ max_age = 60 })
 ok(problem == nil, "the first publish reports no problem, got " .. tostring(problem))
-ok(count == 1 and #published == 1, "one view published, got " .. tostring(count) .. "/" .. tostring(#published))
-local first = published[1]
+ok(count >= 1 and #published == count,
+  "every view that had something to show went out, got " .. tostring(count) .. "/" .. tostring(#published))
+-- `/nodes` is what this test is about: the other builders (`/mcp`, `/login`, `/help`) are read the same
+-- way by the same channel, and each has its own test.
+local first
+for _, entry in ipairs(published) do if entry.name == "/nodes" then first = entry end end
 ok(first and first.name == "/nodes", "it is filed under the command it answers")
 ok(first.spec.command == "/nodes" and first.spec.captured_at == 1000, "the snapshot says what it answers and when it was taken")
 ok(first.spec.nodes == nil, "only what the client draws crosses the channel, not the raw roster")
@@ -62,7 +66,7 @@ local root = first.spec.views and first.spec.views[1]
 ok(root and root.title == "Nodes", "views[1] is the list")
 ok(root and has(root.lines, "Cluster:") and has(root.lines, "0 peers"), "the list carries the cluster and the peer count")
 ok(root and root.options and #root.options == 1, "one option for the one node there is")
-ok(root and root.options[1].view == 2, "the option opens the node's page")
+ok(root and root.options[1].view == 1, "the option opens the node's page: 0-based, as the client indexes it")
 local page = first.spec.views and first.spec.views[2]
 ok(page and has(page.lines, "Node id: "), "views[2] is the node's page")
 ok(page and page.options and page.options[1].pop == true and page.options[1].label == "Back", "the page's way back is the Back option")
@@ -83,21 +87,24 @@ ok(same_labels, "and the same options, label for label: the two surfaces cannot 
 clock = 1010
 ok(select(1, local_views.refresh({ max_age = 60 })) == 0, "a fresh snapshot is not rebuilt")
 clock = 1100
-ok(select(1, local_views.refresh({ max_age = 60 })) == 1, "a snapshot older than its max age is")
-ok(published[2] and published[2].spec.captured_at == 1100, "and it says when it was taken")
+ok(select(1, local_views.refresh({ max_age = 60 })) == count, "a snapshot older than its max age is")
+local again
+for _, entry in ipairs(published) do if entry.name == "/nodes" then again = entry end end
+ok(again and again.spec.captured_at == 1100, "and it says when it was taken")
 
 -- ---- a round boundary never reaches for the network -------------------------------------------------
 host.http = function() error("a local view must never make the model wait on a network read") end
 local cached_ok, cached = pcall(local_views.refresh, { max_age = 0, cached = true })
-ok(cached_ok and cached == 1, "a snapshot taken inside a run reads no network, got " .. tostring(cached))
+ok(cached_ok and cached == count, "a snapshot taken inside a run reads no network, got " .. tostring(cached))
 
 -- ---- a refused snapshot is reported, the old one keeps working --------------------------------------
 refuse = "spec_too_large"
 local refused_count, refused_problem = local_views.refresh({ max_age = 0 })
-ok(refused_count == 0 and type(refused_problem) == "string" and refused_problem:find("/nodes", 1, true) ~= nil,
+ok(refused_count == 0 and type(refused_problem) == "string" and refused_problem:find("/", 1, true) ~= nil
+  and refused_problem:find("spec_too_large", 1, true) ~= nil,
   "a refusal names the view it was for, got " .. tostring(refused_problem))
 refuse = nil
-ok(select(1, local_views.refresh({ max_age = 0 })) == 1, "the next free moment publishes it again")
+ok(select(1, local_views.refresh({ max_age = 0 })) == count, "the next free moment publishes it again")
 
 -- ---- an older binary: no capability, no error, no change -------------------------------------------
 host.local_view = nil

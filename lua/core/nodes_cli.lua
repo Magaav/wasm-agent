@@ -80,39 +80,14 @@ function M.details(node)
 end
 
 function M.run(io, opts)
-  -- One builder for both surfaces: the panel this loop draws and the stack the client draws while a
-  -- run is in flight (M.views -> lua/core/local_views.lua) are the same spec, so a label that changes
-  -- here changes there and nowhere else has to be remembered.
+  -- One builder for both surfaces: the balloon this REPL opens and the stack the client draws while a run
+  -- is in flight (`M.views` -> `lua/core/local_views.lua`) are the same pages, so a label that changes here
+  -- changes there and nowhere else has to be remembered. The walk itself belongs to
+  -- `lua/core/balloon.lua`: this file has no loop of its own any more.
+  local balloon = dofile("lua/core/balloon.lua")
   local set = M.views(opts)
-  local list = set.nodes
-  if not io.panel then
-    io.print(cluster_line())
-    for _, node in ipairs(list) do io.print(label(node) .. "  " .. hint(node)) end
-    return true
-  end
-  local index = 1
-  local focus = 1
-  while true do
-    local view = set.views[index]
-    -- Back lands on the node that was open, as it always has.
-    if index == 1 then view.selected = focus end
-    local answer = io.panel({
-      title = view.title, lines = view.lines, options = view.options, selected = view.selected,
-    })
-    if type(answer) ~= "table" then return true end
-    if answer.action == "cancel" then
-      if index == 1 then return true end
-      index = 1
-    elseif answer.action ~= "select" then
-      return true
-    else
-      local chosen = view.options[answer.index]
-      if not chosen then return true end
-      if chosen.pop then index = 1
-      elseif chosen.view then focus = answer.index; index = chosen.view
-      else return true end
-    end
-  end
+  balloon.drive(io, set.views)
+  return true
 end
 
 -- The whole view as data: the root list and one page per node, as panel specs plus the links between

@@ -122,12 +122,31 @@ check(peer_detail.connector.tools[1].published == true, 'a published peer tool i
 
 -- The text the terminal prints: the list and the detail carry the same names.
 local text = command.text(view)
-check(contains(text, 'MCP connectors: 3'), 'the list says how many connectors there are')
+check(contains(text, '3 connectors'), 'the list says how many connectors there are')
 check(contains(text, 'openclaw:native_reads'), 'the list prints the key to open')
-check(contains(text, '/mcp <key> on|off'), 'the list says how to change one')
+check(contains(text, 'connected'), 'the list names the state in one word a reader scans for')
+check(not contains(text, 'schema'), 'the list is one screen, not a wall of JSON')
+-- The detail: the names verbatim, and the tool's input is its FIELDS, not the raw schema JSON - the
+-- schema used to be pasted whole, which is what made `/mcp` unreadable at 80 columns.
+local pages = command.views(view).views
 local detail_text = command.detail_text(detail.connector)
 check(contains(detail_text, verbatim), 'the detail text carries the verbatim name')
-check(contains(detail_text, 'schema: ' .. SCHEMA_READ_NEWEST), 'the detail text carries the exact schema')
+local seen_tool, seen_input = false, false
+for _, page in ipairs(pages) do
+  if page.title == verbatim then
+    seen_tool = true
+    for _, line in ipairs(page.lines) do
+      -- Fields, or "none": never the schema JSON (no brace can appear on this line).
+      if line:find('^input: ') and not line:find('[{}]') then seen_input = true end
+    end
+  end
+end
+check(seen_tool and seen_input, 'a tool page carries its fields, summarised from the schema')
+check(not contains(table.concat((function()
+  local all = {}
+  for _, page in ipairs(pages) do for _, line in ipairs(page.lines) do all[#all + 1] = line end end
+  return all
+end)(), '\n'), SCHEMA_READ_NEWEST), 'no page pastes the raw schema')
 
 -- ---------------------------------------------------------------- 3. toggle a local connector
 local enabled = command.toggle(ctx, 'native_reads', true)

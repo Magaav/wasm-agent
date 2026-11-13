@@ -115,6 +115,22 @@ function M.classify(problem)
     retryable = false, text = M.PREFIX .. "run_failed - the run stopped without an answer: " .. detail }
 end
 
+-- A run the reader stopped (Esc, Ctrl-C) is not a failure, and it is not retried.
+--
+-- Victor, 13/11: interrupting a self-wake run printed three lines - `⏰ self-wake: run failed:
+-- run_cancelled`, `! run_failed: run_cancelled - the run was cancelled before it answered:
+-- run_cancelled`, and `⎿ Interrupted by user`. The first two were this module treating the reader's
+-- own choice as a failure: it wrote a failure row, announced an error on the stream and the bus, and
+-- scheduled a rerun of a run the reader had just cancelled. The screen now says one line
+-- (`lua/core/cli_view.lua`'s `failed`), and the record says the same sentence once.
+M.CANCEL_CODE = "run_cancelled"
+M.CANCEL_TEXT = "Interrupted by user"
+
+-- Whether a classified failure is really the reader stopping the run.
+function M.cancelled(info)
+  return type(info) == "table" and tostring(info.code or "") == M.CANCEL_CODE
+end
+
 -- The durable row's text for a classified failure. Kept beside classify so a caller that already
 -- has the fields does not rebuild the sentence differently.
 function M.text(info)
@@ -180,7 +196,9 @@ function M.announce(info, opts)
   opts = opts or {}
   local fact = M.fact(info, opts)
   local out = { published = false, event = false, emitted = false, wake = nil }
-  if type(opts.emit) == "function" then
+  -- `opts.quiet`: the fact still goes to the bus and the durable event (a subscriber must learn that the
+  -- run ended), but nothing is written on the reader's stream - a cancellation is already said there, once.
+  if type(opts.emit) == "function" and not opts.quiet then
     local ok = pcall(opts.emit, { type = "failure", code = fact.code, retryable = fact.retryable,
       error = fact.detail, session_id = fact.session_id, run_id = fact.run_id,
       message_id = fact.message_id, text = M.text(info) })
@@ -236,6 +254,8 @@ function M.wake(info, opts)
   local seconds = M.wake_seconds()
   if seconds == nil then return nil, "wake_disabled" end
   if info.retryable ~= true then return nil, "not_retryable" end
+  -- A run the reader stopped is not one to rerun by itself: the reader ended it on purpose.
+  if M.cancelled(info) then return nil, "cancelled" end
   if opts.subagent then return nil, "not_for_subagent" end
   if M.loop_broken(opts.last_user) then return nil, "already_woken" end
   local ok, answer = pcall(function()
@@ -259,6 +279,20 @@ end
 function M.handle(problem, opts)
   opts = opts or {}
   local info = M.classify(problem)
+  -- A user interrupt (Esc, Ctrl-C) is not a failure: no `run_failed` row, no error on the stream, and no
+  -- wake - a cancelled run must not silently start itself again. One row, one sentence, once.
+  if M.cancelled(info) then
+    local cancelled = { code = M.CANCEL_CODE, why = M.CANCEL_TEXT, detail = info.detail,
+      retryable = false, cancelled = true,
+      text = M.CANCEL_TEXT .. (opts.self_wake and " (self-wake)" or "") }
+    local recorded, record_error = M.record(cancelled, opts)
+    local announced = M.announce(cancelled, { quiet = true, session_id = opts.session_id,
+      user_id = opts.user_id, run_id = opts.run_id, message_id = recorded and recorded.id or nil,
+      round = opts.round, attempts = opts.attempts })
+    return { info = cancelled, cancelled = true,
+      message_id = recorded and recorded.id or nil, seq = recorded and recorded.seq or nil,
+      record_error = record_error, announced = announced, wake_id = nil, wake_reason = "cancelled" }
+  end
   local recorded, record_error = M.record(info, opts)
   if recorded then opts.message_id = recorded.id end
   local announced = M.announce(info, opts)

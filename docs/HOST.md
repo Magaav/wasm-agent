@@ -501,6 +501,15 @@ round-boundary steering, not per-keystroke interruption.
   `status_snapshot(spec)` stores the `/status` panel; `/status` submitted while a run is in
   flight is shown from it by the input thread at once (Esc/Left/Enter close it) instead of
   being queued behind the run.
+  `editor_wakes(text)` is the self-wake fact (`⏰ 2 wakes · next 14:05`) on a row of its own, directly
+  above the session status bar, or "" to give the row back when no wake is scheduled: it used to be
+  appended to the status bar's own line, where it squeezed the numbers.
+  `local_view(command, spec)` is the same channel for a whole balloon: a read-only command publishes
+  its pages (`{title, lines, options = {{label, hint, view|pop|run}}}`, `captured_at`) at a turn's
+  start and at every model round, and the input thread draws them when the command is submitted
+  mid-run. Enter opens a page, Esc or Back returns, Esc at the list closes, and an option with `run`
+  queues that line for the interpreter's next turn - the client never changes state itself.
+  The balloon every command draws in is `lua/core/balloon.lua`; `panel` is its renderer.
   The view addresses the rows the menu and panels move by token (`{O}` output, `{S}` status);
   the host fills them in under its input lock.
   Enter clears the draft immediately and queues a complete line without terminal echo or a
@@ -732,6 +741,7 @@ db_ready             read-only
 disk                 writes files
 editor_footer        device
 editor_status        device
+editor_wakes         device
 enqueue_completion   writes files
 exec                 runs a process
 exec_timeout         read-only
@@ -771,6 +781,7 @@ invoke               runs a process
 isatty               device
 jobs                 writes files
 list_dir             read-only
+local_view           device
 log                  device
 mark_db_ready        writes files
 memory               writes files

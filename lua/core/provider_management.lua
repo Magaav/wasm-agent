@@ -45,28 +45,28 @@ end
 -- ---- /login and /provider in `wa chat` ----------------------------------------------------------
 --
 -- `/login` signs in, `/provider` switches. Neither accepts a credential in the chat line: an API key
--- is pasted on the vault page or in a secret panel, never into this terminal's line editor (whose
--- lines have recall history and land in the transcript).
+-- is pasted in the balloon's secret field or on the vault page, never into this terminal's line editor
+-- (whose lines have recall history and land in the transcript).
 --
--- `io`: print(text), ask(question) -> line|nil, wait(ms) -> line|nil (returns early when the reader
--- presses Enter), paint(text, role) -> text (optional).
+-- Both are the same balloon every other command uses (`lua/core/balloon.lua`): the provider list is a
+-- page, a provider is a page, the key is a page with `input = "secret"`, and the outcome is a page that
+-- says what happened. There is no second, numbered rendering - a pipe gets the same pages as text from
+-- the same renderer - and no `io.panel` of this file's own.
+--
+-- `io`: show(pages) -> {action, index|line}, print(text). Both come from `balloon.for_view`.
 local CHECK, CROSS = '\226\156\148', '\226\156\151'
+local balloon = dofile('lua/core/balloon.lua')
+
 local function trim(text) return (tostring(text or ''):gsub('^%s+', ''):gsub('%s+$', '')) end
-local function yes(answer, default)
-  answer = trim(answer):lower()
-  if answer == '' then return default end
-  return answer == 'y' or answer == 'yes' or answer == 's' or answer == 'sim'
-end
-local function painter(io) return io.paint or function(text) return text end end
 
 local function describe(row)
   if row.configured == true then
     local text = CHECK .. ' signed in' .. (row.enabled == false and ', disabled on the vault page' or '')
     if row.error then text = text .. ' (last use failed)' end
-    return text .. (row.source == 'vault' and ' \194\183 wa-vault' or ''), row.enabled == false and 'warning' or 'success'
+    return text .. (row.source == 'vault' and ' \194\183 wa-vault' or '')
   end
-  if row.configured == false then return 'not signed in', 'muted' end
-  return 'status unknown (' .. tostring(row.error or 'no answer') .. ')', 'warning'
+  if row.configured == false then return 'not signed in' end
+  return 'status unknown (' .. tostring(row.error or 'no answer') .. ')'
 end
 
 local function vault_page(row)
@@ -74,172 +74,132 @@ local function vault_page(row)
   return 'the wa-vault admin page (set WASM_AGENT_VAULT_OPERATOR_URL to have it linked here)'
 end
 
-local function list(io, state, title)
-  local paint = painter(io)
-  io.print('' .. paint(title, 'bold'))
-  io.print('')
-  for n, row in ipairs(state.providers) do
-    local text, role = describe(row)
-    io.print(string.format('%d. %-22s %-15s %s%s', n, row.label, 'API key', paint(text, role),
-      row.id == state.selected and paint(' \194\183 in use', 'accent') or ''))
-  end
-  io.print('')
+-- A page that says what just happened, and closes.
+local function outcome(text)
+  return balloon.page({
+    title = 'Done',
+    lines = balloon.wrap(text, balloon.WIDTH, ''),
+    options = { { label = 'Close', hint = 'Esc closes too', back = true } },
+  })
 end
 
-local function choose(io, state, title, question)
-  list(io, state, title)
-  local answer = trim(io.ask(question))
-  for n, row in ipairs(state.providers) do
-    if answer == tostring(n) or answer == row.id then return row end
-  end
-  io.print('' .. (answer == '' and 'Cancelled.' or ('No provider ' .. answer .. '. Cancelled.')))
-  return nil
-end
-
-local function opencode(io, row)
-  local paint = painter(io)
-  if row.source ~= 'vault' then
-    if row.configured then io.print('' .. paint(CHECK, 'success') .. ' OpenCode Go key found in the environment.'); return true end
-    io.print('Set OPENCODE_GO_API_KEY in this node\'s environment, or run it with WASM_AGENT_VAULT_URL to use wa-vault.')
-    return false
-  end
-  if row.configured then
-    io.print('' .. paint(CHECK, 'success') .. ' An OpenCode Go key is stored in wa-vault. Replace it on ' .. vault_page(row) .. '.')
-    return true
-  end
-  io.print('Paste the key on the vault page (keys never go through this terminal):')
-  io.print(painter(io)(vault_page(row), 'mdLink'))
-  if trim(io.ask('Press Enter once it is saved (or type q to stop):')):lower() == 'q' then return false end
-  local fresh = M.state()
-  for _, item in ipairs(fresh.providers) do
-    if item.id == row.id and item.configured then
-      io.print('' .. paint(CHECK, 'success') .. ' wa-vault now holds an OpenCode Go key.'); return true
-    end
-  end
-  io.print('' .. paint(CROSS, 'error') .. ' wa-vault still has no key for OpenCode Go.')
-  return false
-end
-
-local function switch(io, row, state)
-  local paint = painter(io)
-  local ok, problem = dofile('lua/core/provider.lua').set_provider(row.id, state.revision)
-  io.print(ok and (paint(CHECK, 'success') .. ' Now using ' .. row.label .. ' for the next turns.')
-    or (paint(CROSS, 'error') .. ' Could not switch: ' .. tostring(problem)))
-  return ok
-end
-
--- ---- the same flows as panels (Claude Code style; Esc closes, back to the chat) -------------------
-
-local function provider_options(state)
-  local options, selected = {}, 1
-  for n, row in ipairs(state.providers) do
-    local text = describe(row)
-    options[#options + 1] = { label = row.label .. ' (API key)',
-      hint = text .. (row.id == state.selected and ' \194\183 in use' or '') }
-    if row.id == state.selected then selected = n end
-  end
-  return options, selected
-end
-
-local function done_line(io, ok, text)
-  local paint = painter(io)
-  io.print(paint('\226\143\186', ok and 'success' or 'error') .. ' ' .. text)
-end
-
--- After a credential is in place: use it now? Returns the line for the transcript.
-local function offer_switch(io, row, saved)
+-- Use this provider from the next turn, as a page that says whether it worked.
+local function use(row, io, saved)
   local state = M.state()
-  if state.selected == row.id then return saved .. ' \194\183 ' .. row.label .. ' is in use' end
-  local current = 'the current provider'
-  for _, item in ipairs(state.providers) do if item.id == state.selected then current = item.label end end
-  local answer = io.panel({ title = row.label, lines = { CHECK .. ' ' .. saved .. '.' },
-    options = { { label = 'Use ' .. row.label .. ' for this chat' }, { label = 'Keep ' .. current } } })
-  if answer.action == 'select' and answer.index == 1 then
-    local ok, problem = dofile('lua/core/provider.lua').set_provider(row.id, state.revision)
-    return ok and (saved .. ' \194\183 now using ' .. row.label) or (saved .. ' \194\183 could not switch: ' .. tostring(problem))
-  end
-  return saved
-end
-
-local function key_panel(io, row)
-  if row.source ~= 'vault' then
-    io.panel({ title = row.label, lines = { 'This node has no wa-vault (WASM_AGENT_VAULT_URL is unset).',
-      'Set OPENCODE_GO_API_KEY in its environment instead.' }, options = { { label = 'Back' } } })
-    return nil
-  end
-  if row.configured then
-    local answer = io.panel({ title = row.label, lines = { CHECK .. ' A key is stored in wa-vault (keys/opencode-go.key).' },
-      options = { { label = 'Replace the key' }, { label = 'Keep it' } } })
-    if answer.action ~= 'select' then return nil end
-    if answer.index == 2 then return offer_switch(io, row, 'OpenCode Go key kept') end
-  end
-  local lines = { 'Paste your OpenCode Go key. wa hands it straight to wa-vault, which keeps',
-    'it in keys/opencode-go.key - the agent can use it, never read it.' }
-  while true do
-    local answer = io.panel({ title = 'OpenCode Go API key', lines = lines, input = 'secret', placeholder = 'sk-...' })
-    if answer.action ~= 'submit' then return nil end
-    local key = trim(answer.text)
-    answer = nil
-    if key ~= '' then
-      local stored, problem = vault.set_key('opencode-go', key)
-      key = nil
-      if stored then return offer_switch(io, row, 'OpenCode Go key saved in wa-vault') end
-      lines = { CROSS .. ' Not saved: ' .. tostring(problem), 'Paste the key again, or Esc to go back.' }
-    end
-  end
-end
-
-local function login_panel(io)
-  local state = M.state('local-operator')
-  local options, selected = provider_options(state)
-  local answer = io.panel({ title = 'Sign in to a provider', lines = { 'Credentials go to wa-vault; this terminal never keeps them.' },
-    options = options, selected = selected })
-  if answer.action ~= 'select' then return false end
-  local row = state.providers[answer.index]
-  local outcome = key_panel(io, row)
-  if outcome then done_line(io, true, outcome) end
-  return outcome ~= nil
-end
-
-local function provider_panel(io)
-  local state = M.state('local-operator')
-  local options, selected = provider_options(state)
-  local answer = io.panel({ title = 'Switch provider', lines = { 'The next turns use the provider you pick.' },
-    options = options, selected = selected })
-  if answer.action ~= 'select' then return false end
-  local row = state.providers[answer.index]
-  if row.id == state.selected then return true end
-  if row.configured == false then done_line(io, false, row.label .. ' has no credential yet - /login signs in first'); return false end
+  if state.selected == row.id then return outcome(saved .. ' \194\183 ' .. row.label .. ' is in use') end
+  if row.configured == false then return outcome(CROSS .. ' ' .. row.label .. ' has no credential yet - sign in first') end
   local ok, problem = dofile('lua/core/provider.lua').set_provider(row.id, state.revision)
-  done_line(io, ok, ok and ('Now using ' .. row.label) or ('Could not switch: ' .. tostring(problem)))
-  return ok
+  return outcome(ok and (CHECK .. ' ' .. saved .. ' \194\183 now using ' .. row.label)
+    or (CROSS .. ' ' .. saved .. ' \194\183 could not switch: ' .. tostring(problem)))
+end
+
+-- The secret field for one provider's key: one page, bullets in the renderer, and the text never leaves
+-- this function - it goes to wa-vault and is dropped.
+local function key_page(row, io, lines, placeholder)
+  return balloon.page({
+    title = row.label .. ' API key',
+    lines = lines,
+    input = 'secret',
+    placeholder = placeholder or 'sk-...',
+    act = function(text)
+      local key = trim(text)
+      if key == '' then return key_page(row, io, { CROSS .. ' Nothing typed. Paste the key, or Esc to go back.' }) end
+      local stored, problem = vault.set_key(row.id, key)
+      key = nil
+      if not stored then
+        return key_page(row, io, { CROSS .. ' Not saved: ' .. tostring(problem), 'Paste the key again, or Esc to go back.' })
+      end
+      return use(row, io, CHECK .. ' ' .. row.label .. ' key saved in wa-vault')
+    end,
+  })
+end
+
+-- One provider, as a page: how it stands, where the vault is, and what can be done from here.
+local function provider_page(row, io)
+  local options = {}
+  if row.configured == true then
+    options[#options + 1] = { label = 'Replace the key', hint = 'wa-vault keys/' .. row.id .. '.key',
+      act = function() return key_page(row, io, {
+        'Paste your ' .. row.label .. ' key. wa hands it straight to wa-vault, which keeps',
+        'it in keys/' .. row.id .. '.key - the agent can use it, never read it.',
+      }) end }
+  elseif row.source == 'vault' then
+    options[#options + 1] = { label = 'Paste the key', hint = 'straight to wa-vault, never kept here',
+      act = function() return key_page(row, io, {
+        'Paste your ' .. row.label .. ' key. wa hands it straight to wa-vault, which keeps',
+        'it in keys/' .. row.id .. '.key - the agent can use it, never read it.',
+      }) end }
+  end
+  options[#options + 1] = { label = 'Use for this chat', hint = 'the next turns use it',
+    act = function() return use(row, io, '') end }
+  options[#options + 1] = { label = 'Back', hint = 'the provider list', back = true }
+  local lines = {
+    describe(row),
+    'source: ' .. tostring(row.source) .. ' \194\183 keys: ' .. (row.source == 'vault' and ('keys/' .. row.id .. '.key') or 'environment'),
+    'vault: ' .. tostring(vault_page(row)),
+  }
+  if row.source ~= 'vault' then
+    lines[#lines + 1] = 'This node has no wa-vault for it: set the key in its environment instead '
+      .. '(the vault setup is on the vault page above).'
+  end
+  return balloon.page({ title = row.label, lines = lines, options = options, selected = 1 })
+end
+
+-- The list, as pages: one page for the reader, a provider page behind each option. This is what `/login`
+-- opens, what `/provider` opens (with the switch hint first), and what a pipe gets as text.
+function M.login_views(state, io)
+  state = state or M.state('local-operator')
+  local pages = { balloon.page({
+    title = 'Sign in to a provider',
+    lines = {
+      'Credentials go to wa-vault; this terminal never keeps them.',
+      'Enter opens a provider \194\183 Esc or \226\134\144 closes',
+    },
+    options = {},
+    selected = 1,
+  }) }
+  for index, row in ipairs(state.providers) do
+    -- "· in use" is the one thing the old printed list said that the balloon must not lose: which provider
+    -- the next turn will actually use.
+    pages[1].options[#pages[1].options + 1] = { label = row.label,
+      hint = describe(row) .. (row.id == state.selected and ' \194\183 in use' or ''), page = index + 1 }
+    pages[index + 1] = provider_page(row, io)
+  end
+  return pages
+end
+
+function M.provider_views(state, io)
+  state = state or M.state('local-operator')
+  local pages = M.login_views(state, io)
+  pages[1].title = 'Switch provider'
+  pages[1].lines = { 'The next turns use the provider you pick.' }
+  return pages
 end
 
 function M.login_cli(io)
-  if io.panel then return login_panel(io) end
-  local state = M.state('local-operator')
-  local row = choose(io, state, 'Sign in to a provider', 'Choose 1-' .. #state.providers .. ' (Enter to cancel):')
-  if not row then return false end
-  if not opencode(io, row) then return false end
-  if state.selected == row.id then
-    io.print('' .. row.label .. ' is already the provider in use.')
-  elseif yes(io.ask('Use ' .. row.label .. ' for this chat? [Y/n]'), true) then
-    switch(io, row, M.state())
+  io = io or {}
+  local pages = M.login_views(M.state('local-operator'), io)
+  if io.show then
+    local answer = io.show(pages)
+    -- An option that queued a line (`/login` has none) is the caller's to run; nothing here changes
+    -- state after the balloon closes, so the reader's choice is the whole result.
+    return type(answer) == 'table' and answer.action ~= 'cancel'
   end
-  return true
+  -- A pipe gets every page: the list and each provider's own page (its vault link included), which is
+  -- what the printed fallback showed before there was a balloon.
+  if io.print then io.print(balloon.text(pages, balloon.WIDTH)) end
+  return false
 end
 
 function M.provider_cli(io)
-  if io.panel then return provider_panel(io) end
-  local state = M.state('local-operator')
-  local row = choose(io, state, 'Switch provider', 'Switch to 1-' .. #state.providers .. ' (Enter to cancel):')
-  if not row then return false end
-  if row.id == state.selected then io.print('Already using ' .. row.label .. '.'); return true end
-  if row.configured == false then
-    io.print('' .. row.label .. ' has no credential yet - /login signs in first.')
-    return false
+  io = io or {}
+  local pages = M.provider_views(M.state('local-operator'), io)
+  if io.show then
+    local answer = io.show(pages)
+    return type(answer) == 'table' and answer.action ~= 'cancel'
   end
-  return switch(io, row, state)
+  if io.print then io.print(balloon.text(pages, balloon.WIDTH)) end
+  return false
 end
 
 -- The earlier name: `/login`.

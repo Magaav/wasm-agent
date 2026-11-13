@@ -1,0 +1,9 @@
+Sign in to a provider
+
+Credentials go to wa-vault; this terminal never keeps them.
+
+❯  1. OpenCode Go (API key)            ✔ signed in · wa-vault · in use
+   2. ChatGPT subscription (API key)   not signed in
+   3. Environment key (API key)        ✔ signed in
+
+↑↓ to move · Enter to open · Esc or ← to go back

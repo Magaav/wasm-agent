@@ -73,6 +73,12 @@ pub struct ViewOption {
     /// Go back one level ("Back"). Not allowed in the root: from the root, back is close.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pop: bool,
+    /// A line for the interpreter to run **after this turn** ("disable this connector"). The client
+    /// cannot do it - it has no registry, no provider and no business changing state - so choosing
+    /// this option closes the balloon and queues the line exactly where a typed one goes. That is what
+    /// keeps a mid-run action honest: the panel says it is queued, and it runs at the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -169,6 +175,22 @@ impl View {
                     "option_opens_and_pops",
                     format!("views[{index}].options[{option}]"),
                 ));
+            }
+            if let Some(run) = entry.run.as_deref() {
+                // A queued line has to be a command the interpreter owns, never model input: a reader
+                // pressing Enter on "reconnect" must not put a sentence into the conversation.
+                if !run.starts_with('/') || run.chars().count() > MAX_LINE_CHARS || run.contains('\n') {
+                    return Some(Refusal::new(
+                        "option_run_not_a_command",
+                        format!("views[{index}].options[{option}]"),
+                    ));
+                }
+                if entry.view.is_some() || entry.pop {
+                    return Some(Refusal::new(
+                        "option_runs_and_navigates",
+                        format!("views[{index}].options[{option}]"),
+                    ));
+                }
             }
         }
         None
@@ -441,6 +463,7 @@ mod tests {
                 hint: Some("local".into()),
                 view: Some(1),
                 pop: false,
+                run: None,
             }],
             selected: Some(1),
         };

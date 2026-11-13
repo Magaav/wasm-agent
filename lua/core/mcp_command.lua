@@ -129,6 +129,9 @@ local function local_connector(mcp, server, revision)
     state = state, error = error, enabled = server.enabled == true,
     tool_count = published, approved = #sorted_keys(approved), discovered = #(server.probe and server.probe.tools or {}),
     revision = revision, observed = observed, last_call = last_call, probe = reported_probe,
+    -- The vault keys this connector's definition names, by NAME only (`secret_env`): the detail page is
+    -- where a reader learns which key to store, and a value never crosses this boundary.
+    secret_env = definition.secret_env,
     note = retired or (superseded and 'superseded_by_mcp_whatsapp' or nil),
     tools = tools,
     policy = { tier = 'mcp', managed_by = 'lua/core/mcp.lua',
@@ -389,70 +392,263 @@ function M.toggle(ctx, key, enable, opts)
     connector_state = after.ok and after.connector or nil, note = view.note }
 end
 
--- ---------------------------------------------------------------- text (the terminal view)
-local function pad(text, width) return tostring(text) .. string.rep(' ', math.max(0, width - #tostring(text))) end
+-- ------------------------------------------------------- the balloon (one screen, three levels)
+--
+-- What `/mcp` shows, as pages `lua/core/balloon.lua` draws - the SAME pages whether the reader is between
+-- runs (the interpreter opens them) or in the middle of one (the client draws the published stack from
+-- `host.local_view` while this interpreter is blocked in the model call).
+--
+-- The shape it replaces, and why. `/mcp` printed a table of connector rows, a wall of prose per
+-- connector, and every tool's input schema as raw JSON; changing one meant typing `/mcp <key> on`. The
+-- operator's words were "a horrible ux". So: one screen listing every connector with its state, tool
+-- count and last error on one line; Enter opens the connector (where it runs, the error in full, what it
+-- gives the model); its tools are one keypress further, with the schema *summarised* as the fields it
+-- takes rather than pasted.
+--
+-- Actions are pages too, and always as a `run` line - `/mcp <key> probe`, `/mcp <key> off` - never a Lua
+-- callback: the client cannot run one (it has no registry), so an option the client can draw has to be a
+-- line the interpreter executes. Mid-run that line is queued for the next turn, and the balloon says so.
+local balloon = dofile('lua/core/balloon.lua')
 
-local function summary(entry)
-  local count = string.format('%d tool%s', entry.tool_count, entry.tool_count == 1 and '' or 's')
-  local detail = entry.error and ('  ! ' .. tostring(entry.error)) or ''
-  return string.format('%s %s %s %s', entry.state, entry.transport, count, detail)
+-- The one word a reader scans for, per state the registry reports. `enabled` is the registry's word for a
+-- connector that answered its last probe and is published; nobody outside `lua/core/mcp.lua` says it.
+local STATE_LABELS = {
+  enabled = 'connected', stale = 'stale', failing = 'failed', disabled = 'disabled',
+  -- A row whose program was removed (`514a1c41`): retired, not broken, and the one word that says so.
+  retired = 'retired',
+}
+
+-- Whether the connector's own error says the far end refused a credential: the one case where turning it
+-- on is not the next action, signing in is.
+local function credential_refused(entry)
+  local text = tostring(entry.error or ''):lower()
+  return text:find('401', 1, true) or text:find('403', 1, true) or text:find('unauthor', 1, true)
+    or text:find('not logged in', 1, true) or text:find('login', 1, true)
+    or text:find('credential', 1, true) or text:find('token expired', 1, true)
 end
 
--- The list. One row per connector: scope, key, name, where, transport, state, tools, and the last error.
--- The keys are what `/mcp <key>` opens, so they are printed whole and never shortened.
-function M.text(view)
-  local lines = {}
-  local counts = view.counts or {}
-  lines[#lines + 1] = string.format('MCP connectors: %d (%d here, %d from peers) - %d enabled, %d tools callable now',
-    counts.connectors or 0, counts.here or 0, counts.from_peers or 0, counts.enabled or 0, counts.tools or 0)
-  if view.read_only then lines[#lines + 1] = '  read-only: ' .. tostring(view.note) end
-  if #(view.connectors or {}) == 0 then
-    lines[#lines + 1] = '  none: no connector is registered on this node and no peer exports one.'
-  end
-  local key_width = 0
-  for _, entry in ipairs(view.connectors or {}) do key_width = math.max(key_width, #entry.key) end
-  key_width = math.min(key_width, 40)
-  for _, entry in ipairs(view.connectors or {}) do
-    lines[#lines + 1] = string.format('  %-5s %s %s  %s', entry.scope, pad(entry.key, key_width),
-      summary(entry), entry.name)
-  end
-  -- A peer's half is a cache: say how old it is when that is old enough to matter, rather than implying a
-  -- liveness the read never had.
-  local age = tonumber(view.peers_at) and (host.now() - tonumber(view.peers_at)) or nil
-  if age and age > 300 then
-    lines[#lines + 1] = string.format('  peer connectors as last refreshed %d min ago (federation refreshes '
-      .. 'every 10 min, and on a binding or promotion)', math.floor(age / 60))
-  end
-  lines[#lines + 1] = '  open one: /mcp <key>   turn it on/off: /mcp <key> on|off'
-  return table.concat(lines, '\n')
+-- The state, in one word. `needs login` wins: a credential the far end refused is more useful to know than
+-- that the last call failed, and it names the next action.
+function M.state_label(entry)
+  if credential_refused(entry) then return 'needs login' end
+  return STATE_LABELS[tostring(entry.state)] or tostring(entry.state or 'unknown')
 end
 
--- One connector, in full: where it runs, what it is, its policy, and every control it gives the model
--- with the exact name, the description and the input schema the model is offered.
-function M.detail_text(entry)
-  local lines = {}
-  lines[#lines + 1] = string.format('%s - %s', entry.key, entry.name)
-  lines[#lines + 1] = string.format('  where: %s (%s)   transport: %s   state: %s%s', entry.where, entry.scope,
-    entry.transport, entry.state, entry.error and (' - ' .. tostring(entry.error)) or '')
-  lines[#lines + 1] = string.format('  tools callable now: %d (approved %d, discovered %d)',
-    entry.tool_count, entry.approved or 0, entry.discovered or 0)
-  if entry.policy then
-    lines[#lines + 1] = string.format('  policy: tier %s - %s', tostring(entry.policy.tier), tostring(entry.policy.approval))
-    if entry.policy.note then lines[#lines + 1] = '  ' .. tostring(entry.policy.note) end
+-- "6 tools", "1 tool", "no tool".
+local function tools_phrase(count)
+  count = tonumber(count) or 0
+  if count == 0 then return 'no tool' end
+  return string.format('%d tool%s', count, count == 1 and '' or 's')
+end
+
+-- The vault keys this connector's definition names (`secret_env`), by name. Only the NAMES: a value never
+-- leaves the vault, and this page is the only place a reader learns which name to store.
+local function vault_keys(entry)
+  local names = {}
+  for _, name in ipairs(entry.secret_env or {}) do names[#names + 1] = tostring(name) end
+  return names
+end
+
+-- The input a tool takes, summarised: its field names, or "none". The old detail pasted the whole JSON
+-- schema; at 80 columns that was unreadable, and the fields are what a reader is actually asking about.
+local function input_fields(tool)
+  local schema = tool.schema or tool.parameters
+  if type(schema) == 'string' then
+    local decoded
+    if pcall(function() decoded = json.decode(schema) end) and type(decoded) == 'table' then schema = decoded end
   end
-  if entry.observed then lines[#lines + 1] = '  last observation: ' .. tostring(entry.observed) end
+  if type(schema) ~= 'table' then return 'unknown' end
+  local names = {}
+  for name in pairs(schema.properties or {}) do names[#names + 1] = tostring(name) end
+  table.sort(names)
+  if #names == 0 then return 'none' end
+  return table.concat(names, ', ')
+end
+
+-- One tool, in full but not in JSON: what it does, how it is approved, whether the model is offered it
+-- now, and the fields it takes.
+function M.tool_page(tool, entry, back)
+  local lines = {
+    'from ' .. tostring(entry.key) .. ' (' .. tostring(entry.where) .. ')',
+    string.format('approval: %s \u{b7} %s', tostring(tool.approval or 'unknown'),
+      tool.published and 'the model is offered it now' or 'not offered to the model now'),
+    'input: ' .. input_fields(tool),
+  }
+  if tool.description and tool.description ~= '' then
+    for _, line in ipairs(balloon.wrap(tostring(tool.description), balloon.WIDTH, '')) do lines[#lines + 1] = line end
+  end
+  if tool.note then lines[#lines + 1] = 'note: ' .. tostring(tool.note) end
+  return balloon.page({ title = tostring(tool.name), lines = lines,
+    options = { { label = 'Back', hint = 'the connector', back = true } } })
+end
+
+-- What one connector's tools are, as a page of options: one per tool, with its approval and whether the
+-- model is offered it.
+function M.tools_page(entry, links, back)
+  local options = {}
+  for index, tool in ipairs(entry.tools or {}) do
+    options[#options + 1] = {
+      label = tostring(tool.name),
+      hint = string.format('%s \u{b7} %s', tostring(tool.approval or 'unknown'),
+        tool.published and 'callable now' or 'not callable now'),
+      page = links.tool[index],
+    }
+  end
+  options[#options + 1] = { label = 'Back', hint = 'the connector', back = true }
+  local lines = {
+    string.format('%s \u{b7} %s', tostring(entry.key),
+      #(entry.tools or {}) == 0 and 'no tool' or tools_phrase(#(entry.tools or {}))),
+  }
   if #(entry.tools or {}) == 0 then
-    lines[#lines + 1] = '  this connector gives the model no tool: it has not been probed, or it exposes none.'
+    lines[#lines + 1] = 'This connector gives the model no tool: it has not been probed, or it exposes none.'
   else
-    lines[#lines + 1] = '  controls it gives the model (names verbatim):'
-    for _, tool in ipairs(entry.tools) do
-      lines[#lines + 1] = string.format('    %s  [%s%s]', tool.name, tostring(tool.approval),
-        tool.published and ', callable now' or ', not callable now')
-      if tool.description and tool.description ~= '' then lines[#lines + 1] = '      ' .. tostring(tool.description) end
-      lines[#lines + 1] = '      schema: ' .. tostring(tool.schema or (tool.parameters and json.encode(tool.parameters)) or '{}')
+    lines[#lines + 1] = 'The exact name the model is given, then how it is approved. Enter opens one.'
+  end
+  return balloon.page({ title = 'Tools', lines = lines, options = options, selected = 1 })
+end
+
+-- One connector: where it runs, how it stands, the error in full, and what can be done from here.
+--
+-- The actions are the node's real verbs and nothing more: `probe` re-reads the tool list (that is what
+-- "reconnect" means here), `on`/`off` is the registry's own enable/disable, and `login` is offered only
+-- when the connector's definition names a vault key - an invented sign-in flow would be a lie on screen.
+function M.detail_page(entry, links, opts)
+  opts = opts or {}
+  local lines = {
+    string.format('where: %s (%s) \u{b7} transport %s \u{b7} revision %s', tostring(entry.where),
+      tostring(entry.scope), tostring(entry.transport), tostring(entry.revision or '?')),
+    string.format('state: %s \u{b7} %s callable now (approved %s, discovered %s)', M.state_label(entry),
+      tostring(entry.tool_count or 0), tostring(entry.approved or 0), tostring(entry.discovered or 0)),
+  }
+  if entry.note then lines[#lines + 1] = 'note: ' .. tostring(entry.note) end
+  if entry.observed then lines[#lines + 1] = 'last observation: ' .. tostring(entry.observed) end
+  local error_text = entry.error and tostring(entry.error) or ''
+  if entry.last_call and type(entry.last_call) == 'table' and entry.last_call.ok == false and entry.last_call.error then
+    error_text = error_text ~= '' and error_text or tostring(entry.last_call.error)
+  end
+  if error_text ~= '' then
+    lines[#lines + 1] = 'error:'
+    for _, line in ipairs(balloon.wrap(error_text, balloon.WIDTH, '  ')) do lines[#lines + 1] = line end
+  else
+    lines[#lines + 1] = 'error: none reported'
+  end
+  if entry.policy and entry.policy.approval then
+    for _, line in ipairs(balloon.wrap('approval: ' .. tostring(entry.policy.approval), balloon.WIDTH, '')) do
+      lines[#lines + 1] = line
     end
   end
-  return table.concat(lines, '\n')
+  local options = {
+    { label = (entry.tools and #entry.tools > 0) and ('Tools (' .. #entry.tools .. ')') or 'Tools',
+      hint = 'names, approvals, inputs', page = links.tools },
+  }
+  if entry.scope == 'local' then
+    options[#options + 1] = { label = 'Reconnect', hint = 'probe again, now', run = '/mcp ' .. entry.key .. ' probe' }
+    options[#options + 1] = entry.enabled
+      and { label = 'Turn off', hint = 'the model stops seeing its tools', run = '/mcp ' .. entry.key .. ' off' }
+      or { label = 'Turn on', hint = 'needs a passed probe and every approved tool', run = '/mcp ' .. entry.key .. ' on' }
+    local keys = vault_keys(entry)
+    if M.state_label(entry) == 'needs login' or #keys > 0 then
+      options[#options + 1] = { label = 'Sign in', hint = #keys > 0 and ('vault key ' .. table.concat(keys, ', '))
+        or 'no vault key is named by this connector', run = '/mcp ' .. entry.key .. ' login' }
+    end
+  else
+    options[#options + 1] = { label = 'Reconnect', hint = 'on ' .. tostring(entry.where) .. ', from there',
+      run = '/mcp ' .. entry.key .. ' probe' }
+    if not entry.note then
+      options[#options + 1] = entry.enabled
+        and { label = 'Turn off', hint = 'asks ' .. tostring(entry.where), run = '/mcp ' .. entry.key .. ' off' }
+        or { label = 'Turn on', hint = 'asks ' .. tostring(entry.where), run = '/mcp ' .. entry.key .. ' on' }
+    end
+  end
+  options[#options + 1] = { label = 'Back', hint = 'the list', back = true }
+  return balloon.page({ title = tostring(entry.key) .. (entry.name and entry.name ~= entry.key and (' \u{b7} ' .. tostring(entry.name)) or ''),
+    lines = lines, options = options, selected = 1, hint = 'Enter opens \u{b7} Esc or \u{2190} goes back' })
+end
+
+-- The whole `/mcp` balloon: the list and one detail page per connector, plus its tools and their pages.
+-- `links` is the bookkeeping a linked stack needs; nothing here reads a clock or a registry twice.
+function M.views(view, opts)
+  opts = opts or {}
+  view = view or { connectors = {}, counts = {} }
+  local counts = view.counts or {}
+  local pages = {}
+  local lines = {
+    string.format('%d connectors \u{b7} %d here, %d from peers \u{b7} %d enabled \u{b7} %d tools callable now',
+      counts.connectors or 0, counts.here or 0, counts.from_peers or 0, counts.enabled or 0, counts.tools or 0),
+  }
+  if view.read_only then
+    lines[#lines + 1] = 'read-only: ' .. tostring(view.note)
+  end
+  local list = balloon.page({ title = 'MCP connectors', lines = lines, options = {}, selected = 1,
+    hint = 'Enter opens a connector \u{b7} Esc or \u{2190} closes' })
+  pages[1] = list
+  if #(view.connectors or {}) == 0 then
+    list.lines[#list.lines + 1] = 'none: no connector is registered on this node, and no peer exports one.'
+  end
+  local index = 1
+  for _, entry in ipairs(view.connectors or {}) do
+    index = index + 1
+    local detail_index = index
+    index = index + 1
+    local tools_index = index
+    local tool_pages = {}
+    for tool_number in ipairs(entry.tools or {}) do
+      index = index + 1
+      tool_pages[tool_number] = index
+    end
+    local links = { tools = tools_index, tool = tool_pages }
+    pages[detail_index] = M.detail_page(entry, links, opts)
+    pages[tools_index] = M.tools_page(entry, links, detail_index)
+    for tool_number, tool in ipairs(entry.tools or {}) do
+      pages[tool_pages[tool_number]] = M.tool_page(tool, entry, detail_index)
+    end
+    local hint = string.format('%s \u{b7} %s \u{b7} %s', tostring(entry.key), M.state_label(entry),
+      tools_phrase(entry.tool_count))
+    if entry.error and tostring(entry.error) ~= '' then
+      hint = hint .. ' \u{b7} ' .. balloon.fit(tostring(entry.error), 28)
+    end
+    list.options[#list.options + 1] = {
+      label = tostring(entry.name or entry.key), hint = hint, page = detail_index,
+    }
+  end
+  return { command = '/mcp', captured_at = host.now and host.now() or os.time(), views = pages, view = view }
+end
+
+-- The list as text: the balloon's own rendering of its first page (a pipe gets this, and so does a snapshot).
+function M.text(view, width)
+  local set = M.views(view)
+  return balloon.text({ set.views[1] }, width or balloon.WIDTH)
+end
+
+-- One connector as text: its page and the tools it offers, in the same rendering.
+function M.detail_text(entry, width)
+  local set = M.views({ connectors = { entry }, counts = { connectors = 1, here = 1, enabled = entry.enabled and 1 or 0,
+    tools = entry.tool_count or 0 } })
+  return balloon.text(set.views, width or balloon.WIDTH)
+end
+
+-- ---------------------------------------------------------------- reconnect
+--
+-- "Reconnect" is the registry's own `probe`: read the tool list again and cache it. A stale connector
+-- (its tool list moved under an approved set) is fixed by this and nothing else, which is why it is the
+-- first action on the detail page. A peer connector is probed on the node that runs it - this node cannot
+-- start a process there - and says so instead of pretending.
+function M.probe(ctx, key, opts)
+  opts = opts or {}
+  local view = M.list(ctx, opts)
+  local entry = M.find(view, key)
+  if not entry then return { ok = false, error = 'unknown_connector', key = tostring(key) } end
+  if entry.scope ~= 'local' then
+    return { ok = false, error = 'connector_probe_remote', connector = entry.key, where = entry.where,
+      effect = 'none', note = 'a connector is probed on the node that runs it: run /mcp there, from that node' }
+  end
+  local answer = mcp_module().control({ action = 'probe', id = entry.id }, ctx)
+  audit(ctx, 'probe', { connector = entry.key, where = 'this node', ok = answer.ok == true,
+    error = answer.error, tools = type(answer.tools) == 'table' and #answer.tools or nil })
+  local after = M.inspect(ctx, entry.key, opts)
+  return { ok = answer.ok == true, action = 'probe', connector = entry.key, where = 'this node',
+    error = answer.error, tools = type(answer.tools) == 'table' and #answer.tools or nil,
+    connector_state = after.ok and after.connector or nil }
 end
 
 return M

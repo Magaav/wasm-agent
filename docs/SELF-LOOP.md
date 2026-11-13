@@ -150,8 +150,10 @@ cannot lose one.
 
 ## Visibility
 
-* CLI footer: `⏰ 2 wakes · next 14:05` (count + next due), refreshed with the session numbers; a held
-  session reads `⏰ 2 wakes paused` instead.
+* CLI: `⏰ 2 wakes · next 14:05` (count + next due) on a row of its OWN, directly above the session
+  status bar (`host.editor_wakes`, refreshed with the session numbers); a held session reads
+  `⏰ 2 wakes paused` there instead. It is not part of the bar's line: putting it there squeezed the
+  numbers and wrapped the bar on a narrow terminal. No wake scheduled = no row at all.
 * CLI: `/wakes` lists pending wakes (id, status, due or subscription, cadence, last error);
   `/wake cancel <id>` cancels one.
 * Window: the `/session` read carries a `wakes` block (pending, event_pending, next_at, rows); the

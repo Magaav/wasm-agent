@@ -28,6 +28,10 @@ wa-operation = { path = "../wa-operation" }
 # the stall rule, shared with the two renderers so the CLI, the native editor and the window cannot
 # disagree about what a call is doing. A leaf crate; this adds no arrow the split did not have.
 wa-tool-progress = { path = "../wa-tool-progress" }
+# The read-only `/` views a run in flight can answer (`host.local_view`): the published snapshots and the
+# walk over them, so the console reader thread draws a balloon without waiting for the interpreter. A
+# leaf crate (`forbid(unsafe_code)`); the capability below is the only caller.
+wa-cli-views = { path = "../wa-cli-views" }
 wa-jobs = { path = "../wa-jobs" }
 # The explicit WhatsApp send (`whatsapp_send.rs`) names the `wa:queue` request/job types it enqueues
 # and reads back, and the `wa-grant-policy` decision `node_policy` answers with. Both are leaf crates
