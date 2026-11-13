@@ -295,11 +295,15 @@ ok
 ok
 out="$(ship "$WORK/release-yes" "$dropbox" with)"; code=$?
 expect 0 "$code" "a signed set ships" "$out"
-ref="$(git ls-remote "$dropbox" 'refs/heads/artifacts/*' | awk '{print $2}' | head -1)"
+refs="$(git ls-remote "$dropbox" 'refs/heads/artifacts/*' | awk '{print $2}')"
+ref="$(printf '%s\n' "$refs" | head -1)"
 [ -n "$ref" ] || fail "the signed set pushed no artifacts ref"
 listed="$(git --git-dir="$dropbox" ls-tree -r --name-only "${ref#refs/heads/}")"
 for asset in SHA256SUMS SHA256SUMS.sig; do
-  printf '%s\n' "$listed" | grep -qx "$asset" || fail "the shipped ref does not carry $asset"
+  # The failure message carries the ref and what the commit DOES hold: a bare "does not carry" costs a
+  # second run to diagnose (measured once, under load, and it did not reproduce).
+  printf '%s\n' "$listed" | grep -qx "$asset" \
+    || fail "the shipped ref $ref (refs: $(printf '%s' "$refs" | tr '\n' ' ')) does not carry $asset (holds: $(printf '%s' "$listed" | tr '\n' ' '))"
   ok
 done
 publish_sh="$(git --git-dir="$dropbox" show "${ref#refs/heads/}:PUBLISH.sh")"
