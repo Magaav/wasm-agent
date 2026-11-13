@@ -28,7 +28,11 @@ MUSL=${TARGET%-gnu}-musl
 NODEV=24.22.1
 COMMIT=0123456789abcdef0123456789abcdef01234567
 
-mkbundle() { # NAME [tamper] [target] -> prints manifest sha; archive at $T/NAME.tar.gz
+# Each bundle gets its OWN release directory, because a release is a directory now: the installer verifies
+# `SHA256SUMS.sig` from the same place the bundle came from before it installs anything. The test key is the
+# committed fixture one (`tests/fixtures/release-sign/keys.txt`), never a real vault key.
+sign_release() { python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$1" --key A >/dev/null 2>&1; }
+mkbundle() { # NAME [tamper] [target] -> prints manifest sha; archive at $T/rel-NAME/NAME.tar.gz
   local name=$1 dir="$T/src/$1" btarget=${3:-$TARGET} bin=/bin/true; rm -rf "$dir"; mkdir -p "$dir/ui" "$dir/scripts"
   [ "${2:-}" = norun ] && bin=/bin/false
   cp "$bin" "$dir/wa"; cp /bin/true "$dir/wa-sentinel"; echo '<html>' > "$dir/ui/index.html"; echo '//' > "$dir/scripts/mcp-web.mjs"
@@ -36,20 +40,23 @@ mkbundle() { # NAME [tamper] [target] -> prints manifest sha; archive at $T/NAME
   printf 'schema=wa-linux-bundle/1\nsource_commit=%s\ntarget_triple=%s\nnode_version=%s\nwa_version=fixture\nfiles_sha256=%s\n' \
     "$COMMIT" "$btarget" "$NODEV" "$(sha256sum "$dir/files.sha256" | cut -d' ' -f1)" > "$dir/bundle.manifest"
   case "${2:-}" in member) echo tampered >> "$dir/ui/index.html" ;; elf) printf 'not an elf at all, padded to be long enough' > "$dir/wa-sentinel" ;; esac
-  tar -C "$T/src" -czf "$T/$name.tar.gz" "$name"
+  mkdir -p "$T/rel-$name"
+  tar -C "$T/src" -czf "$T/rel-$name/$name.tar.gz" "$name"
+  sign_release "$T/rel-$name"
   sha256sum "$dir/bundle.manifest" | cut -d' ' -f1
 }
 mkindex() { # FILE ENTRIES_JSON
   printf '{"schema":"wasm-agent-linux-release-index","schema_version":1,"releases":[%s]}\n' "$2" > "$1"
 }
 entry() { # NAME SHA TARGET [size]
-  local size=${4:-$(wc -c < "$T/$1.tar.gz" | tr -d ' ')}
+  local size=${4:-$(wc -c < "$T/rel-$1/$1.tar.gz" | tr -d ' ')}
   printf '{"tag":"v0.0.0-test","commit":"%s","target":"%s","manifest_sha256":"%s","url":"file://%s","size":%s,"node_version":"%s"}' \
-    "$COMMIT" "$3" "$2" "$T/$1.tar.gz" "$size" "$NODEV"
+    "$COMMIT" "$3" "$2" "$T/rel-$1/$1.tar.gz" "$size" "$NODEV"
 }
 run() { # INDEX PREFIX [args...] -> output in $out, status in $rc
   local index=$1 prefix=$2; shift 2
-  out=$(HOME="$T/home" XDG_CACHE_HOME="$T/cache" WA_LINUX_RELEASE_ALLOW_LOCAL=1 bash "$BOOT" --index "file://$index" \
+  out=$(HOME="$T/home" XDG_CACHE_HOME="$T/cache" WA_LINUX_RELEASE_ALLOW_LOCAL=1 \
+        WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt" bash "$BOOT" --index "file://$index" \
         --prefix "$prefix" --no-service --rendezvous none --port 59997 --client-port 59998 "$@" 2>&1); rc=$?
 }
 fakenode() { mkdir -p "$1/node/bin"; printf '#!/bin/sh\necho v%s\n' "$NODEV" > "$1/node/bin/node"; chmod +x "$1/node/bin/node"; }
@@ -86,7 +93,10 @@ elfb=$(mkbundle elfbad elf)
 # the elf-tampered bundle must still pass the member hashes to reach the ELF check: rebuild its sums
 ( cd "$T/src/elfbad" && find . -type f ! -name bundle.manifest ! -name files.sha256 -printf '%P\n' | LC_ALL=C sort | while read -r f; do sha256sum -- "$f"; done ) > "$T/src/elfbad/files.sha256"
 sed -i "s/^files_sha256=.*/files_sha256=$(sha256sum "$T/src/elfbad/files.sha256" | cut -d' ' -f1)/" "$T/src/elfbad/bundle.manifest"
-tar -C "$T/src" -czf "$T/elfbad.tar.gz" elfbad; elfb=$(sha256sum "$T/src/elfbad/bundle.manifest" | cut -d' ' -f1)
+# The archive is rebuilt, so its release's signed sums must be rebuilt with it: the signature is over the
+# bytes that ship, and this case must reach the ELF check rather than stop at a hash refusal.
+tar -C "$T/src" -czf "$T/rel-elfbad/elfbad.tar.gz" elfbad; sign_release "$T/rel-elfbad"
+elfb=$(sha256sum "$T/src/elfbad/bundle.manifest" | cut -d' ' -f1)
 mkindex "$T/i-elf.json" "$(entry elfbad "$elfb" "$TARGET")"
 run "$T/i-elf.json" "$T/p1"; [ $rc -ne 0 ] && grep -q elf_machine_mismatch <<<"$out" && ok 'a binary that is not an ELF of this machine is refused' || bad 'ELF refusal' "$out"
 
@@ -124,7 +134,8 @@ mkindex "$T/i-libc.json" "$(entry good "$good" "$TARGET"),$(entry musl "$musl" "
 run "$T/i-libc.json" "$T/p4" --check; [ $rc -eq 0 ] && grep -q "for $MUSL" <<<"$out" && ok 'the static musl entry is picked over a glibc-linked one' || bad 'musl preference' "$out"
 grep -q "^bootstrap: detected: .*-> bundle $MUSL, Node " <<<"$out" && ok 'one line names the detected arch/libc and the choice' || bad 'detected line' "$out"
 run "$T/i-good.json" "$T/p0" --check; [ $rc -eq 0 ] && grep -q "for $TARGET" <<<"$out" && ok 'an index with only a glibc-linked entry still installs it (back-compat)' || bad 'gnu back-compat' "$out"
-out=$(WA_BOOTSTRAP_LIBC='glibc 2.17' HOME="$T/home5" XDG_CACHE_HOME="$T/cache" WA_LINUX_RELEASE_ALLOW_LOCAL=1 bash "$BOOT" --index "file://$T/i-libc.json" \
+out=$(WA_BOOTSTRAP_LIBC='glibc 2.17' HOME="$T/home5" XDG_CACHE_HOME="$T/cache" WA_LINUX_RELEASE_ALLOW_LOCAL=1 \
+      WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt" bash "$BOOT" --index "file://$T/i-libc.json" \
       --prefix "$T/p5" --no-service --rendezvous none --port 59997 --client-port 59998 2>&1); rc=$?
 [ $rc -eq 0 ] && grep -q 'node_runtime_skipped: glibc 2.17 is older than Node' <<<"$out" && [ -x "$T/p5/wa" ] && ! grep -q '^WA_NODE=' "$T/home5/.wasm-agent/env" 2>/dev/null \
   && ok 'glibc older than Node 2.28: the node installs, Node is skipped by name, no WA_NODE' || bad 'old glibc node skip' "$out"

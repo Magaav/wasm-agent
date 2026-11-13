@@ -1,0 +1,31 @@
+# Release signing keys this project trusts.
+#
+# A node verifies a release's `SHA256SUMS.sig` against these before it installs any release asset
+# (`scripts/lib/release-signing.sh`, `scripts/lib/node-verify-release.sh`, `rust/wa-host/src/release.rs`),
+# so whoever can publish a release can no longer swap the binary and the checksum together.
+#
+# THIS FILE IS EMBEDDED IN THE `wa` BINARY (include_str! at compile time) *and* read at runtime from the
+# node's own `<home>/.wasm-agent/release-keys.txt`, so a rotation needs neither a rebuild on every node nor
+# a config file the operator forgot. Both lists are unions of trust, in this order:
+#
+#   1. this file's keys (whatever they were when the binary was built - the anchor),
+#   2. <home>/.wasm-agent/release-keys.txt (the operator's own copy, for a node that rotates first),
+#   3. WA_RELEASE_KEYS (a path or paths, for a test or a hand-run check).
+#
+# One line per key, and nothing else is accepted:
+#
+#   wa-trusted-keys v1
+#   key release-signing-<16 hex> <64 hex ed25519 public key>
+#
+# `key` lines may be repeated; a comment line starts with `#`. A key id is
+# `release-signing-` + the first 16 hex of sha256(the public key), which is what wa-vault reports and what
+# a signature file names.
+#
+# ROTATION (docs/DEPLOY.md, "Signed releases"): a new key is trusted only once a release announces it in
+# `TRUSTED-KEYS`, signed by a key that is trusted BEFORE that release (`TRUSTED-KEYS.sig`). Adding a key
+# here is the other, deliberate way: the operator's own trust decision, in a file only the operator writes.
+#
+# Empty until the operator creates the release signing key in wa-vault and pastes its public half here.
+# While this list is empty every release is refused - by name, with the path - and a node builds from its
+# tree instead. That refusal is the feature: an unverified release is not installable.
+wa-trusted-keys v1

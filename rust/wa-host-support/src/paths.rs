@@ -77,14 +77,18 @@ pub fn tmp_dir() -> std::path::PathBuf {
     root_dir("tmp")
 }
 
-/// The one shared cargo target directory (`CARGO_TARGET_DIR`) for every mission and worktree on this
-/// node, unless the caller set its own.
-///
-/// It is the *parent* of the per-tree islands, not a target dir itself: see
-/// [`crate::disk::build_island`] for why one target dir for every tree on a node is wrong, with the
-/// measurement that showed it.
+/// The one build root of this node: every build kind's output lives under it, and `wa clean` owns it.
 pub fn build_cache_dir() -> std::path::PathBuf {
     root_dir("build")
+}
+
+/// The one shared cargo target root (`<root>/build/target`), whose children are the per-tree target
+/// directories: `CARGO_TARGET_DIR` for a tree is `<root>/build/target/<tree>-<hash>`.
+///
+/// One direct child per tree is not a detail - see [`crate::disk::build_island`] for the measurement
+/// that shows what a FLAT shared target dir does to two worktrees of this workspace.
+pub fn build_target_dir() -> std::path::PathBuf {
+    build_cache_dir().join("target")
 }
 
 /// Where agent and landing worktrees are created (`docs/ONEROOT.md`).

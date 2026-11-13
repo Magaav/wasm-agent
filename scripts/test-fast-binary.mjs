@@ -129,6 +129,26 @@ try {
       "the first line names the path that will run");
   }
 
+  // 1b. A binary stamped with this commit, in a tree that is NOT this commit any more: stale.
+  //
+  // Measured 13/11 on wa-desktop: HEAD 3f538a90, three files edited and uncommitted, and the banner said
+  // `fresh: built from this tree` for the binary built BEFORE the edits - a green run against code the
+  // branch did not contain. The stamp can only say "built from this commit"; the tree has to be that
+  // commit for the two to mean the same thing.
+  {
+    const { dir, repo, head } = fixture({ treeBinary: false });
+    stubBinary(join(repo, "rust", "target", "release", "wa"), { commit: head, sha: "b" });
+    writeFileSync(join(repo, "lua", "core", "agent.lua"), "-- edited but not committed\n");
+    const result = plan(repo, { PATH: `${join(dir, "installed")}:${process.env.PATH}` });
+    check(result.verdict === "stale",
+      `a binary stamped with HEAD in a dirty tree is stale, got ${result.verdict} (${result.why})`);
+    check(result.action === "refuse",
+      `and it is refused rather than used, got action=${result.action}`);
+    check(/uncommitted/.test(result.why), `the reason names the uncommitted work: ${result.why}`);
+    check(/lua\/core\/agent\.lua|agent\.lua/.test(result.why),
+      `and names a file it saw: ${result.why}`);
+  }
+
   // 2. A tree binary from another commit is stale: refused by name, with the command that fixes it.
   {
     const { repo } = fixture({ staleTreeBinary: "d".repeat(40) });

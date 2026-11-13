@@ -67,7 +67,19 @@ RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd)"
 SOURCE_UI="${WA_SOURCE_UI_DIR:-$ROOT/ui}"
 UI_FILES="index.html app.js components.js style.css render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png"
 
-NEW="${1:-}"
+NEW=""
+# `--release DIR` names the release the candidate came from; its signed SHA256SUMS is the gate below. A
+# second positional argument is kept, so `scripts/upgrade.sh <binary> --release <dir>` and a bare path both
+# work exactly as before.
+RELEASE_DIR="${WA_UPGRADE_RELEASE:-}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release) [ "$#" -ge 2 ] || { say '--release needs the directory the candidate came from'; exit 2; }; RELEASE_DIR="$2"; shift 2 ;;
+    --release=*) RELEASE_DIR="${1#*=}"; shift ;;
+    *) [ -n "$NEW" ] || NEW="$1"; shift ;;
+  esac
+done
+unset WA_UPGRADE_RELEASE
 if [ -z "$NEW" ]; then
   for candidate in "$ROOT/rust/target/release/$EXE" "$ROOT/rust/target/release/wa"; do
     [ -x "$candidate" ] && NEW="$candidate" && break
@@ -75,6 +87,30 @@ if [ -z "$NEW" ]; then
 fi
 [ -n "$NEW" ] && [ -x "$NEW" ] || { say "no new binary to install (build one, or pass a path)"; exit 2; }
 [ -x "$INSTALLED" ] || { say "nothing installed at $INSTALLED - this upgrades a running node, it does not create one"; exit 2; }
+
+# SIGNED BEFORE ANY SWAP. These bytes are about to replace the running node, so they must be the bytes a
+# trusted key vouched for - not merely bytes that arrived with a checksum file. `--release DIR` (or
+# WA_UPGRADE_RELEASE=DIR) names the release they came from: its SHA256SUMS must verify against a key this
+# node carries and must name this exact file. A caller that says its bytes came from a release
+# (WA_UPGRADE_RELEASE_TAG) without naming the directory is refused rather than trusted.
+if [ -n "$RELEASE_DIR" ]; then
+  if [ -f "$ROOT/scripts/lib/release-signing.sh" ]; then
+    . "$ROOT/scripts/lib/release-signing.sh"
+  elif [ -f "$(dirname "$0")/lib/release-signing.sh" ]; then
+    . "$(dirname "$0")/lib/release-signing.sh"
+  else
+    say "refused: --release $RELEASE_DIR needs scripts/lib/release-signing.sh, and this install has none; nothing was staged"
+    exit 2
+  fi
+  if ! wa_release_verify_candidate "$NEW" "$RELEASE_DIR"; then
+    say "refused: the release at $RELEASE_DIR does not vouch for $NEW; nothing was staged"
+    exit 3
+  fi
+  say "signed: $NEW is the file $RELEASE_DIR/SHA256SUMS.sig names"
+elif [ -n "${WA_UPGRADE_RELEASE_TAG:-}" ]; then
+  say "refused: WA_UPGRADE_RELEASE_TAG=$WA_UPGRADE_RELEASE_TAG says these bytes came from release $WA_UPGRADE_RELEASE_TAG, and no signed sums were given (--release DIR, or WA_UPGRADE_RELEASE=DIR); nothing was staged"
+  exit 3
+fi
 
 # The sentinel runs the copy beside the installed binary, so ROOT is the install
 # directory in that path. The candidate binary still points back to its source

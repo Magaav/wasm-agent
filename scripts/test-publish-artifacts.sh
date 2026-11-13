@@ -29,6 +29,13 @@ SHIP="$ROOT/scripts/publish-artifacts-branch.sh"
 
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# A release is published only with its signed sums, and the signature comes from wa-vault, so this suite
+# runs a SCRATCH vault (its own data directory, its own ports, a key made through the admin API) and signs
+# the fixture release the transport ships. Never the operator's running vault.
+. "$ROOT/scripts/lib/test-release-vault.sh"
+test_release_vault_start || { echo "SKIP test-publish-artifacts: python3/curl or vault/wa_vault.py is missing, so nothing can be signed"; exit 0; }
+trap 'test_release_vault_stop; chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 checks=0
 ok() { checks=$((checks + 1)); }
 fail() { echo "publish artifacts FAILED: $*" >&2; exit 1; }
@@ -174,7 +181,9 @@ parents="$(git --git-dir="$WORK/dropbox.git" rev-list --parents -n1 "$readback" 
 [ "$parents" = 1 ] || fail "the artifacts commit is not an orphan (rev-list --parents lists $parents ids)"
 ok
 files="$(git --git-dir="$WORK/dropbox.git" ls-tree -r --name-only "$readback" | sort | tr '\n' ' ')"
-want="PUBLISH.sh node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT "
+# The signed sums ship with the binaries they name: a set without them is not a release, and a node
+# refuses it by name (scripts/lib/release-signing.sh).
+want="PUBLISH.sh SHA256SUMS SHA256SUMS.sig node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT "
 [ "$files" = "$want" ] || fail "the commit holds '$files', expected exactly '$want'"
 ok
 shipped_sha="$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:wa-$TRIPLE-$SHORT" | sha256sum | awk '{print $1}')"

@@ -635,6 +635,19 @@ function M.release(memory,id,user_id,expected_head)
       memory.set_session_workspace(id,workspace)
       return nil,'workspace_release_failed: '..tostring(remove_error)
     end
+    -- A released worktree takes its build output with it (docs/ONEROOT.md): the island under the
+    -- node's one build root is named after the tree path, so a tree that no longer exists would leave a
+    -- directory nothing can reuse and nothing would delete - the shape 73 folders (~196 GB) had on
+    -- wa-desktop on 13/11. Best effort and reported, never a reason to fail a release.
+    if type(host)=='table' and host.disk~=nil then
+      local freed_ok,freed=pcall(host.disk,'forget',json.encode({path=expected}))
+      if freed_ok and type(freed)=='string' then
+        local decoded=freed:match('"freed_bytes":%s*(%d+)')
+        if decoded and tonumber(decoded)>0 then
+          print(string.format('workspace release: freed %s of build output for %s',decoded,expected))
+        end
+      end
+    end
     workspace.state,workspace.error='released',''
     return memory.set_session_workspace(id,workspace)
   end
