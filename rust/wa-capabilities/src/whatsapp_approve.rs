@@ -344,7 +344,8 @@ pub fn decide_at(root: &Path, handle: &str, decision: &str, text: Option<&str>, 
             draft.state = "rejected".into();
             draft.outcome = Some("rejected".into());
             draft.decided_at = Some(at);
-            draft.note = note.map(|text| text.chars().take(500).collect());
+            // An empty note is no note: the operator pressed Enter on an empty field.
+            draft.note = note.filter(|text| !text.is_empty()).map(|text| text.chars().take(500).collect());
             if let Err(error) = save_draft_at(root, &draft) {
                 return json!({"ok": false, "error": "whatsapp_approve_draft_failed",
                     "detail": error.chars().take(160).collect::<String>(), "effect": "none"});
@@ -355,7 +356,8 @@ pub fn decide_at(root: &Path, handle: &str, decision: &str, text: Option<&str>, 
             draft.state = "cancelled".into();
             draft.outcome = Some("cancelled".into());
             draft.decided_at = Some(at);
-            draft.note = note.map(|text| text.chars().take(500).collect());
+            // An empty note is no note: the operator pressed Enter on an empty field.
+            draft.note = note.filter(|text| !text.is_empty()).map(|text| text.chars().take(500).collect());
             if let Err(error) = save_draft_at(root, &draft) {
                 return json!({"ok": false, "error": "whatsapp_approve_draft_failed",
                     "detail": error.chars().take(160).collect::<String>(), "effect": "none"});

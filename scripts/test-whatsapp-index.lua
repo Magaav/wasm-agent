@@ -65,13 +65,15 @@ ok(component.capabilities["whatsapp.send"] ~= nil, "the send rule is untouched")
 -- no peer prefix. The names are computed here rather than copied, so a rename in the facade fails this
 -- row instead of drifting away from it.
 local whatsapp = dofile("lua/core/whatsapp.lua")
--- Eight verbs are offered to the model and one is hidden: `mcp_whatsapp_send_status` is the resume form
--- of `mcp_whatsapp_send` ({id, wait_s:0}), callable so an old script keeps working and in no catalogue.
+-- Eight verbs are offered to the model and two are hidden: `mcp_whatsapp_send_status` is the resume
+-- form of `mcp_whatsapp_send` ({id, wait_s:0}), callable so an old script keeps working, and
+-- `mcp_whatsapp_approve` is the operator's door to the approval gate (docs/APPROVE.md). Neither is in
+-- a catalogue the model reads.
 local VERBS = { "contacts", "search", "read", "reactions", "media", "download", "backfill", "send" }
-local HIDDEN = { "send_status" }
+local HIDDEN = { "send_status", "approve" }
 local schemas = {}
 for _, item in ipairs(tools.catalog("master")) do schemas[item["function"].name] = item["function"] end
-ok(#whatsapp.TOOLS == #VERBS + #HIDDEN, "the surface offers one tool per verb, plus its hidden alias")
+ok(#whatsapp.TOOLS == #VERBS + #HIDDEN, "the surface offers one tool per verb, plus its hidden doors")
 for _, verb in ipairs(VERBS) do
   local name = "mcp_whatsapp_" .. verb
   ok(whatsapp.name(verb) == name, "the " .. verb .. " tool is named exactly " .. name)

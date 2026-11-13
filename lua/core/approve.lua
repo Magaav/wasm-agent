@@ -79,7 +79,19 @@ end
 --- The decision. `decision` is send, edit, reject or cancel; `text` is the final text for an edit and
 --- `note` the operator's words for a rejection.
 function M.decide(ctx, handle, decision, text, note)
-  return ask({ action = 'decide', draft = handle, decision = decision, text = text, note = note }, ctx)
+  local answer = ask({ action = 'decide', draft = handle, decision = decision, text = text, note = note }, ctx)
+  -- Every settled decision is recorded HERE, whoever asked: the balloon's key, a `/approve` line, the
+  -- CLI, and a script that decides a draft of its own. A refusal, and a draft that is still waiting,
+  -- record nothing - there is no decision to evaluate.
+  if type(answer) == 'table' and answer.ok ~= false and type(answer.draft) == 'table'
+    and answer.draft.state ~= 'pending' then
+    answer.record = M.record(answer.draft, {
+      outcome = answer.draft.outcome or answer.draft.state,
+      final_text = answer.draft.final,
+      decided_at = answer.draft.decided_at,
+    })
+  end
+  return answer
 end
 
 --- The drafts still waiting, oldest first. A `pending` draft is the only one an operator decides.
@@ -160,20 +172,28 @@ function M.records_path() return M.record_dir() .. '/decisions.jsonl' end
 --- draft and the final text, and never guessed from a length.
 function M.edit_distance(before, after)
   before, after = tostring(before or ''), tostring(after or '')
-  local a, b = { '' }, { '' }
-  for _, code in utf8.codes(before) do a[#a + 1] = utf8.char(code) end
-  for _, code in utf8.codes(after) do b[#b + 1] = utf8.char(code) end
+  local function chars(text)
+    local out = {}
+    for _, code in utf8.codes(text) do out[#out + 1] = utf8.char(code) end
+    return out
+  end
+  local ok, a, b = pcall(chars, before), nil, nil
+  if not ok then return math.abs(#before - #after) end
+  a = chars(before); b = chars(after)
+  -- Levenshtein, with the rows one-based and the row's 0-index stored at [1]: `previous[j]` is the
+  -- distance for the first j-1 characters of `after`, which is what makes the j = 1 case read the
+  -- empty prefix instead of nil.
   local previous = {}
-  for j = 1, #b do previous[j] = j - 1 end
+  for j = 0, #b do previous[j + 1] = j end
   for i = 1, #a do
-    local current = { i }
+    local current = { [1] = i }
     for j = 1, #b do
       local cost = a[i] == b[j] and 0 or 1
-      current[j] = math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+      current[j + 1] = math.min(previous[j + 1] + 1, current[j] + 1, previous[j] + cost)
     end
     previous = current
   end
-  return previous[#b] or 0
+  return previous[#b + 1] or 0
 end
 
 --- One line per decision. `chat_hash` is the digest of the exact JID, so the report can say "this
@@ -309,7 +329,10 @@ function M.parse(rest)
   if action == 'send' or action == 'edit' or action == 'reject' or action == 'cancel' or action == 'show' then
     local handle = parts[2] or ''
     if handle == '' then return { action = action, handle = nil } end
-    return { action = action, handle = handle, text = table.concat(parts, ' ', 3) }
+    -- No words after the handle is NO words, not an empty sentence: `nil` is what makes the balloon
+    -- ask for an edit or a note, and `""` would mean "the operator wrote nothing".
+    local rest = table.concat(parts, ' ', 3)
+    return { action = action, handle = handle, text = rest ~= '' and rest or nil }
   end
   return nil
 end
@@ -457,14 +480,8 @@ function M.act(io, ctx, action, handle, text)
     return answer.draft
   end
   local draft = answer.draft or {}
-  -- The evaluation record is written here, once, from the answer the account node gave: the draft that
-  -- was waiting and the text that was actually sent.
-  if draft.state ~= 'pending' then
-    local written = M.record(draft, {
-      outcome = draft.outcome, final_text = draft.final, decided_at = draft.decided_at,
-    })
-    answer.record = written
-  end
+  -- `M.decide` already wrote the evaluation record (it is the one place a decision happens), so there
+  -- is nothing to add here: this line is the operator's acknowledgement.
   say('  ' .. M.decision_line(draft))
   return draft
 end
@@ -596,7 +613,10 @@ function M.run(line, io, ctx)
 
   if parsed.action == 'on' or parsed.action == 'off' then
     local on = parsed.action == 'on'
-    local mode, chats = nil, nil
+    -- `/approve on` with no qualifier means every chat waits for the operator. A per-chat rule left
+    -- over from an earlier decision is not silently kept: "on" is what a reader reads it as, and
+    -- `/approve on only <chat>` is how the narrower rule is asked for.
+    local mode, chats = on and 'all' or nil, on and {} or nil
     if on and (parsed.mode == 'only' or parsed.mode == 'except') then
       local list, refusal = chat_list(parsed.chats, ctx)
       if not list then

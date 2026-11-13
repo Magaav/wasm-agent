@@ -43,6 +43,13 @@ local function call(name, args, local_ctx) return tools.dispatch(memory, name, a
 local LAURA = "5511999999999@lid"
 local BRUNO = "5511888888888@lid"
 
+-- One draft out of the queue, by handle: the queue is the account node's, and this row shares it with
+-- every send it makes.
+local function find_draft(rows, handle)
+  for _, draft in ipairs(rows or {}) do if draft.handle == handle then return draft end end
+  return nil
+end
+
 -- A writer that records instead of drawing: the balloon's own `for_view` is what a terminal gets, so
 -- what is measured here is the text and the pages it would have drawn.
 local function recorder()
@@ -94,15 +101,19 @@ ok(type(gated.draft) == "string" and gated.draft:sub(1, 2) == "d-", "the handle 
 ok(gated.id == nil, "NO job id: nothing was queued")
 ok(gated.queue_state == nil, "and no queue state either")
 ok(gated.approval == "waiting", "the answer says what it is waiting for")
-ok(gated.effect == "none", "and that it had no effect")
+-- The producer's own answer, read straight from the capability: the gate stopped it, so it says so.
+local producer = json.decode(host.whatsapp_send(json.encode({ chat = LAURA, text = "no produtor" })))
+ok(producer.effect == "none", "the capability itself says the gated send had no effect: " .. json.encode(producer))
+ok(producer.state == "pending" and type(producer.draft) == "string" and producer.id == nil,
+  "and answers the draft, never a job")
 ok(type(gated.resume) == "string" and gated.resume:find("draft", 1, true) ~= nil,
   "the resume names the draft, not a job: " .. tostring(gated.resume))
 local first = gated.draft
 
 -- The draft really is on the account node's own root, and it is the text that was asked for.
 local listed = approve.list(ctx)
-ok(listed.ok == true and #listed.drafts == 1, "the account node holds one draft: " .. json.encode(listed.waiting))
-local record = listed.drafts[1]
+local record = find_draft(listed.drafts, first)
+ok(listed.ok == true and record ~= nil, "the account node holds the draft: " .. json.encode(listed.waiting))
 ok(record.handle == first and record.chat == LAURA and record.text == "bom dia, tudo bem?",
   "the draft is the chat and the text: " .. json.encode(record))
 ok(record.state == "pending", "and it is waiting")
@@ -169,10 +180,8 @@ ok(type(second.draft) == "string" and second.id == nil,
   "and stops at THAT node's gate: no job, a draft handle - " .. json.encode(second))
 ok(second.asked_owner == "acct-node" or second.served_by == "acct-node",
   "the answer says which node holds the draft: " .. json.encode(second))
-local routed_drafts = approve.list(ctx)
-local routed_found = false
-for _, draft in ipairs(routed_drafts.drafts) do if draft.handle == second.draft then routed_found = true end end
-ok(routed_found, "the routed draft is on the account node, where the operator will find it")
+ok(find_draft(approve.list(ctx).drafts, second.draft) ~= nil,
+  "the routed draft is on the account node, where the operator will find it")
 
 -- ---- a send from inside a code-mode script -------------------------------------------------------
 local pending = dofile("lua/core/codemode_pending.lua")
@@ -203,32 +212,34 @@ ok(still_sent.cancelled == false and still_sent.why == "a sent message stays sen
 -- Nothing above has decided the first draft, and the only reader was the capability itself.
 local fresh = dofile("lua/core/approve.lua")  -- a fresh load: the same thing a restarted process does
 local survived = fresh.list(ctx)
-local found = false
-for _, draft in ipairs(survived.drafts) do if draft.handle == first and draft.state == "pending" then found = true end end
-ok(found, "a draft nobody decided is still pending after a restart, and was never sent")
+local restarted = find_draft(survived.drafts, first)
+ok(restarted ~= nil and restarted.state == "pending",
+  "a draft nobody decided is still pending after a restart, and was never sent")
 io = recorder()
 fresh.run("/approve list", io, ctx)
 ok(io.shown[1] ~= nil, "/approve list shows the queue to a reader with no terminal")
 ok(#survived.drafts >= 2, "every draft is in the queue: " .. tostring(#survived.drafts))
 
 -- ---- the balloon: Enter / [e] / [r] --------------------------------------------------------------
-local page = approve.page(survived.drafts[1], 1, #survived.drafts)
-ok(page.options[1].label == "Send as is" and page.options[1].run == "/approve send " .. survived.drafts[1].handle,
+local shown = find_draft(survived.drafts, first)
+ok(shown ~= nil, "the first draft is still in the queue")
+local page = approve.page(shown, 1, #survived.drafts)
+ok(page.options[1].label == "Send as is" and page.options[1].run == "/approve send " .. shown.handle,
   "Enter is the first option and it sends the draft as it is: " .. json.encode(page.options[1]))
-ok(page.options[2].label == "Edit the text" and page.options[2].run == "/approve edit " .. survived.drafts[1].handle,
+ok(page.options[2].label == "Edit the text" and page.options[2].run == "/approve edit " .. shown.handle,
   "[e] edits it")
-ok(page.options[3].label == "Reject with a note" and page.options[3].run == "/approve reject " .. survived.drafts[1].handle,
+ok(page.options[3].label == "Reject with a note" and page.options[3].run == "/approve reject " .. shown.handle,
   "[r] rejects it with a note")
 ok(page.keys.e == 2 and page.keys.r == 3, "the letters are on the page, and only there")
 ok(table.concat(page.lines, "\n"):find(LAURA, 1, true) ~= nil, "the page names the chat by its JID")
 ok(table.concat(page.lines, "\n"):find("bom dia", 1, true) ~= nil, "and shows the text that would be sent")
-ok(approve.edit_page(survived.drafts[1]).value == survived.drafts[1].text,
+ok(approve.edit_page(shown).value == shown.text,
   "the edit page starts with the draft in its field, so it is an edit and not a retype")
 ok(approve.link("veja https://exemplo.com/a?b=1 agora") == "https://exemplo.com/a?b=1", "a link is previewed")
 ok(approve.link("sem link") == nil, "and a text without one says nothing")
 
 -- ---- send as it is: the message id comes back through the handle ---------------------------------
-local target = survived.drafts[1]
+local target = shown
 io = recorder()
 local decided = approve.run("/approve send " .. target.handle, io, ctx)
 ok(decided.ok == true, "the operator sends it: " .. io.text())
@@ -262,11 +273,17 @@ ok(edited.outcome == "edited", "the decision is an edit: " .. tostring(edited.ou
 ok(edited.final == "texto que o operador escreveu", "and the final text is the operator's: " .. tostring(edited.final))
 ok(edited.text == "texto que eu escrevi", "the draft it came from is kept as it was")
 -- What reached the queue is the EDITED text, proved by the queue's own dedupe key: the same chat
--- with the final text is the same job; with the original text it is a different one.
+-- with the final text is the SAME job; with the original text it is a different one. Approval is
+-- switched off for these two, because a gated send would answer a draft instead of the queue's id.
+io = recorder()
+approve.run("/approve off", io, ctx)
 local same_as_final = json.decode(host.whatsapp_send(json.encode({ chat = LAURA, text = "texto que o operador escreveu" })))
 local same_as_draft = json.decode(host.whatsapp_send(json.encode({ chat = LAURA, text = "texto que eu escrevi" })))
-ok(same_as_final.id == edited.job, "the queue holds the OPERATOR's text under the draft's job: " .. json.encode({ queued = same_as_final.id, job = edited.job }))
+ok(same_as_final.id == edited.job,
+  "the queue holds the OPERATOR's text under the draft's job: " .. json.encode({ queued = same_as_final.id, job = edited.job }))
 ok(same_as_draft.id ~= edited.job, "and never the draft's own text under it")
+io = recorder()
+approve.run("/approve on", io, ctx)
 local edited_out = whatsapp.settle_draft(to_edit, 0,
   function() return { ok = true, draft = { handle = to_edit, state = "sent", outcome = "edited", job = 8,
     message_id = "3EB0EDITED", chat = LAURA, final = "texto que o operador escreveu" } } end,
