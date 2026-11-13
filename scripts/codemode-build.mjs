@@ -13,12 +13,44 @@ const packages=[
 ];
 function requireValue(v,label){if(!v)throw Error('codemode_build:'+label);return v;}
 function git(root,...args){const r=cp.spawnSync('git',['-C',root,...args],{encoding:'utf8',windowsHide:true});requireValue(r.status===0,'git_failed:'+JSON.stringify({status:r.status,error:r.error?{code:r.error.code,message:r.error.message}:null,stderr:r.stderr}));return r.stdout.trim();}
-// Where cargo writes. The tree's own `rust/target` by default; an installer that deploys repeatedly points
-// this at a reusable cache instead (WA_CODEMODE_TARGET_DIR), because a deploy pins a fresh worktree per
-// commit and a target inside it is cold every time - measured 272 s of compiling for a landing that changed
-// no Rust (wasm_the_first, 2026-11-11). The directory is build output, never source: the pinned tree is
-// still what gets compiled, and the receipt keeps source_commit/source_tree for the exact bytes.
-const targetDir=root=>{const v=process.env.WA_CODEMODE_TARGET_DIR;return v?path.resolve(v):path.join(root,'rust/target')};
+// Where cargo writes: THIS tree's child of the node's ONE build root (docs/ONEROOT.md), resolved by
+// `scripts/lib/build-target.sh` - the same resolver `scripts/fast.sh`, `scripts/build-components.sh`,
+// `scripts/publish-node-binaries.sh` and `scripts/deploy.sh` use, so a node has one place build output
+// can be, one `wa clean` that judges it and one cap that evicts it. It is requested from that resolver
+// (not re-derived here) so the sweep and the cap run before this build spends space; the name is also
+// computed locally (`treeName`) for the case where no bash is available, and `scripts/test-onebuild.mjs`
+// checks the two agree.
+//
+// NOT one flat target dir for every tree: two checkouts of one workspace give a member the same metadata
+// hash, so the second tree's library overwrites the first's. Measured on this node 13/11 in 30 s - see
+// `scripts/lib/build-target.sh` rule 2 and `scripts/test-onebuild.mjs`.
+//
+// WA_CODEMODE_TARGET_DIR still wins when a caller names a directory (a reproduction that wants isolation,
+// or an installer that pins one deliberately); the receipt records which one ran.
+export function treeName(root){
+ const tree=fs.realpathSync(root);
+ const hash=sha(Buffer.from(tree.replace(/\\/g,'/'))).slice(0,12);
+ const base=path.basename(tree).replace(/[^A-Za-z0-9_-]/g,'-');
+ return base+'-'+hash;
+}
+export function buildTargetRoot(env=process.env){
+ const home=(env.WASM_AGENT_HOME||env.HOME||env.USERPROFILE||'').replace(/\/+/g,'/');
+ return path.join(home,'.wasm-agent','build','target');
+}
+const targetDir=root=>{
+ const v=process.env.WA_CODEMODE_TARGET_DIR;if(v)return path.resolve(v);
+ // Ask the one resolver, so the sweep (what older layouts left behind, and the bytes reclaimed) and the
+ // build cap run before this build uses space. Its answer is authoritative; the local name is a fallback
+ // for a machine without bash.
+ const script=path.join(root,'scripts','lib','build-target.sh');
+ if(fs.existsSync(script)){
+  const r=cp.spawnSync('bash',[script,'prepare',root],{encoding:'utf8',windowsHide:true,timeout:600000});
+  const answer=(r.stdout||'').trim().split(/\r?\n/).filter(Boolean).pop();
+  if(r.status===0&&answer)return path.resolve(answer);
+  if(r.stderr)process.stderr.write(String(r.stderr));
+ }
+ return path.join(buildTargetRoot(),treeName(root));
+};
 export function assetPath(root){return path.join(git(root,'rev-parse','--path-format=absolute','--git-common-dir'),'codemode-assets','pi-1.2.0-quickjs-3.6.2');}
 export function verifyAssets(root,dir){
  const receipt=JSON.parse(fs.readFileSync(path.join(dir,'receipt.json')));

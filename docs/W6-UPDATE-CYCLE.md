@@ -52,6 +52,13 @@ The measured path: 336.2 s cold (baseline) -> 295.3 s on the first deploy throug
 cache held a dead build's artifacts) -> **32.8 s** once the cache held the previous commit's build. A
 no-Rust landing now recompiles nothing.
 
+> **Superseded on 13/11.** That one shared cache is what `docs/ONEROOT.md` ("The one build root") now
+> forbids: two checkouts of this workspace give a member the same metadata hash, so a directory last
+> written by another commit hands this deploy that commit's library and cargo calls it fresh (measured
+> on wa-desktop, 13/11, 30 s - `scripts/test-onebuild.mjs`). The deploy compiles into
+> `<root>/build/target/deploy-<commit>` instead: the same commit still reuses its build, a different one
+> cannot, and the build cap evicts the oldest.
+
 ## What running the cycle found (and fixed)
 
 1. **A deploy poisoned the next deploy's source tree.** `deploy.sh` exported `WA_DEPLOY_ROOT` for its

@@ -151,7 +151,17 @@ fi
 # One target directory for both crates: `wa-host` (workspace rust/Cargo.toml) and `wa-sentinel`
 # (its own workspace) otherwise resolve different `target/` roots, and the second one is invisible to
 # the lookup below. Named here, exported, and used by the build loop - never read from the caller.
-TARGET_DIR="${TARGET_DIR_FLAG:-$ROOT/rust/target}"
+# The one build root (docs/ONEROOT.md): a cross build is still build output, so it goes where every
+# other build on this node goes - this tree's child of `<root>/build/target`, with cargo nesting the
+# per-triple directories inside it exactly as it already does (`<target>/<triple>/release`). A caller
+# that names `--target-dir` keeps it and is told which one ran.
+if [ -n "$TARGET_DIR_FLAG" ]; then
+  TARGET_DIR="$TARGET_DIR_FLAG"
+else
+  . "$ROOT/scripts/lib/build-target.sh"
+  TARGET_DIR="$(wa_build_prepare "$ROOT" 2>/dev/null)" || TARGET_DIR=''
+  [ -n "$TARGET_DIR" ] || TARGET_DIR="$ROOT/rust/target"
+fi
 export CARGO_TARGET_DIR="$TARGET_DIR"
 
 # The channel's published targets, and a landing publishes BOTH of them in one run: `work` is x86_64 Linux

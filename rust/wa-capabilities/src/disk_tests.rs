@@ -246,48 +246,70 @@ fn a_pin_and_a_marker_file_keep_an_old_entry_and_dry_run_deletes_nothing() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Set a directory's modification time, so "the oldest build output" is a fact a test can name. On
+/// a platform where a directory cannot be reopened (Windows), the tie-break by path decides, so every
+/// fixture is named so that both orders pick the same victim.
+fn age(path: &Path, seconds_ago: u64) {
+    #[cfg(unix)]
+    {
+        use std::time::Duration;
+        let when = SystemTime::now() - Duration::from_secs(seconds_ago);
+        let file = std::fs::File::open(path).expect("a directory can be opened on unix");
+        file.set_times(std::fs::FileTimes::new().set_modified(when)).expect("mtime is set");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, seconds_ago);
+    }
+}
+
+/// A cell whose tree still exists: it is not garbage, so only the cap can decide about it.
+fn live_cell(root: &Path, name: &str, bytes: usize) -> PathBuf {
+    let tree = root.join("worktrees").join(format!("{name}-tree"));
+    std::fs::create_dir_all(&tree).unwrap();
+    let cell = root.join("build").join("target").join(name);
+    std::fs::create_dir_all(&cell).unwrap();
+    write(&cell.join("release/artifact.rlib"), &"x".repeat(bytes));
+    write(&cell.join(ISLAND_MARKER), &tree.to_string_lossy());
+    cell
+}
+
 #[test]
-fn a_tree_gets_its_own_build_island_marked_with_its_path() {
+fn a_tree_gets_its_own_cell_under_the_one_build_root() {
     let root = scratch("island");
     let tree = root.join("worktrees").join("my-tree");
     std::fs::create_dir_all(tree.join("rust")).unwrap();
     write(&tree.join("rust/Cargo.toml"), "[workspace]\n");
     let build_root = root.join("build");
     std::fs::create_dir_all(&build_root).unwrap();
-    let target = build_env_for_in(&build_root, &tree).expect("a cargo tree gets an island");
+    let target = build_env_for_in(&build_root, &tree).expect("a cargo tree gets a build dir");
     assert!(target.is_dir(), "the target dir exists: {}", target.display());
-    let island = target.parent().unwrap();
-    let name = island.file_name().unwrap().to_string_lossy().to_string();
-    assert!(name.starts_with("my-tree-"), "the island names its tree, got {name}");
+    // ONE BUILD ROOT: every build dir is a direct child of `<root>/build/target`, and nothing else.
+    assert_eq!(target.parent().unwrap(), build_root.join("target"), "the cell sits under the one build root: {}", target.display());
+    let name = target.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.starts_with("my-tree-"), "the cell names its tree, got {name}");
     let hash = name.trim_start_matches("my-tree-").to_string();
-    assert_eq!(hash.len(), 12, "the island carries 12 hex characters, got {hash}");
+    assert_eq!(hash.len(), 12, "the cell carries 12 hex characters, got {hash}");
     assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "got {hash}");
-    // The marker is what `wa clean` judges the island by, so it must name the tree exactly.
-    let marker = std::fs::read_to_string(island.join(ISLAND_MARKER)).expect("the marker is written");
+    // The marker is what `wa clean` judges the cell by, so it must name the tree exactly.
+    let marker = std::fs::read_to_string(target.join(ISLAND_MARKER)).expect("the marker is written");
     assert_eq!(marker.trim(), std::fs::canonicalize(&tree).unwrap().to_string_lossy());
-    // Two trees never share an island, which is the whole point (see `build_island`).
+    // Two trees never share a cell, which is the whole point (see `build_island_in`): a flat shared
+    // target dir was reproduced handing one worktree another worktree's library.
     let other = root.join("worktrees").join("other-tree");
     std::fs::create_dir_all(other.join("rust")).unwrap();
     write(&other.join("rust/Cargo.toml"), "[workspace]\n");
-    assert_ne!(build_env_for_in(&build_root, &other).unwrap(), target, "each tree has its own island");
+    assert_ne!(build_env_for_in(&build_root, &other).unwrap(), target, "each tree has its own cell");
     // And a directory that is not a cargo tree is left alone: `<root>/build` is not a litter bin.
-    assert!(build_env_for_in(&build_root, &root.join("worktrees")).is_none(), "no island for a plain directory");
+    assert!(build_env_for_in(&build_root, &root.join("worktrees")).is_none(), "no cell for a plain directory");
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
-fn a_build_island_goes_when_its_tree_does_and_stays_when_it_is_in_use() {
+fn a_build_cell_goes_when_its_tree_does_and_stays_when_it_is_in_use() {
     let root = scratch("island-clean");
-    let build = root.join("build");
-    let live = build.join("live-tree-0123456789ab");
-    let gone = build.join("gone-tree-ba9876543210");
-    for island in [&live, &gone] {
-        std::fs::create_dir_all(island.join("target")).unwrap();
-        write(&island.join("target/file.rlib"), &"x".repeat(512));
-    }
-    let kept_tree = root.join("worktrees").join("kept");
-    std::fs::create_dir_all(&kept_tree).unwrap();
-    write(&live.join(ISLAND_MARKER), &kept_tree.to_string_lossy());
+    let live = live_cell(&root, "live-tree-0123456789ab", 512);
+    let gone = live_cell(&root, "gone-tree-ba9876543210", 512);
     write(&gone.join(ISLAND_MARKER), "/nowhere/that/existed/tree");
     let groups = plan(&root, 7, now_epoch()).expect("plan");
     let builds = groups.iter().find(|group| group.name == "build").expect("build group");
@@ -299,9 +321,87 @@ fn a_build_island_goes_when_its_tree_does_and_stays_when_it_is_in_use() {
             .map(|entry| (entry.delete, entry.reason.clone()))
             .unwrap_or_else(|| panic!("{name} is in the plan"))
     };
-    assert!(verdict("gone-tree-ba9876543210").0, "an island whose tree is gone goes");
-    assert!(!verdict("live-tree-0123456789ab").0, "an island of a tree that is still here stays");
+    assert!(verdict("gone-tree-ba9876543210").0, "a build dir whose tree is gone goes");
+    assert!(!verdict("live-tree-0123456789ab").0, "a build dir of a tree that is still here stays");
     assert!(verdict("live-tree-0123456789ab").1.contains("still in use"), "got {}", verdict("live-tree-0123456789ab").1);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = live;
+}
+
+#[test]
+fn an_island_from_the_layout_this_replaced_goes_before_a_build_uses_new_space() {
+    // The 13/11 evidence: 73 build dirs, 196 GB, none ever deleted. An `build/<tree>-<hash>` island is
+    // not the one build root, so it is space a build must reclaim rather than keep.
+    let root = scratch("legacy-island");
+    let legacy = root.join("build").join("graphdb-baseline-0123456789ab");
+    std::fs::create_dir_all(legacy.join("target")).unwrap();
+    write(&legacy.join("target/file.rlib"), &"x".repeat(1024));
+    let live = live_cell(&root, "live-tree-0123456789ab", 256);
+    let groups = plan(&root, 7, now_epoch()).expect("plan");
+    let builds = groups.iter().find(|group| group.name == "build").expect("build group");
+    let legacy_row = builds
+        .entries
+        .iter()
+        .find(|entry| entry.path == legacy)
+        .expect("the legacy island is in the plan");
+    assert!(legacy_row.delete, "an island beside the one build root goes");
+    assert!(legacy_row.reason.contains("one build root"), "got {}", legacy_row.reason);
+    assert!(
+        !builds.entries.iter().find(|entry| entry.path == live).expect("the cell is in the plan").delete,
+        "the one build root's own cell is judged by its tree, not by the layout"
+    );
+    // A real run deletes the island and nothing else: the source tree the cell was built from stays.
+    let source = root.join("worktrees").join("live-tree-0123456789ab-tree").join("rust/Cargo.toml");
+    write(&source, "[workspace]\n");
+    clean(&root, &CleanOptions { days: 7, dry_run: false, now: now_epoch() }).expect("clean");
+    assert!(!legacy.exists(), "the legacy island is gone");
+    assert!(live.is_dir(), "the cell in use is still there");
+    assert!(source.is_file(), "no source is ever touched");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn past_the_build_cap_the_oldest_build_output_goes_first() {
+    let root = scratch("build-cap");
+    // Names chosen so the path tie-break and the mtime order pick the same victim on every platform.
+    let old = live_cell(&root, "aa-old-tree-0123456789ab", 10_000);
+    let mid = live_cell(&root, "mm-mid-tree-0123456789ab", 10_000);
+    let new = live_cell(&root, "zz-new-tree-0123456789ab", 10_000);
+    age(&old, 3600);
+    age(&mid, 1800);
+    age(&new, 60);
+    // ~30 kB of build output against a 25 kB cap: exactly the oldest cell has to go (the slack above the
+    // three artifacts is the marker file and the directory entries `measure` counts).
+    let groups = plan_with_cap(&root, 7, now_epoch(), 25_000).expect("plan");
+    let builds = groups.iter().find(|group| group.name == "build").expect("build group");
+    let verdict = |path: &Path| {
+        builds
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| (entry.delete, entry.reason.clone()))
+            .unwrap_or_else(|| panic!("{} is in the plan", path.display()))
+    };
+    assert!(verdict(&old).0, "over the cap, the oldest build output goes first");
+    assert!(verdict(&old).1.contains("build cap"), "the reason names the cap: {}", verdict(&old).1);
+    assert!(!verdict(&mid).0, "the cap only takes what it has to");
+    assert!(!verdict(&new).0, "the newest build output stays");
+    // A real run deletes it, and the tree's own source is untouched: the cap is about build output.
+    let source = root.join("worktrees").join("aa-old-tree-0123456789ab-tree").join("rust/lib.rs");
+    write(&source, "pub fn kept() {}\n");
+    clean(&root, &CleanOptions { days: 7, dry_run: false, now: now_epoch() }).expect("clean");
+    assert!(source.is_file(), "the cap never deletes source");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn under_the_build_cap_nothing_is_deleted_for_space() {
+    let root = scratch("build-cap-under");
+    let cell = live_cell(&root, "aa-tree-0123456789ab", 400);
+    let groups = plan_with_cap(&root, 7, now_epoch(), 10_000).expect("plan");
+    let builds = groups.iter().find(|group| group.name == "build").expect("build group");
+    let row = builds.entries.iter().find(|entry| entry.path == cell).expect("the cell is in the plan");
+    assert!(!row.delete, "under the cap a live cell stays: {}", row.reason);
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -494,12 +494,18 @@ function main() {
         // left the registrations behind in the first place. No --force, and no fallback if it fails.
         const removed = run('git', ['-C', repo, 'worktree', 'remove', c.path], { timeout: 300000 });
         if (!removed.ok) { say(`FAILED   ${c.name}  git worktree remove: ${removed.why} ${removed.err.trim().split('\n')[0]}`); c.result = { removed: false, error: `${removed.why} ${removed.err.trim().split('\n')[0]}` }; continue; }
+        // The tree's build output goes in the same decision (docs/ONEROOT.md): the node's one build root
+        // is named after the tree path, so a reaped worktree that left its island behind leaves a
+        // directory nothing can reuse - and on 13/11 that is how 196 GB of them accumulated. Measured,
+        // reported, and never the reason a reap fails: the next build's sweep deletes an ownerless island.
+        const forget = run('bash', [path.join(repo, 'scripts', 'lib', 'build-target.sh'), 'forget', c.path], { timeout: 600000 });
+        const buildBytes = forget.ok ? Number(String(forget.out).trim() || 0) || 0 : 0;
         const deleted = run('git', ['-C', repo, 'branch', '-d', c.branch], { timeout: 120000 });
-        c.result = { removed: true, branchDeleted: deleted.ok, branchError: deleted.ok ? '' : `${deleted.why} ${deleted.err.trim().split('\n')[0]}` };
+        c.result = { removed: true, buildBytes, branchDeleted: deleted.ok, branchError: deleted.ok ? '' : `${deleted.why} ${deleted.err.trim().split('\n')[0]}` };
         if (!deleted.ok) say(`PARTIAL  ${c.name}  tree removed, branch kept — git branch -d: ${c.result.branchError}`);
         applied.push(c);
         done += 1;
-        say(`REAPED   ${c.name}  branch=${c.branch}  freed=${human(again.bytes)} (measured)${c.result.branchDeleted ? '' : '  [branch kept]'}`);
+        say(`REAPED   ${c.name}  branch=${c.branch}  freed=${human(again.bytes)} (measured)${buildBytes ? `  + build output ${human(buildBytes)}` : ''}${c.result.branchDeleted ? '' : '  [branch kept]'}`);
       }
       const freedNow = applied.reduce((a, r) => a + (r.bytes || 0), 0);
       say('');
