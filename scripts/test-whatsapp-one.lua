@@ -36,9 +36,11 @@ end
 -- ---- the family, and nothing else ----------------------------------------------------------------
 -- Offered to the model (operator decision, 11/11: one send that answers its own outcome).
 local VERBS = { "contacts", "search", "read", "reactions", "media", "download", "backfill", "send" }
--- Callable but never offered: the resume form of `send`, kept for a script written before it existed.
-local HIDDEN = { "send_status" }
-ok(#whatsapp.TOOLS == #VERBS + #HIDDEN, "eight questions offered and one hidden alias, one surface")
+-- Callable but never offered: the resume form of `send` (kept for a script written before it existed)
+-- and the operator's door to the approval gate, which is not a question the model asks - it is a thing
+-- that happens to its send (docs/APPROVE.md).
+local HIDDEN = { "send_status", "approve" }
+ok(#whatsapp.TOOLS == #VERBS + #HIDDEN, "eight questions offered and two hidden doors, one surface")
 for _, verb in ipairs(VERBS) do
   ok(whatsapp.name(verb) == "mcp_whatsapp_" .. verb, "the exact name of " .. verb)
   ok(whatsapp.tool("mcp_whatsapp_" .. verb) ~= nil, "the exact name is the one the facade answers")

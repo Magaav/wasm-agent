@@ -129,6 +129,7 @@ do
   for _, path in ipairs({ "rust/wa-term/src/terminal_editor.rs", "rust/wa-term/src/transcript.rs",
     "rust/wa-host/src/main.rs", "rust/wa-capabilities/src/host.rs",
     "rust/wa-capabilities/src/core_component.rs", "rust/wa-capabilities/src/disk.rs",
+    "rust/wa-capabilities/src/whatsapp_approve.rs",
     "rust/wa-host/src/release.rs" }) do
     ok(reload.class(path) == "runtime", "a compiled piece is runtime, never a reload source: " .. path)
   end

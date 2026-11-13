@@ -14,7 +14,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn temp_dir(tag: &str) -> PathBuf {
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir().join(format!(
+    let directory = scratch_root().join(format!(
         "wa-mesh-test-{}-{}-{}",
         std::process::id(),
         count,
@@ -23,6 +23,29 @@ pub fn temp_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("temp dir");
     directory
+}
+
+/// Where a test's scratch goes: the system temp directory, unless that is inside the node's own home.
+///
+/// This module's header says every identity is made "in the system temp directory, never in a node
+/// home" - and on a machine that follows `docs/ONEROOT.md` those are the same place, because the node
+/// hands its children `TMPDIR=~/.wasm-agent/tmp`. The fleet key's guard then refuses the scratch
+/// (`key_path_in_node_home`), and the fleetkey rows failed for a reason that had nothing to do with
+/// the code under test, on that machine only (measured on `wa-desktop`, 13/11: two rows red, the same
+/// two green with `TMPDIR=/tmp`). So the fallback is the temp directory the operating system starts
+/// with, and everywhere else nothing changes.
+fn scratch_root() -> PathBuf {
+    let system = std::env::temp_dir();
+    let home = crate::fleetkey::node_home();
+    let (system_text, home_text) = (
+        system.to_string_lossy().replace('\\', "/"),
+        home.to_string_lossy().replace('\\', "/"),
+    );
+    let trimmed = home_text.trim_end_matches('/').to_string();
+    if system_text == trimmed || system_text.starts_with(&(trimmed.clone() + "/")) {
+        return PathBuf::from("/tmp");
+    }
+    system
 }
 
 pub fn identity(tag: &str) -> Identity {

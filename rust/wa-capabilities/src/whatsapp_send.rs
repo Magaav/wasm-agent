@@ -120,6 +120,28 @@ fn send(request: &Value) -> Value {
         return answer;
     }
 
+    // The operator's gate (13/11), ONE choke point for the whole fleet: a send from any node ends
+    // here, on the node that holds the account, after routing. When approval is on for this chat the
+    // request stops BEFORE anything is queued and becomes a draft; the answer is `pending` with the
+    // draft's handle, and the caller's wait follows that handle instead of a job id. Nothing below
+    // this line runs for it - no policy token is spent on a message that is not being sent.
+    if let Some(answer) = crate::whatsapp_approve::gate(
+        &verified.chat.jid(),
+        &verified.text,
+        verified.reply_to.as_deref(),
+        &verified.mentions.iter().map(|chat| chat.jid()).collect::<Vec<_>>(),
+    ) {
+        return answer;
+    }
+
+    commit(&verified)
+}
+
+/// The policy check and the enqueue, in one place because two callers arrive here: a send that never
+/// needed approval (`send`) and a draft the operator approved (`whatsapp_approve::decide`). A draft
+/// the operator sends is therefore charged, audited and queued exactly like any other message - the
+/// approval gate is a detour on the way, not a second path to the account.
+pub(crate) fn commit(verified: &outbox::Verified) -> Value {
     // Governance first: nothing is written to the queue for a request the node refuses, so a spent
     // budget does not leave a job behind for the component to discover.
     let target = target_of(&verified.chat.jid());
@@ -141,11 +163,17 @@ fn send(request: &Value) -> Value {
         return answer;
     }
 
+    let request = OutboxRequest {
+        chat: verified.chat.jid(),
+        text: verified.text.clone(),
+        reply_to: verified.reply_to.clone(),
+        mentions: verified.mentions.iter().map(|chat| chat.jid()).collect(),
+    };
     match queue().enqueue(
-        EnqueueRequest::new(outbox::QUEUE, outbox_request.encode())
+        EnqueueRequest::new(outbox::QUEUE, request.encode())
             .fresh_for(outbox::FRESH_MS)
             .max_attempts(outbox::MAX_ATTEMPTS)
-            .dedupe(outbox_request.dedupe_key()),
+            .dedupe(request.dedupe_key()),
     ) {
         Ok(enqueued) => json!({
             "ok": true,
@@ -170,6 +198,30 @@ fn send(request: &Value) -> Value {
             json!({"ok": false, "error": code, "detail": detail.chars().take(160).collect::<String>(), "effect": "none"})
         }
     }
+}
+
+/// Build, validate and commit one request - the path an approved draft takes, with its final text.
+/// The chat is an exact JID the draft already held, and the text is re-validated here because an edit
+/// is a new body: nothing reaches the queue that has not passed the same checks as any other send.
+pub(crate) fn enqueue(text: &str, chat: &str, reply_to: Option<&str>, mentions: &[String]) -> Value {
+    let request = OutboxRequest {
+        chat: chat.to_string(),
+        text: text.to_string(),
+        reply_to: reply_to.map(str::to_string).filter(|id| !id.is_empty()),
+        mentions: mentions.to_vec(),
+    };
+    match request.validate() {
+        Ok(verified) => commit(&verified),
+        Err(refusal) => {
+            json!({"ok": false, "error": refusal.error(), "detail": refusal.detail, "effect": "none"})
+        }
+    }
+}
+
+/// What the queue knows about one job, in the shape `status` answers: the draft's read folds this in
+/// so a settled send fills the draft's message id without a second call from the agent.
+pub(crate) fn job_state(id: u64) -> Value {
+    status(&json!({"id": id}))
 }
 
 /// One status read. A job id from another queue, or one this node never allocated, is refused rather

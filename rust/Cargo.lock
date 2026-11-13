@@ -2149,6 +2149,7 @@ dependencies = [
  "notify",
  "ring",
  "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
  "ureq",

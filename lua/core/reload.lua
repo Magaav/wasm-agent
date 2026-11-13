@@ -113,6 +113,13 @@ local UI = {
   "lua/core/tool_progress.lua",    -- a running tool's live row
   "lua/core/skills.lua",           -- the skills list and what a skill says it is for
   "lua/core/harness_evaluator_cli.lua", -- the evaluator's report, as rows
+
+  -- `/approve`: the operator approves outgoing WhatsApp drafts (docs/APPROVE.md). This file draws the
+  -- page, reads the queue and asks for the decision - so it is UI, and an edit to it reaches a running
+  -- session like any other command's. It is NOT the gate: the gate is `whatsapp_approve.rs` in
+  -- `rust/wa-capabilities`, compiled into the node and listed under RUNTIME below, because a gate a
+  -- reload source could replace is not a gate.
+  "lua/core/approve.lua",
 }
 
 -- Never reloadable, and named one by one rather than by a pattern: a list a reviewer can read is the
@@ -152,6 +159,7 @@ M.RUNTIME = {
   "rust/wa-capabilities/src/core_component.rs", -- the wasmtime host and the Lua VM boot
   "rust/wa-capabilities/src/capabilities.rs",   -- and its grant table
   "rust/wa-capabilities/src/disk.rs",           -- disk_cap
+  "rust/wa-capabilities/src/whatsapp_approve.rs", -- the operator's gate on an outgoing WhatsApp send
   "rust/wa-agent/src/guards.rs",
   "rust/wa-host/src/main.rs",            -- the process: the session and the in-flight run
   "rust/wa-host/src/release.rs",         -- the trusted-key verifier
