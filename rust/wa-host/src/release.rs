@@ -224,14 +224,40 @@ fn read(path: &Path) -> Result<Vec<u8>, ReleaseError> {
     std::fs::read(path).map_err(|error| ReleaseError::new(6, format!("{}: {error}", path.display())))
 }
 
+/// The keys a refusal names as trusted, and the plain sentence for the case that is nobody.
+fn trusted_key_list(trusted: &[Key]) -> String {
+    if trusted.is_empty() {
+        "no trusted key is configured".to_string()
+    } else {
+        trusted.iter().map(|key| key.id.as_str()).collect::<Vec<&str>>().join(", ")
+    }
+}
+
 /// Verify one release directory. Answers the key id that vouched for it, or the refusal.
 ///
 /// `extra` are trusted-keys files beyond the embedded list and the node's own (a test, or an operator with
 /// a copy on a USB stick).
 pub fn verify_release(directory: &Path, extra: &[PathBuf]) -> Result<String, ReleaseError> {
-    let sums = read(&directory.join(SUMS_FILE))?;
+    verify_release_at(&directory.join(SUMS_FILE), None, extra)
+}
+
+/// Verify the release a `SHA256SUMS` file belongs to: the signature is `SHA256SUMS.sig` beside it, unless
+/// the caller names the signature file for it (the second positional argument, or `--sig`).
+///
+/// This is the shape an operator types - `wa release verify <SHA256SUMS> [SHA256SUMS.sig]` - and the shape
+/// the shell verifiers call, so there is one set of rules whether the release is named by a directory, by
+/// its sums file, or by both of its files.
+pub fn verify_release_at(sums_path: &Path, signature: Option<&Path>, extra: &[PathBuf]) -> Result<String, ReleaseError> {
+    let sums = read(sums_path)?;
     let digest = sha256(&sums);
-    let signature_path = directory.join(SIGNATURE_FILE);
+    let directory = match sums_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let signature_path = match signature {
+        Some(path) => path.to_path_buf(),
+        None => directory.join(SIGNATURE_FILE),
+    };
     if !signature_path.is_file() {
         return Err(ReleaseError::new(2, format!(
             "{} has no {SIGNATURE_FILE}: refusing to install from a release that is not signed",
@@ -276,11 +302,9 @@ pub fn verify_release(directory: &Path, extra: &[PathBuf]) -> Result<String, Rel
     }
 
     let public = trusted.iter().find(|key| key.id == signature.key).map(|key| key.public.clone()).ok_or_else(|| {
-        let listed: Vec<&str> = trusted.iter().map(|key| key.id.as_str()).collect();
         ReleaseError::new(4, format!(
             "{} is signed by {}, which this node does not trust ({})",
-            signature_path.display(), signature.key,
-            if listed.is_empty() { "no trusted key is configured".to_string() } else { listed.join(", ") }))
+            signature_path.display(), signature.key, trusted_key_list(&trusted)))
     })?;
     if !ed25519_verify(&public, &digest, &signature.signature) {
         return Err(ReleaseError::new(4, format!(
@@ -290,13 +314,16 @@ pub fn verify_release(directory: &Path, extra: &[PathBuf]) -> Result<String, Rel
     Ok(signature.key)
 }
 
-/// `wa release verify --sums <dir|SHA256SUMS> [--key <file>]... [--quiet]`
+/// `wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig] [--key <file>]... [--quiet]`
+/// `wa release verify --sums <dir|SHA256SUMS> [--sig <file>] [--key <file>]... [--quiet]`
 ///
 /// A scripts'-facing verb, so the deploy paths have one verifier binary-side as well as shell-side, and so
-/// an operator can check a hand-copied release without installing it.
+/// an operator can check a hand-copied release without installing it. Both spellings name the same two
+/// files: the sums, and the signature that must be about them.
 pub fn run(args: &[String]) -> i32 {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") || args.is_empty() {
-        println!("usage: wa release verify --sums <dir|SHA256SUMS> [--key <file>]... [--quiet]");
+        println!("usage: wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig] [--key <file>]... [--quiet]");
+        println!("       wa release verify --sums <dir|SHA256SUMS> [--sig <file>] [--key <file>]... [--quiet]");
         return if args.is_empty() { 2 } else { 0 };
     }
     match args.first().map(String::as_str) {
@@ -308,6 +335,7 @@ pub fn run(args: &[String]) -> i32 {
         None => return 2,
     }
     let mut sums: Option<PathBuf> = None;
+    let mut signature: Option<PathBuf> = None;
     let mut extra: Vec<PathBuf> = Vec::new();
     let mut quiet = false;
     let mut index = 1;
@@ -320,6 +348,17 @@ pub fn run(args: &[String]) -> i32 {
                     Some(value) => sums = Some(PathBuf::from(value)),
                     None => {
                         eprintln!("release_missing_value: --sums needs a path");
+                        return 2;
+                    }
+                }
+            }
+            "--sig" => {
+                let value = args.get(index + 1).cloned();
+                index += 2;
+                match value {
+                    Some(value) => signature = Some(PathBuf::from(value)),
+                    None => {
+                        eprintln!("release_missing_value: --sig needs a path");
                         return 2;
                     }
                 }
@@ -339,6 +378,20 @@ pub fn run(args: &[String]) -> i32 {
                 quiet = true;
                 index += 1;
             }
+            other if !other.starts_with('-') => {
+                // The two files by position: `wa release verify <SHA256SUMS> [SHA256SUMS.sig]`.
+                if sums.is_none() {
+                    sums = Some(PathBuf::from(other));
+                } else if signature.is_none() {
+                    signature = Some(PathBuf::from(other));
+                } else {
+                    // A third path is never guessed at: two files name a release, and a reader that
+                    // picked one of three would be trusting its own choice.
+                    eprintln!("release_unexpected_argument: '{other}' (the arguments are the sums, then the signature that must be about them)");
+                    return 2;
+                }
+                index += 1;
+            }
             other => {
                 eprintln!("release_unknown_option: '{other}'");
                 return 2;
@@ -346,14 +399,15 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let Some(sums) = sums else {
-        eprintln!("release_missing_value: --sums needs a path");
+        eprintln!("release_missing_value: no SHA256SUMS was named (usage: wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig])");
         return 2;
     };
-    let directory = if sums.is_dir() { sums } else { sums.parent().map(Path::to_path_buf).unwrap_or(sums.clone()) };
-    match verify_release(&directory, &extra) {
+    let release_dir = if sums.is_dir() { sums.clone() } else { sums.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")) };
+    let sums_file = if sums.is_dir() { sums.join(SUMS_FILE) } else { sums };
+    match verify_release_at(&sums_file, signature.as_deref(), &extra) {
         Ok(key) => {
             if !quiet {
-                println!("release signature verified: {key} ({})", directory.display());
+                println!("release signature verified: {key} ({})", release_dir.display());
             }
             0
         }
@@ -473,13 +527,32 @@ mod tests {
     }
 
     #[test]
-    fn no_trusted_key_at_all_is_refused_by_name() {
+    fn a_key_this_node_does_not_trust_is_refused_by_name() {
+        // This asserts the SENTENCE, not a premise about `config/release-keys.txt`: the embedded list is
+        // empty only until the operator registers a release key (it gained one on 13/11), and this test
+        // was written against the empty case - so it went red on the landing that registered the key, for
+        // a reason that was about the file and not about the refusal.
         let directory = scratch("notrust");
         let key = Signer::new("a");
         release(&directory, &key);
-        let error = verify_release(&directory, &[]).expect_err("nothing is trusted here");
+        let error = verify_release(&directory, &[]).expect_err("a stranger's key is not trusted here");
         assert_eq!(error.code, 4);
-        assert!(error.message.contains("no trusted key is configured"), "{}", error.message);
+        assert!(error.message.contains(&key.id), "{}", error.message);
+        assert!(error.message.contains("does not trust"), "{}", error.message);
+        let embedded = parse_trusted_keys(EMBEDDED_TRUSTED_KEYS, "embedded").expect("the embedded list parses");
+        assert!(error.message.contains(&trusted_key_list(&embedded)), "{}", error.message);
+    }
+
+    #[test]
+    fn the_trust_list_says_plainly_when_it_is_nobody() {
+        // The branch the test above stopped reaching: an operator reading "does not trust (...)" must
+        // never be left with an empty pair of brackets.
+        assert_eq!(trusted_key_list(&[]), "no trusted key is configured");
+        let keys = parse_trusted_keys(
+            "wa-trusted-keys v1\nkey release-signing-aaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nkey release-signing-bbbb bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+            "a test list")
+            .expect("two keys");
+        assert_eq!(trusted_key_list(&keys), "release-signing-aaaa, release-signing-bbbb");
     }
 
     #[test]
@@ -558,6 +631,50 @@ mod tests {
                 (other, code) => panic!("fixture {case} verified as {other:?}, expected code {code}"),
             }
         }
+    }
+
+    #[test]
+    fn the_two_files_by_position_name_the_same_release_as_the_directory() {
+        // `wa release verify <SHA256SUMS> [SHA256SUMS.sig]`: what an operator types, and what the
+        // shell verifiers could hand a node instead of a directory.
+        let directory = scratch("positional");
+        let key = Signer::new("a");
+        release(&directory, &key);
+        let trusted = keys_file(&directory, &[&key]);
+        let sums = directory.join(SUMS_FILE);
+        let signature = directory.join(SIGNATURE_FILE);
+        assert_eq!(verify_release_at(&sums, None, &[trusted.clone()]).expect("sums alone"), key.id);
+        assert_eq!(verify_release_at(&sums, Some(&signature), &[trusted]).expect("sums and sig"), key.id);
+    }
+
+    #[test]
+    fn a_named_signature_that_is_not_about_these_sums_is_refused() {
+        // The point of naming the signature is not to make verification optional: it must still be about
+        // exactly the bytes handed in.
+        let directory = scratch("named-sig");
+        let key = Signer::new("a");
+        release(&directory, &key);
+        let trusted = keys_file(&directory, &[&key]);
+        let other = scratch("named-sig-other");
+        write(&other.join(SIGNATURE_FILE), key.signature_file(&sha256(b"another release\n")).as_bytes());
+        let error = verify_release_at(&directory.join(SUMS_FILE), Some(&other.join(SIGNATURE_FILE)), &[trusted])
+            .expect_err("a signature about other bytes must not verify");
+        assert_eq!(error.code, 3);
+    }
+
+    #[test]
+    fn a_bad_signature_is_refused_by_the_named_path_too() {
+        let directory = scratch("named-sig-flipped");
+        let key = Signer::new("a");
+        release(&directory, &key);
+        let trusted = keys_file(&directory, &[&key]);
+        let signature = directory.join(SIGNATURE_FILE);
+        let text = std::fs::read_to_string(&signature).expect("read sig");
+        let flipped = text.replace("sig ", "sig 0");
+        write(&signature, flipped.as_bytes());
+        let error = verify_release_at(&directory.join(SUMS_FILE), Some(&signature), &[trusted])
+            .expect_err("a malformed signature is refused, not skipped");
+        assert_eq!(error.code, 6);
     }
 
     #[test]
