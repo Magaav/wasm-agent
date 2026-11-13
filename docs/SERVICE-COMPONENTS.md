@@ -692,7 +692,7 @@ media key and the direct path never leave the component: they are how it decrypt
 * **What must not be kept is not kept.** A view-once or ephemeral message is a fact (kind, sender,
   time, `unsupported: view_once`) with no text and no keys. `status@broadcast` and newsletters are
   skipped, as the transcription pipeline already skipped them.
-* **Retention is by age, in bounded passes.** `index_retention_days` (default 90) decides the window;
+* **Retention is by age, in bounded passes.** `index_retention_days` (default 180) decides the window;
   a pass walks `ix/all` from the oldest, deletes at most `index_prune_budget` records (default 200)
   and stops at the first record inside the window, so it costs what it deletes. There is no record
   count and no counter: a counter that drifts is a counter that deletes live data. The index is bounded
@@ -798,7 +798,7 @@ bigger one answers `download_too_large` with its `size` instead of pretending.
 | key | default | meaning |
 | --- | --- | --- |
 | `index` | `true` | index every received message and answer queries |
-| `index_retention_days` | `90` | how long a record is kept (clamped to 1..3650) |
+| `index_retention_days` | `180` | how long a record is kept (clamped to 1..3650); the same window the past is bounded by |
 | `index_prune_every_seconds` | `300` | how often a retention pass runs (clamped to 30..86400) |
 | `index_prune_budget` | `200` | records one pass may delete |
 | `index_download_max_bytes` | `524288` | most plaintext `whatsapp_download` will decrypt |

@@ -21,10 +21,12 @@
 //!   live or backfilled - is counted as a duplicate and not written again: a history sync that
 //!   re-delivers the last week must not rewrite (or reorder) records a query already answers with,
 //!   and must never downgrade a live record's `source` to `history`.
-//! * **Bounded, and it says so.** One blob may carry tens of thousands of messages. A drain stops at
-//!   the first budget it hits - per chat, in total, or per notification - and reports which one, so
-//!   the rest is a smaller answer and never a starved component. The counters come from one bounded
-//!   pass over the index's age keys (`index::age_index`), not from a maintained counter that drifts.
+//! * **Bounded by age, and it says so.** One blob may carry tens of thousands of messages. The past
+//!   reaches exactly as far back as the live index keeps (`index_retention_days`, one clock), one
+//!   notification adds at most `per_sync` records, and a drain stops at the first bound it hits and
+//!   reports which one, so the rest is a smaller answer and never a starved component. There is no
+//!   per-chat cap and no total cap: a count is a second window that has to be kept in step with the
+//!   first by hand, and the operator removed both on 13/11.
 //! * **The storage quota is the wall, not a promise.** A failed write stops the drain and is reported
 //!   (`Stop::Store`): the component's grant is what bounds the index, so "quota reached" is a stop
 //!   with a reason, never a silent loss or a retry into the same wall.
@@ -35,15 +37,14 @@
 //!   tell the two apart and an operator can see how much of the index is backfill.
 use crate::index::{self, Store};
 use crate::record::{self, Envelope};
-use std::collections::BTreeMap;
 use wa_whatsapp_index as seam;
 use whatsapp_rust::waproto::whatsapp as wap;
 
 /// Most index entries one budget pass may read to count what is already backfilled.
 ///
 /// The index is bounded by the component's storage grant and by retention; this is the ceiling on what
-/// one history notification costs to *plan*, so a huge index slows a drain down instead of stopping
-/// the component. A capped pass under-counts, which makes the budget stricter, never looser.
+/// one age-index pass reads (the one `anchors` does, to find the oldest message of each chat), so a
+/// huge index slows a backfill down instead of stopping the component. A capped pass under-counts.
 pub const COUNT_CAP: usize = 50_000;
 
 /// Where "we" are, so an own message in a group is attributed to us and not to the chat.
@@ -80,69 +81,83 @@ impl SelfJids {
     }
 }
 
-/// How much of the past one component will hold. Every field is a count, because a count is what a
-/// budget can be measured against; the storage grant is the byte-level wall behind them.
+/// How much of the past one component will hold, and how much work one tick may do.
+///
+/// The past is bounded by **one clock**, not by two counters: a backfilled record is kept for as long
+/// as the live index keeps one (`index_retention_days`), so a sync can never smuggle in a message the
+/// next prune pass would delete, and the two cannot disagree. Until 13/11 this was `per_chat: 200` and
+/// `total: 2_000`, which the operator removed ("bound by age only"): a count is a second, invisible
+/// window that had to be kept in step with the first by hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Budget {
-    /// Most backfilled records one chat may hold.
-    pub per_chat: usize,
-    /// Most backfilled records the index may hold in total.
-    pub total: usize,
-    /// Most records one history notification may add, so a large sync is spread over ticks.
+    /// Most records one history notification may add, so a large sync is spread over ticks. It bounds
+    /// one tick's WORK, not what the index may hold.
     pub per_sync: usize,
+    /// How far back the past may reach: a message whose own timestamp is older than `now - keep_ms` is
+    /// not backfilled.
+    pub keep_ms: i64,
 }
+
+/// The window every node keeps unless its definition says otherwise: 180 days, the same number
+/// `index_retention_days` defaults to (`guest.rs`, `docs/SERVICE-COMPONENTS.md`).
+pub const DEFAULT_KEEP_DAYS: i64 = 180;
 
 impl Default for Budget {
     fn default() -> Budget {
-        // A phone's initial bootstrap can carry a whole account; these defaults keep the component's
-        // storage inside a normal grant while covering a conversation's recent past.
-        Budget { per_chat: 200, total: 2_000, per_sync: 1_000 }
+        // A phone's initial bootstrap can carry a whole account; `per_sync` keeps a large sync from
+        // monopolising the pipeline, and the age is the one the live index is pruned by.
+        Budget { per_sync: 1_000, keep_ms: DEFAULT_KEEP_DAYS * 86_400_000 }
     }
 }
 
 impl Budget {
-    /// Read the service definition's `index_history*` keys. Absent keys are the defaults; a value of
-    /// zero means "off" for that dimension (which is a decision, not a typo).
+    /// Read the service definition. `index_history_per_sync` bounds one tick; `index_retention_days`
+    /// (the same key the live index is pruned by) bounds the age. A definition that still carries the
+    /// removed `index_history_per_chat` / `index_history_total` keys is not refused - it is reported
+    /// once at start (`guest::IndexConfig`), because a key that silently stopped meaning anything is a
+    /// decision someone made that nothing honours.
     pub fn from_json(config: &serde_json::Value) -> Budget {
         let default = Budget::default();
+        let days = config["index_retention_days"].as_u64().unwrap_or(DEFAULT_KEEP_DAYS as u64).clamp(1, 3_650) as i64;
         Budget {
-            per_chat: config["index_history_per_chat"].as_u64().unwrap_or(default.per_chat as u64) as usize,
-            total: config["index_history_total"].as_u64().unwrap_or(default.total as u64) as usize,
             per_sync: config["index_history_per_sync"].as_u64().unwrap_or(default.per_sync as u64) as usize,
+            keep_ms: days * 86_400_000,
         }
     }
 
     /// Nothing may be backfilled: `index_history: false` is the same budget as every count at zero.
     pub fn off() -> Budget {
-        Budget { per_chat: 0, total: 0, per_sync: 0 }
+        Budget { per_sync: 0, keep_ms: 0 }
     }
 
     pub fn is_off(&self) -> bool {
-        self.per_chat == 0 || self.total == 0 || self.per_sync == 0
+        self.per_sync == 0 || self.keep_ms <= 0
+    }
+
+    /// The oldest message timestamp this budget still backfills, for `now`.
+    pub fn oldest_ms(&self, now: i64) -> i64 {
+        now.saturating_sub(self.keep_ms)
     }
 }
 
 /// Why a drain stopped early.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
-    /// This chat already holds `per_chat` backfilled records.
-    PerChat,
-    /// The index already holds `total` backfilled records.
-    Total,
     /// This notification reached `per_sync`; the rest of it is dropped (a new sync, or an on-demand
     /// request, is what fetches more).
     Sync,
     /// A write or a read failed: the store (or the storage grant) is the wall.
     Store,
+    /// History is off for this node (`index_history: false`).
+    Off,
 }
 
 impl Stop {
     pub fn as_str(self) -> &'static str {
         match self {
-            Stop::PerChat => "per_chat",
-            Stop::Total => "total",
             Stop::Sync => "per_sync",
             Stop::Store => "store",
+            Stop::Off => "off",
         }
     }
 }
@@ -160,8 +175,10 @@ pub struct Progress {
     pub duplicate: usize,
     /// Messages with no chat, no id, or a chat the index does not follow (status, newsletter).
     pub skipped: usize,
-    /// Messages a per-chat or total budget refused.
-    pub over_budget: usize,
+    /// Messages older than the window this budget keeps: seen, refused, and not `skipped` (which is
+    /// "not a chat this index follows"), because a reader asking "how much of the past did I get"
+    /// needs to tell the two apart.
+    pub too_old: usize,
     /// Messages not reached because the drain stopped.
     pub remaining: usize,
     pub stopped: Option<Stop>,
@@ -177,7 +194,7 @@ impl Progress {
         self.written += other.written;
         self.duplicate += other.duplicate;
         self.skipped += other.skipped;
-        self.over_budget += other.over_budget;
+        self.too_old += other.too_old;
         self.remaining += other.remaining;
         if self.stopped.is_none() {
             self.stopped = other.stopped;
@@ -188,13 +205,13 @@ impl Progress {
     /// The service log's line for this drain: counts, a stop reason, and nothing a person said.
     pub fn line(&self) -> String {
         format!(
-            "conversations={} seen={} written={} duplicate={} skipped={} over_budget={} remaining={} stopped={}{}",
+            "conversations={} seen={} written={} duplicate={} skipped={} too_old={} remaining={} stopped={}{}",
             self.conversations,
             self.seen,
             self.written,
             self.duplicate,
             self.skipped,
-            self.over_budget,
+            self.too_old,
             self.remaining,
             self.stopped.map(Stop::as_str).unwrap_or("done"),
             if self.reason.is_empty() { String::new() } else { format!(" reason={}", self.reason) },
@@ -272,37 +289,22 @@ pub fn candidates(conversation: &wap::Conversation, me: &SelfJids) -> Vec<Candid
     out
 }
 
-/// What one drain is allowed to add, and what the index already holds.
+/// What one drain is allowed to add.
 ///
-/// Built once per history notification (`Plan::of`): the counting pass is the expensive part of a
-/// drain, and a chunked sync carries many conversations that all share the same budget.
+/// Built once per history notification and shared by every conversation in it: `per_sync` is one
+/// tick's work for the whole notification, and the age is the same for all of them.
 pub struct Plan {
     pub budget: Budget,
-    /// Backfilled records the index holds, plus what this drain has written.
-    pub total: usize,
-    /// Backfilled records per chat, plus what this drain has written.
-    pub per_chat: BTreeMap<String, usize>,
     /// Records this drain has written.
     pub written: usize,
-    /// The counting pass hit its entry budget: the counts are a floor, so the budget is stricter.
-    pub capped: bool,
 }
 
 impl Plan {
-    pub async fn of<S: Store>(store: &S, budget: Budget) -> Result<Plan, String> {
-        let index = index::age_index(store, COUNT_CAP).await?;
-        Ok(Plan {
-            budget,
-            total: index.history,
-            per_chat: index.chats.iter().map(|entry| (entry.chat.clone(), entry.history)).collect(),
-            written: 0,
-            capped: index.capped,
-        })
-    }
-
-    /// How many backfilled records this chat holds (including this drain's writes).
-    pub fn held(&self, chat: &str) -> usize {
-        self.per_chat.get(chat).copied().unwrap_or(0)
+    /// A plan needs nothing from the store: the bound is the age, and the age is a clock. The counting
+    /// pass over the index's age keys that this used to need (one bounded scan per notification) went
+    /// with the per-chat and total counters.
+    pub fn new(budget: Budget) -> Plan {
+        Plan { budget, written: 0 }
     }
 }
 
@@ -318,9 +320,10 @@ pub async fn drain_conversation<S: Store>(
 ) -> Progress {
     let mut progress = Progress { conversations: 1, ..Progress::default() };
     if plan.budget.is_off() {
-        progress.stopped = Some(Stop::Total);
+        progress.stopped = Some(Stop::Off);
         return progress;
     }
+    let oldest = plan.budget.oldest_ms(now_ms);
     let candidates = candidates(conversation, me);
     progress.seen = candidates.len();
     for (position, candidate) in candidates.iter().enumerate() {
@@ -329,16 +332,15 @@ pub async fn drain_conversation<S: Store>(
             progress.remaining = candidates.len() - position;
             break;
         }
-        if plan.total >= plan.budget.total {
-            progress.stopped = Some(Stop::Total);
-            progress.remaining = candidates.len() - position;
-            break;
-        }
-        let chat = candidate.envelope.chat.as_str();
-        if plan.held(chat) >= plan.budget.per_chat {
-            progress.over_budget += 1;
+        // The age bound, and the only one: the past reaches exactly as far back as the live index
+        // keeps, so what a sync adds is what retention will still answer with. A message with no
+        // timestamp (0) is not evidence of age and is kept.
+        let ts = candidate.envelope.ts;
+        if ts > 0 && ts < oldest {
+            progress.too_old += 1;
             continue;
         }
+        let chat = candidate.envelope.chat.as_str();
         // The dedupe: the id *is* the message, so a message already indexed - live or backfilled - is
         // not written again, and the row it already has keeps its own source.
         match index::holds(store, chat, &candidate.envelope.id).await {
@@ -361,8 +363,6 @@ pub async fn drain_conversation<S: Store>(
             Ok(()) => {
                 progress.written += 1;
                 plan.written += 1;
-                plan.total += 1;
-                *plan.per_chat.entry(chat.to_string()).or_insert(0) += 1;
             }
             Err(reason) => {
                 // The storage grant, or the store itself: stop rather than retry into the same wall.

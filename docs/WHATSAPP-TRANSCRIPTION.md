@@ -161,24 +161,32 @@ Event::HistorySync(LazyHistorySync)        one event per blob (chunked: several)
   never reorders a thread and never turns a live record into a history one. A backfilled record is
   otherwise indistinguishable: `read`, `search`, `reactions` and `media` answer with it, and a hit
   carries `source: "history"` so the two can be told apart.
-* **Bounded, and it says which bound it hit.** One blob can carry tens of thousands of messages, so a
-  drain stops at the first budget - per chat, in total, or per notification - and logs the counts
-  (`history: conversations=… seen=… written=… duplicate=… skipped=… over_budget=… remaining=…
-  stopped=per_chat|total|per_sync|store`). Never a message, never a chat's text.
+* **Bounded by age, and it says which bound it hit.** One blob can carry tens of thousands of messages,
+  so a drain stops at the first bound - one notification's `per_sync`, the store itself, history being
+  off - and logs the counts (`history: conversations=… seen=… written=… duplicate=… skipped=… too_old=…
+  remaining=… stopped=per_sync|store|off`). A message whose own timestamp is older than
+  `index_retention_days` is counted as `too_old` and not written: the past reaches exactly as far back
+  as the live index keeps, so what a sync adds is what retention still answers with. Never a message,
+  never a chat's text.
 * **The storage grant is the wall, not a promise.** A failed write stops the drain with `stopped=store`
   and its reason instead of retrying into the same wall; what was written stays.
-* **The counters are read, not maintained.** `index::age_index` walks the age keys once (`ix/all`, whose
-  value now says `history` or nothing) to learn how much backfill the index holds, so a budget cannot
-  drift away from what is on disk.
+* **No counting pass, because there is nothing left to count.** The per-chat and total caps were the
+  reason `index::age_index` was read once per notification; with the age as the only bound, a drain
+  costs one read per message (`index::holds`) and nothing else. The index's age keys are still read by
+  the one caller that needs them: `history::anchors`, to find the oldest message of each chat.
 
 **Configuration** (the service definition's `config`, all optional):
 
 | key | default | meaning |
 | --- | --- | --- |
 | `index_history` | `true` | index history syncs at all; `false` drops a blob and says so once |
-| `index_history_per_chat` | `200` | most backfilled records one chat may hold |
-| `index_history_total` | `2000` | most backfilled records the index may hold |
 | `index_history_per_sync` | `1000` | most records one notification may add (the rest is a later sync) |
+| `index_retention_days` | `180` | how far back a message's own timestamp may be and still be backfilled - the same window the live index is pruned by, so there is one clock for both halves |
+
+The per-chat cap (`index_history_per_chat`, 200) and the total cap (`index_history_total`, 2000) were
+removed on 13/11 (operator): the past is bounded by age, and a definition that still sets either key
+is not refused - the component says once at start that they are ignored, because a key that silently
+stopped meaning anything is a decision nothing honours.
 
 **The on-demand request.** `whatsapp_backfill {chat?, count}` is a sixth op on `whatsapp.query`
 (`rust/wa-whatsapp-index`): the component anchors on the oldest message it holds for the chat
