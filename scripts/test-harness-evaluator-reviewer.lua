@@ -385,15 +385,15 @@ local function door_child(env_prefix)
     .. ' eval reviewer change/fixture --repo ' .. shquote(repo) .. ' --bin ' .. shquote(stub)
   return exec(command, '', 120)
 end
+-- One spawn proves two things: the env switch turns it off, and it does so with NO branch named (the door
+-- reads the switch before demanding a positional - third real review, finding 7 of the first round).
 local bare_off = exec('env -u WA_SCRIPT -u WASM_AGENT_LUA_ROOT HOME=' .. shquote(child_home)
   .. ' WASM_AGENT_HOME=' .. shquote(child_home) .. ' WASM_AGENT_DB=' .. shquote(child_home .. '/door.db')
   .. ' WASM_AGENT_MANAGED=0 WA_REVIEWER=off ' .. shquote(bin) .. ' eval reviewer', '', 120)
-check(tonumber(bare_off.code) == 0 and tostring(bare_off.stdout):find('the reviewer is off', 1, true) ~= nil,
-  'with no branch at all and the switch off, the door says it is off and exits 0 (' .. tostring(bare_off.code) .. ')')
-local env_off = door_child('WA_REVIEWER=off')
-check(tonumber(env_off.code) == 0, 'WA_REVIEWER=off exits 0 (' .. tostring(env_off.code) .. ')')
-check(tostring(env_off.stdout):find('the reviewer is off', 1, true) ~= nil, 'and says the reviewer is off')
-check(tostring(env_off.stdout):find('REVIEW ', 1, true) == nil, 'and runs no review')
+check(tonumber(bare_off.code) == 0, 'WA_REVIEWER=off with no branch exits 0 (' .. tostring(bare_off.code) .. ')')
+check(tostring(bare_off.stdout):find('the reviewer is off', 1, true) ~= nil,
+  'and says the reviewer is off, with or without a branch named')
+check(tostring(bare_off.stdout):find('REVIEW ', 1, true) == nil, 'and runs no review')
 check(host.write_file(child_home .. '/.wasm-agent/env', 'reviewer = off\n'), 'the child config file is writable')
 local config_off = door_child('')
 check(tonumber(config_off.code) == 0, '`reviewer = off` in the config file exits 0 (' .. tostring(config_off.code) .. ')')
