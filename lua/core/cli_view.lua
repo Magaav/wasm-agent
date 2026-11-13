@@ -48,6 +48,10 @@ local markdown = dofile("lua/core/markdown.lua")
 -- per inner call, then the value. The rules (and why they are those rules) live there; this module
 -- owns where the rows go - the running block streams, the one before it collapses to a line.
 local codemode_block = dofile("lua/core/codemode_block.lua")
+-- Live reload (docs/HOTRELOAD.md). This module is one of the reloadable ones, so it reads the store the
+-- core owns rather than keeping state of its own, registers every view it creates so a swap can point it
+-- at the new methods, and ticks the watcher at each frame it begins: a save is visible on the next one.
+local reload = dofile("lua/core/reload.lua")
 
 local M = {}
 
@@ -780,6 +784,9 @@ end
 
 local METHODS = {}
 METHODS.__index = METHODS
+-- What a swap points a live view at: `reload` rebinds `getmetatable(view).__index` through this, so the
+-- object (the state) is never touched and the methods (the code) are always the newest.
+M.__methods = METHODS
 
 -- `opts`: out (write text), live (nil = decide), now (clock), limit (columns),
 -- title (terminal title), workspace/branch/budget (the banner and the footer).
@@ -856,7 +863,18 @@ function M.new(opts)
     -- The row the line was last drawn on, and how wide; nil = nothing drawn (no line, no gap).
     session_shown = nil, session_shown_cols = 0, region_bottom = nil,
   }
-  return setmetatable(view, METHODS)
+  view = setmetatable(view, METHODS)
+  -- A live view is session view state, and every field above survives a reload because the OBJECT does:
+  -- a swap only points it at the reloaded methods. `register = false` is for a throwaway view (the
+  -- reloader's own render probe, a test) that must not be kept alive for the life of the process.
+  if opts.register ~= false then
+    reload.view(view, function(module)
+      local methods = module.__methods
+      if type(methods) ~= "table" then return end
+      setmetatable(view, methods)
+    end)
+  end
+  return view
 end
 
 -- The row to address for `kind` ("O" output's last row, "S" status): a token when the host's editor
@@ -977,15 +995,25 @@ function METHODS:status_template()
   local started = self.screen and self.turn and self.turn.started
     or (self.pending and self.pending.started) or (self.turn and self.turn.started)
   local step = self.turn and (self.turn.step_started or self.turn.started)
+  -- The reload source, on the row a reader looks at: `dev reload` while this CLI draws from the
+  -- operator's working tree (docs/HOTRELOAD.md). It goes on every line this function composes, including
+  -- the one the host's ticker keeps redrawing while Lua is blocked, because a CLI running code that is
+  -- not what it was installed with has to say so in the one place that is always on screen. A deployed
+  -- payload says nothing: it is the node's own bytes.
+  local function with_source(line, live)
+    local marker = reload.status()
+    if not marker or line == "" then return line end
+    return line .. paint(" \194\183 " .. marker, "warning", live)
+  end
   local function compose(shown, live)
     if boxed and self.turn then
       -- `✶ 👣2·5s ⚒️3 ↑12.4k ↓310 ◷1:51`: the step this run is on and how long it has taken, the
       -- run's tool calls, its input and output tokens, and its whole time. `{s}` and `{T}` are
       -- clocks the host keeps moving while Lua is blocked.
-      return "{m}" .. paint(self:run_numbers("{s}", "{T}"), "muted", live)
+      return with_source("{m}" .. paint(self:run_numbers("{s}", "{T}"), "muted", live), live)
     end
     local line = "{m}" .. shown
-    if not self.turn then return line end
+    if not self.turn then return with_source(line, live) end
     if self.screen then
       local run, base, totals = self.turn, self.turn.baseline or {}, self.totals or {}
       local summary = M.footer({
@@ -994,11 +1022,11 @@ function METHODS:status_template()
         completion = math.max(0, (totals.completion or 0) - (base.completion or 0)),
         cached = math.max(0, (totals.cached or 0) - (base.cached or 0)),
       }, { context = self.context, budget = self.budget })
-      return line .. " \194\183 {t} \194\183 " .. summary
+      return with_source(line .. " \194\183 {t} \194\183 " .. summary, live)
     end
     local step = self.total_rounds > 0 and (" \194\183 step " .. self.total_rounds) or ""
     local bound = self.pending and self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
-    return line .. " \194\183 {t}" .. bound .. " \194\183 run " .. self.runs .. step
+    return with_source(line .. " \194\183 {t}" .. bound .. " \194\183 run " .. self.runs .. step, live)
   end
   local plain = compose(phase, false)
   -- The phase word carries the colour: the host's ticker draws this same line, and the mark and
@@ -1022,7 +1050,12 @@ end
 -- Cached for a second: the status row is redrawn on every spinner frame, and this reads a directory.
 local RESTART_NOTICE_TTL = 1
 local RESTART_VERBS = { restart = true, deploy = true, upgrade = true, recover = true }
-local restart_seen = { at = -1, verb = nil }
+-- The last answer, in the core's store rather than in a table of this module: the status row is redrawn
+-- on every spinner frame and this reads a directory, so the cache has to outlive a reload of this file
+-- (a module-level table would come back empty and re-read the disk on the next frame, or - worse - keep
+-- an answer the new copy can no longer refresh).
+local restart_seen = reload.state("restart_notice")
+if restart_seen.at == nil then restart_seen.at, restart_seen.verb = -1, nil end
 function M.restart_pending(now, data_dir)
   now = tonumber(now) or 0
   if restart_seen.at >= 0 and (now - restart_seen.at) < RESTART_NOTICE_TTL then return restart_seen.verb end
@@ -2409,7 +2442,18 @@ local FRAMED = { "paint", "line", "accepted", "answered", "failed", "warn", "eve
 for _, name in ipairs(FRAMED) do
   local inner = METHODS[name]
   assert(inner, "cli view: no method to frame: " .. name)
-  METHODS[name] = function(self, ...) return self:with_frame(inner, ...) end
+  -- The frame boundary is also where a reloaded module takes over (docs/HOTRELOAD.md). The order is the
+  -- whole of it: the tick runs BEFORE the frame, so the bytes this call draws are the new module's, and
+  -- the one line a change or a refusal produces is drawn AFTER it, through the writer this view already
+  -- had - a failure's line therefore never lands in the middle of the frame it interrupted.
+  METHODS[name] = function(self, ...)
+    local notices = reload.tick(self.now())
+    local results = table.pack(self:with_frame(inner, ...))
+    for _, notice in ipairs(notices) do
+      self:line(paint("  " .. tostring(notice.text), notice.ok and "dim" or "warning", self.live))
+    end
+    return table.unpack(results, 1, results.n)
+  end
 end
 
 return M

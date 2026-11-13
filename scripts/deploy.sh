@@ -1731,6 +1731,12 @@ ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-bi
 # nothing to install.
 ship_file "$ROOT/scripts/lib/release-signing.sh" "$INSTALL_DIR/scripts/lib/release-signing.sh" "scripts/lib/release-signing.sh beside deploy.sh (signed releases)"
 ship_file "$ROOT/scripts/lib/release_verify.py" "$INSTALL_DIR/scripts/lib/release_verify.py" "scripts/lib/release_verify.py beside deploy.sh (the verifier the shell paths run)"
+# ...and the keys a release is verified AGAINST, because the install directory is not a checkout: an
+# installed `upgrade.sh --release` takes its root from its own location, so without this file the shell
+# verifiers there have no anchor and refuse every release by name (`does not trust (...)`, "no trusted key
+# is configured"). Fail-closed, but a binary-only node that can never verify installs nothing - and the
+# binary's own embedded list only answers once that binary has the `wa release verify` verb.
+ship_file "$ROOT/config/release-keys.txt" "$INSTALL_DIR/config/release-keys.txt" "config/release-keys.txt beside deploy.sh (the release keys this node trusts)"
 # The command that SIGNS a release, for the node whose vault listener is reachable: `wa land` asks that node
 # to sign the sums of a release built elsewhere and brings the signature back (`lua/core/land.lua`, the `sign`
 # step). A signing host without this file refuses by name (`signer_script_missing`), which is a deployment
