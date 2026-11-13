@@ -31,7 +31,7 @@ The root is the state root the node already had - **no second root concept**:
 ├── worktrees/           worktrees created by agents and landing scripts
 ├── build/<tree>-<hash>/target   one cargo output island per tree on this node
 ├── cache/               (already existed: host.paths().cache)
-├── logs/                node and operation logs
+├── logs/                node-level logs (retention-managed; a supervised operation logs under operations/)
 ├── clean/               pins (clean/pins) and the last clean record (clean/last.json)
 ├── operations/          (already existed: supervised operations)
 └── wa-worktree-<id>/    (already existed: session worktrees, lua/core/workspaces.lua)
