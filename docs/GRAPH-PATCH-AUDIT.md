@@ -4,7 +4,7 @@ The graph is an **omission detector**, not a navigator that every run must use a
 certificate that a patch is correct. `WA_GRAPH_PATCH_AUDIT=1` enables an automatic
 audit when an operator run with native `write`/`edit` changes or a shell-using run
 first attempts to finish. A resolved call from another file into a changed definition becomes a
-review lead if that file was not read with native `read`/`read_many` in this run.
+review lead if that file was not read with native `read` in this run.
 The agent gets an audit follow-up step to inspect the lead and revise the patch.
 It is asked to record `graph {action:"audit_assess",grade:0..3,reason:"...",
 critique:"...",evidence:"..."}` after that inspection. Grades mean 0 irrelevant/noisy,

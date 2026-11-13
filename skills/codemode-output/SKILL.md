@@ -1,6 +1,6 @@
 ---
 name: codemode-output
-description: Present native code-mode reads or edit receipts without double JSON escaping; recover partial output and cached read_many pages, or reread after a formatter/stale-edit refusal. Use when aggregate native output is large or receipts are noisy, not for trivial calls.
+description: Present native code-mode reads or edit receipts without double JSON escaping; recover partial output and cached batch pages, or reread after a formatter/stale-edit refusal. Use when aggregate native output is large or receipts are noisy, not for trivial calls.
 ---
 
 # Native output and fresh receipts
@@ -9,7 +9,8 @@ Load `docs/CODEMODE.md` (Structured native presentation) for the versioned contr
 This is opt-in presentation, not a smaller global output budget or a new cache.
 
 ```js
-await tools.read_many({requests:[{path:'docs/A.md',limit:120},{path:'docs/B.md',limit:120}]});
+await tools.tool_call({calls:[{name:'read',arguments:{path:'docs/A.md',limit:120}},
+  {name:'read',arguments:{path:'docs/B.md',limit:120}}]});
 await showCall({version:1,call:1});
 ```
 
@@ -24,7 +25,7 @@ redacted model view, not byte-identical private evidence. Original source byte c
 and selections remain tied to the captured original. Never form old_text from masked
 source. JSON-key redaction collisions refuse visibly, not complete empty success.
 A visible captured page is not necessarily a whole document or whole batch.
-Continue later cached results with ordinary `read_many({cursor:...})`; do not rerun
+Continue later cached results with ordinary `tool_call({cursor:...})`; do not rerun
 the script, particularly effects. If `presentation_partial`, inspect all unread
 coverage before claiming review complete. Each unread range names the native
 original SHA-256, exact offset and byte count. Retrieve with `tool_result`, following

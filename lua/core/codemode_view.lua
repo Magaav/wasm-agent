@@ -4,7 +4,7 @@ local output=dofile('lua/core/tool_output.lua')
 local contract=dofile('lua/core/json_contract.lua')
 local redact=dofile('lua/core/redact.lua')
 local M={}
-M.help={name='showCall',version=1,description='await showCall({version:1,call:N}) selects the Nth admitted native call for a sanitized structured model view without text(JSON) escaping. Redaction flags distinguish this view from private exact originals; the journal remains retained. Partial views name exact unread byte ranges; read_many next_cursor resumes cached later results. Does not execute, retry, refresh, or edit. See docs/CODEMODE.md.',parameters={type='object',properties={version={type='integer',enum={1}},call={type='integer',minimum=1}},required={'version','call'},additionalProperties=false}}
+M.help={name='showCall',version=1,description='await showCall({version:1,call:N}) selects the Nth admitted native call for a sanitized structured model view without text(JSON) escaping. Redaction flags distinguish this view from private exact originals; the journal remains retained. Partial views name exact unread byte ranges; an answer that carries a `results` array (a peer batch) keeps its own next_cursor on the native result. Does not execute, retry, refresh, or edit. See docs/CODEMODE.md.',parameters={type='object',properties={version={type='integer',enum={1}},call={type='integer',minimum=1}},required={'version','call'},additionalProperties=false}}
 local function exact(ref,keymap)
  local raw=host.read_file(ref.path)
  if not raw or #raw~=ref.bytes or host.sha256(raw)~=ref.sha256 then error('codemode_presentation_evidence_changed') end
@@ -47,14 +47,17 @@ function M.finish(result,selected)
  if size(result,key_redacted)<=output.MAX_BYTES then return sanitized(result,key_redacted) end
  local full=output.store(json.encode(result))
  result.presentation_partial=true;result.full_result=full
- result.presentation_note='PARTIAL presentation: unread entries retain exact native result byte ranges. Use tool_result(sha256,offset,limit), following next_offset; do not rerun the script. Cached later read_many results still use next_cursor. complete describes sanitized captured result visibility, not file EOF or successful effects.'
- -- Pack whole results from each read_many page, preserving ALL page metadata
- -- (including failures, late notes, outcomes and cached continuation).
+ result.presentation_note='PARTIAL presentation: unread entries retain exact native result byte ranges. Use tool_result(sha256,offset,limit), following next_offset; do not rerun the script. A paged batch keeps its own next_cursor on the native result. complete describes sanitized captured result visibility, not file EOF or successful effects.'
+ -- Pack whole results from any native answer that carries a top-level `results` ARRAY - a peer's
+ -- `remote {capability:"batch"}`, a router batch, a plugin's own list - preserving ALL page metadata
+ -- (including failures, late notes, outcomes and cached continuation). No tool NAME is special-cased:
+ -- the retired `*_many` tools used to be the only producer, and a script's own loop cannot produce one,
+ -- so the shape is what decides, not the name.
  local packs={}
  for i,entry in ipairs(result.shown)do
   local _,raw,tree=exact(entry.evidence,keymap)
   local decoded=json.decode(raw);local nodes=contract.at(tree,{'results'})
-  if entry.name=='read_many' and type(decoded)=='table' and nodes and nodes.kind=='array' then
+  if type(decoded)=='table' and nodes and nodes.kind=='array' then
    local metadata={}
    for _,k in ipairs(tree.keys)do if k~='results' then
     local mapped=keymap(k);if metadata[mapped]~=nil then error('json_materialize_key_collision')end

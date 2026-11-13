@@ -10,7 +10,7 @@ scripts/test-child-budget-refusal.lua  # lua error: [string "scripts/test-child-
 scripts/test-child-compaction.lua  # lua error: [string "scripts/test-child-compaction.lua"]:24: child compacts then continues:
 scripts/test-cli-input.lua  # cli input: 2 failed of 16 checks
 scripts/test-cli-terminal.lua  # lua error: [string "scripts/test-cli-terminal.lua"]:7: probe needs a real raw terminal
-scripts/test-codemode-native.lua  # lua error: [string "scripts/test-codemode-native.lua"]:24: opt-in adds one tool, read_many
+scripts/test-codemode-native.lua  # lua error: [string "scripts/test-codemode-native.lua"]:24: opt-in adds one tool, direct tools retained
 scripts/test-codemode-unprepared.lua  # lua error: [string "scripts/test-codemode-unprepared.lua"]:4: default build honestly repor
 scripts/test-context-budget.lua  # lua error: [string "scripts/test-context-budget.lua"]:13: the test must run with WASM_AGEN
 scripts/test-embedded-runtime.lua  # lua error: [string "scripts/test-embedded-runtime.lua"]:1: assertion failed!

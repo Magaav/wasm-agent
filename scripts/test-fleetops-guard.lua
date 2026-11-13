@@ -49,7 +49,9 @@ local refused = {
   { 'the drop-in written through the write tool', 'write',
     nil, '/etc/systemd/system/wa-rendezvous.service.d/managed.conf' },
   { 'an operation that restarts the rendezvous', 'operation', 'systemctl restart wa-rendezvous' },
-  { 'a batched write to the drop-in', 'write_many', nil, nil,
+  -- The `*_many` tools are retired; the list shape is what a routed batch (or a plugin) can still carry,
+  -- and the guard's per-entry path walk must keep catching it there.
+  { 'a list-shaped write to the drop-in', 'write', nil, nil,
     { files = { { path = '/tmp/other.conf', content = 'ok' },
                 { path = '/etc/systemd/system/wa-rendezvous.service.d/managed.conf', content = 'x' } } } },
 }

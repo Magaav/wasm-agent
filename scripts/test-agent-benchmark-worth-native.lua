@@ -15,6 +15,6 @@ r=tools.dispatch(nil,'fixture_api',{op='list',extra=true},'master',ctx);assert(r
 r=tools.dispatch(nil,'fixture_api',{op='list'},'master',{});assert(r.error=='fixture_scope_refused' and n==0)
 r=tools.dispatch(nil,'fixture_api',{op='list'},'master',ctx);assert(r.marker=='isolated-mock' and n==1)
 local names={};for _,s in ipairs(tools.all('master'))do names[s['function'].name]=true end
-assert(names.fixture_api and names.bash and names.read_many and names.write_many and names.edit_many)
+assert(names.fixture_api and names.bash and names.read and names.write and names.edit)
 for _,s in ipairs(tools.all('guest'))do assert(s['function'].name~='fixture_api')end
 print(json.encode({ok=true,checks=8,rpc_calls=n,paid_solver_calls=0,external_effects=0}))

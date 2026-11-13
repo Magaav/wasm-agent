@@ -45,7 +45,7 @@ without relying on Git or timestamps. Roots register before capture; up to32 liv
 cache entries are retained, with only idle derived entries evicted. Cache DBs remain
 on disk. Excluded/build directories and unrelated scratch writes do not queue work.
 
-Successful `write`, `edit`, `write_many` and `edit_many` applications notify the
+Successful `write` and `edit` applications (a script's loop included) notify the
 selected source root. Per-file notifications also cover partial batches; failed
 preflight has no indexing effect. A75ms coalescing window replaces pending captures
 with the latest root revision, without indefinitely waiting for a quiet writer.
@@ -128,7 +128,8 @@ pages to refuse changed source. Path/name/line/optional kind remain mandatory id
 ambiguous selectors refuse instead of silently picking a match. Old selectors remain
 compatible; discovery never automatically chooses an ambiguous definition.
 
-`graph action=symbol_source_many` and compatibility `symbol_source_many` share one
+One `graph action=symbol_source` call answers one definition; several are a script's
+`Promise.all` over it. There is no batch action any more, and it shares one
 backend (1–8 selectors). Each resolved root captures once and uses one pinned snapshot;
 items retain ordered failures and independent20,000-byte source pages. Each item has
 `graph_snapshot_index` into top-level `graph_snapshots`, avoiding repeated status text.

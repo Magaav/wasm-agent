@@ -187,7 +187,7 @@ check(legal_name(replayed and replayed.name),
   "the replayed tool result carries a legal name: " .. tostring(replayed and replayed.name))
 
 -- The rule the fix ships is the rule this row enforced.
-for _, sample in ipairs({ "bash", "read_many", "mcp_whatsapp_send", "", "a b", "x" }) do
+for _, sample in ipairs({ "bash", "tool_call", "mcp_whatsapp_send", "", "a b", "x" }) do
   check(provider.call_name_valid(sample) == legal_name(sample),
     "provider.call_name_valid agrees with the API rule for " .. string.format("%q", sample))
 end

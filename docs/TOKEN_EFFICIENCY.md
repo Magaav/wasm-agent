@@ -139,7 +139,7 @@ There is no measured task-quality or financial improvement claim in this stage.
 
 ### Files and deterministic computation
 
-`read`/`read_many` return raw UTF-8 text (no synthetic line-number prefixes), a
+`read` returns raw UTF-8 text (no synthetic line-number prefixes), a
 whole-file SHA-256 `version`, actual starting/ending line, byte column, `eof`, and
 `next_offset`/`next_column`. A complete whole-line page also returns an opaque
 `selection` receipt bound to its path, version, source lines and exclusive byte

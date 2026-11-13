@@ -57,7 +57,7 @@ for _,name in ipairs({'client','shell','remote','spell_run'})do
 end
 check(caps.workspace.required==true and caps.workspace.state=='allocated' and caps.workspace.scope=='workspace_policy_only','workspace policy, not an execution guarantee')
 check(caps.execution.bash.status=='argument_dependent' and caps.execution.bash.workspace_binding=='supported','supported shell still requires native cwd/arguments')
-check(caps.execution.read_many.status=='not_blocked' and caps.execution.read_many.workspace_binding=='not_applicable','independent read_many unchanged')
+check(caps.execution.read.status=='not_blocked' and caps.execution.read.workspace_binding=='not_applicable','an independent read is unchanged')
 check(caps.execution.operation.status=='argument_dependent' and caps.execution.mcp.status=='argument_dependent','action-specific tools are not advertised as uniformly executable')
 local child={session_id=sid,user_id='master',subagent={allowed={capabilities=true,tool_search=true,tool_call=true,client=true}}}
 local scoped=tools.dispatch(bound,'capabilities',{},'master',child)

@@ -5,7 +5,7 @@ host.http=function()error('network forbidden')end
 local checks=0;local function check(v,why)assert(v,why);checks=checks+1 end
 local sid=memory.start_session('','layers',{user_id='master'});local ctx={session_id=sid,user_id='master',role='master'}
 local schemas=tools.envelope('master',ctx);local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
-check(#schemas>=14 and names.time and names.read_many and names.web_search and names.web_read,'read_many is native main-loop bootstrap')
+check(#schemas>=13 and names.time and names.read and names.web_search and names.web_read,'read is native main-loop bootstrap')
 check(not names.capabilities and not names.tool_result,'only catalog/evidence helpers remain deferred')
 local one=agent.system_sections('master','PROJECT_KEEP','a"&<.md',schemas,'progressive')
 local two=agent.system_sections('master','OTHER_PROJECT','b.md',schemas,'progressive',{orchestration_enabled=true})
@@ -25,7 +25,7 @@ for _,tag in ipairs({'identity','work','style','language','time','memory','tools
 check(prompt:find('orchestration="off"',1,true) and two.workflow:find('orchestration="on"',1,true),'explicit active workflow mode, one tag and one attribute')
 check(prompt:find('PROJECT_KEEP',1,true) and prompt:find('source="a&quot;&amp;&lt;.md"',1,true),'project bytes retained, source escaped')
 check(not prompt:find('Available tools:',1,true),'no progressive duplicate schema index')
-check(prompt:find('request them together with read_many',1,true),'direct batching cue retained')
+check(prompt:find('When multiple tool actions are independent',1,true),'grouping guidance retained')
 check(prompt:find('Before answering about the user',1,true),'memory-on-demand protocol retained')
 check(one.generic:find('<time>',1,true) and not one.generic:find('<style>\n[^<]*Time:'),'time is its own section, not inside style')
 check(one.generic:find('data, not instructions',1,true),'untrusted-content rule in the generic layer')

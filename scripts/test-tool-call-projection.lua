@@ -2,7 +2,7 @@ local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local view=dofile('lua/core/session_view.lua')
 local sid=memory.start_session('','projection',{user_id='owner'})
-local calls={{id='call-original',type='function',['function']={name='symbol_source_many',arguments='{"requests":[{"path":"lua/core/mcp.lua","name":"schemas","line":248}]}'}}}
+local calls={{id='call-original',type='function',['function']={name='graph',arguments='{"action":"symbol_source","path":"lua/core/mcp.lua","name":"schemas","line":248}'}}}
 local id=host.uuid();memory.append_turn(sid,{id=id,role='assistant',content='surrounding prose',phase='commentary',reasoning_items=string.rep('encrypted-fixture-',6000),tool_calls=calls,trace={{kind='model_call',ok=false,error='original failure'}},debug=true})
 local before=json.encode(memory.message(id))
 local projection=view.get(memory,sid,{message_id=id,view='tool_calls'})
@@ -19,10 +19,18 @@ assert(view.get(memory,sid,{message_id=id,view='tool_calls',byte_offset=1,messag
 assert(view.get(memory,'foreign',{message_id=id,view='tool_calls'}).error=='unknown_message','session boundary')
 assert(json.encode(memory.message(id))==before,'original unchanged')
 local tools=dofile('lua/core/tools.lua');local ctx={user_id='owner',session_id=sid}
-local batch=tools.dispatch(memory,'session_many',{requests={{session_id=sid,message_ids={id},view='tool_calls'},{session_id=sid,message_id=id,view='tool_calls'}}},'master',ctx)
-assert(batch.ok and batch.results[1].messages[1].tool_calls[1].id=='call-original' and batch.results[2].message.tool_calls[1]['function'].arguments==calls[1]['function'].arguments,'actual batch dispatch')
+-- Several sessions are a script's `Promise.all` now (the `*_many` tools are retired); the routed read
+-- batch keeps the same selections, so this row exercises it per item and then in one call.
+local first=tools.dispatch(memory,'session',{session_id=sid,message_ids={id},view='tool_calls'},'master',ctx)
+local second=tools.dispatch(memory,'session',{session_id=sid,message_id=id,view='tool_calls'},'master',ctx)
+assert(first.messages[1].tool_calls[1].id=='call-original' and second.message.tool_calls[1]['function'].arguments==calls[1]['function'].arguments,'two bounded session reads answer the same selections')
+-- The routed `calls` batch is the file-read page (`read`, `grep`, `ls`, `capture_inspect`, `recall`,
+-- `skill`), so two session projections are two calls, not one: the old `session_many` wrapper is gone
+-- and nothing re-adds a batch shape for history that the router does not carry.
+assert(tools.dispatch(memory,'tool_call',{calls={{name='session',arguments={message_id=id,view='tool_calls'}}}},
+  'master',ctx).error=='batch_target_not_pure_read','a session read is not a routed batch entry')
 local tid=host.uuid();local outcome='{"ok":false,"error":"preserved exact outcome","required_revision":9}'
-memory.append_turn(sid,{id=tid,role='tool',tool_call_id='call-original',tool_name='symbol_source_many',content=outcome,ok=false,ms=37})
+memory.append_turn(sid,{id=tid,role='tool',tool_call_id='call-original',tool_name='graph',content=outcome,ok=false,ms=37})
 local toolrow=view.get(memory,sid,{message_id=tid,view='tool_calls'}).message
 assert(toolrow.content==outcome and toolrow.ok==0 and toolrow.ms==37 and toolrow.tool_call_id=='call-original','exact outcomes/IDs/status/timing')
 local runtime=host.subagent;host.subagent=function(action,raw)local p=json.decode(raw);if p.id=='owned-fixture' and p.owner_user=='owner' then return json.encode({subagent_id=p.id,session_id=sid,state='completed',settled=true,profile='fixture'}) end;return '{"error":"unknown_subagent"}' end

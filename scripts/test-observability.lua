@@ -86,18 +86,22 @@ host.read_file=function(path)
   return read_original(path)
 end
 local requests={{path='first',offset=2,limit=1},{path='second'},{path='missing'}}
-local batched=tools.dispatch(memory,'read_many',{requests=requests},'master')
+-- The batch is the routed `tool_call` calls form now (the `*_many` tools are retired); the projection
+-- of an oversized batch is the same code path it always was, keyed on the tool that carries `results`.
+local routed={}
+for _,request in ipairs(requests) do routed[#routed+1]={name='read',arguments=request} end
+local batched=tools.dispatch(memory,'tool_call',{calls=routed},'master')
 check(#batched.results==3 and batched.failed==1 and batched.ok==false,'batched reads preserve order and partial failures')
 check(batched.results[1].content==tools.dispatch(memory,'read',requests[1],'master').content
   and batched.results[2].content==tools.dispatch(memory,'read',requests[2],'master').content,
   'batched ranges equal individual reads exactly')
 check(batched.results[3].error=='read_file_missing'
   and tostring(batched.results[3].detail):find('missing',1,true)~=nil
-  and tools.dispatch(memory,'read_many',{requests=requests},'guest').error~=nil,
+  and tools.dispatch(memory,'tool_call',{calls=routed},'guest').error~=nil,
   'batched missing files and role denial remain visible')
 host.read_file=read_original
 local large_batch={ok=true,results={{path='first',content=text},{path='second',content=text}}}
-local large_view=json.decode(output.project('read_many',large_batch))
+local large_view=json.decode(output.project('tool_call',large_batch))
 check(large_view.omitted and host.read_file(large_view.full_result.path)==json.encode(large_batch),
   'oversized batched view retains its complete original')
 check(#json.encode(large_view)<=output.MAX_BYTES,'nested result cannot bypass the total view budget')
@@ -171,9 +175,9 @@ local arguments=json.encode({path='fixture.txt',content=string.rep('exact argume
 memory.append_turn(backlog,{role='user',content=instruction})
 memory.append_turn(backlog,{role='assistant',content='',tool_calls={{id='write-fixture',type='function',['function']={name='write',arguments=arguments}}}})
 memory.append_turn(backlog,{role='tool',tool_call_id='write-fixture',tool_name='write',content='{"ok":true}'})
-local reads=json.encode({requests={{path='source-one.lua'},{path='source-two.lua'}}})
-memory.append_turn(backlog,{role='assistant',content='',tool_calls={{id='read-many-fixture',type='function',['function']={name='read_many',arguments=reads}}}})
-memory.append_turn(backlog,{role='tool',tool_call_id='read-many-fixture',tool_name='read_many',content='{"ok":true}'})
+local reads=json.encode({calls={{name='read',arguments={path='source-one.lua'}},{name='read',arguments={path='source-two.lua'}}}})
+memory.append_turn(backlog,{role='assistant',content='',tool_calls={{id='read-many-fixture',type='function',['function']={name='tool_call',arguments=reads}}}})
+memory.append_turn(backlog,{role='tool',tool_call_id='read-many-fixture',tool_name='tool_call',content='{"ok":true}'})
 for i=1,120 do memory.append_turn(backlog,{role=i%2==1 and 'user' or 'assistant',content=string.rep('past work ',200)}) end
 provider.complete_with=function(_,messages)
   check(messages[2].content:find(instruction,1,true)~=nil,'compaction preserves full user instructions')

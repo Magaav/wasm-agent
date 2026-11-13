@@ -1004,7 +1004,7 @@ end
 --     it is minted for one loopback hop and spent at once) and it is spent at most once.
 -- Without one the legacy list is the whole rule, unchanged.
 local MESH_VERBS = {
-  read = { read = true, read_many = true, ls = true, grep = true, sessions = true, session = true,
+  read = { read = true, ls = true, grep = true, sessions = true, session = true,
     search_messages = true, recall = true, status = true, health = true },
   control = { bash = true, write = true, edit = true, shell = true, chat = true, client = true,
     set_role = true, set_model = true, set_model_less = true, set_provider = true, subagent = true, spell_save = true,

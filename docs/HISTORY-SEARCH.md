@@ -55,7 +55,7 @@ references. Inspect originals before treating excerpts as execution settlement.
 
 ## Tool-call projection
 
-`session`/`session_many` and owned child-session inspection accept explicit
+`session` and owned child-session inspection accept explicit
 `view:tool_calls`. It returns exact call IDs, names and raw arguments, tool-result
 content, phase/status/timing and full-original evidence references. Assistant
 prose, encrypted reasoning, traces, images and accounting are explicitly omitted;

@@ -542,10 +542,6 @@ local function guidelines_for(tool_list, envelope_mode)
   if have.bash then
     add(SHELL_SEARCH_GUIDELINE)
   end
-  if have.read_many then
-    add("When several known file reads are independent, request them together with read_many; "
-      .. "keep dependent reads and edits in order")
-  end
   add("When multiple tool actions are independent, request them together in one assistant response "
     .. "so the tool round can make progress without another model reply. The tool runner may "
     .. "overlap independent shell commands; keep conflicting side effects in separate responses, "
@@ -949,8 +945,6 @@ local function take_tool_images(name,output)
   end
   if name == "read" then
     take(output)
-  elseif name == "read_many" and type(output) == "table" then
-    for _, result in ipairs(output.results or {}) do take(result) end
   end
   return images
 end
@@ -985,12 +979,12 @@ local function navigation_outcome(name, args, output)
       return { action = action, found = output.ok ~= false, count = tonumber(output.indexed) or 0 }
     end
     return { action = action, found = true }
-  elseif type(name)=='string' and name:match('_many$') and type(output.results)=='table' then
+  elseif type(name)=='string' and name=='tool_call' and type(output.results)=='table' then
     return {action='batch',found=output.ok==true,count=#output.results,failed=tonumber(output.failed) or 0}
   elseif name == "grep" then
     local n = tonumber(output.count) or 0
     return { action = "literal", found = n > 0, count = n }
-  elseif name == "read" or name == "read_many" then
+  elseif name == "read" then
     return { action = "read", found = output.error == nil }
   end
   return nil
@@ -1370,10 +1364,14 @@ function M:compact_now(messages, opts)
         local f=call["function"] or {}
         local ok,args=pcall(json.decode,f.arguments or "{}")
         if ok and type(args)=="table" then
-          if (f.name=="read_many" or f.name=="edit_many" or f.name=="write_many") and type(args.requests)=="table" then
-            for _, request in ipairs(args.requests) do
-              if type(request)=="table" and type(request.path)=="string" then
-                if f.name=='read_many' then read_files[request.path]=true else modified_files[request.path]=true end
+          -- A routed `calls` batch carries its targets in the list; a path inside one is the same
+          -- act and belongs in the checkpoint the summary states.
+          if f.name=="tool_call" and type(args.calls)=="table" then
+            for _,entry in ipairs(args.calls) do
+              local inner=type(entry)=="table" and entry.arguments or nil
+              if type(inner)=="table" and type(inner.path)=="string" then
+                if entry.name=="read" then read_files[inner.path]=true
+                elseif entry.name=="write" or entry.name=="edit" then modified_files[inner.path]=true end
               end
             end
           elseif type(args.path)=="string" then
@@ -1405,10 +1403,12 @@ function M:compact_now(messages, opts)
       for _,call in ipairs(rows[index].tool_calls or {}) do
         local f=call['function'] or {}; local ok,args=pcall(json.decode,f.arguments or '{}')
         if ok and type(args)=='table' then
-          if (f.name=='read_many' or f.name=='edit_many' or f.name=='write_many') and type(args.requests)=='table' then
-            for _,request in ipairs(args.requests) do
-              if type(request)=='table' and type(request.path)=='string' then
-                if f.name=='read_many' then read_files[request.path]=true else modified_files[request.path]=true end
+          if f.name=='tool_call' and type(args.calls)=='table' then
+            for _,entry in ipairs(args.calls) do
+              local inner=type(entry)=='table' and entry.arguments or nil
+              if type(inner)=='table' and type(inner.path)=='string' then
+                if entry.name=='read' then read_files[inner.path]=true
+                elseif entry.name=='write' or entry.name=='edit' then modified_files[inner.path]=true end
               end
             end
           elseif type(args.path)=='string' then
@@ -2815,8 +2815,7 @@ function M:run_body(text, images)
       local tool_span=telemetry.start({session_id=self.session_id,run_id=self.run_id},"tool",
         {name=function_.name,call_id=call.id,round=round,parallel_batch=parallel_op~=nil,
           tool_group_id=assistant_id,tool_group_size=#calls,tool_group_index=tool_index,
-          batch_items=type(function_.name)=='string' and function_.name:match('_many$') and type(args.requests)=='table' and #args.requests or nil,
-          read_many_ranges=function_.name=="read_many" and type(args.requests)=="table" and #args.requests or nil,
+          batch_items=function_.name=='tool_call' and type(args.calls)=='table' and #args.calls or nil,
           batching_guidance=batching_mode,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
       pcall(memory.presence_beat, self.session_id)
@@ -2890,10 +2889,6 @@ function M:run_body(text, images)
       end
       if ok_tool and function_.name=="read" and type(args.path)=="string" then
         self.reviewed_paths[args.path]=true
-      elseif ok_tool and function_.name=="read_many" then
-        for _, request in ipairs(args.requests or {}) do
-          if type(request.path)=="string" then self.reviewed_paths[request.path]=true end
-        end
       end
       local projected,content=pcall(tool_output.project,function_.name,output)
       if not projected then

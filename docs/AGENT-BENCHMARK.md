@@ -225,11 +225,11 @@ The patched runtime supports `WASM_AGENT_BATCHING_GUIDANCE=1`; unset/other value
 retain the old parent and child prompt bytes. Both builders use available-tool-aware
 instructions: known independent ranges together, exact outputs/errors/cursors,
 interpretation-dependent actions later, writes/conflicting commands ordered and
-scoped relative discovery. Existing read_many and shell execution stay unchanged.
+scoped relative discovery. Existing reads, batched reads in a script and shell execution stay unchanged.
 No arbitrary bash command becomes safe to overlap because of this switch.
 
 Tool telemetry now records the assistant response's `tool_group_id`, size/index,
-`read_many_ranges` and `batching_guidance` (`control`/`candidate-1`) at matched
+`batch_items` and `batching_guidance` (`control`/`candidate-1`) at matched
 boundaries. The strict offline token auditor aggregates complete/incomplete groups,
 multi-call groups and requested ranges, omits group IDs and reports historical
 missing fields as unmeasured. Grouping is NOT proof of independence, physical overlap,

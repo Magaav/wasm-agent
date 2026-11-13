@@ -26,7 +26,6 @@ pub enum Verb {
 /// `control`, which is the answer that needs more authority.
 const READ_CAPABILITIES: &[&str] = &[
     "read",
-    "read_many",
     "ls",
     "grep",
     "sessions",

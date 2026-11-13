@@ -318,10 +318,10 @@ origin, current authority, and fresh effective-route receipt before displaying s
 
 **A tool row says which file, and what changed.** A row that named, wrote or read a file carries the path
 on the row itself — in the row's own title where the call's arguments state it (`read`, `write`, `edit`,
-`ls`, `grep` and the `_many` batches), and in a `.tool-path` chip when only the *result* reports it.
+`ls`, `grep` and a script's own batch), and in a `.tool-path` chip when only the *result* reports it.
 The path is drawn as its last two segments (`…/ui/style.css`) whatever its length: a row shares its line
 with the outcome, and the full path belongs in the element's `title`/`aria-label`, in the row's hover text
-and in the result payload the row already holds. For `edit`, `edit_many`, `write` and `write_many` the row
+and in the result payload the row already holds. For `edit` and `write` (a script's loop included) the row
 also draws the change its arguments describe, through the one `patchLineRow()` renderer the file balloon
 and the patch window use: `+` lines carry `--diff-add`, `-` lines carry `--diff-del`, and a line the call
 kept is on neither side. It is bounded at 40 lines inline and never clips silently — the lines left out are

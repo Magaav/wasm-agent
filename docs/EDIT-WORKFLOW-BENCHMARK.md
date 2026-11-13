@@ -25,7 +25,7 @@ The three solver profiles expose the same tool schemas:
 | arm | only intended difference |
 | --- | --- |
 | `control` | ordinary bounded-task instruction |
-| `source-first` | editable source must come from `read`/`read_many`, never `cat`/`sed` output |
+| `source-first` | editable source must come from `read`, never `cat`/`sed` output |
 | `graph-first` | `graph overview`, retrieval and final impact are required before ordinary discovery/finalization |
 
 Every graph is pre-indexed, including the controls. A fresh read-only shadow with the

@@ -141,7 +141,10 @@ check(ptools.remote_read_refusal('bash',{command='git status > /tmp/x'})~=nil,'t
 check(ptools.dispatch(memory,'remote',{node='openclaw',capability='bash',command='touch /x'},'master',{user_id='master'}).ran=='bash','outside a script remote keeps its effects')
 
 -- Peer side: `batch` reruns the fence under the peer's own rules.
-check(ptools.remote_read_refusal('search_messages_many',{})==nil and ptools.remote_read_refusal('client',{})~=nil,'the read set is explicit')
+check(ptools.remote_read_refusal('search_messages',{})==nil and ptools.remote_read_refusal('client',{})~=nil,'the read set is explicit')
+-- A retired batch name is not a read any more: it is its own one sentence, from the same door.
+check(ptools.remote_read_refusal('read_many',{}).error=='retired: batch in code mode - Promise.all(items.map(x => tools.read(x)))',
+  'a retired batch name is refused by name on the peer route too')
 
 -- "Last agent session on that repo": bound worktree or recorded file changes under the path.
 local a=memory.start_session('','repo work',{user_id='peer-agent'})

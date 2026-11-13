@@ -57,6 +57,12 @@ local forbidden={}
 for name in pairs(DIRECT_ONLY)do forbidden[name]=true end
 M.DIRECT_ONLY=DIRECT_ONLY
 -- What a tool that is not callable here is for, so discovery never reads as "does not exist" (29/10).
+-- A retired batch name (`read_many`, `edit_many`, ...) is answered with the same one sentence outside
+-- and inside a script, so `describeTool('read_many')` teaches the form instead of leaving a script to
+-- guess from the nearest-name suggestions. One table, in `lua/core/retired.lua`, shared with the
+-- dispatcher and `tool_call`.
+local retired_lib=dofile('lua/core/retired.lua')
+local function retired_text(name) return retired_lib.text(name) end
 local function route_of(name,status)
  if DIRECT_ONLY[name] then return 'Direct call only: '..DIRECT_ONLY[name]..'. End the script, then call '..name..' as an ordinary tool.' end
  if name=='tool_search' or name=='tool_call' then return 'Outer facade: inside a script use searchTools and call await tools.<name>(args) directly.' end
@@ -238,7 +244,7 @@ local function tool_lookup(catalog,execution,dispatch)
   local set={}for _,known in ipairs(list or names())do set[known]=true end
   return {name=echo,found=false,missing=true,error='unknown_tool',
    reason="no name like '"..echo.."' in this script's catalogue",
-   suggestions=envelope.nearest(echo,set,3)}
+   suggestions=envelope.nearest(echo,set,3),retired=retired_text(echo)}
  end
  -- One name, one object: {name, description, parameters, schema, execution, callable, route} - the
  -- shape `describeTool(name)` has always answered, plus the `schema` a batch entry carries. A name the

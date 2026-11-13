@@ -66,9 +66,9 @@ than as new prefix bytes. A section's change is still named in the guard's words
 ## Main-loop tools
 
 <!-- generated:bootstrap-tools (scripts/sync-prompt-docs.lua) -->
-New operator sessions declare 14 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `read_many`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
+New operator sessions declare 13 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
 `codemode` is also declared when code mode is admitted for the run. Orchestration mode adds `route_task`, `subagent`.
-`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (16 in all).
+`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (15 in all).
 Every other permitted tool is called on demand with `tool_call`; the system prompt lists it with its cue.
 <!-- /generated -->
 
@@ -80,7 +80,7 @@ or model quality.
 
 `node scripts/test-layered-web.cjs <built-wa> <fresh-evidence> <baseline-wa>`, then
 `--post`, captures before/after systems/declarations and proves section order/diffs,
-policy and guest/profile boundaries, no memory injection, immediate read_many, and
+policy and guest/profile boundaries, no memory injection, immediate read, and
 native source/embedded web handoff/pending reconstruction through actual MCP/SQLite.
 The upstream HTTP in this proof is labelled fixture data, not a live CAPTCHA solve.
 Also run the existing envelope, full skill-body, read-batch/native reconstruction,

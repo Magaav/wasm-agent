@@ -100,9 +100,12 @@ assert(dispatches==0,'no stale side effects')
 -- included, and they were re-issued verbatim one round later.
 assert(tools.has_effect('bash') and tools.has_effect('write') and tools.has_effect('edit') and
   tools.has_effect('subagent') and tools.has_effect('client'),'an effect must keep the fence')
-assert(not tools.has_effect('read') and not tools.has_effect('read_many') and
-  not tools.has_effect('grep') and not tools.has_effect('ls') and not tools.has_effect('graph') and
-  not tools.has_effect('recall') and not tools.has_effect('session'),'a read must not be fenced by steering')
+assert(not tools.has_effect('read') and not tools.has_effect('grep') and not tools.has_effect('ls') and
+  not tools.has_effect('graph') and not tools.has_effect('recall') and not tools.has_effect('session'),
+  'a read must not be fenced by steering')
+-- A retired batch name is a refusal, not an effect: fencing it would cost a model round for a sentence.
+assert(not tools.has_effect('read_many') and not tools.has_effect('write_many') and not tools.has_effect('edit_many'),
+  'a retired name is refused without a steering fence')
 assert(tools.has_effect('some-plugin-tool-this-file-never-heard-of'),'an unknown tool must default to effectful')
 assert(tools.has_effect(nil),'a nameless call must default to effectful')
 -- Queue steering DURING an admitted read: the next effect in that batch must be a typed cancellation.

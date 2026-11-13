@@ -93,7 +93,7 @@ end
 local function annotate(value, prior, same)
   if type(value) ~= "table" then return value end
   -- A list keeps its shape: adding a key to a Lua array would turn the result into an object for every
-  -- reader downstream (`edit_many` answers a list of per-item results), so a list result carries the
+  -- reader downstream (a `tool_call` calls batch answers a list of per-item results), so a list result carries the
   -- hint in the journal only - `results.last(n)` still shows that the repeat happened and whether it
   -- changed, and the repeat is counted in telemetry either way.
   if value[1] ~= nil then return value end

@@ -95,7 +95,7 @@ coordinator alone installs/provisions/uses the real account. See
 ## Bounded read batches — 2026-10-13 (source verified; not installed)
 
 Fixed the exact harness lead from seq5193:59,723-byte independent read batch
-returned three artifact-only items. `read_many` now packs whole results into the
+returned three artifact-only items. A paged batch now packs whole results into the
 unchanged50 KiB view, returning an account/session/role/profile/workspace-fenced
 SQLite cursor for the remaining cached results. Same six original results in
 two pages, artifact recovery3→0; exact bytes, UTF-8, images, errors, versions and
@@ -253,7 +253,7 @@ message or replay. See `docs/SKILLS.md`; `skill-content-proof` records the verif
 
 ## History projection and automatic graph revisions — 2026-10-12 (installed and verified)
 
-`session`/owned child session/`session_many` now offer explicit `view:'tool_calls'`:
+`session`/owned child session now offer explicit `view:'tool_calls'`:
 SQL does not fetch encrypted reasoning/prose/trace, exact call arguments and outcomes
 remain, and full-original evidence is preserved. Synthetic original108,595 bytes
 projects to under1KB; this is selected JSON size, not token billing or a universal
