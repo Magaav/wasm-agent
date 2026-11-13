@@ -267,16 +267,30 @@ PY
     CORE_REF=$REF
     say "platform: $os $arch"
   fi
+  # The core is fetched AS ITS OWN PATH under the scratch directory, not as `$tmp/core`: the updater it runs
+  # verifies release signatures with `scripts/lib/release-signing.sh` beside it, so the layout has to be the
+  # repository's (scripts/linux/../lib). Two small files travel with it, from the same commit - the anchor is
+  # the same one the core already had (the index pin), and a release's assets are still verified against a
+  # key that is NOT in that release.
   core_url="$BASE/$CORE_REF/$CORE_PATH"
-  fetch "$core_url" "$tmp/core" || die "core_unreachable: $core_url"
-  got_sha=$(sha256sum "$tmp/core" | cut -d' ' -f1)
+  mkdir -p "$tmp/$(dirname "$CORE_PATH")" "$tmp/scripts/lib"
+  fetch "$core_url" "$tmp/$CORE_PATH" || die "core_unreachable: $core_url"
+  # Only the Linux core verifies a release's signature (the phone's bundle is installed by its own updater),
+  # so only that channel needs the verifier beside it.
+  if [ "$os" = linux ]; then
+    for libfile in release-signing.sh release_verify.py; do
+      fetch "$BASE/$CORE_REF/scripts/lib/$libfile" "$tmp/scripts/lib/$libfile" \
+        || die "release_signing_lib_unreachable: $BASE/$CORE_REF/scripts/lib/$libfile (the core verifies release signatures; without it nothing would be installed)"
+    done
+  fi
+  got_sha=$(sha256sum "$tmp/$CORE_PATH" | cut -d' ' -f1)
   if [ "$WANT_PIN" != absent ]; then
     [ "$got_sha" = "$WANT_PIN" ] || die "installer_hash_mismatch: $CORE_PATH at $CORE_REF is $got_sha, the index entry pins $WANT_PIN; nothing was installed"
     say "core: $CORE_PATH at $CORE_REF (sha256 $got_sha, pinned by the index entry)"
   else
     say "core: $CORE_PATH at $CORE_REF (sha256 $got_sha, installer_pin=absent: the entry predates the pin)"
   fi
-  CORE="$tmp/core"
+  CORE="$tmp/$CORE_PATH"
   CORE_ORIGIN="release $CORE_REF"
 fi
 

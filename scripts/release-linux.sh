@@ -248,9 +248,16 @@ fi
 ( cd "$out" && sha256sum "$asset" ) >> "$sums_new" || { rm -f "$sums_new"; fail 'checksums_failed: sha256sum'; }
 LC_ALL=C sort -k2 "$sums_new" > "$sums" && rm -f "$sums_new" || fail 'checksums_failed: could not write SHA256SUMS'
 say "checksums $sums ($(wc -l < "$sums" | tr -d ' ') asset(s))"
+# SIGNED. The installer used by `wa update` verifies SHA256SUMS.sig before it installs anything, so a
+# bundle release without a signature is not installable and must not be published: this is a refusal.
+[ -f "$ROOT/scripts/lib/release-signing.sh" ] || fail "release_signing_lib_missing: $ROOT/scripts/lib/release-signing.sh"
+. "$ROOT/scripts/lib/release-signing.sh"
+wa_release_sign_sums "$sums" "$out/SHA256SUMS.sig" \
+  || fail 'release_not_signed: the sums were not signed by wa-vault, so this bundle release is not published (WA_VAULT_ADMIN_URL/WA_VAULT_ADMIN_TOKEN where the vault reads them; the release-signing key is created on its admin page)'
+say "signature $out/SHA256SUMS.sig ($(sed -n 's/^key //p' "$out/SHA256SUMS.sig"))"
 
 if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
-  gh release upload "$tag" "$out/$asset" "$sums" --repo "$REPO" --clobber || fail 'publish_failed: gh release upload'
+  gh release upload "$tag" "$out/$asset" "$sums" "$out/SHA256SUMS.sig" --repo "$REPO" --clobber || fail 'publish_failed: gh release upload'
 else
   notes="Linux prebuilt node bundle(s) for $commit.
 Install a node on a fresh Linux machine - one command, no checkout and no toolchain:
@@ -258,7 +265,7 @@ Install a node on a fresh Linux machine - one command, no checkout and no toolch
 The same command updates it. Verification: ./SHA256SUMS, and inside the bundle bundle.manifest ->
 files.sha256 -> every member (the installer checks all of it before anything is installed).
 reason: ${reason:-none stated}"
-  gh release create "$tag" "$out/$asset" "$sums" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
+  gh release create "$tag" "$out/$asset" "$sums" "$out/SHA256SUMS.sig" --repo "$REPO" --target "$commit" --title "$tag" --notes "$notes" --prerelease \
     || fail 'publish_failed: gh release create'
 fi
 url="https://github.com/$REPO/releases/download/$tag/$asset"

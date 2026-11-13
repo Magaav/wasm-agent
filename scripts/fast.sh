@@ -330,6 +330,10 @@ lua_run() { # <script> <home>
     for name in "${overrides[@]}"; do printf '%s\n' "$name"; done
     printf 'WA_FAST_CLEARED=%s\n' "$WA_FAST_CLEARED"
     printf 'WA_FAST_ROW_ENV=%s\n' "$env_file"
+    # The binary this run is about, for a row that has to run it as a program of its own rather than as the
+    # node it is already inside (`scripts/test-release-sign.lua` asks it to verify the same six releases the
+    # shell verifier is judged by). Native path, like every other path handed to a row.
+    printf 'WA_FAST_BIN=%s\n' "$FAST_BIN"
   } > "$env_file" 2>/dev/null || true
   # A row is hermetic, and that has to be enforced here rather than trusted in each test: this node's
   # ambient environment exports the operator's real vault (`WASM_AGENT_VAULT_URL=http://192.168.1.27:8765`,
@@ -348,7 +352,7 @@ lua_run() { # <script> <home>
     "${overrides[@]}" \
     WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
     WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
-    WA_FAST_ROW_ENV="$env_file" WA_FAST_CLEARED="$WA_FAST_CLEARED" \
+    WA_FAST_ROW_ENV="$env_file" WA_FAST_CLEARED="$WA_FAST_CLEARED" WA_FAST_BIN="$FAST_BIN" \
     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$1" \
     timeout 120 "$FAST_BIN" --db "$2/t.db"
 }

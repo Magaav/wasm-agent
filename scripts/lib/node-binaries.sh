@@ -37,6 +37,16 @@
 # Sourced by scripts/deploy.sh and by scripts/publish-node-binaries.sh; exercised by
 # scripts/test-node-binaries.sh (the publish half) and scripts/test-deploy-node-binaries.sh (this half).
 
+# The signature gate lives in its own file because three other scripts need it too (scripts/linux/
+# bootstrap.sh, scripts/upgrade.sh, and each publisher); sourcing it here means a caller of this lib has
+# the gate without a second step, and there is one implementation of "is this release signed".
+# (Best effort here, refusal below: a caller that lost the lib must not silently accept a release.)
+if ! command -v wa_release_verify_sums >/dev/null 2>&1; then
+  _wa_release_signing_lib="$(dirname "${BASH_SOURCE[0]}")/release-signing.sh"
+  if [ -f "$_wa_release_signing_lib" ]; then . "$_wa_release_signing_lib"; fi
+  unset _wa_release_signing_lib
+fi
+
 # <file> -> sha256 on stdout; 7 when no sha tool exists. Same expression as the component lib, on
 # purpose: a deploy that can verify one pin can verify the other.
 wa_node_sha256() {
@@ -440,6 +450,44 @@ wa_node_fetch_asset() {
   return 0
 }
 
+# <repo> <tag> <dir> -> 0 when this release's `SHA256SUMS` is signed by a key this node trusts.
+#
+# THE ONE GATE every release asset passes before it is cached or installed. It runs BEFORE the payloads are
+# fetched, so a hostile or broken release is refused before its bytes are on this machine at all.
+#
+# Why a signature and not only the manifest: the manifest, the sums and the binaries all ship in the same
+# release, so a checksum from that release proves only that the release agrees with itself - whoever can
+# publish can swap both halves. The signature is made by a key that is NOT in the release (wa-vault's
+# `release-signing`), and verified against the list this node already carries.
+#
+# Prints the refusal on stdout (the caller prints it) and answers with the verifier's code: 2 unsigned or
+# incomplete, 3 the signature is about other bytes, 4 an untrusted key, 5 an unvouched rotation.
+wa_node_verify_signature() {
+  local repo="$1" tag="$2" dir="$3" base out asset
+  # Fail CLOSED. A tree that lost the verifier cannot check a release, so it installs none of it.
+  if ! command -v wa_release_verify_sums >/dev/null 2>&1; then
+    printf 'release_unverified: scripts/lib/release-signing.sh is missing from this tree, so %s cannot be verified and is not installed\n' "$tag"
+    return 7
+  fi
+  base="$(wa_node_tag_base "$tag")"
+  if ! out="$(wa_node_fetch_asset "$repo" "$tag" SHA256SUMS "$dir" "$base" 2>&1)"; then
+    printf 'node_release_incomplete: %s carries no SHA256SUMS (%s)\n' "$tag" "${out:-unreachable}"
+    return 2
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  if ! wa_node_fetch_asset "$repo" "$tag" SHA256SUMS.sig "$dir" "$base" >/dev/null 2>&1; then
+    printf 'release_unsigned: %s publishes no SHA256SUMS.sig - this node installs no asset of a release that is not signed (%s/SHA256SUMS)\n' \
+      "$tag" "$dir"
+    return 2
+  fi
+  # A rotation announcement is optional: it ships only in the release that announces a new key. Missing is
+  # "no rotation here", not an error; a broken one is refused by the verifier (code 5).
+  for asset in TRUSTED-KEYS TRUSTED-KEYS.sig; do
+    wa_node_fetch_asset "$repo" "$tag" "$asset" "$dir" "$base" >/dev/null 2>&1 || true
+  done
+  wa_release_verify_sums "$dir"
+}
+
 # <dir> <commit> <triple>
 #
 # Verify a directory that claims to hold this commit's build for this triple: the manifest names this
@@ -546,6 +594,15 @@ wa_node_binary_download() {
     printf 'node_target_unpublished: %s is not in %s (it publishes: %s)\n' "$triple" "$tag" "${published:-nothing}" >&2
     return 8
   fi
+  # SIGNED FIRST. The manifest and the sums are claims by whoever could upload them; the signature is the
+  # one fact that comes from the key that never leaves the vault. Before a byte of payload is fetched.
+  out="$(wa_node_verify_signature "$repo" "$tag" "$tmp" 2>&1)"; rc=$?
+  if [ "$rc" != 0 ]; then
+    rm -rf "$tmp"
+    printf '%s\n' "$out" >&2
+    return "$rc"
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
   for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
     if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "${WA_NODE_BINARIES_URL:-}" 2>&1)"; then
       rm -rf "$tmp"
@@ -662,6 +719,11 @@ wa_node_release_digest_search() {
       printf 'node_target_unpublished: %s is not in %s (it publishes: %s)\n' "$triple" "$tag" "${published:-nothing}" >&2
       return 8
     fi
+    # The signature gate, as in wa_node_binary_download: a release whose sums are not signed by a trusted
+    # key never reaches the payload, however well its manifest matches this tree's compiled inputs.
+    out="$(wa_node_verify_signature "$repo" "$tag" "$tmp" 2>&1)"; rc=$?
+    if [ "$rc" != 0 ]; then rm -rf "$tmp"; printf '%s\n' "$out" >&2; return "$rc"; fi
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
     for file in "wa-$triple-$short" "wa-sentinel-$triple-$short"; do
       if ! out="$(wa_node_fetch_asset "$repo" "$tag" "$file" "$tmp" "$(wa_node_tag_base "$tag")" 2>&1)"; then
         rm -rf "$tmp"
