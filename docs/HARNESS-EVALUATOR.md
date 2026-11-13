@@ -59,6 +59,48 @@ node with no vault in the environment, a review cannot answer: the child boots, 
 the record says `no_review` with zero model calls - which is what a fast-path row proves, because the
 answer path needs a model and a fast-path row has none.
 
+## What changed for an operator (BEFORE / AFTER)
+
+Every user-visible string this feature changed, so a reader never has to diff two commits to find one:
+
+```
+wa help (lua/core/init.lua)
+- BEFORE  eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, read metrics
+- AFTER   eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics
+
+wa eval help (lua/core/harness_evaluator_cli.lua)
+- BEFORE  wa eval reviewer <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
+- AFTER   wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
+                                  [--timeout SECONDS] [--keep-scratch] [--branch <name>]
+          wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
+          wa eval reviewer miss <branch> "<note>"
+          wa eval reviewer list
+          wa eval reviewer run <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
+```
+
+The old spelling still exists as `wa eval reviewer run <run-id> ...` (same storage, same JSON answer):
+the positional is the branch a review runs on now. A bare `wa eval reviewer <run-id>` is refused
+("no such branch or commit in <repo>: <run-id>"), which is a behaviour change, and `--branch <name>`
+reaches a branch whose name is one of the subcommand words.
+
+New output, none of it present before:
+
+```
+wa eval: the reviewer is off (<source> = <value>); nothing was run
+wa eval: the reviewer is on; <source> = <value> is not one of off/0/false/no (or on/1/true/yes)
+review <id>: <branch> @ <sha8> (base <ref>) <model> . rounds N . tools N . in N out N . Nms . <state>
+the session's own final line: REVIEW ...   (when the review answered about another commit)
+wa eval: the review answered about <branch> <sha>, not <branch> <sha> - its final line is its own
+(no reviews: `wa eval reviewer <branch> --brief <file>` runs one)
+<id>: accepted N, rejected N of N finding(s)
+miss recorded for <branch>: <note>
+wa eval report  (appended section)
+  reviews (data only - a review never blocks a landing):
+  BRANCH  SHA  FINDINGS  ACCEPT  REJECT  IN  OUT  WALL  STATE
+  totals: N review(s), findings N, accepted N, rejected N, unmarked N, accepted rate N%, misses N
+  cost: N in / N out, N model call(s), N wall
+```
+
 Tests: `scripts/test-harness-evaluator.lua`, `scripts/test-harness-evaluator-replay.lua`,
 `scripts/test-harness-evaluator-privacy.lua`, `scripts/test-harness-evaluator-reviewer.lua` (all four are
 fast-path rows).

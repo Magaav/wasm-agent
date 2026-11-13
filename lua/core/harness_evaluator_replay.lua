@@ -102,15 +102,23 @@ exit 97
 local GIT_GUARD = [==[
 #!/bin/sh
 # harness-evaluator replay guard for git: local git works, a remote operation does not.
-sub=""
+#
+# The subcommand is the first word that is neither a flag nor a flag's VALUE. Taking the first non-flag
+# word as the subcommand let `git -C <dir> push` (and `git -c <k=v> push`) through to the real git: the
+# guard saw the directory as the subcommand, fell through, and pushed - a remote effect recorded as none
+# (found by the third real review of the reviewer, 13/11, which executed it).
+sub=""; skip=0
 for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
   case "$a" in
+    --) break ;;
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--config-env) skip=1 ;;
     -*) continue ;;
     *) sub=$a; break ;;
   esac
 done
 case "$sub" in
-  push|fetch|pull|ls-remote|clone)
+  push|fetch|pull|ls-remote|clone|remote|submodule)
     printf 'git %s %s\n' "$sub" "$*" >> "$WA_EVAL_SINK_DIR/commands.log"
     echo "__WA_SINK_LABEL__: git $sub was not run; the effect is recorded as would-have-done" >&2
     exit 97 ;;

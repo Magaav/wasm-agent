@@ -52,6 +52,14 @@ local function trim(text) return (tostring(text or ""):gsub("^%s+", ""):gsub("%s
 -- line there). Any spelling that says off turns it off; a value nobody recognises leaves it ON and says
 -- which value it saw, because a typo must not quietly disable a review the operator asked for.
 local OFF_WORDS = { off = true, ["0"] = true, ["false"] = true, no = true }
+local ON_WORDS = { on = true, ["1"] = true, ["true"] = true, yes = true }
+
+-- Is this word a spelling the switch understands? The door says so out loud when it is not, so a typo
+-- (`reviewer = disabled`) cannot read as "the switch worked" while every review runs.
+function M.recognised(value)
+  local word = trim(value):lower()
+  return word == "" or OFF_WORDS[word] == true or ON_WORDS[word] == true
+end
 
 local function config_switch(config_text)
   for line in tostring(config_text or ""):gmatch("[^\n]+") do
@@ -361,7 +369,12 @@ function M.run(opts)
   -- all, and the diff is written here, by the parent, from the repository it already has.
   local ws = record.checkout
   exec("mkdir -p " .. shquote(ws), "", 120)
-  local merge_base = trim(git(repo, "merge-base " .. shquote(base_sha) .. " " .. shquote(sha)) or "")
+  -- `git()` answers the status and THEN stdout: `trim(git(...))` handed the boolean to trim, so the merge
+  -- base was never taken and every diff was base..tip - 92 files of other people's landed work, which is
+  -- exactly what the third review of this branch was handed and could not attribute (13/11). Both values,
+  -- by name.
+  local merge_ok, merge_out = git(repo, "merge-base " .. shquote(base_sha) .. " " .. shquote(sha))
+  local merge_base = merge_ok and trim(merge_out) or ""
   if merge_base ~= "" and #merge_base >= 7 then
     record.diff_base = merge_base
   end
@@ -375,14 +388,16 @@ function M.run(opts)
     "branch " .. branch .. "\nsha " .. sha .. "\nbase " .. base_ref .. " " .. base_sha .. "\nmerge_base "
       .. tostring(record.diff_base) .. "\n")
   local diff_path = scratch .. "/diff.patch"
-  local diff = exec("git -C " .. shquote(repo) .. " diff " .. shquote(tostring(record.diff_base))
-    .. " " .. shquote(sha), "", 600)
+  -- The diff is REDIRECTED to its file, never captured: `host.exec` bounds a child's stdout, so a 443 KB
+  -- diff came back as head+tail with an elision notice in the middle and the review read a partial change
+  -- as the whole one (third real review, 13/11). The file is read back only to measure it.
+  local diff = exec("git -C " .. shquote(repo) .. " diff --no-color " .. shquote(tostring(record.diff_base))
+    .. " " .. shquote(sha) .. " > " .. shquote(diff_path), "", 900)
   if diff.status ~= 0 then
     exec("rm -rf " .. shquote(scratch), "", 60)
-    return nil, "the branch's diff could not be read: " .. trim(diff.stderr)
+    return nil, "the branch's diff could not be written: " .. trim(diff.stderr)
   end
-  local diff_text = tostring(diff.stdout or "")
-  replay.write_text(diff_path, diff_text)
+  local diff_text = host.read_file(diff_path) or ""
   record.diff_path = diff_path
   record.diff_bytes = #diff_text
   local ok_diff, names = git(repo, "diff --name-only " .. shquote(tostring(record.diff_base)) .. " " .. shquote(sha))
@@ -490,6 +505,11 @@ function M.run(opts)
   end
   if not line then
     return record, "the review session gave no REVIEW line (state " .. tostring(record.state) .. ")"
+  end
+  if record.state ~= "reviewed" then
+    return record, "the review answered about " .. tostring(record.reported_branch) .. " "
+      .. tostring(record.reported_sha) .. ", not " .. tostring(branch) .. " " .. tostring(sha)
+      .. " - its final line is its own, not this branch's"
   end
   return record
 end

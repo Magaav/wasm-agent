@@ -86,6 +86,13 @@ check(host.write_file(repo .. '/feature.txt', 'the branch adds a file\n'), 'the 
 exec_git(repo, 'add -A')
 local sha = commit(repo, 'the change under review')
 check(#sha >= 7 and sha ~= base_sha, 'the branch tip is its own commit')
+-- main moves on AFTER the branch is cut, so the base is no longer the branching point: the diff a review
+-- reads must be against the MERGE BASE, not the base ref, or it shows main's new work as the branch's
+-- reversions (both of this branch's first reviews were handed exactly that).
+exec_git(repo, 'checkout -q main')
+check(host.write_file(repo .. '/main-only.txt', 'landed after the branch was cut\n'), 'main moves on')
+exec_git(repo, 'add -A')
+local main_sha = commit(repo, 'main moves on')
 local brief_path = home .. '/brief.md'
 local BRIEF = 'BRIEF-MARKER: add feature.txt; nothing else should change.'
 check(host.write_file(brief_path, BRIEF .. '\n'), 'the brief exists')
@@ -112,7 +119,11 @@ check(record.state == 'reviewed', 'the review is recorded as reviewed (' .. tost
 check(record.findings == 2, 'the findings count comes from the REVIEW line, not a guess')
 check(record.review_line == 'REVIEW change/fixture ' .. sha .. ' findings=2', 'the final line is kept verbatim')
 check(record.sha == sha and record.branch == 'change/fixture', 'the record names the branch and its sha')
-check(record.base_ref == 'main' and record.base_sha == base_sha, 'the base that resolved is the base recorded')
+check(record.base_ref == 'main' and record.base_sha == main_sha, 'the base that resolved is the base recorded')
+check(record.diff_base == base_sha, 'and the diff base is the merge base, where the branch was cut')
+check(record.diff_bytes ~= nil and record.diff_bytes > 0, 'the diff was written and measured')
+check((read(record.diff_path) or ''):find('main%-only', 1) == nil,
+  'the diff does NOT carry work that landed on main after the branch was cut')
 check(record.model == 'deepseek-v4.1-flash', 'the model is pinned to the one model in the brief')
 
 -- The prompt: the approved text first, byte for byte, then the input the operator named.
@@ -120,7 +131,9 @@ local prompt = read(record.isolation.scratch .. '/prompt.txt') or ''
 check(prompt:sub(1, #EXPECTED) == EXPECTED, 'the child is given the instruction text, byte for byte, first')
 check(prompt:find('Branch: change/fixture', 1, true) ~= nil, 'the prompt names the branch')
 check(prompt:find('Sha: ' .. sha, 1, true) ~= nil, 'the prompt names the sha')
-check(prompt:find('Base: main (' .. base_sha .. ')', 1, true) ~= nil, 'the prompt names the base')
+check(prompt:find('Base: main (' .. main_sha .. ')', 1, true) ~= nil, 'the prompt names the base')
+check(prompt:find('Merge base: ' .. base_sha, 1, true) ~= nil,
+  'and names the merge base as what the diff is against, so main\'s later commits are not read as the branch\'s')
 check(prompt:find(BRIEF, 1, true) ~= nil, 'the prompt carries the brief')
 check(prompt:find('REVIEW change/fixture ' .. sha .. ' findings=<n>', 1, true) ~= nil,
   'the prompt says which line ends the review')
@@ -174,10 +187,21 @@ check(pattern_text:find('^whatsapp_', 1, true) ~= nil and pattern_text:find('^em
 local sink = read(record.isolation.scratch .. '/sink.sh') or ''
 check(sink:find('review: a review reads and changes nothing', 1, true) ~= nil,
   "the sink refuses in the review's words, and nothing of the replay's")
-local pushed = exec('env -i PATH=' .. shquote(record.isolation.scratch .. '/bin:/usr/local/bin:/usr/bin:/bin')
-  .. ' WA_EVAL_SINK_DIR=' .. shquote(record.isolation.scratch .. '/sink')
-  .. ' sh -c ' .. shquote('git push origin main'), record.checkout, 60)
+local function guarded(command)
+  return exec('env -i PATH=' .. shquote(record.isolation.scratch .. '/bin:/usr/local/bin:/usr/bin:/bin')
+    .. ' WA_EVAL_SINK_DIR=' .. shquote(record.isolation.scratch .. '/sink')
+    .. ' sh -c ' .. shquote(command), record.checkout, 60)
+end
+local pushed = guarded('git push origin main')
 check(tonumber(pushed.code) == 97, 'a remote git verb is refused (exit ' .. tostring(pushed.code) .. ')')
+-- `git -C <dir> push` put the directory where the subcommand should be, and the guard let it through to
+-- the real git (third real review, finding 1: it executed a push with the guard first on PATH).
+local by_dir = guarded('git -C /tmp push origin main')
+check(tonumber(by_dir.code) == 97, 'and `git -C <dir> push` is refused too (exit ' .. tostring(by_dir.code) .. ')')
+local by_config = guarded('git -c user.name=x push origin main')
+check(tonumber(by_config.code) == 97, 'and `git -c <k=v> push` (exit ' .. tostring(by_config.code) .. ')')
+local local_read = guarded('git log --oneline -1 2>/dev/null || true')
+check(tonumber(local_read.code) == 0, 'local git still works through the guard')
 check(tostring(pushed.stderr):find('review:', 1, true) ~= nil, 'and the refusal says review, not replay')
 
 -- A stub keeps no ledger: the tokens stay nil and the record names the rule, never a zero.
@@ -286,6 +310,38 @@ local storage_code, storage_text = door({ 'eval', 'reviewer', 'run', 'fixture-ru
   '--accepted', '2', '--misses', '1', '--cost', '0.04' })
 check(storage_code == 0, 'the storage form on a replay run still works (' .. tostring(storage_code) .. ')')
 check(storage_text:find('"findings":3', 1, true) ~= nil, 'and it stores the reviewer shape it always did')
+-- A stub that answers about another sha: the door must say so and exit non-zero, and the last line must
+-- not be presented as this branch's (third real review, finding 3).
+local wrong_stub = home .. '/wrong-wa.sh'
+check(host.write_file(wrong_stub, table.concat({
+  '#!/bin/sh',
+  'echo "looked at the wrong commit"',
+  'echo "REVIEW change/fixture ' .. string.rep('ab', 20) .. ' findings=1"',
+  'exit 0',
+  '',
+}, '\n')), 'a stub that answers about another commit exists')
+exec('chmod 755 ' .. shquote(wrong_stub), '', 60)
+local wrong_code, wrong_text = door({ 'eval', 'reviewer', 'change/fixture', '--repo', repo, '--bin', wrong_stub })
+check(wrong_code == 1, 'a review about another commit exits non-zero (' .. tostring(wrong_code) .. ')')
+check(wrong_text:find('not change/fixture', 1, true) ~= nil,
+  'and says which commit it answered about')
+check(wrong_text:find("the session's own final line:", 1, true) ~= nil,
+  'and quotes its line as the session\'s, not as this branch\'s')
+
+-- A branch whose name is a subcommand word is reachable with `--branch` (third real review, finding 6).
+check(exec_git(repo, 'branch list ' .. sha).status == 0, 'a branch named `list` exists')
+local list_stub = home .. '/list-wa.sh'
+check(host.write_file(list_stub, table.concat({
+  '#!/bin/sh',
+  'echo "REVIEW list ' .. sha .. ' findings=1"',
+  'exit 0',
+  '',
+}, '\n')), 'a stub that answers for the branch named `list` exists')
+exec('chmod 755 ' .. shquote(list_stub), '', 60)
+local named_code, named_text = door({ 'eval', 'reviewer', '--branch', 'list', '--repo', repo, '--bin', list_stub })
+check(named_code == 0, '`--branch list` reviews the branch named `list` (' .. tostring(named_code) .. ')')
+check(named_text:find('review list', 1, true) ~= nil, 'and the review is of that branch')
+
 local usage_code, usage_text = door({ 'eval', 'help' })
 check(usage_code == 0 and usage_text:find('wa eval reviewer <branch>', 1, true) ~= nil,
   'the help text shows the branch door (not the old run-id recorder)')
@@ -310,6 +366,14 @@ local dash_code, dash_text = door({ 'eval', 'reviewer', 'miss', 'change/fixture'
   '--missed the bypass on line 12' })
 check(dash_code == 0, 'a note that starts with `--` is accepted (' .. tostring(dash_code) .. ')')
 check(dash_text:find('--missed the bypass on line 12', 1, true) ~= nil, 'and stored as written')
+
+-- A switch VALUE nobody recognises leaves the reviewer on and is said out loud (third review, finding 5).
+check(host.write_file(config_file, 'reviewer = disabled\n'), 'the config carries a value nobody knows')
+local typo_code, typo_text = door({ 'eval', 'reviewer', 'change/fixture', '--repo', repo, '--bin', stub,
+  '--timeout', '60' })
+check(typo_code == 0 and typo_text:find('is not one of off/0/false/no', 1, true) ~= nil,
+  'a typo in the switch is printed, not obeyed silently')
+host.write_file(config_file, '')
 
 -- The switch, through the door an operator uses: the env spelling, in a child process.
 local child_home = home .. '/door-home'

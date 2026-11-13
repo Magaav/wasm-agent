@@ -266,9 +266,11 @@ local function reviewer_run(args)
   -- store whose rows were measured on different models is not a measurement (first real review, 13/11).
   local valued = { ["--brief"] = true, ["--base"] = true, ["--bin"] = true, ["--timeout"] = true,
     ["--finding"] = true, ["--note"] = true, ["--repo"] = true, ["--findings"] = true,
-    ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true }
+    ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true, ["--branch"] = true }
   local words = positionals(args, valued)
-  local what = words[1]
+  -- `list`, `mark`, `miss` and `run` are subcommands, so a BRANCH with one of those names could never be
+  -- reviewed; `--branch <name>` names the branch outright (third real review, 13/11, finding 6).
+  local what = flag(args, "--branch") or words[1]
   -- An option this verb does not take is refused, not skipped: `--model` used to be a word here and its
   -- value then became a positional, so a caller asking for another model got a silent review on the
   -- pinned one (first real review, 13/11).
@@ -294,15 +296,27 @@ local function reviewer_run(args)
       .. "); nothing was run")
     return 0
   end
+  local named = flag(args, "--branch") ~= nil
   if what == nil then
     if not switch.on then return off() end
     return refused("reviewer needs a branch, or `run`, `mark`, `miss` or `list` (wa eval help)")
   end
-  if what == "list" then return reviewer_list() end
-  if what == "mark" then return reviewer_mark(args, valued, words) end
-  if what == "miss" then return reviewer_miss(args, words) end
-  if what == "run" then return reviewer_storage(args, valued, words) end
+  if not named then
+    if what == "list" then return reviewer_list() end
+    if what == "mark" then return reviewer_mark(args, valued, words) end
+    if what == "miss" then return reviewer_miss(args, words) end
+    if what == "run" then return reviewer_storage(args, valued, words) end
+  end
+  -- The switch, before the option scan: with the reviewer off, `wa eval reviewer x --whatever` says it is
+  -- off and exits 0 rather than arguing about an option (third real review, finding 5). `mark`, `miss`,
+  -- `list` and the storage form keep working while off - they start no session.
   if not switch.on then return off() end
+  -- A switch VALUE nobody recognises leaves the reviewer on (a typo must not disable a review the operator
+  -- asked for) and says which value it saw, because silence there reads as "the switch worked".
+  if not reviewer.recognised(switch.value or "") then
+    print("wa eval: the reviewer is on; " .. tostring(switch.source) .. " = " .. tostring(switch.value)
+      .. " is not one of off/0/false/no (or on/1/true/yes)")
+  end
   local record, problem = reviewer.run({
     branch = what,
     repo = flag(args, "--repo"),
@@ -323,10 +337,13 @@ local function reviewer_run(args)
     print("")
     print(record.answer)
   end
-  if record.review_line then
+  if record.review_line and record.state == "reviewed" then
     print(record.review_line)
     return 0
   end
+  -- A review that answered about another commit is NOT a review of this branch: its own line is quoted as
+  -- the session's, the door says what went wrong, and the exit is non-zero (third real review, finding 3).
+  if record.review_line then print("the session's own final line: " .. tostring(record.review_line)) end
   print("wa eval: " .. tostring(problem or "the review session gave no REVIEW line"))
   if record.stderr_tail and record.stderr_tail ~= "" then
     print("wa eval: stderr tail: " .. tostring(record.stderr_tail):gsub("%s+$", ""))
