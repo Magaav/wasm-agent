@@ -45,6 +45,19 @@ Vaulted requests use `wa-vault-brokered`, not a key. Fixed routes:
 Caller credential/Host/cookie/forwarding headers are dropped, redirects are not followed.
 No endpoint returns credentials.
 
+The **release signing key** (`release-signing`, ed25519) lives here too, and it has no proxy route at all -
+every route for it is on the admin listener, so the agents' listener answers 404:
+
+| Route (admin only, `X-Vault-Token`) | What it does |
+| --- | --- |
+| `GET /api/release-signing` | the key id and the **public** key; never the seed |
+| `POST /api/release-signing/key` | generate the key inside the vault (`{"replace":true}` rotates it) |
+| `POST /api/release-signing/sign` | `{"sha256": "<hex>"}` or `{"bytes": "<base64>"}` -> signature + key id |
+| `POST /api/release-signing/backup` | the ONE offline backup: `{"path": "/abs/file"}` writes it 0600 without overwriting, `{}` shows it once; after either, every call is refused |
+
+One log line per signature (key id and the manifest's sha256, never key material). Why the key is here and
+how a node trusts it: `docs/INSTALL.md`, "Signed releases".
+
 ## Operator enrollment and secret entry
 
 The node and parent app **never receive the vault admin token or a replacement key**.
