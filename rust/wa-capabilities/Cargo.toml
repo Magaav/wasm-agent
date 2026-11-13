@@ -28,11 +28,6 @@ wa-operation = { path = "../wa-operation" }
 # the stall rule, shared with the two renderers so the CLI, the native editor and the window cannot
 # disagree about what a call is doing. A leaf crate; this adds no arrow the split did not have.
 wa-tool-progress = { path = "../wa-tool-progress" }
-# Consistent snapshots of a store that is being written (the online backup API, a checked copy and a
-# bounded retry). The pre-update backup reads a graph store through it, under the store's own lock, so
-# a store the WASI component is writing is never read mid-write (rust/wa-capabilities/src/graph.rs,
-# "graph_snapshot"). A leaf crate: rusqlite only.
-wa-snapshot = { path = "../wa-snapshot" }
 wa-jobs = { path = "../wa-jobs" }
 # The explicit WhatsApp send (`whatsapp_send.rs`) names the `wa:queue` request/job types it enqueues
 # and reads back, and the `wa-grant-policy` decision `node_policy` answers with. Both are leaf crates

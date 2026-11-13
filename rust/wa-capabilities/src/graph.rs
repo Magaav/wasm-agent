@@ -739,7 +739,6 @@ struct StoreSnapshot {
     copy: PathBuf,
     check: String,
     attempts: u32,
-    pages: u32,
 }
 
 /// Snapshot `db` into `copy` (which must not exist) while holding the store's cross-process lock.
@@ -778,15 +777,69 @@ fn snapshot_store(db: &Path, copy: &Path, wait: Duration) -> Result<StoreSnapsho
         .map_err(|error| format!("graph_snapshot_failed: the store's lock cannot be opened: {error}"))?
         .ok_or_else(|| format!("graph_store_busy: a graph call on {} still holds the store after {} ms", db.display(), wait.as_millis()))?;
     if !db.exists() {return Err(format!("graph_store_missing: {}", db.display()));}
-    let policy = wa_snapshot::Policy { busy_timeout: Duration::from_millis(5_000),
-        attempts: 2, page_batch: 256, backoff: Duration::from_millis(100) };
-    match wa_snapshot::snapshot_with(db, copy, &policy) {
-        Ok(snapshot) => Ok(StoreSnapshot { source: snapshot.source, copy: snapshot.copy,
-            check: snapshot.check, attempts: snapshot.attempts, pages: snapshot.pages }),
-        Err(error) if error.source_is_damaged() => Err(format!("graph_store_damaged: {error}")),
-        Err(wa_snapshot::SnapshotError::Busy { detail, .. }) => Err(format!("graph_store_busy: {detail}")),
-        Err(error) => Err(format!("graph_snapshot_failed: {error}")),
+    // A copy the failed attempt before this one left behind is emptied first: `VACUUM INTO` refuses a
+    // destination that exists and is not empty ("output file already exists"), which is exactly the
+    // refusal that blocked `wa update` on both peers on 11/11.
+    if copy.exists() {let _ = std::fs::remove_file(copy);}
+    // Read-write, not read-only: a guest killed mid-transaction leaves a hot journal, and recovering
+    // it is a write. The store's lock is held, so no guest and no call exists to compete with it.
+    let source = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    source.busy_timeout(Duration::from_millis(wait.as_millis().min(5_000) as u64))
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        // ONE READ THROUGH SQLITE, never a byte copy: `VACUUM INTO` writes every committed page of the
+        // store - a rollback-journal commit included - into a new file, so what lands is a database.
+        match source.execute("VACUUM INTO ?1", [copy.to_string_lossy().as_ref()]) {
+            Ok(_) => break,
+            Err(error) => {
+                let text = error.to_string();
+                if attempt >= 2 || !contended(&text) {return Err(snapshot_failure(&text));}
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
+    // The copy must be a database before it can be a recovery source; a destination that a killed
+    // attempt left empty fails here rather than passing as a snapshot.
+    let check = copy_verdict(copy)?;
+    if check != "ok" {return Err(format!("graph_snapshot_failed: the copy did not pass integrity_check: {check}"));}
+    Ok(StoreSnapshot { source: db.to_path_buf(), copy: copy.to_path_buf(), check, attempts: attempt })
+}
+
+/// Why a snapshot could not be taken, in the three names the pre-update backup acts on.
+fn snapshot_failure(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("locked") || lower.contains("busy") {
+        return format!("graph_store_busy: {text}");
+    }
+    if lower.contains("malformed") || lower.contains("not a database") || lower.contains("corrupt") {
+        return format!("graph_store_damaged: {text}");
+    }
+    format!("graph_snapshot_failed: {text}")
+}
+
+/// Is this failure contention (worth one more read) rather than a verdict about the store?
+fn contended(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("locked") || lower.contains("busy")
+}
+
+/// `PRAGMA integrity_check` on one store, read-only: `"ok"` or SQLite's first complaint.
+fn copy_verdict(store: &Path) -> Result<String, String> {
+    let connection = rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut statement = connection.prepare("PRAGMA integrity_check")
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut rows = statement.query([]).map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut first: Option<String> = None;
+    while let Some(row) = rows.next().map_err(|error| snapshot_failure(&error.to_string()))? {
+        let text: String = row.get(0).map_err(|error| snapshot_failure(&error.to_string()))?;
+        if text == "ok" {return Ok(text);}
+        if first.is_none() {first = Some(text);}
+    }
+    Ok(first.unwrap_or_else(|| "unknown".to_string()))
 }
 
 /// A changeset may name files by absolute host path (native changesets do); inside the component
@@ -987,8 +1040,7 @@ pub extern "C-unwind" fn graph_snapshot(l: *mut LuaState) -> std::ffi::c_int {
         let wait = request.get("wait_ms").and_then(Value::as_u64).unwrap_or(15_000).clamp(1, 600_000);
         let snapshot = snapshot_store(Path::new(&db), Path::new(&copy), Duration::from_millis(wait))?;
         Ok(json!({"ok":true,"source":snapshot.source.to_string_lossy(),"copy":snapshot.copy.to_string_lossy(),
-            "check":snapshot.check,"attempts":snapshot.attempts,"pages":snapshot.pages,
-            "locked":"graph_store"}))
+            "check":snapshot.check,"attempts":snapshot.attempts,"locked":"graph_store"}))
     })();
     reply(l, outcome.unwrap_or_else(|error| json!({"error": error})))
 }

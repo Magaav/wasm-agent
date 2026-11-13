@@ -280,6 +280,8 @@ fn jitter_ms(spread: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("wa-sqlite-{name}-{}", std::process::id()));
@@ -329,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn a_statement_is_retried_past_a_short_hold_and_the_total_is_bounded() {
+    fn a_statement_is_retried_past_a_hold_and_lands_exactly_once() {
         let path = scratch("retry");
         let holder = open(&path).unwrap();
         holder
@@ -339,16 +341,40 @@ mod tests {
         holder.execute("INSERT INTO t(k) VALUES('held')", []).unwrap();
         let waiter = open(&path).unwrap();
         waiter.busy_timeout(Duration::from_millis(20)).unwrap();
-        // The holder releases after 400 ms; the waiter must still land its own write.
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(400));
-            holder.execute_batch("COMMIT").unwrap();
-        });
+        // THE HOLD IS EXPRESSED IN THE CURRENCY THE BUDGET IS SPENT IN, NOT IN MILLISECONDS.
+        //
+        // WHY. This test used to release after a flat 400 ms. The budget is not time: it is
+        // `ATTEMPTS_DEFAULT` (5) attempts, each paying SQLite's 20 ms busy timeout plus its own
+        // exponential backoff - 5 x 20 ms plus the four backoffs is 258..393 ms of the loop's own
+        // arithmetic. So the hold was a race the loop wins on an idle box and loses as soon as the
+        // machine is loaded (measured 13/11: FAILED under the landing gate's parallel lanes; the
+        // module's answer was correct and the assertion was not). The holder now releases once the
+        // loop has provably attempted twice, so the retry it must ride out is real, and nothing here
+        // reads the wall clock.
+        let attempts = Arc::new(AtomicU32::new(0));
+        let release = {
+            let attempts = Arc::clone(&attempts);
+            std::thread::spawn(move || {
+                while attempts.load(Ordering::SeqCst) < 2 {
+                    std::thread::yield_now();
+                }
+                holder.execute_batch("COMMIT").unwrap();
+            })
+        };
+        let counted = Arc::clone(&attempts);
         let wrote = retry("INSERT", || {
-            waiter.execute("INSERT INTO t(k) VALUES('waited')", []).map(|_| ())
+            counted.fetch_add(1, Ordering::SeqCst);
+            waiter
+                .execute("INSERT INTO t(k) VALUES('waited')", [])
+                .map(|_| ())
         });
         release.join().unwrap();
-        assert!(wrote.is_ok(), "a 400 ms hold is ridden out: {wrote:?}");
+        assert!(wrote.is_ok(), "a hold that ends during the retry is ridden out: {wrote:?}");
+        let seen = attempts.load(Ordering::SeqCst);
+        assert!(
+            seen >= 2 && seen <= attempts_max(),
+            "the loop retried at least once and never exceeded its attempt budget: {seen}"
+        );
         let rows: i64 = waiter
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .unwrap();

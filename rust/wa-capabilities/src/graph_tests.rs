@@ -402,6 +402,16 @@ fn guest_shaped_store(dir: &Path) -> PathBuf {
     db
 }
 
+/// The read the pre-update backup made before this branch: SQLite's `VACUUM INTO` on a plain
+/// connection, with no knowledge of the store's lock. Used only to reproduce the failure.
+fn unlocked_copy(source: &Path, copy: &Path) -> Result<String, String> {
+    let connection = rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| error.to_string())?;
+    connection.busy_timeout(Duration::from_millis(0)).map_err(|error| error.to_string())?;
+    connection.execute("VACUUM INTO ?1", [copy.to_string_lossy().as_ref()]).map_err(|error| error.to_string())?;
+    copy_verdict(copy)
+}
+
 fn rows(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     conn.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap()
@@ -483,18 +493,19 @@ fn the_lockless_writer_a_wasi_guest_is_can_only_be_copied_under_the_store_lock()
             }
         })
     };
-    // 1. The read the backup used to make: no shared lock, so it meets the writer mid-commit.
+    // 1. The read the backup used to make: a native `VACUUM INTO` with no shared lock, which is
+    //    exactly `lua/core/backup.lua` before this branch, so it meets the writer mid-commit.
     let mut torn = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(6);
     let mut copy_index = 0;
     while Instant::now() < deadline && torn.is_empty() {
         copy_index += 1;
         let copy = fixture.0.join(format!("unlocked-{copy_index}.db"));
-        let policy = wa_snapshot::Policy { busy_timeout: Duration::from_millis(0), attempts: 1,
-            page_batch: 64, backoff: Duration::from_millis(1) };
-        match wa_snapshot::snapshot_with(&db, &copy, &policy) {
-            Ok(snapshot) => {let _ = std::fs::remove_file(&snapshot.copy);}
-            Err(error) => torn.push(error.to_string()),
+        let _ = std::fs::remove_file(&copy);
+        match unlocked_copy(&db, &copy) {
+            Ok(verdict) if verdict == "ok" => {let _ = std::fs::remove_file(&copy);}
+            Ok(verdict) => torn.push(format!("the copy did not pass integrity_check: {verdict}")),
+            Err(error) => torn.push(error),
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -531,8 +542,8 @@ fn the_lockless_writer_a_wasi_guest_is_can_only_be_copied_under_the_store_lock()
     lock_holder.join().expect("the lock holder did not panic");
     assert_eq!(snapshot.check, "ok");
     assert!(waited >= Duration::from_millis(250), "the copy waited for the writer to finish ({waited:?}), so it never read a page mid-commit");
-    assert_eq!(wa_snapshot::integrity_check(&copy).unwrap(), "ok");
-    assert_eq!(wa_snapshot::integrity_check(&db).unwrap(), "ok", "and the store it read is still sound: no page was written while it was read");
+    assert_eq!(copy_verdict(&copy).unwrap(), "ok");
+    assert_eq!(copy_verdict(&db).unwrap(), "ok", "and the store it read is still sound: no page was written while it was read");
 }
 
 #[test]
