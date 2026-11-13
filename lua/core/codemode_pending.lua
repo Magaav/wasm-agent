@@ -5,36 +5,43 @@
 -- the script that started it, and the model could only choose a timeout and hope. The operator's
 -- decision (Victor, 12/11) is one pattern for all of them: the call answers a *handle* when it is
 -- still running after its wait, and `wait(op)` resumes it later - in the same script, the next step,
--- the next turn or a resumed session of the same scope.
+-- the next turn or a resumed session of the same scope. `pending()` lists the handles a scope still
+-- holds, so a later step needs no memory of them, and `wait([...], {until:"any"})` answers every op it
+-- was asked about, which is what lets a step drop the finished ones and add new calls: a work pool
+-- that grows and shrinks.
 --
--- This module is that pattern, and it is built on what the node already has rather than beside it:
+-- This module is that pattern, built on what the node already has rather than beside it. An
+-- **executor** (`M.EXECUTORS`) is how one kind of work is started, polled and collected:
 --
---   * the work itself is a **managed operation** (`rust/wa-operation`, `operation start/status/wait/
---     read/cancel`). An operation already owns a child, an absolute budget, output cursors, a durable
---     per-operation record on disk and a terminal outcome - so a handle here is the operation id, the
---     very id `operation read` and `/operations` already answer. No second registry of running work
---     is invented; this file only remembers *which tool call* an operation is, and for which scope.
---   * settling, reading and cancelling go back through `dispatch('operation', …)`, so the profile,
---     role, workspace and permission checks are the ones every other call gets.
+--   * `operation` - the managed operations (`rust/wa-operation`, `operation start/status/wait/read/
+--     cancel`). An operation already owns a child, an absolute budget, output cursors, a durable
+--     per-operation record on disk and a terminal outcome, so a handle here *is* the operation id,
+--     the very id `operation read` and `/operations` already answer. `bash` and `operation` use it.
+--   * `outbox` - a WhatsApp send's durable queue job: the message is queued by the connector and the
+--     id it answers is the handle, so a wait reads the queue and a cancel says why it cannot stop a
+--     message that is already sent.
+--
+-- No second registry of running work is invented: this file only remembers *which* call a handle is,
+-- for which scope, and how to ask its executor what happened.
 --
 -- The three rules that make it safe:
 --
 --   1. **Starting is an effect; waiting is a read.** `invoke` is only ever called where the loop
---      already dispatches, in the loop's serial order. `wait`/`cancel` dispatch nothing that has an
---      effect of its own: they poll an operation that is already running.
---   2. **Nothing here holds a lock or a lease.** Every wait is a bounded `operation wait` slice
---      (<= 1 s) followed by a status read, looped until the deadline; the node's own settlement
---      condition variable does the blocking. A cancelled run, a stop/steer or a dead peer therefore
---      ends a wait at once and answers `pending`, never a hang and never a false `failed`.
---   3. **A resume never re-runs an effect.** The operation id *is* the handle: `wait` reads a
---      settled operation's retained output, and a second `wait` on the same id answers the same
---      bytes from disk. There is no code path from here back into the tool's dispatch.
+--      already dispatches, in the loop's serial order. `wait`/`pending`/`cancel` dispatch nothing
+--      that has an effect of its own: they poll work that is already running.
+--   2. **Nothing here holds a lock or a lease.** Every wait is a bounded slice of the executor's own
+--      wait (<= 1 s) followed by a status read, looped until the deadline; the node's settlement
+--      does the blocking. A cancelled run, a stop/steer or a dead peer therefore ends a wait at once
+--      and answers `pending`, never a hang and never a false `failed`.
+--   3. **A resume never re-runs an effect.** The handle *is* the work's id: `wait` reads a settled
+--      call's retained answer, and a second `wait` on the same handle answers the same bytes from
+--      disk. There is no code path from here back into the tool's dispatch.
 --
--- What a handle does NOT do, named rather than hidden: a tool whose work runs *inside* this
--- interpreter cannot be moved off it, so a call can only become pending when the node has a detached
--- executor for it (`M.EXECUTORS`). Today that is `bash` and `operation` - the two the long work in a
--- run actually goes through. A tool with no executor answers exactly as it did before this file
--- existed; it is never turned into a handle that cannot settle.
+-- What a handle does NOT do, named rather than hidden: work that runs *inside* this interpreter
+-- cannot be moved off it, so a call becomes pending only where the node has a detached executor
+-- (`M.EXECUTORS`). A tool with no executor answers exactly as it did before this file existed; it is
+-- never turned into a handle that cannot settle. A `remote`/peer call has no executor yet: the call
+-- is answered synchronously and cannot be resumed (named in docs/CODEMODE.md).
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local output = dofile("lua/core/tool_output.lua")
@@ -47,29 +54,46 @@ M.MAX_WAIT_S = 300
 -- Reserved for the answer itself, the delivery into the guest and the script's return: a wait that
 -- spent the script's last millisecond would answer a handle nobody could read.
 M.MARGIN_MS = 2000
--- Concurrent handles one session may hold. Refused by name past it (`codemode_pending_limit`), never
--- by silently dropping the oldest - a dropped handle is work nobody can find again.
+-- Concurrent pending calls one session may hold. Refused by name past it (`codemode_pending_limit`),
+-- never by silently dropping the oldest - a dropped handle is work nobody can find again.
 M.MAX_OPEN = 16
--- Operations one `wait` may ask about at once.
+-- Operations one `wait` or `cancel` may ask about at once.
 M.MAX_BATCH = 20
--- Bytes of an operation's output kept in `progress`.
+-- Bytes of an operation's output kept in `progress`, and how many handles `pending()` lists.
 M.PROGRESS_BYTES = 400
+M.MAX_LIST = 50
+-- Records kept per scope once they are closed: a settled handle is kept so `results.get(op)` can
+-- re-read it, but the index cannot grow without bound in a long session.
+M.KEEP_CLOSED = 256
 -- The longest single blocking slice. The node does the blocking natively, so this is not a relay
 -- limit; it is what keeps a wait interruptible by a stop/steer without a long call to unwind.
 M.SLICE_MS = 1000
 
 -- ---------------------------------------------------------------------------- the record on disk
 --
--- One index per scope (`<data>/codemode-pending/<scope>.json`), bounded by MAX_OPEN. It holds the
--- mapping handle -> tool call and nothing else: the work, its output and its outcome stay in the
--- operation's own record. A scope is the same hash the guest store and the results journal use
--- (session x user x role x workspace x profile), so "the same scope" is one meaning in this node.
+-- One index per scope (`<data>/codemode-pending/<scope>.json`), bounded. It holds the mapping
+-- handle -> call and nothing else: the work, its output and its outcome stay with its executor. A
+-- scope is the same hash the guest store and the results journal use (session x user x role x
+-- workspace x profile), so "the same scope" is one meaning in this node.
 function M.dir() return paths.data() .. "/codemode-pending" end
 local function index_path(scope) return M.dir() .. "/" .. tostring(scope) .. ".json" end
 
 local function now_seconds()
   local clock = host.now and host.now() or nil
   return tonumber(clock) or 0
+end
+
+-- Is this record still something a caller can act on: running, of-unknown-outcome, or settled and not
+-- yet reported to a script? Only these count against MAX_OPEN.
+local function open_record(record)
+  return record.state == "running" or record.state == "unknown" or record.state == "pending"
+    or (record.reported == false)
+end
+
+local function open_count(index)
+  local count = 0
+  for _, record in pairs(index.ops or {}) do if open_record(record) then count = count + 1 end end
+  return count
 end
 
 function M.open(scope)
@@ -79,30 +103,39 @@ function M.open(scope)
     if ok and type(decoded) == "table" then
       -- `[]` decodes to an empty table, so both spellings of "no handles yet" land here.
       if type(decoded.ops) ~= "table" then decoded.ops = {} end
-      local count = 0
-      for _ in pairs(decoded.ops) do count = count + 1 end
-      decoded.count = count
+      decoded.count = open_count(decoded)
       return decoded
     end
   end
   return { ops = {}, count = 0 }
 end
 
+-- Closed handles are kept so `results.get(op)` keeps working, but the index stays bounded: past
+-- KEEP_CLOSED the oldest closed ones are dropped (their retained result bytes stay in the node's
+-- tool-results directory; only the name stops resolving, and `results.get` says so).
+local function prune(index)
+  local closed = {}
+  for op, record in pairs(index.ops or {}) do
+    if not open_record(record) then closed[#closed + 1] = { op = op, at = tonumber(record.settled_at) or 0 } end
+  end
+  if #closed <= M.KEEP_CLOSED then return index end
+  table.sort(closed, function(a, b) return a.at < b.at end)
+  local drop = #closed - M.KEEP_CLOSED
+  for position = 1, drop do index.ops[closed[position].op] = nil end
+  return index
+end
+
 function M.save(scope, index)
-  local count = 0
-  for _ in pairs(index.ops or {}) do count = count + 1 end
-  index.count = count
+  prune(index)
+  index.count = open_count(index)
   local ok, encoded = pcall(json.encode, { ops = index.ops or {} })
   if not ok then return false end
-  -- Best effort: a node that cannot write its index still has the operation's own record, so the
-  -- work is never lost - only the name the model was given stops resolving, and `wait` says so.
-  local written = host.write_file(index_path(scope), encoded)
-  return written and true or false
+  -- Best effort: a node that cannot write its index still has the work's own record, so the work is
+  -- never lost - only the name the model was given stops resolving, and `wait` says so.
+  return host.write_file(index_path(scope), encoded) and true or false
 end
 
 -- ---------------------------------------------------------------------------- time and arguments
--- The one bound every wait obeys: what the call asked for (default 60 s), the ceiling (300 s) and
--- what is left of the script after the answer's own margin.
 -- What is left of the script, from the loop's own clock: a function (re-read per call) or a number.
 local function remaining_of(opts)
   if type(opts.remaining) == "function" then
@@ -112,6 +145,8 @@ local function remaining_of(opts)
   return tonumber(opts.remaining_ms)
 end
 
+-- The one bound every wait obeys: what the call asked for (default 60 s), the ceiling (300 s) and
+-- what is left of the script after the answer's own margin.
 function M.effective_ms(wait_s, remaining_ms)
   local seconds = tonumber(wait_s)
   if seconds == nil then seconds = M.DEFAULT_WAIT_S end
@@ -140,9 +175,25 @@ function M.strip(raw)
 end
 
 -- ---------------------------------------------------------------------------- the executors
--- One entry per tool whose work the node can run detached. `start` hands the call to the operation
--- manager and answers `{op=…}` (or `{result=…}` when the call was refused, which is then delivered
--- unchanged); `settle` turns a settled operation into the result the tool would have answered.
+-- One entry per family of work the node can run detached. Each provides:
+--   start(dispatch, opts, params, raw) -> {op=…} to register, or {result=…} when the call answered
+--                                        at once (a refusal is an answer, never a second attempt);
+--   poll(dispatch, opts, record, ms)   -> (state, reason), where `state.settled` is the fact;
+--   settle(dispatch, opts, record, state) -> the value the tool would have answered;
+--   progress(dispatch, opts, record, state) -> the bounded `progress` a pending answer carries;
+--   cancel(dispatch, opts, record)      -> only for kinds whose effect can be stopped.
+M.EXECUTORS = {}
+
+local function cancelled()
+  local ok, raw = pcall(function() return host.run_cancelled and host.run_cancelled() end)
+  if not ok or type(raw) ~= "string" then return false end
+  -- Both returns of pcall, or a cancelled run reads as "not cancelled" and the wait runs to its
+  -- deadline: that is the bug this line exists to not have (measured 12/11, caught by
+  -- scripts/test-codemode-pending.lua's stop/steer check).
+  local decoded_ok, decoded = pcall(json.decode, raw)
+  return decoded_ok and type(decoded) == "table" and decoded.cancelled == true
+end
+
 local function operation_call(dispatch, action, args)
   local ok, value = pcall(dispatch, "operation", args, json.encode(args))
   if not ok then return nil, tostring(value) end
@@ -151,11 +202,8 @@ local function operation_call(dispatch, action, args)
   return value, nil
 end
 
--- An operation's live state, without waiting: this is what `progress` is built from and what every
--- poll checks. A refusal or an unreachable supervisor is a reason, never a false `failed`.
 local function snapshot(dispatch, op)
-  local state, reason = operation_call(dispatch, "status", { action = "status", id = op })
-  return state, reason
+  return operation_call(dispatch, "status", { action = "status", id = op })
 end
 
 local function tail(dispatch, op, state)
@@ -169,21 +217,6 @@ local function tail(dispatch, op, state)
   return content
 end
 
--- `progress`: the tail of what the call has printed, or the job's own state, bounded. A pending
--- answer without it is a wait the model cannot judge.
-function M.progress(dispatch, op, state)
-  state = state or {}
-  local entry = { state = tostring(state.state or "running"), elapsed_ms = tonumber(state.elapsed_ms) }
-  if state.remaining_ms ~= nil then entry.remaining_ms = tonumber(state.remaining_ms) end
-  if state.shell_exited ~= nil then entry.shell_exited = state.shell_exited end
-  if state.output_idle_ms ~= nil then entry.output_idle_ms = tonumber(state.output_idle_ms) end
-  if state.promoted ~= nil then entry.promoted = state.promoted end
-  entry.output_bytes = tonumber(state.output_bytes) or 0
-  local line = tail(dispatch, op, state)
-  if line then entry.tail = line end
-  return entry
-end
-
 -- The result a settled operation answers. It is the operation's own state record, which is byte for
 -- byte what `bash` already answers for an adopted tree (`operations::foreground` returns the same
 -- snapshot): stdout, stderr, `output_complete`, `code`/`ok` and the timing all come from the record,
@@ -192,8 +225,6 @@ local function operation_result(dispatch, op, state)
   local out = {}
   for key, value in pairs(type(state) == "table" and state or {}) do out[key] = value end
   out.operation_id = out.operation_id or op
-  -- The partial `operation status` snapshot carries the totals; the text of both streams is a page
-  -- read, the same bounded pages the command result uses.
   local stdout = operation_call(dispatch, "read", { action = "read", id = op, stream = "stdout",
     offset = 0, limit = 24576 })
   if type(stdout) == "table" and type(stdout.content) == "string" then
@@ -213,15 +244,48 @@ local function operation_result(dispatch, op, state)
   return out
 end
 
--- `bash`: the long one. It is started as a managed operation through the tool's own serial path
--- (`ctx.parallel_start`, the branch the model's parallel bash calls already use), so every check bash
--- makes - profile, session cwd, the commit review - runs before the shell does, and the path guard
--- runs here because `operation start` is not behind `host.exec`'s guard (`lua/core/path_guard.lua`).
-local function bash_executor()
-  return {
+-- Wait for one operation up to `ms`, in bounded slices. Answers the state and, when the wait ended
+-- without settlement, the reason (`still_running`, `run_cancelled`, or the supervisor's own words).
+local function operation_poll(dispatch, opts, record, ms)
+  local op = record.op
+  local left = math.max(0, math.floor(tonumber(ms) or 0))
+  local state, reason = snapshot(dispatch, op)
+  if not state then return nil, reason end
+  if state.settled == true then return state, nil end
+  while left > 0 do
+    if cancelled() then return state, "run_cancelled" end
+    local slice = math.min(left, M.SLICE_MS)
+    local waited, wait_reason = operation_call(dispatch, "wait",
+      { action = "wait", id = op, wait_ms = slice, tool = "operation" })
+    if not waited then return state, wait_reason end
+    state = waited
+    left = left - slice
+    if state.settled == true then return state, nil end
+    if state.overdue == true then return state, "operation_supervisor_overdue" end
+  end
+  return state, "still_running"
+end
+
+local function operation_progress(dispatch, opts, record, state)
+  state = state or {}
+  local entry = { state = tostring(state.state or "running"), elapsed_ms = tonumber(state.elapsed_ms) }
+  if state.remaining_ms ~= nil then entry.remaining_ms = tonumber(state.remaining_ms) end
+  if state.shell_exited ~= nil then entry.shell_exited = state.shell_exited end
+  if state.output_idle_ms ~= nil then entry.output_idle_ms = tonumber(state.output_idle_ms) end
+  if state.promoted ~= nil then entry.promoted = state.promoted end
+  entry.output_bytes = tonumber(state.output_bytes) or 0
+  local line = tail(dispatch, record.op, state)
+  if line then entry.tail = line end
+  return entry
+end
+
+-- The managed-operation family: `bash` starts one through the tool's own serial path, and the
+-- `operation` tool's `start` registers the receipt it just answered while `await` becomes a bounded
+-- wait on the id the caller already has.
+do
+  M.EXECUTORS["bash"] = {
     kind = "operation",
     start = function(dispatch, opts, params, raw)
-      local guard = dofile("lua/core/path_guard.lua")
       local copy = {}
       for key, value in pairs(type(params) == "table" and params or {}) do copy[key] = value end
       -- The deadline the synchronous path would have used: the configured default and any active
@@ -230,9 +294,9 @@ local function bash_executor()
         local ok, seconds = pcall(function() return host.exec_timeout and host.exec_timeout() end)
         if ok and tonumber(seconds) then copy.timeout_seconds = math.floor(tonumber(seconds)) end
       end
-      local allowed, refused = guard.command(copy.command, copy.cwd or "")
-      if not allowed then return { result = { error = refused, effect = "none", blocked_by = "path_guard" } } end
-      copy.command = guard.wrap(copy.command)
+      -- The path guard is applied by the `operation` branch of the dispatcher, which this path goes
+      -- through (`lua/core/tools.lua`): one wall, one wrap, one refusal shape, the same one `bash`
+      -- and `host.exec` answer.
       local ctx = opts.ctx or {}
       local saved = ctx.parallel_start
       ctx.parallel_start = true
@@ -246,15 +310,8 @@ local function bash_executor()
       -- always did. A refusal is never permission to run the command a second way.
       return { result = result }
     end,
-    settle = function(dispatch, op, state) return operation_result(dispatch, op, state) end,
   }
-end
-
--- `operation`: `await` on an id the caller already has becomes a bounded wait on that same operation
--- (its handle is already the id), and `start` is registered so `wait(op)` works on the receipt the
--- model just got. Neither changes what the tool answers.
-local function operation_executor()
-  return {
+  M.EXECUTORS["operation"] = {
     kind = "operation",
     applies = function(params)
       local action = type(params) == "table" and tostring(params.action or "") or ""
@@ -275,42 +332,92 @@ local function operation_executor()
       -- decides how long this call watches before it hands back a handle.
       return { op = id, attach = true }
     end,
-    settle = function(dispatch, op, state) return operation_result(dispatch, op, state) end,
+  }
+end
+for _, name in ipairs({ "bash", "operation" }) do
+  M.EXECUTORS[name].poll = operation_poll
+  M.EXECUTORS[name].progress = operation_progress
+  M.EXECUTORS[name].settle = function(dispatch, opts, record, state)
+    return operation_result(dispatch, record.op, state)
+  end
+end
+
+-- The outbox family: a WhatsApp send is a durable queue job (`lua/core/whatsapp.lua`), so the id the
+-- connector answers is the handle. `wait_s:0` queues and answers at once; the id alone resumes. The
+-- message is never sent twice, and a cancel says so rather than pretending.
+do
+  local function queue_read(dispatch, record, seconds)
+    local asked = { id = record.id }
+    if seconds ~= nil then asked.wait_s = seconds end
+    local ok, answer = pcall(dispatch, "mcp_whatsapp_send", asked, json.encode(asked))
+    if not ok then return nil, tostring(answer) end
+    if type(answer) ~= "table" then return nil, "outbox_answer_malformed" end
+    if answer.ok == false and answer.error then return nil, tostring(answer.error) end
+    return answer, nil
+  end
+  M.EXECUTORS["mcp_whatsapp_send"] = {
+    kind = "outbox",
+    -- A sent message stays sent: the honest answer to `cancel` is the reason, not a stop.
+    cancel = false,
+    cancel_why = "a sent message stays sent",
+    applies = function(params)
+      if type(params) ~= "table" then return false end
+      return params.chat ~= nil and params.id == nil and params.ids == nil
+    end,
+    start = function(dispatch, opts, params, raw)
+      local copy = {}
+      for key, value in pairs(params) do copy[key] = value end
+      -- Queue and answer at once: the wait is this layer's, the same one every other call gets.
+      copy.wait_s = 0
+      copy["until"] = nil
+      local ok, answer = pcall(dispatch, "mcp_whatsapp_send", copy, raw)
+      if not ok then return { result = { error = tostring(answer), effect = "unknown", replay_allowed = false } } end
+      if type(answer) ~= "table" or answer.state ~= "pending" then return { result = answer } end
+      local id = tonumber(answer.id)
+      if not id then return { result = answer } end
+      return { op = "msg-" .. tostring(id), id = id }
+    end,
+    poll = function(dispatch, opts, record, ms)
+      -- The connector's own bounded wait does the polling, one short call at a time; `seconds` 0 is a
+      -- status read. A cancelled run ends it inside the connector (`M.settle`).
+      local answer, reason = queue_read(dispatch, record, math.max(0, math.ceil((tonumber(ms) or 0) / 1000)))
+      if not answer then return nil, reason end
+      answer.settled = answer.state ~= "pending"
+      return answer, (answer.settled and nil or (reason or "still_running"))
+    end,
+    settle = function(dispatch, opts, record, state) return state end,
+    progress = function(dispatch, opts, record, state)
+      local entry = { state = tostring(type(state) == "table" and state.state or "pending"), kind = "outbox",
+        job = record.id }
+      if type(state) == "table" and state.waited_s ~= nil then entry.waited_s = tonumber(state.waited_s) end
+      if type(state) == "table" and state.queue_state ~= nil then entry.queue_state = tostring(state.queue_state) end
+      return entry
+    end,
   }
 end
 
-M.EXECUTORS = { bash = bash_executor(), operation = operation_executor() }
-
--- ---------------------------------------------------------------------------- polling
-local function cancelled()
-  local ok, raw = pcall(function() return host.run_cancelled and host.run_cancelled() end)
-  if not ok or type(raw) ~= "string" then return false end
-  -- Both returns of pcall, or a cancelled run reads as "not cancelled" and the wait runs to its
-  -- deadline: that is the bug this line exists to not have (measured 12/11, caught by
-  -- scripts/test-codemode-pending.lua's stop/steer check).
-  local decoded_ok, decoded = pcall(json.decode, raw)
-  return decoded_ok and type(decoded) == "table" and decoded.cancelled == true
+local function executor_of(record)
+  return M.EXECUTORS[record.tool]
 end
 
--- Wait for one operation up to `ms`, in bounded slices. Answers the state and, when the wait ended
--- without settlement, the reason (`still_running`, `run_cancelled`, or the supervisor's own words).
-function M.poll(dispatch, op, ms)
-  local left = math.max(0, math.floor(tonumber(ms) or 0))
-  local state, reason = snapshot(dispatch, op)
-  if not state then return nil, reason end
-  if state.settled == true then return state, nil end
-  while left > 0 do
-    if cancelled() then return state, "run_cancelled" end
-    local slice = math.min(left, M.SLICE_MS)
-    local waited, wait_reason = operation_call(dispatch, "wait",
-      { action = "wait", id = op, wait_ms = slice, tool = "operation" })
-    if not waited then return state, wait_reason end
-    state = waited
-    left = left - slice
-    if state.settled == true then return state, nil end
-    if state.overdue == true then return state, "operation_supervisor_overdue" end
-  end
-  return state, "still_running"
+local function executor_poll(executor, dispatch, opts, record, ms)
+  local poller = executor.poll or operation_poll
+  return poller(dispatch, opts, record, ms)
+end
+
+local function executor_progress(executor, dispatch, opts, record, state)
+  local progress = executor.progress or operation_progress
+  local ok, value = pcall(progress, dispatch, opts, record, state)
+  if ok and type(value) == "table" then return value end
+  return { state = tostring(type(state) == "table" and state.state or "running") }
+end
+
+local function executor_settle(executor, dispatch, opts, record, state)
+  local settle = executor.settle
+  if not settle then return state end
+  local ok, value = pcall(settle, dispatch, opts, record, state)
+  if ok and value ~= nil then return value end
+  return state
 end
 
 local function retain(result)
@@ -324,24 +431,18 @@ end
 -- Record that this handle settled, exactly once. `reported` is flipped by the waiter that observed
 -- the outcome, so an op nobody resumed is announced on the next turn and never twice; a second
 -- `wait` reads the retained result instead of writing the row again.
-local function settle(dispatch, scope, index, record, state)
-  local entry = M.EXECUTORS[record.tool]
-  local result = state
-  if entry and entry.settle then
-    local ok, settled = pcall(entry.settle, dispatch, record.op, state)
-    if ok and settled ~= nil then result = settled end
-  end
+local function settle(executor, dispatch, opts, scope, index, record, state)
+  local result = executor_settle(executor, dispatch, opts, record, state)
   record.reason = nil
-  -- A cancelled operation is a failed call, never a done one: the record says `failed` with
-  -- `cancelled` as the reason, because "it finished" is not what happened to it.
-  local operation_state = tostring(type(state) == "table" and state.state or "")
-  if operation_state == "cancelled" then
+  local executor_state = tostring(type(state) == "table" and state.state or "")
+  if executor_state == "cancelled" then
+    -- A cancelled operation is a failed call, never a done one: "it finished" is not what happened.
     record.state = "failed"
     record.error = "cancelled"
   else
     record.state = (type(result) == "table" and result.error) and "failed" or "done"
     record.error = record.state == "failed"
-      and (type(result) == "table" and tostring(result.error or result.state or "failed") or "failed") or nil
+      and (type(result) == "table" and tostring(result.error or result.reason or result.state or "failed") or "failed") or nil
   end
   record.ok = record.state == "done"
   record.settled_at = now_seconds()
@@ -362,9 +463,9 @@ function M.retained(op, scope)
   end
   local record = look(M.open(scope))
   if not record and scope == nil then
-    -- No scope named: the handle alone is the question (`results.get(op)` inside a script of the same
-    -- scope, a step that resumed a session). The index directory is small and bounded by MAX_OPEN per
-    -- scope; a handle is unique, so one match is the answer and two would be an error, never a guess.
+    -- No scope named: the handle alone is the question. The index directory is small (one file per
+    -- scope, bounded per file); a handle is unique, so one match is the answer and two would be an
+    -- error, never a guess.
     -- `host.list_dir` answers a JSON string (`{path, entries}` or `{error, path}`), not a table: a
     -- string put through `ipairs` yields its length, which is exactly the kind of silence that reads
     -- as "found nothing". Decoded once, here, and a directory that does not exist yet is not an error.
@@ -410,8 +511,8 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
   local index = M.open(scope)
   if index.count >= M.MAX_OPEN then
     return { error = "codemode_pending_limit", limit = M.MAX_OPEN, open = index.count, effect = "none",
-      note = "wait for or cancel a handle you already have before starting another (" .. M.MAX_OPEN ..
-        " pending calls per session)" }
+      note = "wait for, cancel or collect a handle you already have before starting another (" ..
+        M.MAX_OPEN .. " pending calls per session; pending() lists them)" }
   end
   local started_at = now_seconds()
   local started = executor.start(dispatch, opts, params, raw)
@@ -426,11 +527,11 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     return started.result
   end
   local record = { op = started.op, tool = name, kind = executor.kind or "operation", scope = scope,
-    started_at = started_at, state = "running", reported = false,
+    started_at = started_at, state = "running", reported = false, id = started.id,
     session = tostring(opts.session or ""), args = tostring(host.sha256(raw or "{}")) }
   index.ops[record.op] = record
   local budget = M.effective_ms(wait_s, remaining_of(opts))
-  local state, reason = M.poll(dispatch, record.op, budget)
+  local state, reason = executor_poll(executor, dispatch, opts, record, budget)
   if not state then
     record.state = "unknown"
     record.error = tostring(reason)
@@ -439,21 +540,56 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
       progress = { state = "unknown", reason = tostring(reason) } }
   end
   if state.settled == true then
-    local result = settle(dispatch, scope, index, record, state)
+    local result = settle(executor, dispatch, opts, scope, index, record, state)
     record.reported = true
     M.save(scope, index)
     return result
   end
-  record.progress = M.progress(dispatch, record.op, state)
+  record.progress = executor_progress(executor, dispatch, opts, record, state)
   record.reason = reason
   M.save(scope, index)
   return handle(record, math.floor(budget / 1000))
 end
 
+-- ---------------------------------------------------------------------------- pending(): the pool
+-- A READ: the handles this scope still holds, oldest first, so a later step or turn needs no memory
+-- of them. It dispatches nothing, changes nothing, and reports progress from what the executor
+-- already knows.
+function M.list(dispatch, opts)
+  local scope = opts and opts.scope
+  local index = M.open(scope)
+  local rows = {}
+  for _, record in pairs(index.ops or {}) do
+    if open_record(record) then rows[#rows + 1] = record end
+  end
+  table.sort(rows, function(a, b) return (tonumber(a.started_at) or 0) < (tonumber(b.started_at) or 0) end)
+  local now = now_seconds()
+  local ops = {}
+  for position = 1, math.min(#rows, M.MAX_LIST) do
+    local record = rows[position]
+    local executor = executor_of(record) or {}
+    local progress = record.progress
+    if (not progress) and dispatch then
+      local state, reason = executor_poll(executor, dispatch, opts, record, 0)
+      if state then
+        progress = executor_progress(executor, dispatch, opts, record, state)
+        if reason and not progress.reason then progress.reason = reason end
+      elseif reason then
+        progress = { state = "unknown", reason = tostring(reason) }
+      end
+    end
+    ops[#ops + 1] = { op = record.op, tool = record.tool, state = tostring(record.state or "running"),
+      kind = record.kind, age_s = math.floor(now - (tonumber(record.started_at) or now)),
+      progress = progress }
+  end
+  return { ok = true, ops = ops, count = #rows, limit = M.MAX_OPEN, shown = #ops,
+    truncated = #rows > #ops }
+end
+
 -- ---------------------------------------------------------------------------- resume: wait(op)
--- `wait` is a READ. It dispatches nothing with an effect, takes no lock, and answers one entry per
--- op in the order asked. Because it is a read the guest may batch it with anything:
--- `Promise.all([wait(a), tools.read({path}), wait(b)])`.
+-- `wait` is a READ. It dispatches nothing with an effect, takes no lock, and answers one entry per op
+-- in the order asked - including every op `until:"any"` did not have to wait for, which is what lets
+-- a step drop the finished ones, add new calls and wait again.
 function M.wait(dispatch, opts, asked, wait_opts)
   wait_opts = type(wait_opts) == "table" and wait_opts or {}
   local single = type(asked) == "string"
@@ -464,7 +600,6 @@ function M.wait(dispatch, opts, asked, wait_opts)
   if #list > M.MAX_BATCH then
     return { error = "wait_accepts_at_most_" .. M.MAX_BATCH .. "_ops", asked = #list, effect = "none" }
   end
-  -- `until` is a Lua keyword, so the option is read by key.
   if wait_opts.wait_s ~= nil and tonumber(wait_opts.wait_s) == nil then
     return { error = "invalid_wait_s", got = tostring(wait_opts.wait_s), effect = "none" }
   end
@@ -482,41 +617,47 @@ function M.wait(dispatch, opts, asked, wait_opts)
   local function remaining()
     return math.max(0, budget - math.floor((now_seconds() - started) * 1000))
   end
+  local stop_waiting = false
   for _, op in ipairs(list) do
     local id = tostring(op)
     local record = index.ops[id]
     local entry
     if type(record) ~= "table" then
-      -- A handle from another scope, or one already collected: an explicit answer, never a guess.
       -- `reason`, not `error`: a failed entry is an answer a script branches on, not a refusal that
       -- throws. A refusal (a malformed request, 21 ops) still throws, because that is a bug in the
       -- script rather than news about a call.
       entry = { op = id, state = "failed", reason = "unknown_op",
-        note = "no handle with this id in this scope; op ids come from {state:\"pending\", op}" }
+        note = "no handle with this id in this scope; op ids come from {state:\"pending\", op} or pending()" }
     else
-      local state, reason = M.poll(dispatch, id, remaining())
-      if not state then
-        entry = { op = id, tool = record.tool, state = "pending", waited_s = 0,
-          progress = { state = "unknown", reason = tostring(reason) } }
-      elseif state.settled == true then
-        local result = settle(dispatch, scope, index, record, state)
-        record.reported = true
-        M.save(scope, index)
-        entry = { op = id, tool = record.tool, state = record.state, result = result }
-        if record.state ~= "done" then entry.reason = record.error end
+      local executor = executor_of(record)
+      if not executor then
+        entry = { op = id, tool = record.tool, state = "failed", reason = "no_executor",
+          note = "this handle's tool has no detached executor in this build, so it cannot be resumed" }
       else
-        record.progress = M.progress(dispatch, id, state)
-        record.reason = reason
-        M.save(scope, index)
-        entry = { op = id, tool = record.tool, state = "pending",
-          waited_s = math.floor((budget - remaining()) / 1000), progress = record.progress }
-        if reason and reason ~= "still_running" then entry.reason = reason end
+        -- `until:"any"` stops *waiting* after the first op that settled; the ops after it are still
+        -- answered, with the state they have now, so the caller can see its whole pool.
+        local state, reason = executor_poll(executor, dispatch, opts, record, stop_waiting and 0 or remaining())
+        if not state then
+          entry = { op = id, tool = record.tool, state = "pending", waited_s = 0,
+            progress = { state = "unknown", reason = tostring(reason) } }
+        elseif state.settled == true then
+          local result = settle(executor, dispatch, opts, scope, index, record, state)
+          record.reported = true
+          M.save(scope, index)
+          entry = { op = id, tool = record.tool, state = record.state, result = result }
+          if record.state ~= "done" then entry.reason = record.error end
+          if until_kind == "any" then stop_waiting = true end
+        else
+          record.progress = executor_progress(executor, dispatch, opts, record, state)
+          record.reason = reason
+          M.save(scope, index)
+          entry = { op = id, tool = record.tool, state = "pending",
+            waited_s = math.floor((budget - remaining()) / 1000), progress = record.progress }
+          if reason and reason ~= "still_running" then entry.reason = reason end
+        end
       end
     end
     answered[#answered + 1] = entry
-    -- `until:"any"` stops at the first op that settled; the rest are answered nowhere, never
-    -- guessed at, because the script asked for one.
-    if until_kind == "any" and entry.state ~= "pending" then break end
   end
   if single then return answered[1] end
   return answered
@@ -542,41 +683,39 @@ function M.cancel(dispatch, opts, asked)
     local record = index.ops[id]
     if type(record) ~= "table" then
       out[#out + 1] = { op = id, cancelled = false, error = "unknown_op" }
+    elseif (executor_of(record) or {}).cancel == false then
+      -- The kind says its effect cannot be stopped once it started: the answer is the reason, in the
+      -- kind's own vocabulary, never a silent success (`a sent message stays sent`).
+      local executor = executor_of(record) or {}
+      out[#out + 1] = { op = id, tool = record.tool, cancelled = false,
+        error = "not_cancellable", why = tostring(executor.cancel_why or
+          "this effect cannot be stopped once it has started") }
+    elseif type((executor_of(record) or {}).cancel) == "function" then
+      local ok, answer = pcall(executor_of(record).cancel, dispatch, opts, record)
+      out[#out + 1] = ok and answer or { op = id, tool = record.tool, cancelled = false,
+        error = "not_cancellable", why = tostring(answer) }
+      if ok and type(answer) == "table" and answer.cancelled then
+        record.state = "cancelled"; record.reported = true; record.progress = nil
+        M.save(scope, index)
+      end
     else
-      local executor = M.EXECUTORS[record.tool] or {}
-      if executor.cancel == false then
-        -- The kind says its effect cannot be stopped once it started: the answer is the reason, in
-        -- the recorder's own vocabulary, never a silent success (`a sent message stays sent`).
-        out[#out + 1] = { op = id, tool = record.tool, cancelled = false,
-          error = "not_cancellable", why = tostring(executor.cancel_why or
-            "this effect cannot be stopped once it has started") }
-      elseif type(executor.cancel) == "function" then
-        local ok, answer = pcall(executor.cancel, dispatch, id, record)
-        out[#out + 1] = ok and answer or { op = id, tool = record.tool, cancelled = false,
-          error = "not_cancellable", why = tostring(answer) }
-        if ok and type(answer) == "table" and answer.cancelled then
-          record.state = "cancelled"; record.reported = true; record.progress = nil
-          M.save(scope, index)
-        end
+      local state = snapshot(dispatch, id)
+      if type(state) == "table" and state.settled == true then
+        out[#out + 1] = { op = id, tool = record.tool, cancelled = false, state = record.state,
+          error = "finished",
+          note = "the call had finished first; the outcome is retained and wait(op) re-reads it" }
       else
-        local snapshot_state = snapshot(dispatch, id)
-        if type(snapshot_state) == "table" and snapshot_state.settled == true then
-          out[#out + 1] = { op = id, tool = record.tool, cancelled = false, state = record.state,
-            error = "finished",
-            note = "the call had already finished; the outcome is retained and wait(op) re-reads it" }
+        local stopped, reason = operation_call(dispatch, "cancel", { action = "cancel", id = id })
+        if not stopped then
+          out[#out + 1] = { op = id, tool = record.tool, cancelled = false,
+            error = "not_cancellable", why = tostring(reason) }
         else
-          local stopped, reason = operation_call(dispatch, "cancel", { action = "cancel", id = id })
-          if not stopped then
-            out[#out + 1] = { op = id, tool = record.tool, cancelled = false,
-              error = "not_cancellable", why = tostring(reason) }
-          else
-            record.state = "cancelled"
-            record.reported = true
-            record.progress = nil
-            M.save(scope, index)
-            out[#out + 1] = { op = id, tool = record.tool, cancelled = stopped.cancelled ~= false,
-              state = "cancelled" }
-          end
+          record.state = "cancelled"
+          record.reported = true
+          record.progress = nil
+          M.save(scope, index)
+          out[#out + 1] = { op = id, tool = record.tool, cancelled = stopped.cancelled ~= false,
+            state = "cancelled" }
         end
       end
     end
@@ -585,23 +724,29 @@ function M.cancel(dispatch, opts, asked)
 end
 
 -- ---------------------------------------------------------------------------- no orphans
--- Handles outlive the script, so something has to notice an operation that finished while nobody was
--- waiting on it. `begin` settles them (a status read per open handle, no waiting) and `announce`
--- reports each one exactly once, on the next script in that scope. Nothing is ever replayed.
+-- Handles outlive the script, so something has to notice work that finished while nobody was waiting
+-- on it. `begin` settles them (one poll per open handle, no waiting) and `announce` reports each one
+-- exactly once, on the next script in that scope. Nothing is ever replayed.
 function M.begin(dispatch, opts)
   local scope = opts.scope
   local index = M.open(scope)
   if index.count == 0 then return index end
   local changed = false
   for _, record in pairs(index.ops) do
-    if record.state == "running" or record.state == "unknown" then
-      local state = snapshot(dispatch, record.op)
-      if type(state) == "table" and state.settled == true then
-        settle(dispatch, scope, index, record, state)
+    if open_record(record) and (record.state == "running" or record.state == "unknown") then
+      local executor = executor_of(record)
+      local state, reason = executor and executor_poll(executor, dispatch, opts, record, 0) or nil, nil
+      if not executor then
+        record.state = "unknown"
+        record.error = "no_executor"
         changed = true
-      elseif type(state) == "table" then
+      elseif state and state.settled == true then
+        settle(executor, dispatch, opts, scope, index, record, state)
+        changed = true
+      elseif state then
         record.state = "running"
-        record.progress = M.progress(dispatch, record.op, state)
+        record.progress = executor_progress(executor, dispatch, opts, record, state)
+        record.reason = reason
         changed = true
       end
     end
@@ -628,11 +773,18 @@ function M.announce(scope)
   return out
 end
 
--- `searchTools("select:wait")` answers these: the shape a script should expect, in one place.
+-- `searchTools("select:wait")` (and pending, cancel) answer these: the shape a script should expect,
+-- in one place.
 M.WAIT_HELP = {
   name = "wait",
-  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked: {state:\"done\", op, tool, result} with the call's normal result, {state:\"failed\", op, error} when it failed, {state:\"pending\", op, progress, waited_s} while it is still running. A read: it dispatches nothing and never re-runs an effect, so it batches with anything - Promise.all([wait(a), tools.read({path}), wait(b)]). wait_s defaults to 60, is capped at 300 and at the script's remaining time; until:\"any\" returns as soon as one op has settled.",
+  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked: {state:\"done\", op, tool, result} with the call's normal result, {state:\"failed\", op, reason} when it failed, {state:\"pending\", op, progress, waited_s} while it is still running. It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60, is capped at 300 and at the script's remaining time. until:\"any\" stops waiting at the first op that settled and still answers every op, finished or not, so a step can drop the finished, add new calls and wait again - a work pool that grows and shrinks, e.g. const open = (await pending()).ops.map(o => o.op); const done = []; for (const e of await wait(open, {until:'any'})) if (e.state !== 'pending') done.push(e.op);",
   code = "const first = await tools.bash({command:'bash scripts/fast.sh'});\nif (first.state === 'pending') {\n  const [log, resumed] = await Promise.all([tools.read({path:'fast.log'}), wait(first.op, {wait_s:120})]);\n  return {resumed: resumed.state, tail: first.progress && first.progress.tail};\n}\nreturn {code: first.code};",
+}
+
+M.PENDING_HELP = {
+  name = "pending",
+  description = "The pending calls this session still holds, oldest first: {ok, ops:[{op, tool, state, kind, age_s, progress}], count, limit, shown, truncated}. It dispatches nothing and never re-runs an effect. Use it in a later step or turn instead of remembering handles - then wait(ops) resumes them, or wait(ops, {until:\"any\"}) answers which finished while the rest stay pending.",
+  code = "const open = (await pending()).ops.map(o => o.op);\nconst entries = await wait(open, {until:'any'});\nreturn {open: open.length, done: entries.filter(e => e.state !== 'pending').map(e => e.op)};",
 }
 
 M.CANCEL_HELP = {

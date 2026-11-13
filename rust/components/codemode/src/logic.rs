@@ -55,6 +55,7 @@ pub const HOST_GLOBALS: &[&str] = &[
     // is a managed operation, which this seam neither runs nor reads.
     "wait",
     "cancel",
+    "pending",
 ];
 
 /// The guest globals this seam answers, with the prelude's `spread` flag.
@@ -69,6 +70,8 @@ pub const GUEST_GLOBALS: &[(&str, bool)] = &[
     // Spread, so `wait(op, {wait_s:120})` reaches the loop with both arguments.
     ("wait", true),
     ("cancel", true),
+    // The pool: the handles this scope still holds, read so a later step needs no memory of them.
+    ("pending", true),
     ("describeTool", false),
     ("showCall", false),
     ("capabilities", false),

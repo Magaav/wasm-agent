@@ -60,6 +60,7 @@ pub extern "C-unwind" fn mark_db_ready(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Rust-side setter: the environment overrides a host-side test installs. No Lua value.
 pub fn set_env_overrides(values: HashMap<String, String>) {
     let _ = ENV_OVERRIDES.set(values);
 }
@@ -234,6 +235,7 @@ pub extern "C-unwind" fn platform(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Returns JSON text of `{ok, matches, count, …}`; A string the caller decodes (`lua/vendor/json.lua`), never a Lua table.
 /// host.grep(pattern, path, opts?) -> [{ file, line, text }]
 ///
 /// Implemented here rather than by shelling out to `grep`, which does not exist
@@ -249,7 +251,13 @@ pub extern "C-unwind" fn grep(l: *mut LuaState) -> c_int {
     1
 }
 
-/// host.list_dir(path) -> [{ name, kind, size, modified }]
+/// host.list_dir(path) -> JSON text of `{path, entries: [{name, kind, size, modified}]}`, or
+/// `{path, error}` when the directory cannot be read.
+///
+/// **One string, not a table.** `#value` is its byte length and `ipairs(value)` yields nothing, so a
+/// caller must decode it before reading `entries`; a directory that does not exist yet answers an
+/// error object rather than an empty list (measured 12/11: a scan that forgot this silently found no
+/// handles and was indistinguishable from "nothing pending").
 ///
 /// The `ls` tool used to shell out to `ls -la`, which does not exist on Windows:
 /// its description claimed to be portable while the implementation was not, and
@@ -410,6 +418,7 @@ fn agent_for_stream(first_response_seconds: u64) -> ureq::Agent {
 /// own flag. One name means a caller cannot check the wrong one.
 static RUN_CANCEL_PROBE: OnceLock<fn() -> bool> = OnceLock::new();
 
+    /// Rust-side setter: the probe the operation loops ask whether this run was cancelled.
 pub fn set_run_cancel_probe(probe: fn() -> bool) {
     let _ = RUN_CANCEL_PROBE.set(probe);
 }
@@ -422,11 +431,13 @@ fn cli_interrupted() -> bool {
     CLI_INTERRUPT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+    /// Rust-side read of the same cancellation the Lua `host.run_cancelled` answers: a boolean.
 pub(crate) fn run_cancel_requested() -> bool {
     RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || cli_interrupted() || crate::subagents::cancel_requested()
 }
 
-/// host.run_cancelled() -> {cancelled, run_cancel, subagent_cancel}
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
+/// host.run_cancelled() -> JSON text of {cancelled, run_cancel, subagent_cancel}
 ///
 /// `cancelled` is true while either source is set. A foreground run's scoped
 /// cancellation is the run half; a supervised child's is the subagent half.
@@ -470,6 +481,7 @@ fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
         .collect()
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.sql_exec(sql, params_json) -> {ok, changes} | {error}
 ///
 /// A statement error is RETURNED, never forced into a rollback: SQLite lets the
@@ -579,6 +591,7 @@ fn under_policy<T>(
     }
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.sql_query(sql, params_json) -> [ {column: value}, ... ] | {error}
 ///
 /// A read takes no write lock, so the only contention it meets is a schema/journal transition; it is
@@ -651,6 +664,7 @@ pub fn rollback_if_open(lua: &wa_host_support::lua::Lua) {
     }
 }
 
+    /// Rust-side twin of `host.uuid`: a fresh UUID string, never a constant.
 pub(crate) fn new_uuid() -> String {
     let mut bytes = [0u8; 16];
     let random = SystemRandom::new();
@@ -677,6 +691,7 @@ pub(crate) fn new_uuid() -> String {
     )
 }
 
+    /// host.uuid() -> a fresh UUID as a Lua string. Not JSON: one string, no structure.
 pub extern "C-unwind" fn uuid(l: *mut LuaState) -> c_int {
     let value = new_uuid();
     unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
@@ -718,6 +733,8 @@ fn read_text_file(path: &str, limit: u64) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|_| format!("read_file_not_text:{} bytes", metadata.len()))
 }
 
+    /// host.read_file(path) -> the file's text as a Lua string, or `nil, reason` (two values).
+    /// Not JSON: the bytes are the answer, and the reason names why there are none.
 pub extern "C-unwind" fn read_file(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     match read_text_file(&path, read_file_max_bytes()) {
@@ -739,6 +756,8 @@ pub extern "C-unwind" fn read_file(l: *mut LuaState) -> c_int {
 /// Not named `isatty` in Rust: with #[no_mangle] that replaced libc's own isatty process-wide, and the
 /// first caller (the test harness) crashed.
 #[no_mangle]
+    /// host.stream_is_terminal(which?) -> a Lua boolean: is stdin/stderr/stdout a console.
+    /// Not JSON: one boolean.
 pub extern "C-unwind" fn stream_is_terminal(l: *mut LuaState) -> c_int {
     use std::io::IsTerminal;
     let answer = match arg_string(l, 1).as_deref() {
@@ -753,6 +772,8 @@ pub extern "C-unwind" fn stream_is_terminal(l: *mut LuaState) -> c_int {
 /// host.path_kind(path) -> "file" | "dir" | "missing" | "other". `read_file` answers nil both for a
 /// missing file and for one it cannot read as text, and a caller about to overwrite needs to know which.
 #[no_mangle]
+    /// host.path_kind(path) -> a Lua string: `"file"`, `"dir"`, `"missing"` or `"other"`.
+    /// Not JSON: a `read_file` answers nil for both "missing" and "unreadable", so this is how a
 pub extern "C-unwind" fn path_kind(l: *mut LuaState) -> c_int {
     let kind = match arg_string(l, 1).map(|path| std::fs::metadata(path)) {
         Some(Ok(meta)) if meta.is_file() => "file",
@@ -832,6 +853,7 @@ fn read_image_value(path: &str, max_bytes: usize) -> Value {
     })
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.read_image_base64(path, max_bytes) -> JSON
 ///
 /// Probe by magic bytes and read a supported image with a hard allocation bound.
@@ -1032,6 +1054,8 @@ mod atomic_write_tests {
     }
 }
 
+    /// host.write_file(path, text) -> a Lua boolean (written atomically).
+    /// Not JSON: one true/false, and the graph index is told about the write.
 pub extern "C-unwind" fn write_file(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     let text = arg_string(l, 2).unwrap_or_default();
@@ -1082,6 +1106,7 @@ fn run_bounded(
     crate::operations::foreground(program, flag, command, cwd, seconds, &Value::Null)
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.operation(action, args_json) -> operation receipt/state/output | {error}
 pub extern "C-unwind" fn operation(l: *mut LuaState) -> c_int {
     let action = arg_string(l, 1).unwrap_or_default();
@@ -1092,6 +1117,7 @@ pub extern "C-unwind" fn operation(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.jobs(action, args_json): local automation management, never execution.
 pub extern "C-unwind" fn jobs(l: *mut LuaState) -> c_int {
     let action=arg_string(l,1).unwrap_or_else(||"list".into());
@@ -1111,13 +1137,15 @@ pub extern "C-unwind" fn jobs(l: *mut LuaState) -> c_int {
     push_json(l,&result.unwrap_or_else(|e|json!({"error":e.to_string()})));1
 }
 
-/// Internal scheduler enqueue; not exposed as a model tool or HTTP route.
+/// Not exposed as a model tool or HTTP route.
+/// Internal scheduler enqueue; answers JSON text of the scheduler's receipt, never a Lua table.
 pub extern "C-unwind" fn enqueue_completion(l: *mut LuaState) -> c_int {
     let body=arg_string(l,1).unwrap_or_default();
     push_json(l,&crate::serve::enqueue_completion(&body));
     1
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.subagent(action, args_json): the local subagent runtime.
 ///
 /// Agent policy lives in Lua (`lua/core/subagents.lua`): which profile, which
@@ -1134,12 +1162,17 @@ pub extern "C-unwind" fn subagent(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Answers JSON text; A string the caller decodes (`lua/vendor/json.lua`), never a Lua table.
 /// Atomic named-resource claims. Resource choice and authorization stay in Lua.
 pub extern "C-unwind" fn binding_state(l:*mut LuaState)->c_int {
     let action=arg_string(l,1).unwrap_or_default();
     let args=arg_string(l,2).and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
     push_json(l,&wa_rendezvous::binding_runtime::state(&action,&args).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
 }
+/// `main.rs`, never by a script.
+/// **One string, not a table.** `serve` is refused here: the node's own claim at startup is made in
+///
+/// host.binding_transport(action) -> JSON text of the binding transport's answer (`{ok, …}` or `{ok:false, error}`).
 pub extern "C-unwind" fn binding_transport(l:*mut LuaState)->c_int {
     let action=arg_string(l,1).unwrap_or_default();
     // `serve` is the node's own claim at startup (main.rs), never a script's.
@@ -1147,6 +1180,9 @@ pub extern "C-unwind" fn binding_transport(l:*mut LuaState)->c_int {
     push_json(l,&wa_rendezvous::binding_runtime::transport(&action).unwrap_or_else(|error|json!({"ok":false,"error":error})));1
 }
 
+/// **One string, not a table.** Resource choice and authorization stay in Lua.
+///
+/// host.resource(action, args_json) -> JSON text of the resource action's answer (`{ok, …}` or `{ok:false, error}`).
 pub extern "C-unwind" fn resource(l: *mut LuaState) -> c_int {
     let action=arg_string(l,1).unwrap_or_default();
     let args=arg_string(l,2).and_then(|raw|serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null);
@@ -1154,6 +1190,12 @@ pub extern "C-unwind" fn resource(l: *mut LuaState) -> c_int {
     1
 }
 
+/// effective exec timeout.
+/// supervised operation runtime (`docs/OPERATIONS.md`); this call waits for it, bounded by the
+/// **One string, not a table**: every use decodes it. The command goes through the path guard and the
+///
+/// (`{code, ok, stdout, stderr, operation_id, timing, …}`, or `{error}`).
+/// host.exec(command, cwd, timeout_seconds?, context_json?) -> JSON text of the command result
 pub extern "C-unwind" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
@@ -1166,6 +1208,7 @@ pub extern "C-unwind" fn exec(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.client(action, args_json) -> result from the client machine | {error}
 ///
 /// The failure path is deliberately verbose, because it is the only part of this
@@ -1366,14 +1409,16 @@ mod client_diagnosis_tests {
     }
 }
 
-/// host.client_status() -> {connected, last_seen_secs, queued}
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
+/// host.client_status() -> JSON text of {connected, last_seen_secs, queued}
 pub extern "C-unwind" fn client_status(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     push_json(l, &host.client.status());
     1
 }
 
-/// host.node_identity() -> {node_id, public_key}
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
+/// host.node_identity() -> JSON text of {node_id, public_key}
 pub extern "C-unwind" fn node_identity(l: *mut LuaState) -> c_int {
     match wa_rendezvous::node::Identity::load() {
         Ok(identity) => push_json(
@@ -1385,7 +1430,8 @@ pub extern "C-unwind" fn node_identity(l: *mut LuaState) -> c_int {
     1
 }
 
-/// host.sign(text) -> {signature}
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
+/// host.sign(text) -> JSON text of {signature}
 pub extern "C-unwind" fn sign(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();
     match wa_rendezvous::node::Identity::load() {
@@ -1462,6 +1508,7 @@ fn mask(value: &str) -> String {
     format!("{}...{}", &trimmed[..3], &trimmed[trimmed.len() - 4..])
 }
 
+    /// host.log(message) -> no value. Writes one redacted line to the node's log.
 pub extern "C-unwind" fn log(l: *mut LuaState) -> c_int {
     if let Some(message) = arg_string(l, 1) {
         eprintln!("[lua] {}", redact(&message));
@@ -1477,6 +1524,7 @@ pub extern "C-unwind" fn stream(l: *mut LuaState) -> c_int {
     0
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.plugins() -> JSON `[{name, description, parameters}, ...]`
 pub extern "C-unwind" fn plugins(l: *mut LuaState) -> c_int {
     let host = host_of(l);
@@ -1489,6 +1537,7 @@ pub extern "C-unwind" fn plugins(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.invoke(name, arguments_json) -> plugin JSON result | {error}
 pub extern "C-unwind" fn invoke(l: *mut LuaState) -> c_int {
     let host = host_of(l);
@@ -1523,6 +1572,7 @@ fn retry_after_ms(headers: &ureq::http::HeaderMap) -> Option<u64> {
     value.parse::<u64>().ok().map(|seconds| seconds.saturating_mul(1000))
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.http(method, url, headers_json, body) -> {status, body} | {error}
 pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
@@ -1577,6 +1627,7 @@ pub extern "C-unwind" fn http(l: *mut LuaState) -> c_int {
 /// at each run and tool boundary; a long tool call or a stalled provider read is then
 /// visible as silence rather than as health.
 #[no_mangle]
+    /// host.beat() -> no value. Marks the calling interpreter alive for the supervisor.
 pub extern "C-unwind" fn beat(_l: *mut LuaState) -> c_int {
     crate::serve::beat();
     0
@@ -2046,6 +2097,7 @@ mod ticker_tests {
     }
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.http_stream(method, url, headers_json, body) -> aggregated completion.
 ///
 /// Reads an OpenAI-compatible SSE stream, forwards each content delta to the UI
@@ -2080,6 +2132,7 @@ pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.http_sse(method, url, headers_json, body, on_line) -> {status, lines, termination}
 ///
 /// POSTs to an endpoint that answers `text/event-stream` and hands **each response line** to the
@@ -2257,6 +2310,7 @@ fn call_lua_string(l: *mut LuaState, index: c_int, payload: &str) -> Result<bool
     }
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// host.relay(url, headers_json, body) -> {status}
 ///
 /// POSTs to a peer and forwards every SSE `data:` line straight to our UI
@@ -2800,6 +2854,10 @@ pub extern "C-unwind" fn monotonic_ms(l: *mut LuaState) -> c_int {
     1
 }
 
+/// **One string, not a table.** Read-only facts about the running binary; it changes nothing.
+///
+/// build_wave_generation, process_id, boot_id, os, arch, binary_path}`.
+/// host.runtime_info() -> JSON text of `{version, binary_sha256, build_source_commit, build_source_tree,
 pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
     static IDENTITY: OnceLock<Value> = OnceLock::new();
     let identity = IDENTITY.get_or_init(|| {
@@ -2819,6 +2877,7 @@ pub extern "C-unwind" fn runtime_info(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Returns JSON text of the sample; A string the caller decodes (`lua/vendor/json.lua`), never a Lua table.
 /// host.system_resources() -> a fresh CPU, memory and workspace-filesystem sample.
 pub extern "C-unwind" fn system_resources(l: *mut LuaState) -> c_int {
     push_json(l, &wa_host_support::system_resources::sample());
@@ -2929,6 +2988,9 @@ fn usable_size(columns: i32, rows: i32) -> Option<(i32, i32)> {
     Some((columns, rows))
 }
 
+/// **One string, not a table** when it answers at all: a caller decodes it before reading `columns`.
+///
+/// host.terminal_size() -> JSON text of `{columns, rows}`, or `nil` when there is no console.
 pub extern "C-unwind" fn terminal_size(l: *mut LuaState) -> c_int {
     match console_size() {
         Some((columns, rows)) => push_json(l, &json!({"columns": columns, "rows": rows})),
@@ -3443,6 +3505,7 @@ fn console_reader() {
     }
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// `host.input_start()` -> `{started:true}`, or `nil` if the reader cannot be asked.
 ///
 /// Idempotent: a caller that starts twice gets one reader and one `true`, so nothing has to
@@ -3493,6 +3556,7 @@ pub extern "C-unwind" fn input_editor(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// `host.panel(spec_json)` -> `{action, index?|text?}`; `host.panel()` closes it.
 ///
 /// Opens (or replaces) the panel and blocks until the reader confirms (`select` with a 1-based
@@ -3765,6 +3829,7 @@ fn wait_for_input(
     state
 }
 
+    /// Returns JSON text of the array of typed lines; A string the caller decodes (`lua/vendor/json.lua`), never a Lua table.
 /// `host.input_take(timeout_ms)` -> `{lines, eof, running}`.
 ///
 /// Waits up to `timeout_ms` for at least one line, and answers immediately with whatever is
@@ -3812,6 +3877,7 @@ pub fn restore_input() {
     }
 }
 
+    /// Answers JSON text; A string the caller decodes (`lua/vendor/json.lua`), never a Lua table.
 /// `host.input_idle()` -> `{idle, draft_empty, panel, queued, selection}`: whether the CLI can restart
 /// now without throwing away anything the reader is doing.
 pub extern "C-unwind" fn input_idle(l: *mut LuaState) -> c_int {
@@ -3843,6 +3909,7 @@ fn binary_identity(path: &std::path::Path) -> (u64, Option<std::time::SystemTime
     (inode, meta.as_ref().and_then(|m| m.modified().ok()), meta.map(|m| m.len()).unwrap_or(0))
 }
 
+    /// Answers JSON text; A string the caller decodes (`lua/vendor/json.lua`), never a Lua table.
 /// `host.binary_changed()` -> `{changed, path, reason?}`. The first call records what is on disk; a
 /// later one says whether the file at that path is another binary now (an install replaced it: a new
 /// inode, or the running file shows as deleted, or the same file was rewritten). The CLI asks this
@@ -3867,6 +3934,7 @@ pub extern "C-unwind" fn binary_changed(l: *mut LuaState) -> c_int {
     1
 }
 
+    /// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table.
 /// `host.cli_reexec(args_json, env_json)`: give the terminal back (raw mode, scroll region, mouse,
 /// paste mode - everything `input_stop` restores) and replace this process with the wa binary at
 /// this process's own path, run with `args` and these extra environment values. Only returns on
@@ -3904,6 +3972,9 @@ pub extern "C-unwind" fn cli_reexec(l: *mut LuaState) -> c_int {
     }
 }
 
+/// **One string, not a table.** Restores the terminal the CLI's line reader took over.
+///
+/// host.input_stop() -> JSON text of `{stopped: true}`.
 pub extern "C-unwind" fn input_stop(l: *mut LuaState) -> c_int {
     restore_input();
     push_json(l, &json!({"stopped": true}));

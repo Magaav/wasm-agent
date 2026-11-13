@@ -89,32 +89,50 @@ never told "still running" with nothing it can do about it.
   finishes in time sees no change at all.
 * `wait_s` is a property of the call's *wait*, taken out of the arguments before the tool's own schema
   sees them: default 60 s, 0..300 s, and effectively `min(wait_s, 300, the script's remaining time minus
-  a margin)`. A wait never outlives the script that started it.
+  a margin)`. A wait never outlives the script that started it; a `wait_s` that is not a number is
+  refused by name (`invalid_wait_s`), never quietly replaced with the default.
 * `wait(op | [ops], {wait_s, until:"all"|"any"})` is the one resume: 1..20 ops, one entry per op in the
   order asked (`done` with the call's normal result, `failed` with `reason`, `pending` with `progress`).
-  It is a **read** - it dispatches nothing, holds no lock or lease - so the guest batches it with
-  anything: `Promise.all([wait(a), tools.read({path}), wait(b)])`. `cancel(op)` is the one stop; where
-  the effect cannot be stopped it answers `not_cancellable` with the reason, because a sent message
-  stays sent.
-* Handles outlive the script. The work is a **managed operation** (`docs/OPERATIONS.md`), so the handle
-  *is* the operation id: the record is on disk per scope, `operation read`/`/operations` already answer
-  it, and the next step, next turn or a resumed session of the same scope can `wait(op)`. At most 16
-  pending calls per session, refused by name past that. A settled result stays in `results`, so
-  `results.get(op)` re-reads it without re-running anything.
-* Nothing holds a lock: every wait is a bounded `operation wait` slice (<= 1 s) plus a status read, so a
-  stop/steer aborts it at once with `pending` and a reason, an unreachable supervisor answers `pending`
-  with the reason rather than hanging or claiming `failed`, and a resume never re-runs an effect.
+  A failed entry carries `reason`, never `error`: news about a call is an answer a script branches on,
+  not a refusal that throws. It is a **read** - it dispatches nothing, holds no lock or lease - so the
+  guest batches it with anything: `Promise.all([wait(a), tools.read({path}), wait(b)])`.
+* `pending()` is a read of the whole pool: `{ok, ops:[{op, tool, state, kind, age_s, progress}], count,
+  limit, shown, truncated}`, oldest first. A later step or turn asks it instead of remembering handles.
+* `until:"any"` stops *waiting* at the first op that settled and still answers **every** op it was
+  asked about, finished or not. That is the pool: `const open = (await pending()).ops.map(o => o.op)`,
+  wait `{until:"any"}`, drop the finished ones, start new calls, wait again - a batch that grows and
+  shrinks across steps, with every outcome arriving exactly once.
+* Handles outlive the script. `cancel(op)` is the one stop; where the effect cannot be stopped it
+  answers `not_cancellable` with the reason, because a sent message stays sent. At most 16 pending calls
+  per session, refused by name past that; a settled result stays in `results`, so `results.get(op)`
+  re-reads it without re-running anything.
+* Nothing holds a lock: every wait is a bounded slice of its executor's own wait (<= 1 s) plus a status
+  read, so a stop/steer aborts it at once with `pending` and a reason, an unreachable executor answers
+  `pending` with the reason rather than hanging or claiming `failed`, and a resume never re-runs an
+  effect.
 * No orphans: an op nobody resumed still settles, and is reported **once**, on the next script of that
   scope (`pending_settled`), the same exactly-once idea the Sentinel's deploy outcome uses.
 
+**The executors** (`M.EXECUTORS` in `lua/core/codemode_pending.lua`) are how a call becomes a handle,
+and they are the whole difference between "can be resumed" and "cannot":
+
+* `operation` - the managed operations (`docs/OPERATIONS.md`). The handle *is* the operation id, so the
+  record on disk, `operation read`, `/operations` and the supervisor's deadline are the ones already
+  documented; `bash` starts one through the tool's own serial path (path guard included, which now
+  covers `operation start` too), and `operation await` becomes a bounded wait on the id the caller has.
+* `outbox` - a WhatsApp send's durable queue job (land6). The id the connector answers is the handle
+  (`msg-<id>`), a wait reads the queue through the connector's own bounded loop, and `cancel` answers
+  `not_cancellable` with `a sent message stays sent`. Inside a script the send's `wait_s` is the same
+  knob every call has; the connector's `{id}`/`{ids}` resume stays as a hidden alias for a call made
+  outside a script, and the answer's `resume` field names it there.
+
 **The limitation, named.** Work that runs *inside* this interpreter cannot be moved off it, so a call
-becomes pending only where the node has a detached executor (`M.EXECUTORS` in
-`lua/core/codemode_pending.lua`): today `bash` (started through the tool's own serial path, path guard
-included) and `operation` (`start` registers the receipt; `await` becomes a bounded wait on the same
-id). Every other tool answers as it did before this pattern existed - it is never turned into a handle
-that cannot settle. `scripts/test-codemode-pending.lua` asserts all of the above on both loops, and
+becomes pending only where the node has an executor. Today that is `bash`, `operation` and the WhatsApp
+send. A `remote`/peer call has **no** executor: it is answered synchronously and cannot be resumed, and
+so is every other tool without one - it is never turned into a handle that cannot settle.
+`scripts/test-codemode-pending.lua` asserts all of the above on both loops,
 `scripts/test-codemode-component.sh` runs that same suite through the component and compares the check
-counts.
+counts, and `scripts/test-host-return-docs.lua` keeps the `host.*` encodings honest.
 
 ## Peers and discovery (29/10)
 

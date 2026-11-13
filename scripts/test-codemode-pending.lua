@@ -190,9 +190,85 @@ check(batch_value and batch_value.order==true,'a batch answers one entry per op 
 -- Lua sees the JS array 1-based: states[1] is the first op, states[2] the second.
 check(batch_value and batch_value.states[2]=='pending' and batch_value.states[1]=='done',
  'the entry for the running op says pending: '..json.encode(batch_value and batch_value.states))
-check(batch_value and batch_value.anyLen==1 and batch_value.anyState=='done','until:"any" answers as soon as one op settled')
+-- `until:"any"` stops *waiting* at the first settled op and still answers every op it was asked
+-- about, which is what lets a step drop the finished ones and keep the rest.
+check(batch_value and batch_value.anyLen==2 and batch_value.anyState=='done',
+ 'until:"any" answers every op, the settled one first: '..tostring(batch_value and batch_value.anyLen))
 check(batch_value and tostring(batch_value.refused or ''):find('at_most_20'),'a batch of 21 ops is refused by name: '..tostring(batch_value and batch_value.refused))
 local slow_op=batch_value and batch_value.ops and batch_value.ops.b
+
+-- The pool (the operator's follow-up, 12/11): a batch that grows and shrinks across steps. Script 1
+-- starts five calls and keeps none of them in mind; script 2 asks `pending()` what is open, waits
+-- until one is done, drops the finished, adds two more, and waits for the rest - every outcome
+-- arriving exactly once and nothing running twice.
+assert(host.write_file(data..'/pool-marker.txt',''))
+local pool_marker=json.encode(data..'/pool-marker.txt')
+local pool_script1,pool_value1=run([==[
+const marker = ]==]..pool_marker..[==[;
+const ops = [];
+for (let i = 1; i <= 5; i++) {
+  const started = await tools.bash({command: 'echo pool' + i + ' >> ' + marker + '; sleep ' + i + '; echo done' + i, wait_s: 0});
+  ops.push(started.op);
+}
+return {ops: ops};
+]==],90000)
+check(pool_script1.ok==true and type(pool_value1.ops)=='table' and #pool_value1.ops==5,
+ 'script 1 starts five calls and keeps no handle in mind: '..json.encode(pool_value1):sub(1,160))
+local pool_script2,pool_value2=run([==[
+const marker = ]==]..pool_marker..[==[;
+const open = await pending();
+let pool = open.ops.map(o => o.op);
+const collected = [];
+const first = await wait(pool, {until: 'any', wait_s: 60});
+for (const entry of first) {
+  if (entry.state === 'pending') continue;
+  collected.push(entry.op);
+  pool = pool.filter(op => op !== entry.op);
+}
+const added = [];
+for (const n of [6, 7]) {
+  const started = await tools.bash({command: 'echo pool' + n + ' >> ' + marker + '; sleep 1; echo done' + n, wait_s: 0});
+  added.push(started.op);
+}
+pool = pool.concat(added);
+const rest = await wait(pool, {wait_s: 120});
+for (const entry of rest) collected.push(entry.op);
+const afterAll = await pending();
+return {openAtStart: open.ops.length, firstLen: first.length,
+  firstDone: first.filter(e => e.state !== 'pending').length,
+  restLen: rest.length, collected: collected, unique: new Set(collected).size,
+  allDone: rest.every(e => e.state === 'done'), leftOpen: afterAll.ops.length};
+]==],180000)
+check(pool_script2.ok==true,'script 2 drives the pool: '..tostring(pool_script2.error))
+check(pool_value2 and pool_value2.openAtStart>=5,'pending() answers the five handles script 1 left: '..tostring(pool_value2 and pool_value2.openAtStart))
+check(pool_value2 and pool_value2.firstLen==pool_value2.openAtStart and pool_value2.firstDone>=1,
+ 'wait(until:"any") answers every open op with at least one settled: '..json.encode(pool_value2 and {f=pool_value2.firstLen,d=pool_value2.firstDone}))
+check(pool_value2 and pool_value2.restLen==pool_value2.openAtStart-pool_value2.firstDone+2,
+ 'the rest of the pool plus the two new calls are waited in one call: '..json.encode(pool_value2 and {r=pool_value2.restLen}))
+check(pool_value2 and pool_value2.allDone==true,'every call in the pool finished')
+-- Relative to what `pending()` answered, because an earlier script in this file may still have work
+-- open: what must be true is that the pool script collected each open handle plus its two new calls,
+-- exactly once.
+check(pool_value2 and pool_value2.unique==#pool_value2.collected and #pool_value2.collected==pool_value2.openAtStart+2,
+ 'every outcome arrives exactly once across the two waits: '..json.encode(pool_value2 and {c=#pool_value2.collected,u=pool_value2.unique,o=pool_value2.openAtStart}))
+check(pool_value2 and pool_value2.leftOpen==0,'the pool is empty once every outcome was collected: '..tostring(pool_value2 and pool_value2.leftOpen))
+check(lines_of(data..'/pool-marker.txt')==7,
+ 'the pool ran each call exactly once (seven marker lines, saw '..lines_of(data..'/pool-marker.txt')..')')
+
+-- `pending()` is a read: it changes nothing, and it names the tool each handle belongs to.
+local empty_pending,empty_pending_value=run('const p = await pending(); return {count: p.count, ops: p.ops.length};',30000)
+check(empty_pending.ok==true and empty_pending_value.count==0,'pending() is empty once every handle was collected')
+local listed,listed_value=run([==[
+const started = await tools.bash({command: 'sleep 20; echo never', wait_s: 0});
+const p = await pending();
+return {op: started.op, count: p.count, tool: p.ops[0] && p.ops[0].tool, state: p.ops[0] && p.ops[0].state,
+  hasProgress: !!(p.ops[0] && p.ops[0].progress)};
+]==],60000)
+check(listed.ok==true and listed_value.count==1 and listed_value.tool=='bash',
+ 'pending() names the tool behind each open handle: '..json.encode(listed_value):sub(1,200))
+check(listed_value and listed_value.hasProgress==true,'pending() carries the progress the executor already knows')
+local cancelled_listed,cancelled_listed_value=run('const stopped = await cancel("'..tostring(listed_value.op)..'"); return {cancelled: stopped.cancelled};',30000)
+check(cancelled_listed.ok==true and cancelled_listed_value.cancelled==true,'the listed handle can be cancelled by name')
 
 -- 11(b). A stop/steer aborts the wait at once: the op stays recorded and the answer is pending.
 local steer_op,steer_op_value=run([==[
@@ -241,6 +317,21 @@ local after_cancel,after_cancel_value=run('const entry = await wait("'..tostring
 check(after_cancel.ok==true,'a failed pending call does not throw inside the script: '..tostring(after_cancel.error))
 check(after_cancel_value and after_cancel_value.state=='failed','a cancelled call is never reported as done: '..json.encode(after_cancel_value):sub(1,200))
 check(after_cancel_value and after_cancel_value.reason=='cancelled','the failed entry says why: '..tostring(after_cancel_value and after_cancel_value.reason))
+-- The operator's ruling (12/11): the word is `reason`, and the help text must agree with the
+-- behaviour - news about a call never throws, so a failed entry carries no `error`.
+check(after_cancel_value and after_cancel_value.error==nil,'a failed entry answers reason, never error')
+check(pending.WAIT_HELP.description:find('{state:"failed", op, reason}',1,true)~=nil,
+ 'the wait help names the failed shape the same way the implementation answers it')
+check(pending.WAIT_HELP.description:find('error',1,true)==nil,'the wait help promises no error key for a failed call')
+-- `searchTools` matches a keyword as a SUBSTRING of name+description, so a builtin whose help says
+-- "read" (or "already", which contains it) shadows the `read` tool in a three-row query - measured
+-- twice on 12/11, once each time a new help text was written. Matching is a separate change; until
+-- then these entries keep out of that namespace and this is the check that keeps them there.
+for _, name in ipairs({'WAIT_HELP','PENDING_HELP','CANCEL_HELP'}) do
+ local help=pending[name]
+ check(type(help)=='table' and not tostring(help.description):lower():find('read',1,true),
+  name..' does not shadow the read tool with the word "read"')
+end
 -- 7, second half: a kind whose effect cannot be stopped says so instead of pretending.
 local outbox_scope=string.rep('b',64)
 pending.save(outbox_scope,{ops={['op-sent-1']={op='op-sent-1',tool='message_send_fixture',kind='outbox',state='running',reported=false}}})
@@ -282,12 +373,50 @@ for _,row in ipairs(type(second)=='table' and second.pending_settled or {})do
 end
 check(repeated==false,'a settled call is announced exactly once')
 
+-- The outbox executor (land6's WhatsApp send): the queue id the connector answers is the handle, a
+-- wait reads the queue, and a cancel says why it cannot stop a message that is already sent. Driven by
+-- a fake connector here, because a real account is not what this file is measuring; the connector's
+-- own queue, backoff and one-send-per-job behaviour is `scripts/test-whatsapp-send-waits.lua`'s job.
+local outbox_scope=string.rep('d',64)
+local outbox_calls={}
+local function outbox_dispatch(name,args,raw)
+  outbox_calls[#outbox_calls+1]={name=name,args=args}
+  if name~='mcp_whatsapp_send' then return {error='unexpected_tool:'..tostring(name)} end
+  if args.id==nil then return {ok=true,state='pending',id=42,waited_s=0} end
+  if (tonumber(args.wait_s) or 0)>0 then
+    return {ok=true,state='done',id=tonumber(args.id),message_id='MSG-'..tostring(args.id),served_by='acct-node'}
+  end
+  return {ok=true,state='pending',id=tonumber(args.id),waited_s=0}
+end
+local outbox_opts={scope=outbox_scope,remaining_ms=60000,ctx={}}
+local sent=pending.invoke(outbox_dispatch,outbox_opts,'mcp_whatsapp_send',
+ {chat='1234@s.whatsapp.net',text='hello'},'{"chat":"1234@s.whatsapp.net","text":"hello"}',0)
+check(type(sent)=='table' and sent.state=='pending' and sent.op=='msg-42','a send that outlives its wait answers a handle: '..json.encode(sent):sub(1,200))
+check(sent and sent.tool=='mcp_whatsapp_send','the handle names the connector call it belongs to')
+local outbox_list=pending.list(outbox_dispatch,outbox_opts)
+check(outbox_list.count==1 and outbox_list.ops[1].op=='msg-42','pending() lists the outbox handle too')
+local outbox_cancel=pending.cancel(outbox_dispatch,outbox_opts,'msg-42')
+check(outbox_cancel.error=='not_cancellable' and outbox_cancel.why=='a sent message stays sent',
+ 'cancel on a queued message is not_cancellable, in the recorder\'s words: '..json.encode(outbox_cancel))
+local queued=0
+for _, call in ipairs(outbox_calls) do if call.args.id==nil then queued=queued+1 end end
+check(queued==1,'nothing was queued twice by the handle being listed or cancelled (queued '..queued..')')
+local outbox_wait=pending.wait(outbox_dispatch,outbox_opts,'msg-42',{wait_s=5})
+check(outbox_wait.state=='done' and outbox_wait.result and outbox_wait.result.message_id=='MSG-42',
+ 'wait(op) collects the outbox outcome: '..json.encode(outbox_wait):sub(1,200))
+local kept_outbox=pending.retained('msg-42',outbox_scope)
+check(type(kept_outbox)=='table' and kept_outbox.message_id=='MSG-42','results.get(op) re-reads the outbox outcome')
+for index=2,#outbox_calls do
+  check(outbox_calls[index].args.id==42 and outbox_calls[index].args.chat==nil,
+   'every read after the send carries the id and no message: '..json.encode(outbox_calls[index].args))
+end
+
 -- 3, continued: the discovery entry a script reads for the resume.
 local help_ok=false
-local searched,searched_value=run('const rows = await searchTools("select:wait,cancel"); return {names: rows.map(r => r.name)};',30000)
+local searched,searched_value=run('const rows = await searchTools("select:wait,cancel,pending"); return {names: rows.map(r => r.name)};',30000)
 if searched.ok and type(searched_value)=='table' then
  local seen={} for _,name in ipairs(searched_value.names or {})do seen[name]=true end
- help_ok=seen['wait']==true and seen['cancel']==true
+ help_ok=seen['wait']==true and seen['cancel']==true and seen['pending']==true
 end
 check(help_ok,'searchTools("select:wait,cancel") answers both builtins: '..json.encode(searched_value):sub(1,200)..json.encode(searched_value):sub(1,200))
 

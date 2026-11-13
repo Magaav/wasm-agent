@@ -156,12 +156,15 @@ local function host_global(name, params, calls, selected, lookup, ctx, journal, 
   -- `wait(op|[ops], {wait_s, until})` and `cancel(op|[ops])`: the one resume and the one stop for a
   -- call that answered a handle. A READ and an effect-stopper, both over managed operations, both
   -- answered by the same module for this loop and the component's.
-  if name == 'wait' or name == 'cancel' then
+  if name == 'wait' or name == 'cancel' or name == 'pending' then
     if not popts then return { error = 'codemode_global_not_available' }, false end
     local asked = type(params) == 'table' and params[1] or nil
     local value
     if name == 'wait' then
       value = pending_calls.wait(popts.dispatch, popts, asked, type(params) == 'table' and params[2] or nil)
+    elseif name == 'pending' then
+      -- The whole pool this scope holds: a read, so a later step or turn needs no memory of handles.
+      value = pending_calls.list(popts.dispatch, popts)
     else
       value = pending_calls.cancel(popts.dispatch, popts, asked)
     end
@@ -205,6 +208,7 @@ local function builtin_entries()
  add(presentation.searchtools_help)
  add(session_results.HELP)
  add(pending_calls.WAIT_HELP)
+ add(pending_calls.PENDING_HELP)
  add(pending_calls.CANCEL_HELP)
  add(presentation.help)
  table.sort(entries,function(a,b)return a.name<b.name end)
@@ -346,7 +350,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
   -- A call that outlives its wait answers {state:"pending", op}; these two are how a script resumes
   -- or stops it. Both are registered with `spread` so `wait(op, {wait_s:120})` arrives with both
   -- arguments (`lua/core/codemode_pending.lua`).
-  {name='wait',spread=true},{name='cancel',spread=true},
+  {name='wait',spread=true},{name='cancel',spread=true},{name='pending',spread=true},
   {name='describeTool',spread=false},{name='showCall',spread=false},
   -- Introspection of what this node can do, for a workflow that would otherwise guess. They read
   -- the host capability registry and nothing else: no authority moves, no effect is admitted.
@@ -415,7 +419,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
      -- The retained results and this session's journal: `results.get`/`last`/`diff`/`reuse`. Read-only
      -- over records the node already keeps; it dispatches nothing and admits nothing.
      value,success=session_results.answer(type(params)=='table' and params[1] or nil,ctx,journal)
-    elseif call.name=='wait' or call.name=='cancel' then
+    elseif call.name=='wait' or call.name=='cancel' or call.name=='pending' then
      -- The one resume and the one stop, answered by the same module the component's loop answers them
      -- through (`host_global` above): a pending call is a managed operation, and reading it takes no
      -- lock, so a wait never blocks the script that asked.

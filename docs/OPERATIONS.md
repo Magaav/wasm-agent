@@ -44,6 +44,11 @@ available there.
 never permission to launch the command again. `await` defaults to command completion
 for a foreground-adopted tree and returns `command_completed`, `command_code`, and
 `operation_settled=false`; use `wait_for=settled` to await full tree settlement.
+`operation start` passes the same two walls `bash` does (`lua/core/path_guard.lua`): the command text is
+refused before anything is admitted, and the shell it runs carries the prelude that refuses a resolved
+protected target. It used to carry neither - `host.exec` is wrapped by `path_guard.install`, the operation
+manager is not - so a recursive delete could reach it past the guard (`scripts/test-path-guard.lua` proves
+both the literal and the expanded form, and that a `mktemp` scratch directory is still deletable).
 `start` returns a launch receipt, not execution success. Default execution budget is 300 seconds; explicit
 operations may request 1–86400 seconds. Eight operations may be active per manager.
 
