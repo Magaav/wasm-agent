@@ -1318,6 +1318,16 @@ function METHODS:session_draw()
   end
 end
 
+-- The self-wake fact, read once and handed to its own row: `host.editor_wakes` when the native editor owns
+-- the bottom of the screen, `wake_draw` (the fallback layout) otherwise. Both footer writers - the live one
+-- during a run and `run_finished` at its end - call THIS, so the fact cannot creep back into the status
+-- bar's numbers through the one of them somebody forgot (it did: `run_finished` appended it until 13/11).
+function METHODS:wake_row()
+  self.wakes = M.wake_text(self.session_id)
+  if host and host.editor_wakes then pcall(host.editor_wakes, self.wakes) end
+  return self.wakes
+end
+
 -- The self-wake row: the fact on ONE line directly above the session status bar, or nothing when no wake is
 -- scheduled. Drawn only in the fallback layout - with the native editor, `rust/wa-term`'s `Editor` owns that
 -- row from the same text (`host.editor_wakes`), so the two renderers cannot disagree about what it says.
@@ -1369,11 +1379,10 @@ function METHODS:live_footer()
   self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
     prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
     context = self.context, budget = self.budget })
-  -- The self-wake fact has a row of its own now, directly above the session status bar: it used to be
+  -- The self-wake fact has a row of its own, directly above the session status bar: it used to be
   -- appended to the numbers on that bar, where it squeezed them and, on a narrow terminal, wrapped the
   -- bar it was sharing (Victor, 13/11). "" takes the row away again when nothing is scheduled.
-  self.wakes = M.wake_text(self.session_id)
-  if host and host.editor_wakes then pcall(host.editor_wakes, self.wakes) end
+  self:wake_row()
   local hook = M.hook_text(self.session_id, self.model, { runs = self.runs, tokens = self.tokens,
     context = self.context, context_percent = (self.context and self.budget and self.budget > 0)
       and (100 * self.context / self.budget) or nil })
@@ -1697,7 +1706,9 @@ function METHODS:run_finished()
     self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
       prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
       context = self.context, budget = self.budget })
-    if wake ~= "" then self.last_summary = self.last_summary .. " " .. wake end
+    -- The fact is NOT appended here: it has its own row above the bar (`wake_row`). The `text` built
+    -- above keeps it for a caller with no screen, where the once-printed line is the only place it can be.
+    self:wake_row()
   end
   if text ~= "" and not self.screen then
     -- One line, clipped to the width: a footer that wraps puts its own tail at column

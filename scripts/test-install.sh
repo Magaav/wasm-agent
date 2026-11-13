@@ -77,7 +77,12 @@ SH
 }
 
 # A bundle of real shape: one top-level dir, files.sha256 over every member, bundle.manifest over that.
-mkbundle() { # NAME TAG COMMIT [append-bytes] -> prints the manifest sha256; archive at $T/NAME.tar.gz
+# Signed releases: the core the front door runs verifies SHA256SUMS.sig from the release it installs, so every
+# fixture bundle is signed with the committed TEST key and the node trusts that key through WA_RELEASE_KEYS.
+sign_release() { python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$1" --key A >/dev/null 2>&1; }
+export WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt"
+
+mkbundle() { # NAME TAG COMMIT [append-bytes] -> prints the manifest sha256; archive at $T/rel-NAME/NAME.tar.gz
   local name=$1
   local tag=$2
   local commit=$3
@@ -94,7 +99,11 @@ mkbundle() { # NAME TAG COMMIT [append-bytes] -> prints the manifest sha256; arc
       | while IFS= read -r f; do sha256sum -- "$f"; done ) > "$dir/files.sha256"
   printf 'schema=wa-linux-bundle/1\nsource_commit=%s\ntarget_triple=%s\nnode_version=%s\nwa_version=fixture-%s\nfiles_sha256=%s\n' \
     "$commit" "$TARGET" "$NODEV" "$tag" "$(sha256sum "$dir/files.sha256" | cut -d' ' -f1)" > "$dir/bundle.manifest"
-  tar -C "$T/src" -czf "$T/$name.tar.gz" "$name"
+  # One release per bundle: a release is a directory now, and the installer verifies the signature that
+  # sits beside the bundle it is installing.
+  mkdir -p "$T/rel-$name"
+  tar -C "$T/src" -czf "$T/rel-$name/$name.tar.gz" "$name"
+  sign_release "$T/rel-$name"
   sha256sum "$dir/bundle.manifest" | cut -d' ' -f1
 }
 entry() { # NAME TAG COMMIT SHA [target] [pin] -> one JSON object
@@ -104,8 +113,8 @@ entry() { # NAME TAG COMMIT SHA [target] [pin] -> one JSON object
   local sha=$4
   local target=${5:-$TARGET}
   local pin=${6:-}
-  printf '{"tag":"%s","commit":"%s","target":"%s","manifest_sha256":"%s","url":"file://%s/%s.tar.gz","size":%s,"node_version":"%s"%s}' \
-    "$tag" "$commit" "$target" "$sha" "$T" "$name" "$(wc -c < "$T/$name.tar.gz" | tr -d ' ')" "$NODEV" \
+  printf '{"tag":"%s","commit":"%s","target":"%s","manifest_sha256":"%s","url":"file://%s/rel-%s/%s.tar.gz","size":%s,"node_version":"%s"%s}' \
+    "$tag" "$commit" "$target" "$sha" "$T" "$name" "$name" "$(wc -c < "$T/rel-$name/$name.tar.gz" | tr -d ' ')" "$NODEV" \
     "${pin:+,\"installer_sha256\":\"$pin\"}"
 }
 mkindex() { # FILE ENTRIES...
@@ -121,6 +130,10 @@ mkbase() { # DIR COMMIT INDEXFILE...
   local dir=$1 commit=$2; shift 2
   mkdir -p "$dir/$commit/scripts/linux" "$dir/$commit/releases" "$dir/main/releases"
   cp "$ROOT/scripts/linux/bootstrap.sh" "$dir/$commit/scripts/linux/bootstrap.sh"
+  # The core verifies the release it installs, so the tree it is fetched from carries the verifier in the
+  # repository's own layout - exactly what scripts/install.sh downloads beside the core.
+  mkdir -p "$dir/$commit/scripts/lib"
+  cp "$ROOT/scripts/lib/release-signing.sh" "$ROOT/scripts/lib/release_verify.py" "$dir/$commit/scripts/lib/"
   cp "$FRONT" "$dir/$commit/scripts/install.sh"
   local f
   for f in "$@"; do

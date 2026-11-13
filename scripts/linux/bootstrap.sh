@@ -67,6 +67,20 @@ case "$port$cport" in *[!0-9]*) echo 'bootstrap: port_invalid' >&2; exit 2 ;; es
 
 say()  { printf 'bootstrap: %s\n' "$*"; }
 fail() { printf 'bootstrap: %s\n' "$*" >&2; exit 1; }
+# The release-signature gate, from the checkout this script runs out of (scripts/lib/release-signing.sh).
+# Without it this script would install a bundle whose checksums ship in the same release as the bundle -
+# which is the hole signed releases close. A missing lib is a refusal, never a silent pass.
+# Where it can be, in order: the same layout as this repository (scripts/linux/../lib), a copy that brought
+# lib/ beside itself, and an explicit path for a hand-run. `scripts/install.sh` downloads this core AS
+# scripts/linux/bootstrap.sh with scripts/lib/ beside it, so a release-installed updater has it too.
+WA_BOOTSTRAP_LIB=""
+for candidate in "${WA_RELEASE_SIGNING_LIB:-}" \
+                 "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/lib/release-signing.sh" \
+                 "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/release-signing.sh"; do
+  [ -n "$candidate" ] && [ -f "$candidate" ] && { WA_BOOTSTRAP_LIB="$candidate"; break; }
+done
+[ -n "$WA_BOOTSTRAP_LIB" ] || fail "release_signing_lib_missing: no scripts/lib/release-signing.sh beside $(dirname -- "$0")/../lib (a release-installed updater needs it: it is what verifies the releases it installs)"
+. "$WA_BOOTSTRAP_LIB"
 
 # ---- 0a. rollback: the one action that must work with no network and no index --------------------
 #
@@ -200,9 +214,30 @@ say "install $prefix: $state${installed_commit:+ (installed ${installed_commit:0
 
 # ---- 3. download and verify (always, even when current: --check proves the published bytes) ---------
 if [ "$state" != current ] || [ "$check" = 1 ]; then
+  # SIGNED FIRST: the sums beside this bundle in the SAME release, signed by wa-vault's `release-signing`
+  # key, verified against the keys this node already carries. The index's own `manifest_sha256` comes from
+  # the repository's main branch, not from the release, and both must agree: the signed sums name the
+  # bundle's sha256 and the index names its size, so a release whose bytes were swapped fails one of them.
+  signed="$(mktemp -d "$work/signed.XXXXXX")" || fail 'scratch_unwritable'
+  trap 'rm -rf "$tmp" "$signed"' EXIT
+  release_base="${url%/*}"; release_asset="${url##*/}"
+  fetch "$release_base/SHA256SUMS" "$signed/SHA256SUMS" \
+    || fail "release_unsigned: $tag carries no SHA256SUMS beside $release_asset - refusing to install from a release that is not signed"
+  fetch "$release_base/SHA256SUMS.sig" "$signed/SHA256SUMS.sig" \
+    || fail "release_unsigned: $tag publishes no SHA256SUMS.sig - refusing to install $release_asset"
+  for optional in TRUSTED-KEYS TRUSTED-KEYS.sig; do
+    fetch "$release_base/$optional" "$signed/$optional" >/dev/null 2>&1 || rm -f "$signed/$optional"
+  done
+  wa_release_verify_sums "$signed" || fail "release_signature_invalid: the sums beside $tag do not verify against a trusted release key"
+  signed_sha=$(sed -n "s|^\\([0-9a-f]\\{64\\}\\)  $release_asset\$|\\1|p" "$signed/SHA256SUMS" | head -1)
+  [ -n "$signed_sha" ] || fail "release_not_listed: the signed SHA256SUMS of $tag does not name $release_asset; refusing to install it"
+  say "verified: $tag is signed ($(sed -n 's/^key //p' "$signed/SHA256SUMS.sig")) and names $release_asset"
   fetch "$url" "$tmp/bundle.tar.gz" || fail "download_failed: $url"
   got=$(wc -c < "$tmp/bundle.tar.gz" | tr -d ' ')
   [ "$got" = "$size" ] || fail "download_truncated: $got bytes, the index records $size"
+  got_sha=$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)
+  [ "$got_sha" = "$signed_sha" ] \
+    || fail "release_hash_mismatch: $release_asset is $got_sha, the signed SHA256SUMS of $tag names $signed_sha; nothing installed"
   mkdir -p "$tmp/x"
   tar -xzf "$tmp/bundle.tar.gz" -C "$tmp/x" --no-same-owner || fail 'archive_invalid'
   dirs=$(find "$tmp/x" -mindepth 1 -maxdepth 1 | wc -l)

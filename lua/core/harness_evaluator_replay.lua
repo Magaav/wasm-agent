@@ -88,32 +88,66 @@ for f2 in "$dec"/*.json; do
   esac
 done
 printf '%s\n' "-" >> "$dir/served.log"
-printf '%s' '{"decision":"block","reason":"replay: this reaches outside the replay and the task has no recording for it"}'
+printf '%s' '{"decision":"block","reason":"__WA_SINK_REASON__"}'
 ]==]
 
 local GUARD = [==[
 #!/bin/sh
 # harness-evaluator replay guard: a remote command a bash call could otherwise reach.
 printf '%s %s\n' "${GUARD_NAME:-command}" "$*" >> "$WA_EVAL_SINK_DIR/commands.log"
-echo "replay: ${GUARD_NAME:-command} $* was not run; the effect is recorded as would-have-done" >&2
+echo "__WA_SINK_LABEL__: ${GUARD_NAME:-command} $* was not run; the effect is recorded as would-have-done" >&2
 exit 97
 ]==]
 
 local GIT_GUARD = [==[
 #!/bin/sh
 # harness-evaluator replay guard for git: local git works, a remote operation does not.
-sub=""
+#
+# The subcommand is the first word that is neither a flag nor a flag's VALUE: `git -C <dir> push` used to
+# hand the directory to this scan, fall through, and push (third real review of the reviewer, 13/11).
+# An argv that mentions `alias` is refused, because the REAL git expands the alias after this guard has
+# decided the command is harmless (`git -c alias.p=push p ...` pushed; fourth review).
+#
+# It is a DENYLIST of the remote effects on purpose, never an allowlist of "known" verbs: an allowlist
+# refused local verbs that used to work (`git revert`, `git symbolic-ref`, `git notes`) and moved a
+# replay's counts, which is a change nobody asked for (fifth review, finding 1).
+# `git remote -v` and `git submodule status` stay reads: refusing them counted a read as an effect (fourth
+# review, finding 2).
+#
+# What this is NOT: a sandbox. `bash` is not hooked, the real binary is one absolute path away
+# (`/usr/bin/git push`), and a config file written by hand in the child's home is not seen at all. The
+# record says what the guard saw, and the docs say this out loud (fifth review, finding 2).
+sub=""; skip=0; seen_alias=0
 for a in "$@"; do
   case "$a" in
+    *alias*) seen_alias=1 ;;
+  esac
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    --) break ;;
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--config-env) skip=1 ;;
     -*) continue ;;
-    *) sub=$a; break ;;
+    *) if [ -z "$sub" ]; then sub=$a; fi ;;
   esac
 done
+refuse() {
+  printf 'git %s %s\n' "$1" "$*" >> "$WA_EVAL_SINK_DIR/commands.log"
+  echo "__WA_SINK_LABEL__: git $1 was not run; the effect is recorded as would-have-done" >&2
+  exit 97
+}
+if [ "$seen_alias" = 1 ]; then refuse alias; fi
 case "$sub" in
-  push|fetch|pull|ls-remote|clone)
-    printf 'git %s %s\n' "$sub" "$*" >> "$WA_EVAL_SINK_DIR/commands.log"
-    echo "replay: git $sub was not run; the effect is recorded as would-have-done" >&2
-    exit 97 ;;
+  push|fetch|pull|ls-remote|clone) refuse "$sub" ;;
+  remote)
+    case "$*" in
+      *" -v"*|*"--verbose"*|*"get-url"*|*"show"*) : ;;
+      *) refuse remote ;;
+    esac ;;
+  submodule)
+    case "$*" in
+      *" status"*|*" summary"*) : ;;
+      *) refuse submodule ;;
+    esac ;;
 esac
 exec "__REAL_GIT__" "$@"
 ]==]
@@ -130,6 +164,7 @@ local function write_text(path, text)
   if host.write_file(path, text) then return true end
   return false
 end
+M.write_text = write_text
 
 local function write_exec(path, text)
   if not write_text(path, text) then return false end
@@ -164,6 +199,7 @@ local function make_scratch(label)
   end
   return path
 end
+M.make_scratch = make_scratch
 
 local function materialize(task, scratch, record)
   local spec = task.workspace or {}
@@ -263,21 +299,37 @@ local function install_hooks(scratch, sink_path)
   if not core.write_json(path, hooks) then return nil, "the replay hook file could not be written" end
   return path
 end
+M.install_hooks = install_hooks
 
-local function install_guards(scratch, record)
+-- The sink script, with the one word that names WHO is refusing and the default reason, so the landing
+-- reviewer blocks effects with its own sentence instead of the replay's. Same script, same hook entry,
+-- same accounting: a second copy is how the two would drift.
+function M.install_sink(scratch, opts)
+  opts = opts or {}
+  local label = tostring(opts.label or "replay")
+  local reason = tostring(opts.reason or (label .. ": this call reaches outside the run, which performs no effect"))
+  local script = SINK:gsub("__WA_SINK_REASON__", reason)
+  local path = scratch .. "/sink.sh"
+  if not write_exec(path, script) then return nil, "the " .. label .. " sink could not be written" end
+  return path
+end
+
+local function install_guards(scratch, record, label)
+  label = tostring(label or "replay")
   local bindir = scratch .. "/bin"
   local real_git = (exec("command -v git", "", 60).stdout or ""):gsub("%s+$", "")
   if real_git == "" then return nil, "no git on this machine, so a replay workspace cannot be materialized" end
-  if not write_exec(bindir .. "/git", (GIT_GUARD:gsub("__REAL_GIT__", real_git))) then
-    return nil, "the replay git guard could not be written"
+  if not write_exec(bindir .. "/git", (GIT_GUARD:gsub("__REAL_GIT__", real_git):gsub("__WA_SINK_LABEL__", label))) then
+    return nil, "the " .. label .. " git guard could not be written"
   end
   for _, name in ipairs({ "ssh", "scp", "sftp", "rsync", "gh" }) do
-    local script = GUARD:gsub("${GUARD_NAME:-command}", name)
-    if not write_exec(bindir .. "/" .. name, script) then return nil, "the replay guard for " .. name .. " could not be written" end
+    local script = GUARD:gsub("${GUARD_NAME:-command}", name):gsub("__WA_SINK_LABEL__", label)
+    if not write_exec(bindir .. "/" .. name, script) then return nil, "the " .. label .. " guard for " .. name .. " could not be written" end
   end
   record.guards = { "git (remote verbs)", "ssh", "scp", "sftp", "rsync", "gh" }
   return bindir
 end
+M.install_guards = install_guards
 
 local function child_env(scratch, opts, bindir)
   local home = scratch .. "/home"
@@ -291,6 +343,11 @@ local function child_env(scratch, opts, bindir)
     { "WASM_AGENT_RENDEZVOUS", "" },
     { "WASM_AGENT_RELAY", "" },
     { "WA_GRAPH_WATCH", "0" },
+    -- No system or global config: an alias seeded there would shadow a known verb after this run's git
+    -- guard had let the verb through (fourth real review, 13/11).
+    { "GIT_CONFIG_NOSYSTEM", "1" },
+    { "GIT_CONFIG_GLOBAL", "/dev/null" },
+    { "GIT_CONFIG_SYSTEM", "/dev/null" },
     -- Code mode stays ON in a replay, because a nested tool call inside a script now crosses the same
     -- hook boundary everything else does (`tools.dispatch` fires for every nested dispatch, with the
     -- inner name and arguments - docs/HOOKS.md, "nested dispatch is a hook boundary"). It used to be
@@ -350,6 +407,8 @@ local function read_sink(scratch)
   return record
 end
 
+M.read_sink = read_sink
+
 local function evaluate(check, scratch, ws)
   check = check or { kind = "human" }
   if check.kind == "human" then return { state = "needs-human" } end
@@ -373,6 +432,28 @@ local function evaluate(check, scratch, ws)
     return { state = "pass", rule = "the file assertion" }
   end
   return { state = "unknown", detail = "unknown check kind " .. tostring(check.kind) }
+end
+
+-- The child's ledger, read back through a script that runs with that child's own binary and its own
+-- database: `env -i` with the child's home and ledger only, so no second writer touches the file. A run
+-- whose ledger cannot be read answers an empty dump and the reason, never a zero that reads as measured.
+function M.dump_ledger(scratch, bin, bindir)
+  local empty = { sessions = {}, messages = {}, events = {}, runs = {} }
+  local dump_path = scratch .. "/ledger-dump.lua"
+  if not write_text(dump_path, DUMP) then return empty, "the ledger dump script could not be written" end
+  exec("env -i PATH=" .. shquote(bindir .. ":/usr/local/bin:/usr/bin:/bin")
+    .. " HOME=" .. shquote(scratch .. "/home")
+    .. " WASM_AGENT_HOME=" .. shquote(scratch .. "/home")
+    .. " WASM_AGENT_DB=" .. shquote(scratch .. "/home/.wasm-agent/memory.db")
+    .. " WA_SCRIPT=" .. shquote(dump_path)
+    .. " WA_EVAL_DUMP_OUT=" .. shquote(scratch .. "/ledger.json")
+    .. " timeout 120 " .. shquote(bin) .. " --db " .. shquote(scratch .. "/home/.wasm-agent/memory.db"), scratch, 180)
+  -- The dump writes its answer to a file (see DUMP: stdout is bounded and truncation would cut the JSON);
+  -- stdout carries only a one-line receipt.
+  local text = host.read_file(scratch .. "/ledger.json") or ""
+  local ok, decoded = pcall(json.decode, text)
+  if ok and type(decoded) == "table" and type(decoded.messages) == "table" then return decoded end
+  return empty, "the child's ledger could not be read back"
 end
 
 -- `wa eval run <task|--all> --bin <path> [--model] [--timeout S] [--keep-scratch]`
@@ -436,9 +517,12 @@ function M.run(task, opts)
 
   local sinkdir = scratch .. "/sink"
   exec("mkdir -p " .. shquote(sinkdir) .. " " .. shquote(scratch .. "/decisions") .. " " .. shquote(scratch .. "/home") .. " " .. shquote(scratch .. "/tmp"), "", 120)
-  local sink_path = scratch .. "/sink.sh"
-  if not write_exec(sink_path, SINK) then
-    record.error = "the replay sink could not be written"
+  local sink_path, sink_error = M.install_sink(scratch, {
+    label = "replay",
+    reason = "replay: this reaches outside the replay and the task has no recording for it",
+  })
+  if not sink_path then
+    record.error = sink_error or "the replay sink could not be written"
     record.outcome = { state = "error", detail = record.error }
     core.record_run(record)
     return record
@@ -453,7 +537,7 @@ function M.run(task, opts)
     core.record_run(record)
     return record
   end
-  local bindir, guard_error = install_guards(scratch, record)
+  local bindir, guard_error = install_guards(scratch, record, "replay")
   if not bindir then
     record.error = guard_error
     record.outcome = { state = "error", detail = guard_error }
@@ -481,25 +565,11 @@ function M.run(task, opts)
   record.stdout_tail = tostring(ran.stdout or ""):sub(-2000)
   record.stderr_tail = tostring(ran.stderr or ""):sub(-1200)
 
-  -- Read the replay's own ledger back: the dump script travels into the scratch root and runs with the
-  -- candidate binary, so no second database is opened by this process and no sqlite3 is required.
-  local dump_path = scratch .. "/ledger-dump.lua"
-  local dump = { sessions = {}, messages = {}, events = {}, runs = {} }
-  if write_text(dump_path, DUMP) then
-    local dumped = exec("env -i PATH=" .. shquote(bindir .. ":/usr/local/bin:/usr/bin:/bin")
-      .. " HOME=" .. shquote(scratch .. "/home")
-      .. " WASM_AGENT_HOME=" .. shquote(scratch .. "/home")
-      .. " WASM_AGENT_DB=" .. shquote(scratch .. "/home/.wasm-agent/memory.db")
-      .. " WA_SCRIPT=" .. shquote(dump_path)
-      .. " WA_EVAL_DUMP_OUT=" .. shquote(scratch .. "/ledger.json")
-      .. " timeout 120 " .. shquote(bin) .. " --db " .. shquote(scratch .. "/home/.wasm-agent/memory.db"), scratch, 180)
-    -- The dump writes its answer to a file (see DUMP: stdout is bounded and truncation would cut the
-    -- JSON); stdout carries only a one-line receipt.
-    local text = host.read_file(scratch .. "/ledger.json") or ""
-    local ok, decoded = pcall(json.decode, text)
-    if ok and type(decoded) == "table" and type(decoded.messages) == "table" then dump = decoded
-    else record.dump_error = "the replay ledger could not be read back" end
-  end
+  -- Read the run's own ledger back through the shared dump (M.dump_ledger): the script travels into the
+  -- scratch root and runs with the candidate binary, so no second database is opened by this process and
+  -- no sqlite3 is required.
+  local dump, dump_error = M.dump_ledger(scratch, bin, bindir)
+  if dump_error then record.dump_error = dump_error end
 
   local metrics = core.metrics({ messages = dump.messages, events = dump.events })
   local sink = read_sink(scratch)

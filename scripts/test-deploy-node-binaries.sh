@@ -32,6 +32,14 @@ ROOT="$(pwd)"
 . scripts/lib/node-binaries.sh
 
 WORK="$(mktemp -d)"
+
+# SIGNED RELEASES. Every release asset this lib accepts now has to come with `SHA256SUMS` and a signature
+# by a key this node trusts (scripts/lib/release-signing.sh), so each fixture release is signed here with the
+# committed TEST key. A case that tampers with a release re-signs it afterwards, so each refusal below is
+# still the one it names - and one case below proves the signature gate itself.
+sign_release() { python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$1" --key A >/dev/null 2>&1 \
+  || fail "could not sign the fixture release $1"; }
+export WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 checks=0
 # `gh` exists, is first on PATH, and only records that it was asked: the digest fallback reads the release
@@ -87,6 +95,7 @@ built_utc=2026-11-06T00:00:00Z
 # target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes
 $X64 $xsha $xbytes $ssha $sbytes
 MANIFEST
+sign_release "$release"
 
 # --- the triple this machine reads -----------------------------------------------------------------
 [ "$(wa_node_target_triple Linux aarch64)" = "$ARM" ] || fail "aarch64 Linux did not map to $ARM"
@@ -164,6 +173,7 @@ bad="$WORK/bad"; mkdir -p "$bad"
 cp "$release/node-$SHORT.manifest" "$bad/"
 cp "$release/wa-$X64-$SHORT" "$bad/"; cp "$release/wa-sentinel-$X64-$SHORT" "$bad/"
 printf 'tampered' >> "$bad/wa-$X64-$SHORT"
+sign_release "$bad"
 i="$(fresh hash)"
 out="$(WA_NODE_BINARIES_URL="$bad" wa_node_binary_source_resolve "$ROOT" "$COMMIT" "$X64" "$i" 2>&1)"
 expect_status 5 "$?" "a binary whose bytes are not the pinned ones"
@@ -174,6 +184,7 @@ ok
 short_size="$WORK/short"; mkdir -p "$short_size"
 cp "$release/wa-$X64-$SHORT" "$short_size/"; cp "$release/wa-sentinel-$X64-$SHORT" "$short_size/"
 sed "s/^$X64 $xsha $xbytes /$X64 $xsha 999999 /" "$release/node-$SHORT.manifest" > "$short_size/node-$SHORT.manifest"
+sign_release "$short_size"
 i="$(fresh size)"
 out="$(WA_NODE_BINARIES_URL="$short_size" wa_node_binary_source_resolve "$ROOT" "$COMMIT" "$X64" "$i" 2>&1)"
 expect_status 6 "$?" "a binary whose size is not the pinned one"
@@ -182,6 +193,7 @@ contains "$out" "node_size_mismatch:" "the size refusal is named"
 foreign="$WORK/foreign"; mkdir -p "$foreign"
 cp "$release/wa-$X64-$SHORT" "$foreign/"; cp "$release/wa-sentinel-$X64-$SHORT" "$foreign/"
 sed "s/^source_commit=$COMMIT/source_commit=$OTHER/" "$release/node-$SHORT.manifest" > "$foreign/node-$SHORT.manifest"
+sign_release "$foreign"
 i="$(fresh commit)"
 out="$(WA_NODE_BINARIES_URL="$foreign" wa_node_binary_source_resolve "$ROOT" "$COMMIT" "$X64" "$i" 2>&1)"
 expect_status 2 "$?" "a manifest that names another commit"
@@ -201,6 +213,7 @@ ash="$(wa_node_sha256 "$wrongmachine/wa-$ARM-$SHORT")"; abytes="$(wc -c < "$wron
 as="$(wa_node_sha256 "$wrongmachine/wa-sentinel-$ARM-$SHORT")"; ab="$(wc -c < "$wrongmachine/wa-sentinel-$ARM-$SHORT" | tr -d '[:space:]')"
 printf 'schema=wasm-agent-node-binaries/1\nsource_commit=%s\ncodemode=embedded\n%s %s %s %s %s\n' \
   "$COMMIT" "$ARM" "$ash" "$abytes" "$as" "$ab" > "$wrongmachine/node-$SHORT.manifest"
+sign_release "$wrongmachine"
 i="$(fresh machine)"
 out="$(WA_NODE_BINARIES_URL="$wrongmachine" wa_node_binary_source_resolve "$ROOT" "$COMMIT" "$ARM" "$i" 2>&1)"
 expect_status 5 "$?" "an x86_64 binary pinned under the aarch64 row"
@@ -209,6 +222,7 @@ contains "$out" "node_machine_mismatch:" "the machine refusal is named"
 empty_cm="$WORK/emptyc"; mkdir -p "$empty_cm"
 cp "$release/wa-$X64-$SHORT" "$release/wa-sentinel-$X64-$SHORT" "$empty_cm/"
 sed 's/^codemode=embedded/codemode=empty/' "$release/node-$SHORT.manifest" > "$empty_cm/node-$SHORT.manifest"
+sign_release "$empty_cm"
 i="$(fresh emptycodemode)"
 out="$(WA_NODE_BINARIES_URL="$empty_cm" wa_node_binary_source_resolve "$ROOT" "$COMMIT" "$X64" "$i" 2>&1)"
 expect_status 2 "$?" "a binary built without the code-mode assets"
@@ -284,6 +298,7 @@ glibc_floor=2.31
 codemode=embedded
 $X64 $(mksha "$head_release/wa-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-$X64-$HEAD_SHORT") $(mksha "$head_release/wa-sentinel-$X64-$HEAD_SHORT") $(mkbytes "$head_release/wa-sentinel-$X64-$HEAD_SHORT")
 MANIFEST
+sign_release "$head_release"
 
 run_branch_in() { # <tree> <install dir> [env...] -> the branch's output; exit status is its own
   local tree="$1" install="$2"; shift 2
@@ -426,6 +441,9 @@ mk_release() { # a `-` digest writes a manifest with no compiled_inputs row (an 
       "$(wa_node_sha256 "$wa")" "$(wc -c < "$wa" | tr -d '[:space:]')" \
       "$(wa_node_sha256 "$sentinel")" "$(wc -c < "$sentinel" | tr -d '[:space:]')"
   } > "$dir/node-$short.manifest"
+  # The tag directory IS this release's base for the digest search (`wa_node_tag_base`), so the sums and
+  # their signature live beside the manifest here.
+  sign_release "$dir"
 }
 absent() { # <text> <needle> <what>
   printf '%s' "$1" | grep -qF -- "$2" && fail "$3: '$2' unexpectedly in: $1"

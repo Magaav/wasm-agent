@@ -67,6 +67,19 @@ ok(#wake_row_calls == 1 and wake_row_calls[1] == fact, "the fact goes to its own
 ok(not has(view.last_summary, fact), "and not into the status bar's numbers")
 ok(not has(view.last_summary, "1 wake"), "not even the count: " .. tostring(view.last_summary))
 
+-- The OTHER footer writer: `run_finished` builds the same numbers at the end of a run, and it appended
+-- the fact to them too (found while merging 13/11 - a second copy of the old behaviour, invisible until
+-- a run ended while a wake was scheduled). It must not, and the row must be refreshed from there as well.
+wake_row_calls = {}
+local ending = cli_view.new({ out = function() end, live = false, limit = 80, session_id = session })
+ending.screen = cli_view.screen_rows(24, true)
+ending.wakes = ""
+ending:run_finished()
+ok(#wake_row_calls == 1 and wake_row_calls[1] == fact,
+  "the run's end hands the fact to its row: " .. tostring(wake_row_calls[1]))
+ok(not has(ending.last_summary, fact) and not has(ending.last_summary, "1 wake"),
+  "and not into the numbers it builds for the status bar: " .. tostring(ending.last_summary))
+
 -- ---- the fallback layout: one row, directly above the status bar --------------------------------
 -- The boxed layout is the default; this is the canonical fallback (no native editor), which draws its own
 -- rows and must reserve the same one row in the same place.

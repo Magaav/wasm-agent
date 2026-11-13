@@ -78,24 +78,42 @@ fast_binary_newer_than_tree() {
 # The prepared code-mode assets, if this checkout has them: the shipping build embeds them, so a build
 # this script makes must too, or the node it installs cannot run code mode at all.
 fast_binary_assets() {
+  local common
   if [ -n "${WA_CODEMODE_BUILD_ASSETS:-}" ] && [ -d "$WA_CODEMODE_BUILD_ASSETS" ]; then
     FAST_CODEMODE_ASSETS=$WA_CODEMODE_BUILD_ASSETS
-  elif [ -d "$ROOT/.git/codemode-assets" ]; then
-    FAST_CODEMODE_ASSETS=$(find "$ROOT/.git/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
   else
-    FAST_CODEMODE_ASSETS=''
+    # MEASURED 13/11 in a worktree: `$ROOT/.git` is a FILE there (`gitdir: ...`), so the assets the
+    # canonical checkout prepared were never found, the build failed with `code-mode assets required` and
+    # the run stopped as `stale_binary` - 193 rows unrun, and the reason three layers from the cause. The
+    # assets belong to the CLONE, so the common git directory is where to look; they are addressed by
+    # content (sha256 verified on use), so every worktree of this repo builds with the same prepared bytes.
+    common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    case "$common" in
+      '') common="$ROOT/.git" ;;
+      /*) ;;
+      *) common="$ROOT/$common" ;;
+    esac
+    if [ -d "$common/codemode-assets" ]; then
+      FAST_CODEMODE_ASSETS=$(find "$common/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
+    else
+      FAST_CODEMODE_ASSETS=''
+    fi
   fi
+  FAST_CODEMODE_ASSETS=${FAST_CODEMODE_ASSETS:-}
 }
 
 # Where this tree's build actually lands. The node's one root owns all build output
-# (`docs/ONEROOT.md`), as ONE ISLAND PER TREE: `<root>/build/<tree>-<hash>/target`. A single shared
-# `CARGO_TARGET_DIR` for every tree was measured here on 12/11 and is not merely slower, it is wrong -
-# cargo reused the other tree's `libwa_host_support` because its mtime was newer than this tree's
-# source, and the build failed against a library that was never built from this tree.
+# (`docs/ONEROOT.md`), under ONE build root with ONE CHILD PER TREE. A single flat `CARGO_TARGET_DIR`
+# shared by every tree was reproduced here on 13/11 and is not merely slower, it is wrong: two checkouts
+# of one workspace give a member the same metadata hash, so the second tree's library overwrote the
+# first's and tree A's binary printed tree B's value (scripts/test-onebuild.mjs keeps that check).
 #
-# The island name is `basename(realpath) + '-' + first 12 hex of sha256(realpath)`, which
-# `rust/wa-capabilities/src/disk.rs::build_island` computes with `ring`; `scripts/test-oneroot.lua`
-# checks that the two agree, so the binary this script builds is the one the node's own builds use.
+# The island name is `basename(realpath) + '-' + first 12 hex of sha256(realpath)`, under the node's
+# ONE build root: `<root>/build/target/<name>-<hash>` (scripts/lib/build-target.sh, the single place
+# the rule is written down). `rust/wa-capabilities/src/disk.rs::build_island_in` computes the same
+# name with `ring`, and `scripts/test-onebuild.mjs` checks that the implementations agree - so the
+# binary this script builds is the one the node's own builds use, and the node keeps at most one
+# island per LIVE tree: an island whose tree is gone or has landed is swept before the next build.
 # A caller that names CARGO_TARGET_DIR keeps it, and the rule this file exists for is unchanged: the
 # tree's OWN binary wins, identified by the commit it was stamped with, not by the directory.
 fast_binary_target_dir() {
@@ -109,21 +127,12 @@ fast_binary_target_dir() {
     return
   fi
   if [ "${WASM_AGENT_SHARED_BUILD_DIR:-1}" = 0 ]; then printf '%s' "$ROOT/rust/target"; return; fi
-  local tree hash name home
-  tree=$(cd "$ROOT" 2>/dev/null && pwd -P) || { printf '%s' "$ROOT/rust/target"; return; }
-  if command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$tree" | sha256sum | cut -c1-12)
-  elif command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$tree" | shasum -a 256 | cut -c1-12)
-  else
-    printf '%s' "$ROOT/rust/target"; return
-  fi
-  # `basename` in a pipe carries a newline, and `tr -c` would turn it into a trailing '-' - the Rust
-  # side has no newline there, so the two would name different islands. Strip it first.
-  name=$(basename "$tree" | tr -d '\n')
-  name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9_-' '-')
-  home=${WASM_AGENT_HOME:-$HOME}/.wasm-agent
-  printf '%s' "$home/build/$name-$hash/target"
+  # shellcheck source=build-target.sh
+  . "$ROOT/scripts/lib/build-target.sh" 2>/dev/null || { printf '%s' "$ROOT/rust/target"; return; }
+  local target
+  target=$(wa_build_target "$ROOT" 2>/dev/null) || target=''
+  [ -n "$target" ] || target="$ROOT/rust/target"
+  printf '%s' "$target"
 }
 
 # fast_binary_plan -> decides, and sets:
@@ -223,24 +232,35 @@ fast_binary_banner() {
 # empty one (72 598 376 B vs 73 904 880 B, measured) and the code-mode rows then fail for a reason that
 # has nothing to do with the branch.
 fast_binary_build() {
-  local assets=${FAST_CODEMODE_ASSETS:-} log
+  local assets=${FAST_CODEMODE_ASSETS:-} log target
   command -v cargo >/dev/null 2>&1 || { FAST_BIN_WHY="$FAST_BIN_WHY; cargo is not on PATH"; return 1; }
+  # Through the node's ONE BUILD RESOLVER (`scripts/lib/build-target.sh`): it names this tree's directory
+  # under `<root>/build/target`, sweeps what older layouts left behind and prints the reclaim, holds the
+  # build lock and prints the wait, enforces the build cap, and writes the `tree` marker `wa clean` judges
+  # a build dir by - so this build is retired with the tree it belongs to. It is sourced here rather than
+  # assumed: this function runs before `scripts/fast.sh` sets the run's build root up, and a missing
+  # `wa_build_run` used to end the run as "cargo build failed".
+  #
+  # The directory is named by the resolver, never by cargo's default: measured 13/11 in a worktree, an
+  # earlier shape built into `rust/target` while this function read the node's build dir, so a build that
+  # SUCCEEDED was reported as "the binary it just built cannot report its identity" and every row went
+  # unrun. One expression decides it, and the banner below says which.
+  . "$ROOT/scripts/lib/build-target.sh" || { FAST_BIN_WHY="$FAST_BIN_WHY; the node's build resolver (scripts/lib/build-target.sh) cannot be loaded"; return 1; }
   log=$(mktemp "${TMPDIR:-/tmp}/wa-fast-build-XXXXXX" 2>/dev/null) || log=/dev/null
-  echo "fast: building this tree's binary (cargo build --release --offline)${assets:+ with code-mode assets}"
-  (
-    cd "$ROOT" || exit 1
-    if [ -n "$assets" ]; then
-      WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
-      WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
+  echo "fast: building this tree's binary (cargo build --release --offline, target $(fast_binary_target_dir))${assets:+ with code-mode assets}"
+  if [ -n "$assets" ]; then
+    wa_build_run "$ROOT" env \
+      WA_BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)" \
+      WA_BUILD_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
       WA_CODEMODE_BUILD_ASSETS="$assets" \
-        cargo build --release --offline --manifest-path rust/Cargo.toml
-    else
-      WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
-      WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
+      cargo build --release --offline --manifest-path rust/Cargo.toml > "$log" 2>&1
+  else
+    wa_build_run "$ROOT" env \
+      WA_BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)" \
+      WA_BUILD_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
       WA_CODEMODE_ALLOW_EMPTY=1 \
-        cargo build --release --offline --manifest-path rust/Cargo.toml
-    fi
-  ) > "$log" 2>&1
+      cargo build --release --offline --manifest-path rust/Cargo.toml > "$log" 2>&1
+  fi
   local status=$?
   if [ "$status" != 0 ]; then
     FAST_BIN_WHY="$FAST_BIN_WHY; cargo build failed: $(tail -1 "$log" 2>/dev/null | cut -c1-160)"
@@ -248,13 +268,8 @@ fast_binary_build() {
     return 1
   fi
   [ "$log" != /dev/null ] && rm -f "$log"
-  # Mark the island with the tree it was built from, the same way
-  # `rust/wa-capabilities/src/disk.rs::build_env_for` does: that marker is what `wa clean` judges an
-  # island by, so a build this script made is retired when the tree it belongs to lands or goes.
-  local island
-  island=$(dirname "$(fast_binary_target_dir)")
-  if [ -d "$island" ]; then printf '%s' "$(cd "$ROOT" && pwd -P)" > "$island/tree" 2>/dev/null || true; fi
-  FAST_BIN="$(fast_binary_target_dir)/release/wa"; FAST_BIN_SOURCE='tree'
+  target=$(fast_binary_target_dir)
+  FAST_BIN="$target/release/wa"; FAST_BIN_SOURCE='tree'
   if ! fast_binary_probe "$FAST_BIN"; then
     FAST_BIN_VERDICT='unknown'
     FAST_BIN_WHY="the binary it just built cannot report its identity"

@@ -151,7 +151,17 @@ fi
 # One target directory for both crates: `wa-host` (workspace rust/Cargo.toml) and `wa-sentinel`
 # (its own workspace) otherwise resolve different `target/` roots, and the second one is invisible to
 # the lookup below. Named here, exported, and used by the build loop - never read from the caller.
-TARGET_DIR="${TARGET_DIR_FLAG:-$ROOT/rust/target}"
+# The one build root (docs/ONEROOT.md): a cross build is still build output, so it goes where every
+# other build on this node goes - this tree's child of `<root>/build/target`, with cargo nesting the
+# per-triple directories inside it exactly as it already does (`<target>/<triple>/release`). A caller
+# that names `--target-dir` keeps it and is told which one ran.
+if [ -n "$TARGET_DIR_FLAG" ]; then
+  TARGET_DIR="$TARGET_DIR_FLAG"
+else
+  . "$ROOT/scripts/lib/build-target.sh"
+  TARGET_DIR="$(wa_build_prepare "$ROOT" 2>/dev/null)" || TARGET_DIR=''
+  [ -n "$TARGET_DIR" ] || TARGET_DIR="$ROOT/rust/target"
+fi
 export CARGO_TARGET_DIR="$TARGET_DIR"
 
 # The channel's published targets, and a landing publishes BOTH of them in one run: `work` is x86_64 Linux
@@ -507,6 +517,15 @@ assets="$(asset_list) node-$SHORT.manifest"
 } > "$OUT/.SHA256SUMS.$$" && mv -f "$OUT/.SHA256SUMS.$$" "$OUT/SHA256SUMS" || fail "bundle_unwritable: $OUT/SHA256SUMS" 2
 assets="$assets SHA256SUMS"
 say "checksums $OUT/SHA256SUMS ($(wc -l < "$OUT/SHA256SUMS" | tr -d '[:space:]') asset(s))"
+# SIGNED. `SHA256SUMS` on its own is worth nothing: it ships in the same release as the binaries it names,
+# so whoever can publish one can publish the other and every check still passes. The sums are signed by
+# wa-vault's `release-signing` key - which never leaves the vault - and the signature ships beside them.
+# A release WITHOUT a valid signature is not published: this is a refusal here, not a note.
+say "signing $OUT/SHA256SUMS (wa-vault release-signing; nothing is published unsigned)"
+wa_release_sign_sums "$OUT/SHA256SUMS" "$OUT/SHA256SUMS.sig" || fail \
+  "release_not_signed: the sums were not signed by wa-vault, so this release is not published (set WA_VAULT_ADMIN_URL/WA_VAULT_ADMIN_TOKEN where the vault's operator tooling reads them, and create the release-signing key on its admin page)" 6
+assets="$assets SHA256SUMS.sig"
+say "signature $OUT/SHA256SUMS.sig ($(sed -n 's/^key //p' "$OUT/SHA256SUMS.sig"))"
 # gh is a native process: a /c/... path is not one it can open (AGENTS.md's oldest trap). Converted here,
 # in the line a human pastes, so the printed command works from this shell.
 asset_paths=""
