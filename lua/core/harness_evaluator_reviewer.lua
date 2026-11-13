@@ -31,14 +31,18 @@ M.MARKER = ".wasm-agent-eval-scratch"
 -- The reviewer's instruction. Exactly this text, one line, no bytes added: a test asserts it.
 M.INSTRUCTION = [==[You review one branch before it lands on main. You did not write it and you have no notes from the session that did. Read the brief, the diff against main, and every file the diff touches in full. Look for: wrong behavior, a test that passes without proving its claim, a guard or refusal that can be bypassed, a change the brief did not ask for, and user- or model-visible text that changed without being listed. For each finding give file:line, what goes wrong, and the smallest input that shows it. Do not fix anything and do not comment on style. If nothing changes behavior, say so in one line. End with: REVIEW <branch> <sha> findings=<n>]==]
 
--- The model is pinned: the benchmark of a reviewer is only comparable if every review is one model.
+-- The model is pinned: the benchmark of a reviewer is only comparable if every review is one model, and
+-- the operator's brief for this reviewer says deepseek-v4.1-flash only. There is no `--model`/`--provider`
+-- on the door for that reason (found as a gap by the first real review of this branch, 13/11).
 M.DEFAULT_PROVIDER = "opencode-go"
 M.DEFAULT_MODEL = "deepseek-v4.1-flash"
--- The model route is the one thing a review cannot invent; these travel only when the operator's node
--- has them, and never the whole environment (no connector credential, no rendezvous, no relay).
-M.MODEL_ROUTE_ENV = {
-  "WASM_AGENT_VAULT_URL", "WASM_AGENT_VAULT_DIR", "WASM_AGENT_VAULT_KEYSTORE", "WASM_AGENT_VAULT_PASSPHRASE",
-}
+-- The model route is the one thing a review cannot invent, and it is all that travels: the vault's URL
+-- (the route `lua/core/vault.lua` brokers) and its directory. Deliberately NOT
+-- `WASM_AGENT_VAULT_KEYSTORE`/`WASM_AGENT_VAULT_PASSPHRASE`: those are what `rust/wa-keystore` unseals the
+-- operator's sealed store with, the route does not need them, and the review child's `bash` is not one of
+-- the hooked tools - so passing them would put the unseal credentials in a session that can print them
+-- (found by the first real review of this branch, 13/11).
+M.MODEL_ROUTE_ENV = { "WASM_AGENT_VAULT_URL", "WASM_AGENT_VAULT_DIR" }
 
 local function trim(text) return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
 
@@ -210,14 +214,15 @@ local function child_env(scratch, opts, bindir)
     { "WASM_AGENT_RENDEZVOUS", "" },
     { "WASM_AGENT_RELAY", "" },
     { "WA_GRAPH_WATCH", "0" },
-    -- Code mode is off, for the replay's reason: a tool call nested in a code-mode script does not cross
-    -- the hook boundary where this run refuses effects, so leaving it on could perform one while the
-    -- record reported none.
-    { "WASM_AGENT_CODEMODE", "off" },
+    -- Code mode is ON, as in a replay: since the nested-dispatch fix (825ce08f, docs/HOOKS.md "nested
+    -- dispatch is a hook boundary") a tool call inside a script crosses the same sink this run installs,
+    -- so leaving code mode on cannot perform an effect the record would not see. Forcing it off measured
+    -- the direct tool loop only, which is not how the node is worked.
+    { "WASM_AGENT_CODEMODE", "native" },
     { "WA_EVAL_SINK_DIR", scratch .. "/sink" },
     { "WA_EVAL_DECISIONS", scratch .. "/decisions" },
-    { "WASM_AGENT_PROVIDER", tostring(opts.provider or M.DEFAULT_PROVIDER) },
-    { "WASM_AGENT_LLM_MODEL", tostring(opts.model or M.DEFAULT_MODEL) },
+    { "WASM_AGENT_PROVIDER", M.DEFAULT_PROVIDER },
+    { "WASM_AGENT_LLM_MODEL", M.DEFAULT_MODEL },
   }
   for _, name in ipairs(M.MODEL_ROUTE_ENV) do
     local value = host.getenv(name)
@@ -318,8 +323,8 @@ function M.run(opts)
     base_sha = base_sha,
     repo = repo,
     bin = bin,
-    provider = tostring(opts.provider or M.DEFAULT_PROVIDER),
-    model = tostring(opts.model or M.DEFAULT_MODEL),
+    provider = M.DEFAULT_PROVIDER,
+    model = M.DEFAULT_MODEL,
     checkout = scratch .. "/ws",
     brief = { path = brief_path, bytes = brief_text and #brief_text or 0 },
     started_at = host.now(),
@@ -330,8 +335,8 @@ function M.run(opts)
       scratch_inside_operator_home = false,
       session = "fresh: its own home and its own ledger - no memory, no notes, no history of the session that wrote the branch",
       environment = "env -i with an allowlist (HOME, ledger, PATH, sink, the model route); no node env, no rendezvous, no relay",
-      effects = "blocked by the review sink and the PATH guards; a review records what it would have done and does nothing",
-      code_mode = "off: a tool call nested in a code-mode script does not cross the review sink, so a review measures the direct tool loop",
+      effects = "blocked by the review sink and the PATH guards; a review records what it would have done and does nothing. `bash` is not hooked (a review needs it to run `git diff`), so only its remote verbs are shimmed",
+      code_mode = "on, as in a replay: every nested dispatch crosses the same sink, so a script cannot perform an unrecorded effect",
     },
     files_touched = {},
     marks = {},

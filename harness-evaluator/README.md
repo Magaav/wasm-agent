@@ -20,10 +20,11 @@ wa eval run <task-id>|--all --bin <wa> [--model] [--timeout SECONDS] [--keep-scr
 wa eval report [--all] [--compare <run-a> <run-b>]
 wa eval verdict <run-id> pass|fail "<note>"
 wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
-                          [--model <name>] [--timeout SECONDS] [--keep-scratch]
+                          [--timeout SECONDS] [--keep-scratch]
 wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
 wa eval reviewer miss <branch> "<note>"
 wa eval reviewer list
+wa eval reviewer run <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
 ```
 
 `capture` freezes one user task from the node's own session store: the prompt, the workspace it started
@@ -35,8 +36,9 @@ read, tool errors, effects attempted, files changed, the final answer, wall time
 `run` replays it. `report` prints ids, categories and counts. `verdict` records a hand verdict.
 
 `reviewer` is the landing reviewer (below): it runs one review of one branch, and the operator's marks and
-misses are recorded against the same store. A replay run still carries the `reviewer` shape a future
-reviewer may fill in; nothing reads it as a decision.
+misses are recorded against the same store. `reviewer run <run-id>` is the storage form that existed
+before the reviewer ran anything - a replay run still carries that shape, and `report` still prints it;
+nothing reads it as a decision.
 
 ## The landing reviewer
 
@@ -45,7 +47,8 @@ starts a session that shares nothing with the caller: its own home, its own ledg
 no history. It is given the brief file, the branch and its sha, and the base, and it is asked the one
 question in `lua/core/harness_evaluator_reviewer.lua` (`M.INSTRUCTION`, fixed byte for byte and pinned by
 `scripts/test-harness-evaluator-reviewer.lua`). The model is pinned too (`deepseek-v4.1-flash`), because a
-reviewer measured across models is not one reviewer.
+reviewer measured across models is not one reviewer - the door takes no `--model`, and an option it does
+not know is refused rather than skipped.
 
 It **never blocks a landing**. It prints the findings and the final `REVIEW <branch> <sha> findings=<n>`
 line, and the landing queue does not read its store. What it produces is evidence about the reviewer:
@@ -61,9 +64,12 @@ wa eval report                                        # per review + totals: fin
 Isolation is the replay's, reused rather than copied (`harness_evaluator_replay.lua`): a `mktemp -d`
 scratch root with a marker outside the node home, `env -i` with an allowlist, the `PreToolUse` sink
 refusing every effect and connector tool in the review's own words, and the PATH guards refusing
-`git push`/`ssh`/`scp`/`rsync`/`gh`. Code mode is off for the same reason it is off in a replay. The review
-reads a **discarded clone** of the branch tip, so a reviewer that edits cannot touch the operator's tree -
-and `checkout_changed` in the record says whether it did.
+`git push`/`ssh`/`scp`/`rsync`/`gh`. Code mode stays on, as in a replay: since the nested-dispatch fix
+(`825ce08f`, `docs/HOOKS.md`) a call inside a script crosses the same sink, so it cannot perform an effect
+the record would not see. `bash` is not hooked - a review needs it to run `git diff` - so only its remote
+verbs are shimmed, and the model route travels without the sealed keystore's unseal credentials. The
+review reads a **discarded clone** of the branch tip, so a reviewer that edits cannot touch the operator's
+tree - and `checkout_changed` in the record says whether it did.
 
 One switch turns it off: `reviewer = off` in the node's config file (`<config>/env`), or `WA_REVIEWER=off`
 in the environment. The door then says it is off and exits 0.
@@ -104,8 +110,10 @@ says which (`tool_source`).
   recorded answer as additional context, which is what the model sees;
 * `PATH` guards refuse `git push`/`fetch`/`pull`/`clone`, `ssh`, `scp`, `sftp`, `rsync` and `gh`, so a bash
   call cannot do what a tool is not allowed to do. Local git still works;
-* **code mode is off** in a replay, always, and the record says so: a tool call nested in a code-mode
-  script does not cross the hook boundary, so leaving it on could perform an effect while reporting none.
+* **code mode is ON** in a replay, and the record says so: since the nested-dispatch fix (`825ce08f`,
+  `docs/HOOKS.md`) a tool call inside a script crosses the same hook boundary, so it cannot perform an
+  effect the sink would not see. It was forced off before that fix, for exactly the opposite reason -
+  which made a replay measure the direct tool loop, not how the node is worked.
 
 The three fast rows prove the parts separately, from inside the processes that would do the damage:
 `scripts/test-harness-evaluator.lua` (capture, metrics, catalogue, verdict, report),

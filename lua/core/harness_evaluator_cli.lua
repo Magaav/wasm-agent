@@ -25,10 +25,11 @@ wa eval - freeze real tasks and replay them against a candidate binary
   wa eval report [--all] [--compare <run-a> <run-b>]
   wa eval verdict <run-id> pass|fail "<note>"
   wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
-                            [--model <name>] [--timeout SECONDS] [--keep-scratch]
+                            [--timeout SECONDS] [--keep-scratch]
   wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
   wa eval reviewer miss <branch> "<note>"
   wa eval reviewer list
+  wa eval reviewer run <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
 
 A frozen task and every run live under <config>/evaluator (never in a repository, never printed whole).
 `run` is isolated: a mktemp scratch home with a marker, connectors and effects blocked and recorded as
@@ -249,32 +250,65 @@ local function reviewer_miss(args, words)
   return 0
 end
 
+-- Main's storage-only form, kept under the same verb: a replay run's reviewer shape (findings, accepted,
+-- misses, cost) is still recordable, and `wa eval report` still prints it. It decides nothing.
+local function reviewer_storage(args, valued, words)
+  local run_id = words[2]
+  if not run_id then return refused("reviewer run needs a replay run id") end
+  local record, problem = core.reviewer_record(run_id, {
+    findings = flag(args, "--findings"),
+    accepted = flag(args, "--accepted"),
+    misses = flag(args, "--misses"),
+    cost = flag(args, "--cost"),
+  })
+  if not record then return refused(problem or "the record was refused") end
+  print(json.encode({ ok = true, run = record.id, reviewer = record.reviewer }))
+  return 0
+end
+
 local function reviewer_run(args)
-  local valued = { ["--brief"] = true, ["--base"] = true, ["--bin"] = true, ["--model"] = true,
-    ["--provider"] = true, ["--timeout"] = true, ["--finding"] = true, ["--note"] = true,
-    ["--repo"] = true }
+  -- No `--model` and no `--provider`: the reviewer is one model on one route (M.DEFAULT_MODEL), and a
+  -- store whose rows were measured on different models is not a measurement (first real review, 13/11).
+  local valued = { ["--brief"] = true, ["--base"] = true, ["--bin"] = true, ["--timeout"] = true,
+    ["--finding"] = true, ["--note"] = true, ["--repo"] = true, ["--findings"] = true,
+    ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true }
   local words = positionals(args, valued)
   local what = words[1]
-  if what == nil then
-    return refused("reviewer needs a branch, or `mark`, `miss` or `list` (wa eval help)")
+  -- An option this verb does not take is refused, not skipped: `--model` used to be a word here and its
+  -- value then became a positional, so a caller asking for another model got a silent review on the
+  -- pinned one (first real review, 13/11).
+  local allowed = { ["--keep-scratch"] = true }
+  for name in pairs(valued) do allowed[name] = true end
+  for index = 2, #args do
+    local token = args[index]
+    if token:sub(1, 2) == "--" and not allowed[token] then
+      return refused("unknown option " .. token .. " for `wa eval reviewer` (wa eval help)")
+    end
   end
-  if what == "list" then return reviewer_list() end
-  if what == "mark" then return reviewer_mark(args, valued, words) end
-  if what == "miss" then return reviewer_miss(args, words) end
+  -- The switch is read BEFORE a positional is demanded: with the reviewer off, the bare word answers that
+  -- it is off and exits 0, not a usage error (first real review, 13/11). `list`, `mark`, `miss` and the
+  -- storage form still work while off - they read or annotate the store and start no session.
   local switch = reviewer.switch()
-  if not switch.on then
+  local function off() 
     print("wa eval: the reviewer is off (" .. tostring(switch.source) .. " = " .. tostring(switch.value)
       .. "); nothing was run")
     return 0
   end
+  if what == nil then
+    if not switch.on then return off() end
+    return refused("reviewer needs a branch, or `run`, `mark`, `miss` or `list` (wa eval help)")
+  end
+  if what == "list" then return reviewer_list() end
+  if what == "mark" then return reviewer_mark(args, valued, words) end
+  if what == "miss" then return reviewer_miss(args, words) end
+  if what == "run" then return reviewer_storage(args, valued, words) end
+  if not switch.on then return off() end
   local record, problem = reviewer.run({
     branch = what,
     repo = flag(args, "--repo"),
     brief = flag(args, "--brief"),
     base = flag(args, "--base"),
     bin = flag(args, "--bin"),
-    model = flag(args, "--model"),
-    provider = flag(args, "--provider"),
     timeout = flag(args, "--timeout"),
     keep_scratch = has(args, "--keep-scratch"),
   })

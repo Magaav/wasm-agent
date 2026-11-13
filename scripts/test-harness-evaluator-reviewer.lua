@@ -131,7 +131,10 @@ check(record.isolation.scratch ~= home and not replay.inside(record.isolation.sc
 check(read(record.isolation.scratch .. '/.wasm-agent-eval-scratch') ~= nil, 'the scratch carries the marker')
 check(record.command:find('env %-i') ~= nil, 'the child is started with env -i and an allowlist')
 check(record.command:find('WASM_AGENT_HOME=.', 1) ~= nil, 'and its own home travels in that allowlist')
-check(record.command:find('WASM_AGENT_CODEMODE=.off.', 1) ~= nil, 'code mode is off, and the command says so')
+-- Code mode is ON, as in a replay: since the nested-dispatch fix every call inside a script crosses the
+-- same sink, so it cannot perform an effect this run would not see (825ce08f, docs/HOOKS.md).
+check(record.command:find('WASM_AGENT_CODEMODE=.native.', 1) ~= nil,
+  'code mode is on as in a replay, and the command says so')
 check(record.command:find('WASM_AGENT_LLM_MODEL=.deepseek%-v4%.1%-flash.', 1) ~= nil, 'the model is the pinned one')
 check(record.command:find('timeout 60', 1, true) ~= nil, 'the review is bounded')
 -- ONE argument, `--once`, and stdin closed: a prompt on a valve is read line by line, one turn per line
@@ -176,7 +179,10 @@ local second = reviewer.run({ branch = 'change/fixture', repo = repo, bin = stub
 check(second ~= nil and second.id == record.id:gsub('%-001$', '-002'),
   'a second review of the same branch is numbered, not overwritten')
 check(second.brief.path == nil and second.brief.bytes == 0, 'a review with no brief says so instead of inheriting one')
-check(read(second.isolation.scratch) == nil, 'a scratch root is removed when the review is done')
+-- `read_file` answers nil for a directory whether or not it is there, so the scratch's absence is asked
+-- of the path (the first real review of this branch found this check passing with cleanup deleted).
+local gone = select(2, pcall(host.path_kind, second.isolation.scratch))
+check(gone == 'missing', 'a scratch root is removed when the review is done (' .. tostring(gone) .. ')')
 
 -- ---------------------------------------------------------------- 5. marks, misses and the totals
 local marked, mark_why = reviewer.mark(record.id, 'accepted', 1)
@@ -245,11 +251,27 @@ check(door_code == 0, 'the door exits 0 with findings, so it cannot block a land
 check(door_text:find('REVIEW change/fixture ' .. sha .. ' findings=2', 1, true) ~= nil,
   'the door prints the final REVIEW line')
 check(door_text:find('BYPASS-MARKER', 1, true) ~= nil, 'the door prints the findings themselves')
+-- The model is one model: an option that would change it is refused rather than silently dropped.
+local model_code, model_text = door({ 'eval', 'reviewer', 'change/fixture', '--repo', repo, '--bin', stub,
+  '--model', 'gpt-6.1-sol' })
+check(model_code == 2 and model_text:find('unknown option --model', 1, true) ~= nil,
+  'the door refuses `--model`: the reviewer is one model')
+-- Main's storage form for a replay run is still reachable, and still storage only.
+core.record_run({ schema = core.SCHEMA, id = 'fixture-run-001', task_id = 'fixture-run',
+  category = 'code-fix', check = { kind = 'human' }, metrics = { rounds = 1 } })
+local storage_code, storage_text = door({ 'eval', 'reviewer', 'run', 'fixture-run-001', '--findings', '3',
+  '--accepted', '2', '--misses', '1', '--cost', '0.04' })
+check(storage_code == 0, 'the storage form on a replay run still works (' .. tostring(storage_code) .. ')')
+check(storage_text:find('"findings":3', 1, true) ~= nil, 'and it stores the reviewer shape it always did')
 local usage_code, usage_text = door({ 'eval', 'help' })
 check(usage_code == 0 and usage_text:find('wa eval reviewer <branch>', 1, true) ~= nil,
   'the help text shows the branch door (not the old run-id recorder)')
 check(usage_text:find('--brief', 1, true) ~= nil and usage_text:find('reviewer mark', 1, true) ~= nil,
   'and the brief option and the marks are in it')
+-- (`wa eval run` still takes `--model`; it is the REVIEW line that must not, because a reviewer spread
+-- over several models is not one reviewer.)
+check(usage_text:find('reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]',
+  1, true) ~= nil, 'the usage shows the branch door without a model option')
 
 -- Not a gate: the landing queue does not read the reviewer's store.
 local queue = root ~= '' and read(root .. '/scripts/landing-queue.mjs') or nil
@@ -270,6 +292,11 @@ local function door_child(env_prefix)
     .. ' eval reviewer change/fixture --repo ' .. shquote(repo) .. ' --bin ' .. shquote(stub)
   return exec(command, '', 120)
 end
+local bare_off = exec('env -u WA_SCRIPT -u WASM_AGENT_LUA_ROOT HOME=' .. shquote(child_home)
+  .. ' WASM_AGENT_HOME=' .. shquote(child_home) .. ' WASM_AGENT_DB=' .. shquote(child_home .. '/door.db')
+  .. ' WASM_AGENT_MANAGED=0 WA_REVIEWER=off ' .. shquote(bin) .. ' eval reviewer', '', 120)
+check(tonumber(bare_off.code) == 0 and tostring(bare_off.stdout):find('the reviewer is off', 1, true) ~= nil,
+  'with no branch at all and the switch off, the door says it is off and exits 0 (' .. tostring(bare_off.code) .. ')')
 local env_off = door_child('WA_REVIEWER=off')
 check(tonumber(env_off.code) == 0, 'WA_REVIEWER=off exits 0 (' .. tostring(env_off.code) .. ')')
 check(tostring(env_off.stdout):find('the reviewer is off', 1, true) ~= nil, 'and says the reviewer is off')
