@@ -309,11 +309,14 @@ local function child_env(scratch, opts, bindir)
     { "WASM_AGENT_RENDEZVOUS", "" },
     { "WASM_AGENT_RELAY", "" },
     { "WA_GRAPH_WATCH", "0" },
-    -- Code mode is OFF in a replay, always: a nested tool call inside a script does not cross the hook
-    -- boundary where a replay blocks effects (measured 12/11: the model reached `remote` from inside a
-    -- script and the sink never saw it), so a replay that left it on could perform an effect while
-    -- reporting none. A replay therefore measures the direct tool loop, and says so.
-    { "WASM_AGENT_CODEMODE", "off" },
+    -- Code mode stays ON in a replay, because a nested tool call inside a script now crosses the same
+    -- hook boundary everything else does (`tools.dispatch` fires for every nested dispatch, with the
+    -- inner name and arguments - docs/HOOKS.md, "nested dispatch is a hook boundary"). It used to be
+    -- forced off here for exactly the opposite reason: measured 12/11, the model reached `remote` from
+    -- inside a script and the sink never saw it, so a replay that left code mode on could perform an
+    -- effect while reporting none. Turning it off made a replay measure the direct tool loop only,
+    -- which is not how the node is worked; the boundary was fixed instead.
+    { "WASM_AGENT_CODEMODE", "native" },
     { "WA_EVAL_SINK_DIR", scratch .. "/sink" },
     { "WA_EVAL_DECISIONS", scratch .. "/decisions" },
   }
@@ -452,7 +455,7 @@ function M.run(task, opts)
       model_route = opts.model and "passed through at the operator's request" or "none (no provider in the child)",
       connectors = "blocked by the replay hook; answers come from the task's recording",
       effects = "blocked by the replay hook and the PATH guards; recorded as would-have-done",
-      code_mode = "off: a tool call nested in a code-mode script does not cross the replay hook, so a replay measures the direct tool loop",
+      code_mode = "on (native): a nested dispatch inside a script crosses the replay hook like any other call, so an effect attempted from inside a script is refused and recorded",
     },
     rules = {
       tokens = "sum of harness_events kind=model_call normalized usage",
