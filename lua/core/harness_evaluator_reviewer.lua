@@ -232,6 +232,9 @@ local function child_env(scratch, opts, bindir)
     { "WASM_AGENT_RENDEZVOUS", "" },
     { "WASM_AGENT_RELAY", "" },
     { "WA_GRAPH_WATCH", "0" },
+    { "GIT_CONFIG_NOSYSTEM", "1" },
+    { "GIT_CONFIG_GLOBAL", "/dev/null" },
+    { "GIT_CONFIG_SYSTEM", "/dev/null" },
     -- Code mode is ON, as in a replay: since the nested-dispatch fix (825ce08f, docs/HOOKS.md "nested
     -- dispatch is a hook boundary") a tool call inside a script crosses the same sink this run installs,
     -- so leaving code mode on cannot perform an effect the record would not see. Forcing it off measured
@@ -539,7 +542,11 @@ function M.mark(id, word, finding)
   -- ("mixed or invalid key types"), which made marking any single finding but the first crash the door and
   -- lose the mark (the second real review of this branch, 13/11, finding 1).
   record.marks = type(record.marks) == "table" and record.marks or {}
-  for _, index in ipairs(wanted) do record.marks[tostring(index)] = { state = word, at = host.now() } end
+  -- The key is the integer spelling: `--finding 2.0` passes the integer test and `tostring(2.0)` is "2.0",
+  -- so a mark written under it was never read by the counts - a silent write loss (fourth review, 13/11).
+  for _, index in ipairs(wanted) do
+    record.marks[string.format("%d", index)] = { state = word, at = host.now() }
+  end
   if not save(record) then return nil, "the mark could not be written" end
   return record
 end

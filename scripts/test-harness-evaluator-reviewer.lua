@@ -187,10 +187,10 @@ check(pattern_text:find('^whatsapp_', 1, true) ~= nil and pattern_text:find('^em
 local sink = read(record.isolation.scratch .. '/sink.sh') or ''
 check(sink:find('review: a review reads and changes nothing', 1, true) ~= nil,
   "the sink refuses in the review's words, and nothing of the replay's")
-local function guarded(command)
+local function guarded(command, cwd)
   return exec('env -i PATH=' .. shquote(record.isolation.scratch .. '/bin:/usr/local/bin:/usr/bin:/bin')
     .. ' WA_EVAL_SINK_DIR=' .. shquote(record.isolation.scratch .. '/sink')
-    .. ' sh -c ' .. shquote(command), record.checkout, 60)
+    .. ' sh -c ' .. shquote(command), cwd or record.checkout, 60)
 end
 local pushed = guarded('git push origin main')
 check(tonumber(pushed.code) == 97, 'a remote git verb is refused (exit ' .. tostring(pushed.code) .. ')')
@@ -200,8 +200,25 @@ local by_dir = guarded('git -C /tmp push origin main')
 check(tonumber(by_dir.code) == 97, 'and `git -C <dir> push` is refused too (exit ' .. tostring(by_dir.code) .. ')')
 local by_config = guarded('git -c user.name=x push origin main')
 check(tonumber(by_config.code) == 97, 'and `git -c <k=v> push` (exit ' .. tostring(by_config.code) .. ')')
-local local_read = guarded('git log --oneline -1 2>/dev/null || true')
-check(tonumber(local_read.code) == 0, 'local git still works through the guard')
+-- `|| true` used to make this check unfailable, and the export has no `.git` to log in: the assert now
+-- names the real git's own answer (fourth real review, finding 3).
+local local_read = guarded('git --version')
+check(tonumber(local_read.code) == 0, 'local git still works through the guard (' .. tostring(local_read.code) .. ')')
+check(tostring(local_read.stdout):find('git version', 1, true) ~= nil, 'and it is the real git answering')
+-- An alias reaches the remote verb inside the REAL git, after the guard's scan: refused by name
+-- (fourth real review, finding 1 - it executed a push this way).
+local by_alias = guarded('git -c alias.p=push p origin main')
+check(tonumber(by_alias.code) == 97, 'a git alias is refused (exit ' .. tostring(by_alias.code) .. ')')
+local unknown_verb = guarded('git frobnicate')
+check(tonumber(unknown_verb.code) == 97, 'and a verb the guard does not know (' .. tostring(unknown_verb.code) .. ')')
+-- A READ is not an effect: `git remote -v` runs, and nothing is recorded as would-have-done.
+-- In a real repository (the fixture), because `git remote -v` in an export with no `.git` is git's own
+-- "not a repository", not this guard's answer.
+local remote_read = guarded('git remote -v', repo)
+check(tonumber(remote_read.code) == 0, '`git remote -v` is a read and runs (exit ' .. tostring(remote_read.code) .. ')')
+check(#core.entries(record.isolation.scratch .. '/sink') > 0, 'the sink is there, so a refusal would have been recorded')
+local remote_update = guarded('git remote update')
+check(tonumber(remote_update.code) == 97, 'while `git remote update` is refused (' .. tostring(remote_update.code) .. ')')
 check(tostring(pushed.stderr):find('review:', 1, true) ~= nil, 'and the refusal says review, not replay')
 
 -- A stub keeps no ledger: the tokens stay nil and the record names the rule, never a zero.

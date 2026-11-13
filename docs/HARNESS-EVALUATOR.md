@@ -46,6 +46,13 @@ branch tip (`git archive`: no git directory, no alternates, no remote, so nothin
 operator's tree) and a diff the door wrote from the merge base of the base and the tip - a branch cut
 before today's main is not made of other people's landed work.
 
+The `bash` tool is not hooked (a review needs `git diff`), so the guard on `PATH` is the whole barrier for a
+remote git: it refuses `push`/`fetch`/`pull`/`ls-remote`/`clone`, any argument containing `alias` (an alias
+is expanded by the real git after the guard decided), a verb it does not know, and every non-read form of
+`remote`/`submodule` - while `git remote -v` and `git submodule status` still run, because a read is not an
+effect. That is a guard, not a sandbox: a config file written by hand in the child's home followed by a
+known verb is not prevented, and the record does not claim otherwise.
+
 It is **not a gate**. It prints the findings and the final `REVIEW <branch> <sha> findings=<n>` line, exits
 0 whatever the findings are, and `scripts/landing-queue.mjs` never reads its store. The operator marks each
 finding accepted or rejected (`wa eval reviewer mark`), records what the reviewer missed after the landing
@@ -83,6 +90,24 @@ the positional is the branch a review runs on now. A bare `wa eval reviewer <run
 ("no such branch or commit in <repo>: <run-id>"), which is a behaviour change, and `--branch <name>`
 reaches a branch whose name is one of the subcommand words.
 
+Refusals, changed and new (each is `wa eval: <text>` on stderr-less stdout, exit 2):
+
+```
+- BEFORE  reviewer needs a run id
+- AFTER   reviewer needs a branch, or `run`, `mark`, `miss` or `list` (wa eval help)
+          reviewer run needs a replay run id
+          unknown option <token> for `wa eval reviewer` (wa eval help)
+          reviewer mark needs a review id and `accepted` or `rejected`
+          reviewer miss needs the branch the miss was found on
+          not inside a git repository, so there is no branch to review
+          no such branch or commit in <repo>: <branch>
+          no base to diff against (tried ...)
+          the brief cannot be read: <path>
+          the instruction, the brief and the input come to <n> bytes; one prompt argument holds about
+            100000, so give a shorter brief
+          the review session gave no REVIEW line (state <state>)
+```
+
 New output, none of it present before:
 
 ```
@@ -94,6 +119,8 @@ wa eval: the review answered about <branch> <sha>, not <branch> <sha> - its fina
 (no reviews: `wa eval reviewer <branch> --brief <file>` runs one)
 <id>: accepted N, rejected N of N finding(s)
 miss recorded for <branch>: <note>
+wa eval: stderr tail: <text>
+<review-id>  <sha8>  findings N  <state>  <branch>        (`wa eval reviewer list`, one row per review)
 wa eval report  (appended section)
   reviews (data only - a review never blocks a landing):
   BRANCH  SHA  FINDINGS  ACCEPT  REJECT  IN  OUT  WALL  STATE

@@ -103,25 +103,56 @@ local GIT_GUARD = [==[
 #!/bin/sh
 # harness-evaluator replay guard for git: local git works, a remote operation does not.
 #
-# The subcommand is the first word that is neither a flag nor a flag's VALUE. Taking the first non-flag
-# word as the subcommand let `git -C <dir> push` (and `git -c <k=v> push`) through to the real git: the
-# guard saw the directory as the subcommand, fell through, and pushed - a remote effect recorded as none
-# (found by the third real review of the reviewer, 13/11, which executed it).
-sub=""; skip=0
+# The subcommand is the first word that is neither a flag nor a flag's VALUE: `git -C <dir> push` used to
+# hand the directory to this scan, fall through, and push (third real review of the reviewer, 13/11).
+# Two more ways to a remote verb are closed, because the alias is expanded by the REAL git AFTER this guard
+# has decided the command is harmless (fourth review, which executed it):
+#   * an argv that mentions `alias` at all is refused - `git -c alias.p=push p ...`, `git config alias.q`;
+#   * the subcommand must be a git verb this guard knows, and an alias name is not one.
+# `git remote -v` and `git submodule status` stay reads: refusing them turned a read into a counted
+# "effect attempted" in every replay (fourth review, finding 2).
+# What this is NOT: a sandbox. A config file written by hand in the child's home, followed by a known verb,
+# is not prevented - the same limit `docs/HARNESS-EVALUATOR.md` states for bash.
+known() {
+  case "$1" in
+    add|am|apply|archive|bisect|blame|branch|cat-file|check-ignore|checkout|cherry-pick|clean|commit|config|count-objects|describe|diff|diff-tree|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|init|log|ls-files|ls-tree|merge|merge-base|mv|name-rev|prune|reflog|reset|restore|rev-list|rev-parse|rm|shortlog|show|show-ref|stash|status|switch|tag|update-index|update-ref|var|verify-commit|version|whatchanged|worktree|write-tree)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+sub=""; skip=0; seen_alias=0
 for a in "$@"; do
+  case "$a" in
+    *alias*) seen_alias=1 ;;
+  esac
   if [ "$skip" = 1 ]; then skip=0; continue; fi
   case "$a" in
     --) break ;;
     -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--config-env) skip=1 ;;
     -*) continue ;;
-    *) sub=$a; break ;;
+    *) if [ -z "$sub" ]; then sub=$a; fi ;;
   esac
 done
+refuse() {
+  printf 'git %s %s\n' "$1" "$*" >> "$WA_EVAL_SINK_DIR/commands.log"
+  echo "__WA_SINK_LABEL__: git $1 was not run; the effect is recorded as would-have-done" >&2
+  exit 97
+}
+if [ "$seen_alias" = 1 ]; then refuse alias; fi
 case "$sub" in
-  push|fetch|pull|ls-remote|clone|remote|submodule)
-    printf 'git %s %s\n' "$sub" "$*" >> "$WA_EVAL_SINK_DIR/commands.log"
-    echo "__WA_SINK_LABEL__: git $sub was not run; the effect is recorded as would-have-done" >&2
-    exit 97 ;;
+  push|fetch|pull|ls-remote|clone) refuse "$sub" ;;
+  remote)
+    case "$*" in
+      *" -v"*|*"--verbose"*|*"get-url"*|*"show"*) : ;;
+      *) refuse remote ;;
+    esac ;;
+  submodule)
+    case "$*" in
+      *" status"*|*" summary"*) : ;;
+      *) refuse submodule ;;
+    esac ;;
+  "") : ;;
+  *) known "$sub" || refuse "$sub" ;;
 esac
 exec "__REAL_GIT__" "$@"
 ]==]
@@ -317,6 +348,11 @@ local function child_env(scratch, opts, bindir)
     { "WASM_AGENT_RENDEZVOUS", "" },
     { "WASM_AGENT_RELAY", "" },
     { "WA_GRAPH_WATCH", "0" },
+    -- No system or global config: an alias seeded there would shadow a known verb after this run's git
+    -- guard had let the verb through (fourth real review, 13/11).
+    { "GIT_CONFIG_NOSYSTEM", "1" },
+    { "GIT_CONFIG_GLOBAL", "/dev/null" },
+    { "GIT_CONFIG_SYSTEM", "/dev/null" },
     -- Code mode stays ON in a replay, because a nested tool call inside a script now crosses the same
     -- hook boundary everything else does (`tools.dispatch` fires for every nested dispatch, with the
     -- inner name and arguments - docs/HOOKS.md, "nested dispatch is a hook boundary"). It used to be
