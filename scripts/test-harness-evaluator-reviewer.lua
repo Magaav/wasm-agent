@@ -209,8 +209,10 @@ check(tostring(local_read.stdout):find('git version', 1, true) ~= nil, 'and it i
 -- (fourth real review, finding 1 - it executed a push this way).
 local by_alias = guarded('git -c alias.p=push p origin main')
 check(tonumber(by_alias.code) == 97, 'a git alias is refused (exit ' .. tostring(by_alias.code) .. ')')
-local unknown_verb = guarded('git frobnicate')
-check(tonumber(unknown_verb.code) == 97, 'and a verb the guard does not know (' .. tostring(unknown_verb.code) .. ')')
+-- A local verb the guard has no business knowing still runs: an allowlist of "known" verbs refused
+-- `git revert`/`git symbolic-ref` and moved a replay's counts (fifth real review, finding 1).
+local local_verb = guarded('git symbolic-ref --short HEAD', repo)
+check(tonumber(local_verb.code) == 0, 'a local verb runs through the guard (' .. tostring(local_verb.code) .. ')')
 -- A READ is not an effect: `git remote -v` runs, and nothing is recorded as would-have-done.
 -- In a real repository (the fixture), because `git remote -v` in an export with no `.git` is git's own
 -- "not a repository", not this guard's answer.
@@ -236,6 +238,35 @@ check(second.brief.path == nil and second.brief.bytes == 0, 'a review with no br
 -- of the path (the first real review of this branch found this check passing with cleanup deleted).
 local gone = select(2, pcall(host.path_kind, second.isolation.scratch))
 check(gone == 'missing', 'a scratch root is removed when the review is done (' .. tostring(gone) .. ')')
+
+-- A review that writes into its own export is recorded as having done so: the manifest is a digest of the
+-- whole export (one line - a 3,000-line manifest came back clipped and compared equal; fifth review).
+local writer_stub = home .. '/writer-wa.sh'
+check(host.write_file(writer_stub, table.concat({
+  '#!/bin/sh',
+  'echo "edited" >> "$PWD/feature.txt"',
+  'echo "REVIEW change/fixture ' .. sha .. ' findings=0"',
+  'exit 0',
+  '', }, '\n')), 'a stub that edits its own export exists')
+exec('chmod 755 ' .. shquote(writer_stub), '', 60)
+local wrote = reviewer.run({ branch = 'change/fixture', repo = repo, bin = writer_stub, timeout = 60 })
+check(wrote ~= nil, 'the writing review runs')
+check(wrote.checkout_changed == true, 'and the record says its export changed')
+check(wrote.effects ~= nil, 'and the effects the sink refused are stored, not only claimed')
+local clean = reviewer.run({ branch = 'change/fixture', repo = repo, bin = stub, timeout = 60 })
+check(clean.checkout_changed == nil, 'while a review that writes nothing records no change')
+
+-- An abbreviated sha of THIS commit is this commit, not "another commit" (fifth review, finding 5).
+local short_stub = home .. '/short-wa.sh'
+check(host.write_file(short_stub, table.concat({
+  '#!/bin/sh',
+  'echo "REVIEW change/fixture ' .. sha:sub(1, 9) .. ' findings=0"',
+  'exit 0',
+  '', }, '\n')), 'a stub that echoes an abbreviated sha exists')
+exec('chmod 755 ' .. shquote(short_stub), '', 60)
+local short = reviewer.run({ branch = 'change/fixture', repo = repo, bin = short_stub, timeout = 60 })
+check(short ~= nil and short.state == 'reviewed',
+  'an abbreviated sha of this tip is accepted (' .. tostring(short and short.state) .. ')')
 
 -- ---------------------------------------------------------------- 5. marks, misses and the totals
 local marked, mark_why = reviewer.mark(record.id, 'accepted', 1)
@@ -278,9 +309,11 @@ check(empty_miss == nil and tostring(empty_miss_why):find('note', 1, true) ~= ni
   'a miss with no note is refused (a miss nobody can read is not evidence)')
 
 local totals = reviewer.totals()
-check(totals.reviews == 3, 'the totals count every review in the store')
-check(totals.findings == 4 and totals.accepted == 1 and totals.rejected == 2 and totals.unmarked == 1,
-  'the totals count every finding and every mark (4 findings, 1 accepted, 2 rejected, 1 unmarked)')
+check(totals.reviews >= 3, 'the totals count every review in the store (' .. tostring(totals.reviews) .. ')')
+check(totals.findings >= 4 and totals.accepted == 1 and totals.rejected == 2
+  and totals.unmarked == totals.findings - 3,
+  string.format('the totals count every finding and every mark (%d findings, 1 accepted, 2 rejected, %d unmarked)',
+    totals.findings, totals.unmarked))
 check(totals.accepted_rate ~= nil and math.abs(totals.accepted_rate - 1 / 3) < 0.001,
   'the accepted rate is over the findings that were marked')
 check(totals.misses == 1, 'the totals count the misses')
@@ -368,6 +401,8 @@ check(usage_text:find('--brief', 1, true) ~= nil and usage_text:find('reviewer m
 -- over several models is not one reviewer.)
 check(usage_text:find('reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]',
   1, true) ~= nil, 'the usage shows the branch door without a model option')
+check(usage_text:find('[--branch <name>]', 1, true) ~= nil,
+  'and the `--branch` escape hatch the docs list is in the text that ships')
 
 -- Not a gate: the landing queue does not read the reviewer's store.
 local queue = root ~= '' and read(root .. '/scripts/landing-queue.mjs') or nil

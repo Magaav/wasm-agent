@@ -116,10 +116,11 @@ says which (`tool_source`).
 * connector reads answer from the **recording** captured with the task: the blocked result carries the
   recorded answer as additional context, which is what the model sees;
 * `PATH` guards refuse `git push`/`fetch`/`pull`/`ls-remote`/`clone`, any argument that mentions `alias`
-  (an alias is expanded by the real git after the guard has looked), a git verb the guard does not know,
-  every non-read form of `remote`/`submodule`, and `ssh`, `scp`, `sftp`, `rsync`, `gh` - so a bash call
-  cannot do what a tool is not allowed to do. Local git, and the reads `git remote -v`/`git submodule
-  status`, still work. It is a guard, not a sandbox;
+  (an alias is expanded by the real git after the guard has looked), every non-read form of
+  `remote`/`submodule`, and `ssh`, `scp`, `sftp`, `rsync`, `gh` - so a bash call cannot do what a tool is
+  not allowed to do. Local verbs, and the reads `git remote -v`/`git submodule status`, still work. It is a
+  guard, not a sandbox: an absolute path to the real git is one token away, and the record says what the
+  guard saw;
 * **code mode is ON** in a replay, and the record says so: since the nested-dispatch fix (`825ce08f`,
   `docs/HOOKS.md`) a tool call inside a script crosses the same hook boundary, so it cannot perform an
   effect the sink would not see. It was forced off before that fix, for exactly the opposite reason -

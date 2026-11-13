@@ -56,7 +56,7 @@ M.REPLAY_HOOK_MATCHERS = {
 -- remote commands (`harness-evaluator/replay/sink.sh` explains why the hook cannot do that one).
 -- The remote-verb guard's list, as the guard script implements it: the subcommands that leave the machine,
 -- an alias in any argument, a verb the guard does not know, and every non-read form of `remote`/`submodule`.
-M.GUARDED_COMMANDS = { "git push", "git fetch", "git pull", "git ls-remote", "git clone", "git remote <anything but -v/--verbose/get-url/show>", "git submodule <anything but status/summary>", "git <an alias>", "git <a verb this guard does not know>", "ssh", "scp", "sftp", "rsync", "gh" }
+M.GUARDED_COMMANDS = { "git push", "git fetch", "git pull", "git ls-remote", "git clone", "git remote <anything but -v/--verbose/get-url/show>", "git submodule <anything but status/summary>", "git <an argv that mentions alias>", "ssh", "scp", "sftp", "rsync", "gh" }
 
 -- The refusal rule, named so a count can be read as the rule that produced it: a tool result that
 -- begins with one of these is a refusal ("it refused", not "it failed" and not "it answered").

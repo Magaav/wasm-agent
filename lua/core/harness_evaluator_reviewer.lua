@@ -409,8 +409,13 @@ function M.run(opts)
   end
   -- A manifest of the export, so "the review changed nothing in it" is a comparison of content rather
   -- than `git status` in a directory that (rightly) has no git.
-  local manifest = exec("cd " .. shquote(ws) .. " && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum", "", 300)
+  -- ONE line (`| sha256sum`): `host.exec` returns only the head and tail of a stream, so a 3,000-line
+  -- manifest was compared clipped and an edit in the middle looked like no edit at all (fifth review,
+  -- finding 3). A digest of the manifest is one line and exact.
+  local manifest = exec("cd " .. shquote(ws) .. " && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum | sha256sum", "", 300)
   record.checkout_manifest = tostring(manifest.stdout or "")
+  local counted = (exec("cd " .. shquote(ws) .. " && find . -type f | wc -l", "", 120).stdout or ""):gsub("%s", "")
+  record.checkout_files = tonumber(counted)
 
   exec("mkdir -p " .. shquote(scratch .. "/sink") .. " " .. shquote(scratch .. "/decisions")
     .. " " .. shquote(scratch .. "/home") .. " " .. shquote(scratch .. "/tmp"), "", 120)
@@ -470,6 +475,16 @@ function M.run(opts)
   end
 
   local answer = answer_of(dump, ran.stdout)
+  -- What the review's own sink refused: the record said "records what it would have done" while nothing
+  -- read the sink, so an attempted effect left no trace (fifth review, finding 4).
+  local sink = replay.read_sink(scratch)
+  record.effects = {
+    would_have_done = sink.effects,
+    blocked_tool_calls = sink.attempts,
+    commands_refused = sink.commands,
+    refused_without_recording = sink.unrecorded,
+    blocked_total = sink.blocked,
+  }
   record.answer = answer and answer:sub(1, 200000) or nil
   local line = M.review_line(answer)
   record.reviewed = line ~= nil
@@ -477,7 +492,10 @@ function M.run(opts)
     record.review_line = line.line
     record.findings = line.findings
     record.reported_branch, record.reported_sha = line.branch, line.sha
-    if line.sha ~= sha or line.branch ~= branch then
+    -- A reviewer may echo an abbreviated sha of the same commit: a prefix of at least 7 characters that
+    -- names this tip is this tip, not "another commit" (fifth review, finding 5).
+    local same_sha = line.sha == sha or (#line.sha >= 7 and #line.sha < #sha and sha:sub(1, #line.sha) == line.sha)
+    if not same_sha or line.branch ~= branch then
       record.state = "answered_about_another_commit"
     else
       record.state = "reviewed"
@@ -488,7 +506,7 @@ function M.run(opts)
   end
   -- What the review session itself changed, if anything: it is its own discarded export, so this is
   -- evidence that the reviewer fixed nothing, not a warning about the operator's tree.
-  local after_manifest = exec("cd " .. shquote(ws) .. " && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum", "", 300)
+  local after_manifest = exec("cd " .. shquote(ws) .. " && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum | sha256sum", "", 300)
   if tostring(after_manifest.stdout or "") ~= tostring(record.checkout_manifest or "") then
     record.checkout_changed = true
     record.checkout_changed_note = "the export differs from what it was before the review"

@@ -105,21 +105,18 @@ local GIT_GUARD = [==[
 #
 # The subcommand is the first word that is neither a flag nor a flag's VALUE: `git -C <dir> push` used to
 # hand the directory to this scan, fall through, and push (third real review of the reviewer, 13/11).
-# Two more ways to a remote verb are closed, because the alias is expanded by the REAL git AFTER this guard
-# has decided the command is harmless (fourth review, which executed it):
-#   * an argv that mentions `alias` at all is refused - `git -c alias.p=push p ...`, `git config alias.q`;
-#   * the subcommand must be a git verb this guard knows, and an alias name is not one.
-# `git remote -v` and `git submodule status` stay reads: refusing them turned a read into a counted
-# "effect attempted" in every replay (fourth review, finding 2).
-# What this is NOT: a sandbox. A config file written by hand in the child's home, followed by a known verb,
-# is not prevented - the same limit `docs/HARNESS-EVALUATOR.md` states for bash.
-known() {
-  case "$1" in
-    add|am|apply|archive|bisect|blame|branch|cat-file|check-ignore|checkout|cherry-pick|clean|commit|config|count-objects|describe|diff|diff-tree|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|init|log|ls-files|ls-tree|merge|merge-base|mv|name-rev|prune|reflog|reset|restore|rev-list|rev-parse|rm|shortlog|show|show-ref|stash|status|switch|tag|update-index|update-ref|var|verify-commit|version|whatchanged|worktree|write-tree)
-      return 0 ;;
-    *) return 1 ;;
-  esac
-}
+# An argv that mentions `alias` is refused, because the REAL git expands the alias after this guard has
+# decided the command is harmless (`git -c alias.p=push p ...` pushed; fourth review).
+#
+# It is a DENYLIST of the remote effects on purpose, never an allowlist of "known" verbs: an allowlist
+# refused local verbs that used to work (`git revert`, `git symbolic-ref`, `git notes`) and moved a
+# replay's counts, which is a change nobody asked for (fifth review, finding 1).
+# `git remote -v` and `git submodule status` stay reads: refusing them counted a read as an effect (fourth
+# review, finding 2).
+#
+# What this is NOT: a sandbox. `bash` is not hooked, the real binary is one absolute path away
+# (`/usr/bin/git push`), and a config file written by hand in the child's home is not seen at all. The
+# record says what the guard saw, and the docs say this out loud (fifth review, finding 2).
 sub=""; skip=0; seen_alias=0
 for a in "$@"; do
   case "$a" in
@@ -151,8 +148,6 @@ case "$sub" in
       *" status"*|*" summary"*) : ;;
       *) refuse submodule ;;
     esac ;;
-  "") : ;;
-  *) known "$sub" || refuse "$sub" ;;
 esac
 exec "__REAL_GIT__" "$@"
 ]==]
@@ -411,6 +406,8 @@ local function read_sink(scratch)
   end
   return record
 end
+
+M.read_sink = read_sink
 
 local function evaluate(check, scratch, ws)
   check = check or { kind = "human" }

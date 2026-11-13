@@ -25,7 +25,7 @@ wa eval - freeze real tasks and replay them against a candidate binary
   wa eval report [--all] [--compare <run-a> <run-b>]
   wa eval verdict <run-id> pass|fail "<note>"
   wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
-                            [--timeout SECONDS] [--keep-scratch]
+                            [--timeout SECONDS] [--keep-scratch] [--branch <name>]
   wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
   wa eval reviewer miss <branch> "<note>"
   wa eval reviewer list
@@ -274,19 +274,6 @@ local function reviewer_run(args)
   -- An option this verb does not take is refused, not skipped: `--model` used to be a word here and its
   -- value then became a positional, so a caller asking for another model got a silent review on the
   -- pinned one (first real review, 13/11).
-  local allowed = { ["--keep-scratch"] = true }
-  for name in pairs(valued) do allowed[name] = true end
-  local index = 2
-  while index <= #args do
-    local token = args[index]
-    if valued[token] then
-      index = index + 2  -- an option's VALUE is not an option: `--note "--missed the bypass"` is a note
-    elseif token:sub(1, 2) == "--" and not allowed[token] then
-      return refused("unknown option " .. token .. " for `wa eval reviewer` (wa eval help)")
-    else
-      index = index + 1
-    end
-  end
   -- The switch is read BEFORE a positional is demanded: with the reviewer off, the bare word answers that
   -- it is off and exits 0, not a usage error (first real review, 13/11). `list`, `mark`, `miss` and the
   -- storage form still work while off - they read or annotate the store and start no session.
@@ -313,6 +300,19 @@ local function reviewer_run(args)
   if not switch.on then return off() end
   -- A switch VALUE nobody recognises leaves the reviewer on (a typo must not disable a review the operator
   -- asked for) and says which value it saw, because silence there reads as "the switch worked".
+  local allowed = { ["--keep-scratch"] = true }
+  for name in pairs(valued) do allowed[name] = true end
+  local index = 2
+  while index <= #args do
+    local token = args[index]
+    if valued[token] then
+      index = index + 2  -- an option's VALUE is not an option: `--note "--missed the bypass"` is a note
+    elseif token:sub(1, 2) == "--" and not allowed[token] then
+      return refused("unknown option " .. token .. " for `wa eval reviewer` (wa eval help)")
+    else
+      index = index + 1
+    end
+  end
   if not reviewer.recognised(switch.value or "") then
     print("wa eval: the reviewer is on; " .. tostring(switch.source) .. " = " .. tostring(switch.value)
       .. " is not one of off/0/false/no (or on/1/true/yes)")

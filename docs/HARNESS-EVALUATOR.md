@@ -46,12 +46,18 @@ branch tip (`git archive`: no git directory, no alternates, no remote, so nothin
 operator's tree) and a diff the door wrote from the merge base of the base and the tip - a branch cut
 before today's main is not made of other people's landed work.
 
-The `bash` tool is not hooked (a review needs `git diff`), so the guard on `PATH` is the whole barrier for a
-remote git: it refuses `push`/`fetch`/`pull`/`ls-remote`/`clone`, any argument containing `alias` (an alias
-is expanded by the real git after the guard decided), a verb it does not know, and every non-read form of
-`remote`/`submodule` - while `git remote -v` and `git submodule status` still run, because a read is not an
-effect. That is a guard, not a sandbox: a config file written by hand in the child's home followed by a
-known verb is not prevented, and the record does not claim otherwise.
+The `bash` tool is not hooked (a review needs `git diff`), so what stands between a review and a remote git
+is the guard on `PATH`: it refuses `push`/`fetch`/`pull`/`ls-remote`/`clone`, any argument that mentions
+`alias` (an alias is expanded by the real git after the guard has looked), and every non-read form of
+`remote`/`submodule` - while `git remote -v`, `git submodule status` and ordinary local verbs still run,
+because a read is not an effect and an allowlist of "known" verbs refused local work (measured on the fifth
+review of this feature).
+
+That is a guard, not a sandbox, and the record says what the guard saw, not more: `bash` can name the real
+binary by absolute path (`/usr/bin/git push`), the child's PATH is only the first `git`, and a config file
+written by hand in the child's home is not examined. A review therefore stores the refusals its sink did see
+(`record.effects`: what would have been done, blocked tool calls, refused commands) and claims nothing about
+what it could not see.
 
 It is **not a gate**. It prints the findings and the final `REVIEW <branch> <sha> findings=<n>` line, exits
 0 whatever the findings are, and `scripts/landing-queue.mjs` never reads its store. The operator marks each
@@ -90,7 +96,8 @@ the positional is the branch a review runs on now. A bare `wa eval reviewer <run
 ("no such branch or commit in <repo>: <run-id>"), which is a behaviour change, and `--branch <name>`
 reaches a branch whose name is one of the subcommand words.
 
-Refusals, changed and new (each is `wa eval: <text>` on stderr-less stdout, exit 2):
+Refusals, changed and new - `wa eval: <text>` on stdout, exit 2, except the two that describe a review
+that RAN and did not review (no `REVIEW` line, or one about another commit), which exit 1:
 
 ```
 - BEFORE  reviewer needs a run id
