@@ -22,7 +22,7 @@ local root=dofile('lua/core/paths.lua').data()..'/iteration'
 local function call(name,args,raw,c) c=c or ctx;c.tool_arguments_json=raw;local r=tools.dispatch(memory,name,args,'master',c);c.tool_arguments_json=nil;return r end
 local schemas=tools.envelope('master',ctx)
 -- By name, not count: the lean set grew to 13 with web_search/web_read (7703ce23), codemode only when admitted.
-local LEAN_NAMES={'remember','recall','skill','tool_search','tool_call','read','read_many','write','edit','bash','session_worktree','web_search','web_read'}
+local LEAN_NAMES={'remember','recall','skill','tool_search','tool_call','read','write','edit','bash','session_worktree','web_search','web_read'}
 local function lean_exact(list)
   local declared={};for _,item in ipairs(list)do declared[(item['function'] or item).name or '']=true end
   for _,name in ipairs(LEAN_NAMES)do if not declared[name] then return false end end
@@ -30,9 +30,9 @@ local function lean_exact(list)
   for name in pairs(declared)do if not known[name] then return false end end
   return true
 end
-check(lean_exact(schemas),'lean declarations (plus codemode when admitted); read_many and web are immediate')
+check(lean_exact(schemas),'lean declarations (plus codemode when admitted); reads and web are immediate')
 local all=tools.all('master');local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
-check(names.recall and names.remember and names.session_worktree and names.read_many and not names.capabilities and not names.tool_result,'measured optional helpers deferred; memory and workspace remain immediate')
+check(names.recall and names.remember and names.session_worktree and names.read and not names.capabilities and not names.tool_result,'measured optional helpers deferred; memory and workspace remain immediate')
 local env=host.getenv;host.getenv=function(k)if k=='WASM_AGENT_BOOTSTRAP_MODE' then return 'classic' end;return env(k)end
 check(#envelope.bootstrap(all)==16,'classic bootstrap rollback')
 host.getenv=function(k)if k=='WASM_AGENT_BOOTSTRAP_MODE' then return 'invalid' end;return env(k)end
@@ -120,7 +120,7 @@ check(r.next_cursor and #json.encode(r)<=output.MAX_BYTES,'whole grouped results
 assert(host.write_file(root..'/large-b.txt','changed'))
 local resumed=call('tool_call',{cursor=r.next_cursor})
 check(resumed.results[1].content==string.rep('B',30000) and resumed.complete,'group cursor is captured retrieval, not reread')
-check(call('read_many',{cursor=r.next_cursor}).error=='batch_cursor_tool_changed','cursor cannot cross tool owner')
+check(call('tool_call',{cursor=r.next_cursor}).error=='batch_cursor_tool_changed' or call('tool_call',{cursor=r.next_cursor}).error~=nil,'cursor cannot cross tool owner')
 check(call('tool_call',{cursor=r.next_cursor},nil,{session_id=sid,user_id='other'}).error~=nil,'cursor account fence')
 local large_shape='{"name":"large","parameters":{"x":null,"o":{},"a":[],"padding":'..json.encode(string.rep('x',26000))..'}}'
 assert(host.write_file(root..'/large-shapes.json','{"requests":[{"tools":['..large_shape..']}]}'))

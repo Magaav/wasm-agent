@@ -89,7 +89,7 @@ Settlement hides the current phase and preserves totals in the footer:
 attempts at the prepared-request boundary (including failed/retried requests and
 summaries), not decision rounds, billed inferences or internal transport reconnects.
 Pre-request refusals do not count. `⚒` counts requested tool dispatches, including
-failed/fenced calls; it is not successful effects or ranges inside `read_many`.
+failed/fenced calls; it is not successful effects or items inside a batch.
 `◈` is net task-context growth, not provider/cache spend: measured post-request
 boundary minus the pre-turn boundary; original billed accounting remains below.
 Snapshots retain both endpoints and uncertainty for replay, including compaction
@@ -155,11 +155,11 @@ Each request start also records JSON byte counts by message role, plus the
 source bytes of assistant reasoning and tool arguments. These are diagnostic
 subsets, not token allocations: JSON escaping and provider tokenization differ.
 They help identify growth without copying prompt text into the event ledger.
-`read_many` can request up to eight independent file ranges in one step;
+`tool_call`'s `calls` form can request up to eight independent reads in one step;
 each result uses the same read path and reports its own failure.
 Tool starts/ends also identify the response group (`tool_group_id`, size/index)
 and `batching_guidance` (always `control` since the treatment was retired on 04/11);
-starts count `read_many_ranges` separately.
+starts count `batch_items` separately.
 The offline audit exposes only aggregate complete/incomplete groups and counts,
 never group IDs. Historical missing group metadata stays unmeasured. This measures
 requested grouping, not proof of independence/parallel execution or saved model calls. Large combined

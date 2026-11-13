@@ -342,7 +342,6 @@ mod tests {
         ))
         .unwrap();
         assert!(policy.grant_for(&oracle, &laptop, "read").is_some());
-        assert!(policy.grant_for(&oracle, &laptop, "read_many").is_some());
         assert!(policy.grant_for(&oracle, &laptop, "control").is_none());
         assert!(policy.grant_for(&laptop, &laptop, "read").is_none());
     }

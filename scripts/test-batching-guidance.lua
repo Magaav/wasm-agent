@@ -27,14 +27,20 @@ check(agent.system_prompt('master',nil,nil,list)==prompt,'retired switches no lo
 overrides.WASM_AGENT_BATCHING_GUIDANCE=nil;overrides.WASM_AGENT_EDIT_SOURCE_FIRST=nil
 local read_only=agent.system_prompt('master',nil,nil,tools.all_for({read=true},'master'))
 local read_only_guidance=read_only:gsub('<available_skills>.-</available_skills>','')
-check(not read_only_guidance:find('read_many',1,true),'guidance names only available readers')
+for _,retired_name in ipairs(dofile('lua/core/retired.lua').list()) do
+  check(not read_only_guidance:find(retired_name,1,true),'guidance never names a retired batch: '..retired_name)
+end
 check(json.encode(list)==original_schemas,'prompt building does not alter any schemas')
 local root=dofile('lua/core/paths.lua').data()..'/batching/'
 local first,second=root..'first.txt',root..'second.txt'
 assert(host.write_file(first,'alpha\nbeta\n'));assert(host.write_file(second,'second\n'))
 local requests={{path=first,offset=2,limit=1},{path=second},{path=root..'missing.txt'}}
+-- One batch of three independent reads is the `tool_call` calls form (the `*_many` tools are retired;
+-- code mode is the batch, and this form is the outer facade's own 1-8 read page).
+local grouped={}
+for _,request in ipairs(requests) do grouped[#grouped+1]={name='read',arguments=request} end
 local calls={
-  {id='range-group',type='function',['function']={name='read_many',arguments=json.encode({requests=requests})}},
+  {id='range-group',type='function',['function']={name='tool_call',arguments=json.encode({calls=grouped})}},
   {id='single-range',type='function',['function']={name='read',arguments=json.encode({path=first,offset=1,limit=1})}},
 }
 local function execute(mode)
@@ -71,7 +77,7 @@ local function execute(mode)
   check(#starts==2 and #ends==2,'tool telemetry has matched boundaries')
   check(starts[1].tool_group_id==starts[2].tool_group_id and starts[1].tool_group_size==2
     and starts[1].tool_group_index==1 and starts[2].tool_group_index==2,'response group identity/count/order measured')
-  check(starts[1].read_many_ranges==3 and starts[2].read_many_ranges==nil,'range count distinct from tool call count')
+  check(starts[1].batch_items==3 and starts[2].batch_items==nil,'batch item count distinct from tool call count')
   check(starts[1].batching_guidance=='control'
     and ends[1].batching_guidance==starts[1].batching_guidance,'both telemetry boundaries name actual treatment')
   check(ends[1].ok==false,'partial read failure not disguised as group success')

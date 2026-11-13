@@ -29,9 +29,9 @@ time (neither a complete provider request), see
 ## Declared and on-demand tools
 
 <!-- generated:bootstrap-tools (scripts/sync-prompt-docs.lua) -->
-New operator sessions declare 14 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `read_many`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
+New operator sessions declare 13 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
 `codemode` is also declared when code mode is admitted for the run. Orchestration mode adds `route_task`, `subagent`.
-`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (16 in all).
+`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (15 in all).
 Every other permitted tool is called on demand with `tool_call`; the system prompt lists it with its cue.
 <!-- /generated -->
 
@@ -94,12 +94,6 @@ Built-in tools not declared at bootstrap, as the progressive prompt lists them (
 - `wave_autoflush`: Control coordinator acceptance and durable wave-end installation obligation
 - `integrate`: Land an orchestration worker's tested tip; never deploy
 - `resource`: Inspect resource ownership and reconcile interrupted effects
-- `edit_many`: Preflight independent edits, then apply with per-file outcomes
-- `grep_many`: Run separately scoped literal searches together
-- `search_messages_many`: Run independently filtered history searches together
-- `session_many`: Read bounded ranges from several sessions
-- `symbol_source_many`: Retrieve several selected symbol implementations
-- `write_many`: Preflight independent writes, retaining diff and undo evidence
 - `mcp_whatsapp_contacts`: Which WhatsApp chat a name means, with the candidates when a name is ambiguous
 - `mcp_whatsapp_search`: Search every indexed WhatsApp message by text, chat, kind, sender or time window
 - `mcp_whatsapp_read`: Read one WhatsApp chat by JID or name, newest first, with a header and a cursor
@@ -158,12 +152,11 @@ runs on the client too, while `bash` runs on this node.
 | `bash` | `command` `cwd?` `timeout_seconds?` | Run a shell command on this machine |
 | `operation` | `action` `command?` `cwd?` `id?` `limit?` `offset?` `stream?` `timeout_seconds?` `wait_for?` `wait_ms?` | Run or collect a supervised long command |
 | `read` | `path` `column?` `limit?` `offset?` `version?` | Read a file (text or image), paged |
-| `read_many` | `cursor?` `requests?` | Read several files or ranges in one call |
 | `write` | `content` `path` | Create or overwrite a file |
 | `edit` | `path` `edits?` `range_edits?` | Replace a versioned range returned by read |
 | `ls` | `path?` | List a directory |
 | `grep` | `pattern` `extensions?` `ignore_case?` `limit?` `max_depth?` `path?` | Find lines matching literal text |
-| `graph` | `action` `aspects?` `byte_offset?` `commit?` `critique?` `cursor?` `cwd?` `depth?` `direction?` `evidence?` `force?` `from?` `grade?` `hours?` `kind?` `limit?` `line?` `max_bytes?` `name?` `offset?` `outcome?` `path?` `prefer_implementations?` `reason?` `requests?` `run_id?` `source?` `source_version?` `to?` | Retrieve symbol source, trace relationships, or audit patch impact |
+| `graph` | `action` `aspects?` `byte_offset?` `commit?` `critique?` `cursor?` `cwd?` `depth?` `direction?` `evidence?` `force?` `from?` `grade?` `hours?` `kind?` `limit?` `line?` `max_bytes?` `name?` `offset?` `outcome?` `path?` `prefer_implementations?` `reason?` `run_id?` `source?` `source_version?` `to?` | Retrieve symbol source, trace relationships, or audit patch impact |
 | `diagnose` | `steps` | Run a fixed read/grep check sequence once |
 | `client` | `action` `button?` `id?` `key?` `max_chars?` `port?` `profile?` `reuse?` `script?` `target?` `text?` `timeout_ms?` `url?` `x?` `y?` | Act on the user's machine: screen, mouse, keyboard, browser |
 | `shell` | `command` `cwd?` `shell?` | Run a shell command on the client machine |
@@ -182,12 +175,6 @@ runs on the client too, while `bash` runs on this node.
 | `wave_autoflush` | `action` `binary_receipt?` `child_id?` `digest?` `evidence?` `request_id?` `revision?` `sha?` `tip?` `tree?` | Control coordinator acceptance and durable wave-end installation obligation |
 | `integrate` | - | Land an orchestration worker's tested tip; never deploy |
 | `resource` | `action` `evidence?` `key?` `principal?` `run?` | Inspect resource ownership and reconcile interrupted effects |
-| `edit_many` | `requests` | Preflight independent edits, then apply with per-file outcomes |
-| `grep_many` | `requests` | Run separately scoped literal searches together |
-| `search_messages_many` | `requests` | Run independently filtered history searches together |
-| `session_many` | `requests` | Read bounded ranges from several sessions |
-| `symbol_source_many` | `requests` | Retrieve several selected symbol implementations |
-| `write_many` | `requests` | Preflight independent writes, retaining diff and undo evidence |
 | `mcp_whatsapp_contacts` | `limit?` `q?` | Which WhatsApp chat a name means, with the candidates when a name is ambiguous |
 | `mcp_whatsapp_search` | `chat?` `from?` `kind?` `limit?` `q?` `since?` `until?` | Search every indexed WhatsApp message by text, chat, kind, sender or time window |
 | `mcp_whatsapp_read` | `chat` `before?` `limit?` | Read one WhatsApp chat by JID or name, newest first, with a header and a cursor |

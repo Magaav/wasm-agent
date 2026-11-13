@@ -40,8 +40,8 @@ M.GUARD = {
   kind = 'lua',
   -- Documentation, not a matcher: the predicate below decides per call. Named tools are the ones whose
   -- arguments can carry one of the two actions.
-  tools = { bash = true, shell = true, operation = true, exec = true, write = true, write_many = true,
-    edit = true, edit_many = true, patch = true, apply_patch = true },
+  tools = { bash = true, shell = true, operation = true, exec = true, write = true,
+    edit = true, patch = true, apply_patch = true },
 }
 
 -- A bounded view of the arguments: a write's content can be megabytes, and the guard only needs the
@@ -118,8 +118,8 @@ function M.judge(tool_name, tool_input)
   local path = text_of(input.path or input.file or input.file_path or input.target or '')
   local lowered_command = command:lower()
   local lowered_path = path:lower()
-  -- The batched tools (`write_many`, `edit_many`) carry their targets in a list; a drop-in path inside
-  -- one of those is the same act and must not slip past because the top-level path was empty.
+  -- A tool that carries its targets in a list (a routed `tool_call` batch, a plugin's own shape) is the
+  -- same act and must not slip past because the top-level path was empty.
   local extra_paths = {}
   for _, key in ipairs({ 'files', 'edits', 'items', 'writes', 'targets' }) do
     local list = input[key]

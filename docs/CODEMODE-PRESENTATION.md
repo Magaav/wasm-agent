@@ -10,14 +10,14 @@ See `skills/codemode-output/SKILL.md` for workflow and [CODEMODE.md](CODEMODE.md
 for VM/pinning/scope limits; [BATCH-TOOLS.md](BATCH-TOOLS.md) owns cached read paging.
 
 ```js
-await tools.read_many({requests:[
-  {path:'docs/A.md',offset:1,limit:120},
-  {path:'docs/B.md',offset:1,limit:120}
+await tools.tool_call({calls:[
+  {name:'read',arguments:{path:'docs/A.md',offset:1,limit:120}},
+  {name:'read',arguments:{path:'docs/B.md',offset:1,limit:120}}
 ]});
 await showCall({version:1,call:1});
 ```
 
-Instead of `text(await tools.read_many(...))`, the selected result appears as
+Instead of `text(await tools.tool_call({calls:[...]}))`, the selected result appears as
 `shown[i].result`, native JSON once, without the guest text item's extra JSON
 string escaping. The model view preserves fields and JSON object/array/null shapes
 through normal redaction. `presentation_sanitized=true` identifies this derived
@@ -53,19 +53,20 @@ a read cache. Original native result bytes are the existing hash-addressed evide
 
 When everything fits, `shown[i].complete=true` means the *sanitized captured result*
 is entirely visible, not that original secret-bearing bytes were displayed or every
-document/page was read. For a `read_many`
-page, `next_cursor` still means later cached results remain unread. Follow it with
-ordinary `read_many({cursor:...})` across scripts/process restarts without refetch.
+document/page was read. For a paged batch
+page (`tool_call`'s `calls` form), `next_cursor` still means later cached results
+remain unread. Follow it with an ordinary `tool_call({cursor:...})` across
+scripts/process restarts without refetch.
 Normal source byte/line continuations remain version-bound and separate.
 
 If the encoded envelope would exceed the budget, `presentation_partial=true`
-labels incomplete awareness. Native read batches pack whole items into `results`,
+labels incomplete awareness. A paged read batch (`tool_call`'s `calls` form) packs whole items into `results`,
 preserve typed top-level page `metadata` subject to redaction (including cached continuation and late
 notes), and give every captured slot `coverage`: original index, visible flag,
 error/effect/outcome/path fields where present, and an exact unread SHA-256/offset/
 byte count. No partial source text or clipped receipt is offered as editable data.
 Retrieve unread ranges with ordinary `tool_result`, following its `next_offset`
-until that range is covered; later cached batch pages still use `read_many` cursor.
+until that range is covered; later cached batch pages still use the batch cursor.
 This high-boundary fallback can require extra artifact retrievals; it does not
 claim arbitrary metadata always fits or replace the existing cursor mechanism.
 If the journal/metadata itself cannot fit, the whole exact result is referenced

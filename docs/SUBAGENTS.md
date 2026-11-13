@@ -96,7 +96,7 @@ or supervisor tool and owns only implement/verify/integrate/report. See
   "description": "A bounded task that may edit files and run a shell.",
   "operator_authorized": true,
   "instructions": "Do the task you were given, then stop.",
-  "allowed_tools": ["read", "read_many", "grep", "ls", "diagnose", "write", "edit", "bash"],
+  "allowed_tools": ["read", "grep", "ls", "diagnose", "write", "edit", "bash"],
   "resources": {},
   "limits": {
     "max_depth": 0,

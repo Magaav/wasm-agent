@@ -23,7 +23,7 @@ local root=dofile('lua/core/paths.lua').data()..'/work';assert(host.write_file(r
 local ctx={session_id=sid,user_id='master',role='master'}
 local checks=0;local function check(v,label)assert(v,label);checks=checks+1 end
 local function call(code,c)return tools.dispatch(memory,'codemode',{code=code},'master',c or ctx)end
-local boot=tools.envelope('master',ctx);check(#boot==12,'opt-in adds one tool, read_many and direct tools retained')
+local boot=tools.envelope('master',ctx);check(#boot==11,'opt-in adds one tool, direct tools retained')
 local r=call('const r=await tools.read({path:'..json.encode(root..'/a.txt')..'}); text(r.content); return 42;')
 check(r.ok and r.backend==backend and r.items[1].text=='alpha','native guest calls real read and filters output')
 check(#r.calls==1 and r.calls[1].evidence and host.read_file(r.calls[1].evidence.path)~=nil and r.calls[1].evidence.sha256==host.sha256(host.read_file(r.calls[1].evidence.path)),'complete nested original retained with its exact hash')

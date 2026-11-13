@@ -25,7 +25,7 @@ local sid='measured-context-proof';if not memory.session(sid) then memory.start_
 local bot=agent.new(sid,function()end,'master','master','');bot.model='deepseek-v4.1-flash'
 local messages={{role='system',content='stable rules'},{role='user',content='keep all raw evidence'},
   {role='assistant',content='prior work',reasoning_items={{type='reasoning',encrypted_content=string.rep('x',3900000)}}}}
-local tools={{type='function',['function']={name='read_many',parameters={type='object'}}}}
+local tools={{type='function',['function']={name='tool_call',parameters={type='object'}}}}
 bot.tool_list=tools
 local usage={known=true,prompt=567352,output=492}
 local raw=telemetry.estimate_messages(messages)+math.ceil(#json.encode(tools)/4)

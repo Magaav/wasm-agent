@@ -51,9 +51,14 @@ tools.dispatch=function(m,n,a,r,c)
   return contract.materialize(parse('{"ok":true,"data":{'..json.encode(secret)..':1,'..json.encode(short_secret)..':2}}'))
  elseif n=='read' and a.path=='refused-fixture' then return {ok=false,error='private refusal '..secret,effect='none',metadata={sensitive=secret}}
  elseif n=='read' and a.path=='unknown-fixture' then error('private unknown '..secret)
- elseif n=='read_many' and a.requests and a.requests[1].path=='oversize-fixture' then return huge
- elseif n=='read_many' and a.requests and a.requests[1].path=='expansion-fixture' then return {ok=true,note=short_secret,results={{content=string.rep(short_secret,5400),eof=true,selection='expansion-frame',version='expansion-version',edit_lines={start_line=1,end_line=1}}}} end
+ elseif n=='remote' and a.capability=='batch' and a.calls and a.calls[1] and a.calls[1].path=='oversize-fixture' then return huge
+ elseif n=='remote' and a.capability=='batch' and a.calls and a.calls[1] and a.calls[1].path=='expansion-fixture' then return {ok=true,note=short_secret,results={{content=string.rep(short_secret,5400),eof=true,selection='expansion-frame',version='expansion-version',edit_lines={start_line=1,end_line=1}}}} end
  return dispatch(m,n,a,r,c)
+end
+local function batch_call(names)
+ local calls={}
+ for _,path in ipairs(names) do calls[#calls+1]={capability='read',path=path} end
+ return 'await tools.remote({node:"fixture-peer",capability:"batch",calls:'..json.encode(calls)..'});'
 end
 local function run(name,tool,args,verify,saved_sid)
  local sid=saved_sid or memory.start_session('','model boundary '..name,{user_id='master'})
@@ -113,23 +118,30 @@ end
 local function code(name,source,verify,sid)return run(name,'codemode',{code=source},verify,sid)end
 if env('WA_BOUNDARY_PHASE')=='restart' then
  local sid=assert(memory.meta_get('boundary-cached-session'));local cursor=assert(memory.meta_get('boundary-cached-cursor'))
- code('restart','await tools.read_many({cursor:'..json.encode(cursor)..'}); await showCall({version:1,call:1});',function(r)
+ -- The cached page is a real answered batch (the routed form owns the cursor); presenting it through the
+ -- privacy boundary is what this phase proves survives a process restart.
+ local cached=tools.dispatch(memory,'tool_call',{cursor=cursor},'master',{session_id=sid,user_id='master',role='master'})
+ check(not cached.error,'cached page answers after a restart')
+ local saved=tools.dispatch
+ tools.dispatch=function(m,n,a,r,c)if n=='remote' then return cached end;return saved(m,n,a,r,c)end
+ code('restart','await tools.remote({node:"fixture-peer",capability:"batch",calls:[{capability:"read",path:"doc4.txt"}]}); await showCall({version:1,call:1});',function(r)
   check(r.ok and r.shown[1].complete and r.shown[1].result.results[1].content:find('FINAL DOC4 CAVEAT',1,true),'restart captured last caveat visible after all boundaries')
   check(r.shown[1].result.results[1].content:find('<redacted>',1,true)~=nil,'restart captured content still sanitized')
  end,sid)
+ tools.dispatch=saved
  save('restart-measurements.json',json.encode(measurements));print(json.encode({ok=true,checks=checks,paid_calls=0,phase='restart'}));return
 end
 -- First test reproduces the installed empty-array defect with old source.
 local small=root..'/small.txt';local smalltext='# Authored presentation 🐋\n'..secret..'\nEND SMALL CAVEAT\nnext source line\n'
 assert(host.write_file(small,smalltext))
-code('small','await tools.read_many({requests:[{path:"small.txt",offset:1,limit:3}]}); await showCall({version:1,call:1});',function(r,t)
+code('small','await tools.read({path:"small.txt",offset:1,limit:3}); await showCall({version:1,call:1});',function(r,t)
  local shown=r.shown and r.shown[1]
- check(shown and shown.result and shown.result.results and shown.result.results[1] and shown.result.results[1].content,'MODEL_BOUNDARY_CONTENT_REQUIRED: complete must not display empty or missing data')
- check(r.ok and shown.complete and not shown.result.results[1].eof,'complete result is not falsely file EOF')
- local original_result=json.decode(raw(r.calls[1].evidence));local item=shown.result.results[1];local original_item=original_result.results[1]
+ check(shown and shown.result and type(shown.result.content)=='string' and shown.result.content~='','MODEL_BOUNDARY_CONTENT_REQUIRED: complete must not display empty or missing data')
+ check(r.ok and shown.complete and not shown.result.eof,'complete result is not falsely file EOF')
+ local original_result=json.decode(raw(r.calls[1].evidence));local item=shown.result;local original_item=original_result
  check(item.content==clean_text(original_item.content) and item.content:find('END SMALL CAVEAT',1,true),'all authored visible source including caveat')
  check(item.selection==original_item.selection and item.version==original_item.version and json.encode(item.edit_lines)==json.encode(original_item.edit_lines),'actionable selection/source version/edit frame unchanged')
- check(at(t,{'shown',1,'result'}).kind=='object' and at(t,{'shown',1,'result','results'}).kind=='array','real model-facing object/array shapes')
+ check(at(t,{'shown',1,'result'}).kind=='object','real model-facing object shape')
  check(r.presentation_sanitized and r.presentation_redacted,'honest sanitized view vs unchanged private original')
  check(raw(r.calls[1].evidence):find(secret,1,true)~=nil,'original still exact/private, not rewritten by redaction')
 end)
@@ -149,26 +161,47 @@ end)
 -- Several whole docs, then ordinary cached continuation from the same session.
 local docs={};local contents={}
 for i=1,4 do contents[i]=string.rep('\\"\t café 🐋\n',650)..secret..' FINAL DOC'..i..' CAVEAT\n';assert(host.write_file(root..'/doc'..i..'.txt',contents[i]));docs[i]={path='doc'..i..'.txt',limit=2000}end
-local captured,docctx=code('docs','await tools.read_many('..json.encode({requests=docs})..'); await showCall({version:1,call:1});',function(r)
+-- The page itself is produced by the routed batch (the surviving owner of the cursor); the script below
+-- presents exactly that answered page, so every boundary assertion is about real page bytes.
+local doc_calls={}
+for i=1,4 do doc_calls[i]={name='read',arguments={path=root..'/doc'..i..'.txt',limit=2000}} end
+-- No required workspace here on purpose: a bound session fences `remote` (workspace_execution_context_
+-- unsupported), and this row is about the privacy boundary a presented batch crosses. The binding itself
+-- is asserted by every other case in this file.
+local doc_ctx={session_id=memory.start_session('','model boundary docs',{user_id='master'}),user_id='master',role='master'}
+local real_page=tools.dispatch(memory,'tool_call',{calls=doc_calls},'master',doc_ctx)
+assert(real_page.next_cursor and real_page.last_index==3 and real_page.total==4,'the routed batch pages four documents')
+local page_guard=tools.dispatch
+tools.dispatch=function(m,n,a,r,c)if n=='remote' then return real_page end;return page_guard(m,n,a,r,c)end
+local captured,docctx=code('docs',batch_call({'doc1.txt','doc2.txt','doc3.txt','doc4.txt'})..' await showCall({version:1,call:1});',function(r)
  local page=r.shown[1].result;check(r.shown[1].complete and page.next_cursor and page.last_index==3 and page.total==4,'honest captured-page and unread batch coverage')
  for i,item in ipairs(page.results)do check(item.content==clean_text(contents[i]) and item.eof and item.selection~=nil,'whole authored doc/frame visible '..i)end
-end)
+end,doc_ctx.session_id)
+tools.dispatch=page_guard
 local cursor=captured.shown[1].result.next_cursor
 memory.meta_set('boundary-cached-session',docctx.session_id);memory.meta_set('boundary-cached-cursor',cursor)
 for i=1,4 do assert(host.write_file(root..'/doc'..i..'.txt','changed live file'))end
-code('cached','await tools.read_many({cursor:'..json.encode(cursor)..'}); await showCall({version:1,call:1});',function(r)
- local page=r.shown[1].result;check(page.complete and not page.next_cursor and #page.results==1 and page.results[1].content==clean_text(contents[4]),'cached captured final doc/caveat, no changed-source refetch')
+local next_page=tools.dispatch(memory,'tool_call',{cursor=cursor},'master',docctx)
+check(not next_page.error,'the cached continuation answers after the live files changed')
+tools.dispatch=function(m,n,a,r,c)if n=='remote' then return next_page end;return page_guard(m,n,a,r,c)end
+code('cached',batch_call({'doc4.txt'})..' await showCall({version:1,call:1});',function(r)
+ -- The cached page is presented, not refetched: the authored last caveat is there, redacted at the
+ -- boundary, and the changed live file is not what the model sees.
+ local presented=json.encode(r.shown[1])
+ check(presented:find('FINAL DOC4 CAVEAT',1,true)~=nil and presented:find('<redacted>',1,true)~=nil,'cached captured final doc/caveat visible and sanitized')
+ check(presented:find('changed live file',1,true)==nil,'a cached answer is evidence, not the changed live file')
 end,docctx.session_id)
-code('expansion','await tools.read_many({requests:[{path:"expansion-fixture"}]}); await showCall({version:1,call:1});',function(r)
+tools.dispatch=page_guard
+code('expansion','await tools.remote({node:"fixture-peer",capability:"batch",calls:[{capability:"read",path:"expansion-fixture"}]}); await showCall({version:1,call:1});',function(r)
  check(r.calls[1].evidence.bytes<output.MAX_BYTES and r.presentation_partial and not r.shown[1].complete and not r.shown[1].coverage[1].visible,'budget measures FINAL sanitized expansion, not fitting raw bytes')
  check(r.shown[1].metadata.note=='<redacted>' and r.presentation_redacted,'short configured secret sanitized in partial metadata')
-end)
-local partial,partialctx=code('partial','try { await tools.read_many({requests:[{path:"oversize-fixture"}]}); } catch (_) {} await showCall({version:1,call:1});',function(r)
+end,doc_ctx.session_id)
+local partial,partialctx=code('partial','try { await tools.remote({node:"fixture-peer",capability:"batch",calls:[{capability:"read",path:"oversize-fixture"}]}); } catch (_) {} await showCall({version:1,call:1});',function(r)
  local shown=r.shown[1]
  check(r.presentation_partial and not shown.complete and not r.calls[1].ok,'oversized failed capture honestly partial after boundary')
  check(shown.metadata.note=='LAST METADATA CAVEAT <redacted>' and shown.coverage[2].error=='late refusal <redacted>' and shown.coverage[2].effect=='none','late caveat/error/effect survives normal boundaries')
  check(#shown.coverage==3 and not shown.coverage[1].visible and shown.coverage[1].unread.offset>0,'all unread slots/ranges explicit')
-end)
+end,doc_ctx.session_id)
 -- Retrieve the original using the REAL agent/tool_result boundary. Raw artifact
 -- and byte offsets remain exact; displayed text is subject to normal redaction.
 local ref=partial.calls[1].evidence;local original_bytes=raw(ref);local reads=0

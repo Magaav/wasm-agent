@@ -24,7 +24,7 @@ local rounds=0;local nested
 provider.complete_with=function(_,messages,schemas)
  rounds=rounds+1;local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
  check(names.codemode,'DEFAULT_POSITIVE: eligible coding exposes codemode without opt-in')
- check(names.read and names.edit and names.write and names.bash and names.read_many and names.session_worktree,'ordinary tools and workspace control retained')
+ check(names.read and names.edit and names.write and names.bash and names.session_worktree,'ordinary tools and workspace control retained')
  check(messages[1].content:find('preferred programmatic coding path',1,true),'native runtime guidance present')
  if rounds==1 then
   setting='off' -- active admissions must not follow a later setting change

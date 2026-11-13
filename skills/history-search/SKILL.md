@@ -23,7 +23,7 @@ not independent confirmation. `group_by:"message"` removes the two-hits-per-sess
 presentation cap when investigating a particular thread.
 
 For inspecting executed tools, choose `session {view:"tool_calls", ...}` (also
-`session_many`/owned child sessions): exact calls/arguments and tool outcomes are
+and owned child sessions; several sessions are a script's `Promise.all`): exact calls/arguments and tool outcomes are
 selected without encrypted reasoning. It explicitly omits prose/diagnostics and
 retains full-original references. Use full for general context and diagnosis;
 projection byte versions belong to the selected encoding, not the original row.

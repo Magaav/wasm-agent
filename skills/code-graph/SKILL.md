@@ -62,8 +62,8 @@ If `complete:false`, keep the exact page and continue with its `next_offset`
 and `snapshot` using `--offset N --snapshot SHA`; a changed inventory refuses.
 Alternatively narrow an unrelated scope, never pretend omitted candidates were
 examined. Scope/term selection and reading the returned source remain inference.
-Read independent known source ranges together with `read_many`, keeping exact
-bytes, errors and continuation addresses. No index or filter replaces necessary
+Read independent known source ranges together in one script (a `Promise.all` over
+`read`), keeping exact bytes, errors and continuation addresses. No index or filter replaces necessary
 source inspection. Private proof: `node <skill>/scripts/test-discover-files.mjs
 <absolute-evidence-scratch>`; it checks pagination, Unicode/space paths, ignored
 files, exact candidate sets, changed-snapshot refusal and visible failures.
@@ -125,7 +125,7 @@ files. Source retrieval replaces the first broad read, but inspect imports and
 nearby state before changing code.
 
 `graph {action:"audit"}` checks the current run's recorded patch against resolved
-callers not read through native `read`/`read_many`; use `source:"git"` for the
+callers not read through native `read`; use `source:"git"` for the
 current staged-and-unstaged Git patch, including shell edits. `graph {action:"audit_report",
 hours:48}` summarizes the trial. `audit_feedback` records an operator-reviewed
 outcome for a run with leads; never label a catch yourself. See
@@ -135,7 +135,7 @@ grade (0-3), concrete reason and critique. This is your opinion, not a confirmed
 catch; grade 3 only means the lead prompted a patch or test revision.
 
 Every query captures content evidence, freezes a required revision and automatically
-waits for a committed snapshot covering it. Native mutations (including `edit_many`)
+waits for a committed snapshot covering it. Native mutations (a script's `edit` loop included)
 and OS events queue shared root-isolated indexing; missed hints are reconciled by
 content, never Git/mtime alone. `graph_wait_timeout` or `graph_index_failed` is an
 explicit failure, not an empty result: inspect revision/progress/recovery fields and
@@ -144,10 +144,11 @@ use bounded `grep`/`read`. Do not blindly retry or heartbeat a quiet worker. Exp
 workers need supported node recovery. Later edits do not make this query chase a
 moving target. Known locations can still make grep/read cheaper than graph.
 
-For1–8 known definitions use `graph {action:'symbol_source_many',requests:[...]}`
-or compatibility `symbol_source_many`. They share one captured/pinned snapshot per
-resolved root. Follow each item's `graph_snapshot_index` into `graph_snapshots` and
-inspect every error/continuation. Carry returned `source_version` with continuation
+For 1–8 known definitions use one `Promise.all` over
+`graph {action:'symbol_source',path,name,line}` inside a script: each call captures its
+own pinned snapshot, so follow every error/continuation and carry the returned
+`source_version` with a continuation. There is no batch action any more - a selector
+list is the script's own array.
 selectors; ambiguous/changed definitions refuse, never auto-select.
 
 Focused proof and retained hash check:

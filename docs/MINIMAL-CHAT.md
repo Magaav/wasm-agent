@@ -47,7 +47,7 @@ notice pointing to the complete `steering_status`, never fail transcript deliver
 No new
 polling loop or dispatch.
 Deferred/unknown remains not placed. Original legacy rows are never rewritten.
-`read_many` displays successful/failed counts and the first failed path, not a
+`tool_call`'s `calls` form displays successful/failed counts and the first failed path, not a
 generic `ok` when one range failed.
 
 The footer trigger shows only `▤ 26%/1M`: occupancy of one task request versus

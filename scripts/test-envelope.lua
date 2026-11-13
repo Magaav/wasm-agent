@@ -12,7 +12,7 @@ local all=tools.all('master',ctx,memory);local bootstrap,mode=tools.envelope('ma
 check(mode=='progressive','empty session progressive')
 -- The lean set by name (13 since web_search/web_read joined it, 7703ce23; 14 with time, so the clock
 -- rule never names an undeclared tool), plus codemode only when this run admits it.
-local LEAN_NAMES={'time','remember','recall','skill','tool_search','tool_call','read','read_many','write','edit','bash','session_worktree','web_search','web_read'}
+local LEAN_NAMES={'time','remember','recall','skill','tool_search','tool_call','read','write','edit','bash','session_worktree','web_search','web_read'}
 local function lean_exact(list)
   local declared={};for _,item in ipairs(list)do declared[(item['function'] or item).name or '']=true end
   for _,name in ipairs(LEAN_NAMES)do if not declared[name] then return false end end

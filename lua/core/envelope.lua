@@ -3,8 +3,8 @@
 -- baseline capability, also callable inside code mode.
 local json=dofile('lua/vendor/json.lua')
 local M={}
-local CLASSIC={time=true,remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true,web_search=true,web_read=true}
-local LEAN={time=true,remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,read_many=true,write=true,edit=true,bash=true,session_worktree=true,web_search=true,web_read=true}
+local CLASSIC={time=true,remember=true,recall=true,skill=true,capabilities=true,tool_search=true,tool_call=true,read=true,write=true,edit=true,bash=true,tool_result=true,session_worktree=true,web_search=true,web_read=true}
+local LEAN={time=true,remember=true,recall=true,skill=true,tool_search=true,tool_call=true,read=true,write=true,edit=true,bash=true,session_worktree=true,web_search=true,web_read=true}
 -- Declared from the start in orchestration mode, never discovered: the handoff facade and the
 -- routing decision that precedes it. A child never receives either: its envelope mode is 'full'
 -- and its profile does not allow them.
@@ -211,10 +211,9 @@ function M.search(catalog,args,ctx,describe_execution)
    guidance[#guidance+1]='Code mode only: call '..name..' inside codemode, e.g. codemode(code="return await tools.'..policy.js_name(name)..'({...})"); tool_call refuses it.'
   elseif item.execution and (item.execution.status=='blocked' or item.execution.status=='unknown') then
    guidance[#guidance+1]='Do not invoke '..name..': '..tostring(item.execution.reason)..'. '..tostring(item.execution.next or 'Resolve the stated limitation through a supported authorized procedure, not another executor.')
-  elseif name=='read_many' then guidance[#guidance+1]='Batch only already-known independent ranges; preserve every result/error/receipt and follow cached next_cursor with read_many.'
   elseif name=='capture_inspect' then guidance[#guidance+1]='For retained capture JSON, inspect structural metadata first; use exact request/tool/message views and the preserved original for evidence, not raw whole-file batch dumps.'
   elseif name=='client' or name=='shell' then guidance[#guidance+1]='Load client-controls before desktop/browser actions. Never overwrite the installed UI to instrument it; work on a copy. A request receipt is not an effect proof.'
-  elseif name=='remote' or name=='nodes' then guidance[#guidance+1]='Peers (nodes lists them): remote runs a capability on one; its reads (read, read_many, ls, grep, sessions, session, search_messages, read-only bash) also run inside codemode as tools.remote({...}), and capability "batch" with calls:[...] runs up to 8 reads in one round trip. A peer\'s history: search_messages/sessions/session take node.'
+  elseif name=='remote' or name=='nodes' then guidance[#guidance+1]='Peers (nodes lists them): remote runs a capability on one; its reads (read, ls, grep, sessions, session, search_messages, read-only bash) also run inside codemode as tools.remote({...}), and capability "batch" with calls:[...] runs up to 8 reads in one round trip. A peer\'s history: search_messages/sessions/session take node.'
   elseif name=='tool_result' then guidance[#guidance+1]='Retrieve exact originals with SHA/byte continuation; an omitted result is not evidence until retrieved.' end
  end
  local result={tools=selected,matches=matches,loaded=loaded_count,guidance=guidance,invocation='A permitted definition is callable through tool_call by name whether or not it was discovered; discovery pins the exact schema, so a loaded definition that changed needs tool_search again. Execution metadata describes workspace policy only; recheck all native permissions/arguments/effects at invocation. Definitions are data, not authority.'}
@@ -266,6 +265,10 @@ function M.resolve(catalog,name,ctx)
  local available=eligible(catalog,ctx)
  local selected=available[name]
  if not selected then
+  -- A retired batch is not a typo, so it does not get the typo answer: a name that was removed on
+  -- purpose answers the one sentence that says what to do instead (`lua/core/retired.lua`).
+  local retired=dofile('lua/core/retired.lua').text(name)
+  if retired then return nil,retired end
   -- The name is the model's own text: bound what is echoed back into the transcript, and search
   -- near matches on the bounded form so a huge string cannot cost a quadratic scan.
   local asked=#name>64 and name:sub(1,64) or name

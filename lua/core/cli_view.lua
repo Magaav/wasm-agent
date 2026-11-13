@@ -268,8 +268,8 @@ function M.call_line(name, args, limit)
   local a = (type(args) == "table") and args or {}
   local path = tostring(a.path or a.file_path or "")
   limit = limit or 96
-  if type(name)=='string' and name:match('_many$') and type(a.requests)=='table' then
-    return string.format('%d independent requests',#a.requests)
+  if name == "tool_call" and type(a.calls) == "table" then
+    return string.format('%d independent requests',#a.calls)
   elseif name == "bash" or name == "shell" then
     return "$ " .. clip(a.command or "", limit)
   elseif name == "read" then
@@ -451,7 +451,7 @@ function M.outcome(name, result, args)
   end
   local r = (type(result) == "table") and result or {}
   if r.error then return false, clip(r.error, 80) end
-  if type(name)=='string' and name:match('_many$') and type(r.results)=='table' then
+  if name == "tool_call" and type(r.results)=='table' then
     return r.ok==true,string.format('%d items; %d failed; %d not run',#r.results,r.failed or 0,r.not_run or 0)
   end
   if name == "read" then

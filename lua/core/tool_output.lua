@@ -24,8 +24,9 @@ if configured_bytes and configured_bytes >= 4096 and configured_bytes <= 4 * 102
   M.MAX_BYTES = math.floor(configured_bytes)
 end
 local legacy_views,legacy_count={},0
-local BATCH_OUTPUTS={read_many=true,edit_many=true,write_many=true,grep_many=true,
-  session_many=true,search_messages_many=true,symbol_source_many=true}
+-- The one surviving batch surface is `tool_call`'s `calls` form (1-8 known reads in one call): its
+-- result keeps every item's outcome visible even when the whole answer exceeds the view budget.
+local BATCH_OUTPUTS={tool_call=true}
 
 function M.slice(text, from, count)
   text = tostring(text or "")

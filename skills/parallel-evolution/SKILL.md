@@ -65,7 +65,7 @@ old-policy negative control must pass, along with focused overflow/accounting
 regressions. Preserve originals and reasoning; estimated cold/tail context is
 not provider usage. See `<repo>/docs/CONTEXT-COMPACTION.md`.
 
-For tagged prompt/read_many bootstrap or recoverable public HTTP changes,
+For tagged prompt/bootstrap or recoverable public HTTP changes,
 `layered-web-proof` records `test-layered-web.cjs <built-wa> <fresh-evidence>
 <baseline-wa>` and its retained-hash `--post`. Required worktrees use that same
 verified direct CLI, not unsupported replay. Also run the TAP web/HTTP suites,
@@ -73,7 +73,7 @@ existing envelope/full bodies/read-batch/MCP no-replay/socket regressions and
 shipping/instruction checks. Keep original responses and source-scope boundaries;
 HTTP acceptance is not completion, challenge solving is human-only, and a browser
 solve does not certify anonymous HTTP recovery. See `<repo>/docs/LAYERED-PROMPT.md`
-and `<repo>/docs/WEB-HTTP-OUTCOMES.md`. Tags/read_many may cost initial bytes;
+and `<repo>/docs/WEB-HTTP-OUTCOMES.md`. Tags may cost initial bytes;
 report actual task outcomes and context, not a claimed saving.
 
 For capture/lean-bootstrap/typed-routing changes, `envelope-iteration-proof`
@@ -94,12 +94,13 @@ replay. Also run complete skill-body and progressive-envelope proofs. Preserve
 scope/snapshot refusals and shared safety policy; first-use discovery and lexical
 misses remain risks. Bytes alone do not establish autonomous quality or billing.
 
-For `read_many` packing changes, `read-batch-packing-proof` records
+For batch packing changes (the pager behind `tool_call`'s `calls` form), `read-batch-packing-proof` records
 `node <repo>/scripts/test-read-batch.cjs <built-wa> <fresh-evidence> <capture>`
 plus `--post`; required worktrees use that verified direct CLI. Verify whole
 results/receipts, scope fences, source/embedded native restart and exact historical
-payload parity. The global view budget stays unchanged; follow cached `next_cursor`
-with read_many, not an artifact-recovery workaround. See `<repo>/docs/BATCH-TOOLS.md`.
+payload parity. The global view budget stays unchanged; follow a cached `next_cursor`
+with `tool_call({cursor:...})`, not an artifact-recovery workaround. A retired `*_many`
+name answers one sentence: batch in code mode. See `<repo>/docs/BATCH-TOOLS.md`.
 
 For MCP changes, `mcp-native-proof` records
 `node <repo>/scripts/test-mcp-native.cjs <absolute-built-wa> <fresh-evidence>`

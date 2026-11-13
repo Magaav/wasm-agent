@@ -3,9 +3,9 @@
 ## Model boundary
 
 <!-- generated:bootstrap-tools (scripts/sync-prompt-docs.lua) -->
-New operator sessions declare 14 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `read_many`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
+New operator sessions declare 13 tools from the start (`lean`, the default): `bash`, `edit`, `read`, `recall`, `remember`, `session_worktree`, `skill`, `time`, `tool_call`, `tool_search`, `web_read`, `web_search`, `write`.
 `codemode` is also declared when code mode is admitted for the run. Orchestration mode adds `route_task`, `subagent`.
-`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (16 in all).
+`WASM_AGENT_BOOTSTRAP_MODE=classic` adds `capabilities`, `tool_result` (15 in all).
 Every other permitted tool is called on demand with `tool_call`; the system prompt lists it with its cue.
 <!-- /generated -->
 
@@ -28,7 +28,7 @@ admits bash, mutations, MCP or plugin effects. Current permissions and definitio
 hashes are rechecked before each dispatch; cancellation/authority drift leaves
 an explicit unexecuted suffix. Null array slots and duplicate raw members refuse.
 Name/arguments, calls and cursor forms are exclusive. Large group replies page
-captured originals using tool_call(cursor); they cannot cross read_many cursor
+captured originals using tool_call(cursor); they cannot cross another batch's cursor
 ownership, accounts or workspace/profile scope. Cursor retention has no TTL/quota.
 
 Call shapes weaker models get wrong are repaired only where one reading exists, and

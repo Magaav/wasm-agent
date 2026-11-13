@@ -1,107 +1,70 @@
-# Independent batch tools
+# Batching: code mode is the batch
 
-Operator tools `edit_many`, `write_many`, `grep_many`, `session_many`,
-`search_messages_many`, and `symbol_source_many` take `requests` (1–8 items).
-Use them only for already-known independent operations. Keep dependent discovery,
-reads followed by edits, and conflicting effects sequential. Individual tools and
-multiple independent calls in one model response remain available.
+Operator decision (12/11): the `*_many` tools are **retired**. There is one way to do several
+independent things in one step - a script - and one sentence for anyone who asks for the old names:
 
-## Contracts
+```
+retired: batch in code mode - Promise.all(items.map(x => tools.<single>(x)))
+```
 
-- Each request reuses its primitive's fields, bounds and authorization. Batch
-  schemas derive from primitive schemas instead of maintaining duplicate contracts.
-  Symbol requests contain selected path/name/line/kind, optional file SHA-256,
-  byte/cwd options only; they cannot index, audit or dispatch another action.
-  They share the graph source-batch backend and automatic revision wait.
-  `graph_snapshot_index` points to one top-level `graph_snapshots` record per root.
-- All new batches are operator-only. A child needs both the batch and primitive
-  in its explicit profile; built-in explore gains only search/source batches.
-  Task owners gain the same safe read/write conveniences, never broader authority.
-  Guest tools/account visibility and remote image restrictions do not expand.
-- Read results remain in request order with separate errors, source identities,
-  scope/filter semantics and continuations. Search omissions are not success at
-  complete discovery. General batches are not a simultaneous filesystem/database
-  snapshot. Source batches are the explicit exception: one pinned graph snapshot
-  per resolved root, never a cross-root or live-filesystem transaction.
-- Mutations validate all item shapes, workspace paths, text/receipt versions,
-  anchors/ranges, duplicate/ancestor targets and prepared snapshots before the
-  first write. No-op requests do not rewrite files. Each actual application
-  rechecks the source and workspace and observes the steering fence.
-- `write_many` optionally accepts `version` (existing text SHA-256). Empty
-  versions are not relaxed for writes/edits. Unreadable/binary/directory targets
-  refuse before any mutation because a reliable text preimage is unavailable.
-- Effects are serial, **not a multi-file transaction or an OS-wide CAS**. A late
-  external edit, failed write or recording failure stops later items. Earlier
-  applied effects remain recorded. `applied`, `failed`, `not_run`, `unknown`,
-  `partial`, and ordered item outcomes distinguish them. A failed write is an
-  unknown outcome; never automatically retry, rollback or manufacture settlement.
-- Diff/undo uses the ordinary per-run changeset. Existing size/storage/create
-  limits remain visible, not silently bypassed. Preparation writes no files or
-  changeset evidence. Aggregate telemetry records batch item counts; one model
-  tool invocation is still counted as one invocation, not fabricated as N calls.
-- If the aggregate result exceeds the ordinary total view budget, every outcome
-  slot stays visible and omitted items have exact JSON artifact pointers. Full
-  originals are retained. Retrieve an omitted item before using its contents or
-  continuation; large batches can cost additional retrieval rounds.
-- No batch sends, deployments, restarts, cancellation, arbitrary tool dispatch,
-  retries or parallel mutation workers. Source indexing uses the shared graph
-  coordinator, not a batch-owned watcher/job. Successful source mutations notify
-  their actual root; partial outcomes still retain each notification and effect.
+## The mapping
 
-## Budget-paged `read_many`
+| retired name | the single tool it batched | the form that replaced it |
+| --- | --- | --- |
+| `read_many` | `read` | `await Promise.all(items.map(x => tools.read(x)))` |
+| `grep_many` | `grep` | `await Promise.all(items.map(x => tools.grep(x)))` |
+| `session_many` | `session` | `await Promise.all(items.map(x => tools.session(x)))` |
+| `search_messages_many` | `search_messages` | `await Promise.all(items.map(x => tools.search_messages(x)))` |
+| `symbol_source_many` | `graph` (`action:"symbol_source"`) | `await Promise.all(items.map(x => tools.graph({...x, action:"symbol_source"})))` |
+| `write_many` | `write` | `for (const f of items) await tools.write(f)` (effects stay serial) |
+| `edit_many` | `edit` | `for (const f of items) await tools.edit(f)` (effects stay serial) |
 
-`read_many` accepts1–8 independent requests OR an opaque `cursor`, never both.
-Small replies retain the original shape. Large replies return whole results in
-request order within the unchanged50 KiB budget, with `first_index`, `last_index`,
-`total`, all outcome slots, `complete`, `has_more` and `next_cursor`. Call
-`read_many({cursor:next_cursor})` for the remaining cached results: no file refetch,
-per-item omission or `tool_result` detour for ordinary oversized text batches.
-The complete original JSON remains hash-bound evidence. Versions, byte continuations,
-image references and receipt-bound edit frames are preserved exactly.
+## Why the script is enough
 
-Cursors are SQLite-persisted and fenced by account/session/role/profile/workspace
-and cwd. A changed scope or damaged artifact refuses. A new interpreter can resume
-without repeating reads. These are captured read results, not a guarantee files
-are still current; edits retain their ordinary stale-version checks. Individual
-near-limit text pages reserve wrapper overhead and expose normal line/byte cursors.
-An unusually oversized nontext item still refuses with its original evidence;
-this is not a claim that arbitrary metadata always fits. No budget increase,
-mutation batching change, automatic memory or recurring cursor-cleanup job.
+- **Same data.** Each `tools.<single>(x)` is the primitive's own call through the same dispatcher: the
+  same schema contract, the same role/profile/workspace checks, the same result object, the same exact
+  evidence references. `scripts/test-retire-many.lua` asserts value-for-value parity for every retired
+  name, including per-item errors and request order.
+- **Same guards.** A workspace binding, a guest ceiling or a managed-capability refusal reads the same
+  inside the loop as outside it, because both reach `M.dispatch`. A refused item arrives as a rejection:
+  catch it (`p.then(r => r, e => ...)`) and the batch keeps its per-item outcomes.
+- **Reads in parallel, effects one at a time.** `Promise.all` over reads is genuinely concurrent; the
+  dispatcher admits effectful calls serially, which is what the mutating batches did one item at a time.
+- **No 1-8 ceiling.** The bound was a property of a request array. A loop is bounded by the script's own
+  clock (`timeout_ms`, default 30 s, max 300 s), and work that outlives a turn is a pending handle
+  (`wait_s:0` then `wait(op)` - see [CODEMODE.md](CODEMODE.md), "Pending calls").
+- **One contract instead of two.** The batch schemas were derived from the primitives' properties and
+  still needed their own bounds, preflight, presentation and prose. That second contract is what the
+  retirement removes; nothing about the capability is lost.
 
-Exact seq5193 fixture:59,723 bytes/six results previously required three artifact
-reads. Whole-result packing returns the identical six results in two pages and
-zero artifact-recovery calls. `test-read-batch.cjs <wa> <fresh-evidence>
-<exact-seq5193-capture>` plus `--post` verifies source/embedded43+43 checks,
-restart3+3, UTF-8/escaping, integrity, receipt and scope fences; ordinary batch
-regression245+245. The historical capture is caller-supplied, not user-path-bound
-in the runner. This is model-free mechanism proof, not paid token/quality savings.
+## What the retirement did not change
 
-## Performance and risk
+- `tool_call` with `calls:[...]` (1-8 known independent **reads** in one call, serially) is the outer
+  facade's batch and stays. It is the paging surface in
+  [CODEMODE-PRESENTATION.md](CODEMODE-PRESENTATION.md): a reply that exceeds the view budget keeps every
+  item's outcome visible and returns `next_cursor`.
+- `lua/core/read_batch.lua` stays, as the pager behind that `tool_call` batch.
+- The peer protocol keeps its read set (`read`, `ls`, `grep`, `sessions`, `session`,
+  `search_messages`, `recall`, read-only `bash`), and `remote` with `capability:"batch"` runs up to eight
+  peer reads in one signed round trip. A retired batch name sent to a peer is answered with the one
+  sentence, from the same dispatcher.
 
-The measurable target is less invocation/envelope overhead for the same verified
-work. General batches still execute their underlying reads/writes; source batches
-explicitly share graph admission/content reconciliation and a pinned root snapshot
-(see `GRAPH.md`). This is not an invented result cache or a universal speedup.
-Existing independent calls already share a
-model round, so batches do not inherently reduce inference rounds. Added schemas
-increase each operator request's tool surface, and large outputs may need extra
-artifact reads. This risk must be weighed against measured task latency/context,
-not justified by counting calls alone. AGENTS.md remains unchanged.
-`WASM_AGENT_BATCH_TOOLS=0` disables the six schemas and direct batch dispatch at
-interpreter startup as an explicit rollback knob; ordinary tools remain. Enabled
-by this operator-requested rollout does not force batching or change discovery
-policy. No automatic fallback or per-round tool/schema shuffle.
+## Rules kept from the batch contract
 
-Initial model-free eight-write exchange: 4,799 bytes in eight primitive calls
-versus 3,974 bytes in one batch (825 bytes / 17.2% less); the six full schemas add
-7,700 bytes. This is serialized exchange metadata, not tokenizer/provider billing
-or an inference-round/latency guarantee. The fixed schema addition alone is larger
-than this one exchange's saving. Real task correctness and timing need separate
-measurement; do not claim that every task becomes faster.
+- **A per-item outcome stays visible.** In a script, catch the rejection; a bare `await` inside
+  `Promise.all` fails fast on the first refusal, which is a *stronger* default (no half-applied batch
+  presented as a whole one).
+- **Effects are never replayed.** A failed script is read, not rerun. `results.get`/`results.last` re-read
+  what a call answered without re-running it.
+- **No multi-file transaction is implied.** A serial loop of `write`/`edit` applies each call on its own;
+  a late failure leaves the earlier applications recorded in the changeset, exactly as the mutating batch
+  did.
+- **Aggregate output can cost retrieval.** A large directory listing, history page or search result is
+  bounded by the view budget; the original stays hash-addressed and is read back with `tool_result`.
 
-`scripts/test-batch-tools.lua` verifies real private native filesystem/SQLite and
-changeset behavior, refusal/no-effect and unknown/partial cases, primitive result
-parity, ownership/profile fences, original artifact recovery and deterministic
-argument/result envelope bytes. `scripts/test-batch-tools.cjs <wa> <evidence>` runs
-source and standalone embedded modes plus `--post` hash checks. Evidence is
-model-free, not a paid-model task-quality or guaranteed latency claim.
+## History
+
+`docs/BATCH-TOOLS.md` used to describe six operator batch tools (and `read_many`'s paged cursor). The
+measurements and journals that mention them (`docs/measurements/`, `docs/*-JOURNAL.md`) are dated
+records of that design and are not edited; the live surfaces - the catalogue, the prompt, discovery,
+skills and this doc - offer the script form only.

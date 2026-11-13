@@ -229,7 +229,7 @@ Oversized tool output is kept as hashed
 JSON under `data/tool-results/` and retrieved with `tool_result`. Views are created
 once (2,000 lines / 50 KiB per text field), saved, and replayed unchanged. Artifacts
 are node-local, not automatically replicated or pruned. Back them up with the DB.
-Independent `read_many` batches now pack whole results into budget-sized cached
+Independent batches (`tool_call`'s `calls` form, and a script's Promise.all) now pack whole results into budget-sized cached
 pages rather than discarding large items into artifact-only slots. Scope-fenced
 SQLite cursors preserve the original snapshot and resume after interpreter restart;
 this does not increase the global budget or imply current file freshness. See

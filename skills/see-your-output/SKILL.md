@@ -211,7 +211,7 @@ required UI/recovery suite, not a full release gate. Never claim exact per-token
 streaming from chars or substitute cache misses for context growth.
 Adjacent `test-turn-topics.cjs <fresh-evidence>` + `--post` checks actual-summary
 visibility/clock/replay, dashed queued steering above status/read-to-Steered topic
-identity and main/child isolation, plus truthful partial `read_many` failures.
+identity and main/child isolation, plus truthful partial batch failures.
 Use its direct CLI in a required workspace; these probes never control live runs.
 
 ## Run-count footer proof

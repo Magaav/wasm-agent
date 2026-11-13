@@ -20,7 +20,7 @@ local read_batch = dofile('lua/core/read_batch.lua')
 local mcp = dofile('lua/core/mcp.lua')
 local envelope = dofile('lua/core/envelope.lua')
 local web = dofile('lua/core/web.lua')
-local batch_tools = dofile("lua/core/batch_tools.lua")
+local M = {}
 local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
@@ -34,6 +34,14 @@ local M = {}
 local function is_master(role)
   return role == "master" or role == "admin"
 end
+
+-- Retired batches (operator's decision, 12/11: "many can be retired as naturally code mode can queue
+-- many"). The table and the one sentence live in `lua/core/retired.lua`, so the dispatcher,
+-- `tool_call`, a peer capability, code mode's `describeTool` and the gate test cannot drift apart.
+-- Refused HERE, in the dispatcher every route reaches, so no route keeps a working alias of a retired
+-- name: reading one is one sentence naming the primitive and the form, never a batch result.
+local retired_lib = dofile('lua/core/retired.lua')
+function M.retired(name) return retired_lib.text(name) end
 
 -- Image references name files in this node's content-addressed store. Returning
 -- one through `remote` would look successful but point at the wrong machine; fail
@@ -92,12 +100,14 @@ end
 -- What a peer may be asked for where no effect is allowed: inside code mode and in a `calls` batch
 -- (29/10). Reads, history and discovery on the peer; bash only when the orchestration classifier
 -- calls the whole command read-only. Anything else names its route instead of running.
-local REMOTE_READ = { read = true, read_many = true, ls = true, grep = true, grep_many = true, graph = true,
-  symbol_source_many = true, tool_result = true, diagnose = true, capabilities = true, nodes = true,
-  sessions = true, session = true, session_many = true, search_messages = true, search_messages_many = true,
+local REMOTE_READ = { read = true, ls = true, grep = true, graph = true,
+  tool_result = true, diagnose = true, capabilities = true, nodes = true,
+  sessions = true, session = true, search_messages = true,
   recall = true, memories = true, spell_list = true, spell_get = true, skill = true }
 M.REMOTE_READ = REMOTE_READ
 function M.remote_read_refusal(capability, args)
+  local retired = M.retired(capability)
+  if retired then return { error = retired, capability = tostring(capability), effect = "none" } end
   if REMOTE_READ[capability] then return nil end
   if capability == "bash" then
     local command = type(args) == "table" and args.command or nil
@@ -107,7 +117,7 @@ function M.remote_read_refusal(capability, args)
   end
   return { error = "remote_effect_outside_codemode", capability = tostring(capability), effect = "none",
     note = "A `calls` batch carries reads only, so remote " .. tostring(capability) .. " travels as its own call, not inside one. Batches accept: "
-      .. "read, read_many, ls, grep, grep_many, graph, sessions, session, session_many, search_messages, search_messages_many, recall, memories, tool_result, read-only bash." }
+      .. "read, ls, grep, graph, sessions, session, search_messages, recall, memories, tool_result, read-only bash." }
 end
 
 local function declares_param(catalog, capability, key)
@@ -412,13 +422,6 @@ M.admin = {
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("read_many", "Read several independent files/ranges/images in one call. Results keep request order, per-file errors, versions and edit receipts. If next_cursor is returned, call again with only `cursor` for the rest.", {
-    cursor = {type='string',maxLength=36,description='Opaque next_cursor from this account/session/profile/workspace; exclusive with requests.'},
-    requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
-      properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
-        column = { type = "integer", minimum = 1 }, version = { type = "string" },
-        limit = { type = "integer", minimum = 1, maximum = 2000 } }, required = { "path" } } }
-  }, {}),
   schema("write", "Create or overwrite a text file. In a required session workspace, writes are limited to the worktree and its session scratch root; a refusal lists both in allowed_writes.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
   schema("edit", "Replace text in one file, using exactly one form. `edits` (old_text/new_text) quotes bytes that must occur exactly once; a miss returns the nearest region. `range_edits` copies a read `selection` unchanged with replacement_lines (optional start_line/end_line inside its edit_lines), for text you cannot quote; shell output does not provide an edit receipt. All ranges apply atomically; check the echo of what each replaced.", {
@@ -445,7 +448,7 @@ M.admin = {
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
   schema("graph", "Concept discovery, exact source (including bounded source batches), overview and patch reachability. Queries capture content evidence, automatically await a committed invocation revision and never silently return stale results; use read/grep after explicit indexing failures. After using graph, state in the final answer whether it helped your reasoning and why.", {
-    action = { type = "string", enum = { "search_symbols", "symbol_source", "symbol_source_many", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
+    action = { type = "string", enum = { "search_symbols", "symbol_source", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
     name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
     prefer_implementations = { type = "boolean", description = "search_symbols: opt-in ranking that demotes partial local-variable matches; useful when looking for a component/function implementation, not a state binding." },
     path = { type = "string", description = "symbol_source: path from a search_symbols result." },
@@ -526,7 +529,7 @@ M.admin = {
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
     path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
-  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"}. Text reads work; image results are refused until the node protocol has bounded binary transfer. Inside codemode tools.remote runs the read-only capabilities (read, read_many, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Put the capability's own parameters at this same level, flat: {\"node\":\"<name>\",\"capability\":\"bash\",\"command\":\"ls\"} or {\"node\":\"<name>\",\"capability\":\"read\",\"path\":\"/etc/hosts\"}. Text reads work; image results are refused until the node protocol has bounded binary transfer. Inside codemode tools.remote runs the read-only capabilities (read, ls, grep, sessions, session, search_messages, recall, read-only bash ...); effects run here, outside. capability:\"batch\" with calls:[{capability,...},...] runs up to 8 reads in one round trip.", {
     node = { type = "string", description = "Peer name or node_id (the nodes tool lists them)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
     command = { type = "string", description = "For bash/shell: the command." },
@@ -554,47 +557,12 @@ M.admin = {
     principal={type="string"},evidence={type="string"} }, {"action"}),
 }
 
--- Batch schemas reuse the primitive properties so their contracts cannot drift.
--- Only selected read actions are batched; no generic effect dispatcher is exposed.
-local BATCH = {
-  edit_many={base='edit',mutates=true}, write_many={base='write',mutates=true},
-  grep_many={base='grep'}, session_many={base='session'},
-  search_messages_many={base='search_messages'}, symbol_source_many={base='graph'},
-}
-local function add_batches(list)
-  local originals={}
-  for _,group in ipairs({M.shared,M.admin}) do
-    for _,entry in ipairs(group) do originals[entry['function'].name]=entry['function'].parameters end
-  end
-  local additions={}
-  for name,entry in pairs(BATCH) do
-    local original=originals[entry.base]
-    if original then
-      local properties={}
-      for key,value in pairs(original.properties or {}) do properties[key]=value end
-      properties.node=nil -- a batch runs where it was sent; route a whole batch with remote (29/10)
-      local required=original.required
-      if name=='symbol_source_many' then
-        properties={}
-        for _,key in ipairs({'path','name','line','kind','source_version','byte_offset','max_bytes','cwd'}) do properties[key]=original.properties[key] end
-        required={'path','name','line'}
-      elseif name=='write_many' then
-        properties.version={type='string',description='Optional expected existing text SHA-256; never relaxed for empty strings.'}
-      end
-      entry.item={type='object',properties=properties,required=required}
-      local description=entry.mutates and
-        ('Apply 1-8 independent '..entry.base..' requests. Validate every item/path/snapshot before any write; duplicate/overlapping targets refuse. Serial application rechecks each file and stops on failure or steering. Per-item results and diff/undo retained; NOT a multi-file transaction. Never retry unknown effects.') or
-        ('Run 1-8 independent '..(name=='symbol_source_many' and 'graph symbol_source' or entry.base)..' reads. Same permissions, scopes, limits and exact evidence as the primitive. Ordered per-item results/errors; inspect each continuation/completeness flag. No snapshot, retries or indexing.')
-      if name=='symbol_source_many' then description='Retrieve 1-8 exact definitions. Shared admission revision and pinned snapshot per resolved root; automatically waits for background indexing. Same graph permissions, selector/version checks, byte ceilings and ordered per-item errors.' end
-      additions[#additions+1]=schema(name,description,{requests={type='array',minItems=1,maxItems=8,items=entry.item}},{'requests'})
-    end
-  end
-  originals.graph.properties.requests={type='array',minItems=1,maxItems=8,items=BATCH.symbol_source_many.item,description='symbol_source_many: selectors, grouped by resolved root; shares the compatibility tool backend.'}
-  table.sort(additions,function(a,b)return a['function'].name<b['function'].name end)
-  for _,entry in ipairs(additions) do list[#list+1]=entry end
-end
--- Operator batches only: guest surfaces and artifact access do not expand.
-add_batches(M.admin)
+-- The `*_many` tool schemas are NOT declared here any more (see RETIRED above): one name, one tool, and
+-- the batch is a script. `graph` lost its `requests` compatibility form with them, `lua/core/batch_tools.lua`
+-- (their shared item-shape helper) is deleted with the last caller, and no wrapper stays registered to keep
+-- a second contract alive.
+
+-- Operator schemas only: guest surfaces and artifact access do not expand.
 -- WhatsApp (#118): ONE surface on every node - nine exact names, no namespace hash and no peer prefix.
 -- The schemas live in `lua/core/whatsapp.lua`, beside the routing that answers them, so the description
 -- a model reads and the call that runs cannot drift apart; this file only registers the family, the way
@@ -635,17 +603,6 @@ M.admin[#M.admin+1]=schema('mcp','List/manage explicit MCP connectors. New/edite
  action={type='string',enum={'list','put','probe','enable','disable','remove'}},id={type='string'},expected_revision={type='integer',minimum=0,description='Required for changes/probes: exact registry revision from list. Stale state refuses.'},definition={type='object',description='Reviewed connector: id/name, transport stdio or http, program/args or url, optional cwd, environment-reference env/headers, timeout_seconds; tools maps exact tool names to locally approved read/write.'}},nil)
 M.admin[#M.admin+1]=schema('services','List/manage long-lived WASI service components (docs/SERVICE-COMPONENTS.md): put a definition (disabled), enable (start now and at boot), disable, restart, remove, status, logs, upgrade (transactional install of a new artifact: stage, verify pin, check imported interfaces are served, migrate state on a snapshot copy, retire the running instance, start the candidate, health, switch - one instance per service name at every step, and any failure puts the previous pin back), profile_dump (the effective configuration after base -> node -> user -> patch, rows by id), stt (the speech queue this node produces or works for: role, attached workers, their recent latency and the local/remote decode counts - ids and durations only, never a transcript; with set_role it becomes the durable role change a running node applies on its next tick, admin/master only and audited). Grants are references: env/file_env names or a file path, exact net addresses. A component whose manifest declares `state_version` is migrated on a snapshot copy of its kv before it starts, and the start answer reports it under `state` (`fresh`, `up-to-date` or `migrated` with the versions); a refused migration (`state_no_migration_path`, `state_owner_mismatch`) starts nothing and leaves the old state at its old version. Read a namespace, its journal and its snapshots with `host.state` (action status), not by asking the component.',{
  action={type='string',enum={'list','put','enable','disable','restart','remove','status','logs','upgrade','profile_dump','stt'}},name={type='string'},set_role={type='string',enum={'producer','worker','both','off'},description='stt: the speech role this node takes from now on, without a restart (admin/master only, audited). The environment, when set, still wins.'},producer={type='string',description='stt set_role on a worker: the producer node (name or id) to long-poll. Omit to keep the one already configured.'},expected_revision={type='integer',minimum=0,description='Required for changes: exact registry revision from list.'},bytes={type='integer',minimum=1,maximum=262144},ready_ms={type='integer',minimum=1,maximum=600000,description='upgrade: how long the new instance gets to report health before the old one is kept (default 10000).'},source={type='object',description='upgrade: the artifact to install - wasm (path to the built .wasm), manifest (object) or manifest_path (file), pin (sha256 or a .sha256 file). A component without a pin is refused; a candidate whose imports nobody serves, or that never becomes healthy, leaves the running instance untouched.'},definition={type='object',description='name (an installed kind:service component), env/file_env references, net addresses (host:port, *.suffix:port), config object.'}},nil)
--- Stable per-interpreter rollback knob, never automatic failure fallback or
--- per-round schema shuffling. The operator explicitly requested these APIs.
-local batches_enabled=host.getenv('WASM_AGENT_BATCH_TOOLS')~='0'
-if not batches_enabled then
-  local ordinary={}
-  for _,entry in ipairs(M.admin) do
-    if not BATCH[entry['function'].name] then ordinary[#ordinary+1]=entry end
-  end
-  M.admin=ordinary
-end
-
 M.admin[#M.admin+1]=schema('capture_inspect','Inspect retained JSON model-request captures as bounded structural metadata before reading raw dumps. Exact request/tool/message views and complete hash-bound originals remain available. No inference or app calls.',{
  path={type='string'},view={type='string',enum={'summary','request','tool','message'}},
  offset={type='integer',minimum=0},limit={type='integer',minimum=1,maximum=8},snapshot={type='string'},
@@ -663,9 +620,6 @@ M.admin[#M.admin+1]=schema('node_update','Ask another node of the fabric to upda
   follow_up_seconds={type='integer',minimum=30,maximum=3600,description='Seconds before the session is woken to read the outcome (default 180).'},
 },{'node'})
 
-function M.batch_base(name)return BATCH[name] and BATCH[name].base end
-function M.batch_enabled()return batches_enabled end
-
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
 -- listed here is a WASM plugin.
 M.tier_of = {
@@ -679,14 +633,12 @@ M.tier_of = {
   capabilities = "capabilities", tool_search='capabilities', tool_call='capabilities',
   subagent = "subagents",
   sessions = "sessions", session = "sessions", search_messages = "sessions",
-  session_many = "sessions", search_messages_many = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   session_worktree = "sessions",
   resource = "sessions", integrate = "sessions", wave_autoflush = "sessions",
-  bash = "environment", read = "environment", read_many = "environment", write = "environment",
+  bash = "environment", read = "environment", write = "environment",
   diagnose = "environment", operation = "environment",
   edit = "environment", ls = "environment", grep = "environment", graph = "environment",
-  edit_many="environment",write_many="environment",grep_many="environment",symbol_source_many="environment",
   shell = "shell",
   client = "client",
   spell_save = "spells", spell_run = "spells", spell_list = "spells",
@@ -773,13 +725,6 @@ local CUES = {
   bash = "Run a shell command on this machine",
   operation = "Run or collect a supervised long command",
   read = "Read a file (text or image), paged",
-  read_many = "Read several files or ranges in one call",
-  edit_many = "Preflight independent edits, then apply with per-file outcomes",
-  write_many = "Preflight independent writes, retaining diff and undo evidence",
-  grep_many = "Run separately scoped literal searches together",
-  session_many = "Read bounded ranges from several sessions",
-  search_messages_many = "Run independently filtered history searches together",
-  symbol_source_many = "Retrieve several selected symbol implementations",
   write = "Create or overwrite a file",
   edit = "Replace a versioned range returned by read",
   ls = "List a directory",
@@ -1032,7 +977,7 @@ local function target_identity(path)
 end
 
 local WORKSPACE_UNSUPPORTED={shell=true,client=true,remote=true,spell_run=true}
-local WORKSPACE_FIXED={write=true,edit=true,write_many=true,edit_many=true,bash=true,codemode=true}
+local WORKSPACE_FIXED={write=true,edit=true,bash=true,codemode=true}
 local function workspace_effectful(name,args)
   return WORKSPACE_FIXED[name] or WORKSPACE_UNSUPPORTED[name]
     or name=='mcp' and args.action=='probe'
@@ -1207,36 +1152,9 @@ local function graph_hint(memory,ctx,path)
   return called and json.decode(raw or '') or {error='graph_notification_failed',detail=tostring(raw)}
 end
 
--- One implementation for graph source batches and the compatibility alias.
-local function graph_sources(memory,args,ctx)
-  if not batches_enabled then return {error='batch_tools_disabled',effect='none'} end
-  local requests,failure=batch_tools.requests({requests=args.requests})
-  if not requests then return failure end
-  local results,groups,order,snapshots={},{},{},{}
-  for i,request in ipairs(requests) do
-    local refusal=batch_tools.item(request,BATCH.symbol_source_many.item,i)
-    local root,err
-    if not refusal then root,err=patch_audit.workspace_root(memory,ctx,request.cwd or args.cwd);if err then refusal={error=err} end end
-    if refusal then results[i]=refusal else
-      local key=root or '<configured>'
-      if not groups[key] then groups[key]={root=root,requests={},positions={}};order[#order+1]=key end
-      local group=groups[key];local item=batch_tools.copy(request);item.cwd=nil
-      group.requests[#group.requests+1]=item;group.positions[#group.positions+1]=i
-    end
-  end
-  local graph=dofile('lua/core/graph.lua')
-  for _,key in ipairs(order) do
-    local group=groups[key];local reply,err,detail=graph.symbol_sources(group.requests,{root=group.root})
-    local snapshot_index
-    if reply and reply.graph_snapshot then snapshots[#snapshots+1]=reply.graph_snapshot;snapshot_index=#snapshots end
-    for position,index in ipairs(group.positions) do
-      results[index]=reply and reply.results and reply.results[position] or detail or {error=err or 'graph_batch_failed'}
-      if snapshot_index then results[index].graph_snapshot_index=snapshot_index end
-    end
-  end
-  local failed=0;for _,item in ipairs(results) do if item.error or item.ok==false then failed=failed+1 end end
-  return {ok=failed==0,results=results,failed=failed,succeeded=#requests-failed,graph_snapshots=snapshots}
-end
+-- Graph source batches were the `symbol_source_many` compatibility alias and are retired with it: one
+-- definition is `graph {action:'symbol_source', ...}`, and N of them are a script's Promise.all over
+-- that call.
 
 local HISTORY_ON_NODE = { sessions = true, session = true, search_messages = true }
 
@@ -1313,6 +1231,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   ctx = ctx or {}
   local user_id = ctx.user_id or "master"
   ctx.role=role
+  -- A retired batch name is answered before any other check, so every route - an ordinary call, a
+  -- `tool_call`, a peer capability and a script's `tools.<name>` - gets the same one sentence, with no
+  -- effect and no uncertainty record: nothing ran, so nothing is unknown.
+  local retired = M.retired(name)
+  if retired then return { error = retired, tool = tostring(name), effect = "none" } end
   -- A subagent runs only the exact tools its profile named. Checked here as well
   -- as in the schema list it was offered: a model can ask for a tool it was not
   -- offered, and a schema filter that is not re-checked is not a boundary.
@@ -1378,46 +1301,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       if not ok then error(result) end;return result
     end)
   end
-  if BATCH[name] then
-    if not is_master(role) then return {error='forbidden_for_role:'..role} end
-    if not batches_enabled then return {error='batch_tools_disabled',effect='none'} end
-    local batch=BATCH[name]
-    -- The wrapper grants nothing: a profile must explicitly permit BOTH names.
-    if ctx.subagent and not (ctx.subagent.allowed or {})[batch.base] then
-      return {error='capability_not_in_profile:'..batch.base}
-    end
-    if name=='symbol_source_many' then
-      local requests,failure=batch_tools.requests(args);if not requests then return failure end
-      return graph_sources(memory,args,ctx)
-    end
-    if not batch.mutates then
-      return batch_tools.read(args,batch.item,function(request)
-        if name=='symbol_source_many' then request.action='symbol_source' end
-        return M.dispatch(memory,batch.base,request,role,ctx)
-      end)
-    end
-    local record=ctx.changes and function(path,before,after)
-      changeset.record(ctx.changes,path,before,after)
-    end or nil
-    return batch_tools.mutate(args,batch.item,function(request)
-      local refusal=required_workspace_error(memory,ctx,batch.base,request)
-      if refusal then return refusal end
-      request.path=resolve_path(memory,ctx,request.path)
-      local real_refusal=required_workspace_error(memory,ctx,batch.base,{path=target_identity(request.path)})
-      if real_refusal then return real_refusal end
-      if batch.base=='edit' then return file_tools.edit(request,nil,true) end
-      return file_tools.prepare_write(request)
-    end,function(plan)
-      local refusal=required_workspace_error(memory,ctx,batch.base,{path=plan.path})
-        or required_workspace_error(memory,ctx,batch.base,{path=target_identity(plan.path)})
-      if refusal then return refusal end
-      local result=file_tools.apply(plan,record)
-      if result.applied then result.graph_index=graph_hint(memory,ctx,result.path) end
-      return result
-    end,target_identity,ctx.steering_admit,file_tools.check)
-  end
-  if name=='wave_autoflush' then return dofile('lua/core/wave_autoflush.lua').control(args,ctx) end
-  if name=='integrate' then return dofile('lua/core/integrate.lua').run(memory,ctx) end
+  -- A retired batch name never reaches a reader, a handler or a fallback: the refusal at the top of
+  -- this dispatcher already answered it.
   local workspace_error = required_workspace_error(memory, ctx, name, args)
   if workspace_error then return workspace_error end
   if name=="resource" then
@@ -1734,26 +1619,6 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return diagnose.run(args.steps,function(tool,options)
       return M.dispatch(memory,tool,options,role,ctx)
     end)
-  elseif name == "read_many" then
-    if args.cursor~=nil and args.requests~=nil then return {error='read_many_forms_are_exclusive'} end
-    local workspace=ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
-    local scope=host.sha256(json.encode({user=ctx.user_id or user_id,role=role,session=ctx.session_id or '',
-      cwd=session_cwd(memory,ctx),workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
-    if args.cursor~=nil then return read_batch.resume(args.cursor,scope) end
-    if type(args.requests) ~= "table" or #args.requests < 1 or #args.requests > 8 then
-      return { error = "requests_required_1_to_8" }
-    end
-    local results, failed = {}, 0
-    for index, request in ipairs(args.requests) do
-      if type(request) ~= "table" or type(request.path) ~= "string" or request.path == "" then
-        results[index] = { error = "path_required" }
-      else
-        request.path = resolve_path(memory, ctx, request.path)
-        results[index] = file_tools.read(request,function(entry) return memory.store_image(entry) end,tool_output.MAX_BYTES-1024)
-      end
-      if results[index].error then failed = failed + 1 end
-    end
-    return read_batch.start({ok=failed==0,results=results,failed=failed},scope)
   elseif name == "write" then
     if not args.path then return { error = "path_required" } end
     if type(args.content)~="string" then return {error="content_required"} end
@@ -1835,7 +1700,6 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     elseif action == "audit_feedback" then
       return patch_audit.feedback(args.run_id,args.outcome,args.commit,ctx)
     end
-    if action=='symbol_source_many' then return graph_sources(memory,args,ctx) end
     if not graph.available() then return { error = "graph_unavailable" } end
     local result, err, diagnostic
     if action == "search_symbols" then result, err, diagnostic = graph.search_symbols(args.name,
@@ -2106,8 +1970,7 @@ end
 -- a call needs stopping only when it has one. A read-only allowlist, not an effectful one: a tool
 -- this file has never heard of (a plugin's) keeps the fence, which is the safe direction.
 local READ_ONLY = {
-  read = true, read_many = true, capture_inspect=true, grep = true, grep_many=true, session_many=true,
-  search_messages_many=true,symbol_source_many=true, ls = true, tool_result = true, skill = true,
+  read = true, capture_inspect=true, grep = true, ls = true, tool_result = true, skill = true,
   graph = true, diagnose = true, capabilities = true, tool_search=true, web_search=true,web_read=true,nodes = true,
   fleetview = true,
   recall = true, memories = true, sessions = true, session = true,
@@ -2123,6 +1986,9 @@ local READ_ONLY = {
 
 function M.has_effect(name, args)
   if type(name)~='string' then return true end
+  -- A retired batch name answers one sentence and touches nothing, so it needs no steering fence: an
+  -- effect fence exists to stop something that cannot be undone, and a refusal is already undone.
+  if retired_lib.NAMES[name] then return false end
   -- The one WhatsApp surface knows its own effects: `mcp_whatsapp_read` is a read on a node whose
   -- account it may ask a peer for, and the generic `mcp_` rule below would look it up in a registry it
   -- is no longer part of. One of them is two calls: a send queues a message (an effect) and a resume with

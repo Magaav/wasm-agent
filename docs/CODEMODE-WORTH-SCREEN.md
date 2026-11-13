@@ -8,14 +8,14 @@ No defaults, production authority, UI, installed assets or credential store chan
 ## Frozen design
 
 - Candidate core is identical in both modes, independently pinned from the task.
-  A: ordinary native tools, code mode off; Bash, read_many and batching retained.
+  A: ordinary native tools, code mode off; Bash and batching (a script) retained.
   B: only the neutral codemode declaration; actual pinned Node QuickJS-WASI VM,
   trusted nested native broker, direct/routed outer attempts refused.
 - Both receive the same public task and original five instruction-file bytes.
   Only the declared interface treatment/routing appendix differs. Native tool
   representations (including text/base64) are shared. The existing blind adapter
   serializes broker effects and disables its ambient-host asynchronous Bash fast
-  path in both modes; ordinary Bash and multi-tool/read_many batching remain
+  path in both modes; ordinary Bash and multi-tool batching (a script) remain
   available in A. This is not a clean shell-parallelism benchmark. Fresh task Git snapshots
   contain no original object store, gold repair, private scorer or solved history.
 - Repair: realistic pure half-open interval coalescing repair, including validation,
