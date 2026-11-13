@@ -663,6 +663,7 @@ ix/all/<ts>/<chat>/<id>               empty                       (age order: re
 ix/pend/<chat>/<id>                   a mutation for a message not indexed yet
 ix/ct/<chat>                          one chat's card, JSON       (the name side: names observed there)
 ix/bf/cards, ix/bf/cards/done         the name walk's cursor and its done mark
+ix/arc/<YYYY-MM>                      a month loaded back from its archive (read-only here)
 ```
 
 `inv(ts)` is `u64::MAX - ts` in fixed-width hex, so an ascending scan is newest-first and `before` is
@@ -692,9 +693,12 @@ media key and the direct path never leave the component: they are how it decrypt
 * **What must not be kept is not kept.** A view-once or ephemeral message is a fact (kind, sender,
   time, `unsupported: view_once`) with no text and no keys. `status@broadcast` and newsletters are
   skipped, as the transcription pipeline already skipped them.
-* **Retention is by age, in bounded passes.** `index_retention_days` (default 90) decides the window;
+* **Retention is by age, in bounded passes.** `index_retention_days` (default 180) decides the window;
   a pass walks `ix/all` from the oldest, deletes at most `index_prune_budget` records (default 200)
-  and stops at the first record inside the window, so it costs what it deletes. There is no record
+  and stops at the first record inside the window, so it costs what it deletes. A range that belongs to
+  a month **restored from its archive** is walked past instead of deleted (one scan of `ix/arc/` per
+  pass, then a cursor jump), which is what keeps a restore from being undone by the next tick
+  (`docs/WHATSAPP-ARCHIVE.md`). There is no record
   count and no counter: a counter that drifts is a counter that deletes live data. The index is bounded
   by the component's storage grant; a write that fails is handed back to the ingest lane and retried
   (`index::RETRY_LIMIT`), never treated as done.
@@ -798,8 +802,9 @@ bigger one answers `download_too_large` with its `size` instead of pretending.
 | key | default | meaning |
 | --- | --- | --- |
 | `index` | `true` | index every received message and answer queries |
-| `index_retention_days` | `90` | how long a record is kept (clamped to 1..3650) |
+| `index_retention_days` | `180` | how long a record is kept (clamped to 1..3650); the same window the past is bounded by |
 | `index_prune_every_seconds` | `300` | how often a retention pass runs (clamped to 30..86400) |
+| - | - | what leaves the window is archived by the node, not the component: `docs/WHATSAPP-ARCHIVE.md` |
 | `index_prune_budget` | `200` | records one pass may delete |
 | `index_download_max_bytes` | `524288` | most plaintext `whatsapp_download` will decrypt |
 

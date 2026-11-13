@@ -48,6 +48,12 @@ wa-email-outbox = { path = "../wa-email-outbox" }
 # The query seam (`whatsapp.query`): the request/answer shape, its bounds and the download manifest,
 # shared with the WA component that answers it (docs/SERVICE-COMPONENTS.md).
 wa-whatsapp-index = { path = "../wa-whatsapp-index" }
+# Retention's other half (`docs/WHATSAPP-ARCHIVE.md`): the monthly cut, the encrypted archive file,
+# the push and the restore. Pure (kv + sealer + a directory), so its own tests need no node.
+wa-whatsapp-archive = { path = "../wa-whatsapp-archive" }
+wa-keystore = { path = "../wa-keystore" }
+# The archive reads the component's kv namespace through the same adapter the host's own kv uses.
+wa-kv = { path = "../wa-kv" }
 # The email index's seam (`email_query`): the request, the key layout and the bounded answer, shared with
 # the `wa-email` component that answers from its own kv.
 wa-email-index = { path = "../wa-email-index" }
@@ -73,6 +79,11 @@ ureq = { version = "3", features = ["json"] }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "component-model", "component-model-async", "async", "gc", "gc-drc", "anyhow"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p1", "p2", "p3"] }
 tokio = { version = "1", features = ["rt", "time"] }
+
+[dev-dependencies]
+# The archive's node-side tests run against a real namespace and a real keystore in a temp directory,
+# so nothing they measure is a mock of the storage the node actually uses.
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

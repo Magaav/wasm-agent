@@ -238,6 +238,11 @@ pub const REGISTRY: &[Capability] = &[
     plain!("whatsapp_download", WritesFiles, crate::whatsapp_query::download, "Decrypt one WhatsApp message's media into this node's bounded download folder and return the path"),
     // The one query that asks the phone: it enqueues on the same `whatsapp.query` queue, and the
     // component's answer is the history request it made (ids and counts), never a message.
+    // Retention's other half: the monthly cut into a compressed and sealed archive file, the push to
+    // another disk or node, the 360-day expiry, and restore/unload of one month. Master-only and
+    // file-writing: it cuts the index the component owns and writes archives to the node's own
+    // components directory (`docs/WHATSAPP-ARCHIVE.md`).
+    plain!("whatsapp_archive", WritesFiles, crate::whatsapp_archive::capability, "WhatsApp index archives: cut a month that left the window into one sealed file, list, push with its sha256 verified, restore, unload, expire"),
     plain!("whatsapp_backfill", Network, crate::whatsapp_query::backfill, "Ask the primary phone for WhatsApp messages older than the index holds, so a search can reach the account's past"),
     // ---- Email (docs/EMAIL-CONNECTOR.md) -------------------------------------------------------
     // The same two shapes as the WhatsApp tools: an effect (`email_send`) is a job on `email.outbox`
