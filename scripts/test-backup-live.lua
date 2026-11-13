@@ -101,9 +101,9 @@ ok(#rows == 3, "the copy of the WAL store holds every committed row", #rows)
 -- `run` refuse (the walk is sorted).
 
 ok(real_backup.is_graph_store(data .. "/graph.db.d/graph.db"), "the component's own store is recognised")
-ok(real_backup.is_graph_store(data .. "/graph.db.roots/ab12.db"), "and a second root's cache")
-ok(not real_backup.is_graph_store(data .. "/graph.db"), "a store merely named graph.db is not the component's")
-ok(not real_backup.is_graph_store(config .. "/jobs.db"), "and neither is another store")
+ok(real_backup.is_graph_store(data .. "/graph.db.roots/ab12.db.d/graph.db"), "and a second root's cache")
+ok(real_backup.is_graph_store(data .. "/deploy-graph-check/graph.db"), "and the deploy check's, which names its file directly")
+ok(not real_backup.is_graph_store(config .. "/jobs.db"), "another store is not")
 
 local graph_dir = data .. "/graph.db.d"
 ok(host.write_file(graph_dir .. "/.keep", ""), "the component's directory exists")
@@ -141,11 +141,18 @@ local newest_damaged = nil
 for _, entry in ipairs(json.decode(host.list_dir(config .. "/backups")).entries) do
   if entry.kind == "dir" and (newest_damaged == nil or entry.name > newest_damaged) then newest_damaged = entry.name end
 end
+-- The bytes are the test: another store in the same run may legitimately produce a `<n>-graph.db`
+-- copy, so what must be absent is a copy of THIS store's content.
+local marker = "a torn page, not a database."
 local leaked_skip = false
 for _, entry in ipairs(json.decode(host.list_dir(config .. "/backups/" .. newest_damaged)).entries) do
-  if tostring(entry.name):find("graph.db", 1, true) then leaked_skip = true end
+  if entry.kind == "file" then
+    local text = host.read_file(config .. "/backups/" .. newest_damaged .. "/" .. entry.name) or ""
+    if text:find(marker, 1, true) then leaked_skip = true end
+  end
 end
-ok(leaked_skip == false, "a skipped store publishes no copy, not even an empty one")
+ok(leaked_skip == false, "a skipped store publishes no copy of itself, not even a partial one")
+ok(host.path_kind(graph_dir .. "/graph.db") == "file", "and the store is left exactly where it was, for the next index to rebuild")
 
 
 -- ---- 2. a store that is really damaged is refused --------------------------------------------

@@ -264,18 +264,17 @@ local function with_busy_timeout(work)
   return table.unpack(returned, 2, returned.n)
 end
 
--- Is this store the code graph's? `rust/wa-capabilities/src/graph.rs` keeps it in `P.d/graph.db`
--- (one directory per logical database, so a second root's store is `graph.db.roots/<sha>.db`), and
--- the graph component is the only process that may write it. Named by path, because the same module
--- snapshots stores this rule must not touch.
+-- Is this store the code graph's? `rust/wa-capabilities/src/graph.rs` keeps every store the `graph`
+-- component writes as `graph.db` inside a per-store directory - `graph.db.d/` for the configured
+-- database, `graph.db.roots/<digest>.db.d/` for another indexed root - and an explicit `db` option may
+-- name the file directly (`scripts/check-graph-component.lua` does, in `<data>/deploy-graph-check/`).
+-- The NAME is therefore what identifies it, and a store that merely happens to be called `graph.db`
+-- and belongs to something else is still skipped *visibly*: it gets its `backup_skipped` line with the
+-- reason, and is never attached. Attaching a store a component may be writing is the defect this rule
+-- exists for (`docs/RELEASE-UPDATE.md`, "The graph store is copied by its owner's lock").
 function M.is_graph_store(path)
-  local parent, name = tostring(path or ""):gsub("\\", "/"):match("^(.*)/([^/]+)$")
-  if not parent then return false end
-  local directory = parent:match("([^/]+)$") or ""
-  if directory == "graph.db.d" then return name == "graph.db" end
-  -- A second indexed root gets its own store in `graph.db.roots/`, keyed by the root's digest.
-  if directory == "graph.db.roots" then return name:match("%.db$") ~= nil end
-  return false
+  local _, name = tostring(path or ""):gsub("\\", "/"):match("^(.*)/([^/]+)$")
+  return name == "graph.db"
 end
 
 -- One snapshot of a graph store, taken by its owner's lock (`host.graph_snapshot`). Returns
