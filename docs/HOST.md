@@ -857,6 +857,7 @@ whatsapp_message     read-only
 whatsapp_search      read-only
 whatsapp_backfill    network
 whatsapp_contacts    read-only
+whatsapp_archive     writes files
 email_send           network
 email_send_status    read-only
 email_search         read-only
@@ -994,6 +995,20 @@ or a `reason`. Neither answer ever carries a subject or a body.
 `host.email_read({mailbox?, uid?, before?, limit?})` and `host.email_media({uid, mailbox?})` enqueue on
 `email.query` and answer with the component's bounded answer (`matched`/`returned`/`truncated`, or a page
 with `has_more`/`next_before`). A question with no narrowing is refused with `email_empty_query`.
+
+## WhatsApp index archives (`host.whatsapp_archive`)
+
+`host.whatsapp_archive({action, month?, to?, keep_local?, keep_days?, part?, parts?, bytes?})` is the
+node's half of index retention: the monthly cut of a month that left the 180-day window into one
+compressed and sealed file, the list, the push to another disk or node with the digest verified on
+arrival, restore and unload of one month, and the 360-day expiry. The rules, the file format and the
+bounds are `docs/WHATSAPP-ARCHIVE.md`; the operations are `rust/wa-whatsapp-archive` and this module is
+the seam to the node's kv, keystore, disk and mesh.
+
+`wa whatsapp archive list|cut|restore|unload|push|expire` is the operator's door to it
+(`lua/core/whatsapp_archive_cli.lua`), and a peer calls the same capability with `action: "receive"` to
+accept a pushed archive. Master-only, writes files, and its answers carry a month, counts, a digest, a
+path and a node name - never a message, a chat id or a key.
 
 ## WhatsApp explicit sends (`host.whatsapp_send`, `host.whatsapp_send_status`)
 

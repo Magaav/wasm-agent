@@ -1754,11 +1754,14 @@ fn media_type(kind: &str) -> whatsapp_rust::download::MediaType {
 /// Retention: delete what fell out of the window, in bounded passes (`index::prune`).
 async fn prune_index(cfg: &IndexConfig) {
     match index::prune(&IndexKv, now_ms(), cfg.retention, cfg.prune_budget).await {
-        Ok(pruned) if pruned.records > 0 => say!(
-            "index: pruned {} record(s) more={} retention_days={}",
+        // A pass that only walked past a restored month is still a pass an operator wants to see: it is
+        // the difference between "retention ran and kept them on purpose" and "retention stopped".
+        Ok(pruned) if pruned.records > 0 || pruned.restored_months > 0 => say!(
+            "index: pruned {} record(s) more={} retention_days={} restored_months={}",
             pruned.records,
             pruned.more,
-            cfg.retention.days
+            cfg.retention.days,
+            pruned.restored_months
         ),
         Ok(_) => {}
         Err(reason) => say!("index: prune failed reason={reason}"),

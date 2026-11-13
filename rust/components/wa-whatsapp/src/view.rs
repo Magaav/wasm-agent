@@ -129,6 +129,13 @@ pub fn message(record: &Record, quote: Option<&str>) -> serde_json::Value {
     if record.from_history() {
         view["source"] = serde_json::Value::String(crate::record::SOURCE_HISTORY.to_string());
     }
+    if record.restored {
+        // Where this answer came from, said out loud: a month that was archived and loaded back, named
+        // so a reader knows the message is a copy of one that left the live index months ago
+        // (`docs/WHATSAPP-ARCHIVE.md`).
+        view["restored"] = serde_json::Value::Bool(true);
+        view["restored_month"] = serde_json::Value::String(seam::month::of(record.ts));
+    }
     if !record.unsupported.is_empty() {
         view["unsupported"] = serde_json::Value::String(record.unsupported.clone());
     }

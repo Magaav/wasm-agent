@@ -2151,6 +2151,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "ureq",
  "wa-cli-views",
@@ -2162,6 +2163,8 @@ dependencies = [
  "wa-host-support",
  "wa-jobs",
  "wa-kernel-runtime",
+ "wa-keystore",
+ "wa-kv",
  "wa-local-tz",
  "wa-mesh",
  "wa-operation",
@@ -2171,6 +2174,7 @@ dependencies = [
  "wa-term",
  "wa-tool-progress",
  "wa-vault",
+ "wa-whatsapp-archive",
  "wa-whatsapp-index",
  "wa-whatsapp-outbox",
  "wasmtime",
@@ -2553,6 +2557,19 @@ dependencies = [
 [[package]]
 name = "wa-watchdog"
 version = "0.1.0"
+
+[[package]]
+name = "wa-whatsapp-archive"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "wa-keystore",
+ "wa-whatsapp-index",
+ "zstd",
+]
 
 [[package]]
 name = "wa-whatsapp-index"
