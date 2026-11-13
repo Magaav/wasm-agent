@@ -207,8 +207,21 @@ function M.answer(request, ctx, journal)
   local op = tostring(request.op or "")
   local now = now_seconds()
   if op == "get" then
-    local id = type(request.hash) == "string" and request.hash:lower() or nil
-    if not id or #id ~= 64 or id:find("[^0-9a-f]") then return { error = "results_get_requires_a_sha256", effect = "none" }, false end
+    local asked = type(request.hash) == "string" and request.hash or nil
+    -- A pending call's handle is a name too: `results.get(op)` re-reads what the call answered
+    -- without re-running it, because the settled result is retained under the operation's id
+    -- (`lua/core/codemode_pending.lua`). A hash and a handle are the same question - what did this
+    -- call answer - so they are one branch, never a second door with its own rules.
+    if asked and asked:match("^op%-") then
+      local value, why = dofile("lua/core/codemode_pending.lua").retained(asked, nil)
+      if value == nil then
+        return { error = "results_get_unknown_op", op = asked, reason = why, effect = "none",
+          note = "op handles come from {state:\"pending\", op}; wait(op) settles one" }, false
+      end
+      return { ok = true, op = asked, value = value }, true
+    end
+    local id = type(asked) == "string" and asked:lower() or nil
+    if not id or #id ~= 64 or id:find("[^0-9a-f]") then return { error = "results_get_requires_a_sha256_or_op", effect = "none" }, false end
     local value, problem = read_result(id)
     if value == nil then
       return { error = problem, hash = id, effect = "none",

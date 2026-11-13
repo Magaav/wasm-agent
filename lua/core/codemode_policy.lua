@@ -139,6 +139,7 @@ M.guidance=table.concat({
  'History is per node: work done on a peer is in that peer\'s history, not yours. search_messages({query, node}) searches a peer; sessions({node, all_owners:true, path:"/repo"}) lists the sessions on that peer that worked in that repository, newest first - the first row is the last agent session there; session({node, session_id}) reads one.',
  'WhatsApp is the linked-device connector (mcp_whatsapp_*, or peer_<node>__* where another node holds it): read and send through it from a script.',
  'Inside a script, searchTools("text") finds tools (searchTools("*") lists all; searchTools("select:a,b") adds each one\'s full schema). Filtered output can hide relevant evidence: inspect complete nested originals when needed. Never replay a failed effectful script; unknown effects require explicit reconciliation. WASM_AGENT_CODEMODE=off disables code mode for a new run. The VM is not the OS security boundary for bash/write.',
+ 'Calls are always fresh; reuse an earlier result only by asking for it (results.get / {reuse}).',
 },'\n')
 -- The peers the last federation refresh saw, one line; cache only, so the prompt never waits on them.
 function M.peer_index()

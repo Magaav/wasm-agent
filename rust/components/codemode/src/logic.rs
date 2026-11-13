@@ -45,7 +45,18 @@ pub const FORBIDDEN: &[&str] = &[
 
 /// The guest globals that come from the node rather than from this seam: the retained evidence behind
 /// `showCall`, and the live capability registry behind `capabilities()`/`describe()`.
-pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe", "results"];
+pub const HOST_GLOBALS: &[&str] = &[
+    "showCall",
+    "capabilities",
+    "describe",
+    "results",
+    // A call that outlives its wait answers `{state:"pending", op}` and these two are how a script
+    // resumes or stops it (`lua/core/codemode_pending.lua`). They are the loop's to answer: the work
+    // is a managed operation, which this seam neither runs nor reads.
+    "wait",
+    "cancel",
+    "pending",
+];
 
 /// The guest globals this seam answers, with the prelude's `spread` flag.
 ///
@@ -56,6 +67,11 @@ pub const HOST_GLOBALS: &[&str] = &["showCall", "capabilities", "describe", "res
 pub const GUEST_GLOBALS: &[(&str, bool)] = &[
     ("searchTools", true),
     ("results", true),
+    // Spread, so `wait(op, {wait_s:120})` reaches the loop with both arguments.
+    ("wait", true),
+    ("cancel", true),
+    // The pool: the handles this scope still holds, read so a later step needs no memory of them.
+    ("pending", true),
     ("describeTool", false),
     ("showCall", false),
     ("capabilities", false),
@@ -939,6 +955,12 @@ mod tests {
             other => panic!("searchTools is answered here: {other:?}"),
         }
         assert!(matches!(interpret(&catalogue, "global", "results", Some("[{\"op\":\"last\"}]")), Guest::Host), "the retained results belong to the node");
+        // A pending call's handle is resumed and stopped by the node, never by this seam: the work is a
+        // managed operation, which a component neither runs nor reads (`lua/core/codemode_pending.lua`).
+        assert!(matches!(interpret(&catalogue, "global", "wait", Some("[\"op-1\",{\"wait_s\":5}]")), Guest::Host),
+            "wait is answered by the loop");
+        assert!(matches!(interpret(&catalogue, "global", "cancel", Some("[\"op-1\"]")), Guest::Host),
+            "cancel is answered by the loop");
         match interpret(&catalogue, "global", "nope", None) {
             Guest::Answered(value, ok) => {
                 assert!(!ok);

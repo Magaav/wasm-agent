@@ -854,7 +854,7 @@ function M.catalog(role)
     },{'route','task'})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     if host.quickjs then
-      list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") finds tools (searchTools("select:a,b") adds their schemas). Calls are always fresh and run even if not awaited; await one only where its value is used in an expression; effectful calls run serially. No filesystem, network or Node APIs.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
+      list[#list+1]=schema('codemode','JavaScript sandbox that calls approved native tools: await tools.<name>(args), text(value), return. Preferred for multi-step programmatic work. Connector tools (MCP servers such as mail and WhatsApp, peers) are callable only here; peers are read with tools.remote. searchTools("text"|"*") finds tools (searchTools("select:a,b") adds their schemas). Await every call; effectful calls run serially. A call still running after wait_s (default 60) returns {state:"pending", op}; wait(op | [ops]) resumes it and batches with other calls. No filesystem, network or Node APIs.',{code={type='string'},timeout_ms={type='integer',minimum=1,maximum=300000}},{'code'})
     end
     for _, item in ipairs(mcp.schemas()) do list[#list+1]=item end
     -- Every online peer's connectors, run on that peer (lua/core/federation.lua). Masters only.
@@ -1506,6 +1506,16 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if args.action == "start" then
       args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
       if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end
+      -- The same two walls `bash` has had since the 11/11 home wipe: the text is refused before
+      -- anything is launched, and the shell runs a command whose resolved targets refuse too. This
+      -- path had neither - `host.exec` is wrapped by `path_guard.install`, `operation start` was not -
+      -- so an explicit operation (or a code-mode pending `bash`, which starts one) could carry a
+      -- recursive delete past the guard. Wall one here, wall two through `wrap`, one answer shape.
+      if type(args.command) == "string" and args.command ~= "" then
+        local allowed, refused = path_guard.command(args.command, args.cwd)
+        if not allowed then return { error = refused, effect = "none", blocked_by = "path_guard" } end
+        args.command = path_guard.wrap(args.command)
+      end
     end
     -- The name the reader knows this call by, so the session-status-content row can say `⟳ operation`
     -- while a long one runs (docs/TOOL-PROGRESS.md). Drawn, never used as a policy fact.

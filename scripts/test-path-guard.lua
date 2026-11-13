@@ -118,6 +118,55 @@ if home ~= '' then
   check(host.read_file(home .. '/keep.txt') ~= nil, 'and the file inside HOME survived the refused delete')
   check(host.path_kind(home) == 'dir', 'and HOME is still a directory')
 end
+-- ---- wall three: `operation start` (and every code-mode pending `bash`, which starts one) --------
+-- The 11/11 loss was an exec path that had no guard; `operation start` was the other one: `host.exec`
+-- is wrapped by `guard.install`, the operation manager is not. It must answer the SAME refusal, and
+-- start nothing.
+local literal = 'rm -rf "' .. (home ~= '' and home or '/') .. '"'
+local via_bash = tools.dispatch(memory, 'bash', { command = literal }, 'master', ctx)
+local via_operation = tools.dispatch(memory, 'operation', { action = 'start', command = literal }, 'master', ctx)
+check(via_bash.blocked_by == 'path_guard', 'the bash tool refuses the literal home: ' .. json.encode(via_bash):sub(1, 200))
+check(via_operation.blocked_by == 'path_guard', 'operation start refuses it too: ' .. json.encode(via_operation):sub(1, 200))
+check(via_operation.operation_id == nil, 'and no operation was launched for it')
+eq(via_operation.error, via_bash.error, 'operation start answers the same refusal word as the bash tool')
+-- The expanded form of the 11/11 loss, through an operation: the prelude refuses inside the shell, and
+-- the directory survives. This one is a real operation, so it is awaited like any other.
+if home ~= '' then
+  local made = tools.dispatch(memory, 'bash', { command = 'printf survives > "$HOME/keep-op.txt"' }, 'master', ctx)
+  check(made.ok == true, 'a marker file exists inside HOME before the operation tries to delete it')
+  local expanded_op = tools.dispatch(memory, 'operation',
+    { action = 'start', command = 'H="$HOME"; rm -rf "$H"; echo after' }, 'master', ctx)
+  check(type(expanded_op.operation_id) == 'string', 'the expanded form is admitted as an operation: ' .. json.encode(expanded_op):sub(1, 200))
+  if expanded_op.operation_id then
+    tools.dispatch(memory, 'operation', { action = 'await', id = expanded_op.operation_id, wait_for = 'settled' }, 'master', ctx)
+    local err = tools.dispatch(memory, 'operation', { action = 'read', id = expanded_op.operation_id, stream = 'stderr', offset = 0, limit = 4096 }, 'master', ctx)
+    local said_op = tostring(type(err) == 'table' and err.content or '')
+    check(said_op:find('path_guard', 1, true) ~= nil, 'the operation\'s shell refused it by name: ' .. said_op:sub(1, 200))
+    check(host.read_file(home .. '/keep-op.txt') ~= nil, 'the file inside HOME survived the refused operation')
+    check(host.path_kind(home) == 'dir', 'and HOME is still a directory after it')
+  end
+end
+-- The guard is a fence, not a wall: a scratch directory this test made (mktemp + marker) is deleted
+-- through `operation start` exactly as `bash` may delete it.
+local scratch = tools.dispatch(memory, 'operation', { action = 'start',
+  command = 'T=$(mktemp -d); printf x > "$T/marker"; rm -rf "$T"; if [ -e "$T" ]; then echo kept; else echo gone; fi' }, 'master', ctx)
+check(type(scratch.operation_id) == 'string', 'a scratch delete is admitted as an operation')
+if scratch.operation_id then
+  tools.dispatch(memory, 'operation', { action = 'await', id = scratch.operation_id, wait_for = 'settled' }, 'master', ctx)
+  local page = tools.dispatch(memory, 'operation', { action = 'read', id = scratch.operation_id, stream = 'stdout', offset = 0, limit = 4096 }, 'master', ctx)
+  check(tostring(type(page) == 'table' and page.content or ''):find('gone', 1, true) ~= nil,
+    'a mktemp scratch directory with a marker is still deletable through operation start: ' .. json.encode(page):sub(1, 200))
+end
+-- An ordinary operation is untouched by the guard, and carries no prelude bytes.
+local plain_op = tools.dispatch(memory, 'operation', { action = 'start', command = 'echo operation-guard-ok' }, 'master', ctx)
+if type(plain_op.operation_id) == 'string' then
+  tools.dispatch(memory, 'operation', { action = 'await', id = plain_op.operation_id, wait_for = 'settled' }, 'master', ctx)
+  local page = tools.dispatch(memory, 'operation', { action = 'read', id = plain_op.operation_id, stream = 'stdout', offset = 0, limit = 4096 }, 'master', ctx)
+  local text = tostring(type(page) == 'table' and page.content or '')
+  check(text:find('operation-guard-ok', 1, true) ~= nil, 'an ordinary operation still runs: ' .. text:sub(1, 160))
+  check(text:find('__wa_path_guard', 1, true) == nil, 'and a command that deletes nothing carries no prelude')
+end
+
 -- The same shape, allowed: a directory this run made. This is the idiom the 66 regressions used.
 local own = tools.dispatch(memory, 'bash', { command = 'T=$(mktemp -d); echo x > "$T/f"; rm -rf "$T"; if [ -e "$T" ]; then echo kept; else echo gone; fi' }, 'master', ctx)
 check(own.ok == true and tostring(own.stdout or ''):find('gone', 1, true) ~= nil,

@@ -365,7 +365,12 @@ ok(not send_schema.parameters.required, 'neither shape is required: chat+text se
 ok(send_schema.description:find('state:"done"', 1, true) ~= nil, 'the description names the done answer')
 ok(send_schema.description:find('state:"pending"', 1, true) ~= nil, 'and the pending answer with its resume')
 ok(send_schema.description:find('mcp_whatsapp_send_status', 1, true) == nil, 'and never sends the model to send_status')
-ok(send_schema.description:find('ids', 1, true) ~= nil, 'and says several ids can be resumed in one call')
+-- 12/11: the resume a script is taught is the one every call answers, `wait(op)`; the `{id}`/`{ids}`
+-- shapes stay accepted (asserted above) as a hidden alias for a call made outside a script, where the
+-- answer's own `resume` field still names it.
+ok(send_schema.description:find('wait(op)', 1, true) ~= nil, 'and points a script at wait(op)')
+ok(send_schema.description:find('mcp_whatsapp_send({ids', 1, true) == nil,
+  'the {ids} resume is a hidden alias, not something the description teaches')
 
 -- A guest may not resume either: the outbox is the operator's.
 local guest = tools.dispatch(memory, 'mcp_whatsapp_send', { id = 1 }, 'guest', { user_id = 'guest', role = 'guest' })

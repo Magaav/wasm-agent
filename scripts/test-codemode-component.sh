@@ -15,6 +15,9 @@
 #   3. scripts/test-codemode-component.lua: the seam's own parity suite, which compares the native and
 #      component loops field for field (value, items, calls, attempts, unexecuted) and asserts the
 #      fence's discovery on both.
+#   4. scripts/test-codemode-pending.lua on both paths: the pending-call handle (a call still running
+#      after wait_s answers {state:"pending", op}; wait(op)/cancel(op) resume or stop it), with the
+#      same check count on each side so "both passed" cannot hide a suite that stopped measuring.
 #
 # All three need the pinned code-mode assets (`quickjs.wasm`, `prelude.js`), because both paths run the
 # real guest. Without them this wrapper reports SKIPPED once, and says why — a skip is never a pass, and
@@ -115,6 +118,31 @@ echo "== scripts/test-codemode-component.lua (parity suite) =="
 parity_log="$home/parity.log"
 run scripts/test-codemode-component.lua "WA_CODEMODE_COMPONENT=1" "WA_CODEMODE_COMPONENT_WASM=$(native "$artifact")" 2>&1 | tee "$parity_log"
 check "parity suite" "$parity_log" "${PIPESTATUS[0]}"
+
+# The pending-call handle, on both paths and with the same suite unchanged: a call that outlives its
+# wait is a managed operation the loop answers, so the component must drive it identically
+# (`scripts/test-codemode-pending.lua`). The check count is compared, because "both passed" would
+# also be true if the suite had stopped measuring on one side.
+echo "== scripts/test-codemode-pending.lua (native) =="
+pending_native="$home/pending-native.log"
+run scripts/test-codemode-pending.lua 2>&1 | tee "$pending_native"
+check "pending handles native" "$pending_native" "${PIPESTATUS[0]}"
+echo "== scripts/test-codemode-pending.lua (component path: the same suite, unchanged) =="
+pending_seam="$home/pending-seam.log"
+run scripts/test-codemode-pending.lua "WA_CODEMODE_COMPONENT=1" "WA_CODEMODE_COMPONENT_WASM=$(native "$artifact")" 2>&1 | tee "$pending_seam"
+check "pending handles component" "$pending_seam" "${PIPESTATUS[0]}"
+if grep -q 'codemode: .*served natively' "$pending_seam"; then
+  echo "  FAILED the pending suite fell back to the native loop:"; grep 'codemode: .*served natively' "$pending_seam" | head -3
+  failed=$((failed + 1))
+fi
+native_checks=$(sed -n 's/.*codemode pending handles ok (\([0-9][0-9]*\) checks.*/\1/p' "$pending_native" | tail -1)
+seam_checks=$(sed -n 's/.*codemode pending handles ok (\([0-9][0-9]*\) checks.*/\1/p' "$pending_seam" | tail -1)
+if [ -z "${native_checks:-}" ] || [ -z "${seam_checks:-}" ] || [ "$native_checks" != "$seam_checks" ]; then
+  echo "  FAILED the two paths measured differently (native ${native_checks:-none}, component ${seam_checks:-none})"
+  failed=$((failed + 1))
+else
+  echo "  pending handles: $seam_checks checks, identical on both paths"
+fi
 
 echo
 if [ "$failed" -gt 0 ]; then
