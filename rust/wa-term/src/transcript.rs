@@ -26,7 +26,16 @@ const FOCUS: &str = "\x1b[38;2;255;255;255m";
 pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool,
     /// Lines that can be copied, by line index: `{line: content}`. The content is the block's own
     /// text (a fenced block's body), not the drawn rows - the rows carry the border and the icon.
-    pub copies: HashMap<usize, String> }
+    pub copies: HashMap<usize, String>,
+    /// A code-mode block (`⏺ Code · …`): drawn expanded while it is the running one, and folded to
+    /// `summary` - ONE row - once the next one starts (`fold_code`).
+    pub code: bool,
+    /// The one row this block collapses to, set when a newer code-mode block takes the screen:
+    /// `⏺ Code · bash ×3 ✓ · 1.2s → "a,b,c"`.
+    pub summary: Option<String>,
+    /// Ctrl+O on this block: pinned expanded, so the next code-mode block does not collapse it. The
+    /// same key lets it go.
+    pub pinned: bool }
 
 pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub dirty: bool,
     /// The scrollbar in the last column (#115): `auto` shows it when the chat is taller than the
@@ -89,10 +98,76 @@ impl Transcript {
         self.clear_live();
         self.pending_copy.clear();
         if let Some(last) = self.blocks.last_mut() {
-            if last.lines.is_empty() { last.topic = topic; last.expanded = false; return; }
+            if last.lines.is_empty() {
+                last.topic = topic; last.expanded = false;
+                last.code = false; last.summary = None; last.pinned = false;
+                return;
+            }
         }
         self.blocks.push(Block { topic, ..Default::default() });
         self.counts.push(None);
+    }
+
+    /// Start a code-mode block: collapsible, but drawn **expanded** while it is the newest one - the
+    /// block that is running is the one a reader is watching stream (`lua/core/codemode_block.lua`
+    /// decides its rows; this decides its fold).
+    pub fn code_block(&mut self) {
+        self.block(true);
+        if let Some(last) = self.blocks.last_mut() {
+            last.code = true; last.expanded = true; last.pinned = false; last.summary = None;
+        }
+        self.dirty = true;
+    }
+
+    /// Collapse the code-mode blocks a newer one supersedes: the newest takes `summary` (the one row
+    /// it becomes) and folds, and every older code block folds too - so exactly ONE code block is
+    /// open, the one that is running, plus whatever the reader pinned with Ctrl+O. Called by the view
+    /// immediately before it starts the next block. Returns whether anything folded.
+    pub fn fold_code(&mut self, summary: &str) -> bool {
+        let Some(newest) = (0..self.blocks.len()).rev().find(|&i| self.blocks[i].code && !self.blocks[i].lines.is_empty()) else { return false };
+        let mut folded = false;
+        if !self.blocks[newest].pinned {
+            self.blocks[newest].summary = Some(summary.to_string());
+            self.blocks[newest].expanded = false;
+            if let Some(count) = self.counts.get_mut(newest) { *count = None; }
+            folded = true;
+        }
+        for index in 0..newest {
+            if self.blocks[index].code && !self.blocks[index].pinned && self.blocks[index].expanded {
+                self.blocks[index].expanded = false;
+                if let Some(count) = self.counts.get_mut(index) { *count = None; }
+                folded = true;
+            }
+        }
+        if folded { self.dirty = true; }
+        folded
+    }
+
+    /// Rewrite a committed line of the current block by offset from its end (`-1` is the last row):
+    /// how a code-mode block flips a running call's `⏳` row to `✓` in place instead of drawing the
+    /// block again. The live row is not a committed line and is taken away first, as a write does.
+    pub fn rewrite(&mut self, offset: isize, text: &str) -> bool {
+        self.clear_live();
+        let Some(block) = self.blocks.last_mut() else { return false };
+        let index = block.lines.len() as isize + offset;
+        if index < 0 || index as usize >= block.lines.len() { return false }
+        block.lines[index as usize] = text.to_string();
+        if let Some(count) = self.counts.last_mut() { *count = None; }
+        self.dirty = true;
+        true
+    }
+
+    /// Ctrl+O: pin the focused block - or the newest code-mode block - expanded, so the blocks that
+    /// follow it no longer collapse it; the same key lets it go. Returns the new state.
+    pub fn pin_toggle(&mut self) -> Option<bool> {
+        let index = self.focus.or_else(|| (0..self.blocks.len()).rev()
+            .find(|&i| self.blocks[i].code && !self.blocks[i].lines.is_empty()))?;
+        let block = &mut self.blocks[index];
+        block.pinned = !block.pinned;
+        if block.pinned { block.expanded = true; }
+        if let Some(count) = self.counts.get_mut(index) { *count = None; }
+        self.dirty = true;
+        Some(block.pinned)
     }
 
     /// The running tool call's line, **inside that call's own block** (Victor, 2026-11-10: the
@@ -268,6 +343,15 @@ impl Transcript {
             }
         }
         while block.topic && rows.last().is_some_and(|r| visible(r) == 0) { rows.pop(); }
+        // A code-mode block is open while it runs and ONE row afterwards: the summary a newer block
+        // left it with. Pinned (Ctrl+O) or focused, it shows everything it holds.
+        if block.code && !block.expanded && !block.pinned && !focused {
+            if let Some(summary) = block.summary.as_ref() { return (vec![summary.clone()], Vec::new()) }
+            // No summary was ever handed to this block (it was pinned when its successor started): its
+            // own heading is the row it keeps - `⏺ Code · bash … 1.2s` says what it was and how it
+            // went, which is what the collapsed state is for.
+            if let Some(head) = block.lines.first() { return (vec![head.clone()], Vec::new()) }
+        }
         // Folded: the topic's title row, then its first FOLDED_ROWS rows of content - blank rows
         // skipped, so three rows are three lines of text - then how much is hidden.
         if block.topic && !block.expanded && rows.len() > 1 + FOLDED_ROWS {
@@ -622,7 +706,7 @@ fn hanging_indent(cells: &[(String, char, usize)]) -> (usize, usize) {
 
 /// Keys while the transcript has focus.
 #[derive(Debug, PartialEq)]
-pub enum NavKey { None, Up, Down, Right, Left, Exit, PageUp, PageDown, Bottom, Other(Vec<u8>) }
+pub enum NavKey { None, Up, Down, Right, Left, Pin, Exit, PageUp, PageDown, Bottom, Other(Vec<u8>) }
 
 #[derive(Default)]
 pub struct NavDecoder { escape: Vec<u8> }
@@ -647,6 +731,7 @@ impl NavDecoder {
         match byte {
             0x1b => { self.escape.push(byte); NavKey::None }
             b'\r' | 3 => NavKey::Exit,
+            0x0f => NavKey::Pin,
             _ => NavKey::Other(vec![byte]),
         }
     }
@@ -940,6 +1025,76 @@ mod tests {
             && open.contains("chat.lua") && open.contains("\"count\":2"),
             "expanded: the whole script and the value the model received: {open}");
         assert!(!open.contains("+2 lines"), "and nothing left hidden: {open}");
+    }
+    #[test]
+    fn a_code_mode_block_is_open_while_it_runs_and_one_row_after() {
+        let mut t = Transcript::default();
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} bash                                                     1.2s\n");
+        t.write("  const files = await tools.ls({path: 'lua/core'});\n");
+        t.write("  \u{2713} bash \u{b7} $ ls lua/core \u{b7} 210ms\n");
+        t.write("\u{23bf} {\"count\":2,\"first\":\"chat.lua\"}\n");
+        let open = t.view(80, 24).join("\n");
+        assert!(open.contains("Code \u{b7} bash") && open.contains("ls lua/core")
+            && open.contains("\"count\":2"), "the running block is open, all of it: {open}");
+        assert!(!open.contains("+2 lines"), "and folds none of its own rows: {open}");
+        // The next code-mode call starts: this one collapses to the ONE row the view built for it.
+        let summary = "\u{23fa} Code \u{b7} bash \u{2713} \u{b7} 1.2s \u{2192} {\"count\":2}";
+        assert!(t.fold_code(summary), "the block before the new one folds");
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} grep\n");
+        t.write("  return hits.count;\n");
+        let screen = t.view(80, 24);
+        let text = screen.join("\n");
+        assert!(text.contains(summary), "the older block is its summary row: {text}");
+        assert!(!text.contains("ls lua/core") && !text.contains("const files"),
+            "and none of its rows are drawn: {text}");
+        assert!(text.contains("grep") && text.contains("hits.count"), "the new one is open: {text}");
+        assert_eq!(screen.iter().filter(|row| row.contains("\u{23fa} Code")).count(), 2,
+            "two headings, one row for the collapsed one: {text}");
+    }
+
+    #[test]
+    fn a_pinned_code_mode_block_survives_the_next_one() {
+        let mut t = Transcript::default();
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} bash\n");
+        t.write("  const files = await tools.ls({path: 'lua/core'});\n");
+        assert_eq!(t.pin_toggle(), Some(true), "Ctrl+O pins the newest code-mode block");
+        assert!(!t.fold_code("\u{23fa} Code \u{b7} bash \u{2713} \u{b7} 1.2s"),
+            "a pinned block is not collapsed when the next one starts");
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} grep\n");
+        t.write("  return 1;\n");
+        let text = t.view(80, 24).join("\n");
+        assert!(text.contains("tools.ls"), "the pinned block keeps every row: {text}");
+        assert!(text.contains("return 1"), "and the newer one is open beside it: {text}");
+        // Ctrl+O again lets it go: focus it (newest topic first, then the older one) and toggle.
+        assert!(t.focus_prev(), "the newest topic is the code block that is running");
+        assert!(t.focus_prev(), "and the one before it is the pinned block");
+        assert_eq!(t.pin_toggle(), Some(false), "Ctrl+O again unpins it");
+        t.unfocus();
+        assert!(t.fold_code("\u{23fa} Code \u{b7} grep \u{2713}"), "now the next block collapses it");
+        let after = t.view(80, 24).join("\n");
+        assert!(!after.contains("tools.ls"), "to its summary row: {after}");
+    }
+
+    #[test]
+    fn rewriting_a_row_flips_a_running_call_in_place() {
+        let mut t = Transcript::default();
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} bash\n");
+        t.write("  \u{23f3} bash \u{b7} $ wc -l a.txt\n");
+        let before = t.view(80, 24);
+        assert!(before.join("\n").contains("\u{23f3} bash"), "the call is drawn as running: {before:?}");
+        assert!(t.rewrite(-1, "  \u{2713} bash \u{b7} $ wc -l a.txt \u{b7} 210ms"),
+            "its own row is rewritten in place");
+        let after = t.view(80, 24);
+        assert!(after.join("\n").contains("\u{2713} bash \u{b7} $ wc -l a.txt \u{b7} 210ms"),
+            "to the settled row: {after:?}");
+        let rows = |view: &Vec<String>| view.iter().filter(|row| visible(row) > 0).count();
+        assert_eq!(rows(&after), rows(&before), "without adding or removing a row: {after:?}");
+        assert!(!t.rewrite(-99, "x"), "an offset past the block rewrites nothing");
     }
     #[test]
     fn the_view_is_bottom_anchored_and_keeps_a_focused_topic_on_screen() {

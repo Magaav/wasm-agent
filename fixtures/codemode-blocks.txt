@@ -1,0 +1,116 @@
+### one call ok @ 80x24
+⏺ Code · bash                                                               1.2s
+  const files = await tools.ls({path: 'lua/core'});
+  await tools.read({path: 'lua/core/chat.lua'});
+  return {count: 2, first: 'chat.lua'};
+  ✓ bash · $ ls lua/core · 210ms
+⎿ {"count":2,"first":"chat.lua"}
+
+### one call ok @ 120x40
+⏺ Code · bash                                                                                                       1.2s
+  const files = await tools.ls({path: 'lua/core'});
+  await tools.read({path: 'lua/core/chat.lua'});
+  return {count: 2, first: 'chat.lua'};
+  ✓ bash · $ ls lua/core · 210ms
+⎿ {"count":2,"first":"chat.lua"}
+
+### one call failed web_http_429 @ 80x24
+⏺ Code · web_read                                                          400ms
+  await tools.web_read({url: 'https://example.com'});
+  ✗ web_read · https://example.com · web_http_429
+
+### one call failed web_http_429 @ 120x40
+⏺ Code · web_read                                                                                                  400ms
+  await tools.web_read({url: 'https://example.com'});
+  ✗ web_read · https://example.com · web_http_429
+
+### promise.all of 10 mixed @ 80x24
+⏺ Code · bash ×10                                                           1.4s
+  const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + …
+  return out.length;
+  bash ×10 ✓9 ✗1
+⎿ 10
+
+### promise.all of 10 mixed @ 120x40
+⏺ Code · bash ×10                                                                                                   1.4s
+  const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + p})));
+  return out.length;
+  bash ×10 ✓9 ✗1
+⎿ 10
+
+### a pending call @ 80x24
+⏺ Code · mcp_whatsapp_send                                                 300ms
+  const r = await tools.mcp_whatsapp_send({to: 'me', text: 'hi'});
+  return r;
+  ⏳ mcp_whatsapp_send · to=me · pending op-77
+⎿ 1
+
+### a pending call @ 120x40
+⏺ Code · mcp_whatsapp_send                                                                                         300ms
+  const r = await tools.mcp_whatsapp_send({to: 'me', text: 'hi'});
+  return r;
+  ⏳ mcp_whatsapp_send · to=me · pending op-77
+⎿ 1
+
+### two consecutive blocks @ 80x24
+⏺ Code · bash ✓ · 1.2s → {"count":2,"first":"chat.lua"}
+⏺ Code · grep                                                               1.5s
+  const hits = await tools.grep({pattern: 'TODO'});
+  return hits.count;
+  ✓ grep · 90ms
+⎿ 4
+
+### two consecutive blocks @ 120x40
+⏺ Code · bash ✓ · 1.2s → {"count":2,"first":"chat.lua"}
+⏺ Code · grep                                                                                                       1.5s
+  const hits = await tools.grep({pattern: 'TODO'});
+  return hits.count;
+  ✓ grep · 90ms
+⎿ 4
+
+### a pinned block survives a newer one @ 80x24
+⏺ Code · bash                                                               1.2s
+  const files = await tools.ls({path: 'lua/core'});
+  await tools.read({path: 'lua/core/chat.lua'});
+  return {count: 2, first: 'chat.lua'};
+  ✓ bash · $ ls lua/core · 210ms
+⎿ {"count":2,"first":"chat.lua"}
+⏺ Code · bash                                                               1.3s
+  return 1;
+  ✓ bash · $ true · 40ms
+⎿ 1
+
+### a pinned block survives a newer one @ 120x40
+⏺ Code · bash                                                                                                       1.2s
+  const files = await tools.ls({path: 'lua/core'});
+  await tools.read({path: 'lua/core/chat.lua'});
+  return {count: 2, first: 'chat.lua'};
+  ✓ bash · $ ls lua/core · 210ms
+⎿ {"count":2,"first":"chat.lua"}
+⏺ Code · bash                                                                                                       1.3s
+  return 1;
+  ✓ bash · $ true · 40ms
+⎿ 1
+
+### a long script collapsed @ 80x24
+⏺ Code                                                                      50ms
+  const v1 = await tools.read({path: 'f1.txt'});
+  const v2 = await tools.read({path: 'f2.txt'});
+  const v3 = await tools.read({path: 'f3.txt'});
+  const v4 = await tools.read({path: 'f4.txt'});
+  const v5 = await tools.read({path: 'f5.txt'});
+  const v6 = await tools.read({path: 'f6.txt'});
+  … +7 lines
+⎿ alpha
+
+### a long script collapsed @ 120x40
+⏺ Code                                                                                                              50ms
+  const v1 = await tools.read({path: 'f1.txt'});
+  const v2 = await tools.read({path: 'f2.txt'});
+  const v3 = await tools.read({path: 'f3.txt'});
+  const v4 = await tools.read({path: 'f4.txt'});
+  const v5 = await tools.read({path: 'f5.txt'});
+  const v6 = await tools.read({path: 'f6.txt'});
+  … +7 lines
+⎿ alpha
+

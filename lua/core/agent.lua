@@ -2785,7 +2785,12 @@ function M:run_body(text, images)
       run_id = self.run_id, subagent = self.subagent, run_origin=self.run_origin, changes = self.changes, codemode_policy=self.codemode_policy,
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
-      model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }
+      model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected,
+      -- The run's own event stream, for a tool that has something to say while it works: a code-mode
+      -- script reports each nested call as it starts and settles, which is what the CLI's block shows
+      -- (`lua/core/codemode.lua` -> `lua/core/codemode_block.lua`). Nothing on the result path reads
+      -- it, and a caller with no listener emits into `on_event`, which is a no-op.
+      emit = function(event) self.emit(event) end }
     dispatch_ctx.steering_admit=function() return steering.admit(self.user,self.session_id,self.steering_run_id) end
     local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
     -- The batching treatment was retired (04/11): every run now carries the default guidance, so
