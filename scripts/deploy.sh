@@ -1724,6 +1724,11 @@ ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-bi
 # nothing to install.
 ship_file "$ROOT/scripts/lib/release-signing.sh" "$INSTALL_DIR/scripts/lib/release-signing.sh" "scripts/lib/release-signing.sh beside deploy.sh (signed releases)"
 ship_file "$ROOT/scripts/lib/release_verify.py" "$INSTALL_DIR/scripts/lib/release_verify.py" "scripts/lib/release_verify.py beside deploy.sh (the verifier the shell paths run)"
+# The command that SIGNS a release, for the node whose vault listener is reachable: `wa land` asks that node
+# to sign the sums of a release built elsewhere and brings the signature back (`lua/core/land.lua`, the `sign`
+# step). A signing host without this file refuses by name (`signer_script_missing`), which is a deployment
+# gap and not a silent unsigned release.
+ship_file "$ROOT/scripts/sign-release.sh" "$INSTALL_DIR/scripts/sign-release.sh" "scripts/sign-release.sh beside the binary (release signing on the vault's host)"
 # ...and the rule that retires a script this release no longer ships: it runs at the end of THIS deploy, from
 # the copy beside deploy.sh, so an installed `request deploy` prunes exactly as the checkout deploy does.
 ship_file "$ROOT/scripts/lib/retire-unshipped.sh" "$INSTALL_DIR/scripts/lib/retire-unshipped.sh" "scripts/lib/retire-unshipped.sh beside deploy.sh"

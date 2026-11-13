@@ -273,7 +273,11 @@ contains "$out" "release_unsigned" "the unsigned candidate refusal is named"
 dropbox="$WORK/dropbox.git"; git init -q --bare "$dropbox"
 ship() { # <artifact dir> <remote> <token: with|without> -> code, output
   if [ "$3" = with ]; then
-    WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" WA_VAULT_ADMIN_TOKEN="$token" \
+    # WA_RELEASE_KEYS: the transport VERIFIES the signature before it commits it (change/waland's half of the
+    # rule - presence alone would ship a signature nobody can check), and in this suite the trust anchor is the
+    # scratch vault's key. In production the anchor is the key in `config/release-keys.txt` or in the node's own
+    # `<home>/.wasm-agent/release-keys.txt`.
+    WA_RELEASE_KEYS="$WORK/node-keys.txt" WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" WA_VAULT_ADMIN_TOKEN="$token" \
       WA_PUBLISH_RUNNER=true bash "$ROOT/scripts/publish-artifacts-branch.sh" --from "$1" --commit "$COMMIT" \
       --targets "$TRIPLE" --out "$1" --remote "$2" 2>&1
   else

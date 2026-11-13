@@ -9,6 +9,8 @@ wa land --ready                     # every branch with a READY line in the read
 wa land --branches change/a,change/b
 wa land --dry-run                   # the plan and every command; changes nothing
 wa land --no-deploy                 # land and publish, deploy nothing
+wa land --signer <node>|local       # where the release is signed (default: the node whose
+                                    # WA_VAULT_ADMIN_URL is set - the vault's listener is loopback)
 wa land --resume                    # continue the newest unfinished run at its failed step
 wa land --run <id> --resume
 wa land --rollback                  # put every node's kept pair back (reverse ring order)
@@ -16,8 +18,9 @@ wa land status [--run <id>]         # the journal, read-only
 wa land ready change/x <sha>        # record an agent's READY line
 ```
 
-Code: `lua/core/land.lua` (the machine), `lua/core/remote_update.lua` (the per-node verb it calls).
-Test: `scripts/test-land.lua` (119 checks, ~75 s, real git, scripted nodes).
+Code: `lua/core/land.lua` (the machine), `lua/core/remote_update.lua` (the per-node verb it calls),
+`scripts/sign-release.sh` (the one command that signs a release). Test: `scripts/test-land.lua` (145 checks,
+~40 s, real git, a real scratch wa-vault, scripted nodes).
 
 ## The steps, in order
 
@@ -29,8 +32,10 @@ Test: `scripts/test-land.lua` (119 checks, ~75 s, real git, scripted nodes).
 | `gate` | the weighted checks, one run each, a failing check re-run **once alone** | `gate_failed`, `gate_vacuous`, `flaky_under_load` (stops, never green) |
 | `push` | the landed tip to the incoming repository, read back | `push_failed`, `push_not_readback` |
 | `main` | fast-forward the source of truth onto the landed tip, read back | `main_not_fast_forward`, `main_push_needs_credentials`, `main_not_readback` |
-| `artifacts` | `scripts/publish-artifacts-branch.sh`, then hold the shipped ref to every file its `PUBLISH.sh` names | `artifacts_failed`, `artifacts_incomplete`, `artifacts_wrong_commit` |
-| `publish` | sign (when the signer is on main), then the release | `publish_needs_credentials`, `publish_failed`, `signing_failed` |
+| `artifacts` | build the release set (`publish-node-binaries.sh` with `WA_RELEASE_SIGN_DEFER=1`) and verify every payload against the manifest's pins | `artifacts_failed`, `artifacts_not_pinned`, `artifacts_wrong_commit` |
+| `sign` | `scripts/sign-release.sh` on the host that can reach wa-vault, the signature handed back, then verified against the trusted keys of the landed tree | `signer_unknown`, `release_not_signed`, `release_key_not_trusted` |
+| `ship` | `scripts/publish-artifacts-branch.sh` from the built set, then hold the shipped ref to every file its `PUBLISH.sh` names, signature included | `ship_unsigned`, `ship_incomplete`, `ship_wrong_commit` |
+| `publish` | the release itself, from the shipped ref | `publish_unsigned`, `publish_needs_credentials`, `publish_failed` |
 | `deploy` | the ring, in order, stopping at the first node that is not installed | `deploy_refused`, `deploy_failed` |
 | `report` | one summary written to a file and printed; runs even when the machine stopped | - |
 
@@ -116,16 +121,47 @@ It restores the two binaries by rename, proves `wa --version` runs, rewrites `in
 release feed, because the node it is about may be the reason it is needed. `wa land --rollback` walks the
 whole ring in reverse.
 
-## The two conditional channels
+## Signing, and where it runs
 
-Neither `change/sign` nor `change/reviewer` is on main, so both are detected, never assumed:
+A release is signed or it is not published. `change/sign` is on main: the publisher signs `SHA256SUMS` with
+wa-vault's `release-signing` key (ed25519, the key never leaves the vault), every node verifies the signature
+before it installs, and `scripts/publish-artifacts-branch.sh` refuses a set without `SHA256SUMS` **and**
+`SHA256SUMS.sig` (`release_not_signed`, exit 6) and refuses one whose signature does not verify
+(`release_signature_invalid`).
 
-* **sign** - `scripts/publish-sign.sh` in the landed tree. Absent: the release is recorded
-  `signed=false` and the journal carries a TODO naming the file and `scripts/test-land.lua`'s signing case,
-  which stands a fixture signer in a tree and asserts the publish step runs it.
-* **reviewer** - `scripts/review-branch.mjs` at the base commit; it reviews a branch before that branch is
-  merged, so a reviewer that arrived with the branch could never have looked at it. Absent: the step is
-  `skipped` with a TODO naming the same test.
+The constraint the three steps exist for: **the vault's admin listener answers only where the vault runs** -
+measured 13/11, `127.0.0.1:8801` on the operator's laptop, loopback. So the host that builds a release is not
+always the host that can sign it:
+
+1. `artifacts` builds with `WA_RELEASE_SIGN_DEFER=1`. The publisher writes the payloads, the manifest and
+   `SHA256SUMS`, does **not** sign, refuses `--publish`, and says so in a line; if a signature is already
+   there it verifies it instead.
+2. `sign` runs `scripts/sign-release.sh <SHA256SUMS>` where the vault is reachable and hands the signature
+   back over the fabric (the sums travel as base64, the signature comes back the same way; the admin token is
+   read on the signing host and never travels). The receiver then verifies it - `. scripts/lib/release-signing.sh;
+   wa_release_verify_sums <dir>` - against `config/release-keys.txt` of the landed tree. A key this project
+   does not trust is refused (`release_key_not_trusted`), and the answer names the file to add it to.
+3. `ship` refuses to build a commit without the two signed-sums files, and re-verifies them.
+
+Which host signs, in order (nothing guesses):
+
+| choice | how |
+| --- | --- |
+| explicit | `wa land --signer <node>` (or `--signer local`) |
+| recorded | `<config>/land/signer.json`, `{"node":"laptop"}` or `{"local":true}` |
+| default | the node that sets `WA_VAULT_ADMIN_URL` / `WASM_AGENT_VAULT_OPERATOR_URL` - this node if it is the one, else the first peer the fabric lists whose `printenv` of those two names answers |
+| none | `signer_unknown`, naming both knobs and the vault's admin page |
+
+A signing node needs `scripts/sign-release.sh` beside its binary (shipped by `deploy.sh`); a node without it
+answers `signer_script_missing` rather than an unsigned release. The vault's own routes and the key's
+rotation are in [VAULT.md](VAULT.md) and [INSTALL.md](INSTALL.md), "Signed releases".
+
+## The reviewer channel
+
+`change/reviewer` is not on main, so it is detected, never assumed: `scripts/review-branch.mjs` at the base
+commit (it reviews a branch BEFORE that branch is merged, so a reviewer that arrived with the branch could
+never have looked at it). Absent: the step is `skipped` with a TODO naming the file and the test that turns
+it on. Its findings are recorded in the report and never block a landing.
 
 ## What this node can and cannot do
 

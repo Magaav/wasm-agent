@@ -31,6 +31,8 @@
 --   wa land --branches a,b             land exactly these branches
 --   wa land --dry-run                  print the plan and every command; change nothing
 --   wa land --no-deploy                land and publish, deploy nothing
+--   wa land --signer <node>|local      where the release is signed (default: the node whose
+--                                      WA_VAULT_ADMIN_URL is set - the vault's admin listener is loopback)
 --   wa land --resume                   continue the newest unfinished run from its failed step
 --   wa land --run <id> --resume        continue that run
 --   wa land status [--run <id>]        the journal as text (read-only)
@@ -58,6 +60,21 @@ end
 local function write(path, text)
   local ok, wrote = pcall(host.write_file, path, text)
   return ok and wrote == true
+end
+
+-- Lines of a file's text, without `io.lines` (the host hands over the whole file).
+local function vsplit(text, separator)
+  local rows, from = {}, 1
+  while true do
+    local at = tostring(text):find(separator, from, true)
+    if not at then
+      rows[#rows + 1] = tostring(text):sub(from)
+      break
+    end
+    rows[#rows + 1] = tostring(text):sub(from, at - 1)
+    from = at + 1
+  end
+  return rows
 end
 
 local function json_file(path)
@@ -136,18 +153,139 @@ function M.call()
   return nodes.remote_call
 end
 
+-- ---------------------------------------------------------------- who signs a release
+--
+-- The vault's ADMIN listener answers on the machine that runs the vault - measured 13/11: 127.0.0.1:8801 on
+-- the operator's laptop, loopback only - so the signature is produced THERE and handed back here. The order
+-- is deliberate: an explicit name wins, then the recorded choice, then the node that sets the vault's
+-- operator URL (the default the mission names), then a refusal by name. Nothing guesses a signer and nothing
+-- ever reads, prints or forwards the admin token.
+
+function M.vault_var()
+  for _, name in ipairs(M.SIGNER_VARS) do
+    if trim(host.getenv and host.getenv(name) or "") ~= "" then return name end
+  end
+  return nil
+end
+
+-- The nodes worth asking: the fabric's peers, minus this node. `M.candidates` is the test seam (it takes the
+-- options and answers names), and the module itself never sets it.
+function M.signer_nodes(options)
+  if type(M.candidates) == "function" then return M.candidates(options) end
+  local ok, nodes = pcall(dofile, "lua/core/nodes.lua")
+  if not ok or type(nodes) ~= "table" or type(nodes.list) ~= "function" then return {} end
+  local names = {}
+  for _, node in ipairs(nodes.list() or {}) do
+    local name = tostring(node.name or "")
+    if name ~= "" and node.local_node ~= true then names[#names + 1] = name end
+  end
+  return names
+end
+
+-- Can that node reach a vault? One signed call, one command, and only the two URL variables are asked for:
+-- `printenv` prints the values of the names it was given and skips the ones that are unset, so the answer is
+-- a URL or nothing, never a token.
+function M.probes_vault(node)
+  local ok, reply = pcall(M.call(), node, "bash",
+    { command = "printenv WA_VAULT_ADMIN_URL WASM_AGENT_VAULT_OPERATOR_URL 2>/dev/null || true" })
+  if not ok or type(reply) ~= "table" or reply.error then return false end
+  if (tonumber(reply.code) or 1) ~= 0 then return false end
+  return trim(reply.stdout) ~= ""
+end
+
+function M.signer(options)
+  options = type(options) == "table" and options or {}
+  local explicit = trim(options.signer)
+  if explicit ~= "" then
+    if explicit == "local" or explicit == "this" then return { kind = "local", why = "--signer local" } end
+    return { kind = "node", node = explicit, why = "--signer " .. explicit }
+  end
+  local configured = json_file(M.root() .. "/signer.json")
+  if configured then
+    if configured["local"] == true then return { kind = "local", why = M.root() .. "/signer.json says local" } end
+    local node = trim(configured.node)
+    if node ~= "" then return { kind = "node", node = node, why = M.root() .. "/signer.json names " .. node } end
+  end
+  local variable = M.vault_var()
+  if variable then return { kind = "local", why = "this node sets " .. variable } end
+  local names = M.signer_nodes(options)
+  for _, name in ipairs(names) do
+    if M.probes_vault(name) then return { kind = "node", node = name, why = name .. " sets a vault operator URL" } end
+  end
+  return nil, { error = "signer_unknown",
+    detail = "no host was found that can reach wa-vault's admin listener",
+    observed = "this node sets neither " .. table.concat(M.SIGNER_VARS, " nor ") .. ";" ..
+      (#names > 0 and (" it asked " .. table.concat(names, ", ") .. " and none named one")
+        or " the fabric lists no other node to ask"),
+    next = "name the host (`wa land --signer <node>`, or `--signer local` here), or set WA_VAULT_ADMIN_URL and "
+      .. "WA_VAULT_ADMIN_TOKEN on the node that runs the vault" }
+end
+
+-- The signature, produced on `node` and handed back: the sums travel as base64, the signer's own
+-- `scripts/sign-release.sh` runs there (found in its install, or wherever WA_LAND_SIGNER_SCRIPT names), and
+-- the signature file comes back the same way. The token never leaves that node.
+function M.sign_on_node(node, sums_path, sig_path, evidence)
+  local encoded = M.exec("base64 < " .. quote(sums_path) .. " | tr -d '\\n'", "", 120)
+  if (encoded.code or 1) ~= 0 or trim(encoded.stdout) == "" then
+    return nil, { error = "sign_transfer_failed", observed = "cannot read " .. sums_path .. " to send it to " .. node }
+  end
+  local command = table.concat({
+    'set -e',
+    'd=$(mktemp -d)',
+    'trap \'rm -rf "$d"\' EXIT',
+    'printf %s ' .. quote(trim(encoded.stdout)) .. ' | base64 -d > "$d/SHA256SUMS"',
+    's=""',
+    'for c in "${WA_LAND_SIGNER_SCRIPT:-}" "${WA_INSTALL_DIR:-$HOME/.local/bin}/scripts/sign-release.sh" "$HOME/wasm-agent/scripts/sign-release.sh"; do',
+    '  if [ -n "$c" ] && [ -f "$c" ]; then s="$c"; break; fi',
+    'done',
+    '[ -n "$s" ] || { echo "signer_script_missing: no scripts/sign-release.sh on this node (deploy this commit there, or set WA_LAND_SIGNER_SCRIPT)" >&2; exit 9; }',
+    'bash "$s" "$d/SHA256SUMS" "$d/SHA256SUMS.sig" >/dev/null',
+    'base64 < "$d/SHA256SUMS.sig" | tr -d \'\\n\'',
+  }, '\n')
+  if evidence then evidence(string.format("sign on %s: the sums travel as base64 and the signature comes back\n", node)) end
+  local ok, reply = pcall(M.call(), node, "bash", { command = command })
+  if not ok or type(reply) ~= "table" then
+    return nil, { error = "signer_unreachable", observed = "the call to " .. node .. " produced no answer" }
+  end
+  if reply.error then
+    return nil, { error = "signer_refused", detail = "node " .. node .. " refused the signing request",
+      observed = tostring(reply.error) .. (reply.note and (" - " .. tostring(reply.note)) or "") }
+  end
+  if (tonumber(reply.code) or 1) ~= 0 then
+    return nil, { error = "release_not_signed", detail = "node " .. node .. " could not sign",
+      observed = first_line(tostring(reply.stderr or "") ~= "" and tostring(reply.stderr) or tostring(reply.stdout or "")) }
+  end
+  local signature = trim(reply.stdout)
+  if signature == "" then
+    return nil, { error = "signer_answered_nothing", observed = node .. " answered exit 0 with no signature" }
+  end
+  local decoded = M.exec("printf %s " .. quote(signature) .. " | base64 -d > " .. quote(sig_path), "", 120)
+  if (decoded.code or 1) ~= 0 or not read(sig_path) then
+    return nil, { error = "sign_transfer_failed", observed = "the signature " .. node .. " sent could not be written to " .. sig_path }
+  end
+  return { code = 0, stdout = "signed on " .. node, stderr = "" }
+end
+
 -- ---------------------------------------------------------------- the steps, in order
 --
 -- Data, so a reader can check the order against the mission and a test can assert it: merge, gate, push
--- the landed tip, fast-forward main, build and verify the artifacts, publish, deploy. `report` is last and
--- runs even when the machine stopped, because a stop without a report is the thing this file exists to
--- end.
-M.STEPS = { "collect", "review", "merge", "gate", "push", "main", "artifacts", "publish", "deploy", "report" }
+-- the landed tip, fast-forward main, build and verify the release set, SIGN it, ship it as
+-- `artifacts/node-<sha12>`, publish it, deploy. `report` is last and runs even when the machine stopped,
+-- because a stop without a report is the thing this file exists to end.
+--
+-- `artifacts`/`sign`/`ship` are the three halves of publishing and they are separate steps because the
+-- hosts differ: the build needs a toolchain, the signature needs the vault's admin listener, and the ship
+-- needs a git remote. Keeping them apart is what makes a rerun of one of them cheap - and a signature that
+-- arrives after a stopped run is not thrown away with the build.
+M.STEPS = { "collect", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "report" }
 
 -- The two channels the mission names as conditional. Both are looked up in the LANDED TREE, so "is it on
 -- main" is answered by the tree being landed and not by this machine's opinion.
 M.REVIEW_SCRIPT = "scripts/review-branch.mjs"
-M.SIGN_SCRIPT = "scripts/publish-sign.sh"
+-- The one command that signs a release's SHA256SUMS, run on whichever host can reach the vault
+-- (`scripts/sign-release.sh` is a thin wrapper over `scripts/lib/release-signing.sh`).
+M.SIGN_SCRIPT = "scripts/sign-release.sh"
+M.SIGNER_VARS = { "WA_VAULT_ADMIN_URL", "WASM_AGENT_VAULT_OPERATOR_URL" }
 
 -- ---------------------------------------------------------------- the gate's checks
 --
@@ -649,95 +787,261 @@ impl.main = function(run, options)
   return true, { detail = origin .. " main = " .. sha:sub(1, 12) .. " (read back)" }
 end
 
--- artifacts: build and verify the release artifacts, ship them to the incoming repository as
--- `artifacts/node-<sha12>`, and then prove the ref carries every file the shipped PUBLISH.sh names. That
--- last check is the one that was missing: on 13/11 the ref held PUBLISH.sh naming SHA256SUMS and did not
--- carry it, which would have failed the publish a human was instructed to run.
+-- ---------------------------------------------------------------- the release, in three steps
+--
+-- BUILD, SIGN, SHIP are separate steps because they need different hosts. The build needs a toolchain, the
+-- signature needs wa-vault's ADMIN listener (which answers on the machine that runs the vault and nowhere
+-- else - measured 13/11: 127.0.0.1:8801 on the operator's laptop), and the ship needs a git remote. Keeping
+-- them apart also means a signature that arrives after a stopped run is not thrown away with the build.
+--
+-- What never changes, whichever host does which: a release is signed by a key this project trusts, and an
+-- unsigned one is not shipped and not published (`scripts/lib/release-signing.sh`, `docs/INSTALL.md`
+-- "Signed releases"). `--dry-run` is the only mode that ends without a signature, and it ends without a
+-- release either.
+
+-- artifacts: build the release set for the landed commit and verify it HERE - payloads, manifest and
+-- SHA256SUMS - with the signature DEFERRED (`WA_RELEASE_SIGN_DEFER=1`: the publisher is told that the signer
+-- is another host, and it will neither sign nor publish an unsigned set).
 impl.artifacts = function(run, options)
   local evidence = sink(run, "artifacts")
   local tree, sha = run.tree, run.journal.tree_commit
-  local incoming = M.incoming()
-  local command = "bash scripts/publish-artifacts-branch.sh --remote " .. quote(incoming) .. " --commit " .. quote(sha)
-  evidence(command_line("artifacts", command))
-  local result = M.exec(command, slashes(tree), 5400)
+  local dir = run.journal.release_dir or (M.run_dir(run.id) .. "/release")
+  run.journal.release_dir = dir
+  local command = "WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit " .. quote(sha) ..
+    " --out " .. quote(dir)
+  evidence(command_line("build release", command))
+  local result = M.exec(command, slashes(tree), 7200)
   evidence((result.stdout or "") .. (result.stderr or ""))
   if (result.code or 1) ~= 0 then
     return false, { error = "artifacts_failed", observed = first_line(result.stderr ~= "" and result.stderr or result.stdout),
       next = "the publisher's own words are in " .. M.evidence_path(run.id, "artifacts") }
   end
-  -- `PUBLISHREADY <ref> <artifacts commit> source=<landed commit>`: the ref carries an orphan commit of its
-  -- own, so the two are compared separately - the artifacts commit is what was pushed, the source commit is
-  -- the landing it was built from, and a reference built from a different tree is not this landing's release.
-  local ref, artifacts_commit, source = tostring(result.stdout or ""):match("PUBLISHREADY%s+(%S+)%s+(%x+)%s+source=(%x+)")
-  if not ref then
-    return false, { error = "artifacts_unreadable",
-      observed = "the publisher printed no PUBLISHREADY line",
+  local short = sha:sub(1, 12)
+  local manifest = dir .. "/node-" .. short .. ".manifest"
+  local text = read(manifest)
+  if not text then
+    return false, { error = "artifacts_manifest_missing", observed = manifest .. " was not written by the publisher",
       next = "inspect " .. M.evidence_path(run.id, "artifacts") }
   end
+  local source = tostring(text):match("source_commit=(%x+)")
   if source ~= sha then
     return false, { error = "artifacts_wrong_commit",
-      observed = "the artifacts reference names source " .. source:sub(1, 12) .. ", the landed tip is " .. sha:sub(1, 12) }
+      observed = "the manifest names source_commit " .. tostring(source) .. ", the landed tip is " .. sha }
   end
-  -- Read the ref back out of the remote and hold it to the files PUBLISH.sh names.
+  -- A target row is `<triple> <sha> <bytes> <sha> <bytes>`; everything else in the manifest is `key=value` or a
+  -- comment. The triple itself is not parsed by shape (a target triple is not a version number):
+  -- `aarch64-unknown-linux-gnu` has no dot at all.
+  local triples = {}
+  for line in tostring(text):gmatch("[^\r\n]+") do
+    local triple = line:match("^(%S+)%s+%x+%s+%d+")
+    if triple and not triple:match("^#") and not triple:match("=") then triples[#triples + 1] = triple end
+  end
+  if #triples == 0 then
+    return false, { error = "artifacts_manifest_empty", observed = manifest .. " names no target row" }
+  end
+  -- The publisher says it verified its own bytes; this asks the same question again from the manifest's own
+  -- pins - sha256 and size of each payload for each target - so a truncated, stale or tampered directory
+  -- cannot reach the signer. Spelled here rather than through `scripts/lib/node-binaries.sh` because this is
+  -- the one check that has to work in a tree that cannot run that library.
+  for _, line in ipairs(vsplit(tostring(text), "\n")) do
+    local triple, want_sha, want_bytes, want_ssha, want_sbytes = line:match("^(%S+)%s+(%x+)%s+(%d+)%s+(%x+)%s+(%d+)")
+    if triple then
+      local measured = M.exec(
+        'for n in ' .. quote("wa-" .. triple .. "-" .. short) .. ' ' .. quote("wa-sentinel-" .. triple .. "-" .. short) ..
+        '; do printf "%s %s\n" "$(sha256sum < ' .. quote(dir) .. '/$n 2>/dev/null | cut -d" " -f1)" ' ..
+        '"$(wc -c < ' .. quote(dir) .. '/$n 2>/dev/null | tr -d " ")"; done', "", 300)
+      evidence(string.format("$ verify %s against the manifest pins\n%s%s\n", triple, tostring(measured.stdout), tostring(measured.stderr)))
+      local got = {}
+      for line2 in tostring(measured.stdout or ""):gmatch("[^\r\n]+") do got[#got + 1] = line2 end
+      local pairs_ = { { got[1], want_sha, want_bytes, "wa" }, { got[2], want_ssha, want_sbytes, "wa-sentinel" } }
+      for _, pair in ipairs(pairs_) do
+        local got_sha, got_bytes = tostring(pair[1] or ""):match("^(%x+)%s+(%d+)")
+        if got_sha ~= pair[2] or got_bytes ~= pair[3] then
+          return false, { error = "artifacts_not_pinned",
+            observed = string.format("%s for %s is %s/%s bytes, the manifest pins %s/%s", pair[4], triple,
+              tostring(got_sha or "missing"), tostring(got_bytes or "0"), pair[2], pair[3]),
+            next = "the built bytes do not match the manifest the publisher wrote for this commit; nothing is signed and nothing ships" }
+        end
+      end
+    end
+  end
+  run.journal.artifacts = { dir = dir, manifest = manifest, commit = sha, triples = triples }
+  return true, { detail = string.format("%s holds %s for %s (%s); unsigned so far, by design",
+    dir, short, sha:sub(1, 12), table.concat(triples, " ")) }
+end
+
+-- sign: the SHA256SUMS of the release set, signed by wa-vault's `release-signing` key ON THE HOST THAT CAN
+-- REACH THE VAULT, and the signature handed back here, where it is verified against the trusted keys of the
+-- landed tree. This is the step that used to be a TODO while `change/sign` was not on main.
+impl.sign = function(run, options)
+  local evidence = sink(run, "sign")
+  local tree, sha = run.tree, run.journal.tree_commit
+  local artifacts = run.journal.artifacts
+  if not artifacts or not artifacts.dir then
+    return false, { error = "sign_without_artifacts", observed = "the artifacts step has not built a release set" }
+  end
+  local sums = artifacts.dir .. "/SHA256SUMS"
+  local sig = sums .. ".sig"
+  if not read(sums) then
+    return false, { error = "sign_without_sums", observed = sums .. " does not exist, so there is nothing to sign" }
+  end
+  local signer, problem = M.signer(options)
+  if not signer then return false, problem end
+  evidence(string.format("signer: %s (%s)\n", signer.kind == "local" and "this node" or tostring(signer.node), tostring(signer.why)))
+  local result
+  if signer.kind == "local" then
+    local command = "bash scripts/sign-release.sh " .. quote(sums) .. " " .. quote(sig)
+    evidence(command_line("sign", command))
+    result = M.exec(command, slashes(tree), 900)
+    evidence((result.stdout or "") .. (result.stderr or ""))
+  else
+    result, problem = M.sign_on_node(signer.node, sums, sig, evidence)
+    if not result then return false, problem end
+  end
+  if (result.code or 1) ~= 0 then
+    local text = tostring(result.stderr or "") .. tostring(result.stdout or "")
+    return false, { error = "release_not_signed",
+      detail = "the release for " .. sha:sub(1, 12) .. " was not signed, so nothing is shipped and nothing is published",
+      observed = first_line(text ~= "" and text or "the signer answered nothing"),
+      next = "the vault's admin listener answers only where the vault runs: set WA_VAULT_ADMIN_URL and "
+        .. "WA_VAULT_ADMIN_TOKEN on that node (or name it: `wa land --signer <node>`), create the "
+        .. "release-signing key on its admin page, then `wa land --resume`" }
+  end
+  -- Verified HERE, against the keys the landed tree trusts. A signature this project does not trust is not a
+  -- release, and the answer says which key arrived and where its public half has to go.
+  local verify = M.exec(". scripts/lib/release-signing.sh && wa_release_verify_sums " .. quote(artifacts.dir),
+    slashes(tree), 300)
+  evidence(command_line("verify signature", ". scripts/lib/release-signing.sh; wa_release_verify_sums " .. artifacts.dir))
+  evidence((verify.stdout or "") .. (verify.stderr or ""))
+  if (verify.code or 1) ~= 0 then
+    return false, { error = "release_key_not_trusted",
+      detail = "the vault signed " .. sha:sub(1, 12) .. " with a key this tree does not trust, so nothing is shipped",
+      observed = first_line(verify.stderr ~= "" and verify.stderr or verify.stdout),
+      next = "add the key's public half to config/release-keys.txt (the key id is in " .. sig ..
+        "; GET <vault>/api/release-signing returns it) and land that: a release no node can verify is not a release" }
+  end
+  local key_id = tostring(read(sig) or ""):match("key%s+(%S+)")
+  artifacts.signed = true
+  artifacts.signer = signer.kind == "local" and "local" or tostring(signer.node)
+  artifacts.key_id = key_id
+  return true, { detail = string.format("signed on %s (key %s)",
+    signer.kind == "local" and "this node" or tostring(signer.node), tostring(key_id)) }
+end
+
+-- ship: the release set becomes the orphan commit `artifacts/node-<sha12>` on the incoming repository - and a
+-- ref that already carries this source commit is recorded and reused rather than pushed twice. Then the ref
+-- is read back and held to every file its own PUBLISH.sh names: the check that was missing on 13/11, when a
+-- ref named SHA256SUMS it did not carry.
+impl.ship = function(run, options)
+  local evidence = sink(run, "ship")
+  local tree, sha = run.tree, run.journal.tree_commit
+  local artifacts = run.journal.artifacts
+  if not artifacts or not artifacts.dir then
+    return false, { error = "ship_without_artifacts", observed = "the artifacts step has not built a release set" }
+  end
+  if not read(artifacts.dir .. "/SHA256SUMS.sig") then
+    return false, { error = "ship_unsigned", observed = "the release set has no SHA256SUMS.sig, so the sign step has not run",
+      next = "run the sign step: `wa land --resume` (it signs where the vault is and brings the signature back)" }
+  end
+  local incoming = M.incoming()
+  local ref = "artifacts/node-" .. sha:sub(1, 12)
+  local tip = remote_tip(tree, incoming, "refs/heads/" .. ref)
+  local reused = false
+  if tip then
+    local fetched = git(run, tree, "fetch --quiet " .. quote(incoming) .. " " .. quote("refs/heads/" .. ref), 600)
+    local probe = M.exec("git -C " .. quote(slashes(tree)) .. " show " ..
+      quote("FETCH_HEAD:node-" .. sha:sub(1, 12) .. ".manifest"), slashes(tree), 120)
+    if (fetched.code or 1) == 0 and tostring(probe.stdout or ""):match("source_commit=" .. sha) then
+      reused = true
+      evidence("the ref " .. ref .. " already carries this source commit (" .. tip .. "); not shipped again\n")
+    end
+  end
+  local artifacts_commit = tip
+  if not reused then
+    local command = "WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-artifacts-branch.sh --remote " .. quote(incoming) ..
+      " --commit " .. quote(sha) .. " --from " .. quote(artifacts.dir) .. " --out " .. quote(artifacts.dir)
+    evidence(command_line("ship", command))
+    local result = M.exec(command, slashes(tree), 3600)
+    evidence((result.stdout or "") .. (result.stderr or ""))
+    if (result.code or 1) ~= 0 then
+      return false, { error = "ship_failed", observed = first_line(result.stderr ~= "" and result.stderr or result.stdout),
+        next = "the shipper's own words are in " .. M.evidence_path(run.id, "ship") }
+    end
+    -- `PUBLISHREADY <ref> <artifacts commit> source=<landed commit>`: the ref carries an orphan commit of its
+    -- own, so the two are compared separately - a reference built from another tree is not this release.
+    local shipped_ref, shipped_commit, source = tostring(result.stdout or ""):match(
+      "PUBLISHREADY%s+(%S+)%s+(%x+)%s+source=(%x+)")
+    if not shipped_ref then
+      return false, { error = "ship_unreadable", observed = "the shipper printed no PUBLISHREADY line",
+        next = "inspect " .. M.evidence_path(run.id, "ship") }
+    end
+    if source ~= sha or shipped_ref ~= ref then
+      return false, { error = "ship_wrong_commit",
+        observed = "the ref " .. shipped_ref .. " names source " .. tostring(source):sub(1, 12) ..
+          ", the landed tip is " .. sha:sub(1, 12) }
+    end
+    artifacts_commit = shipped_commit
+  end
+  -- Read the ref back out of the remote and hold it to the files PUBLISH.sh names, and to its own signature.
   local fetched = git(run, tree, "fetch --quiet " .. quote(incoming) .. " " .. quote("refs/heads/" .. ref), 600)
-  evidence(command_line("fetch artifacts", "git fetch " .. incoming .. " refs/heads/" .. ref))
+  evidence(command_line("fetch ship", "git fetch " .. incoming .. " refs/heads/" .. ref))
   evidence((fetched.stdout or "") .. (fetched.stderr or ""))
   if (fetched.code or 1) ~= 0 then
-    return false, { error = "artifacts_not_readback", observed = "cannot fetch " .. ref .. " from " .. incoming }
+    return false, { error = "ship_not_readback", observed = "cannot fetch " .. ref .. " from " .. incoming }
   end
   local script = M.exec("git -C " .. quote(slashes(tree)) .. " show " .. quote("FETCH_HEAD:PUBLISH.sh"), slashes(tree), 120)
   if (script.code or 1) ~= 0 then
-    return false, { error = "artifacts_no_publish_script", observed = ref .. " carries no PUBLISH.sh" }
+    return false, { error = "ship_no_publish_script", observed = ref .. " carries no PUBLISH.sh" }
   end
   local line = tostring(script.stdout or ""):match("gh release create[^\r\n]*")
   if not line then
-    return false, { error = "artifacts_no_publish_line", observed = "the shipped PUBLISH.sh names no `gh release create`" }
+    return false, { error = "ship_no_publish_line", observed = "the shipped PUBLISH.sh names no `gh release create`" }
   end
   local missing, named = {}, {}
   for word in (line .. " "):gmatch("(%S+)%s") do
     local name = word:gsub("^%./", "")
     if name:match("^[%w%._%-]+$") and not name:match("^node%-%x+%.manifest$") and
-       (name:match("^wa%-") or name:match("^SHA256SUMS$") or name:match("%.manifest$")) then
+       (name:match("^wa%-") or name:match("^SHA256SUMS") or name:match("%.manifest$")) then
       named[name] = true
       local check = git(run, tree, "cat-file -e " .. quote("FETCH_HEAD:" .. name), 120)
       if (check.code or 1) ~= 0 then missing[#missing + 1] = name end
     end
   end
   if #missing > 0 then
-    return false, { error = "artifacts_incomplete",
-      observed = ref .. " does not carry " .. table.concat(missing, ", ") .. " though its PUBLISH.sh names them",
-      next = "fix scripts/publish-artifacts-branch.sh (the SHA256SUMS omission measured 13/11) and re-run this step" }
+    return false, { error = "ship_incomplete",
+      observed = ref .. " does not carry " .. table.concat(missing, ", ") .. " though its PUBLISH.sh names them" ..
+        (reused and " (the ref was already there for this commit: it was shipped incomplete)" or ""),
+      next = "fix the shipper and publish a complete ref for this commit (an existing artifacts/ ref is reused, "
+        .. "never overwritten, so a broken one has to be replaced deliberately)" }
+  end
+  if not named["SHA256SUMS.sig"] then
+    return false, { error = "ship_unsigned",
+      observed = ref .. "'s PUBLISH.sh names no SHA256SUMS.sig, so this release would be published unsigned",
+      next = "the signed sums ship with the payloads (`scripts/lib/release-signing.sh`); fix the publisher" }
   end
   local count = 0
   for _ in pairs(named) do count = count + 1 end
-  run.journal.artifacts = { ref = ref, commit = source, artifacts_commit = artifacts_commit, files = count }
-  return true, { detail = string.format("%s %s carries all %d file(s) its PUBLISH.sh names", ref,
-                  tostring(artifacts_commit):sub(1, 12), count) }
+  artifacts.ref = ref
+  artifacts.artifacts_commit = artifacts_commit
+  artifacts.files = count
+  return true, { detail = string.format("%s %s carries all %d file(s) its PUBLISH.sh names%s", ref,
+    tostring(artifacts_commit):sub(1, 12), count, reused and " (already there, not pushed again)" or "") }
 end
 
--- publish: the release. Two channels decide this step, and neither is assumed:
---   * signing - `scripts/publish-sign.sh` in the landed tree. Absent (change/sign is not on main) means the
---     step records the TODO and does not claim the release is signed.
---   * the credential - `gh`, on a machine allowed to hold one. Absent means `blocked` with the exact command
---     that publishes from the machine that has it.
+-- publish: the release itself. The credential is the only thing this step can be missing: the signature is
+-- already made and verified (the `sign` step) and the ref already exists (the `ship` step).
 impl.publish = function(run, options)
   local evidence = sink(run, "publish")
   local tree, sha = run.tree, run.journal.tree_commit
   local artifacts = run.journal.artifacts
-  if not artifacts then
-    return false, { error = "publish_without_artifacts", observed = "the artifacts step has not run" }
+  if not artifacts or not artifacts.ref then
+    return false, { error = "publish_without_artifacts", observed = "the ship step has not run",
+      next = "the release ref is what PUBLISH.sh lives in; run `wa land --resume`" }
   end
-  local signing = git(run, tree, "cat-file -e " .. quote(sha .. ":" .. M.SIGN_SCRIPT)).code == 0
-  if signing then
-    evidence("signing channel present: " .. M.SIGN_SCRIPT .. "\n")
-  else
-    run.journal.todos[#run.journal.todos + 1] = {
-      item = "sign", state = "not_on_main", looks_for = M.SIGN_SCRIPT,
-      test = "scripts/test-land.lua's signing case stands a fixture " .. M.SIGN_SCRIPT ..
-             " in a tree and asserts publish runs it and records its signature",
-      enable = "land change/sign, then this step signs the artifacts before publishing and nodes verify on install",
-    }
-    evidence("no " .. M.SIGN_SCRIPT .. " at " .. sha:sub(1, 12) .. ": the release will not be signed (change/sign is not on main)\n")
+  if artifacts.signed ~= true then
+    return false, { error = "publish_unsigned",
+      observed = "the journal records no verified signature for this release",
+      next = "the sign step runs before this one and refuses to continue unsigned; nothing is published here" }
   end
   local gh = M.exec("command -v gh >/dev/null 2>&1 && echo yes || echo no", "", 60)
   local tag = "node-" .. sha:sub(1, 12)
@@ -748,16 +1052,8 @@ impl.publish = function(run, options)
         artifacts.ref .. ":refs/heads/" .. artifacts.ref .. " && git worktree add /tmp/" .. tag .. " " ..
         artifacts.ref .. " && bash /tmp/" .. tag .. "/PUBLISH.sh" }
   end
-  if signing then
-    local signed = M.exec("bash " .. M.SIGN_SCRIPT .. " " .. quote(artifacts.artifacts_commit or artifacts.commit), slashes(tree), 900)
-    evidence(command_line("sign", "bash " .. M.SIGN_SCRIPT .. " " .. tostring(artifacts.artifacts_commit or artifacts.commit)))
-    evidence((signed.stdout or "") .. (signed.stderr or ""))
-    if (signed.code or 1) ~= 0 then
-      return false, { error = "signing_failed", observed = first_line(signed.stderr ~= "" and signed.stderr or signed.stdout) }
-    end
-  end
-  -- The artifacts commit is fetched again here rather than trusted from an earlier step: on a resume the
-  -- artifacts step is `done` and its FETCH_HEAD died with the process that made it.
+  -- The artifacts commit is fetched again here rather than trusted from the ship step: on a resume that step
+  -- is `done` and its FETCH_HEAD died with the process that made it.
   local refetch = git(run, tree, "fetch --quiet " .. quote(M.incoming()) .. " " .. quote("refs/heads/" .. artifacts.ref), 600)
   evidence(command_line("refetch artifacts", "git fetch " .. M.incoming() .. " refs/heads/" .. artifacts.ref))
   evidence((refetch.stdout or "") .. (refetch.stderr or ""))
@@ -767,7 +1063,8 @@ impl.publish = function(run, options)
       next = "git fetch " .. M.incoming() .. " refs/heads/" .. tostring(artifacts.ref) }
   end
   local scratch = M.run_dir(run.id) .. "/publish"
-  local extract = M.exec("mkdir -p " .. quote(scratch) .. " && git -C " .. quote(slashes(tree)) .. " archive FETCH_HEAD | tar -x -C " .. quote(scratch), "", 300)
+  local extract = M.exec("mkdir -p " .. quote(scratch) .. " && git -C " .. quote(slashes(tree)) ..
+    " archive FETCH_HEAD | tar -x -C " .. quote(scratch), "", 300)
   evidence(command_line("extract", "git archive " .. artifacts.ref .. " | tar -x -C " .. scratch))
   evidence((extract.stdout or "") .. (extract.stderr or ""))
   if (extract.code or 1) ~= 0 then
@@ -776,7 +1073,7 @@ impl.publish = function(run, options)
   local existing = M.exec("gh release view " .. quote(tag) .. " >/dev/null 2>&1 && echo present || echo absent", "", 120)
   if trim(existing.stdout) == "present" then
     evidence("release " .. tag .. " already exists; not published again\n")
-    run.journal.publish = { tag = tag, state = "already_present" }
+    run.journal.publish = { tag = tag, state = "already_present", signed = true, key_id = artifacts.key_id }
     return true, { detail = "release " .. tag .. " already published (not repeated)" }
   end
   local published = M.exec("bash " .. quote(scratch .. "/PUBLISH.sh"), scratch, 1800)
@@ -786,8 +1083,8 @@ impl.publish = function(run, options)
     return false, { error = "publish_failed", observed = first_line(published.stderr ~= "" and published.stderr or published.stdout),
       next = "the publisher's own words are in " .. M.evidence_path(run.id, "publish") }
   end
-  run.journal.publish = { tag = tag, state = "published", signed = signing }
-  return true, { detail = "release " .. tag .. (signing and " (signed)" or " (unsigned: change/sign is not on main)") }
+  run.journal.publish = { tag = tag, state = "published", signed = true, key_id = artifacts.key_id }
+  return true, { detail = "release " .. tag .. " published (signed, key " .. tostring(artifacts.key_id) .. ")" }
 end
 
 -- the ring, as configured: `--ring name:mode,...`, else `<config>/land/ring.json`, else M.RING.
@@ -925,7 +1222,18 @@ function M.report_text(journal)
   if journal.main_sha then add("| main | `" .. journal.main_sha:sub(1, 12) .. "` on " .. tostring(journal.origin) .. " |") end
   if journal.artifacts then
     add("| release tag | `node-" .. tostring(journal.artifacts.commit or ""):sub(1, 12) .. "` |")
-    add("| artifacts | `" .. tostring(journal.artifacts.ref) .. "` `" .. tostring(journal.artifacts.commit or ""):sub(1, 12) .. "` |")
+    if journal.artifacts.dir then
+      add("| release set | `" .. tostring(journal.artifacts.dir) .. "` (" .. #(journal.artifacts.triples or {}) .. " target(s)) |")
+    end
+    if journal.artifacts.signed then
+      add("| signature | key `" .. tostring(journal.artifacts.key_id) .. "`, signed on " ..
+        tostring(journal.artifacts.signer) .. " |")
+    end
+    if journal.artifacts.ref then
+      add("| artifacts | `" .. tostring(journal.artifacts.ref) .. "` `" ..
+        tostring(journal.artifacts.artifacts_commit or ""):sub(1, 12) .. "` (" ..
+        tostring(journal.artifacts.files or 0) .. " file(s)) |")
+    end
   end
   if journal.publish then add("| publish | " .. tostring(journal.publish.state) .. " (`" .. tostring(journal.publish.tag) .. "`" ..
     (journal.publish.signed and ", signed" or ", unsigned") .. ") |") end
@@ -1146,7 +1454,15 @@ function M.dry_run(run, options)
   print("  merge        git worktree add -b <land N>/final " .. tree .. " <base>; one --no-ff merge per branch")
   print("  push         git push " .. M.incoming() .. " HEAD:refs/heads/<land N>/final")
   print("  main         git push " .. M.origin() .. " <landed>:refs/heads/main")
-  print("  artifacts    bash scripts/publish-artifacts-branch.sh --remote " .. M.incoming() .. " --commit <landed>")
+  local signer = M.signer(options)
+  print("  artifacts    WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit <landed> --out <run>/release")
+  print("  sign         " .. (signer and (signer.kind == "local" and
+    ("bash scripts/sign-release.sh <run>/release/SHA256SUMS (this node: " .. tostring(signer.why) .. ")")
+    or ("bash scripts/sign-release.sh on " .. tostring(signer.node) .. " (" .. tostring(signer.why) ..
+      "); the signature travels back and is verified here"))) or
+    "REFUSED: no signer found (--signer <node>|local, or WA_VAULT_ADMIN_URL on the vault's node)")
+  print("  ship         WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-artifacts-branch.sh --remote " ..
+    M.incoming() .. " --commit <landed> --from <run>/release --out <run>/release")
   print("  publish      bash <artifacts ref>/PUBLISH.sh")
   for _, entry in ipairs(M.ring(options)) do
     print(string.format("  deploy       wa update %-12s (%s)", entry.node, entry.mode))
@@ -1229,6 +1545,9 @@ function M.cli(argv)
     elseif flag == "--dry-run" then options.dry_run = true; index = index + 1
     elseif flag == "--no-deploy" then options.no_deploy = true; index = index + 1
     elseif flag == "--rollback" then options.rollback = true; index = index + 1
+    elseif flag == "--signer" then
+      local value = read_value(flag); if not value then return 2 end
+      options.signer = value; index = index + 2
     elseif flag == "--resume" then options.resume = true; index = index + 1
     elseif flag == "--run" then
       local value = read_value(flag); if not value then return 2 end
@@ -1257,6 +1576,7 @@ function M.cli(argv)
       print("wa land status [--run <id>]        the journal, read-only")
       print("wa land ready <branch> <sha>       record a READY line for a finished branch")
       print("  --repo <dir> --incoming <remote> --origin <remote> --ring node:mode,... --json")
+      print("  --signer <node|local>   where the release is signed (default: the node whose WA_VAULT_ADMIN_URL is set)")
       return 0
     else
       print("wa land: unknown option " .. flag .. "; nothing was done")
