@@ -108,6 +108,8 @@ Every payload carries `hook_event_name`, `version`, `session_id`, `cwd` and, whe
 `node_id`, `user_id`, `role`. Payloads are ids, names, counts and lengths; a hook is not handed the
 transcript, a credential or a whole tool result.
 
+**Nested dispatch is a hook boundary.** A tool call made inside another call - code mode's `await tools.<name>()`, `tool_call`, a batched item - fires `PreToolUse`/`PostToolUse` with its own inner name and arguments, and its refusal is that call's failed result; only the continuation of one call (a `bash` starting its own supervised `operation`, a history read forwarded to the peer that holds it) is the same event and does not fire twice, and a hook that itself runs a tool does not re-enter the engine.
+
 | event | fires | extra fields | may |
 |---|---|---|---|
 | `SessionStart` | a run's context is built, before the first request | `source`, `resume` | context, systemMessage |
