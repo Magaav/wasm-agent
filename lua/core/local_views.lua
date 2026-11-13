@@ -66,8 +66,14 @@ local builders = {
   end,
 }
 
--- When each view was last published (`host.now` seconds), so a refresh knows what is already there.
-local published_at = {}
+-- When each view was last published (`host.now` seconds), so a refresh knows what is already there. In
+-- the core's store rather than in a table here (docs/HOTRELOAD.md): a reload of this file mid-run used
+-- to forget which views the reader already has, and the next model round republished them all over a
+-- reader who was reading one.
+local reload = dofile("lua/core/reload.lua")
+local published = reload.state("local_views")
+if type(published.at) ~= "table" then published.at = {} end
+local published_at = published.at
 
 -- Whether this binary has the channel at all. False is an ordinary condition, not an error.
 function M.available()
@@ -139,7 +145,9 @@ end
 
 -- Forget what has been published. For tests and for a view whose data must be re-read (a rebind).
 function M.forget(name)
-  if name then published_at[name] = nil else published_at = {} end
+  if name then published_at[name] = nil else
+    for key in pairs(published_at) do published_at[key] = nil end
+  end
 end
 
 return M

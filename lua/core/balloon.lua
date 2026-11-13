@@ -34,6 +34,10 @@
 -- flow whose next page depends on what the reader chose (`/login` asks for a key and then offers the
 -- switch). One of the three per option; the reader-facing hint says which.
 local json = dofile("lua/vendor/json.lua")
+-- The balloon's own state - the stack it last showed, the page and the selection - lives in the store the
+-- core owns, not in a table here (docs/HOTRELOAD.md). A command re-entered after this file was reloaded
+-- opens where the reader left it, and `/mcp`'s published pages survive a swap mid-run.
+local reload = dofile("lua/core/reload.lua")
 
 local M = {}
 
@@ -327,6 +331,10 @@ function M.flow(pages, io)
   local stack = { { index = pages[start] and start or 1, focus = root and root.selected or 1 } }
   local kept = pages
   local last
+  -- Where this walk is, in the store: a reload of this file during the walk (a command that opened a
+  -- page of its own, a run that published one) finds the reader on the same page instead of at the top.
+  local state = reload.state("balloon")
+  state.stack, state.page, state.selected = stack, start, stack[1].focus
   while true do
     local frame = stack[#stack]
     local page = kept[frame.index]
@@ -334,6 +342,7 @@ function M.flow(pages, io)
       close()
       return { action = "cancel" }
     end
+    state.page, state.selected = frame.index, frame.focus
     local answer = open(M.panel_spec(page, frame.focus, io))
     if type(answer) ~= "table" then answer = { action = "cancel" } end
     if answer.action == "unsupported" then return { action = "unsupported" } end
@@ -506,6 +515,10 @@ function M.publish(name, pages, captured_at)
   -- a live turn, which is the only place the client validates it).
   local at = math.floor(tonumber(captured_at) or tonumber(host.now()) or 0)
   local spec = { command = name, captured_at = at, views = views }
+  -- What the mid-run channel is showing, in the store: the same field the blocking walk writes, so a
+  -- report or a reloaded copy can say what is on the reader's screen without re-deriving it.
+  local state = reload.state("balloon")
+  state.command, state.published, state.published_at = name, #views, at
   local ok, raw = pcall(host.local_view, name, json.encode(spec))
   if not ok then return false, tostring(raw) end
   local decoded_ok, answer = pcall(json.decode, raw)
