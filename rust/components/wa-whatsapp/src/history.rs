@@ -265,6 +265,10 @@ pub fn candidates(conversation: &wap::Conversation, me: &SelfJids) -> Vec<Candid
                 ts: info.message_timestamp.unwrap_or(0).saturating_mul(1000) as i64,
                 received: 0, // filled by the drain: when *this node* indexed it
                 push_name: info.push_name.clone().unwrap_or_default(),
+                // A history-sync entry is the one wire shape that carries the business name
+                // (`WebMessageInfo.verifiedBizName`): it is the name WhatsApp shows for that account,
+                // and the only way a query for `Padaria` finds a bakery nobody saved.
+                business: info.verified_biz_name.as_ref().map(|name| name.to_string()).unwrap_or_default(),
             },
             message: info.message.as_option().cloned().unwrap_or_default(),
         });

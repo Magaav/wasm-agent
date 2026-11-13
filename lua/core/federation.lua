@@ -441,6 +441,24 @@ function M.remember(node_id, answer)
   return true
 end
 
+-- The schema a peer published for one tool, exactly as it sent it.
+--
+-- A peer publishes the catalogue shape (`parameters`, the object its own `searchTools` answers) and its
+-- `/mcp` view publishes the same declaration as JSON text (`schema`); either is the server's own word
+-- about its arguments and neither may be replaced by an empty one. So: `parameters` when it is there,
+-- the decoded `schema` text when only that is, and `{type="object"}` - a tool that takes no arguments -
+-- only when the peer declared neither. 13/11: a peer tool whose declaration did not arrive in
+-- `parameters` was offered with `properties = {}`, so the model guessed argument names and ate a
+-- `schema_extra` refusal for each guess. `scripts/test-tool-schema-fidelity.lua` holds this line.
+local function peer_parameters(tool)
+  if type(tool.parameters) == 'table' and next(tool.parameters) ~= nil then return tool.parameters end
+  if type(tool.schema) == 'string' then
+    local ok, decoded = pcall(json.decode, tool.schema)
+    if ok and type(decoded) == 'table' and next(decoded) ~= nil then return decoded end
+  end
+  return { type = 'object' }
+end
+
 function M.schemas()
   local out = {}
   for _, peer in pairs(M.catalog().peers or {}) do
@@ -453,7 +471,7 @@ function M.schemas()
         out[#out + 1] = { type = 'function', ['function'] = {
           name = M.local_name(peer.name, tool.name),
           description = '[on peer ' .. tostring(peer.name) .. '] ' .. tostring(tool.description or ''),
-          parameters = tool.parameters or { type = 'object', properties = {} } } }
+          parameters = peer_parameters(tool) } }
       end
     end
   end

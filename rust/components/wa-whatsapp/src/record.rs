@@ -135,6 +135,12 @@ pub struct Record {
     pub mentions: Vec<String>,
     /// Push name of the sender when the envelope carried one (a group's subject is not this).
     pub push_name: String,
+    /// The verified business name this record was told for its sender, when the wire carried one
+    /// (`WebMessageInfo.verifiedBizName`, which only a history-sync entry has). It is the name WhatsApp
+    /// itself shows for that account, which no push name and no address-book entry can stand in for - a
+    /// query for "Padaria" has to find the bakery whose owner's own push name is a first name
+    /// (index.rs folds it as the `profile` source).
+    pub business: String,
     /// An event's target: the message a reaction/edit/delete names.
     pub target: String,
     /// A reaction's emoji. Empty means the reaction was *removed* (WhatsApp sends the same message
@@ -170,6 +176,11 @@ pub struct Envelope {
     pub ts: i64,
     pub received: i64,
     pub push_name: String,
+    /// The verified business name the wire carried for this sender, when it carried one. WhatsApp puts
+    /// it on the history-sync entry (`WebMessageInfo.verifiedBizName`) and not on the message itself
+    /// (`Message` has no such field), so a live message leaves this empty: absent is what it is, and a
+    /// guess would be a name nobody said.
+    pub business: String,
 }
 
 impl Record {
@@ -293,6 +304,7 @@ pub fn from_message(envelope: &Envelope, message: &wap::Message) -> Record {
         ts: envelope.ts,
         received: envelope.received,
         push_name: envelope.push_name.clone(),
+        business: envelope.business.clone(),
         source: SOURCE_LIVE.to_string(),
         ..Record::default()
     };
@@ -648,6 +660,17 @@ pub fn fold(text: &str) -> String {
         }
     }
     out
+}
+
+/// The key a NAME is compared by: [`fold`], minus the emoji, with the spaces collapsed.
+///
+/// A name is not a search token. The operator saves a contact as `Laura ❤️` and then types `laura`;
+/// folding keeps the emoji - a sticker is found by the emoji its sender tagged it with, so an emoji is
+/// a token there - and a comparison that kept it would answer "Laura ❤️" as a *prefix* of "laura"
+/// instead of the same name. Ignoring it is what the caller means by the name, and it is the one place
+/// that decides so: `index::ChatCard::match_score` compares names through this and nothing else.
+pub fn name_key(text: &str) -> String {
+    fold(text).split_whitespace().filter(|token| !token.chars().any(is_emoji)).collect::<Vec<_>>().join(" ")
 }
 
 /// One entry of a folding table, or the character itself when the table has no opinion (`?`).

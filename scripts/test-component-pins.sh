@@ -665,7 +665,13 @@ SEAM
   cp -f "$race/components-pinned-src/graph.wasm" "$work/release/fixture/repo/releases/download/$tag/graph.wasm"
   rm -rf "$race/components-pinned-src"
   race_run() { # <n> -> exit code, output in $work/race-$n.log
+    # `WA_PINNED_COMPONENTS_DIR` is cleared for the same reason `expect_bytes` clears it: a caller who
+    # names a real artifact directory is ASSERTING where the pinned bytes are, so an inherited one makes
+    # this fixture judge that directory instead of its own (`graph.wasm is not the pinned build` about
+    # bytes this fixture never wrote - measured 13/11, a fast run that passed the variable so the row
+    # could verify every component). A fixture judges what it built.
     HOME="$work/home" WA_COMPONENTS_DIR="$work/home/components" WA_COMPONENTS_CACHE="$work/home/cache" \
+      WA_PINNED_COMPONENTS_DIR="" \
       WA_COMPONENT_RELEASE_REPO=fixture/repo WA_PIN_CHECK_RELEASE_BASE="file://$work/release" \
       bash "$0" --repo "$race" --bytes-only > "$work/race-$1.log" 2>&1
   }

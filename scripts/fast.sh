@@ -572,6 +572,22 @@ else
     else fails=$((fails + 1)); echo "FAIL rust $crate (exit $c):"; { grep -E "^test .* FAILED|panicked at|^error" "$work/rust-$crate.log" || tail -5 "$work/rust-$crate.log"; } | head -8
       record_row fail rust "rust $crate" "$c" "$ms" 0 "$(first_error_of "$work/rust-$crate.log")"; fi
   done
+  # A COMPONENT IS ITS OWN CARGO WORKSPACE, so the `-p` loop above cannot reach its tests: they are run
+  # from its own directory. Until now nothing ran them automatically anywhere - the component suite was
+  # green only when someone ran it by hand, which is how the 13/11 `contacts` defect (every name query
+  # answering `count: 0` on a full index) reached a deploy beside component tests that passed. Same rule
+  # as the crates above: a component this change touches has its tests run here, into this tree's child
+  # of the one build root (docs/ONEROOT.md) so no build lands inside the checkout.
+  for component in $(printf '%s\n' "$changed" | sed -n 's|^rust/components/\([^/]*\)/.*|\1|p' | sort -u); do
+    [ -f "rust/components/$component/Cargo.toml" ] || continue
+    s=$(date +%s)
+    CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}/components/$component" \
+      cargo test --offline --manifest-path "rust/components/$component/Cargo.toml" > "$work/rust-component-$component.log" 2>&1
+    c=$?; ran=$((ran + 1)); ms=$(( ($(date +%s) - s) * 1000 ))
+    if [ "$c" = 0 ]; then echo "fast: rust component $component ok ($(( $(date +%s) - s ))s)"; record_row pass rust "rust component $component" "$c" "$ms" 0 ''
+    else fails=$((fails + 1)); echo "FAIL rust component $component (exit $c):"; { grep -E "^test .* FAILED|panicked at|^error" "$work/rust-component-$component.log" || tail -5 "$work/rust-component-$component.log"; } | head -8
+      record_row fail rust "rust component $component" "$c" "$ms" 0 "$(first_error_of "$work/rust-component-$component.log")"; fi
+  done
 fi
 
 # ---- 3. contract checks -------------------------------------------------------------------------------

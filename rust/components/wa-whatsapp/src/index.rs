@@ -241,12 +241,68 @@ fn key_card(chat: &str) -> String {
     format!("{PREFIX}ct/{chat}")
 }
 
+/// `ix/ab/<jid>` -> one [`AddressBookContact`]: what the phone's address book says about that address.
+///
+/// It is its own row, not a flag on the card, because the two arrive in an order nobody controls: the
+/// phone syncs the address book when the operator pairs a device or saves a contact, and the index
+/// learns a chat when a message arrives. A name that only existed on a card could not be written for a
+/// chat this node has never heard from, and a name written only when a message arrives would be lost
+/// for the chats the operator asks about before they say anything (13/11, `q: "Laura"` -> 0 while the
+/// phone's own address book knew her).
+fn key_address(jid: &str) -> String {
+    format!("{PREFIX}ab/{jid}")
+}
+
+/// `ix/ab/sync` -> a word: this store has already asked the phone for its whole address book.
+///
+/// It exists because WhatsApp sends a linked device the contact catalogue when it pairs and only when
+/// it asks afterwards, so a device paired before this index kept names must ask once. The mark is what
+/// keeps that to ONE request per store instead of one per reconnect (an app-state sync worker keeps the
+/// collection current with versions after that).
+fn key_address_sync() -> String {
+    format!("{PREFIX}ab/sync")
+}
+
+/// Has this store already asked the phone for the whole address book?
+pub async fn address_sync_done<S: Store>(store: &S) -> Result<bool, String> {
+    Ok(store.get(key_address_sync().as_bytes()).await?.is_some())
+}
+
+/// Record that it has (see [`key_address_sync`]).
+pub async fn mark_address_sync<S: Store>(store: &S) -> Result<(), String> {
+    store.set(key_address_sync().as_bytes(), b"1").await
+}
+
 /// Most names one card keeps: enough for a person's rename history and a group's active members,
 /// few enough that the row stays small.
 const CARD_NAMES: usize = 12;
+/// Most phone numbers one card keeps: the chat's own, and the ones the address book and the envelopes
+/// taught the index for the same person (a PN and the LID it is also journaled under).
+const CARD_NUMBERS: usize = 4;
+/// Shortest run of digits a query may be read as a phone number, and longest one may be: a Brazilian
+/// mobile without its country code is 11 digits, an international number is at most 15, and a stray
+/// "2" in a name is not a number to resolve.
+const NUMBER_DIGITS: usize = 7;
+const MAX_NUMBER_DIGITS: usize = 15;
+/// Most addresses one contact action may name: the JID it applies to, its `lidJid`, its `pnJid`.
+const CONTACT_JIDS: usize = 4;
 /// Most chats one shared contact card may name: a contact array can be long, and every entry it
 /// points at costs a read and (when it lands) a write against the component's kv grant.
 const CONTACT_CARDS: usize = 8;
+
+/// Where a name came from. These words are model-facing (`name_source`, `matched_source`), so they are
+/// part of the answer's contract and never change silently:
+///
+/// * `address_book` - the name the operator saved for this contact on the phone (the app-state contact
+///   action WhatsApp syncs to linked devices). Their own word for the person, and the one they type.
+/// * `push_name` - the name the contact writes on their own messages.
+/// * `profile` - the name WhatsApp shows for a business account
+///   (`WebMessageInfo.verifiedBizName`, which only a history-sync entry carries).
+/// * `contact_card` - a card somebody shared that names this chat's number (weaker than the two above).
+pub const SOURCE_ADDRESS_BOOK: &str = "address_book";
+pub const SOURCE_PUSH_NAME: &str = "push_name";
+pub const SOURCE_PROFILE: &str = "profile";
+pub const SOURCE_CONTACT_CARD: &str = "contact_card";
 
 /// One name this node has seen, with how often and how recently.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -266,6 +322,29 @@ pub struct CardName {
     /// It is evidence about that number and not a guess - but it is weaker than the name the person
     /// writes on their own messages, so [`ChatCard::best_name`] only falls back to it.
     pub card: bool,
+    /// True when the phone's address book knows this chat by this name (`address_book`).
+    pub address_book: bool,
+    /// True when this is a business account's own name (`profile`).
+    pub profile: bool,
+}
+
+impl CardName {
+    /// The source word a reader is told. One name can be true of several sources (the same string as
+    /// push name and as address-book entry): the strongest is the one said, so a reader is never told
+    /// "push_name" about a name the operator saved themselves.
+    pub fn source(&self) -> &'static str {
+        if self.address_book {
+            SOURCE_ADDRESS_BOOK
+        } else if self.sender {
+            SOURCE_PUSH_NAME
+        } else if self.profile {
+            SOURCE_PROFILE
+        } else if self.card {
+            SOURCE_CONTACT_CARD
+        } else {
+            ""
+        }
+    }
 }
 
 /// One chat as the index knows it: its address, what kind it is, and every name seen there.
@@ -278,71 +357,156 @@ pub struct ChatCard {
     /// a group is not named after its members, and a guess here would point a reader at a wrong chat.
     pub subject: String,
     pub names: Vec<CardName>,
+    /// The phone numbers this chat is known by, digits only: its own address when it is a
+    /// `<digits>@s.whatsapp.net` chat, plus the number the address book and the envelopes taught the
+    /// index for the same person. A chat WhatsApp journals under its `@lid` is found by the number the
+    /// operator has in their phone, which is the only spelling of it they know.
+    pub numbers: Vec<String>,
     pub first: i64,
     pub last: i64,
     pub rows: u32,
 }
 
+/// The digits of a text: what a phone number is compared by, so `+55 (19) 99482-7533`,
+/// `5519994827533` and `5519994827533@s.whatsapp.net` are one number and not three.
+pub fn digits_of(text: &str) -> String {
+    text.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// Whether two digit strings are the same phone number.
+///
+/// Equal digits are the same number. So are the same digits with the country code on one side and not
+/// the other: a Brazilian mobile is typed `(19) 99482-7533` and WhatsApp knows it as `5519994827533`,
+/// and the operator asked about a person, not about a spelling. The suffix is only accepted when the
+/// shorter side is a full national number (10-11 digits) and the difference is a country code (1-3
+/// digits), so a fragment like `4827533` is never read as somebody's whole number.
+fn same_number(candidate: &str, wanted: &str) -> bool {
+    if candidate == wanted {
+        return true;
+    }
+    let (long, short) = if candidate.len() >= wanted.len() { (candidate, wanted) } else { (wanted, candidate) };
+    (10..=11).contains(&short.len()) && long.len() > short.len() && long.len() - short.len() <= 3 && long.ends_with(short)
+}
+
+/// [`record::name_key`], with one exception: a text whose whole name is an emoji keeps it.
+///
+/// A name is compared without its emoji (`Laura ❤️` is `laura`), but a group called `🔔` has nothing
+/// left once the emoji goes, and a chat that cannot be named at all is worse than one matched by its
+/// decoration. So the emoji is dropped only while something else remains: the same rule on both sides
+/// of the comparison, or a query and a name would stop agreeing.
+fn name_key_or_emoji(text: &str) -> String {
+    let key = record::name_key(text);
+    if key.is_empty() {
+        record::fold(text).split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        key
+    }
+}
+
 impl ChatCard {
     /// The name a reader should see for this chat, and where it came from.
+    ///
+    /// For a person the operator's own name for them wins (`address_book`): it is the name they will
+    /// type, and a renamed contact is not a reason to show a stranger's spelling back at them. Then a
+    /// business account's own name (`profile`) - WhatsApp shows that one as the chat's title, and a
+    /// business's push name is often just the owner's - then the name the contact writes, then a shared
+    /// card.
     pub fn best_name(&self) -> (&str, &'static str) {
         if self.group {
             if !self.subject.is_empty() {
                 return (&self.subject, "group_subject");
             }
-        } else if let Some(name) = self.names.iter().filter(|name| name.sender && !name.name.is_empty()).max_by_key(|name| name.last) {
-            return (&name.name, "push_name");
-        } else if let Some(name) = self.names.iter().filter(|name| name.card && !name.name.is_empty()).max_by_key(|name| name.last) {
-            // The second source a direct chat has: a contact card that names this number. Weaker than
-            // the name its owner writes, which is why it is only reached when there is none.
-            return (&name.name, "contact_card");
+        } else {
+            for source in [SOURCE_ADDRESS_BOOK, SOURCE_PROFILE, SOURCE_PUSH_NAME] {
+                if let Some(name) = self.names.iter().filter(|name| name.source() == source && !name.name.is_empty()).max_by_key(|name| name.last) {
+                    return (&name.name, source);
+                }
+            }
+            if let Some(name) = self.names.iter().filter(|name| name.card && !name.name.is_empty()).max_by_key(|name| name.last) {
+                // The weakest source a direct chat has: a contact card that names this number. Reached
+                // only when the two above have nothing to say.
+                return (&name.name, SOURCE_CONTACT_CARD);
+            }
         }
         ("", "jid")
     }
 
     /// How a query of `folded` (already folded) matches this chat: 3 exact, 2 prefix, 1 substring, 0 no
-    /// match, with the name that matched.
+    /// match, with the name that matched and where it came from.
     ///
-    /// The chat's own address is matched too: a caller with a phone number and no name gets the one
-    /// chat that number belongs to, which is not a guess when exactly one chat carries those digits.
-    pub fn match_score(&self, folded: &str) -> Option<(u8, String)> {
+    /// A name is compared through [`record::name_key`], which ignores case, accents and emoji: the
+    /// operator saves `Laura ❤️` and types `laura`, and that is the same name.
+    ///
+    /// The chat's own address is matched too - and any number the address book attached to it - so a
+    /// caller holding a phone number in any formatting gets the one chat that number belongs to, which
+    /// is not a guess when exactly one chat carries those digits.
+    pub fn match_score(&self, folded: &str) -> Option<(u8, String, &'static str)> {
+        let (best_shown, best_source) = self.best_name();
         if folded.is_empty() {
-            return Some((1, self.best_name().0.to_string()));
+            return Some((1, best_shown.to_string(), best_source));
         }
-        let mut best: Option<(u8, String)> = None;
-        let mut consider = |text: &str, shown: &str| {
-            let candidate = record::fold(text);
+        let query = name_key_or_emoji(folded);
+        let wanted = digits_of(&query);
+        let number_query = (NUMBER_DIGITS..=MAX_NUMBER_DIGITS).contains(&wanted.len());
+        let mut best: Option<(u8, String, &'static str)> = None;
+        let mut consider = |text: &str, shown: &str, source: &'static str| {
+            let candidate = name_key_or_emoji(text);
             if candidate.is_empty() {
                 return;
             }
-            let score = if candidate == folded {
+            let mut score = if candidate == query {
                 3
-            } else if candidate.starts_with(folded) {
+            } else if candidate.starts_with(&query) {
                 2
-            } else if candidate.contains(folded) {
+            } else if candidate.contains(&query) {
                 1
             } else {
                 0
             };
-            if score > 0 && best.as_ref().is_none_or(|(current, _)| score > *current) {
-                best = Some((score, shown.to_string()));
+            // A phone number is one number in many spellings. The fold above keeps the digits but
+            // breaks them apart with the spaces where `+`, `(`, `)` and `-` were, so `+55 19 99482-7533`
+            // never equals `5519994827533` as text while being exactly the same number.
+            if score < 3 && number_query && same_number(&digits_of(text), &wanted) {
+                score = 3;
+            }
+            if score > 0 && best.as_ref().is_none_or(|(current, _, _)| score > *current) {
+                best = Some((score, shown.to_string(), source));
             }
         };
         for name in &self.names {
-            consider(&name.name, &name.name);
+            consider(&name.name, &name.name, name.source());
         }
         if !self.subject.is_empty() {
-            consider(&self.subject, &self.subject);
+            consider(&self.subject, &self.subject, "group_subject");
         }
         // The address itself: `5519994939204@s.whatsapp.net` matches on its digits, and so does a
         // group's `<creator>-<epoch>@g.us` id on its first half.
         let user = self.chat.split('@').next().unwrap_or("");
-        consider(user, user);
+        consider(user, user, "number");
         if let Some((creator, _)) = user.split_once('-') {
-            consider(creator, user);
+            consider(creator, user, "number");
+        }
+        for number in &self.numbers {
+            consider(number, number, "number");
         }
         best
     }
+}
+
+/// What the phone's address book says about one contact, as an app-state contact action carries it
+/// (`wa::sync_action_value::ContactAction`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AddressBookContact {
+    /// Every person address this contact is known by: the action's own JID, its `lidJid`, its `pnJid`.
+    pub jids: Vec<String>,
+    /// The name the operator saved: `fullName`, else `firstName`. Empty when the phone does not save
+    /// this contact on its address book - a mapping is then written and no name is.
+    pub name: String,
+    /// The phone numbers the action named, digits only.
+    pub numbers: Vec<String>,
+    /// When this node learned it, Unix ms.
+    pub at: i64,
 }
 
 /// The word a record's age entry carries: `history` for a backfilled record, empty for a live one.
@@ -460,6 +624,8 @@ async fn contact_cards<S: Store>(store: &S, record: &Record) -> Result<(), Strin
                 last: record.ts,
                 sender: false,
                 card: true,
+                address_book: false,
+                profile: false,
             });
             card.names.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.folded.cmp(&b.folded)));
             card.names.truncate(CARD_NAMES);
@@ -561,35 +727,107 @@ fn card_fold(card: &mut ChatCard, record: &Record) {
     card.rows = card.rows.saturating_add(1);
     let name = record.push_name.trim();
     if !name.is_empty() {
-        let folded = record::fold(name);
         // The chat's own contact: their message in a direct chat. An own message carries the account's
         // push name, which is a name this node has seen but is not the chat's.
         let own_contact = !record.own && record.sender == record.chat;
-        match card.names.iter_mut().find(|entry| entry.folded == folded) {
-            Some(entry) => {
-                entry.rows = entry.rows.saturating_add(1);
-                entry.sender = entry.sender || own_contact;
-                if entry.first == 0 || record.ts < entry.first {
-                    entry.first = record.ts;
-                }
-                if record.ts > entry.last {
-                    entry.last = record.ts;
-                }
-            }
-            None => card.names.push(CardName {
+        card_name(card, name, record.ts, true, |entry| entry.sender = entry.sender || own_contact);
+    }
+    // A business account's own name: WhatsApp's name for it, which neither a push name nor an
+    // address-book entry stands in for (`profile`).
+    let business = record.business.trim();
+    if !business.is_empty() {
+        card_name(card, business, record.ts, false, |entry| entry.profile = true);
+    }
+    card_numbers_of(card, record);
+}
+
+/// Fold one name into a card: its freshness, how many messages carried it, and the flag the caller owns.
+///
+/// `counted` says whether this name came from a message (`rows`), because a name learned from the
+/// address book or from a profile is not a message and an answer must not count it as one.
+fn card_name(card: &mut ChatCard, name: &str, ts: i64, counted: bool, flag: impl Fn(&mut CardName)) {
+    let folded = record::fold(name);
+    let index = match card.names.iter().position(|entry| entry.folded == folded) {
+        Some(index) => index,
+        None => {
+            card.names.push(CardName {
                 name: name.chars().take(seam::MAX_NAME_CHARS).collect(),
                 folded,
-                rows: 1,
-                first: record.ts,
-                last: record.ts,
-                sender: own_contact,
+                rows: 0,
+                first: ts,
+                last: ts,
+                sender: false,
                 card: false,
-            }),
+                address_book: false,
+                profile: false,
+            });
+            card.names.len() - 1
         }
-        // Most recent first, then by name so two equally recent names have a stable order, and
-        // bounded: a busy group does not grow a card without limit.
-        card.names.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.folded.cmp(&b.folded)));
-        card.names.truncate(CARD_NAMES);
+    };
+    let entry = &mut card.names[index];
+    if counted {
+        entry.rows = entry.rows.saturating_add(1);
+    }
+    if entry.first == 0 || (ts > 0 && ts < entry.first) {
+        entry.first = ts;
+    }
+    if ts > entry.last {
+        entry.last = ts;
+    }
+    flag(entry);
+    card_names_bounded(card);
+}
+
+/// Keep one card's name list bounded without ever dropping the operator's own names.
+///
+/// The list is ordered newest-first, which is what a reader wants for a person's renames and a busy
+/// group's members - but "newest" would drop a contact name the phone synced months ago and never
+/// mentioned again. The address-book names are kept first and the rest fill what is left.
+fn card_names_bounded(card: &mut ChatCard) {
+    card.names.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.folded.cmp(&b.folded)));
+    if card.names.len() <= CARD_NAMES {
+        return;
+    }
+    card.names.sort_by_key(|entry| !entry.address_book);
+    let mut kept: Vec<CardName> = Vec::with_capacity(CARD_NAMES);
+    for entry in card.names.drain(..) {
+        if kept.len() >= CARD_NAMES {
+            break;
+        }
+        kept.push(entry);
+    }
+    kept.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.folded.cmp(&b.folded)));
+    card.names = kept;
+}
+
+/// Record one phone number on a card, digits only, deduplicated and bounded.
+fn card_number(card: &mut ChatCard, digits: &str) {
+    if !(NUMBER_DIGITS..=MAX_NUMBER_DIGITS).contains(&digits.len()) {
+        return;
+    }
+    if card.numbers.iter().any(|number| number == digits) {
+        return;
+    }
+    card.numbers.push(digits.to_string());
+    card.numbers.truncate(CARD_NUMBERS);
+}
+
+/// Every number this record teaches the index about its chat's contact.
+///
+/// Three sources, each one evidence and not a guess:
+/// * the chat's own address when it is a `<digits>@s.whatsapp.net` chat - the number itself;
+/// * the envelope's `sender_alt`: the sender's other address (PN<->LID). In a direct chat the sender
+///   *is* the contact, so a chat journaled under its `@lid` learns the phone number here;
+/// * never a group member's, and never the account's own (`own`).
+fn card_numbers_of(card: &mut ChatCard, record: &Record) {
+    if card.group {
+        return;
+    }
+    if record.chat.ends_with("@s.whatsapp.net") {
+        card_number(card, &digits_of(record.chat.split('@').next().unwrap_or("")));
+    }
+    if !record.own && record.sender == record.chat && record.sender_alt.ends_with("@s.whatsapp.net") {
+        card_number(card, &digits_of(record.sender_alt.split('@').next().unwrap_or("")));
     }
 }
 
@@ -617,6 +855,114 @@ async fn put_card<S: Store>(store: &S, card: &ChatCard) -> Result<(), String> {
 async fn card_touch<S: Store>(store: &S, record: &Record) -> Result<(), String> {
     let mut card = card_of(store, &record.chat).await?.unwrap_or_default();
     card_fold(&mut card, record);
+    // The address book first, so a chat this node has never heard from before arrives with the name the
+    // operator saved for it rather than with a push name only (13/11: `q: "Laura"` answered 0 for a
+    // chat that had been talking for weeks, because the only name the index kept was her push name).
+    if let Some(contact) = address_of(store, &record.chat).await? {
+        card_contact(&mut card, &contact);
+    }
+    put_card(store, &card).await
+}
+
+// ---- the address book the phone syncs ------------------------------------------------------------
+
+/// One address-book row: the contact that address belongs to, or nothing.
+async fn address_of<S: Store>(store: &S, jid: &str) -> Result<Option<AddressBookContact>, String> {
+    let Some(value) = store.get(key_address(jid).as_bytes()).await? else { return Ok(None) };
+    Ok(serde_json::from_slice::<AddressBookContact>(&value).ok().filter(|contact| !contact.jids.is_empty()))
+}
+
+/// Fold one address-book contact into a card, in memory.
+///
+/// The phone is the source of truth for this name, so a sync *replaces* what the index knew: the
+/// operator renames a contact and the old name stops matching, removes a contact and the name goes.
+/// The name is not touched when the action carries none (a contact WhatsApp knows but the operator
+/// never saved) - the mapping is still worth keeping, and dropping a push name over it would be loss.
+///
+/// The card's own address is never rewritten from the contact: one contact action names several
+/// addresses (its JID, its LID, its PN), and the card belongs to the chat the messages are in. A fold
+/// that took the first address would write this card under another chat's key and leave the real one
+/// unchanged.
+fn card_contact(card: &mut ChatCard, contact: &AddressBookContact) {
+    if card.chat.is_empty() {
+        card.chat = contact.jids.first().cloned().unwrap_or_default();
+    }
+    card.group = card.chat.ends_with("@g.us");
+    card.names.retain(|entry| !entry.address_book);
+    let name = contact.name.trim();
+    if !name.is_empty() {
+        card_name(card, name, contact.at, false, |entry| entry.address_book = true);
+    }
+    for number in &contact.numbers {
+        card_number(card, number);
+    }
+    // The card's own address is a number too, when it is a phone-number chat.
+    if card.chat.ends_with("@s.whatsapp.net") {
+        card_number(card, &digits_of(card.chat.split('@').next().unwrap_or("")));
+    }
+}
+
+/// Record what the phone's address book says about one contact, and fold it into every chat the index
+/// already knows for it.
+///
+/// This is the writer behind [`AddressBookContact`]. It is called once per app-state contact action -
+/// the full sync WhatsApp sends a newly linked device, and each change afterwards - and it is
+/// idempotent: the same action twice writes the same rows.
+pub async fn set_contact<S: Store>(store: &S, contact: &AddressBookContact) -> Result<(), String> {
+    let mut jids: Vec<String> = Vec::new();
+    for jid in &contact.jids {
+        let chat = crate::chat::storable(jid);
+        if !(chat.ends_with("@s.whatsapp.net") || chat.ends_with("@lid")) || jids.contains(&chat) {
+            continue;
+        }
+        jids.push(chat);
+        if jids.len() >= CONTACT_JIDS {
+            break;
+        }
+    }
+    if jids.is_empty() {
+        return Ok(());
+    }
+    let mut numbers: Vec<String> = Vec::new();
+    for number in &contact.numbers {
+        let digits = digits_of(number);
+        if (NUMBER_DIGITS..=MAX_NUMBER_DIGITS).contains(&digits.len()) && !numbers.contains(&digits) {
+            numbers.push(digits);
+        }
+    }
+    let entry = AddressBookContact {
+        jids: jids.clone(),
+        name: contact.name.chars().take(seam::MAX_NAME_CHARS).collect(),
+        numbers,
+        at: contact.at,
+    };
+    let json = serde_json::to_vec(&entry).map_err(|error| format!("address encode: {error}"))?;
+    for jid in &jids {
+        store.set(key_address(jid).as_bytes(), &json).await?;
+        // A chat the index already knows learns it now. A chat it does not know yet is covered by
+        // `card_touch`: the row is already there when the first message arrives.
+        if let Some(mut card) = card_of(store, jid).await? {
+            card_contact(&mut card, &entry);
+            put_card(store, &card).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Record a push name a contact changed to, for a chat the index knows (`Event::PushNameUpdate`).
+///
+/// It is the same name a message would carry, so it is folded the same way and counted as no message:
+/// the change is evidence about the person, not a message they sent.
+pub async fn set_push_name<S: Store>(store: &S, chat: &str, name: &str, at: i64) -> Result<(), String> {
+    let name = name.trim();
+    let chat = crate::chat::storable(chat);
+    if name.is_empty() || chat.is_empty() || chat.ends_with("@g.us") {
+        return Ok(());
+    }
+    // A chat the index has never seen has nothing to name yet, and a card invented here would be a chat
+    // with no message in it: the first message folds the name anyway, from the envelope that carries it.
+    let Some(mut card) = card_of(store, &chat).await? else { return Ok(()) };
+    card_name(&mut card, name, at, false, |entry| entry.sender = true);
     put_card(store, &card).await
 }
 
@@ -702,6 +1048,12 @@ pub async fn backfill_cards<S: Store>(store: &S, budget: usize) -> Result<CardsB
             for record in &rows {
                 card_fold(&mut card, record);
             }
+            // The address book is not in the records (`ix/ab/` is its own row), so a rebuild that only
+            // walked messages would drop every name the phone had synced - the one name the operator
+            // actually types. Folded here exactly as `card_touch` folds it on a live message.
+            if let Some(contact) = address_of(store, &chat).await? {
+                card_contact(&mut card, &contact);
+            }
             out.visited += rows.len();
             put_card(store, &card).await?;
             out.chats += 1;
@@ -756,6 +1108,32 @@ pub async fn record_count<S: Store>(store: &S, cap: usize) -> Result<(usize, boo
     }
 }
 
+/// How many address-book contacts the index holds, bounded by `cap`: `(count, capped)`.
+///
+/// It counts ROWS, one per address, so a contact WhatsApp knows by a PN and a LID counts twice - which
+/// is the honest answer to "how much of the phone's address book reached this node", the question a
+/// `count: 0` answer used to leave open (13/11).
+pub async fn address_count<S: Store>(store: &S, cap: usize) -> Result<(usize, bool), String> {
+    let prefix = format!("{PREFIX}ab/");
+    let cap = cap.max(1);
+    let mut cursor: Option<Vec<u8>> = None;
+    let mut count = 0usize;
+    loop {
+        let page = store.scan(prefix.as_bytes(), cursor.clone(), PAGE).await?;
+        if page.is_empty() {
+            return Ok((count, false));
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        count += page.len();
+        if page.len() < PAGE {
+            return Ok((count, false));
+        }
+        if count >= cap {
+            return Ok((count, true));
+        }
+    }
+}
+
 /// Record a group's subject, when this node fetched it (the alert line, or a metadata lookup).
 ///
 /// A subject is the only honest name a group has: the envelope's push name in a group is the *sender's*,
@@ -775,7 +1153,7 @@ pub async fn set_subject<S: Store>(store: &S, chat: &str, subject: &str) -> Resu
 }
 
 /// One candidate chat, as `whatsapp_contacts` lists it.
-fn candidate_json(score: u8, card: &ChatCard, matched: &str) -> serde_json::Value {
+fn candidate_json(score: u8, card: &ChatCard, matched: &str, matched_source: &'static str) -> serde_json::Value {
     let (name, source) = card.best_name();
     let mut out = serde_json::json!({
         "chat": card.chat,
@@ -783,13 +1161,14 @@ fn candidate_json(score: u8, card: &ChatCard, matched: &str) -> serde_json::Valu
         "name": name,
         "name_source": source,
         "matched": matched,
+        "matched_source": matched_source,
         "confidence": match score { 3 => "exact", 2 => "prefix", _ => "partial" },
         "messages": card.rows,
         "last_at": card.last,
         "at_local": crate::view::local(card.last),
         "at_iso": crate::view::iso(card.last),
         "names": card.names.iter().take(seam::MAX_LISTED).map(|entry| serde_json::json!({
-            "name": entry.name, "messages": entry.rows, "last_at": entry.last,
+            "name": entry.name, "source": entry.source(), "messages": entry.rows, "last_at": entry.last,
         })).collect::<Vec<_>>(),
     });
     if !card.group && !name.is_empty() {
@@ -800,18 +1179,18 @@ fn candidate_json(score: u8, card: &ChatCard, matched: &str) -> serde_json::Valu
 
 /// Every chat whose observed name matches, best first: the one ranking both `whatsapp_contacts` and a
 /// `whatsapp_read` by name use, so the two can never disagree about which chat "Laura" is.
-async fn ranked<S: Store>(store: &S, query: &str) -> Result<Vec<(u8, ChatCard, String)>, String> {
+async fn ranked<S: Store>(store: &S, query: &str) -> Result<Vec<(u8, ChatCard, String, &'static str)>, String> {
     Ok(rank(&cards(store).await?, query))
 }
 
 /// The same ranking over cards already in hand: `contacts` reads them once, so the count it reports
 /// and the list it answers come from one scan, not two.
-fn rank(list: &[ChatCard], query: &str) -> Vec<(u8, ChatCard, String)> {
+fn rank(list: &[ChatCard], query: &str) -> Vec<(u8, ChatCard, String, &'static str)> {
     let folded = record::fold(query);
-    let mut matches: Vec<(u8, ChatCard, String)> = Vec::new();
+    let mut matches: Vec<(u8, ChatCard, String, &'static str)> = Vec::new();
     for card in list {
-        if let Some((score, matched)) = card.match_score(&folded) {
-            matches.push((score, card.clone(), matched));
+        if let Some((score, matched, source)) = card.match_score(&folded) {
+            matches.push((score, card.clone(), matched, source));
         }
     }
     // Best score first; between equals the chat heard from most recently; then the address, so one
@@ -832,16 +1211,16 @@ pub enum Resolved {
 /// candidates, not a pick.
 async fn resolve_chat<S: Store>(store: &S, name: &str) -> Result<Resolved, String> {
     let matches = ranked(store, name).await?;
-    let Some(top) = matches.first().map(|(score, _, _)| *score) else { return Ok(Resolved::None) };
-    let best: Vec<&(u8, ChatCard, String)> = matches.iter().filter(|(score, _, _)| *score == top).collect();
+    let Some(top) = matches.first().map(|(score, _, _, _)| *score) else { return Ok(Resolved::None) };
+    let best: Vec<&(u8, ChatCard, String, &'static str)> = matches.iter().filter(|(score, _, _, _)| *score == top).collect();
     if best.len() == 1 {
-        let (score, card, matched) = best[0];
+        let (score, card, matched, _) = best[0];
         return Ok(Resolved::One(card.chat.clone(), *score, matched.clone()));
     }
     Ok(Resolved::Many(
         best.iter()
             .take(seam::CONTACTS_MAX as usize)
-            .map(|(score, card, matched)| candidate_json(*score, card, matched))
+            .map(|(score, card, matched, source)| candidate_json(*score, card, matched, source))
             .collect(),
     ))
 }
@@ -877,10 +1256,10 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     let chats = all.len();
     let matches = rank(&all, &query);
     let total = matches.len();
-    let kept: Vec<(u8, ChatCard, String)> = matches.into_iter().take(request.limit as usize).collect();
-    let top = kept.first().map(|(score, _, _)| *score).unwrap_or(0);
-    let top_count = kept.iter().filter(|(score, _, _)| *score == top).count();
-    let candidates: Vec<serde_json::Value> = kept.iter().map(|(score, card, matched)| candidate_json(*score, card, matched)).collect();
+    let kept: Vec<(u8, ChatCard, String, &'static str)> = matches.into_iter().take(request.limit as usize).collect();
+    let top = kept.first().map(|(score, _, _, _)| *score).unwrap_or(0);
+    let top_count = kept.iter().filter(|(score, _, _, _)| *score == top).count();
+    let candidates: Vec<serde_json::Value> = kept.iter().map(|(score, card, matched, source)| candidate_json(*score, card, matched, source)).collect();
     let mut answer = serde_json::json!({
         "q": query,
         "candidates": candidates,
@@ -903,24 +1282,44 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     // and not a guess about the account. An index full of messages whose names were never derived and
     // an account nobody has ever talked to used to answer the same sentence (13/11): the counts and
     // the backfill's state are what tell them apart.
+    //
+    // `address_book` is the count that answers the 13/11 finding itself: the phone knew the name and the
+    // index did not, so the same "no chat carries that name" was true of an index that had never seen an
+    // address-book sync and of one whose sync had simply not arrived yet. Now the answer says which.
     let (messages, capped) = record_count(store, COUNT_CAP).await.unwrap_or((0, false));
     let names = backfill_state(store).await.unwrap_or("pending");
+    let (address_book, address_book_capped) = address_count(store, COUNT_CAP).await.unwrap_or((0, false));
     answer["index"] = serde_json::json!({
         "chats": chats,
         "messages": messages,
         "messages_capped": capped,
         "names": names,
+        "address_book": address_book,
+        "address_book_capped": address_book_capped,
     });
     if total == 0 {
-        let note = match (chats, messages) {
-            (0, 0) => "no chat in this index carries that name; the index holds no message yet, so it knows no name"
-                .to_string(),
-            (0, _) => format!(
-                "no chat in this index carries that name yet: {messages} message(s) are indexed and the chat names are still being derived from them (names: {names})"
-            ),
-            (_, _) => format!(
-                "no chat in this index carries that name; the index knows {chats} chat(s) - ask with no q to list them, newest first"
-            ),
+        // Every sentence below describes a DIFFERENT state of the index, because "no chat carries that
+        // name" was true of four of them at once (13/11): an empty index, an index whose names were
+        // never derived, an index whose phone never synced its address book, and an index that simply
+        // does not know that person. The counts are what tell them apart.
+        let note = if address_book > 0 && chats > 0 {
+            format!(
+                "no chat in this index carries that name: the index knows {chats} chat(s) and {address_book} address-book contact(s), and none of them matches. Ask with no q to list the chats, newest first"
+            )
+        } else if address_book > 0 {
+            format!(
+                "no chat in this index carries that name: this node knows {address_book} address-book contact(s) and the index holds no chat for any of them yet"
+            )
+        } else if chats > 0 {
+            format!(
+                "no chat in this index carries that name; the index knows {chats} chat(s), and no address book has been synced to this node yet, so the names the phone saved are not known. Ask with no q to list the chats, newest first"
+            )
+        } else if messages > 0 {
+            format!(
+                "no chat in this index carries that name yet: {messages} message(s) are indexed, the chat names are still being derived from them (names: {names}), and no address book has been synced to this node yet"
+            )
+        } else {
+            "no chat in this index carries that name; the index holds no message yet, so it knows no name, and no address book has been synced to it yet".to_string()
         };
         answer["note"] = serde_json::Value::String(note);
     }

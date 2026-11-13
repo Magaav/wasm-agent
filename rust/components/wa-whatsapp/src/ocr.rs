@@ -395,6 +395,7 @@ mod tests {
             ts: 1_760_000_000_000,
             received: 1_760_000_000_005,
             push_name: "Ana".into(),
+            business: String::new(),
         }
     }
 

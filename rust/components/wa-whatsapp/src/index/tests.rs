@@ -30,6 +30,7 @@ fn envelope(id: &str, ts: i64) -> Envelope {
         ts,
         received: ts + 5,
         push_name: "Ana".into(),
+        business: String::new(),
     }
 }
 
@@ -1419,4 +1420,259 @@ fn a_refused_write_is_retried_a_bounded_number_of_times_and_then_said() {
     assert_eq!(refused(RETRY_LIMIT), Refused::Drop);
     assert_eq!(refused(u8::MAX), Refused::Drop);
     assert_eq!(RETRY_LIMIT, 8);
+}
+
+// ---- the address book the phone syncs (13/11: `q: "Laura"` answered 0) ---------------------------
+
+/// The contact the operator saved on their phone, as the app-state action carries it: the saved name,
+/// the address it applies to, and the two identities WhatsApp knows that person by.
+fn saved(jid: &str, name: &str, lid: &str, pn: &str, at: i64) -> AddressBookContact {
+    AddressBookContact {
+        jids: vec![jid.to_string(), lid.to_string(), pn.to_string()],
+        name: name.to_string(),
+        numbers: vec![pn.to_string()],
+        at,
+    }
+}
+
+#[test]
+fn an_address_book_name_finds_the_chat_the_phone_saved_it_under() {
+    let store = Memory::new();
+    // The person talks under a push name of their own choosing; the operator saved them as `Laura ❤️`.
+    block_on(put(&store, &direct(LAURA, "Lou", "L1", base(), "bom dia"))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("Laura"))).unwrap()["count"], 0, "nothing carries that name yet");
+
+    block_on(set_contact(&store, &saved(LAURA, "Laura ❤️", "", "5511977777777@s.whatsapp.net", base() + 1))).unwrap();
+
+    // Case is ignored, the emoji is ignored, and the answer says where the name came from.
+    let answer = block_on(contacts(&store, &named("laura"))).unwrap();
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["chat"], LAURA);
+    let candidate = &answer["candidates"][0];
+    assert_eq!(candidate["matched"], "Laura ❤️");
+    assert_eq!(candidate["matched_source"], "address_book");
+    assert_eq!(candidate["confidence"], "exact", "the emoji is not part of the name: {answer}");
+    assert_eq!(candidate["name"], "Laura ❤️", "the operator's own word for the person is what they see");
+    assert_eq!(candidate["name_source"], "address_book");
+    assert_eq!(candidate["jid"], LAURA);
+    // The push name the person writes is still in the answer, with its source.
+    let names = candidate["names"].as_array().expect("names");
+    assert!(names.iter().any(|entry| entry["name"] == "Lou" && entry["source"] == "push_name"), "{candidate}");
+    assert!(names.iter().any(|entry| entry["name"] == "Laura ❤️" && entry["source"] == "address_book"), "{candidate}");
+    // `index.address_book` is the count that tells "no sync yet" from "no such name".
+    assert_eq!(answer["index"]["address_book"], 1, "{answer}");
+}
+
+#[test]
+fn an_accented_saved_name_matches_without_the_accent() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(BRUNO, "", "B1", base(), "oi"))).unwrap();
+    let mut contact = saved(BRUNO, "Família Andrade", "", BRUNO, base() + 1);
+    contact.numbers = vec!["5511966666666".into()];
+    block_on(set_contact(&store, &contact)).unwrap();
+
+    for spelling in ["familia andrade", "FAMÍLIA ANDRADE", "Familia Andrade"] {
+        let answer = block_on(contacts(&store, &named(spelling))).unwrap();
+        assert_eq!(answer["count"], 1, "{spelling}: {answer}");
+        assert_eq!(answer["chat"], BRUNO);
+        assert_eq!(answer["candidates"][0]["matched_source"], "address_book");
+        assert_eq!(answer["candidates"][0]["confidence"], "exact", "{spelling}: {answer}");
+    }
+    // A prefix is still a prefix, and says so.
+    let partial = block_on(contacts(&store, &named("familia"))).unwrap();
+    assert_eq!(partial["candidates"][0]["confidence"], "prefix", "{partial}");
+}
+
+#[test]
+fn a_phone_number_resolves_its_chat_in_any_formatting() {
+    let store = Memory::new();
+    // The chat is knowledge the index got from messages only: no address book, no name at all.
+    block_on(put(&store, &direct(LAURA, "", "L1", base(), "oi"))).unwrap();
+    block_on(put(&store, &direct(BRUNO, "", "B1", base() + 1, "oi"))).unwrap();
+
+    for number in ["5511977777777", "+55 11 97777-7777", "+55 (11) 97777-7777", "55 11 97777 7777", "(11) 97777-7777", "11 97777-7777"] {
+        let answer = block_on(contacts(&store, &named(number))).unwrap();
+        assert_eq!(answer["count"], 1, "{number}: {answer}");
+        assert_eq!(answer["chat"], LAURA, "{number}: {answer}");
+        assert_eq!(answer["candidates"][0]["confidence"], "exact", "{number}: {answer}");
+        assert_eq!(answer["candidates"][0]["matched_source"], "number", "{number}: {answer}");
+    }
+    // A fragment is not a number: it is a partial match, which the answer admits.
+    let fragment = block_on(contacts(&store, &named("77777"))).unwrap();
+    assert_eq!(fragment["candidates"][0]["confidence"], "partial", "{fragment}");
+}
+
+#[test]
+fn a_lid_chat_is_found_by_the_phone_number_the_index_learned_for_it() {
+    let store = Memory::new();
+    // A DM WhatsApp journals under its hidden `@lid`, with the sender's other address on the envelope:
+    // that is where the index learns which phone number this chat is.
+    let mut lid = direct(LID, "Lou", "L1", base(), "oi");
+    lid.sender_alt = LAURA.into();
+    block_on(put(&store, &lid)).unwrap();
+
+    let by_number = block_on(contacts(&store, &named("+55 11 97777-7777"))).unwrap();
+    assert_eq!(by_number["count"], 1, "{by_number}");
+    assert_eq!(by_number["chat"], LID, "the chat the messages are in, not a chat invented from the number");
+    assert_eq!(by_number["candidates"][0]["jid"], LID);
+    // And the address book's own PN mapping says the same thing, without a second message. The action
+    // names the phone number FIRST here, as the server does when the contact's JID is the PN and the
+    // chat is the LID: the fold must still land on the LID chat the messages are in, not on a card it
+    // invents for the PN (which would answer a chat holding nothing).
+    block_on(set_contact(&store, &saved(LAURA, "Laura ❤️", LID, LAURA, base() + 1))).unwrap();
+    let by_name = block_on(contacts(&store, &named("laura"))).unwrap();
+    assert_eq!(by_name["chat"], LID, "{by_name}");
+    let by_number = block_on(contacts(&store, &named("5511977777777"))).unwrap();
+    assert_eq!(by_number["chat"], LID, "{by_number}");
+}
+
+#[test]
+fn a_business_name_is_found_as_a_profile_name() {
+    let store = Memory::new();
+    // A bakery whose owner's push name is a first name; WhatsApp's own name for the account is the one
+    // the operator would search for.
+    let mut bakery = direct(BRUNO, "Ana", "B1", base(), "pão quentinho");
+    bakery.business = "Padaria do Zé".into();
+    block_on(put(&store, &bakery)).unwrap();
+
+    let answer = block_on(contacts(&store, &named("padaria do ze"))).unwrap();
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["chat"], BRUNO);
+    assert_eq!(answer["candidates"][0]["matched"], "Padaria do Zé");
+    assert_eq!(answer["candidates"][0]["matched_source"], "profile");
+    assert_eq!(answer["candidates"][0]["name"], "Padaria do Zé", "the business name outranks the push name for a business");
+    assert_eq!(answer["candidates"][0]["name_source"], "profile");
+}
+
+#[test]
+fn the_address_book_and_the_messages_meet_in_either_order() {
+    // A sync that arrives before the first message, and one that arrives after it, end in the same card:
+    // `card_touch` folds the address-book row it finds, and `set_contact` folds into the cards it finds.
+    let before = Memory::new();
+    block_on(set_contact(&before, &saved(LAURA, "Laura ❤️", "", LAURA, base()))).unwrap();
+    block_on(put(&before, &direct(LAURA, "Lou", "L1", base() + 1, "oi"))).unwrap();
+
+    let after = Memory::new();
+    block_on(put(&after, &direct(LAURA, "Lou", "L1", base() + 1, "oi"))).unwrap();
+    block_on(set_contact(&after, &saved(LAURA, "Laura ❤️", "", LAURA, base()))).unwrap();
+
+    for store in [&before, &after] {
+        let answer = block_on(contacts(store, &named("laura"))).unwrap();
+        assert_eq!(answer["count"], 1, "{answer}");
+        assert_eq!(answer["candidates"][0]["name"], "Laura ❤️");
+        assert_eq!(answer["candidates"][0]["name_source"], "address_book");
+        // The person's own name is still there beside it.
+        assert_eq!(block_on(contacts(store, &named("lou"))).unwrap()["count"], 1, "the push name survives the sync");
+    }
+}
+
+#[test]
+fn renaming_or_removing_a_contact_replaces_what_the_index_knew() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Lou", "L1", base(), "oi"))).unwrap();
+    block_on(set_contact(&store, &saved(LAURA, "Laura ❤️", "", LAURA, base() + 1))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["count"], 1);
+
+    // The operator renames the contact: the old saved name stops matching, the new one starts.
+    block_on(set_contact(&store, &saved(LAURA, "Mãe da Juju", "", LAURA, base() + 2))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["count"], 0, "a renamed contact is not found by the old name");
+    let renamed = block_on(contacts(&store, &named("mae da juju"))).unwrap();
+    assert_eq!(renamed["count"], 1, "{renamed}");
+    assert_eq!(renamed["chat"], LAURA);
+
+    // The operator removes them from the address book: the name goes, the mapping and the push name stay.
+    block_on(set_contact(&store, &saved(LAURA, "", "", LAURA, base() + 3))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("mae da juju"))).unwrap()["count"], 0);
+    assert_eq!(block_on(contacts(&store, &named("lou"))).unwrap()["count"], 1, "the person's own name is not ours to drop");
+    assert_eq!(block_on(contacts(&store, &named("5511977777777"))).unwrap()["count"], 1, "the number still resolves");
+}
+
+#[test]
+fn a_name_match_with_no_sync_says_so_in_the_index_block() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
+
+    let none = block_on(contacts(&store, &named("Zeca"))).unwrap();
+    assert_eq!(none["count"], 0, "{none}");
+    assert_eq!(none["index"]["address_book"], 0, "{none}");
+    let note = none["note"].as_str().expect("a note");
+    assert!(note.contains("no address book has been synced"), "{note}");
+
+    // Once the address book is here, the same empty answer is a fact about the names and not about a
+    // sync that never came - the two used to be one sentence (13/11).
+    block_on(set_contact(&store, &saved(BRUNO, "Bruno", "", BRUNO, base() + 1))).unwrap();
+    let synced = block_on(contacts(&store, &named("Zeca"))).unwrap();
+    assert_eq!(synced["index"]["address_book"], 1, "{synced}");
+    let note = synced["note"].as_str().expect("a note");
+    assert!(note.contains("1 address-book contact(s)"), "{note}");
+    assert!(!note.contains("no address book has been synced"), "the sync is no longer the missing half: {note}");
+}
+
+#[test]
+fn a_push_name_change_is_a_name_the_index_knows() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "", "L1", base(), "oi"))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("Laurinha"))).unwrap()["count"], 0);
+    block_on(set_push_name(&store, &LAURA, "Laurinha", base() + 1)).unwrap();
+    let answer = block_on(contacts(&store, &named("laurinha"))).unwrap();
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["candidates"][0]["name_source"], "push_name");
+    // A group is never named after a member, so a push name does not name a group's card either.
+    assert!(block_on(set_push_name(&store, CHAT, "Alguém", base() + 2)).is_ok());
+    assert_eq!(block_on(contacts(&store, &named("alguem"))).unwrap()["count"], 0);
+}
+
+#[test]
+fn a_rebuild_of_the_name_side_keeps_the_address_book() {
+    // `backfill_cards` walks messages (`ix/m`) and rewrites every card. The address book is not in the
+    // records, so a rebuild that only folded records would drop the operator's own names.
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Lou", "L1", base(), "oi"))).unwrap();
+    block_on(set_contact(&store, &saved(LAURA, "Laura ❤️", "", LAURA, base() + 1))).unwrap();
+    // Forget every card, the way an index that arrived without its name side looks.
+    for chat in [LAURA] {
+        use crate::index::Store as _;
+        block_on(store.del(key_card(chat).as_bytes())).unwrap();
+    }
+    assert_eq!(block_on(contacts(&store, &every_chat())).unwrap()["index"]["chats"], 0);
+
+    let pass = block_on(backfill_cards(&store, 64)).unwrap();
+    assert_eq!(pass.done, true);
+    let rebuilt = block_on(contacts(&store, &named("laura"))).unwrap();
+    assert_eq!(rebuilt["count"], 1, "{rebuilt}");
+    assert_eq!(rebuilt["candidates"][0]["name_source"], "address_book");
+    assert_eq!(rebuilt["candidates"][0]["messages"], 1, "the message the rebuild folded is still counted");
+}
+
+#[test]
+fn a_name_that_is_only_an_emoji_is_still_a_name() {
+    // Dropping the emoji from a comparison is what makes `laura` find `Laura ❤️`; taken literally it
+    // would leave a chat called `🔔` with no name at all. The rule is "the emoji goes while something
+    // else remains", on both sides of the comparison.
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "🔔", "L1", base(), "oi"))).unwrap();
+    let answer = block_on(contacts(&store, &named("🔔"))).unwrap();
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["chat"], LAURA);
+    assert_eq!(answer["candidates"][0]["confidence"], "exact", "{answer}");
+
+    // And the emoji-decorated saved name still matches the bare name, exactly. The chat has to exist
+    // first: an address-book row names a chat, it never invents one (the index drops a card with no
+    // message only when nobody wrote one, which is the same rule `/mcp` applies to a chat nobody has).
+    block_on(put(&store, &direct(BRUNO, "", "B1", base() + 500, "oi"))).unwrap();
+    block_on(set_contact(&store, &saved(BRUNO, "Bruno 🎸", "", BRUNO, base() + 1))).unwrap();
+    let named_ = block_on(contacts(&store, &named("bruno"))).unwrap();
+    assert_eq!(named_["chat"], BRUNO, "{named_}");
+    assert_eq!(named_["candidates"][0]["confidence"], "exact", "{named_}");
+}
+
+#[test]
+fn the_address_book_is_asked_for_once_per_store() {
+    // WhatsApp sends a linked device the contact catalogue when it pairs, and only asks again if the
+    // device does. So a store that was paired by a build which did not keep the names has to ask ONCE:
+    // the mark is per store (`ix/ab/sync`), and the pipeline asks only while it is absent.
+    let store = Memory::new();
+    assert_eq!(block_on(address_sync_done(&store)).unwrap(), false);
+    block_on(mark_address_sync(&store)).unwrap();
+    assert_eq!(block_on(address_sync_done(&store)).unwrap(), true);
 }

@@ -765,4 +765,12 @@ function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
   return answer
 end
 
+-- The one lookup both loops build (`tool_lookup`), exported so a test can ask the SAME entry,
+-- `searchTools("select:...")` and `describeTool` path the model does without a sandbox: a test that
+-- rebuilt the lookup itself would be asserting against a copy. `scripts/test-tool-schema-fidelity.lua`
+-- is the one caller, and what it holds is that every connector tool's declared `properties` reach
+-- `searchTools`/`describeTool` instead of arriving empty (13/11, when the model had to guess argument
+-- names three times before finding `q`).
+M.lookup = tool_lookup
+
 return M

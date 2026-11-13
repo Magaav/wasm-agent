@@ -705,6 +705,26 @@ and `contact`/`contact_array` messages name the chats their phone numbers belong
 (`index::contact_cards`, only for a chat the index already holds, and always weaker than the name a
 person writes on their own messages). A group is named by its subject and by nothing else.
 
+Four sources, each one an answer's `name_source` / `matched_source`, strongest first:
+
+| source | where it comes from | why it matters |
+| --- | --- | --- |
+| `address_book` | the app-state contact action WhatsApp syncs to a linked device: `fullName` / `firstName` per JID, plus the `lidJid`/`pnJid` pair (`Event::ContactUpdate` -> `guest::contact_inbox` -> `index::set_contact`, one row per address under `ix/ab/`) | it is the name the operator saved and the one they type. Nothing on a message carries it, which is why "Laura" answered `count: 0` on 13/11 while the phone knew her |
+| `profile` | a business account's own name (`WebMessageInfo.verifiedBizName`, which rides the history-sync entry, never a live `Message`) | WhatsApp's own name for the account; a business's push name is often just the owner's |
+| `push_name` | the name the contact writes on their own messages, and `Event::PushNameUpdate` when they change it | what they call themselves |
+| `contact_card` | a card somebody shared that names this chat's number | evidence about a number, weaker than either above |
+
+A name is compared through `record::name_key` (case, accents and **emoji** ignored: `laura` is the same
+name as `Laura ❤️`), and a chat is also matched by its **phone number in any formatting** (`+55 19
+99482-7533`, `5519994827533`, `(19) 99482-7533`, or the same without its country code). The numbers a
+card knows are its own address plus what the address book and the envelopes taught it: an envelope's
+`sender_alt` (the sender's PN<->LID twin) is how a chat journaled under its hidden `@lid` is found by the
+number the operator has in their phone. The address-book row is its own row, not a flag on the card,
+because the two arrive in an order nobody controls; `card_touch` folds the row into a card it finds and
+`set_contact` folds into the cards it finds, so either order ends in the same card, and a phone that
+renames or un-saves a contact replaces what the index knew (`card_contact`). `backfill_cards` folds the
+address-book row too, so a rebuild of the name side does not drop the operator's names.
+
 Two things this side had to learn the hard way, both measured on the account node (13/11: 57310 stored
 entries, messages arriving, and every `whatsapp_contacts` query answering `count: 0`):
 
@@ -722,10 +742,12 @@ entries, messages arriving, and every `whatsapp_contacts` query answering `count
   the tail of every message, fills its names back in instead of answering "no chat carries that name"
   forever.
 * **The answer says which half it has.** `whatsapp_contacts` carries `index: {chats, messages,
-  messages_capped, names}` beside its candidates, where `names` is `ready` / `rebuilding` / `pending`,
-  so an index of messages whose names are still being derived can never be read as an account nobody
-  has ever talked to. `messages` is a bounded count (`index::COUNT_CAP`, 5000) and `messages_capped`
-  says when it stopped there.
+  messages_capped, names, address_book, address_book_capped}` beside its candidates, where `names` is
+  `ready` / `rebuilding` / `pending`, so an index of messages whose names are still being derived can
+  never be read as an account nobody has ever talked to. `messages` is a bounded count
+  (`index::COUNT_CAP`, 5000) and `messages_capped` says when it stopped there. `address_book` counts the
+  `ix/ab/` rows, so a `count: 0` answer distinguishes "no address book has synced to this node yet" from
+  "that name is not in it" - the two used to be one sentence.
 
 **The query lane.** `wa:queue`, queue name `whatsapp.query` (`rust/wa-whatsapp-index` is the shared
 request/answer shape; the node's seven capabilities are `rust/wa-capabilities/src/whatsapp_query.rs`):

@@ -346,7 +346,7 @@ function M.inventory()
    probe=probe,probe_stale=row.probe_stale,last_call=last_call,session_mode='read-reuse/write-request',observed_status=observed}
  end
  table.sort(servers,function(a,b)return a.id<b.id end)
- return {ok=true,revision=store.revision,servers=servers,templates={},can_manage=true,
+ return {ok=true,revision=store.revision,servers=servers,templates={},can_manage=true,schema_faults=M.SCHEMA_FAULTS,
   adapters={{id='whatsapp',name='WhatsApp',profile_managed=true,capabilities={'scoped linked-device journal reads','explicit self/target identity','draft visibility unsupported; general sends refused'},note='Linked-device connector only. Private deterministic transcript policy is activated by the operator separately; no generic send authority, Chrome fallback or automatic wake.'}},
   note='Explicit trusted connectors; last probe is not live health. Approved reads may reuse idle-bounded sessions; writes and WhatsApp stay request-scoped. Jobs owns wakes.'}
 end
@@ -399,16 +399,37 @@ end
 function M.whatsapp_family(id)
  return type(id)=='string' and (id=='whatsapp' or id:sub(1,9)=='whatsapp_')
 end
+-- Every connector tool's schema this node could not read, by catalogue name, from the last
+-- `M.schemas()`: `{name=..., connector=..., error='mcp_cached_schema_invalid'}`.
+--
+-- A cached probe whose `inputSchema` cannot be read as a JSON object is a tool nobody can call safely:
+-- the schema is what guards its arguments, and offering it without one invites a call the server refuses
+-- (or worse, one it accepts and should not have). So it is not offered - and the reason is kept HERE
+-- rather than thrown, because one connector's bad cache must not take the node's whole tool list down
+-- with it. `M.inventory()` carries the list, so `/mcp` can say which connector to re-probe.
+M.SCHEMA_FAULTS = {}
+function M.schema_faults() return M.SCHEMA_FAULTS end
+
 function M.schemas()
  local ready=query("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'",{})
  if #ready==0 then return {} end -- schema-only bootstrap, not a cached empty store
- local store=load_store();local schemas,seen={},{}
+ local store=load_store();local schemas,seen={},{};M.SCHEMA_FAULTS={}
  for id,row in pairs(store.servers)do if row.enabled and row.probe and row.probe.ok and not M.whatsapp_family(id) then
   for _,tool in ipairs(row.probe.tools or {})do if row.definition.tools[tool.name] then
    local name=M.namespace(id,tool.name);if seen[name]then error('mcp_namespace_collision') end;seen[name]=true
-   if type(tool.input_schema_json)~='string' then error('mcp_cached_schema_invalid') end
-   local parameters=json.raw(tool.input_schema_json)
-   schemas[#schemas+1]={type='function',['function']={name=name,description='MCP '..id..' / '..tool.name..': '..tostring(tool.description or ''),parameters=parameters}}
+   -- The server's own bytes, kept exactly (`json.raw` is the validated raw-JSON carrier: a pydantic
+   -- server stamps `$schema`/`$defs` inside its `inputSchema` and they must travel untouched), and a
+   -- payload that is not a JSON object is refused BY NAME instead of published as an empty schema.
+   -- Publishing `properties: {}` for a tool whose server declares properties is what made a model guess
+   -- argument names on 13/11 (three refusals before it found `q`); a fault says which connector is
+   -- unreadable, which is what the operator can act on. `scripts/test-tool-schema-fidelity.lua` proves
+   -- the declaration reaches `searchTools`/`describeTool` intact.
+   local ok,parameters=pcall(json.raw,tool.input_schema_json)
+   if ok and type(parameters)=='table' then
+    schemas[#schemas+1]={type='function',['function']={name=name,description='MCP '..id..' / '..tool.name..': '..tostring(tool.description or ''),parameters=parameters}}
+   else
+    M.SCHEMA_FAULTS[#M.SCHEMA_FAULTS+1]={name=name,connector=id,tool=tool.name,error='mcp_cached_schema_invalid'}
+   end
   end end
  end end
  table.sort(schemas,function(a,b)return a['function'].name<b['function'].name end);return schemas

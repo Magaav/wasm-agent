@@ -233,6 +233,22 @@ local function schema(name, description, properties, required)
     name = name, description = description, parameters = parameters } }
 end
 
+-- A catalogue entry from a parameters object that is already in the server's own shape.
+--
+-- `schema()` above builds a schema from the per-property map, which is right for the tools this file
+-- declares by hand and wrong for anything that arrives declaratively: rebuilding a plugin's schema from
+-- `properties` and `required` alone dropped every other keyword it declared (`additionalProperties`,
+-- `items`, a pydantic `$defs`), and a plugin whose declaration is not the map shape lost its properties
+-- altogether - the empty-`properties` a model saw in `searchTools("select:...")` on 13/11 and then had
+-- to guess argument names for. Passed through verbatim, apart from the one thing a provider refuses: an
+-- empty table, which encodes as `[]`. `scripts/test-tool-schema-fidelity.lua` guards it.
+local function schema_from(name, description, parameters)
+  local shaped = type(parameters) == "table" and parameters or {}
+  if next(shaped) == nil then shaped = { type = "object" } end
+  return { type = "function", ["function"] = {
+    name = name, description = description, parameters = shaped } }
+end
+
 -- The foreground shell deadline, read from the host that enforces it
 -- (`host.exec_timeout`). Naming the number in the description is what lets a model
 -- plan a long command as an operation: the audit found `bash` calls that spent the
@@ -810,7 +826,7 @@ function M.catalog(role)
     local plugins=wasm_plugins()
     table.sort(plugins,function(a,b)return tostring(a.name)<tostring(b.name) end)
     for _, plugin in ipairs(plugins) do
-      list[#list + 1] = schema(plugin.name, plugin.description or "", plugin.parameters and plugin.parameters.properties, plugin.parameters and plugin.parameters.required)
+      list[#list + 1] = schema_from(plugin.name, plugin.description or "", plugin.parameters)
     end
   end
   return list
