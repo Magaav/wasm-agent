@@ -13,6 +13,10 @@
 --                       reported unknown and never replayed (an interrupted turn may have had effects).
 --   self_notes          one document per session, owned by the model.
 --   self_notes_archive  the versions a write/compact replaced, retrievable by id.
+--   self_wake_pauses    sessions whose schedule is held: an interrupted run pauses the whole
+--                       schedule (operator, 13/11). A paused wake is still a pending wake - nothing
+--                       about it was decided - so it keeps its time, its order and its target, and an
+--                       overdue one fires once after the resume, never once per missed interval.
 --
 -- Dispatch: a wake becomes due on the node's existing placement tick (`wa_orchestrator_tick`, every
 -- 2s, `lua/core/subagents.lua`) and is handed to the run scheduler through
@@ -90,9 +94,17 @@ local SCHEMA = {
     created_at REAL NOT NULL
   )]],
   [[CREATE INDEX IF NOT EXISTS self_notes_archive_session_idx ON self_notes_archive(session_id, created_at)]],
+  -- One row per held session. Keyed by session, which is unique across owners; `owner` is kept so a
+  -- reader can see who held it and beside which run.
+  [[CREATE TABLE IF NOT EXISTS self_wake_pauses (
+    session_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    paused_at REAL NOT NULL
+  )]],
 }
 
--- Create the three tables once per interpreter. `IF NOT EXISTS` makes a second interpreter safe; the
+-- Create the five tables once per interpreter. `IF NOT EXISTS` makes a second interpreter safe; the
 -- flag keeps the (write-locking) DDL off every call.
 function M.setup()
   if ready then return true end
@@ -439,7 +451,15 @@ function M.summary(session_id, opts)
   session_id = tostring(session_id or "")
   if session_id == "" then return { pending = 0, event_pending = 0 } end
   local seam_answer = routed("summary", { session_id = session_id, now = clock(opts) })
-  if seam_answer then return seam_answer end
+  if seam_answer then
+    -- The hold is kernel state this file owns (a row beside the wakes, not in them), so it is read
+    -- here on both paths and added to the answer rather than asked of the component.
+    local held = M.paused(session_id)
+    seam_answer.paused = held ~= nil
+    seam_answer.paused_since = held and tonumber(held.paused_at) or nil
+    seam_answer.paused_reason = held and tostring(held.reason or "") or nil
+    return seam_answer
+  end
   local now = clock(opts)
   local rows = query([[SELECT
       SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
@@ -457,13 +477,21 @@ function M.summary(session_id, opts)
   }
   out.total = out.pending + out.dispatching
   if out.next_at then out.next_in_seconds = math.max(0, math.floor(out.next_at - now + 0.999)) end
+  local held = M.paused(session_id)
+  out.paused = held ~= nil
+  out.paused_since = held and tonumber(held.paused_at) or nil
+  out.paused_reason = held and tostring(held.reason or "") or nil
   return out
 end
 
--- One short footer fact: `⏰ 2 wakes · next 14:05`, or "" when there is nothing pending.
+-- One short footer fact: `⏰ 2 wakes · next 14:05`, or "" when there is nothing pending. A held
+-- session says so instead of a next time: its schedule is paused, and the count is what it is holding.
 function M.footer_text(session_id, opts)
   local ok, summary = pcall(M.summary, session_id, opts)
   if not ok or not summary or (summary.total or 0) == 0 then return "" end
+  if summary.paused then
+    return "\226\143\176 " .. tostring(summary.total) .. (summary.total == 1 and " wake paused" or " wakes paused")
+  end
   local parts = { tostring(summary.total) .. (summary.total == 1 and " wake" or " wakes") }
   if summary.next_at then parts[#parts + 1] = "next " .. os.date("%H:%M", math.floor(summary.next_at)) end
   return "\226\143\176 " .. table.concat(parts, " \194\183 ")
@@ -490,7 +518,8 @@ function M.list(args, ctx)
   for _, row in ipairs(rows) do wakes[#wakes + 1] = view(row, now) end
   local summary = M.summary(session.id, { now = now })
   return { wakes = wakes, count = #wakes, now = now, pending = summary.pending,
-    event_pending = summary.event_pending, next_at = summary.next_at }
+    event_pending = summary.event_pending, next_at = summary.next_at,
+    paused = summary.paused and true or false, paused_reason = summary.paused_reason }
 end
 
 function M.cancel(args, ctx)
@@ -520,6 +549,112 @@ function M.cancel(args, ctx)
   local changed = exec("UPDATE self_wakes SET status='cancelled', updated_at=? WHERE id=? AND status='pending'", { now, id })
   if (tonumber(changed.changes) or 0) ~= 1 then return { error = "wake_not_pending", effect = "none" } end
   return { ok = true, cancelled = id }
+end
+
+-- ---- pauses: the schedule follows the run -----------------------------------------------
+--
+-- Operator, 13/11: "interrupting a session should be in sync with the schedule, once interrupted, it
+-- stops, once it resumes, it resumes". A run the user stopped pauses every scheduled wake of that
+-- session, and nothing un-pauses it except the user coming back (a message in the session, `wa
+-- resume --session <id>`, `wa chat --resume <id>`).
+--
+-- The held state is one row here, not a status on `self_wakes`: a paused wake is still a *pending*
+-- wake - nothing about it was decided - so it keeps its `due_at`, its order and its target, and a
+-- resume cannot lose one to a failed rewrite. A wake whose time passed while the session was held is
+-- simply due; the claim takes the earliest row once, so it fires once and not once per interval.
+
+-- The pause row for a session, or nil. Read on every claim and every tick, so it is one indexed read.
+function M.paused(session_id)
+  M.setup()
+  session_id = tostring(session_id or "")
+  if session_id == "" then return nil end
+  return query("SELECT * FROM self_wake_pauses WHERE session_id=?", { session_id })[1]
+end
+
+-- Hold a session's schedule. Idempotent: the first reason and time are kept, so a wake turn that
+-- observes the same interrupt again cannot move the moment it started. `ON CONFLICT DO NOTHING` is the
+-- atomic half: a CLI and a served node can both see the cancel and both call this, and the loser of
+-- that race reads the winner's row instead of failing on the primary key.
+function M.pause(session_id, owner, reason, opts)
+  M.setup()
+  session_id = tostring(session_id or "")
+  if session_id == "" then return { error = "selfloop_requires_session", effect = "none" } end
+  local now = clock(opts)
+  local inserted = exec([[INSERT INTO self_wake_pauses(session_id, owner, reason, paused_at) VALUES(?,?,?,?)
+    ON CONFLICT(session_id) DO NOTHING]], { session_id, tostring(owner or ""), slug(reason), now })
+  if (tonumber(inserted.changes) or 0) == 1 then
+    return { ok = true, paused = true, since = now, reason = slug(reason) }
+  end
+  local row = M.paused(session_id)
+  if row then
+    return { ok = true, paused = true, already = true, since = tonumber(row.paused_at), reason = row.reason }
+  end
+  -- The row was gone again between the insert and the read (a resume in another process): this call did
+  -- not hold anything, and it does not claim it did.
+  return { ok = true, paused = false, raced = true }
+end
+
+-- Let a held session's schedule run again. Nothing else is touched: the rows were never changed, so
+-- what fires next is what the model asked for. `overdue` is what is already due and will fire once at
+-- the first claim after this call.
+function M.resume(session_id, owner, opts)
+  M.setup()
+  session_id = tostring(session_id or "")
+  if session_id == "" then return { error = "selfloop_requires_session", effect = "none" } end
+  local now = clock(opts)
+  local held = M.paused(session_id)
+  local pending = query([[SELECT COUNT(*) AS n, MIN(CASE WHEN due_at IS NOT NULL AND due_at<=? THEN due_at END) AS overdue_at,
+      SUM(CASE WHEN due_at IS NOT NULL AND due_at<=? THEN 1 ELSE 0 END) AS overdue
+    FROM self_wakes WHERE session_id=? AND status='pending']], { now, now, session_id })[1] or {}
+  if not held then
+    return { ok = true, paused = false, resumed = false, pending = tonumber(pending.n) or 0,
+      overdue = tonumber(pending.overdue) or 0 }
+  end
+  local changed = exec("DELETE FROM self_wake_pauses WHERE session_id=?", { session_id })
+  if (tonumber(changed.changes) or 0) ~= 1 then
+    return { ok = true, paused = true, resumed = false, note = "the hold changed underneath this call" }
+  end
+  return { ok = true, paused = false, resumed = true, since = tonumber(held.paused_at),
+    reason = tostring(held.reason or ""), pending = tonumber(pending.n) or 0,
+    overdue = tonumber(pending.overdue) or 0, overdue_at = tonumber(pending.overdue_at) }
+end
+
+-- Is a cancel requested on this thread right now? The same source the agent loop polls
+-- (`host.run_cancelled`, which is the run's own flag plus a child's) - never a second notion of
+-- "interrupted".
+function M.cancel_requested()
+  if type(host.run_cancelled) ~= "function" then return false end
+  local checked, raw = pcall(host.run_cancelled)
+  if not checked then return false end
+  local state = raw
+  if type(raw) == "string" then
+    local decoded_ok, decoded = pcall(json.decode, raw)
+    state = decoded_ok and decoded or nil
+  end
+  return type(state) == "table" and state.cancelled == true
+end
+
+-- Did this turn stop because the user cancelled it? The run names its own cancellation as an error
+-- string (`run_cancelled`, or `subagent_cancelled` for a child): `agent.lua` converts a provider call
+-- cut by a cancel into exactly that name, so the text is the complete signal and a provider fault is
+-- never mistaken for an interrupt.
+function M.cancelled_stop(value)
+  local text = tostring(value or "")
+  return text:find("run_cancelled", 1, true) ~= nil or text:find("subagent_cancelled", 1, true) ~= nil
+end
+
+-- A wake whose turn the user stopped. It is not a failure (the model did nothing wrong and should not
+-- be woken about it) and it is not retried: the row settles `cancelled` with no `due_at`, so a cadence
+-- cannot turn one interrupt into a failed turn per interval, and a cancelled wake never schedules
+-- another wake. The model reschedules on resume if it still wants the cadence.
+function M.settle_interrupted(row, opts)
+  M.setup()
+  if type(row) ~= "table" or row.id == nil then return { error = "wake_id_required", effect = "none" } end
+  local now = clock(opts)
+  local changed = exec([[UPDATE self_wakes SET status='cancelled', due_at=NULL, probe_result='', event_json='',
+    updated_at=?, last_error=? WHERE id=? AND status='dispatching']],
+    { now, "cancelled by the user before the turn finished", tostring(row.id) })
+  return { status = "cancelled", changed = (tonumber(changed.changes) or 0) == 1 }
 end
 
 -- ---- notes ------------------------------------------------------------------------------
@@ -857,16 +992,32 @@ end
 function M.claim_due(session_id, owner, opts)
   M.setup()
   session_id = tostring(session_id or "")
+  owner = tostring(owner or "master")
+  -- A cancelled run takes its schedule with it (13/11). The claim is the one place a turn can start from
+  -- the schedule, on every surface: the CLI's idle prompt, the node's tick and a served run all reach
+  -- it. Two facts stop it - a session already held (an interrupt seen earlier), and a cancel requested
+  -- on this thread right now (the CLI's own interrupt flag stays set until the next line is submitted,
+  -- and a wake claimed under it started a turn that failed `run_cancelled` at once, re-armed for its
+  -- cadence, and did it again: that is the recursive-error loop the operator reported).
+  if M.paused(session_id) then return nil end
+  if M.cancel_requested() then
+    local held = M.pause(session_id, owner, "run_cancelled", opts)
+    -- Once per interrupt, not once per claim: an idle CLI asks again every couple of seconds.
+    if held and held.ok and not held.already then
+      pcall(host.log, "self-loop: schedule paused with the cancelled run (session " .. session_id .. ")")
+    end
+    return nil
+  end
   local seam_answer = routed("claim_due", {
     session_id = session_id,
-    owner = tostring(owner or "master"),
+    owner = owner,
     boot = boot_id(opts),
     now = clock(opts),
   })
   if seam_answer then return seam_answer.claimed end
   local now = clock(opts)
   local row = query([[SELECT * FROM self_wakes WHERE session_id=? AND owner=? AND status='pending'
-    AND due_at IS NOT NULL AND due_at<=? ORDER BY due_at LIMIT 1]], { session_id, tostring(owner or "master"), now })[1]
+    AND due_at IS NOT NULL AND due_at<=? ORDER BY due_at LIMIT 1]], { session_id, owner, now })[1]
   if not row then return nil end
   local boot = (opts and opts.boot) or (json.decode(host.runtime_info()) or {}).boot_id or ""
   local changed = exec([[UPDATE self_wakes SET status='dispatching', boot=?, attempts=attempts+1, updated_at=?
@@ -930,6 +1081,13 @@ function M.run_wake(args)
     M.finish(row, false, "authority or session changed before the wake", { now = now })
     return { error = "self_wake_forbidden" }
   end
+  -- The hold landed between the claim and this callback: give the row back exactly as it was, so it
+  -- fires once on resume instead of spending a turn under an interrupt.
+  if M.paused(row.session_id) then
+    exec([[UPDATE self_wakes SET status='pending', due_at=?, updated_at=?
+      WHERE id=? AND status='dispatching']], { row.due_at, now, row.id })
+    return { paused = true, wake_id = row.id }
+  end
   local content, trace = M.turn_content(row, { now = now })
   -- `SelfWake`: a due wake is claimed and about to spend a turn. The operator may veto it (a quiet
   -- hours rule, a budget that is spent) and say when to try again; a veto without a reschedule is a
@@ -962,6 +1120,14 @@ function M.run_wake(args)
   bot.self_wake = trace
   local ok, result = pcall(bot.run, bot, content)
   bot.self_wake = nil
+  -- A turn the user stopped is not retried and never schedules another wake (13/11): a repeating wake
+  -- that was mid-turn settles `cancelled` instead of re-arming for its cadence, because the model never
+  -- got its turn and a cadence fired under a cancelled run is the loop that produced a failed turn and
+  -- an error line per interval.
+  if not ok and M.cancelled_stop(result) then
+    local settled = M.settle_interrupted(row, { now = clock({}) })
+    return { cancelled = true, wake_id = row.id, status = settled.status }
+  end
   M.finish(row, ok, result, { now = clock({}) })
   return ok and { ok = true } or { error = tostring(result) }
 end
@@ -975,7 +1141,15 @@ function M.tick(opts)
   M.setup()
   opts = opts or {}
   local now = clock(opts)
-  local out = { dispatched = 0, skipped = 0, deferred = 0, unknown = 0, reconciled = 0 }
+  local out = { dispatched = 0, skipped = 0, deferred = 0, unknown = 0, reconciled = 0, paused = 0 }
+  -- The sessions whose schedule is held (an interrupted run), read once per tick: a held session's rows
+  -- are left exactly as they are - pending, in their order - so the tick dispatches none of them and a
+  -- resume fires each one once. Read here rather than filtered in SQL on both paths, because the
+  -- component's plan is a fixed shape and the node's half of the tick owns the dispatch decision.
+  local held = {}
+  for _, row in ipairs(query("SELECT session_id FROM self_wake_pauses", {})) do
+    held[tostring(row.session_id)] = true
+  end
   -- The state machine's half (which rows are due, what a probe decided, who won the claim, what the
   -- scheduler said) is the component's; the node's half (running the probe, dispatching the turn) is
   -- this loop's, on both paths.
@@ -986,7 +1160,11 @@ function M.tick(opts)
       local probe_fn = opts.probe or M.run_probe
       for _, row in ipairs(plan.due or {}) do
         local skip = false
-        if tostring(row.probe or "") ~= "" then
+        if held[tostring(row.session_id or "")] then
+          out.paused = out.paused + 1
+          skip = true
+        end
+        if not skip and tostring(row.probe or "") ~= "" then
           local role = (dep("users").find(row.owner) or {}).role or "master"
           local value, why
           local called, a, b = pcall(probe_fn, row.probe, row, { role = role, probe_timeout_ms = opts.probe_timeout_ms })
@@ -1045,7 +1223,11 @@ function M.tick(opts)
   local probe_fn = opts.probe or M.run_probe
   for _, row in ipairs(rows) do
     local skip = false
-    if tostring(row.probe or "") ~= "" then
+    if held[tostring(row.session_id or "")] then
+      out.paused = out.paused + 1
+      skip = true
+    end
+    if not skip and tostring(row.probe or "") ~= "" then
       local role = (dep("users").find(row.owner) or {}).role or "master"
       local value, why = probe_fn(row.probe, row, { role = role, probe_timeout_ms = opts.probe_timeout_ms })
       if why then
@@ -1152,10 +1334,23 @@ end
 
 -- A real user message in a session. The agent calls this after it records a user turn, never for a
 -- self-wake turn, so `on:["message"]` means a human (or a sentinel/user-facing turn), not the loop.
+--
+-- It is also the resume (13/11): a message is the user coming back to the session, so a schedule an
+-- interrupt held runs again from here - once per wake, and an overdue one fires once at its next claim.
+-- The resume happens before the message is published, so an `on:["message"]` wake that was held wakes
+-- for this message like it would have any other.
 function M.on_user_message(session_id, opts)
+  session_id = tostring(session_id or "")
+  local resumed
+  local resumed_ok, answer = pcall(M.resume, session_id, opts and opts.user_id, opts)
+  if resumed_ok then resumed = answer end
   local ok, result = pcall(M.publish, "session.message",
-    { session_id = tostring(session_id or ""), id = (opts and opts.message_id) or nil }, opts)
+    { session_id = session_id, id = (opts and opts.message_id) or nil }, opts)
   if not ok then return { error = "publish_failed" } end
+  if type(result) == "table" then
+    result.resumed = (resumed and resumed.resumed) and true or false
+    if result.resumed then result.resumed_wakes = resumed.pending end
+  end
   return result
 end
 
