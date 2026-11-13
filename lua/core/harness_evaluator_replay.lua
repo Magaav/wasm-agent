@@ -152,7 +152,10 @@ end
 -- environment (`$TMPDIR` is used only as mktemp's parent, by mktemp), and cleanup only removes a
 -- directory that carries the marker.
 local function make_scratch(label)
-  local made = exec("mktemp -d \"${TMPDIR:-/tmp}/wa-eval-" .. core.safe_id(label):sub(1, 24) .. "-XXXXXX\"", "", 120)
+  -- The one root points TMPDIR inside the node home (<home>/.wasm-agent/tmp); a replay's scratch must
+  -- live OUTSIDE the node home, so such a TMPDIR falls back to /tmp as mktemp's parent.
+  local home = paths.home() or ""
+  local made = exec("p=\"${TMPDIR:-/tmp}\"; h=" .. shquote(home) .. "; if [ -n \"$h\" ]; then case \"$p\" in \"$h\"|\"$h\"/*) p=/tmp;; esac; fi; mktemp -d \"$p/wa-eval-" .. core.safe_id(label):sub(1, 24) .. "-XXXXXX\"", "", 120)
   -- `%s+$`, not a `[\r\n]` class: a Lua *pattern* has no backslash escapes, so the class spelled with
   -- backslashes matched nothing and a trailing newline rode into every path this function built.
   local path = (made.stdout or ""):gsub("%s+$", "")
