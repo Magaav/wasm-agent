@@ -1384,7 +1384,11 @@ function wa_session(session_id, session)
         return { pending = 0, event_pending = 0, wakes = {}, error = ok and listed.error or 'wakes_unavailable' }
       end
       return { pending = listed.pending, event_pending = listed.event_pending,
-        next_at = listed.next_at, wakes = listed.wakes }
+        next_at = listed.next_at, wakes = listed.wakes,
+        -- An interrupted run holds the schedule (`docs/SELF-LOOP.md`): the window's wake line says
+        -- `2 wakes paused` instead of a next time, and this is the fact it reads. The wakes themselves
+        -- are unchanged - held, not cancelled - and a resume re-arms them.
+        paused = listed.paused and true or false, paused_reason = listed.paused_reason }
     end)(),
     orchestration = record.objective~='subagent' and users.is_master(effective_role(user)) and
       dofile('lua/core/orchestration_mode.lua').read(session_id) or nil,
