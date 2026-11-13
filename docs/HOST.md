@@ -351,6 +351,16 @@ queued warm-up cannot make an answer stale because every call admits content fir
 that raced the background worker reported a fresh graph as unready. `queued`/`active`/`dirty_hint`
 report the warm-up separately, and `failure` reports a background build that failed.
 
+`graph_snapshot({db, copy, wait_ms})` takes one consistent copy of a graph store for the pre-update
+backup, under the same cross-process lock (`.<db>.lock`) every component call holds for the whole guest
+run. It is not a general database copy: the component writes its store from inside WASI, where SQLite
+has no POSIX locks, so a reader that does not hold that lock can meet a page mid-commit and answer
+`database disk image is malformed` about a store that is sound (measured 13/11: 3,653 such reads in 70 s
+against a live index). `wait_ms` (default 15000) bounds the wait for a running index; past it the answer
+is `graph_store_busy`, and a damaged store answers `graph_store_damaged`. The copy is written beside
+itself and renamed only after `PRAGMA integrity_check`, so a failed attempt leaves nothing that looks
+like a snapshot. See `docs/RELEASE-UPDATE.md`, "The graph store is copied by its owner's lock".
+
 `graph_overview(opts)` returns bounded architectural orientation: languages,
 modules, entry points, routes, capabilities, dependency hotspots, boundaries,
 and edge-resolution coverage. Every section reports exact `total`, `returned`,
@@ -762,6 +772,7 @@ graph_path           read-only
 graph_query          read-only
 graph_search         read-only
 graph_source         read-only
+graph_snapshot       writes files
 graph_sources        read-only
 graph_stats          read-only
 graph_status         read-only

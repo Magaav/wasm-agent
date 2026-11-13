@@ -63,6 +63,13 @@
 #   bash scripts/test-component-pins.sh --artifact <dir>      # the bytes are exactly these
 #   bash scripts/test-component-pins.sh --self-test           # prove both directions on fixtures
 #
+# WA_PIN_CHECK_RELEASE_BASE (default https://github.com) is a URL base only - the slug, tag and file name
+# still come from the lock - so `--self-test` can prove the fetch and its cache under parallel rows with
+# no network. The fetch writes a temporary file of its own (`mktemp` in the cache directory) and renames
+# it into place only after the pin matches, and `judge_bytes` judges a private copy of what it verified:
+# two rows of one gate share that cache, and a fixed temporary name made them hash each other's
+# half-written download (measured 13/11: `is not the pinned build` for correct bytes).
+#
 # Exit: 0 every pin agrees with the source and the bytes; 1 a pin disagrees (the line says which and
 # the command that fixes it); 2 this checkout cannot be judged (no components.lock, no git).
 set -uo pipefail
@@ -90,7 +97,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 say() { printf 'component-pins: %s\n' "$*"; }
-fail() { printf 'FAIL component-pins: %s\n' "$*" >&2; exit 1; }
+# The private directory this run judges a copy in (`judge_bytes`), removed whichever way the check ends:
+# a failure path exits from deep inside the comparisons and a leaked 8.5 MB copy per failed row is
+# exactly the kind of scratch `wa clean` would have to reclaim.
+PIN_SCRATCH=''
+fail() { [ -n "$PIN_SCRATCH" ] && rm -rf "$PIN_SCRATCH"; printf 'FAIL component-pins: %s\n' "$*" >&2; exit 1; }
 
 sha_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'
              else shasum -a 256 < "$1" | awk '{print $1}'; fi; }
@@ -316,19 +327,35 @@ has_artifact() {
   tag="$( (cd "$repo" && . scripts/lib/deploy-components.sh && wa_component_release_tag .) 2>/dev/null)" || return 1
   slug="$( (cd "$repo" && . scripts/lib/deploy-components.sh && wa_component_release_repo .) 2>/dev/null)" || return 1
   [ -n "$sha" ] && [ -n "$tag" ] || return 1
-  url="https://github.com/$slug/releases/download/$tag/$name.wasm"
+  # The release host is a knob so the fetch and its race can be proved on a machine with no network
+  # (`--self-test`, "parallel rows fetch the same bytes"). It is a URL base only: the slug, the tag and
+  # the file name are still the lock's.
+  url="${WA_PIN_CHECK_RELEASE_BASE:-https://github.com}/$slug/releases/download/$tag/$name.wasm"
   dest="$gitpath"
   mkdir -p "$dest" 2>/dev/null || return 1
-  say "$name: no local copy of the pinned bytes; fetching $url"
-  if ! curl -sSfL --max-time 60 -o "$dest/.$name.wasm.tmp" "$url" 2>/dev/null; then
-    rm -f "$dest/.$name.wasm.tmp"; return 1
+  # ONE TEMPORARY FILE PER PROCESS, RENAMED ATOMICALLY. Two rows of the same gate judge the same repo
+  # from the same git dir, so a fixed `.wa-whatsapp.wasm.tmp` was a shared file: one row's `curl` was
+  # writing it while the other row hashed it, and the second row's `mv` then failed or moved a partial
+  # download over the cache. Measured 13/11 on the landing gate: `wa-whatsapp` reported as "not the
+  # pinned build" while the bytes in the cache were the pinned bytes. `mktemp` in the destination
+  # directory (same filesystem, so `mv` is a rename) and the verification happens on the file THIS
+  # process wrote, before anyone else can see it under the published name.
+  local tmp
+  tmp="$(mktemp "$dest/.$name.wasm.XXXXXX" 2>/dev/null)" || return 1
+  # ON STDERR, because `has_artifact` is read by its CALLER'S command substitution: a line printed on
+  # stdout here became part of the "path" the caller got back ("component-pins: wa-whatsapp: no local
+  # copy...\n/…/wa-whatsapp.wasm"), so a fetch that worked could never be judged - measured on this
+  # fixture: `cannot be copied for judging`. Only the path belongs on stdout.
+  say "$name: no local copy of the pinned bytes; fetching $url" >&2
+  if ! curl -sSfL --max-time 60 -o "$tmp" "$url" 2>/dev/null; then
+    rm -f "$tmp"; return 1
   fi
-  if [ "$(sha_file "$dest/.$name.wasm.tmp")" != "$want_sha" ]; then
-    rm -f "$dest/.$name.wasm.tmp"
-    say "$name: the release $tag does not hold the pinned bytes (sha256 mismatch) - that is a publication gap, not a pass"
+  if [ "$(sha_file "$tmp")" != "$want_sha" ]; then
+    rm -f "$tmp"
+    say "$name: the release $tag does not hold the pinned bytes (sha256 mismatch) - that is a publication gap, not a pass" >&2
     return 1
   fi
-  mv "$dest/.$name.wasm.tmp" "$dest/$name.wasm"
+  mv -f "$tmp" "$dest/$name.wasm" || { rm -f "$tmp"; return 1; }
   printf '%s\n' "$dest/$name.wasm"
   return 0
 }
@@ -346,11 +373,24 @@ judge_bytes() {
     printf 'SKIP wa-whatsapp-pin: %s\n' "$reason"
     return 0
   fi
-  [ "$(sha_file "$wasm")" = "$sha" ] || fail "$wasm is not the pinned build (pin $sha)"
+  # ONE HASH, ONE FILE, AND THE FILE THAT IS JUDGED IS THE FILE THAT WAS VERIFIED.
+  #
+  # `$wasm` can be a cache several parallel rows share (`<git-dir>/wa-pinned-components`), and another
+  # row may rename a fresh copy over it at any moment - so the sha, the size and the `contains` scans
+  # below were three reads of a path somebody else could change between them. Measured 13/11 on the
+  # landing gate: `sha256` matched and the next read saw a different file, so the row failed for a
+  # component whose bytes were correct. The verified file is copied into this run's own directory and
+  # every judgement below reads that copy, which nothing else can touch.
+  PIN_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/wa-pin-bytes-XXXXXX")" || fail "mktemp failed: cannot prepare a private copy to judge"
+  local verified="$wasm"
+  wasm="$PIN_SCRATCH/$(basename "$verified")"
+  cp -f "$verified" "$wasm" 2>/dev/null || fail "$verified cannot be copied for judging (it vanished or is unreadable)"
+  [ "$(sha_file "$wasm")" = "$sha" ] || fail "$verified is not the pinned build (pin $sha)"
   if [ "$bytes" != "-" ]; then
-    [ "$(bytes_in "$wasm")" = "$bytes" ] || fail "$wasm is $(bytes_in "$wasm") bytes, components.lock pins $bytes"
+    local got; got="$(bytes_in "$wasm")"
+    [ "$got" = "$bytes" ] || fail "$verified is $got bytes, components.lock pins $bytes"
   fi
-  say "pinned bytes: $wasm ($bytes bytes, sha256 ${sha:0:12}…)"
+  say "pinned bytes: $verified ($bytes bytes, sha256 ${sha:0:12}…), judged from a private copy"
 
   local ops
   if ! ops="$(seam_ops "$root")"; then
@@ -373,6 +413,7 @@ judge_bytes() {
   contains "$wasm" 'op must be' || fail "the pinned bytes carry no 'op must be' refusal: they are not a build of a component that validates ops"
   contains "$wasm" 'contacts_v2' && fail "the pinned bytes contain 'contacts_v2', which only a test names: this is not a release build"
   say "the pinned bytes answer all $count ops the seam defines: $(printf '%s\n' "$ops" | awk '{printf "%s%s", (NR > 1 ? ", " : ""), $3}')"
+  rm -rf "$PIN_SCRATCH"; PIN_SCRATCH=''
   return 0
 }
 
@@ -448,6 +489,85 @@ Components-Unchanged: fixture-comp"
   d="$work/uncommitted"; fixture "$d"
   printf 'pub fn a() -> u32 { 4 }\n' > "$d/rust/components/fixture-comp/src/lib.rs"
   expect "an uncommitted component change is judged too" 1 "$d"
+
+  # ---- the race: parallel rows judging the same pinned bytes from one cache ---------------------
+  #
+  # WHAT HAPPENED (13/11, the landing gate). Every row of a gate judges the same checkout, so
+  # `has_artifact` fetches into the same `<git-dir>/wa-pinned-components/wa-whatsapp.wasm` and
+  # `judge_bytes` re-hashes that shared path. The fetch wrote a fixed `.wa-whatsapp.wasm.tmp`, so one
+  # row was writing it while another hashed it, and the loser reported `is not the pinned build` about
+  # bytes that were the pinned bytes. This fixture is that shape on a `file://` release: eight rows,
+  # one cache, one pin, and every one of them must pass. It fails on the fixed-temp-name code and it
+  # cannot pass by luck on this one, because each row verifies the file it wrote itself and judges a
+  # copy nobody else can rename.
+  local race="$work/race"
+  mkdir -p "$race/rust/wa-whatsapp-index/src" "$race/scripts/lib" "$race/components-pinned-src"
+  cp -f "$ROOT/scripts/lib/deploy-components.sh" "$race/scripts/lib/deploy-components.sh"
+  cat > "$race/rust/wa-whatsapp-index/src/lib.rs" <<'SEAM'
+pub const ALL: [Op; 2] = [
+    Op::Query,
+    Op::Contacts,
+];
+pub fn as_str(self) -> &'static str {
+    match self {
+        Op::Query => "query",
+        Op::Contacts => "contacts",
+    }
+}
+pub fn tool(self) -> &'static str {
+    match self {
+        Op::Query => "whatsapp_query",
+        Op::Contacts => "whatsapp_contacts",
+    }
+}
+SEAM
+  # The bytes, as the artifact half judges them: every op's tool name and op name, the refusal wording,
+  # and not the unknown op a test-only build carries.
+  printf 'whatsapp_query query whatsapp_contacts contacts op must be\n' > "$race/components-pinned-src/wa-whatsapp.wasm"
+  local race_sha race_bytes lock_sha tag
+  race_sha="$(sha_file "$race/components-pinned-src/wa-whatsapp.wasm")"
+  race_bytes="$(bytes_in "$race/components-pinned-src/wa-whatsapp.wasm")"
+  printf 'wa-whatsapp %s %s\n' "$race_sha" "$race_bytes" > "$race/components.lock"
+  git -C "$race" init -q -b main
+  git -C "$race" -c user.email=t@example -c user.name=t add -A
+  git -C "$race" -c user.email=t@example -c user.name=t commit -q -m "fixture: a pinned component with a seam"
+  lock_sha="$(sha_file "$race/components.lock")"; tag="components-${lock_sha:0:12}"
+  mkdir -p "$work/release/fixture/repo/releases/download/$tag" "$work/home"
+  cp -f "$race/components-pinned-src/wa-whatsapp.wasm" "$work/release/fixture/repo/releases/download/$tag/wa-whatsapp.wasm"
+  rm -rf "$race/components-pinned-src"
+  race_run() { # <n> -> exit code, output in $work/race-$n.log
+    HOME="$work/home" WA_COMPONENTS_DIR="$work/home/components" WA_COMPONENTS_CACHE="$work/home/cache" \
+      WA_COMPONENT_RELEASE_REPO=fixture/repo WA_PIN_CHECK_RELEASE_BASE="file://$work/release" \
+      bash "$0" --repo "$race" --bytes-only > "$work/race-$1.log" 2>&1
+  }
+  local n rc_race=0
+  for n in 1 2 3 4 5 6 7 8; do race_run "$n" & done
+  for n in 1 2 3 4 5 6 7 8; do wait %$n 2>/dev/null; done
+  for n in 1 2 3 4 5 6 7 8; do
+    if ! grep -q "^component-pins: the pinned bytes answer all 2 ops the seam defines" "$work/race-$n.log"; then
+      rc_race=1
+      printf 'self-test FAILED: parallel row %s did not judge the pinned bytes\n' "$n" >&2
+      sed 's/^/    /' "$work/race-$n.log" >&2
+    fi
+  done
+  fixtures=$((fixtures + 1))
+  if [ "$rc_race" = 0 ] && [ "$(sha_file "$race/.git/wa-pinned-components/wa-whatsapp.wasm")" = "$race_sha" ]; then
+    say "self-test ok: eight rows fetched and judged one cache at once, all eight passed (8 rows, 1 pin)"
+  else
+    rc=1; printf 'self-test FAILED: the cache after eight parallel rows is not the pinned build\n' >&2
+  fi
+  # The negative control: the same fixture with a pin that is not these bytes still fails, so the race
+  # case above cannot pass by accepting anything.
+  printf 'wa-whatsapp 0000000000000000000000000000000000000000000000000000000000000000 %s\n' "$race_bytes" > "$race/components.lock"
+  git -C "$race" -c user.email=t@example -c user.name=t commit -q -am "fixture: a pin that is not these bytes"
+  fixtures=$((fixtures + 1))
+  if HOME="$work/home" WA_COMPONENTS_DIR="$work/home/components" WA_COMPONENTS_CACHE="$work/home/cache" \
+       WA_COMPONENT_RELEASE_REPO=fixture/repo WA_PIN_CHECK_RELEASE_BASE="file://$work/release" \
+       bash "$0" --repo "$race" --bytes-only --require > "$work/race-negative.log" 2>&1; then
+    rc=1; printf 'self-test FAILED: a pin that is not these bytes passed\n' >&2
+  else
+    say "self-test ok: a pin that is not these bytes still fails"
+  fi
 
   rm -rf "$work"
   [ "$rc" = 0 ] && say "self-test ok: $fixtures fixtures, exactly the waroute shape fails"

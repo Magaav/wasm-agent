@@ -209,6 +209,38 @@ read was treated as corruption. The backup now separates the two questions (`lua
 The whole snapshot is still per store, not one simultaneous multi-store point in time, and a refused
 backup deploys nothing (`backup_failed` in the verdict, `nothing was queued`).
 
+### The graph store is copied by its owner's lock (`host.graph_snapshot`, 13/11)
+
+The retry above treats a symptom, and on 13/11 the symptom was still there: `graph.db` was corrupting
+again on `wa-desktop` - 77 quarantine copies in `graph.db.d/` on node `work`, 30 on `openclaw`, and
+`wa update` refusing with the same `backup_failed` line. The graph component writes its store from
+inside WASI, where SQLite has no POSIX byte-range locks and the journal mode is `delete`, not WAL
+whatever `wa_sqlite::tune` asks for; in `delete` mode a commit is a page overwrite that excludes
+nobody, and this backup's native connection read the file mid-commit. Measured on `wa-desktop`: 3,653
+`database disk image is malformed` reads and torn copies in 70 s of concurrent index + backup, on a
+store that passed `PRAGMA integrity_check` immediately afterwards. The store was never damaged - the
+reading side lost a race - so each false verdict moved a sound store aside and rebuilt it.
+
+So a graph store is no longer attached at all. `lua/core/backup.lua` asks `host.graph_snapshot`, and
+`rust/wa-capabilities/src/graph.rs` takes the same cross-process lock (`.<db>.lock`) that every graph
+component call holds for the whole guest run before it reads, through SQLite's online backup API with
+one `PRAGMA integrity_check` on the copy (`rust/wa-snapshot`). The guest only exists inside such a
+call, so the read cannot meet a page mid-commit.
+
+- **A store that cannot be copied right now is skipped, with one named line.** `backup_skipped:
+  <store>: <reason> (derived: the code graph is rebuilt from its sources, so this backup steps over
+  it)`. The reason is the capability's own - `graph_store_busy` when an index held the lock past
+  `wait_ms`, `graph_store_damaged` when the store really answers like a broken image, and
+  `graph_snapshot_failed` for anything else. A derived store never refuses a deploy; the ledger and
+  every store that cannot be rebuilt keep the rule above, because a damaged ledger is exactly what a
+  rollback needs.
+- **The verdict names the skip.** `verdict.backup_skipped` lists `{source, reason}` and
+  `backup_skipped_message` says how many derived stores were stepped over; `backup_failed` is not set.
+- **One quarantine copy per store, not one per detection.** `quarantine_database` removes the copy it
+  is about to replace (its own store's siblings only, by name) before it renames the malformed store
+  aside, and logs one line with the reason. `scripts/reclaim-disk.mjs` still reclaims a directory an
+  older binary filled, keeping its newest copy, and `wa clean` prints the bytes it freed per category.
+
 Knobs, all optional: `WA_BACKUP_BUSY_TIMEOUT_MS` (15000), `WA_BACKUP_ATTEMPTS` (3),
 `WA_BACKUP_BACKOFF_MS` (250). `rust/wa-snapshot` is the same rule as a library, using SQLite's online
 backup API step by step, for the host path once a store is copied outside the Lua interpreter; its

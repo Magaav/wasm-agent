@@ -75,6 +75,31 @@ fast_binary_newer_than_tree() {
   [ -z "$newer" ]
 }
 
+# Is the tree dirty where the binary is built from? A binary stamped with HEAD is this tree's build only
+# while the tree IS HEAD: an uncommitted edit under `lua/` or `rust/` is a change to the very bytes the
+# binary embeds, and a gate that grades a commit while running a binary from other bytes is the one
+# failure the stamp exists to prevent.
+#
+# MEASURED 13/11 on `wa-desktop`: HEAD was 3f538a90 and three files were edited but not committed; the
+# banner said `fresh: built from this tree` and the binary was the one built BEFORE those edits. The run
+# was green against code the branch did not contain, and it took a rebuild by hand to see it. A dirty
+# tree therefore cannot be `fresh`: the plan rebuilds (cargo is incremental in this tree's own build
+# directory, seconds) and the binary it builds is the tree, edits included.
+fast_binary_tree_dirty() {
+  local changed
+  # Sources only: a build directory is untracked here by definition (the one build root lives under
+  # `build/target`, and a tree built before it may still carry `rust/target`), and counting the binary
+  # this check is about as "an uncommitted change" made every tree dirty - measured on the fixture
+  # below: `?? rust/target/release/wa`.
+  changed="$(git -C "$ROOT" status --porcelain --untracked-files=all -- lua rust \
+    ':(exclude)rust/target' ':(exclude)build' ':(exclude)*/target' 2>/dev/null)" || return 1
+  changed="$(printf '%s\n' "$changed" | sed '/^$/d')"
+  [ -n "$changed" ] || return 1
+  FAST_BIN_DIRTY_COUNT="$(printf '%s\n' "$changed" | wc -l | tr -d '[:space:]')"
+  FAST_BIN_DIRTY_FIRST="$(printf '%s\n' "$changed" | head -1 | cut -c1-80)"
+  return 0
+}
+
 # The prepared code-mode assets, if this checkout has them: the shipping build embeds them, so a build
 # this script makes must too, or the node it installs cannot run code mode at all.
 fast_binary_assets() {
@@ -142,7 +167,7 @@ fast_binary_target_dir() {
 #   FAST_BIN_ACTION     use | build | refuse | docker
 #   FAST_BIN_WHY        one clause for the banner
 fast_binary_plan() {
-  local head tree_commit installed candidate source
+  local head tree_commit installed candidate source dirty
   fast_binary_assets
   head=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo '')
   FAST_HEAD=${head:0:12}
@@ -180,16 +205,23 @@ fast_binary_plan() {
     case "$source" in
       explicit) FAST_BIN_VERDICT='explicit'
                 FAST_BIN_WHY="named by WA_BIN (build ${FAST_BIN_COMMIT:0:12})" ;;
-      *) if [ -n "$FAST_BIN_COMMIT" ] && [ -n "$head" ] && [ "$FAST_BIN_COMMIT" = "$head" ]; then
+      *) fast_binary_tree_dirty; dirty=$?
+         if [ -n "$FAST_BIN_COMMIT" ] && [ -n "$head" ] && [ "$FAST_BIN_COMMIT" = "$head" ] && [ "$dirty" = 1 ]; then
            FAST_BIN_VERDICT='fresh'
            FAST_BIN_WHY="built from this tree"
-         elif [ -z "$FAST_BIN_COMMIT" ] && [ "$source" = tree ] && fast_binary_newer_than_tree "$candidate"; then
+         elif [ -n "$FAST_BIN_COMMIT" ] && [ -n "$head" ] && [ "$FAST_BIN_COMMIT" = "$head" ]; then
+           # The stamp matches, the bytes are not shown to: uncommitted work under lua/ or rust/.
+           FAST_BIN_VERDICT='stale'
+           FAST_BIN_WHY="build ${FAST_BIN_COMMIT:0:12} is this commit, but the tree has ${FAST_BIN_DIRTY_COUNT:-some} uncommitted change(s) under lua/ or rust/ (${FAST_BIN_DIRTY_FIRST:-?}) and the binary does not carry them"
+         elif [ -z "$FAST_BIN_COMMIT" ] && [ "$source" = tree ] && [ "$dirty" = 1 ] && fast_binary_newer_than_tree "$candidate"; then
            FAST_BIN_VERDICT='fresh'
            FAST_BIN_WHY="unstamped build, newer than every lua/ and rust/ source"
          else
            FAST_BIN_VERDICT='stale'
            if [ -n "$FAST_BIN_COMMIT" ]; then
              FAST_BIN_WHY="build ${FAST_BIN_COMMIT:0:12} is not this tree (${FAST_HEAD:-unknown})"
+           elif [ "$dirty" = 0 ]; then
+             FAST_BIN_WHY="unstamped build, and the tree has ${FAST_BIN_DIRTY_COUNT:-some} uncommitted change(s) under lua/ or rust/ (${FAST_BIN_DIRTY_FIRST:-?})"
            else
              FAST_BIN_WHY="unstamped build, older than the tree's lua/ or rust/ sources"
            fi
@@ -304,5 +336,11 @@ fast_binary_refuse() {
   printf 'fast: the rows must run THIS tree, so the run stops here instead of grading another commit.\n' >&2
   printf 'fast: build it with: WA_BUILD_SOURCE_COMMIT=$(git -C %s rev-parse HEAD) WA_CODEMODE_BUILD_ASSETS=<prepared assets> cargo build --release --offline --manifest-path rust/Cargo.toml\n' "$ROOT" >&2
   printf 'fast: or name a binary you mean with WA_BIN=<path>, or run WA_FAST_ALLOW_STALE_BINARY=1 to use the stale one (said out loud, every row).\n' >&2
-  return 2
+  # EXIT, do not return. Both call sites in `scripts/fast.sh` are `if ...; then fast_binary_refuse; fi`,
+  # so a return let the run continue with no binary at all and grade every row as `exit 127: No such file
+  # or directory` - a hole in the runner reported as hundreds of failures of the tree (measured 13/11:
+  # 196 lua rows, 196 such failures). 2 is the code this refusal has always had and the contract in
+  # `scripts/test-fast-binary.mjs` asserts ("a tree verdict, not the machine"); exit 3 is the
+  # fork-exhaustion case, where the machine could not run the rows at all.
+  exit 2
 }

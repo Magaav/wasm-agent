@@ -743,6 +743,17 @@ function M.run(options)
       return verdict
     end
     verdict.backup = snapshot.dir
+    -- A store the backup stepped over is named in the verdict, never hidden and never a refusal: the
+    -- code graph is derived (rebuilt from the tree), so a graph store that could not be copied - because
+    -- an index held its lock, or because it is damaged - must not block a deploy (`lua/core/backup.lua`).
+    if type(snapshot.skipped) == "table" and #snapshot.skipped > 0 then
+      verdict.backup_skipped = {}
+      for _, skip in ipairs(snapshot.skipped) do
+        verdict.backup_skipped[#verdict.backup_skipped + 1] = { source = skip.source, reason = skip.reason }
+      end
+      verdict.backup_skipped_message = "the pre-update backup stepped over " .. #snapshot.skipped
+        .. " derived store(s); each is named with its reason, and nothing that cannot be rebuilt was skipped."
+    end
   end
 
   local reason = trim(options.reason or "")

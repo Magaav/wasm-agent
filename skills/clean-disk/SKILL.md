@@ -174,7 +174,8 @@ Rules for every row:
 - **`scripts/reclaim-disk.mjs` is the repository's automatic reclaim pass**, and since 11/11 it runs
   **active** from the `disk-reclaim` job (hourly) and the `disk-reclaim-live` job (the moment free space
   drops below 5 GB or 5 %). It removes four categories and nothing else: `*-pre-update` backups beyond the
-  newest 3 (plus any a pending rollback names), `graph.db.malformed-*` older than the newest stamp, the
+  newest 3 (plus any a pending rollback names), `graph.db.malformed-*` older than the newest stamp
+  (the indexer keeps exactly one per store since 13/11, so this row reclaims what an older binary left), the
   `session-scratch` of sessions that ended more than 24 h ago, and the `rust/target` of a managed
   worktree whose session ended. The never-touch list is enforced in one function at the only removal, so
   a wrong pattern shows up as "nothing removed", never as a store that is gone. For the plan:

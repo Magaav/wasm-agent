@@ -499,7 +499,10 @@ impl Scheduler {
                     state.reported = Some(error.clone());
                     drop(state);
                     let disk_note = match disk {Some(DiskAnswer::Enough(free)) => format!(" free_bytes={free} floor_bytes={floor}"), Some(DiskAnswer::Unmeasurable) => " free_bytes=unknown".to_string(), _ => String::new()};
-                    eprintln!("graph_db_quarantined root={} moved={} next=rebuild{disk_note}", entry.root.display(), names.join(","));
+                    // One line, with the reason: `moved` is one copy now, kept for evidence, and the
+                    // reason is what a human needs to tell a torn read from a damaged b-tree.
+                    eprintln!("graph_db_quarantined root={} moved={} reason={} next=rebuild{disk_note}",
+                        entry.root.display(), names.join(","), error.replace(char::is_whitespace, "_"));
                     self.enqueue(&entry);
                     return;
                 }
@@ -610,11 +613,11 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
     // 05/11: a pre-existing `<db>.lock` made every write answer `database is locked` for the whole
     // busy timeout). The kernel's file is therefore dot-prefixed, so it can never be mistaken for
     // the guest's own lock.
-    let lock = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!(".{file}.lock"))) {
-        Ok(file) => file,
+    let lock = match lock_store(&dir, &file, None) {
+        Ok(Some(handle)) => handle,
+        Ok(None) => return json!({"error": "graph_db_lock_failed: the store's lock was not released before the call"}),
         Err(error) => return json!({"error": format!("graph_db_unavailable: {error}")}),
     };
-    if let Err(error) = lock.lock() {return json!({"error": format!("graph_db_lock_failed: {error}")});}
     // A component run killed mid-transaction (its deadline, or a node stop) leaves the guest's
     // dot-file lock behind, and every later write then answers `database is locked` for the whole
     // busy timeout - a permanently broken graph. This lock proves no graph call on this database is
@@ -656,15 +659,68 @@ fn call(entry: &Arc<Entry>, tool: &str, mut arguments: Value, deadline: Instant)
     result
 }
 
+/// The store's cross-process lock, opened (and created if needed) and never locked here.
+///
+/// Its NAME is load-bearing: SQLite in the component locks through its dot-file style,
+/// `%s.lock` beside the database (measured 05/11: a pre-existing `<db>.lock` made every write
+/// answer `database is locked` for the whole busy timeout), so the kernel's file is dot-prefixed and
+/// can never be mistaken for the guest's own lock. Every opener of a graph store takes this file:
+/// every component call (`call`), the quarantine rename (`quarantine_database`) and the pre-update
+/// snapshot (`snapshot_store`, `host.graph_snapshot`). That is what makes the store single-writer.
+fn store_lock_file(dir: &Path, file: &str) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!(".{file}.lock")))
+}
+
+/// Hold the store's lock for as long as the returned handle lives.
+///
+/// `deadline` None waits until the lock is free (a call must not be dropped); `Some(deadline)` gives
+/// up at the deadline and answers `Ok(None)`, which is how a background reader stays bounded instead
+/// of parking behind a 900 s index.
+fn lock_store(dir: &Path, file: &str, deadline: Option<Instant>) -> std::io::Result<Option<std::fs::File>> {
+    let handle = store_lock_file(dir, file)?;
+    let Some(deadline) = deadline else {
+        // A call waits for as long as the call in front of it takes: that is what it did before this
+        // helper existed, and a poll loop here would only add wake-ups to a 900 s index.
+        handle.lock()?;
+        return Ok(Some(handle));
+    };
+    loop {
+        match handle.try_lock() {
+            Ok(()) => return Ok(Some(handle)),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+        if Instant::now() >= deadline {return Ok(None);}
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Move a malformed database - and SQLite's own siblings - aside under a timestamped name. It is
 /// derived state but still state: renamed, never deleted (skills/clean-disk rule 4). The rename runs
 /// under the same cross-process lock every graph call takes, so another node process sharing this
 /// database cannot keep writing into a file that is being moved.
+///
+/// ONE COPY PER STORE (13/11). Each detection used to leave its own copy, and a store that came back
+/// malformed after every rebuild left one copy per cycle: 77 files (~4 GB) in `graph.db.d/` on node
+/// `work` between 10/11 and 13/11, 30 more on `openclaw`. The copy that is about to be replaced is
+/// therefore removed first, by name and only for THIS store's own siblings, so the directory holds
+/// the newest quarantine and nothing else. `scripts/reclaim-disk.mjs` still reclaims a directory an
+/// older binary filled, keeping its newest copy.
 fn quarantine_database(entry: &Arc<Entry>, stamp: &str) -> std::io::Result<Vec<PathBuf>> {
     let dir = entry.db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let file = entry.db.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| DB_FILE.to_string());
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!(".{file}.lock")))?;
-    lock.lock()?;
+    let lock = match lock_store(&dir, &file, None)? {
+        Some(handle) => handle,
+        None => return Err(std::io::Error::other("the store's lock was not released")),
+    };
+    let prefix = format!("{file}.malformed-");
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&prefix) {continue;}
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     let mut moved = Vec::new();
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let source = dir.join(format!("{file}{suffix}"));
@@ -674,6 +730,116 @@ fn quarantine_database(entry: &Arc<Entry>, stamp: &str) -> std::io::Result<Vec<P
     }
     let _ = lock.unlock();
     Ok(moved)
+}
+
+/// A snapshot of one graph store, taken under the store's own lock.
+#[derive(Debug)]
+struct StoreSnapshot {
+    source: PathBuf,
+    copy: PathBuf,
+    check: String,
+    attempts: u32,
+}
+
+/// Snapshot `db` into `copy` (which must not exist) while holding the store's cross-process lock.
+///
+/// WHY THE LOCK AND NOT JUST THE ONLINE BACKUP API. The graph store has two openers with two
+/// different locking realities, and that is the corruption this exists to stop (measured 13/11, and
+/// reproduced on `wa-desktop` the same day: 3,653 `database disk image is malformed` reads and torn
+/// copies in 70 s while a component indexed):
+///
+///  * the `graph` WASI component writes the store from inside wasmtime, where SQLite's OS layer has
+///    no POSIX byte-range locks, so its pages are overwritten without excluding anybody. The journal
+///    mode is `delete` there too, whatever `wa_sqlite::tune` asks for (`PRAGMA journal_mode=WAL`
+///    cannot take effect in the guest), and in `delete` mode a commit IS a page overwrite;
+///  * the kernel's native SQLite reads the same file for the pre-update backup. It takes real locks,
+///    which the guest does not honour, so a `VACUUM INTO` or a hot-journal recovery ran against a
+///    store that was being written.
+///
+/// The store was therefore never damaged - it passed `PRAGMA integrity_check` immediately after - but
+/// whichever side lost the race reported `database disk image is malformed`. That verdict refused
+/// `wa update` (`backup_failed: .../graph.db.d/graph.db: ...`) and, when the component saw it, moved
+/// the store aside and rebuilt it: one `graph.db.malformed-*` per cycle, 77 of them on node `work`.
+///
+/// The lock every component call holds is the single writer, and the guest only exists inside such a
+/// call, so holding it here means no guest is running: the read cannot tear. `wait` bounds the wait,
+/// because an index may hold the lock for minutes and a backup that blocks a deploy is the other half
+/// of the same bug - past the deadline the answer is `graph_store_busy`, which the backup reports and
+/// steps over.
+fn snapshot_store(db: &Path, copy: &Path, wait: Duration) -> Result<StoreSnapshot, String> {
+    if db.as_os_str().is_empty() {return Err("graph_snapshot_failed: no store was named".into());}
+    let dir = db.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let file = db.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| DB_FILE.to_string());
+    if let Some(parent) = copy.parent() {std::fs::create_dir_all(parent)
+        .map_err(|error| format!("graph_snapshot_failed: the destination directory {} cannot be created: {error}", parent.display()))?;}
+    let deadline = Instant::now() + wait;
+    let _guard = lock_store(&dir, &file, Some(deadline))
+        .map_err(|error| format!("graph_snapshot_failed: the store's lock cannot be opened: {error}"))?
+        .ok_or_else(|| format!("graph_store_busy: a graph call on {} still holds the store after {} ms", db.display(), wait.as_millis()))?;
+    if !db.exists() {return Err(format!("graph_store_missing: {}", db.display()));}
+    // A copy the failed attempt before this one left behind is emptied first: `VACUUM INTO` refuses a
+    // destination that exists and is not empty ("output file already exists"), which is exactly the
+    // refusal that blocked `wa update` on both peers on 11/11.
+    if copy.exists() {let _ = std::fs::remove_file(copy);}
+    // Read-write, not read-only: a guest killed mid-transaction leaves a hot journal, and recovering
+    // it is a write. The store's lock is held, so no guest and no call exists to compete with it.
+    let source = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    source.busy_timeout(Duration::from_millis(wait.as_millis().min(5_000) as u64))
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        // ONE READ THROUGH SQLITE, never a byte copy: `VACUUM INTO` writes every committed page of the
+        // store - a rollback-journal commit included - into a new file, so what lands is a database.
+        match source.execute("VACUUM INTO ?1", [copy.to_string_lossy().as_ref()]) {
+            Ok(_) => break,
+            Err(error) => {
+                let text = error.to_string();
+                if attempt >= 2 || !contended(&text) {return Err(snapshot_failure(&text));}
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    // The copy must be a database before it can be a recovery source; a destination that a killed
+    // attempt left empty fails here rather than passing as a snapshot.
+    let check = copy_verdict(copy)?;
+    if check != "ok" {return Err(format!("graph_snapshot_failed: the copy did not pass integrity_check: {check}"));}
+    Ok(StoreSnapshot { source: db.to_path_buf(), copy: copy.to_path_buf(), check, attempts: attempt })
+}
+
+/// Why a snapshot could not be taken, in the three names the pre-update backup acts on.
+fn snapshot_failure(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("locked") || lower.contains("busy") {
+        return format!("graph_store_busy: {text}");
+    }
+    if lower.contains("malformed") || lower.contains("not a database") || lower.contains("corrupt") {
+        return format!("graph_store_damaged: {text}");
+    }
+    format!("graph_snapshot_failed: {text}")
+}
+
+/// Is this failure contention (worth one more read) rather than a verdict about the store?
+fn contended(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("locked") || lower.contains("busy")
+}
+
+/// `PRAGMA integrity_check` on one store, read-only: `"ok"` or SQLite's first complaint.
+fn copy_verdict(store: &Path) -> Result<String, String> {
+    let connection = rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut statement = connection.prepare("PRAGMA integrity_check")
+        .map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut rows = statement.query([]).map_err(|error| snapshot_failure(&error.to_string()))?;
+    let mut first: Option<String> = None;
+    while let Some(row) = rows.next().map_err(|error| snapshot_failure(&error.to_string()))? {
+        let text: String = row.get(0).map_err(|error| snapshot_failure(&error.to_string()))?;
+        if text == "ok" {return Ok(text);}
+        if first.is_none() {first = Some(text);}
+    }
+    Ok(first.unwrap_or_else(|| "unknown".to_string()))
 }
 
 /// A changeset may name files by absolute host path (native changesets do); inside the component
@@ -857,6 +1023,26 @@ pub extern "C-unwind" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
 /// Like navigation, audit captures a required revision and reads one pinned committed snapshot.
 pub extern "C-unwind" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
     reply(l, run(json_arg(l, 1), "patch_audit", &[]))
+}
+
+/// host.graph_snapshot(request_json) -> {ok, source, copy, check, attempts, pages} | {error}
+///
+/// `{"db": "<store>", "copy": "<new file>", "wait_ms": 15000}`. One consistent copy of a graph
+/// store, taken under the store's own lock so the WASI component cannot be writing it (see
+/// `snapshot_store`). `wait_ms` bounds how long the caller waits for a running index: a pre-update
+/// backup must report a busy store and step over it, never block the deploy. This is the read the
+/// pre-update backup uses; nothing else may snapshot a graph store.
+pub extern "C-unwind" fn graph_snapshot(l: *mut LuaState) -> std::ffi::c_int {
+    let request = json_arg(l, 1);
+    let outcome = (|| -> Result<Value, String> {
+        let db = opt_str(&request, "db").ok_or_else(|| "graph_snapshot_failed: db_names_no_store".to_string())?;
+        let copy = opt_str(&request, "copy").ok_or_else(|| "graph_snapshot_failed: copy_names_no_destination".to_string())?;
+        let wait = request.get("wait_ms").and_then(Value::as_u64).unwrap_or(15_000).clamp(1, 600_000);
+        let snapshot = snapshot_store(Path::new(&db), Path::new(&copy), Duration::from_millis(wait))?;
+        Ok(json!({"ok":true,"source":snapshot.source.to_string_lossy(),"copy":snapshot.copy.to_string_lossy(),
+            "check":snapshot.check,"attempts":snapshot.attempts,"locked":"graph_store"}))
+    })();
+    reply(l, outcome.unwrap_or_else(|error| json!({"error": error})))
 }
 
 /// `wa serve` keeps the configured root refreshed for the life of the node; `WA_GRAPH_WATCH=0`

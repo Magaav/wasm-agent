@@ -90,6 +90,71 @@ local rows = query("SELECT x FROM cp.t ORDER BY x")
 sql("DETACH DATABASE cp")
 ok(#rows == 3, "the copy of the WAL store holds every committed row", #rows)
 
+-- ---- 1b. the graph store is copied by its owner's lock, and a store that cannot be copied is skipped
+--
+-- The graph component writes its store from inside WASI, where SQLite has no POSIX locks (measured
+-- 13/11 on `wa-desktop`: 3,653 torn reads in 70 s of concurrent index + backup, on a store that
+-- passed `integrity_check` afterwards). So the backup never attaches it: it asks `host.graph_snapshot`,
+-- which takes the same cross-process lock every graph call holds. And when even that cannot copy the
+-- store, the store is SKIPPED with a named line - the graph is rebuilt from the tree, so it must never
+-- refuse a deploy. It runs before section 2, which seeds a `broken.db` that would make every later
+-- `run` refuse (the walk is sorted).
+
+ok(real_backup.is_graph_store(data .. "/graph.db.d/graph.db"), "the component's own store is recognised")
+ok(real_backup.is_graph_store(data .. "/graph.db.roots/ab12.db.d/graph.db"), "and a second root's cache")
+ok(real_backup.is_graph_store(data .. "/deploy-graph-check/graph.db"), "and the deploy check's, which names its file directly")
+ok(not real_backup.is_graph_store(config .. "/jobs.db"), "another store is not")
+
+local graph_dir = data .. "/graph.db.d"
+ok(host.write_file(graph_dir .. "/.keep", ""), "the component's directory exists")
+sql("ATTACH DATABASE ? AS g", { graph_dir .. "/graph.db" })
+sql("CREATE TABLE IF NOT EXISTS g.def(name TEXT)")
+sql("INSERT INTO g.def VALUES('index_snapshot_probe')")
+sql("DETACH DATABASE g")
+
+local snapshotted = real_backup.run("graph-live")
+ok(snapshotted.ok == true and #snapshotted.skipped == 0, "the graph store was snapshotted, not skipped")
+local graph_copy
+for _, store in ipairs(snapshotted.stores) do
+  if store.source == graph_dir .. "/graph.db" then graph_copy = store end
+end
+ok(graph_copy ~= nil, "the graph store is in the snapshot")
+ok(graph_copy and graph_copy.locked == "graph_store", "it was copied under the store's own lock, never attached")
+ok(graph_copy and graph_copy.check == "ok", "and the copy passes integrity_check")
+sql("ATTACH DATABASE ? AS gc", { graph_copy.copy })
+local defs = query("SELECT name FROM gc.def")
+sql("DETACH DATABASE gc")
+ok(#defs == 1 and defs[1].name == "index_snapshot_probe", "the copy holds the committed row")
+
+-- A graph store that cannot be copied at all: the deploy still proceeds, with one named line.
+host.write_file(graph_dir .. "/graph.db", string.rep("a torn page, not a database. ", 128))
+local damaged_graph = real_backup.run("graph-damaged")
+ok(damaged_graph.ok == true, "a graph store that cannot be copied does not refuse the backup")
+ok(#damaged_graph.skipped == 1, "it is recorded as skipped, one entry", #damaged_graph.skipped)
+local skip = damaged_graph.skipped[1] or {}
+ok(skip.source == graph_dir .. "/graph.db", "the skipped store is named, got: " .. tostring(skip.source))
+ok(tostring(skip.line):find("backup_skipped", 1, true) ~= nil, "the warning is a backup_skipped line, got: " .. tostring(skip.line))
+ok(tostring(skip.line):find("graph.db", 1, true) ~= nil, "and it names the store, got: " .. tostring(skip.line))
+ok(tostring(skip.line):find("derived", 1, true) ~= nil, "and says why it is safe to step over, got: " .. tostring(skip.line))
+ok(tostring(skip.reason) ~= "" and tostring(skip.reason) ~= "nil", "the reason is carried, got: " .. tostring(skip.reason))
+local newest_damaged = nil
+for _, entry in ipairs(json.decode(host.list_dir(config .. "/backups")).entries) do
+  if entry.kind == "dir" and (newest_damaged == nil or entry.name > newest_damaged) then newest_damaged = entry.name end
+end
+-- The bytes are the test: another store in the same run may legitimately produce a `<n>-graph.db`
+-- copy, so what must be absent is a copy of THIS store's content.
+local marker = "a torn page, not a database."
+local leaked_skip = false
+for _, entry in ipairs(json.decode(host.list_dir(config .. "/backups/" .. newest_damaged)).entries) do
+  if entry.kind == "file" then
+    local text = host.read_file(config .. "/backups/" .. newest_damaged .. "/" .. entry.name) or ""
+    if text:find(marker, 1, true) then leaked_skip = true end
+  end
+end
+ok(leaked_skip == false, "a skipped store publishes no copy of itself, not even a partial one")
+ok(host.path_kind(graph_dir .. "/graph.db") == "file", "and the store is left exactly where it was, for the next index to rebuild")
+
+
 -- ---- 2. a store that is really damaged is refused --------------------------------------------
 
 -- Garbage where a database should be: SQLite answers "file is not a database", and no retry can make
@@ -252,4 +317,5 @@ ok(#emptied == 1 and emptied[1]:find("ledger.db", 1, true) ~= nil,
   "the destination the failed attempt left was emptied first: " .. json.encode(emptied))
 
 host = real_host
+
 print("backup live ok (" .. checks .. " checks)")
