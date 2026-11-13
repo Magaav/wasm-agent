@@ -1396,6 +1396,10 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
     if !cfg.enabled {
         return false;
     }
+    // The one op list (`index::OPS`) and the seam's must be the same list: the `match` below is
+    // exhaustive, and this says the SET agrees as well, so a build that answers a stale list says so
+    // here instead of refusing a live caller's op as `bad_op`.
+    debug_assert_eq!(crate::index::OPS, seam::Op::ALL, "the worker and the seam disagree about the ops");
     let taken = match worker::take(seam::QUEUE.to_string(), QUERY_WORKER.to_string(), Some(QUERY_LEASE_MS)).await {
         Ok(worker::TakeOutcome::Taken(lease)) => {
             QUERY_NOTE.with(|note| *note.borrow_mut() = None);
@@ -1410,14 +1414,23 @@ async fn query_tick(cfg: &IndexConfig) -> bool {
     };
     let job = taken.job;
     let id = job.id;
-    let request = match seam::Request::decode(&job.payload).and_then(|request| request.validate()) {
+    let (op_text, validated) = match seam::Request::decode(&job.payload) {
+        Ok(request) => (request.op.clone(), request.validate()),
+        Err(refusal) => (String::new(), Err(refusal)),
+    };
+    let request = match validated {
         Ok(request) => request,
         Err(refusal) => {
-            // A payload this component cannot read is permanent: it is failed with its own word, never
-            // retried into the same wall.
-            say!("query: refused job={id} code={}", refusal.code);
-            if let Err(error) = worker::fail(seam::QUEUE.to_string(), id, QUERY_WORKER.to_string(), refusal.code.to_string()).await {
-                query_note(format!("fail refused: {error:?}"));
+            // A payload this component cannot read is PERMANENT: the same bytes refuse the same way for
+            // ever, so it is ANSWERED with its code (an answer settles the job; nothing is retried) and
+            // the host turns the code into the tool's own error (`whatsapp_<op>_<code>`). It used to
+            // `fail`, which spent the queue's attempts reaching the same wall: measured 13/11 on the
+            // account node, a component built before `contacts` existed refused the job `bad_op` twice,
+            // dead-lettered it, and the tool answered `whatsapp_contacts_failed state=dead` 20 s later.
+            say!("query: refused job={id} op={} code={}", one_line(&op_text), refusal.code);
+            let body = serde_json::to_vec(&seam::terminal_refusal(&op_text, &refusal)).unwrap_or_default();
+            if let Err(error) = worker::done(seam::QUEUE.to_string(), id, QUERY_WORKER.to_string(), body).await {
+                query_note(format!("refusal not settled for job={id}: {error:?}"));
             }
             return true;
         }

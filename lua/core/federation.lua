@@ -19,6 +19,36 @@
 local json = dofile('lua/vendor/json.lua')
 
 local M = { SCHEMA = 2, TTL = 600, RETRY = 60, PREFIX = 'peer_' }
+
+-- Is this name a spelling of the ONE WhatsApp surface (`lua/core/whatsapp.lua`)?
+--
+-- WhatsApp has one surface on every node - `mcp_whatsapp_<verb>`, answered by the account node - and
+-- no peer spelling of it (operator decision, 11/11; #118). A peer that still exports one (an older
+-- build, a registry row from before 11/11) must therefore never become a `peer_<node>__*` tool here:
+-- in session b393f280 the model found `peer_openclaw__mcp_whatsapp_native_inspect_chat_*`, spent its
+-- turns on a second route for the same question, and the one surface went unused. The predicate is
+-- `whatsapp.renamed`, which is the mapping the dispatch already refuses these names with, so the two
+-- cannot disagree about which spellings are the same question.
+-- `lua/core/whatsapp.lua`, loaded once: the predicate below runs per peer tool, and a `dofile` per
+-- name would re-read the whole surface for every name in a catalogue.
+local whatsapp_loaded
+local function whatsapp_module()
+  if whatsapp_loaded == nil then
+    local ok, module = pcall(dofile, 'lua/core/whatsapp.lua')
+    whatsapp_loaded = (ok and type(module) == 'table') and module or false
+  end
+  return whatsapp_loaded or nil
+end
+
+local function whatsapp_spelling(name)
+  if type(name) ~= 'string' or name == '' then return false end
+  local whatsapp = whatsapp_module()
+  if whatsapp == nil then return false end
+  if whatsapp.tool(name) then return true end
+  return whatsapp.renamed(name) ~= nil
+end
+M.whatsapp_spelling = whatsapp_spelling
+
 -- v2 carries `connectors` beside `tools`. A v1 row is not read as a v2 answer: an old cache would list a
 -- peer with tools and no registry, which is the "older build" case and must say so, not be guessed at.
 local CACHE_KEY = 'federation.catalog.v2'
@@ -54,8 +84,14 @@ function M.exported()
   local ok, schemas = pcall(mcp.schemas)
   for _, schema in ipairs(ok and schemas or {}) do
     local fn = schema['function']
-    tools[#tools + 1] = { name = fn.name, description = fn.description, parameters = fn.parameters,
-      effect = mcp.is_read(fn.name) and 'read' or 'write' }
+    -- The one WhatsApp surface is not exported (11/11). This is the second half of that decision: `mcp`
+    -- already refuses to publish a WhatsApp connector's tools here, and this refuses a name that got
+    -- into the catalogue another way, so no peer of this node can ever offer a `peer_<this>__*whatsapp*`
+    -- tool to a master.
+    if not whatsapp_spelling(fn.name) then
+      tools[#tools + 1] = { name = fn.name, description = fn.description, parameters = fn.parameters,
+        effect = mcp.is_read(fn.name) and 'read' or 'write' }
+    end
   end
   if next(M.operator_profiles()) and M.operator_script() then tools[#tools + 1] = M.operator_schema(M.operator_profiles()) end
   table.sort(tools, function(a, b) return a.name < b.name end)
@@ -409,10 +445,16 @@ function M.schemas()
   local out = {}
   for _, peer in pairs(M.catalog().peers or {}) do
     for _, tool in ipairs(peer.tools or {}) do
-      out[#out + 1] = { type = 'function', ['function'] = {
-        name = M.local_name(peer.name, tool.name),
-        description = '[on peer ' .. tostring(peer.name) .. '] ' .. tostring(tool.description or ''),
-        parameters = tool.parameters or { type = 'object', properties = {} } } }
+      -- A peer's WhatsApp spelling is not a tool here, whatever the peer says: its one surface is this
+      -- node's own `mcp_whatsapp_<verb>`, which asks the account node itself. Skipping it in the
+      -- catalogue is what keeps it out of the model's tool list, `searchTools` and `describeTool` at
+      -- once - a name that is not offered cannot be discovered.
+      if not whatsapp_spelling(tool.name) then
+        out[#out + 1] = { type = 'function', ['function'] = {
+          name = M.local_name(peer.name, tool.name),
+          description = '[on peer ' .. tostring(peer.name) .. '] ' .. tostring(tool.description or ''),
+          parameters = tool.parameters or { type = 'object', properties = {} } } }
+      end
     end
   end
   table.sort(out, function(a, b) return a['function'].name < b['function'].name end)
@@ -420,11 +462,14 @@ function M.schemas()
 end
 
 -- The peer and the tool a local name stands for, from the cache only.
+-- A WhatsApp spelling resolves to nothing: it is not a peer tool here (see `whatsapp_spelling`), and a
+-- cached name from before this rule must stop working at the same moment it stops being listed.
 function M.resolve(name)
   if type(name) ~= 'string' or name:sub(1, #M.PREFIX) ~= M.PREFIX then return nil end
+  if whatsapp_spelling(name) then return nil end
   for _, peer in pairs(load_cache().peers or {}) do
     for _, tool in ipairs(peer.tools or {}) do
-      if M.local_name(peer.name, tool.name) == name then return peer, tool end
+      if not whatsapp_spelling(tool.name) and M.local_name(peer.name, tool.name) == name then return peer, tool end
     end
   end
   return nil
@@ -436,6 +481,16 @@ function M.is_read(name)
 end
 
 function M.call(name, args)
+  if whatsapp_spelling(name) then
+    -- The one surface answers this question, on this node, routed to the account node: say so with the
+    -- name to use instead of "unknown tool", which sends the model looking for a route that is gone.
+    local whatsapp = dofile('lua/core/whatsapp.lua')
+    local use = whatsapp.renamed(name)
+    local answer = { ok = false, error = 'whatsapp_tool_renamed', effect = 'none',
+      note = tostring(name) .. ' is not a WhatsApp tool any more: WhatsApp has one surface, and a peer spelling of it is not one of them' }
+    if use then answer.use = use end
+    return answer
+  end
   local peer, tool = M.resolve(name)
   if not peer then return { ok = false, error = 'federation_tool_unknown', effect = 'none' } end
   local answer = dofile('lua/core/nodes.lua').remote_call(peer.node_id, 'federation',

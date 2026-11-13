@@ -235,6 +235,15 @@ fn enqueue(q: &wa_queue::Queue, verified: &seam::Verified) -> Result<u64, Value>
 }
 
 /// Wait (bounded) for the job to settle, then turn it into the tool's answer.
+///
+/// A settled REFUSAL is answered at once, by its own word. Measured 13/11 on the account node itself
+/// (`openclaw`, component built 01:10): a component that predates `contacts` refused the job `bad_op`,
+/// the queue retried it and dead-lettered it, and this function answered
+/// `whatsapp_contacts_failed state=dead` twenty seconds later - a permanent refusal dressed as a slow
+/// query. Both halves are fixed: the component now SETTLES a payload it can never read with
+/// [`seam::terminal_refusal`] (an answer, so no retry), and a dead job whose reason is permanent is
+/// answered here with the seam's code (`whatsapp_contacts_bad_op`), so an older component on a node
+/// still names its refusal instead of stalling.
 fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
     let deadline = Instant::now() + Duration::from_millis(wait_ms.max(1));
     loop {
@@ -248,12 +257,24 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
                 let Some(result) = job.result.as_deref() else {
                     return seam::refusal(op, "answer_missing", "the query settled without a result");
                 };
-                return serde_json::from_slice::<Value>(result).unwrap_or_else(|_| {
-                    seam::refusal(op, "answer_unreadable", "the stored answer is not readable")
-                });
+                let value: Value = match serde_json::from_slice::<Value>(result) {
+                    Ok(value) => value,
+                    Err(_) => return seam::refusal(op, "answer_unreadable", "the stored answer is not readable"),
+                };
+                if value.get("ok") == Some(&Value::Bool(false)) {
+                    if let Some(code) = value.get("code").and_then(Value::as_str) {
+                        return refused(op, code, value.get("detail").and_then(Value::as_str).unwrap_or_default(), value.get("op").and_then(Value::as_str));
+                    }
+                }
+                return value;
             }
             "dead" | "expired" => {
                 let reason = job.last_error.unwrap_or_else(|| job.state.as_str().to_string());
+                if let Some(code) = seam::permanent_code(&reason) {
+                    let mut answer = refused(op, code, &reason, None);
+                    answer["state"] = Value::String(seam::state_word(job.state.as_str()).to_string());
+                    return answer;
+                }
                 let mut answer = seam::refusal(op, "failed", reason.chars().take(160).collect::<String>());
                 answer["state"] = Value::String(seam::state_word(job.state.as_str()).to_string());
                 return answer;
@@ -268,6 +289,24 @@ fn settle(q: &wa_queue::Queue, op: seam::Op, id: u64, wait_ms: u64) -> Value {
         crate::serve::beat();
         std::thread::sleep(POLL);
     }
+}
+
+/// The tool's answer for a refusal the component made: its own error word, and - when the code is
+/// `bad_op`, the one disagreement a caller cannot fix by asking differently - the sentence that names
+/// the skew. A component built before an op existed is the case this was measured on: the tool knows
+/// the question, the installed component does not, and only an upgrade on that node can settle it.
+fn refused(op: seam::Op, code: &str, detail: &str, asked_op: Option<&str>) -> Value {
+    let mut answer = seam::refusal(op, code, detail);
+    if let Some(asked) = asked_op.filter(|asked| !asked.is_empty() && *asked != op.as_str()) {
+        answer["component_op"] = json!(asked);
+    }
+    if code == "bad_op" {
+        answer["state"] = json!("refused");
+        answer["note"] = json!(format!(
+            "the installed {COMPONENT} component does not know this op: it was built before it existed. Upgrade the component on the node that holds the account (`wa services upgrade {COMPONENT}`); nothing is retried."
+        ));
+    }
+    answer
 }
 
 // ---- download ----------------------------------------------------------------------------------

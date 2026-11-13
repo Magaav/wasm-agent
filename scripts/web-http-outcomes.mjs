@@ -40,7 +40,17 @@ export function createHTTPOutcomes({put,get,clock,publicURL}){
    const record={source_kind:'web-pending',monitor_url:url,original_url:pending?.original_url||reply.url,previous_pending_ref:pending?.ref||null,response_ref:evidence.response_ref,fetched_at:clock(),poll_after_at:at};
    return {ok:false,state:'pending',status:reply.status,pending_ref:put(record),poll_after_at:at,response_ref:evidence.response_ref,url:reply.url,note:'Read pending_ref later for one monitor GET. No original query replay, automatic polling or wake.'};
   }
-  if(reply.status!==200)return {ok:false,state:'failed',error:'web_http_'+reply.status,status:reply.status,url:reply.url,response_ref:evidence.response_ref};
+  if(reply.status!==200){
+   const out={ok:false,state:'failed',error:'web_http_'+reply.status,status:reply.status,url:reply.url,response_ref:evidence.response_ref};
+   // A transient refusal (408/425/429/5xx) is a wait, not a verdict, and the server often says how long:
+   // carry the wait it named so the answer can say when the same URL is readable again. The caller does
+   // not replay the request on its own (`lua/core/web.lua` adds the one sentence the model reads).
+   if([408,425,429].includes(reply.status)||reply.status>=500){
+    out.retryable=true;
+    try{const at=retryAt(reply);if(at)out.retry_after=at;}catch(e){}
+   }
+   return out;
+  }
   if(evidence.raw===undefined)return {ok:false,state:'failed',error:'web_response_not_utf8',status:reply.status,url:reply.url,response_ref:evidence.response_ref};
   return null;
  }

@@ -716,6 +716,15 @@ the producer writes nothing: `whatsapp_search_empty_query`, `whatsapp_read_bad_c
 is queued rather than refused, because resolving it is the index's answer (`whatsapp_read_chat_ambiguous`
 lists the candidates, `whatsapp_read_chat_not_found` says nobody carries that name).
 
+A refusal the COMPONENT makes is the tool's own error word, at once: a payload it can never read is
+settled `done` with `wa_whatsapp_index::terminal_refusal` (an answer, so nothing is retried into the
+same wall) and the host answers `whatsapp_<op>_<code>`; a job an **older** component dead-lettered with
+a permanent code answers the same way, with `state: "dead"` and a note naming the upgrade. Measured
+13/11 on the account node itself: a component built before `contacts` existed refused the job `bad_op`,
+the queue retried and dead-lettered it, and the tool answered `whatsapp_contacts_failed state=dead`
+twenty seconds later. The op set is now one list on both sides - `Op::ALL` here, `index::OPS` in the
+component, and a test on each side that they are equal, so an op cannot be half-added.
+
 **Backfill.** `whatsapp_backfill` is the one query that reaches out: `{chat?, count?}` asks the
 primary phone for messages **older** than the index holds, so a search covers the account's past and
 not only what arrived while the node was running. Naming no chat asks the chats the index already

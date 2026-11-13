@@ -325,8 +325,25 @@ function M.inventory()
   -- Saying so here is what makes the refusal actionable instead of looking like a connector that went away.
   local observed=row.probe_stale and ('enabled, but its tool list changed since the last probe ('..tostring(row.probe_stale.error or 'schema_changed')..') - re-probe to approve it')
    or (row.probe and (row.probe.ok and 'last probe passed' or 'last probe failed') or 'not verified')
-  servers[#servers+1]={id=id,name=row.definition.name or id,definition=row.definition,enabled=row.enabled==true,revision=row.revision,
-   probe=row.probe,probe_stale=row.probe_stale,last_call=row.last_call,session_mode='read-reuse/write-request',observed_status=observed}
+  local definition,probe,last_call=row.definition,row.probe,row.last_call
+  -- A RETIRED connector (the WhatsApp family, since 11/11) is not a failing one: its program was removed
+  -- from this tree, and what its last probe recorded - the command line with port 28787/8787, "stopped,
+  -- port held by space-serve", "down ~37h" - is not a fact about this node any more. The row keeps what
+  -- identifies it and what it used to offer, and drops the words that read as a live incident: measured
+  -- 13/11, session b393f280 spent ten rounds chasing them instead of using the one surface.
+  if M.whatsapp_family(id) then
+   local kept={}
+   for key,value in pairs(type(definition)=='table' and definition or {})do
+    if key~='program' and key~='args' and key~='env' then kept[key]=value end
+   end
+   kept.retired=true
+   definition=kept
+   probe=type(probe)=='table' and {ok=false,retired=true,tools=probe.tools} or nil
+   last_call=nil
+   observed='retired: the Go connector was removed on 11/11; WhatsApp is mcp_whatsapp_*'
+  end
+  servers[#servers+1]={id=id,name=row.definition.name or id,definition=definition,enabled=row.enabled==true,revision=row.revision,
+   probe=probe,probe_stale=row.probe_stale,last_call=last_call,session_mode='read-reuse/write-request',observed_status=observed}
  end
  table.sort(servers,function(a,b)return a.id<b.id end)
  return {ok=true,revision=store.revision,servers=servers,templates={},can_manage=true,

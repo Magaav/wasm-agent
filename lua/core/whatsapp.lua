@@ -63,7 +63,7 @@ local function bounded(minimum, maximum) return { type = 'integer', minimum = mi
 M.TOOLS = {
   {
     verb = 'contacts', capability = 'whatsapp_contacts', effect = 'read',
-    description = 'Which WhatsApp chat a name means. Answers from the names this node has actually seen on messages (push names, a group subject when one was fetched, and the chat\'s own digits), best match first, each candidate with its exact JID, whether it is a person or a group, how many messages, when it was last heard from and a confidence (exact, prefix, partial). One exact match also fills chat; several matches are listed as candidates and marked ambiguous, never resolved, because picking the wrong Laura is the mistake this exists to prevent. No query lists the chats the index knows, newest first.',
+    description = 'Which WhatsApp chat a name means. Answers from the names this node has actually seen on messages (push names, a group subject when one was fetched, and the chat\'s own digits), best match first, each candidate with its exact JID, whether it is a person or a group, how many messages, when it was last heard from and a confidence (exact, prefix, partial). One exact match also fills chat; several matches are listed as candidates and marked ambiguous, never resolved, because picking the wrong Laura is the mistake this exists to prevent. No query lists the chats the index knows, newest first. An older name for this question - whatsapp_contacts, mcp_whatsapp_native_lookup_self_<hash>, mcp_whatsapp_native_list_chats_<hash>, or peer_<node>__whatsapp_contacts - is refused with this one.',
     parameters = { type = 'object', properties = {
       q = { type = 'string', maxLength = 80, description = 'The name to resolve: a name, part of one, or a phone number. Omit it to list the chats the index knows.' },
       limit = bounded(1, 20),
@@ -89,7 +89,7 @@ M.TOOLS = {
   },
   {
     verb = 'read', capability = 'whatsapp_read', effect = 'read',
-    description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page.',
+    description = 'Read one WhatsApp chat, newest message first. chat is an exact JID (<digits>@s.whatsapp.net, <digits>@lid, <digits>@g.us) OR a name: a name is resolved through the same ranking the contacts tool uses, and an ambiguous name answers with the candidates instead of reading the wrong chat. The answer starts with a header - the chat name, whether it is a person or a group, a group\'s participant names, and the unread count when the index has one - then the messages: id, time three ways, from (name and jid), text (a snippet, with full for the whole stored body), reply_to (the quoted message), reactions folded on, media metadata, and edited/deleted flags. Pass next_before back as before to read the older page. An older name for this question - whatsapp_read, mcp_whatsapp_native_read_newest_<hash>, mcp_whatsapp_native_inspect_chat_<hash>, or peer_<node>__whatsapp_read - is refused with this one, so a name from an older build still finds the tool that answers it.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 80, description = 'An exact chat JID, or a name to resolve (ambiguous names answer with candidates).' },
       before = { type = 'string', maxLength = 128, description = 'The next_before cursor from the previous page.' },
@@ -210,6 +210,19 @@ function M.renamed(name)
   return 'mcp_whatsapp_' .. mapped
 end
 
+--- Is this name a spelling of the ONE WhatsApp surface?
+---
+--- True for the exact `mcp_whatsapp_<verb>` names and for every spelling an older build answered - the
+-- bare `whatsapp_read`, the MCP-native `mcp_whatsapp_native_<name>_<hash8>`, and a peer-prefixed
+-- `peer_<node>__` spelling of either. The mapping is `M.renamed`, so "the same question under another
+-- name" has exactly one definition and the catalogue, the federation export and the refusal cannot
+-- disagree about it (`lua/core/federation.lua` keeps every one of them out of a peer's tool list).
+function M.surface(name)
+  if type(name) ~= 'string' or name == '' then return false end
+  if M.tool(name) then return true end
+  return M.renamed(name) ~= nil
+end
+
 --- The schemas the model is offered, in catalogue shape (`tools.catalog`).
 --
 -- A hidden verb (today only `send_status`, the compatibility alias) is callable and is not offered: no
@@ -319,6 +332,59 @@ local function absent_answer(answer, owner)
   return refusal
 end
 
+--- The refusal a node without the account gives when ROUTING cannot answer: one word, one sentence,
+-- and never a queue.
+---
+-- 13/11, session b393f280 on node `work`: `mcp_whatsapp_contacts` and `mcp_whatsapp_read` were asked
+-- on a node that runs no `wa-whatsapp` component, the local capability answered `..._slow` with
+-- `state:"queued"` (a durable job on THIS node's queue, where nothing can ever settle it), and the
+-- model read the same job id three times in 30 s. A node that cannot answer must not write a job at
+-- all (`docs/WHATSAPP-OPERABILITY.md`): the honest answer names the node that holds the account and
+-- says that this one queued nothing.
+local function unreachable_answer(owner, detail, extra)
+  local where = owner and ('the WhatsApp account lives on ' .. owner .. ', which did not answer')
+    or ('no node in this fleet says it runs ' .. M.COMPONENT
+      .. ' (set WASM_AGENT_WHATSAPP_OWNER on this node, or enable the component where the account is)')
+  local refusal = {
+    ok = false, error = 'whatsapp_account_unreachable', effect = 'none',
+    component = M.COMPONENT, where = 'this node', note = where,
+  }
+  if owner then refusal.account_lives_on = owner end
+  if type(extra) == 'table' then
+    -- The local job that was NOT written / NOT kept: named so a reader can see it was discarded rather
+    -- than left to be settled by nobody. It is never a handle: no worker here can settle it.
+    if extra.id ~= nil then refusal.discarded_job = extra.id end
+    if extra.state ~= nil and refusal.queue_state == nil then refusal.queue_state = extra.state end
+  end
+  if detail ~= nil then refusal.detail = tostring(detail):sub(1, 200) end
+  return refusal
+end
+M.unreachable_answer = unreachable_answer
+
+--- The node that must answer this call: a name, or nil when this node may answer it itself.
+---
+--- The decision is made BEFORE any local capability call, from facts about the fleet - the deploy's
+-- declaration (`WASM_AGENT_WHATSAPP_OWNER`), then this node's own registry - and never from what the
+-- local capability happens to answer. That order is the whole fix: a capability that enqueues a local
+-- job (because it cannot tell it has no worker, or because its registry still says `running`) can no
+-- longer turn a read into an endless `queued` loop, because a node that does not hold the account is
+-- never asked locally in the first place.
+---
+--- nil is the local case: this node holds the account (its component is running), or the deploy named
+-- THIS node, in which case the local capability answers what is wrong with it by name.
+function M.route(ctx)
+  local declared = host.getenv('WASM_AGENT_WHATSAPP_OWNER')
+  declared = type(declared) == 'string' and (declared:gsub('%s', '')) or ''
+  local mine = M.holds_account()
+  if declared ~= '' then
+    local self_name = M.self_name()
+    if declared == self_name then return nil end
+    return declared
+  end
+  if mine then return nil end
+  return M.owner(ctx and ctx.owner_catalog or nil)
+end
+
 --- One capability call of the account surface, decoded and never routed: routing is the caller's step.
 function M.invoke(tool, args)
   local capability = host[tool.capability]
@@ -374,7 +440,11 @@ end
 -- settling jobs while this sleeps (a job in `leased` is still the worker's, never ours). Across nodes
 -- it is a series of short `mcp_whatsapp_send_status` calls, each far under the relay's ~45 s call
 -- limit, with backoff from 0.5 s to 5 s - never one long call that a relay deadline could cut.
-M.WAIT = { default_s = 60, max_s = 300, margin_s = 2, first_s = 0.5, cap_s = 5 }
+M.WAIT = { default_s = 60, max_s = 300, margin_s = 2, first_s = 0.5, cap_s = 5,
+  -- How long a routed READ stays on one call while the ACCOUNT NODE's own queue finishes it. A read
+  -- that answered would have come back at once; this only covers the owner being busy, and the answer
+  -- at the end of it is the owner's own id (the same call reads the same job), never a local queue.
+  read_s = 20 }
 local FAILED_STATES = { failed = true, dead = true, expired = true }
 
 local function clock_s() return tonumber(host.now()) or 0 end
@@ -399,6 +469,65 @@ function M.wait_budget(requested, ctx)
     if left < wait_s then wait_s = left end
   end
   return wait_s
+end
+
+--- A routed READ: ask the account node, and answer within one bounded wait.
+---
+--- Reads follow the same route sends do (operator decision, 11/11; the read half measured missing on
+-- 13/11). The answer is the owner's, unchanged, plus `served_by`/`asked_owner` - a refusal it makes
+-- travels as it was, because it is the owner's decision. What the loop adds is only this: the owner's
+-- OWN queue may legitimately be busy, and its `..._slow` answer names a job that the same call reads
+-- again (the request is the dedupe key, so re-asking scans nothing twice). So a slow owner is re-asked
+-- inside `M.WAIT.read_s`, and when that budget ends the model gets the owner's own answer with the id
+-- and the one call that collects it - never a retry loop, and never a local job.
+---
+--- `ctx.remote_call`, `ctx.owner_catalog` and `ctx.whatsapp_wait.sleep` are the doors a test drives it
+-- through; a real caller passes none of them.
+function M.routed(owner, tool, args, ctx)
+  local call = ctx and ctx.remote_call or nil
+  local doors = type(ctx) == 'table' and type(ctx.whatsapp_wait) == 'table' and ctx.whatsapp_wait or {}
+  local sleep = doors.sleep or function(seconds)
+    if type(host.sleep) ~= 'function' then return false end
+    return (pcall(host.sleep, math.max(0, math.floor(seconds * 1000))))
+  end
+  local budget = M.WAIT.read_s
+  local deadline = type(ctx) == 'table' and tonumber(ctx.codemode_deadline) or nil
+  if deadline then
+    local left = deadline - clock_s() - M.WAIT.margin_s
+    if left < budget then budget = math.max(0, left) end
+  end
+  local started, pause, asked = clock_s(), M.WAIT.first_s, 0
+  local answer
+  while true do
+    asked = asked + 1
+    answer = M.forward(owner, tool.name, args, call)
+    if type(answer) ~= 'table' then return unreachable_answer(owner) end
+    if answer.error == 'whatsapp_owner_unreachable' then
+      -- The owner did not answer the call at all: that is a refusal, not a job to keep waiting on.
+      return unreachable_answer(owner, answer.detail)
+    end
+    local slow = type(answer.error) == 'string' and answer.error:find('_slow$') ~= nil
+    if not slow then break end
+    local left = budget - (clock_s() - started)
+    if left <= 0 then break end
+    local slept = sleep(math.min(pause, left))
+    if slept == false then break end
+    pause = math.min(pause * 2, M.WAIT.cap_s)
+  end
+  answer.asked_owner = owner
+  answer.served_by = answer.served_by or owner
+  if type(answer.error) == 'string' and answer.error:find('_slow$') then
+    -- The account node's own queue is busy: its id is the handle, and the same arguments are the same
+    -- job, so one more call reads it instead of scanning again. Not an error, and not a local queue.
+    answer.ok = true
+    answer.state = 'pending'
+    answer.waited_s = waited_since(started)
+    answer.reads = asked
+    answer.resume = tool.name .. ' with the same arguments (the same job: no second scan)'
+    answer.note = 'the account node has not finished this read yet; ask the same call again - it reads '
+      .. 'the same job on ' .. owner .. ', and nothing is queued on this node'
+  end
+  return answer
 end
 
 --- Did the run ask us to stop? Stop, steer and cancellation are one answer: stop waiting now.
@@ -747,18 +876,46 @@ function M.call(name, args, ctx)
   -- same step, and the hidden alias is that resume with no wait (operator decision, 11/11).
   if tool.verb == 'send' then return M.send(args, ctx) end
   if tool.verb == 'send_status' then return M.status(args, ctx) end
+  -- Every verb, read or effect, is the account node's question to answer, and WHICH node that is comes
+  -- from the fleet, not from what this node's capability happens to answer (13/11): a read asked here
+  -- used to enqueue a durable job on a node with no worker, and the model read the same queued id until
+  -- it gave up (session b393f280). The decision is therefore taken first, and a node that does not hold
+  -- the account never asks itself at all.
+  local owner = M.route(ctx)
+  if owner ~= nil then return M.routed(owner, tool, args, ctx) end
   local decoded = M.invoke(tool, args)
-  if decoded.error ~= 'whatsapp_component_absent' then return decoded end
-  -- Every verb, read or effect, is the account node's question to answer: the effect happens where the
-  -- worker is, under the owner's own guards, and the answer that comes back keeps its shape plus
-  -- `served_by` (a refusal from the owner travels unchanged).
-  local owner, refusal = route_owner(decoded, ctx)
-  if not owner then return refusal end
-  local routed = M.forward(owner, tool.name, args, ctx and ctx.remote_call or nil)
-  -- Say who answered, and that this node asked them: an answer served by another node is still this
-  -- tool's answer, and the caller should not have to guess why it took a hop.
-  if type(routed) == 'table' then routed.asked_owner = owner end
-  return routed
+  if decoded.error == 'whatsapp_component_absent' then
+    -- This node runs no component. Its own refusal already carries the two facts a caller needs (which
+    -- component, and whether anybody was told to serve it), so the fleet is asked once and the question
+    -- takes a hop when a holder is known; when none is, that refusal travels - and it is NOT a queue:
+    -- nothing was written.
+    local found, refusal = route_owner(decoded, ctx)
+    if not found then return refusal end
+    return M.routed(found, tool, args, ctx)
+  end
+  if type(decoded.error) == 'string' and decoded.error:find('_slow$') and not M.holds_account() then
+    -- The one case left: the capability queued a local job on a node that runs no component (a stale
+    -- registry, a component that died between the check and the call). When the fleet names the account
+    -- node, that job is durable and unsettleable here, so it is never the answer: route the same
+    -- question, and say which local job was discarded instead of leaving it for nobody. When the fleet
+    -- names nobody, this process may simply not be the serving node (a CLI or a `WA_SCRIPT` run has no
+    -- registry of its own), so the local answer stands - it names its job, and the same call reads it.
+    local found = M.owner(ctx and ctx.owner_catalog or nil)
+    if found ~= nil and found ~= M.self_name() then
+      local routed = M.routed(found, tool, args, ctx)
+      if type(routed) == 'table' and decoded.id ~= nil then routed.discarded_job = decoded.id end
+      return routed
+    end
+    -- Nobody in this fleet says it holds the account, so there is nowhere to route to - and this
+    -- process may not even be the serving node. The local answer stands (it names its job and the same
+    -- call reads it), and it says the one thing the model still needs: if this is not the account node,
+    -- nothing here will settle that job, so do not sit on it.
+    decoded.note = tostring(decoded.note or '') .. ' no node in this fleet says it runs ' .. M.COMPONENT
+      .. ': if this is not the node that holds the account, nothing here settles that job (set '
+      .. 'WASM_AGENT_WHATSAPP_OWNER on this node, or enable the component where the account is)'
+    return decoded
+  end
+  return decoded
 end
 
 return M
