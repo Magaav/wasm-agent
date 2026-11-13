@@ -512,7 +512,13 @@ else
   # wa-model-router is the routing-policy modules (`wit/model/router.wit`, docs/MODEL-GATEWAY.md) and
   # wa-fleetview the fleet-view record contract (docs/FLEET-OPS.md); both are leaves with one dependency,
   # so their tests are seconds and there is no reason to leave them out.
-  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview; do
+  # wa-keystore is the crate every other vault row depends on and the one whose decisions are invisible
+  # from above it: which protection wraps the root key, what a wrapped-root file is read as, and what a
+  # kernel-keyring refusal means. Its tests are seconds (a leaf with ring/chacha20/argon2), and until now
+  # they ran nowhere in the fast path - which is how two defects in it reached a landing (13/11: the key
+  # quota leak behind `keystore_keyring_unavailable`, and a wrapped root read with the wrong cipher behind
+  # `sealed_blob_version_unknown`).
+  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview wa-keystore; do
     if [ "$all_rust" = 1 ] || printf '%s\n' "$changed" | grep -q "^rust/$crate/"; then crates="$crates $crate"; fi
   done
   printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh"

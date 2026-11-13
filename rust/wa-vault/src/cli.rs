@@ -300,6 +300,14 @@ fn open_keystore(options: &Flags) -> Result<(Arc<wa_keystore::Keystore>, PathBuf
     let mut keystore = wa_keystore::Keystore::open(&wa_keystore::Options::from_env(&dir))
         .map_err(|error| error.reason().to_string())?;
     keystore.ensure_root().map_err(|error| error.reason().to_string())?;
+    // ONE line, once per command, and only when the protection that was taken is not the one this host
+    // would have preferred: `keystore_keyring_refused:edquot, using the passphrase file` when the uid's
+    // kernel-keyring quota is spent (the machine state that failed three vault rows inside the fast path,
+    // 13/11), or `keystore_protection_from_file:passphrase, …` when the root file on disk decided instead
+    // of the environment. A downgrade an operator cannot see is a downgrade nobody can fix.
+    if let Some(note) = keystore.note() {
+        eprintln!("vault: {note}");
+    }
     Ok((Arc::new(keystore), dir))
 }
 
