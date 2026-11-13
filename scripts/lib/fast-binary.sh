@@ -238,16 +238,25 @@ fast_binary_banner() {
 fast_binary_build() {
   local assets=${FAST_CODEMODE_ASSETS:-} log
   command -v cargo >/dev/null 2>&1 || { FAST_BIN_WHY="$FAST_BIN_WHY; cargo is not on PATH"; return 1; }
+  local log island_target
+  # THE ISLAND IS THE TARGET, and it has to be said here or the build and the probe disagree: measured
+  # 13/11 in a worktree, cargo built into `rust/target` while this function then looked for the binary in
+  # the island, so a build that SUCCEEDED was reported as "the binary it just built cannot report its
+  # identity" and every row went unrun. `fast_binary_target_dir` is the one expression (docs/ONEROOT.md).
+  island_target="$(fast_binary_target_dir)"
+  mkdir -p "$island_target" 2>/dev/null || true
   log=$(mktemp "${TMPDIR:-/tmp}/wa-fast-build-XXXXXX" 2>/dev/null) || log=/dev/null
-  echo "fast: building this tree's binary (cargo build --release --offline)${assets:+ with code-mode assets}"
+  echo "fast: building this tree's binary (cargo build --release --offline, target $island_target)${assets:+ with code-mode assets}"
   (
     cd "$ROOT" || exit 1
     if [ -n "$assets" ]; then
+      CARGO_TARGET_DIR="$island_target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_BUILD_ASSETS="$assets" \
         cargo build --release --offline --manifest-path rust/Cargo.toml
     else
+      CARGO_TARGET_DIR="$island_target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_ALLOW_EMPTY=1 \
