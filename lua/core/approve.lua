@@ -486,6 +486,16 @@ function M.act(io, ctx, action, handle, text)
   return draft
 end
 
+--- Draw a stack of pages: the balloon when the writer has a screen, and the same pages as text when it
+--- does not (the CLI's `wa approve`, a pipe, a script). One call site for every page this file shows,
+--- so a surface cannot grow a page the other cannot render.
+local function show(io, pages)
+  if type(io.show) == 'function' then return io.show(pages) end
+  local say = io.say or print
+  say(balloon().text(pages, balloon().width()))
+  return { action = 'printed' }
+end
+
 --- What one settled draft says to the operator, in one line.
 function M.decision_line(draft)
   local state = tostring(draft.state or '')
@@ -526,7 +536,7 @@ function M.review(io, ctx)
     local pages = {}
     for index, draft in ipairs(rows) do pages[index] = M.page(draft, index, #rows) end
     M.publish(pages)
-    local result = io.show(pages)
+    local result = show(io, pages)
     if type(result) ~= 'table' or result.action ~= 'run' or not result.line then
       local left = #rows
       io.say(string.format('  %d draft%s still waiting - /approve list shows them, /approve review decides them',
@@ -565,7 +575,7 @@ function M.run(line, io, ctx)
       'gates     ' .. M.rule_line(policy),
       'waiting   ' .. tostring(waiting) .. ' draft' .. (tonumber(waiting) == 1 and '' or 's'),
     }
-    io.show(balloon().paged('Approve', lines, { per = 12, nowrap = true }))
+    show(io, balloon().paged('Approve', lines, { per = 12, nowrap = true }))
     return { ok = true, policy = policy, waiting = waiting }
   end
 
@@ -581,7 +591,7 @@ function M.run(line, io, ctx)
         tostring(draft.chat or ''), tostring(draft.text or ''):gsub('\n', ' '))
     end
     if #lines == 0 then lines[1] = 'no drafts: nothing is waiting for a decision' end
-    io.show(balloon().paged('Drafts', lines, { per = 12, nowrap = true }))
+    show(io, balloon().paged('Drafts', lines, { per = 12, nowrap = true }))
     return answer
   end
 

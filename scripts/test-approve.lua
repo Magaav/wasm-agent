@@ -372,4 +372,13 @@ local page_text = table.concat(io.shown[1][1].lines, "\n")
 ok(page_text:find("approval is OFF", 1, true) ~= nil, "which starts with the switch: " .. page_text)
 ok(page_text:find("off: every send goes out as written", 1, true) ~= nil, "and says what off means")
 
+-- ---- the CLI's writer has no screen: the same pages come out as text ------------------------------
+local said = {}
+local cli = { say = function(text) said[#said + 1] = tostring(text) end }
+local ran = approve.run("approve", cli, ctx)   -- exactly what `wa approve` passes
+ok(type(ran) == "table" and ran.ok == true, "`wa approve` with no argument answers the status: " .. tostring(ran and ran.ok))
+local printed = table.concat(said, "\n")
+ok(printed:find("approval is", 1, true) ~= nil, "and prints it, because there is no balloon to draw in: " .. printed)
+ok(printed:find("gates", 1, true) ~= nil, "with the rule it applies")
+
 print(string.format("%d checks, %d skipped", checks, skipped))
