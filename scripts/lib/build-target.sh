@@ -151,6 +151,14 @@ wa_build_deletable() { # <path> <kind: island|buildcache|tree-target|child>
       case "$base" in target|target-*) : ;; *) return 1 ;; esac
       [ "$(basename "$(dirname "$path")")" = rust ] || return 1
       ;;
+    fast-components)
+      # The per-worktree component cache the fast path kept inside each worktree's git dir: one target
+      # dir per worktree, 635M each and 59 of them (37 GB) measured on this node on 13/11. Components are
+      # built into the one build root now, so these are pure garbage - and they are still cargo output,
+      # which is what makes them a candidate at all.
+      [ "$base" = target ] || return 1
+      [ "$(basename "$(dirname "$path")")" = wa-fast-components ] || return 1
+      ;;
     child)
       parent=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
       [ "$parent" = "$(cd "$(wa_build_target_root)" 2>/dev/null && pwd -P)" ] || return 1
@@ -173,7 +181,7 @@ wa_build_delete() { # <path> <kind>
   local path=$1 kind=$2 bytes age
   wa_build_deletable "$path" "$kind" || return 1
   case "$kind" in
-    island|buildcache|tree-target)
+    island|buildcache|tree-target|fast-components)
       age=$(( $(date +%s) - $(stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null || echo 0) ))
       if [ "$age" -lt "${WASM_AGENT_BUILD_GRACE:-600}" ]; then
         printf 'onebuild: leaving %s alone: written to %ss ago, so a build may be using it (swept after %ss, WASM_AGENT_BUILD_GRACE)\n' \
@@ -226,7 +234,7 @@ wa_build_known_trees() {
 # checkout of this repo, children of `<root>/build` that are not `target`, and `<root>/build-cache`.
 # Prints the bytes reclaimed on stdout.
 wa_build_sweep() { # [--quiet]
-  local quiet=${1:-} tree legacy total=0 count=0 bytes root home
+  local quiet=${1:-} tree legacy total=0 count=0 bytes root home common
   root=$(wa_build_root)
   # 1. islands an older layout wrote: children of <root>/build other than `target`.
   for legacy in "$root"/*; do
@@ -283,6 +291,17 @@ EOF
     bytes=$(wa_build_delete "$legacy" child) || continue
     total=$((total + bytes)); count=$((count + 1))
   done
+  # 5. the per-worktree component cache inside each worktree's git dir (`<git dir>/wa-fast-components/
+  #    target`, one per worktree, 635M each on this node on 13/11). Components build into the one build
+  #    root now, so every one of them is space nothing will ever write to again.
+  common=$(git -C "${WA_BUILD_THIS_TREE:-$PWD}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [ -n "$common" ]; then
+    for legacy in "$common"/wa-fast-components/target "$common"/worktrees/*/wa-fast-components/target; do
+      [ -e "$legacy" ] || [ -L "$legacy" ] || continue
+      bytes=$(wa_build_delete "$legacy" fast-components) || continue
+      total=$((total + bytes)); count=$((count + 1))
+    done
+  fi
   if [ "$count" -gt 0 ] && [ "$quiet" != --quiet ]; then
     printf 'onebuild: reclaimed %s from %d build dir(s) no script owns any more - one build root owns build space from now on: %s\n' \
       "$(wa_build_human "$total")" "$count" "$(wa_build_target_root)" >&2
@@ -383,7 +402,10 @@ wa_build_run() {
     esac
     printf 'onebuild: CARGO_TARGET_DIR was named by the caller: %s (the one build root is %s)\n' "$target" "$(wa_build_target_root)" >&2
   else
-    export CARGO_TARGET_DIR="$target"
+    # NOT `export`: this function runs in the caller's shell, and a leaked CARGO_TARGET_DIR is inherited by
+    # every later child of that shell - a row of `scripts/fast.sh` then believes the caller named a build
+    # dir and resolves the fast path against this run's instead of its own fixture (measured on this
+    # branch: the `fast-binary` check failed exactly there). The assignment is prefixed onto the command.
     printf 'onebuild: target %s (cap %s, WASM_AGENT_BUILD_CAP_GB)\n' "$target" "$(wa_build_human "$(wa_build_cap_bytes)")" >&2
   fi
   if command -v flock >/dev/null 2>&1 && [ -d "$target" ]; then
@@ -391,7 +413,7 @@ wa_build_run() {
     (
       flock -w "${WA_BUILD_LOCK_WAIT:-1800}" 9 || printf 'onebuild: waited %ss for the build lock on %s and gave up (another build holds it; WA_BUILD_LOCK_WAIT raises the wait)\n' "$(awk -v s="${WA_BUILD_LOCK_WAIT:-1800}" 'BEGIN{printf "%d", s}')" "$(basename "$target")" >&2
       cd "$tree" 2>/dev/null || exit 1
-      "$@"
+      CARGO_TARGET_DIR="$target" "$@"
     ) 9>>"$target/.wa-build.lock"
     status=$?
     waited=$(( $(wa_build_now_ms) - started ))
@@ -402,7 +424,7 @@ wa_build_run() {
     fi
     return "$status"
   fi
-  ( cd "$tree" 2>/dev/null || exit 1; "$@" )
+  ( cd "$tree" 2>/dev/null || exit 1; CARGO_TARGET_DIR="$target" "$@" )
 }
 
 # `wa_build_forget <tree>` - delete this tree's build output (worktree removal).

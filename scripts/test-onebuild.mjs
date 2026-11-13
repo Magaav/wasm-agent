@@ -236,10 +236,30 @@ let TREE_A_MOVED = TREE_A;
   check('the live tree kept its own island', fs.existsSync(path.join(TARGET_ROOT, treeName(TREE_B))));
 }
 
+// ---- 4b. the per-worktree component cache inside a git dir is cargo output too ----------------------
+// Measured on wa-desktop 13/11: 59 `<git dir>/worktrees/<name>/wa-fast-components/target` dirs, 635M
+// each - one cargo target per worktree, kept inside the git dir where no `rust/target` sweep could see
+// it. The one build root owns components now, so they are garbage, and the sweep must find them.
+{
+  const repo = path.join(HOME, 'repo2');
+  fs.mkdirSync(path.join(repo, 'rust', 'wa-host-support'), {recursive: true});
+  fs.writeFileSync(path.join(repo, 'rust', 'wa-host-support', 'Cargo.toml'), '[package]\nname = "wa-host-support"\nversion = "0.1.0"\nedition = "2021"\n');
+  spawnSync('git', ['init', '-q', repo]);
+  const gitDir = path.join(repo, '.git', 'worktrees', 'a-lane', 'wa-fast-components', 'target');
+  fs.mkdirSync(gitDir, {recursive: true});
+  fs.writeFileSync(path.join(gitDir, 'blob'), Buffer.alloc(32 * 1024, 5));
+  spawnSync('touch', ['-d', '-1 hour', gitDir]);
+  spawnSync('touch', ['-d', '-1 hour', path.dirname(gitDir)]);
+  const r = bash(`. "${RESOLVER}"; wa_build_sweep`, {WA_BUILD_THIS_TREE: repo});
+  check('the per-worktree component cache in the git dir is swept', !fs.existsSync(gitDir), gitDir);
+  check('and the sweep counts it', /from [0-9]+ build dir\(s\) no script owns any more/.test(String(r.stderr)), String(r.stderr));
+  fs.rmSync(repo, {recursive: true, force: true});
+}
+
 // ---- 5. the cap evicts the oldest ------------------------------------------------------------------
 {
-  // Two build outputs with distinct ages, and a cap small enough that one of them has to go. The tree
-  // about to build is the newest, so it is the one that survives.
+  // Two build outputs with distinct, explicit ages, and a cap that leaves room for exactly one deletion -
+  // the oldest. The tree about to build (`keep`) is never a candidate, whatever its age.
   const keep = path.join(TARGET_ROOT, treeName(TREE_B));
   const oldest = path.join(TARGET_ROOT, 'deploy-0000000000aa');
   const middle = path.join(TARGET_ROOT, 'deploy-0000000000bb');
@@ -249,12 +269,17 @@ let TREE_A_MOVED = TREE_A;
   }
   spawnSync('touch', ['-d', '2020-01-01T00:00:00Z', oldest]);
   spawnSync('touch', ['-d', '2021-01-01T00:00:00Z', middle]);
-  // One byte under the total, so exactly one build output has to go - and it must be the oldest.
+  const mtime = (dir) => Number(String(spawnSync('stat', ['-c', '%Y', dir], {encoding: 'utf8'}).stdout || 0).trim());
+  check('the fixture ages are what the eviction order reads', mtime(oldest) < mtime(middle), `${mtime(oldest)} < ${mtime(middle)}`);
   const total = sizeOf(TARGET_ROOT);
-  const cap = Math.max(sizeOf(keep), total - 1);
+  const cap = total - sizeOf(oldest);
   const r = bash(`. "${RESOLVER}"; wa_build_cap_enforce "${keep}"`, {WASM_AGENT_BUILD_CAP_BYTES: String(cap)});
-  check('the cap run says what it deleted', /over the [0-9.]+[kMG]? build cap: deleted deploy-0000000000aa/.test(String(r.stderr)), String(r.stderr));
-  check('the oldest build output went first', !fs.existsSync(oldest) && fs.existsSync(middle));
+  check('the oldest build output went first', !fs.existsSync(oldest), String(r.stderr));
+  check('the cap only takes what it has to', fs.existsSync(middle), String(r.stderr));
+  check('the tree being built is never a candidate', fs.existsSync(keep), String(r.stderr));
+  check('the cap run says what it deleted',
+    /over the [0-9.]+[kMG]? build cap: deleted deploy-0000000000aa .* oldest build output/.test(String(r.stderr)),
+    `cap=${cap} ${String(r.stderr)}`);
   check('the cap reports the bytes it freed', /[0-9]+ build output\(s\) went/.test(String(r.stderr)) && Number(String(r.stdout).trim()) > 0,
     `stdout=${r.stdout} stderr=${r.stderr}`);
   fs.rmSync(middle, {recursive: true, force: true});
