@@ -453,11 +453,14 @@ function M.summary(session_id, opts)
   local seam_answer = routed("summary", { session_id = session_id, now = clock(opts) })
   if seam_answer then
     -- The hold is kernel state this file owns (a row beside the wakes, not in them), so it is read
-    -- here on both paths and added to the answer rather than asked of the component.
-    local held = M.paused(session_id)
-    seam_answer.paused = held ~= nil
-    seam_answer.paused_since = held and tonumber(held.paused_at) or nil
-    seam_answer.paused_reason = held and tostring(held.reason or "") or nil
+    -- here on both paths and added to the answer rather than asked of the component. A refusal keeps
+    -- the component's own shape: only a report gains the two fields.
+    if type(seam_answer) == "table" and seam_answer.error == nil then
+      local held = M.paused(session_id)
+      seam_answer.paused = held ~= nil
+      seam_answer.paused_since = held and tonumber(held.paused_at) or nil
+      seam_answer.paused_reason = held and tostring(held.reason or "") or nil
+    end
     return seam_answer
   end
   local now = clock(opts)
@@ -506,7 +509,17 @@ function M.list(args, ctx)
     all = args.all and true or false,
     now = clock(args),
   })
-  if seam_answer then return seam_answer end
+  if seam_answer then
+    -- Same reason as `summary`: the hold is the kernel's, so it is added here on both paths, and a
+    -- reader (the model, the window, the CLI) sees one shape whichever path answered. A refusal keeps
+    -- the component's shape.
+    if type(seam_answer) == "table" and seam_answer.error == nil then
+      local summary = M.summary(tostring((ctx or {}).session_id or args.session_id or ""), { now = clock(args) })
+      seam_answer.paused = summary.paused and true or false
+      seam_answer.paused_reason = summary.paused_reason
+    end
+    return seam_answer
+  end
   local owner, session, refusal = owner_of(args, ctx)
   if not owner then return refusal end
   local now = clock(args)
