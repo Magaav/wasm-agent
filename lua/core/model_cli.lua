@@ -13,18 +13,17 @@ local function paint(io, text, role) return io.paint and io.paint(text, role) or
 local function said(io, ok, text) io.print(paint(io, DOT, ok and "success" or "error") .. " " .. text) end
 
 -- One choice from `options` ({label, hint}): a 1-based index, or nil when the reader backs out.
+--
+-- Drawing is not this file's: the page goes to `lua/core/balloon.lua` (`io.show`), which opens the
+-- overlay in a terminal and prints the same page in a pipe. The numbered fallback that lived here - a
+-- second way to ask the same question, with its own list layout - is gone with it.
+local balloon = dofile("lua/core/balloon.lua")
+
 local function choose(io, title, lines, options, selected)
-  if io.panel then
-    local answer = io.panel({ title = title, lines = lines, options = options, selected = selected })
-    return answer.action == "select" and answer.index or nil
-  end
-  io.print(title)
-  for _, line in ipairs(lines) do io.print(line) end
-  for n, option in ipairs(options) do
-    io.print(string.format("%d. %s%s", n, option.label, option.hint ~= "" and ("  " .. option.hint) or ""))
-  end
-  local answer = tonumber(trim(io.ask("Choose 1-" .. #options .. " (Enter to cancel):")))
-  return answer and options[answer] and answer or nil
+  local page = balloon.page({ title = title, lines = lines, options = options, selected = selected or 1 })
+  local answer = balloon.drive(io, { page }, { start = 1 })
+  if type(answer) ~= "table" or answer.action ~= "select" then return nil end
+  return tonumber(answer.index) or nil
 end
 
 function M.model(io)

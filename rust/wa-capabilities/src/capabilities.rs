@@ -283,6 +283,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("transcript_head", Device, crate::host::transcript_head, "Rewrite the current transcript block's first line (a call's heading when its result lands)"),
     plain!("transcript_copy", Device, crate::host::transcript_copy, "Mark lines of the next transcript write as copyable: a copy icon on each, a click puts its content on the clipboard"),
     plain!("status_snapshot", Device, crate::host::status_snapshot, "Store the /status panel the CLI shows by itself while a run is in flight"),
+    plain!("local_view", Device, crate::host::local_view, "Store a read-only command's balloon so the CLI draws it while a run is in flight"),
     plain!("transcript_hold", Device, crate::host::transcript_hold, "Keep CLI transcript writes undrawn until released, then draw once"),
     plain!("editor_status", Device, crate::host::editor_status, "Show or hide the CLI's status line row (shown while a run is in flight)"),
     plain!("editor_footer", Device, crate::host::editor_footer, "Set the hint row under the CLI's input box"),

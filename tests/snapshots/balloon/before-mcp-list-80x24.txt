@@ -1,0 +1,6 @@
+MCP connectors: 4 (3 here, 1 from peers) - 2 enabled, 5 tools callable now
+  local whatsapp                 enabled native 3 tools   WhatsApp
+  peer  openclaw:whatsapp_native enabled native 1 tool   whatsapp_native
+  local native_reads             failing stdio 0 tools   ! probe failed: connect to /run/wasm-agent/mcp/native_reads.sock: connection refused (the component was rebuilt without its socket, so this node has no catalogue of its tools)  Filesystem reads
+  local gated                    disabled http 0 tools   ! 401 unauthorized: the access token was rejected by the reports service  Gated reports
+  open one: /mcp <key>   turn it on/off: /mcp <key> on|off

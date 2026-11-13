@@ -891,6 +891,103 @@ mod tests {
         let narrow = Panel::from_spec(&serde_json::json!({"title": "t", "lines": [format!("\x1b[1m{}", "x".repeat(40))]}), 20, 30);
         assert!(narrow.render().contains(&format!("\x1b[1m{}\x1b[0m", "x".repeat(20))), "cut at 20 cells, then reset");
     }
+    /// The rows a panel frame actually drew, as text: cursor moves split them, colour and erase sequences
+    /// are dropped. This is how "nothing is wider than the terminal" is measured instead of assumed.
+    fn drawn_rows(frame: &str) -> Vec<String> {
+        let mut rows: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut chars = frame.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\x1b' {
+                current.push(ch);
+                continue;
+            }
+            // A sequence: ESC [ params final-byte (or a two-character one we can ignore).
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                let mut params = String::new();
+                let mut last = ' ';
+                for next in chars.by_ref() {
+                    last = next;
+                    if last.is_ascii_alphabetic() { break; }
+                    params.push(last);
+                }
+                if last == 'H' && params.ends_with(";1") {
+                    rows.push(std::mem::take(&mut current));
+                }
+            }
+        }
+        rows.push(current);
+        rows
+    }
+
+    #[test]
+    fn a_balloon_at_80x24_moves_opens_and_closes_with_its_keys() {
+        let spec = serde_json::json!({
+            "title": "MCP connectors",
+            "lines": ["4 connectors \u{b7} 3 here, 1 from peers \u{b7} 2 enabled"],
+            "options": [
+                {"label": "WhatsApp", "hint": "whatsapp \u{b7} connected \u{b7} 3 tools"},
+                {"label": "Filesystem reads", "hint": "native_reads \u{b7} failed \u{b7} no tool"},
+                {"label": "Back", "hint": "the list"},
+            ],
+            "selected": 1,
+        });
+        let mut panel = Panel::from_spec(&spec, 80, 22);
+        let frame = panel.render();
+        assert!(frame.contains("MCP connectors"), "the title is drawn");
+        assert!(frame.contains("\u{276f}"), "the reader's row is marked");
+        assert!(frame.contains("Esc or \u{2190} to go back"), "the hint row says how to leave: {frame:?}");
+        // Down moves and wraps; Up wraps back.
+        for &key in b"\x1b[B\x1b[B\x1b[B" { panel.feed(key); }
+        assert_eq!(panel.selected, 0, "past the last row, the selection wraps to the first");
+        for &key in b"\x1b[A" { panel.feed(key); }
+        assert_eq!(panel.selected, 2, "and Up from the first lands on the last");
+        // Enter picks the row the reader is on, 1-based, the way the client reads it.
+        panel.feed(b'\r');
+        assert_eq!(panel.result, Some(serde_json::json!({"action": "select", "index": 3})));
+        // A lone Esc closes it: back to the chat, never cancelling the run behind it.
+        let mut panel = Panel::from_spec(&spec, 80, 22);
+        panel.feed(0x1b);
+        panel.escape();
+        assert_eq!(panel.result, Some(serde_json::json!({"action": "cancel"})));
+    }
+
+    #[test]
+    fn a_balloon_in_a_narrow_terminal_never_draws_wider_than_it() {
+        let spec = serde_json::json!({
+            "title": "whatsapp \u{b7} WhatsApp",
+            "lines": [
+                "where: this node (local) \u{b7} transport native \u{b7} revision 42",
+                "error:",
+                "  401 unauthorized: the access token was rejected by the reports service, which is long",
+            ],
+            "options": [
+                {"label": "Tools (3)", "hint": "names, approvals, inputs"},
+                {"label": "Reconnect", "hint": "probe again, now"},
+                {"label": "Turn off", "hint": "the model stops seeing its tools"},
+                {"label": "Back", "hint": "the list"},
+            ],
+        });
+        for &width in &[80usize, 40, 24] {
+            // A 12-row terminal as well: the panel may take no more rows than there are.
+            for &rows in &[24usize, 12] {
+                let panel = Panel::from_spec(&spec, width, rows);
+                let frame = panel.render();
+                for row in drawn_rows(&frame) {
+                    let wide = row.chars().count();
+                    assert!(wide <= width, "{wide} cells at {width} columns: {row:?}");
+                }
+                assert!(panel.height() <= rows.saturating_sub(2).max(1), "the panel fits the screen");
+            }
+        }
+        // The field variant, at the same widths: the bullets and the counter fit too.
+        let field = Panel::from_spec(&serde_json::json!({"title": "Key", "input": "secret", "placeholder": "sk-..."}), 24, 24);
+        for row in drawn_rows(&field.render()) {
+            assert!(row.chars().count() <= 24, "field row: {row:?}");
+        }
+    }
+
     fn type_bytes(editor: &mut Editor, bytes: &[u8]) -> Action {
         let mut action = Action::None;
         for &byte in bytes { action = editor.feed(byte); }

@@ -1,0 +1,14 @@
+whatsapp · WhatsApp
+
+where: this node (local) · transport native · revision 42
+state: connected · 3 callable now (approved 3, discovered 3)
+last observation: probe ok 4 min ago
+error: none reported
+approval: each tool is approved locally as read or write
+
+❯  1. Tools (3)   names, approvals, inputs
+   2. Reconnect   probe again, now
+   3. Turn off    the model stops seeing its tools
+   4. Back        the list
+
+Enter opens · Esc or ← goes back

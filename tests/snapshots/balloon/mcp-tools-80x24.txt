@@ -1,0 +1,11 @@
+Tools
+
+whatsapp · 3 tools
+The exact name the model is given, then how it is approved. Enter opens one.
+
+❯  1. mcp_whatsapp_read     read · callable now
+   2. mcp_whatsapp_search   read · callable now
+   3. mcp_whatsapp_send     write · callable now
+   4. Back                  the connector
+
+↑↓ to move · Enter to open · Esc or ← to go back

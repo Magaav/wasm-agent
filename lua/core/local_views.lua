@@ -30,9 +30,35 @@ M.MAX_AGE = 60
 
 -- The views by the command that opens them. Each builder returns
 -- `{command, captured_at, views = {{title, lines, options}, ...}}` - `views[1]` the root, and
--- `options[i].view` the index of the panel an option opens (`pop = true` is the way back).
+-- `options[i].page` (or the older `view`) the page an option opens (`back`/`pop` is the way back).
+--
+-- Every builder is the SAME builder its command uses between runs, in `lua/core/balloon.lua`'s page shape:
+-- `/nodes` (nodes_cli.views), `/mcp` (mcp_command.views - the list, a connector, its tools), `/login`
+-- (provider_management.login_views) and `/help` (the command registry). One builder, two renderers; there
+-- is no second copy of a label that can drift while the run is in flight.
 local builders = {
   ["/nodes"] = function(opts) return dofile("lua/core/nodes_cli.lua").views(opts) end,
+  ["/mcp"] = function(opts)
+    local command = dofile("lua/core/mcp_command.lua")
+    -- Mid-run the peer half comes from the federation cache and nothing waits on the network: a
+    -- snapshot is allowed to be a minute old and to say so (`captured_at`), never to stall a turn.
+    local ctx = opts.ctx or { user_id = "master", role = "master", session_id = opts.session_id }
+    local view = command.list(ctx, { cache_only = true })
+    if type(view) ~= "table" or view.ok == false then return nil end
+    return command.views(view)
+  end,
+  ["/login"] = function(opts)
+    local manager = dofile("lua/core/provider_management.lua")
+    local pages = manager.login_views(manager.state("local-operator"), {})
+    return { command = "/login", captured_at = host.now(), views = pages }
+  end,
+  ["/help"] = function(opts)
+    local balloon = dofile("lua/core/balloon.lua")
+    local help = dofile("lua/core/commands.lua").help()
+    local rows = {}
+    for row in (help .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
+    return { command = "/help", captured_at = host.now(), views = balloon.paged("Help", rows, { per = 14, nowrap = true }) }
+  end,
 }
 
 -- When each view was last published (`host.now` seconds), so a refresh knows what is already there.
@@ -56,14 +82,14 @@ end
 -- business crossing to the reader thread twice.
 function M.publish(name, set)
   if not M.available() then return false, "unavailable" end
-  local spec = { command = set.command or name, captured_at = set.captured_at or host.now(), views = set.views or {} }
-  local sent, raw = pcall(host.local_view, name, json.encode(spec))
-  if not sent then return false, tostring(raw) end
-  local decoded_ok, answer = pcall(json.decode, raw)
-  if not decoded_ok or type(answer) ~= "table" then return false, "unreadable answer" end
-  if answer.ok ~= true then return false, tostring(answer.error or "refused") .. (answer.detail and (" " .. tostring(answer.detail)) or "") end
-  published_at[name] = spec.captured_at
-  return true
+  local spec = { command = set.command or name, captured_at = math.floor(tonumber(set.captured_at) or tonumber(host.now()) or 0), views = set.views or {} }
+  -- The page links are converted in ONE place (`lua/core/balloon.lua`'s `publish`): a page is 1-based here
+  -- and its published `view` is 0-based, and two conversions would be two chances to disagree.
+  local balloon = dofile("lua/core/balloon.lua")
+  local done, problem = balloon.publish(set.command or name, spec.views, spec.captured_at)
+  if done then published_at[name] = spec.captured_at; return true end
+  if problem == "unavailable" then return false, "unavailable" end
+  return false, tostring(problem)
 end
 
 -- Rebuild and publish the views that are missing or older than `opts.max_age`.
@@ -78,25 +104,36 @@ function M.refresh(opts)
   if not M.available() then return 0, nil end
   local now = host.now()
   local max_age = tonumber(opts.max_age) or M.MAX_AGE
-  local count = 0
+  local count, problem = 0, nil
   for _, name in ipairs(M.names()) do
     local at = published_at[name]
     if not at or (now - at) >= max_age then
       local built, set = pcall(builders[name], opts)
-      if not built or type(set) ~= "table" then
-        return count, string.format("%s could not be built: %s", name, tostring(set))
+      if not built then
+        -- One view that cannot be built must not cost the others their snapshot: `/login` on a node with
+        -- no provider state used to stop `/nodes` publishing, and the reader lost a view that worked.
+        problem = problem or string.format("%s could not be built: %s", name, tostring(set))
+        M.forget(name)
+      elseif type(set) ~= "table" then
+        problem = problem or string.format("%s had nothing to show", name)
+        M.forget(name)
+      else
+        local done, why = M.publish(name, set)
+        if not done then
+          problem = problem or string.format("%s was not published: %s", name, tostring(why))
+          M.forget(name)
+        else
+          count = count + 1
+        end
       end
-      local done, problem = M.publish(name, set)
-      if not done then return count, string.format("%s was not published: %s", name, tostring(problem)) end
-      count = count + 1
     end
   end
-  return count, nil
+  return count, problem
 end
 
 -- Forget what has been published. For tests and for a view whose data must be re-read (a rebind).
-function M.forget()
-  published_at = {}
+function M.forget(name)
+  if name then published_at[name] = nil else published_at = {} end
 end
 
 return M

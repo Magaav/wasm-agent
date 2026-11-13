@@ -1,0 +1,8 @@
+OpenCode Go
+
+✔ A key is stored in wa-vault (keys/opencode-go.key).
+
+❯  1. Replace the key
+   2. Keep it
+
+↑↓ to move · Enter to open · Esc or ← to go back

@@ -1,0 +1,15 @@
+gated · Gated reports
+
+where: this node (local) · transport http · revision 42
+state: needs login · 0 callable now (approved 0, discovered 0)
+error:
+  401 unauthorized: the access token was rejected by the reports service
+approval: each tool is approved locally as read or write
+
+❯  1. Tools       names, approvals, inputs
+   2. Reconnect   probe again, now
+   3. Turn on     needs a passed probe and every approved tool
+   4. Sign in     vault key GATED_MCP_TOKEN
+   5. Back        the list
+
+Enter opens · Esc or ← goes back

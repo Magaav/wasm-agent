@@ -92,6 +92,10 @@ pub enum Answer {
     Draw(Value),
     /// Nothing left to show: the panel closes and the draft comes back.
     Close,
+    /// The reader chose an action the interpreter owns ("reconnect"): the balloon closes and this
+    /// line is handed to the queue a typed line goes to, so it runs after the turn - never now, and
+    /// never as model input. The panel said so before the reader pressed Enter.
+    Queue(String),
 }
 
 /// What a publish did, as the caller can report it.
@@ -201,6 +205,7 @@ impl Store {
         enum Decision {
             Pop,
             Push { child: usize, focus: usize },
+            Run(String),
             Close,
         }
         let decision = {
@@ -230,8 +235,10 @@ impl Store {
                         // close on them for a keystroke this side asked for.
                         None => Decision::Pop,
                         Some(option) if option.pop => Decision::Pop,
-                        Some(option) => match option.view {
-                            Some(child)
+                        Some(option) => match (&option.run, option.view) {
+                            // An action the client cannot do itself: queued for the interpreter.
+                            (Some(run), _) => Decision::Run(run.clone()),
+                            (None, Some(child))
                                 if child != frame.view
                                     && child < set.views.len()
                                     && depth < MAX_DEPTH =>
@@ -254,6 +261,10 @@ impl Store {
             Decision::Close => {
                 self.session = None;
                 Answer::Close
+            }
+            Decision::Run(line) => {
+                self.session = None;
+                Answer::Queue(line)
             }
             Decision::Pop => {
                 if self.pop() {

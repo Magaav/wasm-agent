@@ -31,10 +31,12 @@ ok(has(lines, "offline, seen 2m ago"), "an offline peer says when it was last se
 ok(has(lines, "relay"), "a peer with no endpoint is reached through the relay")
 ok(has(lines, "Memory: 1.0 GiB free of 4.0 GiB"), "resources are readable")
 
--- No raw editor: one printed line per node.
+-- No raw editor: the same balloon, as text (one rendering, printed once).
 local printed = {}
 nodes_cli.run({ print = function(text) printed[#printed + 1] = text end })
-ok(#printed == 2 and has(printed, "(this node)"), "without a panel, /nodes prints the cluster and one line per node")
+local shown = table.concat(printed, "\n")
+ok(has({ shown }, "(this node)") and has({ shown }, "Cluster:"),
+  "without a panel, /nodes prints the cluster and one line per node: " .. shown)
 
 -- `/bind` names no fabric of its own: with nothing saved and no WASM_AGENT_RENDEZVOUS there is no
 -- suggestion, and an empty service is refused rather than replaced by a built-in one.

@@ -90,13 +90,21 @@ local NOTICE = "Update available (cccccccccccc): run wa update or /update"
 -- tree" channel answers from the local checkout, and this test is about the *release* notice, so the
 -- tree channel must not answer first (a tree commit this repository does not contain is `unknown`).
 local function binary()
-  local candidates = { host.getenv("WA_BIN"), host.getenv("WA_TEST_BIN"), host.getenv("FAST_BIN") }
-  local path = shell("command -v wa").stdout:gsub("%s+$", "")
-  candidates[#candidates + 1] = path ~= "" and path or nil
-  local home = host.getenv("HOME") or ""
-  candidates[#candidates + 1] = home .. "/.local/bin/wa"
-  local root = host.getenv("WASM_AGENT_LUA_ROOT") or ""
-  candidates[#candidates + 1] = root .. "/rust/target/release/wa"
+  -- A list with an explicit index, never `#list + 1`: an unset variable is a nil in the middle of the
+  -- list, `#` over nil holes is unspecified, and measured 13/11 that made this row SKIP while FAST_BIN
+  -- was set and executable - the one candidate the fast path hands it - because the three nil slots
+  -- collapsed and the path landed at index 1 only when the first slot was not nil. A lost candidate is
+  -- a row that reports less coverage than it has.
+  local candidates, count = {}, 0
+  local function add(value)
+    if type(value) == "string" and value ~= "" then count = count + 1; candidates[count] = value end
+  end
+  add(host.getenv("WA_BIN"))
+  add(host.getenv("WA_TEST_BIN"))
+  add(host.getenv("FAST_BIN"))
+  add(shell("command -v wa").stdout:gsub("%s+$", ""))
+  add((host.getenv("HOME") or "") .. "/.local/bin/wa")
+  add((host.getenv("WASM_AGENT_LUA_ROOT") or "") .. "/rust/target/release/wa")
   for _, candidate in ipairs(candidates) do
     if candidate and candidate ~= "" and shell("test -x '" .. candidate .. "'").code == 0 then return candidate end
   end

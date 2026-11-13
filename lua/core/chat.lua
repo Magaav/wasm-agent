@@ -331,7 +331,7 @@ function M.run(argv)
     -- The round boundary: the only other moment at which this side runs during a run. `cached` keeps
     -- the rendezvous out of the turn's critical path - a snapshot is allowed to be a minute old and to
     -- say so, and is not allowed to make the model wait.
-    publish_views({ max_age = local_views.MAX_AGE, cached = true })
+    publish_views({ max_age = local_views.MAX_AGE, cached = true, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
     local lines = input:take_steering()
     for _, line in ipairs(lines) do view:accepted(line) end
     return lines
@@ -419,7 +419,7 @@ function M.run(argv)
     snapshot_status({ color = view.live, max_age = 300 })
     -- Nothing is blocked yet: a live read of the roster is exactly what a `/nodes` typed in a moment
     -- will be drawn from, and the reader is not waiting on anything but this turn.
-    publish_views({ max_age = local_views.MAX_AGE })
+    publish_views({ max_age = local_views.MAX_AGE, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
     view:run_started()
     local ok, reply = pcall(agent.run, agent, line)
     if not ok then
@@ -638,6 +638,14 @@ function M.run(argv)
     start_notice(view, { banner = banner, seen = seen })
   end
 
+  -- The one overlay every command below draws in (`lua/core/balloon.lua`). `ui.say` is a line of
+  -- acknowledgement through the transcript writer (redacted, as every command's output has been);
+  -- `ui.show` is the balloon - pages, arrow keys, Enter, Esc - and a pipe gets the same pages as text
+  -- from the same renderer. No arm below calls `print`, `host.panel` or `io.write` itself, and
+  -- `scripts/test-cli-balloon.lua` fails when one does.
+  local balloon = dofile("lua/core/balloon.lua")
+  local ui = balloon.for_view(view, { print = print, redact = redact })
+
   while true do
     -- Whatever the last command wrote (a turn, a `!` line, /new) is this CLI's own: already shown.
     mark_seen()
@@ -649,113 +657,110 @@ function M.run(argv)
     elseif line == "/exit" or line == "/quit" then
       break
     elseif line == "/help" then
-      print(HELP)
+      -- The same help text, in the balloon: a screen at a time, arrow keys and Enter, Esc closes. The
+      -- rows are not re-wrapped (`nowrap`): they are columns, and a hint that moved to its own line
+      -- would stop being one.
+      local rows = {}
+      for row in (HELP .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
+      ui.show(balloon.paged("Help", rows, { per = 14, nowrap = true }))
     elseif line == "/bind" or line:sub(1, 6) == "/bind " then
-      dofile('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,print)
+      dofile('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,ui.print)
     elseif line == "/unbind" then
-      dofile('lua/core/binding_cli.lua').run('unbind','',read_line,print)
+      dofile('lua/core/binding_cli.lua').run('unbind','',read_line,ui.print)
     elseif line == "/nodes" then
-      -- The cluster as a panel to move through, like /login; `/nodes pending` stays a binding command.
-      local panel = dofile('lua/core/cli_panel.lua')
-      local panels = view.editor and view.stdout and panel.available()
+      -- The cluster as pages to move through (lua/core/nodes_cli.lua builds them; the walk is the
+      -- balloon's). `/nodes pending` stays a binding command.
       local done, problem = pcall(dofile('lua/core/nodes_cli.lua').run, {
-        print = print,
-        panel = panels and panel.open or nil,
+        print = ui.print, show = ui.show,
         paint = function(text, role) return cli_view.paint(text, role, view.live) end,
       })
-      if panels then panel.close() end
-      if not done then print(redact.text(tostring(problem))) end
+      if not done then ui.say(redact.text(tostring(problem))) end
     elseif line:sub(1, 7) == "/nodes " then
-      dofile('lua/core/binding_cli.lua').run('nodes',line:sub(8),read_line,print)
+      dofile('lua/core/binding_cli.lua').run('nodes',line:sub(8),read_line,ui.print)
     elseif line == "/accept" or line:sub(1, 8) == "/accept " then
-      dofile('lua/core/binding_cli.lua').run('accept',line:sub(9),read_line,print)
+      dofile('lua/core/binding_cli.lua').run('accept',line:sub(9),read_line,ui.print)
     elseif line == "/promote" or line:sub(1, 9) == "/promote " then
-      dofile('lua/core/binding_cli.lua').run('promote',line:sub(10),read_line,print)
+      dofile('lua/core/binding_cli.lua').run('promote',line:sub(10),read_line,ui.print)
     elseif line == "/demote" or line:sub(1, 8) == "/demote " then
-      dofile('lua/core/binding_cli.lua').run('demote',line:sub(9),read_line,print)
+      dofile('lua/core/binding_cli.lua').run('demote',line:sub(9),read_line,ui.print)
     elseif line == "/revoke" or line:sub(1, 8) == "/revoke " then
-      dofile('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,print)
+      dofile('lua/core/binding_cli.lua').run('revoke',line:sub(9),read_line,ui.print)
     elseif line == "/session" then
-      print(agent.session_id)
+      ui.say(agent.session_id)
     elseif line == "/wakes" or line == "/wake" or line:sub(1, 6) == "/wake " then
-      -- The model's own schedule (docs/SELF-LOOP.md). The window gets the same facts in its session
-      -- read and composer footer; this is the reader's own list and cancel, beside the session it names.
+      -- The model's own schedule (docs/SELF-LOOP.md), as a balloon: one row per wake, and a cancel is
+      -- still `/wake cancel <id>`.
       local ctx = { user_id = USER, role = "master", session_id = agent.session_id }
       local arg = line == "/wakes" and "" or line:sub(6):gsub("^%s+", "")
       if arg ~= "" then
         local verb, id = arg:match("^(%S+)%s+(%S+)$")
         if verb ~= "cancel" or not id then
-          print("usage: /wake cancel <id>")
+          ui.say("usage: /wake cancel <id>")
         else
           local result = selfloop.cancel({ id = id }, ctx)
-          print(result.ok and ("  cancelled " .. id) or ("  " .. tostring(result.error or "not cancelled")))
+          ui.say(result.ok and ("  cancelled " .. id) or ("  " .. tostring(result.error or "not cancelled")))
         end
       else
         local listed = selfloop.list({}, ctx)
         if listed.error then
-          print("  " .. tostring(listed.error))
+          ui.say("  " .. tostring(listed.error))
         elseif listed.count == 0 then
-          print("  no pending wakes")
+          ui.say("  no pending wakes")
         else
+          local rows = {}
           for _, wake in ipairs(listed.wakes) do
             local when = wake.due_at and os.date("%Y-%m-%d %H:%M", math.floor(wake.due_at))
               or ("on " .. table.concat(wake.on, ", "))
-            print(string.format("  %s  %s  %s%s%s", wake.id, wake.status, when,
+            rows[#rows + 1] = string.format("%s  %s  %s%s%s", wake.id, wake.status, when,
               wake.every_seconds and (" every " .. wake.every_seconds .. "s") or "",
-              wake.last_error ~= "" and ("  ! " .. wake.last_error) or ""))
+              wake.last_error ~= "" and ("  ! " .. wake.last_error) or "")
           end
+          ui.show(balloon.paged("Wakes", rows, { per = 14, nowrap = true }))
         end
       end
     elseif line == "/status" then
-      -- A panel, like /model: Esc, Left or Enter goes back to the chat. Printed where there is none.
-      -- During a run the host shows it by itself (see `status_snapshot` above); this arm is between runs.
-      local panel = dofile('lua/core/cli_panel.lua')
-      if view.editor and view.stdout and panel.available() then
-        panel.open(status_panel({ color = view.live }))
-        panel.close()
-      else
-        print(redact.text(status.session_report(agent.session_id)))
+      -- A balloon, like every other view. During a run the host shows it by itself from the snapshot
+      -- (`status_snapshot` above); this arm is the one between runs, from the same lines.
+      local rows = {}
+      for _, row in ipairs(status.session_lines(agent.session_id, { color = view.live })) do
+        rows[#rows + 1] = redact.text(row)
       end
+      ui.show(balloon.paged("Status", rows, { per = 14, nowrap = true }))
     elseif line == "/restart" then
       restart_refused = nil
       restart("restart requested from the chat")
     elseif line:sub(1, 1) == "!" then
       -- Bash mode: run here, show it, record it as context; no model turn (lua/core/bash_mode.lua).
       local command = bash_mode.command(line)
-      if not command then print("  ! needs a command, e.g. !git status")
+      if not command then ui.say("  ! needs a command, e.g. !git status")
       else
         local done, problem = pcall(bash_mode.run, command, { session_id = agent.session_id, cwd = platform.cwd(), view = view })
-        if not done then print(redact.text("  ! failed: " .. tostring(problem))) end
+        if not done then ui.say(redact.text("  ! failed: " .. tostring(problem))) end
       end
     elseif line == "/vault" or line:sub(1, 7) == "/vault " then
       -- Handled here and nowhere else: the line never reaches `turn`, so the value never reaches a
-      -- model, a transcript row or the ledger. Without a value, the value is asked for in a secret
-      -- panel (bullets, no history) where the editor has one.
+      -- model, a transcript row or the ledger. Without a value, the value is asked for in a secret page
+      -- (bullets, no history) of the same balloon every other command uses.
       local name, value = keys.parse(line)
       if not name or name == "" then
         local stored = keys.names()
-        print("usage: /vault <name> <value>   (stored: " .. (#stored > 0 and table.concat(stored, ", ") or "none") .. ")")
+        ui.say("usage: /vault <name> <value>   (stored: " .. (#stored > 0 and table.concat(stored, ", ") or "none") .. ")")
       else
         if not value or value == "" then
-          local panel = dofile('lua/core/cli_panel.lua')
-          if view.editor and view.stdout and panel.available() then
-            local answer = panel.open({ title = "Key " .. name, input = "secret",
-              lines = { "Stored as " .. keys.path(name) .. " (0600). The agent uses it by name; its value is redacted everywhere." },
-              placeholder = "value" })
-            panel.close()
-            value = type(answer) == "table" and answer.action == "submit" and answer.text or nil
-          end
+          value = ui.ask(balloon.page({ title = "Key " .. name, input = "secret",
+            lines = { "Stored as " .. keys.path(name) .. " (0600). The agent uses it by name; its value is redacted everywhere." },
+            placeholder = "value" }))
         end
         if not value or value == "" then
-          print("usage: /vault " .. name .. " <value>")
+          ui.say("usage: /vault " .. name .. " <value>")
         else
           local result = keys.set(name, value)
           value = nil
           if result.ok then
-            print(string.format("  %s %s - %s (0600). Use it as \"$(cat %s)\"; its value is redacted in every output.",
+            ui.say(string.format("  %s %s - %s (0600). Use it as \"$(cat %s)\"; its value is redacted in every output.",
               result.replaced and "replaced" or "stored", name, result.path, result.path))
           else
-            print("  vault: " .. result.error .. (result.note and (" - " .. result.note) or ""))
+            ui.say("  vault: " .. result.error .. (result.note and (" - " .. result.note) or ""))
           end
         end
       end
@@ -768,80 +773,54 @@ function M.run(argv)
       agent = agentlib.new(id, printer(view), "master", USER, NODE)
       agent.steer = function()
         if refresh_status then refresh_status() end
-        publish_views({ max_age = local_views.MAX_AGE, cached = true })
+        publish_views({ max_age = local_views.MAX_AGE, cached = true, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
         local lines = input:take_steering()
         for _, text in ipairs(lines) do view:accepted(text) end
         return lines
       end
-      print(redact.text(notice))
+      ui.say(redact.text(notice))
     elseif line == "/model" or line == "/reasoning" or line == "/thinking" then
-      local panel = dofile('lua/core/cli_panel.lua')
-      local panels = view.editor and view.stdout and panel.available()
       local picker = dofile('lua/core/model_cli.lua')
       local done, problem = pcall(line == "/model" and picker.model or picker.reasoning, {
-        print = print,
-        ask = function(text) view:prompt(text); while true do
-          local answer, eof = input:poll(cli_input.WAIT_MS)
-          if answer ~= nil then view:accepted(answer); view:submitted(); return answer end
-          if eof then return nil end end end,
-        panel = panels and panel.open or nil,
+        print = ui.print, show = ui.show,
         paint = function(text, role) return cli_view.paint(text, role, view.live) end,
       })
-      if panels then panel.close() end
       refresh_model()
-      if not done then print(redact.text(tostring(problem))) end
+      if not done then ui.say(redact.text(tostring(problem))) end
     elseif line == "/login" or line == "/provider" then
       -- Credentials never pass through this REPL/editor, whose lines have recall history: a ChatGPT
-      -- login is a device code entered in the browser, an API key is pasted on the vault page.
-      local function ask(text)
-        view:prompt(text)
-        while true do
-          local answer, eof = input:poll(cli_input.WAIT_MS)
-          if answer ~= nil then
-            view:accepted(answer)
-            view:submitted()
-            return answer
-          end
-          if eof then return nil end
-        end
-      end
+      -- login is a device code entered in the browser, an API key is pasted in the balloon's secret
+      -- field or on the vault page.
       local manager = dofile('lua/core/provider_management.lua')
       local flow = line == "/login" and manager.login_cli or manager.provider_cli
-      local panel = dofile('lua/core/cli_panel.lua')
-      local panels = view.editor and view.stdout and panel.available()
       local done, problem = pcall(flow, {
-        print = print,
-        ask = ask,
-        -- A panel over the bottom of the screen (Esc closes it); nil where there is no raw editor,
-        -- and the flow falls back to numbered questions.
-        panel = panels and panel.open or nil,
+        print = ui.print, show = ui.show,
         paint = function(text, role) return cli_view.paint(text, role, view.live) end,
-        wait = function(ms)
-          local deadline = host.monotonic_ms() + ms
-          while host.monotonic_ms() < deadline do
-            local answer = input:poll(math.min(cli_input.WAIT_MS, deadline - host.monotonic_ms()))
-            if answer ~= nil then view:submitted(); return answer end
-          end
-          return nil
-        end,
       })
-      if panels then panel.close() end
       refresh_model()
-      if not done then print(redact.text(tostring(problem))) end
+      if not done then ui.say(redact.text(tostring(problem))) end
     elseif line == "/stats" then
-      print(json.encode(memory.stats()))
+      local stats = memory.stats()
+      local rows = {}
+      for _, key in ipairs({ "sessions", "messages", "memories", "turns" }) do
+        if stats[key] ~= nil then rows[#rows + 1] = string.format("%-10s %s", key, tostring(stats[key])) end
+      end
+      for key, value in pairs(stats) do
+        if type(value) ~= "table" then rows[#rows + 1] = string.format("%-10s %s", tostring(key), tostring(value)) end
+      end
+      ui.show(balloon.paged("Database", rows, { per = 14, nowrap = true }))
     elseif line == "/console" then
       -- The console is the raw view of the same run: every event as it arrived, and a tool's
       -- output whole. It is a toggle rather than a flag on the launcher because the question
       -- ("what is it actually doing?") arrives in the middle of a run, not before it.
       local on = view:set_console(not view:console_on())
-      print(on and "  console on: every event, and a tool's output unclipped"
+      ui.say(on and "  console on: every event, and a tool's output unclipped"
         or "  console off: the formatted view")
     elseif line == "/orchestration" or line == "/ochestration" then
       local mode=dofile('lua/core/orchestration_mode.lua')
       local current=mode.read(agent.session_id)
       local result=mode.control({mode_action='toggle',revision=current.revision},{role='master',user_id=USER,session_id=agent.session_id})
-      print(result.ok and ('orchestration '..(result.orchestration.enabled and 'on' or 'off')) or json.encode(result))
+      ui.say(result.ok and ('orchestration '..(result.orchestration.enabled and 'on' or 'off')) or json.encode(result))
     elseif line == "/update" then
       -- The same report the window gets from POST /update, and the same sentence: this node cannot
       -- replace itself, so the answer is what it decided and what it queued for the sentinel.
@@ -849,11 +828,11 @@ function M.run(argv)
         reason = "requested from the interactive chat",
         session_id = agent.session_id,
       })
-      print(redact.text(report.message or json.encode(report)))
+      ui.say(redact.text(report.message or json.encode(report)))
       if report.release and report.release.state == "behind" then
-        print(redact.text("release: " .. report.release.message))
+        ui.say(redact.text("release: " .. report.release.message))
       end
-      if report.next then print(redact.text("next: " .. report.next)) end
+      if report.next then ui.say(redact.text("next: " .. report.next)) end
     elseif line == "/merge" then
       -- Not a node operation: the merge runs outside this process, in the worktrees. The command
       -- is the agent's brief, and it names the skill that holds the procedure.
@@ -864,45 +843,62 @@ function M.run(argv)
       -- Deterministic: it reads the ledger and the transcript, writes the prefix artifact, and
       -- prints. It is not sent to the model, so it cannot spend a token or change the thread.
       local text = efficiency.report({ session_id = agent.session_id, agent = agent, hours = 48 })
-      print(redact.text(text))
+      local rows = {}
+      for row in tostring(redact.text(text) .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
+      ui.show(balloon.paged("Efficiency", rows, { per = 14, nowrap = true }))
     elseif line == "/memories" then
-      each(memory.memories(nil, 50), memory_line, print)
+      local rows = {}
+      for _, row in ipairs(memory.memories(nil, 50)) do rows[#rows + 1] = memory_line(row) end
+      if #rows == 0 then rows[1] = "(empty)" end
+      ui.show(balloon.paged("Memories", rows, { per = 12 }))
     elseif line:sub(1, 10) == "/remember " then
-      print((memory.remember(line:sub(11))))
+      ui.say((memory.remember(line:sub(11))))
     elseif line:sub(1, 8) == "/recall " then
-      each(memory.recall(line:sub(9), 10), memory_line, print)
+      local rows = {}
+      for _, row in ipairs(memory.recall(line:sub(9), 10)) do rows[#rows + 1] = memory_line(row) end
+      if #rows == 0 then rows[1] = "(empty)" end
+      ui.show(balloon.paged("Recall", rows, { per = 12 }))
     elseif line == "/hooks" or line:sub(1, 7) == "/hooks " then
       -- What is configured and what happened last (docs/HOOKS.md). A read: no hook runs for it, and
       -- no payload, prompt or hook output is printed - names, events, timeouts and outcomes only.
       local arg = line:sub(7):gsub("^%s+", "")
       if arg == "reload" then
         hooks.reset()
-        print("  hooks: configuration reread, footer segment cache cleared")
+        ui.say("  hooks: configuration reread, footer segment cache cleared")
       elseif arg ~= "" and arg ~= "list" then
-        print("usage: /hooks [reload]")
+        ui.say("usage: /hooks [reload]")
       end
-      print(hooks.report({ session_id = agent.session_id, cwd = platform.cwd() }))
+      local rows = {}
+      for row in tostring(hooks.report({ session_id = agent.session_id, cwd = platform.cwd() }) .. "\n"):gmatch("([^\n]*)\n") do
+        rows[#rows + 1] = row
+      end
+      ui.show(balloon.paged("Hooks", rows, { per = 14, nowrap = true }))
     elseif line == "/mcp" or line:sub(1, 5) == "/mcp " then
-      -- Every connector this node can use - its own registry and each peer's - and the exact names the
-      -- model is given (lua/core/mcp_command.lua). A change goes through mcp.control here or the peer's
-      -- own registry through the fabric; a running session is told by the existing [session update] note.
+      -- Every connector this node can use - its own registry and each peer's - as one balloon
+      -- (lua/core/mcp_command.lua builds the pages, lua/core/mcp_cli.lua drives them). A change goes
+      -- through mcp.control here or the peer's own registry through the fabric; a running session is
+      -- told by the existing [session update] note.
       local done, problem = pcall(dofile("lua/core/mcp_cli.lua").run, line:sub(5), {
-        print = print,
+        print = ui.print, io = ui,
         ctx = { user_id = USER, role = "master", session_id = agent.session_id },
       })
-      if not done then print(redact.text(tostring(problem))) end
+      if not done then ui.say(redact.text(tostring(problem))) end
     elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
       -- A slash word that is not a built-in command: the operator's own command (docs/MODS.md), run
-      -- with the payload on stdin, and printed. Unknown words stay a refusal rather than a model turn:
-      -- a typo like /hlep used to start a full agent run with tools.
+      -- with the payload on stdin, and shown in the balloon. Unknown words stay a refusal rather than a
+      -- model turn: a typo like /hlep used to start a full agent run with tools.
       local name, rest = line:match("^(/[%w_-]+)%s*(.*)$")
       local ran = hooks.run_command(name, rest, { session_id = agent.session_id, cwd = platform.cwd() })
       if ran.ok then
-        if ran.output ~= "" then print(ran.output) end
+        if ran.output ~= "" then
+          local rows = {}
+          for row in (ran.output .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
+          ui.show(balloon.paged(name, rows, { per = 14, nowrap = true }))
+        end
       else
-        print("unknown or incomplete command " .. name .. " - /help lists them")
+        ui.say("unknown or incomplete command " .. name .. " - /help lists them")
         if ran.error ~= "unknown_hook_command" then
-          print(redact.text("  " .. tostring(ran.error) .. (ran.detail and (": " .. tostring(ran.detail)) or "")))
+          ui.say(redact.text("  " .. tostring(ran.error) .. (ran.detail and (": " .. tostring(ran.detail)) or "")))
         end
       end
     else

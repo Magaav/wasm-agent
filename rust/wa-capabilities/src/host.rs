@@ -3055,6 +3055,9 @@ struct ConsoleInput {
     status_snapshot: Option<Value>,
     /// The open panel is that one: this thread owns it and closes it itself, no Lua call waits on it.
     host_panel: bool,
+    /// The open panel is a **published balloon** (`host.local_view`): its answers walk the stack Lua
+    /// captured (`rust/wa-cli-views`), and an option with `run` queues that line for the interpreter.
+    balloon: bool,
 }
 
 /// A mouse selection over the chat area: where the drag started and where it is, in screen cells, the
@@ -3418,6 +3421,30 @@ fn console_reader() {
                                         continue;
                                     }
                                 }
+                                // Every OTHER read-only command with a published balloon (`/mcp`, `/help`,
+                                // `/nodes`): drawn from the snapshot now, over the box, and NOT queued
+                                // behind the run. The store refuses a line between runs on purpose - the
+                                // REPL's own arm can read afresh, and this cannot.
+                                if running {
+                                    let route = wa_cli_views::route(&text, true, wa_cli_views::now_seconds());
+                                    if let wa_cli_views::Route::Local(spec) = route {
+                                        let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
+                                        if let Some((width, rows)) = dims {
+                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                            state.host_panel = true;
+                                            state.balloon = true;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // An ordinary line: a balloon the reader was in is them changing their
+                                // mind, and the line goes to the interpreter exactly as before.
+                                if state.balloon {
+                                    wa_cli_views::dismiss();
+                                    state.balloon = false;
+                                    state.host_panel = false;
+                                    state.panel = None;
+                                }
                                 CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
                                 state.transcript.to_bottom();
                                 state.lines.push(text);
@@ -3452,11 +3479,41 @@ fn console_reader() {
                             }
                         }
                     }
-                    // The host's own `/status` panel closes itself on its answer (Esc, Left, Enter).
+                    // An answer to a panel this thread owns. `/status` closes on it; a published
+                    // balloon walks its stack - draw the next page, go back, close, or queue the
+                    // chosen action for the interpreter's next turn.
                     if state.host_panel && state.panel.as_ref().map_or(true, |panel| panel.result.is_some()) {
-                        state.panel = None;
-                        state.host_panel = false;
-                        state.transcript.dirty = true;
+                        let answer = state.panel.as_mut().and_then(|panel| panel.result.take());
+                        let dims = state.editor.as_ref().map(|e| (e.width, e.row + 1));
+                        let mut closed = true;
+                        if state.balloon {
+                            match answer {
+                                Some(answer) => match wa_cli_views::answer(&answer, wa_cli_views::now_seconds()) {
+                                    wa_cli_views::Answer::Draw(spec) => {
+                                        if let Some((width, rows)) = dims {
+                                            state.panel = Some(wa_term::terminal_editor::Panel::from_spec(&spec, width, rows));
+                                            closed = false;
+                                        }
+                                    }
+                                    wa_cli_views::Answer::Close => {}
+                                    // In the queue a typed line goes to, so the REPL runs it once the
+                                    // turn is over - which is what the balloon's hint says it will do.
+                                    wa_cli_views::Answer::Queue(line) => {
+                                        state.lines.push(line);
+                                        sync_queued(&mut state);
+                                    }
+                                },
+                                // The panel went away with no answer (the editor was lost): forget
+                                // the stack rather than leaving half of it on screen.
+                                None => wa_cli_views::dismiss(),
+                            }
+                        }
+                        if closed {
+                            state.panel = None;
+                            state.host_panel = false;
+                            state.balloon = false;
+                            state.transcript.dirty = true;
+                        }
                     }
                     let frame = layout_frame(&mut state);
                     if !frame.is_empty() { let _ = wa_term::terminal_editor::write(&frame); }
@@ -3647,6 +3704,24 @@ pub extern "C-unwind" fn status_snapshot(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.status_snapshot = spec;
     unsafe { wa_host_support::lua::lua_pushboolean(l, 1) };
+    1
+}
+
+/// `host.local_view(command, spec_json)`: a read-only `/` command's whole balloon, filed so the reader
+/// thread can draw it while a run is in flight (`lua/core/local_views.lua`, `lua/core/balloon.lua`).
+///
+/// The interpreter publishes at the moments it is running - a turn's start and each model-round
+/// boundary - and the reader's Enter is answered from that snapshot, never by waiting for the side that
+/// is blocked in the model call. The spec is checked before it is filed (`rust/wa-cli-views`): a view
+/// that could hurt the thread drawing it is refused, and the refusal is the answer.
+///
+/// Answers one JSON text string, never a Lua table: `{ok:true, command, views, captured_at}` or
+/// `{ok:false, error, detail}` - the caller decodes it with `lua/vendor/json.lua`.
+pub extern "C-unwind" fn local_view(l: *mut LuaState) -> c_int {
+    let command = arg_string(l, 1).unwrap_or_default();
+    let spec = arg_string(l, 2).unwrap_or_default();
+    let answer = wa_cli_views::publish(&command, &spec);
+    push_json(l, &answer);
     1
 }
 

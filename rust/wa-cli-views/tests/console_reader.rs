@@ -38,6 +38,12 @@ impl Reader {
         match self.views.answer(&result, now) {
             Answer::Draw(spec) => self.panel = Some(spec),
             Answer::Close => self.panel = None,
+            // An action the client cannot take: the balloon closes and the line joins the queue a typed
+            // line goes to, so the interpreter runs it after the turn.
+            Answer::Queue(line) => {
+                self.panel = None;
+                self.queue.push(line);
+            }
         }
     }
 
@@ -234,4 +240,86 @@ fn two_read_only_views_do_not_share_a_stack() {
     reader.views.publish("/wakes", &wakes.to_string()).unwrap();
     reader.key(json!({"action": "cancel"}), CAPTURED_AT);
     assert_eq!(reader.title(), Some("Nodes"));
+}
+
+/// The `/mcp` shape: a list whose rows open a connector, whose page carries the actions as `run` lines.
+fn mcp_spec() -> String {
+    json!({
+        "command": "/mcp",
+        "captured_at": CAPTURED_AT,
+        "views": [
+            {
+                "title": "MCP connectors",
+                "lines": ["2 connectors \u{b7} 1 enabled \u{b7} 3 tools callable now"],
+                "options": [
+                    {"label": "WhatsApp", "hint": "whatsapp \u{b7} connected \u{b7} 3 tools", "view": 1},
+                    {"label": "Filesystem reads", "hint": "native_reads \u{b7} failed \u{b7} no tool", "view": 2},
+                ],
+            },
+            {
+                "title": "whatsapp \u{b7} WhatsApp",
+                "lines": ["where: this node (local) \u{b7} transport native"],
+                "options": [
+                    {"label": "Reconnect", "hint": "probe again, now", "run": "/mcp whatsapp probe"},
+                    {"label": "Turn off", "hint": "the model stops seeing its tools", "run": "/mcp whatsapp off"},
+                    {"label": "Back", "hint": "the list", "pop": true},
+                ],
+            },
+            {
+                "title": "native_reads",
+                "lines": ["state: failed \u{b7} 0 callable now", "error:", "  probe failed: connection refused"],
+                "options": [{"label": "Back", "hint": "the list", "pop": true}],
+            },
+        ],
+    })
+    .to_string()
+}
+
+#[test]
+fn an_action_chosen_mid_run_is_queued_for_the_next_turn_and_never_run_by_the_client() {
+    let mut reader = Reader::default();
+    reader.views.publish("/mcp", &mcp_spec()).unwrap();
+    reader.submit("/mcp", true, CAPTURED_AT);
+    assert_eq!(reader.title(), Some("MCP connectors"));
+    // Enter on WhatsApp, then Enter on "Turn off": the balloon closes and the line is queued exactly as a
+    // typed one would be, so the REPL runs it once the turn is over. The client changed nothing.
+    reader.key(json!({"action": "select", "index": 1}), CAPTURED_AT);
+    assert_eq!(reader.title(), Some("whatsapp \u{b7} WhatsApp"));
+    reader.key(json!({"action": "select", "index": 2}), CAPTURED_AT);
+    assert_eq!(reader.panel, None, "the balloon closed on the action");
+    assert_eq!(reader.queue, vec!["/mcp whatsapp off".to_string()]);
+}
+
+#[test]
+fn a_failing_connector_opens_on_its_error_in_full() {
+    let mut reader = Reader::default();
+    reader.views.publish("/mcp", &mcp_spec()).unwrap();
+    reader.submit("/mcp", true, CAPTURED_AT);
+    reader.key(json!({"action": "select", "index": 2}), CAPTURED_AT);
+    assert_eq!(reader.title(), Some("native_reads"));
+    let lines: Vec<String> = reader.panel.as_ref().unwrap()["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(lines.iter().any(|line| line.contains("connection refused")), "lines: {lines:?}");
+    // And Esc closes it without touching the run.
+    reader.key(json!({"action": "cancel"}), CAPTURED_AT);
+    assert_eq!(reader.title(), Some("MCP connectors"));
+    reader.key(json!({"action": "cancel"}), CAPTURED_AT);
+    assert_eq!(reader.panel, None);
+    assert!(reader.queue.is_empty(), "closing a balloon queues nothing");
+}
+
+#[test]
+fn a_run_option_that_is_not_a_command_is_refused_at_publish_time() {
+    let mut store = Store::new();
+    let bad = json!({
+        "command": "/mcp", "captured_at": CAPTURED_AT,
+        "views": [{"title": "x", "options": [{"label": "Send", "run": "delete everything"}]}],
+    });
+    let refused = store.publish("/mcp", &bad.to_string()).unwrap_err();
+    assert_eq!(refused.code, "option_run_not_a_command",
+        "a queued line is a command the interpreter owns, never model input");
 }

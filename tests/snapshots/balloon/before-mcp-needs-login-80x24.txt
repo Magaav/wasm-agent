@@ -1,0 +1,5 @@
+gated - Gated reports
+  where: this node (local)   transport: http   state: disabled - 401 unauthorized: the access token was rejected by the reports service
+  tools callable now: 0 (approved 0, discovered 0)
+  policy: tier mcp - each tool is approved locally as read or write
+  this connector gives the model no tool: it has not been probed, or it exposes none.
