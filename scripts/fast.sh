@@ -623,6 +623,16 @@ check whatsapp-go-retired bash scripts/test-whatsapp-go-retired.sh
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
 check fast-environment bash scripts/test-fast-environment.sh
+# A pinned component's bytes are the build of the source this tree ships (13/11: `change/waroute` added
+# the `contacts` op to `rust/components/wa-whatsapp` and to the seam crate it shares with the node, and
+# `components.lock` kept pinning the artifact built before it - every deploy installed those bytes and
+# the tool answered `whatsapp_contacts_bad_op`; the component's tests were green because they ran
+# against the source). Two halves: the pin must move when anything under a pinned component's tree or a
+# crate it path-depends on moves (git only - it never skips, no toolchain, no network), and the pinned
+# `wa-whatsapp.wasm` must answer every op `rust/wa-whatsapp-index` defines. The artifact half says
+# `SKIP wa-whatsapp-pin: <why>` when no copy of the pinned bytes is reachable; `WA_PIN_CHECK_REQUIRE=1`
+# (a release gate) makes that a failure instead.
+check component-pins bash scripts/test-component-pins.sh
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.
