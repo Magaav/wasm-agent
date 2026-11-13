@@ -212,6 +212,52 @@ if [ "$PUBLISH" = 1 ]; then
   [ "$CHECK" = 0 ] || fail 'publish_check_refused: --check builds nothing, so there is nothing to publish'
 fi
 
+# ---- the round's identity is FROZEN once: built_utc, build_seconds ----------------------------------
+#
+# WHY. A landing builds a release set, the SIGNING HOST signs its `SHA256SUMS`, and only then is the set
+# shipped and published - and the ship step runs this script again (through
+# scripts/publish-artifacts-branch.sh). Every re-run used to write the manifest with a fresh `built_utc`,
+# which changed the manifest's own sha256, which changed `SHA256SUMS`, which invalidated the signature made
+# over the first `SHA256SUMS`. Measured 13/11: publishing a signed release needed a hand-run "freeze the
+# build and publish with --from", and the operator had to do it. The identity of a build is therefore
+# recorded ONCE per (commit, target set) in `$OUT/build-stamp.txt` and reused by every later run over the
+# same artifacts, so the manifest and its sums are byte-identical and a signature over them stays true.
+# `--from` takes the stamp from the incoming manifest, so the BUILD host's identity travels with the bytes
+# and a signing host - which has no cargo - never invents one.
+BUILD_STAMP="$OUT/build-stamp.txt"
+BUILT_UTC=""
+STAMP_SECONDS=""
+stamp_read() { # -> 0 when the stamp names THIS commit and THESE targets
+  local stamp_commit stamp_targets want_targets
+  [ -f "$BUILD_STAMP" ] || return 1
+  stamp_commit="$(sed -n 's/^source_commit=//p' "$BUILD_STAMP" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  stamp_targets="$(sed -n 's/^targets=//p' "$BUILD_STAMP" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  want_targets="$(printf '%s' "$MANIFEST_TRIPLES" | tr -d '[:space:]')"
+  [ "$stamp_commit" = "$COMMIT" ] && [ "$stamp_targets" = "$want_targets" ] || return 1
+  BUILT_UTC="$(sed -n 's/^built_utc=//p' "$BUILD_STAMP" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  STAMP_SECONDS="$(sed -n 's/^build_seconds=//p' "$BUILD_STAMP" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  [ -n "$BUILT_UTC" ] || return 1
+  return 0
+}
+stamp_write() { # <built_utc> [build_seconds]
+  mkdir -p "$OUT" 2>/dev/null || return 1
+  {
+    printf 'source_commit=%s\n' "$COMMIT"
+    printf 'targets=%s\n' "$(printf '%s' "$MANIFEST_TRIPLES" | tr -d '[:space:]')"
+    printf 'built_utc=%s\n' "$1"
+    printf 'build_seconds=%s\n' "${2:-}"
+  } > "$BUILD_STAMP.tmp.$$" 2>/dev/null && mv -f "$BUILD_STAMP.tmp.$$" "$BUILD_STAMP" 2>/dev/null
+}
+if [ -z "$FROM" ] && [ "$CHECK" = 0 ]; then
+  if stamp_read; then
+    say "identity frozen: built_utc=$BUILT_UTC${STAMP_SECONDS:+ build_seconds=$STAMP_SECONDS} (recorded once for $SHORT in $BUILD_STAMP, so a re-run rewrites neither the manifest nor SHA256SUMS)"
+  else
+    BUILT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    stamp_write "$BUILT_UTC" "" || say "warning: the build stamp $BUILD_STAMP could not be written; a re-run of this commit will rewrite built_utc and invalidate a signature made over its sums"
+    say "identity recorded: built_utc=$BUILT_UTC for $SHORT (kept for every later run over these artifacts)"
+  fi
+fi
+
 # ---- --ensure: is this commit already covered? ------------------------------------------------------
 # A landing runs this before paying for a build. The question is not "does a release name this commit"
 # but "does a published release have this commit's compiled inputs" - the same digest rule the deploy's
@@ -301,7 +347,9 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     [ -n "${BUILD_SECONDS:-}" ] && echo "build_seconds=$BUILD_SECONDS"
     echo "glibc_floor=$GLIBC_FLOOR"
     echo "codemode=$CODEMODE"
-    echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # The frozen identity, never `date` at the moment of writing: see the stamp block above. The fallback
+    # only fires on a run that could not write its stamp, and it says so there.
+    echo "built_utc=${BUILT_UTC:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
     echo '# target wa_sha256 wa_bytes wa-sentinel_sha256 wa-sentinel_bytes'
     for triple in $MANIFEST_TRIPLES; do
       local wa="$dir/wa-$triple-$SHORT" sentinel="$dir/wa-sentinel-$triple-$SHORT"
@@ -342,14 +390,31 @@ if [ -n "$FROM" ]; then
   if [ -n "$INCOMING" ] && [ "$INCOMING" != "$DIGEST" ]; then
     fail "compiled_inputs_mismatch: $FROM's manifest records compiled_inputs=$INCOMING and $COMMIT's tree is $DIGEST, so that manifest is not this commit's" 5
   fi
-  awk -v d="$DIGEST" '
-    /^compiled_inputs=/ {next}
-    {print}
-    /^source_tree=/ {print "compiled_inputs=" d; done = 1}
-    END {if (!done) print "compiled_inputs=" d}
-  ' "$OUT/node-$SHORT.manifest" > "$OUT/.node-$SHORT.manifest.$$.tmp" \
-    && mv -f "$OUT/.node-$SHORT.manifest.$$.tmp" "$OUT/node-$SHORT.manifest" \
-    || fail "manifest_unwritable: $OUT/node-$SHORT.manifest" 2
+  # The identity travels with the bytes, and it is never re-invented here: `--from` runs on a host that may
+  # not be able to build, and a fresh built_utc is exactly what invalidates the signature made over the sums
+  # the signing host saw.
+  FROM_UTC="$(wa_node_manifest_value "$OUT/node-$SHORT.manifest" built_utc)"
+  FROM_SECONDS="$(wa_node_manifest_value "$OUT/node-$SHORT.manifest" build_seconds)"
+  if [ -n "$FROM_UTC" ]; then
+    BUILT_UTC="$FROM_UTC"; STAMP_SECONDS="$FROM_SECONDS"
+    stamp_write "$FROM_UTC" "$FROM_SECONDS" || say "warning: the build stamp $BUILD_STAMP could not be written"
+    say "identity taken from $FROM: built_utc=$FROM_UTC${FROM_SECONDS:+ build_seconds=$FROM_SECONDS}"
+  fi
+  if [ "$INCOMING" = "$DIGEST" ]; then
+    # Already this commit's: NOT rewritten. A manifest rewritten byte-for-byte is still a different file to
+    # anything that hashed it (mtime, inode, a concurrent reader), and the sums that name it must stay
+    # exactly the bytes the signing host signed.
+    say "manifest kept byte-for-byte (compiled_inputs=$DIGEST already recorded)"
+  else
+    awk -v d="$DIGEST" '
+      /^compiled_inputs=/ {next}
+      {print}
+      /^source_tree=/ {print "compiled_inputs=" d; done = 1}
+      END {if (!done) print "compiled_inputs=" d}
+    ' "$OUT/node-$SHORT.manifest" > "$OUT/.node-$SHORT.manifest.$$.tmp" \
+      && mv -f "$OUT/.node-$SHORT.manifest.$$.tmp" "$OUT/node-$SHORT.manifest" \
+      || fail "manifest_unwritable: $OUT/node-$SHORT.manifest" 2
+  fi
   for triple in $MANIFEST_TRIPLES; do
     for name in "wa-$triple-$SHORT" "wa-sentinel-$triple-$SHORT"; do
       [ -f "$FROM/$name" ] || fail "binary_missing: $FROM/$name" 2
@@ -509,12 +574,44 @@ assets="$(asset_list) node-$SHORT.manifest"
 # deploy verifies (source_commit + sha256/size per triple), and this is the same set in the flat form every
 # other release of this project publishes, so a mirror, an audit or a human with `sha256sum -c` needs no
 # knowledge of the manifest's shape. It lies beside the manifest, never instead of it.
-{
-  for asset in $assets; do
-    [ -f "$OUT/$asset" ] || fail "binary_missing: $OUT/$asset" 2
-    ( cd "$OUT" && sha256sum "$asset" ) || fail 'sha256_tool_missing: no sha256sum or shasum' 7
+#
+# PRODUCED ONCE PER ROUND. This file is what the signing host signs, and it is the only thing that makes a
+# release installable at all, so a re-run over the same artifacts must not rewrite it: `sums_match` answers
+# "is what is on disk already exactly these bytes' manifest", and when it is, the file is left alone
+# (byte for byte, inode and all). Without this, the ship step's re-run of this publisher invalidated a
+# signature the operator had just made - measured 13/11, worked around by hand-freezing the build and
+# publishing with `--from`.
+sums_match() { # <sums-file> -> 0 when it lists exactly `$assets` with these hashes
+  local sums="${1:-}" want actual count=0 rows
+  [ -f "$sums" ] || return 1
+  rows="$(grep -c . "$sums" 2>/dev/null || true)"
+  for want in $assets; do
+    count=$((count + 1))
+    [ -f "$OUT/$want" ] || return 1
+    actual="$(wa_node_sha256 "$OUT/$want" 2>/dev/null)" || return 1
+    [ -n "$actual" ] || return 1
+    grep -qx "$actual  $want" "$sums" || return 1
   done
-} > "$OUT/.SHA256SUMS.$$" && mv -f "$OUT/.SHA256SUMS.$$" "$OUT/SHA256SUMS" || fail "bundle_unwritable: $OUT/SHA256SUMS" 2
+  [ "$rows" = "$count" ] || return 1
+  return 0
+}
+if sums_match "$OUT/SHA256SUMS"; then
+  say "checksums reused $OUT/SHA256SUMS ($(grep -c . "$OUT/SHA256SUMS") asset(s), the same bytes a signature was made over)"
+else
+  {
+    for asset in $assets; do
+      [ -f "$OUT/$asset" ] || fail "binary_missing: $OUT/$asset" 2
+      ( cd "$OUT" && sha256sum "$asset" ) || fail 'sha256_tool_missing: no sha256sum or shasum' 7
+    done
+  } > "$OUT/.SHA256SUMS.$$" && mv -f "$OUT/.SHA256SUMS.$$" "$OUT/SHA256SUMS" || fail "bundle_unwritable: $OUT/SHA256SUMS" 2
+  # A signature left over from another set is now about other bytes, and shipping it would be a release no
+  # node can install. Named here, before anything is printed for upload, instead of being discovered on four
+  # nodes.
+  if [ -f "$OUT/SHA256SUMS.sig" ]; then
+    wa_release_verify_sums "$OUT" || fail \
+      "signature_stale: $OUT/SHA256SUMS.sig is not a signature over the sums just written (they changed after it was made), so nothing is published; sign the new $OUT/SHA256SUMS where the vault is (bash scripts/sign-release.sh $OUT/SHA256SUMS) and run this again" 6
+  fi
+fi
 assets="$assets SHA256SUMS"
 say "checksums $OUT/SHA256SUMS ($(wc -l < "$OUT/SHA256SUMS" | tr -d '[:space:]') asset(s))"
 # SIGNED. `SHA256SUMS` on its own is worth nothing: it ships in the same release as the binaries it names,

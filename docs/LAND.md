@@ -7,7 +7,9 @@ output as evidence, and writes what it did before it moves on.
 ```bash
 wa land --ready                     # every branch with a READY line in the ready box
 wa land --branches change/a,change/b
-wa land --dry-run                   # the plan and every command; changes nothing
+wa land --dry-run                   # the plan (path, steps run or skipped, expected cost) and every command
+wa land --full                      # ignore the plan: run every step, even the ones this round does not need
+wa land --canary <node> --account <node>   # which node goes first (default work) and last (default openclaw)
 wa land --no-deploy                 # land and publish, deploy nothing
 wa land --signer <node>|local       # where the release is signed (default: the node whose
                                     # WA_VAULT_ADMIN_URL is set - the vault's listener is loopback)
@@ -18,28 +20,119 @@ wa land status [--run <id>]         # the journal, read-only
 wa land ready change/x <sha>        # record an agent's READY line
 ```
 
-Code: `lua/core/land.lua` (the machine), `lua/core/remote_update.lua` (the per-node verb it calls),
-`scripts/sign-release.sh` (the one command that signs a release). Test: `scripts/test-land.lua` (145 checks,
-~40 s, real git, a real scratch wa-vault, scripted nodes).
+Code: `lua/core/land.lua` (the machine, the plan and the ring's waves), `lua/core/remote_update.lua` (the
+per-node verb it calls), `scripts/sign-release.sh` (the one command that signs a release),
+`scripts/lib/land-classify.sh` (which kind of change a path is - the one definition, over `wa_compiled_input`),
+`scripts/lib/fast-rows.sh` (which Lua rows a narrowed run may execute), `scripts/publish-lua-tree.sh` (the
+record a Lua-only round signs). Tests: `scripts/test-land.lua` (197 checks, real git, a real scratch wa-vault,
+scripted nodes - including the four paths, the gate's narrowing, the deploy's waves and the cost report),
+`scripts/test-land-signing.sh` (build -> sign -> re-run the publisher -> publish, without a hand-frozen build)
+and `scripts/test-fast-rows.sh` (the narrowing's three rules).
 
 ## The steps, in order
 
 | step | what it does | refuses by name when |
 | --- | --- | --- |
 | `collect` | fetch the incoming repository, resolve each branch and its tip, record the base | `no_repository`, `no_main`, `branch_unknown`, `ready_sha_moved`, `ready_empty` |
+| `plan` | classify what changed and decide the round's path: which steps run, which steps are skipped **and why**, what the gate will check, and what the round should cost (the journal's own medians) | `plan_no_changes` (nothing to land) |
 | `review` | run `scripts/review-branch.mjs` on each branch **before** the merge; findings are reported, never blocking | `skipped` + a TODO when the reviewer is not on main |
 | `merge` | a fresh worktree (`land<N>/final`) from the base, `merge-tree --write-tree` first, then one `--no-ff` merge per branch | `merge_conflict`, `merge_failed`, `worktree_failed` |
 | `gate` | the weighted checks, one run each, a failing check re-run **once alone** | `gate_failed`, `gate_vacuous`, `flaky_under_load` (stops, never green) |
 | `push` | the landed tip to the incoming repository, read back | `push_failed`, `push_not_readback` |
 | `main` | fast-forward the source of truth onto the landed tip, read back | `main_not_fast_forward`, `main_push_needs_credentials`, `main_not_readback` |
-| `artifacts` | build the release set (`publish-node-binaries.sh` with `WA_RELEASE_SIGN_DEFER=1`) and verify every payload against the manifest's pins | `artifacts_failed`, `artifacts_not_pinned`, `artifacts_wrong_commit` |
+| `artifacts` | by path: a **Lua-tree record** (`publish-lua-tree.sh`), the **components bundle** (`publish-components.sh`), or the node release (`publish-node-binaries.sh` with `WA_RELEASE_SIGN_DEFER=1`, every payload verified against the manifest's pins) | `artifacts_failed`, `artifacts_not_pinned`, `artifacts_wrong_commit` |
 | `sign` | `scripts/sign-release.sh` on the host that can reach wa-vault, the signature handed back, then verified against the trusted keys of the landed tree | `signer_unknown`, `release_not_signed`, `release_key_not_trusted` |
 | `ship` | `scripts/publish-artifacts-branch.sh` from the built set, then hold the shipped ref to every file its `PUBLISH.sh` names, signature included | `ship_unsigned`, `ship_incomplete`, `ship_wrong_commit` |
 | `publish` | the release itself, from the shipped ref | `publish_unsigned`, `publish_needs_credentials`, `publish_failed` |
-| `deploy` | the ring, in order, stopping at the first node that is not installed | `deploy_refused`, `deploy_failed` |
-| `report` | one summary written to a file and printed; runs even when the machine stopped | - |
+| `deploy` | the ring in **waves**: the canary alone, then the other non-account nodes together, then the account node last; stops at the first node that is not installed | `deploy_refused`, `deploy_failed` |
+| `report` | one summary written to a file and printed, with the path, the per-step time, the total and the journal's average; runs even when the machine stopped | - |
 
 `report` is the only step that always runs: a stop without a summary is what this module exists to end.
+
+## The plan: the cheapest safe path, decided from what changed
+
+Operator, 13/11: *"it should automatically know best compile time and take best path"*. A round cost ~40
+minutes every time (measured by hand: merge + code-mode build 3-5 min, gate 4-6, a cross-build of both Linux
+targets 7-9 **even when no compiled input had changed**, sign+publish 2-5, four deploys in series 15-20), and
+most of that day's branches were Lua-only. So the first thing a round does after `collect` is `plan`: it
+classifies every path the branches introduce and takes the cheapest path that is SAFE for them.
+
+```
+land: plan: 7 path(s) changed -> lua-scripts-only
+land:   compiled 0, component 0, lua 5, docs 2 (classified by land-classify.sh)
+land:   gate: fast prompt-docs over 18 Lua row(s) of the suite
+land:   collect   run  runs on every path
+land:   plan      run  runs on every path
+land:   artifacts run  Lua tree record (manifest + SHA256SUMS over the shipped Lua tree): no cross-build, no node release
+land:   sign      run  signs the Lua-tree record's SHA256SUMS (the vault's host, as always)
+land:   ship      skip a Lua-only round ships no node release: each node installs the tree with its own deploy, which keeps the installed binary
+land:   publish   skip a Lua-only round publishes no node release; the signed record is the round's evidence and the deploy is the transport
+land:   deploy    run  the ring, in order: the nodes take the Lua tree and keep their binary (the deploy's Lua fast path)
+land:   expected 18m20s (median of 4 finished run(s) on this path)
+```
+
+| path | artifacts | sign | ship | publish | deploy |
+| --- | --- | --- | --- | --- | --- |
+| `docs-only` | skipped | skip | skip | skip | skip (a document is not loaded at runtime) |
+| `lua-scripts-only` | Lua-tree record | run | skip | skip | the tree, binary kept (the deploy's Lua fast path) |
+| `components` | components bundle + repin check | skip | skip | skip | the repinned components |
+| `compiled` | node release | run | run | run | run |
+
+Three properties, deliberately:
+
+- **The classification is not spelled here.** `scripts/lib/land-classify.sh` calls `wa_compiled_input`
+  (`scripts/lib/node-binaries.sh`), the same function the deploy's Lua fast path, the release's digest fallback
+  and the publisher use - so "this round needs no build" and "that release is this commit's binary" cannot
+  disagree about the same file. It adds only the two categories the planner needs on top: `component`
+  (`rust/components/**`, `components.lock`) and `docs` (markdown, skills, reviews). A shared crate a component
+  uses but the node also compiles stays `compiled`.
+- **A skipped step is recorded as `skipped` with its reason**, in the journal and in the report. Nothing is
+  silently omitted, and nothing is reported done. `--full` is the explicit escape hatch that runs every step.
+- **A tree without the classifier takes the full path** (`classifier: missing`), because a plan that guessed
+  would be a plan that skips work nobody proved unnecessary.
+
+### The gate runs what the change touches - never less than the core
+
+The gate is narrowed by the same plan: `fast` and `prompt-docs` always run; the code-mode checks are added
+when a code-mode path changed, the WhatsApp crate's tests when its crate changed; and `scripts/fast.sh` gets a
+`WA_FAST_ROWS` list of the Lua rows the changed modules touch (a row whose own text mentions the module,
+proved by `grep` in the tree, not guessed from a name). A change no row maps to runs the whole suite.
+
+`scripts/lib/fast-rows.sh` is where a narrowing is stopped from meaning less than a full run: the always-on
+core rows are added whatever the request says (the row-environment probe, and `scripts/test-land.lua`), the
+contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by name, and an
+empty request is refused (a plan that maps nothing asks for the whole suite, never for silence).
+
+**A failing row is still re-run once alone** under the machine's highest weight, and a row that passes alone
+is reported `flaky under load: <name>` and **still stops the landing** - narrowing changes what runs, never
+what a failure means.
+
+### Signing: the identity is produced once per round
+
+`built_utc`/`build_seconds` are recorded in `$OUT/build-stamp.txt` for a (commit, target set) and reused, and
+`SHA256SUMS` is reused byte-for-byte when it already names the set's files; `--from` takes the stamp from the
+incoming manifest and leaves the manifest untouched when it already carries the commit's `compiled_inputs`.
+That is the 13/11 fix: the ship step re-runs the publisher after the vault host signed, and before this the
+re-run rewrote the manifest (a new `built_utc`), which rewrote `SHA256SUMS`, which left the signature about
+other bytes - the operator had to freeze the build by hand and publish with `--from`. Now a re-run after
+signing is byte-identical, and a set whose payloads moved after it was signed is refused `signature_stale`
+(every `scripts/publish-node-binaries.sh` re-run, and by `scripts/publish-lua-tree.sh` too).
+
+### The deploy ring goes in waves
+
+The canary (default `work`) is deployed first and **alone**; then the other non-account nodes go **together**;
+then the account node (`openclaw`, which holds the WhatsApp account and the relay) goes **last**. The first
+node that is not `installed` stops the round: nodes in later waves are recorded `not_attempted` with the reason,
+and the nodes already asked in the failing wave keep their own recorded outcome (a parallel wave cannot un-ask
+a request, and pretending otherwise would be a lie in the journal). `--canary <node>` and `--account <node>`
+move the two ends; a ring that names neither still gets them (the first non-account node becomes the canary, and
+the plan says it defaulted).
+
+### What a round cost
+
+The report ends with a `## cost` table: the path taken, every step's seconds, the total, what the plan
+expected, and the average of the finished runs in the journal. A number nobody compares is a number nobody can
+improve; the point of the plan is that "~40 minutes every round" became a measurement per round, per path.
 
 ## Resumable, and what it refuses to repeat
 

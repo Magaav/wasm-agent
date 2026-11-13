@@ -758,7 +758,156 @@ eq(moved_code, 1, "a moved branch is refused")
 eq(step_of("case16", "collect").error, "ready_sha_moved", "the refusal is named")
 contains(step_of("case16", "collect").next, "moved", "the refusal says what to do")
 
+-- ---------------------------------------------------------------- case 18: the fastlane plan
+--
+-- The mission's rule: the round takes the CHEAPEST safe path, decided from what changed before anything runs.
+-- These cases stand the REAL classifier and the REAL record script in a fixture and assert the decisions - the
+-- categories, the steps each one skips, the gate's narrowing with its never-dropped core, the deploy's waves
+-- (canary first, the middle together, the account node last, stop at the first failure) and the cost report
+-- against the journal's own history.
+
+-- The classifier is the tree's own (`scripts/lib/land-classify.sh` + `scripts/lib/node-binaries.sh`): a fork
+-- of the rule would be a plan that disagrees with the deploy about the same file.
+for _, relative in ipairs({ "scripts/lib/land-classify.sh", "scripts/lib/node-binaries.sh", "scripts/publish-lua-tree.sh", "scripts/lib/lua-tree.sh" }) do
+  must("mkdir -p " .. repo .. "/" .. (relative:match("^(.*)/[^/]+$") or "."), "mkdir for " .. relative)
+  must("cp -f " .. tree_root .. "/" .. relative .. " " .. repo .. "/" .. relative, "copy " .. relative)
+end
+must("git add -A && git commit -q -m fastlane-fixtures", "commit the fastlane fixtures", repo)
+
+local function classify(paths)
+  local command = "bash scripts/lib/land-classify.sh --repo " .. repo
+  for _, path in ipairs(paths) do command = command .. " " .. path end
+  return must(command, "classify", repo)
+end
+local function category_of(paths)
+  local command = "bash scripts/lib/land-classify.sh --category --repo " .. repo
+  for _, path in ipairs(paths) do command = command .. " " .. path end
+  return (must(command, "category", repo):gsub("%s+$", ""))
+end
+
+-- 18a. The four classes, on paths whose answer is not a guess.
+eq(category_of({ "docs/LAND.md", "skills/x/SKILL.md" }), "docs-only", "markdown is the docs path")
+eq(category_of({ "lua/core/agent.lua", "ui/app.js", "scripts/fast.sh" }), "lua-scripts-only",
+  "the Lua tree, the UI and the scripts are the lua path")
+eq(category_of({ "rust/components/wa-whatsapp/src/lib.rs", "components.lock" }), "components",
+  "a component's own crate and its pins are the components path")
+eq(category_of({ "lua/core/agent.lua", "rust/wa-host/src/main.rs" }), "compiled", "the strongest class wins")
+eq(category_of({ "rust/components/graph/src/lib.rs", "rust/wa-whatsapp-outbox/src/lib.rs" }), "compiled",
+  "a crate the NODE also compiles is compiled even though a component uses it")
+contains(classify({ "rust/components/graph/src/lib.rs" }), "component\trust/components/graph/src/lib.rs",
+  "one line per path, class then path")
+-- The classification IS `wa_compiled_input`, not a second opinion about it: the same function the deploy's Lua
+-- fast path and the release digest use decides here.
+contains(classify({ "rust/wa-host/src/main.rs" }), "compiled\trust/wa-host/src/main.rs", "rust/ is compiled")
+contains(classify({ "docs/LAND.md" }), "docs\tdocs/LAND.md", "a document is not compiled")
+
+-- 18b. The steps each path skips, and the artifact each one builds.
+local function steps_of(category) return land.plan_steps(category) end
+eq(steps_of("docs-only").artifacts.action, "skip", "docs-only builds nothing")
+eq(steps_of("docs-only").deploy.action, "skip", "docs-only deploys nothing")
+eq(steps_of("docs-only").sign.action, "skip", "docs-only signs nothing")
+contains(steps_of("docs-only").deploy.why, "docs-only", "the skip says why")
+eq(steps_of("lua-scripts-only").artifacts.kind, "lua-tree", "the lua path writes a tree record")
+eq(steps_of("lua-scripts-only").ship.action, "skip", "the lua path ships no node release")
+eq(steps_of("lua-scripts-only").deploy.action, "run", "the lua path deploys the tree to every node")
+eq(steps_of("components").artifacts.kind, "components", "the components path rebuilds the bundle")
+eq(steps_of("components").deploy.action, "run", "and deploys the repinned components")
+for _, name in ipairs({ "artifacts", "sign", "ship", "publish", "deploy" }) do
+  eq(steps_of("compiled")[name].action, "run", "the compiled path runs " .. name)
+end
+
+-- 18c. The gate: the always-on checks are never dropped, a path adds only what it touches, and a changed Lua
+-- module maps to the rows that mention it (proved by grep on the fixture, not by a naming convention alone).
+local function gate_for(paths)
+  local wanted = land.gate_checks_for(paths)
+  local names = {}
+  for _, name in ipairs({ "fast", "prompt-docs", "codemode-component", "cargo-codemode", "cargo-wa-whatsapp" }) do
+    if wanted[name] then names[#names + 1] = name end
+  end
+  return table.concat(names, ",")
+end
+eq(gate_for({ "docs/LAND.md" }), "fast,prompt-docs", "a document runs the fast path and the prompt-docs check only")
+eq(gate_for({ "rust/components/wa-whatsapp/src/lib.rs" }), "fast,prompt-docs,cargo-wa-whatsapp",
+  "the WhatsApp component's crate brings its own check")
+eq(gate_for({ "lua/core/codemode.lua" }), "fast,prompt-docs,codemode-component,cargo-codemode",
+  "a code-mode path brings its two checks")
+
+-- A changed module maps to rows: the fixture carries one row that names `lua/core/agent.lua` and one that does
+-- not, and only the first may be planned.
+must("mkdir -p scripts lua/core", "fixture dirs", repo)
+write_file(repo .. "/lua/core/agent.lua", "return {}\n")
+write_file(repo .. "/scripts/test-agent-thing.lua", "-- mentions lua/core/agent.lua\n")
+write_file(repo .. "/scripts/test-unrelated-thing.lua", "-- mentions nothing\n")
+write_file(repo .. "/scripts/test-fast-row-environment.lua", "-- the core row\n")
+must("git add -A && git commit -q -m rows", "commit the rows", repo)
+local row_run = { id = "rows", journal = { repo = repo, base = "HEAD~1", branches = { { name = "x", sha = "HEAD" } } } }
+local rows = land.gate_rows(row_run, { "lua/core/agent.lua" })
+eq(#rows, 1, "one row mentions the changed module")
+eq(rows[1], "scripts/test-agent-thing.lua", "and it is the one the grep found")
+eq(#land.gate_rows(row_run, { "lua/core/agent.lua", "scripts/test-unrelated-thing.lua" }), 2,
+  "a changed row is planned too")
+eq(#land.gate_rows(row_run, { "docs/LAND.md" }), 0, "no row maps to a document, which makes the run whole")
+
+-- 18d. The deploy's waves: canary alone, the middle together, the account node last.
+local function wave_names(plan)
+  local parts = {}
+  for index, wave in ipairs(plan.waves) do
+    local names = {}
+    for _, entry in ipairs(wave) do names[#names + 1] = tostring(entry.node) end
+    parts[index] = table.concat(names, "+")
+  end
+  return table.concat(parts, " | ")
+end
+local route = land.deploy_waves(land.RING, {})
+eq(wave_names(route), "work | mail+nextcloud | openclaw",
+  "the canary goes first alone, the middle goes together, the account node goes last")
+eq(route.canary, "work", "the default canary is work")
+eq(route.account, "openclaw", "the default account node is openclaw")
+eq(route.canary_defaulted, nil, "a ring that names the canary does not default it")
+local named = land.deploy_waves(land.RING, { canary = "nextcloud", account = "mail" })
+eq(wave_names(named), "nextcloud | work+openclaw | mail", "the canary and the account node are knobs, not constants")
+local ringless = land.deploy_waves({ { node = "a", mode = "tree" }, { node = "openclaw", mode = "tree" } }, {})
+eq(wave_names(ringless), "a |  | openclaw", "a ring without `work` still gets a canary (the first non-account node)")
+eq(ringless.canary_defaulted, true, "and the plan says the canary defaulted")
+eq(#land.deploy_waves(land.RING, { canary = "work", account = "work" }).waves[3], 0,
+  "a canary that IS the account node is not deployed twice")
+
+-- 18e. A cost estimate and a report that compares: written once, read back from the journal.
+local estimate = land.estimate("docs-only", {})
+ok(estimate.seconds > 0, "the estimate is a number even with no history")
+eq(estimate.per_step.deploy, 0, "the docs path expects no deploy at all")
+eq(estimate.per_step.artifacts, 0, "and no build")
+ok(estimate.per_step.gate > 0, "the gate is never free")
+contains(estimate.from, "13/11", "with no finished run the estimate says where its numbers come from")
+-- A journal with two finished runs is what the next plan measures against.
+for index, seconds in ipairs({ 100, 300 }) do
+  local id = "history" .. index
+  write_file(land.journal_path(id), json.encode({ run = id, result = "done", created_at = 1, updated_at = 1,
+    steps = { gate = { name = "gate", state = "done", seconds = seconds } },
+    plan = { category = "lua-scripts-only" } }))
+end
+local measured = land.estimate("lua-scripts-only", land.land_runs())
+eq(measured.per_step.gate, 200, "the gate's median comes from the journal, not from the fallback table")
+contains(measured.from, "median", "and the plan says it was measured")
+local average = land.journal_average(land.land_runs())
+ok(average ~= nil and average.average > 0, "the report's comparison has a number to compare with")
+ok(average.runs >= 2, "over the finished runs only (earlier cases in this row are finished runs too)")
+
+-- 18f. The report names the path, the per-step time, the total and the journal's average.
+local report_text = land.report_text({ run = "report-check", result = "done", plan = { category = "lua-scripts-only",
+  expected_seconds = 600, expected_from = "median of 2 finished run(s)" },
+  steps = { gate = { state = "done", seconds = 120 }, artifacts = { state = "done", seconds = 30 } },
+  deploy_plan = { canary = "work", account = "openclaw", waves = { { "work" }, { "mail", "nextcloud" }, { "openclaw" } } },
+  deploy = { { node = "work", mode = "tree", wave = 1, state = "installed", seconds = 12 } } })
+contains(report_text, "## cost", "the report has a cost table")
+contains(report_text, "`lua-scripts-only`", "it names the path the round took")
+contains(report_text, "total | 2m30s", "it states the total in the same units as the plan")
+contains(report_text, "journal average", "and the journal's average to compare with")
+contains(report_text, "deploy order: canary work -> parallel mail+nextcloud -> account openclaw",
+  "the report names the deploy's waves")
+
 -- ---------------------------------------------------------------- case 17: the CLI
+
 eq(land.cli({ "chat" }), nil, "not a land request: the dispatcher keeps its own path")
 eq(land.cli({ "land", "--help" }), 0, "the help is free")
 eq(land.cli({ "land" }), 2, "no arguments is a usage answer")
