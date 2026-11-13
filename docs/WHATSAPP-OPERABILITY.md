@@ -139,6 +139,14 @@ nothing to install and no unit to enable. What an operator does now is the Rust 
   and the answer says `served_by`; the dead `mcp-whatsapp` bridge is
   [WHATSAPP-MCP-QUEUE.md](WHATSAPP-MCP-QUEUE.md)
   ([WHATSAPP-MCP-QUEUE.md](WHATSAPP-MCP-QUEUE.md) records exactly what it can reach today).
+  That routing is decided BEFORE the local capability is called, from the deploy's
+  `WASM_AGENT_WHATSAPP_OWNER` and then the fleet, so a node that does not hold the account never
+  writes a job nobody there can settle; a read the account node's own queue has not finished answers
+  `{state:"pending", id, served_by}` and the same call reads the same job. An account node that was
+  named and did not answer is one refusal, `whatsapp_account_unreachable` with `account_lives_on`.
+  Measured 13/11 (session b393f280 on node `work`): before this, three `mcp_whatsapp_contacts` calls
+  and one `mcp_whatsapp_read` each answered `{"error":"whatsapp_contacts_slow","state":"queued"}`
+  with the same local job id, and the run ended without sending anything.
 * **Explicit sends** are the operator path, prepare -> approve -> send -> status
   ([WHATSAPP-OPERATOR-MANAGEMENT.md](WHATSAPP-OPERATOR-MANAGEMENT.md)), and they are dispatched by the
   component's outbox.

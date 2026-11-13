@@ -92,7 +92,9 @@ fn a_dead_job_answers_with_its_reason_and_not_with_a_success() {
     queue.fail_by(taken.id, "wa-whatsapp", "permanent:not_indexed").unwrap();
     let answer = ask_in(&queue, seam::Op::Media, &serde_json::json!({"chat": "5511999999999@lid", "id": "3EB01"}), 1);
     assert_eq!(answer["ok"], false);
-    assert_eq!(answer["error"], "whatsapp_media_failed");
+    // A refusal the caller can act on keeps its own code, and the tool names it: `not_indexed` is not a
+    // slow query and not a generic failure (13/11: `contacts` answered `_failed state=dead` here).
+    assert_eq!(answer["error"], "whatsapp_media_not_indexed", "{answer}");
     assert_eq!(answer["state"], "dead");
     assert!(answer["detail"].as_str().unwrap().contains("not_indexed"), "{answer}");
 }
@@ -294,4 +296,79 @@ fn a_reason_is_one_bounded_line() {
     let line = one_line("multi\nline\terror");
     assert!(!line.contains('\n') && !line.contains('\t'), "{line}");
     assert!(one_line(&"x".repeat(500)).chars().count() <= 160);
+}
+
+#[test]
+fn every_op_the_seam_defines_is_a_host_capability() {
+    // The contract between the node and the component, from the node's side: the seam's op list and the
+    // capability registry are the same set, so an op can never be enqueued by nobody (a name the model
+    // is offered with no `host.whatsapp_*` behind it) or registered with no question to ask.
+    //
+    // Measured 13/11 on the account node: `mcp_whatsapp_contacts` reached a component built before
+    // `contacts` existed, was refused `bad_op`, retried, dead-lettered, and answered
+    // `whatsapp_contacts_failed state=dead` twenty seconds later - a disagreement no test could see.
+    let registered: Vec<&str> = crate::capabilities::inventory().iter().map(|capability| capability.name).collect();
+    for op in seam::Op::ALL {
+        assert!(
+            registered.contains(&op.tool()),
+            "{} is one of the seam's ops but no host capability answers it",
+            op.tool()
+        );
+    }
+}
+
+#[test]
+fn a_settled_refusal_is_the_tools_own_error_and_not_a_dead_letter() {
+    // The component answers a payload it can never read (`seam::terminal_refusal`): the job settles
+    // `done`, and the tool names the refusal by its own code at once.
+    let (_host, queue) = queue("settled-refusal");
+    let args = serde_json::json!({});
+    let first = ask_in(&queue, seam::Op::Contacts, &args, 1);
+    let id = first["id"].as_u64().unwrap_or_else(|| panic!("a job was queued: {first}"));
+    // The worker takes it and answers the refusal.
+    let _ = queue.take(seam::QUEUE, COMPONENT, None).expect("take");
+    let refusal = seam::Refusal::new("bad_op", "op must be one of search, read, contacts");
+    let body = serde_json::to_vec(&seam::terminal_refusal("contacts", &refusal)).unwrap();
+    queue.done_by(wa_queue::JobId(id), COMPONENT, &body).expect("settle the refusal");
+    // The same call reads the same job (the request is the dedupe key) and answers its own word.
+    let answer = ask_in(&queue, seam::Op::Contacts, &args, 50);
+    assert_eq!(answer["error"], "whatsapp_contacts_bad_op", "{answer}");
+    assert_eq!(answer["state"], "refused");
+    assert_eq!(answer["ok"], false);
+    assert_eq!(answer["effect"], "none");
+    assert!(
+        answer["note"].as_str().unwrap_or_default().contains("wa services upgrade wa-whatsapp"),
+        "the refusal names the fix: {answer}"
+    );
+    assert_eq!(queue.stats(seam::QUEUE).expect("stats").dead, 0, "nothing was dead-lettered");
+}
+
+#[test]
+fn a_dead_permanent_refusal_from_an_older_component_still_names_its_code() {
+    // A component built before the host learned an op cannot settle it; it fails the job and the queue
+    // dead-letters it. That is still a refusal the caller can act on, and the tool says so by its code
+    // instead of `_failed state=dead`.
+    let (_host, queue) = queue("dead-permanent");
+    let args = serde_json::json!({ "q": "Laura" });
+    // One attempt, so the component's refusal is final and the queue dead-letters it - the state an
+    // older component leaves on a live node.
+    let verified = seam::Request { op: "contacts".into(), q: Some("Laura".into()), ..Default::default() }
+        .validate()
+        .expect("a contacts question validates");
+    let id = queue
+        .enqueue(
+            EnqueueRequest::new(seam::QUEUE, verified.to_request().encode())
+                .fresh_for(seam::FRESH_MS)
+                .max_attempts(1)
+                .dedupe(verified.dedupe_key()),
+        )
+        .expect("enqueue")
+        .id
+        .0;
+    let _ = queue.take(seam::QUEUE, COMPONENT, None).expect("take");
+    queue.fail_by(wa_queue::JobId(id), COMPONENT, "permanent:bad_op").expect("record the refusal");
+    let answer = ask_in(&queue, seam::Op::Contacts, &args, 50);
+    assert_eq!(answer["error"], "whatsapp_contacts_bad_op", "{answer}");
+    assert_eq!(answer["state"], "dead", "the queue's own word for how it ended: {answer}");
+    assert_eq!(queue.stats(seam::QUEUE).expect("stats").ready, 0, "nothing is retried");
 }

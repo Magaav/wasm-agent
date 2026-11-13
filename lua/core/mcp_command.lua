@@ -61,6 +61,22 @@ local function local_connector(mcp, server, revision)
   -- `/mcp` from listing a row as "callable now" when the callable name is a different one.
   local superseded = mcp.whatsapp_family ~= nil and mcp.whatsapp_family(server.id)
   if superseded then published = 0 end
+  -- A connector of the WhatsApp family is RETIRED, not broken, and the row says so instead of repeating
+  -- the last probe error it recorded.
+  --
+  -- The Go connector (`connectors/whatsapp`) went on 11/11 (Phase 4) and nothing in this tree serves its
+  -- port any more; 28787/8787 belongs to unrelated services now. A registry row can outlive its program,
+  -- and the row used to keep publishing `failing` with the last error it saw - "connector stopped, port
+  -- 8787 held by space-serve", "down ~37h" - which reads as a live incident: session b393f280 spent ten
+  -- rounds chasing a connector that cannot be started again before it gave up on the task. A retired
+  -- thing must SAY it is retired, once, in the place the model reads it.
+  local retired = nil
+  if superseded then
+    state, error = 'retired', nil
+    retired = 'retired: the WhatsApp Go connector was removed on 11/11 and this row is what is left of it. '
+      .. 'It is not stopped, absent or down, and no port it used to hold says anything about this node. '
+      .. 'WhatsApp is mcp_whatsapp_* - one surface, answered by the node that holds the account.'
+  end
   local function add(tool_name, description, schema, note)
     local tier = approved[tool_name]
     local is_published = server.enabled == true and tier ~= nil and note == nil and not superseded
@@ -91,17 +107,29 @@ local function local_connector(mcp, server, revision)
     -- off is still `disabled` (that is the truth about it), and one that is on but whose tools are offered
     -- elsewhere says why next to its state.
     for _, tool in ipairs(tools) do tool.note = tool.note or 'superseded_by_mcp_whatsapp' end
-    if server.enabled == true then
-      error = error or 'its tools are offered as mcp_whatsapp_* instead (one WhatsApp surface, #118)'
+  end
+  -- A retired row keeps its facts but not its last failure's words: the probe/observed/last-call error
+  -- strings are what carried the port 8787 / "down ~37h" noise to the model, and none of it is true any
+  -- more. `retired_at` is the fact that replaces them.
+  local reported_probe, observed, last_call = server.probe, server.observed_status, server.last_call
+  if superseded then
+    local function cleared(value)
+      if type(value) ~= 'table' then return value end
+      local copy = {}
+      for key, item in pairs(value) do if key ~= 'error' then copy[key] = item end end
+      if next(copy) == nil then return nil end
+      copy.retired = true
+      return copy
     end
+    reported_probe, observed, last_call = cleared(reported_probe), cleared(observed), cleared(last_call)
   end
   return {
     key = server.id, id = server.id, name = server.name or server.id,
     where = 'this node', scope = 'local', transport = definition.transport or 'unknown',
     state = state, error = error, enabled = server.enabled == true,
     tool_count = published, approved = #sorted_keys(approved), discovered = #(server.probe and server.probe.tools or {}),
-    revision = revision, observed = server.observed_status, last_call = server.last_call, probe = server.probe,
-    note = superseded and 'superseded_by_mcp_whatsapp' or nil,
+    revision = revision, observed = observed, last_call = last_call, probe = reported_probe,
+    note = retired or (superseded and 'superseded_by_mcp_whatsapp' or nil),
     tools = tools,
     policy = { tier = 'mcp', managed_by = 'lua/core/mcp.lua',
       approval = 'each tool is approved locally as read or write; a connector stays disabled until a probe passed',

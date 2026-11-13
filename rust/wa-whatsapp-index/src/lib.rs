@@ -146,6 +146,25 @@ pub enum Op {
 }
 
 impl Op {
+    /// Every question this seam can carry, in the order the docs list them.
+    ///
+    /// It exists so a new op cannot be half-added. Three things enumerate it instead of repeating the
+    /// list: the `bad_op` sentence below, the host's capability contract test (every op has a
+    /// `host.whatsapp_<op>`), and the component's coverage test (every op is dispatched). Measured
+    /// 13/11 on the account node itself: `contacts` reached a component built before it existed, was
+    /// refused `bad_op`, retried, dead-lettered, and the tool answered `whatsapp_contacts_failed
+    /// state=dead` twenty seconds later - a disagreement no test could see.
+    pub const ALL: [Op; 8] = [
+        Op::Search,
+        Op::Read,
+        Op::Message,
+        Op::Reactions,
+        Op::Media,
+        Op::Download,
+        Op::Backfill,
+        Op::Contacts,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Op::Search => "search",
@@ -271,7 +290,11 @@ impl Request {
     /// Check every argument. The first refusal wins; a query is all-or-nothing.
     pub fn validate(&self) -> Result<Verified, Refusal> {
         let op = Op::parse(self.op.trim()).ok_or_else(|| {
-            Refusal::new("bad_op", "op must be search, read, message, reactions, media, download or backfill")
+            // Built from `Op::ALL`: the sentence said "search, read, message, reactions, media, download
+            // or backfill" for a day after `contacts` landed, so a refusal quoted the rule and still
+            // left out the one op the caller had just used.
+            let known: Vec<&str> = Op::ALL.iter().map(|op| op.as_str()).collect();
+            Refusal::new("bad_op", format!("op must be one of {}", known.join(", ")))
         })?;
         // A chat typed as a name is a question about *which* chat, not an address: `read` may answer
         // it and `contacts` exists to answer it. Every other op keeps the exact-JID rule and its own
@@ -617,6 +640,43 @@ pub fn download_header_job(chunk: &[u8]) -> Option<u64> {
     let mut id = [0u8; 8];
     id.copy_from_slice(&chunk[DOWNLOAD_MAGIC.len()..]);
     Some(u64::from_le_bytes(id))
+}
+
+/// The body a component settles when it refuses a payload it will never be able to read.
+///
+/// It is an ANSWER, not a failed attempt: the same bytes produce the same refusal, so a retry spends the
+/// queue's attempts to reach the same wall and the caller waits for a dead letter that says nothing new.
+/// The `code` is the seam's own word and the host turns it into the tool's error (`whatsapp_<op>_<code>`) -
+/// only the host knows which tool the caller used. `op` is the raw string from the payload, which is how
+/// a component built before an op existed can still say WHICH question it could not read.
+pub fn terminal_refusal(op_text: &str, refusal: &Refusal) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "code": refusal.code,
+        "op": op_text.chars().take(32).collect::<String>(),
+        "detail": refusal.detail,
+        "effect": "none",
+    })
+}
+
+/// The code a settled-but-unanswered job names, when the refusal is permanent.
+///
+/// A component stores a failed attempt's reason with its own prefix (`permanent:<code>` or
+/// `retry:<why>`), and an older one stores the bare code. A `dead`/`expired` job whose reason is one of
+/// those is not a slow query: it is a refusal the caller can act on, and the tool must answer it by its
+/// own word (`whatsapp_contacts_bad_op`) instead of `whatsapp_contacts_failed` after two attempts.
+/// `None` means the failure was the store or the wire, where a retry could plausibly have helped.
+pub fn permanent_code(reason: &str) -> Option<&str> {
+    let bare = reason
+        .strip_prefix("permanent:")
+        .or_else(|| reason.strip_prefix("retry:"))
+        .unwrap_or(reason)
+        .trim();
+    let code = bare.split([':', ' ']).next().unwrap_or(bare);
+    if code.is_empty() || retryable(code) {
+        return None;
+    }
+    Some(code)
 }
 
 /// Is this failure worth another attempt? A refusal the caller can act on (no such message, no media,

@@ -142,7 +142,7 @@ ok(routed.served_by == "openclaw" and routed.asked_owner == "openclaw",
 local unreachable = whatsapp.call("mcp_whatsapp_read", { chat = "Laura" }, {
   remote_call = function() error("no route to openclaw") end,
 })
-ok(unreachable.error == "whatsapp_owner_unreachable" and unreachable.owner == "openclaw",
+ok(unreachable.error == "whatsapp_account_unreachable" and unreachable.account_lives_on == "openclaw",
   "an unreachable owner is a named refusal")
 ok(unreachable.effect == "none" and unreachable.id == nil, "and it queues nothing")
 

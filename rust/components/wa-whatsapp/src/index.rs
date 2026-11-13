@@ -576,6 +576,24 @@ async fn resolve_chat<S: Store>(store: &S, name: &str) -> Result<Resolved, Strin
     ))
 }
 
+/// The ops this component's query worker answers, in the seam's own order.
+///
+/// The dispatch in `guest.rs` is a `match` over [`seam::Op`], so the compiler already refuses a new op
+/// that nobody handles. What this list adds is a set a TEST can compare with
+/// [`seam::Op::ALL`](wa_whatsapp_index::Op::ALL): a component built from a tree where one op is missing
+/// fails its own tests instead of refusing that op at run time, which is what a live node saw on 13/11
+/// (`contacts` answered `bad_op` on the account node, was retried, and dead-lettered).
+pub const OPS: [seam::Op; 8] = [
+    seam::Op::Search,
+    seam::Op::Read,
+    seam::Op::Message,
+    seam::Op::Reactions,
+    seam::Op::Media,
+    seam::Op::Download,
+    seam::Op::Backfill,
+    seam::Op::Contacts,
+];
+
 /// `whatsapp_contacts`: which chats the index knows, by the name it observed.
 ///
 /// The answer is a list, never a decision. One exact match also fills `chat`, so a caller holding one
@@ -1763,6 +1781,48 @@ pub async fn repair<S: Store>(store: &S, budget: usize) -> Result<usize, String>
 /// The tokens of one text, as this module indexes them (the tests use it to assert the token keys).
 pub fn tokens_of(text: &str) -> BTreeSet<String> {
     record::tokenize(text).into_iter().take(MAX_TOKENS).collect()
+}
+
+#[cfg(test)]
+mod op_contract {
+    use super::{seam, OPS};
+
+    /// The component answers every question the seam can carry - no more, no fewer.
+    ///
+    /// This is the contract between the node that enqueues a query and the component that settles it,
+    /// asserted from the component's side on purpose: the host has its own half
+    /// (`rust/wa-capabilities/src/whatsapp_query.rs`, every `seam::Op` has a `host.whatsapp_<op>`), and
+    /// a disagreement between the two is what dead-letters a job the caller expected an answer to
+    /// (measured 13/11: `contacts` on the account node answered `bad_op`, retried, and dead-lettered).
+    #[test]
+    fn the_component_answers_every_op_the_seam_defines() {
+        assert_eq!(OPS, seam::Op::ALL, "the worker's op list and the seam's differ");
+        for op in seam::Op::ALL {
+            assert!(OPS.contains(&op), "this component does not answer {op:?}");
+            assert_eq!(seam::Op::parse(op.as_str()), Some(op), "{op:?} does not round-trip from its own name");
+            assert_eq!(seam::Op::parse_tool(op.tool()), Some(op), "{op:?} does not round-trip from its tool name");
+        }
+    }
+
+    /// The `bad_op` sentence names every op, so a refusal quotes the rule it enforces.
+    ///
+    /// Measured 13/11: it still read "search, read, message, reactions, media, download or backfill" a
+    /// day after `contacts` landed, so the refusal that named the caller's mistake left out the op the
+    /// caller had just used.
+    #[test]
+    fn the_bad_op_refusal_lists_every_op() {
+        let refusal = seam::Request { op: "contacts_v2".into(), ..seam::Request::default() }
+            .validate()
+            .expect_err("an unknown op is refused");
+        assert_eq!(refusal.code, "bad_op");
+        for op in seam::Op::ALL {
+            assert!(
+                refusal.detail.contains(op.as_str()),
+                "the refusal names no {op:?}: {}",
+                refusal.detail
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -46,7 +46,13 @@ where
             let _ = queue.done_by(job.id, worker, &serde_json::to_vec(&answer).unwrap_or_default());
         }
         Err(refusal) => {
-            let _ = queue.fail_by(job.id, worker, refusal.code);
+            // The component ANSWERS a payload it can never read (`seam::terminal_refusal`): the same
+            // bytes refuse the same way for ever, so a retry only reaches the same wall. The op string
+            // travels with it, so a component that predates an op can still say WHICH question it
+            // could not read.
+            let op_text = Request::decode(&job.payload).map(|request| request.op).unwrap_or_default();
+            let body = serde_json::to_vec(&wa_whatsapp_index::terminal_refusal(&op_text, &refusal)).unwrap_or_default();
+            let _ = queue.done_by(job.id, worker, &body);
         }
     }
     Some(id)
@@ -163,15 +169,23 @@ fn a_question_that_waited_too_long_is_never_answered() {
 }
 
 #[test]
-fn a_request_the_worker_cannot_read_fails_with_its_code_and_is_not_retried_into_an_answer() {
+fn a_request_the_worker_cannot_read_is_answered_with_its_code_and_never_retried() {
+    // Measured on the account node 13/11: a component that predated `contacts` failed the job `bad_op`,
+    // the queue retried it, dead-lettered it, and the tool answered `whatsapp_contacts_failed
+    // state=dead` twenty seconds later. A permanent refusal is an ANSWER, settled once, whose body
+    // names the code; the host turns it into `whatsapp_<op>_<code>` at once.
     let (_kv, _clock, queue) = queue_pair();
     queue
-        .enqueue(EnqueueRequest::new(QUEUE, b"{\"op\":\"rm -rf\"}".to_vec()).fresh_for(FRESH_MS).max_attempts(1))
+        .enqueue(EnqueueRequest::new(QUEUE, b"{\"op\":\"rm -rf\"}".to_vec()).fresh_for(FRESH_MS).max_attempts(MAX_ATTEMPTS))
         .unwrap();
     work_one(&queue, 1_000_000, |_| panic!("a bad payload is never answered"));
     let job = queue.job(wa_queue::JobId(1)).unwrap().unwrap();
-    assert_eq!(job.state.as_str(), "dead");
-    assert_eq!(job.last_error.as_deref(), Some("bad_op"));
+    assert_eq!(job.state.as_str(), "done", "a permanent refusal settles at once: {:?}", job.last_error);
+    let settled: serde_json::Value = serde_json::from_slice(job.result.as_deref().unwrap()).unwrap();
+    assert_eq!(settled["ok"], false);
+    assert_eq!(settled["code"], "bad_op");
+    assert_eq!(settled["op"], "rm -rf", "the refusal quotes the op the payload asked for");
+    assert_eq!(queue.stats(QUEUE).expect("stats").ready, 0, "it is never retried into the same wall");
 }
 
 #[test]
