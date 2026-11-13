@@ -147,26 +147,38 @@ check(cli_text:find("dry run", 1, true) ~= nil,
 check(cli_text:find("wa clean", 1, true) == nil or cli_text:find("unknown command", 1, true) == nil,
   "`wa clean` must be a known command")
 
--- ---- 6. the build island: one per tree, named the same way in Rust and in fast-binary.sh --------
--- A single shared CARGO_TARGET_DIR for every tree on a node was measured on 12/11 and is WRONG: cargo
--- reused another tree's `libwa_host_support` because its mtime was newer than this tree's source, and
--- the build failed against a library that was never built from this tree. Per-tree islands under the
--- root are the safe shape, and the two programs that have to agree on an island's name are the Rust
--- side (`host.disk("island", ...)`) and `scripts/lib/fast-binary.sh`. This is the check that they do.
--- It also pins the refusal: the node itself sets no CARGO_TARGET_DIR for an ordinary shell, because a
--- `cd other-tree && cargo build` would compile one tree into another tree's island.
+-- ---- 6. the one build root: a child per tree, named the same way in Rust and in build-target.sh ----
+-- ONE FLAT shared `CARGO_TARGET_DIR` for every tree on a node was reproduced on this node on 13/11 and is
+-- WRONG: two checkouts of one workspace give a member the same metadata hash, so the second tree's
+-- `libbase` overwrote the first's and the first tree's binary printed the other tree's value
+-- (scripts/test-onebuild.mjs keeps that measurement). So the node has ONE build root,
+-- `<root>/build/target`, with ONE CHILD PER TREE inside it - one directory to own, one `wa clean`, one
+-- cap, and no artifact crossing a tree. The two programs that must agree on a child's name are the Rust
+-- side (`host.disk("island", ...)`) and `scripts/lib/build-target.sh`. This is the check that they do.
+-- It also pins the refusal: the node sets no CARGO_TARGET_DIR for an ordinary shell, because a
+-- `cd other-tree && cargo build` would compile one tree into another tree's build dir.
 local iso = decode(host.disk("island", json.encode({ path = root })))
-check(type(iso) == "table" and iso.ok == true, "host.disk island must answer the island for a tree")
-check(normalise(iso.target):sub(-7) == "/target", "the island's cargo dir is <island>/target, got " .. tostring(iso.target))
-check(normalise(iso.target):find(normalise(root .. "/build/"), 1, true) == 1,
-  "every island lives under the root's build/, got " .. tostring(iso.target))
-local name = tostring(iso.island):match("([^/]+)$") or ""
-local expected = run(string.format(
-  'tree="%s"; name=$(basename "$tree" | tr -d "\\n"); name=$(printf %%s "$name" | tr -c "A-Za-z0-9_-" "-"); hash=$(printf %%s "$tree" | sha256sum | cut -c1-12); printf %%s "$name-$hash"',
-  iso.tree))
-check(name == tostring(expected.stdout), "the island's name must match fast-binary.sh: node=" .. name .. " script=" .. tostring(expected.stdout))
+check(type(iso) == "table" and iso.ok == true, "host.disk island must answer the build dir for a tree")
+check(normalise(iso.target):find(normalise(root .. "/build/target/"), 1, true) == 1,
+  "every build dir lives under the root's one build root (build/target/), got " .. tostring(iso.target))
+check(normalise(iso.island) == normalise(iso.target),
+  "the island IS the cargo dir now, got " .. tostring(iso.island) .. " vs " .. tostring(iso.target))
+local name = tostring(iso.target):match("([^/]+)$") or ""
+local repo = os.getenv("WASM_AGENT_LUA_ROOT") or "."
+local expected = run(string.format('bash "%s/scripts/lib/build-target.sh" target "%s"', repo, tostring(iso.tree)))
+local expected_name = tostring(expected.stdout):match("([^/]+)$") or ""
+check(name == expected_name,
+  "the build dir's name must match build-target.sh: node=" .. name .. " script=" .. tostring(expected.stdout))
 local plain = run('printf %s "${CARGO_TARGET_DIR:-unset}"')
 check(tostring(plain.stdout) == "unset" or not tostring(plain.stdout):find(normalise(root), 1, true),
   "an ordinary shell must not be handed a build dir, got " .. tostring(plain.stdout))
+-- A tree that goes takes its build output with it, with the name the build itself used: `wa clean`
+-- removes a worktree and its island in one decision, and a released session worktree asks for the same.
+os.execute(string.format('mkdir -p "%s/release-marker"', normalise(iso.target) .. "/wa-island-probe"))
+local forgot = decode(host.disk("forget", json.encode({ path = iso.tree })))
+check(type(forgot) == "table" and forgot.ok == true, "host.disk forget must answer for a tree")
+local still = run(string.format('test -e "%s" && echo there || echo gone', normalise(iso.target)))
+local still_text = (tostring(still.stdout):gsub("%s+$", ""))
+check(still_text == "gone", "forget must delete the tree's build output, saw " .. still_text)
 
-print("oneroot ok: child TMPDIR, status line, dry run, pins, guard, build island, wa clean")
+print("oneroot ok: child TMPDIR, status line, dry run, pins, guard, one build root, wa clean")

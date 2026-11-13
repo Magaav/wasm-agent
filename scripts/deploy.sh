@@ -902,14 +902,21 @@ for qf in "$QUEUE_DIR"/*.json; do
 done
 [ "$UPGRADE_ACTIVE" = "0" ] || fail "an upgrade request is active; refusing a second install"
 
-# Where the compile writes. The pin above is a fresh worktree per commit, so a target dir inside it is
-# cold on every deploy: measured 336 s of a 481 s deploy on wasm_the_first (2026-11-11) for a landing
-# that changed no Rust at all. The target dir is build output, not state, so it lives in the data dir
-# and is reused: a deploy whose Rust did not change recompiles only what its source path moved.
-# WA_DEPLOY_BUILD_TARGET names another directory; a directory that cannot be created or written falls
-# back to the pin's own target, which is the old (cold) behaviour and never a failed deploy.
+# Where the compile writes: the node's ONE build root (docs/ONEROOT.md), under the commit being
+# deployed - `<root>/build/target/deploy-<commit>`. A deploy pins a fresh worktree per commit, so a
+# target dir inside the pin is cold on every deploy (measured 336 s of a 481 s deploy on wasm_the_first,
+# 2026-11-11, for a landing that changed no Rust). The old answer was ONE shared dir for every deploy
+# (`<root>/build-cache/target`); it is not reused here, and that is deliberate: two checkouts of this
+# workspace give a member the same metadata hash, so a dir last written by another commit hands this
+# deploy that commit's library and cargo calls it fresh (measured on this node 13/11, 30 s,
+# scripts/test-onebuild.mjs). Keying the directory by the COMMIT keeps the reuse where it is safe -
+# the same commit deployed again, retried or re-run - and makes a different commit a different
+# directory, which the build cap then evicts oldest-first if it is old. WA_DEPLOY_BUILD_TARGET still
+# names another directory; one that cannot be written falls back to the pin's own target, which never
+# fails a deploy.
 DEPLOY_DATA="${WASM_AGENT_DATA:-${WASM_AGENT_HOME:-$HOME}/.wasm-agent}"
-DEPLOY_BUILD_TARGET="${WA_DEPLOY_BUILD_TARGET:-$DEPLOY_DATA/build-cache/target}"
+DEPLOY_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null | cut -c1-12)"
+DEPLOY_BUILD_TARGET="${WA_DEPLOY_BUILD_TARGET:-$DEPLOY_DATA/build/target/deploy-${DEPLOY_COMMIT:-unknown}}"
 # A POSIX path handed to a native Windows process is silently unusable (AGENTS.md): cargo would write to
 # C:\c\Users\... and this deploy would then look for the binary where it is not. Measured 2026-11-11: a
 # build under /c/... created a stray C:\c tree. Convert once, here, and hand every consumer the same string.
@@ -917,8 +924,8 @@ if command -v cygpath >/dev/null 2>&1; then DEPLOY_BUILD_TARGET="$(cygpath -m "$
 if mkdir -p "$DEPLOY_BUILD_TARGET" 2>/dev/null && [ -w "$DEPLOY_BUILD_TARGET" ]; then
   DEPLOY_BUILD_TARGET="$(cd "$DEPLOY_BUILD_TARGET" && pwd)"
   export WA_CODEMODE_TARGET_DIR="$DEPLOY_BUILD_TARGET"
-  printf 'deploy: compiling into the reusable target %s (%s)\n' "$DEPLOY_BUILD_TARGET" \
-    "${WA_DEPLOY_BUILD_TARGET:+named by WA_DEPLOY_BUILD_TARGET}" | sed 's/ ()$//'
+  printf 'deploy: compiling into %s (%s)\n' "$DEPLOY_BUILD_TARGET" \
+    "${WA_DEPLOY_BUILD_TARGET:+named by WA_DEPLOY_BUILD_TARGET}${WA_DEPLOY_BUILD_TARGET:-the one build root, keyed by this commit}"
 else
   DEPLOY_BUILD_TARGET="$ROOT/rust/target"
   unset WA_CODEMODE_TARGET_DIR

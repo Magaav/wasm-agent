@@ -548,9 +548,15 @@ impl Group {
     }
 }
 
-/// Everything the groups look at, as one plan. Deleting is a separate step so `--dry-run` and the
-/// real run judge the same list, and a test can assert on the plan without a deletion.
+/// Everything the groups look at, as one plan, with the build cap read from the node's environment
+/// (`WASM_AGENT_BUILD_CAP_GB`, default 30 GB). The tests call [`plan_with_cap`] so a cap is a number
+/// they name, never a process-wide variable a parallel test could change under them.
 pub fn plan(root: &Path, days: u64, now: u64) -> Result<Vec<Group>, String> {
+    plan_with_cap(root, days, now, build_cap_bytes())
+}
+
+/// [`plan`] against a named build-space cap, in bytes.
+pub fn plan_with_cap(root: &Path, days: u64, now: u64, cap: u64) -> Result<Vec<Group>, String> {
     if !root.is_dir() {
         return Err(format!("root_missing: {} is not a directory", root.display()));
     }
@@ -604,8 +610,14 @@ pub fn plan(root: &Path, days: u64, now: u64) -> Result<Vec<Group>, String> {
     }
     groups.push(Group { name: "worktrees", entries: worktrees });
 
+    // ---- the build root: one root, one child per tree, and a hard cap ------------------------------
+    // The cap is a rule about SPACE, not about age, so it is judged here - where the plan is made -
+    // and not inside the deletion loop: `--dry-run` must show the same victims the real run takes.
+    groups.push(build_group(root, days, now, cap));
+
     // ---- retention groups: older than N days, and settled -----------------------------------------
-    for group in RETENTION_GROUPS {
+    // `build` is judged above: its children are cargo target dirs, not things with an age.
+    for group in RETENTION_GROUPS.iter().copied().filter(|group| *group != "build") {
         let dir = root.join(group);
         let mut entries = Vec::new();
         if let Ok(children) = std::fs::read_dir(&dir) {
@@ -623,7 +635,6 @@ pub fn plan(root: &Path, days: u64, now: u64) -> Result<Vec<Group>, String> {
                     Err(reason) => (false, reason),
                     Ok(_) => match pinned(root, &path, &pins) {
                         Some(reason) => (false, reason),
-                        None if group == "build" => island_verdict(&path, days, now),
                         None => {
                             let age = age_days(&path, now);
                             if age < 0.0 {
@@ -705,41 +716,146 @@ fn settled(dir: &Path) -> Result<bool, String> {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// the build cache: one island per tree, under the one root
+// the build root: one root, a child per tree, and a hard cap
 // ---------------------------------------------------------------------------------------------------
 
-/// The file inside a build island that names the tree it was built from.
+/// The file inside a per-tree build dir that names the tree it was built from.
 pub const ISLAND_MARKER: &str = "tree";
 
-/// `<root>/build/<tree>-<hash8>`: where one tree's cargo output lives.
+/// The cap on build space, in GB. `WASM_AGENT_BUILD_CAP_GB` names another one; 30 GB is the default
+/// the operator asked for, and it has to hold `launch(wa) + a release build of every crate in use`.
+pub const BUILD_CAP_GB_ENV: &str = "WASM_AGENT_BUILD_CAP_GB";
+pub const DEFAULT_BUILD_CAP_GB: u64 = 30;
+
+/// The build cap in bytes: `WASM_AGENT_BUILD_CAP_GB` (decimal GB), else [`DEFAULT_BUILD_CAP_GB`].
 ///
-/// WHY NOT ONE `CARGO_TARGET_DIR` FOR EVERY TREE ON THE NODE. That was the first shape of this rule,
-/// and it is **wrong** - measured here on 12/11, not reasoned about:
+/// `scripts/lib/build-target.sh::wa_build_cap_bytes` reads the same variable and computes the same
+/// number, because the sweep before a build and `wa clean` must agree about what "over the cap" means.
+pub fn build_cap_bytes() -> u64 {
+    std::env::var(BUILD_CAP_GB_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|gb| *gb > 0.0)
+        .map(|gb| (gb * 1_000_000_000.0) as u64)
+        .unwrap_or(DEFAULT_BUILD_CAP_GB * 1_000_000_000)
+}
+
+/// The `build` group of the plan: the one build root's per-tree target dirs, everything an older
+/// layout left beside them, and the cap that decides which of them goes first.
 ///
-///   1. a cold `cargo build --release` into a shared dir took 3 m 25 s and 7.6 GB;
-///   2. a second worktree at the same commit then built into the same dir in 1 m 34 s;
-///   3. a source edit in that second tree rebuilt `wa-host-support` **in the shared dir**;
-///   4. back in the first tree, `cargo build` reported the shared `libwa_host_support-*.rlib` as fresh
-///      (its mtime was newer than that tree's source) and failed with
-///      `cannot find function state_root in module wa_host_support::paths` - the first tree was
-///      compiled against the *other* tree's library.
+/// Three rules, in this order, because they answer three different questions:
 ///
-/// Cargo decides freshness by comparing source mtimes with the fingerprint in the target dir; it does
-/// not know that the same unit id came from a different checkout. So a shared target dir does not
-/// just rebuild more - it hands one tree another tree's artifacts. That is the failure mode this
-/// project keeps paying for: a verdict about a tree that was never loaded.
+///   1. an island whose tree is **gone or landed** goes (`island_verdict`) - a finished worktree and
+///      its build outputs are one decision;
+///   2. anything under `<root>/build` that is **not** the `target` child is an island an older layout
+///      wrote (73 of them, 196 GB, on this node on 13/11): it goes, and the reason says why;
+///   3. past the **cap**, the oldest build output goes first until the space fits. The tree being
+///      built right now is not special here: the plan is about space, and a build that needs room it
+///      does not have has to wait for the sweep `scripts/lib/build-target.sh` runs before it starts.
+fn build_group(root: &Path, days: u64, now: u64, cap: u64) -> Group {
+    let build_root = root.join("build");
+    let target_root = build_root.join("target");
+    let mut entries = Vec::new();
+    // Islands from the layout this replaces, and anything else that is not the one target root.
+    if let Ok(children) = std::fs::read_dir(&build_root) {
+        for child in children.flatten() {
+            let path = child.path();
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if name == "target" || PROTECTED.contains(&name.as_str()) {
+                continue;
+            }
+            let (bytes, files) = measure(&path);
+            let (delete, reason) = match guard_inside(root, &path) {
+                Err(reason) => (false, reason),
+                Ok(_) => (true, "an island from the layout this replaced: the node has one build root (build/target) now, and old space goes before a build uses new".to_string()),
+            };
+            entries.push(Entry { path, bytes, files, delete, reason });
+        }
+    }
+    // The one build root's children: one cargo target dir per tree, named by the tree.
+    if let Ok(children) = std::fs::read_dir(&target_root) {
+        for child in children.flatten() {
+            let path = child.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let (bytes, files) = measure(&path);
+            let (delete, reason) = match guard_inside(root, &path) {
+                Err(reason) => (false, reason),
+                Ok(_) => island_verdict(&path, days, now),
+            };
+            entries.push(Entry { path, bytes, files, delete, reason });
+        }
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+    // Rule 3: the cap. The oldest build output goes first - "mtime of the directory" is "when a build
+    // last wrote there", which is exactly the question "which of these will a build wait on longest".
+    let total: u64 = entries.iter().map(|entry| entry.bytes).sum();
+    if total > cap {
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        // Oldest first, then by name: two build dirs written in the same second must still be evicted in
+        // a fixed order, or a bisect of this rule is a race.
+        order.sort_by_key(|index| (modified(&entries[*index].path), entries[*index].path.clone()));
+        let mut over = total;
+        for index in order {
+            if over <= cap {
+                break;
+            }
+            let entry = &mut entries[index];
+            if entry.delete {
+                // Already going for its own reason: its bytes are part of the reclaim either way.
+                over = over.saturating_sub(entry.bytes);
+                continue;
+            }
+            entry.delete = true;
+            entry.reason = format!(
+                "over the {} GB build cap ({} bytes used of {}): the oldest build output goes first",
+                cap / 1_000_000_000,
+                total,
+                cap
+            );
+            over = over.saturating_sub(entry.bytes);
+        }
+    }
+    Group { name: "build", entries }
+}
+
+/// When a build dir was last written to, as epoch seconds (0 when it cannot be read, which makes it
+/// the first candidate for eviction - an unreadable build dir is not worth keeping).
+fn modified(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// `<root>/build/target/<tree>-<hash>`: where one tree's cargo output lives.
 ///
-/// What is shared instead is the **root**: every tree's output lives under `<root>/build/`, named by
-/// the tree it belongs to, so there is still nothing scattered beside a checkout, `wa clean` still
-/// owns all of it (`docs/ONEROOT.md`), and one disk cap still covers it. The name is
-/// `<basename>-<first 8 hex of sha256 of the tree's canonical path>`, which `scripts/lib/fast-binary.sh`
-/// computes with `sha256sum` and this function computes with `ring` - the same 12 hex characters on
-/// both sides, checked by `scripts/test-oneroot.lua`.
+/// ONE ROOT, ONE CHILD PER TREE - and why the children are per tree is the part that must not be
+/// "simplified" away later. A single FLAT `CARGO_TARGET_DIR` for every tree on a node was measured
+/// here on 12/11 (3 m 25 s and 7.6 GB cold, a second worktree reusing the same dir in 1 m 34 s, and
+/// then `cannot find function state_root in module wa_host_support::paths` when the first tree was
+/// rebuilt) and REPRODUCED on 13/11 in seconds with a two-member fixture
+/// (`scripts/test-onebuild.mjs`, which keeps it as a check):
 ///
-/// The dedupe that a shared target dir was supposed to give is NOT delivered here, and this file does
-/// not pretend it is: that needs a compiler cache (`sccache`) with per-tree target dirs, which keeps
-/// the compiled dependencies outside the target dir entirely. `WASM_AGENT_SHARED_BUILD_DIR=0` is the
-/// switch that turns the whole default off, for a node that would rather keep `rust/target`.
+///   1. tree A and tree B are two checkouts of `rust/Cargo.toml` - the same workspace, the same
+///      members, the same relative paths, at two absolute paths;
+///   2. cargo gives a workspace member the same unit hash in both trees, so both trees' builds of
+///      `libbase`/`libwa_host_support` land on the SAME file name in the shared dir;
+///   3. tree B adds `pub fn g()` to its `base` and builds; back in tree A, `cargo build` was a no-op
+///      and A's binary printed `base=1 g=2` - **tree A ran tree B's library**.
+///
+/// That is the failure this project keeps paying for: a verdict about a tree that was never loaded.
+/// Cargo has no supported way to key a workspace member's artifacts by the checkout path, so the
+/// target dir itself has to be per tree. What is shared is the root: one directory, one `wa clean`,
+/// one `wa status` line, one cap, one owner - and no artifact crosses a tree.
+///
+/// The name is `<basename>-<first 12 hex of sha256 of the tree's canonical path>`, which
+/// `scripts/lib/build-target.sh::wa_build_tree_name` computes with `sha256sum`; the two sides are
+/// compared by `scripts/test-onebuild.mjs` and `scripts/test-oneroot.lua`.
 pub fn build_island(tree: &Path) -> Option<PathBuf> {
     build_island_in(&wa_host_support::paths::build_cache_dir(), tree)
 }
@@ -747,7 +863,15 @@ pub fn build_island(tree: &Path) -> Option<PathBuf> {
 /// [`build_island`] inside a named build root. The tests use this one, so a unit test writes its
 /// islands in its own scratch directory and never in a live node's root.
 pub fn build_island_in(build_root: &Path, tree: &Path) -> Option<PathBuf> {
-    let canonical = std::fs::canonicalize(tree).ok()?;
+    // The canonical path when it can be resolved; an ABSOLUTE path as given when it cannot, because a
+    // tree that has just been removed (`control("forget")`, `clean`) still has its build output named
+    // after it. `scripts/lib/build-target.sh::wa_build_tree_name` falls back the same way, which is what
+    // keeps the two names equal.
+    let canonical = match std::fs::canonicalize(tree) {
+        Ok(path) => path,
+        Err(_) if tree.is_absolute() => tree.to_path_buf(),
+        Err(_) => return None,
+    };
     let text = canonical.to_string_lossy().replace('\\', "/");
     let digest = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
     let hash: String = digest.as_ref().iter().take(6).map(|byte| format!("{byte:02x}")).collect();
@@ -758,7 +882,7 @@ pub fn build_island_in(build_root: &Path, tree: &Path) -> Option<PathBuf> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
-    Some(build_root.join(format!("{name}-{hash}")))
+    Some(build_root.join("target").join(format!("{name}-{hash}")))
 }
 
 /// Does this directory look like something cargo can build? Used to avoid filling `<root>/build` with
@@ -767,9 +891,9 @@ pub fn is_cargo_tree(tree: &Path) -> bool {
     tree.join("rust").join("Cargo.toml").is_file() || tree.join("Cargo.toml").is_file()
 }
 
-/// `CARGO_TARGET_DIR` for a child process starting in `tree`, and the island's marker written so
-/// `wa clean` can tell whose output it is. `None` when this is not a cargo tree or the island cannot
-/// be created - a child is never pointed at a directory that is not there.
+/// `CARGO_TARGET_DIR` for a child process starting in `tree`, and the marker written so `wa clean` can
+/// tell whose output it is. `None` when this is not a cargo tree or the directory cannot be created - a
+/// child is never pointed at a directory that is not there.
 pub fn build_env_for(tree: &Path) -> Option<PathBuf> {
     build_env_for_in(&wa_host_support::paths::build_cache_dir(), tree)
 }
@@ -784,9 +908,17 @@ pub fn build_env_for_in(build_root: &Path, tree: &Path) -> Option<PathBuf> {
     if let Ok(canonical) = std::fs::canonicalize(tree) {
         let _ = std::fs::write(island.join(ISLAND_MARKER), canonical.to_string_lossy().as_bytes());
     }
-    let target = island.join("target");
-    std::fs::create_dir_all(&target).ok()?;
-    Some(target)
+    Some(island)
+}
+
+/// The build space one tree occupies right now, and where it is: what the sweep before a build and
+/// `wa build --status` report.
+pub fn build_space(tree: &Path) -> Option<(PathBuf, u64)> {
+    let island = build_island(tree)?;
+    if !island.exists() {
+        return None;
+    }
+    Some((island.clone(), measure(&island).0))
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -804,6 +936,7 @@ pub fn clean(root: &Path, options: &CleanOptions) -> Result<Value, String> {
     let groups = plan(root, options.days, options.now)?;
     let mut freed: u64 = 0;
     let mut deleted: u64 = 0;
+    let mut islands_deleted: u64 = 0;
     let mut kept: u64 = 0;
     let mut refused: Vec<Value> = Vec::new();
     let mut rows_json: Vec<Value> = Vec::new();
@@ -824,10 +957,28 @@ pub fn clean(root: &Path, options: &CleanOptions) -> Result<Value, String> {
                 deleted += 1;
                 freed = freed.saturating_add(entry.bytes);
             } else {
+                // The island has to be named BEFORE the tree goes: `build_island` canonicalizes the tree
+                // path, and a removed worktree has no path to canonicalize.
+                let island = if group.name == "worktrees" {
+                    build_island(&entry.path).filter(|island| island.exists())
+                } else {
+                    None
+                };
                 match remove(&entry.path) {
                     Ok(()) => {
                         deleted += 1;
                         freed = freed.saturating_add(entry.bytes);
+                        // A finished worktree and its build outputs are ONE decision (`docs/ONEROOT.md`):
+                        // the plan kept this island because its tree was still there, so this same run
+                        // takes it - otherwise every removal costs the next clean a second pass, which is
+                        // exactly how 73 build folders (~196 GB) survived on this node.
+                        if let Some(island) = island {
+                            let (bytes, _files) = measure(&island);
+                            if remove(&island).is_ok() {
+                                freed = freed.saturating_add(bytes);
+                                islands_deleted += 1;
+                            }
+                        }
                     }
                     Err(reason) => {
                         kept += 1;
@@ -893,6 +1044,8 @@ pub fn clean(root: &Path, options: &CleanOptions) -> Result<Value, String> {
         "days": options.days,
         "groups": rows_json,
         "outside": outside(root),
+        "build_cap_bytes": build_cap_bytes(),
+        "build_islands_deleted": islands_deleted,
         "freed_bytes": if options.dry_run { 0 } else { freed },
         "would_free_bytes": freed,
         "deleted": deleted,
@@ -1060,6 +1213,12 @@ pub fn status(root: &Path) -> Result<Value, String> {
         "over_cap": usage.map(|usage| usage.used_percent > cap).unwrap_or(false),
         "days": retention_days(),
         "pins": pins.iter().map(|pin| pin.to_string_lossy().to_string()).collect::<Vec<_>>(),
+        // The build root, as facts a reader can act on: how much build space this node holds, the cap
+        // it must stay under, and the one directory that owns it (`docs/ONEROOT.md`).
+        "build_target": wa_host_support::paths::build_target_dir().to_string_lossy(),
+        "build_bytes": measure(&wa_host_support::paths::build_cache_dir()).0,
+        "build_cap_bytes": build_cap_bytes(),
+        "build_over_cap": measure(&wa_host_support::paths::build_cache_dir()).0 > build_cap_bytes(),
         "last_clean": last,
     }))
 }
@@ -1114,8 +1273,34 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
                 "ok": true,
                 "tree": std::fs::canonicalize(&tree).map(|path| path.to_string_lossy().to_string()).unwrap_or(given),
                 "island": island.to_string_lossy(),
-                "target": island.join("target").to_string_lossy(),
+                // The directory cargo writes: the island itself, one child of the one build root.
+                "target": island.to_string_lossy(),
+                "build_target_root": wa_host_support::paths::build_target_dir().to_string_lossy(),
                 "cargo_tree": is_cargo_tree(&tree),
+            }))
+        }
+        "forget" => {
+            // A tree went away (a released session worktree, a reaped landing worktree): its build
+            // output goes with it, in the same call, because "a finished worktree and its build outputs"
+            // is one decision (`docs/ONEROOT.md`). The name is [`build_island`]'s, so this cannot drift
+            // from the directory a build actually writes.
+            let given = args["path"].as_str().unwrap_or("").trim().to_string();
+            if given.is_empty() {
+                return Err("path_required".into());
+            }
+            let island = build_island(Path::new(&given)).ok_or_else(|| format!("unreadable: {given}"))?;
+            let inside = guard_inside(&root, &island).map_err(|error| format!("forget_refused: {error}"))?;
+            if !inside.exists() {
+                return Ok(json!({"ok": true, "tree": given, "build": island.to_string_lossy(), "freed_bytes": 0}));
+            }
+            let (bytes, files) = measure(&inside);
+            remove(&inside).map_err(|error| format!("forget_failed: {error}"))?;
+            Ok(json!({
+                "ok": true,
+                "tree": given,
+                "build": island.to_string_lossy(),
+                "freed_bytes": bytes,
+                "files": files,
             }))
         }
         "guard" => {

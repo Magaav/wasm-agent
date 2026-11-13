@@ -14,6 +14,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# THE ONE BUILD ROOT (docs/ONEROOT.md): every build kind on this node resolves its cargo target dir
+# through `scripts/lib/build-target.sh`. A caller that names CARGO_TARGET_DIR keeps it; otherwise this
+# tree's child of the one root is used, exported so the `cargo build` below and the lookup after it
+# cannot disagree about where the artifact went.
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  . "$PWD/scripts/lib/build-target.sh"
+  one_build_target=$(wa_build_prepare "$PWD" 2>/dev/null) || one_build_target=''
+  if [ -n "$one_build_target" ]; then export CARGO_TARGET_DIR="$one_build_target"; fi
+fi
+: "${CARGO_TARGET_DIR:=$PWD/rust/target}"
+one_build_target="$CARGO_TARGET_DIR"
+
 # The two spellings a path can have for the toolchain on this machine: `C:/a/b` (mixed, what
 # cygpath -m gives and what Cargo/rustc print in most places on Windows) and `C:\a\b` (what a
 # native tool hands to the C compiler). Off Windows both are the same POSIX path. A
@@ -151,11 +163,13 @@ for crate in rust/components/*/; do
     echo "error: component $name needs wasi-sdk (C inside); set WASI_SDK=<dir>" >&2; exit 2
   fi
   cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >/dev/null
-  # Cargo's artifact directory: `CARGO_TARGET_DIR` when the caller set one (a node that shares one
-  # target directory between every build, and the job harness that runs these builds), else the
-  # crate's own. A relative CARGO_TARGET_DIR is resolved against the directory cargo runs in, which
-  # is this script's cwd (the repository root).
-  target_dir="${CARGO_TARGET_DIR:-$crate/target}"
+  # Cargo's artifact directory: `CARGO_TARGET_DIR` when the caller set one (the fast path, the job
+  # harness), else THIS tree's child of the node's one build root (`scripts/lib/build-target.sh`,
+  # docs/ONEROOT.md) - never a `target/` beside each component crate, which is one more folder per
+  # crate that nothing owned (73 of them were 196 GB on wa-desktop on 13/11). A relative
+  # CARGO_TARGET_DIR is resolved against the directory cargo runs in, which is this script's cwd (the
+  # repository root).
+  target_dir="${CARGO_TARGET_DIR:-$one_build_target}"
   case "$target_dir" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;; *) target_dir="$PWD/$target_dir" ;; esac
   wasm="$target_dir/$TARGET/release/$name.wasm"
   # A library component (cdylib) is named with underscores.

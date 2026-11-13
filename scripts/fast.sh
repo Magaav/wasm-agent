@@ -122,6 +122,27 @@ if [ "${FAST_BIN_ACTION:-}" = build ]; then
   fast_binary_banner
 fi
 if [ "${FAST_BIN_ACTION:-}" = refuse ]; then fast_binary_refuse; fi
+# ---- the one build root ------------------------------------------------------------------------------
+# Every cargo invocation this run makes - the rows' `cargo test`, the components, a build a row does for
+# itself - writes into the node's ONE build root, this tree's child of it (`docs/ONEROOT.md`), and the
+# sweep runs BEFORE the first of them so nothing new is spent while another layout's target dir is still
+# on the disk. The sweep prints what it reclaimed and the cap prints what it holds; both are on the run's
+# own output, next to the rest of the environment facts, because "how much build space is this node
+# using" was the question nobody could answer on 13/11 (73 folders, ~196 GB).
+. "$ROOT/scripts/lib/build-target.sh"
+fast_build_target=$(wa_build_target "$ROOT" 2>/dev/null) || fast_build_target=''
+if [ -n "$fast_build_target" ]; then
+  wa_build_prepare "$ROOT" >/dev/null
+  case "$fast_build_target" in
+    [A-Za-z]:[\\/]*) : ;;
+    *) [ "$(command -v cygpath 2>/dev/null)" ] && fast_build_target=$(cygpath -w "$fast_build_target") ;;
+  esac
+  echo "fast: build root $fast_build_target ($(du -sh "$fast_build_target" 2>/dev/null | cut -f1 || echo unmeasured) of a $(wa_build_human "$(wa_build_cap_bytes)") cap)"
+  # NOT exported: a row inherits what it is given, and `CARGO_TARGET_DIR` in a row's environment means
+  # "the caller named this directory" to `scripts/lib/fast-binary.sh` - the row would then resolve the
+  # fast path against this run's build dir instead of its own fixture (measured on this branch: the
+  # `fast-binary` check failed exactly there). The cargo rows below get it named explicitly instead.
+fi
 case "${FAST_BIN_CODEMODE:-unknown}" in
   no) echo "fast: this binary has no code-mode assets; the rows that need them: $(fast_binary_rows_needing_assets)" ;;
   unknown) echo "fast: this binary does not report code-mode assets; a row that needs them says so by name" ;;
@@ -257,14 +278,15 @@ fast_components_prepare() {
   gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) \
     || { echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): not a git checkout, so there is nowhere to cache a build"; return 0; }
   cache="${WA_FAST_COMPONENTS_DIR:-$gitdir/wa-fast-components}"
-  if ! mkdir -p "$cache/set" "$cache/target" 2>/dev/null; then
+  if ! mkdir -p "$cache/set" 2>/dev/null; then
     echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): cannot create $cache"
     return 0
   fi
   log="$work/components.log"
   # The sandbox's WASI_SDK, when it has one, travels in the environment; otherwise build-components.sh finds
-  # ~/wasi-sdk*. CARGO_TARGET_DIR is shared across digests so a source change is an incremental build.
-  if WA_COMPONENTS_DIR="$(native "$cache/set")" CARGO_TARGET_DIR="$(native "$cache/target")" \
+  # ~/wasi-sdk*. Cargo writes into the node's ONE build root, this tree's child of it (the same dir the
+  # rows' cargo tests use): a second target dir per worktree is what 13/11 left behind 73 of.
+  if WA_COMPONENTS_DIR="$(native "$cache/set")" \
        bash scripts/build-components.sh $FAST_COMPONENT_NAMES >"$log" 2>&1; then
     FAST_COMPONENT_SOURCE="$(native "$cache/set")"
     export FAST_COMPONENT_SOURCE
@@ -530,7 +552,7 @@ else
   for crate in $crates; do
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
-      cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
+      CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
     elif [ "$crate" = wa-capabilities ]; then
       # wa-capabilities holds the streaming timeout tests (http_transport's phase budgets: 250 ms for
       # response headers, 500 ms of body silence) next to the agent-core pool's heavy ones. Those
@@ -538,12 +560,12 @@ else
       # of the crate first (the pool's engines, compiles and wasm instances cannot starve them), then
       # the streaming tests alone. Neither run skips anything - the split is the isolation, not a
       # filter on what is proved (docs/KERNEL.md, "A2.3").
-      cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+      CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
         -- --skip http_transport::streaming_timeout_tests > "$work/rust-$crate.log" 2>&1 \
-      && cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
+      && CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-capabilities \
         -- http_transport::streaming_timeout_tests >> "$work/rust-$crate.log" 2>&1
     else
-      cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
+      CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --release --offline --manifest-path rust/Cargo.toml -p "$crate" > "$work/rust-$crate.log" 2>&1
     fi
     c=$?; ran=$((ran + 1)); ms=$(( ($(date +%s) - s) * 1000 ))
     if [ "$c" = 0 ]; then echo "fast: rust $crate ok ($(( $(date +%s) - s ))s)"; record_row pass rust "rust $crate" "$c" "$ms" 0 ''
@@ -575,6 +597,10 @@ if command -v node >/dev/null 2>&1; then
   # Seconds, self-contained (a fixture repository and a fixture ledger), so it belongs here and not
   # only in the nightly gate.
   check landing-queue node scripts/test-landing-queue.mjs
+  # The one build root (13/11: 73 build folders, ~196 GB, none ever deleted): one directory every build
+  # kind resolves through, one child per tree inside it, a sweep that deletes what older layouts left,
+  # the build cap that evicts the oldest, and the measurement that keeps the per-tree child honest.
+  check onebuild node scripts/test-onebuild.mjs
   # Session liveness comes from the running process, never from a ledger row another process can
   # close: the 10/11 `owner_ended` refusal of a live session, pinned against a real ledger and a
   # real pid.

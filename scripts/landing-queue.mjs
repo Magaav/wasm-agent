@@ -426,6 +426,10 @@ function ensurePinnedWorktree({canonical, commit, pinDir}) {
   if (fs.existsSync(root)) {
     spawnSync('git', ['-C', canonical, 'worktree', 'remove', '--force', root], {encoding: 'utf8'});
     fs.rmSync(root, {recursive: true, force: true});
+    // A removed worktree takes its build output with it (docs/ONEROOT.md): the node's one build root is
+    // named after the tree path, so a pin that goes without it leaves a directory nothing can reuse.
+    // Best effort: the next build's sweep deletes an island whose tree is gone anyway.
+    spawnSync('bash', [path.join(canonical, 'scripts', 'lib', 'build-target.sh'), 'forget', root], {encoding: 'utf8'});
   }
   spawnSync('git', ['-C', canonical, 'worktree', 'prune'], {encoding: 'utf8'});
   fs.mkdirSync(pinDir, {recursive: true});
