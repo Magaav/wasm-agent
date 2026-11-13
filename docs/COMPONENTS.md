@@ -425,7 +425,50 @@ artifact - including a component with C inside (`graph`). It exits 1 while anyth
 whether the difference is a leaked path or Cargo's metadata. It is not in `scripts/fast.sh`: it needs
 wasi-sdk and two full component builds (minutes), and a landing does not have to wait for it.
 
-## Capabilities: declared by the manifest, granted by the caller
+## The pin is checked against the source, and the bytes against the seam
+
+`scripts/test-component-pins.sh` runs in the fast path and has two halves. It exists because of what
+happened on 13/11: `change/waroute` added the `contacts` op to `rust/components/wa-whatsapp` **and to
+the seam crate the node shares with it** (`rust/wa-whatsapp-index`), landed, and deployed - while
+`components.lock` still pinned the artifact built before it. Every deploy installed those old bytes, so
+on the account node `whatsapp_contacts` answered `whatsapp_contacts_bad_op`, retried and dead-lettered.
+waroute's contract tests were green, because they ran against the component SOURCE
+(`cargo test --lib`), which no deploy installs.
+
+**Half 1, pin vs source (never skips: git only, no toolchain, no network).** For every component the
+lock pins that has a tree under `rust/components/<name>/`, the judged range - the merge base with
+`origin/main` .. HEAD, plus the working tree - must not change any file under that tree, or under any
+crate it depends on through a `path =` dependency (resolved transitively: for `wa-whatsapp` that is its
+own tree, `wa-whatsapp-outbox`, `wa-whatsapp-index` and `wa-queue`) without the lock's line for that
+component moving in the same range. A change that provably cannot reach the bytes still needs a
+record, because no check on a machine without the toolchain can tell it from one that does - a commit
+trailer in the range:
+
+```
+Components-Unchanged: <name> <what changed and why the bytes are the same>
+```
+
+A trailer with no reason is refused, and the check is proved on fixture repositories (`--self-test`:
+the waroute shape, the repin, an unrelated change, a path dependency, a recorded trailer, a trailer
+without a reason, an uncommitted change - 7 fixtures, and exactly the first, fourth, sixth and
+seventh fail).
+
+**Half 2, pin vs bytes.** The pinned `wa-whatsapp.wasm` is verified against its own line (sha256 AND
+size), and every op the seam defines must be in those bytes: the op list is read from
+`rust/wa-whatsapp-index` (`Op::ALL`, `Op::as_str`, `Op::tool`), never copied into the test, and each
+tool name must appear in the module. Measured on the two builds: the one pinned before waroute
+(8,554,548 bytes) contains `whatsapp_contacts` 0 times, the build of this tree (8,557,078) 2 times.
+The bare word `contacts` is *not* discriminating - the old build carries it 3 times already - which is
+why the check keys on the tool names. The bytes come from the first candidate that matches the pin:
+`$WA_PINNED_COMPONENTS_DIR`, the component directory the core reads, `build/components-pinned/`, this
+worktree's git dir, or the public release `components-<lock sha12>` (fetched and verified the way a
+deploy verifies it). No candidate prints `SKIP wa-whatsapp-pin: <why>` with the command that builds
+them; `WA_PIN_CHECK_REQUIRE=1` turns that into a failure, which is what a release gate wants.
+
+A rebuild is deliberately **not** part of this: with a `path =` dependency the bytes are not
+reproducible across checkout paths (previous section), so "does a rebuild match the pin" would be a
+check that fails for the right code. The pin names one build; half 2 proves that build is a build of
+the shipped seam.
 
 Nothing is ambient: no filesystem, no network, no inherited environment. The manifest **declares**
 what the component may ever need; the registry definition **grants** a subset; the host refuses a

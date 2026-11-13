@@ -78,20 +78,25 @@ fast_binary_newer_than_tree() {
 # The prepared code-mode assets, if this checkout has them: the shipping build embeds them, so a build
 # this script makes must too, or the node it installs cannot run code mode at all.
 fast_binary_assets() {
-  local assets_root
-  # `$ROOT/.git` is a DIRECTORY in the canonical checkout and a FILE in a linked worktree, so a worktree
-  # lane found no prepared assets, built without them, and every row failed at the build
-  # (`code-mode assets required`), or worse: a build succeeded with WA_CODEMODE_ALLOW_EMPTY and installed a
-  # node that cannot run code mode. The assets live in the repository's COMMON git directory, which is what
-  # both shapes name (`docs/ONEROOT.md`: one root, one prepared set).
-  assets_root="$ROOT/.git/codemode-assets"
-  [ -d "$assets_root" ] || assets_root="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)/codemode-assets"
+  local common
   if [ -n "${WA_CODEMODE_BUILD_ASSETS:-}" ] && [ -d "$WA_CODEMODE_BUILD_ASSETS" ]; then
     FAST_CODEMODE_ASSETS=$WA_CODEMODE_BUILD_ASSETS
-  elif [ -d "$assets_root" ]; then
-    FAST_CODEMODE_ASSETS=$(find "$assets_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
   else
-    FAST_CODEMODE_ASSETS=''
+    # MEASURED 13/11 in a worktree: `$ROOT/.git` is a FILE there (`gitdir: ...`), so the assets that the
+    # canonical checkout prepared were never found, the build failed with `code-mode assets required` and
+    # the run stopped as `stale_binary` - 193 rows unrun, and the reason three layers from the cause. The
+    # assets belong to the CLONE, so the common git directory is where to look for them.
+    common="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)"
+    case "$common" in
+      '') common="$ROOT/.git" ;;
+      /*) ;;
+      *) common="$ROOT/$common" ;;
+    esac
+    if [ -d "$common/codemode-assets" ]; then
+      FAST_CODEMODE_ASSETS=$(find "$common/codemode-assets" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
+    else
+      FAST_CODEMODE_ASSETS=''
+    fi
   fi
 }
 
@@ -231,28 +236,27 @@ fast_binary_banner() {
 # empty one (72 598 376 B vs 73 904 880 B, measured) and the code-mode rows then fail for a reason that
 # has nothing to do with the branch.
 fast_binary_build() {
-  local assets=${FAST_CODEMODE_ASSETS:-} log target
+  local assets=${FAST_CODEMODE_ASSETS:-} log
   command -v cargo >/dev/null 2>&1 || { FAST_BIN_WHY="$FAST_BIN_WHY; cargo is not on PATH"; return 1; }
-  # The build must land where the probe below looks for it. `fast_binary_target_dir` names this tree's own
-  # island (`<root>/build/<tree>-<hash>/target`, the same one `rust/wa-capabilities/src/disk.rs` computes),
-  # and cargo resolves a RELATIVE CARGO_TARGET_DIR against ITS cwd - so it is exported absolute, here, once.
-  # MEASURED 13/11 on wa-desktop: without this line cargo wrote to `rust/target`, the probe looked in the
-  # island, and the run stopped with `stale_binary: the binary it just built cannot report its identity`
-  # while a perfectly good binary sat in the tree.
-  target="$(fast_binary_target_dir)"
-  mkdir -p "$target" 2>/dev/null || true
+  local log island_target
+  # THE ISLAND IS THE TARGET, and it has to be said here or the build and the probe disagree: measured
+  # 13/11 in a worktree, cargo built into `rust/target` while this function then looked for the binary in
+  # the island, so a build that SUCCEEDED was reported as "the binary it just built cannot report its
+  # identity" and every row went unrun. `fast_binary_target_dir` is the one expression (docs/ONEROOT.md).
+  island_target="$(fast_binary_target_dir)"
+  mkdir -p "$island_target" 2>/dev/null || true
   log=$(mktemp "${TMPDIR:-/tmp}/wa-fast-build-XXXXXX" 2>/dev/null) || log=/dev/null
-  echo "fast: building this tree's binary (cargo build --release --offline)${assets:+ with code-mode assets} -> $target"
+  echo "fast: building this tree's binary (cargo build --release --offline, target $island_target)${assets:+ with code-mode assets}"
   (
     cd "$ROOT" || exit 1
     if [ -n "$assets" ]; then
-      CARGO_TARGET_DIR="$target" \
+      CARGO_TARGET_DIR="$island_target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_BUILD_ASSETS="$assets" \
         cargo build --release --offline --manifest-path rust/Cargo.toml
     else
-      CARGO_TARGET_DIR="$target" \
+      CARGO_TARGET_DIR="$island_target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_ALLOW_EMPTY=1 \

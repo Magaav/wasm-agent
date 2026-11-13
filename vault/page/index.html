@@ -65,6 +65,31 @@
       <div class="note" id="ocg-note"></div>
     </section>
 
+    <section id="release-signing" hidden>
+      <div class="head">
+        <h2>Release signing key</h2>
+        <span class="state" id="rs-state">…</span>
+      </div>
+      <p class="note">The vault signs each release's <code>SHA256SUMS</code> with this ed25519 key and never returns it. Nodes verify the signature against the public key below, which they carry. Generate it here, then take its ONE offline backup.</p>
+      <div class="row" id="rs-public-row" hidden>
+        <input id="rs-public" type="text" readonly spellcheck="false" aria-label="public key" />
+      </div>
+      <div class="row" id="rs-create-row" hidden>
+        <button id="rs-create" class="primary" type="button">Generate the key</button>
+      </div>
+      <div id="rs-backup" hidden>
+        <p class="note">One backup, offered now and never again. Write it straight to a file on the vault's volume (mode 0600, an existing file is never overwritten) and copy that to your USB stick, or show it once and write it down by hand.</p>
+        <div class="row">
+          <input id="rs-path" type="text" spellcheck="false" placeholder="/data/backups/release-signing.key" />
+          <button id="rs-write" type="button">Write the backup</button>
+          <button id="rs-show" type="button">Show it once</button>
+        </div>
+        <div class="note" id="rs-backup-note"></div>
+        <div class="code" id="rs-seed" hidden></div>
+      </div>
+      <div class="note" id="rs-note"></div>
+    </section>
+
     <button id="reconcile" type="button">Read status / reconcile save</button>
     <p class="note">After a provider is set, pick it in wasm-agent's provider menu (the status chip). The agent reaches it through the vault; a key pasted here is never returned by any endpoint.</p>
   </main>

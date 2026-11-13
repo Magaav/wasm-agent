@@ -20,6 +20,14 @@
 //! kernel keyring, or the Argon2id-sealed file with `WASM_AGENT_VAULT_PASSPHRASE`. The tests set the
 //! passphrase so a CI container with no usable keyring takes the sealed-file path instead of failing
 //! for a reason that has nothing to do with the vault.
+//!
+//! They also PIN that protection (`WASM_AGENT_VAULT_KEYSTORE=passphrase`) rather than letting the machine
+//! decide, and that is not a convenience. The user keyring is per-uid machine state with a hard budget
+//! (`kernel.keys.maxkeys` 200), shared by every `wa` process on the host: measured on wa-desktop (13/11)
+//! it stood at 200/200 charged keys, and these rows were the ones filling it - each one gets a fresh temp
+//! home, so each one stores a fresh wrapping key, and the row then failed on a machine another test had
+//! spent. A row must not depend on, or consume, the keyring budget of the machine it runs on; the
+//! keyring path itself is covered where it belongs, in `wa-keystore`'s own tests.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -72,6 +80,10 @@ impl Home {
             .env("WASM_AGENT_RELAY", "")
             .env("WASM_AGENT_MANAGED", "0")
             .env("WASM_AGENT_VAULT_PASSPHRASE", PASSPHRASE)
+            // Pinned, not preferred: the sealed-file protection is what these tests are about, and asking
+            // the machine to choose would spend (and depend on) the uid's kernel-keyring budget. See this
+            // file's header.
+            .env("WASM_AGENT_VAULT_KEYSTORE", "passphrase")
             .env_remove("WA_SCRIPT")
             .env_remove("WASM_AGENT_LUA_ROOT")
             // `WASM_AGENT_VAULT_URL` too: this harness promises "no test here can reach a real node's

@@ -19,7 +19,12 @@ wa eval list
 wa eval run <task-id>|--all --bin <wa> [--model] [--timeout SECONDS] [--keep-scratch]
 wa eval report [--all] [--compare <run-a> <run-b>]
 wa eval verdict <run-id> pass|fail "<note>"
-wa eval reviewer <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
+wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
+                          [--timeout SECONDS] [--keep-scratch]
+wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
+wa eval reviewer miss <branch> "<note>"
+wa eval reviewer list
+wa eval reviewer run <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
 ```
 
 `capture` freezes one user task from the node's own session store: the prompt, the workspace it started
@@ -28,9 +33,60 @@ tools the session really called, the model and provider the run used, the connec
 **recorded** answers, never live access) and what the session did with it - rounds, tokens in/out, cache
 read, tool errors, effects attempted, files changed, the final answer, wall time.
 
-`run` replays it. `report` prints ids, categories and counts. `verdict` records a hand verdict;
-`reviewer` stores the shape a future landing reviewer will fill in (findings, accepted, misses, cost) -
-storage and report only, no reviewer exists here.
+`run` replays it. `report` prints ids, categories and counts. `verdict` records a hand verdict.
+
+`reviewer` is the landing reviewer (below): it runs one review of one branch, and the operator's marks and
+misses are recorded against the same store.
+
+That verb used to take a replay run id (`wa eval reviewer <run-id> --findings N ...`). That spelling is
+now `wa eval reviewer run <run-id> ...` - same storage, same output, kept under the same verb - because
+the positional is the branch a review runs on. A replay run still carries that `reviewer` shape and
+`report` still prints it; nothing reads it as a decision.
+
+## The landing reviewer
+
+A session that wrote a branch cannot review it - it remembers what it meant. So `wa eval reviewer <branch>`
+starts a session that shares nothing with the caller: its own home, its own ledger, no memory, no notes,
+no history. It is given the brief file, the branch and its sha, and the base, and it is asked the one
+question in `lua/core/harness_evaluator_reviewer.lua` (`M.INSTRUCTION`, fixed byte for byte and pinned by
+`scripts/test-harness-evaluator-reviewer.lua`). The model is pinned too (`deepseek-v4.1-flash`), because a
+reviewer measured across models is not one reviewer - the door takes no `--model`, and an option it does
+not know is refused rather than skipped.
+
+It **never blocks a landing**. It prints the findings and the final `REVIEW <branch> <sha> findings=<n>`
+line, and the landing queue does not read its store. What it produces is evidence about the reviewer:
+
+```
+wa eval reviewer change/x --brief brief.md            # one review: findings + the final line
+wa eval reviewer mark change-x-001 accepted           # every finding of that review
+wa eval reviewer mark change-x-001#2 rejected         # one finding
+wa eval reviewer miss change/x "missed the bypass"    # found after landing
+wa eval report                                        # per review + totals: findings, accepted rate, misses, cost
+```
+
+Isolation is the replay's, reused rather than copied (`harness_evaluator_replay.lua`): a `mktemp -d`
+scratch root with a marker outside the node home, `env -i` with an allowlist, the `PreToolUse` sink
+refusing every effect and connector tool in the review's own words, and the PATH guards refusing
+`git push`/`ssh`/`scp`/`rsync`/`gh`. Code mode stays on, as in a replay: since the nested-dispatch fix
+(`825ce08f`, `docs/HOOKS.md`) a call inside a script crosses the same sink, so it cannot perform an effect
+the record would not see. `bash` is not hooked - a review needs it to run `git diff` - so only its remote
+verbs are shimmed, and the model route travels without the sealed keystore's unseal credentials. The
+review reads a **discarded export** of the branch tip (`git archive`, written by the door from the repository it
+already has): it has no git directory, no object alternates and no remote, so nothing in it points at the
+operator's tree - a `--shared` clone does, which is what the second real review of this feature found. The
+diff the review reads is `git diff <merge base>..<sha>`, because a branch cut before today's main is not
+made of other people's landed work. `checkout_changed` compares a sha256 manifest of the export before and
+after the review.
+
+One switch turns it off: `reviewer = off` in the node's config file (`<config>/env`), or `WA_REVIEWER=off`
+in the environment. The door then says it is off and exits 0.
+
+Where it stores, under the node's own state directory (never a repository):
+
+```
+<config>/evaluator/reviews/<id>/review.json   branch, sha, base, findings, the review text, tokens, time, marks
+<config>/evaluator/reviews/misses.json        the misses found after a landing
+```
 
 ## Where the numbers come from
 
@@ -59,10 +115,16 @@ says which (`tool_source`).
   through `tool_call` and the sink never saw it);
 * connector reads answer from the **recording** captured with the task: the blocked result carries the
   recorded answer as additional context, which is what the model sees;
-* `PATH` guards refuse `git push`/`fetch`/`pull`/`clone`, `ssh`, `scp`, `sftp`, `rsync` and `gh`, so a bash
-  call cannot do what a tool is not allowed to do. Local git still works;
-* **code mode is off** in a replay, always, and the record says so: a tool call nested in a code-mode
-  script does not cross the hook boundary, so leaving it on could perform an effect while reporting none.
+* `PATH` guards refuse `git push`/`fetch`/`pull`/`ls-remote`/`clone`, any argument that mentions `alias`
+  (an alias is expanded by the real git after the guard has looked), every non-read form of
+  `remote`/`submodule`, and `ssh`, `scp`, `sftp`, `rsync`, `gh` - so a bash call cannot do what a tool is
+  not allowed to do. Local verbs, and the reads `git remote -v`/`git submodule status`, still work. It is a
+  guard, not a sandbox: an absolute path to the real git is one token away, and the record says what the
+  guard saw;
+* **code mode is ON** in a replay, and the record says so: since the nested-dispatch fix (`825ce08f`,
+  `docs/HOOKS.md`) a tool call inside a script crosses the same hook boundary, so it cannot perform an
+  effect the sink would not see. It was forced off before that fix, for exactly the opposite reason -
+  which made a replay measure the direct tool loop, not how the node is worked.
 
 The three fast rows prove the parts separately, from inside the processes that would do the damage:
 `scripts/test-harness-evaluator.lua` (capture, metrics, catalogue, verdict, report),

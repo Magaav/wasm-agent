@@ -40,6 +40,20 @@ pub const ROOT_FILE: &str = "root-key.wrap";
 /// key sealed by a future format under the same root.
 const KDF_DOMAIN: &[u8] = b"wa-keystore-v1";
 
+/// The wrapped-root file's size says which protection wrote it. The root is always 32 bytes, so a sealed
+/// blob is `version || nonce[24] || ciphertext+tag[48]` (`seal.rs`) = 73 bytes, and the passphrase file
+/// is that with its own 16-byte Argon2id salt in front = 89 bytes.
+///
+/// This is a *reading* rule, not a format change: both protections have written exactly these sizes
+/// since the file existed, so a vault written by either one opens under this build. It exists because
+/// the protection is otherwise recorded nowhere, and choosing it per process from a mutable machine
+/// resource (the kernel keyring) made one process read another process's file with the wrong cipher:
+/// measured on wa-desktop (13/11), a keyring-wrapped file read on the passphrase path had its version
+/// byte taken from the keyring blob's nonce, and the vault answered `sealed_blob_version_unknown` for a
+/// file that was perfectly intact.
+const SEALED_ROOT_LEN: usize = 1 + 24 + 32 + 16;
+const PASSPHRASE_ROOT_LEN: usize = 16 + SEALED_ROOT_LEN;
+
 /// Which protection wraps the root key. This is **not** a secret and is reported in
 /// `wa vault status` and in the audit line of every start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +73,26 @@ impl Protection {
             Protection::Dpapi => "dpapi",
             Protection::KernelKeyring => "keyring",
             Protection::PassphraseFile => "passphrase",
+        }
+    }
+
+    /// Which protection wrote this wrapped-root file, or `None` when this host cannot tell from the
+    /// bytes. Linux: the two shapes are exact and distinct (see `SEALED_ROOT_LEN`). Windows: a DPAPI
+    /// blob has no fixed shape, and a Windows host has no ambiguity to resolve — its default protection
+    /// does not depend on machine state, so the chosen protection stands.
+    pub fn from_root_file(blob: &[u8]) -> Option<Protection> {
+        #[cfg(target_os = "linux")]
+        {
+            match blob.len() {
+                SEALED_ROOT_LEN => Some(Protection::KernelKeyring),
+                PASSPHRASE_ROOT_LEN => Some(Protection::PassphraseFile),
+                _ => None,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = blob;
+            None
         }
     }
 
@@ -163,6 +197,16 @@ pub struct Keystore {
     passphrase: Option<Zeroizing<String>>,
     /// The root key, unwrapped for the life of this object. Never written, never returned.
     root: Option<Zeroizing<[u8; 32]>>,
+    /// Test-only: the keyring this keystore talks to. `Some` in this crate's tests, which point it at a
+    /// private keyring they invalidate to get a REAL refusal from the kernel without spending the
+    /// machine's key budget; `None` (and absent from every shipping build) means the user's keyring.
+    #[cfg(test)]
+    ring: Option<i32>,
+    /// The one named note this keystore owes an operator, if any: `keystore_keyring_refused:<errno>`
+    /// when a refused keyring made it take the passphrase file, `keystore_protection_from_file:<p>` when
+    /// the file on disk decided the protection instead of the environment. Printed once by the caller
+    /// (`wa vault ...`), never stored and never repeated: a note is a fact about one process's start.
+    note: Option<String>,
 }
 
 impl Keystore {
@@ -170,20 +214,63 @@ impl Keystore {
     pub fn open(options: &Options) -> Result<Self> {
         std::fs::create_dir_all(&options.dir)
             .map_err(|error| Error::bad(format!("keystore_dir: {error}")))?;
-        let protection = match options.requested {
-            Some(requested) => requested,
-            None => default_protection(&options.dir),
-        };
         let mut keystore = Keystore {
             dir: options.dir.clone(),
-            protection,
+            protection: options.requested.unwrap_or(Protection::PassphraseFile),
             passphrase: options.passphrase.clone(),
             root: None,
+            #[cfg(test)]
+            ring: None,
+            note: None,
         };
         if keystore.root_path().exists() {
+            // The FILE says how it was wrapped, and that is the whole rule. Asking the machine instead
+            // is what made one process read another process's file with the wrong cipher
+            // (`sealed_blob_version_unknown` on an intact file), and it is also what spent the uid's
+            // keyring quota on every single `wa vault` command, existing vault or not.
+            let blob = std::fs::read(keystore.root_path())
+                .map_err(|error| Error::bad(format!("keystore_root_unreadable: {error}")))?;
+            let on_disk = Self::protection_for_file(options, &blob)?;
+            if let Some(requested) = options.requested {
+                if requested != on_disk {
+                    keystore.note = Some(format!(
+                        "keystore_protection_from_file:{}, so WASM_AGENT_VAULT_KEYSTORE={} is ignored",
+                        on_disk.as_str(),
+                        requested.as_str()
+                    ));
+                }
+            }
+            keystore.protection = on_disk;
             keystore.root = Some(keystore.load_root()?);
+        } else {
+            let (protection, note) = resolve_protection(options);
+            keystore.protection = protection;
+            keystore.note = note;
         }
         Ok(keystore)
+    }
+
+    /// How a wrapped-root file that already exists must be read. Linux: by its shape, and an unexpected
+    /// length is a refusal rather than a guess (a blob written by a protection this machine does not have
+    /// is exactly what guessing used to mis-parse). Elsewhere: the requested protection, else the host
+    /// default, as before.
+    fn protection_for_file(options: &Options, blob: &[u8]) -> Result<Protection> {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = options;
+            Protection::from_root_file(blob).ok_or_else(|| Error::bad("keystore_root_corrupt"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = blob;
+            Ok(options.requested.unwrap_or_else(|| default_protection(&options.dir)))
+        }
+    }
+
+    /// The one note this keystore owes an operator (`keystore_keyring_refused:edquot`, …), for the
+    /// caller to print once. `None` when the protection it took is the one it asked for.
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 
     pub fn dir(&self) -> &Path {
@@ -198,6 +285,24 @@ impl Keystore {
         Status { root: self.root_path().exists(), protection: self.protection }
     }
 
+    /// The keyring this keystore reads its wrapping key from: the user's, except in this crate's tests.
+    fn keyring(&self) -> i32 {
+        #[cfg(test)]
+        {
+            if let Some(ring) = self.ring {
+                return ring;
+            }
+        }
+        keyring::user_keyring()
+    }
+
+    /// Test-only: read the wrapping key from `ring` instead of the user's keyring.
+    #[cfg(test)]
+    fn with_ring(mut self, ring: i32) -> Self {
+        self.ring = Some(ring);
+        self
+    }
+
     fn root_path(&self) -> PathBuf {
         self.dir.join(ROOT_FILE)
     }
@@ -209,7 +314,15 @@ impl Keystore {
             return Ok(self.status());
         }
         let root = generate_root()?;
-        let blob = self.wrap_root(&root)?;
+        let mut note = None;
+        let blob = self.wrap_root(&root, &mut note)?;
+        if note.is_some() {
+            // The wrap fell back to the passphrase file, so what this keystore reports from here on —
+            // `status().protection`, the audit line, the next `wa vault status` of a new process that
+            // reads the file's shape — has to be what the file actually is.
+            self.protection = Protection::PassphraseFile;
+            self.note = note;
+        }
         write_0600(&self.root_path(), &blob)?;
         self.root = Some(root);
         Ok(self.status())
@@ -234,7 +347,7 @@ impl Keystore {
         Ok(root)
     }
 
-    fn wrap_root(&self, root: &[u8; 32]) -> Result<Vec<u8>> {
+    fn wrap_root(&self, root: &[u8; 32], note: &mut Option<String>) -> Result<Vec<u8>> {
         match self.protection {
             Protection::Dpapi => {
                 #[cfg(windows)]
@@ -251,29 +364,46 @@ impl Keystore {
                 {
                     // The keyring holds the wrapping key; the file holds the XChaCha blob, so the
                     // root key is never in a file in the clear and never fully in the keyring.
-                    let wrapping = keyring::wrapping_key(&self.dir)?;
-                    seal::seal_with(&wrapping, KDF_DOMAIN, root)
+                    match keyring::wrapping_key_in(&self.dir, self.keyring()) {
+                        Ok(wrapping) => seal::seal_with(&wrapping, KDF_DOMAIN, root),
+                        // A real refusal is not a dead end when a passphrase is configured: the sealed
+                        // file is the fallback this keystore exists to take, and it takes it with ONE
+                        // named note instead of the hard `keystore_keyring_unavailable` that three
+                        // vault rows died with inside the fast path (13/11, the uid's key quota spent).
+                        // With no passphrase the answer is exactly what it was: the refusal.
+                        Err(refusal) if self.passphrase.is_some() => {
+                            *note = Some(format!(
+                                "keystore_keyring_refused:{}, using the passphrase file",
+                                refusal.name()
+                            ));
+                            self.passphrase_wrap(root)
+                        }
+                        Err(refusal) => Err(refusal.into()),
+                    }
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
+                    let _ = note;
                     Err(Error::bad("keystore_protection_unavailable:keyring"))
                 }
             }
-            Protection::PassphraseFile => {
-                // A fresh salt per wrapping, stored in front of the blob so one passphrase on two
-                // machines does not derive one key.
-                let mut salt = [0u8; 16];
-                ring::rand::SystemRandom::new()
-                    .fill(&mut salt)
-                    .map_err(|_| Error::bad("keystore_entropy_unavailable"))?;
-                let wrapping = self.passphrase_key(&salt)?;
-                let sealed = seal::seal_with(&wrapping, KDF_DOMAIN, root)?;
-                let mut blob = Vec::with_capacity(salt.len() + sealed.len());
-                blob.extend_from_slice(&salt);
-                blob.extend_from_slice(&sealed);
-                Ok(blob)
-            }
+            Protection::PassphraseFile => self.passphrase_wrap(root),
         }
+    }
+
+    /// The sealed-file half of a wrap: a fresh salt per wrapping, stored in front of the blob so one
+    /// passphrase on two machines does not derive one key.
+    fn passphrase_wrap(&self, root: &[u8; 32]) -> Result<Vec<u8>> {
+        let mut salt = [0u8; 16];
+        ring::rand::SystemRandom::new()
+            .fill(&mut salt)
+            .map_err(|_| Error::bad("keystore_entropy_unavailable"))?;
+        let wrapping = self.passphrase_key(&salt)?;
+        let sealed = seal::seal_with(&wrapping, KDF_DOMAIN, root)?;
+        let mut blob = Vec::with_capacity(salt.len() + sealed.len());
+        blob.extend_from_slice(&salt);
+        blob.extend_from_slice(&sealed);
+        Ok(blob)
     }
 
     fn unwrap_root(&self, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
@@ -292,7 +422,11 @@ impl Keystore {
             Protection::KernelKeyring => {
                 #[cfg(target_os = "linux")]
                 {
-                    let wrapping = keyring::wrapping_key(&self.dir)?;
+                    // The file says a keyring wrapped it, so the keyring is the only thing that can open
+                    // it: a passphrase cannot, and pretending it might would answer
+                    // `sealed_blob_version_unknown` about a file that is intact. The refusal is named.
+                    let wrapping = keyring::wrapping_key_in(&self.dir, self.keyring())
+                        .map_err(Error::from)?;
                     seal::open_with(&wrapping, KDF_DOMAIN, blob)
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -378,26 +512,95 @@ fn generate_root() -> Result<Zeroizing<[u8; 32]>> {
     Ok(root)
 }
 
+/// The host's default protection, for a host that cannot tell a wrapped-root file's shape (Windows).
+#[cfg(not(target_os = "linux"))]
 fn default_protection(dir: &Path) -> Protection {
     #[cfg(windows)]
     {
         let _ = dir;
         Protection::Dpapi
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(not(windows))]
     {
-        // A restricted container can refuse `add_key`; the passphrase file is then the honest
-        // fallback, and it is reported as such in `wa vault status`.
-        if keyring::available(dir) {
-            Protection::KernelKeyring
-        } else {
-            Protection::PassphraseFile
-        }
-    }
-    #[cfg(not(any(windows, target_os = "linux")))]
-    {
+        // No keyring on this host: the passphrase file is the honest fallback, and `wa vault status`
+        // says so.
         let _ = dir;
         Protection::PassphraseFile
+    }
+}
+
+/// The protection a keystore takes when it has no root key yet (so nothing on disk decides it), and the
+/// one note that decision owes an operator.
+///
+/// A real keyring refusal with a passphrase configured is a downgrade we can take and must name: the
+/// sealed file is the protection the vault was designed to fall back to, and the alternative is the hard
+/// `keystore_keyring_unavailable` that three vault rows died with inside the fast path (13/11 — the uid's
+/// 200-key quota spent by the very rows that ran before them). With no passphrase the answer is exactly
+/// what it was before this note existed: the passphrase path, and the `keystore_passphrase_missing`
+/// refusal that names what is absent. Never weaker, only louder.
+fn resolve_protection(options: &Options) -> (Protection, Option<String>) {
+    #[cfg(windows)]
+    {
+        resolve_protection_with(options, Ok(()))
+    }
+    #[cfg(not(windows))]
+    {
+        resolve_protection_with(options, keyring_availability(&options.dir))
+    }
+}
+
+/// The decision itself, with the keyring's answer as an argument: that is what makes a refusal — EPERM in
+/// a container, EDQUOT when the uid's key budget is spent — testable without spending a real one.
+fn resolve_protection_with(
+    options: &Options,
+    keyring: std::result::Result<(), &'static str>,
+) -> (Protection, Option<String>) {
+    if let Some(requested) = options.requested {
+        return (requested, None);
+    }
+    #[cfg(windows)]
+    {
+        let _ = keyring;
+        (Protection::Dpapi, None)
+    }
+    #[cfg(not(windows))]
+    {
+        let passphrase = options.passphrase.as_ref().map(|value| !value.is_empty()).unwrap_or(false);
+        match keyring {
+            Ok(()) => (Protection::KernelKeyring, None),
+            Err(reason) if passphrase => (
+                Protection::PassphraseFile,
+                Some(format!("keystore_keyring_refused:{reason}, using the passphrase file")),
+            ),
+            Err(_) => (Protection::PassphraseFile, None),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn keyring_availability(dir: &Path) -> std::result::Result<(), &'static str> {
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        keyring::available(dir).map_err(|refusal| refusal.name())
+    }
+    #[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+    {
+        let _ = dir;
+        Err("unsupported")
+    }
+}
+
+/// Refusals from the kernel keyring reach an operator in the words they have always seen, and reach this
+/// crate's caller as a value first ([`keyring::Refusal`]) so the keystore can decide to fall back.
+#[cfg(target_os = "linux")]
+impl From<keyring::Refusal> for Error {
+    fn from(refusal: keyring::Refusal) -> Error {
+        match refusal.name() {
+            // This build has no syscall numbers for this architecture, so there is no keyring here at
+            // all: the refusal names the protection, not the keyring.
+            "unsupported" => Error::bad("keystore_protection_unavailable:keyring"),
+            _ => Error::bad("keystore_keyring_unavailable"),
+        }
     }
 }
 

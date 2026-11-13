@@ -13,12 +13,26 @@
 //! `host.rs` holds the state and the drawing.
 use crate::terminal_editor::cell_width_of;
 
-/// Turn on mouse reports: button-event tracking (press, drag, release, wheel) in SGR encoding.
-pub const ENABLE: &str = "\x1b[?1002h\x1b[?1006h";
-pub const DISABLE: &str = "\x1b[?1002l\x1b[?1006l";
+/// Turn on mouse reports: button-event tracking (press, drag, release, wheel) *and* any-motion
+/// tracking (the pointer moving with no button down, which is what the scrollbar's hover needs), in
+/// SGR encoding (`1006`, so a column above 223 is one number and not two bytes). Only while the chat
+/// owns the screen: `host.input_editor` turns them on when it takes the frame and `restore_input`
+/// turns them off on the way out, and the fullscreen console does the same around its session.
+///
+/// `1003` is the mode that costs something - a moving pointer sends a report - so nothing may
+/// redraw on one: the bar redraws only when the pointer enters or leaves it, and a report that
+/// matches nothing is dropped (`handle_mouse`). pi enables the same set (`tui-alt-screen.ts`:
+/// `1000h 1002h 1003h 1004h 1006h`); `1004` (focus) is left out here, because this decoder has no
+/// way to tell a focus event from a key sequence and would type one into the draft.
+pub const ENABLE: &str = "\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+/// Off in the reverse order, so no terminal is left tracking motion after the last sequence.
+pub const DISABLE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l";
+
+/// Motion with no button down (`35`), which only `1003` reports: the pointer's row and column.
+pub const MOTION: usize = 35;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub enum Mouse { Press(usize, usize), Drag(usize, usize), Release(usize, usize), WheelUp, WheelDown, Other }
+pub enum Mouse { Press(usize, usize), Drag(usize, usize), Release(usize, usize), Motion(usize, usize), WheelUp, WheelDown, Other }
 
 /// Take every complete SGR mouse report (`ESC [ < b ; x ; y M|m`) out of `bytes`, returning the
 /// bytes that were not mouse reports and the reports in order. An incomplete report at the very end
@@ -52,6 +66,7 @@ fn decode(params: &[u8], press: bool) -> Mouse {
         (65, true) => Mouse::WheelDown,
         (0, true) => Mouse::Press(y, x),
         (32, true) => Mouse::Drag(y, x),
+        (MOTION, true) => Mouse::Motion(y, x),
         (0, false) | (32, false) => Mouse::Release(y, x),
         _ => Mouse::Other,
     }
@@ -133,6 +148,20 @@ pub fn osc52(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn any_motion_tracking_is_turned_on_with_the_reports_and_off_again_in_reverse() {
+        // 1006 SGR, 1003 any-motion (the bar's hover), 1002 button-event (drag, wheel).
+        assert_eq!(ENABLE, "\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        assert_eq!(DISABLE, "\x1b[?1006l\x1b[?1003l\x1b[?1002l");
+        // A pointer moving with no button down is a report of its own, not a press or a drag.
+        let (rest, events, pending) = take(b"\x1b[<35;12;7M");
+        assert!(rest.is_empty() && pending.is_empty());
+        assert_eq!(events, vec![Mouse::Motion(7, 12)], "row 7, column 12: what a hover needs");
+        // And a moving pointer arrives with every other report in the same read.
+        let (_, events, _) = take(b"\x1b[<35;1;2M\x1b[<0;3;4M\x1b[<32;5;6M\x1b[<35;7;8M");
+        assert_eq!(events, vec![Mouse::Motion(2, 1), Mouse::Press(4, 3), Mouse::Drag(6, 5), Mouse::Motion(8, 7)]);
+    }
 
     #[test]
     fn mouse_reports_are_taken_out_of_the_input_and_the_rest_is_kept() {

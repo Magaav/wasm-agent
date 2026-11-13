@@ -330,6 +330,10 @@ lua_run() { # <script> <home>
     for name in "${overrides[@]}"; do printf '%s\n' "$name"; done
     printf 'WA_FAST_CLEARED=%s\n' "$WA_FAST_CLEARED"
     printf 'WA_FAST_ROW_ENV=%s\n' "$env_file"
+    # The binary this run is about, for a row that has to run it as a program of its own rather than as the
+    # node it is already inside (`scripts/test-release-sign.lua` asks it to verify the same six releases the
+    # shell verifier is judged by). Native path, like every other path handed to a row.
+    printf 'WA_FAST_BIN=%s\n' "$FAST_BIN"
   } > "$env_file" 2>/dev/null || true
   # A row is hermetic, and that has to be enforced here rather than trusted in each test: this node's
   # ambient environment exports the operator's real vault (`WASM_AGENT_VAULT_URL=http://192.168.1.27:8765`,
@@ -348,7 +352,7 @@ lua_run() { # <script> <home>
     "${overrides[@]}" \
     WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
     WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
-    WA_FAST_ROW_ENV="$env_file" WA_FAST_CLEARED="$WA_FAST_CLEARED" \
+    WA_FAST_ROW_ENV="$env_file" WA_FAST_CLEARED="$WA_FAST_CLEARED" WA_FAST_BIN="$FAST_BIN" \
     WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT="$1" \
     timeout 120 "$FAST_BIN" --db "$2/t.db"
 }
@@ -512,7 +516,13 @@ else
   # wa-model-router is the routing-policy modules (`wit/model/router.wit`, docs/MODEL-GATEWAY.md) and
   # wa-fleetview the fleet-view record contract (docs/FLEET-OPS.md); both are leaves with one dependency,
   # so their tests are seconds and there is no reason to leave them out.
-  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview; do
+  # wa-keystore is the crate every other vault row depends on and the one whose decisions are invisible
+  # from above it: which protection wraps the root key, what a wrapped-root file is read as, and what a
+  # kernel-keyring refusal means. Its tests are seconds (a leaf with ring/chacha20/argon2), and until now
+  # they ran nowhere in the fast path - which is how two defects in it reached a landing (13/11: the key
+  # quota leak behind `keystore_keyring_unavailable`, and a wrapped root read with the wrong cipher behind
+  # `sealed_blob_version_unknown`).
+  for crate in wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-sentinel wa-whatsapp-outbox wa-whatsapp-index wa-mesh wa-stt-remote wa-model-gateway wa-tool-progress wa-model-router wa-fleetview wa-keystore; do
     if [ "$all_rust" = 1 ] || printf '%s\n' "$changed" | grep -q "^rust/$crate/"; then crates="$crates $crate"; fi
   done
   printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh"
@@ -623,6 +633,16 @@ check whatsapp-go-retired bash scripts/test-whatsapp-go-retired.sh
 # The runner's half of "the machine, not the code": the classifier and the serial retry, against fixture
 # commands that fail the way a starved machine fails (and a real failure that must NOT be excused).
 check fast-environment bash scripts/test-fast-environment.sh
+# A pinned component's bytes are the build of the source this tree ships (13/11: `change/waroute` added
+# the `contacts` op to `rust/components/wa-whatsapp` and to the seam crate it shares with the node, and
+# `components.lock` kept pinning the artifact built before it - every deploy installed those bytes and
+# the tool answered `whatsapp_contacts_bad_op`; the component's tests were green because they ran
+# against the source). Two halves: the pin must move when anything under a pinned component's tree or a
+# crate it path-depends on moves (git only - it never skips, no toolchain, no network), and the pinned
+# `wa-whatsapp.wasm` must answer every op `rust/wa-whatsapp-index` defines. The artifact half says
+# `SKIP wa-whatsapp-pin: <why>` when no copy of the pinned bytes is reachable; `WA_PIN_CHECK_REQUIRE=1`
+# (a release gate) makes that a failure instead.
+check component-pins bash scripts/test-component-pins.sh
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.

@@ -10,6 +10,7 @@
 local json = dofile("lua/vendor/json.lua")
 local core = dofile("lua/core/harness_evaluator.lua")
 local replay = dofile("lua/core/harness_evaluator_replay.lua")
+local reviewer = dofile("lua/core/harness_evaluator_reviewer.lua")
 
 local M = {}
 
@@ -23,7 +24,12 @@ wa eval - freeze real tasks and replay them against a candidate binary
   wa eval run <task-id>|--all --bin <wa> [--model] [--timeout SECONDS] [--keep-scratch]
   wa eval report [--all] [--compare <run-a> <run-b>]
   wa eval verdict <run-id> pass|fail "<note>"
-  wa eval reviewer <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
+  wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
+                            [--timeout SECONDS] [--keep-scratch] [--branch <name>]
+  wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
+  wa eval reviewer miss <branch> "<note>"
+  wa eval reviewer list
+  wa eval reviewer run <run-id> [--findings N] [--accepted N] [--misses N] [--cost TEXT]
 
 A frozen task and every run live under <config>/evaluator (never in a repository, never printed whole).
 `run` is isolated: a mktemp scratch home with a marker, connectors and effects blocked and recorded as
@@ -176,7 +182,7 @@ local function report(args)
     print(text)
     return 0
   end
-  for _, line in ipairs(core.report({ all = has(args, "--all") })) do print(line) end
+  for _, line in ipairs(core.report({ all = has(args, "--all"), reviews = reviewer })) do print(line) end
   return 0
 end
 
@@ -197,11 +203,53 @@ local function verdict(args)
   return 0
 end
 
-local function reviewer(args)
-  local valued = { ["--findings"] = true, ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true }
-  local words = positionals(args, valued)
-  local run_id = words[1]
-  if not run_id then return refused("reviewer needs a run id") end
+-- `wa eval reviewer ...` - the landing reviewer (lua/core/harness_evaluator_reviewer.lua).
+--
+-- The verb that existed on main stored a reviewer's shape on a REPLAY run and ran nothing. This one runs
+-- the review: a fresh session (its own home and ledger), the branch, its base and the brief, and the
+-- findings back. It is not a gate - nothing in the landing queue reads it and it never blocks a landing.
+-- The operator's marks and the misses found after landing are recorded against the same store.
+local function reviewer_list()
+  local rows = reviewer.records()
+  if #rows == 0 then
+    print("(no reviews: `wa eval reviewer <branch> --brief <file>` runs one)")
+    return 0
+  end
+  for _, record in ipairs(rows) do
+    print(string.format("%-28s %-10s findings %-4s %-10s %s", tostring(record.id), tostring(record.sha):sub(1, 8),
+      tostring(record.findings or "-"), tostring(record.state or "-"), tostring(record.branch)))
+  end
+  return 0
+end
+
+local function reviewer_mark(args, valued, words)
+  local id, word = words[2], words[3]
+  if not id or not word then return refused("reviewer mark needs a review id and `accepted` or `rejected`") end
+  local record, problem = reviewer.mark(id, word, flag(args, "--finding"))
+  if not record then return refused(problem or "the mark was refused") end
+  local accepted, rejected = reviewer.counts(record)
+  print(string.format("%s: accepted %d, rejected %d of %s finding(s)", record.id, accepted, rejected,
+    tostring(record.findings or "-")))
+  return 0
+end
+
+local function reviewer_miss(args, words)
+  local branch = words[2]
+  if not branch then return refused("reviewer miss needs the branch the miss was found on") end
+  local rest = {}
+  for index = 3, #words do rest[#rest + 1] = words[index] end
+  local note = flag(args, "--note") or table.concat(rest, " ")
+  local entry, problem = reviewer.miss(branch, note, flag(args, "--repo") or "")
+  if not entry then return refused(problem or "the miss was refused") end
+  print(string.format("miss recorded for %s: %s", tostring(entry.branch), tostring(entry.note)))
+  return 0
+end
+
+-- Main's storage-only form, kept under the same verb: a replay run's reviewer shape (findings, accepted,
+-- misses, cost) is still recordable, and `wa eval report` still prints it. It decides nothing.
+local function reviewer_storage(args, valued, words)
+  local run_id = words[2]
+  if not run_id then return refused("reviewer run needs a replay run id") end
   local record, problem = core.reviewer_record(run_id, {
     findings = flag(args, "--findings"),
     accepted = flag(args, "--accepted"),
@@ -211,6 +259,96 @@ local function reviewer(args)
   if not record then return refused(problem or "the record was refused") end
   print(json.encode({ ok = true, run = record.id, reviewer = record.reviewer }))
   return 0
+end
+
+local function reviewer_run(args)
+  -- No `--model` and no `--provider`: the reviewer is one model on one route (M.DEFAULT_MODEL), and a
+  -- store whose rows were measured on different models is not a measurement (first real review, 13/11).
+  local valued = { ["--brief"] = true, ["--base"] = true, ["--bin"] = true, ["--timeout"] = true,
+    ["--finding"] = true, ["--note"] = true, ["--repo"] = true, ["--findings"] = true,
+    ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true, ["--branch"] = true }
+  local words = positionals(args, valued)
+  -- `list`, `mark`, `miss` and `run` are subcommands, so a BRANCH with one of those names could never be
+  -- reviewed; `--branch <name>` names the branch outright (third real review, 13/11, finding 6).
+  local what = flag(args, "--branch") or words[1]
+  -- An option this verb does not take is refused, not skipped: `--model` used to be a word here and its
+  -- value then became a positional, so a caller asking for another model got a silent review on the
+  -- pinned one (first real review, 13/11).
+  -- The switch is read BEFORE a positional is demanded: with the reviewer off, the bare word answers that
+  -- it is off and exits 0, not a usage error (first real review, 13/11). `list`, `mark`, `miss` and the
+  -- storage form still work while off - they read or annotate the store and start no session.
+  local switch = reviewer.switch()
+  local function off() 
+    print("wa eval: the reviewer is off (" .. tostring(switch.source) .. " = " .. tostring(switch.value)
+      .. "); nothing was run")
+    return 0
+  end
+  local named = flag(args, "--branch") ~= nil
+  if what == nil then
+    if not switch.on then return off() end
+    return refused("reviewer needs a branch, or `run`, `mark`, `miss` or `list` (wa eval help)")
+  end
+  if not named then
+    if what == "list" then return reviewer_list() end
+    if what == "mark" then return reviewer_mark(args, valued, words) end
+    if what == "miss" then return reviewer_miss(args, words) end
+    if what == "run" then return reviewer_storage(args, valued, words) end
+  end
+  -- The switch, before the option scan: with the reviewer off, `wa eval reviewer x --whatever` says it is
+  -- off and exits 0 rather than arguing about an option (third real review, finding 5). `mark`, `miss`,
+  -- `list` and the storage form keep working while off - they start no session.
+  if not switch.on then return off() end
+  -- A switch VALUE nobody recognises leaves the reviewer on (a typo must not disable a review the operator
+  -- asked for) and says which value it saw, because silence there reads as "the switch worked".
+  local allowed = { ["--keep-scratch"] = true }
+  for name in pairs(valued) do allowed[name] = true end
+  local index = 2
+  while index <= #args do
+    local token = args[index]
+    if valued[token] then
+      index = index + 2  -- an option's VALUE is not an option: `--note "--missed the bypass"` is a note
+    elseif token:sub(1, 2) == "--" and not allowed[token] then
+      return refused("unknown option " .. token .. " for `wa eval reviewer` (wa eval help)")
+    else
+      index = index + 1
+    end
+  end
+  if not reviewer.recognised(switch.value or "") then
+    print("wa eval: the reviewer is on; " .. tostring(switch.source) .. " = " .. tostring(switch.value)
+      .. " is not one of off/0/false/no (or on/1/true/yes)")
+  end
+  local record, problem = reviewer.run({
+    branch = what,
+    repo = flag(args, "--repo"),
+    brief = flag(args, "--brief"),
+    base = flag(args, "--base"),
+    bin = flag(args, "--bin"),
+    timeout = flag(args, "--timeout"),
+    keep_scratch = has(args, "--keep-scratch"),
+  })
+  if not record then return refused(problem or "the review could not run") end
+  local m = record.metrics or {}
+  print(string.format("review %s: %s @ %s (base %s) %s · rounds %s · tools %s · in %s out %s · %sms · %s",
+    tostring(record.id), tostring(record.branch), tostring(record.sha):sub(1, 8), tostring(record.base_ref),
+    tostring(record.model), tostring(m.rounds or "-"), tostring(m.tool_calls or "-"),
+    tostring(m.tokens_in or "-"), tostring(m.tokens_out or "-"), tostring(record.wall_ms),
+    tostring(record.state)))
+  if record.answer and record.answer ~= "" then
+    print("")
+    print(record.answer)
+  end
+  if record.review_line and record.state == "reviewed" then
+    print(record.review_line)
+    return 0
+  end
+  -- A review that answered about another commit is NOT a review of this branch: its own line is quoted as
+  -- the session's, the door says what went wrong, and the exit is non-zero (third real review, finding 3).
+  if record.review_line then print("the session's own final line: " .. tostring(record.review_line)) end
+  print("wa eval: " .. tostring(problem or "the review session gave no REVIEW line"))
+  if record.stderr_tail and record.stderr_tail ~= "" then
+    print("wa eval: stderr tail: " .. tostring(record.stderr_tail):gsub("%s+$", ""))
+  end
+  return 1
 end
 
 function M.run(args)
@@ -228,7 +366,7 @@ function M.run(args)
   if verb == "run" then return run(rest) end
   if verb == "report" then return report(rest) end
   if verb == "verdict" then return verdict(rest) end
-  if verb == "reviewer" then return reviewer(rest) end
+  if verb == "reviewer" then return reviewer_run(rest) end
   return refused("unknown verb " .. tostring(verb) .. " (wa eval help)")
 end
 

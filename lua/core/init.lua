@@ -221,6 +221,16 @@ elseif command == "resume" then
     end
     state.messages = memory.message_count(target)
     states, targeted = { state }, true
+    -- `wa resume --session <id>` is the operator's resume, so the session's held schedule re-arms with
+    -- it (operator, 13/11: once interrupted it stops, once it resumes it resumes). The wakes were never
+    -- touched by the pause, so what is due fires once rather than once per missed interval, and nothing
+    -- fires before this line. Nothing held, nothing said.
+    local resumed_ok, resumed = pcall(function() return dofile("lua/core/selfloop.lua").resume(target) end)
+    if resumed_ok and type(resumed) == "table" and resumed.resumed then
+      print(string.format("  wakes     %d re-armed (they were paused by an interrupt)%s",
+        tonumber(resumed.pending) or 0,
+        (tonumber(resumed.overdue) or 0) > 0 and ", the overdue one fires once" or ""))
+    end
   else
     states = memory.unfinished(nil, 40)
   end
@@ -390,7 +400,7 @@ elseif command == "help" then
   print("    stt status | stt role <producer|worker|both|off> [--producer <node>]  this node's speech role, changed live")
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
-  print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, read metrics")
+  print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
   print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")

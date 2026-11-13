@@ -29,6 +29,13 @@ SHIP="$ROOT/scripts/publish-artifacts-branch.sh"
 
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# A release is published only with its signed sums, and the signature comes from wa-vault, so this suite
+# runs a SCRATCH vault (its own data directory, its own ports, a key made through the admin API) and signs
+# the fixture release the transport ships. Never the operator's running vault.
+. "$ROOT/scripts/lib/test-release-vault.sh"
+test_release_vault_start || { echo "SKIP test-publish-artifacts: python3/curl or vault/wa_vault.py is missing, so nothing can be signed"; exit 0; }
+trap 'test_release_vault_stop; chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 checks=0
 ok() { checks=$((checks + 1)); }
 fail() { echo "publish artifacts FAILED: $*" >&2; exit 1; }
@@ -174,10 +181,11 @@ parents="$(git --git-dir="$WORK/dropbox.git" rev-list --parents -n1 "$readback" 
 [ "$parents" = 1 ] || fail "the artifacts commit is not an orphan (rev-list --parents lists $parents ids)"
 ok
 files="$(git --git-dir="$WORK/dropbox.git" ls-tree -r --name-only "$readback" | sort | tr '\n' ' ')"
-# SHA256SUMS is part of the set, not beside it: the shipped PUBLISH.sh names it (the publisher does), and
-# measured 13/11 the ref carried PUBLISH.sh, the manifest and the payloads while that line asked for a file
-# the commit did not hold - a publish that fails on a missing file, after a human was told to paste it.
-want="PUBLISH.sh SHA256SUMS node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT "
+# The signed sums ship WITH the binaries they name (change/sign), and the flat form SHA256SUMS is part of
+# the set too - the shipped PUBLISH.sh names it, and measured 13/11 the ref held PUBLISH.sh, the manifest
+# and the payloads while that line asked for a file the commit did not hold: a publish that fails on a
+# missing file, after a human was told to paste it. Both rules, one list.
+want="PUBLISH.sh SHA256SUMS SHA256SUMS.sig node-$SHORT.manifest wa-sentinel-$TRIPLE-$SHORT wa-$TRIPLE-$SHORT "
 [ "$files" = "$want" ] || fail "the commit holds '$files', expected exactly '$want'"
 ok
 contains "$(cat "$P")" "SHA256SUMS" "PUBLISH.sh names SHA256SUMS (which is why the commit must carry it)"
@@ -186,6 +194,18 @@ contains "$sums" "$wa_sha  wa-$TRIPLE-$SHORT" "SHA256SUMS pins the payload the m
 contains "$sums" "$sen_sha  wa-sentinel-$TRIPLE-$SHORT" "SHA256SUMS pins the supervisor too"
 contains "$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS" | grep -c .)" "3" \
   "SHA256SUMS holds one row per payload and the manifest"
+# ...and the shipped signature is about the shipped SHA256SUMS, by the key the vault made in this run:
+# signed sums that nobody can verify are decoration, and a node verifies them before it installs
+# (scripts/lib/release-signing.sh, rust/wa-host/src/release.rs).
+sigdump="$WORK/shipped-release"; mkdir -p "$sigdump"
+git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS" > "$sigdump/SHA256SUMS"
+git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:SHA256SUMS.sig" > "$sigdump/SHA256SUMS.sig"
+SHIPPED_SUMS_SHA="$(sha256sum < "$sigdump/SHA256SUMS" | awk '{print $1}')"
+. "$ROOT/scripts/lib/release-signing.sh"
+if wa_release_verify_sums "$sigdump" 2> "$WORK/sig.err"; then ok
+else fail "the shipped signature does not verify against the vault's key: $(cat "$WORK/sig.err")"; fi
+contains "$(cat "$sigdump/SHA256SUMS.sig")" "wa-release-signature v1" "the shipped signature carries the v1 header"
+contains "$(cat "$sigdump/SHA256SUMS.sig")" "sha256 $SHIPPED_SUMS_SHA" "the signature names the digest of the shipped SHA256SUMS"
 shipped_sha="$(git --git-dir="$WORK/dropbox.git" cat-file -p "$readback:wa-$TRIPLE-$SHORT" | sha256sum | awk '{print $1}')"
 [ "$shipped_sha" = "$wa_sha" ] || fail "the shipped payload is $shipped_sha, the pin is $wa_sha"
 ok

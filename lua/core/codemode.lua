@@ -108,6 +108,30 @@ end
 
 local fallback_logged = {}
 
+-- The view's row for one nested call (`lua/core/codemode_block.lua`): it appears as `⏳` when the call
+-- starts and its own row is rewritten to `✓`/`✗` when it settles, inside the block the CLI opened
+-- for this script. A caller with no view (a run, a peer, a subagent, a test) has no `emit`, so this is
+-- one nil check - and nothing on the result path reads it, which is why the model-facing result is
+-- the same bytes whether a reader is watching or not.
+local function live(ctx, event)
+  local emit = type(ctx) == 'table' and ctx.emit or nil
+  if type(emit) ~= 'function' then return end
+  pcall(emit, event)
+end
+
+-- What a settled nested call says: its state, how long it took, and the error code the row shows in
+-- red (`web_http_429`, not "failed"). `{state:"pending", op}` is its own state - a call that
+-- outlived its wait is not a failure and not a success.
+local function live_settled(ctx, id, name, result, called, started)
+  local r = type(result) == 'table' and result or nil
+  local state = 'ok'
+  if not called or (r and (r.error or r.ok == false)) then state = 'failed' end
+  if r and r.state == 'pending' then state = 'pending' end
+  live(ctx, { type = 'codemode_call', id = id, name = name, state = state,
+    ms = math.floor(((tonumber(host.now()) or started) - started) * 1000),
+    error = r and r.error or nil, code = r and (r.code or r.error) or nil, op = r and r.op or nil })
+end
+
 local function note_fallback(op, reason)
   local key = tostring(op) .. "|" .. tostring(reason)
   if fallback_logged[key] then return end
@@ -463,7 +487,10 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
        local fenced=action_refusal(def.name,params)
        if fenced then value=fenced;success=false else
        local span=telemetry.start(ctx,'tool',{name=def.name,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
+       live(ctx,{type='codemode_call',id=call.id,name=def.name,arguments=params,state='running'})
+       local live_started=tonumber(host.now()) or 0
        local called,result=pcall(pending_calls.invoke,dispatch,popts,def.name,params,stripped,wait_s);admitted=true
+       live_settled(ctx,call.id,def.name,result,called,live_started)
        if called then
         value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
         -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one
@@ -620,8 +647,11 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
         if fenced then value,success=fenced,false
         else
          local span=telemetry.start(ctx,'tool',{name=step.name,nested=true,codemode_call=step.id,arguments_hash=host.sha256(argument_text or '{}')})
+         live(ctx,{type='codemode_call',id=step.id,name=step.name,arguments=params,state='running'})
+         local live_started=tonumber(host.now()) or 0
          local called,result=pcall(pending_calls.invoke,dispatch,popts,step.name,params,stripped,wait_s)
          admitted=true
+         live_settled(ctx,step.id,step.name,result,called,live_started)
          if called then value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
           value=session_results.record(ctx,journal,{id=step.id,tool=step.name,args=host.sha256(argument_text or '{}'),
            args_value=params,result=host.sha256(json.encode(value)),ok=success},value)

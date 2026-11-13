@@ -6,7 +6,7 @@
 //! A *topic* is a collapsible block - the model's thinking, a tool call - shown at most
 //! `FOLDED_ROWS` rows until it is expanded. Ctrl+Up (from the draft) focuses the latest topic; Up and
 //! Down move between topics, Right expands, Left folds, Esc goes back to typing.
-use crate::scroll::chat::{fit, thumb};
+use crate::scroll::bar::{fit, Bar};
 use crate::scroll::settings::Scrollbar;
 use crate::terminal_editor::cell_width_of;
 use std::collections::HashMap;
@@ -21,15 +21,21 @@ const MAX_LINES: usize = 20_000;
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[38;2;119;119;119m";
 const FOCUS: &str = "\x1b[38;2;255;255;255m";
-/// The scrollbar's colours, the fullscreen console's own (`scroll::chat`): one bar, one look.
-const BAR_TRACK: &str = "\x1b[38;2;80;80;80m";
-const BAR_THUMB: &str = "\x1b[38;2;136;136;136m";
 
 #[derive(Default, Clone)]
 pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool,
     /// Lines that can be copied, by line index: `{line: content}`. The content is the block's own
     /// text (a fenced block's body), not the drawn rows - the rows carry the border and the icon.
-    pub copies: HashMap<usize, String> }
+    pub copies: HashMap<usize, String>,
+    /// A code-mode block (`⏺ Code · …`): drawn expanded while it is the running one, and folded to
+    /// `summary` - ONE row - once the next one starts (`fold_code`).
+    pub code: bool,
+    /// The one row this block collapses to, set when a newer code-mode block takes the screen:
+    /// `⏺ Code · bash ×3 ✓ · 1.2s → "a,b,c"`.
+    pub summary: Option<String>,
+    /// Ctrl+O on this block: pinned expanded, so the next code-mode block does not collapse it. The
+    /// same key lets it go.
+    pub pinned: bool }
 
 pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub dirty: bool,
     /// The scrollbar in the last column (#115): `auto` shows it when the chat is taller than the
@@ -44,6 +50,14 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     count_width: usize,
     /// Whether the last view drew the bar (and so wrapped one column narrower).
     bar: bool,
+    /// The bar as the last view drew it: what a mouse report is measured against (`scroll::bar`).
+    /// `None` while no bar is shown.
+    bar_last: Option<Bar>,
+    /// The pointer is on the bar: the thumb is drawn thick while it is (`scroll::bar`).
+    bar_hovered: bool,
+    /// A press grabbed the thumb (or came down on the track): the pointer's offset on the thumb,
+    /// held for as long as the button is.
+    bar_grab: Option<usize>,
     /// The view's first row while it is frozen (the reader is navigating or has paged back): new
     /// output then lands below it without moving what they are reading. `None` = follow the bottom.
     /// Negative while the chat is shorter than the screen: the blank rows above it are part of
@@ -70,7 +84,7 @@ impl Default for Transcript {
         Transcript { blocks: Vec::new(), focus: None, dirty: false, top: None, freeze: false,
             page_delta: 0, nav: false, live_row: None, pending_copy: Vec::new(),
             copy_rows: HashMap::new(), scrollbar: Scrollbar::Auto, counts: Vec::new(),
-            count_width: 0, bar: false }
+            count_width: 0, bar: false, bar_last: None, bar_hovered: false, bar_grab: None }
     }
 }
 
@@ -84,10 +98,76 @@ impl Transcript {
         self.clear_live();
         self.pending_copy.clear();
         if let Some(last) = self.blocks.last_mut() {
-            if last.lines.is_empty() { last.topic = topic; last.expanded = false; return; }
+            if last.lines.is_empty() {
+                last.topic = topic; last.expanded = false;
+                last.code = false; last.summary = None; last.pinned = false;
+                return;
+            }
         }
         self.blocks.push(Block { topic, ..Default::default() });
         self.counts.push(None);
+    }
+
+    /// Start a code-mode block: collapsible, but drawn **expanded** while it is the newest one - the
+    /// block that is running is the one a reader is watching stream (`lua/core/codemode_block.lua`
+    /// decides its rows; this decides its fold).
+    pub fn code_block(&mut self) {
+        self.block(true);
+        if let Some(last) = self.blocks.last_mut() {
+            last.code = true; last.expanded = true; last.pinned = false; last.summary = None;
+        }
+        self.dirty = true;
+    }
+
+    /// Collapse the code-mode blocks a newer one supersedes: the newest takes `summary` (the one row
+    /// it becomes) and folds, and every older code block folds too - so exactly ONE code block is
+    /// open, the one that is running, plus whatever the reader pinned with Ctrl+O. Called by the view
+    /// immediately before it starts the next block. Returns whether anything folded.
+    pub fn fold_code(&mut self, summary: &str) -> bool {
+        let Some(newest) = (0..self.blocks.len()).rev().find(|&i| self.blocks[i].code && !self.blocks[i].lines.is_empty()) else { return false };
+        let mut folded = false;
+        if !self.blocks[newest].pinned {
+            self.blocks[newest].summary = Some(summary.to_string());
+            self.blocks[newest].expanded = false;
+            if let Some(count) = self.counts.get_mut(newest) { *count = None; }
+            folded = true;
+        }
+        for index in 0..newest {
+            if self.blocks[index].code && !self.blocks[index].pinned && self.blocks[index].expanded {
+                self.blocks[index].expanded = false;
+                if let Some(count) = self.counts.get_mut(index) { *count = None; }
+                folded = true;
+            }
+        }
+        if folded { self.dirty = true; }
+        folded
+    }
+
+    /// Rewrite a committed line of the current block by offset from its end (`-1` is the last row):
+    /// how a code-mode block flips a running call's `⏳` row to `✓` in place instead of drawing the
+    /// block again. The live row is not a committed line and is taken away first, as a write does.
+    pub fn rewrite(&mut self, offset: isize, text: &str) -> bool {
+        self.clear_live();
+        let Some(block) = self.blocks.last_mut() else { return false };
+        let index = block.lines.len() as isize + offset;
+        if index < 0 || index as usize >= block.lines.len() { return false }
+        block.lines[index as usize] = text.to_string();
+        if let Some(count) = self.counts.last_mut() { *count = None; }
+        self.dirty = true;
+        true
+    }
+
+    /// Ctrl+O: pin the focused block - or the newest code-mode block - expanded, so the blocks that
+    /// follow it no longer collapse it; the same key lets it go. Returns the new state.
+    pub fn pin_toggle(&mut self) -> Option<bool> {
+        let index = self.focus.or_else(|| (0..self.blocks.len()).rev()
+            .find(|&i| self.blocks[i].code && !self.blocks[i].lines.is_empty()))?;
+        let block = &mut self.blocks[index];
+        block.pinned = !block.pinned;
+        if block.pinned { block.expanded = true; }
+        if let Some(count) = self.counts.get_mut(index) { *count = None; }
+        self.dirty = true;
+        Some(block.pinned)
     }
 
     /// The running tool call's line, **inside that call's own block** (Victor, 2026-11-10: the
@@ -263,6 +343,15 @@ impl Transcript {
             }
         }
         while block.topic && rows.last().is_some_and(|r| visible(r) == 0) { rows.pop(); }
+        // A code-mode block is open while it runs and ONE row afterwards: the summary a newer block
+        // left it with. Pinned (Ctrl+O) or focused, it shows everything it holds.
+        if block.code && !block.expanded && !block.pinned && !focused {
+            if let Some(summary) = block.summary.as_ref() { return (vec![summary.clone()], Vec::new()) }
+            // No summary was ever handed to this block (it was pinned when its successor started): its
+            // own heading is the row it keeps - `⏺ Code · bash … 1.2s` says what it was and how it
+            // went, which is what the collapsed state is for.
+            if let Some(head) = block.lines.first() { return (vec![head.clone()], Vec::new()) }
+        }
         // Folded: the topic's title row, then its first FOLDED_ROWS rows of content - blank rows
         // skipped, so three rows are three lines of text - then how much is hidden.
         if block.topic && !block.expanded && rows.len() > 1 + FOLDED_ROWS {
@@ -365,7 +454,7 @@ impl Transcript {
             shown.extend(tail.into_iter().skip(skip));
             // Following the bottom: the first row shown is the one `height` above the end.
             let first = total.saturating_sub(shown.len());
-            Transcript::draw_bar(&mut shown, text_width, self.bar, total, first);
+            self.draw_bar(&mut shown, text_width, self.bar, total, first);
             return shown;
         }
         let mut rows = Vec::new();
@@ -415,7 +504,7 @@ impl Transcript {
         // The bar is sized from the rows this frame actually wrapped: in this path every block is
         // laid out, so that is the whole chat.
         let first = start.max(0) as usize;
-        Transcript::draw_bar(&mut shown, text_width, self.bar, rows.len(), first);
+        self.draw_bar(&mut shown, text_width, self.bar, rows.len(), first);
         shown
     }
 
@@ -423,24 +512,99 @@ impl Transcript {
     /// reader is. `scroll::chat`'s `thumb` and `fit` are borrowed rather than re-invented - the
     /// fullscreen console's bar and this one are the same bar, and its arithmetic is the part a
     /// second implementation would get subtly wrong.
-    fn draw_bar(rows: &mut [String], text_width: usize, bar: bool, total: usize, first: usize) {
-        if !bar || rows.is_empty() { return }
-        let (top, len) = thumb(rows.len(), total, first);
-        for (index, row) in rows.iter_mut().enumerate() {
-            let glyph = if index >= top && index < top + len {
-                format!("{BAR_THUMB}\u{2588}")
-            } else {
-                format!("{BAR_TRACK}\u{2502}")
-            };
-            *row = format!("{}{}{RESET}", fit(row, text_width), glyph);
+    fn draw_bar(&mut self, rows: &mut [String], text_width: usize, bar: bool, total: usize, first: usize) {
+        if !bar || rows.is_empty() { self.bar_last = None; return }
+        // One glyph per row, from the first row of the region to the last: a click is measured
+        // against exactly this (`scroll::bar`), so what is drawn and what is hit cannot drift apart.
+        let drawn = Bar { active: self.bar_active(), ..Bar::new(rows.len(), total, first) };
+        for (row, (glyph, colour)) in rows.iter_mut().zip(drawn.cells()) {
+            *row = format!("{}{colour}{glyph}{RESET}", fit(row, text_width));
         }
+        self.bar_last = Some(drawn);
+    }
+
+    /// The bar as the last `view` drew it: `None` while no bar is shown.
+    pub fn bar(&self) -> Option<Bar> { self.bar_last }
+
+    /// Whether a pointer at `(row, col)` of a `width`-wide screen is on the bar: its last column,
+    /// while the bar is shown. Rows and columns are screen rows and cells, 1-based, as the terminal
+    /// reports them.
+    pub fn on_bar(&self, row: usize, col: usize, width: usize) -> bool {
+        self.bar_last.is_some_and(|bar| width > 1 && col == width && row >= 1 && row <= bar.track)
+    }
+
+    /// A press on the bar: the thumb comes to the pointer (its middle, when the press was on the
+    /// track) and the drag starts there. Returns whether the press was the bar's - a press that is
+    /// not on the bar is the selection's, as it always was.
+    pub fn bar_press(&mut self, row: usize, col: usize, width: usize) -> bool {
+        if !self.on_bar(row, col, width) { return false }
+        let bar = self.bar_last.expect("on_bar checked it");
+        if !bar.scrolling() { return false }
+        let at = row.saturating_sub(1).min(bar.track - 1);
+        let grab = bar.grab(at);
+        self.bar_grab = Some(grab);
+        self.bar_to(bar.first_at(at, grab));
+        true
+    }
+
+    /// The button is down and the pointer moved: the bar scrolls with it. Only a press that grabbed
+    /// the bar drags it, and a drag that wandered off the bar still scrolls (as it does in pi).
+    pub fn bar_drag(&mut self, row: usize) -> bool {
+        let Some(grab) = self.bar_grab else { return false };
+        let Some(bar) = self.bar_last else { return false };
+        if bar.track == 0 { return false }
+        let at = row.saturating_sub(1).min(bar.track - 1);
+        self.bar_to(bar.first_at(at, grab));
+        true
+    }
+
+    /// The button came up: the thumb lets go.
+    pub fn bar_release(&mut self) -> bool {
+        let had = self.bar_grab.take().is_some() || self.bar_hovered;
+        self.bar_hovered = false;
+        had
+    }
+
+    /// The pointer is on the bar, or left it: the thumb thickens and thins. Returns whether the
+    /// frame changed - a pointer that stays on one side of the bar costs no redraw.
+    pub fn bar_hover(&mut self, row: usize, col: usize, width: usize) -> bool {
+        if self.bar_grab.is_some() { return false }
+        let hovered = self.on_bar(row, col, width);
+        if hovered == self.bar_hovered { return false }
+        self.bar_hovered = hovered;
+        self.dirty = true;
+        true
+    }
+
+    /// Whether the pointer is on the bar (or holding it): the thumb is drawn thick.
+    pub fn bar_active(&self) -> bool { self.bar_hovered || self.bar_grab.is_some() }
+
+    /// Put the view at content row `first`, frozen there: what the bar's click and drag are. At the
+    /// bottom the view follows again, which `view` decides from the same number.
+    fn bar_to(&mut self, first: usize) {
+        self.freeze = true;
+        self.page_delta = 0;
+        self.top = Some(first as isize);
+        self.dirty = true;
     }
 
     /// The frame that draws the output region (`rows` = its last row).
+    ///
+    /// The bar's cell is written a second time, at its own column, after the row. A row's text can
+    /// turn out one cell wider than `cell_width` believes - an emoji a terminal draws two cells wide
+    /// and this crate counts as one - and a terminal then wraps the rest of the row onto the next
+    /// line, which used to carry the bar's glyph with it and leave a break in the track (the
+    /// operator's screenshot, 13/11 ~06:50). An absolute cursor position cannot wrap: every row of
+    /// the track gets its glyph at the same column, whatever the text does.
     pub fn render(&mut self, width: usize, rows: usize) -> String {
+        let view = self.view(width, rows);
+        let bar = self.bar();
         let mut frame = String::new();
-        for (offset, row) in self.view(width, rows).iter().enumerate() {
+        for (offset, row) in view.iter().enumerate() {
             frame.push_str(&format!("\x1b[{};1H\x1b[2K{row}{RESET}", offset + 1));
+            if let Some((glyph, colour)) = bar.and_then(|bar| bar.cells().get(offset).copied()) {
+                frame.push_str(&format!("\x1b[{};{width}H{colour}{glyph}{RESET}", offset + 1));
+            }
         }
         frame
     }
@@ -542,7 +706,7 @@ fn hanging_indent(cells: &[(String, char, usize)]) -> (usize, usize) {
 
 /// Keys while the transcript has focus.
 #[derive(Debug, PartialEq)]
-pub enum NavKey { None, Up, Down, Right, Left, Exit, PageUp, PageDown, Bottom, Other(Vec<u8>) }
+pub enum NavKey { None, Up, Down, Right, Left, Pin, Exit, PageUp, PageDown, Bottom, Other(Vec<u8>) }
 
 #[derive(Default)]
 pub struct NavDecoder { escape: Vec<u8> }
@@ -567,6 +731,7 @@ impl NavDecoder {
         match byte {
             0x1b => { self.escape.push(byte); NavKey::None }
             b'\r' | 3 => NavKey::Exit,
+            0x0f => NavKey::Pin,
             _ => NavKey::Other(vec![byte]),
         }
     }
@@ -627,11 +792,13 @@ mod tests {
     // the bar for the fullscreen console - the same thumb arithmetic, the same `auto`/`always`/
     // `hidden` knob - so this borrows it instead of inventing a second one, and the two transcripts
     // now answer the same question the same way.
+    /// The rows the thumb is on: at rest it is `┃` (`scroll::bar`), joined to the `│` track.
     fn thumb_rows(view: &[String]) -> Vec<usize> {
-        (0..view.len()).filter(|&at| view[at].ends_with("\u{2588}\u{1b}[0m")).collect()
+        (0..view.len()).filter(|&at| view[at].ends_with("\u{2503}\u{1b}[0m") || view[at].ends_with("\u{2588}\u{1b}[0m")).collect()
     }
     fn bar_rows(view: &[String]) -> usize {
-        view.iter().filter(|row| row.ends_with("\u{2588}\u{1b}[0m") || row.ends_with("\u{2502}\u{1b}[0m")).count()
+        view.iter().filter(|row| row.ends_with("\u{2503}\u{1b}[0m") || row.ends_with("\u{2588}\u{1b}[0m")
+            || row.ends_with("\u{2502}\u{1b}[0m")).count()
     }
     #[test]
     fn a_long_chat_draws_a_scrollbar_and_its_position_follows_the_reader() {
@@ -676,6 +843,85 @@ mod tests {
         t.scrollbar = Scrollbar::Hidden;
         assert_eq!(bar_rows(&t.view(40, 10)), 0, "hidden: nothing, whatever the length");
     }
+    // ---- the bar takes the mouse (operator, 13/11 ~06:50) ---------------------------------------
+    // The same bar, now a handle: a click on the track jumps there, a drag on the thumb scrolls,
+    // and the thumb is thick while the pointer is on it (`scroll::bar` has the arithmetic and the
+    // rules; this is the transcript's side of them). What must not change: a press that is not in
+    // the bar's column is still the start of a text selection.
+    /// A row's text, without the escapes and without the bar's column.
+    fn text_of(row: &str) -> String {
+        crate::selection::plain(row).trim_end()
+            .trim_end_matches(['\u{2502}', '\u{2503}', '\u{2588}']).trim_end().to_string()
+    }
+
+    #[test]
+    fn the_bars_column_takes_a_click_and_a_drag_and_nothing_else_is_the_bars() {
+        let mut t = Transcript::default();
+        for n in 0..100 { t.write(&format!("line {n}\n")); }
+        let bottom = t.view(40, 10);
+        assert_eq!(bar_rows(&bottom), 10, "a bar on every row of the region: {bottom:?}");
+        // A press in the text, or where there is no bar at all, is not the bar's: the host keeps it
+        // for the selection it has always started.
+        assert!(!t.bar_press(2, 20, 40), "a press in the chat's text is not the bar's");
+        assert!(!t.bar_press(2, 41, 40), "past the last column is not the bar's either");
+        assert!(!t.bar_press(2, 40, 1), "a screen one column wide has no bar");
+        // The bar's column, two rows down: the thumb's middle comes to the pointer, which is the
+        // top of the chat, and the press is held as a grab.
+        assert!(t.bar_press(2, 40, 40), "a press in the bar's column is the bar's");
+        let at_top = t.view(40, 10);
+        assert_eq!(text_of(&at_top[0]), "line 0", "the click jumped to the top: {at_top:?}");
+        // Still held, moved down to the last row: the newest output, and following again.
+        assert!(t.bar_drag(10), "a drag that began on the bar scrolls it");
+        let at_bottom = t.view(40, 10);
+        assert_eq!(text_of(&at_bottom[9]), "line 99", "the drag's end is the newest output: {at_bottom:?}");
+        assert!(t.following(), "at the bottom the transcript follows new output again");
+        assert!(t.bar_release(), "the button came up on the bar");
+        assert!(!t.bar_drag(5), "and a drag after the release does not belong to the bar");
+        // A chat that fits its region has no scroll position to move, so its bar takes nothing.
+        let mut short = Transcript::default();
+        short.write("one\ntwo\n");
+        short.scrollbar = Scrollbar::Always;
+        short.view(40, 10);
+        assert!(!short.bar_press(3, 40, 40), "nothing to scroll, nothing to press");
+    }
+
+    #[test]
+    fn the_thumb_is_thick_under_the_pointer_and_thin_when_it_leaves() {
+        let mut t = Transcript::default();
+        for n in 0..100 { t.write(&format!("line {n}\n")); }
+        let rest = t.view(40, 10);
+        assert!(thumb_rows(&rest).len() >= 2, "at rest: a thin thumb on the track: {rest:?}");
+        assert!(!rest.iter().any(|row| row.ends_with("\u{2588}\u{1b}[0m")), "and nothing thick: {rest:?}");
+        // The pointer arrives on the bar's column: a redraw, and the thumb is a block.
+        assert!(t.bar_hover(5, 40, 40), "the pointer arrived: redraw");
+        let hovered = t.view(40, 10);
+        assert_eq!(thumb_rows(&hovered), thumb_rows(&rest), "the same rows: the thumb did not move");
+        assert!(hovered.iter().any(|row| row.ends_with("\u{2588}\u{1b}[0m")), "thicker where it was: {hovered:?}");
+        assert!(!hovered.iter().any(|row| row.ends_with("\u{2503}\u{1b}[0m")), "and the thin glyph is gone");
+        // A pointer that stays on the bar costs no frame; one that leaves thins the thumb again.
+        assert!(!t.bar_hover(6, 40, 40), "still on the bar: nothing changed");
+        assert!(t.bar_hover(5, 20, 40), "the pointer left the column: redraw");
+        let thin = t.view(40, 10);
+        assert!(!thin.iter().any(|row| row.ends_with("\u{2588}\u{1b}[0m")), "thin again: {thin:?}");
+        assert_eq!(thumb_rows(&thin), thumb_rows(&rest), "in the same rows");
+    }
+
+    #[test]
+    fn every_row_of_the_track_writes_its_glyph_at_the_columns_own_position() {
+        // The operator's break in the track: a row whose text the terminal draws one cell wider than
+        // `cell_width` counts wraps, and a glyph that is part of the row's text wraps with it. The
+        // render writes the bar's cell again at an absolute column, so the column is one line.
+        let mut t = Transcript::default();
+        for n in 0..100 { t.write(&format!("line {n}\n")); }
+        t.write("done \u{2705} and more\n"); // U+2705: one cell here, two in most terminals
+        let frame = t.render(40, 10);
+        let bar = t.bar().expect("a long chat draws the bar");
+        for (row, (glyph, colour)) in bar.cells().iter().enumerate() {
+            let at = format!("\x1b[{};40H{colour}{glyph}", row + 1);
+            assert!(frame.contains(&at), "row {} writes its bar at column 40 and no other: {at:?} in {frame:?}", row + 1);
+        }
+    }
+
     // ---- a fenced block can be copied from the transcript (#114) -------------------------------
     // The operator's ask (11/11 ~11:25): a fenced block in the CLI transcript gets a copy icon in
     // front of its title, and clicking it puts the block's content on the clipboard. pi does this;
@@ -779,6 +1025,76 @@ mod tests {
             && open.contains("chat.lua") && open.contains("\"count\":2"),
             "expanded: the whole script and the value the model received: {open}");
         assert!(!open.contains("+2 lines"), "and nothing left hidden: {open}");
+    }
+    #[test]
+    fn a_code_mode_block_is_open_while_it_runs_and_one_row_after() {
+        let mut t = Transcript::default();
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} bash                                                     1.2s\n");
+        t.write("  const files = await tools.ls({path: 'lua/core'});\n");
+        t.write("  \u{2713} bash \u{b7} $ ls lua/core \u{b7} 210ms\n");
+        t.write("\u{23bf} {\"count\":2,\"first\":\"chat.lua\"}\n");
+        let open = t.view(80, 24).join("\n");
+        assert!(open.contains("Code \u{b7} bash") && open.contains("ls lua/core")
+            && open.contains("\"count\":2"), "the running block is open, all of it: {open}");
+        assert!(!open.contains("+2 lines"), "and folds none of its own rows: {open}");
+        // The next code-mode call starts: this one collapses to the ONE row the view built for it.
+        let summary = "\u{23fa} Code \u{b7} bash \u{2713} \u{b7} 1.2s \u{2192} {\"count\":2}";
+        assert!(t.fold_code(summary), "the block before the new one folds");
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} grep\n");
+        t.write("  return hits.count;\n");
+        let screen = t.view(80, 24);
+        let text = screen.join("\n");
+        assert!(text.contains(summary), "the older block is its summary row: {text}");
+        assert!(!text.contains("ls lua/core") && !text.contains("const files"),
+            "and none of its rows are drawn: {text}");
+        assert!(text.contains("grep") && text.contains("hits.count"), "the new one is open: {text}");
+        assert_eq!(screen.iter().filter(|row| row.contains("\u{23fa} Code")).count(), 2,
+            "two headings, one row for the collapsed one: {text}");
+    }
+
+    #[test]
+    fn a_pinned_code_mode_block_survives_the_next_one() {
+        let mut t = Transcript::default();
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} bash\n");
+        t.write("  const files = await tools.ls({path: 'lua/core'});\n");
+        assert_eq!(t.pin_toggle(), Some(true), "Ctrl+O pins the newest code-mode block");
+        assert!(!t.fold_code("\u{23fa} Code \u{b7} bash \u{2713} \u{b7} 1.2s"),
+            "a pinned block is not collapsed when the next one starts");
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} grep\n");
+        t.write("  return 1;\n");
+        let text = t.view(80, 24).join("\n");
+        assert!(text.contains("tools.ls"), "the pinned block keeps every row: {text}");
+        assert!(text.contains("return 1"), "and the newer one is open beside it: {text}");
+        // Ctrl+O again lets it go: focus it (newest topic first, then the older one) and toggle.
+        assert!(t.focus_prev(), "the newest topic is the code block that is running");
+        assert!(t.focus_prev(), "and the one before it is the pinned block");
+        assert_eq!(t.pin_toggle(), Some(false), "Ctrl+O again unpins it");
+        t.unfocus();
+        assert!(t.fold_code("\u{23fa} Code \u{b7} grep \u{2713}"), "now the next block collapses it");
+        let after = t.view(80, 24).join("\n");
+        assert!(!after.contains("tools.ls"), "to its summary row: {after}");
+    }
+
+    #[test]
+    fn rewriting_a_row_flips_a_running_call_in_place() {
+        let mut t = Transcript::default();
+        t.code_block();
+        t.write("\u{23fa} Code \u{b7} bash\n");
+        t.write("  \u{23f3} bash \u{b7} $ wc -l a.txt\n");
+        let before = t.view(80, 24);
+        assert!(before.join("\n").contains("\u{23f3} bash"), "the call is drawn as running: {before:?}");
+        assert!(t.rewrite(-1, "  \u{2713} bash \u{b7} $ wc -l a.txt \u{b7} 210ms"),
+            "its own row is rewritten in place");
+        let after = t.view(80, 24);
+        assert!(after.join("\n").contains("\u{2713} bash \u{b7} $ wc -l a.txt \u{b7} 210ms"),
+            "to the settled row: {after:?}");
+        let rows = |view: &Vec<String>| view.iter().filter(|row| visible(row) > 0).count();
+        assert_eq!(rows(&after), rows(&before), "without adding or removing a row: {after:?}");
+        assert!(!t.rewrite(-99, "x"), "an offset past the block rewrites nothing");
     }
     #[test]
     fn the_view_is_bottom_anchored_and_keeps_a_focused_topic_on_screen() {

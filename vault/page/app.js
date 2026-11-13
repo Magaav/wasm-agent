@@ -12,6 +12,7 @@ const showError = text => { $("err").textContent = text || ""; };
 function showAuth(needed) {
   $("auth").hidden = !needed || !bindingReady;
   $("opencode-go").hidden = needed;
+  $("release-signing").hidden = needed;
 }
 async function api(method, path, body) {
   const response = await fetch(path, {method, headers:{"X-Vault-Token":adminToken,"X-Vault-Instance":snapshot?.vault_id || expectedVaultId,"Content-Type":"application/json"},
@@ -43,12 +44,37 @@ function render(value) {
       showError("Save reconciled: this exact operation committed. Entitlement remains unknown.");
     } else showError("Save outcome unresolved or superseded. No replay. Reconcile with the operator before authorizing another write.");
   }
+  if (value.release_signing) renderSigning(value.release_signing);
   lock();
 }
 function lock() {
   document.querySelectorAll("button,input").forEach(el => { if (!el.closest("#auth")) el.disabled = busy; });
   $("ocg-form").querySelector("button").disabled = busy || !!uncertain;
   $("ocg-remove").disabled = busy || !!uncertain;
+  // The key's own state decides these, never the shared busy flag alone: a backup is offered only while
+  // the vault says it has not been taken, and creating a key is offered only while there is none.
+  const signing = snapshot && snapshot.releaseSigning;
+  $("rs-create").disabled = busy || !!(signing && signing.configured);
+  $("rs-write").disabled = busy || !signing || !signing.configured || !!signing.backup_taken;
+  $("rs-show").disabled = busy || !signing || !signing.configured || !!signing.backup_taken;
+}
+function renderSigning(value) {
+  snapshot.releaseSigning = value;
+  $("rs-state").textContent = value.configured
+    ? (value.backup_taken ? "key created · backup taken" : "key created · BACK UP NOW")
+    : "no key";
+  $("rs-state").className = "state" + (value.configured ? (value.backup_taken ? " ok" : " bad") : "");
+  $("rs-public-row").hidden = !value.configured;
+  $("rs-public").value = value.public_key || "";
+  $("rs-create-row").hidden = !!value.configured;
+  $("rs-backup").hidden = !value.configured || !!value.backup_taken;
+  $("rs-note").textContent = value.configured
+    ? "key id " + value.key_id + " · " + (value.signatures | 0) + " signature(s) made" + (value.backup_taken ? " · the backup was taken; the key is not readable again" : "")
+    : "No signing key: releases cannot be signed until you generate one. Do it where the vault lives, then copy the one backup off this machine.";
+}
+async function refreshSigning() {
+  const value = await api("GET", "/api/release-signing");
+  renderSigning(value);
 }
 async function run(action) {
   if (busy) return;
@@ -59,6 +85,7 @@ async function run(action) {
 async function refresh() {
   if (busy || !adminToken) return;
   await run(() => api("GET", "/api/status"));
+  if (!busy && adminToken) await run(refreshSigning);
 }
 $("auth-form").addEventListener("submit", event => {
   event.preventDefault(); if(!bindingReady)return;adminToken = $("auth-token").value.trim(); $("auth-token").value = ""; refresh();
@@ -77,12 +104,39 @@ $("ocg-form").addEventListener("submit", event => {
 });
 $("ocg-cancel").addEventListener("click", () => { $("ocg-key").value = ""; showError("Entry cancelled; no credential write sent."); });
 $("reconcile").addEventListener("click", refresh);
+$("rs-create").addEventListener("click", () => {
+  if (!confirm("Generate the release signing key inside this vault? Releases will be signed with it and its private half will never be readable again except through the one backup offered next.")) return;
+  run(async () => { await api("POST", "/api/release-signing/key", {}); return null; }).then(refreshSigning);
+});
+$("rs-write").addEventListener("click", () => {
+  const path = $("rs-path").value.trim();
+  if (!path) { showError("Name the file the vault should write the one backup to."); return; }
+  if (!confirm("Write the one and only backup of the release signing key to " + path + "?")) return;
+  run(async () => {
+    const value = await api("POST", "/api/release-signing/backup", {path});
+    $("rs-backup-note").textContent = "Backup written to " + value.path + " (mode 0600). Move it to offline media, then delete it here. This is the only one.";
+    $("rs-seed").hidden = true;
+    await refreshSigning();
+    return null;
+  });
+});
+$("rs-show").addEventListener("click", () => {
+  if (!confirm("Show the one and only backup of the release signing key? It will not be shown or exportable again.")) return;
+  run(async () => {
+    const value = await api("POST", "/api/release-signing/backup", {});
+    $("rs-seed").textContent = value.seed_hex;
+    $("rs-seed").hidden = false;
+    $("rs-backup-note").textContent = "Write this down now and keep it offline. This is the only time it is shown.";
+    await refreshSigning();
+    return null;
+  });
+});
 $("ocg-remove").addEventListener("click", () => {
   if (confirm("Remove this vault Go credential?")) run(() => api("DELETE", "/api/opencode-go/key", {expected_generation:snapshot.providers["opencode-go"].generation}));
 });
 $("ocg-enabled").addEventListener("change", event => run(() => api("POST", "/api/opencode-go/enabled", {enabled:event.target.checked})));
 // No model probes on this recovery surface.
 $("ocg-test").hidden = true;
-window.addEventListener("pagehide", () => { adminToken = ""; $("ocg-key").value = ""; $("auth-token").value = ""; });
+window.addEventListener("pagehide", () => { adminToken = ""; $("ocg-key").value = ""; $("auth-token").value = ""; $("rs-seed").textContent = ""; $("rs-seed").hidden = true; });
 showAuth(true);
 if(expectedVaultId)bindVault(expectedVaultId);

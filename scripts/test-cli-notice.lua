@@ -90,15 +90,26 @@ local NOTICE = "Update available (cccccccccccc): run wa update or /update"
 -- tree" channel answers from the local checkout, and this test is about the *release* notice, so the
 -- tree channel must not answer first (a tree commit this repository does not contain is `unknown`).
 local function binary()
-  local candidates = { host.getenv("WA_BIN"), host.getenv("WA_TEST_BIN"), host.getenv("FAST_BIN") }
-  local path = shell("command -v wa").stdout:gsub("%s+$", "")
-  candidates[#candidates + 1] = path ~= "" and path or nil
+  -- The list is built with an append that SKIPS empty entries, not with `name = v or nil` and `#t`:
+  -- a table with a hole in the middle has no reliable `#`, `ipairs` stops at the first nil, and this
+  -- function then answered "no wa binary" on a machine that had one (measured 13/11 on wa-desktop:
+  -- WA_BIN and WA_TEST_BIN unset, FAST_BIN the fast path's own binary at index 3, candidate 1 nil -
+  -- both halves of this row skipped while `test -x` on FAST_BIN returned 0 from the same process,
+  -- and the run was reported with a named skip instead of running the check it exists for).
+  local candidates = {}
+  local function add(candidate)
+    if type(candidate) == "string" and candidate ~= "" then candidates[#candidates + 1] = candidate end
+  end
+  add(host.getenv("WA_BIN"))
+  add(host.getenv("WA_TEST_BIN"))
+  add(host.getenv("FAST_BIN"))
+  add((shell("command -v wa").stdout:gsub("%s+$", "")))
   local home = host.getenv("HOME") or ""
-  candidates[#candidates + 1] = home .. "/.local/bin/wa"
+  add(home .. "/.local/bin/wa")
   local root = host.getenv("WASM_AGENT_LUA_ROOT") or ""
-  candidates[#candidates + 1] = root .. "/rust/target/release/wa"
+  add(root .. "/rust/target/release/wa")
   for _, candidate in ipairs(candidates) do
-    if candidate and candidate ~= "" and shell("test -x '" .. candidate .. "'").code == 0 then return candidate end
+    if shell("test -x '" .. candidate .. "'").code == 0 then return candidate end
   end
   return nil
 end
