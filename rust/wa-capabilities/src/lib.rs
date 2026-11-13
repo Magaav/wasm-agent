@@ -63,6 +63,10 @@ pub mod subagents;
 // the `whatsapp.send` policy, enqueue on `wa:queue`; the `wa-whatsapp` component sends it.
 pub mod whatsapp_query;
 pub mod whatsapp_send;
+// The operator's approval of outgoing WhatsApp drafts (13/11, docs/APPROVE.md): the policy, the queue
+// of drafts and the decision. `whatsapp_send` asks it before it queues anything, which is what makes
+// one gate cover a send from any node.
+pub mod whatsapp_approve;
 /// The email connector's tools: the send on `email.outbox` and the index on `email.query`
 /// (`docs/EMAIL-CONNECTOR.md`).
 pub mod email_query;

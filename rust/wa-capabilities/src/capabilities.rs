@@ -223,6 +223,10 @@ pub const REGISTRY: &[Capability] = &[
     // out in its answer.
     plain!("whatsapp_send", Network, crate::whatsapp_send::capability, "Send one WhatsApp message to an exact chat JID through the durable whatsapp.outbox queue, after the whatsapp.send policy check; returns the job id"),
     plain!("whatsapp_send_status", ReadOnly, crate::whatsapp_send::status_capability, "State of one queued WhatsApp send: queued, sending, done with its message id, or failed with a reason"),
+    // The operator's gate on the same send (docs/APPROVE.md): while approval is on for a chat,
+    // `whatsapp_send` queues nothing and answers a draft instead, and this capability is how a reader
+    // sees the drafts waiting and decides one. `network` because a decision enqueues a send.
+    plain!("whatsapp_approve", Network, crate::whatsapp_approve::capability, "List, read and decide the WhatsApp drafts waiting for operator approval; a decision enqueues the send, a rejection queues nothing"),
     // The message index the component keeps: one capability per question, all of them a job on
     // `whatsapp.query` (read-only, so no policy rule and no rate limit of their own).
     plain!("whatsapp_search", ReadOnly, crate::whatsapp_query::search, "Search indexed WhatsApp messages by text (accent-folded), chat, kind, sender or time window; returns matching records with snippets"),

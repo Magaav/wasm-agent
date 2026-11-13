@@ -897,6 +897,15 @@ function M.run(argv)
         rows[#rows + 1] = row
       end
       ui.show(balloon.paged("Hooks", rows, { per = 14, nowrap = true }))
+    elseif line == "/approve" or line:sub(1, 9) == "/approve " then
+      -- The operator's gate on outgoing WhatsApp drafts (docs/APPROVE.md): the switch, the queue of
+      -- drafts, and the balloon Enter / e / r decide in. Every answer here comes from the node that
+      -- HOLDS THE ACCOUNT - the one whose `whatsapp_send` reads the policy - so this arm only asks and
+      -- draws; it never changes a policy or a draft of its own.
+      local done, problem = pcall(dofile("lua/core/approve.lua").run, line, ui, {
+        user_id = USER, role = "master", session_id = agent.session_id,
+      })
+      if not done then ui.say(redact.text(tostring(problem))) end
     elseif line == "/mcp" or line:sub(1, 5) == "/mcp " then
       -- Every connector this node can use - its own registry and each peer's - as one balloon
       -- (lua/core/mcp_command.lua builds the pages, lua/core/mcp_cli.lua drives them). A change goes

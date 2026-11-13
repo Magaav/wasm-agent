@@ -705,6 +705,14 @@ const PLACEHOLDER: &str = "Type a message, or / for commands";
 pub struct Panel {
     pub title: String, pub lines: Vec<String>, pub options: Vec<(String, String)>, pub selected: usize,
     pub input: Option<bool>, pub placeholder: String, pub hint: String,
+    /// A field that keeps its spaces: what an `input: "line"` page types into. A `text` field drops
+    /// whitespace (it has always been a name, a key or a path); a message draft is a sentence, and a
+    /// sentence typed into a field that eats its spaces is not editable at all.
+    pub spaces: bool,
+    /// The letters a page offers as shortcuts, with the 1-based option each one means
+    /// (`{"e": 2}`). Opt-in per page, so no other panel's keys change: pressing a letter on a list
+    /// that did not name it still does nothing.
+    pub keys: Vec<(u8, usize)>,
     text: Vec<char>, escape: Vec<u8>, paste: bool, utf8: Vec<u8>,
     pub result: Option<serde_json::Value>, pub width: usize, pub rows: usize,
 }
@@ -717,7 +725,31 @@ impl Panel {
         let options: Vec<(String, String)> = spec.get("options").and_then(|v| v.as_array()).map(|a| a.iter().map(|o| (
             o.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             o.get("hint").and_then(|v| v.as_str()).unwrap_or("").to_string())).collect()).unwrap_or_default();
-        let input = match spec.get("input").and_then(|v| v.as_str()) { Some("secret") => Some(true), Some("text") => Some(false), _ => None };
+        let input = match spec.get("input").and_then(|v| v.as_str()) {
+            Some("secret") => Some(true),
+            Some("text") => Some(false),
+            // A line of prose: spaces kept, Enter submits - the field `docs/APPROVE.md`'s edit page
+            // needs, because a draft with its spaces removed is a different message.
+            Some("line") => Some(false),
+            _ => None,
+        };
+        let spaces = spec.get("input").and_then(|v| v.as_str()) == Some("line");
+        // A page that starts with text already in its field (an edit in place, not a blank prompt).
+        // A carriage return is dropped for the same reason the field is one line: it renders nothing
+        // and would only be backspaced away.
+        let value: Vec<char> = spec.get("value").and_then(|v| v.as_str()).unwrap_or("")
+            .chars().filter(|c| *c != '\r' && (!c.is_control() || *c == '\n')).collect();
+        // The letter shortcuts a page names, and only those: an entry that points at no option on
+        // the page is dropped rather than made into a keystroke that does nothing.
+        let keys: Vec<(u8, usize)> = spec.get("keys").and_then(|v| v.as_object()).map(|object| object
+            .iter()
+            .filter_map(|(letter, index)| {
+                let byte = letter.as_bytes();
+                let option = index.as_u64()? as usize;
+                if byte.len() != 1 || option == 0 { return None; }
+                Some((byte[0].to_ascii_lowercase(), option))
+            })
+            .collect()).unwrap_or_default();
         let selected = spec.get("selected").and_then(|v| v.as_u64()).map(|n| (n as usize).saturating_sub(1)).unwrap_or(0)
             .min(options.len().saturating_sub(1));
         let hint = match text("hint") {
@@ -726,7 +758,8 @@ impl Panel {
             _ if !options.is_empty() => "\u{2191}\u{2193} to move \u{b7} Enter to select \u{b7} Esc or \u{2190} to go back".into(),
             _ => "Esc or \u{2190} to go back".into(),
         };
-        Panel { title: text("title"), lines, options, selected, input, placeholder: text("placeholder"), hint, width, rows, ..Default::default() }
+        Panel { title: text("title"), lines, options, selected, input, placeholder: text("placeholder"), hint,
+            spaces, keys, text: value, width, rows, ..Default::default() }
     }
 
     /// How many options are on screen at once; the window follows the selection.
@@ -787,11 +820,30 @@ impl Panel {
                 self.selected = (byte - b'1') as usize;
                 self.finish(serde_json::json!({"action": "select", "index": self.selected + 1}));
             }
+            // A letter this page named as a shortcut (`keys`): [e] edits, [r] rejects, and a letter no
+            // page named is still not a key. Only where there is a list and no field, so a page with
+            // a field keeps every printable byte for the text being typed.
+            _ if self.input.is_none() && !self.options.is_empty() => {
+                let letter = byte.to_ascii_lowercase();
+                if let Some((_, index)) = self.keys.iter().find(|(named, _)| *named == letter) {
+                    if *index >= 1 && *index <= self.options.len() {
+                        self.selected = index - 1;
+                        self.finish(serde_json::json!({"action": "select", "index": *index}));
+                    }
+                }
+            }
             0..=31 => {}
             _ if self.input.is_some() => {
                 self.utf8.push(byte);
                 match std::str::from_utf8(&self.utf8) {
-                    Ok(text) => { let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect(); self.utf8.clear(); self.text.extend(chars); }
+                    // `spaces` is the difference between a field for a name and a field for a
+                    // sentence: a draft's spaces are part of the message.
+                    Ok(text) => {
+                        let chars: Vec<char> = if self.spaces { text.chars().filter(|c| !c.is_control()).collect() }
+                            else { text.chars().filter(|c| !c.is_whitespace()).collect() };
+                        self.utf8.clear();
+                        self.text.extend(chars);
+                    }
                     Err(error) if error.error_len().is_some() || self.utf8.len() > 4 => self.utf8.clear(),
                     Err(_) => {}
                 }
@@ -1493,6 +1545,52 @@ mod tests {
         assert_eq!(k.result.take(), Some(serde_json::json!({"action": "submit", "text": "sk-abcdef123456"})));
     }
     fn type_panel(p: &mut Panel, bytes: &[u8]) { for &b in bytes { p.feed(b); } }
+
+    /// The three things the approval balloon needs from a panel and no other page did (`docs/APPROVE.md`):
+    /// a field that keeps a sentence's spaces, a field that starts with text in it (edit in place), and
+    /// letters a page names as shortcuts. None of them changes a page that did not ask for it.
+    #[test]
+    fn a_line_field_keeps_its_spaces_and_starts_from_its_value() {
+        let spec = serde_json::json!({"title": "Edit", "input": "line", "value": "bom dia, tudo bem?"});
+        let mut p = Panel::from_spec(&spec, 60, 30);
+        assert!(p.render().contains("bom dia, tudo bem?"), "the draft is in the field, editable in place");
+        // Backspace once, type the rest: what is submitted is the whole edited sentence.
+        type_panel(&mut p, &[127]);
+        type_panel(&mut p, b"!\r");
+        assert_eq!(p.result.take(), Some(serde_json::json!({"action": "submit", "text": "bom dia, tudo bem!"})));
+        // A `text` field is unchanged: it is a name, a key or a path, and whitespace still never lands.
+        let mut t = Panel::from_spec(&serde_json::json!({"title": "Name", "input": "text"}), 60, 30);
+        type_panel(&mut t, b"a b c\r");
+        assert_eq!(t.result.take(), Some(serde_json::json!({"action": "submit", "text": "abc"})));
+    }
+
+    #[test]
+    fn only_a_page_that_names_its_letters_has_them() {
+        let spec = serde_json::json!({
+            "title": "Draft for Laura",
+            "lines": ["bom dia"],
+            "options": [{"label": "Send as is"}, {"label": "Edit the text"}, {"label": "Reject with a note"}],
+            "keys": {"e": 2, "r": 3},
+        });
+        type_panel_action(&spec, b'r', 3);
+        type_panel_action(&spec, b'E', 2);
+        // A letter the page did not name does nothing at all, exactly as before this existed.
+        let mut quiet = Panel::from_spec(&spec, 60, 30);
+        type_panel(&mut quiet, b"z");
+        assert_eq!(quiet.result, None, "an unnamed letter is not a key");
+        // And a page with no `keys` field is untouched by the feature.
+        let plain = serde_json::json!({"title": "Sign in", "options": [{"label": "ChatGPT"}]});
+        let mut p = Panel::from_spec(&plain, 60, 30);
+        type_panel(&mut p, b"c");
+        assert_eq!(p.result, None, "a page that named no letter keeps none");
+    }
+
+    fn type_panel_action(spec: &serde_json::Value, key: u8, expected: usize) {
+        let mut p = Panel::from_spec(spec, 60, 30);
+        type_panel(&mut p, &[key]);
+        assert_eq!(p.result.take(), Some(serde_json::json!({"action": "select", "index": expected})),
+            "{:?} picks option {expected}", key as char);
+    }
     #[test]
     fn a_long_list_scrolls_with_the_selection() {
         let options: Vec<serde_json::Value> = (1..=37).map(|n| serde_json::json!({"label": format!("model-{n:02}")})).collect();

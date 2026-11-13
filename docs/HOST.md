@@ -848,6 +848,7 @@ uuid                 read-only
 verify               read-only
 whatsapp_send        network
 whatsapp_send_status read-only
+whatsapp_approve     network
 whatsapp_download    writes files
 whatsapp_media       read-only
 whatsapp_reactions   read-only

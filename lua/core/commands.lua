@@ -89,6 +89,11 @@ M.commands = {
     hint = "list the active hook points and mods, and the last outcome; `reload` rereads the config files",
   },
   {
+    name = "/approve",
+    usage = "/approve [on|off]",
+    hint = "approve outgoing WhatsApp drafts: the switch, the queue, and Enter / e / r to send, edit or reject",
+  },
+  {
     name = "/mcp",
     usage = "/mcp [<key>] [on|off]",
     hint = "every MCP connector, here and from peers: state, tools, and the exact names the model is given; on/off changes one",

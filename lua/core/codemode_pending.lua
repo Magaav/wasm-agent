@@ -345,24 +345,30 @@ end
 -- The outbox family: a WhatsApp send is a durable queue job (`lua/core/whatsapp.lua`), so the id the
 -- connector answers is the handle. `wait_s:0` queues and answers at once; the id alone resumes. The
 -- message is never sent twice, and a cancel says so rather than pretending.
+--
+-- The same tool answers a DRAFT when operator approval is on for the chat (docs/APPROVE.md): nothing
+-- was queued, the handle is the draft, and the three things an op does still hold - `wait` re-reads
+-- what the operator decided, `pending` shows the draft's state, and `cancel` is possible HERE,
+-- because nothing has been sent yet. That last difference is why this kind's cancel is a function and
+-- no longer the fixed `false` it used to be.
 do
-  local function queue_read(dispatch, record, seconds)
-    local asked = { id = record.id }
-    if seconds ~= nil then asked.wait_s = seconds end
+  local function read_call(dispatch, asked)
     local ok, answer = pcall(dispatch, "mcp_whatsapp_send", asked, json.encode(asked))
     if not ok then return nil, tostring(answer) end
     if type(answer) ~= "table" then return nil, "outbox_answer_malformed" end
     if answer.ok == false and answer.error then return nil, tostring(answer.error) end
     return answer, nil
   end
+  local function queue_read(dispatch, record, seconds)
+    local asked = record.draft and { draft = record.draft } or { id = record.id }
+    if seconds ~= nil then asked.wait_s = seconds end
+    return read_call(dispatch, asked)
+  end
   M.EXECUTORS["mcp_whatsapp_send"] = {
     kind = "outbox",
-    -- A sent message stays sent: the honest answer to `cancel` is the reason, not a stop.
-    cancel = false,
-    cancel_why = "a sent message stays sent",
     applies = function(params)
       if type(params) ~= "table" then return false end
-      return params.chat ~= nil and params.id == nil and params.ids == nil
+      return params.chat ~= nil and params.id == nil and params.ids == nil and params.draft == nil
     end,
     start = function(dispatch, opts, params, raw)
       local copy = {}
@@ -373,6 +379,10 @@ do
       local ok, answer = pcall(dispatch, "mcp_whatsapp_send", copy, raw)
       if not ok then return { result = { error = tostring(answer), effect = "unknown", replay_allowed = false } } end
       if type(answer) ~= "table" or answer.state ~= "pending" then return { result = answer } end
+      if type(answer.draft) == "string" and answer.draft ~= "" then
+        -- A draft IS the handle: nothing is queued, and the operator's decision settles it.
+        return { op = "draft-" .. answer.draft, draft = answer.draft }
+      end
       local id = tonumber(answer.id)
       if not id then return { result = answer } end
       return { op = "msg-" .. tostring(id), id = id }
@@ -386,11 +396,31 @@ do
       return answer, (answer.settled and nil or (reason or "still_running"))
     end,
     settle = function(dispatch, opts, record, state) return state end,
+    -- The one kind whose effect can be stopped: a cancelled DRAFT was never sent, and the operator
+    -- never had to decide it. A queued message keeps the old answer, in its own words.
+    cancel = function(dispatch, opts, record)
+      if not record.draft then
+        return { op = record.op, tool = "mcp_whatsapp_send", cancelled = false,
+          error = "not_cancellable", why = "a sent message stays sent" }
+      end
+      local asked = { action = "decide", draft = record.draft, decision = "cancel" }
+      local ok, answer = pcall(dispatch, "mcp_whatsapp_approve", asked, json.encode(asked))
+      if not ok or type(answer) ~= "table" or answer.ok == false then
+        local why = not ok and tostring(answer)
+          or tostring(type(answer) == "table" and answer.error or "the account node answered nothing")
+        return { op = record.op, tool = "mcp_whatsapp_send", cancelled = false,
+          error = "not_cancellable", why = why }
+      end
+      return { op = record.op, tool = "mcp_whatsapp_send", cancelled = true, draft = record.draft,
+        note = "the draft was cancelled: nothing was sent, and nobody had to decide it" }
+    end,
     progress = function(dispatch, opts, record, state)
       local entry = { state = tostring(type(state) == "table" and state.state or "pending"), kind = "outbox",
         job = record.id }
+      if record.draft then entry.draft = record.draft end
       if type(state) == "table" and state.waited_s ~= nil then entry.waited_s = tonumber(state.waited_s) end
       if type(state) == "table" and state.queue_state ~= nil then entry.queue_state = tostring(state.queue_state) end
+      if type(state) == "table" and state.draft_state ~= nil then entry.draft_state = tostring(state.draft_state) end
       return entry
     end,
   }
