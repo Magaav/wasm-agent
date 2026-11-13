@@ -198,6 +198,23 @@ and the manifest's sha256 - never key material.
 3. nodes accept the announced list for that release and can then be rebuilt/configured with it. A
    `TRUSTED-KEYS` signed by an unknown key is refused (`release_signature_invalid`, exit 5).
 
+**How a node verifies it** - three backends, tried in this order, because a node must be able to check a
+release with what its OS already has and a deploy started by the sentinel runs with a *service's* `PATH`
+(no `~/bin`, so a `python3` the operator installed there used to be invisible - `release_unverified` on a
+good release):
+
+1. the **installed `wa` binary's** own verifier - `wa release verify <dir|SHA256SUMS> [SHA256SUMS.sig]`,
+   dispatched before the interpreter, so it answers on a node whose tree is broken;
+2. **OpenSSL 3** and newer (`openssl pkeyutl -verify -rawin` over the ed25519 SPKI) - what a binary-only
+   node such as Debian 12 or Ubuntu 20.04 already has, no python and no extra package;
+3. **`python3`**, from `PATH` or from `~/bin`, `/usr/bin`, `/usr/local/bin` - the reference implementation
+   (`scripts/lib/release_verify.py`), for the callers that run before a `wa` binary exists.
+
+With none of the three a node installs nothing and says what it tried
+(`release_unverified: no verifier on this node can check ... (tried: ...)`). Every backend is judged by the
+same fixtures, and none of them is a way around the signature: a missing `SHA256SUMS.sig`, a flipped byte,
+a key this node does not trust and a rotation nobody vouched for are refused by whichever backend answers.
+
 **What this does not do**: the signing host is the publishing host, so a compromised publisher account can
 ask the vault for one signature - the differences are that the key itself is not on that host and every
 signature is logged (key id + digest) where an operator can see it. The shell paths

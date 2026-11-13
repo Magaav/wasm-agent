@@ -29,6 +29,7 @@
     "scripts/check-disk-floor.sh",
     "scripts/sign-release.sh",
     "components.lock",
+    "config/release-keys.txt",
     "scripts/check-graph-component.lua"
   ],
   "globs": [

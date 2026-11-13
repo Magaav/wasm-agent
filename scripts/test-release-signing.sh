@@ -12,6 +12,9 @@
 #      a rotation signed by an unknown key is refused - and the refusal names the file;
 #   2. the same six through the node's binary (`wa release verify`), when this run knows which binary it is
 #      about (WA_RELEASE_BIN) - the two implementations answer identically;
+#   2b. the same six through EACH of the three backends alone (binary, openssl, python3), the other two
+#      faked absent - and the sentinel's own environment (a PATH with no python3 in it, the operator's
+#      python3 only in ~/bin) verifying a good release and still refusing a flipped one;
 #   3. signing against a SCRATCH vault: the vault signs the sums, the signature verifies, and with no token
 #      or no key in the vault nothing is signed and no file is written (a release is not published);
 #   4. the deploy's release path (scripts/lib/node-binaries.sh): a signed release is cached, an unsigned or
@@ -85,6 +88,82 @@ if [ -n "${WA_RELEASE_BIN:-}" ] && [ -x "${WA_RELEASE_BIN}" ]; then
 else
   say "the binary check was not run (WA_RELEASE_BIN is not set); its rules are exercised by cargo test -p wa-host"
 fi
+
+# ---- 2b. each backend ALONE --------------------------------------------------------------------------
+# The verifier answers from the installed binary, then OpenSSL, then python3. Each is proved on its own
+# here, with the other two faked absent (`WA_RELEASE_VERIFY_SKIP`), on the same six cases: a fallback
+# nobody ever runs is a fallback that does not work, and 13/11 is the day the only one that existed
+# (python3) was not on the PATH the deploy ran with.
+SIX="good:0 flipped:3 unknown:4 missing:2 rotation:0 rotation-unknown:5"
+alone() { # <name of the backend that must answer> <the two to fake absent>
+  local backend="$1" skip="$2" pair case want out code
+  for pair in $SIX; do
+    case="${pair%%:*}"; want="${pair##*:}"
+    out="$(WA_RELEASE_ROOT="$ROOT" WA_RELEASE_VERIFY_SKIP="$skip" WA_RELEASE_BIN="${WA_RELEASE_BIN:-}" \
+      wa_release_verify_sums "$FIXTURES/$case" "$keys" 2>&1)"; code=$?
+    expect "$want" "$code" "$backend alone on fixture $case" "$out"
+  done
+  say "$backend alone answers all six cases exactly as the other backends do"
+}
+
+alone python3 "binary openssl"
+
+openssl_why="$(WA_RELEASE_ROOT="$ROOT" wa_release_openssl_why)"
+if [ -z "$openssl_why" ]; then
+  alone openssl "binary python3"
+else
+  echo "SKIP test-release-signing: this machine's openssl cannot verify an ed25519 signature with pkeyutl -rawin ($openssl_why), so the openssl backend cannot be proved here"
+fi
+
+if [ -n "${WA_RELEASE_BIN:-}" ] && [ -x "${WA_RELEASE_BIN:-}" ]; then
+  alone binary "openssl python3"
+else
+  say "the binary backend alone was not proved here (WA_RELEASE_BIN is not set); its rules are exercised by cargo test -p wa-host"
+fi
+
+# ---- 2c. the sentinel's PATH -------------------------------------------------------------------------
+# Measured 13/11 on node `work`: `wa update` refused a GOOD signed release with
+#   release_unverified: no python3 here to verify ...
+# while /home/agent/bin/python3 existed - because the deploy the sentinel starts runs with a SERVICE's
+# PATH, which has no ~/bin (rust/wa-sentinel/src/role.rs hands it the sentinel's own PATH, and
+# rust/wa-operation/src/shell_env.rs never sources a login profile). This is that node, assembled here: a
+# PATH with the tools and no python3 in it at all, and the operator's python3 only in ~/bin.
+sentinel_path="$WORK/sentinel-path"; sentinel_home="$WORK/sentinel-home"
+mkdir -p "$sentinel_path" "$sentinel_home/bin"
+for tool in sha256sum awk sed grep sort tr dirname basename mktemp cat rm wc head cut sh; do
+  one="$(command -v "$tool")" && ln -sf "$one" "$sentinel_path/$tool"
+done
+real_python="$(command -v python3)"
+cat > "$sentinel_home/bin/python3" <<PY
+#!/bin/sh
+printf 'used-the-operators-python3\n' >> "$sentinel_home/marker"
+exec "$real_python" "\$@"
+PY
+chmod +x "$sentinel_home/bin/python3"
+BASH_BIN="$(command -v bash)"
+sentinel() { # <fixture> [extra env assignment...] -> the verifier's output; sets code
+  local fixture="$1"; shift
+  local args=(env -i PATH="$sentinel_path" HOME="$sentinel_home" WA_RELEASE_ROOT="$ROOT" \
+    WA_RELEASE_VERIFY_SKIP="binary openssl" "$@")
+  out="$("${args[@]}" "$BASH_BIN" -c '. "$0"; wa_release_verify_sums "$1" "$2"' \
+    "$ROOT/scripts/lib/release-signing.sh" "$FIXTURES/$fixture" "$keys" 2>&1)"; code=$?
+}
+sentinel good
+expect 0 "$code" "a node whose PATH has no python3 at all verifies a good release" "$out"
+[ -f "$sentinel_home/marker" ] \
+  || fail "the verifier never looked in ~/bin: the sentinel's PATH case is exactly this and it must search ~/bin, /usr/bin, /usr/local/bin"
+contains "$(cat "$sentinel_home/marker")" "used-the-operators-python3" "the operator's ~/bin/python3 was the verifier"
+# The same fallback refuses what must be refused - a fallback is not a way around the signature.
+sentinel flipped
+expect 3 "$code" "the ~/bin fallback still refuses a flipped signature" "$out"
+sentinel unknown
+expect 4 "$code" "the ~/bin fallback still refuses an untrusted key" "$out"
+# Nothing to verify WITH: the refusal is a refusal, it names the release, and it says what was tried.
+sentinel good WA_RELEASE_PYTHON_DIRS=/nonexistent
+expect 7 "$code" "a node with no verifier at all installs nothing" "$out"
+contains "$out" "release_unverified: no verifier on this node can check" "the no-backend refusal is named"
+contains "$out" "tried: binary" "the no-backend refusal says what was tried"
+contains "$out" "no python3 on PATH" "the no-backend refusal says why python3 could not answer"
 
 # ---- 3. signing, against a scratch vault -------------------------------------------------------------
 free_port() { python3 - <<'PY'
