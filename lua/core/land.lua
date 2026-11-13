@@ -277,7 +277,7 @@ end
 -- hosts differ: the build needs a toolchain, the signature needs the vault's admin listener, and the ship
 -- needs a git remote. Keeping them apart is what makes a rerun of one of them cheap - and a signature that
 -- arrives after a stopped run is not thrown away with the build.
-M.STEPS = { "collect", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "report" }
+M.STEPS = { "collect", "plan", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "report" }
 
 -- The two channels the mission names as conditional. Both are looked up in the LANDED TREE, so "is it on
 -- main" is answered by the tree being landed and not by this machine's opinion.
@@ -323,6 +323,157 @@ M.RING = {
   { node = "nextcloud", mode = "binary", why = "aarch64 with no toolchain: the published binary, never a build" },
   { node = "openclaw", mode = "tree", why = "last: it holds the WhatsApp account and the relay" },
 }
+
+-- ---------------------------------------------------------------- the plan: the cheapest safe path
+--
+-- WHY. A round cost ~40 minutes every time it ran (measured by hand, 13/11): merge, code-mode build, the
+-- fast gate, a cross-build of BOTH Linux targets - even when no compiled input had changed - sign+publish,
+-- and four deploys in series. Most of that day's branches were Lua-only, so most of every round was work the
+-- round did not need. The plan is therefore made FIRST, from what actually changed, and it decides which
+-- steps run: a docs-only round builds, releases and deploys nothing; a Lua-only round signs and ships a
+-- RECORD of the tree it installed instead of cross-building a binary it would not use; a components round
+-- rebuilds only the bundle and checks the pins; only a round that changed a compiled input pays for a build.
+--
+-- The classification is not spelled here either - `scripts/lib/land-classify.sh` is the one definition
+-- (it calls `wa_compiled_input`, the same function the deploy's Lua fast path and the release digest use).
+-- What lives here is the DECISION, as data a reader can check and a test can assert:
+--
+--   category            artifacts            sign  ship  publish  deploy
+--   docs-only           skipped              skip  skip  skip     skip
+--   lua-scripts-only    Lua-tree record      run   skip  skip     run (the tree, binary kept)
+--   components          components bundle    skip  skip  skip     run
+--   compiled            node release         run   run   run      run
+--
+-- A skipped step is recorded as `skipped` with its reason - never silently omitted, never reported done.
+M.CATEGORIES = { "docs-only", "lua-scripts-only", "components", "compiled" }
+M.CANARY_NODE = "work"
+M.ACCOUNT_NODE = "openclaw"
+
+-- What each step costs when the journal has no measurement yet. These are NOT guesses about this machine's
+-- speed: they are the hand-run round of 13/11 (merge + code-mode build 3-5 min, gate 4-6, release 7-9,
+-- sign+publish 2-5, four deploys in series 15-20), split per step and per path, so the first ever plan is
+-- still comparable with what follows it. Every later plan uses the journal's own medians instead.
+M.ESTIMATE_DEFAULTS = {
+  collect = 40, review = 60, plan = 5, merge = 150, gate = 300, push = 30, main = 30,
+  artifacts = 480, sign = 150, ship = 120, publish = 180, deploy = 960, report = 5,
+}
+-- Per path, the parts that differ: a Lua-only round signs a small record (seconds) and ships nothing; a
+-- components round builds one wasm bundle and no binary; a full round pays the cross-build.
+M.ESTIMATE_BY_CATEGORY = {
+  ["docs-only"] = { artifacts = 0, sign = 0, ship = 0, publish = 0, deploy = 0 },
+  ["lua-scripts-only"] = { artifacts = 30, sign = 60, ship = 0, publish = 0, deploy = 660 },
+  ["components"] = { artifacts = 240, sign = 0, ship = 0, publish = 0, deploy = 660 },
+  ["compiled"] = {},
+}
+
+-- The gate's always-on checks: a plan may never drop these, whatever the paths say, because they are what
+-- makes a green run mean anything (the generated prompt documents, the landing queue's own evidence, the
+-- binary the rows run, the machine-vs-code classifier, and the fast path's result file).
+M.GATE_ALWAYS = { "fast", "prompt-docs" }
+-- Checks a plan may ADD when a path touches their subject, with the paths that trigger them. The Rust
+-- crates are already narrowed by `scripts/fast.sh` itself (it tests the crates a change touches), so only
+-- the checks that are NOT inside the fast path are listed here.
+M.GATE_TRIGGERS = {
+  ["codemode-component"] = { "^lua/core/codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^scripts/build%-codemode" },
+  ["cargo-codemode"] = { "^lua/core/codemode", "^rust/components/codemode", "^rust/wa%-capabilities/src/codemode", "^scripts/codemode", "^wit/model/codemode" },
+  ["cargo-wa-whatsapp"] = { "^rust/components/wa%-whatsapp", "^rust/wa%-whatsapp%-outbox", "^rust/wa%-whatsapp%-index", "^wit/whatsapp" },
+}
+
+-- The plan's own rows/checks, as pure functions so the decisions are testable without git or a build.
+
+-- <paths> -> which of M.GATE_TRIGGERS fire (a pattern is matched against each changed path).
+function M.gate_checks_for(paths)
+  local wanted = {}
+  for _, name in ipairs(M.GATE_ALWAYS) do wanted[name] = true end
+  for name, patterns in pairs(M.GATE_TRIGGERS) do
+    for _, path in ipairs(paths or {}) do
+      local hit = false
+      for _, pattern in ipairs(patterns) do
+        if tostring(path):find(pattern) then hit = true break end
+      end
+      if hit then wanted[name] = true break end
+    end
+  end
+  return wanted
+end
+
+-- <category> -> step name -> {action = "run"|"skip", why = <reason>, kind = <what the artifacts step writes>}.
+-- Data, so a reader can check the table above against the code and the report can print the reason of every
+-- skip.
+function M.plan_steps(category)
+  local function run(why) return { action = "run", why = why } end
+  local function skip(why) return { action = "skip", why = why } end
+  local steps = {}
+  for _, name in ipairs(M.STEPS) do steps[name] = run("runs on every path") end
+  if category == "docs-only" then
+    steps.artifacts = skip("docs-only: nothing compiled, nothing a node loads, so there is nothing to build")
+    steps.sign = skip("docs-only: no release to sign")
+    steps.ship = skip("docs-only: no release to ship")
+    steps.publish = skip("docs-only: no release to publish")
+    steps.deploy = skip("docs-only: no node needs these bytes (a document is not loaded at runtime)")
+  elseif category == "lua-scripts-only" then
+    steps.artifacts = run("Lua tree record (manifest + SHA256SUMS over the shipped Lua tree): no cross-build, no node release")
+    steps.artifacts.kind = "lua-tree"
+    steps.sign = run("signs the Lua-tree record's SHA256SUMS (the vault's host, as always)")
+    steps.ship = skip("a Lua-only round ships no node release: each node installs the tree with its own deploy, which keeps the installed binary")
+    steps.publish = skip("a Lua-only round publishes no node release; the signed record is the round's evidence and the deploy is the transport")
+    steps.deploy = run("the ring, in order: the nodes take the Lua tree and keep their binary (the deploy's Lua fast path)")
+  elseif category == "components" then
+    steps.artifacts = run("components bundle only (scripts/publish-components.sh): build, verify against components.lock, print the repin line")
+    steps.artifacts.kind = "components"
+    steps.sign = skip("the component bundle is not covered by the release-signing key: scripts/publish-components.sh prints its own gh line")
+    steps.ship = skip("no node release to ship: the bundle is fetched by the tag components-<lock sha12>")
+    steps.publish = skip("publishing the bundle needs a credential host: the exact gh line is in the artifacts evidence and the report")
+    steps.deploy = run("the ring installs the repinned components (and their binary, if the pins moved one)")
+  end
+  return steps
+end
+
+-- <ring> <options> -> the deploy's waves. The canary goes FIRST and alone (a broken commit must break one
+-- node, not the fleet), then every other non-account node IN PARALLEL, then the account node last - it holds
+-- the WhatsApp account and the relay, so it is the last thing touched and the first thing a stop protects.
+function M.deploy_waves(ring, options)
+  options = type(options) == "table" and options or {}
+  local canary = tostring(options.canary or M.CANARY_NODE)
+  local account = tostring(options.account or M.ACCOUNT_NODE)
+  local by_name, order = {}, {}
+  for _, entry in ipairs(ring or {}) do
+    by_name[tostring(entry.node)] = entry
+    order[#order + 1] = entry
+  end
+  local waves = { {}, {}, {} }
+  local canary_entry = by_name[canary]
+  if not canary_entry then
+    -- A ring that does not name the canary still gets one: the first node that is not the account node, and
+    -- the plan says it defaulted rather than pretending `work` was there.
+    for _, entry in ipairs(order) do
+      if tostring(entry.node) ~= account then canary_entry = entry break end
+    end
+  end
+  local place = {}
+  if canary_entry then
+    waves[1][1] = canary_entry
+    place[tostring(canary_entry.node)] = "canary"
+  end
+  for _, entry in ipairs(order) do
+    local name = tostring(entry.node)
+    if place[name] then
+      -- already placed (the canary): a node appears in exactly one wave
+      local _ = name
+    elseif name == account then
+      waves[3][1] = entry
+      place[name] = "account"
+    else
+      waves[2][#waves[2] + 1] = entry
+      place[name] = "parallel"
+    end
+  end
+  local flat = {}
+  for index = 1, 3 do for _, entry in ipairs(waves[index]) do flat[#flat + 1] = entry end end
+  return { waves = waves, place = place, flat = flat, canary = canary_entry and tostring(canary_entry.node) or nil,
+           account = by_name[account] and account or nil,
+           canary_defaulted = (canary_entry ~= nil and tostring(canary_entry.node) ~= canary) or nil }
+end
 
 -- ---------------------------------------------------------------- the journal
 
@@ -529,6 +680,321 @@ impl.collect = function(run, options)
                   end)(), " ")) }
 end
 
+-- ---------------------------------------------------------------- plan
+--
+-- What the round changed, which of the four paths it takes, which steps that path skips, what the gate has to
+-- run, and what the round should cost. Read-only: no fetch, no merge, no build. It runs after `collect`
+-- because the tips are what make "what changed" answerable at all.
+
+-- <journal> -> the round's changed paths (base..tip of every collected branch), deduplicated.
+-- Renames are not followed (`--no-renames`): the planner asks which paths the merge introduces, and a rename
+-- is two paths - the old one gone and the new one here - exactly as `git diff --name-status` reports it.
+function M.changed_paths(run)
+  local repo = run.journal.repo or M.repo()
+  local base = run.journal.base
+  local seen, paths = {}, {}
+  for _, branch in ipairs(run.journal.branches or {}) do
+    if base and branch.sha then
+      local listing = M.exec("git -C " .. quote(slashes(repo)) .. " diff --name-only --no-renames " ..
+        quote(base) .. " " .. quote(branch.sha), repo, 120)
+      for path in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+        path = trim(path)
+        if path ~= "" and not seen[path] then seen[path] = true; paths[#paths + 1] = path end
+      end
+    end
+  end
+  table.sort(paths)
+  return paths
+end
+
+-- <run> <paths> -> {category, counts, classifier} from `scripts/lib/land-classify.sh` (the ONE classification:
+-- it calls `wa_compiled_input`, the same function the deploy's Lua fast path and the release digest use).
+-- A tree without the classifier takes the FULL path and says so: a plan that guessed would be a plan that
+-- skips work nobody proved unnecessary.
+function M.classify(run, paths)
+  local repo = run.journal.repo or M.repo()
+  local counts, class_of = {}, {}
+  -- The paths travel as ARGUMENTS, not through a file: a `--dry-run` promises to change nothing, and a
+  -- scratch list under the run directory is still a write. ARG_MAX is ~2 MB on this platform and a 2000-path
+  -- round is ~120 KB, so the ceiling is not reachable by a landing.
+  local command = "bash scripts/lib/land-classify.sh --repo " .. quote(slashes(repo))
+  for _, path in ipairs(paths) do command = command .. " " .. quote(path) end
+  local listing = M.exec(command, repo, 300)
+  if (listing.code or 1) ~= 0 then
+    return { category = "compiled", counts = {}, classifier = "missing",
+      why = "scripts/lib/land-classify.sh could not classify this tree (" ..
+        first_line(tostring(listing.stderr ~= "" and listing.stderr or listing.stdout)) .. "), so the full path runs" }
+  end
+  for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+    local class, path = line:match("^(%S+)%s+(.+)$")
+    if class and path then
+      counts[class] = (counts[class] or 0) + 1
+      class_of[#class_of + 1] = { class = class, path = trim(path) }
+    end
+  end
+  local category = M.exec(command .. " --category", repo, 120)
+  local word = trim(first_line(tostring(category.stdout or "")))
+  if word == "" then
+    return { category = "compiled", counts = counts, classifier = "no_answer",
+      why = "land-classify.sh named no category for these paths, so the full path runs" }
+  end
+  return { category = word, counts = counts, classifier = "land-classify.sh", files = class_of }
+end
+
+-- <run> <paths> -> the Lua rows a narrowed fast-path run should execute (`scripts/fast.sh` adds its
+-- never-dropped core rows itself, so this list is a REQUEST). A row is affected when the round changed it,
+-- when its own name names a changed module (`lua/core/agent.lua` -> `scripts/test-agent*.lua`), or when its
+-- text mentions the changed path - a dependency proved by the file, not guessed from the name. No row and a
+-- non-doc change means the suite runs whole, which the plan reports as `full`.
+function M.gate_rows(run, paths)
+  local repo = run.journal.repo or M.repo()
+  local rows, seen = {}, {}
+  local function add(path)
+    path = trim(path)
+    if path == "" or seen[path] then return end
+    if not path:match("^scripts/test%-[%w%._%-]+%.lua$") then return end
+    seen[path] = true; rows[#rows + 1] = path
+  end
+  local modules = {}
+  for _, path in ipairs(paths) do
+    if path:match("^scripts/test%-[%w%._%-]+%.lua$") then add(path) end
+    if path:match("^lua/.+%.lua$") then modules[#modules + 1] = path end
+  end
+  if #modules > 0 then
+    local listing = M.exec("ls -1 scripts/test-*.lua 2>/dev/null", repo, 60)
+    local named = {}
+    for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+      local candidate = trim(line)
+      if (candidate:gsub("^scripts/", "")):match("^test%-") then named[#named + 1] = candidate end
+    end
+    for _, module in ipairs(modules) do
+      local base_name = module:match("([^/]+)%.lua$") or ""
+      if base_name ~= "" then
+        for _, candidate in ipairs(named) do
+          local file_name = candidate:match("([^/]+)%.lua$") or ""
+          if file_name:find("test-" .. base_name, 1, true) then add(candidate) end
+        end
+        local mentions = M.exec("grep -rlF -- " .. quote(module) .. " scripts/test-*.lua 2>/dev/null", repo, 120)
+        for line in tostring(mentions.stdout or ""):gmatch("[^\r\n]+") do add(line) end
+      end
+    end
+  end
+  table.sort(rows)
+  return rows
+end
+
+-- <run> -> {list, why}: the gate's checks for this round. The always-on two (`fast`, `prompt-docs`) are never
+-- dropped; the others are added when a changed path touches their subject (M.GATE_TRIGGERS). A round whose
+-- plan is `full` runs every check.
+function M.gate_checks(run, options)
+  if options.checks then return options.checks, #options.checks .. " check(s), named with --checks" end
+  local plan = run.journal.plan
+  if not plan or plan.full then return M.DEFAULT_CHECKS, "every check (no narrower set was proved)" end
+  local wanted = {}
+  for _, name in ipairs(plan.checks or {}) do wanted[name] = true end
+  local list = {}
+  for _, check in ipairs(M.DEFAULT_CHECKS) do if wanted[check.name] then list[#list + 1] = check end end
+  -- A name the plan asked for that this tree does not define is refused rather than dropped: a gate that
+  -- silently runs less than it said is the failure the always-on set exists to prevent.
+  for _, name in ipairs(plan.checks or {}) do
+    local found = false
+    for _, check in ipairs(list) do if check.name == name then found = true break end end
+    if not found then
+      return M.DEFAULT_CHECKS, "every check (the plan named " .. tostring(name) .. ", which this tree does not define)"
+    end
+  end
+  return list, table.concat((function()
+    local names = {}
+    for _, check in ipairs(list) do names[#names + 1] = check.name end
+    return names
+  end)(), " ")
+end
+
+-- The finished runs in the journal: what an estimate is made from. Only a run whose result is `done` is used -
+-- a stopped round's step times are the part that worked, not what a round costs.
+function M.land_runs(limit)
+  local runs = {}
+  -- `find`, not `ls <dir>/*/journal.json`: the glob has to be expanded by the shell, and quoting a path that
+  -- contains a wildcard (the right thing to do with a path a user named) stops `ls` from doing it - measured
+  -- here, the estimate silently fell back to the default table because the listing was empty. `find` takes
+  -- the directory quoted and matches the name itself.
+  local listing = M.exec("find " .. quote(M.root()) .. " -maxdepth 2 -name journal.json -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -" .. tostring(limit or 20), "", 60)
+  for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+    local path = line:match("^%S+%s+(.+)$")
+    if path then
+      local journal = json_file(trim(path))
+      if journal and journal.run and journal.result == "done" then runs[#runs + 1] = journal end
+    end
+  end
+  return runs
+end
+
+local function median(values)
+  local list = {}
+  for _, value in ipairs(values) do list[#list + 1] = value end
+  if #list == 0 then return nil end
+  table.sort(list)
+  local middle = math.floor((#list + 1) / 2)
+  if #list % 2 == 1 then return list[middle] end
+  return math.floor((list[middle] + list[middle + 1]) / 2)
+end
+
+function M.duration_text(seconds)
+  local total = tonumber(seconds) or 0
+  if total < 60 then return string.format("%ds", total) end
+  return string.format("%dm%02ds", math.floor(total / 60), total % 60)
+end
+
+-- <category> [runs] -> {seconds, per_step, from, samples}. Each step's expected time is the MEDIAN of the
+-- runs that actually ran it (a skipped step measured 0 and would drag the median to nothing), falling back
+-- per step to the hand-run round of 13/11 - so the first plan is comparable with every later one.
+function M.estimate(category, runs)
+  runs = runs or M.land_runs()
+  local per_step, from = {}, nil
+  local same, any = {}, {}
+  for _, journal in ipairs(runs) do
+    any[#any + 1] = journal
+    if journal.plan and journal.plan.category == category then same[#same + 1] = journal end
+  end
+  local basis = (#same >= 2) and same or any
+  from = (#basis > 0) and ("median of " .. tostring(#basis) .. " finished run(s)" .. ((#same >= 2) and " on this path" or ""))
+    or "the hand-run round of 13/11 (no finished run in the journal yet)"
+  local total = 0
+  for _, name in ipairs(M.STEPS) do
+    local samples = {}
+    for _, journal in ipairs(basis) do
+      local step = (journal.steps or {})[name]
+      if step and tonumber(step.seconds) and (step.state == "done" or step.state == "skipped" or step.state == "flaky") then
+        samples[#samples + 1] = tonumber(step.seconds)
+      end
+    end
+    local value = median(samples)
+    if value == nil then
+      value = (M.ESTIMATE_BY_CATEGORY[category] or {})[name]
+    end
+    if value == nil then value = M.ESTIMATE_DEFAULTS[name] or 0 end
+    per_step[name] = value
+    total = total + value
+  end
+  return { seconds = total, per_step = per_step, from = from, samples = #basis }
+end
+
+-- <runs> -> the average total of the finished runs, for the report's comparison. Nothing is invented when
+-- there are none: it answers nil and the report says so.
+function M.journal_average(runs)
+  runs = runs or M.land_runs()
+  local sum, count = 0, 0
+  for _, journal in ipairs(runs) do
+    local total = 0
+    for _, name in ipairs(M.STEPS) do
+      local step = (journal.steps or {})[name]
+      if step and tonumber(step.seconds) then total = total + tonumber(step.seconds) end
+    end
+    if total > 0 then sum = sum + total; count = count + 1 end
+  end
+  if count == 0 then return nil end
+  return { average = math.floor(sum / count), runs = count }
+end
+
+-- <run> <paths> -> the plan table (the shape `journal.plan` holds), built the same way for a real round and
+-- for `--dry-run`: one implementation, so a printed plan and the plan a round obeys cannot differ.
+function M.build_plan(run, paths)
+  local classified = M.classify(run, paths)
+  local rows = M.gate_rows(run, paths)
+  local full = (#rows == 0 and classified.category ~= "docs-only")
+  local checks = M.gate_checks_for(paths)
+  local names = {}
+  for _, check in ipairs(M.DEFAULT_CHECKS) do
+    if checks[check.name] then names[#names + 1] = check.name end
+  end
+  if full then
+    for _, check in ipairs(M.DEFAULT_CHECKS) do
+      local known = false
+      for _, name in ipairs(names) do if name == check.name then known = true break end end
+      if not known then names[#names + 1] = check.name end
+    end
+  end
+  table.sort(names)
+  local estimate = M.estimate(classified.category)
+  return { category = classified.category, files = #paths, counts = classified.counts or {},
+    classifier = classified.classifier, why = classified.why, steps = M.plan_steps(classified.category),
+    checks = names, rows = rows, full = full, expected_seconds = estimate.seconds,
+    expected_from = estimate.from, per_step = estimate.per_step }
+end
+
+impl.plan = function(run, options)
+  local evidence = sink(run, "plan")
+  local repo = run.journal.repo or M.repo()
+  local paths = M.changed_paths(run)
+  if #paths == 0 then
+    return false, { error = "plan_no_changes", observed = "the collected branches introduce no path this tree does not already have",
+      next = "nothing to land: check the branches with `git -C " .. tostring(repo) .. " log --oneline <base>..<tip>`" }
+  end
+  local plan = M.build_plan(run, paths)
+  run.journal.plan = plan
+  -- The plan, printed BEFORE any step that changes anything, and kept in the journal so a later reader (or
+  -- the report) knows which path this round took and why.
+  local text = M.plan_text(run.journal)
+  print(text)
+  evidence(text .. "\n")
+  return true, { detail = string.format("%s: %d path(s), %d check(s)%s, expected %s (%s)",
+    plan.category, plan.files, #plan.checks,
+    (not plan.full and plan.category ~= "docs-only") and (" over " .. tostring(#plan.rows) .. " Lua row(s)") or "",
+    M.duration_text(plan.expected_seconds), plan.expected_from) }
+end
+
+-- <options> [run] -> plan, notes: the plan a `--dry-run` prints, resolved from what THIS checkout already has.
+-- A dry run fetches nothing (the header says so), so a branch that is not here yet is named in `notes` and
+-- left out rather than fetched to make the plan look complete.
+function M.plan_preview(options, run)
+  local repo = M.repo()
+  local incoming = M.incoming()
+  local notes = {}
+  local base = rev(repo, "origin/main") or rev(repo, "refs/remotes/" .. incoming .. "/main")
+    or rev(repo, incoming .. "/main")
+  if not base then
+    return nil, { "no main in " .. tostring(repo) .. ": the plan needs a base, and a dry run does not fetch (run without --dry-run)" }
+  end
+  local branches = {}
+  for _, name in ipairs(options.branches or {}) do
+    local tip = rev(repo, "refs/heads/" .. name) or rev(repo, "refs/remotes/" .. incoming .. "/" .. name)
+    if tip then
+      branches[#branches + 1] = { name = name, sha = tip }
+    else
+      notes[#notes + 1] = name .. " is not in this checkout yet (collect fetches it), so the plan leaves it out"
+    end
+  end
+  if #branches == 0 then return nil, notes end
+  local shell = { id = (run and run.id) or "dry-run", journal = { repo = repo, base = base, branches = branches } }
+  local paths = M.changed_paths(shell)
+  if #paths == 0 then return nil, { "the named branches introduce no path this tree does not already have" } end
+  return M.build_plan(shell, paths), notes
+end
+
+-- The plan as text: what changed, which path, which steps run or are skipped and why, and what it should cost.
+function M.plan_text(journal)
+  local plan = journal.plan or {}
+  local lines = {}
+  local function add(line) lines[#lines + 1] = line end
+  local counts = plan.counts or {}
+  add(string.format("land: plan: %d path(s) changed -> %s", tonumber(plan.files or 0), tostring(plan.category or "unknown")))
+  add(string.format("land:   compiled %d, component %d, lua %d, docs %d (classified by %s)",
+    tonumber(counts.compiled or 0), tonumber(counts.component or 0), tonumber(counts.lua or 0), tonumber(counts.docs or 0),
+    tostring(plan.classifier or "?")))
+  if plan.why then add("land:   " .. tostring(plan.why)) end
+  local rows = plan.rows or {}
+  add(string.format("land:   gate: %s%s", table.concat(plan.checks or {}, " "),
+    plan.full and "" or (" over " .. tostring(#rows) .. " Lua row(s) of the suite")))
+  for _, name in ipairs(M.STEPS) do
+    local step = (plan.steps or {})[name]
+    if step then
+      add(string.format("land:   %-9s %-4s %s", name, step.action == "skip" and "skip" or "run", tostring(step.why or "")))
+    end
+  end
+  add(string.format("land:   expected %s (%s)", M.duration_text(plan.expected_seconds or 0), tostring(plan.expected_from or "?")))
+  return table.concat(lines, "\n")
+end
+
 -- review: the reviewer runs on each branch BEFORE it is merged, and its findings are reported without ever
 -- blocking. The channel is not on main yet (change/reviewer), so the step detects it in the landed tree
 -- instead of assuming it: absent means `skipped` plus a TODO naming the file and the test that turns it on.
@@ -646,12 +1112,30 @@ end
 impl.gate = function(run, options)
   local evidence = sink(run, "gate")
   local tree = run.tree
-  local checks = options.checks or M.DEFAULT_CHECKS
+  -- Which checks: the plan's set (M.gate_checks), which is never smaller than the always-on core, and - when
+  -- the plan mapped rows - a WA_FAST_ROWS file for `scripts/fast.sh` so a Lua-only round runs the rows its
+  -- changed modules touch instead of all ~140. The rows file is written here, next to the evidence, so the
+  -- command in the log is the command that ran.
+  local checks, why = M.gate_checks(run, options)
+  local rows_file = nil
+  if not options.checks and run.journal.plan and run.journal.plan.rows and #run.journal.plan.rows > 0
+     and not run.journal.plan.full then
+    rows_file = M.run_dir(run.id) .. "/gate-rows.txt"
+    if not write(rows_file, table.concat(run.journal.plan.rows, "\n") .. "\n") then
+      rows_file = nil
+      evidence("the row list could not be written; every Lua row will run\n")
+    end
+  end
+  run.journal.gate_checks = why
   local decorator = M.weight()
   run.journal.gate_weight = decorator ~= "" and decorator or "none (no weight could be applied)"
   local rows = {}
   for _, check in ipairs(checks) do
-    local command = (decorator ~= "" and (decorator .. " " .. quote(check.command))) or check.command
+    local command = check.command
+    if rows_file and check.name == "fast" then
+      command = "WA_FAST_ROWS=" .. quote(rows_file) .. " " .. command
+    end
+    command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
     evidence(command_line(check.name, check.command, decorator))
     local started = now()
@@ -807,6 +1291,14 @@ impl.artifacts = function(run, options)
   local tree, sha = run.tree, run.journal.tree_commit
   local dir = run.journal.release_dir or (M.run_dir(run.id) .. "/release")
   run.journal.release_dir = dir
+  -- WHICH BUILD THIS ROUND NEEDS is the plan's answer, not a constant: `lua-tree` writes the signed record of
+  -- the tree the nodes will load, `components` rebuilds only the wasm bundle, and anything else is the node
+  -- release this step always built. The release DIRECTORY is shared (`<run>/release`) so the sign step signs
+  -- whichever sums the round produced, with one code path.
+  local kind = (run.journal.plan and run.journal.plan.steps and run.journal.plan.steps.artifacts
+    and run.journal.plan.steps.artifacts.kind) or "node-release"
+  if kind == "lua-tree" then return impl.artifacts_lua_tree(run, options, evidence, tree, sha, dir) end
+  if kind == "components" then return impl.artifacts_components(run, options, evidence, tree, sha, dir) end
   local command = "WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit " .. quote(sha) ..
     " --out " .. quote(dir)
   evidence(command_line("build release", command))
@@ -868,6 +1360,74 @@ impl.artifacts = function(run, options)
   run.journal.artifacts = { dir = dir, manifest = manifest, commit = sha, triples = triples }
   return true, { detail = string.format("%s holds %s for %s (%s); unsigned so far, by design",
     dir, short, sha:sub(1, 12), table.concat(triples, " ")) }
+end
+
+-- A LUA-ONLY round's artifacts: the signed record of the tree the nodes will load, and nothing compiled.
+--
+-- `scripts/publish-lua-tree.sh` writes `<release>/node-lua-tree.manifest` + `SHA256SUMS` over the same file set
+-- `scripts/deploy.sh` stages (`scripts/lib/lua-tree.sh` is that one definition), stamped once so a resume
+-- cannot rewrite what the signing host signed. The signature is the SAME sign step every other path uses -
+-- `scripts/sign-release.sh <dir>/SHA256SUMS` - because what gets signed is "the bytes that name the payloads",
+-- and for this path the payload is a tree.
+impl.artifacts_lua_tree = function(run, options, evidence, tree, sha, dir)
+  local command = "bash scripts/publish-lua-tree.sh --commit " .. quote(sha) .. " --out " .. quote(dir)
+  evidence(command_line("lua-tree record", command))
+  local result = M.exec(command, slashes(tree), 900)
+  evidence((result.stdout or "") .. (result.stderr or ""))
+  if (result.code or 1) ~= 0 then
+    return false, { error = "artifacts_failed", observed = first_line(result.stderr ~= "" and result.stderr or result.stdout),
+      next = "the record script's own words are in " .. M.evidence_path(run.id, "artifacts") }
+  end
+  local manifest = dir .. "/node-lua-tree.manifest"
+  local text = read(manifest)
+  if not text then
+    return false, { error = "artifacts_manifest_missing", observed = manifest .. " was not written",
+      next = "inspect " .. M.evidence_path(run.id, "artifacts") }
+  end
+  local source = tostring(text):match("source_commit=(%x+)")
+  if source ~= sha then
+    return false, { error = "artifacts_wrong_commit",
+      observed = "the record names source_commit " .. tostring(source) .. ", the landed tip is " .. sha }
+  end
+  local inputs = tostring(text):match("lua_inputs=(%x+)")
+  if not inputs then
+    return false, { error = "artifacts_record_unreadable", observed = manifest .. " names no lua_inputs digest" }
+  end
+  local files = 0
+  for _ in tostring(text):gmatch("\n%x+  ") do files = files + 1 end
+  run.journal.artifacts = { kind = "lua-tree", dir = dir, manifest = manifest, commit = sha,
+    lua_inputs = inputs, files = files }
+  return true, { detail = string.format("Lua tree record: %d file(s) at %s, lua_inputs %s (no cross-build, no node release)",
+    files, sha:sub(1, 12), tostring(inputs):sub(1, 12)) }
+end
+
+-- A COMPONENTS round's artifacts: rebuild and verify only the wasm bundle, and make the repin decision
+-- visible. `scripts/publish-components.sh` verifies every artifact against `components.lock` and refuses
+-- (exit 5) with the line that WOULD pin it - which is exactly the repin check: a bundle whose bytes are not
+-- the pins cannot be deployed by a node, and the round stops here rather than on four nodes.
+--
+-- The bundle is not signed by the release-signing key and is published by the gh line the script prints (the
+-- tag is `components-<first 12 hex of sha256(components.lock)>`), so this step keeps that line in the journal
+-- and the report, where an operator with a credential can run it. Nothing here pretends it was published.
+impl.artifacts_components = function(run, options, evidence, tree, sha, dir)
+  local command = "bash scripts/publish-components.sh --out " .. quote(dir)
+  evidence(command_line("components bundle", command))
+  local result = M.exec(command, slashes(tree), 3600)
+  evidence((result.stdout or "") .. (result.stderr or ""))
+  if (result.code or 1) ~= 0 then
+    return false, { error = "artifacts_failed", observed = first_line(result.stderr ~= "" and result.stderr or result.stdout),
+      detail = "the component bundle is not the pins components.lock names, so no node could install it",
+      next = "the builder's own words (and the line that would pin each artifact) are in " .. M.evidence_path(run.id, "artifacts") }
+  end
+  local publish_line, tag
+  for line in tostring(result.stdout or ""):gmatch("[^\r\n]+") do
+    if not publish_line and line:match("^gh release create") then publish_line = line end
+    if not tag then tag = line:match("release tag: (%S+)") end
+  end
+  run.journal.artifacts = { kind = "components", dir = dir, commit = sha, tag = tag, publish_line = publish_line }
+  return true, { detail = string.format("components bundle %s verified against components.lock%s%s",
+    tostring(tag or "(no tag)"), publish_line and "; publish with the printed gh line" or "",
+    publish_line and (" in " .. M.evidence_path(run.id, "artifacts")) or "") }
 end
 
 -- sign: the SHA256SUMS of the release set, signed by wa-vault's `release-signing` key ON THE HOST THAT CAN
@@ -1112,84 +1672,165 @@ impl.deploy = function(run, options)
     return false, { error = "remote_update_unavailable", observed = "lua/core/remote_update.lua could not be loaded" }
   end
   local ring = M.ring(options)
-  local order = {}
-  if options.rollback then
-    for index = #ring, 1, -1 do order[#order + 1] = ring[index] end
-  else
-    for index = 1, #ring do order[#order + 1] = ring[index] end
-  end
   local sha = run.journal.main_sha or run.journal.tree_commit
   local deadline = tonumber(options.deploy_timeout or (host.getenv and host.getenv("WA_LAND_DEPLOY_TIMEOUT")) or 900) or 900
   local poll = tonumber(options.deploy_poll or 5) or 5
+  local function request_for(node, mode_, why)
+    return { commit = (not options.rollback) and sha or nil, mode = mode_,
+             reason = "wa land " .. run.id .. (why and (" " .. why) or ""), session = options.session }
+  end
   -- One node: ask it to update itself, then read its own record until it settles or the deadline passes.
   -- "Queued" is not installed - the row carries the peer's state and the record id an operator (or
-  -- `wa update <node> --status`) reads next, and the first node that is not installed stops the ring.
-  local function deploy_one(run_, node, mode_, sha_, options_, log)
-    local started = now()
-    local request = { commit = (not options_.rollback) and sha_ or nil, mode = mode_,
-                      reason = "wa land " .. run_.id .. (options_.rollback and " rollback" or ""),
-                      session = options_.session }
-    log(string.format("deploy %s (%s) -> %s\n", node, mode_, tostring(sha_)))
-    local reply = remote_update.request(M.call(), node, request)
-    local row = { node = node, mode = mode_, commit = sha_,
-                  state = tostring(reply and (reply.state or reply.status or reply.error) or "no_answer"),
-                  record = reply and tostring(reply.record or "") }
+  -- `wa update <node> --status`) reads next.
+  local function ask(node, mode_, why)
+    local row = { node = node, mode = mode_, commit = sha, started_at = now() }
+    evidence(string.format("deploy %s (%s) -> %s\n", node, mode_, tostring(sha)))
+    local reply = remote_update.request(M.call(), node, request_for(node, mode_, why))
+    row.state = tostring(reply and (reply.state or reply.status or reply.error) or "no_answer")
+    row.record = reply and tostring(reply.record or "") or ""
     if not reply or reply.error then
       row.state = "refused"
       row.detail = reply and (tostring(reply.error) .. (reply.observed and (": " .. tostring(reply.observed)) or "")) or "no answer from the node"
-      row.seconds = now() - started
-      log(json.encode(row) .. "\n")
-      return row, { error = "deploy_refused", detail = "node " .. node .. " (" .. mode_ .. "): " .. tostring(row.detail),
+      row.seconds = now() - row.started_at
+      evidence(json.encode(row) .. "\n")
+      row.failure = { error = "deploy_refused", detail = "node " .. node .. " (" .. mode_ .. "): " .. tostring(row.detail),
         observed = row.record ~= "" and ("record " .. row.record) or "",
         next = "inspect it: wa update " .. node .. " --status" .. (row.record ~= "" and (" --id " .. row.record) or "") }
+      return row
     end
-    local settle_at = now() + deadline
-    local status = nil
-    while true do
-      status = remote_update.status(M.call(), node, { id = row.record, session = options_.session })
-      local state = tostring(status and status.state or "unknown")
-      if state == "installed" or state == "failed" or state == "silent" then break end
-      if now() >= settle_at then break end
-      log(string.format("  %s: %s\n", node, state))
-      M.sleep(poll)
-    end
-    row.state = tostring(status and status.state or "unknown")
-    row.installed_commit = status and status.installed_commit or nil
+    return row
+  end
+  -- Read one node's record ONCE. Called from the wave loop below, so the nodes of a wave are read
+  -- interleaved rather than one after the other - that is what makes the middle wave parallel: every request
+  -- is issued first, and the settling is one loop over all of them.
+  local function settle_once(row)
+    local status = remote_update.status(M.call(), row.node, { id = row.record, session = options.session })
+    local state = tostring(status and status.state or "unknown")
+    row.state = state
+    row.installed_commit = status and status.installed_commit or row.installed_commit
     row.verified = (status and status.verified == true) or false
-    row.detail = status and status.detail or nil
-    row.seconds = now() - started
-    log(json.encode(row) .. "\n")
-    if row.state ~= "installed" then
-      return row, { error = "deploy_failed",
-        detail = string.format("node %s (%s) is %s after %ss: %s", node, mode_, row.state, tostring(row.seconds), tostring(row.detail or "")),
-        observed = row.record ~= "" and ("record " .. row.record) or "",
-        next = "read the node's own records (installed.txt, the sentinel's done/failed) and the evidence in " ..
-          M.evidence_path(run_.id, "deploy") .. "; then `wa land --resume` continues at this step" }
-    end
-    return row, nil
+    row.detail = status and status.detail or row.detail
+    row.seconds = now() - (row.started_at or now())
+    return state == "installed" or state == "failed" or state == "silent" or state == "unknown"
+  end
+  local function failure_for(row)
+    if row.state == "installed" then return nil end
+    return { error = "deploy_failed",
+      detail = string.format("node %s (%s) is %s after %ss: %s", row.node, row.mode, row.state, tostring(row.seconds or "?"), tostring(row.detail or "")),
+      observed = row.record ~= "" and ("record " .. row.record) or "",
+      next = "read the node's own records (installed.txt, the sentinel's done/failed) and the evidence in " ..
+        M.evidence_path(run.id, "deploy") .. "; then `wa land --resume` continues at this step" }
   end
   run.journal.deploy = run.journal.deploy or {}
+  local function record(row)
+    run.journal.deploy[#run.journal.deploy + 1] = row
+    evidence(json.encode(row) .. "\n")
+    save(run)
+  end
+
+  -- A rollback is one action per node in the REVERSE ring, serially: it puts back the pair the last install
+  -- replaced, and there is nothing to gain from overlapping it with a second node's rollback.
+  if options.rollback then
+    for index = #ring, 1, -1 do
+      local entry = ring[index]
+      local row = ask(entry.node, "rollback", "rollback")
+      local settle_at = now() + deadline
+      while row.state ~= "refused" and not settle_once(row) and now() < settle_at do
+        evidence(string.format("  %s: %s\n", entry.node, tostring(row.state)))
+        M.sleep(poll)
+      end
+      record(row)
+      if row.failure then return false, row.failure end
+      if row.state ~= "installed" then return false, failure_for(row) end
+    end
+    return true, { detail = string.format("%d node(s) rolled back", #ring) }
+  end
+
   -- What an earlier attempt of THIS run already installed at THIS commit is not installed again: a resume
   -- continues at the node that failed, which is the whole point of the journal.
   local settled_nodes = {}
   for _, row in ipairs(run.journal.deploy) do
     if row.state == "installed" and (row.commit == sha or row.installed_commit == sha) then settled_nodes[row.node] = true end
   end
-  for _, entry in ipairs(order) do
-    local mode = options.rollback and "rollback" or (entry.mode or "tree")
-    if settled_nodes[entry.node] and not options.rollback then
-      evidence("deploy " .. entry.node .. ": already installed at " .. tostring(sha) .. " in this run; not asked again\n")
-      print("land: deploy: " .. entry.node .. " already installed in this run")
+  -- THE ORDER IS THE PLAN's: the canary alone, then the rest of the non-account nodes together, then the
+  -- account node. Measured 13/11: four deploys in series cost 15-20 minutes of a ~40 minute round, and three
+  -- of those four nodes have nothing to do with the account - so they wait on each other for nothing. The
+  -- canary still goes first and alone (a broken commit breaks one node, not the fleet), and the account node
+  -- is still last (it holds the WhatsApp account and the relay).
+  local plan = M.deploy_waves(ring, options)
+  run.journal.deploy_plan = { canary = plan.canary, account = plan.account, canary_defaulted = plan.canary_defaulted,
+    waves = (function()
+      local rows = {}
+      for index, wave in ipairs(plan.waves) do
+        local names = {}
+        for _, entry in ipairs(wave) do names[#names + 1] = tostring(entry.node) end
+        rows[index] = names
+      end
+      return rows
+    end)() }
+  local stopped = nil
+  local deployed = 0
+  for index, wave in ipairs(plan.waves) do
+    if #wave == 0 then
+      local _ = index
+    elseif stopped then
+      for _, entry in ipairs(wave) do
+        record({ node = entry.node, mode = entry.mode or "tree", commit = sha, state = "not_attempted", seconds = 0,
+          detail = "not deployed: the round stopped at " .. tostring(stopped.detail or "an earlier node") })
+      end
     else
-      local row, failure = deploy_one(run, entry.node, mode, sha, options, evidence)
-      run.journal.deploy[#run.journal.deploy + 1] = row
-      save(run)
-      if failure then return false, failure end
+      local asked = {}
+      for _, entry in ipairs(wave) do
+        local name = tostring(entry.node)
+        if settled_nodes[name] then
+          evidence("deploy " .. name .. ": already installed at " .. tostring(sha) .. " in this run; not asked again\n")
+          print("land: deploy: " .. name .. " already installed in this run")
+          record({ node = name, mode = entry.mode or "tree", commit = sha, state = "installed", seconds = 0,
+            detail = "already installed at this commit in this run" })
+        elseif stopped then
+          record({ node = name, mode = entry.mode or "tree", commit = sha, state = "not_attempted", seconds = 0,
+            detail = "not deployed: the round stopped at " .. tostring(stopped.detail or "an earlier node") })
+        else
+          local row = ask(name, entry.mode or "tree", nil)
+          row.wave = index
+          asked[#asked + 1] = row
+          if row.failure then stopped = row.failure end
+        end
+      end
+      -- Settle what was asked, all of it in one loop: a wave with three nodes costs the slowest one, not the
+      -- sum of three. A node whose request was refused does not enter this loop (it already has a failure).
+      local pending = {}
+      for _, row in ipairs(asked) do if not row.failure then pending[#pending + 1] = row end end
+      local settle_at = now() + deadline
+      while #pending > 0 and now() < settle_at do
+        local still = {}
+        for _, row in ipairs(pending) do
+          if not settle_once(row) then still[#still + 1] = row end
+        end
+        pending = still
+        if #pending > 0 then
+          for _, row in ipairs(pending) do evidence(string.format("  %s: %s\n", row.node, tostring(row.state))) end
+          M.sleep(poll)
+        end
+      end
+      for _, row in ipairs(pending) do
+        -- The deadline passed with the node still working: say `unknown`, never `installed`. Its own records
+        -- are the truth and `wa update <node> --status` reads them.
+        row.state = "unknown"
+        row.detail = "not settled within " .. tostring(deadline) .. "s; read it with: wa update " .. row.node .. " --status"
+        row.seconds = now() - (row.started_at or now())
+      end
+      for _, row in ipairs(asked) do
+        record(row)
+        deployed = deployed + 1
+        if not stopped then stopped = row.failure or failure_for(row) end
+      end
     end
   end
-  return true, { detail = string.format("%d node(s) %s", #order, options.rollback and "rolled back" or "installed") }
+  if stopped then return false, stopped end
+  return true, { detail = string.format("%d node(s) installed in %d wave(s) (canary %s first, account %s last)",
+    deployed, #plan.waves, tostring(plan.canary or "-"), tostring(plan.account or "-")) }
 end
-
 -- report: one summary, written to a file and printed. It runs even when the machine stopped, because the
 -- thing it is for is a human reading what happened.
 impl.report = function(run, options)
@@ -1263,12 +1904,51 @@ function M.report_text(journal)
     add("")
     add("## nodes")
     add("")
-    add("| node | mode | state | seconds | detail |")
-    add("| --- | --- | --- | --- | --- |")
-    for _, row in ipairs(journal.deploy) do
-      add(string.format("| %s | %s | %s | %s | %s |", tostring(row.node), tostring(row.mode), tostring(row.state),
-        tostring(row.seconds or "-"), tostring(row.detail or ""):gsub("|", "/"):sub(1, 160)))
+    if journal.deploy_plan then
+      local waves = journal.deploy_plan.waves or {}
+      local parts = {}
+      for index, names in ipairs(waves) do
+        parts[#parts + 1] = (index == 1 and "canary " or (index == #waves and "account " or "parallel ")) .. table.concat(names, "+")
+      end
+      add("deploy order: " .. table.concat(parts, " -> ") .. (journal.deploy_plan.canary_defaulted and " (the canary defaulted: the ring names no " .. tostring(journal.deploy_plan.canary) .. ")" or ""))
+      add("")
     end
+    add("| node | mode | wave | state | seconds | detail |")
+    add("| --- | --- | --- | --- | --- | --- |")
+    for _, row in ipairs(journal.deploy) do
+      add(string.format("| %s | %s | %s | %s | %s | %s |", tostring(row.node), tostring(row.mode), tostring(row.wave or "-"),
+        tostring(row.state), tostring(row.seconds or "-"), tostring(row.detail or ""):gsub("|", "/"):sub(1, 160)))
+    end
+  end
+  -- WHAT THE ROUND COST, and what a round of this shape has cost before. A number nobody compares is a number
+  -- nobody can improve - the point of the plan (and of this table) is that "~40 minutes every round" became a
+  -- measurement per round, per path, against the journal's own history.
+  local total = 0
+  for _, name in ipairs(M.STEPS) do
+    local step = (journal.steps or {})[name]
+    if step and tonumber(step.seconds) then total = total + tonumber(step.seconds) end
+  end
+  add("")
+  add("## cost")
+  add("")
+  add("| what | value |")
+  add("| --- | --- |")
+  add("| path | `" .. tostring((journal.plan or {}).category or "not planned") .. "` |")
+  add("| total | " .. M.duration_text(total) .. " (" .. tostring(total) .. "s) |")
+  if journal.plan and tonumber(journal.plan.expected_seconds) then
+    local expected = tonumber(journal.plan.expected_seconds)
+    add(string.format("| expected | %s (%s), actual %s |", M.duration_text(expected),
+      tostring(journal.plan.expected_from or "?"), M.duration_text(total - expected) .. " off"))
+  end
+  local average = M.journal_average()
+  if average then
+    add(string.format("| journal average | %s over %d finished run(s) |", M.duration_text(average.average), average.runs))
+    if total > 0 then
+      local delta = total - average.average
+      add(string.format("| this round | %s the average |", (delta >= 0 and "+" or "-") .. M.duration_text(math.abs(delta))))
+    end
+  else
+    add("| journal average | no finished run in the journal yet |")
   end
   if #(journal.gate or {}) > 0 then
     add("")
@@ -1400,7 +2080,15 @@ function M.run(options)
     elseif settled and name ~= "report" then
       print("land: " .. name .. ": " .. step.state .. " already" .. (step.detail and (" (" .. tostring(step.detail) .. ")") or ""))
     else
-      if name == "deploy" and options.no_deploy then
+      -- The plan's skip, applied here and nowhere else: a step the round does not need is recorded `skipped`
+      -- with its reason (never omitted, never reported done), and `--full` is the explicit escape hatch for a
+      -- human who wants every step anyway.
+      local planned = run.journal.plan and run.journal.plan.steps and run.journal.plan.steps[name]
+      if planned and planned.action == "skip" and name ~= "plan" and not options.full then
+        step.state, step.detail = "skipped", "skipped by the plan: " .. tostring(planned.why)
+        save(run)
+        print("land: " .. name .. ": skipped by the plan (" .. tostring(planned.why) .. ")")
+      elseif name == "deploy" and options.no_deploy then
         step.state, step.detail = "skipped", "skipped: --no-deploy"
         save(run)
         print("land: deploy: skipped (--no-deploy)")
@@ -1447,25 +2135,73 @@ function M.dry_run(run, options)
   end
   local decorator = M.weight()
   print("land: gate weight " .. (decorator ~= "" and decorator or "none (no weight could be applied)"))
+  -- THE PLAN, before the command list, because it is what decides which of those commands run at all. Built
+  -- from this checkout's own refs (a dry run fetches nothing), by the same code the round itself uses.
+  local plan, notes = M.plan_preview(options, run)
+  if plan then
+    print(M.plan_text({ plan = plan }))
+    for _, note in ipairs(notes or {}) do print("land:   note: " .. note) end
+  else
+    print("land: plan: cannot be made without a fetch - " .. table.concat(notes or { "no base" }, "; "))
+  end
+  -- The checks the plan will actually run, not every check the machine knows: the list has to match the plan
+  -- line above it, or the dry run reads as "everything" while the round would run a subset.
   for _, check in ipairs(options.checks or M.DEFAULT_CHECKS) do
-    print(string.format("  gate %-22s %s", check.name, check.command))
+    if options.checks then
+      print(string.format("  gate %-22s %s", check.name, check.command))
+    elseif not plan then
+      print(string.format("  gate %-22s %s", check.name, check.command))
+    else
+      for _, name in ipairs(plan.checks or {}) do
+        if name == check.name then print(string.format("  gate %-22s %s", check.name, check.command)) end
+      end
+    end
   end
   local tree = run.tree or (M.run_dir(run.id) .. "/tree")
   print("  merge        git worktree add -b <land N>/final " .. tree .. " <base>; one --no-ff merge per branch")
   print("  push         git push " .. M.incoming() .. " HEAD:refs/heads/<land N>/final")
   print("  main         git push " .. M.origin() .. " <landed>:refs/heads/main")
   local signer = M.signer(options)
-  print("  artifacts    WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit <landed> --out <run>/release")
-  print("  sign         " .. (signer and (signer.kind == "local" and
-    ("bash scripts/sign-release.sh <run>/release/SHA256SUMS (this node: " .. tostring(signer.why) .. ")")
-    or ("bash scripts/sign-release.sh on " .. tostring(signer.node) .. " (" .. tostring(signer.why) ..
-      "); the signature travels back and is verified here"))) or
-    "REFUSED: no signer found (--signer <node>|local, or WA_VAULT_ADMIN_URL on the vault's node)")
-  print("  ship         WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-artifacts-branch.sh --remote " ..
+  -- Each command carries the plan's action for its step, so the dry run reads as "this is what would run" and
+  -- not as a list of everything the pipeline can do. A step the plan skips still prints its command, prefixed
+  -- `skip`, because "what would this have done" is a question an operator asks before trusting a plan.
+  local function action_of(name)
+    local steps = plan and plan.steps or nil
+    if steps and steps[name] and steps[name].action == "skip" then return "skip" end
+    return "run "
+  end
+  local kind = plan and plan.steps and plan.steps.artifacts and plan.steps.artifacts.kind or "node-release"
+  local artifacts_command = kind == "lua-tree" and
+    ("bash scripts/publish-lua-tree.sh --commit <landed> --out <run>/release")
+    or (kind == "components" and ("bash scripts/publish-components.sh --out <run>/release")
+    or ("WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit <landed> --out <run>/release"))
+  print("  " .. action_of("artifacts") .. "      artifacts    " .. artifacts_command)
+  -- `..` binds tighter than `or`, so the whole signer expression is parenthesised before it is concatenated:
+  -- without those brackets a node with no signer concatenated nil (measured: `attempt to concatenate a nil
+  -- value` on the dry run of a node that has no vault admin URL).
+  local sign_command = "REFUSED: no signer found (--signer <node>|local, or WA_VAULT_ADMIN_URL on the vault's node)"
+  if signer then
+    sign_command = signer.kind == "local" and
+      ("bash scripts/sign-release.sh <run>/release/SHA256SUMS (this node: " .. tostring(signer.why) .. ")")
+      or ("bash scripts/sign-release.sh on " .. tostring(signer.node) .. " (" .. tostring(signer.why) ..
+        "); the signature travels back and is verified here")
+  end
+  print("  " .. action_of("sign") .. "      sign         " .. sign_command)
+  print("  " .. action_of("ship") .. "      ship         WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-artifacts-branch.sh --remote " ..
     M.incoming() .. " --commit <landed> --from <run>/release --out <run>/release")
-  print("  publish      bash <artifacts ref>/PUBLISH.sh")
-  for _, entry in ipairs(M.ring(options)) do
-    print(string.format("  deploy       wa update %-12s (%s)", entry.node, entry.mode))
+  print("  " .. action_of("publish") .. "      publish      bash <artifacts ref>/PUBLISH.sh")
+  -- The ring in its WAVES: the canary alone, the middle nodes together, the account node last.
+  local waves = M.deploy_waves(M.ring(options), options)
+  for index, wave in ipairs(waves.waves) do
+    for _, entry in ipairs(wave) do
+      print(string.format("  %s      deploy       wa update %-12s (%s)%s", action_of("deploy"), entry.node, entry.mode,
+        #wave > 1 and " [wave " .. tostring(index) .. ", together with: " ..
+          (function()
+            local names = {}
+            for _, other in ipairs(wave) do if other.node ~= entry.node then names[#names + 1] = other.node end end
+            return table.concat(names, "+")
+          end)() .. "]" or (index == 1 and " [canary]" or " [account, last]")))
+    end
   end
   return 0
 end
@@ -1543,6 +2279,13 @@ function M.cli(argv)
       options.branches = split(value); index = index + 2
     elseif flag == "--ready" then options.ready = true; index = index + 1
     elseif flag == "--dry-run" then options.dry_run = true; index = index + 1
+    elseif flag == "--full" then options.full = true; index = index + 1
+    elseif flag == "--canary" then
+      local value = read_value(flag); if not value then return 2 end
+      options.canary = value; index = index + 2
+    elseif flag == "--account" then
+      local value = read_value(flag); if not value then return 2 end
+      options.account = value; index = index + 2
     elseif flag == "--no-deploy" then options.no_deploy = true; index = index + 1
     elseif flag == "--rollback" then options.rollback = true; index = index + 1
     elseif flag == "--signer" then
@@ -1571,11 +2314,13 @@ function M.cli(argv)
       options.ring = rows; index = index + 2
     elseif flag == "--json" then options.json = true; index = index + 1
     elseif flag == "--help" or flag == "-h" then
-      print("wa land --ready | --branches a,b [--dry-run] [--no-deploy] [--resume] [--run <id>]")
+      print("wa land --ready | --branches a,b [--dry-run] [--no-deploy] [--full] [--resume] [--run <id>]")
       print("wa land --rollback                 put every node's kept pair back (reverse ring order)")
       print("wa land status [--run <id>]        the journal, read-only")
       print("wa land ready <branch> <sha>       record a READY line for a finished branch")
       print("  --repo <dir> --incoming <remote> --origin <remote> --ring node:mode,... --json")
+      print("  --canary <node> --account <node>  which node goes first (default work) and last (default openclaw)")
+      print("  --full                 ignore the plan: run every step, even the ones this round does not need")
       print("  --signer <node|local>   where the release is signed (default: the node whose WA_VAULT_ADMIN_URL is set)")
       return 0
     else

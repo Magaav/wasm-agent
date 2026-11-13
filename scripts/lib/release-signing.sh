@@ -257,6 +257,19 @@ wa_release_binary_candidates() {
 # (a) The node's own verifier. `wa release verify` is dispatched before the interpreter on purpose
 # (rust/wa-host/src/main.rs), so this answers on a node whose tree is broken - which is the node an
 # upgrade is usually about.
+# A nested `wa` must be asked the CLI QUESTION, not handed the script the caller happens to be running.
+# Measured 13/11 on wa-desktop inside `wa land`'s sign step: the row exported WA_SCRIPT for the harness, every
+# child inherited it, and `wa release verify --help` therefore re-ran the whole `scripts/test-land.lua` - a
+# second vault, a second fixture, a command that never answered (killed at the host's 300 s deadline, and the
+# verdict blamed the signature). `WA_SCRIPT` and `WA_FAST_ROW_ENV` mean "run this instead of the CLI", so the
+# verifier - whose whole job is to run the CLI - removes them, and bounds the probe: a binary that cannot say
+# whether it has the verb in 20 s is not a verifier, and the next backend is the real one.
+wa_release_binary_cli() { # <binary> <arguments...>
+  local binary="$1"; shift
+  env -u WA_SCRIPT -u WA_FAST_ROW_ENV -u NAMED_SKIPS -u FAST_WORK \
+    timeout 20 "$binary" "$@"
+}
+
 wa_release_verify_binary() {
   local sums="$1"; shift
   local candidate binary="" answer code key
@@ -266,7 +279,7 @@ wa_release_verify_binary() {
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
     # "Has one" is answered by the binary itself: a build that predates the verb says so in its own words,
     # and an unknown command is not a verifier.
-    if "$candidate" release verify --help 2>/dev/null | grep -q 'wa release verify'; then
+    if wa_release_binary_cli "$candidate" release verify --help 2>/dev/null | grep -q 'wa release verify'; then
       binary="$candidate"
       break
     fi
@@ -277,7 +290,8 @@ wa_release_verify_binary() {
   fi
   local args=(--sums "$sums")
   for key in "$@"; do [ -n "$key" ] && args+=(--key "$key"); done
-  answer="$("$binary" release verify "${args[@]}" --quiet 2>&1)"; code=$?
+  answer="$(wa_release_binary_cli "$binary" release verify "${args[@]}" --quiet 2>&1)"; code=$?
+  [ "$code" != 124 ] || { WA_RELEASE_ANSWER="$binary release verify did not answer within 20s"; return 7; }
   WA_RELEASE_ANSWER="$answer"
   case "$code" in
     0|2|3|4|5|6) return "$code" ;;
