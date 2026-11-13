@@ -87,6 +87,45 @@ fast_binary_assets() {
   fi
 }
 
+# Where this tree's build actually lands. The node's one root owns all build output
+# (`docs/ONEROOT.md`), as ONE ISLAND PER TREE: `<root>/build/<tree>-<hash>/target`. A single shared
+# `CARGO_TARGET_DIR` for every tree was measured here on 12/11 and is not merely slower, it is wrong -
+# cargo reused the other tree's `libwa_host_support` because its mtime was newer than this tree's
+# source, and the build failed against a library that was never built from this tree.
+#
+# The island name is `basename(realpath) + '-' + first 12 hex of sha256(realpath)`, which
+# `rust/wa-capabilities/src/disk.rs::build_island` computes with `ring`; `scripts/test-oneroot.lua`
+# checks that the two agree, so the binary this script builds is the one the node's own builds use.
+# A caller that names CARGO_TARGET_DIR keeps it, and the rule this file exists for is unchanged: the
+# tree's OWN binary wins, identified by the commit it was stamped with, not by the directory.
+fast_binary_target_dir() {
+  local dir=${CARGO_TARGET_DIR:-}
+  if [ -n "$dir" ]; then
+    # Cargo resolves a relative CARGO_TARGET_DIR against the directory it runs in, which is $ROOT here.
+    case "$dir" in
+      /*|[A-Za-z]:[\\/]*) printf '%s' "$dir" ;;
+      *) printf '%s/%s' "$ROOT" "$dir" ;;
+    esac
+    return
+  fi
+  if [ "${WASM_AGENT_SHARED_BUILD_DIR:-1}" = 0 ]; then printf '%s' "$ROOT/rust/target"; return; fi
+  local tree hash name home
+  tree=$(cd "$ROOT" 2>/dev/null && pwd -P) || { printf '%s' "$ROOT/rust/target"; return; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$tree" | sha256sum | cut -c1-12)
+  elif command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$tree" | shasum -a 256 | cut -c1-12)
+  else
+    printf '%s' "$ROOT/rust/target"; return
+  fi
+  # `basename` in a pipe carries a newline, and `tr -c` would turn it into a trailing '-' - the Rust
+  # side has no newline there, so the two would name different islands. Strip it first.
+  name=$(basename "$tree" | tr -d '\n')
+  name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9_-' '-')
+  home=${WASM_AGENT_HOME:-$HOME}/.wasm-agent
+  printf '%s' "$home/build/$name-$hash/target"
+}
+
 # fast_binary_plan -> decides, and sets:
 #   FAST_BIN            the binary to use (may be the one about to be built)
 #   FAST_BIN_SOURCE     explicit | tree | installed | none
@@ -104,7 +143,13 @@ fast_binary_plan() {
 
   if [ -n "${WA_BIN:-}" ]; then
     candidate=$WA_BIN; source=explicit
+  elif [ -x "$(fast_binary_target_dir)/release/wa" ]; then
+    candidate=$(fast_binary_target_dir)/release/wa; source=tree
+  elif [ -x "$(fast_binary_target_dir)/release/wa.exe" ]; then
+    candidate=$(fast_binary_target_dir)/release/wa.exe; source=tree
   elif [ -x "$ROOT/rust/target/release/wa" ]; then
+    # A tree built before the node's one root owned build output (or with
+    # WASM_AGENT_SHARED_BUILD_DIR=0). It is still judged by its stamp, never by its path.
     candidate=$ROOT/rust/target/release/wa; source=tree
   elif [ -x "$ROOT/rust/target/release/wa.exe" ]; then
     candidate=$ROOT/rust/target/release/wa.exe; source=tree
@@ -203,7 +248,13 @@ fast_binary_build() {
     return 1
   fi
   [ "$log" != /dev/null ] && rm -f "$log"
-  FAST_BIN="$ROOT/rust/target/release/wa"; FAST_BIN_SOURCE='tree'
+  # Mark the island with the tree it was built from, the same way
+  # `rust/wa-capabilities/src/disk.rs::build_env_for` does: that marker is what `wa clean` judges an
+  # island by, so a build this script made is retired when the tree it belongs to lands or goes.
+  local island
+  island=$(dirname "$(fast_binary_target_dir)")
+  if [ -d "$island" ]; then printf '%s' "$(cd "$ROOT" && pwd -P)" > "$island/tree" 2>/dev/null || true; fi
+  FAST_BIN="$(fast_binary_target_dir)/release/wa"; FAST_BIN_SOURCE='tree'
   if ! fast_binary_probe "$FAST_BIN"; then
     FAST_BIN_VERDICT='unknown'
     FAST_BIN_WHY="the binary it just built cannot report its identity"

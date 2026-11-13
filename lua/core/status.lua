@@ -138,6 +138,10 @@ function M.lines()
   if unfinished then lines[#lines + 1] = "unfinished " .. unfinished end
   lines[#lines + 1] = "tools     " .. M.tools()
   lines[#lines + 1] = "tree      " .. M.working_tree()
+  -- The node's one root: how big it is, how full its filesystem is against the cap, and when the last
+  -- clean ran (docs/ONEROOT.md, rule 4). One line, read from the host's own measurement.
+  local ok_clean, clean_line = pcall(function() return dofile("lua/core/clean.lua").status_line() end)
+  lines[#lines + 1] = "root      " .. (ok_clean and clean_line or ("unavailable - " .. tostring(clean_line)))
   lines[#lines + 1] = "config    " .. M.config_path()
   return lines
 end

@@ -77,6 +77,9 @@ if command == "--continue" or command == "-c" or command == "--session" or comma
   command = "chat"
 end
 if command == nil or command == "chat" then
+  -- A new session is new work: past the disk cap the node runs its own `wa clean` first, and refuses
+  -- by name when cleaning cannot help (docs/ONEROOT.md, rule 4). It costs one measurement otherwise.
+  if not dofile("lua/core/clean.lua").guard("session") then os.exit(1) end
   -- Propagate the REPL's status: `wa chat --session <bogus>` exits non-zero so a
   -- script can tell a rejected session from a successful one.
   local code = dofile("lua/core/chat.lua").run(args)
@@ -147,6 +150,11 @@ elseif command == "stats" then
 elseif command == "status" then
   -- One health line per fact, from this checkout (the Lua core, not the host).
   dofile("lua/core/status.lua").report()
+elseif command == "clean" then
+  -- One command over the node's one root (docs/ONEROOT.md): landed worktrees, operations/logs/temp
+  -- past retention, pins, and the cap. The rules are Rust (`rust/wa-capabilities/src/disk.rs`); this
+  -- is the command line and the table the operator reads.
+  os.exit(dofile("lua/core/clean.lua").run(args) or 0)
 elseif command == "toolchain" then
   -- What this node needs in order to build *itself*, and how to get it on this machine. Asking is
   -- read-only; only `ensure --yes` installs anything. The exit code is useful in scripts: non-zero
@@ -368,6 +376,7 @@ elseif command == "help" then
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
   print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")
   print("    paths  where this node keeps its files, and the config file it would read")
+  print("    clean [--dry-run] [--days N] [--pin <path>] [--cap <percent>] [--status]  reclaim the node's one root")
   print('    bind [service|status|renew|run] | unbind | nodes pending | accept <pairing-code>')
   print('    promote <node> | demote <node> | revoke <node>  confirmed network controls')
   print("    network role <node-id> master|guest  administrator-controlled network role")

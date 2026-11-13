@@ -157,6 +157,9 @@ pub const REGISTRY: &[Capability] = &[
     plain!("enqueue_completion", WritesFiles, crate::host::enqueue_completion, "Internal scheduler enqueue for a finished background completion"),
     plain!("subagent", RunsProcess, crate::host::subagent, "Start, inspect, wait for, message or cancel an owned child agent on its own thread"),
     plain!("resource", WritesFiles, crate::host::resource, "Supervised host resources: leases, receipts and their settlement"),
+    // One root and one clean (`docs/ONEROOT.md`): what the node's state root holds, what `wa clean`
+    // may reclaim and why it keeps the rest, the pins, and the disk cap that refuses new heavy work.
+    plain!("disk", WritesFiles, crate::disk::capability, "The node's one root: its size and disk usage, `wa clean` with pins and retention, and the disk cap before new work"),
     // ---- the codemode sandbox ----------------------------------------------------------------
     plain!("quickjs", RunsProcess, crate::quickjs::capability, "The checksum-pinned QuickJS sandbox in wasmtime: fuel-metered, deadline-bounded, owner-checked, 4 sessions; effects only through nested tool calls"),
     // The code-mode seam (docs/CORE-SPLIT.md, "code mode"): the `codemode` component owns the guest's

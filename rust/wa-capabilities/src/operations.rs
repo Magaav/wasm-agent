@@ -193,8 +193,64 @@ fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promot
         "WASM_AGENT_PROVENANCE".into(),
         crate::subagents::current_provenance().unwrap_or_default().to_string(),
     ));
+    // ---- one root (`docs/ONEROOT.md`): scratch and the shared build cache -----------------------
+    // Every child the node spawns - the `bash` tool, `operation start`, a build, a test, a landing,
+    // a component build - gets `TMPDIR` inside the node's one root, so a temp file an agent writes is
+    // something `wa clean` can find and one disk cap covers. Measured 12/11: `/tmp` was 98 % full on
+    // the `work` node and broke deploys while the node's own state root sat at 0.4 GB.
+    //
+    // It is set unconditionally, including when the caller's environment already names a TMPDIR: the
+    // promise is "everything an agent creates lives under one root", and a child that honoured an
+    // inherited `/tmp` would break exactly that promise. When the root's `tmp/` cannot be created
+    // there is nothing honest to point at, so the inherited value is left alone and the child is not
+    // told a directory exists that does not.
+    let tmp = wa_host_support::paths::tmp_dir();
+    if tmp.is_dir() {
+        let text = tmp.to_string_lossy().to_string();
+        for name in ["TMPDIR", "TEMP", "TMP"] {
+            spec.env.push((name.into(), text.clone()));
+        }
+    }
+    // `CARGO_TARGET_DIR` IS DELIBERATELY NOT SET HERE.
+    //
+    // The operator's rule 2 asked for one shared build cache, and this was first implemented as one
+    // `CARGO_TARGET_DIR` for every child. Measured on 12/11, that is **wrong**, not merely slow: with
+    // two worktrees building into one target dir, cargo decided a `libwa_host_support-*.rlib` built from
+    // the OTHER tree was fresh (its mtime was newer than this tree's source) and the build failed with
+    // `cannot find function state_root in module wa_host_support::paths`. Cargo's freshness is
+    // mtime-based and does not know which checkout a unit id came from (the measurement is in
+    // `docs/ONEROOT.md`).
+    //
+    // Per-TREE target dirs under the root (`crate::disk::build_island`) are the safe shape, but they
+    // cannot be chosen here: this function sees the child's *starting* directory, and `cd other-tree &&
+    // cargo build` - an ordinary thing for an agent to type - would compile one tree into another tree's
+    // island and re-create exactly that failure. So the node sets no CARGO_TARGET_DIR implicitly, and
+    // the build entry points that DO know their tree (`scripts/lib/fast-binary.sh` for the fast path,
+    // the deploy scripts for a deploy) point at the island themselves. `wa clean` judges those islands
+    // by the tree named in `build/<island>/tree`. The dedupe a shared cache was meant to give needs a
+    // compiler cache (sccache) with per-tree targets; it is proposed in `docs/ONEROOT.md`, not claimed.
     spec
 }
+/// The disk cap, checked before new heavy work starts (`docs/ONEROOT.md`, rule 4).
+///
+/// A build, a test or a deploy is what a full disk kills half way - `os error 112` in the middle of a
+/// gate, after the clone, the turn and the resolution were paid for (`scripts/check-disk-floor.sh`
+/// measured that on 30/9). So the same check runs where that work starts: `operation start` for a
+/// supervised build/test/deploy, and the `bash` tool when its command is one. Under the cap it is one
+/// measurement; over it, the node runs `wa clean` first and says so; still over, the work is refused
+/// by name (`disk_cap`) with the numbers, rather than filling the disk.
+///
+/// Cheap kinds (`command`) are not gated: a `git status` on a full disk is not the thing that made
+/// deploys fail, and refusing it would make the node unable to tell the operator what is going on.
+fn cap_guard(command: &str) -> Result<(), String> {
+    let kind = operation_kind(&Value::Null, command)?;
+    if kind == "command" {
+        return Ok(());
+    }
+    let root = wa_host_support::paths::state_root();
+    crate::disk::guard_cached(&root, kind).map(|_| ())
+}
+
 fn launch_context(mut spec: Spec, context: &Value) -> Spec {
     spec.cwd_requested = context["requested"].as_str().map(String::from);
     spec.cwd_source = context["source"].as_str().map(String::from);
@@ -225,6 +281,8 @@ pub fn foreground(
     context: &Value,
 ) -> Result<Value, String> {
     let launch = command_launch(program, flag, command)?;
+    // Before the work is paid for, not after it dies on a full disk.
+    cap_guard(command)?;
     let staged = launch.staged.clone();
     let id = manager()
         .start(launch_context(spec(
@@ -324,6 +382,8 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             };
             let seconds = requested_seconds
                 .unwrap_or_else(|| default_operation_timeout_seconds(default_kind.unwrap_or("command")));
+            // The disk cap, before a supervised build/test/deploy is admitted (docs/ONEROOT.md).
+            cap_guard(command_hint)?;
             let cwd=args["cwd"].as_str().unwrap_or("");
             let mut staged_script: Option<std::path::PathBuf> = None;
             let launch=if let Some(program)=args["program"].as_str() {

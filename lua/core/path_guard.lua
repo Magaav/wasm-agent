@@ -160,8 +160,19 @@ function M.refusal(path)
   end
   for _, root in ipairs(M.state_roots()) do
     if resolved:sub(1, #root + 1) == root .. '/' then
-      return 'path_guard: refusing to delete ' .. tostring(path) .. ': it is inside the node state ' .. root
-        .. '.'
+      -- ONE exception, and it is the one root's own scratch: `<node state>/tmp/` is the TMPDIR every
+      -- child process the node spawns is given (`docs/ONEROOT.md`), so a scratch directory under it is
+      -- exactly what a test, a build or a mission must be able to create AND remove. Refusing it refused
+      -- every `mktemp -d` fixture in the suite the moment TMPDIR moved under the node state.
+      --
+      -- It stays narrow on purpose: the scratch root itself (`<node state>/tmp`) is still refused,
+      -- because it is state, and nothing else under the node state is exempt - not `memory.db`, not
+      -- `sessions/`, not `components/`, not the ledger's directory.
+      local scratch = root .. '/tmp/'
+      if resolved:sub(1, #scratch) ~= scratch then
+        return 'path_guard: refusing to delete ' .. tostring(path) .. ': it is inside the node state ' .. root
+          .. '.'
+      end
     end
   end
   return nil

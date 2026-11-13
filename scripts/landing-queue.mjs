@@ -1098,7 +1098,8 @@ async function commandPreflight(options) {
   let worktree = explicit ? {path: explicit, head: gitOk(explicit, ['rev-parse', 'HEAD']).trim(), branch} : worktreeFor(canonical, branch, tip);
   if (!worktree) {
     throw new QueueError(`preflight_worktree_required: ${branch} (${tip.slice(0, 12)}) is not checked out in a worktree of ${canonical}, so there is no tree to run its checks on.\n`
-      + `  Make one: git -C ${canonical} worktree add ../wt-${branch.replace(/[^a-z0-9]+/gi, '-')} ${branch}\n`
+      + `  Make one: bash ${path.join(canonical, 'scripts', 'new-worktree.sh')} ${branch.replace(/[^a-z0-9]+/gi, '-')} --canonical ${canonical}  (it creates the tree under the node's one root, docs/ONEROOT.md)\n`
+      + `  Or by hand: git -C ${canonical} worktree add ${path.join(process.env.WASM_AGENT_HOME || process.env.HOME || '~', '.wasm-agent', 'worktrees', branch.replace(/[^a-z0-9]+/gi, '-'))} ${branch}\n`
       + `  Or name an existing clean tree at that tip: --worktree <dir>`, 75, 'preflight_worktree_required');
   }
   if (worktree.head !== tip) {
