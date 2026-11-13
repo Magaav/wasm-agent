@@ -291,6 +291,9 @@ function M.run(argv)
     local file, err = M.set_build_cap(build_cap)
     if not file then print("wa clean: " .. tostring(err)); return 1 end
     print(string.format("build cap written: %s=%d in %s (a build reads it before it starts)", BUILD_CAP_KEY, build_cap, file))
+    -- Writing the cap was the whole command: a `--build-cap` that then deleted files would be a
+    -- configuration change that also reclaimed, and the operator reads one line per intention.
+    if not dry_run and not status_only and not days then return 0 end
   end
   if pin or unpin then
     local action = pin and "pin" or "unpin"
