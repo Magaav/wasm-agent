@@ -50,7 +50,10 @@ fs.mkdirSync(TARGET_ROOT, {recursive: true});
 let passed = 0;
 function check(name, condition, detail = '') {
   if (!condition) {
-    console.error(`FAIL ${name}${detail ? `: ${detail}` : ''}`);
+    // The last line is deliberately "assert failed": a runner that reports the FIRST error line of a row
+    // (scripts/fast.sh) greps for that shape, and a bare `FAIL <name>` left the row's record empty - a
+    // red check with no reason is exactly what this repo refuses to ship.
+    console.error(`onebuild: assert failed - ${name}${detail ? `: ${detail}` : ''}`);
     process.exitCode = 1;
     throw new Error(`check failed: ${name}`);
   }
