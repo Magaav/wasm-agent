@@ -3682,6 +3682,29 @@ pub extern "C-unwind" fn editor_footer(l: *mut LuaState) -> c_int {
     1
 }
 
+/// `host.editor_wakes(text)`: the self-wake fact (`⏰ 2 wakes · next 14:05`) on its own row directly above
+/// the session status bar, or "" to take the row away again when nothing is scheduled. It used to be
+/// appended to the status bar's own text, where it squeezed the numbers (Victor, 13/11).
+///
+/// Redraws only when the fact changed: this is called from the footer path, which runs on every event of a
+/// run, and a frame per call would be a frame per token.
+pub extern "C-unwind" fn editor_wakes(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = state.editor.as_mut().map(|editor| {
+        let changed = editor.wakes != text;
+        editor.wakes = text;
+        changed
+    }).unwrap_or(false);
+    let ok = if changed {
+        let frame = layout_frame(&mut state);
+        frame.is_empty() || wa_term::terminal_editor::write(&frame).is_ok()
+    } else { true };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
 /// `host.transcript_write(text)`: append to the chat's current block (the host draws it).
 pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();

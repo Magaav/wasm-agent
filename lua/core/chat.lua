@@ -567,7 +567,7 @@ function M.run(argv)
     agent.self_wake = trace
     local ok, reply = pcall(agent.run, agent, content)
     agent.self_wake = nil
-    if not ok then view:failed(redact.text(tostring(reply))) else view:answered(reply) end
+    if not ok then view:failed(redact.text(tostring(reply)), { self_wake = true }) else view:answered(reply) end
     selfloop.finish(row, ok, reply)
     mark_seen()
   end

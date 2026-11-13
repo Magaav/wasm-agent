@@ -706,6 +706,7 @@ local function screen_rows(rows, editor)
 end
 M.screen_rows = screen_rows
 
+
 -- ---- where this is running -----------------------------------------------------
 
 -- The workspace as a reader recognises it: the home directory abbreviated, the rest
@@ -811,6 +812,8 @@ function M.new(opts)
     -- the view owns once it knows the console's height - see `METHODS:screen_on`. `framing` says a
     -- frame is open, `frame_open` whether its first byte has gone out - see `METHODS:with_frame`.
     shown = nil, shown_cols = 0, screen = nil, framing = false, frame_open = false,
+    -- The self-wake fact as last read (`⏰ 2 wakes · next 14:05`), "" when nothing is scheduled.
+    wakes = "",
     logged = "", logged_session = nil, turn = nil, totals = nil, deltas = 0, warned = nil,
     -- `Update available (<sha>): run wa update or /update` while a newer release is published
     -- (`lua/core/update_banner.lua`). It is the standing text of the **session-status-content** area:
@@ -1197,6 +1200,27 @@ function METHODS:session_line()
   return paint(clip(content.text, math.max(1, self.limit)), M.session_role(content.kind), self.live), content.kind
 end
 
+-- The layout as it reads *now*: `screen_rows` reserves the worst case once, and the self-wake fact is the
+-- one row that comes and goes with the world. When it is showing, it takes the row directly above the
+-- session status bar and everything above it moves up one line - the output region included, so the chat
+-- is pushed up rather than drawn over.
+function METHODS:layout()
+  local screen = self.screen
+  if not screen then return nil end
+  if not self:has_wakes() then return screen end
+  -- The wake row is the one directly above the status bar. In the boxed layout every other row is named
+  -- absolutely and the native editor owns them, so only the fallback's rows move.
+  local wake = screen.status - 1
+  local shifted = { top = screen.top, status = screen.status, input = screen.input, footer = screen.footer,
+    wake = wake, session = wake - 1, content = wake - 1, region = wake - 2, bottom = wake - 2 }
+  return shifted
+end
+
+-- Whether the self-wake row has anything to say.
+function METHODS:has_wakes()
+  return type(self.wakes) == "string" and self.wakes ~= ""
+end
+
 -- The output region's last row: one less while the line is showing, because the line is reserved
 -- rather than drawn over whatever the chat had there. The two layouts reserve different rows - the
 -- fallback's line sits on the region's own last row, the boxed one's below the box - so `region` is
@@ -1212,11 +1236,14 @@ end
 -- avoid (`scripts/test-cli-view.lua`, "a turn of ten tool calls erases the status row no times").
 -- `rust/wa-term/src/terminal_editor.rs`'s `out_bottom` reserves the same row from the same two facts.
 function METHODS:region_bottom()
-  if not self.screen then return nil end
-  if self:session_content() or self.turn then
-    return math.max(1, self.screen.region or (self.screen.content - 1))
+  local screen = self:layout()
+  if not screen then return nil end
+  -- The self-wake row is reserved the same way (`layout` already moved these rows up when it shows), so a
+  -- chat line never lands under it.
+  if self:session_content() or self.turn or self:has_wakes() then
+    return math.max(1, screen.region or (screen.content - 1))
   end
-  return self.screen.bottom
+  return screen.bottom
 end
 
 -- Where the line goes, as a cursor address. In the boxed layout it is the row directly under the box
@@ -1224,7 +1251,7 @@ end
 -- slash menu opens or when a run's status line comes and goes, so it needs no token. The fallback
 -- names the row `screen_rows` gave it, which is the output region's last row.
 function METHODS:session_address()
-  local screen = self.screen
+  local screen = self:layout()
   if not screen then return nil end
   if self.editor and self.editor_ready and self.stdout and host and host.panel then
     return "\27[" .. tostring(screen.session or screen.status) .. ";1H"
@@ -1264,6 +1291,28 @@ function METHODS:session_draw()
   end
 end
 
+-- The self-wake row: the fact on ONE line directly above the session status bar, or nothing when no wake is
+-- scheduled. Drawn only in the fallback layout - with the native editor, `rust/wa-term`'s `Editor` owns that
+-- row from the same text (`host.editor_wakes`), so the two renderers cannot disagree about what it says.
+function METHODS:wake_draw()
+  local layout = self:layout()
+  local wake_row = (layout and layout.wake) or (self.screen and self.screen.status and self.screen.status - 1)
+  if not wake_row then return end
+  if self.editor and self.editor_ready and self.stdout and host and host.editor_wakes then return end
+  if not self.live then return end
+  local row = wake_row
+  if self:has_wakes() then
+    local text = clip(self.wakes, math.max(1, self.limit))
+    self:control(CURSOR_SAVE .. "\27[" .. row .. ";1H\27[2K" .. paint(text, "dim", self.live) .. CURSOR_RESTORE)
+    self.wake_shown = true
+    return
+  end
+  if self.wake_shown then
+    self:control(CURSOR_SAVE .. "\27[" .. row .. ";1H\27[2K" .. CURSOR_RESTORE)
+    self.wake_shown = false
+  end
+end
+
 -- The hint row under the input box: the last run's numbers, or what to type. Boxed screens only.
 -- Its own content only: the update notice has a line of its own above the status bar now, so the
 -- numbers are never pushed right to make room for it (07/11).
@@ -1279,7 +1328,9 @@ function METHODS:footer_draw()
       .. paint(clip(hint, math.max(10, self.limit - 1)), "dim", self.live) .. CURSOR_RESTORE)
   end
   -- After the footer, never before: the host's footer write redraws the whole bottom of the screen,
-  -- so a line drawn first would be erased by it.
+  -- so a line drawn first would be erased by it. The wake row first, so the session line above it is
+  -- drawn last and owns its own row.
+  self:wake_draw()
   self:session_draw()
 end
 
@@ -1291,8 +1342,11 @@ function METHODS:live_footer()
   self.last_summary = M.session_summary({ runs = self.runs, tools = self.session_tools or 0,
     prompt = totals.prompt, completion = totals.completion, cached = totals.cached,
     context = self.context, budget = self.budget })
-  local wake = M.wake_text(self.session_id)
-  if wake ~= "" then self.last_summary = self.last_summary .. " " .. wake end
+  -- The self-wake fact has a row of its own now, directly above the session status bar: it used to be
+  -- appended to the numbers on that bar, where it squeezed them and, on a narrow terminal, wrapped the
+  -- bar it was sharing (Victor, 13/11). "" takes the row away again when nothing is scheduled.
+  self.wakes = M.wake_text(self.session_id)
+  if host and host.editor_wakes then pcall(host.editor_wakes, self.wakes) end
   local hook = M.hook_text(self.session_id, self.model, { runs = self.runs, tokens = self.tokens,
     context = self.context, context_percent = (self.context and self.budget and self.budget > 0)
       and (100 * self.context / self.budget) or nil })
@@ -1779,13 +1833,18 @@ function METHODS:answered(reply)
   self:run_finished()
 end
 
-function METHODS:failed(problem)
+function METHODS:failed(problem, opts)
+  opts = opts or {}
   self:clear()
   self:flush_call()
-  -- An interrupt (Esc, Ctrl+C) is the reader's own choice, not an error: say so plainly.
+  -- An interrupt (Esc, Ctrl+C) is the reader's own choice, not an error: say so plainly, in ONE line, and
+  -- name the wake when the run was one (a self-wake is a promise the session made itself, and a reader who
+  -- stops it should see which promise they stopped). No `run_failed`, and `run_cancelled` never appears:
+  -- the code is the harness's word, and this line is the reader's.
   if tostring(problem or ""):find("run_cancelled", 1, true) then
     self:topic(false)
-    self:line(paint(RESULT .. " Interrupted by user", "warning", self.live))
+    local text = RESULT .. " Interrupted by user" .. (opts.self_wake and " (self-wake)" or "")
+    self:line(paint(text, "warning", self.live))
     self:run_finished()
     return
   end

@@ -1659,6 +1659,9 @@ function M:run(text, images)
       session_id=self.session_id,user_id=self.user,run_id=self.run_id,
       trace=failure.trace,round=failure.round,attempts=failure.attempts,
       debug=self.debug,subagent=self.subagent and true or false,
+      -- A wake answers a promise the session made itself; when the reader interrupts it, the one line that
+      -- says so names it (`lua/core/run_failure.lua`, `cli_view.failed`).
+      self_wake=self.self_wake and true or false,
       last_user=self.last_user_text,
       record=function(turn) return record_turn(self, turn) end,
       ms=math.max(0,math.floor((host.now()-(self.run_counts.started_at or host.now()))*1000)),

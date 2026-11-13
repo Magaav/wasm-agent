@@ -148,6 +148,10 @@ pub struct Editor {
     /// Lines submitted during the run that the agent has not taken yet: drawn above the status line
     /// (`Steering queued`), never into the chat, so a steer is not printed twice. The host sets it.
     pub queued: Vec<String>,
+    /// The self-wake fact (`⏰ 2 wakes · next 14:05`, `lua/core/selfloop.lua`), on a row of its own
+    /// directly above the session status bar. It used to be appended to the footer's numbers row, where
+    /// it squeezed them; "" (no wake scheduled) means the row does not exist and the chat keeps it.
+    pub wakes: String,
     /// A one-keystroke note drawn in the footer's place (`Interrupting…`, `Draft kept`); the next
     /// key clears it, and so does the run's status row coming or going.
     pub notice: String,
@@ -337,7 +341,9 @@ impl Editor {
     }
     /// The box's bottom border: the row above the footer, one higher while the session-status-content
     /// line has something to say - the line sits between the box and the footer (Victor, 08/11).
-    pub fn bottom(&self) -> usize { self.row.saturating_sub(self.session_rows()) }
+    pub fn bottom(&self) -> usize {
+        self.row.saturating_sub(self.session_rows() + self.wakes_rows())
+    }
     /// The footer row: the last row of the screen, which is the CLI's session status bar.
     pub fn footer_row(&self) -> usize { self.row + 1 }
     /// Inside a paste: an Esc here is the start of the paste's end marker, never the Esc key.
@@ -363,7 +369,19 @@ impl Editor {
     /// A tool call's progress is **not** one of its claimants (Victor, 2026-11-10): it belongs in that
     /// call's own block in the transcript (`crate::transcript::Transcript::live`), where the host's
     /// ticker rewrites it while Lua is blocked. The row is the update notice's.
-    pub fn session_row(&self) -> usize { self.row }
+    pub fn session_row(&self) -> usize { self.row.saturating_sub(self.wakes_rows()) }
+    /// The self-wake row: ONE row directly above the session status bar (`footer_row`), so the fact cannot
+    /// squeeze the numbers and cannot wrap them. It exists only while a wake is scheduled - nothing is
+    /// reserved that is not drawn, so the chat keeps the row when there is none.
+    pub fn wakes_row(&self) -> usize { self.row }
+    fn wakes_rows(&self) -> usize { usize::from(!self.wakes.trim().is_empty()) }
+    /// That row, rendered: the fact in the hint colour, clipped to the width so it can never wrap.
+    pub fn wakes_content(&self) -> String {
+        let text = self.wakes.trim();
+        if text.is_empty() { return String::new(); }
+        let text = clip_cells(text, self.width);
+        if std::env::var_os("NO_COLOR").is_some() { text } else { format!("{HINT}{text}{RESET}") }
+    }
     fn session_rows(&self) -> usize { usize::from(self.has_session_content()) }
     fn has_session_content(&self) -> bool {
         !self.build.is_empty() || !self.session_notice.trim().is_empty()
@@ -582,9 +600,19 @@ impl Editor {
         // build is in flight (it replaces the notice), the standing notice otherwise, nothing when
         // there is neither - and then the box's bottom border takes the row, which is what `bottom`
         // and `out_bottom` account for. Drawn before the box, so a shrinking box never erases it.
+        // The rows below the box, bottom up: the session-status-content line, then the self-wake fact,
+        // then the session status bar (the footer). Erased first, because a row that stops having a fact
+        // must lose its text: the wake line disappears when the last wake fires.
+        for row in self.bottom() + 1..self.footer_row() {
+            frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+        }
         let session = self.session_content();
         if !session.is_empty() {
             frame.push_str(&format!("\x1b[{};1H\x1b[2K{session}", self.session_row()));
+        }
+        let wakes = self.wakes_content();
+        if !wakes.is_empty() {
+            frame.push_str(&format!("\x1b[{};1H\x1b[2K{wakes}", self.wakes_row()));
         }
         let border = if self.bash { BASH } else { BORDER };
         frame.push_str(&format!("\x1b[{top};1H\x1b[2K{border}{}{RESET}", "\u{2500}".repeat(self.width)));
@@ -986,6 +1014,104 @@ mod tests {
         for row in drawn_rows(&field.render()) {
             assert!(row.chars().count() <= 24, "field row: {row:?}");
         }
+    }
+
+    fn editor_at(width: usize) -> Editor {
+        // A 24-row terminal: the status bar is the last row, so the editor's `row` is 23 and the footer 24.
+        let mut editor = Editor::default();
+        editor.row = 23;
+        editor.width = width;
+        editor.height = 1;
+        editor
+    }
+
+    #[test]
+    fn the_self_wake_row_sits_directly_above_the_status_bar_and_goes_away_when_empty() {
+        let mut editor = editor_at(80);
+        // Nothing scheduled: no wake row at all, and the box keeps the row above the status bar.
+        assert_eq!(editor.footer_row(), 24, "the status bar is the last row");
+        assert_eq!(editor.wakes_row(), 23);
+        assert_eq!(editor.bottom(), 23);
+
+        // A fact: its own row directly above the status bar, everything above it up by one.
+        editor.wakes = "\u{23f0} 2 wakes \u{b7} next 14:05".into();
+        assert_eq!(editor.footer_row() - editor.wakes_row(), 1, "directly above the status bar");
+        assert_eq!(editor.session_row(), 22, "the row above that one");
+        assert_eq!(editor.bottom(), 22, "and the box - so the chat moved up, not the bar");
+        assert!(editor.out_bottom() < 22, "the output region lost the row, it is not drawn over");
+
+        // A notice as well: two rows under the box, wake last (nearest the bar).
+        editor.session_notice = "update available".into();
+        assert_eq!(editor.session_row(), 22);
+        assert_eq!(editor.bottom(), 21);
+    }
+
+    /// What each screen row ended up holding, by row number: cursor moves address the rows, and text is
+    /// appended to the row the cursor is on (a row can be written in pieces - the footer's numbers, then the
+    /// model at a column of its own), so this is the screen as the reader sees it.
+    fn rows_by_number(frame: &str) -> std::collections::BTreeMap<usize, String> {
+        let mut rows: std::collections::BTreeMap<usize, String> = std::collections::BTreeMap::new();
+        let mut rest = frame;
+        let mut row: Option<usize> = None;
+        while !rest.is_empty() {
+            if let Some(start) = rest.find('\x1b') {
+                // Text before the sequence belongs to the row the cursor is on.
+                if start > 0 {
+                    if let Some(known) = row { rows.entry(known).or_default().push_str(&rest[..start]); }
+                }
+                let after = &rest[start + 2..];
+                let end = after.find(|c: char| !(c.is_ascii_digit() || c == '[' || c == ';' || c == '?')).unwrap_or(after.len());
+                let sequence = &after[..=end];
+                if sequence.ends_with('H') {
+                    if let Some(parsed) = sequence.trim_start_matches('[').trim_end_matches('H')
+                        .split(';').next().and_then(|first| first.parse::<usize>().ok()) {
+                        row = Some(parsed);
+                    }
+                }
+                rest = &after[end + 1..];
+                continue;
+            }
+            if let Some(known) = row { rows.entry(known).or_default().push_str(rest); }
+            break;
+        }
+        rows
+    }
+
+    #[test]
+    fn at_80x24_the_fact_is_on_its_own_row_and_the_status_bar_keeps_its_numbers() {
+        let mut editor = editor_at(80);
+        editor.footer = "\u{21bb}3 \u{2692}2 \u{2191}9 \u{2193}4 \u{25c7}0.31%".into();
+        editor.footer_right = "stub-model".into();
+        // Without a wake: no wake text anywhere, and the status bar keeps its numbers and its model.
+        let plain = rows_by_number(&editor.render());
+        assert!(plain.values().all(|row| !row.contains("wakes")), "no wake text anywhere: {plain:?}");
+        let bar = plain.get(&editor.footer_row()).cloned().unwrap_or_default();
+        assert!(bar.contains("\u{21bb}3") && bar.contains("stub-model"), "the status bar: {bar:?}");
+
+        // With a wake: one more row, directly above the status bar, and the numbers are untouched.
+        editor.wakes = "\u{23f0} 2 wakes \u{b7} next 14:05".into();
+        let with = rows_by_number(&editor.render());
+        let bar = with.get(&24).cloned().unwrap_or_default();
+        assert!(bar.contains("\u{21bb}3") && bar.contains("stub-model"),
+            "the status bar keeps the numbers and the model: {bar:?}");
+        assert!(!bar.contains("wakes"), "and no wake text on it: {bar:?}");
+        let above = with.get(&23).cloned().unwrap_or_default();
+        assert!(above.contains("2 wakes") && above.contains("next 14:05"),
+            "the fact is on row 23, directly above the bar at 24: {above:?} in {with:?}");
+        assert_eq!(with.get(&22).map(String::as_str), Some(&*"\u{2500}".repeat(80)),
+            "the box's bottom divider moved up to row 22, so nothing overlaps it: {with:?}");
+        assert_eq!(with.get(&23).map(String::as_str).map(|row| row.contains("wakes")), Some(true),
+            "row 23 is the fact and nothing else: {with:?}");
+        for row in with.values() {
+            assert!(row.chars().count() <= 80, "nothing is wider than the terminal: {row:?}");
+        }
+
+        // It disappears again, and takes its row with it.
+        editor.wakes = String::new();
+        let gone = rows_by_number(&editor.render());
+        assert!(gone.values().all(|row| !row.contains("wakes")), "the row is gone: {gone:?}");
+        assert_eq!(gone.get(&23).map(String::as_str), Some(&*"\u{2500}".repeat(80)),
+            "and the box's divider came back down to row 23: {gone:?}");
     }
 
     fn type_bytes(editor: &mut Editor, bytes: &[u8]) -> Action {

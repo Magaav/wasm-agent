@@ -287,6 +287,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("transcript_hold", Device, crate::host::transcript_hold, "Keep CLI transcript writes undrawn until released, then draw once"),
     plain!("editor_status", Device, crate::host::editor_status, "Show or hide the CLI's status line row (shown while a run is in flight)"),
     plain!("editor_footer", Device, crate::host::editor_footer, "Set the hint row under the CLI's input box"),
+    plain!("editor_wakes", Device, crate::host::editor_wakes, "Set the CLI's self-wake row, one line above the session status bar"),
     plain!("input_commands", Device, crate::host::input_commands, "Set the commands the CLI's slash menu offers"),
     plain!("input_held", Device, crate::host::input_held, "List lines the CLI took but holds as still queued above its status line"),
     plain!("input_take", Device, crate::host::input_take, "Take lines the reader buffered while a run was in flight"),
