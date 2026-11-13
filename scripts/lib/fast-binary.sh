@@ -227,14 +227,24 @@ fast_binary_build() {
   command -v cargo >/dev/null 2>&1 || { FAST_BIN_WHY="$FAST_BIN_WHY; cargo is not on PATH"; return 1; }
   log=$(mktemp "${TMPDIR:-/tmp}/wa-fast-build-XXXXXX" 2>/dev/null) || log=/dev/null
   echo "fast: building this tree's binary (cargo build --release --offline)${assets:+ with code-mode assets}"
+  # WHERE THE BINARY WILL BE LOOKED FOR, the build is told to write. `fast_binary_target_dir` is the one
+  # root's island (`<home>/.wasm-agent/build/<tree>-<hash>/target`) unless CARGO_TARGET_DIR says
+  # otherwise, and this build used to run without it: cargo wrote `rust/target/release/wa` while the run
+  # resolved `$FAST_BIN` in the island, so the freshly built binary was never found. Measured 13/11 on
+  # `wa-desktop`: `stale_binary: the binary it just built cannot report its identity`, and then every
+  # lua row failed with `exit 127 ... No such file or directory` instead of the run stopping.
+  local target
+  target="$(fast_binary_target_dir)"
   (
     cd "$ROOT" || exit 1
     if [ -n "$assets" ]; then
+      CARGO_TARGET_DIR="$target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_BUILD_ASSETS="$assets" \
         cargo build --release --offline --manifest-path rust/Cargo.toml
     else
+      CARGO_TARGET_DIR="$target" \
       WA_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
       WA_BUILD_SOURCE_TREE=$(git rev-parse 'HEAD^{tree}') \
       WA_CODEMODE_ALLOW_EMPTY=1 \
@@ -289,5 +299,12 @@ fast_binary_refuse() {
   printf 'fast: the rows must run THIS tree, so the run stops here instead of grading another commit.\n' >&2
   printf 'fast: build it with: WA_BUILD_SOURCE_COMMIT=$(git -C %s rev-parse HEAD) WA_CODEMODE_BUILD_ASSETS=<prepared assets> cargo build --release --offline --manifest-path rust/Cargo.toml\n' "$ROOT" >&2
   printf 'fast: or name a binary you mean with WA_BIN=<path>, or run WA_FAST_ALLOW_STALE_BINARY=1 to use the stale one (said out loud, every row).\n' >&2
-  return 2
+  # EXIT, do not return: both call sites are `if ! fast_binary_build; then fast_binary_refuse; fi` and
+  # `if [ ... = refuse ]; then fast_binary_refuse; fi`, and a return from inside those braces let the run
+  # continue to the rows with no binary at all (measured 13/11: 196 lua rows, 196 x `exit 127: No such
+  # file or directory` - a hole in the runner reported as 196 failures of the tree).
+  # 2 is the code this refusal has always had and the contract asserts (scripts/test-fast-binary.mjs,
+  # "the refusal exits 2 (a tree verdict, not the machine)"): exit 3 is the fork-exhaustion case, where
+  # the machine could not run the rows at all.
+  exit 2
 }
