@@ -1,8 +1,8 @@
 // Pure admission validation; synthetic references here NEVER authorize/run trials.
-import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import crypto from 'node:crypto';import {checkPilotManifest,runApprovedPilot,runApprovedPiPilot,proposedLimits} from './agent-benchmark-pilot.mjs';
+import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import crypto from 'node:crypto';import {checkPilotManifest,runApprovedPilot,runApprovedPiPilot,proposedLimits} from '../harness-evaluator/scripts/agent-benchmark-pilot.mjs';
 if(process.argv[2]==='--capture'){
  const {openPiEvidence,verifyPiEvidence,durablePiResult}=await import('../benchmarks/codemode/pi-evidence.mjs');
- const {createGeneration,containedProcess}=await import('./agent-benchmark-results.mjs');
+ const {createGeneration,containedProcess}=await import('../harness-evaluator/scripts/agent-benchmark-results.mjs');
  const [binary,out]=process.argv.slice(3);assert(path.isAbsolute(binary)&&path.isAbsolute(out)&&!fs.existsSync(out));fs.mkdirSync(out);let checks=0;
  const events=path.join(out,'events.jsonl'),writer=openPiEvidence(events);const expected=[];
  for(let i=0;i<160;i++){const event={type:'message_update',message:{content:'x'.repeat(i*1024)}};expected.push(JSON.stringify({event})+'\n');writer.append(event);}

@@ -103,15 +103,15 @@ also requires their build receipts plus current runtime/grader qualification.
 The installed skill may be stale: use this selected repository's files.
 
 ```
-node scripts/agent-benchmark.mjs --pilot-forced-qualify <artifact-config.json> <fresh-runtime-proof>
-node scripts/agent-benchmark.mjs --pilot-forced-negative <artifact-config.json> <fresh-negative-proof>
-node scripts/check-agent-benchmark-forced-proof.mjs <artifact-config.json> <runtime-proof>
-node scripts/check-agent-benchmark-forced-proof.mjs <artifact-config.json> <negative-proof> --negative
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-forced-qualify <artifact-config.json> <fresh-runtime-proof>
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-forced-negative <artifact-config.json> <fresh-negative-proof>
+node harness-evaluator/scripts/check-agent-benchmark-forced-proof.mjs <artifact-config.json> <runtime-proof>
+node harness-evaluator/scripts/check-agent-benchmark-forced-proof.mjs <artifact-config.json> <negative-proof> --negative
 node scripts/test-agent-benchmark-forced-unknown.mjs <artifact-config.json> <fresh-unknown-proof>
 # Requalify the frozen grader if one of its execution-source pins changed:
 node scripts/test-agent-benchmark-pilot-grade.mjs <fresh-grade-proof> <exact-image-sha256>
 # Privately set qualificationReceipt/gradingReceipt in preparation config.
-node scripts/agent-benchmark.mjs --pilot-forced-prepare <preparation-config.json> <fresh-plan>
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-forced-prepare <preparation-config.json> <fresh-plan>
 ```
 
 Preparation and postchecks make no live vault/provider request and create no grant.
@@ -122,8 +122,8 @@ zero whole-trial-retry envelope. Only the coordinator records the actual human
 approval reference and runs the single fresh wave:
 
 ```
-node scripts/agent-benchmark.mjs --pilot-forced-run-approved <manifest.json> <fresh-results> <exact-manifest-sha256> <actual-human-reference.json>
-node scripts/check-agent-benchmark-forced-proof.mjs <artifact-config.json> <results> --live
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-forced-run-approved <manifest.json> <fresh-results> <exact-manifest-sha256> <actual-human-reference.json>
+node harness-evaluator/scripts/check-agent-benchmark-forced-proof.mjs <artifact-config.json> <results> --live
 ```
 
 One durable exclusive/fsynced launch intent precedes trial effects. Consumed or

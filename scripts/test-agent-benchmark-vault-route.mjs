@@ -7,8 +7,8 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
-import {createVaultSubscriptionRoute, responseUsage, readModelRouteJournal} from './agent-benchmark-model-route.mjs';
-import {isolatedEnvironment} from './agent-benchmark-environment.mjs';
+import {createVaultSubscriptionRoute, responseUsage, readModelRouteJournal} from '../harness-evaluator/scripts/agent-benchmark-model-route.mjs';
+import {isolatedEnvironment} from '../harness-evaluator/scripts/agent-benchmark-environment.mjs';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const [out] = process.argv.slice(2);
 assert(out && path.isAbsolute(out) && !fs.existsSync(out), 'fresh evidence root required');
@@ -51,7 +51,7 @@ const provider = http.createServer(async (req, res) => {
 });
 await new Promise(r => provider.listen(0, '127.0.0.1', r));
 const python = process.env.WA_BENCHMARK_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-const child = cp.spawn(python, ['-B', path.join(repo, 'scripts/fixtures/benchmark-vault.py'), path.join(repo, 'vault/wa_vault.py'),
+const child = cp.spawn(python, ['-B', path.join(repo, 'harness-evaluator/scripts/fixtures/benchmark-vault.py'), path.join(repo, 'vault/wa_vault.py'),
   path.join(out, 'vault-data'), 'http://127.0.0.1:' + provider.address().port], {
   env: isolatedEnvironment(out), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true});
 let stdout = '', stderr = '';
@@ -182,7 +182,7 @@ try {
   check(journal.complete && journal.complete_provider_usage && journal.provider_attempts === 4
     && journal.prompt_total === 400 && journal.output === 80 && journal.actual_cost === null, 'offline complete journal readback covers all four arms');
   check(!readModelRouteJournal(path.join(out, 'partial')).complete_provider_usage, 'failed provider attempt makes total usage unknown');
-  const cli = cp.spawnSync(process.execPath, [path.join(repo, 'scripts/agent-benchmark.mjs'), '--route-journal', path.join(out, 'common')],
+  const cli = cp.spawnSync(process.execPath, [path.join(repo, 'harness-evaluator/scripts/agent-benchmark.mjs'), '--route-journal', path.join(out, 'common')],
     {env: isolatedEnvironment(out), encoding: 'utf8'});
   fs.writeFileSync(path.join(out, 'journal-cli.stdout'), cli.stdout); fs.writeFileSync(path.join(out, 'journal-cli.stderr'), cli.stderr);
   check(cli.status === 0 && JSON.parse(cli.stdout).provider_attempts === 4 && !cli.stdout.includes('CALLER_SECRET'), 'runner exposes metadata-only offline journal readback');

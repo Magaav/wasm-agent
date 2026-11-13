@@ -1,9 +1,9 @@
 // Shared real contestant lifecycle for deterministic qualification and approved
 // trials. Trusted runtime is outside the blind, networkless tool container.
-import fs from 'node:fs';import cp from 'node:child_process';import path from 'node:path';import assert from 'node:assert/strict';import {createToolSandbox,sandboxRpc} from './agent-benchmark-sandbox.mjs';import {disposable,registerSnapshotGit,containedProcess} from './agent-benchmark-results.mjs';import {isolatedEnvironment} from './agent-benchmark-environment.mjs';import {createReferenceServer} from '../benchmarks/codemode/reference-server.mjs';
+import fs from 'node:fs';import cp from 'node:child_process';import path from 'node:path';import assert from 'node:assert/strict';import {createToolSandbox,sandboxRpc} from './agent-benchmark-sandbox.mjs';import {disposable,registerSnapshotGit,containedProcess} from './agent-benchmark-results.mjs';import {isolatedEnvironment} from './agent-benchmark-environment.mjs';import {createReferenceServer} from '../../benchmarks/codemode/reference-server.mjs';
 import crypto from 'node:crypto';
-import {verifyPiEvidence} from '../benchmarks/codemode/pi-evidence.mjs';
-import {codemodeSchema,routingAppendix,readVmJournal,adaptedLabels} from '../benchmarks/codemode/forced-contract.mjs';
+import {verifyPiEvidence} from '../../benchmarks/codemode/pi-evidence.mjs';
+import {codemodeSchema,routingAppendix,readVmJournal,adaptedLabels} from '../../benchmarks/codemode/forced-contract.mjs';
 import {verifyBlindReference} from './agent-benchmark-blind-reference.mjs';import {stageTrialContext,taskModes} from './agent-benchmark-pilot-input.mjs';
 export async function runIsolatedArm({repo,root,input,artifacts,arm,route,mode,prompt,manifestSha=null,limits,probe=false,forced=false,startBarrier=null,negative=false,screen=null}){
  if(screen){assert(['repair','aggregation','workflow'].includes(screen.task)&&['A','B'].includes(screen.treatment)&&arm.arm===screen.task+'-'+screen.treatment.toLowerCase(),'fixed matched screen identity');assert(forced===(screen.treatment==='B'),'screen routing condition');}

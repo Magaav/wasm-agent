@@ -1,6 +1,6 @@
 # Model-free benchmark foundations
 
-This extends `scripts/agent-benchmark.mjs` and the existing offline token auditor;
+This extends `harness-evaluator/scripts/agent-benchmark.mjs` and the existing offline token auditor;
 it is not another platform or a ready four-arm comparison. No code-mode engines,
 benchmark solver inference, installed assets/configuration or production caps change.
 Subsequent experimental engine implementation is documented separately in
@@ -10,7 +10,7 @@ Preparation assistant inference is real work and must not be labeled zero infere
 
 ## Fixture and hidden behavioral acceptance
 
-`fixtures/benchmarks/binding-discovery/v1/README.md` describes the final fixture.
+`harness-evaluator/fixtures/benchmarks/binding-discovery/v1/README.md` describes the final fixture.
 Its manifest hashes the exact original task, sanitized input, native declarations,
 original private artifact and sealed complete selected original message rows. The
 private rows include full original fields/trace/encrypted reasoning without elision;
@@ -22,9 +22,9 @@ latency; all are retained, none relabeled as a new solver result. The historical
 included push/deployment coordination outside the restricted future solver scope.
 
 ```
-node scripts/agent-benchmark.mjs --binding-export <fresh-private-output>
-node scripts/agent-benchmark.mjs --binding-preflight <native-binary> <fresh-evidence>
-node scripts/agent-benchmark.mjs --binding-grade <native-binary> <candidate-tree> <fresh-evidence>
+node harness-evaluator/scripts/agent-benchmark.mjs --binding-export <fresh-private-output>
+node harness-evaluator/scripts/agent-benchmark.mjs --binding-preflight <native-binary> <fresh-evidence>
+node harness-evaluator/scripts/agent-benchmark.mjs --binding-grade <native-binary> <candidate-tree> <fresh-evidence>
 ```
 
 Task source is `dc11c4626358438514624afa05c20bacb68cdbe7`; native grader binary is
@@ -55,10 +55,10 @@ return the complete counted oracle summary and make zero planner client effects.
 ## Trace and accounting adapters
 
 ```
-node scripts/agent-benchmark-observe.mjs native <complete-private-events.json>
-node scripts/agent-benchmark-observe.mjs pi <private-session.jsonl>
-node scripts/agent-benchmark-observe.mjs prepared <private-prepared-requests.json>
-python scripts/agent-benchmark-report.py <private-trace-dir> <fixture.json>
+node harness-evaluator/scripts/agent-benchmark-observe.mjs native <complete-private-events.json>
+node harness-evaluator/scripts/agent-benchmark-observe.mjs pi <private-session.jsonl>
+node harness-evaluator/scripts/agent-benchmark-observe.mjs prepared <private-prepared-requests.json>
+python harness-evaluator/scripts/agent-benchmark-report.py <private-trace-dir> <fixture.json>
 ```
 
 `agent-benchmark-telemetry.mjs` reuses `lib/token-audit.cjs` for native identity,
@@ -142,10 +142,10 @@ cannot be certified as complete results. Completeness is of the declared/retaine
 records, not proof that an uninstrumented provider never made another attempt.
 
 ```
-node scripts/agent-benchmark.mjs --seal-results <owned-generation>
-node scripts/agent-benchmark.mjs --verify-results <owned-generation>
-node scripts/agent-benchmark.mjs --cleanup-results <owned-generation>
-node scripts/agent-benchmark.mjs --reconcile-results <owned-generation>
+node harness-evaluator/scripts/agent-benchmark.mjs --seal-results <owned-generation>
+node harness-evaluator/scripts/agent-benchmark.mjs --verify-results <owned-generation>
+node harness-evaluator/scripts/agent-benchmark.mjs --cleanup-results <owned-generation>
+node harness-evaluator/scripts/agent-benchmark.mjs --reconcile-results <owned-generation>
 ```
 
 Independent native/OS-owned tree settlement and complete

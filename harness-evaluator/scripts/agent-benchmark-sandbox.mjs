@@ -3,7 +3,7 @@
 // immutable recovery snapshots precede seal-first container/volume retirement.
 import fs from 'node:fs';import path from 'node:path';import cp from 'node:child_process';import crypto from 'node:crypto';import http from 'node:http';import zlib from 'node:zlib';import assert from 'node:assert/strict';
 import {realDockerAdapter} from './agent-benchmark-docker.mjs';import {isolatedEnvironment} from './agent-benchmark-environment.mjs';import {dockerResource,assertDisposable} from './agent-benchmark-results.mjs';
-const worker=fs.readFileSync(new URL('../benchmarks/codemode/sandbox-worker.cjs',import.meta.url),'utf8'),init=fs.readFileSync(new URL('../benchmarks/codemode/sandbox-init.cjs',import.meta.url),'utf8');export const sandboxWorkerSha=crypto.createHash('sha256').update(worker).digest('hex');
+const worker=fs.readFileSync(new URL('../../benchmarks/codemode/sandbox-worker.cjs',import.meta.url),'utf8'),init=fs.readFileSync(new URL('../../benchmarks/codemode/sandbox-init.cjs',import.meta.url),'utf8');export const sandboxWorkerSha=crypto.createHash('sha256').update(worker).digest('hex');
 export function createToolSandbox(root,{imageId,lifetimeMilliseconds=3060000,existingVolume,readOnly=false}={}){
  assert(Number.isSafeInteger(lifetimeMilliseconds)&&lifetimeMilliseconds>=1000&&lifetimeMilliseconds<=3060000,'explicit experiment lifetime');
  const base=realDockerAdapter(root,{imageId}),volume=existingVolume??dockerResource(root,'volume',base);let id,adapter,readonly=readOnly,halted=false,serial=0,captured=false,deadline=null;

@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep pyt
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 COPY --from=wa-build /source/rust/target/release/wa /usr/local/bin/wa
-COPY scripts/agent-benchmark-ui-observe.mjs /usr/local/bin/wa-ui-observe
+COPY harness-evaluator/scripts/agent-benchmark-ui-observe.mjs /usr/local/bin/wa-ui-observe
 COPY scripts/ui-contract-audit.mjs /usr/local/bin/wa-ui-contracts
 RUN chmod +x /usr/local/bin/wa-ui-observe /usr/local/bin/wa-ui-contracts
 WORKDIR /work

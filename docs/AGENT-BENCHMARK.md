@@ -15,7 +15,7 @@ separate prerequisites; no production installation/configuration is implied.
 See [AGENT-BENCHMARK-FOUNDATIONS.md](AGENT-BENCHMARK-FOUNDATIONS.md) for the
 verified fixture, native behavioral oracle, strict Pi/native trace adapters, actual
 prepared-message prefix analysis and seal-first owned-resource cleanup procedures.
-The final fixture is `fixtures/benchmarks/binding-discovery/v1/manifest.json`; only
+The final fixture is `harness-evaluator/fixtures/benchmarks/binding-discovery/v1/manifest.json`; only
 its `solver/` input and the clean original task snapshot are exported. The earlier
 candidate descriptor remains an explicitly obsolete, non-exportable checkpoint.
 Private complete selected originals and artifact bytes are sealed with SHA-256
@@ -78,10 +78,10 @@ transport, complete provider journals and runtime-image selection still need wir
 
 ## Existing components and actual limits
 
-- Skill: `skills/agent-benchmark/SKILL.md` (Agent Skills layout, not agent-benchmark.md).
-- Paired container runner: `scripts/agent-benchmark.mjs`.
-- Trace adapter: `scripts/agent-benchmark-report.py`.
-- Frozen historical fixture: `benchmarks/agent-benchmark/ui-diff-topic.json`.
+- Skill: `harness-evaluator/skills/agent-benchmark/SKILL.md` (Agent Skills layout, not agent-benchmark.md).
+- Paired container runner: `harness-evaluator/scripts/agent-benchmark.mjs`.
+- Trace adapter: `harness-evaluator/scripts/agent-benchmark-report.py`.
+- Frozen historical fixture: `harness-evaluator/benchmarks/agent-benchmark/ui-diff-topic.json`.
 - Offline accounting: `scripts/audit-tokens.cjs`, `docs/OBSERVABILITY.md`,
   `docs/TOKEN_EFFICIENCY.md`. Native spans record model/tool/run latency, usage,
   retries and summary attempts; Pi JSONL records its messages, tools and usage.
@@ -136,7 +136,7 @@ The fixture oracle deliberately walks no unrelated historical worktrees.
 
 ## Proposed main fixture: telemetry-empty-payload
 
-Descriptor: `benchmarks/agent-benchmark/telemetry-empty-payload.json`.
+Descriptor: `harness-evaluator/benchmarks/agent-benchmark/telemetry-empty-payload.json`.
 Status: **candidate-awaiting-pi-qualification**, not the new default yet.
 
 Real historical defect at task source `9fa1ae552d96d5f54f97a3c857035246a7d69d1d`:

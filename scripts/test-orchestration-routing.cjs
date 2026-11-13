@@ -11,7 +11,7 @@ const git=(root,...args)=>{const r=spawnSync('git',args,{cwd:root,encoding:'utf8
 git(out,'init','--bare',remote);git(out,'init','-b','main',main);git(main,'config','core.autocrlf','false');git(main,'config','user.name','fixture');git(main,'config','user.email','fixture@invalid');fs.writeFileSync(main+'/base','base');git(main,'add','.');git(main,'commit','-m','baseline');git(main,'remote','add','origin',remote);git(main,'push','-u','origin','main');
 let calls=0,parentCalls=0,childCalls=0,held=null,released=false,child,provider;const sockets=new Set();
 (async()=>{try{
- const {isolatedEnvironment}=await import(pathToFileURL(repo+'/scripts/agent-benchmark-environment.mjs').href);
+ const {isolatedEnvironment}=await import(pathToFileURL(repo+'/harness-evaluator/scripts/agent-benchmark-environment.mjs').href);
  provider=http.createServer((req,res)=>{
   if(req.url==='/release'){released=true;if(held){held();held=null;}res.end('ok');return;}
   let raw='';req.on('data',b=>raw+=b);req.on('end',()=>{try{

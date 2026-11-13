@@ -1,7 +1,7 @@
 // Read-only, source/artifact-bound sealed proof/result verification. No process,
 // Docker, provider, credential, reservation or cleanup effects.
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {fileURLToPath} from 'node:url';
-import {runtimePins,sha} from './agent-benchmark-pilot-pins.mjs';import {verifyBundle,readSealedRecord} from './agent-benchmark-results.mjs';import {forcedScope,verifyVmJournal,codemodeFunction} from '../benchmarks/codemode/forced-contract.mjs';
+import {runtimePins,sha} from './agent-benchmark-pilot-pins.mjs';import {verifyBundle,readSealedRecord} from './agent-benchmark-results.mjs';import {forcedScope,verifyVmJournal,codemodeFunction} from '../../benchmarks/codemode/forced-contract.mjs';
 const address=p=>p.replaceAll('\\','/').replace(/^records\//,'');
 export function verifyForcedProof(config,out,{live=false,negative=false}={}){
  const root=path.join(out,'g'),r=JSON.parse(fs.readFileSync(path.join(out,'receipt.json'))),bundle=verifyBundle(root),owner=JSON.parse(fs.readFileSync(path.join(root,'owner.json')));

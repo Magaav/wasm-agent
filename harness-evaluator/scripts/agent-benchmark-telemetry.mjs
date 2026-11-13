@@ -1,7 +1,7 @@
 // Offline adapters for native telemetry exports and Pi JSONL; metadata-only reports.
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
-const require=createRequire(import.meta.url),{audit}=require('./lib/token-audit.cjs');
+const require=createRequire(import.meta.url),{audit}=require('../../scripts/lib/token-audit.cjs');
 export const canonical=v=>Array.isArray(v)?'['+v.map(canonical).join(',')+']':v&&typeof v==='object'?'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}':JSON.stringify(v);
 export const digest=v=>crypto.createHash('sha256').update(canonical(v)??'null').digest('hex');
 const count=x=>Number.isSafeInteger(x)&&x>=0;

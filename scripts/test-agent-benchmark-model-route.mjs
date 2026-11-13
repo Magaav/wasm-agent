@@ -1,6 +1,6 @@
 // Loopback-only common-route proof, no solver/provider inference.
 import fs from 'node:fs';import path from 'node:path';import http from 'node:http';import crypto from 'node:crypto';import assert from 'node:assert/strict';
-import {createSharedModelRoute,responseUsage} from './agent-benchmark-model-route.mjs';
+import {createSharedModelRoute,responseUsage} from '../harness-evaluator/scripts/agent-benchmark-model-route.mjs';
 const [out]=process.argv.slice(2);assert(out&&path.isAbsolute(out)&&!fs.existsSync(out));fs.mkdirSync(out,{recursive:true});let checks=0;const check=(v,m)=>{assert(v,m);checks++;};const secret='MOCK_ONLY_CREDENTIAL_DO_NOT_FORWARD_TO_SOLVER';const observed=[];
 const upstream=http.createServer(async(req,res)=>{const chunks=[];for await(const b of req)chunks.push(b);const body=JSON.parse(Buffer.concat(chunks));observed.push({headers:req.headers,body});
  if(body.input[0]?.content==='unknown'){res.writeHead(503,{'content-type':'application/json'});res.end(JSON.stringify({error:{code:'server_error'}}));return;}

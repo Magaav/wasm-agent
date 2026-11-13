@@ -55,13 +55,13 @@ and defaults remain four-arm; neither entry accepts the other scope's manifest.
 Use absolute paths and **new directories**, with the original artifact config:
 
 ```
-node scripts/agent-benchmark.mjs --pilot-pi-qualify <artifact-config.json> <fresh-pi-proof>
-node scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config.json> <fresh-pi-proof> <verified-grade-proof> --pi-only
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-pi-qualify <artifact-config.json> <fresh-pi-proof>
+node harness-evaluator/scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config.json> <fresh-pi-proof> <verified-grade-proof> --pi-only
 # Copy artifact/preparation config privately; set qualificationReceipt to
 # <fresh-pi-proof>/receipt.json. Keep build/grading receipts and artifact pins.
-node scripts/agent-benchmark.mjs --pilot-pi-prepare <pi-preparation-config.json> <fresh-pi-plan>
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-pi-prepare <pi-preparation-config.json> <fresh-pi-plan>
 # Coordinator only, after recording the ACTUAL new human message reference:
-node scripts/agent-benchmark.mjs --pilot-pi-run-approved <fresh-pi-plan>/manifest.json <fresh-pi-results> <manifest-sha256> <actual-approval-reference.json>
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-pi-run-approved <fresh-pi-plan>/manifest.json <fresh-pi-results> <manifest-sha256> <actual-approval-reference.json>
 ```
 
 Pi-only qualification streams over8MiB of actual SDK raw events through the unchanged
@@ -124,10 +124,10 @@ These are disclosed benchmark adapters, not new production capabilities.
 Use absolute paths and a fresh directory for every attempt:
 
 ```
-node scripts/agent-benchmark.mjs --pilot-qualify <artifact-config.json> <fresh-runtime-proof>
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-qualify <artifact-config.json> <fresh-runtime-proof>
 node scripts/test-agent-benchmark-pilot-grade.mjs <fresh-grade-proof> <exact-cached-image-sha256>
-node scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config.json> <runtime-proof> <grade-proof>
-node scripts/agent-benchmark.mjs --pilot-prepare <preparation-config.json> <fresh-plan>
+node harness-evaluator/scripts/check-agent-benchmark-pilot-proof.mjs <artifact-config.json> <runtime-proof> <grade-proof>
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-prepare <preparation-config.json> <fresh-plan>
 ```
 
 Artifact configuration names `baselineBinary`, `candidateBinary`, `piPackage`,
@@ -187,7 +187,7 @@ After actual human approval, preserve its original message reference in an appro
 file (`session_id`, `message_id`, `manifest_sha256`) and invoke only the exact plan:
 
 ```
-node scripts/agent-benchmark.mjs --pilot-run-approved <manifest.json> <fresh-results> <approved-sha256> <approval-reference.json>
+node harness-evaluator/scripts/agent-benchmark.mjs --pilot-run-approved <manifest.json> <fresh-results> <approved-sha256> <approval-reference.json>
 ```
 
 A local vault-presence check precedes trial admission; no login/import/refresh or
