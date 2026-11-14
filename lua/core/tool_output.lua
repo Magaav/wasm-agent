@@ -145,6 +145,23 @@ function M.project(name, output)
     if #encoded<=M.MAX_BYTES then return encoded end
     return preview_view(name,{},encoded,M.store(encoded))
   end
+  -- A script's model view is its outcome, not its bookkeeping (operator 14/11, "will that bloat and hurt
+  -- reasoning?"): `summary` already says each call's status in one line, so the per-call evidence arrays
+  -- (attempts, calls: paths and hashes the model cannot use) and the constant backend/context_policy
+  -- strings leave the view. The complete result is kept as a file, named by full_result, as for any
+  -- oversized output - a reader that needs a call's evidence asks for it.
+  if name=='codemode' and output.summary~=nil and (output.attempts~=nil or output.calls~=nil) then
+    local full = json.encode(output)
+    local lean = {}
+    for key, value in pairs(output) do
+      if key~='attempts' and key~='calls' and key~='backend' and key~='context_policy'
+          and not (key=='unexecuted' and type(value)=='table' and next(value)==nil)
+          and not (key=='items' and type(value)=='table' and next(value)==nil) then lean[key]=value end
+    end
+    local ref = M.store(full)
+    lean.full_result = {sha256=ref.sha256, bytes=#full}
+    output = lean
+  end
   local encoded = json.encode(output)
   -- A native read page already obeys both limits and carries a byte-exact cursor. A trailing
   -- newline is not a 2001st line; re-truncating here would skip bytes on the next page.

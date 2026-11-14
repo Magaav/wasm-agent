@@ -140,11 +140,10 @@ end
 -- and the behaviour, because a stale sentence here tells the model about a rule that no longer exists (31/10).
 M.guidance=table.concat({
  'Work in code: one `codemode` call runs JavaScript in which every tool is `tools.<name>(args)`. Put `await` before a call whose result you use; a call you return is awaited for you. What the script returns is your result.',
- 'Find tools with searchTools("text"); searchTools("select:a,b") gives their schemas. Run independent calls together with Promise.all. Calling a tool directly also works: it runs as the same one-line script.',
- 'Effects run one at a time and are never replayed: when an effectful call failed or its outcome is unknown, read its state before trying again.',
+ 'Find tools with searchTools("text"); searchTools("select:a,b") gives their schemas. Calling a tool directly also works: it runs as the same one-line script.',
+ 'How to work: 1) Gather - one script runs every independent read together (Promise.all) and returns only what you need. 2) Reflect - read the result\'s summary line, one status per call: 200 done, 202 still running, 400 fix that call, 403/404/500 the world said no, so do not reshape it. 3) Act - one script for the effects, each awaited; effects are never replayed, so after an unknown outcome read the state before trying again. 4) Stop at 200 - an effect that answered 200 is done; do not re-read to verify it.',
  'Other wasm-agent nodes: tools.nodes() lists them; tools.remote({node, capability, ...}) runs a capability there. WhatsApp is mcp_whatsapp_* on every node.',
  'Calls are always fresh; reuse an earlier result only by asking for it (results.get).',
- 'Every answer has a status: 200 done, 202 accepted and still running, 400 fix the call, 403 not allowed, 404 not found, 500 the call was right and it failed - read the error, do not reshape the call.',
 },'\n')
 -- The peers the last federation refresh saw, one line; cache only, so the prompt never waits on them.
 function M.peer_index()

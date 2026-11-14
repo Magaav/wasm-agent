@@ -31,7 +31,8 @@ function M.of(result)
 end
 
 function M.stamp(result)
-  if type(result) == 'table' and result.status == nil then result.status = M.of(result) end
+  -- An array answer (a list) stays a list: a key on it would make it an object nothing can encode.
+  if type(result) == 'table' and result.status == nil and result[1] == nil and next(result) ~= nil then result.status = M.of(result) end
   return result
 end
 

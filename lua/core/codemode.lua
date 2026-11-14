@@ -16,6 +16,25 @@ local contract=dofile('lua/core/json_contract.lua')
 -- same refusal two different answers. The text says where it came from either way - the script loop,
 -- not the parser that noticed.
 local refusal=dofile('lua/core/refusal.lua')
+-- Reflect in one line (operator 14/11, "combo -> combo -> output reflection -> loop"): every nested call
+-- keeps its status and, when it failed, its code; the script result leads with
+-- `summary: "read 200 · contacts 400 schema_extra:arguments.query · send 200"`, so the model reads what
+-- happened to each call before it reads any payload. Both loops record it; finish() writes the line.
+local status_lib=dofile('lua/core/status.lua')
+local function call_status(value) return status_lib.of(value) end
+local function call_why(value)
+ if type(value)~='table' or (value.ok~=false and value.error==nil) then return nil end
+ return tostring(value.code or value.error or ''):match('^[^\n(]*'):sub(1,60)
+end
+local function summary_of(calls)
+ if type(calls)~='table' or #calls==0 then return nil end
+ local parts={}
+ for i,call in ipairs(calls) do
+  if i>12 then parts[#parts+1]='+'..(#calls-12)..' more';break end
+  parts[#parts+1]=tostring(call.name)..' '..tostring(call.status or (call.ok and 200 or 500))..(call.why and call.why~='' and (' '..call.why) or '')
+ end
+ return table.concat(parts,' · ')
+end
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local presentation=dofile('lua/core/codemode_view.lua')
@@ -510,7 +529,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
         success=type(value)~='table' or (not value.error and value.ok~=false)
        else value={error=tostring(result),effect='unknown',replay_allowed=false};success=false end
        local encoded=json.encode(value);local reference=output.store(encoded)
-       calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference}
+       calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
        telemetry.finish(span,{ok=success,name=def.name,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
       end
       end
@@ -679,7 +698,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
           success=type(value)~='table' or (not value.error and value.ok~=false)
          else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
          local encoded=json.encode(value);local reference=output.store(encoded)
-         calls[#calls+1]={id=step.id,name=step.name,ok=success,evidence=reference}
+         calls[#calls+1]={id=step.id,name=step.name,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
          telemetry.finish(span,{ok=success,name=step.name,nested=true,codemode_call=step.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
        end
       end
@@ -819,6 +838,7 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local function finish(result)
   if type(result)~='table' then return result end
   result=explain(result,source)
+  if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
   return result
