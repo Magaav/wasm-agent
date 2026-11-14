@@ -1760,98 +1760,257 @@ fn the_address_book_is_asked_for_once_per_store() {
 
 // ---- the collection the device already holds (14/11: `q: "Laura"` answered 0, `address_book: 1`) ----
 
-/// The app-state store as a test sees it: one collection's persisted version, and the reset that takes
-/// it back to zero. It is the same two calls `guest`'s `AppState` makes over `whatsapp_rust`, so a test
-/// that drives [`ensure_address_book`] exercises the decision AND the write that follows it.
-struct Persisted(std::cell::Cell<u64>);
+/// A fake server and store, in one: the collection's persisted version, whether it holds a sync key, and
+/// how many times the component ASKED.
+///
+/// The counting is the point. The 14/11 night deploy logged one request and then nothing for 25 minutes
+/// with the index still empty, because `process_sync_task` can return without contacting the server at
+/// all. So this fake behaves like the real one in the only way that matters: it hands over the address
+/// book ONLY when it was asked, and it says how many asks it took. A component that assumes one request
+/// is one answer passes a test written against a fake that answers by itself; it fails this one.
+struct FakePhone {
+    /// The collection's persisted version - what `snapshot_is_stale` reads.
+    version: std::cell::Cell<u64>,
+    /// Whether an app-state sync key exists to decode an answer with.
+    keys: std::cell::Cell<bool>,
+    /// How many full-sync requests reached this "server".
+    asked: std::cell::Cell<u32>,
+    /// What this phone's address book holds, released on the next request.
+    book: Vec<AddressBookContact>,
+}
 
-impl Persisted {
-    fn new(version: u64) -> Persisted {
-        Persisted(std::cell::Cell::new(version))
+impl FakePhone {
+    fn new(version: u64, book: Vec<AddressBookContact>) -> FakePhone {
+        FakePhone {
+            version: std::cell::Cell::new(version),
+            keys: std::cell::Cell::new(true),
+            asked: std::cell::Cell::new(0),
+            book,
+        }
     }
 
-    fn version(&self) -> u64 {
-        self.0.get()
+    fn asked(&self) -> u32 {
+        self.asked.get()
+    }
+
+    /// Answer the request, if there was one: the snapshot is applied the way `whatsapp_rust` applies it -
+    /// the collection advances to the version the snapshot carries, and each contact action arrives with
+    /// `from_full_sync`, which is what the component's `contact_inbox` turns into `set_contact` plus
+    /// `ix/ab/full`.
+    ///
+    /// With no request outstanding it answers NOTHING and changes nothing: that is a server that was not
+    /// asked, and it is the state the 14/11 deploy was actually in.
+    fn answer(&self, store: &Memory, answered: &std::cell::Cell<u32>) {
+        if self.asked.get() == answered.get() {
+            return;
+        }
+        answered.set(self.asked.get());
+        if self.book.is_empty() {
+            // A snapshot that carries no contact: the collection still advances, so the next decision
+            // reads a version above zero. Nothing is written to the index.
+            self.version.set(9);
+            return;
+        }
+        for contact in &self.book {
+            block_on(set_contact(store, contact)).unwrap();
+        }
+        block_on(mark_address_full(store)).unwrap();
+        block_on(mark_address_sync(store)).unwrap();
+        self.version.set(9);
     }
 }
 
-impl AppStateVersions for Persisted {
+impl AddressBookAppState for FakePhone {
     fn persisted_version(&self, collection: &str) -> impl std::future::Future<Output = Result<u64, String>> {
-        // The reset is only ever allowed to touch the collection that carries contacts.
         assert_eq!(collection, CONTACT_COLLECTION);
-        let version = self.0.get();
+        let version = self.version.get();
         async move { Ok(version) }
     }
 
     fn reset_collection(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>> {
+        // The reset is only ever allowed to touch the collection that carries contacts.
         assert_eq!(collection, CONTACT_COLLECTION);
-        self.0.set(0);
+        self.version.set(0);
+        async move { Ok(()) }
+    }
+
+    fn has_sync_keys(&self) -> impl std::future::Future<Output = Result<bool, String>> {
+        let keys = self.keys.get();
+        async move { Ok(keys) }
+    }
+
+    fn request_full_sync(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>> {
+        assert_eq!(collection, CONTACT_COLLECTION);
+        self.asked.set(self.asked.get() + 1);
         async move { Ok(()) }
     }
 }
 
 #[test]
-fn a_persisted_collection_the_index_never_received_is_reset_once_then_asked_again() {
-    // The 14/11 state exactly: the phone asked the device for the whole book ONCE (13/11's fix, so
-    // `ix/ab/sync` is set), the store persisted the collection at v9, and the index holds no contact.
-    // Asking again is answered with the same v9 snapshot, and `wacore` drops it - "incoming v9 <=
-    // persisted v9" - because the version says the device already has what the records were never
-    // kept for. So the ask has to be preceded by the reset, and the once-per-store mark is not a
-    // reason to skip it.
+fn the_book_arrives_only_because_the_component_asked() {
+    // The whole 13/11 -> 14/11 story in one test. The store persists `regular` at v9 and holds no
+    // contact; with nothing asked, the index learns NOTHING - a fake that answers by itself would hide
+    // the defect that actually shipped. Then one supervised step resets the version (v9 would get the
+    // snapshot dropped as stale), asks, and the answer puts the saved name and the number in the index.
     let store = Memory::new();
-    block_on(mark_address_sync(&store)).unwrap();
-    let app = Persisted::new(9);
-    assert_eq!(block_on(ensure_address_book(&store, &app)).unwrap(), AddressBookAsk::ResetThenAsk);
-    assert_eq!(app.version(), 0, "the persisted version is what hid the collection");
-    assert_eq!(block_on(address_reset_done(&store)).unwrap(), true, "the reset is marked as spent");
-    assert_eq!(block_on(address_sync_done(&store)).unwrap(), true, "the 13/11 mark is left alone");
-    assert_eq!(block_on(address_full_done(&store)).unwrap(), false, "nothing has been received yet");
+    let answered = std::cell::Cell::new(0);
+    let phone = FakePhone::new(9, vec![saved(LAURA, "Laura ❤️", "", LAURA, base())]);
+    block_on(put(&store, &direct(LAURA, "Lou", "", base(), "bom dia"))).unwrap();
 
-    // The reset is spent once: a second boot neither resets again nor asks again - which is what keeps
-    // an account with no saved contacts from resyncing the collection on every connection.
-    assert_eq!(block_on(ensure_address_book(&store, &app)).unwrap(), AddressBookAsk::Done);
-    assert_eq!(app.version(), 0);
+    // Not asked yet: the server says nothing and the index holds no name.
+    phone.answer(&store, &answered);
+    assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["count"], 0);
+    assert_eq!(block_on(address_count(&store, COUNT_CAP)).unwrap(), (0, false));
+
+    let mut reset_performed = false;
+    let step = block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap();
+    assert_eq!(step, AddressBookStep::Requested { attempts: 1, reset: true }, "v9 was hiding it: reset, then ask");
+    assert_eq!(phone.asked(), 1);
+    assert_eq!(phone.version.get(), 0, "the persisted version is what would have got the snapshot dropped");
+    assert!(reset_performed);
+
+    // The server answers the request it was given.
+    phone.answer(&store, &answered);
+    let answer = block_on(contacts(&store, &named("laura"))).unwrap();
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["chat"], LAURA);
+    assert_eq!(answer["candidates"][0]["name_source"], "address_book");
+    assert_eq!(block_on(address_count(&store, COUNT_CAP)).unwrap(), (1, false));
+
+    // And the recovery is over: a further tick asks for nothing at all.
+    let before = phone.asked();
+    assert_eq!(block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(), AddressBookStep::Received);
+    assert_eq!(phone.asked(), before, "a store that has the book asks nothing");
+}
+
+#[test]
+fn a_request_the_server_never_answers_is_asked_again() {
+    // The live failure, reproduced: the request goes out, the server never answers (in the field, a
+    // connect-time sync held the collection and `process_sync_task` returned at `debug!`), and the index
+    // stays empty. One call is not allowed to be the end of it - the loop must ask again, and only the
+    // arrival of the book may settle it.
+    let store = Memory::new();
+    let answered = std::cell::Cell::new(0);
+    let phone = FakePhone::new(9, vec![saved(LAURA, "Laura ❤️", "", LAURA, base())]);
+    // The chat exists: an address-book row names a chat, it never invents one.
+    block_on(put(&store, &direct(LAURA, "Lou", "", base(), "bom dia"))).unwrap();
+    let mut reset_performed = false;
+
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::Requested { attempts: 1, reset: true }
+    );
+    // No answer: the next tick must ask AGAIN, not report success. It also must not reset a second time
+    // for nothing - the version is already zero, which is what `reset: false` says.
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::Requested { attempts: 2, reset: false }
+    );
+    assert_eq!(phone.asked(), 2, "a request is not an answer, so it is asked again");
+
+    // When it finally answers, the book lands and the loop stops.
+    phone.answer(&store, &answered);
+    assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["count"], 1);
+    assert_eq!(block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(), AddressBookStep::Received);
+}
+
+#[test]
+fn a_phone_that_loses_patience_is_said_once_and_not_forever() {
+    // Per connection the budget is bounded, and the last word is a line that can be read rather than an
+    // endless silent loop: the 14/11 deploy produced 25 minutes of silence and no diagnosis.
+    let store = Memory::new();
+    let phone = FakePhone::new(9, vec![saved(LAURA, "Laura", "", LAURA, base())]);
+    let mut reset_performed = false;
+    for attempt in 1..=ADDRESS_ATTEMPT_CAP {
+        let step = block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap();
+        assert_eq!(step, AddressBookStep::Requested { attempts: attempt, reset: attempt == 1 }, "{step:?}");
+    }
+    assert_eq!(block_on(address_attempts(&store)).unwrap(), ADDRESS_ATTEMPT_CAP);
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::Exhausted { attempts: ADDRESS_ATTEMPT_CAP }
+    );
+    // A new connection gets its own budget: the fetch that was skipped was skipped against work in
+    // flight on that connection, and a reconnect is what clears it - the budget, and the caller's memory
+    // of having reset the version, which is `guest`'s `AddressBookRun` cleared on a drop.
+    block_on(clear_address_attempts(&store)).unwrap();
+    reset_performed = false;
+    // `reset: false`, because the version is already zero: there is nothing left for a reset to uncover,
+    // and resetting again every connection would be a write with no question behind it.
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::Requested { attempts: 1, reset: false }
+    );
+}
+
+#[test]
+fn a_store_with_no_sync_key_says_so_instead_of_asking_forever() {
+    // Without an app-state sync key the snapshot cannot be decoded at all, and no request produces the
+    // key: it is shared by the phone. So this is the one state that must be NAMED, and asking again would
+    // be the silence with extra steps.
+    let store = Memory::new();
+    let phone = FakePhone::new(9, vec![saved(LAURA, "Laura", "", LAURA, base())]);
+    phone.keys.set(false);
+    let mut reset_performed = false;
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::KeysMissing
+    );
+    assert_eq!(phone.asked(), 0, "nothing can be decoded, so nothing is requested");
+    assert_eq!(block_on(address_attempts(&store)).unwrap(), 0);
+}
+
+#[test]
+fn a_collection_that_synced_back_with_no_contact_is_an_empty_address_book() {
+    // An account whose phone saves nobody: the snapshot applies, the collection advances to v9 again, and
+    // no contact action ever arrives. That is the whole address book, so it is recorded as received - the
+    // alternative is a store that resets the collection on every connection forever.
+    let store = Memory::new();
+    let answered = std::cell::Cell::new(0);
+    let phone = FakePhone::new(9, Vec::new());
+    let mut reset_performed = false;
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::Requested { attempts: 1, reset: true }
+    );
+    phone.answer(&store, &answered);
+    assert_eq!(phone.version.get(), 9, "the snapshot applied and carried nothing");
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::SyncedEmpty { version: 9 }
+    );
+    // Settled for good: the next call asks nothing, because the empty book is the book.
+    let before = phone.asked();
+    assert_eq!(block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(), AddressBookStep::Received);
+    assert_eq!(phone.asked(), before);
 }
 
 #[test]
 fn the_address_book_decision_answers_every_measured_state() {
-    // (persisted version, full snapshot received, reset spent, asked before) -> what a boot must do.
+    // (persisted version, book received, attempts, keys, reset performed) -> what one attempt must do.
     let states = [
-        // Never synced: the ordinary first-sync path. Version 0 is already "fresh", nothing to reset.
-        ((0, false, false, false), AddressBookAsk::Ask),
-        // Asked, and still nothing: this is the 14/11 store, and the one case that must recover.
-        ((9, false, false, true), AddressBookAsk::ResetThenAsk),
-        // A collection at v9 that nobody ever asked for is the same defect with a different history.
-        ((9, false, false, false), AddressBookAsk::ResetThenAsk),
-        // The resync was already spent and did not deliver: do not spend it again.
-        ((9, false, true, true), AddressBookAsk::Done),
-        // The book arrived: nothing at all is owed, whatever version the store holds.
-        ((9, true, false, true), AddressBookAsk::Done),
-        ((9, true, true, true), AddressBookAsk::Done),
-        // Asked at version 0 and nothing came: done, not a second request per connection.
-        ((0, false, false, true), AddressBookAsk::Done),
+        // Never synced, key present: the ordinary first-sync path. Version 0 is already "fresh".
+        ((0, false, 0, true, false), AddressBookStep::Requested { attempts: 0, reset: false }),
+        // The 14/11 store: v9, nothing received, nothing asked yet. Reset first or the snapshot is stale.
+        ((9, false, 0, true, false), AddressBookStep::Requested { attempts: 0, reset: true }),
+        // Asked before and still v9: ask again, and reset again only if a sync wrote the version back.
+        ((9, false, 2, true, true), AddressBookStep::SyncedEmpty { version: 9 }),
+        ((9, false, 2, true, false), AddressBookStep::Requested { attempts: 2, reset: true }),
+        // Budget spent on this connection.
+        ((0, false, ADDRESS_ATTEMPT_CAP, true, true), AddressBookStep::Exhausted { attempts: ADDRESS_ATTEMPT_CAP }),
+        // No key: named, never retried.
+        ((9, false, 0, false, false), AddressBookStep::KeysMissing),
+        // The book arrived: nothing is ever owed again, whatever the bookkeeping says.
+        ((9, true, 0, true, false), AddressBookStep::Received),
+        ((9, true, ADDRESS_ATTEMPT_CAP, false, true), AddressBookStep::Received),
     ];
-    for ((version, full, reset, asked), expected) in states {
+    for ((version, full, attempts, keys, reset), expected) in states {
         assert_eq!(
-            address_book_ask(version, full, reset, asked),
+            address_book_decision(version, full, attempts, keys, reset),
             expected,
-            "version={version} full={full} reset={reset} asked={asked}"
+            "version={version} full={full} attempts={attempts} keys={keys} reset={reset}"
         );
     }
-}
-
-#[test]
-fn a_full_snapshot_is_what_ends_the_recovery() {
-    // `ix/ab/full` is written when a contact action arrives from a full sync, and it is the fact that
-    // stops the next boot from spending a resync on a store already in sync.
-    let store = Memory::new();
-    assert_eq!(block_on(address_full_done(&store)).unwrap(), false);
-    block_on(mark_address_full(&store)).unwrap();
-    assert_eq!(block_on(address_full_done(&store)).unwrap(), true);
-    assert_eq!(block_on(ensure_address_book(&store, &Persisted::new(9))).unwrap(), AddressBookAsk::Done);
-    // And a store that received the book is not reset even if no reset was ever recorded: the reset
-    // exists only to make a snapshot applicable, and one was applied.
-    assert_eq!(block_on(address_reset_done(&store)).unwrap(), false);
 }
 
 #[test]
@@ -1862,7 +2021,7 @@ fn the_address_book_count_counts_people_and_not_its_own_marks() {
     let store = Memory::new();
     block_on(mark_address_sync(&store)).unwrap();
     block_on(mark_address_full(&store)).unwrap();
-    block_on(mark_address_reset(&store)).unwrap();
+    block_on(bump_address_attempts(&store)).unwrap();
     assert_eq!(block_on(address_count(&store, COUNT_CAP)).unwrap(), (0, false), "marks are not contacts");
 
     block_on(set_contact(&store, &saved(LAURA, "Laura ❤️", "", LAURA, base()))).unwrap();
@@ -1876,8 +2035,8 @@ fn the_address_book_count_counts_people_and_not_its_own_marks() {
 
 #[test]
 fn the_recovery_writes_contacts_and_nothing_about_the_pairing() {
-    // What a reset-then-snapshot leaves behind, at the index's own level: address rows and cards, and
-    // no key of the device, the sync keys or the versions. `set_contact` is the ONLY writer a delivered
+    // What a reset-then-snapshot leaves behind, at the index's own level: address rows and cards, and no
+    // key of the device, the sync keys or the versions. `set_contact` is the ONLY writer a delivered
     // contact action reaches, and this is the proof that it touches nothing else - the reason the
     // recovery cannot change the pairing is that it has no call that could.
     let store = Memory::new();
@@ -1889,14 +2048,15 @@ fn the_recovery_writes_contacts_and_nothing_about_the_pairing() {
 
     let after: Vec<String> = store.keys();
     let added: Vec<&String> = after.iter().filter(|key| !before.contains(key)).collect();
-    assert!(added.iter().all(|key| key.starts_with("ix/ab/") ), "only address rows are added: {added:?}");
+    assert!(added.iter().all(|key| key.starts_with("ix/ab/")), "only address rows are added: {added:?}");
     for forbidden in ["dev", "sync/", "ver/", "id/", "ses/", "pk/", "lid/"] {
         assert!(
             after.iter().all(|key| !key.starts_with(forbidden)),
             "a contact action must not write `{forbidden}`: {after:?}"
         );
     }
-    // The name and the number it maps the `@lid` chat to both answer, from one action.
+    // The name and the number it maps the `@lid` chat to both answer, from one action: the `pnJid` on the
+    // contact action is the only place a `@lid` chat's phone number comes from.
     assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["chat"], LID);
     assert_eq!(block_on(contacts(&store, &named("5511977777777"))).unwrap()["chat"], LID);
 }
