@@ -2105,6 +2105,27 @@ fn the_contact_collection_is_the_one_the_schema_registry_names() {
     assert_eq!(wacore_appstate::schemas::LID_CONTACT.name, "lid_contact");
 }
 
+/// The request this component sends names the contact collection - asserted on the value that becomes the
+/// wire attribute, not on a label in a log line.
+///
+/// This is the test the 05:50 deploy needed. That build logged `full critical_unblock_low snapshot
+/// requested` and every request went out as `regular`, because the guest mapped `CONTACT_COLLECTION` to
+/// `WAPatchName::Regular`. The library writes this value straight into the IQ
+/// (`attr("name", name.as_str())`), so an assertion here is an assertion about the outgoing request: the
+/// collection name the server sees, and therefore which collection's snapshot comes back.
+#[test]
+fn the_outgoing_request_names_the_collection_that_carries_contacts() {
+    use wacore::appstate::patch_decode::WAPatchName;
+    let asked = contact_patch_name();
+    // What `<collection name="...">` carries.
+    assert_eq!(asked.as_str(), CONTACT_COLLECTION, "the request must name the collection this index keeps the book for");
+    assert_eq!(asked, WAPatchName::CriticalUnblockLow);
+    assert_ne!(asked, WAPatchName::Regular, "`regular` is what made every answer a stale `regular` snapshot");
+    // Derived from the registry, so it cannot drift from what the protocol declares.
+    assert_eq!(asked.as_str(), wacore_appstate::schemas::CONTACT.collection.as_str());
+    assert_eq!(asked.as_str(), wacore_appstate::schemas::LID_CONTACT.collection.as_str());
+}
+
 /// One fixture snapshot: the collection it arrived in, the contact actions it carries, and how many other
 /// action kinds it carried (chat pins, archives, ...), which this index never reads.
 struct Fixture {
