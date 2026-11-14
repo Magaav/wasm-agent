@@ -16,6 +16,10 @@ local telemetry = dofile("lua/core/telemetry.lua")
 local context_usage = dofile("lua/core/context_usage.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local json_contract = dofile("lua/core/json_contract.lua")
+-- The one renderer for a refusal (lua/core/refusal.lua). The dispatcher already applies it to every
+-- table it returns; this file applies it to the two shapes that never reach the dispatcher: a tool that
+-- raised, and a call refused before dispatch (a missing name, arguments that do not parse).
+local refusal = dofile("lua/core/refusal.lua")
 local selfloop = dofile("lua/core/selfloop.lua")
 local hooks = dofile("lua/core/hooks.lua")
 local done_gate = dofile("lua/core/done_gate.lua")
@@ -2807,6 +2811,8 @@ function M:run_body(text, images)
       local call_repair = call_repairs[call.id]
       local name_error = call_repair and call_repair.name_missing
         and provider.malformed_call_error(call_repair) or nil
+      if name_error then name_error = refusal.finalize(name_error, { tool = function_.name,
+        role = self.role, input = function_.arguments, site = "the tool loop" }) end
       if function_.name=="bash" then shell_used=true end
       local args,argument_error,argument_repair = {},nil,nil
       local arguments_text = function_.arguments
@@ -2814,10 +2820,15 @@ function M:run_body(text, images)
         local decoded_ok, decoded = pcall(json.decode, function_.arguments)
         if decoded_ok and type(decoded) == "table" then args = decoded
         else
-          local repaired, refusal, completed, note = parse_tool_arguments(function_.name,
+          local repaired, refusal_value, completed, note = parse_tool_arguments(function_.name,
             function_.arguments, tool_list, self.role)
           if repaired then args, arguments_text, argument_repair = repaired, completed, note
-          else argument_error = refusal end
+          else
+            -- The refusal knows the tool and the rejected text, so its fix can name the arguments that
+            -- tool takes (lua/core/refusal.lua).
+            argument_error = refusal.finalize(refusal_value, { tool = function_.name, role = self.role,
+              input = function_.arguments, site = "the tool loop" })
+          end
         end
       end
       -- The deadline travels with the call, not with the UI. `bash`/`shell` use the configured
@@ -2869,7 +2880,12 @@ function M:run_body(text, images)
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
       host.beat()
-      if not handled then output = { error = tostring(output) } end
+      if not handled then
+        -- A raise is not a refusal with a code: the message carries the tool's own words and names the
+        -- line that raised (refusal.lua renders it as a cause, never as an unknown code).
+        output = refusal.finalize({ error = tostring(output) },
+          { tool = function_.name, role = self.role, input = arguments_text, site = "the tool loop" })
+      end
       if argument_repair and type(output) == "table" and output.normalized == nil then
         output.normalized = "arguments: " .. argument_repair .. "; the call ran with the completed object"
       end
