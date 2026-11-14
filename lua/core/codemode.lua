@@ -9,6 +9,13 @@ local function normalize_args(text)
 end
 local json=dofile('lua/vendor/json.lua')
 local contract=dofile('lua/core/json_contract.lua')
+-- What a refusal says: the code, the real cause, the offending input, the fix - one helper, called at
+-- the two places a call's value is settled (lua/core/refusal.lua). The two loops pass the SAME `site`
+-- on purpose: `scripts/test-codemode-component.lua` compares their refusals field for field (the
+-- argument and result hashes of every attempt), so a sentence that named the backend would make the
+-- same refusal two different answers. The text says where it came from either way - the script loop,
+-- not the parser that noticed.
+local refusal=dofile('lua/core/refusal.lua')
 local output=dofile('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local presentation=dofile('lua/core/codemode_view.lua')
@@ -481,7 +488,11 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
       if wait_error then value={error=wait_error,effect='none'};success=false
       else
       local _,err=contract.validate(current['function'].parameters,stripped or '{}')
-      if err then value={error=err};success=false
+      -- The refusal carries the rejected argument text AND the tool's own schema, so the fix can name
+      -- the arguments this tool takes instead of letting the model guess (13/11: `notes_write` answered
+      -- `notes_text_required` three times before the model found `text`).
+      if err then value=refusal.finalize({error=err,input=stripped},{tool=def.name,
+        parameters=current['function'].parameters,input=stripped,site='the code-mode script loop'});success=false
       else
        local params=json.decode(stripped or '{}')
        local span=telemetry.start(ctx,'tool',{name=def.name,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
@@ -505,6 +516,17 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
      end
     end
    else error('codemode_target_unknown')end
+   -- One boundary per settled call: a refusal from a global, the fence, the schema or a tool leaves
+   -- this loop with its four fields (a value that has them already is returned untouched).
+   -- Discovery answers are DATA, not a refusal of this call: `searchTools`/`describeTool` return
+   -- catalogue entries, and an unknown name is one member of that array (`found=false`, `reason`,
+   -- `suggestions`). They are left untouched here because the same member is produced by the component's
+   -- own Rust (`unknown_tool`), and decorating one side only would make the two loops two different
+   -- answers - scripts/test-codemode-component.lua compares them field for field, and
+   -- scripts/test-tool-search-names-codemode.lua asserts the alias IS its batch element.
+   if not (call.target=='global' and (call.name=='searchTools' or call.name=='describeTool')) then
+    value=refusal.finalize(value,{tool=call.name,input=call.args,role=role,site='the code-mode script loop'})
+   end
    local argument_reference=output.store(call.args or '{}');local result_reference=output.store(json.encode(value))
    attempts[#attempts+1]={id=call.id,name=call.name,target=call.target,admitted=admitted or false,ok=success,arguments=argument_reference,result=result_reference}
    telemetry.finish(attempt_span,{name=call.name,target=call.target,ok=success,admitted=admitted or false,nested=true,codemode_call=call.id,result_hash=result_reference.sha256})
@@ -637,8 +659,10 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
        if wait_error then value,success={error=wait_error,effect='none'},false
        else
        local _,err=contract.validate(current['function'].parameters,stripped or '{}')
-       -- the rejected argument text travels with the refusal, so the cause is visible where it is read
-       if err then value,success={error=err,input=tostring(stripped or ''):sub(1,80)},false
+       -- the rejected argument text and the tool's own schema travel with the refusal, so the cause and
+       -- the accepted names are visible where the refusal is read
+       if err then value,success=refusal.finalize({error=err},{tool=step.name,
+         parameters=current['function'].parameters,input=stripped,site='the code-mode script loop'}),false
        else
         local params=json.decode(stripped or '{}')
          local span=telemetry.start(ctx,'tool',{name=step.name,nested=true,codemode_call=step.id,arguments_hash=host.sha256(argument_text or '{}')})
@@ -658,6 +682,12 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
        end
       end
       end
+     end
+     -- The component loop's own boundary, for the refusals that are decided above it: the fence, a
+     -- changed definition, a bad wait budget, a global the node does not answer.
+     if not (step.kind=='host_global' and (step.name=='searchTools' or step.name=='describeTool')) then
+      value=refusal.finalize(value,{tool=step.name,input=argument_text,role=role,
+        site='the code-mode script loop'})
      end
      attempts[#attempts+1]={id=step.id,name=step.name,
       target=(step.kind=='host_global' and 'global') or step.target or 'tool',admitted=admitted or false,

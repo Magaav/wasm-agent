@@ -26,6 +26,9 @@ local resources = dofile("lua/core/resources.lua")
 -- because both the dispatch wrapper at the bottom of this file and the parallel-bash gate read it.
 local hookslib = dofile("lua/core/hooks.lua")
 local redact = dofile("lua/core/redact.lua")
+-- What a refusal says, in one place (lua/core/refusal.lua): every refusal a model can read leaves this
+-- module through the wrapper at the bottom, so the four fields are added there and nowhere else.
+local refusal = dofile("lua/core/refusal.lua")
 local M = {}
 
 local function is_master(role)
@@ -2106,6 +2109,22 @@ function M.await_parallel_bash(operation_id, role, ctx)
     error = state.error, timing = state.timing, parallel = true }
 end
 
+-- The schema of the tool a refusal is about, read only when a refusal is rendered: it is what turns
+-- "the arguments were wrong" into "this tool takes path (string, required)". It reads the two tables
+-- this module already holds - never `M.catalog`, which asks the connectors and the peers: a refusal must
+-- not make a network call to explain itself, and a peer that is down would turn one refusal into two.
+local function parameters_of(name,role)
+ local lists = { M.shared or {} }
+ if is_master(role or "guest") then lists[#lists+1] = M.admin or {} end
+ for _,list in ipairs(lists) do
+  for _,item in ipairs(list) do
+   local fn=item["function"]
+   if fn and fn.name==name then return fn.parameters end
+  end
+ end
+ return nil
+end
+
 -- Hook points around one tool call (docs/HOOKS.md). This wrapper is the one funnel every tool call
 -- passes - the model's, a subagent's, a probe's, and one made *inside* another call: code mode's
 -- `await tools.bash(...)`, `tool_call {name=...}`, a `remote {capability:"batch"}` entry that runs
@@ -2165,6 +2184,12 @@ local dispatch = M.dispatch
 -- granted.
 function M.dispatch(memory,name,args,role,ctx,cwd_provenance,same_call)
   ctx=ctx or {}
+  -- Every return of this wrapper is a refusal a model may read, so all of them pass the one renderer.
+  local function refuse(value)
+    if type(value)~="table" or value.error==nil then return value end
+    return refusal.finalize(value,{tool=name,role=role,args=args,input=ctx.tool_arguments_json,
+      parameters=parameters_of(name,role),site="the tool dispatcher"})
+  end
   local generation=ctx.resource_effect_generation or 0
   local boundary = not same_call and hook_depth == 0 and hookslib.active()
   local call_args = args
@@ -2173,9 +2198,9 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance,same_call)
     pre = hook_fire('PreToolUse', { tool_name = name, tool_input = args or {},
       tool_call_id = ctx.tool_call_id, cwd = ctx.cwd or platform.cwd() }, hook_ctx(ctx))
     if pre.blocked then
-      return { error = 'hook_denied', denied_by = pre.blocked_by, permission = pre.permission,
+      return refuse({ error = 'hook_denied', denied_by = pre.blocked_by, permission = pre.permission,
         reason = pre.reason, effect = 'none', hook_system_messages = pre.system_messages,
-        note = 'A configured hook refused this call: ' .. tostring(pre.reason) }
+        note = 'A configured hook refused this call: ' .. tostring(pre.reason) })
     end
     if next(pre.updated_input or {}) ~= nil then
       local merged = {}
@@ -2188,7 +2213,7 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance,same_call)
   -- hold the landing lease may not write into it. Refused HERE, before the tool runs, because a check after
   -- the write is a report about damage, not a boundary. Reads stay allowed.
   local protected = canonical_guard.guard(name, call_args, ctx)
-  if protected then return protected end
+  if protected then return refuse(protected) end
   local ok,result=pcall(dispatch,memory,name,call_args,role,ctx,cwd_provenance)
   -- Uncertainty is for unknown *effects*, not for refusals. A result the node marked
   -- `effect:"none"` never reached the client, so it cannot have changed anything, and
@@ -2230,6 +2255,9 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance,same_call)
       if #messages > 0 then result.hook_system_messages = messages end
     end
   end
+  -- The one boundary every refusal crosses: the code in `error` is never touched, and a message, the
+  -- offending input and a fix are added where they are missing (lua/core/refusal.lua).
+  if ok then result=refuse(result) end
   if not ok then error(result) end
   return result
 end

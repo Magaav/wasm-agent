@@ -126,7 +126,9 @@ usable checkout of its own refuses with `workspace_destination_source_missing`, 
 missing, and records the child's workspace as `failed` — never `pending` with an empty source, which
 a retrying dispatcher reads as "not finished yet". A refusal names its own reason as the error code
 (`workspace_source_dirty`, `workspace_source_unavailable`, `workspace_destination_source_missing`),
-with the whole sentence in `detail`.
+with the whole sentence in `detail`. Every refusal a model can read also carries a rendered `message`,
+the offending `input` and a `fix`, added once at the boundary every refusal crosses - one helper, four
+call sites, codes unchanged: [REFUSALS.md](REFUSALS.md).
 
 A retry of a request must have the effect of the attempt before it: the child session of a request
 that carries an idempotency key is named by that key, so the next attempt finds the session and the
