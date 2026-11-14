@@ -129,6 +129,7 @@ async fn wait(for_: Duration) {
 
 use whatsapp_rust::waproto::buffa::Message as _;
 use whatsapp_rust::waproto::whatsapp as wap;
+use wacore::appstate::hash::HashState;
 use wacore::proto_helpers::{MessageBuilderExt, MessageExt};
 use whatsapp_rust::wacore_binary::jid::JidExt;
 
@@ -156,12 +157,18 @@ struct AudioJob {
 enum ContactJob {
     /// The address book's own entry for one contact: their saved name and the addresses and number it
     /// maps to (`index::set_contact`).
-    Address(index::AddressBookContact),
+    Address {
+        contact: index::AddressBookContact,
+        /// The action came from a full-sync snapshot of the collection rather than from a live change:
+        /// it is the proof `ix/ab/full` records, that the whole book has actually been received.
+        full: bool,
+    },
     /// A push name a contact changed to, for a chat the index already knows (`index::set_push_name`).
     PushName { chat: String, name: String, at: i64 },
 }
 
-/// Ask WhatsApp for the whole address book, once per store.
+/// Ask WhatsApp for the whole address book, once per store - and first, when the store's own persisted
+/// app-state version is what is hiding it, make that snapshot applicable again.
 ///
 /// A linked device is sent the phone's contact catalogue as app-state mutations (the `contact` actions
 /// in the `regular` collection) when it PAIRS, and never again unless it asks; the sync worker then
@@ -173,11 +180,35 @@ enum ContactJob {
 /// metadata (the same snapshot fetch WhatsApp does for a newly linked device): nothing is written to
 /// the account, nothing is sent to anybody, and `ix/ab/sync` is what keeps it to one request instead of
 /// one per reconnect.
+///
+/// 14/11 showed that the request alone is not enough, and why. The store persists the collection's
+/// VERSION (`ver/regular`, written through `store.rs`'s `AppSyncStore`) and never its records, so after
+/// a restart the version says v9 while nothing of v9 is in memory; the snapshot the request brings back
+/// is then refused whole - `wacore`'s `snapshot_is_stale` drops any snapshot at or below the persisted
+/// version (`"incoming v9 <= persisted v9"`) - and no contact action is ever dispatched, so no name ever
+/// reaches the index. `index::ensure_address_book` decides that case from the two marks and hands back
+/// `ResetThenAsk`: this function then takes that ONE collection's persisted version back to zero, which
+/// is a standard full app-state resync of it (and of nothing else - no device record, no sync key, no
+/// pairing is reachable from `AppState`), and the snapshot that follows is applied as a fresh baseline.
 async fn request_address_book(client: &Arc<whatsapp_rust::Client>) {
-    match index::address_sync_done(&IndexKv).await {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(reason) => say!("index: address book sync state unreadable reason={reason}"),
+    let app = AppState(client.clone());
+    let action = match index::ensure_address_book(&IndexKv, &app).await {
+        Ok(action) => action,
+        // Not fatal: the mark that would keep this to one pass is unreadable, so the next connection
+        // asks again - one extra read, never a name missed.
+        Err(reason) => {
+            say!("index: address book state unreadable reason={reason}");
+            return;
+        }
+    };
+    if action == index::AddressBookAsk::Done {
+        return;
+    }
+    if action == index::AddressBookAsk::ResetThenAsk {
+        // The count is what the operator sees in a `contacts` answer (`index.address_book`), so the log
+        // line carries it too: a resync that lands shows the number move on the next query.
+        let (held, _) = index::address_count(&IndexKv, index::COUNT_CAP).await.unwrap_or((0, false));
+        say!("index: app-state version reset for the contact collection so the phone's snapshot is applied (address-book rows held: {held})");
     }
     let task = whatsapp_rust::sync_task::MajorSyncTask::AppStateSync {
         name: wacore::appstate::patch_decode::WAPatchName::Regular,
@@ -189,6 +220,50 @@ async fn request_address_book(client: &Arc<whatsapp_rust::Client>) {
         // Not fatal: the request is out, and an unmarked store asks again on the next connection -
         // which is the right direction to fail in (one extra read, never a name missed).
         Err(reason) => say!("index: address book requested, sync mark not written reason={reason}"),
+    }
+}
+
+/// The app-state store as the index sees it: one collection's persisted version, and the reset that
+/// takes it back to zero.
+///
+/// It is a newtype over the client rather than a handle to `whatsapp_rust`'s backend so the two calls
+/// `index::ensure_address_book` is allowed to make are the only ones it CAN make: the device record,
+/// the sync keys and every other collection stay out of reach, which is what makes "this recovers the
+/// address book and cannot touch the identity or the pairing" a property of the code and not a promise
+/// in a comment.
+struct AppState(Arc<whatsapp_rust::Client>);
+
+impl index::AppStateVersions for AppState {
+    fn persisted_version(&self, collection: &str) -> impl std::future::Future<Output = Result<u64, String>> {
+        let backend = self.0.persistence_manager().backend();
+        // Owned before the future: the returned future may not borrow its argument.
+        let collection = collection.to_string();
+        async move {
+            backend
+                .get_version(&collection)
+                .await
+                .map(|state| state.version)
+                .map_err(|error| format!("app state version: {error}"))
+        }
+    }
+
+    fn reset_collection(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>> {
+        let backend = self.0.persistence_manager().backend();
+        let collection = collection.to_string();
+        async move {
+            // Version zero is what `snapshot_is_stale` reads as "nothing persisted, so any snapshot
+            // applies". The mutation MACs of the collection go with it, because the baseline they were
+            // anchored to is being replaced: `wacore` clears them for the same reason on its own
+            // snapshot path, and a leftover index->value entry would corrupt the next patch's ltHash.
+            backend
+                .set_version(&collection, HashState::default())
+                .await
+                .map_err(|error| format!("app state version reset: {error}"))?;
+            backend
+                .clear_mutation_macs(&collection)
+                .await
+                .map_err(|error| format!("app state mutation macs: {error}"))
+        }
     }
 }
 
@@ -1378,14 +1453,18 @@ async fn contact_inbox(enabled: bool) -> usize {
     }
     let total = batch.len();
     let mut written = 0usize;
+    let mut full_received = false;
     let mut again: Vec<ContactJob> = Vec::new();
     for job in batch {
-        let result = match &job {
-            ContactJob::Address(contact) => index::set_contact(&IndexKv, contact).await,
-            ContactJob::PushName { chat, name, at } => index::set_push_name(&IndexKv, chat, name, *at).await,
+        let (result, full) = match &job {
+            ContactJob::Address { contact, full } => (index::set_contact(&IndexKv, contact).await, *full),
+            ContactJob::PushName { chat, name, at } => (index::set_push_name(&IndexKv, chat, name, *at).await, false),
         };
         match result {
-            Ok(()) => written += 1,
+            Ok(()) => {
+                written += 1;
+                full_received |= full;
+            }
             Err(reason) => {
                 // No attempt counter of its own: a name write is idempotent and cheap, and a row that
                 // keeps being refused is visible in `contacts` (`index.address_book` not growing) - the
@@ -1402,6 +1481,15 @@ async fn contact_inbox(enabled: bool) -> usize {
                 inbox.push_front(job);
             }
         });
+    }
+    // A contact action that arrived on a full-sync snapshot is the phone answering the request
+    // `request_address_book` made: the book reached the index. `ix/ab/full` is what stops the next boot
+    // from spending its one resync on a store that is already in sync, and what separates "asked"
+    // (`ix/ab/sync`) from "received" in an answer that used to imply the second from the first.
+    if full_received {
+        if let Err(reason) = index::mark_address_full(&IndexKv).await {
+            say!("index: address book received, full-sync mark not written reason={reason}");
+        }
     }
     say!("index: {written}/{total} contact name(s) written");
     written
@@ -2211,7 +2299,10 @@ async fn serve(config: serde_json::Value) {
                             privacy::at(&update.jid.to_string(), ""),
                             !name.is_empty()
                         );
-                        ContactJob::Address(index::AddressBookContact { jids, name, numbers, at: now_ms() })
+                        ContactJob::Address {
+                            contact: index::AddressBookContact { jids, name, numbers, at: now_ms() },
+                            full: update.from_full_sync,
+                        }
                     }
                     Event::PushNameUpdate(update) => {
                         say!("contact: push name changed {}", privacy::at(&update.jid.to_string(), ""));
@@ -2345,9 +2436,9 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut last_query = Instant::now();
     let mut last_prune = Instant::now();
     let mut last_ocr = Instant::now();
-    // Whether this instance has already asked for the whole address book (`request_address_book`): the
-    // store's own mark (`ix/ab/sync`) is what makes it once per store, this is what makes it once per
-    // connection.
+    // Whether this instance has already settled the address book (`request_address_book`): the store's
+    // own marks (`ix/ab/sync`, `ix/ab/full`, `ix/ab/reset`) are what make it once per store, this is
+    // what makes it once per connection.
     let mut address_book_asked = false;
     // Whether the name-side walk has already said it is rebuilding, so a multi-minute rebuild is two
     // lines (start, done) and not one per tick.
@@ -2366,9 +2457,11 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // is the name a `contacts` query finds one tick later, and one written before it is picked up
         // by `card_touch`. Either order answers; this one costs the fewer cards written twice.
         contact_inbox(index.enabled).await;
-        // The whole address book, once for a store that has never asked: a device paired by an older
-        // build was never sent the contact names this index answers from, so the first tick after a
-        // connection asks for them (`request_address_book`). It is asked for HERE and not in the
+        // The whole address book, once for a store that has never received it: a device paired by an
+        // older build was never sent the contact names this index answers from, so the first tick after
+        // a connection asks for them (`request_address_book`), and a store whose collection is
+        // persisted at a version the index never received has that ONE collection's version reset
+        // first, so the snapshot is not dropped as stale. It is asked for HERE and not in the
         // `on_connected` handler because that handler's future must be `Send` and holding the client
         // across an await makes it not one.
         if !address_book_asked && bot() == outbox::Bot::Connected && index.enabled {

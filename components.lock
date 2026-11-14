@@ -88,6 +88,26 @@
 # `scripts/publish-components.sh --from <the bundle's artifacts>` and not a rebuild: the pin names bytes,
 # and the bundle is where those bytes are.
 #
+# THE LINE ABOVE, MOVED ON 14/11 (change/abook). One component, one defect, one line: the address
+# book the phone had already synced never reached the index. The store persists the `regular`
+# collection's VERSION and never its records, so a restart left v9 in the store and nothing of v9 in
+# memory, and `wacore`'s `snapshot_is_stale` then dropped the snapshot the (13/11) full-sync request
+# brought back - `incoming v9 <= persisted v9` - so no contact action was ever applied and no saved
+# name was ever written. The fix resets that ONE collection's persisted version (a standard full
+# app-state resync, no device record and no sync key reachable from it) and counts `ix/ab/` contact
+# rows instead of counting its own marks - which is why the answer used to say `address_book: 1` for a
+# store that held no contact. wa-whatsapp was the only component this change touched: the ten other
+# lines below are untouched and carry the exact bytes they already named.
+#
+# The wa-whatsapp bytes here are the build of fabf2b61 in the checkout /home/wa/wt-abook on wa-desktop
+# (rustc 1.99.1, wasi-sdk 34). Measured for this line, and not assumed: two builds of that commit in
+# that ONE path are byte-identical (f63419ec twice, the second with a fresh CARGO_TARGET_DIR), and two
+# checkout paths are NOT equal - /home/wa/wt-abook-b at the same commit gave 8,754,778 bytes /
+# 20e0516a, the `-C metadata` of its `wa-whatsapp-index` and `wa-whatsapp-outbox` path dependencies
+# (docs/COMPONENTS.md, "Reproducible builds"; measured again by scripts/test-repro-components.sh). A
+# pin names ONE build: the bundle `artifacts/components-<sha12 of this file>` holds these bytes, each
+# verified against these lines before it was committed.
+#
 # FORMAT: <name> <sha256> <bytes>. Regenerate a line on the machine that produces the release
 # artifacts, from the reviewed tree:
 #
@@ -123,4 +143,4 @@ model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 4
 selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email ddbe326a5d394a0dc50a0c947740a1364e4cdeda348286666a3ba21569893915 565827
-wa-whatsapp 7516b3a2edbd70254b05e75dcab6e133367ea377491043cbe8ef2c547d0cde6d 8747624
+wa-whatsapp f63419ecc801a208eb7458f3a2074d10e132b19fbf64c3b69dd04dc774e5ae25 8754838
