@@ -146,15 +146,15 @@ function M.project(name, output)
     return preview_view(name,{},encoded,M.store(encoded))
   end
   -- A script's model view is its outcome, not its bookkeeping (operator 14/11, "will that bloat and hurt
-  -- reasoning?"): `summary` already says each call's status in one line, so the per-call evidence arrays
-  -- (attempts, calls: paths and hashes the model cannot use) and the constant backend/context_policy
-  -- strings leave the view. The complete result is kept as a file, named by full_result, as for any
-  -- oversized output - a reader that needs a call's evidence asks for it.
-  if name=='codemode' and output.summary~=nil and (output.attempts~=nil or output.calls~=nil) then
+  -- reasoning?"): `summary` says each call's status in one line; `calls` stays, because its evidence
+  -- references are what a model passes to tool_result to read a nested original (a real run did); the
+  -- `attempts` array (arguments + results again, per call) and the constant backend/context_policy
+  -- strings leave the view. The complete result is kept as a file, named by full_result.
+  if name=='codemode' and output.summary~=nil and output.attempts~=nil then
     local full = json.encode(output)
     local lean = {}
     for key, value in pairs(output) do
-      if key~='attempts' and key~='calls' and key~='backend' and key~='context_policy'
+      if key~='attempts' and key~='backend' and key~='context_policy'
           and not (key=='unexecuted' and type(value)=='table' and next(value)==nil)
           and not (key=='items' and type(value)=='table' and next(value)==nil) then lean[key]=value end
     end

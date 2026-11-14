@@ -32,8 +32,13 @@ provider.complete_with=function(_,messages,schemas)
  end
  check(rounds==2,'no replay or extra model rounds')
  for _,m in ipairs(messages)do if m.role=='tool' and m.tool_call_id=='native-default-call' then nested=json.decode(m.content) end end
- check(nested and nested.ok and nested.backend=='rust-wasmtime-quickjs-wasi','real native backend result reaches actual agent loop')
- check(#nested.calls==3 and #nested.attempts==3,'all nested results retained')
+ -- The model's view is the outcome (14/11): summary + calls (their evidence references) + full_result;
+ -- the complete result - backend and every attempt included - is the stored file it names.
+ check(nested and nested.ok and type(nested.summary)=='string' and nested.attempts==nil and nested.backend==nil,'the script result reaches the agent loop as its lean view: '..json.encode(nested or {}):sub(1,200))
+ local full=nested.full_result and host.read_file(dofile('lua/core/paths.lua').data()..'/tool-results/'..nested.full_result.sha256..'.txt')
+ local complete=full and json.decode(full)
+ check(complete and complete.backend=='rust-wasmtime-quickjs-wasi' and #complete.attempts==3,'real native backend result is kept whole in the file the view names')
+ check(#nested.calls==3,'all nested results retained')
  for _,call in ipairs(nested.calls)do local bytes=host.read_file(call.evidence.path);check(bytes and host.sha256(bytes)==call.evidence.sha256,'nested original matches exact hash')end
  return {content='FIXTURE-DONE',finish_reason='stop',tool_calls={}}
 end

@@ -1331,6 +1331,13 @@ function METHODS:session_draw()
   -- the progress bar): this module draws only the notice there, so the loader is never written twice
   -- on one row. The layout this module owns shrinks its scroll region so output cannot reach the row.
   if native and text and kind ~= "notice" then text = nil end
+  -- ONE drawer (14/11): the editor owns the row and draws the notice from the text it is handed, so this
+  -- view never writes there - two writers on one row painted the notice over the box's bottom border.
+  if native and host and host.editor_notice then
+    local content = kind == "notice" and self:session_content() or nil
+    pcall(host.editor_notice, content and content.text or "")
+    return
+  end
   local bottom = self:region_bottom()
   if not native and bottom and self.region_row ~= bottom then
     self:control("\27[1;" .. bottom .. "r")

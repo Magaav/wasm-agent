@@ -66,7 +66,8 @@ M.TARGETS = {
 }
 -- "Update available (abc123456789): run wa update or /update" - one wording, used by the CLI footer,
 -- the session-start line and the window, so the three surfaces cannot drift (docs/RELEASE-UPDATE.md).
-M.LINE = "Update available (%s): run wa update or /update"
+-- 14/11 (operator): worded as Claude Code words it, and shown calm - one static line on its own row.
+M.LINE = "Update available! Run: wa update"
 
 local function trim(text)
   return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", ""))

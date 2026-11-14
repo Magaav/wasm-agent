@@ -83,7 +83,7 @@ assert(host.write_file(install .. "/installed.txt",
   .. "binary_source=prebuilt-release\nbinary_release=node-111111111111\nvia=deploy.sh\n"),
   "cli notice: could not write the install record")
 
-local NOTICE = "Update available (cccccccccccc): run wa update or /update"
+local NOTICE = "Update available! Run: wa update"
 
 -- ---- (a) a real `wa chat`, from outside ----------------------------------------------------------
 -- The child is run from the scratch directory rather than from the tree: `update.lua`'s "buildable
@@ -178,7 +178,7 @@ else
     -- appears in the capture (`Update available (cccccccccccc): run wa update or /update`). After it,
     -- the notice is the footer's session row and nothing of it reaches the transcript.
     ok(not has(child.stdout, "Update available"), "the started CLI prints no notice into its transcript")
-    ok(not has(child.stdout, "run wa update or /update"), "in either wording: nothing about an update")
+    ok(not has(child.stdout, "Run: wa update"), "in either wording: nothing about an update")
   end
 end
 

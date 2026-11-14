@@ -3817,6 +3817,28 @@ pub extern "C-unwind" fn editor_wakes(l: *mut LuaState) -> c_int {
     1
 }
 
+/// `host.editor_notice(text)`: the standing update notice on the editor's own row between the box and the
+/// footer, or "" to take the row away. ONE drawer (14/11): the notice used to be painted by the Lua view at
+/// a row it reserved itself while the editor, never told, put the box's bottom border on that same row -
+/// each frame repainted the border and the next notice write covered it again, a blink over the divider.
+/// Redraws only when the text changed, like `editor_wakes`.
+pub extern "C-unwind" fn editor_notice(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = state.editor.as_mut().map(|editor| {
+        let changed = editor.session_notice != text;
+        editor.session_notice = text;
+        changed
+    }).unwrap_or(false);
+    let ok = if changed {
+        let frame = layout_frame(&mut state);
+        frame.is_empty() || wa_term::terminal_editor::write(&frame).is_ok()
+    } else { true };
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
 /// `host.transcript_write(text)`: append to the chat's current block (the host draws it).
 pub extern "C-unwind" fn transcript_write(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_default();

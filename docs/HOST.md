@@ -512,6 +512,7 @@ round-boundary steering, not per-keystroke interruption.
   flight is shown from it by the input thread at once (Esc/Left/Enter close it) instead of
   being queued behind the run.
   `editor_wakes(text)` is the self-wake fact (`⏰ 2 wakes · next 14:05`) on a row of its own, directly
+  `editor_notice(text)` is the update notice on the editor's own row between the input box and the session status bar ("" takes the row away). The editor is its ONE drawer: the Lua view hands it the text and paints nothing there (14/11, a second writer covered the box's bottom border).
   above the session status bar, or "" to give the row back when no wake is scheduled: it used to be
   appended to the status bar's own line, where it squeezed the numbers.
   `local_view(command, spec)` is the same channel for a whole balloon: a read-only command publishes
@@ -752,6 +753,7 @@ disk                 writes files
 editor_footer        device
 editor_status        device
 editor_wakes         device
+editor_notice        device
 enqueue_completion   writes files
 exec                 runs a process
 exec_timeout         read-only
