@@ -2036,6 +2036,27 @@ fn the_address_book_count_counts_people_and_not_its_own_marks() {
 }
 
 #[test]
+fn a_received_mark_from_a_collection_that_carries_no_contact_is_not_a_received_book() {
+    // The live store's state, exactly: the 9a5414f5 build wrote `ix/ab/full` after asking `regular`, which
+    // carries no contact. A bare flag would bind this build to that claim and it would ask nothing at all -
+    // a deploy that changes the code and does nothing. The mark stores the collection it came from, so `1`
+    // reads as "not received from critical_unblock_low" and the recovery runs.
+    let store = Memory::new();
+    block_on(store.set(key_address_full().as_bytes(), b"1")).unwrap();
+    assert_eq!(block_on(address_full_done(&store)).unwrap(), false, "a legacy flag proves nothing");
+    let phone = FakePhone::new(9, vec![saved(LAURA, "Laura ❤️", "", LAURA, base())]);
+    let mut reset_performed = false;
+    assert_eq!(
+        block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
+        AddressBookStep::Requested { attempts: 1, reset: true },
+        "the recovery is not blocked by a mark from the wrong collection"
+    );
+    // And the mark this build writes does bind it.
+    block_on(mark_address_full(&store)).unwrap();
+    assert_eq!(block_on(address_full_done(&store)).unwrap(), true);
+}
+
+#[test]
 fn the_recovery_writes_contacts_and_nothing_about_the_pairing() {
     // What a reset-then-snapshot leaves behind, at the index's own level: address rows and cards, and no
     // key of the device, the sync keys or the versions. `set_contact` is the ONLY writer a delivered

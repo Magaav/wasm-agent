@@ -331,14 +331,22 @@ fn key_address_full() -> String {
     format!("{PREFIX}ab/full")
 }
 
-/// Has a full-sync snapshot of the contact collection reached this index?
+/// Has the book reached this index FROM THE COLLECTION THAT CARRIES IT?
+///
+/// The mark stores the collection's own name, not a bare flag, because a bare flag cannot say which
+/// collection it is about - and the 14/11 night deploy proved what that costs. That build wrote this mark
+/// after asking `regular`, a collection that carries no contact at all, so a store on the account node now
+/// holds a "received" mark for a book it never received. Reading the value against
+/// [`CONTACT_COLLECTION`] is what makes that mark stale rather than binding: `1` is not
+/// `critical_unblock_low`, so the recovery runs again instead of settling on a claim that was wrong.
 pub async fn address_full_done<S: Store>(store: &S) -> Result<bool, String> {
-    Ok(store.get(key_address_full().as_bytes()).await?.is_some())
+    let Some(value) = store.get(key_address_full().as_bytes()).await? else { return Ok(false) };
+    Ok(value == CONTACT_COLLECTION.as_bytes())
 }
 
-/// Record that one has (see [`key_address_full`]).
+/// Record that one has (see [`key_address_full`]): the collection it arrived from.
 pub async fn mark_address_full<S: Store>(store: &S) -> Result<(), String> {
-    store.set(key_address_full().as_bytes(), b"1").await
+    store.set(key_address_full().as_bytes(), CONTACT_COLLECTION.as_bytes()).await
 }
 
 /// `ix/ab/attempts` -> a decimal count: how many full-snapshot requests this connection has spent
