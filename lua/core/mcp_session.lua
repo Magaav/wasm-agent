@@ -74,6 +74,21 @@ function M.reconcile(uncertain_key,request,schema_hash)
  end
  return {released=true,reason=why}
 end
+-- An uncertain READ expires (14/11). The reservation exists so a read that may have run is not replayed;
+-- for an approved read there is nothing a replay can repeat, and a timeout leaves no evidence to settle it
+-- with - so the connector answered mcp_connection_uncertain for the rest of the process (the email run).
+-- After this many seconds the reservation is released with reason `read_expired` and a fresh session starts.
+M.READ_UNCERTAIN_EXPIRY_S=120
+local function expired(uncertain_key)
+ local at=decode(host.sql_query('SELECT value FROM meta WHERE key=?',json.encode({uncertain_key..':at'})))
+ local t=at and not at.error and at[1] and tonumber(at[1].value)
+ if not t then return false end
+ return ((tonumber(host.now()) or 0)-t)>M.READ_UNCERTAIN_EXPIRY_S
+end
+local function release_expired(uncertain_key)
+ local done=decode(host.sql_exec('DELETE FROM meta WHERE key=? OR key=?',json.encode({uncertain_key,uncertain_key..':at'})))
+ return done and not done.error and done.ok==true
+end
 function M.invoke(input,ctx,directory)
  ctx=ctx or {};if not input.read_tools or #input.read_tools==0 then return failure('mcp_read_scope_required') end
  local owner=tostring(ctx.user_id or '')..'\0'..tostring(ctx.session_id or '')..'\0'..tostring(ctx.role or '')
@@ -87,6 +102,9 @@ function M.invoke(input,ctx,directory)
  local reconciled
  if saved[1] then
   local settled=M.reconcile(uncertain_key,saved[1].value,input.schema_hash)
+  if not settled.released and expired(uncertain_key) and release_expired(uncertain_key) then
+   settled={released=true,reason='read_expired'};pool[key]=nil
+  end
   if not settled.released then
    return failure('mcp_connection_uncertain',{request=saved[1].value,reason=settled.reason})
   end
@@ -94,6 +112,7 @@ function M.invoke(input,ctx,directory)
  end
  local function hold(slot,request)
   slot.unknown=request
+  host.sql_exec('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',json.encode({uncertain_key..':at',tostring(tonumber(host.now()) or 0)}))
   local r=decode(host.sql_exec('INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)',json.encode({uncertain_key,request})))
   if not r or r.error or r.ok~=true then error('mcp_uncertainty_not_durable: '..request) end
   local claim=decode(host.sql_query('SELECT value FROM meta WHERE key=?',json.encode({uncertain_key})))
@@ -116,7 +135,11 @@ function M.invoke(input,ctx,directory)
   end
   if not slot.ready or slot.ready.token~=slot.token or not tostring(slot.ready.url):match('^http://127%.0%.0%.1:%d+$') then return failure('mcp_session_not_ready',{operation_id=slot.operation_id}) end
  end
- if slot.unknown then return failure('mcp_connection_uncertain',{operation_id=slot.operation_id,request=slot.unknown}) end
+ if slot.unknown then
+  if expired(uncertain_key) and release_expired(uncertain_key) then pool[key]=nil;return M.invoke(input,ctx,directory) end
+  return failure('mcp_connection_uncertain',{operation_id=slot.operation_id,request=slot.unknown,
+   retry_after_s=M.READ_UNCERTAIN_EXPIRY_S,note='a read on this connector timed out or lost its answer; it is retried automatically after '..M.READ_UNCERTAIN_EXPIRY_S..' s - do not sleep in the script, do other work or report it'})
+ end
  if not slot.ready then return failure('mcp_session_not_ready',{operation_id=slot.operation_id}) end
  -- A clean idle shutdown may start a fresh read session; an uncertain one never does.
  local state=decode(host.operation('status',json.encode({id=slot.operation_id})))

@@ -1561,6 +1561,15 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
                 answer["others"] = serde_json::Value::from(total - 1);
             }
         }
+    } else if top_count > 1 && !query.trim().is_empty() {
+        // Several chats carry the name equally well: the one talked to most recently is the likely one
+        // (operator 14/11: "if 10 Fernandas, I am probably referring to the last talked Fernanda"). The
+        // candidates are already ordered by the last message, so the first is that chat; `ambiguous`
+        // stays true and `picked` says why, so the choice is visible and the others are one step away.
+        if let Some(first) = answer["candidates"].as_array().and_then(|list| list.first()).cloned() {
+            answer["chat"] = first["chat"].clone();
+            answer["picked"] = serde_json::Value::from("most_recent");
+        }
     }
     // What the name side covers, in numbers, so "no chat carries that name" is a fact about the index
     // and not a guess about the account. An index full of messages whose names were never derived and

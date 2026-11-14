@@ -26,6 +26,38 @@ local function call_why(value)
  if type(value)~='table' or (value.ok~=false and value.error==nil) then return nil end
  return tostring(value.code or value.error or ''):match('^[^\n(]*'):sub(1,60)
 end
+-- What a script receives from a call, the same in both loops (14/11, a real run's email scripts all
+-- guessed `r.structuredContent || r.result.structuredContent ... .data`, and a `pgrep` that found nothing
+-- killed its script): the evidence keeps the original; the script gets the answer.
+--   * a connector read (MCP shape: result.content / result.structuredContent) is its data - the
+--     structured `data` when the server gave one, else the structured content, else the text (parsed
+--     when it is JSON);
+--   * a command that RAN and exited non-zero is a result, not an exception: {ok:true, status:200, code,
+--     stdout, stderr, ...}. A timeout, a cancel or a process that never started stays a failure.
+local function script_value(value,success)
+ if type(value)~='table' then return value,success end
+ local result=value.result
+ if success and type(result)=='table' and value.tool_call_issued~=nil and (result.structuredContent~=nil or type(result.content)=='table') then
+  local sc=result.structuredContent
+  if type(sc)=='table' then
+   if sc.data~=nil then return sc.data,true end
+   return sc,true
+  end
+  local texts={}
+  for _,item in ipairs(result.content) do if type(item)=='table' and item.type=='text' then texts[#texts+1]=tostring(item.text or '') end end
+  local text=table.concat(texts,'\n')
+  local ok,decoded=pcall(json.decode,text)
+  if ok and type(decoded)=='table' then return decoded,true end
+  return {text=text},true
+ end
+ if not success and type(value.process_exit_code)=='number' and value.process_exit_code~=0 and value.settled==true
+   and value.timed_out~=true and value.cancelled~=true and value.error==nil then
+  local out={};for k,v in pairs(value) do out[k]=v end
+  out.ok=true;out.status=200;out.code=value.process_exit_code;out.state=nil
+  return out,true
+ end
+ return value,success
+end
 local function summary_of(calls)
  if type(calls)~='table' or #calls==0 then return nil end
  local parts={}
@@ -529,6 +561,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
         success=type(value)~='table' or (not value.error and value.ok~=false)
        else value={error=tostring(result),effect='unknown',replay_allowed=false};success=false end
        local encoded=json.encode(value);local reference=output.store(encoded)
+       value,success=script_value(value,success)
        calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
        telemetry.finish(span,{ok=success,name=def.name,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
       end
@@ -698,6 +731,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
           success=type(value)~='table' or (not value.error and value.ok~=false)
          else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
          local encoded=json.encode(value);local reference=output.store(encoded)
+         value,success=script_value(value,success)
          calls[#calls+1]={id=step.id,name=step.name,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
          telemetry.finish(span,{ok=success,name=step.name,nested=true,codemode_call=step.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
        end
@@ -879,5 +913,7 @@ end
 -- `searchTools`/`describeTool` instead of arriving empty (13/11, when the model had to guess argument
 -- names three times before finding `q`).
 M.lookup = tool_lookup
+-- What a script receives from one settled call (both loops); exported for its test.
+M.script_value = script_value
 
 return M

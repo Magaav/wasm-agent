@@ -24,4 +24,17 @@ text,renamed=contract.normalize_names({type='object',properties={query={type='st
 check(renamed==nil,'a declared name is never renamed')
 r=run('const a = 1;\nconst b = ;')
 check(r.line==2,'the line is still the script line: '..tostring(r.line))
+-- A command that ran and exited non-zero is a result the script reads, not an exception (a pgrep that
+-- found nothing killed its script, 14/11).
+r=run('const r = await tools.bash({command:"exit 3"});\nreturn [r.ok, r.status, r.code].join(",");')
+check(r.ok and tostring(r.value):find('true,200,3',1,true),'a non-zero exit is a result: '..json.encode(r):sub(1,300))
+-- A connector read is its data, not the MCP envelope (every email script guessed the path, 14/11).
+local codemode=dofile('lua/core/codemode.lua')
+local env={ok=true,tool_call_issued=true,evidence={sha256='x'},result={content={{type='text',text='{}'}},structuredContent={data={account_id='a',count=2},summary='s'},isError=false}}
+local v,ok=codemode.script_value(env,true)
+check(ok and v.account_id=='a' and v.count==2 and v.result==nil,'an MCP read arrives as structuredContent.data')
+v,ok=codemode.script_value({ok=true,tool_call_issued=true,result={content={{type='text',text='{"n":1}'}}}},true)
+check(ok and v.n==1,'without structured content the text is parsed')
+v,ok=codemode.script_value({ok=false,error='mcp_rpc_error:-32602:bad'},false)
+check(not ok,'a refusal stays a refusal')
 print(json.encode({ok=true,checks=checks}))

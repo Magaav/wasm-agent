@@ -7,7 +7,8 @@ local M = {}
 
 local NOT_FOUND = { 'unknown_tool', 'unknown_node', 'unknown_capability', 'unknown_id', '_not_found', 'file_missing', 'not_found' }
 local FORBIDDEN = { 'forbidden', 'not_in_profile', 'denied', 'not_granted', 'requires_approval', 'hook_denied' }
-local BAD_CALL = { 'schema_', 'bad_', '_required', 'invalid', 'exclusive', 'retired', 'codemode_only' }
+-- JSON-RPC protocol rejections (parse error, invalid request, unknown method, invalid params) are the call to fix.
+local BAD_CALL = { 'schema_', 'bad_', '_required', 'invalid', 'exclusive', 'retired', 'codemode_only', ':-32700', ':-32600', ':-32601', ':-32602' }
 
 local function has(text, list)
   for _, part in ipairs(list) do if text:find(part, 1, true) then return true end end

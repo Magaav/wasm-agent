@@ -1156,7 +1156,7 @@ fn a_name_resolves_to_the_one_chat_that_carries_it() {
 }
 
 #[test]
-fn two_chats_with_the_same_name_are_candidates_and_never_a_pick() {
+fn two_chats_with_the_same_name_pick_the_one_talked_to_most_recently() {
     let store = Memory::new();
     block_on(put(&store, &direct(LAURA, "Laura", "L1", base(), "bom dia"))).unwrap();
     block_on(put(&store, &direct(LAURA_TWO, "Laura", "L2", base() + 1, "oi"))).unwrap();
@@ -1164,7 +1164,9 @@ fn two_chats_with_the_same_name_are_candidates_and_never_a_pick() {
     let answer = block_on(contacts(&store, &verified(seam::Request { op: "contacts".into(), q: Some("Laura".into()), ..Default::default() }))).unwrap();
     assert_eq!(answer["count"], 2, "{answer}");
     assert_eq!(answer["ambiguous"], true);
-    assert!(answer.get("chat").is_none(), "two Lauras: no chat is picked for the caller");
+    // Operator 14/11: of equal names, the chat talked to last is the likely one - picked, and said so.
+    assert_eq!(answer["chat"], LAURA_TWO, "two Lauras: the most recent one is picked: {answer}");
+    assert_eq!(answer["picked"], "most_recent");
 
     // A read by that name refuses with the candidates rather than reading whichever sorted first.
     let ambiguous = block_on(read(&store, &verified(seam::Request { op: "read".into(), chat: Some("Laura".into()), ..Default::default() }))).unwrap();
