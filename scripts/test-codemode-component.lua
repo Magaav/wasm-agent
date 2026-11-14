@@ -187,6 +187,11 @@ local scripts = {
   { label = 'the node capability registry', code = 'const caps = await capabilities(); return typeof caps;' },
   { label = 'an unknown global is refused', code = 'const nope = await describeTool("no_such_tool"); return JSON.stringify({null:nope===null,found:nope.found,error:nope.error,reason:typeof nope.reason,suggest:nope.suggestions.length});' },
   { label = 'a fenced tool called from a script', code = 'return await tools.subagent({task:"x"});' },
+  -- A tool called with no argument at all: the guest sends the literal text `undefined`, and the two loops
+  -- must journal the SAME bytes for it. 13/11 fixed the parse (`normalize_args`); this case is the other
+  -- half - the journal, the attempts reference and the telemetry hash must go through the same normaliser,
+  -- or `prior`/`{reuse}`/`results.diff` answer differently depending on which loop drove the script.
+  { label = 'a tool called with no argument', code = 'const now = await tools.time(); return now.time ~= nil;' },
 }
 
 -- Can THIS binary carry a failed script's reason across the component boundary? The node maps the guest's
