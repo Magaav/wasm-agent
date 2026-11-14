@@ -25,7 +25,7 @@ wa eval - freeze real tasks and replay them against a candidate binary
   wa eval report [--all] [--compare <run-a> <run-b>]
   wa eval verdict <run-id> pass|fail "<note>"
   wa eval reviewer <branch> [--brief <file>] [--base <ref>] [--repo <dir>] [--bin <wa>]
-                            [--timeout SECONDS] [--keep-scratch] [--branch <name>]
+                            [--timeout SECONDS] [--keep-scratch] [--branch <name>] [--json <file>]
   wa eval reviewer mark <review-id>[#N] accepted|rejected [--finding N]
   wa eval reviewer miss <branch> "<note>"
   wa eval reviewer list
@@ -268,12 +268,40 @@ local function reviewer_storage(args, valued, words)
   return 0
 end
 
+-- The machine-readable answer, for a caller that started the review itself: `wa land` runs this verb in the
+-- background and joins it at the report, and it needs three facts a human sentence cannot carry - whether the
+-- review happened, how many findings it wrote, and the answer itself. The file is written for BOTH outcomes
+-- (a review that could not run says so in the same place), because a caller that only sees "no file" cannot
+-- tell a crashed review from a slow one.
+local function write_answer(path, what, record, problem)
+  if not path or path == "" then return true end
+  local payload = { schema = "harness-evaluator/review/answer/1", branch = tostring(what or ""),
+    ok = (record ~= nil and problem == nil), error = problem }
+  if record then
+    payload.review_id = record.id
+    payload.sha = record.sha
+    payload.state = record.state
+    payload.findings = record.findings
+    payload.review_line = record.review_line
+    payload.answer = record.answer
+    payload.model = record.model
+    payload.wall_ms = record.wall_ms
+  end
+  local written_ok, wrote = pcall(host.write_file, path, json.encode(payload) .. "\n")
+  if not written_ok or wrote ~= true then
+    print("wa eval: the answer could not be written to " .. tostring(path))
+    return false
+  end
+  return true
+end
+
 local function reviewer_run(args)
   -- No `--model` and no `--provider`: the reviewer is one model on one route (M.DEFAULT_MODEL), and a
   -- store whose rows were measured on different models is not a measurement (first real review, 13/11).
   local valued = { ["--brief"] = true, ["--base"] = true, ["--bin"] = true, ["--timeout"] = true,
     ["--finding"] = true, ["--note"] = true, ["--repo"] = true, ["--findings"] = true,
-    ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true, ["--branch"] = true }
+    ["--accepted"] = true, ["--misses"] = true, ["--cost"] = true, ["--branch"] = true,
+    ["--json"] = true }
   local words = positionals(args, valued)
   -- `list`, `mark`, `miss` and `run` are subcommands, so a BRANCH with one of those names could never be
   -- reviewed; `--branch <name>` names the branch outright (third real review, 13/11, finding 6).
@@ -288,6 +316,10 @@ local function reviewer_run(args)
   local function off() 
     print("wa eval: the reviewer is off (" .. tostring(switch.source) .. " = " .. tostring(switch.value)
       .. "); nothing was run")
+    -- A caller that started this review itself still gets an answer: "the reviewer is off" and not an
+    -- empty file, so a landing says which switch stopped it instead of "no answer".
+    write_answer(flag(args, "--json"), what, nil, "the reviewer is off (" .. tostring(switch.source) .. " = "
+      .. tostring(switch.value) .. ")")
     return 0
   end
   local named = flag(args, "--branch") ~= nil
@@ -333,7 +365,10 @@ local function reviewer_run(args)
     timeout = flag(args, "--timeout"),
     keep_scratch = has(args, "--keep-scratch"),
   })
-  if not record then return refused(problem or "the review could not run") end
+  if not record then
+    write_answer(flag(args, "--json"), what, nil, problem)
+    return refused(problem or "the review could not run")
+  end
   local m = record.metrics or {}
   print(string.format("review %s: %s @ %s (base %s) %s · rounds %s · tools %s · in %s out %s · %sms · %s",
     tostring(record.id), tostring(record.branch), tostring(record.sha):sub(1, 8), tostring(record.base_ref),
@@ -345,12 +380,15 @@ local function reviewer_run(args)
     print(record.answer)
   end
   if record.review_line and record.state == "reviewed" then
+    write_answer(flag(args, "--json"), what, record, nil)
     print(record.review_line)
     return 0
   end
   -- A review that answered about another commit is NOT a review of this branch: its own line is quoted as
   -- the session's, the door says what went wrong, and the exit is non-zero (third real review, finding 3).
   if record.review_line then print("the session's own final line: " .. tostring(record.review_line)) end
+  write_answer(flag(args, "--json"), what, record,
+    problem or "the review session gave no REVIEW line")
   print("wa eval: " .. tostring(problem or "the review session gave no REVIEW line"))
   if record.stderr_tail and record.stderr_tail ~= "" then
     print("wa eval: stderr tail: " .. tostring(record.stderr_tail):gsub("%s+$", ""))

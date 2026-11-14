@@ -35,7 +35,7 @@ and `scripts/test-fast-rows.sh` (the narrowing's three rules).
 | --- | --- | --- |
 | `collect` | fetch the incoming repository, resolve each branch and its tip, record the base | `no_repository`, `no_main`, `branch_unknown`, `ready_sha_moved`, `ready_empty` |
 | `plan` | classify what changed and decide the round's path: which steps run, which steps are skipped **and why**, what the gate will check, and what the round should cost (the journal's own medians) | `plan_no_changes` (nothing to land) |
-| `review` | run `scripts/review-branch.mjs` on each branch **before** the merge; findings are reported, never blocking | `skipped` + a TODO when the reviewer is not on main |
+| `review` | run the landing reviewer (`wa eval reviewer`, lua/core/harness_evaluator_reviewer.lua) on each branch **before** the merge: one background process per branch, joined by `report`; findings are reported, never blocking | `skipped` with `review unavailable: <reason>` when the reviewer cannot run (never a silent skip) |
 | `merge` | a fresh worktree (`land<N>/final`) from the base, `merge-tree --write-tree` first, then one `--no-ff` merge per branch | `merge_conflict`, `merge_failed`, `worktree_failed` |
 | `gate` | the weighted checks, one run each, a failing check re-run **once alone** | `gate_failed`, `gate_vacuous`, `flaky_under_load` (stops, never green) |
 | `push` | the landed tip to the incoming repository, read back | `push_failed`, `push_not_readback` |
@@ -249,12 +249,32 @@ A signing node needs `scripts/sign-release.sh` beside its binary (shipped by `de
 answers `signer_script_missing` rather than an unsigned release. The vault's own routes and the key's
 rotation are in [VAULT.md](VAULT.md) and [INSTALL.md](INSTALL.md), "Signed releases".
 
-## The reviewer channel
+## The reviewer
 
-`change/reviewer` is not on main, so it is detected, never assumed: `scripts/review-branch.mjs` at the base
-commit (it reviews a branch BEFORE that branch is merged, so a reviewer that arrived with the branch could
-never have looked at it). Absent: the step is `skipped` with a TODO naming the file and the test that turns
-it on. Its findings are recorded in the report and never block a landing.
+`wa land` runs the reviewer that landed - `wa eval reviewer` (lua/core/harness_evaluator_reviewer.lua) - on
+every branch of the round, BEFORE that branch is merged, through that door and no other. There is no second
+reviewer and no wrapper script: the step starts `<the landing's own binary> eval reviewer <branch> --repo
+<repo> --base <base> [--brief <file>] --json <file>` as a process of its own, one per branch, and joins them
+in `report`.
+
+- **Before the merge, beside the gate.** Each review is a child process started in the `review` step and
+  joined at the end, so a branch's review runs while the merge, the gate, the release and the deploy run. The
+  landing does not pay the review's minutes; it pays the join at the report, bounded by `M.REVIEW_WAIT`
+  (900 s), and says "still running" by name if a review outlives that.
+- **The answer is a file, not a sentence.** `--json <file>` is written by the reviewer for both outcomes -
+  `ok` with the findings, or `ok: false` with the reason - so a landing never has to parse prose, and a review
+  that answered about another commit is not mistaken for one of this branch's.
+- **Never blocking.** Findings go into the journal (`journal.review`), the report (`## review`, with each
+  review's own answer and its id, so a finding can be marked later with `wa eval reviewer mark <id>#<n>`) and
+  the console. Nothing in the step, the join or the report can stop a landing.
+- **One opt-out.** `reviewer = off` in the node's config file (or `WA_REVIEWER=off`) is read through the
+  reviewer's own module; the step is then `skipped` with the switch and its value, and no review starts.
+- **A failure is a row.** A reviewer that cannot start, exits non-zero, answers about another commit or never
+  answers is recorded as `review unavailable: <reason>` in the journal, the step and the report - never as a
+  silent skip and never as "no findings".
+- **The brief travels.** `wa land ready <branch> <sha> [--brief <file>]` puts the operator's brief on the
+  ready line (`READY <branch> <sha> brief=<file>`), `collect` reads it, and `review` hands it to the reviewer,
+  so a branch is reviewed against what it was for and not only against its diff.
 
 ## What this node can and cannot do
 
