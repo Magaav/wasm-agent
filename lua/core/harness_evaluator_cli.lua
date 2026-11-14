@@ -183,6 +183,13 @@ local function report(args)
     return 0
   end
   for _, line in ipairs(core.report({ all = has(args, "--all"), reviews = reviewer })) do print(line) end
+  -- The operator's approval decisions on outgoing WhatsApp drafts (docs/APPROVE.md): per chat, how
+  -- often the draft went out as written, how often it was edited and how far, how often it was
+  -- rejected. The decision to give an agent full autonomy is this number, not an impression.
+  local approve = dofile("lua/core/approve.lua").report()
+  print("")
+  print("approval decisions (" .. tostring(approve.total) .. " recorded)")
+  for _, line in ipairs(approve.lines) do print("  " .. line) end
   return 0
 end
 

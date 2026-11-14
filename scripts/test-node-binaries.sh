@@ -37,11 +37,16 @@ expect_status() { # <want> <got> <what>
   ok
 }
 contains() { # <text> <needle> <what>
-  printf '%s' "$1" | grep -qF -- "$2" || fail "$3: '$2' not in: $1"
+  # No pipe, on purpose. `printf '%s' "$1" | grep -qF -- "$2"` under `set -o pipefail` reports the pipeline
+  # as failed when `grep -q` finds its match and exits while `printf` is still writing: printf dies of
+  # SIGPIPE (141), pipefail makes 141 the pipeline's status, and a TRUE assertion fails. Measured 13/11 on
+  # this file after the publisher grew past ~43 KB - the same assertions passed and failed on alternate
+  # runs, which is the worst possible evidence. Here-strings keep one process, so the answer is the grep's.
+  grep -qF -- "$2" <<< "$1" || fail "$3: '$2' not in: $1"
   ok
 }
 absent() { # <text> <needle> <what>
-  printf '%s' "$1" | grep -qF -- "$2" && fail "$3: '$2' unexpectedly in: $1"
+  grep -qF -- "$2" <<< "$1" && fail "$3: '$2' unexpectedly in: $1"
   ok
 }
 

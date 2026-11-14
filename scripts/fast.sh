@@ -2,6 +2,9 @@
 # The fast path: the day-to-day check before landing a change. Minutes, not the gate's ~50.
 #
 #   bash scripts/fast.sh [--jobs N] [--all-rust] [--docker] [--binary]
+#   WA_FAST_ROWS=<file> bash scripts/fast.sh   # only the Lua rows a planned round's changes touch
+#                                              # (scripts/lib/fast-rows.sh; the always-on core rows and
+#                                              # every contract check still run, an unknown row refuses)
 #
 # What it runs, in parallel where it can:
 #   1. every scripts/test-*.lua not listed in scripts/fast-path.exclude, each with its own scratch home and
@@ -51,7 +54,7 @@ while [ "$#" -gt 0 ]; do
     --all-rust) all_rust=1; shift ;;
     --docker) docker_mode=1; shift ;;
     --binary) binary_only=1; shift ;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "fast: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -302,6 +305,21 @@ fast_components_prepare
 # ---- 1. Lua -----------------------------------------------------------------------------------------
 excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
 for f in scripts/test-*.lua; do printf '%s\n' "$excluded" | grep -qxF "$f" || printf '%s\n' "$f"; done > "$work/lua.list"
+# WA_FAST_ROWS narrows the run to the rows a planned round's changed paths touch (scripts/lib/fast-rows.sh,
+# the caller is `wa land`). It is a REQUEST, not an authority: the always-on core rows are added here, an
+# unknown row is a refusal by name (exit 2, nothing runs), and the contract `check` lines below are not
+# narrowable at all. The count and the reason are printed, so a narrowed run never reads like a full one.
+if [ -n "${WA_FAST_ROWS:-}" ]; then
+  . "$ROOT/scripts/lib/fast-rows.sh"
+  lua_before=$(wc -l < "$work/lua.list")
+  if ! wa_fast_row_filter "$work/lua.list" "$WA_FAST_ROWS" > "$work/lua.narrow" 2> "$work/lua.narrow.err"; then
+    echo "fast: narrowed run REFUSED by $WA_FAST_ROWS: $(tr '\n' ' ' < "$work/lua.narrow.err")" >&2
+    echo "fast: nothing ran; a plan that names a row this runner cannot execute has to be fixed, not obeyed" >&2
+    exit 2
+  fi
+  mv "$work/lua.narrow" "$work/lua.list"
+  echo "fast: narrowed by the landing plan ($WA_FAST_ROWS): $(wc -l < "$work/lua.list") of $lua_before Lua rows; the never-dropped core rows are included, and every contract check below still runs"
+fi
 timings=$(git rev-parse --git-path wa-fast-timings.tsv 2>/dev/null || true)
 if [ -n "$timings" ] && [ -s "$timings" ]; then
   awk -F'\t' 'NR==FNR{ms[$3]=$2; next} {print (($0 in ms)?ms[$0]:999999) "\t" $0}' "$timings" "$work/lua.list" | sort -rn | cut -f2 > "$work/lua.sorted" \
@@ -667,6 +685,14 @@ fi
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
 check deploy-prune bash scripts/test-deploy-prune.sh
 check publish-artifacts bash scripts/test-publish-artifacts.sh
+# The fastlane's two halves, both seconds and self-contained. The row list a narrowed run executes: the core
+# rows are never dropped, an unknown row is a refusal and an empty request runs nothing (scripts/lib/fast-rows.sh,
+# the one place a plan could make a green run mean less). And the signing chain a round depends on: the
+# manifest and SHA256SUMS are produced once, so a re-run of the publisher after the vault host signed them does
+# not invalidate the signature - the 13/11 failure that needed a hand-frozen build (the lua-tree record is
+# covered by the same row).
+check fast-rows bash scripts/test-fast-rows.sh
+check land-signing bash scripts/test-land-signing.sh
 # The Go WhatsApp connector was removed in Phase 4 (11/11) and must not come back: no Go source, no
 # build/install entry point, no unit that starts it - while the Rust component, its MCP, the operator
 # client and the STT/OCR workers stay. The scan is proved on fixtures, so it is a gate and not a grep

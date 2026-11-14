@@ -23,7 +23,9 @@
 # wasm32-wasip2, so they do not depend on the CPU - the same artifact runs on arm64 and x86_64 - and
 # building it once here is what makes every node's deploy one command.
 #
-# Reproducible within one checkout, and not across two (measured 13/11 on the repin below): two builds
+# Reproducible within one checkout, and still not across two (re-measured 13/11 on the archive repin:
+# two builds in this path gave 8,582,128 bytes / `f3d60624…` twice, and the same tree copied to another
+# path gave 8,582,132 bytes / `cb410807…`). Measured first on the repin below: two builds
 # in one path gave the same sha256; the same commit in two paths gave 8,557,078 bytes / `0bf8762a…`
 # and 8,557,275 bytes / `67a9414f…`. The cause is measured too - this component path-depends on
 # `wa-whatsapp-outbox` and `wa-whatsapp-index`, and Cargo's `-C metadata` for a path package is a hash
@@ -121,4 +123,4 @@ model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 4
 selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email ddbe326a5d394a0dc50a0c947740a1364e4cdeda348286666a3ba21569893915 565827
-wa-whatsapp 18e9ab23aac13bdc39e87ce83baf9ce44de393f606e46468f90758c147bd174e 8750736
+wa-whatsapp f3d6062451c805eed85a1de875097de46d69d422a122614479b5a53af504f8d0 8582128

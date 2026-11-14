@@ -90,6 +90,9 @@ M.commands = {
     hint = "list the active hook points and mods, and the last outcome; `reload` rereads the config files",
   },
   {
+    name = "/approve",
+    usage = "/approve [on|off]",
+    hint = "approve outgoing WhatsApp drafts: the switch, the queue, and Enter / e / r to send, edit or reject",
     name = "/reload",
     usage = "/reload",
     hint = "live reload: which tree the UI comes from, what was swapped and what failed",

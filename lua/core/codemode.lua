@@ -1,5 +1,12 @@
 -- Pi1.2-compatible guest protocol over Node-free host.quickjs. Agent/tool policy
 -- stays here and in the native dispatcher; JS never receives host capabilities.
+-- A tool called with no argument (`await tools.nodes()`) sends the text `undefined`, as a global does.
+-- No arguments is {} - in BOTH dispatch loops (native and component). 13/11: only the native loop did
+-- this, so the running component loop parsed "undefined" as JSON and died on json_number_invalid.
+local function normalize_args(text)
+ if text==nil or text=='' or text=='undefined' then return '{}' end
+ return text
+end
 local json=dofile('lua/vendor/json.lua')
 local contract=dofile('lua/core/json_contract.lua')
 local output=dofile('lua/core/tool_output.lua')
@@ -463,8 +470,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
      if value==nil then value={error='codemode_global_not_available'};success=false end
     else value={error='codemode_global_not_available'};success=false end
    elseif call.target=='tool' then
-    -- tools.nodes() with no argument sends `undefined`, as a global does: no arguments is {} (29/10).
-    if call.args=='undefined' or call.args=='' then call.args='{}' end
+    call.args=normalize_args(call.args) -- the same normalizer the component loop uses (see normalize_args)
     local def=definitions[call.name]
     if not def or forbidden[call.name] then
      local out=outside[call.name]
@@ -636,11 +642,12 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
       if not current or host.sha256(json.encode(current))~=hashes[step.name] then
        value,success={error='tool_definition_changed'},false
       else
-       local stripped,wait_s,wait_error=pending_calls.strip(argument_text)
+       local stripped,wait_s,wait_error=pending_calls.strip(normalize_args(argument_text))
        if wait_error then value,success={error=wait_error,effect='none'},false
        else
        local _,err=contract.validate(current['function'].parameters,stripped or '{}')
-       if err then value,success={error=err},false
+       -- the rejected argument text travels with the refusal, so the cause is visible where it is read
+       if err then value,success={error=err,input=tostring(stripped or ''):sub(1,80)},false
        else
         local params=json.decode(stripped or '{}')
         local fenced=action_refusal(step.name,params)

@@ -1237,7 +1237,11 @@ impl IndexConfig {
             ocr: config["index_ocr"].as_bool().unwrap_or(true),
             ocr_every: Duration::from_secs(config["index_ocr_every_seconds"].as_u64().unwrap_or(60).clamp(10, 86_400)),
             ocr_budget: config["index_ocr_budget"].as_u64().unwrap_or(8).clamp(1, 200) as usize,
-            retention: index::Retention::new(config["index_retention_days"].as_u64().unwrap_or(90) as u32),
+            // 180 days (was 90): the operator's decision of 13/11, and the same number the past is
+            // bounded by (`history::Budget::from_json` reads this key too), so there is one window.
+            retention: index::Retention::new(
+                config["index_retention_days"].as_u64().unwrap_or(history::DEFAULT_KEEP_DAYS as u64) as u32,
+            ),
             prune_every: Duration::from_secs(config["index_prune_every_seconds"].as_u64().unwrap_or(300).clamp(30, 86_400)),
             prune_budget: config["index_prune_budget"].as_u64().unwrap_or(200).clamp(1, 5_000) as usize,
             download_max: config["index_download_max_bytes"]
@@ -1759,13 +1763,7 @@ async fn history_tick(cfg: &IndexConfig) -> bool {
         return true;
     }
     let me = CLIENT.with(|c| c.borrow().clone()).map(|client| own_jids(&client)).unwrap_or_default();
-    let mut plan = match history::Plan::of(&IndexKv, cfg.history).await {
-        Ok(plan) => plan,
-        Err(reason) => {
-            say!("history: counting the index failed reason={}", one_line(&reason));
-            return true;
-        }
-    };
+    let mut plan = history::Plan::new(cfg.history);
     let mut total = history::Progress::default();
     // One conversation at a time: `HistorySyncStream` inflates and decodes the blob incrementally, so
     // the memory this holds is the largest single conversation, not the whole sync.
@@ -1787,13 +1785,13 @@ async fn history_tick(cfg: &IndexConfig) -> bool {
         }
     }
     say!(
-        "history: sync_type={} chunk={:?} progress={:?} bytes={} skipped_conversations={} counted_to_cap={} {}",
+        "history: sync_type={} chunk={:?} progress={:?} bytes={} skipped_conversations={} keeping_days={} {}",
         lazy.sync_type(),
         lazy.chunk_order(),
         lazy.progress(),
         lazy.decompressed_size(),
         stream.skipped_conversations(),
-        plan.capped,
+        cfg.history.keep_ms / 86_400_000,
         total.line()
     );
     true
@@ -1868,11 +1866,14 @@ fn media_type(kind: &str) -> whatsapp_rust::download::MediaType {
 /// Retention: delete what fell out of the window, in bounded passes (`index::prune`).
 async fn prune_index(cfg: &IndexConfig) {
     match index::prune(&IndexKv, now_ms(), cfg.retention, cfg.prune_budget).await {
-        Ok(pruned) if pruned.records > 0 => say!(
-            "index: pruned {} record(s) more={} retention_days={}",
+        // A pass that only walked past a restored month is still a pass an operator wants to see: it is
+        // the difference between "retention ran and kept them on purpose" and "retention stopped".
+        Ok(pruned) if pruned.records > 0 || pruned.restored_months > 0 => say!(
+            "index: pruned {} record(s) more={} retention_days={} restored_months={}",
             pruned.records,
             pruned.more,
-            cfg.retention.days
+            cfg.retention.days,
+            pruned.restored_months
         ),
         Ok(_) => {}
         Err(reason) => say!("index: prune failed reason={reason}"),
@@ -2098,16 +2099,24 @@ async fn serve(config: serde_json::Value) {
         post.held.len()
     );
     say!(
-        "index: {} (retention {} days, prune every {} s by {}, download <= {} KiB, history {} per chat / {} total / {} per sync)",
+        "index: {} (retention {} days, prune every {} s by {}, download <= {} KiB, history {} per sync bounded by that same {} days)",
         if index.enabled { "on" } else { "off" },
         index.retention.days,
         index.prune_every.as_secs(),
         index.prune_budget,
         index.download_max / 1024,
-        index.history.per_chat,
-        index.history.total,
-        index.history.per_sync
+        index.history.per_sync,
+        index.history.keep_ms / 86_400_000
     );
+    // A definition that still sets the removed caps is not refused - it is reported once, because a
+    // key that silently stopped meaning anything is a decision nothing honours (13/11: the operator
+    // removed the 200-per-chat and 2000-total history caps; the age bounds the past now).
+    if config["index_history_per_chat"].as_u64().is_some() || config["index_history_total"].as_u64().is_some() {
+        say!(
+            "index: index_history_per_chat / index_history_total are gone and are ignored; the past is bounded by index_retention_days ({} days) and index_history_per_sync",
+            index.history.keep_ms / 86_400_000
+        );
+    }
     say!("wa-whatsapp: starting (pairing by {})", if pair_phone.is_some() { "code" } else { "QR" });
     let tasks = Tasks::start();
     let runtime = HostRuntime;

@@ -162,6 +162,13 @@ pub struct Record {
     /// `view_once`, `ephemeral_media_not_retained`, `media_too_large`, `unsupported_kind`, …: why this
     /// record is a fact rather than a readable message. Empty for a normal one.
     pub unsupported: String,
+    /// True when this record was loaded back from an archived month (`docs/WHATSAPP-ARCHIVE.md`).
+    ///
+    /// The node sets it when it restores a month: the record is a copy of one that was cut months ago,
+    /// retention keeps it instead of deleting it again, and an answer built from it says where it came
+    /// from. A record written before this field existed reads back as `false`, which is what a live
+    /// message is.
+    pub restored: bool,
 }
 
 /// What the protocol layer knows about one inbound message: the envelope, not the content.
@@ -237,51 +244,26 @@ impl Record {
     /// Everything this record is searchable by: its text, a document's filename, the attachment's
     /// name, and any transcript/OCR text that was attached to it.
     pub fn searchable(&self) -> String {
-        let mut out = String::with_capacity(self.text.len() + self.transcript.len() + 64);
-        for part in [self.text.as_str(), self.transcript.as_str(), self.ocr.as_str()] {
-            if !part.is_empty() {
-                out.push_str(part);
-                out.push(' ');
-            }
+        // The concatenation lives in the seam (`wa_whatsapp_index::Searchable`), because the node
+        // rebuilds this same haystack when it restores an archived month: a different order or a
+        // different separator there would write token keys this index never wrote.
+        let options: Vec<&str> = self.poll.as_ref().map(|poll| poll.options.iter().map(String::as_str).collect()).unwrap_or_default();
+        let contacts: Vec<&str> = self.contacts.iter().map(|contact| contact.name.as_str()).collect();
+        wa_whatsapp_index::Searchable {
+            body: &[self.text.as_str(), self.transcript.as_str(), self.ocr.as_str()],
+            media: self.media.as_ref().map(|media| (media.filename.as_str(), media.mime.as_str())),
+            place: self.place.as_ref().map(|place| (place.name.as_str(), place.address.as_str())),
+            poll: self.poll.as_ref().map(|poll| (poll.name.as_str(), options.as_slice())),
+            contacts: &contacts,
         }
-        if let Some(media) = &self.media {
-            out.push_str(&media.filename);
-            out.push(' ');
-            out.push_str(&media.mime);
-        }
-        if let Some(place) = &self.place {
-            out.push_str(&place.name);
-            out.push(' ');
-            out.push_str(&place.address);
-        }
-        if let Some(poll) = &self.poll {
-            out.push_str(&poll.name);
-            for option in &poll.options {
-                out.push(' ');
-                out.push_str(option);
-            }
-        }
-        for contact in &self.contacts {
-            out.push(' ');
-            out.push_str(&contact.name);
-        }
-        out
+        .text()
     }
 
     /// The normalized tokens this record is indexed under (accent-folded, lowercase, deduplicated,
     /// bounded). Always includes the chat's user part and the sender's, so "messages from
     /// 5511…" style searches work without a separate query path.
     pub fn tokens(&self) -> Vec<String> {
-        let mut tokens: Vec<String> = Vec::new();
-        for token in tokenize(&self.searchable()) {
-            if tokens.len() >= crate::index::MAX_TOKENS {
-                break;
-            }
-            if !tokens.iter().any(|seen| seen == &token) {
-                tokens.push(token);
-            }
-        }
-        tokens
+        wa_whatsapp_index::tokens(&self.searchable())
     }
 }
 
@@ -640,98 +622,30 @@ fn contact_of(display_name: &str, vcard: &str) -> Contact {
 /// a document named `Relatório.pdf` was unfindable as `relatorio`. Folding is what makes the index
 /// worth having; it is done on the way in *and* on the way out, so a query typed either way matches.
 pub fn fold(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        let lower = ch.to_lowercase().next().unwrap_or(ch);
-        let code = lower as u32;
-        let folded = if (0xC0..=0xFF).contains(&code) {
-            mapped(LATIN1, code - 0xC0, lower)
-        } else if (0x100..=0x17F).contains(&code) {
-            mapped(LATIN_EXT_A, code - 0x100, lower)
-        } else {
-            lower
-        };
-        // Letters and digits are the tokens; so is an emoji, because a sticker is found by the emoji
-        // its sender tagged it with and "an emoji" has no letters to fold. Everything else separates.
-        if folded.is_alphanumeric() || is_emoji(folded) {
-            out.push(folded);
-        } else {
-            out.push(' ');
-        }
-    }
-    out
+    wa_whatsapp_index::fold(text)
 }
 
 /// The key a NAME is compared by: [`fold`], minus the emoji, with the spaces collapsed.
 ///
-/// A name is not a search token. The operator saves a contact as `Laura ❤️` and then types `laura`;
-/// folding keeps the emoji - a sticker is found by the emoji its sender tagged it with, so an emoji is
-/// a token there - and a comparison that kept it would answer "Laura ❤️" as a *prefix* of "laura"
-/// instead of the same name. Ignoring it is what the caller means by the name, and it is the one place
-/// that decides so: `index::ChatCard::match_score` compares names through this and nothing else.
+/// It lives in the seam beside the fold (`wa_whatsapp_index::name_key`) for the reason the tokenizer
+/// does: the node rebuilds a restored month, and a name the operator saved must keep matching. This is
+/// the component's name for it, so `index.rs` reads as it always did.
 pub fn name_key(text: &str) -> String {
-    fold(text).split_whitespace().filter(|token| !token.chars().any(is_emoji)).collect::<Vec<_>>().join(" ")
+    wa_whatsapp_index::name_key(text)
 }
 
-/// One entry of a folding table, or the character itself when the table has no opinion (`?`).
-fn mapped(table: &str, index: u32, fallback: char) -> char {
-    match table.chars().nth(index as usize) {
-        Some('?') | None => fallback,
-        Some(folded) => folded,
-    }
-}
-
-/// A symbol that is not punctuation: what an emoji is, and what a token may be.
-fn is_emoji(ch: char) -> bool {
-    !ch.is_ascii() && !ch.is_whitespace() && !ch.is_alphanumeric() && !is_punctuation(ch)
-}
-
-/// Punctuation, which never belongs to a token (an emoji is a symbol, not punctuation).
-fn is_punctuation(ch: char) -> bool {
-    ch.is_ascii_punctuation()
-        || ('\u{a1}'..='\u{bf}').contains(&ch)
-        || ('\u{2010}'..='\u{2027}').contains(&ch)
-        || ('\u{2030}'..='\u{205e}').contains(&ch)
-        || ('\u{3000}'..='\u{303f}').contains(&ch)
-}
-
-/// The tokens of a text: folded, split, bounded, deduplicated in place by the caller.
+/// The tokens of a text: folded, split, bounded, deduplicated. The tokenizer lives in the seam
+/// (`wa_whatsapp_index::tokenize`) because the node recomputes it when a month is restored.
 pub fn tokenize(text: &str) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    for token in fold(text).split_whitespace() {
-        let chars = token.chars().count();
-        if chars == 0 || chars > 40 {
-            continue;
-        }
-        // A one-character token is dropped when it is a letter or a digit (nobody searches "a") and
-        // kept when it is an emoji: a sticker is indexed by the emoji it was tagged with, and by
-        // nothing else.
-        if chars == 1 && token.chars().next().is_some_and(|ch| ch.is_alphanumeric()) {
-            continue;
-        }
-        let token = token.to_string();
-        if !tokens.iter().any(|seen| seen == &token) {
-            tokens.push(token);
-        }
-    }
-    tokens
+    wa_whatsapp_index::tokenize(text)
 }
 
 /// Latin-1 supplement (U+00C0..U+00FF), one ASCII letter per character (`?` = no opinion).
-pub const LATIN1: &str = "AAAAAAACEEEEIIIIDNOOOOO?OUUUUYTsaaaaaaaceeeeiiiidnooooo?ouuuuyty";
+pub const LATIN1: &str = wa_whatsapp_index::text::LATIN1;
 
 /// Latin Extended-A (U+0100..U+017F): the Polish, Czech, Baltic and Turkish letters a Portuguese or
 /// English speaker still types without the accent.
-pub const LATIN_EXT_A: &str = concat!(
-    "AaAaAaCcCcCcCcDd",
-    "DdEeEeEeEeGgGgGg",
-    "GgGgGgHhHhIiIiIi",
-    "IiIiJjKkkLlLlLlL",
-    "lLlNnNnNnnNnOoOo",
-    "OoOoRrRrRrSsSsSs",
-    "SsTtTtTtUuUuUuUu",
-    "UuUuWwYyYZzZzZzs",
-);
+pub const LATIN_EXT_A: &str = wa_whatsapp_index::text::LATIN_EXT_A;
 
 /// One line, bounded: a snippet, a title or a reason never carries a newline into an answer.
 pub fn one_line(text: &str, max: usize) -> String {

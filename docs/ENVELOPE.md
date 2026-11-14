@@ -182,7 +182,7 @@ runs on the client too, while `bash` runs on this node.
 | `mcp_whatsapp_media` | `chat` `id` | The media metadata of one WhatsApp message: mime, filename, size, sha256, duration |
 | `mcp_whatsapp_download` | `chat` `id` `max_bytes?` | Decrypt one WhatsApp message's media on the account node and return its file path there |
 | `mcp_whatsapp_backfill` | `chat?` `count?` | Ask the phone for older WhatsApp messages so search covers the account's past |
-| `mcp_whatsapp_send` | `chat?` `id?` `ids?` `mentions?` `reply_to?` `text?` `until?` `wait_s?` | Send one WhatsApp message to an exact chat and answer WhatsApp's message id or its reason |
+| `mcp_whatsapp_send` | `chat?` `draft?` `id?` `ids?` `mentions?` `reply_to?` `text?` `until?` `wait_s?` | Send one WhatsApp message to an exact chat and answer WhatsApp's message id or its reason |
 | `email_send` | `body` `subject` `to` `attachments?` `cc?` `in_reply_to?` | Send one email through the durable outbox, with the message id readable afterwards |
 | `email_send_status` | `id` | Read the state of a queued email send, with its message id when delivered |
 | `email_search` | `from?` `has_attachment?` `limit?` `mailbox?` `q?` `since?` `subject?` `until?` | Search every indexed email by text, sender, subject, mailbox or time window |

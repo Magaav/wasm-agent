@@ -1016,6 +1016,13 @@ printf '%s' "$NEW_DIGEST" | grep -qE '^[0-9a-f]{64}$' || fail "the binary being 
 # the deploy refused with `stale embedded module: lua/core/server.lua` although nothing was wrong with
 # either tree. Staging is only meaningful from a tree that holds still, so the source is recorded before
 # and after the copy: one retry, and then a refusal that names the race instead of blaming the binary.
+# WHICH FILES the shipped Lua tree is, is `wa_lua_tree_files` (scripts/lib/lua-tree.sh) and not a list spelled
+# here: the release record a Lua-only round signs describes the same set, and two spellings of it would let the
+# record certify a tree this deploy does not install. Sourced next to the node-binaries lib for the same reason
+# (an installed copy needs it beside it, and the deploy ships it).
+if ! command -v wa_lua_tree_files >/dev/null 2>&1; then
+  . "$ROOT/scripts/lib/lua-tree.sh" 2>/dev/null || true
+fi
 stage_lua_tree() {
   local head_before dirty_before head_after dirty_after
   head_before="$(git rev-parse HEAD 2>/dev/null)"; dirty_before="$(git status --porcelain 2>/dev/null)"
@@ -1023,7 +1030,7 @@ stage_lua_tree() {
   {
     echo "capabilities $NEW_DIGEST"
     echo "commit $COMMIT"
-    ( cd "$ROOT" && { find lua/core lua/vendor -type f \( -name '*.lua' -o -name '*.sql' \); printf '%s\n' AGENTS.orchestrator.md AGENTS.subagents.md; } | LC_ALL=C sort ) | while read -r f; do
+    wa_lua_tree_files "$ROOT" | while read -r f; do
       mkdir -p "$LUA_STAGE/$(dirname "$f")" && cp "$ROOT/$f" "$LUA_STAGE/$f" || exit 1
       printf '%s  %s\n' "$(sha256sum < "$ROOT/$f" | awk '{print $1}')" "$f"
     done
@@ -1726,6 +1733,9 @@ ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/dep
 # node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2
 # cores, no disk for ~600 crates) cannot do. Measured 06/11: the prebuilt path was reached only from the tree.
 ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-binaries.sh" "scripts/lib/node-binaries.sh beside deploy.sh"
+# ...and the shipped-Lua-tree definition, which the staging above uses: an installed deploy without it would
+# stage no tree at all (lua-tree.sh is where "which files" lives now).
+ship_file "$ROOT/scripts/lib/lua-tree.sh" "$INSTALL_DIR/scripts/lib/lua-tree.sh" "scripts/lib/lua-tree.sh beside deploy.sh (which files the Lua tree is)"
 # ...and the release-signature gate it now sources: without it an installed deploy cannot verify a release and
 # refuses every prebuilt binary by name (fail closed), which would leave a node that cannot compile with
 # nothing to install.

@@ -745,12 +745,12 @@ fn retention_deletes_the_oldest_first_and_leaves_the_window_intact() {
     assert_eq!(retention.days, 30);
     // One pass, budget 1: the oldest goes and the pass says there is more.
     let pruned = block_on(prune(&store, now, retention, 1)).unwrap();
-    assert_eq!(pruned, Pruned { records: 1, more: true });
+    assert_eq!(pruned, Pruned { records: 1, more: true, restored_months: 0 });
     assert!(block_on(load(&store, CHAT, "OLD1")).unwrap().is_none());
     assert!(store.keys().iter().all(|key| !key.contains("OLD1")), "the record's keys went with it");
     // A second pass takes the next one, and then stops: the one inside the window stays, and its keys.
     let pruned = block_on(prune(&store, now, retention, 10)).unwrap();
-    assert_eq!(pruned, Pruned { records: 1, more: false });
+    assert_eq!(pruned, Pruned { records: 1, more: false, restored_months: 0 });
     assert!(block_on(load(&store, CHAT, "OLD2")).unwrap().is_none());
     assert!(block_on(load(&store, CHAT, "NEW1")).unwrap().is_some());
     // Nothing stale left: a third pass is free.
@@ -758,6 +758,87 @@ fn retention_deletes_the_oldest_first_and_leaves_the_window_intact() {
     // And a wider window keeps everything that is left.
     assert_eq!(block_on(prune(&store, now, Retention::new(3650), 10)).unwrap(), Pruned::default());
     assert_eq!(Retention::new(0).days, 1, "a typo cannot stop the index");
+}
+
+#[test]
+fn retention_walks_past_a_month_that_was_restored_from_its_archive() {
+    // The archive (`docs/WHATSAPP-ARCHIVE.md`) loads a month back that is older than the window by
+    // construction. Without the mark's range this pass would delete it again on its next tick, which is
+    // the whole reason a restore is not simply a write.
+    let store = Memory::new();
+    let now = 1_760_000_000_000;
+    let day = 86_400_000i64;
+    // Two records in the restored month, one stale record from a different month, one inside the window.
+    let (month, _) = seam::month::bounds(&seam::month::of(now - 400 * day)).unwrap();
+    let restored_ts = month + 5 * day;
+    let stale_ts = now - 200 * day;
+    for (id, ts) in [("ARC1", restored_ts), ("ARC2", restored_ts + day)] {
+        let mut record = text(id, ts, "mes passado");
+        record.restored = true;
+        block_on(put(&store, &record)).unwrap();
+    }
+    block_on(put(&store, &text("STALE", stale_ts, "antigo"))).unwrap();
+    block_on(put(&store, &text("LIVE", now - day, "hoje"))).unwrap();
+    // The mark is the month's, and it is the only thing that says the range is read-only here.
+    block_on(store.set(seam::keys::archive_mark(&seam::month::of(restored_ts)).as_bytes(), br#"{"month":"x"}"#)).unwrap();
+
+    let pruned = block_on(prune(&store, now, Retention::new(180), 10)).unwrap();
+    // The stale record outside the restored range is deleted; the two restored ones are not.
+    assert_eq!(pruned.records, 1, "one record was stale: {pruned:?}");
+    assert_eq!(pruned.restored_months, 1, "one range was walked past: {pruned:?}");
+    assert!(block_on(load(&store, CHAT, "ARC1")).unwrap().is_some(), "a restored record survives retention");
+    assert!(block_on(load(&store, CHAT, "ARC2")).unwrap().is_some());
+    assert!(block_on(load(&store, CHAT, "STALE")).unwrap().is_none());
+    assert!(block_on(load(&store, CHAT, "LIVE")).unwrap().is_some());
+
+    // And with the mark gone (an unload), the same records are no longer protected.
+    block_on(store.del(seam::keys::archive_mark(&seam::month::of(restored_ts)).as_bytes())).unwrap();
+    block_on(store.del(seam::keys::archive_mark(&seam::month::of(restored_ts)).as_bytes())).unwrap();
+    let pruned = block_on(prune(&store, now, Retention::new(180), 10)).unwrap();
+    assert_eq!(pruned.records, 2, "the month is ordinary data again once it is unloaded: {pruned:?}");
+    assert!(block_on(load(&store, CHAT, "ARC1")).unwrap().is_none());
+    assert!(block_on(load(&store, CHAT, "LIVE")).unwrap().is_some());
+}
+
+#[test]
+fn a_restored_record_says_where_the_answer_came_from() {
+    // The one user-visible promise of a restore: an answer built from a month that was archived says so,
+    // and names the month, so a reader is never told that six-month-old text is live.
+    let store = Memory::new();
+    let ts = 1_760_000_000_000i64;
+    let mut live = text("L1", ts, "mensagem viva");
+    block_on(put(&store, &live)).unwrap();
+    let live_answer = block_on(
+        message(&store, &verified(seam::Request { op: "message".into(), chat: Some(CHAT.into()), id: Some("L1".into()), ..Default::default() })),
+    )
+    .unwrap();
+    let live_message = &live_answer["message"];
+    assert!(live_message.get("restored").is_none(), "a live record is not marked: {live_answer}");
+    assert!(live_message.get("restored_month").is_none());
+
+    live.restored = true;
+    block_on(put(&store, &live)).unwrap();
+    let restored_answer = block_on(
+        message(&store, &verified(seam::Request { op: "message".into(), chat: Some(CHAT.into()), id: Some("L1".into()), ..Default::default() })),
+    )
+    .unwrap();
+    let restored_message = &restored_answer["message"];
+    assert_eq!(restored_message["restored"], true, "{restored_answer}");
+    assert_eq!(restored_message["restored_month"], seam::month::of(ts));
+}
+
+#[test]
+fn a_record_written_before_the_archive_existed_reads_back_as_live() {
+    // `restored` is a field an older build never wrote: an absent one must mean "live", never "restored".
+    let json = format!(r#"{{"chat":"{CHAT}","id":"OLD","sender":"{SENDER}","ts":1,"kind":"text","text":"oi"}}"#);
+    let record: Record = serde_json::from_str(&json).unwrap();
+    assert!(!record.restored);
+    assert!(!record.from_history());
+    let restored = text("R1", 1_760_000_000_000, "voltou");
+    let mut restored = restored;
+    restored.restored = true;
+    let round: Record = serde_json::from_slice(&serde_json::to_vec(&restored).unwrap()).unwrap();
+    assert!(round.restored, "the mark survives a round trip through the record JSON");
 }
 
 #[test]

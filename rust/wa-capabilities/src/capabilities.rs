@@ -223,6 +223,10 @@ pub const REGISTRY: &[Capability] = &[
     // out in its answer.
     plain!("whatsapp_send", Network, crate::whatsapp_send::capability, "Send one WhatsApp message to an exact chat JID through the durable whatsapp.outbox queue, after the whatsapp.send policy check; returns the job id"),
     plain!("whatsapp_send_status", ReadOnly, crate::whatsapp_send::status_capability, "State of one queued WhatsApp send: queued, sending, done with its message id, or failed with a reason"),
+    // The operator's gate on the same send (docs/APPROVE.md): while approval is on for a chat,
+    // `whatsapp_send` queues nothing and answers a draft instead, and this capability is how a reader
+    // sees the drafts waiting and decides one. `network` because a decision enqueues a send.
+    plain!("whatsapp_approve", Network, crate::whatsapp_approve::capability, "List, read and decide the WhatsApp drafts waiting for operator approval; a decision enqueues the send, a rejection queues nothing"),
     // The message index the component keeps: one capability per question, all of them a job on
     // `whatsapp.query` (read-only, so no policy rule and no rate limit of their own).
     plain!("whatsapp_search", ReadOnly, crate::whatsapp_query::search, "Search indexed WhatsApp messages by text (accent-folded), chat, kind, sender or time window; returns matching records with snippets"),
@@ -234,6 +238,11 @@ pub const REGISTRY: &[Capability] = &[
     plain!("whatsapp_download", WritesFiles, crate::whatsapp_query::download, "Decrypt one WhatsApp message's media into this node's bounded download folder and return the path"),
     // The one query that asks the phone: it enqueues on the same `whatsapp.query` queue, and the
     // component's answer is the history request it made (ids and counts), never a message.
+    // Retention's other half: the monthly cut into a compressed and sealed archive file, the push to
+    // another disk or node, the 360-day expiry, and restore/unload of one month. Master-only and
+    // file-writing: it cuts the index the component owns and writes archives to the node's own
+    // components directory (`docs/WHATSAPP-ARCHIVE.md`).
+    plain!("whatsapp_archive", WritesFiles, crate::whatsapp_archive::capability, "WhatsApp index archives: cut a month that left the window into one sealed file, list, push with its sha256 verified, restore, unload, expire"),
     plain!("whatsapp_backfill", Network, crate::whatsapp_query::backfill, "Ask the primary phone for WhatsApp messages older than the index holds, so a search can reach the account's past"),
     // ---- Email (docs/EMAIL-CONNECTOR.md) -------------------------------------------------------
     // The same two shapes as the WhatsApp tools: an effect (`email_send`) is a job on `email.outbox`

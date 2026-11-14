@@ -383,6 +383,21 @@ elseif command == "services" then
   -- node. Every verb goes through the registry's own master gate (lua/core/services.lua).
   local code = dofile("lua/core/services_cli.lua").run({ table.unpack(args, 2) })
   if code and code ~= 0 then os.exit(code) end
+elseif command == "approve" then
+  -- The operator's gate on outgoing WhatsApp drafts (lua/core/approve.lua, docs/APPROVE.md): the
+  -- switch, the queue of drafts, and the decision. Every answer comes from the node that HOLDS THE
+  -- ACCOUNT - the one whose `whatsapp_send` reads the policy - so this command asks and prints; the
+  -- balloon the `/approve` of `wa chat` opens is the same code with a screen.
+  local rest = table.concat(args, " ", 2)
+  local code = dofile("lua/core/approve.lua").run("approve " .. rest, { say = function(text) print(text) end }, nil)
+  if type(code) == "table" and code.ok == false then os.exit(1) end
+
+elseif command == "whatsapp" then
+  -- The index archives (`lua/core/whatsapp_archive_cli.lua`, docs/WHATSAPP-ARCHIVE.md): list, cut,
+  -- restore, unload, push, expire. Master-only at the host capability, and it needs no turn: a node
+  -- whose model is unreachable must still be able to find out what was archived and push it off.
+  local code = dofile("lua/core/whatsapp_archive_cli.lua").run({ table.unpack(args, 2) })
+  if code and code ~= 0 then os.exit(code) end
 elseif command == "eval" then
   -- The harness evaluator (lua/core/harness_evaluator_cli.lua, docs/HARNESS-EVALUATOR.md): freeze a real
   -- task, replay it against a candidate binary in an isolated home, and print metrics. It gathers
@@ -401,11 +416,13 @@ elseif command == "help" then
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
   print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
+  print("    whatsapp archive list|cut|restore|unload|push|expire [YYYY-MM]  the index's monthly archives")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    chat [--continue|-c|--resume <id>] [--once|-p] [prompt]  one thread; --once exits after its turn(s)")
   print("    steer <session> \"<note>\" [--status]  queue a note for a session whose run is in flight")
   print("    paths  where this node keeps its files, and the config file it would read")
   print("    clean [--dry-run] [--days N] [--pin <path>] [--cap <percent>] [--status]  reclaim the node's one root")
+  print("    approve [on|off|status|list|only|except|send|edit|reject|cancel]  approve outgoing WhatsApp drafts")
   print('    bind [service|status|renew|run] | unbind | nodes pending | accept <pairing-code>')
   print('    promote <node> | demote <node> | revoke <node>  confirmed network controls')
   print("    network role <node-id> master|guest  administrator-controlled network role")

@@ -957,13 +957,28 @@ function M.run(argv)
         rows[#rows + 1] = row
       end
       ui.show(balloon.paged("Hooks", rows, { per = 14, nowrap = true }))
+    elseif line == "/approve" or line:sub(1, 9) == "/approve " then
+      -- The operator's gate on outgoing WhatsApp drafts (docs/APPROVE.md): the switch, the queue of
+      -- drafts, and the balloon Enter / e / r decide in. Every answer here comes from the node that
+      -- HOLDS THE ACCOUNT - the one whose `whatsapp_send` reads the policy - so this arm only asks and
+      -- draws; it never changes a policy or a draft of its own.
+      --
+      -- The command is reloadable (docs/HOTRELOAD.md): `lua/core/approve.lua` is in `reload.UI`, so an
+      -- edit to it reaches a running session through `reload.require` above. The GATE is not, and
+      -- cannot be: it is the compiled `whatsapp_approve.rs` on the node that holds the account, which a
+      -- reload source cannot supply - and a gate that could be swapped at runtime is not a gate.
+      local done, problem = pcall(reload.require("lua/core/approve.lua").run, line, ui, {
+        user_id = USER, role = "master", session_id = agent.session_id,
+      })
+      if not done then ui.say(redact.text(tostring(problem))) end
     elseif line == "/reload" then
       -- Live reload, stated (docs/HOTRELOAD.md): which tree the UI comes from, whether a deployed payload
       -- verified, what has been swapped and what failed. The mechanism is invisible by design, so "is it
       -- on, and is it reading the tree I am editing?" has to be a command and not an inference from a
       -- screen that changed on its own.
       ui.show(balloon.paged("Reload", reload.report(), { per = 14, nowrap = true }))
-    elseif line == "/mcp" or line:sub(1, 5) == "/mcp " then      -- Every connector this node can use - its own registry and each peer's - as one balloon
+    elseif line == "/mcp" or line:sub(1, 5) == "/mcp " then
+      -- Every connector this node can use - its own registry and each peer's - as one balloon
       -- (lua/core/mcp_command.lua builds the pages, lua/core/mcp_cli.lua drives them). A change goes
       -- through mcp.control here or the peer's own registry through the fabric; a running session is
       -- told by the existing [session update] note.

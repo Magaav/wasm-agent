@@ -34,9 +34,28 @@
 //!
 //! Nothing here logs and nothing here reads a message: the answer carries text because a search
 //! result is text, and the component's log carries ids, kinds and counts.
+//!
+//! Two things here are not about the wire at all, and are shared for the same reason: the index's
+//! [key layout](keys) and its [fold and tokens](text). The node cuts a month out of the index into
+//! an archive and restores it later, and it must produce exactly the keys and tokens the component
+//! produced when the messages arrived.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use wa_whatsapp_outbox::Chat;
+
+/// The index's key layout (`ix/m/…`, `ix/all/…`, `ix/w/…`) and the facts one record's keys follow from.
+///
+/// It is here, and not only in the component, because the node cuts a month out of the index and puts
+/// it back: a second copy of the layout is a cut that misses a key and a restore that writes a month
+/// nobody can search (`docs/WHATSAPP-ARCHIVE.md`).
+pub mod keys;
+/// The fold, the tokenizer and the fields a message is searched by - one definition for both writers
+/// of the token index, so a restored month is found by exactly what a live one is found by.
+pub mod text;
+/// The calendar the archive and an answer share: `YYYY-MM`, UTC, half-open ranges.
+pub mod month;
+
+pub use text::{fold, name_key, tokenize, tokens, Searchable, MAX_TOKENS};
 
 /// The queue every query travels on (`docs/SERVICE-COMPONENTS.md`).
 pub const QUEUE: &str = "whatsapp.query";

@@ -149,4 +149,12 @@ local guest=tools.dispatch(memory,'codemode',{code='return 1'},'guest',{session_
 check(tostring(guest.error):find('forbidden_for_role:guest',1,true)~=nil,
  'a guest cannot run a script at all: '..json.encode(guest):sub(1,160))
 
+-- No argument is {} in the loop that actually runs (13/11: the component loop sent `undefined` to the
+-- schema contract and refused with json_number_invalid, while the native loop normalised it).
+do
+ local r=run('return await tools.time();')
+ check(r.ok,'a tool called with no argument runs in code mode: '..json.encode(r):sub(1,300))
+ check(not json.encode(r):find('json_number_invalid',1,true),'a no-argument call is never parsed as a JSON number')
+end
+
 print(json.encode({ok=true,checks=checks,tools=#catalog,direct_only=#actual,paid_calls=0}))

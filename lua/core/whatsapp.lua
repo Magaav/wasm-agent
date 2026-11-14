@@ -127,13 +127,14 @@ M.TOOLS = {
   },
   {
     verb = 'send', capability = 'whatsapp_send', effect = 'write',
-    description = 'Send one WhatsApp message yourself, on this account, to one exact chat, and answer what WhatsApp did with it. It is queued on the account node\'s durable queue and sent by the wa-whatsapp component; this call waits for that answer and returns {state:"done", id, message_id, served_by} or {state:"failed", id, reason, served_by}. wait_s is how long it waits: default 60, 0 queues and answers at once, at most 300, and never longer than the script that asked has left. Not finished in time is not an error: it answers {state:\"pending\", id, waited_s} and, in a script, the same {state:\"pending\", op} handle every other call answers - wait(op) resumes it and never sends again (a repeated chat+text+reply_to is one job, so nothing is sent twice), and one wait(...) collects several sends in one call, one entry per op in the order asked. Outside a script the answer\'s resume field names the one call that collects the same job. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group) - a name is not accepted here, use mcp_whatsapp_contacts to turn a name into a chat first.',
+    description = 'Send one WhatsApp message yourself, on this account, to one exact chat, and answer what WhatsApp did with it. It is queued on the account node\'s durable queue and sent by the wa-whatsapp component; this call waits for that answer and returns {state:"done", id, message_id, served_by} or {state:"failed", id, reason, served_by}. wait_s is how long it waits: default 60, 0 queues and answers at once, at most 300, and never longer than the script that asked has left. Not finished in time is not an error: it answers {state:\"pending\", id, waited_s} and, in a script, the same {state:\"pending\", op} handle every other call answers - wait(op) resumes it and never sends again (a repeated chat+text+reply_to is one job, so nothing is sent twice), and one wait(...) collects several sends in one call, one entry per op in the order asked. Outside a script the answer\'s resume field names the one call that collects the same job. Governance applies (the node policy whatsapp.send rule: rate limits, daily cap, audit); a refusal comes back as an error word and nothing is sent. chat is an exact JID: <digits>@s.whatsapp.net (phone number), <digits>@lid (the hidden LID identity) or <digits>@g.us (group) - a name is not accepted here, use mcp_whatsapp_contacts to turn a name into a chat first. When operator approval is ON for that chat nothing is queued at all: this call answers {state:\"pending\", draft, approval:\"waiting\"} and the message waits as a draft until the operator sends it, edits it or rejects it. Waiting on it is the same call with {draft:<handle>}, which never sends anything; the settled draft answers {state:\"done\", outcome:\"unchanged\"|\"edited\", message_id, text(when edited)} or {state:\"rejected\", note} or {state:\"cancelled\"}.',
     parameters = { type = 'object', properties = {
       chat = { type = 'string', maxLength = 160, description = 'Exact chat JID: <digits>@s.whatsapp.net, <digits>@lid or <digits>@g.us. A bare phone number is refused.' },
       text = { type = 'string', maxLength = 65536, description = 'The message body, exactly as it should appear.' },
       reply_to = { type = 'string', maxLength = 128, description = 'Optional message id to quote.' },
       mentions = { type = 'array', maxItems = 64, items = { type = 'string' }, description = 'Optional mention targets as exact user JIDs; meaningful in a group.' },
       id = { type = 'integer', minimum = 1, description = 'Resume waiting on a job an earlier send answered: no chat or text, and nothing is sent again.' },
+      draft = { type = 'string', maxLength = 40, description = 'Resume waiting on a DRAFT an earlier send answered under operator approval: no chat or text, and nothing is sent from here.' },
       ids = { type = 'array', minItems = 1, maxItems = 20, items = { type = 'integer', minimum = 1 }, description = 'Resume several jobs in one call: one entry per id, in the order asked. Nothing is sent again.' },
       ['until'] = { type = 'string', enum = { 'all', 'any' }, description = 'With ids: wait until every one is done or failed (default all), or answer as soon as one is.' },
       wait_s = { type = 'integer', minimum = 0, maximum = 300, description = 'How long to wait for the answer (default 60; 0 queues and answers at once).' },
@@ -145,6 +146,28 @@ M.TOOLS = {
     description = 'Kept for a script written before one send answered its own outcome: the same answer as mcp_whatsapp_send({id, wait_s:0}). No catalogue and no guidance offers it - call mcp_whatsapp_send with the id instead.',
     parameters = { type = 'object', properties = { id = { type = 'integer', minimum = 1, description = 'The job id a send answered.' } }, required = { 'id' }, additionalProperties = false },
     request = function(args) return { id = tonumber(args.id) or args.id } end,
+  },
+  {
+    -- The operator's door to the approval gate (docs/APPROVE.md). Hidden: the model is never offered
+    -- it, because the gate is not a thing the model asks about - it is a thing that happens to its
+    -- send. It exists as a routed tool so `/approve` on a node that does not hold the account asks the
+    -- node that does, through the same remote call every other WhatsApp question takes.
+    verb = 'approve', capability = 'whatsapp_approve', effect = 'write', hidden = true,
+    description = 'The operator\'s door to the approval gate on outgoing WhatsApp messages: list the drafts waiting on the account node, read one, and decide it (send as it is, send the operator\'s edit, reject with a note, or cancel). A decision enqueues the send; a rejection queues nothing. No catalogue offers this tool.',
+    parameters = { type = 'object', properties = {
+      action = { type = 'string', enum = { 'status', 'list', 'policy', 'policy_set', 'decide' } },
+      draft = { type = 'string', maxLength = 40, description = 'The draft handle a send answered.' },
+      decision = { type = 'string', enum = { 'send', 'edit', 'reject', 'cancel' } },
+      text = { type = 'string', maxLength = 65536, description = 'The final text, for an edit.' },
+      note = { type = 'string', maxLength = 500, description = 'The operator\'s note, for a rejection.' },
+      on = { type = 'boolean', description = 'The approval switch, for policy_set.' },
+      mode = { type = 'string', enum = { 'all', 'only', 'except' }, description = 'Which chats the switch gates, for policy_set.' },
+      chats = { type = 'array', maxItems = 256, items = { type = 'string' }, description = 'The exact chat JIDs the mode names, for policy_set.' },
+    }, additionalProperties = false },
+    request = function(args)
+      return { action = args.action, draft = args.draft, decision = args.decision, text = args.text,
+        note = args.note, on = args.on, mode = args.mode, chats = args.chats }
+    end,
   },
 }
 
@@ -183,7 +206,7 @@ end
 function M.is_wait(args)
   if type(args) ~= 'table' then return false end
   if args.chat ~= nil or args.text ~= nil then return false end
-  return args.id ~= nil or args.ids ~= nil
+  return args.id ~= nil or args.ids ~= nil or args.draft ~= nil
 end
 
 --- The one sentence a caller of a removed spelling needs: the family, and the name to use instead.
@@ -664,6 +687,109 @@ function M.settle(id, wait_s, read, options)
   return pending()
 end
 
+--- The reader a wait on a DRAFT uses: one `status` read of the approval record, on the node that
+--- holds it. `owner` is the node the send already learned (a routed send knows it); nil asks this node
+--- and routes on the first `whatsapp_component_absent`, the way `status_reader` does for a job.
+function M.draft_reader(owner, ctx)
+  local call = ctx and ctx.remote_call or nil
+  local resolved = owner
+  return function(handle)
+    local asked = { action = 'status', draft = handle }
+    if resolved then return M.forward(resolved, 'mcp_whatsapp_approve', asked, call) end
+    local answer = M.invoke({ capability = 'whatsapp_approve', request = function(args) return args end }, asked)
+    if type(answer) ~= 'table' or answer.error ~= 'whatsapp_component_absent' then return answer end
+    local discovered = (type(answer.owner) == 'string' and answer.owner ~= '' and answer.owner)
+      or M.owner(ctx and ctx.owner_catalog or nil)
+    if discovered == nil or discovered == M.self_name() then return answer end
+    resolved = discovered
+    return M.forward(resolved, 'mcp_whatsapp_approve', asked, call)
+  end
+end
+
+--- Wait for one DRAFT's decision and answer it in the send tool's own shape.
+---
+--- This is `M.settle` over a draft instead of a job, and the difference is the one thing an operator
+--- wanted: a draft has three terminal answers, not two - `done` (sent, unchanged or with the
+--- operator's text), `rejected` (with the note, and nothing was sent) and `cancelled`. A `sent` draft
+--- whose job has not come back yet keeps waiting, exactly as a queued job does, because the message id
+--- is what the agent is waiting for. The text of an edited message is in the answer: the operator's
+--- correction is the point of the feature, not a secret.
+function M.settle_draft(handle, wait_s, read, options)
+  options = options or {}
+  local sleep = options.sleep or function(seconds)
+    if type(host.sleep) ~= 'function' then return false end
+    return (pcall(host.sleep, math.max(0, math.floor(seconds * 1000))))
+  end
+  local started, reads, pause = clock_s(), 0, M.WAIT.first_s
+  local last, reason = nil, nil
+  local function who()
+    if type(last) == 'table' and type(last.served_by) == 'string' and last.served_by ~= '' then return last.served_by end
+    return options.served_by
+  end
+  local function resume_call()
+    return 'mcp_whatsapp_send({draft:"' .. tostring(handle) .. '", wait_s:' .. tostring(M.WAIT.default_s) .. '})'
+  end
+  local function pending()
+    local answer = { ok = true, state = 'pending', draft = handle, approval = 'waiting',
+      waited_s = waited_since(started), reads = reads, resume = resume_call(),
+      note = 'waiting for the operator: nothing was sent. Resume with the same tool and the draft, which never sends anything.' }
+    if type(last) == 'table' and type(last.draft) == 'table' then
+      answer.chat = last.draft.chat
+      if last.draft.state ~= nil then answer.draft_state = last.draft.state end
+    end
+    if reason then answer.reason = reason end
+    if who() then answer.served_by = who() end
+    return answer
+  end
+  while true do
+    local stop = stop_reason(options.ctx, options)
+    if stop then reason = stop; break end
+    reads = reads + 1
+    local answer = read(handle)
+    if type(answer) ~= 'table' then answer = { error = 'whatsapp_approve_unreadable' } end
+    last = answer
+    local draft = type(answer.draft) == 'table' and answer.draft or nil
+    local state = draft and type(draft.state) == 'string' and draft.state or nil
+    if answer.ok == false or draft == nil then
+      -- An unknown handle will not settle by being asked again.
+      return { ok = false, state = 'failed', draft = handle,
+        error = tostring(answer.error or 'whatsapp_approve_unreadable'),
+        waited_s = waited_since(started), reads = reads,
+        note = 'the node that holds the account has no draft under this handle' }
+    end
+    if state == 'sent' and type(draft.message_id) == 'string' and draft.message_id ~= '' then
+      local done = { ok = true, state = 'done', outcome = draft.outcome or 'unchanged', draft = handle,
+        id = draft.job, message_id = draft.message_id, chat = draft.chat,
+        waited_s = waited_since(started), reads = reads }
+      if draft.outcome == 'edited' then
+        done.text = draft.final
+        done.note = 'the operator edited this draft before sending it: this is the text that was sent'
+      else
+        done.note = 'the operator sent this draft unchanged'
+      end
+      if who() then done.served_by = who() end
+      return done
+    end
+    if state == 'rejected' or state == 'cancelled' or state == 'failed' then
+      local settled = { ok = true, state = state, outcome = draft.outcome or state, draft = handle,
+        chat = draft.chat, waited_s = waited_since(started), reads = reads }
+      if type(draft.note) == 'string' and draft.note ~= '' then settled.note = draft.note end
+      if state == 'rejected' then
+        settled.note = settled.note or 'the operator rejected this draft: nothing was sent'
+      elseif state == 'cancelled' then
+        settled.note = settled.note or 'the draft was cancelled: nothing was sent'
+      end
+      if who() then settled.served_by = who() end
+      return settled
+    end
+    local left = wait_s - (clock_s() - started)
+    if left <= 0 then break end
+    sleep(math.min(pause, left))
+    pause = math.min(pause * 2, M.WAIT.cap_s)
+  end
+  return pending()
+end
+
 --- The options one wait runs with: `ctx` (stop, steer and the script's own deadline are read from it)
 --- plus the two doors a test needs to drive the loop without a clock - `ctx.whatsapp_wait.sleep` and
 --- `ctx.whatsapp_wait.cancelled`, the same kind of door `ctx.remote_call` and `ctx.owner_catalog` are.
@@ -815,6 +941,16 @@ function M.send(args, ctx)
     end
     return M.settle(id, wait_s, M.status_reader(nil, ctx), wait_options(ctx, M.self_name()))
   end
+  if args.draft ~= nil then
+    -- The resume form of a GATED send (docs/APPROVE.md): nothing was queued, a draft is waiting, and
+    -- this call only reads what the operator did. It can never send - the decision is theirs.
+    local handle = tostring(args.draft)
+    if args.chat ~= nil or args.text ~= nil or args.id ~= nil or args.ids ~= nil then
+      return { ok = false, error = 'whatsapp_send_id_or_message', effect = 'none',
+        note = 'with a draft this call only waits: pass chat+text to send a message, or draft alone to resume a wait' }
+    end
+    return M.settle_draft(handle, wait_s, M.draft_reader(nil, ctx), wait_options(ctx, M.self_name()))
+  end
   if args.chat == nil and args.text == nil then
     return { ok = false, error = 'whatsapp_send_chat_text_required', effect = 'none',
       note = 'send a message with chat+text, or resume a wait with the id a previous send answered' }
@@ -842,6 +978,13 @@ function M.send(args, ctx)
     queued.asked_owner = owner
   end
   if queued.error then return queued end
+  if queued.state == 'pending' and type(queued.draft) == 'string' then
+    -- The approval gate stopped it before anything was queued: the handle is the draft, and the wait
+    -- follows that instead of a job id. `asked_owner` stays on the answer so a caller on another node
+    -- still learns which node holds the draft.
+    return M.settle_draft(queued.draft, wait_s, M.draft_reader(owner or queued.asked_owner, ctx),
+      wait_options(ctx, owner or M.self_name()))
+  end
   local id = tonumber(queued.id) or queued.id
   if id == nil then
     return { ok = false, error = 'whatsapp_send_no_id', effect = 'unknown',

@@ -29,6 +29,13 @@ It runs, in parallel where it can:
 3. **contract checks**: prompt docs in sync, the instruction files, the landing queue, session
    liveness, the landing baseline, the deploy's retirement rule, and the fast-environment classifier.
 
+**Narrowed, when a landing asks.** `WA_FAST_ROWS=<file> bash scripts/fast.sh` runs only the Lua rows listed
+in that file plus the always-on core rows (the row-environment probe and `scripts/test-land.lua`); the contract
+checks are not narrowable, an unknown row refuses the run by name and an empty request is refused too
+(`scripts/lib/fast-rows.sh`). `wa land` writes that file from the plan - the rows whose text mentions a module
+the round changed - so a Lua-only landing pays for its own rows instead of all of them. A narrowed run prints
+how many rows it ran and how many it did not, so it never reads like a full one.
+
 A pass with a `SKIP` row is reported as skipped, never as a run that tested it: the reasons are
 printed under the counts. A machine-only failure (`cannot fork`, exit 125/126) is retried once,
 serially, and only then reported as the machine (exit 3) - the landing queue reads that as "retry",

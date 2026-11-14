@@ -848,6 +848,7 @@ uuid                 read-only
 verify               read-only
 whatsapp_send        network
 whatsapp_send_status read-only
+whatsapp_approve     network
 whatsapp_download    writes files
 whatsapp_media       read-only
 whatsapp_reactions   read-only
@@ -856,6 +857,7 @@ whatsapp_message     read-only
 whatsapp_search      read-only
 whatsapp_backfill    network
 whatsapp_contacts    read-only
+whatsapp_archive     writes files
 email_send           network
 email_send_status    read-only
 email_search         read-only
@@ -994,6 +996,20 @@ or a `reason`. Neither answer ever carries a subject or a body.
 `email.query` and answer with the component's bounded answer (`matched`/`returned`/`truncated`, or a page
 with `has_more`/`next_before`). A question with no narrowing is refused with `email_empty_query`.
 
+## WhatsApp index archives (`host.whatsapp_archive`)
+
+`host.whatsapp_archive({action, month?, to?, keep_local?, keep_days?, part?, parts?, bytes?})` is the
+node's half of index retention: the monthly cut of a month that left the 180-day window into one
+compressed and sealed file, the list, the push to another disk or node with the digest verified on
+arrival, restore and unload of one month, and the 360-day expiry. The rules, the file format and the
+bounds are `docs/WHATSAPP-ARCHIVE.md`; the operations are `rust/wa-whatsapp-archive` and this module is
+the seam to the node's kv, keystore, disk and mesh.
+
+`wa whatsapp archive list|cut|restore|unload|push|expire` is the operator's door to it
+(`lua/core/whatsapp_archive_cli.lua`), and a peer calls the same capability with `action: "receive"` to
+accept a pushed archive. Master-only, writes files, and its answers carry a month, counts, a digest, a
+path and a node name - never a message, a chat id or a key.
+
 ## WhatsApp explicit sends (`host.whatsapp_send`, `host.whatsapp_send_status`)
 
 Two capabilities, one path: an explicit message somebody asked for is a **job on the shared queue**,
@@ -1020,6 +1036,31 @@ component has no policy interface - one that could ask "may I?" could answer "ye
 the component writes still passes the kernel's opaque-send cap, so an explicit send is gated twice.
 [GRANT-POLICY.md](GRANT-POLICY.md#the-shipped-default) has the rule, and
 [SERVICE-COMPONENTS.md](SERVICE-COMPONENTS.md) has the component side.
+
+## Operator approval of outgoing WhatsApp drafts (`host.whatsapp_approve`)
+
+One capability for the operator's side of the gate described in [APPROVE.md](APPROVE.md). While
+approval is ON for a chat, `host.whatsapp_send` queues **nothing** for it and answers
+`{ok, state: "pending", draft, approval: "waiting", effect: "none"}`; the message waits as a draft file
+under the node's own root, and this capability is how a person sees it and decides it.
+
+`host.whatsapp_approve({action})`:
+
+| action | arguments | answer |
+| --- | --- | --- |
+| `status` | `draft` | `{ok, draft:{handle, state, chat, text, outcome, job, message_id, final, note}}`, with the outbox job's own outcome folded in |
+| `list` | - | `{ok, drafts:[…], waiting}` - oldest first |
+| `policy` | - | `{ok, on, mode, chats, updated_at}` |
+| `policy_set` | `on?`, `mode?` (`all`/`only`/`except`), `chats?` | the policy after the change |
+| `decide` | `draft`, `decision` (`send`/`edit`/`reject`/`cancel`), `text?`, `note?` | the settled draft, plus the job id for a send |
+
+A decision is the only thing that enqueues, and it takes the send's own path (`whatsapp_send::commit`:
+the `whatsapp.send` policy check and the queue) - so an approved message is charged, audited and
+refused exactly like one that never needed approval. Refusals are words:
+`whatsapp_approve_unknown_draft`, `whatsapp_approve_already_decided` (a second `send` on one handle
+would be a second message), `whatsapp_approve_unknown_decision`, `whatsapp_approve_text_required`,
+`whatsapp_approve_bad_mode`, `whatsapp_approve_draft_required`, `whatsapp_approve_unknown_action`. An
+absent or unreadable `policy.json` is OFF, never ON: the one direction a broken switch may fail in.
 
 ## WhatsApp message index (`host.whatsapp_contacts`, `search`, `read`, `message`, `reactions`, `media`, `download`)
 
