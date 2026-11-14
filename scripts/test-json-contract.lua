@@ -59,6 +59,19 @@ eq(enum,'schema_enum:arguments.a','a value outside the enum is refused')
 local ok_enum=contract.validate({type='object',properties={a={enum={'x','y'}}}}, '{"a":"y"}')
 check(ok_enum~=nil,'a value inside the enum passes')
 local _,extra=contract.validate({type='object',additionalProperties=false},'{"a":1}')
-eq(extra,'schema_extra:arguments.a','additionalProperties=false still refuses an extra key')
+eq(extra,'schema_extra:arguments.a (this object takes no arguments)','additionalProperties=false still refuses an extra key, and says it takes none')
+-- The refusal that names the wrong argument also names the right ones (13/11: the model guessed `query`
+-- for a tool whose parameter is `q`, then `name`, then found `q` - three calls for one question, on a
+-- tool whose schema was offered with empty `properties` and so had nothing to read).
+local _, guessed = contract.validate({type='object',additionalProperties=false,properties={
+  q={type='string'}, ['from']={type='string'}, limit={type='integer'}}}, '{"query":"laura"}')
+eq(guessed,'schema_extra:arguments.query (accepted: from, limit, q)','the refusal names every argument the tool accepts')
+-- Bounded: a wide schema names the first twelve and says there are more, so the refusal stays a
+-- refusal and not a schema dump.
+local wide={type='object',additionalProperties=false,properties={}}
+for index=1,20 do wide.properties['arg'..index]={type='string'} end
+local _, many = contract.validate(wide,'{"nope":1}')
+check(many:find('^schema_extra:arguments%.nope %(accepted: arg1, arg10')~=nil, 'a wide schema is listed, sorted, from the start: '..tostring(many))
+check(many:find('%.%.%.%)$')~=nil, 'and says the list continues: '..tostring(many))
 
 print('test-json-contract: '..checks..' checks passed')

@@ -1,6 +1,7 @@
 gated · Gated reports
 
-where: this node (local) · transport http · revision 42
+type: MCP · on this node · transport http
+where: this node (local) · revision 42
 state: needs login · 0 callable now (approved 0, discovered 0)
 error:
   401 unauthorized: the access token was rejected by the reports service

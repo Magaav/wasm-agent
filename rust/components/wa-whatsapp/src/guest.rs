@@ -148,6 +148,50 @@ struct AudioJob {
     audio: wap::message::AudioMessage,
 }
 
+/// One name the phone told this node about, handed from the app-state event handler to the pipeline.
+///
+/// Two kinds, because WhatsApp sends them two ways: an address-book contact action (`ContactUpdate`, the
+/// full sync a newly linked device gets and every change later) and a push-name change
+/// (`PushNameUpdate`, the contact renaming themselves).
+enum ContactJob {
+    /// The address book's own entry for one contact: their saved name and the addresses and number it
+    /// maps to (`index::set_contact`).
+    Address(index::AddressBookContact),
+    /// A push name a contact changed to, for a chat the index already knows (`index::set_push_name`).
+    PushName { chat: String, name: String, at: i64 },
+}
+
+/// Ask WhatsApp for the whole address book, once per store.
+///
+/// A linked device is sent the phone's contact catalogue as app-state mutations (the `contact` actions
+/// in the `regular` collection) when it PAIRS, and never again unless it asks; the sync worker then
+/// keeps that collection current with versions. So a node that was paired before this build kept any
+/// contact names would go on answering "no chat in this index carries that name" for every contact the
+/// operator saved, forever, and no message would ever change that - the 13/11 finding exactly.
+///
+/// One `full_sync` request per store is the whole fix. It is a protocol READ of the account's own
+/// metadata (the same snapshot fetch WhatsApp does for a newly linked device): nothing is written to
+/// the account, nothing is sent to anybody, and `ix/ab/sync` is what keeps it to one request instead of
+/// one per reconnect.
+async fn request_address_book(client: &Arc<whatsapp_rust::Client>) {
+    match index::address_sync_done(&IndexKv).await {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(reason) => say!("index: address book sync state unreadable reason={reason}"),
+    }
+    let task = whatsapp_rust::sync_task::MajorSyncTask::AppStateSync {
+        name: wacore::appstate::patch_decode::WAPatchName::Regular,
+        full_sync: true,
+    };
+    client.process_sync_task(task).await;
+    match index::mark_address_sync(&IndexKv).await {
+        Ok(()) => say!("index: whole address book requested from the phone (once per store)"),
+        // Not fatal: the request is out, and an unmarked store asks again on the next connection -
+        // which is the right direction to fail in (one extra read, never a name missed).
+        Err(reason) => say!("index: address book requested, sync mark not written reason={reason}"),
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -243,6 +287,14 @@ thread_local! {
     /// of multi-megabyte blobs.
     static HISTORY_INBOX: RefCell<std::collections::VecDeque<whatsapp_rust::types::events::LazyHistorySync>> =
         RefCell::new(std::collections::VecDeque::new());
+    /// What the phone's address book said, handed over by the app-state event handler and written by
+    /// the pipeline's own loop (`index::set_contact`).
+    ///
+    /// It travels through an inbox for the same reason a record does: the event handler runs on the
+    /// dispatch path, and one store write there would stall every message behind it. The full sync
+    /// WhatsApp sends a newly linked device is one event per contact, so this is also how a hundred of
+    /// them at once stay a deque of small rows instead of a hundred writes inside one dispatch.
+    static CONTACTS_INBOX: RefCell<std::collections::VecDeque<ContactJob>> = RefCell::new(std::collections::VecDeque::new());
 }
 
 fn now_ms() -> i64 {
@@ -1116,6 +1168,13 @@ const CARDS_PER_TICK: usize = 400;
 /// oldest id is dropped, and the backlog pass (`index::ocr_backlog`) still finds it later - a dropped
 /// id costs a scan, never an image that is silently never read.
 const OCR_PENDING: usize = 64;
+/// Most address-book entries written per tick. A full sync is one event per contact, so this is the
+/// difference between a relink settling in a few seconds and one store write per contact happening on
+/// the dispatch path (`contact_inbox`).
+const CONTACTS_PER_TICK: usize = 100;
+/// Most address-book events held while the pipeline catches up. A full sync of a large address book is
+/// the burst this bounds; beyond it the oldest is dropped, and the next full sync re-sends it.
+const CONTACTS_PENDING: usize = 4096;
 /// One progress chunk. 32 KiB keeps a 512 KiB download inside sixteen entries, well below the queue's
 /// 1 MiB progress bound.
 const DOWNLOAD_CHUNK: usize = 32 * 1024;
@@ -1293,6 +1352,59 @@ async fn index_inbox(enabled: bool) -> usize {
     }
     say!("index: {indexed}/{total} records written, retried {retried}, lost {lost}");
     indexed
+}
+
+/// Write the names the phone's address book synced, and the push names contacts changed to.
+///
+/// Bounded per tick and refused writes are handed back, exactly like [`index_inbox`]: the store's
+/// refusal here is the kv grant's token bucket, which refills, and a dropped contact row is a name the
+/// operator will type and not find - the 13/11 finding itself. A full sync is one event per contact, so
+/// this takes a batch per tick instead of everything at once, and a name that is still queued is
+/// already counted in `contacts`'s `index.address_book` note as soon as its row is written.
+async fn contact_inbox(enabled: bool) -> usize {
+    let batch: Vec<ContactJob> = CONTACTS_INBOX.with(|inbox| {
+        let mut inbox = inbox.borrow_mut();
+        let take = inbox.len().min(CONTACTS_PER_TICK);
+        inbox.drain(..take).collect()
+    });
+    if batch.is_empty() {
+        return 0;
+    }
+    if !enabled {
+        // `index: false` is a decision, not a queue: a node that turned the index off pays nothing for
+        // the address book either, and says once that the names were not kept.
+        say!("index: off; {} contact name(s) dropped", batch.len());
+        return 0;
+    }
+    let total = batch.len();
+    let mut written = 0usize;
+    let mut again: Vec<ContactJob> = Vec::new();
+    for job in batch {
+        let result = match &job {
+            ContactJob::Address(contact) => index::set_contact(&IndexKv, contact).await,
+            ContactJob::PushName { chat, name, at } => index::set_push_name(&IndexKv, chat, name, *at).await,
+        };
+        match result {
+            Ok(()) => written += 1,
+            Err(reason) => {
+                // No attempt counter of its own: a name write is idempotent and cheap, and a row that
+                // keeps being refused is visible in `contacts` (`index.address_book` not growing) - the
+                // alternative, dropping it after N tries, loses the operator's own name quietly.
+                again.push(job);
+                say!("index: contact write refused reason={reason}");
+            }
+        }
+    }
+    if !again.is_empty() {
+        CONTACTS_INBOX.with(|inbox| {
+            let mut inbox = inbox.borrow_mut();
+            for job in again.into_iter().rev() {
+                inbox.push_front(job);
+            }
+        });
+    }
+    say!("index: {written}/{total} contact name(s) written");
+    written
 }
 
 /// The name side of an index that already holds messages (`index::backfill_cards`).
@@ -2070,6 +2182,58 @@ async fn serve(config: serde_json::Value) {
                     lazy.decompressed_size()
                 );
             })
+            // The names the phone's address book syncs to a linked device, and the push names contacts
+            // change to. This is the half no message carries: the *saved* name is the operator's own word
+            // for a person and the one they type into a search, while a push name is only what the person
+            // calls themselves (13/11: `q: "Laura"` answered 0 while the phone's address book knew her).
+            .on_event_for(&[EventKind::ContactUpdate, EventKind::PushNameUpdate], |event, _client| async move {
+                let job = match &*event {
+                    Event::ContactUpdate(update) => {
+                        let action = &update.action;
+                        // `saveOnPrimaryAddressbook` false is WhatsApp saying the operator never saved
+                        // this contact: the addresses are still worth knowing (that is how a `@lid`
+                        // learns its phone number) and the name is not theirs to answer with.
+                        let saved = action.save_on_primary_addressbook.unwrap_or(true);
+                        let full = action.full_name.clone().unwrap_or_default();
+                        let first = action.first_name.clone().unwrap_or_default();
+                        let name = if saved {
+                            if full.trim().is_empty() { first.trim().to_string() } else { full.trim().to_string() }
+                        } else {
+                            String::new()
+                        };
+                        let mut jids = vec![update.jid.to_string()];
+                        jids.extend(action.lid_jid.clone());
+                        jids.extend(action.pn_jid.clone());
+                        let numbers: Vec<String> = jids.iter().filter(|jid| jid.ends_with("@s.whatsapp.net")).cloned().collect();
+                        // Metadata only, never the name: the address is hashed by `privacy`.
+                        say!(
+                            "contact: address book entry {} saved={saved} named={}",
+                            privacy::at(&update.jid.to_string(), ""),
+                            !name.is_empty()
+                        );
+                        ContactJob::Address(index::AddressBookContact { jids, name, numbers, at: now_ms() })
+                    }
+                    Event::PushNameUpdate(update) => {
+                        say!("contact: push name changed {}", privacy::at(&update.jid.to_string(), ""));
+                        ContactJob::PushName {
+                            chat: update.jid.to_string(),
+                            name: update.new_push_name.clone(),
+                            at: now_ms(),
+                        }
+                    }
+                    _ => return,
+                };
+                CONTACTS_INBOX.with(|inbox| {
+                    let mut inbox = inbox.borrow_mut();
+                    if inbox.len() >= CONTACTS_PENDING {
+                        // A burst beyond the bound drops the oldest: the next full sync re-sends the
+                        // whole address book, and a stale name is worse than a name learned late.
+                        inbox.pop_front();
+                    }
+                    inbox.push_back(job);
+                    inbox.len()
+                });
+            })
             .on_message(|ctx| {
                 let line = format!("message {} kind={} media={}", privacy::at(&ctx.info.source.chat.to_string(), &ctx.info.id), ctx.info.r#type, ctx.info.media_type);
                 let base = ctx.message.get_base_message();
@@ -2123,6 +2287,9 @@ async fn serve(config: serde_json::Value) {
                         ts: ctx.info.timestamp.timestamp_millis(),
                         received: now_ms(),
                         push_name: ctx.info.push_name.clone(),
+                        // A live message carries no business name: WhatsApp puts `verifiedBizName` on the
+                        // history-sync entry only (record.rs `Envelope::business`).
+                        business: String::new(),
                     };
                     let entry = record::from_message(&envelope, &ctx.message);
                     INDEX_INBOX.with(|q| q.borrow_mut().push_back((entry, 0)));
@@ -2178,6 +2345,10 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut last_query = Instant::now();
     let mut last_prune = Instant::now();
     let mut last_ocr = Instant::now();
+    // Whether this instance has already asked for the whole address book (`request_address_book`): the
+    // store's own mark (`ix/ab/sync`) is what makes it once per store, this is what makes it once per
+    // connection.
+    let mut address_book_asked = false;
     // Whether the name-side walk has already said it is rebuilding, so a multi-minute rebuild is two
     // lines (start, done) and not one per tick.
     let mut names_announced = false;
@@ -2191,6 +2362,21 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // The index first, so a message that just arrived is already findable when the query lane is
         // asked about it: the same tick's order, not a race between two independent loops.
         index_inbox(index.enabled).await;
+        // Then the names the phone synced: an address-book name written after the record it belongs to
+        // is the name a `contacts` query finds one tick later, and one written before it is picked up
+        // by `card_touch`. Either order answers; this one costs the fewer cards written twice.
+        contact_inbox(index.enabled).await;
+        // The whole address book, once for a store that has never asked: a device paired by an older
+        // build was never sent the contact names this index answers from, so the first tick after a
+        // connection asks for them (`request_address_book`). It is asked for HERE and not in the
+        // `on_connected` handler because that handler's future must be `Send` and holding the client
+        // across an await makes it not one.
+        if !address_book_asked && bot() == outbox::Bot::Connected && index.enabled {
+            if let Some(client) = CLIENT.with(|c| c.borrow().clone()) {
+                address_book_asked = true;
+                request_address_book(&client).await;
+            }
+        }
         // Then the name side of the same index, from the records already stored: an index that
         // arrived without its cards answers `whatsapp_contacts` with no chat at all until this ran.
         if index.enabled {

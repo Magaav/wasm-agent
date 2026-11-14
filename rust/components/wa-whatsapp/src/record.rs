@@ -135,6 +135,12 @@ pub struct Record {
     pub mentions: Vec<String>,
     /// Push name of the sender when the envelope carried one (a group's subject is not this).
     pub push_name: String,
+    /// The verified business name this record was told for its sender, when the wire carried one
+    /// (`WebMessageInfo.verifiedBizName`, which only a history-sync entry has). It is the name WhatsApp
+    /// itself shows for that account, which no push name and no address-book entry can stand in for - a
+    /// query for "Padaria" has to find the bakery whose owner's own push name is a first name
+    /// (index.rs folds it as the `profile` source).
+    pub business: String,
     /// An event's target: the message a reaction/edit/delete names.
     pub target: String,
     /// A reaction's emoji. Empty means the reaction was *removed* (WhatsApp sends the same message
@@ -177,6 +183,11 @@ pub struct Envelope {
     pub ts: i64,
     pub received: i64,
     pub push_name: String,
+    /// The verified business name the wire carried for this sender, when it carried one. WhatsApp puts
+    /// it on the history-sync entry (`WebMessageInfo.verifiedBizName`) and not on the message itself
+    /// (`Message` has no such field), so a live message leaves this empty: absent is what it is, and a
+    /// guess would be a name nobody said.
+    pub business: String,
 }
 
 impl Record {
@@ -275,6 +286,7 @@ pub fn from_message(envelope: &Envelope, message: &wap::Message) -> Record {
         ts: envelope.ts,
         received: envelope.received,
         push_name: envelope.push_name.clone(),
+        business: envelope.business.clone(),
         source: SOURCE_LIVE.to_string(),
         ..Record::default()
     };
@@ -611,6 +623,15 @@ fn contact_of(display_name: &str, vcard: &str) -> Contact {
 /// worth having; it is done on the way in *and* on the way out, so a query typed either way matches.
 pub fn fold(text: &str) -> String {
     wa_whatsapp_index::fold(text)
+}
+
+/// The key a NAME is compared by: [`fold`], minus the emoji, with the spaces collapsed.
+///
+/// It lives in the seam beside the fold (`wa_whatsapp_index::name_key`) for the reason the tokenizer
+/// does: the node rebuilds a restored month, and a name the operator saved must keep matching. This is
+/// the component's name for it, so `index.rs` reads as it always did.
+pub fn name_key(text: &str) -> String {
+    wa_whatsapp_index::name_key(text)
 }
 
 /// The tokens of a text: folded, split, bounded, deduplicated. The tokenizer lives in the seam

@@ -1846,7 +1846,6 @@ class WaMcps extends HTMLElement {
     // The template button only appears when the node actually publishes one: the WhatsApp template was
     // the Node bridge, deleted 10/11, so an empty templates map hides it instead of leaving a dead button.
     this.template.hidden=!data?.templates?.whatsapp;
-    for(const adapter of data.adapters||[]){const row=document.createElement('section');row.className='job-row';const label=document.createElement('strong');label.textContent=adapter.name+' · built-in profile-managed MCP';const body=document.createElement('p');body.textContent=(adapter.capabilities||[]).join(' · ')+'. '+adapter.note;row.append(label,body);this.list.append(row);}
     // One list, from the node's own answer (`GET /mcp` composes this node's registry and every peer's
     // connectors into `connectors`). The rows are the same facts `wa chat` prints: where it runs, its
     // transport, its state, how many tools the model is given now - and, opened, the exact names, their
@@ -1854,12 +1853,19 @@ class WaMcps extends HTMLElement {
     const readOnly=data.read_only===true;
     const connectors=Array.isArray(data.connectors)?data.connectors:null;
     if(!connectors){const note=document.createElement('p');note.textContent='This node did not report a connector list (older build). Refresh after it is updated.';this.list.append(note);}
-    if(connectors&&!connectors.length){const empty=document.createElement('p');empty.textContent='No MCP connector is registered here and no peer exports one. Reads go through the native index; WhatsApp sends go through the operator path alone.';this.list.append(empty);}
+    if(connectors&&!connectors.length){const empty=document.createElement('p');empty.textContent='No service is registered here and no peer exports one.';this.list.append(empty);}
     for(const connector of connectors||[]){
       const row=document.createElement('section');row.className='job-row';row.dataset.connector=String(connector.key||'');
       const name=document.createElement('strong');name.textContent=`${connector.name||connector.id} · ${connector.key}`;
       const status=document.createElement('div');status.className='job-status';
-      status.textContent=`${connector.state} · ${connector.transport} · runs on ${connector.where} · ${connector.tool_count} tool${connector.tool_count===1?'':'s'} callable now${connector.error?` · last error: ${connector.error}`:''}`;
+      // One line per service, the same columns for every kind: what it is, where it runs, how it
+      // stands, and how much it carries. The node is a COLUMN here, never a heading over a group - the
+      // built-in WhatsApp row and a peer's MCP connector read the same way (operator, 13/11).
+      const type=connector.type||'MCP';
+      const nodePhrase=connector.node_phrase||`on ${connector.where}`;
+      const count=connector.count_phrase||`${connector.tool_count} tool${connector.tool_count===1?'':'s'} callable now`;
+      const stateWord=connector.state_label||connector.state;
+      status.textContent=`${type} · ${nodePhrase} · ${stateWord} · ${count}${connector.error?` · ${connector.error}`:''}`;
       const policy=document.createElement('p');policy.textContent=`policy: tier ${connector.policy?.tier||'?'} — ${connector.policy?.approval||'no approval recorded'}`;
       const controls=document.createElement('div');controls.className='job-controls';
       const button=(label,action,args)=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=()=>this.emit(action,{...args,expected_revision:connector.revision},b);return b;};
@@ -1894,7 +1900,8 @@ class WaMcps extends HTMLElement {
       }
       details.append(list);row.append(details);this.list.append(row);
     }
-    this.message=`${(connectors||[]).length} connectors · registry revision ${data.revision}${readOnly?' · read-only (a master turns one on or off)':''}. Inventory does not probe or connect.`;
+    const counts=data.counts||{};
+    this.message=`${counts.services??(connectors||[]).length} services · ${counts.built_in??0} built-in, ${counts.mcp??0} MCP · ${counts.enabled??0} connected · ${counts.tools??0} tools callable now · registry revision ${data.revision??'?'}${readOnly?' · read-only (a master turns one on or off)':''}. Inventory does not probe or connect.`;
     if(!this.postingLoaded){this.postingLoaded=true;this.loadPosting();}
   }
 }

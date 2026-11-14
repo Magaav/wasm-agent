@@ -55,7 +55,7 @@ pub mod text;
 /// The calendar the archive and an answer share: `YYYY-MM`, UTC, half-open ranges.
 pub mod month;
 
-pub use text::{fold, tokenize, tokens, Searchable, MAX_TOKENS};
+pub use text::{fold, name_key, tokenize, tokens, Searchable, MAX_TOKENS};
 
 /// The queue every query travels on (`docs/SERVICE-COMPONENTS.md`).
 pub const QUEUE: &str = "whatsapp.query";

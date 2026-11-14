@@ -10,14 +10,17 @@ local M = {}
 function M.mcp_view()
   return {
     ok = true, read_only = false, role = 'master', revision = 42, peers_at = 1762700000,
-    counts = { connectors = 4, here = 3, from_peers = 1, enabled = 2, tools = 5 },
+    counts = { connectors = 4, services = 4, built_in = 1, mcp = 3, here = 3, from_peers = 1, enabled = 2, tools = 5 },
     note = 'A change applies to new sessions at once; sessions already running are told on their next turn '
       .. 'by the existing [session update] note, because the callable tool list is part of the frozen prefix.',
     connectors = {
       {
-        key = 'whatsapp', id = 'whatsapp', name = 'WhatsApp', where = 'this node', scope = 'local',
+        key = 'whatsapp', id = 'whatsapp', name = 'WhatsApp', where = 'this node', scope = 'built-in',
+        type = 'built-in', node = 'openclaw', node_phrase = 'account on openclaw', state_label = 'connected',
+        count_phrase = '36 chats',
         transport = 'native', state = 'enabled', enabled = true, tool_count = 3, approved = 3, discovered = 3,
-        revision = 42, observed = 'probe ok 4 min ago',
+        -- No `revision`: a built-in service has no registry row, so the page must not print one.
+        observed = 'probe ok 4 min ago',
         policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write',
           note = 'Trusted executable code, not a sandbox.' },
         tools = {
@@ -32,6 +35,7 @@ function M.mcp_view()
       },
       {
         key = 'openclaw:whatsapp_native', id = 'whatsapp_native', name = 'whatsapp_native', peer = 'openclaw',
+        type = 'MCP', node = 'openclaw', node_phrase = 'on openclaw',
         where = 'openclaw', scope = 'peer', transport = 'native', state = 'enabled', enabled = true,
         tool_count = 1, approved = 1, discovered = 1, revision = 7,
         policy = { tier = 'mcp', managed_by = 'openclaw (lua/core/mcp.lua there)',
@@ -43,6 +47,7 @@ function M.mcp_view()
       },
       {
         key = 'native_reads', id = 'native_reads', name = 'Filesystem reads', where = 'this node', scope = 'local',
+        type = 'MCP', node = 'this node', node_phrase = 'on this node',
         transport = 'stdio', state = 'failing', enabled = false, tool_count = 0, approved = 1, discovered = 0,
         revision = 42, error = 'probe failed: connect to /run/wasm-agent/mcp/native_reads.sock: connection refused '
           .. '(the component was rebuilt without its socket, so this node has no catalogue of its tools)',
@@ -55,6 +60,7 @@ function M.mcp_view()
       },
       {
         key = 'gated', id = 'gated', name = 'Gated reports', where = 'this node', scope = 'local', transport = 'http',
+        type = 'MCP', node = 'this node', node_phrase = 'on this node',
         state = 'disabled', enabled = false, tool_count = 0, approved = 0, discovered = 0, revision = 42,
         error = '401 unauthorized: the access token was rejected by the reports service', secret_env = { 'GATED_MCP_TOKEN' },
         policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write' }, tools = {},

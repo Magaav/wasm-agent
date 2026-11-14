@@ -63,9 +63,9 @@ local function bounded(minimum, maximum) return { type = 'integer', minimum = mi
 M.TOOLS = {
   {
     verb = 'contacts', capability = 'whatsapp_contacts', effect = 'read',
-    description = 'Which WhatsApp chat a name means. Answers from the names this node has actually seen on messages (push names, a group subject when one was fetched, and the chat\'s own digits), best match first, each candidate with its exact JID, whether it is a person or a group, how many messages, when it was last heard from and a confidence (exact, prefix, partial). One exact match also fills chat; several matches are listed as candidates and marked ambiguous, never resolved, because picking the wrong Laura is the mistake this exists to prevent. No query lists the chats the index knows, newest first. An older name for this question - whatsapp_contacts, mcp_whatsapp_native_lookup_self_<hash>, mcp_whatsapp_native_list_chats_<hash>, or peer_<node>__whatsapp_contacts - is refused with this one.',
+    description = 'Which WhatsApp chat a name means. Answers from every name this node knows for a chat, best match first: the name the phone\'s address book saved for the contact (the one you typed when you saved them - case, accents and emoji do not matter, so "laura" finds "Laura ❤️"), the name the contact writes on their own messages, a business account\'s own name, a group subject when one was fetched, and the chat\'s phone number in any formatting ("+55 19 99482-7533", "5519994827533", "(19) 99482-7533"). Each candidate carries its exact JID, whether it is a person or a group, how many messages, when it was last heard from, a confidence (exact, prefix, partial), which name matched (matched) and where that name came from (matched_source: address_book, push_name, profile, contact_card, group_subject, number). One exact match also fills chat; several matches are listed as candidates and marked ambiguous, never resolved, because picking the wrong Laura is the mistake this exists to prevent. When nothing matches, index says how many chats and address-book contacts the node knows - 0 address_book means no address book has synced to it yet, which is a different fact from "nobody by that name". No query lists the chats the index knows, newest first. An older name for this question - whatsapp_contacts, mcp_whatsapp_native_lookup_self_<hash>, mcp_whatsapp_native_list_chats_<hash>, or peer_<node>__whatsapp_contacts - is refused with this one.',
     parameters = { type = 'object', properties = {
-      q = { type = 'string', maxLength = 80, description = 'The name to resolve: a name, part of one, or a phone number. Omit it to list the chats the index knows.' },
+      q = { type = 'string', maxLength = 80, description = 'The name to resolve - the one you saved on your phone, part of it, or a phone number in any formatting. Omit it to list the chats the index knows.' },
       limit = bounded(1, 20),
     }, additionalProperties = false },
     request = function(args) return { q = args.q, limit = args.limit } end,
@@ -267,6 +267,97 @@ end
 function M.hidden(name)
   local tool = M.tool(name)
   return (tool ~= nil and tool.hidden == true) or false
+end
+
+--- How long the `/mcp` row above is reused, in seconds. One chat count is one read of the account
+--- node's index; a `/mcp` opened twice in a minute asks once.
+M.SERVICE_ROW_TTL_S = 60
+M._service_row = nil
+
+--- The built-in service as one `/mcp` row: what it is, where the account lives, how it stands, and how
+--- many chats the index knows.
+---
+--- `/mcp` lists external services, and WhatsApp is one of them: it has been built in since 11/11 (one
+--- surface, `mcp_whatsapp_<verb>`, on every node) and it was the only service that list did not show,
+--- because `mcp_command` listed a registry of MCP connectors and WhatsApp has no registry row - it is
+--- not a connector, it is part of the node. A reader asking "what can this machine reach" got Gmail and
+--- the graph but not the account the operator actually uses (operator, 13/11).
+---
+--- `node` and `node_phrase` are the account's home, not the caller's: a node that runs no component
+--- answers the same question for the node that does, which is what the tool does too. `count` is the
+--- index's own chat count when it can be read without a guess - one short read locally, or one short
+--- read of the account node - and nil when it cannot, which the row says instead of inventing a number.
+function M.service_row(opts)
+  opts = opts or {}
+  local now = tonumber(host.now()) or 0
+  local cached = M._service_row
+  if opts.fresh ~= true and cached and (now - (cached.at or 0)) < M.SERVICE_ROW_TTL_S then
+    return cached.row
+  end
+  local holds = M.holds_account()
+  local self_name = M.self_name()
+  local owner = holds and nil or M.owner(opts.owner_catalog)
+  local node = holds and (self_name or 'this node') or owner
+  local state, detail = 'unknown', nil
+  if holds then
+    state = 'connected'
+  elseif owner then
+    -- The owner is in the fleet catalog only if it answered it recently; that is the only "is it up"
+    -- this node can honestly report about another machine.
+    local seen = false
+    local ok, catalog = pcall(opts.owner_catalog or function() return dofile('lua/core/federation.lua').catalog() end)
+    for _, peer in pairs(ok and type(catalog) == 'table' and catalog.peers or {}) do
+      if type(peer) == 'table' and peer.name == owner then seen = true end
+    end
+    if seen then state = 'connected'
+    else
+      state, detail = 'offline', 'the account node ' .. tostring(owner) .. ' is not in the fleet catalog this node holds'
+    end
+  else
+    detail = 'no node says it holds the WhatsApp account: set WASM_AGENT_WHATSAPP_OWNER here, or enable '
+      .. M.COMPONENT .. ' where the account is'
+  end
+  local chats = nil
+  if state == 'connected' and opts.counts ~= false then
+    local answer
+    if holds then
+      answer = M.invoke(M.by_verb.contacts, { limit = 1 })
+    else
+      answer = M.forward(owner, M.by_verb.contacts.name, { limit = 1 }, opts.remote_call)
+    end
+    if type(answer) == 'table' and type(answer.index) == 'table' then chats = tonumber(answer.index.chats) end
+  end
+  local row = {
+    key = 'whatsapp', id = 'whatsapp', name = 'WhatsApp', type = 'built-in',
+    where = holds and 'this node' or (owner or 'this node'),
+    node = node or 'unknown',
+    node_phrase = holds and 'on this node' or (owner and ('account on ' .. owner) or 'account node unknown'),
+    scope = 'built-in', transport = 'native',
+    state = state, state_label = state, error = detail,
+    enabled = state == 'connected',
+    tool_count = #M.schemas(), approved = #M.schemas(), discovered = #M.schemas(),
+    chats = chats,
+    count_phrase = chats and (tostring(chats) .. (chats == 1 and ' chat' or ' chats')) or 'chats unknown',
+    note = holds
+      and 'Built into this node: the account is here, and every verb answers here.'
+      or (owner and ('Built into every node; the account itself is on ' .. owner .. ', and every verb is answered there.')
+        or 'Built into every node, but no node in this fleet says it holds the account.'),
+    tools = (function()
+      local out = {}
+      for _, schema in ipairs(M.schemas()) do
+        local fn = schema['function']
+        out[#out + 1] = { name = fn.name, tool = fn.name:gsub('^mcp_whatsapp_', ''), description = fn.description,
+          parameters = fn.parameters, approval = 'read', published = state == 'connected' }
+      end
+      return out
+    end)(),
+    policy = { tier = 'built-in', managed_by = 'lua/core/whatsapp.lua',
+      approval = 'built in, not a connector: it has no registry row and nothing to turn on or off here',
+      note = 'The account lives on one node; every other node asks it. Sends still pass the operator '
+        .. 'policy (rate limit, daily cap, audit) on the node that holds the account.' },
+  }
+  M._service_row = { at = now, row = row }
+  return row
 end
 
 --- Does this node run the component that holds the account? The deploy's own registry answers this

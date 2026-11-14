@@ -43,6 +43,31 @@ pub fn fold(text: &str) -> String {
     out
 }
 
+/// The key a NAME is compared by: [`fold`], minus the emoji, with the spaces collapsed.
+///
+/// A name is not a search token. The operator saves a contact as `Laura ❤️` and then types `laura`;
+/// folding keeps the emoji - a sticker is found by the emoji its sender tagged it with, so an emoji is a
+/// token there - and a comparison that kept it would answer "Laura ❤️" as a *prefix* of "laura" instead
+/// of the same name. Ignoring it is what a caller means by the name.
+///
+/// One exception, and it is the reason this is a function rather than a filter at each call site: a name
+/// that IS an emoji (`🔔`) has nothing left once the emoji goes, and a chat that cannot be named at all
+/// is worse than one matched by its decoration. So the emoji is dropped only while something else
+/// remains, and both sides of every comparison go through here - a query and a name cannot disagree.
+///
+/// It lives beside [`fold`] for the reason this module exists: the node rebuilds a restored month, and a
+/// second copy of the name comparison in one crate only is how a restored chat stops answering to the
+/// name the operator saved.
+pub fn name_key(text: &str) -> String {
+    let folded = fold(text);
+    let key = folded.split_whitespace().filter(|token| !token.chars().any(is_emoji)).collect::<Vec<_>>().join(" ");
+    if key.is_empty() {
+        folded.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        key
+    }
+}
+
 /// One entry of a folding table, or the character itself when the table has no opinion (`?`).
 fn mapped(table: &str, index: u32, fallback: char) -> char {
     match table.chars().nth(index as usize) {
@@ -229,6 +254,21 @@ mod tests {
         }
         assert!(!tokens.iter().any(|token| token == "a"), "a one-letter word is not a token");
         assert!(!tokens.iter().any(|token| token == "casa"), "the parts are concatenated, not separated - folded the way the index folds them");
+    }
+
+    #[test]
+    fn a_name_is_compared_without_its_case_its_accents_and_its_emoji() {
+        // The operator saves `Laura ❤️` on the phone and types `laura` into the tool. Both sides of the
+        // comparison go through this function, so the two must land on the same key - and a name that IS
+        // an emoji keeps it, because dropping it would leave that chat with no name at all.
+        assert_eq!(name_key("Laura ❤️"), "laura");
+        assert_eq!(name_key("LAURA"), "laura");
+        assert_eq!(name_key("Família Andrade"), "familia andrade");
+        assert_eq!(name_key("🔔"), "🔔");
+        assert_eq!(name_key("  Laura   Souza  "), "laura souza");
+        // The fold itself keeps an emoji (a sticker is found by the one it was tagged with); only the
+        // name comparison drops it.
+        assert_eq!(fold("Laura ❤️").trim(), "laura ❤️");
     }
 
     #[test]

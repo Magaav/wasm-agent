@@ -133,6 +133,25 @@ local function supported_schema(schema,path)
  for _,key in ipairs({'items','additionalProperties'})do if type(schema[key])=='table' then local e=supported_schema(schema[key],path..'.'..key);if e then return e end end end
  for _,v in ipairs(schema.enum or {})do if type(v)=='table' then return 'schema_unsupported:'..path..':composite_enum' end end
 end
+-- The argument names an object schema accepts, for the refusal that just named one it does not.
+--
+-- `schema_extra:arguments.query` says what was wrong and never what would have been right, so a model
+-- that guessed `query` for a tool whose parameter is `q` had to guess again - measured on 13/11, three
+-- calls and three refusals before the accepted name was found by luck (the connector tools were offered
+-- with empty `properties`, so there was nothing to read). The refusal now carries the names, sorted and
+-- bounded: the point is one retry, not a schema dump.
+local ACCEPTED_SHOWN = 12
+local function accepted_note(schema)
+ local names = {}
+ for name in pairs(schema.properties or {}) do names[#names + 1] = tostring(name) end
+ if #names == 0 then return ' (this object takes no arguments)' end
+ table.sort(names)
+ local shown = {}
+ for index = 1, math.min(#names, ACCEPTED_SHOWN) do shown[#shown + 1] = names[index] end
+ local text = table.concat(shown, ', ')
+ if #names > ACCEPTED_SHOWN then text = text .. ', ...' end
+ return ' (accepted: ' .. text .. ')'
+end
 local function validate(schema,node,path)
  -- OpenAPI/pydantic `nullable: true`: a null is accepted where the schema says it may be, otherwise
  -- the `type` check below would refuse an argument the connector's own contract allows.
@@ -165,7 +184,7 @@ local function validate(schema,node,path)
   for _,key in ipairs(schema.required or {})do if not node.children[key] then return 'schema_required:'..path..'.'..key end end
   for _,key in ipairs(node.keys)do local sub=(schema.properties or {})[key]
    if sub then local e=validate(sub,node.children[key],path..'.'..key);if e then return e end
-   elseif schema.additionalProperties==false then return 'schema_extra:'..path..'.'..key
+   elseif schema.additionalProperties==false then return 'schema_extra:'..path..'.'..key..accepted_note(schema)
    elseif type(schema.additionalProperties)=='table' then local e=validate(schema.additionalProperties,node.children[key],path..'.'..key);if e then return e end end
   end
  end
