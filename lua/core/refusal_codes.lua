@@ -194,6 +194,7 @@ return {
   ['lesson_object_required']='lessons.lua',
   ['lesson_rule_required']='lessons.lua',
   ['lesson_symptom_required']='lessons.lua',
+  ['mcp_cached_schema_invalid']='mcp.lua',
   ['mcp_result_settlement_unverified']='mcp_session.lua',
   ['mcp_script_directory_unbound']='mcp.lua',
   ['mcp_tool_not_approved']='tools.lua',
