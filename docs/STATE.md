@@ -2,7 +2,7 @@
 
 Every component owns one kv namespace (`wa:kernel/kv`, `storage` grant). This document is the rule
 book for changing what lives in it. The implementation is `rust/wa-state` (pure library: no
-wasmtime, no clock, no filesystem) plus the host half in `rust/wa-host/src/state_host.rs` and the
+wasmtime, no clock, no filesystem) plus the host half in `rust/wa-kernel-runtime/src/state_host.rs` and the
 shared kv adapter in `rust/wa-kv`: the transactional install, the snapshot admin tool (`host.state`),
 and one `Store` over the kernel's per-component SQLite kv that this crate, the queue and the bus all
 run on. The install sequence is at the end, with what is built and what is still a policy knob. See [KERNEL.md](KERNEL.md) for the component model and
@@ -159,7 +159,7 @@ new version's writes cannot be represented in the old shape.
 
 ## Host integration: the transactional install
 
-Built in `rust/wa-host/src/state_host.rs` (`prepare_install`, called by `services::start` before the
+Built in `rust/wa-kernel-runtime/src/state_host.rs` (`prepare_install`, called by `services::start` before the
 instance exists). The sequence below is what it runs; the notes after it say where the code differs
 and what is still open.
 

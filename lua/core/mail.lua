@@ -7,7 +7,6 @@
 -- offered. The proxy checks the same write tier again, on its own, before dispatching.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
-local platform = dofile('lua/core/platform.lua')
 local M = {}
 
 -- Tools that change mail. Everything not listed here is a read, which is why the list is exhaustive

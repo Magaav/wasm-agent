@@ -1,7 +1,7 @@
 -- `/vault <name> <value>`: a key the agent can *use* in a command without ever *seeing* it.
 --
 -- One file per key, `~/.wasm-agent/keys/<name>.key`, mode 0600 (the host writes every `*.key`
--- private, see `secret_file` in rust/wa-host/src/host.rs). The agent is told the names and the path,
+-- private, see `secret_file` in rust/wa-capabilities/src/host.rs). The agent is told the names and the path,
 -- never a value, and uses one by reference - `curl -H "Authorization: Bearer $(cat ~/.wasm-agent/keys/github.key)"`
 -- - so the value goes from the file into the child process and nowhere else.
 --

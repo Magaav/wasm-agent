@@ -22,7 +22,7 @@ remain unchanged. See [SENTINEL.md](SENTINEL.md).
 ## Contract and implementation
 
 `rust/wa-operation` owns shell process lifetime and output independently of Lua.
-`rust/wa-host/src/operations.rs` is the adapter; agent policy remains in Lua.
+`rust/wa-capabilities/src/operations.rs` is the adapter; agent policy remains in Lua.
 The existing `bash`/`host.exec` interface waits for the shell command, bounded by
 the default budget or a per-call `timeout_seconds` (1-86400, the same range as
 `operation start`); the `bash` description carries the default and the knob, so a

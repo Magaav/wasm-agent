@@ -149,7 +149,7 @@ if [ "$failed" -gt 0 ]; then
   echo "codemode seam FAILED ($failed)" >&2
   exit 1
 fi
-comparisons=$(sed -n 's/.*\([0-9][0-9]*\) parity comparisons.*/\1/p' "$parity_log" | tail -1)
+comparisons=$(sed -n 's/^codemode seam: [0-9][0-9]* checks, \([0-9][0-9]*\) parity comparisons.*/\1/p' "$parity_log" | tail -1)
 if [ -z "${comparisons:-}" ] || [ "${comparisons:-0}" -lt 1 ]; then
   echo "codemode seam FAILED: the parity suite ran no comparisons" >&2
   exit 1

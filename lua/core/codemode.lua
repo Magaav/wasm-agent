@@ -76,12 +76,6 @@ local function route_of(name,status)
  if status and (status.status=='blocked' or status.status=='unknown') then return 'Not callable in this run: '..tostring(status.reason or status.status)..'. '..tostring(status.next or '') end
  return 'Control plane: call '..name..' as an ordinary tool, outside codemode (end the script, then call it directly). Inside a script it is refused.'
 end
--- Multi-action tools whose read actions belong inside and whose effects do not: a script may watch an
--- operation or list resource claims, never start, cancel or reconcile one.
--- Multi-action tools: every action is callable inside now, with the same admission, effect and workspace
--- checks an ordinary call gets - `operation start/cancel/await` and `resource reconcile` are how a script
--- supervises what it started (31/10). Kept as a named seam so a later fence has somewhere to live.
-local function action_refusal(name,args) return nil end
 -- ---------------------------------------------------------------- the code-mode seam
 ---
 --- The guest's *protocol* - the fence, the tool table, `searchTools`/`describeTool`, the admit/deliver
@@ -490,8 +484,6 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
       if err then value={error=err};success=false
       else
        local params=json.decode(stripped or '{}')
-       local fenced=action_refusal(def.name,params)
-       if fenced then value=fenced;success=false else
        local span=telemetry.start(ctx,'tool',{name=def.name,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
        live(ctx,{type='codemode_call',id=call.id,name=def.name,arguments=params,state='running'})
        local live_started=tonumber(host.now()) or 0
@@ -508,7 +500,6 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
        local encoded=json.encode(value);local reference=output.store(encoded)
        calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference}
        telemetry.finish(span,{ok=success,name=def.name,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
-       end
       end
       end
      end
@@ -650,9 +641,6 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
        if err then value,success={error=err,input=tostring(stripped or ''):sub(1,80)},false
        else
         local params=json.decode(stripped or '{}')
-        local fenced=action_refusal(step.name,params)
-        if fenced then value,success=fenced,false
-        else
          local span=telemetry.start(ctx,'tool',{name=step.name,nested=true,codemode_call=step.id,arguments_hash=host.sha256(argument_text or '{}')})
          live(ctx,{type='codemode_call',id=step.id,name=step.name,arguments=params,state='running'})
          local live_started=tonumber(host.now()) or 0
@@ -667,7 +655,6 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
          local encoded=json.encode(value);local reference=output.store(encoded)
          calls[#calls+1]={id=step.id,name=step.name,ok=success,evidence=reference}
          telemetry.finish(span,{ok=success,name=step.name,nested=true,codemode_call=step.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
-        end
        end
       end
       end

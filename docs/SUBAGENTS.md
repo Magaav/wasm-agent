@@ -15,7 +15,7 @@ file specifies the local implementation.
 
 | Concern | Owner | Where |
 | --- | --- | --- |
-| OS thread, capacity, cancellation flag, deadline, durable record, `await` | Rust | `rust/wa-host/src/subagents.rs` |
+| OS thread, capacity, cancellation flag, deadline, durable record, `await` | Rust | `rust/wa-capabilities/src/subagents.rs` |
 | Profile, tool allow-list, prompt, budgets, ownership derivation, child loop | Lua | `lua/core/subagents.lua`, `lua/core/agent.lua` |
 | Lease on the provider call | Rust (deadline) + Lua (between steps) | `host.http*` reads the thread-local task context |
 

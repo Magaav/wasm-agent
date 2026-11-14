@@ -45,7 +45,7 @@ Existing: `env`, `file_env`, `net`, `config`. New for services:
 
 ## Built so far (step 1, 05/11)
 
-- **Host runner** `rust/wa-host/src/services.rs`, capability `host.service` (start / stop / status / logs):
+- **Host runner** `rust/wa-kernel-runtime/src/services.rs`, capability `host.service` (start / stop / status / logs):
   wasip1 core modules on their own thread, `wa_sock` (exact or `*.suffix:port` allowlist, 64 sockets,
   non-blocking), `wa_ctl.stopping`, 5 s grace then epoch trap, restart with backoff 1 s doubling to
   60 s (reset after 10 min healthy), memory from `limits.memory_mb` (default 512), stdout/stderr to
@@ -67,7 +67,7 @@ Example (a definition the `services` tool stores, then `enable`):
 
 ## Component services on wa:kernel (05/11)
 
-`rust/wa-host/src/service_components.rs` runs services built as **components** on the
+`rust/wa-kernel-runtime/src/service_components.rs` runs services built as **components** on the
 `wa:kernel` WIT contract (`wit/kernel`, `service-component` world: websocket, http, kv, lifecycle,
 log, credentials in; `service.run(config)` out). `wa:kernel@0.2` (native async) is served next to it
 by `service_components_v2.rs`; the supervisor picks the runner from the binary's preamble
@@ -151,7 +151,7 @@ cargo build --release --target wasm32-wasip2             # the component
 ## Component services on `wa:kernel@0.2` (WASI 0.3, native async)
 
 The same class, one contract newer: `wit/kernel-v2/kernel.wit` is `wa:kernel@0.2.0`, run by
-`rust/wa-host/src/service_components_v2.rs`. The grants, limits, log file, epoch deadline and
+`rust/wa-kernel-runtime/src/service_components_v2.rs`. The grants, limits, log file, epoch deadline and
 supervisor are the ones described above — what changes is that the guest no longer polls. It awaits a
 `stream<list<u8>>` for inbound frames, one `http.send` for an exchange, a segment stream plus one
 transcript future for recognition, and `wasi:clocks@0.3.0.wait-for` for a timer. The contract and its

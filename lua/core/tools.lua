@@ -16,12 +16,9 @@ local canonical_guard = dofile("lua/core/canonical_guard.lua")
 -- runtime wall (the shell prelude) has to be added here, not only in init.lua - a WA_SCRIPT run does not
 -- load init.lua, and that is exactly how a test runs.
 local path_guard = dofile("lua/core/path_guard.lua")
-local read_batch = dofile('lua/core/read_batch.lua')
 local mcp = dofile('lua/core/mcp.lua')
 local envelope = dofile('lua/core/envelope.lua')
 local web = dofile('lua/core/web.lua')
-local M = {}
-local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
 local resources = dofile("lua/core/resources.lua")
@@ -2107,7 +2104,8 @@ end
 
 -- Hook points around one tool call (docs/HOOKS.md). This wrapper is the one funnel every tool call
 -- passes - the model's, a subagent's, a probe's, and one made *inside* another call: code mode's
--- `await tools.bash(...)`, `tool_call {name=...}`, a `read_many` item. A nested dispatch is a hook
+-- `await tools.bash(...)`, `tool_call {name=...}`, a `remote {capability:"batch"}` entry that runs
+-- here (`remote_batch` dispatches it through this file). A nested dispatch is a hook
 -- boundary of its own, so `PreToolUse` cannot be bypassed by calling a tool a second way (11/11: the
 -- engine fired only for the outermost call, so a script - the way this node is normally worked -
 -- reached any tool and no hook ever saw it). It is inert with no hooks configured: `hooks.active` is

@@ -1,7 +1,7 @@
 # Queue — one durable queue for every kind of work
 
 Status 2026-11-06: `rust/wa-queue` exists and is tested, and the host serves `wa:queue` to
-components (`rust/wa-host/src/queue_host.rs`) over it: a `wa_queue::Queue` per call in the
+components (`rust/wa-kernel-runtime/src/queue_host.rs`) over it: a `wa_queue::Queue` per call in the
 component's own kv (`q/` inside it), a manifest `queue` grant per interface and per namespace, a host
 sweeper, and alerts written to the process log and published on the bus topic `kernel.queue.alert`.
 `wit/queue/queue.wit` is expressed with WASI 0.3 `async func`s plus one `stream<list<u8>>` (the

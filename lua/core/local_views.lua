@@ -19,8 +19,6 @@
 -- Absent capability (`host.local_view` is not in this binary - an older build, or a test): `refresh`
 -- publishes nothing, answers 0, and `/nodes` behaves exactly as it always has. This file can be
 -- landed before the host side and changes nothing until it arrives.
-local json = dofile("lua/vendor/json.lua")
-
 local M = {}
 
 -- How old a published snapshot may be before the next free moment rebuilds it. A node's roster moves

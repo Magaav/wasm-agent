@@ -46,7 +46,7 @@ One limit is closed, and one is not:
 
 - the status line **animates on a timer**, not only when an event arrives. The interpreter is
   blocked inside the model call and inside a tool, so the timer lives in the host
-  (`host.ticker`, `rust/wa-host/src/host.rs`): the view hands it the line's layout with one
+  (`host.ticker`, `rust/wa-capabilities/src/host.rs`): the view hands it the line's layout with one
   token for the mark and one for the clock, and takes the line back before it prints anything
   else. A slow call shows the frame and the count still moving, which is what distinguishes
   thinking from hung. `WASM_AGENT_CLI_TICKER=off` stops the motion.

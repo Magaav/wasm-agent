@@ -7,7 +7,7 @@
 -- plain, and both are worth stating because they are what the view is shaped around:
 --
 --   * The answer is never streamed here. Content deltas are written to the node's SSE
---     sink (`rust/wa-host/src/host.rs`, `serve::write_event`), and a CLI run has no
+--     sink (`rust/wa-capabilities/src/host.rs`, `serve::write_event`), and a CLI run has no
 --     sink, so the terminal shows tool noise for as long as the run lasts and the
 --     reply only when it ends.
 --   * A model call spends most of its time thinking, and nothing was printed for it
@@ -32,7 +32,7 @@
 -- What keeps the line moving cannot live in this process: Lua is blocked inside the model
 -- call and inside a tool, so nothing here can repaint while one is in flight - a slow call
 -- showed a frozen frame and a clock that had stopped, which is exactly what a hung run looks
--- like. The timer is therefore in the host (`host.ticker`, rust/wa-host/src/host.rs), which
+-- like. The timer is therefore in the host (`host.ticker`, rust/wa-capabilities/src/host.rs), which
 -- draws the same line between events: this module hands it the line and takes it back before
 -- printing anything else. One limit does remain, and it is a different one - the *answer* is
 -- not streamed here, because content deltas go to the node's SSE sink and a CLI run has no
@@ -147,7 +147,7 @@ end
 -- The marks the transcript uses: a step (`⏺`), what it returned (`⎿`), and the welcome glyph.
 local DOT, RESULT, STAR = "\226\143\186", "\226\142\191", "\226\156\187"
 -- The prompt glyph, Claude Code's `❯` (U+276F: three bytes, one cell), on the input row and on the
--- reader's own turn in the transcript. `rust/wa-host/src/terminal_editor.rs` (`PROMPT`) is its twin.
+-- reader's own turn in the transcript. `rust/wa-term/src/terminal_editor.rs` (`PROMPT`) is its twin.
 local PROMPT = "\226\157\175 "
 M.PROMPT = PROMPT
 local SPARKLE = "\226\156\166" -- ✦, the UI's commentary glyph
@@ -229,7 +229,7 @@ function M.duration(seconds)
   return string.format("%dm%02ds", math.floor(s / 60), math.floor(s % 60))
 end
 
--- The status line's clocks, twins of `ticker_step` / `ticker_clock` in rust/wa-host/src/host.rs:
+-- The status line's clocks, twins of `ticker_step` / `ticker_clock` in rust/wa-capabilities/src/host.rs:
 -- the current step in whole seconds (`5s`, `1m05s`), the whole run as `m:ss`.
 function M.step_clock(seconds)
   local s = math.max(0, math.floor(tonumber(seconds) or 0))
@@ -712,7 +712,7 @@ end
 -- the input box (bottom border, up to three draft rows, top border), the run's own status line and
 -- the output region above that. The line is ONE row directly BELOW the text area and directly ABOVE
 -- the status bar, the order the window has; it is not the row above the run-status line (that was
--- the 07/11 layout, and Victor's 08/11 position spec moves it). `rust/wa-host/src/host.rs`
+-- the 07/11 layout, and Victor's 08/11 position spec moves it). `rust/wa-capabilities/src/host.rs`
 -- (`editor_status_row`, `resize_editor`) and `rust/wa-term/src/terminal_editor.rs` (`status_row`,
 -- `session_row`) keep the same rows while Lua is blocked, so the three must change together.
 --

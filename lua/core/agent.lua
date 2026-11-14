@@ -2468,7 +2468,7 @@ function M:run_body(text, images)
     if result.model and result.model ~= "" then self.model = result.model end
 
     -- What the model thought before it acted, emitted per round so the view can show it beside
-    -- the calls it explains. A CLI run has no SSE sink (`rust/wa-host/src/host.rs`
+    -- the calls it explains. A CLI run has no SSE sink (`rust/wa-capabilities/src/host.rs`
     -- `serve::write_event` writes deltas to the node's, and this process has none), so without
     -- this event the reasoning exists only in the transcript and a terminal never shows it.
     if (result.reasoning or "") ~= "" then

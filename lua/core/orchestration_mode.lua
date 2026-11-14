@@ -51,11 +51,14 @@ function M.is_task(text)
 end
 -- Compatibility for old internal callers: mode is permission, never a dispatch.
 -- A raw continuation cannot become a child before coordinator inference/context.
+-- KEPT, not dead: `scripts/test-orchestration-mode.lua:25` calls it (five texts) and asserts nil.
 function M.route() return nil end
 
 -- The effects that are the *work*: writing files, running a command, changing a worktree and
 -- landing a tip. Reads, discovery, memory and status stay direct.
-local DIRECT_EFFECT={write=true,write_many=true,edit=true,edit_many=true,bash=true,shell=true,
+-- `write_many`/`edit_many` are not entries: the batch tools were retired 12/11 (`lua/core/retired.lua`
+-- refuses both names ahead of this guard), so a name no dispatch can reach does not belong here.
+local DIRECT_EFFECT={write=true,edit=true,bash=true,shell=true,
   integrate=true,spell_run=true,operation=true,session_worktree=true}
 -- Shell verbs whose whole effect is reading. Anything unlisted - an interpreter, a wrapper, a
 -- heredoc - counts as an effect: a wrong "read-only" would let the work through, while a

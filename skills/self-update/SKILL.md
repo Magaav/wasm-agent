@@ -29,7 +29,7 @@ So the shape is always the same: **you write a request; something outside the no
 
 A `wa` chat in a terminal and the node (`wa serve`, supervised by the sentinel) share one home. The
 binding transport is the node's: a CLI holds it only while no node runs and yields within seconds when a
-node starts (`rust/wa-host/src/binding_runtime.rs`). So:
+node starts (`rust/wa-rendezvous/src/binding_runtime.rs`). So:
 
 - **Never stop, kill or "hand over from" a reader's CLI** to restart, start or replace the node. A
   `request restart` / `request deploy` works with the CLI open. A script that `pkill`s `wa` is a bug.

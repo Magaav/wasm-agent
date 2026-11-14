@@ -1,7 +1,7 @@
 -- Local subagents: the policy half of the runtime.
 --
 -- A subagent is a supervised child task with its own fresh context, its own
--- session and bounded execution (docs/EXECUTION.md). Rust (`rust/wa-host/src/subagents.rs`)
+-- session and bounded execution (docs/EXECUTION.md). Rust (`rust/wa-capabilities/src/subagents.rs`)
 -- owns the OS thread, the durable record, capacity and the cancel flag; this file
 -- owns everything an agent is allowed to decide: which profile, which exact
 -- tools, which prompt, which budgets and how a caller's ownership is derived.

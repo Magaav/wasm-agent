@@ -11,7 +11,6 @@
 --
 -- A guest is granted access explicitly, one connector at a time, by the operator; this module refuses
 -- to push to a guest and refuses to apply on a guest.
-local json = dofile('lua/vendor/json.lua')
 local mcp = dofile('lua/core/mcp.lua')
 local nodes = dofile('lua/core/nodes.lua')
 

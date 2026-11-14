@@ -232,7 +232,7 @@ file. The `AuditSink` trait is the seam and needs no change.
 
 ## How the host wires it
 
-The host side is `rust/wa-host/src/node_policy.rs` (one engine, one pair of sinks, the counters); the
+The host side is `rust/wa-governance/src/node_policy.rs` (one engine, one pair of sinks, the counters); the
 call sites are `service_components.rs` (the `wa:kernel@0.1` imports), `service_components_v2.rs` (the
 same imports on `wa:kernel@0.2` / WASI 0.3), `components.rs` (the outbound wasi-socket path of request
 components) and `services.rs` (the supervisor). The numbered list below is

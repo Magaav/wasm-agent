@@ -1034,7 +1034,7 @@ end
 --   3. The path is stable, so replays and fixtures can resolve it.
 --
 -- The bytes are stored base64 *as text*, because the host's read_file/write_file
--- are UTF-8 text only (rust/wa-host/src/host.rs). Encoding is therefore part of
+-- are UTF-8 text only (rust/wa-capabilities/src/host.rs). Encoding is therefore part of
 -- the on-disk format, not an implementation detail to change casually.
 
 local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -1113,7 +1113,7 @@ function M.store_image(entry)
   if bytes == "" then return nil, "empty_image" end
   -- Hash the *base64 text*, never the decoded bytes.
   --
-  -- host.sha256() reaches Lua through `CStr::from_ptr` (rust/wa-host/src/lua.rs),
+  -- host.sha256() reaches Lua through `CStr::from_ptr` (rust/wa-host-support/src/lua.rs),
   -- which stops at the first NUL. A PNG has a NUL at byte 9 of 70, so hashing
   -- the decoded binary hashed an 8-byte prefix: a silent, truncated content
   -- address, where two different images sharing a head would collide. The

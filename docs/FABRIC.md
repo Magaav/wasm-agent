@@ -28,7 +28,7 @@ map of who is what, so a thing can be named correctly before it is changed.
 | --- | --- | --- |
 | client | the page a person looks at (`ui/`, `<wa-chat-shell>`), served by a node and reloading on its own | **the window**, or **the client** - it is not "the node" |
 | node process | one `wa serve`: one identity, one state home, one transcript, admission, plugins, capabilities | **the node** - a node is not a computer, and one machine may host several instances |
-| execution inside the node | the threads that serve work, reported by `/health` as one array per thread with `role: "runs"` or `"reads"` and a state (`rust/wa-host/src/serve.rs`) | **node-threads** (singular **node-thread**) - never `workers`, never `nodes` |
+| execution inside the node | the threads that serve work, reported by `/health` as one array per thread with `role: "runs"` or `"reads"` and a state (`rust/wa-capabilities/src/serve.rs`) | **node-threads** (singular **node-thread**) - never `workers`, never `nodes` |
 | conversation | an independently resumable conversation: a **session** holds many **runs**, and a run holds many **turns** | **session -> runs -> turns** |
 | delegated work | a supervised child task with its own context and execution state - a session of its own, which a profile may bind to its own worktree and branch (`session_worktree`, [EXECUTION.md](EXECUTION.md)) | **a subagent** - never `factory worker`, never `child node` |
 | supervisor | the process outside the node that starts work without doing it: declared verbs, never a shell, and it installs or restarts when the node is idle | **the sentinel** (`wa-sentinel`, [SENTINEL.md](SENTINEL.md)) |
