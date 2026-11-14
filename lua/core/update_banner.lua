@@ -800,6 +800,7 @@ end
 M.BUILDING_FOR = 120      -- seconds; `build_status::FRESH`
 M.INSTALLED_FOR = 30      -- `build_status::INSTALLED_FOR`
 M.FAILED_FOR = 60         -- `build_status::FAILED_FOR`
+M.UPDATING_FOR = 1800     -- `build_status::UPDATING_FOR`: an /update in flight, until a final state
 -- The loader's prefix, the same words `build_status.rs` uses: `⟳ building wasm-agent ...`.
 M.BUILDING_LINE = "\226\159\179 building wasm-agent"
 M.REBUILT_LINE = "\226\156\147 wasm-agent rebuilt%s \226\128\148 restarting into the new build"
@@ -876,6 +877,15 @@ function M.build_line(build, now)
   local state = trim(build.state)
   if state == "building" and age < M.BUILDING_FOR then
     return { kind = "building", text = M.building_text(build, now) }
+  end
+  if state == "updating" and age < M.UPDATING_FOR then
+    local phase = trim(build.phase)
+    local started = tonumber(build.started_at)
+    local clock = started and (" \194\183 " .. elapsed(tonumber(now) - started)) or ""
+    return { kind = "building", text = "\226\159\179 updating wasm-agent" .. (phase ~= "" and (" \194\183 " .. phase) or "") .. clock }
+  end
+  if state == "current" and age < M.INSTALLED_FOR then
+    return { kind = "installed", text = "\226\156\147 wasm-agent is up to date" }
   end
   if state == "installed" and age < M.INSTALLED_FOR then
     local took = trim(build.crate)

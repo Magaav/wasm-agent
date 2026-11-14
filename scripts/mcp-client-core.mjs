@@ -148,7 +148,10 @@ export async function openMCP(server){
     const unsupported_content_types=[...new Set(result.content.filter(item=>item.type!=='text').map(item=>item.type))];
     const answer={ok:result.isError!==true,result,schema_hash:metadata.schema_hash,session_mode:'persistent-read',reused:calls++>0,tool_call_issued:true,...(unsupported_content_types.length?{unsupported_content_types,content_delivery:'raw evidence only; no image/resource materialization'}:{})};
     return credentials.redact(answer);
-   }catch(error){if(issued||controller.signal.aborted)poisoned=true;return credentials.redact({ok:false,error:String(error.message||error),phase,tool_call_issued:issued,outcome:issued?'unknown':'not_submitted'});}
+   // A protocol rejection (-32700..-32602) is the server refusing the request: nothing ran, so it does not
+   // poison the session - the same rule requestMCP applies. 14/11: `max_bytes` too small (-32602) wedged a
+   // working mailbox and every later read answered mcp_connection_uncertain.
+   }catch(error){const rejected=rpc_rejection(error.rpc_error);if((issued&&!rejected)||controller.signal.aborted)poisoned=true;return credentials.redact({ok:false,error:String(error.message||error),rpc_error:error.rpc_error,phase,tool_call_issued:issued&&!rejected,outcome:(issued&&!rejected)?'unknown':'not_submitted'});}
    finally{clearTimeout(timer);busy=false;}
   },
   async close(){poisoned=true;timer=setTimeout(()=>controller.abort(),3000);try{await transport.close();}finally{clearTimeout(timer);}},

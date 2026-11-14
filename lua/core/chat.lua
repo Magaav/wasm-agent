@@ -908,10 +908,25 @@ function M.run(argv)
     elseif line == "/update" then
       -- The same report the window gets from POST /update, and the same sentence: this node cannot
       -- replace itself, so the answer is what it decided and what it queued for the sentinel.
+      -- One continuous line from here to the end (operator 14/11): the editor draws build-status.json on
+      -- its own ticker, so writing it BEFORE the check shows the loader at once, even while this call
+      -- blocks; the deploy's own phases overwrite it, and a final state (installed/current/failed) ends it.
+      local banner = dofile("lua/core/update_banner.lua")
+      local started = math.floor(host.now and host.now() or os.time())
+      local function status(state, phase)
+        local now = math.floor(host.now and host.now() or os.time())
+        pcall(host.write_file, banner.build_path(), json.encode({ state = state, phase = phase, started_at = started, at = now }))
+      end
+      status("updating", "checking for updates")
       local report = updater.run({
         reason = "requested from the interactive chat",
         session_id = agent.session_id,
       })
+      if report.status == "current" then status("current", "")
+      elseif report.queued or report.status == "queue" or report.status == "already_pending" then
+        status("updating", "queued \194\183 waiting for this node to be idle")
+      elseif report.ok == false then status("failed", tostring(report.error or report.status or "refused"):sub(1, 60))
+      end
       ui.say(redact.text(report.message or json.encode(report)))
       if report.release and report.release.state == "behind" then
         ui.say(redact.text("release: " .. report.release.message))

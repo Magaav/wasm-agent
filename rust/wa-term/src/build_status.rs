@@ -14,6 +14,10 @@ use std::time::{Instant, SystemTime};
 const FRESH: f64 = 120.0;
 const INSTALLED_FOR: f64 = 30.0;
 const FAILED_FOR: f64 = 60.0;
+/// An `/update` in flight (checking, queued, waiting for idle): shown until a final state replaces it,
+/// bounded so a request that never runs cannot hold the row for ever (operator 14/11: one continuous
+/// line from `/update` to the end, never blank in between).
+const UPDATING_FOR: f64 = 1800.0;
 const BAR: usize = 14;
 /// The loader's colour, published because the tool-progress row (`crate::tool_progress`) is the same
 /// row and the same kind of fact, and two blues one row apart would read as two features.
@@ -65,6 +69,15 @@ fn facts(status: &Value, now: f64) -> Option<(Build, &'static str, String, Strin
             let what = what.trim_end();
             let clock = num("started_at").map(|s| format!(" \u{b7} {}", elapsed(now - s))).unwrap_or_default();
             (Build::Building, BUILDING, format!("\u{27f3} building wasm-agent {bar}{what}{clock}"), format!("\u{27f3} building wasm-agent {what}{clock}"))
+        }
+        "updating" if age < UPDATING_FOR => {
+            let phase = text("phase");
+            let clock = num("started_at").map(|s| format!(" \u{b7} {}", elapsed(now - s))).unwrap_or_default();
+            let what = if phase.is_empty() { String::new() } else { format!(" \u{b7} {phase}") };
+            (Build::Building, BUILDING, format!("\u{27f3} updating wasm-agent{what}{clock}"), format!("\u{27f3} updating wasm-agent{what}{clock}"))
+        }
+        "current" if age < INSTALLED_FOR => {
+            (Build::Installed, DONE, "\u{2713} wasm-agent is up to date".to_string(), String::new())
         }
         "installed" if age < INSTALLED_FOR => {
             let took = text("crate");
@@ -257,5 +270,16 @@ mod tests {
         assert_eq!(session_line(NOTICE_TEXT, None, 1.0, 0), None, "no columns, no row");
         // A width wider than the sentence is the sentence.
         assert_eq!(plain(&session_line(NOTICE_TEXT, None, 1.0, 200).unwrap()), NOTICE_TEXT);
+    }
+
+    #[test]
+    fn an_update_in_flight_is_one_line_until_it_ends() {
+        let checking: Value = serde_json::from_str(r#"{"state":"updating","phase":"checking for updates","started_at":100,"at":100}"#).unwrap();
+        assert_eq!(plain(&line(&checking, 103.0, 100).unwrap()), "\u{27f3} updating wasm-agent \u{b7} checking for updates \u{b7} 3s");
+        let queued: Value = serde_json::from_str(r#"{"state":"updating","phase":"queued","started_at":100,"at":100}"#).unwrap();
+        assert!(line(&queued, 100.0 + 600.0, 100).is_some(), "still showing after ten minutes of waiting for idle");
+        assert!(line(&queued, 100.0 + 1801.0, 100).is_none(), "but not for ever");
+        let current: Value = serde_json::from_str(r#"{"state":"current","at":100}"#).unwrap();
+        assert_eq!(plain(&line(&current, 101.0, 100).unwrap()), "\u{2713} wasm-agent is up to date");
     }
 }
