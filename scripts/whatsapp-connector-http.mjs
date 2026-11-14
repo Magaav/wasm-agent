@@ -3,9 +3,11 @@
 //
 // This module is what survived the Node MCP bridge (scripts/mcp-whatsapp.mjs, deleted 10/11). The
 // bridge was two things: the MCP stdio server an operator registered as a connector, and this client.
-// Only the client is still used - by the operator send path (scripts/whatsapp-operator.mjs, run by the
-// node through lua/core/federation.lua) and by the read-only readiness check - so it lives here with
-// the same refusals and the same limits, and the server half is gone.
+// Only the client is still used - by the read-only readiness check (scripts/whatsapp-readiness.mjs) -
+// so it lives here with the same refusals and the same limits, and the server half is gone. Its other
+// caller, the operator send path (scripts/whatsapp-operator.mjs), was retired 14/11 with the second
+// WhatsApp surface: a send is `mcp_whatsapp_send`, and the `/approve` gate decides whether it waits as a
+// draft.
 //
 // Every function takes the binding explicitly. There is no ambient account, no discovery and no
 // fallback: a missing field refuses, it never guesses another account.

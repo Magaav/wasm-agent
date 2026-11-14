@@ -29,12 +29,12 @@ check() { # <name> <condition...>
 
 TREE="$WORK/tree"; INSTALL="$WORK/install"
 mkdir -p "$TREE/scripts/lib" "$TREE/jobs" "$INSTALL/scripts/lib" "$INSTALL/scripts/.retired/20260101T000000Z"
-printf 'operator\n' > "$TREE/scripts/whatsapp-operator.mjs"
+printf 'readiness\n' > "$TREE/scripts/whatsapp-readiness.mjs"
 printf 'keep module\n' > "$TREE/scripts/lib/keep.mjs"
 printf '{"id":"live"}\n' > "$TREE/jobs/live.json"
 
 # The install the LAST release left behind: the same files, plus the ones this tree no longer has.
-printf 'operator\n' > "$INSTALL/scripts/whatsapp-operator.mjs"
+printf 'readiness\n' > "$INSTALL/scripts/whatsapp-readiness.mjs"
 printf 'keep module\n' > "$INSTALL/scripts/lib/keep.mjs"
 printf 'deleted reader\n' > "$INSTALL/scripts/whatsapp-read.mjs"
 printf 'deleted module\n' > "$INSTALL/scripts/lib/websocket-runtime.mjs"
@@ -52,7 +52,7 @@ STAMP="$(ls -1d "$INSTALL/scripts/.retired"/*/ | tail -1)"
 check 'a shipped script the tree no longer has is gone from scripts/' test ! -e "$INSTALL/scripts/whatsapp-read.mjs"
 check 'its bytes are kept under scripts/.retired/<utc>/' bash -c "grep -q 'deleted reader' \"\$1/whatsapp-read.mjs\"" _ "$STAMP"
 check 'the lib closure is retired by the same rule' bash -c "grep -q 'deleted module' \"\$1/lib/websocket-runtime.mjs\"" _ "$STAMP"
-check 'a shipped script the tree still has is untouched' bash -c "grep -q operator \"\$1/whatsapp-operator.mjs\"" _ "$INSTALL/scripts"
+check 'a shipped script the tree still has is untouched' bash -c "grep -q readiness \"\$1/whatsapp-readiness.mjs\"" _ "$INSTALL/scripts"
 check 'a live module is untouched' bash -c "grep -q 'keep module' \"\$1/lib/keep.mjs\"" _ "$INSTALL/scripts"
 check 'a job whose definition is gone is retired with its marker' bash -c "test ! -e \"\$1/gone.job.json\" && test ! -e \"\$1/gone.job.json.shipped\"" _ "$INSTALL/scripts"
 check 'a live job keeps its definition and its shipped marker' bash -c "test -f \"\$1/live.job.json\" && test -f \"\$1/live.job.json.shipped\"" _ "$INSTALL/scripts"

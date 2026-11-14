@@ -529,6 +529,8 @@ local CODES={
   fix='send `chat` (the number or group id) and `text` (the message body) together.'},
  whatsapp_tool_renamed={message='the tool name used here was renamed in this build ({origin}).',
   fix='use the one WhatsApp tool name this build publishes: `searchTools("whatsapp")` lists the callable ones.'},
+ whatsapp_tool_retired={message='a WhatsApp tool name this build retired ({origin}).',
+  fix='call `mcp_whatsapp_send` instead; turn on `/approve` to review drafts first.'},
  -- the rest of the dispatcher\'s own codes
  cancelled={message='the run was cancelled before this call settled ({origin}).',
   fix='start a new run if the work is still wanted; a cancelled call is not retried automatically.'},

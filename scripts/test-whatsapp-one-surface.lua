@@ -31,6 +31,11 @@ local peer_tools = {
     parameters = { type = "object", properties = {} }, effect = "read" },
   { name = "whatsapp_read", description = "the bare spelling before 11/11",
     parameters = { type = "object", properties = {} }, effect = "read" },
+  -- The second send path retired 14/11. A peer on an older build still exports it; it must not become a
+  -- tool here, must not be discoverable, and must answer its one sentence if a cached name calls it.
+  { name = "whatsapp_operator", effect = "write",
+    description = "Operator-directed WhatsApp text (docs/WHATSAPP-OPERATOR-MANAGEMENT.md): prepare -> approve",
+    parameters = { type = "object", properties = {} } },
   { name = "chat_read", description = "Read a chat on the peer",
     parameters = { type = "object", properties = { chat = { type = "string" } } }, effect = "read" },
 }
@@ -57,7 +62,8 @@ local listed = {}
 for _, schema in ipairs(federation.schemas()) do listed[schema["function"].name] = schema["function"].description end
 ok(listed.peer_openclaw__chat_read ~= nil, "an ordinary peer tool is still federated: " .. json.encode(listed))
 for _, name in ipairs({ "peer_openclaw__mcp_whatsapp_native_inspect_chat_47452e4e",
-  "peer_openclaw__mcp_whatsapp_native_lookup_self_47452e4e", "peer_openclaw__whatsapp_read" }) do
+  "peer_openclaw__mcp_whatsapp_native_lookup_self_47452e4e", "peer_openclaw__whatsapp_read",
+  "peer_openclaw__whatsapp_operator" }) do
   ok(listed[name] == nil, name .. " is not a peer tool any more")
 end
 
@@ -90,15 +96,49 @@ ok(tostring(json.encode(via_dispatch)):find("whatsapp_tool_renamed", 1, true) ~=
 -- The gate: every spelling of the surface is recognised, and nothing else is.
 local whatsapp = dofile("lua/core/whatsapp.lua")
 for _, name in ipairs({ "mcp_whatsapp_read", "mcp_whatsapp_send", "whatsapp_read",
-  "whatsapp_contacts", "mcp_whatsapp_native_inspect_chat_47452e4e", "mcp_whatsapp_native_read_newest_47452e4e",
+  "whatsapp_contacts", "whatsapp_operator", "peer_openclaw__whatsapp_operator",
+  "mcp_whatsapp_native_inspect_chat_47452e4e", "mcp_whatsapp_native_read_newest_47452e4e",
   "peer_openclaw__whatsapp_search", "peer_openclaw__mcp_whatsapp_native_list_chats_47452e4e" }) do
   ok(whatsapp.surface(name) == true, name .. " is a spelling of the one surface")
   ok(federation.whatsapp_spelling(name) == true, name .. " is not exportable to a master")
 end
-for _, name in ipairs({ "whatsapp_operator", "chat_read", "peer_openclaw__chat_read", "mcp_mail_search_ab12cd34", "read" }) do
+for _, name in ipairs({ "chat_read", "peer_openclaw__chat_read", "mcp_mail_search_ab12cd34", "read" }) do
   ok(whatsapp.surface(name) == false, name .. " is not a WhatsApp spelling")
   ok(federation.whatsapp_spelling(name) == false, name .. " stays exportable")
 end
+
+-- ---- 2b. A RETIRED spelling never comes back in any export --------------------------------------
+-- `whatsapp_operator` was a second WhatsApp send path, retired 14/11 (docs/WHATSAPP-OPERATOR-MANAGEMENT.md
+-- is now the pointer). The gate has two halves: no export of this node may carry a WhatsApp spelling, and
+-- a peer that still exports one gets neither a tool here nor a silent success - it gets the one sentence.
+local SENTENCE = 'retired: use mcp_whatsapp_send; turn on /approve to review drafts first'
+ok(whatsapp.retired_name('whatsapp_operator') == SENTENCE, 'the retired name carries the exact sentence')
+ok(whatsapp.retired_name('peer_openclaw__whatsapp_operator') == SENTENCE, 'so does its peer spelling')
+ok(whatsapp.retired_name('whatsapp_read') == nil, 'a RENAMED spelling is not a retired one')
+for _, tool in ipairs(federation.exported()) do
+  ok(federation.whatsapp_spelling(tool.name) == false,
+    'this node exports no WhatsApp spelling, retired or renamed: ' .. tostring(tool.name))
+end
+local stale = 0
+for _, peer in pairs(federation.cached().peers or {}) do
+  for _, tool in ipairs(peer.tools or {}) do
+    if whatsapp.surface(tool.name) then stale = stale + 1 end
+  end
+end
+ok(stale >= 1, 'the fixture peer does export WhatsApp spellings, so the next checks mean something')
+local ran_on_peer = #remote
+local refused = federation.call('peer_openclaw__whatsapp_operator', { profile = 'laura-1', action = 'status' })
+ok(refused.ok == false and refused.error == 'whatsapp_tool_retired',
+  'a cached retired name is refused by name: ' .. json.encode(refused))
+ok(refused.note == SENTENCE and refused.use == 'mcp_whatsapp_send' and refused.effect == 'none',
+  'with the one sentence, the door and no effect: ' .. json.encode(refused))
+ok(#remote == ran_on_peer, 'and the peer was never asked: nothing ran anywhere')
+local via_tools = tools.dispatch(memory, 'peer_openclaw__whatsapp_operator', {}, 'master', ctx)
+ok(tostring(json.encode(via_tools)):find('whatsapp_tool_retired', 1, true) ~= nil,
+  'the dispatcher answers it the same way: ' .. json.encode(via_tools))
+local bare = tools.dispatch(memory, 'whatsapp_operator', {}, 'master', ctx)
+ok(tostring(json.encode(bare)):find(SENTENCE, 1, true) ~= nil,
+  'the bare name answers the sentence too, never "unknown tool": ' .. json.encode(bare))
 
 -- ---- 3. A name that exists is found by a plain substring query of it --------------------------
 local execution = tools.discovery_execution(memory, ctx)

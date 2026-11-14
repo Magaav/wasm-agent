@@ -234,21 +234,29 @@ function M.peer_connectors(opts)
         end
         return groups[id]
       end
+      -- A peer's WhatsApp spelling is not a tool this node can call (it is not in the catalogue, it does
+      -- not resolve, and a call to it answers the one surface's refusal), so it is not a row here either.
+      -- Without this, a peer that still exports `whatsapp_operator` - the second send path retired 14/11 -
+      -- showed as "<peer> (other exported tools) · 1 tool": the stray row the operator pointed at on 14/11.
+      local whatsapp_spelling = type(federation().whatsapp_spelling) == 'function'
+        and federation().whatsapp_spelling or function() return false end
       for _, tool in ipairs(peer.tools) do
-        local description = tostring(tool.description or '')
-        local id = description:match('^MCP ([%w_%-]+) / ')
-        local label, transport
-        if id then
-          label, transport = id, 'unknown'
-        elseif description:sub(1, 8) == '[native]' then
-          id, label, transport = 'native', tostring(peer.name) .. ' native', 'native'
-        else
-          id, label, transport = '*', tostring(peer.name) .. ' (other exported tools)', 'unknown'
+        if not whatsapp_spelling(tool.name) then
+          local description = tostring(tool.description or '')
+          local id = description:match('^MCP ([%w_%-]+) / ')
+          local label, transport
+          if id then
+            label, transport = id, 'unknown'
+          elseif description:sub(1, 8) == '[native]' then
+            id, label, transport = 'native', tostring(peer.name) .. ' native', 'native'
+          else
+            id, label, transport = '*', tostring(peer.name) .. ' (other exported tools)', 'unknown'
+          end
+          local group = bucket(id, label, transport)
+          group.tools[#group.tools + 1] = { name = federation().local_name(peer.name, tool.name), tool = tool.name,
+            description = description, parameters = tool.parameters, approval = tool.effect or 'unknown',
+            published = true }
         end
-        local group = bucket(id, label, transport)
-        group.tools[#group.tools + 1] = { name = federation().local_name(peer.name, tool.name), tool = tool.name,
-          description = description, parameters = tool.parameters, approval = tool.effect or 'unknown',
-          published = true }
       end
       for _, id in ipairs(order) do
         local group = groups[id]

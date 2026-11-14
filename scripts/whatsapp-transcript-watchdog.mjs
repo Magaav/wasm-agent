@@ -2,25 +2,29 @@
 // Automatic-transcript watchdog: the transcript pipeline must never degrade silently.
 //
 // On 28/10 posting had stopped in 38 chats (unproven_mutation_chat_hold) and a long voice note had timed out
-// 20 times, and nothing told anyone. This job reads the connector's journal (read-only) every few minutes and,
-// when something is wrong, sends ONE message to the account owner's own chat through the operator-directed
-// path (docs/WHATSAPP-OPERATOR-MANAGEMENT.md: prepare -> approve -> send, the `self` operator profile). Each
-// problem is reported at most once per day; a problem that clears is forgotten, so a recurrence is reported.
+// 20 times, and nothing told anyone. This job reads the connector's journal (read-only) every few minutes and
+// reports what is wrong; each problem is reported at most once per day, and a problem that clears is
+// forgotten, so a recurrence is reported again.
+//
+// DELIVERY, since 14/11: the alert is WRITTEN and never sent from here. It used to message the account
+// owner's own chat through the operator route (prepare -> approve -> send, docs/WHATSAPP-OPERATOR-MANAGEMENT.md),
+// whose transport was the Go connector's `/operator/*` HTTP API - removed 11/11, so the send could only
+// fail. That route is retired: WhatsApp has ONE send surface, `mcp_whatsapp_send`, with the operator's
+// `/approve` gate in front of it, and an unattended job has no door to it (a send is the node's Lua
+// capability, not a shell command). Reaching around the gate is what the retirement removed, so the alert
+// goes to a durable file, to stdout, and out as a non-zero exit - which is what makes a job's failure
+// visible in the node's own history. Nothing is silent and nothing leaves the machine.
 //
 // Settings (environment, all optional):
 //   WA_WHATSAPP_STATE       connector state dir      (default ~/.local/state/wa-whatsapp)
-//   WA_WHATSAPP_OPERATOR_DIR operator configs dir     (default ~/.config/wa-whatsapp)
-//   WA_WATCHDOG_PROFILE     operator profile to send with (default: the one whose only chat is the account itself)
-//   WA_WATCHDOG_DRY_RUN=1   report on stdout, send nothing
+//   WA_WATCHDOG_DRY_RUN=1   report on stdout, write no alert and remember nothing
 import { DatabaseSync } from 'node:sqlite';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const home = os.homedir();
 const stateDir = process.env.WA_WHATSAPP_STATE || path.join(home, '.local/state/wa-whatsapp');
-const operatorDir = process.env.WA_WHATSAPP_OPERATOR_DIR || path.join(home, '.config/wa-whatsapp');
 const memoryFile = path.join(stateDir, 'transcript-watchdog.json');
 const now = Math.floor(Date.now() / 1000);
 const DAY = 86400;
@@ -72,37 +76,17 @@ function snapshot() {
   return { config, lastConnected, lastDisconnected, pending, held, unposted };
 }
 
-// The operator profile that writes only to the account's own chat.
-function selfProfile(account) {
-  if (process.env.WA_WATCHDOG_PROFILE) return path.join(operatorDir, `operator-management-${process.env.WA_WATCHDOG_PROFILE}.json`);
-  for (const name of fs.readdirSync(operatorDir)) {
-    if (!/^operator-management-.*\.json$/.test(name)) continue;
-    const config = JSON.parse(fs.readFileSync(path.join(operatorDir, name), 'utf8'));
-    if (Array.isArray(config.conversations) && config.conversations.length === 1 && config.conversations[0] === account) {
-      return path.join(operatorDir, name);
-    }
-  }
-  return null;
-}
+// The alert's own file. One path, fixed, beside the watchdog's memory: an operator or a model can read
+// the current alert without a WhatsApp message having been sent, and a dry run writes nothing.
+export const alertFile = path.join(stateDir, 'transcript-watchdog-alert.json');
 
-function operator(action, profile, request) {
-  const file = path.join(operatorDir, 'requests', `watchdog-${action}-${process.pid}-${Date.now()}.json`);
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, JSON.stringify(request), { mode: 0o600 });
-  const script = path.join(path.dirname(new URL(import.meta.url).pathname), 'whatsapp-operator.mjs');
-  const out = execFileSync(process.execPath, [script, action, '--authority-file', profile, '--request-file', file], { encoding: 'utf8', timeout: 60000 });
-  return JSON.parse(out);
-}
-
-function send(account, text) {
-  const profile = selfProfile(account);
-  if (!profile) throw Error('watchdog_self_profile_missing: no operator profile scoped to the account itself');
-  const prepared = operator('prepare', profile, { conversation_id: account, body: text });
-  const intent = prepared.intent || {};
-  if (!intent.intent_id || !intent.approval_digest) throw Error('watchdog_prepare_without_intent');
-  operator('approve', profile, { conversation_id: account, body: intent.body, intent_id: intent.intent_id, approval_digest: intent.approval_digest });
-  const sent = operator('send', profile, { conversation_id: account, intent_id: intent.intent_id });
-  return { intent_id: intent.intent_id, state: (sent.intent || {}).state };
+// Report, never send: the one WhatsApp surface is behind the operator's `/approve` gate and has no door
+// for a job. The answer says so in the same words the retired name answers with, so a reader who finds
+// this file is told where a message would come from now.
+export function deliver(account, text, problems, at = now) {
+  fs.writeFileSync(alertFile, JSON.stringify({ at, account, text, problems: problems.map((p) => p.key) }, null, 1), { mode: 0o600 });
+  return { ok: false, error: 'alert_not_delivered_to_whatsapp', where: alertFile,
+    note: 'retired: use mcp_whatsapp_send; turn on /approve to review drafts first' };
 }
 
 export function main() {
@@ -113,17 +97,23 @@ export function main() {
   let delivery = null;
   if (fresh.length && process.env.WA_WATCHDOG_DRY_RUN !== '1') {
     const text = ['Vigia das transcrições automáticas: algo precisa de atenção', '', ...fresh.map((p) => `• ${p.line}`)].join('\n');
-    delivery = send(snap.config.account, text);
+    delivery = deliver(snap.config.account, text, fresh);
   }
-  // Forget what cleared (so a recurrence is reported again); remember what was just reported.
+  // Forget what cleared (so a recurrence is reported again); remember what was DELIVERED, and only that:
+  // an alert nobody received must not mute the next run.
   const current = new Set(problems.map((p) => p.key));
   const reported = Object.fromEntries(Object.entries(memory.reported).filter(([key]) => current.has(key)));
-  if (delivery) for (const p of fresh) reported[p.key] = now;
+  if (delivery && delivery.ok) for (const p of fresh) reported[p.key] = now;
   // A dry run reports and remembers nothing, so it never mutes the first real alert.
   if (process.env.WA_WATCHDOG_DRY_RUN !== '1') fs.writeFileSync(memoryFile, JSON.stringify({ reported, held: snap.held, at: now }), { mode: 0o600 });
-  const result = { ok: true, problems: problems.length, reported: delivery ? fresh.length : 0, held: snap.held.length, pending: snap.pending.length, delivery,
-    lines: process.env.WA_WATCHDOG_DRY_RUN === '1' ? fresh.map((p) => p.line) : undefined };
+  // An undelivered alert is a failing run, with its lines in the evidence: the alternative is a green job
+  // that told nobody (`AGENTS.md`: no silent success).
+  const undelivered = delivery !== null && delivery.ok === false;
+  const result = { ok: !undelivered, problems: problems.length, reported: delivery && delivery.ok ? fresh.length : 0,
+    held: snap.held.length, pending: snap.pending.length, delivery,
+    lines: process.env.WA_WATCHDOG_DRY_RUN === '1' || undelivered ? fresh.map((p) => p.line) : undefined };
   console.log(JSON.stringify(result));
+  if (undelivered) process.exitCode = 1;
   return result;
 }
 

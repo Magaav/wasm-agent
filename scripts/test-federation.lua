@@ -66,28 +66,35 @@ dofile=real_dofile
 local tools=dofile('lua/core/tools.lua')
 check(tools.dispatch(memory,'peer_openclaw__chat_read',{},'guest',{}).error:find('forbidden_for_role',1,true),'a guest cannot use federated tools')
 check(tools.has_effect('peer_openclaw__chat_send') and not tools.has_effect('peer_openclaw__chat_read'),'effects follow the peer tier')
--- Operator-directed send: exported only where configs and the CLI exist; profile and chat scope enforced.
+-- The retired operator route (14/11): an installed profile exports NOTHING, and the name answers one
+-- sentence on every route - a local call, a federated one and a cached peer spelling.
 local paths=dofile('lua/core/paths.lua')
 local opdir=paths.data()..'/operator-fixture'
 assert(host.write_file(opdir..'/operator-management-laura-1.json',json.encode({kind='whatsapp-operator-v1',generation=2,
   conversations={'5500000000001@s.whatsapp.net'},dispatch_token_file='/nonexistent/d',approval_token_file='/nonexistent/a'})))
-assert(host.write_file(opdir..'/operator-read-1.json','{"kind":"other"}'))
-local scripts=paths.data()..'/op-scripts'
+assert(host.write_file(opdir..'/operator-read-1.json','{\"kind\":\"other\"}'))
 local mcp=dofile('lua/core/mcp.lua')
+local scripts=paths.data()..'/op-scripts'
 for _,file in ipairs(mcp.RUNTIME) do assert(host.write_file(scripts..'/'..file,'// fixture\n')) end
-assert(host.write_file(scripts..'/whatsapp-operator.mjs','// fixture\n'))
 local env=host.getenv
 host.getenv=function(k) if k=='WA_WHATSAPP_OPERATOR_DIR' then return opdir end if k=='WA_MCP_SCRIPT_DIR' then return scripts end return env(k) end
-local profiles=federation.operator_profiles()
-check(profiles['laura-1'] and profiles['read-1']==nil,'only operator-management configs are profiles')
 local exported={};for _,t in ipairs(federation.exported()) do exported[t.name]=t end
-check(exported.whatsapp_operator and exported.whatsapp_operator.effect=='write','the operator send is exported as a write')
-check(exported.whatsapp_operator.description:find('5500000000001@s.whatsapp.net',1,true),'the description names each profile scope')
-check(federation.operator_call({action='prepare',profile='nobody',request={}}).error=='operator_profile_unknown','an unknown profile refuses')
-check(federation.operator_call({action='delete',profile='laura-1',request={conversation_id='5500000000001@s.whatsapp.net'}}).error=='operator_action_unsupported','only the four actions')
-check(federation.operator_call({action='prepare',profile='laura-1',request={conversation_id='5599999999999@s.whatsapp.net',body='x'}}).error=='operator_conversation_outside_profile','a chat outside the profile refuses before the CLI runs')
+check(exported.whatsapp_operator==nil,'an operator profile left on disk no longer exports the operator route')
+for _,t in ipairs(federation.exported()) do
+  check(not federation.whatsapp_spelling(t.name),'no WhatsApp spelling is exported: '..tostring(t.name))
+end
+local retired=dofile('lua/core/whatsapp.lua').RETIRED.whatsapp_operator
+check(retired=='retired: use mcp_whatsapp_send; turn on /approve to review drafts first','the one sentence is exact')
+local local_answer=dofile('lua/core/whatsapp.lua').call('whatsapp_operator',{profile='laura-1',action='status'},nil)
+check(local_answer.ok==false and local_answer.error=='whatsapp_tool_retired' and local_answer.note==retired and local_answer.use=='mcp_whatsapp_send' and local_answer.effect=='none','the local call answers the sentence and touches nothing')
 local called
-check(federation.serve({action='call',name='whatsapp_operator',args={action='status',profile='nobody'}},{role='master'},function() called=true end).error=='operator_profile_unknown' and not called,'served through the operator path, never the generic dispatch')
+local served=federation.serve({action='call',name='whatsapp_operator',args={action='status',profile='laura-1'}},{role='master'},function() called=true end)
+check(served.ok==false and served.error=='federation_tool_not_exported' and not called,'a federated call is refused as not exported, and runs nothing')
+check(federation.whatsapp_spelling('whatsapp_operator') and federation.whatsapp_spelling('peer_openclaw__whatsapp_operator'),'the name and its peer spelling are spellings of the one surface, so nothing can export them')
+local through_peer=federation.call('peer_openclaw__whatsapp_operator',{})
+check(through_peer.ok==false and through_peer.error=='whatsapp_tool_retired' and through_peer.note==retired,'a cached peer spelling answers the same sentence')
+check(federation.resolve('peer_openclaw__whatsapp_operator')==nil,'and resolves to no tool here')
+check(federation.operator_profiles==nil and federation.operator_call==nil and federation.operator_schema==nil,'the route itself is gone from the module, not merely unused')
 host.getenv=env
 
 -- Peers in the code-mode hint, from the cache only (29/10).

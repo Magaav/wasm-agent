@@ -95,8 +95,8 @@ An uncertain control requires inspection and a new explicit decision.
 
 A connector belongs to the machine that holds it (a linked WhatsApp device, a mail credential file, a
 loopback service), so a copied definition cannot run elsewhere. `lua/core/federation.lua` leaves each
-connector where it is: a master lists each online peer's enabled connector tools (its MCP tools and, where
-an operator profile is installed, `whatsapp_operator`) as `peer_<peer>__<tool>` and a call runs ON that peer through the signed node call, under
+connector where it is: a master lists each online peer's enabled connector tools as
+`peer_<peer>__<tool>` and a call runs ON that peer through the signed node call, under
 that peer's own guards - its write gates, approvals and refusals still decide. Nothing secret moves and no
 node is configured by hand. The catalog refreshes when a node is bound (the binding tick that reaches
 `accepted`), when a peer is promoted to master, and when it is older than ten minutes; listing tools reads
@@ -105,9 +105,17 @@ the catalog with its reason and no tools. Guests neither list nor call. Proof: `
 
 ## WhatsApp first
 
-2026-10-17: [operator-directed management](WHATSAPP-OPERATOR-MANAGEMENT.md) is a
+2026-10-17: [operator-directed management](WHATSAPP-OPERATOR-MANAGEMENT.md) was a
 separate provisioned CLI/API capability, NOT generic MCP `send_message` or a
 permission widening of this read boundary. GENERAL responder sends remain refused.
+14/11: that route is RETIRED. WhatsApp has ONE send surface, `mcp_whatsapp_send`,
+and the `/approve` gate decides whether a message waits as a draft ([APPROVE.md](APPROVE.md)).
+The old name answers one sentence and nothing runs behind it.
+
+A peer that still exports a WhatsApp spelling (`whatsapp_operator`, or an older build's
+`whatsapp_read`) contributes no row to `/mcp` and no tool to this node: the name is a
+spelling of the one surface (`lua/core/whatsapp.lua`), so the fleet view cannot show a
+send path that this node has no way to call.
 
 The Node MCP bridge (`scripts/mcp-whatsapp.mjs`, `scripts/whatsapp-mcp-client.mjs`) was deleted
 on 10/11/2026: WhatsApp reads answer from the native index (`whatsapp_native`) and the
@@ -223,9 +231,10 @@ for exact cache, permission, paging and shadow-benchmark limits.
 
 - `node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs`
   uses private stdio/HTTP peers, credentials, malformed output, schema change and
-  timeout/no replay. The operator send path's negatives are covered by
-  `scripts/test-whatsapp-operator.lua` (the state machine, `lua/core/whatsapp_operator.lua`); the Go
-  connector's own process test went with that connector in Phase 4 (11/11). No real WhatsApp messages
+  timeout/no replay. The operator route retired on 14/11 is covered where it now lives:
+  `scripts/test-whatsapp-one-surface.lua` (no peer export, no catalogue row, and the one sentence a
+  retired name answers), and the Go connector's own process test went with that connector in Phase 4
+  (11/11). No real WhatsApp messages
   or paid model.
 - `node scripts/test-mcp-native.cjs <built-wa> <fresh-evidence>` and `--post`
   verify private native SQL/operation source plus standalone embedded paths.

@@ -114,8 +114,8 @@ rust_path() { # <root>
     rust/components/wa-whatsapp/Cargo.toml rust/components/wa-whatsapp/manifest.json \
     rust/components/mcp-whatsapp/Cargo.toml rust/components/mcp-whatsapp/manifest.json \
     rust/wa-whatsapp-index/src/lib.rs rust/wa-whatsapp-outbox/src/lib.rs \
-    lua/core/whatsapp_operator.lua scripts/whatsapp-stt-local.py scripts/whatsapp-ocr-local.py \
-    scripts/whatsapp-operator.mjs scripts/whatsapp-connector-http.mjs \
+    scripts/whatsapp-stt-local.py scripts/whatsapp-ocr-local.py \
+    scripts/whatsapp-connector-http.mjs scripts/whatsapp-readiness.mjs \
     stt/python-stt-dependency.json stt/python-stt-linux-arm64.requirements.txt \
     docs/WHATSAPP-OPERATOR-MANAGEMENT.md; do
     [ -e "$root/$entry" ] || { printf 'missing, and the Rust path needs it: %s\n' "$entry"; missing=1; }
@@ -126,7 +126,7 @@ rust_path() { # <root>
     || { printf 'missing: the wa-whatsapp rule in policies/default.json\n'; missing=1; }
   return "$missing"
 }
-check 'the Rust component, its MCP, the workers, the operator client and their pins all survive' rust_path "$ROOT"
+check 'the Rust component, its MCP, the workers, the connector client and their pins all survive' rust_path "$ROOT"
 
 # ---- the scan is a gate: it finds each path on a fixture that has one ------------------------------
 FIX="$WORK/fixture"
