@@ -189,6 +189,30 @@ local function validate(schema,node,path)
   end
  end
 end
+-- The names models reach for that a schema spells differently (14/11: contacts({query}) against `q`).
+-- A key is renamed only when the schema lacks it, takes the synonym, and the call did not pass the
+-- synonym too - so nothing a schema declares is ever reinterpreted. Returns the text and the renames.
+local SYNONYMS={query={'q'},search={'q'},term={'q'},keyword={'q'},q={'query'},
+ chat_id={'chat'},jid={'chat'},message={'text'},msg={'text'},body={'text'},content={'text'},
+ max={'limit'},n={'limit'},file={'path'},filepath={'path'},file_path={'path'},cmd={'command'}}
+function M.normalize_names(schema,text)
+ if type(schema)~='table' or type(schema.properties)~='table' or type(text)~='string' or text=='' then return text,nil end
+ local codec=dofile('lua/vendor/json.lua')
+ local ok,args=pcall(codec.decode,text)
+ if not ok or type(args)~='table' or args[1]~=nil then return text,nil end
+ local renamed={}
+ for key,value in pairs(args) do
+  if schema.properties[key]==nil and SYNONYMS[key] then
+   for _,target in ipairs(SYNONYMS[key]) do
+    if schema.properties[target]~=nil and args[target]==nil then args[target]=value;args[key]=nil;renamed[#renamed+1]=key..'->'..target;break end
+   end
+  end
+ end
+ if #renamed==0 then return text,nil end
+ table.sort(renamed)
+ return codec.encode(args),renamed
+end
+
 function M.validate(schema,text)
  local node,err=M.parse(text);if not node then return nil,err end
  local ok,failure=pcall(function()return supported_schema(schema,'arguments') or validate(schema,node,'arguments')end)

@@ -21,6 +21,17 @@ check(seen[#seen].where=='openclaw' and seen[#seen].req.cancel==true and seen[#s
 r=wa.send({id=127,wait_s=0},{})
 check(seen[#seen].where=='openclaw' and seen[#seen].req.id==127,'a resume asks the account node, not this queue: '..json.encode(seen[#seen]))
 
+-- a job left in THIS node's queue (before sends were routed) is still reachable: the owner holds no
+-- such id, so the resume and the cancel ask this node's own queue (job 7, 14/11)
+wa.forward=function(owner,name,req) seen[#seen+1]={where=owner,name=name,req=req}; return {ok=false,error='whatsapp_send_unknown_id',id=req.id} end
+r=wa.send({id=7,wait_s=0},{})
+check(r.served_by==wa.self_name() and r.state~=nil and r.error==nil,'a resume falls back to this node for a local job: '..json.encode(r))
+r=wa.send({cancel=7},{})
+check(r.cancelled==true,'a cancel falls back to this node for a local job: '..json.encode(r))
+wa.forward=function(owner,name,req) seen[#seen+1]={where=owner,name=name,req=req}; return {ok=true,id=req.id,state='done',message_id='X',served_by=owner} end
+r=wa.send({id=127,wait_s=0},{})
+check(r.status==200 and r.message_id=='X','a sent message answers status 200 and its message_id: '..json.encode(r))
+
 -- the stuck hint
 local clock=0;local real_now=host.now;host.now=function() return clock end
 local answer=wa.settle(5,30,function() return {ok=true,id=5,state='queued',attempts=0} end,{sleep=function(s) clock=clock+s;return true end})

@@ -155,7 +155,7 @@ function makeGlobal(name,raw){ return function(){ var args=[].slice.call(argumen
 /* A name that is not a tool answers with the names closest to it instead of "not a function" (14/11). Only string names are checked; symbols and the names a runtime probes (then, toJSON...) stay undefined. */
 var probes={then:1,toJSON:1,constructor:1,valueOf:1,toString:1,inspect:1,prototype:1,length:1,name:1};
 function nearest(name,keys){ var low=name.toLowerCase(); var parts=low.split(/[_\W]+/).filter(function(p){ return p.length>2; }); var scored=[]; for(var index=0;index<keys.length;index++){ var key=keys[index]; var k=key.toLowerCase(); var score=0; if(k.indexOf(low)>=0||low.indexOf(k)>=0){ score+=3; } for(var position=0;position<parts.length;position++){ if(k.indexOf(parts[position])>=0){ score+=1; } } if(score>0){ scored.push([score,key]); } } scored.sort(function(a,b){ return b[0]-a[0]||a[1].length-b[1].length; }); return scored.slice(0,4).map(function(entry){ return entry[1]; }); }
-function wrapTools(raw){ var out=Object.create(null); var keys=Reflect.ownKeys(raw); for(var index=0;index<keys.length;index++){ var key=keys[index]; if(typeof key==='string'){ out[key]=makeTool(key,raw[key]); } } Object.freeze(out); var names=objectKeys(out); return new Proxy(out,{ get:function(object,property){ if(typeof property!=='string'||property in object||probes[property]){ return object[property]; } var close=nearest(property,names); throw new TypeError('tools.'+property+' is not a tool here.'+(close.length?' Closest: '+close.join(', ')+'.':'')+' searchTools("'+property.replace(/"/g,'')+'") finds tools by words.'); } }); }
+function wrapTools(raw,extras){ var out=Object.create(null); var keys=Reflect.ownKeys(raw); for(var index=0;index<keys.length;index++){ var key=keys[index]; if(typeof key==='string'){ out[key]=makeTool(key,raw[key]); } } Object.freeze(out); var names=objectKeys(out); return new Proxy(out,{ get:function(object,property){ if(typeof property!=='string'||property in object||probes[property]){ return object[property]; } if(extras&&Object.prototype.hasOwnProperty.call(extras,property)){ return extras[property]; } var close=nearest(property,names); throw new TypeError('tools.'+property+' is not a tool here.'+(close.length?' Closest: '+close.join(', ')+'.':'')+' searchTools("'+property.replace(/"/g,'')+'") finds tools by words.'); } }); }
 function text(value){ if(busy===0&&!hasPending(value)){ G.text(value); return; } enqueue(async function(){ G.text(await settle(value,new Map(),0)); }); }
 function image(value){ if(busy===0&&!hasPending(value)){ G.image(value); return; } enqueue(async function(){ G.image(await settle(value,new Map(),0)); }); }
 function store(key,value){ if(busy===0&&!hasPending(value)){ G.store(key,value); return; } enqueue(async function(){ G.store(key,await settle(value,new Map(),0)); }); }
@@ -181,7 +181,9 @@ var results=Object.freeze({
 });
 return {
  enter:async function(body){
-  var value=await body(wrapTools(G.tools),makeConsole(G.console),makeGlobal('searchTools',G.searchTools),makeGlobal('describeTool',G.describeTool),makeGlobal('showCall',G.showCall),makeGlobal('capabilities',G.capabilities),makeGlobal('describe',G.describe),results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS);
+  /* The script helpers are reachable as tools.<name> too (14/11: tools.searchTools(...) read as "not a tool"): one name, wherever the model reaches for it. */
+  var helpers={ searchTools:makeGlobal('searchTools',G.searchTools), describeTool:makeGlobal('describeTool',G.describeTool), showCall:makeGlobal('showCall',G.showCall), describe:makeGlobal('describe',G.describe), results:results, parallel:parallel };
+  var value=await body(wrapTools(G.tools,helpers),makeConsole(G.console),helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS);
   return await settleAll(value);
  }
 };
@@ -209,8 +211,11 @@ local ONE = join(SOURCE)
 -- The user's own code keeps its shape: it is the body of ONE function, whose parameters are the
 -- wrapped values, so no global has to be reassigned (the prelude's globals are non-writable) and a
 -- script that declares its own `const` still sees the wrapped `tools`/`text`/`store`.
-M.prologue = ONE .. ";return await __h.enter(async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS){"
-M.epilogue = "\n});"
+-- The script runs in its own block, so `const text = ...` (or store, load, image, exit, results, parallel)
+-- shadows the helper instead of being "invalid redefinition of parameter name" (14/11). The brace stays on
+-- line 1, so script line N is still compiled line N+1.
+M.prologue = ONE .. ";return await __h.enter(async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS){{"
+M.epilogue = "\n}});"
 
 -- The script the node sends: the harness on line 1, the model's code from line 2.
 function M.decorate(code)

@@ -394,7 +394,10 @@ impl Editor {
         let notice = self.session_notice.trim();
         if notice.is_empty() { return String::new(); }
         let text = clip_cells(notice, self.width);
-        if std::env::var_os("NO_COLOR").is_some() { text } else { format!("{NOTICE_ROW}{text}{RESET}") }
+        if std::env::var_os("NO_COLOR").is_some() { return text; }
+        // The command the reader types is bold, the way Claude Code words it: `Run: **wa update**`.
+        let text = text.replacen("wa update", &format!("\x1b[1mwa update\x1b[22m{NOTICE_ROW}"), 1);
+        format!("{NOTICE_ROW}{text}{RESET}")
     }
     /// The output region's last row: everything the bottom furniture draws is above it. The run's
     /// status line and the queued-steer rows are taken out of the chat here; the session-status-content

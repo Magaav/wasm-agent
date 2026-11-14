@@ -1266,6 +1266,30 @@ async fn send_outbox(client: &whatsapp_rust::Client, request: &wa_whatsapp_outbo
         .map_err(|error| error.to_string())
 }
 
+/// The index record for a message this client just sent: our own, live, text, with what we quoted and
+/// mentioned. The same shape an echoed message of ours would have had.
+fn sent_record(client: &whatsapp_rust::Client, request: &wa_whatsapp_outbox::Verified, message_id: &str) -> Record {
+    let me = own_jids(client);
+    let chat = request.chat.jid();
+    let now = now_ms();
+    Record {
+        group: chat.ends_with("@g.us"),
+        chat,
+        id: message_id.to_string(),
+        sender: if me.lid.is_empty() { me.pn.clone() } else { me.lid.clone() },
+        sender_alt: if me.lid.is_empty() { String::new() } else { me.pn.clone() },
+        own: true,
+        ts: now,
+        received: now,
+        kind: "text".to_string(),
+        text: request.text.clone(),
+        source: crate::record::SOURCE_LIVE.to_string(),
+        quoted: request.reply_to.clone().unwrap_or_default(),
+        mentions: request.mentions.iter().map(|m| m.jid()).collect(),
+        ..Record::default()
+    }
+}
+
 /// One line, bounded, no control characters: a reason is a log field and a status answer, not a place a
 /// multi-line error can break the line it lands in.
 fn one_line(text: &str) -> String {
@@ -1322,6 +1346,10 @@ async fn outbox_tick() -> bool {
                 match send_outbox(&client, &request).await {
                     Ok(message_id) => {
                         say!("outbox: sent job={id} message={} {} mentions={}", privacy::mark(&message_id), privacy::chat(&request.chat.jid()), request.mentions.len());
+                        // What this client sends never comes back as an event, so it was never indexed: a
+                        // read after a successful send did not show the message, and the model went looking
+                        // for it (14/11). The sent message is indexed here, as our own, like any other.
+                        INDEX_INBOX.with(|q| q.borrow_mut().push_back((sent_record(&client, &request, &message_id), 0)));
                         let output = wa_whatsapp_outbox::Outcome { message_id: message_id.clone() }.encode();
                         if let Err(error) = worker::done(wa_whatsapp_outbox::QUEUE.to_string(), id, OUTBOX_WORKER.to_string(), output).await {
                             // The message is out; a settle that failed is a queue problem, and retrying the
