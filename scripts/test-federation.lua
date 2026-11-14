@@ -101,7 +101,7 @@ host.getenv=env
 local policy=dofile('lua/core/codemode_policy.lua')
 check(policy.prompt({}):find('Peers seen online at the last refresh',1,true) and policy.prompt({}):find('openclaw',1,true),'the hint names cached peers')
 check(not table.concat(federation.cached_peers(),','):find('old-build',1,true),'a peer that did not answer is not advertised')
-check(policy.guidance:find('search_messages({query, node})',1,true) and policy.guidance:find('capability:"batch", calls:[',1,true),'the hint teaches peer history and the read batch')
+check(policy.guidance:find('tools.nodes()',1,true) and policy.guidance:find('tools.remote({node, capability',1,true),'the hint names the peer list and the remote call; the rest is found with searchTools')
 
 -- History on a peer and the read-only remote batch, against stubbed peers (29/10).
 local sent={}

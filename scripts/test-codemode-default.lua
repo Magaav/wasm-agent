@@ -24,8 +24,8 @@ local rounds=0;local nested
 provider.complete_with=function(_,messages,schemas)
  rounds=rounds+1;local names={};for _,s in ipairs(schemas)do names[s['function'].name]=true end
  check(names.codemode,'DEFAULT_POSITIVE: eligible coding exposes codemode without opt-in')
- check(names.read and names.edit and names.write and names.bash and names.session_worktree,'ordinary tools and workspace control retained')
- check(messages[1].content:find('preferred programmatic coding path',1,true),'native runtime guidance present')
+ check(names.session_worktree and not names.read and not names.bash and not names.tool_call,'code mode shows one way to act: codemode and the control plane, no ordinary tools beside it')
+ check(messages[1].content:find('Work in code: one `codemode` call',1,true),'native runtime guidance present')
  if rounds==1 then
   setting='off' -- active admissions must not follow a later setting change
   return {content='',finish_reason='tool_calls',tool_calls={{id='native-default-call',type='function',['function']={name='codemode',arguments=json.encode({code='const r=await tools.read({path:"sum.txt"}); await tools.edit({path:"sum.txt",edits:[{old_text:r.content,new_text:"a+b"}]}); return (await tools.read({path:"sum.txt"})).content;'})}}}}

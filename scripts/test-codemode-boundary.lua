@@ -68,9 +68,9 @@ check(#(claims.calls or {})==1,'resource list admitted inside')
 
 -- Connectors: direct or routed calls are pointed at code mode; nested calls pass the gate.
 local direct=tools.dispatch(memory,'mcp_mail_list_messages_deadbeef',{},'master',ctx)
-check(tostring(direct.error):find('codemode_only',1,true) and direct.effect=='none','direct connector call points to code mode')
+check(not tostring(direct.error):find('codemode_only',1,true),'a direct connector call runs as its one-line script, never refused (14/11)')
 local peer=tools.dispatch(memory,'peer_box__mail',{},'master',ctx)
-check(tostring(peer.error):find('codemode_only',1,true),'peer connector also code mode only')
+check(not tostring(peer.error):find('codemode_only',1,true),'a direct peer connector call also runs as its one-line script')
 ctx.codemode_nested=true
 local nested=tools.dispatch(memory,'mcp_mail_list_messages_deadbeef',{},'master',ctx)
 ctx.codemode_nested=nil

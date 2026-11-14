@@ -155,6 +155,8 @@ end
 local function tool_ref(name, declared, available)
   if declared[name] then return "`" .. name .. "`" end
   if available[name] and declared.tool_call then return 'tool_call(name="' .. name .. '")' end
+  -- Code mode declares `codemode` alone (envelope.lua); every other tool is called inside the script.
+  if available[name] and declared.codemode then return "`tools." .. name .. "()`" end
 end
 
 local GENERIC_ORDER = { "identity", "law", "work", "habits", "style", "language", "time", "memory", "turn" }
@@ -527,6 +529,11 @@ local function guidelines_for(tool_list, envelope_mode)
   for _, tool in ipairs(tool_list or {}) do
     local name = (tool["function"] or {}).name
     if name then have[name] = true end
+  end
+  -- Code mode declares `codemode` alone; the core tools are still there, called as tools.<name> inside
+  -- the script, so the guidelines that depend on them (shell search, file operations) still apply.
+  if have.codemode then
+    for _, name in ipairs(dofile("lua/core/envelope.lua").core_names()) do have[name] = true end
   end
   local list, seen = {}, {}
   local function add(text)
