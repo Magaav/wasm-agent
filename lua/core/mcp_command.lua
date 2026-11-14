@@ -568,8 +568,10 @@ function M.detail_page(entry, links, opts)
   local lines = {
     string.format('type: %s \u{b7} %s \u{b7} transport %s', tostring(entry.type or 'MCP'),
       tostring(entry.node_phrase or ('on ' .. tostring(entry.where))), tostring(entry.transport)),
-    string.format('where: %s (%s) \u{b7} revision %s', tostring(entry.where),
-      tostring(entry.scope), tostring(entry.revision or '?')),
+    -- A built-in service has no registry revision, so the clause is left out rather than printed as
+    -- `revision ?`: the page says what it does know.
+    string.format('where: %s (%s)%s', tostring(entry.where), tostring(entry.scope),
+      entry.revision ~= nil and (' \u{b7} revision ' .. tostring(entry.revision)) or ''),
     string.format('state: %s \u{b7} %s callable now (approved %s, discovered %s)', M.state_label(entry),
       tostring(entry.tool_count or 0), tostring(entry.approved or 0), tostring(entry.discovered or 0)),
   }

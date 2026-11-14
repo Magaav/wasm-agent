@@ -19,7 +19,8 @@ function M.mcp_view()
         type = 'built-in', node = 'openclaw', node_phrase = 'account on openclaw', state_label = 'connected',
         count_phrase = '36 chats',
         transport = 'native', state = 'enabled', enabled = true, tool_count = 3, approved = 3, discovered = 3,
-        revision = 42, observed = 'probe ok 4 min ago',
+        -- No `revision`: a built-in service has no registry row, so the page must not print one.
+        observed = 'probe ok 4 min ago',
         policy = { tier = 'mcp', approval = 'each tool is approved locally as read or write',
           note = 'Trusted executable code, not a sandbox.' },
         tools = {

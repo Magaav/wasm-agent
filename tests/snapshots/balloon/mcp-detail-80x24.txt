@@ -1,7 +1,7 @@
 whatsapp · WhatsApp
 
 type: built-in · account on openclaw · transport native
-where: this node (built-in) · revision 42
+where: this node (built-in)
 state: connected · 3 callable now (approved 3, discovered 3)
 carries: 36 chats
 last observation: probe ok 4 min ago
