@@ -791,7 +791,7 @@ function M.settle(id, wait_s, read, options)
       if reason == 'whatsapp_send_unknown_id' then
         local failed = { ok = false, state = 'failed', id = id, error = reason, reason = reason,
           waited_s = waited_since(started), reads = reads,
-          note = 'the node that holds the account never allocated this id: nothing is queued under it' }
+          note = 'the account node holds no job with this id: it was never queued there, or it settled and its record was swept (done jobs are kept 1 h, failed 7 days). Nothing is queued under it now.' }
         if who() then failed.served_by = who() end
         return failed
       end
@@ -989,7 +989,7 @@ function M.settle_many(ids, wait_s, read, options)
           if tostring(answer.error) == 'whatsapp_send_unknown_id' then
             entry.state, entry.ok, entry.error, entry.reason, terminal[index] = 'failed', false,
               'whatsapp_send_unknown_id', 'whatsapp_send_unknown_id', true
-            entry.note = 'the node that holds the account never allocated this id: nothing is queued under it'
+            entry.note = 'the account node holds no job with this id: it was never queued there, or it settled and its record was swept (done jobs are kept 1 h, failed 7 days). Nothing is queued under it now.'
           else
             -- One id's unreadable answer does not end the others' wait: it stays pending with its reason.
             entry.reason = tostring(answer.error)

@@ -2902,6 +2902,9 @@ function M:run_body(text, images)
         end
         dispatch_ctx.tool_arguments_json=arguments_text
         dispatch_ctx.tool_call_id=call.id
+        -- The name the model called, so the dispatcher can tell the model's own call from the inner calls
+        -- a facade (tool_call) makes with this same ctx (lua/core/tools.lua, one pathway).
+        dispatch_ctx.tool_call_name=function_.name
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
       host.beat()

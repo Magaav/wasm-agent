@@ -1274,11 +1274,34 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return whatsapp_lib.call(name, args, ctx)
   end
   -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.
-  if codemode_policy.connector(name) and codemode_policy.enforced(ctx) and not ctx.codemode_nested then
-    -- One pathway (operator 14/11): a connector called directly runs as the one-line script it stands
-    -- for, so its inputs, outputs, waits and errors are exactly the in-script ones - no refusal, and no
-    -- second route to keep in sync.
-    return M.dispatch(memory, 'codemode', {code = codemode_policy.one_line(name, args)}, role, ctx, cwd_provenance)
+  -- One pathway (operator 14/11): under code mode a tool the MODEL calls directly runs as the one-line
+  -- script it stands for, so its inputs, outputs, waits and errors are exactly the in-script ones - no
+  -- refusal, and no second route to keep in sync. Connectors from every caller (they were script-only);
+  -- any other script member only when the call is the model's own (`tool_call_id` + `tool_call_name`, set
+  -- by the tool loop; a facade's inner calls share the ctx but not the name),
+  -- so an internal or peer caller keeps the answer shape it was built on. DIRECT_ONLY stays direct.
+  if codemode_policy.enforced(ctx) and not ctx.codemode_nested and name ~= 'codemode' then
+    local wrap = codemode_policy.connector(name)
+    if not wrap and ctx.tool_call_id ~= nil and ctx.tool_call_name == name and not dofile('lua/core/codemode.lua').DIRECT_ONLY[name] then
+      for _, schema in ipairs(M.all(role, ctx)) do
+        if schema['function'] and schema['function'].name == name then wrap = true; break end
+      end
+    end
+    if wrap then
+      -- Same output as inside: the value `await tools.<name>(args)` gives the script - the tool's own
+      -- result - not the script envelope around it; a failure keeps the script's one-sentence error.
+      local ran = M.dispatch(memory, 'codemode', {code = codemode_policy.one_line(name, args)}, role, ctx, cwd_provenance)
+      if type(ran) == 'table' and ran.ok == true and ran.value ~= nil then
+        local value = ran.value
+        if type(value) == 'string' then
+          local decoded_ok, decoded = pcall(json.decode, value)
+          if decoded_ok and decoded ~= nil then value = decoded end
+        end
+        if type(value) == 'table' then return value end
+        return { value = value }
+      end
+      return ran
+    end
   end
   -- Orchestration mode's floor: a direct effect is the work itself, so it is refused until this
   -- turn has a recorded route ('direct' allows short work here, 'delegate' hands it to a child)
