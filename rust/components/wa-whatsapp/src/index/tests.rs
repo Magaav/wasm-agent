@@ -1961,10 +1961,12 @@ fn a_store_with_no_sync_key_says_so_instead_of_asking_forever() {
 }
 
 #[test]
-fn a_collection_that_synced_back_with_no_contact_is_an_empty_address_book() {
-    // An account whose phone saves nobody: the snapshot applies, the collection advances to v9 again, and
-    // no contact action ever arrives. That is the whole address book, so it is recorded as received - the
-    // alternative is a store that resets the collection on every connection forever.
+fn a_collection_that_synced_back_is_a_fact_and_not_a_conclusion() {
+    // The snapshot applies, the collection advances to v9 again, and no contact action arrives. The step
+    // reports EXACTLY that: `Synced { version }`. It deliberately does not say the account has no saved
+    // contacts - the 14/11 deploy said so, on this state alone, about an operator whose phone had his wife
+    // saved. It settles the loop (asking again would bring the same answer) and leaves the meaning to the
+    // caller, which reports the events it counted.
     let store = Memory::new();
     let answered = std::cell::Cell::new(0);
     let phone = FakePhone::new(9, Vec::new());
@@ -1977,7 +1979,7 @@ fn a_collection_that_synced_back_with_no_contact_is_an_empty_address_book() {
     assert_eq!(phone.version.get(), 9, "the snapshot applied and carried nothing");
     assert_eq!(
         block_on(advance_address_book(&store, &phone, &mut reset_performed)).unwrap(),
-        AddressBookStep::SyncedEmpty { version: 9 }
+        AddressBookStep::Synced { version: 9 }
     );
     // Settled for good: the next call asks nothing, because the empty book is the book.
     let before = phone.asked();
@@ -1994,7 +1996,7 @@ fn the_address_book_decision_answers_every_measured_state() {
         // The 14/11 store: v9, nothing received, nothing asked yet. Reset first or the snapshot is stale.
         ((9, false, 0, true, false), AddressBookStep::Requested { attempts: 0, reset: true }),
         // Asked before and still v9: ask again, and reset again only if a sync wrote the version back.
-        ((9, false, 2, true, true), AddressBookStep::SyncedEmpty { version: 9 }),
+        ((9, false, 2, true, true), AddressBookStep::Synced { version: 9 }),
         ((9, false, 2, true, false), AddressBookStep::Requested { attempts: 2, reset: true }),
         // Budget spent on this connection.
         ((0, false, ADDRESS_ATTEMPT_CAP, true, true), AddressBookStep::Exhausted { attempts: ADDRESS_ATTEMPT_CAP }),
@@ -2059,4 +2061,114 @@ fn the_recovery_writes_contacts_and_nothing_about_the_pairing() {
     // contact action is the only place a `@lid` chat's phone number comes from.
     assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["chat"], LID);
     assert_eq!(block_on(contacts(&store, &named("5511977777777"))).unwrap()["chat"], LID);
+}
+
+// ---- which collection carries contacts, and what a snapshot of each one does ------------------------
+
+/// The collection this component asks for is the one the PROTOCOL names, asserted against the schema
+/// registry rather than against memory.
+///
+/// This is the test that would have caught the 14/11 night deploy before it happened. The component asked
+/// `regular`, which is where chat actions live; `CONTACT` and `LID_CONTACT` are declared on
+/// `critical_unblock_low`, so the request could only ever be answered "not here" - and the log turned that
+/// into a claim about the operator's phone.
+#[test]
+fn the_contact_collection_is_the_one_the_schema_registry_names() {
+    let contact = wacore_appstate::schemas::CONTACT.collection.as_str();
+    let lid_contact = wacore_appstate::schemas::LID_CONTACT.collection.as_str();
+    assert_eq!(contact, lid_contact, "both contact actions share one collection");
+    assert_eq!(CONTACT_COLLECTION, contact, "the collection asked for is the one `contact` is written to");
+    assert_ne!(CONTACT_COLLECTION, "regular", "`regular` carries chat actions, not the address book");
+    // And the action names a report would show are the schema's own.
+    assert_eq!(wacore_appstate::schemas::CONTACT.name, "contact");
+    assert_eq!(wacore_appstate::schemas::LID_CONTACT.name, "lid_contact");
+}
+
+/// One fixture snapshot: the collection it arrived in, the contact actions it carries, and how many other
+/// action kinds it carried (chat pins, archives, ...), which this index never reads.
+struct Fixture {
+    collection: &'static str,
+    contacts: Vec<AddressBookContact>,
+    other_actions: u32,
+}
+
+/// Apply a fixture the way `guest`'s contact inbox does: a `contact` action becomes an address row, and an
+/// action from any other collection is not an address-book action at all, so it writes nothing.
+fn apply(store: &Memory, snapshot: &Fixture) -> usize {
+    let mut written = 0;
+    if snapshot.collection == CONTACT_COLLECTION {
+        for contact in &snapshot.contacts {
+            block_on(set_contact(store, contact)).unwrap();
+            written += 1;
+        }
+        if written > 0 {
+            block_on(mark_address_full(store)).unwrap();
+        }
+    }
+    written
+}
+
+#[test]
+fn a_snapshot_of_the_contact_collection_puts_the_saved_name_and_number_in_the_index() {
+    let store = Memory::new();
+    block_on(put(&store, &direct(LID, "Lou", "L1", base(), "oi"))).unwrap();
+
+    // The phone's saved contact, as `critical_unblock_low` carries it: the name, the `@lid` address it also
+    // knows her by, and the PN that is her phone number.
+    let snapshot = Fixture {
+        collection: CONTACT_COLLECTION,
+        contacts: vec![saved(LAURA, "Laura ❤️", LID, LAURA, base() + 1)],
+        other_actions: 0,
+    };
+    assert_eq!(apply(&store, &snapshot), 1);
+    // TWO rows for ONE person: `address_count` counts rows, one per address, and this contact is known by
+    // both a PN and a LID - which is the pair that makes the number lookup below work.
+    assert_eq!(block_on(address_count(&store, COUNT_CAP)).unwrap(), (2, false));
+
+    // Both the name and the number answer, and both point at the chat the messages are in.
+    assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["chat"], LID);
+    assert_eq!(block_on(contacts(&store, &named("5511977777777"))).unwrap()["chat"], LID);
+}
+
+#[test]
+fn a_snapshot_of_a_chat_collection_writes_no_address_row() {
+    // `regular` carries pins, archives, mutes and stars. It is NOT where contacts live, so a full snapshot
+    // of it can arrive, apply, carry forty actions and still leave this index with no name - which is
+    // exactly what the 14/11 deploy observed, and why asking it was the bug.
+    let store = Memory::new();
+    block_on(put(&store, &direct(LAURA, "Lou", "", base(), "bom dia"))).unwrap();
+    let snapshot = Fixture {
+        collection: "regular",
+        contacts: vec![saved(LAURA, "Laura ❤️", "", LAURA, base() + 1)],
+        other_actions: 40,
+    };
+    // Forty chat actions and still not one address row: the collection is where a full snapshot can
+    // succeed and say nothing about the address book.
+    assert_eq!(snapshot.other_actions, 40);
+    assert_eq!(apply(&store, &snapshot), 0, "no contact action arrives from a chat collection");
+    assert_eq!(block_on(address_count(&store, COUNT_CAP)).unwrap(), (0, false));
+    assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["count"], 0, "the push name is all there is");
+}
+
+#[test]
+fn the_two_contact_collection_snapshots_tell_the_apart_states_apart() {
+    // The two fixtures side by side, which is the difference the log line has to preserve: one collection
+    // delivers the book, the other delivers chat actions. A component that asked the wrong one has the
+    // second state and no right to describe the first.
+    let delivered = Memory::new();
+    block_on(put(&delivered, &direct(LAURA, "Lou", "", base(), "oi"))).unwrap();
+    let hit = Fixture { collection: CONTACT_COLLECTION, contacts: vec![saved(LAURA, "Laura", "", LAURA, base())], other_actions: 0 };
+    assert_eq!(apply(&delivered, &hit), 1);
+
+    let missed = Memory::new();
+    block_on(put(&missed, &direct(LAURA, "Lou", "", base(), "oi"))).unwrap();
+    let miss = Fixture { collection: "regular", contacts: vec![saved(LAURA, "Laura", "", LAURA, base())], other_actions: 40 };
+    assert_eq!(apply(&missed, &miss), 0);
+
+    assert_eq!(block_on(contacts(&delivered, &named("laura"))).unwrap()["count"], 1);
+    assert_eq!(block_on(contacts(&missed, &named("laura"))).unwrap()["count"], 0);
+    // A store that received nothing has received nothing: `ix/ab/full` is not written for it, so the
+    // component keeps asking instead of settling on a collection that is not the address book.
+    assert_eq!(block_on(address_full_done(&delivered)).unwrap(), true);
+    assert_eq!(block_on(address_full_done(&missed)).unwrap(), false);
 }

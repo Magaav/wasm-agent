@@ -224,10 +224,12 @@ async fn address_book_tick(state: &mut AddressBookRun, connected: bool) {
             // is what makes a recovery visible as a number that moves.
             let (held, _) = index::address_count(&IndexKv, index::COUNT_CAP).await.unwrap_or((0, false));
             if reset {
-                say!("index: app-state version reset for the contact collection and the full snapshot requested (attempt {attempts}, address-book rows held: {held})");
+                say!("index: app-state version reset for {} and the full snapshot requested (attempt {attempts}, address-book rows held: {held})", index::CONTACT_COLLECTION);
             } else {
-                say!("index: full contact snapshot requested from the phone (attempt {attempts}, address-book rows held: {held})");
+                say!("index: full {} snapshot requested from the phone (attempt {attempts}, address-book rows held: {held})", index::CONTACT_COLLECTION);
             }
+            // Nothing has been counted for an answer that has not arrived.
+            let _ = take_actions();
             // The sent request is not the received book. Ask again on a timer until `ix/ab/full` says it
             // arrived, which is the whole reason this is a loop and not one call at connect time.
             state.next_at = Instant::now() + ADDRESS_RETRY;
@@ -235,23 +237,75 @@ async fn address_book_tick(state: &mut AddressBookRun, connected: bool) {
         index::AddressBookStep::Received => {
             state.settled = true;
             let (held, _) = index::address_count(&IndexKv, index::COUNT_CAP).await.unwrap_or((0, false));
-            say!("index: address book received; the names the phone saved are in the index (address-book rows: {held})");
+            say!("index: {} synced and the index holds {held} address-book row(s)", index::CONTACT_COLLECTION);
         }
-        index::AddressBookStep::SyncedEmpty { version } => {
+        index::AddressBookStep::Synced { version } => {
             state.settled = true;
-            say!("index: the contact collection synced to v{version} and carried no saved contact: this account has none on the phone");
+            // ONLY what was observed, and explicitly not what it might mean. The 14/11 deploy turned this
+            // exact state into "this account has none on the phone" and was wrong about an operator whose
+            // phone had his wife saved: a version moving is not evidence about an address book.
+            let (kinds, total) = take_actions();
+            say!(
+                "index: {} synced to v{version} on this connection; app-state action events observed since the request: {total} ({kinds}), and `contact` was not among them; `lid_contact` is not dispatched by whatsapp-rust so it is not counted here, and this says nothing about the phone's own address book",
+                index::CONTACT_COLLECTION
+            );
         }
         index::AddressBookStep::KeysMissing => {
             // Said once, by name, instead of the silence the 14/11 deploy produced. Nothing this node can
             // do about it either: the key is shared by the phone, and asking again would not produce it.
             state.settled = true;
-            say!("index: app-state sync key missing for the contact collection; no saved contact can be read until the phone shares it");
+            say!("index: app-state sync key missing for {}; no saved contact can be read until the phone shares it", index::CONTACT_COLLECTION);
         }
         index::AddressBookStep::Exhausted { attempts } => {
             state.settled = true;
-            say!("index: address book not received after {attempts} request(s) on this connection; asking again on the next connection");
+            say!("index: {} not received after {attempts} request(s) on this connection; asking again on the next connection", index::CONTACT_COLLECTION);
         }
     }
+}
+
+/// One app-state action event observed, counted under the protocol's own action name.
+fn count_action(name: &'static str) {
+    ABOOK_ACTIONS.with(|counts| *counts.borrow_mut().entry(name).or_default() += 1);
+}
+
+/// The action name of one dispatched app-state event - what the mutation's index starts with, and what a
+/// sync report calls it. `whatsapp-rust` dispatches per action type; anything it does not dispatch
+/// (`lid_contact` today) cannot be named here, which is why the report says so rather than showing a zero.
+fn action_name(event: &whatsapp_rust::types::events::Event) -> &'static str {
+    use whatsapp_rust::types::events::Event;
+    match event {
+        Event::PinUpdate(_) => "pin",
+        Event::MuteUpdate(_) => "mute",
+        Event::ArchiveUpdate(_) => "archive",
+        Event::StarUpdate(_) => "star",
+        Event::MarkChatAsReadUpdate(_) => "mark_chat_as_read",
+        Event::DeleteChatUpdate(_) => "delete_chat",
+        Event::ClearChatUpdate(_) => "clear_chat",
+        Event::UserStatusMuteUpdate(_) => "user_status_mute",
+        Event::DeleteMessageForMeUpdate(_) => "delete_message_for_me",
+        Event::LabelEditUpdate(_) => "label_edit",
+        Event::LabelAssociationUpdate(_) => "label_association",
+        _ => "other",
+    }
+}
+
+/// What has been observed since the last request: `name=count` pairs, and the total.
+///
+/// Exactly what was counted and nothing else. The caller's line states which collection was asked, which
+/// version it synced to and that no `contact` action was among the events - never what the phone's
+/// address book contains, which this cannot see.
+fn take_actions() -> (String, u32) {
+    ABOOK_ACTIONS.with(|counts| {
+        let mut counts = counts.borrow_mut();
+        let total: u32 = counts.values().sum();
+        let text = if counts.is_empty() {
+            "none".to_string()
+        } else {
+            counts.iter().map(|(name, count)| format!("{name}={count}")).collect::<Vec<_>>().join(", ")
+        };
+        counts.clear();
+        (text, total)
+    })
 }
 
 /// How long to wait between attempts at the contact collection: long enough for the answer to a
@@ -412,6 +466,16 @@ enum Outcome {
 }
 
 thread_local! {
+    /// App-state action events observed since the last request for the contact collection, by the action
+    /// name the protocol uses (`contact`, `pin`, `archive`, ...).
+    ///
+    /// It exists because a version moving says nothing about what a snapshot carried, and the 14/11 night
+    /// deploy proved what guessing costs: `critical_unblock_low` was asked, no contact event arrived, and
+    /// the log concluded "this account has none on the phone" about an operator whose phone had his wife
+    /// saved. Only the actions `whatsapp-rust` dispatches as events can be counted; `lid_contact` is not
+    /// one of them, and the line that reports these numbers says so instead of showing a zero it does not
+    /// have.
+    static ABOOK_ACTIONS: RefCell<std::collections::BTreeMap<&'static str, u32>> = const { RefCell::new(std::collections::BTreeMap::new()) };
     static QUEUE: RefCell<queue::AudioQueue<AudioJob>> = RefCell::new(queue::AudioQueue::new(queue::Policy::default()));
     static COMPLETIONS: RefCell<Vec<(queue::Item<AudioJob>, Outcome)>> = const { RefCell::new(Vec::new()) };
     static ALERTS: RefCell<alerts::AlertBook> = RefCell::new(alerts::AlertBook::default());
@@ -2380,6 +2444,9 @@ async fn serve(config: serde_json::Value) {
                         jids.extend(action.lid_jid.clone());
                         jids.extend(action.pn_jid.clone());
                         let numbers: Vec<String> = jids.iter().filter(|jid| jid.ends_with("@s.whatsapp.net")).cloned().collect();
+                        // Counted, so the line that reports what a synced collection carried has a fact
+                        // behind it instead of an inference.
+                        count_action("contact");
                         // Metadata only, never the name: the address is hashed by `privacy`.
                         say!(
                             "contact: address book entry {} saved={saved} named={}",
@@ -2412,6 +2479,28 @@ async fn serve(config: serde_json::Value) {
                     inbox.len()
                 });
             })
+            // Every OTHER app-state action `whatsapp-rust` dispatches, counted so a synced collection can be
+            // described by what it carried instead of by what its version did. These are chat setters, not
+            // address-book entries, and counting them is what lets one line say which action types
+            // arrived and that `contact` was not among them.
+            .on_event_for(
+                &[
+                    EventKind::PinUpdate,
+                    EventKind::MuteUpdate,
+                    EventKind::ArchiveUpdate,
+                    EventKind::StarUpdate,
+                    EventKind::MarkChatAsReadUpdate,
+                    EventKind::DeleteChatUpdate,
+                    EventKind::ClearChatUpdate,
+                    EventKind::UserStatusMuteUpdate,
+                    EventKind::DeleteMessageForMeUpdate,
+                    EventKind::LabelEditUpdate,
+                    EventKind::LabelAssociationUpdate,
+                ],
+                |event, _client| async move {
+                    count_action(action_name(&event));
+                },
+            )
             .on_message(|ctx| {
                 let line = format!("message {} kind={} media={}", privacy::at(&ctx.info.source.chat.to_string(), &ctx.info.id), ctx.info.r#type, ctx.info.media_type);
                 let base = ctx.message.get_base_message();
