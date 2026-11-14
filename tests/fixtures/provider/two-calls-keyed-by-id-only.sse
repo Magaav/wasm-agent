@@ -1,0 +1,14 @@
+data: {"id":"gw-fixture-idkey","object":"chat.completion.chunk","created":3,"model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":""}}]}
+
+data: {"id":"gw-fixture-idkey","object":"chat.completion.chunk","created":3,"model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":null,"delta":{"tool_calls":[{"id":"call_idkey_a","type":"function","function":{"name":"bash","arguments":""}}]}}]}
+
+data: {"id":"gw-fixture-idkey","object":"chat.completion.chunk","created":3,"model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":null,"delta":{"tool_calls":[{"id":"call_idkey_b","type":"function","function":{"name":"read","arguments":""}}]}}]}
+
+data: {"id":"gw-fixture-idkey","object":"chat.completion.chunk","created":3,"model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":null,"delta":{"tool_calls":[{"id":"call_idkey_a","function":{"arguments":"{\"command\":\"echo ok\"}"}}]}}]}
+
+data: {"id":"gw-fixture-idkey","object":"chat.completion.chunk","created":3,"model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":null,"delta":{"tool_calls":[{"id":"call_idkey_b","function":{"arguments":"{\"path\":\"/etc/hostname\"}"}}]}}]}
+
+data: {"id":"gw-fixture-idkey","object":"chat.completion.chunk","created":3,"model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":"tool_calls","delta":{}}]}
+
+data: [DONE]
+

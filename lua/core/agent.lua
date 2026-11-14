@@ -2512,18 +2512,33 @@ function M:run_body(text, images)
       end
     end
 
-    local calls, call_repairs = provider.repair_calls(result.tool_calls or {})
-    local repaired_calls = 0
-    for _ in pairs(call_repairs) do repaired_calls = repaired_calls + 1 end
+    local calls, call_repairs = provider.repair_calls(result.tool_calls or {}, tool_list,
+      (self.prefix and self.prefix.catalog) or tools.all(self.role))
+    local repaired_calls, recovered_calls = 0, 0
+    for _, repair in pairs(call_repairs) do
+      if repair.named then recovered_calls = recovered_calls + 1 else repaired_calls = repaired_calls + 1 end
+    end
+    if recovered_calls > 0 then
+      -- The call is not lost and nothing is asked of the model: the name was recovered from the
+      -- arguments, so the tool runs and its own result says so (`provider.repaired_note`).
+      self.emit({ type = "status", text = string.format(
+        "the model sent %d tool call(s) with no name; the arguments identified the tool, so they ran",
+        recovered_calls) })
+    end
     if repaired_calls > 0 then
       -- Nothing ran, and the model is told which call and why (below, per call). Said once here so the
       -- reader sees the harness catch it instead of a silent `plugin_not_found:` on their screen.
-      local first_id = next(call_repairs)
+      local first_id, first_refused
+      for id, repair in pairs(call_repairs) do
+        if not repair.named then first_id = id break end
+      end
       self.emit({ type = "status", text = string.format(
         "the model sent %d tool call(s) with no usable name; each is answered with an error it can correct",
         repaired_calls) })
+      first_refused = first_id and call_repairs[first_id] or {}
       telemetry.event(self.session_id, self.run_id, "", "tool_call", "repaired",
-        { calls = repaired_calls, arrived_name = tostring((call_repairs[first_id] or {}).arrived or "") })
+        { calls = repaired_calls, recovered = recovered_calls,
+          arrived_name = tostring(first_refused.arrived or "") })
     end
     local assistant = { role = "assistant", content = result.content or "" }
     reply_phase = result.final_phase or ""
@@ -2809,7 +2824,10 @@ function M:run_body(text, images)
       -- A call the harness repaired was not a call the model can make: nothing runs, and the answer is a
       -- tool error that names the fault and hands its own arguments back (11/11, gate.log 50f2c555).
       local call_repair = call_repairs[call.id]
-      local name_error = call_repair and call_repair.name_missing
+      -- A call whose name was recovered from its arguments is a call, not a fault: it runs below
+      -- under that name and its result carries the one-line note. Only a call nothing identifies is
+      -- refused (`provider.repair_calls`).
+      local name_error = call_repair and call_repair.name_missing and not call_repair.named
         and provider.malformed_call_error(call_repair) or nil
       if name_error then name_error = refusal.finalize(name_error, { tool = function_.name,
         role = self.role, input = function_.arguments, site = "the tool loop" }) end
@@ -2888,6 +2906,11 @@ function M:run_body(text, images)
       end
       if argument_repair and type(output) == "table" and output.normalized == nil then
         output.normalized = "arguments: " .. argument_repair .. "; the call ran with the completed object"
+      end
+      -- A call whose tool name was recovered from its arguments ran as that tool, and the result says
+      -- so in one sentence: the model reads which tool its own call became, and so does the operator.
+      if handled and call_repair and call_repair.named and type(output) == "table" then
+        output.normalized = provider.repaired_note(call_repair.named)
       end
       -- The node's own secrets must not enter the transcript through a tool result. A `bash`
       -- call once dumped the config file and its API key was stored, journalled and sent; the

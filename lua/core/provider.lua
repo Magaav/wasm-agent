@@ -1427,11 +1427,118 @@ end
 -- because it is a tool result that is re-sent in every later request of the session.
 M.MALFORMED_ARGUMENT_ECHO = 400
 
--- `calls, repairs = provider.repair_calls(raw)` -> the calls a provider accepts, and what was
--- repaired about each, keyed by call id (`{name_missing, id_missing, arguments_repaired, arrived,
--- arguments, index}`). Nothing else on a call is touched, and no marker is stored *on* the call: an
--- extra field would be sent back to the API and be exactly the invalid parameter this removes.
-function M.repair_calls(raw)
+-- The one sentence a call repaired this way carries into its own result, so the model and the
+-- operator both read the same fact: this tool ran, and why it was this tool.
+function M.repaired_note(name)
+  return "repaired: the tool name was missing; the arguments fit only " .. tostring(name)
+end
+
+-- The argument keys of a JSON object, sorted, or nil for anything that is not text holding an object.
+local function argument_keys(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local ok, value = pcall(json.decode, text)
+  if not ok or type(value) ~= "table" then return nil end
+  local keys = {}
+  for key in pairs(value) do
+    if type(key) ~= "string" then return nil end
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+  return keys, value
+end
+
+-- Does this tool's declared schema accept exactly these argument keys? Every required key present,
+-- every key it carries declared, and nothing else - the shape the model sent is the shape that tool
+-- takes. A tool that declares no parameters refuses every shape rather than accepting one on a guess.
+function M.schema_accepts(item, keys)
+  local function_ = type(item) == "table" and item["function"] or nil
+  local parameters = type(function_) == "table" and function_.parameters or nil
+  if type(parameters) ~= "table" or #keys == 0 then return false end
+  local properties = type(parameters.properties) == "table" and parameters.properties or {}
+  local present = {}
+  for _, key in ipairs(keys) do present[key] = true end
+  if type(parameters.required) == "table" then
+    for _, key in ipairs(parameters.required) do
+      if not present[key] then return false end
+    end
+  end
+  for key in pairs(present) do
+    if properties[key] == nil then return false end
+  end
+  return true
+end
+
+local function matching_names(keys, list)
+  local names, seen = {}, {}
+  for _, item in ipairs(type(list) == "table" and list or {}) do
+    local name = type(item) == "table" and type(item["function"]) == "table" and item["function"].name
+    if M.call_name_valid(name) and not seen[name] and M.schema_accepts(item, keys) then
+      seen[name] = true
+      names[#names + 1] = name
+    end
+  end
+  table.sort(names)
+  return names
+end
+
+local function name_in(name, list)
+  for _, item in ipairs(type(list) == "table" and list or {}) do
+    if type(item) == "table" and type(item["function"]) == "table" and item["function"].name == name then
+      return true
+    end
+  end
+  return false
+end
+
+-- `name, arguments, how = provider.infer_tool(arguments_text, shown, catalog)` -> the one tool a
+-- nameless call's arguments can only belong to, the arguments to run it with, and how it was found.
+--
+-- Two forms are known, both measured on this node (11/11 session 50f2c555, 13/11 session 400c7145):
+--   * the model's own wrapped form `{name:"<tool>",arguments:{...}}` sent *as* the arguments;
+--   * a bare object whose keys fit exactly one tool's schema (`{"code":...}` -> codemode,
+--     `{"command":...}` -> bash).
+-- `shown` is what this turn offered the model and is tried first, because two callable tools can share
+-- a shape (`command` is bash on the node and shell on the client machine) while only one was shown.
+-- Ambiguity is never guessed: two matches in the same list mean no answer, and the caller refuses.
+--
+-- A wrapped name must be one the turn actually offered (`shown`): the wrapper is the model's own
+-- mistake, and a repair that ran a name the model could not have called would be a way around the
+-- envelope instead of a way back into it.
+function M.infer_tool(arguments_text, shown, catalog)
+  local keys, value = argument_keys(arguments_text)
+  if not keys then return nil end
+  if #keys == 2 and type(value.name) == "string" and value.arguments ~= nil then
+    local inner = value.arguments
+    local inner_text = type(inner) == "string" and inner
+      or (type(inner) == "table" and json.encode(inner) or nil)
+    if inner_text and name_in(value.name, shown) then
+      return value.name, inner_text, "wrapped"
+    end
+    -- A wrapped payload is a wrapped payload: it is never re-read as a bare `{name,arguments}` object
+    -- that some other tool's schema happens to accept (`tool_call` accepts exactly those two keys), or
+    -- the envelope would be reachable through the wrapper after all.
+    return nil
+  end
+  local offered = matching_names(keys, shown)
+  if #offered == 1 then return offered[1], arguments_text, "schema" end
+  if #offered > 1 then return nil end
+  local callable = matching_names(keys, catalog)
+  if #callable == 1 then return callable[1], arguments_text, "schema" end
+  return nil
+end
+
+-- `calls, repairs = provider.repair_calls(raw, shown, catalog)` -> the calls a provider accepts, and
+-- what was repaired about each, keyed by call id (`{name_missing, named, how, id_missing,
+-- arguments_repaired, arrived, arguments, index}`). Nothing else on a call is touched, and no marker
+-- is stored *on* the call: an extra field would be sent back to the API and be exactly the invalid
+-- parameter this removes.
+--
+-- The name is the one field dispatch cannot infer, so it is recovered here, once, before any loop
+-- sees the call: a call whose arguments fit exactly one tool is given that tool's name and RUNS
+-- (`named`), and only a call nothing identifies keeps the placeholder name and is answered with the
+-- refusal. `shown` and `catalog` are optional: a caller replaying a stored transcript passes neither
+-- and gets today's behaviour.
+function M.repair_calls(raw, shown, catalog)
   local calls, repairs = {}, {}
   if type(raw) ~= "table" then return calls, repairs end
   for index, entry in ipairs(raw) do
@@ -1443,8 +1550,19 @@ function M.repair_calls(raw)
     local echoed = type(arguments) == "string" and arguments:sub(1, M.MALFORMED_ARGUMENT_ECHO) or ""
     local repair
     if not M.call_name_valid(name) then
+      local inferred, inferred_arguments, how = M.infer_tool(arguments, shown, catalog)
       repair = { name_missing = true, arrived = tostring(name == nil and "" or name), arguments = echoed }
-      name = M.UNNAMED_CALL
+      if inferred then
+        name, repair.named, repair.how = inferred, inferred, how
+        if type(inferred_arguments) == "string" and inferred_arguments ~= arguments then
+          -- The wrapped form's inner object is what the tool takes, not the wrapper around it.
+          arguments = inferred_arguments
+          echoed = arguments:sub(1, M.MALFORMED_ARGUMENT_ECHO)
+          repair.arguments = echoed
+        end
+      else
+        name = M.UNNAMED_CALL
+      end
     end
     if id == "" then
       repair = repair or { arguments = echoed }
@@ -1474,11 +1592,15 @@ function M.malformed_call_error(repair)
   if repair.id_missing then parts[#parts + 1] = "it also arrived with no call id, so this node gave it one" end
   if repair.arguments_repaired then parts[#parts + 1] = "its arguments were not JSON text and were re-encoded" end
   local note = "tool_call_name_missing: " .. table.concat(parts, "; ") .. ", so nothing ran. "
-    .. "Call a tool by its exact name from the tool list, with its arguments as a JSON object."
+    .. "Call a tool by its exact name in the tool call itself, with its arguments as a JSON object."
   if type(repair.arguments) == "string" and repair.arguments ~= "" then
     note = note .. " The arguments that arrived were: " .. repair.arguments
   end
-  return { error = "tool_call_name_missing", effect = "none", retryable = true, note = note }
+  -- Not retryable in the sense the loop counts: re-issuing the same nameless call cannot help, so the
+  -- model is told once, with the fix that does work, instead of being invited to try the same shape
+  -- again. Measured 13/11 (session 400c7145): `retryable = true` and a fix naming a wrapped payload
+  -- turned one fault into fourteen identical calls in a row.
+  return { error = "tool_call_name_missing", effect = "none", retryable = false, note = note }
 end
 
 -- Why an empty assistant message is not an answer, in words a reader can act on.

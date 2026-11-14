@@ -9,7 +9,12 @@
 --
 -- What this row asserts, through the real request/parse path (host.http_stream), not a mock of it:
 --   1. the run survives a call with no name: it is answered with a tool error the model can act on,
---      and nothing runs (the arguments are echoed, never executed);
+--      and nothing runs (the arguments are echoed, never executed).
+--      SCOPE, since 14/11: a call whose arguments fit EXACTLY ONE tool is no longer refused - it is
+--      repaired from its arguments and runs, with one sentence saying which tool it became
+--      (`scripts/test-toolname-repair.lua` owns that half, and `lua/core/provider.lua`
+--      `M.infer_tool` is the implementation). This row keeps the half that must still refuse: a call
+--      whose arguments identify nothing, which is what the measured sessions sent;
 --   2. the request the provider receives next is VALID: every assistant tool_call has a non-empty id
 --      and a legal name, every tool result answers a declared id, and every tool result has a name;
 --   3. a session already bricked by an older binary (rows stored with an empty name) is replayed
@@ -113,11 +118,13 @@ agent.stream = true
 local marker = "/tmp/wa-tool-call-name-marker-" .. tostring(math.random(1e9))
 
 bodies, script = {}, {
-  -- The measured shape: a bash call whose name did not arrive. The command would leave a marker if
-  -- it ever ran, so "nothing executed" is checked against an effect, not against a sentence.
+  -- A call whose name did not arrive and whose arguments identify NOTHING: no tool declares a
+  -- `marker_command`, so the repair has nothing to infer and this must refuse. The command would
+  -- leave a marker if it ever ran, so "nothing executed" is checked against an effect, not a
+  -- sentence. (A `{command}` call is the shape that now runs - see the header.)
   { status = 200, content = "Let me check that.", finish_reason = "tool_calls", stream_complete = true,
     tool_calls = { { id = "call_malformed", type = "function",
-      ["function"] = { name = "", arguments = json.encode({ command = "touch " .. marker }) } } } },
+      ["function"] = { name = "", arguments = json.encode({ marker_command = "touch " .. marker }) } } } },
   { status = 200, content = "the call was malformed, rewritten by name", finish_reason = "stop",
     stream_complete = true, tool_calls = {} },
 }

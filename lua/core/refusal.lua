@@ -537,7 +537,10 @@ local CODES={
  calls_required_1_to_8={message='the call carried a call list of the wrong shape or size ({origin}).',
   fix='send `calls` as a dense array of 1 to 8 entries, each naming its own tool or capability.'},
  tool_call_name_missing={message='a `tool_call` arrived with no tool name in it ({origin}).',
-  fix='send `{name:"<tool>",arguments:{...}}`; `searchTools("*")` lists the names.'},
+  -- The fix names the shape that works, in the tool call itself. It must never suggest putting
+  -- `{name,arguments}` *inside* the arguments: measured 13/11 (session 400c7145), the previous
+  -- wording taught the model exactly that, and every later call of the run was the same fault again.
+  fix='call the tool by name in the tool call itself, e.g. `codemode` with `{"code":"..."}`; `searchTools("*")` lists the names.'},
  tool_call_forms_are_exclusive={message='`tool_call` was given two forms of the same call ({origin}).',
   fix='send one form: `{name,arguments}`, or the tool\'s name as the form\'s own field, never both.'},
  skill_forms_are_exclusive={message='`skill` was given both a name and a query ({origin}).',

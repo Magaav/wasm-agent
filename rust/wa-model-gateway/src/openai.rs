@@ -327,6 +327,34 @@ mod tests {
         assert_eq!(items.last(), Some(&StreamItem::Finish(FinishReason::ToolCalls)));
     }
 
+    /// The same guarantee as the host's own stream reader (`wa-capabilities`: `merge_name`): a name
+    /// that arrived is not cleared by a later delta. Measured shape (opencode-go/DeepSeek, 14/11):
+    /// the id and the name on the first delta, argument fragments afterwards - and providers exist
+    /// that repeat the id on those fragments, which used to re-open the call carrying an empty name.
+    #[test]
+    fn a_later_delta_repeating_the_id_with_no_name_keeps_the_name() {
+        let frames = [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"","arguments":"{\"command\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"\"echo ok\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ];
+        let mut scanner = crate::adapter::SseScanner::default();
+        let mut adapter = OpenAiAdapter::default();
+        let mut items = Vec::new();
+        for payload in scanner.feed(&sse(&frames)) {
+            items.extend(adapter.on_data(&payload));
+        }
+        items.extend(adapter.finish());
+        assert!(items.contains(&StreamItem::ToolCall(crate::types::ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            arguments_json: "{\"command\":\"echo ok\"}".into(),
+        })), "the call keeps the name its first delta carried: {items:?}");
+        assert!(!items.iter().any(|item| matches!(item, StreamItem::Fault(text) if text.contains("no name"))),
+            "a call whose name arrived is not a fault: {items:?}");
+    }
+
     #[test]
     fn an_error_object_is_a_fault() {
         let mut adapter = OpenAiAdapter::default();
