@@ -1361,6 +1361,19 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if type(decoded)~='table' then return {error=name..'_answer_unreadable',effect='none'} end
     return decoded
   end
+  if name=='whatsapp_archive' then
+    -- The index archives (docs/WHATSAPP-ARCHIVE.md). Not a model tool and never offered in a catalogue:
+    -- it is the operator's CLI verb (`wa whatsapp archive`) and the capability a peer calls to receive a
+    -- pushed archive (`receive`). Master only, because it cuts the index the account node owns and
+    -- deletes archives past their 360 days.
+    if not is_master(role) then return {error='forbidden_for_role:'..role} end
+    if type(host.whatsapp_archive) ~= 'function' then return {error='whatsapp_archive_unavailable',effect='none'} end
+    local ok,answer=pcall(host.whatsapp_archive,json.encode(args or {}))
+    if not ok then return {error='whatsapp_archive_failed',detail=tostring(answer):sub(1,160),effect='none'} end
+    local decoded=json.decode(tostring(answer or ''))
+    if type(decoded)~='table' then return {error='whatsapp_archive_answer_unreadable',effect='none'} end
+    return decoded
+  end
   if name=='email_search' or name=='email_read' or name=='email_media' then
     -- The mailbox index (docs/EMAIL-CONNECTOR.md): a question is a job on `email.query`, answered by the
     -- wa-email component out of its own kv.

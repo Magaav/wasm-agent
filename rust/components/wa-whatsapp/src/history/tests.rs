@@ -17,7 +17,10 @@ const DM: &str = "5511999999999@lid";
 const SENDER: &str = "5511888888888@s.whatsapp.net";
 const OWN_PN: &str = "5511000000000@s.whatsapp.net";
 const OWN_LID: &str = "72103978127547@lid";
-const BASE_TS: u64 = 1_700_000_000; // seconds, as the proto carries them
+/// Seconds, as the proto carries them, and *inside* the window: the drain measures a message's own
+/// timestamp against the retention clock, so a fixture from 2023 would be (correctly) refused as old.
+/// One thousand seconds before [`NOW`].
+const BASE_TS: u64 = 1_759_999_000;
 
 fn me() -> SelfJids {
     SelfJids { pn: OWN_PN.into(), lid: OWN_LID.into() }
@@ -50,14 +53,27 @@ fn text_chat(chat: &str, count: u64) -> wap::Conversation {
     conversation(chat, messages)
 }
 
-fn budget(per_chat: usize, total: usize, per_sync: usize) -> Budget {
-    Budget { per_chat, total, per_sync }
+fn budget(per_sync: usize) -> Budget {
+    Budget { per_sync, ..Budget::default() }
+}
+
+/// The same budget, keeping only `days` of the past: the one bound a drain has on age.
+fn keeping(per_sync: usize, days: i64) -> Budget {
+    Budget { per_sync, keep_ms: days * 86_400_000 }
+}
+
+/// When the tests say "now": the clock every backfilled record is measured against.
+const NOW: i64 = 1_760_000_000_000;
+
+/// One message `seconds` before [`NOW`], as the proto carries it (seconds).
+fn seconds_ago(seconds: i64) -> u64 {
+    (NOW / 1000 - seconds) as u64
 }
 
 /// Drain one conversation the way the guest does: a plan once, then the conversation.
 fn drain(store: &Memory, chat: &wap::Conversation, budget: Budget) -> Progress {
     block_on(async {
-        let mut plan = Plan::of(store, budget).await.expect("a counting pass");
+        let mut plan = Plan::new(budget);
         drain_conversation(store, chat, &me(), &mut plan, 1_760_000_000_000).await
     })
 }
@@ -102,7 +118,7 @@ fn a_history_blob_becomes_records_a_search_finds() {
     );
     let store = Memory::new();
     let progress = block_on(async {
-        let mut plan = Plan::of(&store, Budget::default()).await.expect("a counting pass");
+        let mut plan = Plan::new(Budget::default());
         let mut total = Progress::default();
         let mut stream = lazy.stream();
         while let Some(conversation) = stream.next_conversation().expect("a decodable conversation") {
@@ -178,39 +194,54 @@ fn a_message_the_live_stream_already_indexed_keeps_its_own_row() {
 // ---- bounded ------------------------------------------------------------------------------
 
 #[test]
-fn the_total_budget_stops_the_drain_and_says_which() {
+fn a_message_older_than_the_window_is_not_backfilled() {
+    // The one bound on how far back the past reaches: the same age the live index is pruned by. The
+    // operator removed the 200-per-chat and 2000-total caps on 13/11, so this is what replaced them.
     let store = Memory::new();
-    let progress = drain(&store, &text_chat(CHAT, 5), budget(200, 2, 1_000));
-    assert_eq!((progress.written, progress.remaining), (2, 3), "{}", progress.line());
-    assert_eq!(progress.stopped, Some(Stop::Total));
-    assert!(progress.line().contains("stopped=total"), "{}", progress.line());
-    // The count the index reports is what the budget was measured against: two, not five.
-    let index = block_on(index::age_index(&store, COUNT_CAP)).unwrap();
-    assert_eq!((index.history, index.entries), (2, 2));
+    let chat = conversation(
+        CHAT,
+        vec![
+            entry(CHAT, "OLD", seconds_ago(200 * 86_400), "doiscentos dias atras", false, Some(SENDER)),
+            entry(CHAT, "KEPT", seconds_ago(179 * 86_400), "cento e setenta e nove dias", false, Some(SENDER)),
+            entry(CHAT, "NEW", seconds_ago(60), "agora", false, Some(SENDER)),
+        ],
+    );
+    let progress = drain(&store, &chat, keeping(1_000, 180));
+    assert_eq!((progress.seen, progress.written, progress.too_old), (3, 2, 1), "{}", progress.line());
+    assert!(progress.line().contains("too_old=1"), "{}", progress.line());
+    assert_eq!(progress.stopped, None, "an old message is skipped, not a reason to stop");
+    // The old one is not in the index; the two inside the window are.
+    assert!(block_on(index::load(&store, CHAT, "OLD")).unwrap().is_none());
+    assert!(block_on(index::load(&store, CHAT, "KEPT")).unwrap().is_some());
+    assert!(block_on(index::load(&store, CHAT, "NEW")).unwrap().is_some());
 }
 
 #[test]
-fn the_per_chat_budget_skips_the_rest_of_that_chat() {
+fn a_deep_chat_is_bounded_by_age_and_not_by_a_count() {
+    // The cap that is gone: a chat may hold more backfilled records than the old 200 per chat, as long
+    // as they are inside the window. The only count left is the per-notification one.
     let store = Memory::new();
-    let progress = drain(&store, &text_chat(CHAT, 4), budget(1, 200, 1_000));
-    assert_eq!((progress.written, progress.over_budget), (1, 3), "{}", progress.line());
-    assert_eq!(progress.stopped, None, "a per-chat stop is not a reason to stop the drain");
+    let progress = drain(&store, &text_chat(CHAT, 260), keeping(1_000, 180));
+    assert_eq!(progress.written, 260, "{}", progress.line());
+    assert_eq!(progress.stopped, None, "{}", progress.line());
 
-    // A second chat in the same drain still gets its own allowance.
-    let mut plan = block_on(Plan::of(&store, budget(1, 200, 1_000))).unwrap();
-    let other = block_on(drain_conversation(&store, &text_chat(DM, 3), &me(), &mut plan, 1));
-    assert_eq!(other.written, 1, "{}", other.line());
-    assert_eq!(other.over_budget, 2);
+    // And the index may hold more than the old 2000-total, which went with it.
+    let mut total = 0;
+    for chat in 0..9 {
+        let id = format!("12036300000000000{chat}@g.us");
+        total += drain(&store, &text_chat(&id, 260), keeping(1_000, 180)).written;
+    }
+    assert!(total > 2_000, "the past is bounded by age, not by a total: {total}");
 }
 
 #[test]
 fn the_per_sync_budget_spreads_a_blob_over_ticks() {
     let store = Memory::new();
-    let progress = drain(&store, &text_chat(CHAT, 10), budget(200, 200, 3));
+    let progress = drain(&store, &text_chat(CHAT, 10), budget(3));
     assert_eq!((progress.written, progress.remaining), (3, 7), "{}", progress.line());
     assert_eq!(progress.stopped, Some(Stop::Sync));
-    // Nothing was lost: the next sync (or the next chunk) indexes more, up to the total.
-    let again = drain(&store, &text_chat(CHAT, 10), budget(200, 200, 3));
+    // Nothing was lost: the next sync (or the next chunk) indexes more.
+    let again = drain(&store, &text_chat(CHAT, 10), budget(3));
     assert_eq!(again.written, 3);
     assert_eq!(again.duplicate, 3, "the first three are already indexed");
 }
@@ -220,8 +251,31 @@ fn an_off_budget_writes_nothing_and_says_so() {
     let store = Memory::new();
     let progress = drain(&store, &text_chat(CHAT, 3), Budget::off());
     assert_eq!(progress.written, 0);
-    assert_eq!(progress.stopped, Some(Stop::Total));
+    assert_eq!(progress.stopped, Some(Stop::Off));
+    assert!(progress.line().contains("stopped=off"), "{}", progress.line());
     assert!(store.is_empty());
+}
+
+#[test]
+fn the_window_is_the_one_the_live_index_is_pruned_by() {
+    // One clock for both halves: `index_retention_days` bounds what arrives from the phone and what
+    // stays in the store. A definition that still names the removed caps is not refused - their keys
+    // simply do not reach the budget.
+    let config = serde_json::json!({
+        "index_retention_days": 30,
+        "index_history_per_sync": 40,
+        "index_history_per_chat": 200,
+        "index_history_total": 2_000,
+    });
+    let budget = Budget::from_json(&config);
+    assert_eq!(budget.per_sync, 40);
+    assert_eq!(budget.keep_ms, 30 * 86_400_000);
+    assert_eq!(budget.oldest_ms(NOW), NOW - 30 * 86_400_000);
+    // Absent keys: the seam's defaults, 180 days.
+    let defaults = Budget::from_json(&serde_json::json!({}));
+    assert_eq!(defaults.keep_ms, 180 * 86_400_000);
+    assert_eq!(defaults.per_sync, 1_000);
+    assert!(!defaults.is_off());
 }
 
 /// A store whose writes fail after `budget` of them: the storage grant, or a broken kv.
@@ -265,7 +319,7 @@ impl Store for Failing {
 fn a_failed_write_stops_the_drain_with_a_reason_and_keeps_what_was_written() {
     let store = Failing { inner: Memory::new(), writes: std::cell::Cell::new(0), budget: 1 };
     let progress = block_on(async {
-        let mut plan = Plan::of(&store, Budget::default()).await.expect("a counting pass");
+        let mut plan = Plan::new(Budget::default());
         drain_conversation(&store, &text_chat(CHAT, 4), &me(), &mut plan, 1).await
     });
     // One record's `put` is several `set`s, so the first message may be cut mid-write; what matters is

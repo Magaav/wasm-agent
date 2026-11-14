@@ -1,0 +1,29 @@
+[package]
+name = "wa-whatsapp-archive"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Retention and the monthly archive (`docs/WHATSAPP-ARCHIVE.md`): the live index keeps 180 days, and
+# every month that falls out of it is cut into ONE self-describing, compressed and encrypted file
+# (`whatsapp-archive-YYYY-MM.waa`), kept up to 360 days from the message date, pushable to another
+# disk or node and restorable on demand.
+#
+# Dependencies, and why each one is here:
+# - `wa-whatsapp-index`: the key layout and the tokenizer, shared with the component. A second copy of
+#   either is a cut that misses a key and a restore that writes a month nobody can search.
+# - `wa-keystore`: the archive is sealed with the node's root data key through a namespace sealer, so
+#   no key is ever printed, stored next to the file or handled by the guest.
+# - `zstd`: one frame per archive payload; the same compression the namespace snapshots use.
+# - `sha2`: the digest the push verifies on arrival and the manifest carries.
+# - `serde`/`serde_json`: the manifest is JSON on purpose - an operator's next tool is `jq`.
+[dependencies]
+wa-whatsapp-index = { path = "../wa-whatsapp-index" }
+wa-keystore = { path = "../wa-keystore" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zstd = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

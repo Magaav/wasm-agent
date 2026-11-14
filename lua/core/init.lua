@@ -392,6 +392,12 @@ elseif command == "approve" then
   local code = dofile("lua/core/approve.lua").run("approve " .. rest, { say = function(text) print(text) end }, nil)
   if type(code) == "table" and code.ok == false then os.exit(1) end
 
+elseif command == "whatsapp" then
+  -- The index archives (`lua/core/whatsapp_archive_cli.lua`, docs/WHATSAPP-ARCHIVE.md): list, cut,
+  -- restore, unload, push, expire. Master-only at the host capability, and it needs no turn: a node
+  -- whose model is unreachable must still be able to find out what was archived and push it off.
+  local code = dofile("lua/core/whatsapp_archive_cli.lua").run({ table.unpack(args, 2) })
+  if code and code ~= 0 then os.exit(code) end
 elseif command == "eval" then
   -- The harness evaluator (lua/core/harness_evaluator_cli.lua, docs/HARNESS-EVALUATOR.md): freeze a real
   -- task, replay it against a candidate binary in an isolated home, and print metrics. It gathers
@@ -418,6 +424,7 @@ elseif command == "help" then
   print("    capabilities [--json]  what this node can do: every registered host capability")
   print("    services list|status|start|stop|enable|disable <name>  service components, no turn required")
   print("    eval capture|list|run|report|verdict|reviewer  freeze real tasks, replay isolated, review a branch, read metrics")
+  print("    whatsapp archive list|cut|restore|unload|push|expire [YYYY-MM]  the index's monthly archives")
   print("    turns [--since 24h] [--top N] [--json]  the model's own <turn> complaints, grouped and ranked")
   print("    turns fixed <cluster> --sha <commit>     mark a cluster fixed; the report then says if it is still hurting")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")

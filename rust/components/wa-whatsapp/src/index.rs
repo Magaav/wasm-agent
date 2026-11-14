@@ -43,7 +43,7 @@ use wa_whatsapp_index as seam;
 /// Every key this module owns starts here (the component's `kv.write` policy rules it as `ix/*`).
 pub const PREFIX: &str = "ix/";
 /// Most token keys one record writes. A long document's caption is not a thesaurus.
-pub const MAX_TOKENS: usize = 48;
+pub const MAX_TOKENS: usize = seam::MAX_TOKENS;
 /// How many candidates one narrowing may collect before the answer is "narrow it down".
 const CANDIDATE_BUDGET: usize = 2_000;
 /// How many records a search may load to rank them.
@@ -181,40 +181,84 @@ fn age(ts: i64) -> String {
     format!("{:016x}", ts.max(0) as u64)
 }
 
+// The layout itself lives in the seam (`wa_whatsapp_index::keys`), because the node now cuts a month
+// out of this index into an archive and puts it back: a second copy of these `format!`s here would be a
+// cut that misses a key and a restore that writes a month nobody can search
+// (`docs/WHATSAPP-ARCHIVE.md`). These keep the names this module's code reads by.
 fn from_age(text: &str) -> Option<i64> {
-    u64::from_str_radix(text, 16).ok().and_then(|value| i64::try_from(value).ok())
+    seam::keys::from_age(text)
 }
 
 fn key_message(chat: &str, ts: i64, id: &str) -> String {
-    format!("{PREFIX}m/{chat}/{}/{id}", inv(ts))
+    seam::keys::message(chat, ts, id)
 }
 
 fn key_id(chat: &str, id: &str) -> String {
-    format!("{PREFIX}id/{chat}/{id}")
+    seam::keys::id(chat, id)
 }
 
 fn key_age(ts: i64, chat: &str, id: &str) -> String {
-    format!("{PREFIX}all/{}/{chat}/{id}", age(ts))
+    seam::keys::age_key(ts, chat, id)
 }
 
 fn key_sender(sender: &str, ts: i64, id: &str, chat: &str) -> String {
-    format!("{PREFIX}s/{sender}/{}/{id}/{chat}", inv(ts))
+    seam::keys::sender(sender, ts, id, chat)
 }
 
 fn key_kind(kind: &str, ts: i64, id: &str, chat: &str) -> String {
-    format!("{PREFIX}k/{kind}/{}/{id}/{chat}", inv(ts))
+    seam::keys::kind(kind, ts, id, chat)
 }
 
 fn key_token(token: &str, ts: i64, id: &str, chat: &str) -> String {
-    format!("{PREFIX}w/{token}/{}/{id}/{chat}", inv(ts))
+    seam::keys::token(token, ts, id, chat)
 }
 
 fn key_reaction(chat: &str, target: &str, reactor: &str, emoji: &str) -> String {
-    format!("{PREFIX}x/{chat}/{target}/{reactor}/{emoji}")
+    seam::keys::reaction(chat, target, reactor, emoji)
 }
 
 fn reaction_prefix(chat: &str, target: &str) -> String {
-    format!("{PREFIX}x/{chat}/{target}/")
+    seam::keys::reaction_prefix(chat, target)
+}
+
+/// The months loaded back from their archives, as `[start, end)` ranges in the age order.
+///
+/// One small scan of `ix/arc/` (`docs/WHATSAPP-ARCHIVE.md`); an unreadable or foreign mark is skipped,
+/// because a mark that cannot name a range cannot protect one.
+async fn restored_ranges<S: Store>(store: &S) -> Result<Vec<(i64, i64)>, String> {
+    let prefix = seam::keys::archive_prefix();
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let page = store.scan(prefix.as_bytes(), cursor.clone(), 64).await?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        let short = page.len() < 64;
+        for (key, _) in page {
+            let text = String::from_utf8_lossy(&key).into_owned();
+            if let Some(month) = text.strip_prefix(&prefix) {
+                if let Ok(range) = seam::month::bounds(month) {
+                    out.push(range);
+                }
+            }
+        }
+        if short {
+            break;
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// A scan cursor that sits after every age key below `end_ms`.
+///
+/// `age()` is fixed-width hex, and no chat id starts with a character above `U+10FFFF`'s bytes, so this
+/// key sorts after the last entry of the passed range and before the first entry at or after `end_ms`.
+fn jump_key(end_ms: i64) -> Vec<u8> {
+    format!("{PREFIX}all/{}/\u{10FFFF}", age(end_ms - 1)).into_bytes()
 }
 
 fn key_pending(chat: &str, id: &str) -> String {
@@ -225,7 +269,7 @@ fn key_pending(chat: &str, id: &str) -> String {
 /// would re-download the same screenshot every pass to learn the same thing
 /// (`docs/WHATSAPP-OCR.md`).
 fn key_ocr_seen(chat: &str, id: &str) -> String {
-    format!("{PREFIX}ocr/{chat}/{id}")
+    seam::keys::ocr_seen(chat, id)
 }
 
 // ---- the chats, by the name this node observed ---------------------------------------------------
@@ -238,7 +282,7 @@ fn key_ocr_seen(chat: &str, id: &str) -> String {
 /// makes `whatsapp_contacts` one bounded scan, instead of one record load per chat the account has
 /// ever talked in.
 fn key_card(chat: &str) -> String {
-    format!("{PREFIX}ct/{chat}")
+    seam::keys::chat_card(chat)
 }
 
 /// Most names one card keeps: enough for a person's rename history and a group's active members,
@@ -1618,6 +1662,12 @@ fn message_json(record: &Record) -> serde_json::Value {
     if record.from_history() {
         message["source"] = serde_json::Value::String(record::SOURCE_HISTORY.to_string());
     }
+    if record.restored {
+        // An exact-message answer says where it came from, exactly as a hit and a read do
+        // (`crate::view::message`, `docs/WHATSAPP-ARCHIVE.md`).
+        message["restored"] = serde_json::Value::Bool(true);
+        message["restored_month"] = serde_json::Value::String(seam::month::of(record.ts));
+    }
     message
 }
 
@@ -1981,6 +2031,10 @@ impl Retention {
 pub struct Pruned {
     pub records: usize,
     pub more: bool,
+    /// How many archived months the pass walked past without deleting anything in them: a month loaded
+    /// back from its archive is read-only here, and its records are older than the window by
+    /// construction (`docs/WHATSAPP-ARCHIVE.md`).
+    pub restored_months: usize,
 }
 
 /// Delete records older than the retention window, oldest first, at most `budget` of them.
@@ -1993,7 +2047,12 @@ pub async fn prune<S: Store>(store: &S, now_ms: i64, retention: Retention, budge
     let mut pruned = Pruned::default();
     let mut cursor: Option<Vec<u8>> = None;
     let prefix = format!("{PREFIX}all/");
-    loop {
+    // The months loaded back from an archive, as ranges. A restored month is older than the window by
+    // construction, so it sits exactly where this pass deletes; skipping its range is what keeps a
+    // restore from being undone by the next tick, and it costs one scan of `ix/arc/` per pass instead
+    // of one read per restored record.
+    let restored = restored_ranges(store).await?;
+    'walk: loop {
         let page = store.scan(prefix.as_bytes(), cursor.clone(), PAGE).await?;
         if page.is_empty() {
             return Ok(pruned);
@@ -2008,6 +2067,13 @@ pub async fn prune<S: Store>(store: &S, now_ms: i64, retention: Retention, budge
                 continue;
             }
             let Some(ts) = from_age(parts[0]) else { continue };
+            if let Some(end) = restored.iter().find(|(start, end)| ts >= *start && ts < *end).map(|(_, end)| *end) {
+                // Everything left in this range belongs to an archived month: nothing here is this
+                // pass's to delete. Continue after the range instead of reading it page by page.
+                pruned.restored_months += 1;
+                cursor = Some(jump_key(end));
+                continue 'walk;
+            }
             if ts >= cutoff {
                 // Everything after this key is newer still: the window is intact from here on.
                 return Ok(pruned);
