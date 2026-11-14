@@ -1,10 +1,10 @@
-MCP connectors
+Services
 
-4 connectors · 3 here, 1 from peers · 2 enabled · 5 tools callable now
+4 services · 1 built-in, 3 MCP · 2 connected · 5 tools callable now
 
-❯  1. WhatsApp           whatsapp · connected · 3 tools
-   2. whatsapp_native    openclaw:whatsapp_native · connected · 1 tool
-   3. Filesystem reads   native_reads · failed · no tool · probe failed: connec…
-   4. Gated reports      gated · needs login · no tool · 401 unauthorized: the …
+❯  1. WhatsApp           built-in · account on openclaw · connected · 36 chats
+   2. whatsapp_native    MCP · on openclaw · connected · 1 tool
+   3. Filesystem reads   MCP · on this node · failed · no tool · probe failed: …
+   4. Gated reports      MCP · on this node · needs login · no tool · 401 unaut…
 
-Enter opens a connector · Esc or ← closes
+Enter opens a service · Esc or ← closes

@@ -85,6 +85,90 @@ check(view.ok == true, 'list answers')
 check(view.read_only == false, 'a master may change connectors')
 check(view.counts.here == 2, 'two connectors registered on this node, found ' .. tostring(view.counts.here))
 check(view.counts.from_peers == 1, 'one connector federated from a peer, found ' .. tostring(view.counts.from_peers))
+-- ---------------------------------------------------------------- 1b. every service, one shape (13/11)
+-- The operator's words: "WhatsApp is missing from /mcp while Gmail shows grouped under a node header.
+-- Node becomes a column, not a group header." So: WhatsApp is a row like any other, every row carries
+-- its type, its node, its state and a count, and no row is a heading over other rows.
+local whatsapp = dofile('lua/core/whatsapp.lua')
+local seen_whatsapp = command.find(view, 'whatsapp')
+check(seen_whatsapp ~= nil, '/mcp lists WhatsApp: it is built in, not a connector, and it was the one service missing')
+check(seen_whatsapp and seen_whatsapp.type == 'built-in', 'the WhatsApp row says it is built-in')
+check(seen_whatsapp and seen_whatsapp.scope == 'built-in', 'and it is not offered as a registry connector')
+check(seen_whatsapp and seen_whatsapp.state_label ~= nil,
+  'a built-in service reports its own state word (' .. tostring(seen_whatsapp and seen_whatsapp.state_label) .. ')')
+check(seen_whatsapp and type(seen_whatsapp.node_phrase) == 'string' and seen_whatsapp.node_phrase ~= '',
+  'the WhatsApp row says where the account lives: ' .. tostring(seen_whatsapp and seen_whatsapp.node_phrase))
+check(seen_whatsapp and type(seen_whatsapp.count_phrase) == 'string',
+  'and what it carries: ' .. tostring(seen_whatsapp and seen_whatsapp.count_phrase))
+check(view.counts.built_in == 1, 'the header counts the built-in service: ' .. tostring(view.counts.built_in))
+check(view.counts.mcp == view.counts.connectors - 1,
+  'and the MCP ones separately: ' .. tostring(view.counts.mcp) .. ' of ' .. tostring(view.counts.connectors))
+-- One shape for every row: type, node, state, count - the same four columns for the built-in service and
+-- for a peer's connector, whichever node they run on.
+-- The rendered rows, in the order the view lists them: one option per service (labels may repeat - two
+-- nodes can both export a connector called "Native reads" - so the row is found by position, the same way
+-- the client draws it).
+local rendered_options = command.views(view).views[1].options or {}
+check(#rendered_options == #view.connectors, 'the list draws one row per service: '
+  .. #rendered_options .. ' row(s), ' .. #view.connectors .. ' service(s)')
+for index, entry in ipairs(view.connectors) do
+  local hint = (rendered_options[index] or {}).hint or ''
+  local kind = entry.type or 'MCP'
+  check(hint:sub(1, #(kind .. ' \u{b7} ')) == kind .. ' \u{b7} ',
+    'every row names its type first (' .. tostring(entry.key) .. '): ' .. hint)
+  check(hint:find(entry.node_phrase or '?', 1, true) ~= nil,
+    'and where it runs (' .. tostring(entry.key) .. '): ' .. hint)
+  check(hint:find(command.state_label(entry), 1, true) ~= nil,
+    'and its state (' .. tostring(entry.key) .. '): ' .. hint)
+  local count = entry.count_phrase
+  if count == nil then
+    local n = tonumber(entry.tool_count) or 0
+    count = n == 0 and 'no tool' or (tostring(n) .. (n == 1 and ' tool' or ' tools'))
+  end
+  check(hint:find(count, 1, true) ~= nil, 'and a count (' .. tostring(entry.key) .. '): ' .. hint)
+end
+-- The node is a column, not a header: no row's label is a node name, and no hint is empty.
+for _, entry in ipairs(view.connectors) do
+  check(entry.name ~= 'openclaw' and entry.name ~= 'this node', 'no row is a node heading: ' .. tostring(entry.name))
+end
+-- Turning a built-in on or off is refused by name, with the reason - it has no registry row at all.
+local refused = command.toggle(ctx, 'whatsapp', false)
+check(refused.ok == false and refused.error == 'built_in_service', 'turning WhatsApp off from /mcp is refused by name')
+check(tostring(refused.note or ''):find('built in', 1, true) ~= nil, 'and the refusal says why: ' .. tostring(refused.note))
+local probed = command.probe(ctx, 'whatsapp')
+check(probed.ok == false and probed.error == 'built_in_service', 'and there is nothing to probe on it')
+-- A node that KNOWS where the account is (the deploy declares it, and the fleet carries that node): the
+-- row reads exactly like the operator's example, and the count is the account node's own index.
+local getenv = host.getenv
+host.getenv = function(name)
+  if name == 'WASM_AGENT_WHATSAPP_OWNER' then return 'openclaw' end
+  return getenv(name)
+end
+whatsapp._service_row = nil
+local located = command.list(ctx, {
+  cache_only = true,
+  owner_catalog = function() return { peers = { ['peer-openclaw'] = { name = 'openclaw', node_id = 'peer-openclaw' } } } end,
+  remote_call = function(node, name, args) return { ok = true, served_by = node, index = { chats = 36 } } end,
+})
+host.getenv = getenv
+whatsapp._service_row = nil
+local located_row = command.find(located, 'whatsapp')
+check(located_row and located_row.node_phrase == 'account on openclaw',
+  'the row says where the account lives: ' .. tostring(located_row and located_row.node_phrase))
+check(located_row and located_row.state_label == 'connected', 'and that it answered the fleet catalog')
+check(located_row and located_row.count_phrase == '36 chats',
+  'and the account node\'s own chat count: ' .. tostring(located_row and located_row.count_phrase))
+local located_text = command.text(located, 80)
+check(located_text:find('built-in \u{b7} account on openclaw \u{b7} connected \u{b7} 36 chats', 1, true) ~= nil,
+  'the rendered row is one line of four columns: ' .. tostring(located_text:match('[^\n]*built%-in[^\n]*')))
+
+-- The rendered list, at 80 columns: one line per service, and the header counts services, not connectors.
+local rendered = command.text(view, 80)
+check(rendered:find(string.format('%d services \u{b7} 1 built-in, %d MCP', view.counts.services, view.counts.mcp), 1, true) ~= nil,
+  'the header counts services by kind: ' .. tostring(rendered:match('^[^\n]*\n\n([^\n]*)')))
+check(rendered:find('built-in \u{b7} ', 1, true) ~= nil, 'and the built-in row is in it')
+check(rendered:find('36 chats', 1, true) == nil or seen_whatsapp.chats == 36, 'the count is the index\'s own')
+
 local native = command.find(view, 'native_reads')
 check(native and native.where == 'this node' and native.scope == 'local', 'the local connector says where it runs')
 check(native.transport == 'native', 'the local connector reports its transport')
@@ -122,9 +206,14 @@ check(peer_detail.connector.tools[1].published == true, 'a published peer tool i
 
 -- The text the terminal prints: the list and the detail carry the same names.
 local text = command.text(view)
-check(contains(text, '3 connectors'), 'the list says how many connectors there are')
-check(contains(text, 'openclaw:native_reads'), 'the list prints the key to open')
+check(contains(text, tostring(view.counts.services) .. ' services'),
+  'the list counts services, not one transport: ' .. tostring(text:match('^[^\n]*\n\n([^\n]*)')))
 check(contains(text, 'connected'), 'the list names the state in one word a reader scans for')
+-- The key moved off the row (the row is the operator's four columns) and onto the page it opens, which is
+-- where a reader learns what to type: `/mcp <key>` still resolves, and a bare id does too (`M.find`).
+check(contains(command.detail_text(command.find(view, 'openclaw:native_reads')), 'openclaw:native_reads'),
+  'the connector\'s own page still prints the key to type')
+check(command.find(view, 'native_reads') ~= nil, 'a bare id still resolves to its connector')
 check(not contains(text, 'schema'), 'the list is one screen, not a wall of JSON')
 -- The detail: the names verbatim, and the tool's input is its FIELDS, not the raw schema JSON - the
 -- schema used to be pasted whole, which is what made `/mcp` unreadable at 80 columns.

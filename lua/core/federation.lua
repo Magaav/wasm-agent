@@ -118,7 +118,13 @@ function M.connectors()
   -- (`mcp_whatsapp_send_status`) is callable and is in no catalogue, so it is not a tool of the surface
   -- an operator is told about either.
   local offered = whatsapp.schemas()
-  local surface = { id = 'whatsapp', name = 'WhatsApp (' .. #offered .. ' tools, one surface)',
+  -- The same columns this node's own `/mcp` draws for it (`whatsapp.service_row`): a peer reading this
+  -- node's inventory sees WhatsApp as one service among the connectors, with its type, its node and a
+  -- count, not as a special row that needs a heading of its own.
+  local surface = { id = 'whatsapp', name = 'WhatsApp',
+    type = 'built-in', node = tostring(whatsapp.self_name() or 'this node'),
+    node_phrase = 'on this node', state_label = holds and 'connected' or 'unknown',
+    count_phrase = (holds and 'account here' or 'account elsewhere'),
     transport = 'native', enabled = true, state = 'enabled', tools = {}, approved = #offered,
     discovered = #offered, whatsapp_account = holds,
     note = holds

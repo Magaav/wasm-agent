@@ -269,6 +269,97 @@ function M.hidden(name)
   return (tool ~= nil and tool.hidden == true) or false
 end
 
+--- How long the `/mcp` row above is reused, in seconds. One chat count is one read of the account
+--- node's index; a `/mcp` opened twice in a minute asks once.
+M.SERVICE_ROW_TTL_S = 60
+M._service_row = nil
+
+--- The built-in service as one `/mcp` row: what it is, where the account lives, how it stands, and how
+--- many chats the index knows.
+---
+--- `/mcp` lists external services, and WhatsApp is one of them: it has been built in since 11/11 (one
+--- surface, `mcp_whatsapp_<verb>`, on every node) and it was the only service that list did not show,
+--- because `mcp_command` listed a registry of MCP connectors and WhatsApp has no registry row - it is
+--- not a connector, it is part of the node. A reader asking "what can this machine reach" got Gmail and
+--- the graph but not the account the operator actually uses (operator, 13/11).
+---
+--- `node` and `node_phrase` are the account's home, not the caller's: a node that runs no component
+--- answers the same question for the node that does, which is what the tool does too. `count` is the
+--- index's own chat count when it can be read without a guess - one short read locally, or one short
+--- read of the account node - and nil when it cannot, which the row says instead of inventing a number.
+function M.service_row(opts)
+  opts = opts or {}
+  local now = tonumber(host.now()) or 0
+  local cached = M._service_row
+  if opts.fresh ~= true and cached and (now - (cached.at or 0)) < M.SERVICE_ROW_TTL_S then
+    return cached.row
+  end
+  local holds = M.holds_account()
+  local self_name = M.self_name()
+  local owner = holds and nil or M.owner(opts.owner_catalog)
+  local node = holds and (self_name or 'this node') or owner
+  local state, detail = 'unknown', nil
+  if holds then
+    state = 'connected'
+  elseif owner then
+    -- The owner is in the fleet catalog only if it answered it recently; that is the only "is it up"
+    -- this node can honestly report about another machine.
+    local seen = false
+    local ok, catalog = pcall(opts.owner_catalog or function() return dofile('lua/core/federation.lua').catalog() end)
+    for _, peer in pairs(ok and type(catalog) == 'table' and catalog.peers or {}) do
+      if type(peer) == 'table' and peer.name == owner then seen = true end
+    end
+    if seen then state = 'connected'
+    else
+      state, detail = 'offline', 'the account node ' .. tostring(owner) .. ' is not in the fleet catalog this node holds'
+    end
+  else
+    detail = 'no node says it holds the WhatsApp account: set WASM_AGENT_WHATSAPP_OWNER here, or enable '
+      .. M.COMPONENT .. ' where the account is'
+  end
+  local chats = nil
+  if state == 'connected' and opts.counts ~= false then
+    local answer
+    if holds then
+      answer = M.invoke(M.by_verb.contacts, { limit = 1 })
+    else
+      answer = M.forward(owner, M.by_verb.contacts.name, { limit = 1 }, opts.remote_call)
+    end
+    if type(answer) == 'table' and type(answer.index) == 'table' then chats = tonumber(answer.index.chats) end
+  end
+  local row = {
+    key = 'whatsapp', id = 'whatsapp', name = 'WhatsApp', type = 'built-in',
+    where = holds and 'this node' or (owner or 'this node'),
+    node = node or 'unknown',
+    node_phrase = holds and 'on this node' or (owner and ('account on ' .. owner) or 'account node unknown'),
+    scope = 'built-in', transport = 'native',
+    state = state, state_label = state, error = detail,
+    enabled = state == 'connected',
+    tool_count = #M.schemas(), approved = #M.schemas(), discovered = #M.schemas(),
+    chats = chats,
+    count_phrase = chats and (tostring(chats) .. (chats == 1 and ' chat' or ' chats')) or 'chats unknown',
+    note = holds
+      and 'Built into this node: the account is here, and every verb answers here.'
+      or (owner and ('Built into every node; the account itself is on ' .. owner .. ', and every verb is answered there.')
+        or 'Built into every node, but no node in this fleet says it holds the account.'),
+    tools = (function()
+      local out = {}
+      for _, schema in ipairs(M.schemas()) do
+        local fn = schema['function']
+        out[#out + 1] = { name = fn.name, tool = fn.name:gsub('^mcp_whatsapp_', ''), description = fn.description,
+          parameters = fn.parameters, approval = 'read', published = state == 'connected' }
+      end
+      return out
+    end)(),
+    policy = { tier = 'built-in', managed_by = 'lua/core/whatsapp.lua',
+      approval = 'built in, not a connector: it has no registry row and nothing to turn on or off here',
+      note = 'The account lives on one node; every other node asks it. Sends still pass the operator '
+        .. 'policy (rate limit, daily cap, audit) on the node that holds the account.' },
+  }
+  M._service_row = { at = now, row = row }
+  return row
+end
+
 --- Does this node run the component that holds the account? The deploy's own registry answers this
 --- (`host.service` status), so "who owns the account" is a fact about the fleet, not a name in a file.
 function M.holds_account()

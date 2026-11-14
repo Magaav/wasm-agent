@@ -165,7 +165,7 @@ published = {}
 local set = mcp.views(fixture.mcp_view())
 ok(set.command == "/mcp", "the /mcp pages are filed under the command that opens them")
 ok(#set.views >= 6, "the /mcp balloon has the list, a page per connector and their tools: " .. #set.views)
-ok(set.views[1].title == "MCP connectors", "the root is the list")
+ok(set.views[1].title == "Services", "the root is the list of services")
 ok(#set.views[1].options == 4, "one row per connector")
 
 -- The links a client has to understand: a page link is 0-based in the spec, and the run options are the
@@ -183,8 +183,9 @@ for _, view in ipairs(sent.spec.views) do
     if option.act then saw_act = true end
   end
 end
-ok(runs["/mcp whatsapp probe"], "a connector's Reconnect is published as the line it queues")
-ok(runs["/mcp whatsapp off"], "so is Turn off: the client may queue it, and only the interpreter runs it")
+ok(runs["/mcp native_reads probe"], "a connector's Reconnect is published as the line it queues")
+ok(runs["/mcp native_reads off"] or runs["/mcp native_reads on"],
+  "so is Turn off/on: the client may queue it, and only the interpreter runs it")
 ok(not saw_act, "no page carries an `act` the client could not run")
 
 -- /login publishes the list and a page per provider, and no secret field: a client panel cannot type.
@@ -229,7 +230,7 @@ snapshot("login-provider-80x24.txt", balloon.text({ login[2] }, 80))
 
 -- What the snapshots say, in assertions a person reads: the words the operator asked for.
 local list_text = balloon.text({ set.views[1] }, 80)
-for _, word in ipairs({ "connected", "failed", "needs login", "3 tools", "1 tool" }) do
+for _, word in ipairs({ "connected", "failed", "needs login", "1 tool", "built-in", "36 chats" }) do
   ok(has(list_text, word), "the list names the state/tool count: " .. word)
 end
 local needs = nil
@@ -241,8 +242,19 @@ local tools_text = balloon.text({ set.views[3] }, 80)
 ok(has(tools_text, "mcp_whatsapp_read"), "the tools page lists the exact name the model is given")
 ok(has(balloon.text({ set.views[4] }, 80), "input: chat, limit") or
   has(balloon.text({ set.views[4] }, 80), "input: limit, chat"), "a tool's input is its fields, not its JSON")
-ok(has(balloon.text({ set.views[2] }, 80), "Reconnect"), "a local connector offers Reconnect")
-ok(has(balloon.text({ set.views[2] }, 80), "Turn off"), "an enabled connector offers Turn off")
+-- A page per connector, found by title: the fixture's first row is the built-in service now, whose page
+-- offers neither verb (it has no registry row), so the verbs are read off the registry connector.
+local function page_titled(prefix)
+  for _, page in ipairs(set.views) do
+    if page.title and page.title:sub(1, #prefix) == prefix then return balloon.text({ page }, 80) end
+  end
+  return ""
+end
+ok(has(page_titled("native_reads"), "Reconnect"), "a local connector offers Reconnect")
+ok(has(page_titled("native_reads"), "Turn on"), "a connector that is off offers Turn on")
+ok(has(page_titled("openclaw:whatsapp_native"), "Turn off"), "an enabled peer connector offers Turn off")
+ok(not has(page_titled("whatsapp"), "Turn off"), "the built-in service offers no Turn off: it has no registry row")
+ok(has(page_titled("whatsapp"), "Where it runs"), "its page says where the account lives instead")
 
 -- ---------------------------------------------------------------- the structural rule
 

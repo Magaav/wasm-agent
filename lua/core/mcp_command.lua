@@ -123,8 +123,17 @@ local function local_connector(mcp, server, revision)
     end
     reported_probe, observed, last_call = cleared(reported_probe), cleared(observed), cleared(last_call)
   end
+  -- The built-in surface owns the key `whatsapp` (`whatsapp.service_row`): a retired registry row of that
+  -- family keeps its place in the list, its tools and its history, but not the name a reader types -
+  -- `/mcp whatsapp` opens the surface that answers, and this row answers to `whatsapp:retired`.
+  local key = server.id
+  if superseded then key = server.id .. ':retired' end
   return {
-    key = server.id, id = server.id, name = server.name or server.id,
+    key = key, id = server.id, name = superseded and ((server.name or server.id) .. ' (retired)') or (server.name or server.id),
+    -- What it is and where it runs, as columns a reader scans (13/11): `type` is the kind of service,
+    -- `node` is its bare home, and `node_phrase` is that home as a clause. Nothing is grouped by node any
+    -- more - the node is a column, so a flat list sorted by it stays a flat list.
+    type = 'MCP', node = 'this node', node_phrase = 'on this node',
     where = 'this node', scope = 'local', transport = definition.transport or 'unknown',
     state = state, error = error, enabled = server.enabled == true,
     tool_count = published, approved = #sorted_keys(approved), discovered = #(server.probe and server.probe.tools or {}),
@@ -173,6 +182,7 @@ local function peer_connector(peer, connector, exported)
   table.sort(tools, function(a, b) return a.name < b.name end)
   return {
     key = tostring(peer.name) .. ':' .. tostring(connector.id), id = connector.id, peer = peer.name,
+    type = 'MCP', node = tostring(peer.name), node_phrase = 'on ' .. tostring(peer.name),
     node_id = peer.node_id, where = tostring(peer.name), scope = 'peer',
     name = connector.name or connector.id, transport = connector.transport or 'unknown',
     state = connector.state or (connector.enabled and 'enabled' or 'disabled'), error = connector.error,
@@ -272,6 +282,20 @@ end
 
 -- The list `/mcp` prints and the window renders. `read_only` is the guest's answer: the same inventory,
 -- with no controls (the toggle refuses, and says why).
+-- The built-in services, as rows of the same list the MCP connectors live in (13/11).
+--
+-- WhatsApp is not a connector - it has no registry row, nothing to probe and nothing to turn on - and
+-- because this list was built from the registry it simply did not appear, while a peer's Gmail did. A
+-- reader asking `/mcp` "what can this machine reach" is asking about services, not about one transport,
+-- so the built-in answer is a row: the same columns as every other row, no special case in the renderer.
+local function builtin_services(opts)
+  local loaded, whatsapp = pcall(dofile, 'lua/core/whatsapp.lua')
+  if not loaded or type(whatsapp) ~= 'table' or type(whatsapp.service_row) ~= 'function' then return {} end
+  local ok, row = pcall(whatsapp.service_row, opts)
+  if not ok or type(row) ~= 'table' then return {} end
+  return { row }
+end
+
 function M.list(ctx, opts)
   opts = opts or {}
   local role = type(ctx) == 'table' and ctx.role or 'guest'
@@ -279,18 +303,24 @@ function M.list(ctx, opts)
   local local_list, registry = M.local_connectors(ctx)
   local peer_list, peers_meta = M.peer_connectors(opts)
   local connectors = {}
+  -- The built-in services first, then this node's registry, then the peers'. One list: every row says
+  -- which node it lives on, so nothing needs a heading over a group of them.
+  for _, entry in ipairs(builtin_services(opts)) do connectors[#connectors + 1] = entry end
   for _, entry in ipairs(local_list) do connectors[#connectors + 1] = entry end
   for _, entry in ipairs(peer_list) do connectors[#connectors + 1] = entry end
-  local enabled, tools = 0, 0
+  local enabled, tools, built_in = 0, 0, 0
   for _, entry in ipairs(connectors) do
     if entry.enabled == true then enabled = enabled + 1 end
     tools = tools + (tonumber(entry.tool_count) or 0)
+    if entry.type == 'built-in' then built_in = built_in + 1 end
   end
   return {
     ok = true, connectors = connectors, read_only = read_only, role = role,
     revision = registry and registry.revision, registry_error = registry and registry.error,
     peers_at = peers_meta and peers_meta.at,
-    counts = { connectors = #connectors, here = #local_list, from_peers = #peer_list, enabled = enabled, tools = tools },
+    counts = { connectors = #connectors, services = #connectors, built_in = built_in,
+      mcp = #connectors - built_in, here = #local_list, from_peers = #peer_list,
+      enabled = enabled, tools = tools },
     note = read_only
       and 'Read-only: turning a connector on or off needs a master (the same rule the mcp tool follows).'
       or 'A change applies to new sessions at once; sessions already running are told on their next turn '
@@ -352,6 +382,11 @@ function M.toggle(ctx, key, enable, opts)
   end
   local entry = M.find(view, key)
   if not entry then return { ok = false, error = 'unknown_connector', key = tostring(key) } end
+  if entry.scope == 'built-in' then
+    return { ok = false, error = 'built_in_service', connector = entry.key, effect = 'none',
+      note = tostring(entry.name) .. ' is built in, not a connector: it has no registry row and nothing to turn '
+        .. 'on or off here. The account lives on ' .. tostring(entry.node) .. ', where its component runs.' }
+  end
   local action = enable and 'enable' or 'disable'
   if entry.scope == 'local' then
     if type(view.revision) ~= 'number' then
@@ -430,6 +465,9 @@ end
 -- The state, in one word. `needs login` wins: a credential the far end refused is more useful to know than
 -- that the last call failed, and it names the next action.
 function M.state_label(entry)
+  -- A built-in service reports its own word (`connected` / `offline` / `unknown`): it has no registry
+  -- state to translate, and calling it `enabled` would be a claim about a component nobody asked about.
+  if entry.state_label ~= nil then return tostring(entry.state_label) end
   if credential_refused(entry) then return 'needs login' end
   return STATE_LABELS[tostring(entry.state)] or tostring(entry.state or 'unknown')
 end
@@ -439,6 +477,19 @@ local function tools_phrase(count)
   count = tonumber(count) or 0
   if count == 0 then return 'no tool' end
   return string.format('%d tool%s', count, count == 1 and '' or 's')
+end
+
+-- What one row's second column says: the type, where it runs, how it stands, and how much it carries.
+--
+-- One function for every service, because that is the whole point of the list: WhatsApp (built in) and
+-- Gmail (an MCP connector on another node) are read the same way, and the node is a column rather than a
+-- heading that only some rows live under.
+local function row_hint(entry)
+  local count = entry.count_phrase
+  if count == nil then count = tools_phrase(entry.tool_count) end
+  return string.format('%s \u{b7} %s \u{b7} %s \u{b7} %s',
+    tostring(entry.type or 'MCP'), tostring(entry.node_phrase or ('on ' .. tostring(entry.where or '?'))),
+    M.state_label(entry), tostring(count))
 end
 
 -- The vault keys this connector's definition names (`secret_env`), by name. Only the NAMES: a value never
@@ -515,11 +566,14 @@ end
 function M.detail_page(entry, links, opts)
   opts = opts or {}
   local lines = {
-    string.format('where: %s (%s) \u{b7} transport %s \u{b7} revision %s', tostring(entry.where),
-      tostring(entry.scope), tostring(entry.transport), tostring(entry.revision or '?')),
+    string.format('type: %s \u{b7} %s \u{b7} transport %s', tostring(entry.type or 'MCP'),
+      tostring(entry.node_phrase or ('on ' .. tostring(entry.where))), tostring(entry.transport)),
+    string.format('where: %s (%s) \u{b7} revision %s', tostring(entry.where),
+      tostring(entry.scope), tostring(entry.revision or '?')),
     string.format('state: %s \u{b7} %s callable now (approved %s, discovered %s)', M.state_label(entry),
       tostring(entry.tool_count or 0), tostring(entry.approved or 0), tostring(entry.discovered or 0)),
   }
+  if entry.count_phrase then lines[#lines + 1] = 'carries: ' .. tostring(entry.count_phrase) end
   if entry.note then lines[#lines + 1] = 'note: ' .. tostring(entry.note) end
   if entry.observed then lines[#lines + 1] = 'last observation: ' .. tostring(entry.observed) end
   local error_text = entry.error and tostring(entry.error) or ''
@@ -541,7 +595,11 @@ function M.detail_page(entry, links, opts)
     { label = (entry.tools and #entry.tools > 0) and ('Tools (' .. #entry.tools .. ')') or 'Tools',
       hint = 'names, approvals, inputs', page = links.tools },
   }
-  if entry.scope == 'local' then
+  if entry.scope == 'built-in' then
+    -- Nothing to probe and nothing to turn off: a built-in service has no registry row. The page says
+    -- where the account lives rather than offering a verb that could only be refused.
+    options[#options + 1] = { label = 'Where it runs', hint = tostring(entry.node_phrase or entry.node), back = true }
+  elseif entry.scope == 'local' then
     options[#options + 1] = { label = 'Reconnect', hint = 'probe again, now', run = '/mcp ' .. entry.key .. ' probe' }
     options[#options + 1] = entry.enabled
       and { label = 'Turn off', hint = 'the model stops seeing its tools', run = '/mcp ' .. entry.key .. ' off' }
@@ -573,17 +631,18 @@ function M.views(view, opts)
   local counts = view.counts or {}
   local pages = {}
   local lines = {
-    string.format('%d connectors \u{b7} %d here, %d from peers \u{b7} %d enabled \u{b7} %d tools callable now',
-      counts.connectors or 0, counts.here or 0, counts.from_peers or 0, counts.enabled or 0, counts.tools or 0),
+    string.format('%d services \u{b7} %d built-in, %d MCP \u{b7} %d connected \u{b7} %d tools callable now',
+      counts.services or counts.connectors or 0, counts.built_in or 0,
+      counts.mcp or ((counts.connectors or 0) - (counts.built_in or 0)), counts.enabled or 0, counts.tools or 0),
   }
   if view.read_only then
     lines[#lines + 1] = 'read-only: ' .. tostring(view.note)
   end
-  local list = balloon.page({ title = 'MCP connectors', lines = lines, options = {}, selected = 1,
-    hint = 'Enter opens a connector \u{b7} Esc or \u{2190} closes' })
+  local list = balloon.page({ title = 'Services', lines = lines, options = {}, selected = 1,
+    hint = 'Enter opens a service \u{b7} Esc or \u{2190} closes' })
   pages[1] = list
   if #(view.connectors or {}) == 0 then
-    list.lines[#list.lines + 1] = 'none: no connector is registered on this node, and no peer exports one.'
+    list.lines[#list.lines + 1] = 'none: no service is registered on this node, and no peer exports one.'
   end
   local index = 1
   for _, entry in ipairs(view.connectors or {}) do
@@ -602,8 +661,7 @@ function M.views(view, opts)
     for tool_number, tool in ipairs(entry.tools or {}) do
       pages[tool_pages[tool_number]] = M.tool_page(tool, entry, detail_index)
     end
-    local hint = string.format('%s \u{b7} %s \u{b7} %s', tostring(entry.key), M.state_label(entry),
-      tools_phrase(entry.tool_count))
+    local hint = row_hint(entry)
     if entry.error and tostring(entry.error) ~= '' then
       hint = hint .. ' \u{b7} ' .. balloon.fit(tostring(entry.error), 28)
     end
@@ -638,6 +696,11 @@ function M.probe(ctx, key, opts)
   local view = M.list(ctx, opts)
   local entry = M.find(view, key)
   if not entry then return { ok = false, error = 'unknown_connector', key = tostring(key) } end
+  if entry.scope == 'built-in' then
+    return { ok = false, error = 'built_in_service', connector = entry.key, effect = 'none',
+      note = tostring(entry.name) .. ' is built in and has no probe: its surface is there whenever the '
+        .. 'component runs on ' .. tostring(entry.node) }
+  end
   if entry.scope ~= 'local' then
     return { ok = false, error = 'connector_probe_remote', connector = entry.key, where = entry.where,
       effect = 'none', note = 'a connector is probed on the node that runs it: run /mcp there, from that node' }
