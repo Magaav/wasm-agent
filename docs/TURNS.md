@@ -45,6 +45,15 @@ itself asks for when nothing hurt ("say so in one line and stop").
 
 ## What one record holds
 
+The record is **derived from the ledger on every run**, not copied into a second table: the note is
+already stored there (with its session, its time and its model in the turn's own trace), and a
+normalized copy would be a stale replica of the source of truth - the failure this repository's memory
+rule is written against. What persists is what the ledger cannot hold: the daily digest
+(`<config>/reports/turns-<date>.md`, the normalized records of that day) and the fix markers
+(`<config>/turns/fixed.json`). `wa turns --json` is the same records in machine form, for anything that
+wants to archive them.
+
+
 | field | where it comes from |
 | --- | --- |
 | `node`, `session`, `message`, `seq`, `at` | the ledger row the note was found in |
