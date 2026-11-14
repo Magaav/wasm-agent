@@ -1757,3 +1757,146 @@ fn the_address_book_is_asked_for_once_per_store() {
     block_on(mark_address_sync(&store)).unwrap();
     assert_eq!(block_on(address_sync_done(&store)).unwrap(), true);
 }
+
+// ---- the collection the device already holds (14/11: `q: "Laura"` answered 0, `address_book: 1`) ----
+
+/// The app-state store as a test sees it: one collection's persisted version, and the reset that takes
+/// it back to zero. It is the same two calls `guest`'s `AppState` makes over `whatsapp_rust`, so a test
+/// that drives [`ensure_address_book`] exercises the decision AND the write that follows it.
+struct Persisted(std::cell::Cell<u64>);
+
+impl Persisted {
+    fn new(version: u64) -> Persisted {
+        Persisted(std::cell::Cell::new(version))
+    }
+
+    fn version(&self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl AppStateVersions for Persisted {
+    fn persisted_version(&self, collection: &str) -> impl std::future::Future<Output = Result<u64, String>> {
+        // The reset is only ever allowed to touch the collection that carries contacts.
+        assert_eq!(collection, CONTACT_COLLECTION);
+        let version = self.0.get();
+        async move { Ok(version) }
+    }
+
+    fn reset_collection(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>> {
+        assert_eq!(collection, CONTACT_COLLECTION);
+        self.0.set(0);
+        async move { Ok(()) }
+    }
+}
+
+#[test]
+fn a_persisted_collection_the_index_never_received_is_reset_once_then_asked_again() {
+    // The 14/11 state exactly: the phone asked the device for the whole book ONCE (13/11's fix, so
+    // `ix/ab/sync` is set), the store persisted the collection at v9, and the index holds no contact.
+    // Asking again is answered with the same v9 snapshot, and `wacore` drops it - "incoming v9 <=
+    // persisted v9" - because the version says the device already has what the records were never
+    // kept for. So the ask has to be preceded by the reset, and the once-per-store mark is not a
+    // reason to skip it.
+    let store = Memory::new();
+    block_on(mark_address_sync(&store)).unwrap();
+    let app = Persisted::new(9);
+    assert_eq!(block_on(ensure_address_book(&store, &app)).unwrap(), AddressBookAsk::ResetThenAsk);
+    assert_eq!(app.version(), 0, "the persisted version is what hid the collection");
+    assert_eq!(block_on(address_reset_done(&store)).unwrap(), true, "the reset is marked as spent");
+    assert_eq!(block_on(address_sync_done(&store)).unwrap(), true, "the 13/11 mark is left alone");
+    assert_eq!(block_on(address_full_done(&store)).unwrap(), false, "nothing has been received yet");
+
+    // The reset is spent once: a second boot neither resets again nor asks again - which is what keeps
+    // an account with no saved contacts from resyncing the collection on every connection.
+    assert_eq!(block_on(ensure_address_book(&store, &app)).unwrap(), AddressBookAsk::Done);
+    assert_eq!(app.version(), 0);
+}
+
+#[test]
+fn the_address_book_decision_answers_every_measured_state() {
+    // (persisted version, full snapshot received, reset spent, asked before) -> what a boot must do.
+    let states = [
+        // Never synced: the ordinary first-sync path. Version 0 is already "fresh", nothing to reset.
+        ((0, false, false, false), AddressBookAsk::Ask),
+        // Asked, and still nothing: this is the 14/11 store, and the one case that must recover.
+        ((9, false, false, true), AddressBookAsk::ResetThenAsk),
+        // A collection at v9 that nobody ever asked for is the same defect with a different history.
+        ((9, false, false, false), AddressBookAsk::ResetThenAsk),
+        // The resync was already spent and did not deliver: do not spend it again.
+        ((9, false, true, true), AddressBookAsk::Done),
+        // The book arrived: nothing at all is owed, whatever version the store holds.
+        ((9, true, false, true), AddressBookAsk::Done),
+        ((9, true, true, true), AddressBookAsk::Done),
+        // Asked at version 0 and nothing came: done, not a second request per connection.
+        ((0, false, false, true), AddressBookAsk::Done),
+    ];
+    for ((version, full, reset, asked), expected) in states {
+        assert_eq!(
+            address_book_ask(version, full, reset, asked),
+            expected,
+            "version={version} full={full} reset={reset} asked={asked}"
+        );
+    }
+}
+
+#[test]
+fn a_full_snapshot_is_what_ends_the_recovery() {
+    // `ix/ab/full` is written when a contact action arrives from a full sync, and it is the fact that
+    // stops the next boot from spending a resync on a store already in sync.
+    let store = Memory::new();
+    assert_eq!(block_on(address_full_done(&store)).unwrap(), false);
+    block_on(mark_address_full(&store)).unwrap();
+    assert_eq!(block_on(address_full_done(&store)).unwrap(), true);
+    assert_eq!(block_on(ensure_address_book(&store, &Persisted::new(9))).unwrap(), AddressBookAsk::Done);
+    // And a store that received the book is not reset even if no reset was ever recorded: the reset
+    // exists only to make a snapshot applicable, and one was applied.
+    assert_eq!(block_on(address_reset_done(&store)).unwrap(), false);
+}
+
+#[test]
+fn the_address_book_count_counts_people_and_not_its_own_marks() {
+    // 14/11's `address_book: 1` was the mark, not a person: `ix/ab/sync` shares the prefix with the
+    // contact rows, so the answer said the index knew one address-book contact while it knew none -
+    // and the note a model reads ("this node knows 1 address-book contact(s)") was false with it.
+    let store = Memory::new();
+    block_on(mark_address_sync(&store)).unwrap();
+    block_on(mark_address_full(&store)).unwrap();
+    block_on(mark_address_reset(&store)).unwrap();
+    assert_eq!(block_on(address_count(&store, COUNT_CAP)).unwrap(), (0, false), "marks are not contacts");
+
+    block_on(set_contact(&store, &saved(LAURA, "Laura ❤️", "", LAURA, base()))).unwrap();
+    assert_eq!(block_on(address_count(&store, COUNT_CAP)).unwrap(), (1, false), "one person, one row");
+
+    // And the answer a model reads says so, rather than describing a sync that never happened.
+    let answer = block_on(contacts(&store, &named("zzz nobody"))).unwrap();
+    assert_eq!(answer["index"]["address_book"], 1, "{answer}");
+    assert!(!answer["note"].as_str().unwrap_or_default().contains("no address book has been synced"), "{answer}");
+}
+
+#[test]
+fn the_recovery_writes_contacts_and_nothing_about_the_pairing() {
+    // What a reset-then-snapshot leaves behind, at the index's own level: address rows and cards, and
+    // no key of the device, the sync keys or the versions. `set_contact` is the ONLY writer a delivered
+    // contact action reaches, and this is the proof that it touches nothing else - the reason the
+    // recovery cannot change the pairing is that it has no call that could.
+    let store = Memory::new();
+    block_on(put(&store, &direct(LID, "Lou", "L1", base(), "oi"))).unwrap();
+    let before: Vec<String> = store.keys();
+    assert!(before.iter().all(|key| key.starts_with("ix/")), "{before:?}");
+
+    block_on(set_contact(&store, &saved(LAURA, "Laura ❤️", LID, LAURA, base() + 1))).unwrap();
+
+    let after: Vec<String> = store.keys();
+    let added: Vec<&String> = after.iter().filter(|key| !before.contains(key)).collect();
+    assert!(added.iter().all(|key| key.starts_with("ix/ab/") ), "only address rows are added: {added:?}");
+    for forbidden in ["dev", "sync/", "ver/", "id/", "ses/", "pk/", "lid/"] {
+        assert!(
+            after.iter().all(|key| !key.starts_with(forbidden)),
+            "a contact action must not write `{forbidden}`: {after:?}"
+        );
+    }
+    // The name and the number it maps the `@lid` chat to both answer, from one action.
+    assert_eq!(block_on(contacts(&store, &named("laura"))).unwrap()["chat"], LID);
+    assert_eq!(block_on(contacts(&store, &named("5511977777777"))).unwrap()["chat"], LID);
+}

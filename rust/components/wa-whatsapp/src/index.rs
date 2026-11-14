@@ -317,6 +317,124 @@ pub async fn mark_address_sync<S: Store>(store: &S) -> Result<(), String> {
     store.set(key_address_sync().as_bytes(), b"1").await
 }
 
+/// `ix/ab/full` -> a word: a full-sync snapshot of the phone's contact collection has actually been
+/// applied to this index.
+///
+/// It exists because asking is not receiving. `ix/ab/sync` says the phone was asked; the snapshot it
+/// answers with can still be refused wholesale - `wacore`'s `snapshot_is_stale` drops any snapshot at
+/// or below the collection's persisted version (`"incoming v9 <= persisted v9"`), and the store
+/// persists that version while it never persists the collection's own records, so the contact actions
+/// it stands for are gone. A store in exactly that state is indistinguishable from a correctly synced
+/// one by `ix/ab/sync` alone, which is why 14/11 answered 0 for every saved name while the mark said
+/// the book had been asked for. This is the mark that separates "asked" from "received".
+fn key_address_full() -> String {
+    format!("{PREFIX}ab/full")
+}
+
+/// Has a full-sync snapshot of the contact collection reached this index?
+pub async fn address_full_done<S: Store>(store: &S) -> Result<bool, String> {
+    Ok(store.get(key_address_full().as_bytes()).await?.is_some())
+}
+
+/// Record that one has (see [`key_address_full`]).
+pub async fn mark_address_full<S: Store>(store: &S) -> Result<(), String> {
+    store.set(key_address_full().as_bytes(), b"1").await
+}
+
+/// `ix/ab/reset` -> a word: this store has already forced ONE full app-state resync of the contact
+/// collection, in the hope that the snapshot it was never able to apply would finally be applied.
+///
+/// It is what keeps the recovery bounded: a store whose account genuinely has no saved contacts asks
+/// for the collection once, spends the reset, and never asks again. Without it, "no `ix/ab/full` yet"
+/// would be a reason to resync the collection on every boot forever.
+fn key_address_reset() -> String {
+    format!("{PREFIX}ab/reset")
+}
+
+/// Has this store already forced its one resync for the contact collection?
+pub async fn address_reset_done<S: Store>(store: &S) -> Result<bool, String> {
+    Ok(store.get(key_address_reset().as_bytes()).await?.is_some())
+}
+
+/// Record that it has (see [`key_address_reset`]).
+pub async fn mark_address_reset<S: Store>(store: &S) -> Result<(), String> {
+    store.set(key_address_reset().as_bytes(), b"1").await
+}
+
+/// The collection whose `contact` actions carry the phone's address book.
+///
+/// `regular` is where WhatsApp keeps the address book, and where every other chat action (archive,
+/// pin, mute, star) lives too: the collection cannot be split, so a resync of it re-delivers all of
+/// them. They are idempotent setters applied the way a newly linked device applies them, which is
+/// exactly what a full app-state resync is.
+pub const CONTACT_COLLECTION: &str = "regular";
+
+/// What the first connected tick of a boot must do about the address book.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressBookAsk {
+    /// Ask the phone for the whole collection: this store has never asked.
+    Ask,
+    /// The persisted version already claims a state the index never received, so asking alone would
+    /// be answered with a snapshot that is dropped as stale. Reset the persisted version first (a
+    /// standard full app-state resync), then ask.
+    ResetThenAsk,
+    /// Nothing: a full snapshot has been received, or the one forced resync has been spent.
+    Done,
+}
+
+/// Decide what this store's address book needs, with no I/O of its own.
+///
+/// The inputs are the four facts that decide it: the collection's persisted version, whether a full
+/// snapshot ever reached the index, whether the one resync was already spent, and whether the phone
+/// was asked before. The order of the tests is the point, and each line is a measured state:
+///
+/// * `full` first: a store that received the book needs nothing, whatever else is true of it.
+/// * a version above zero that no snapshot ever delivered (`full == false`) is the 14/11 state, and
+///   asking again would be dropped again - the version is what hides the collection.
+/// * only then the once-per-store ask, which is the 13/11 path for a store that has never asked.
+pub fn address_book_ask(persisted_version: u64, full: bool, reset: bool, asked: bool) -> AddressBookAsk {
+    if full {
+        return AddressBookAsk::Done;
+    }
+    if persisted_version > 0 && !reset {
+        return AddressBookAsk::ResetThenAsk;
+    }
+    if asked {
+        return AddressBookAsk::Done;
+    }
+    AddressBookAsk::Ask
+}
+
+/// What the index needs from the app-state store, and nothing more.
+///
+/// Two calls, both about ONE collection's version: the version it persisted, and the write that takes
+/// it back to zero. The device record, the sync keys and the mutation MACs of any other collection are
+/// deliberately not reachable from here - a resync of the address book must never be able to touch the
+/// identity or the pairing, and the way to guarantee that is to have no call for it.
+pub trait AppStateVersions {
+    fn persisted_version(&self, collection: &str) -> impl std::future::Future<Output = Result<u64, String>>;
+    /// Reset one collection's local version so the next snapshot is applied as fresh.
+    fn reset_collection(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>>;
+}
+
+/// Bring this store's address book to the index, once: reset the persisted version when that is what
+/// is hiding the collection, then answer whether the whole book must be asked for now.
+///
+/// `Err` is a store that cannot be read or written; the caller keeps its previous state in that case
+/// rather than deciding on half the facts.
+pub async fn ensure_address_book<S: Store, A: AppStateVersions>(store: &S, app: &A) -> Result<AddressBookAsk, String> {
+    let full = address_full_done(store).await?;
+    let reset = address_reset_done(store).await?;
+    let asked = address_sync_done(store).await?;
+    let version = app.persisted_version(CONTACT_COLLECTION).await?;
+    let decision = address_book_ask(version, full, reset, asked);
+    if decision == AddressBookAsk::ResetThenAsk {
+        app.reset_collection(CONTACT_COLLECTION).await?;
+        mark_address_reset(store).await?;
+    }
+    Ok(decision)
+}
+
 /// Most names one card keeps: enough for a person's rename history and a group's active members,
 /// few enough that the row stays small.
 const CARD_NAMES: usize = 12;
@@ -1154,7 +1272,7 @@ pub async fn address_count<S: Store>(store: &S, cap: usize) -> Result<(usize, bo
             return Ok((count, false));
         }
         cursor = page.last().map(|(key, _)| key.clone());
-        count += page.len();
+        count += page.iter().filter(|(key, _)| is_contact_row(key)).count();
         if page.len() < PAGE {
             return Ok((count, false));
         }
@@ -1162,6 +1280,19 @@ pub async fn address_count<S: Store>(store: &S, cap: usize) -> Result<(usize, bo
             return Ok((count, true));
         }
     }
+}
+
+/// Whether one `ix/ab/` row is an address-book CONTACT and not one of the marks that live beside
+/// them (`ab/sync`, `ab/full`, `ab/reset`).
+///
+/// The distinction is load-bearing: the marks share the prefix, and counting them made the answer say
+/// `address_book: 1` for a store that held no contact at all - the 14/11 observation, where the one
+/// counted row was the "asked once" mark itself. Every contact row is keyed by the JID it belongs to
+/// (`set_contact` only writes `@s.whatsapp.net` and `@lid` addresses), so a row whose suffix carries no
+/// `@` is a mark. Written as a property rather than a list of the three names so a mark added later
+/// cannot quietly start counting as a person.
+fn is_contact_row(key: &[u8]) -> bool {
+    key.iter().any(|byte| *byte == b'@')
 }
 
 /// Record a group's subject, when this node fetched it (the alert line, or a metadata lookup).
