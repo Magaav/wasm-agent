@@ -331,14 +331,22 @@ fn key_address_full() -> String {
     format!("{PREFIX}ab/full")
 }
 
-/// Has a full-sync snapshot of the contact collection reached this index?
+/// Has the book reached this index FROM THE COLLECTION THAT CARRIES IT?
+///
+/// The mark stores the collection's own name, not a bare flag, because a bare flag cannot say which
+/// collection it is about - and the 14/11 night deploy proved what that costs. That build wrote this mark
+/// after asking `regular`, a collection that carries no contact at all, so a store on the account node now
+/// holds a "received" mark for a book it never received. Reading the value against
+/// [`CONTACT_COLLECTION`] is what makes that mark stale rather than binding: `1` is not
+/// `critical_unblock_low`, so the recovery runs again instead of settling on a claim that was wrong.
 pub async fn address_full_done<S: Store>(store: &S) -> Result<bool, String> {
-    Ok(store.get(key_address_full().as_bytes()).await?.is_some())
+    let Some(value) = store.get(key_address_full().as_bytes()).await? else { return Ok(false) };
+    Ok(value == CONTACT_COLLECTION.as_bytes())
 }
 
-/// Record that one has (see [`key_address_full`]).
+/// Record that one has (see [`key_address_full`]): the collection it arrived from.
 pub async fn mark_address_full<S: Store>(store: &S) -> Result<(), String> {
-    store.set(key_address_full().as_bytes(), b"1").await
+    store.set(key_address_full().as_bytes(), CONTACT_COLLECTION.as_bytes()).await
 }
 
 /// `ix/ab/attempts` -> a decimal count: how many full-snapshot requests this connection has spent
@@ -386,13 +394,24 @@ pub async fn clear_address_attempts<S: Store>(store: &S) -> Result<(), String> {
 /// reconnect; few enough that a device whose key will never arrive does not ask forever.
 pub const ADDRESS_ATTEMPT_CAP: u32 = 6;
 
-/// The collection whose `contact` actions carry the phone's address book.
+/// The collection that carries the phone's address book.
 ///
-/// `regular` is where WhatsApp keeps the address book, and where every other chat action (archive,
-/// pin, mute, star) lives too: the collection cannot be split, so a resync of it re-delivers all of
-/// them. They are idempotent setters applied the way a newly linked device applies them, which is
-/// exactly what a full app-state resync is.
-pub const CONTACT_COLLECTION: &str = "regular";
+/// It is NOT `regular`, and the 14/11 night deploy is why this is written down: the index asked `regular`
+/// for a full snapshot, logged `the contact collection synced to v9 and carried no saved contact: this
+/// account has none on the phone`, and the operator's phone had his wife saved.
+///
+/// The protocol's own schema registry says where contacts live, and it is a different collection:
+/// `wacore_appstate::schemas::CONTACT` (action `contact`, field `contactAction`) and
+/// `wacore_appstate::schemas::LID_CONTACT` (action `lid_contact`, field `lidContactAction`) are BOTH
+/// declared on `Collection::CriticalUnblockLow`, and those two are the only contact actions in the
+/// registry. `whatsapp-rust` writes the same thing where it sends one: `WAWebContactSync writes
+/// ["contact", jid] to critical_unblock_low` (`features/chat_actions.rs`). So this is the one collection
+/// to ask, and asking any other one can only ever answer "not here".
+///
+/// It also carries `lid_contact`, the `@lid`<->PN pairing; `whatsapp-rust` does not dispatch that action
+/// as an event, so the mapping this index keeps comes from the `lidJid`/`pnJid` fields of the `contact`
+/// action itself (`guest`'s contact handler).
+pub const CONTACT_COLLECTION: &str = "critical_unblock_low";
 
 /// What one attempt at bringing the address book in must do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,10 +422,14 @@ pub enum AddressBookStep {
     Requested { attempts: u32, reset: bool },
     /// The index holds the book. Nothing is ever owed again for this store.
     Received,
-    /// The collection synced back to a version above zero after this node reset it, and delivered no
-    /// contact action: the account has no saved contacts. That IS the whole address book, so it is
-    /// recorded as received and the answer stops describing a sync that never happened.
-    SyncedEmpty { version: u64 },
+    /// The collection synced back to a version above zero after this node reset it - so an answer WAS
+    /// applied and the request was not skipped.
+    ///
+    /// Deliberately only that fact. What the sync CARRIED is the caller's to count (the action events it
+    /// observes), because a version moving says nothing about the mutations: the 14/11 deploy turned
+    /// exactly this state into "this account has none on the phone", which the data did not support and
+    /// which was wrong.
+    Synced { version: u64 },
     /// No app-state sync key is stored. The snapshot cannot be decoded at all, and the key can only
     /// come from the phone, so this is the one state that must be SAID rather than retried.
     KeysMissing,
@@ -421,7 +444,8 @@ pub enum AddressBookStep {
 /// * `full` first: a store that received the book - or proved it has none - is finished forever.
 /// * no key: nothing can be decoded, and only the phone can fix it. Said, not retried.
 /// * a reset this process performed, followed by a version above zero, is the collection having synced
-///   back (the processor is the only writer of a version) and carried no contact.
+///   back - the processor is the only writer of a version - so an answer was applied. It says nothing
+///   about WHAT was in it.
 /// * the budget, so a device that cannot be answered does not ask forever.
 /// * otherwise ask, resetting first when a persisted version is what would get the snapshot dropped as
 ///   stale (`wacore`'s `snapshot_is_stale`: `incoming v9 <= persisted v9`).
@@ -439,7 +463,7 @@ pub fn address_book_decision(
         return AddressBookStep::KeysMissing;
     }
     if reset_performed && persisted_version > 0 {
-        return AddressBookStep::SyncedEmpty { version: persisted_version };
+        return AddressBookStep::Synced { version: persisted_version };
     }
     if attempts >= ADDRESS_ATTEMPT_CAP {
         return AddressBookStep::Exhausted { attempts };
@@ -486,10 +510,10 @@ pub async fn advance_address_book<S: Store, A: AddressBookAppState>(
         AddressBookStep::Received | AddressBookStep::KeysMissing | AddressBookStep::Exhausted { .. } => {
             Ok(decision)
         }
-        AddressBookStep::SyncedEmpty { .. } => {
-            // The collection is in the index and holds no contact: the phone's address book is empty.
-            // Marking it received is the honest record of that, and it is what stops every later
-            // connection from resetting a collection that has nothing left to deliver.
+        AddressBookStep::Synced { .. } => {
+            // An answer was applied to this collection. The loop settles on it - asking again would bring
+            // the same answer - and the caller reports what it OBSERVED it to carry, which is the only
+            // thing this state establishes.
             let _ = mark_address_full(store).await;
             Ok(decision)
         }

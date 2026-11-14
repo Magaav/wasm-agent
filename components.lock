@@ -88,35 +88,48 @@
 # `scripts/publish-components.sh --from <the bundle's artifacts>` and not a rebuild: the pin names bytes,
 # and the bundle is where those bytes are.
 #
-# THE LINE ABOVE, MOVED TWICE ON 14/11 (change/abook). One defect, one component, and the second move
-# is what the first one's live evidence taught.
+# THE LINE ABOVE, MOVED THREE TIMES ON 14/11 (change/abook). One component, one defect, and each move is
+# what the previous one's live evidence taught.
 #
-# FIRST MOVE. The address book the phone had already synced never reached the index. The store persists
-# the `regular` collection's VERSION and never its records, so a restart left v9 in the store and nothing
-# of v9 in memory, and `wacore`'s `snapshot_is_stale` then dropped the snapshot the 13/11 full-sync
-# request brought back - `incoming v9 <= persisted v9` - so no contact action was ever applied and no
-# saved name was ever written. It also counted its own `ix/ab/` marks as contacts, which is why the
-# answer said `address_book: 1` for a store that held none.
+# FIRST MOVE (f63419ec). The address book the phone had already synced never reached the index: the store
+# persists the `regular` collection's VERSION and never its records, so a restart left v9 in the store and
+# nothing of v9 in memory, and `wacore`'s `snapshot_is_stale` dropped the snapshot the 13/11 request
+# brought back (`incoming v9 <= persisted v9`). It also counted its own `ix/ab/` marks as contacts, which
+# is why the answer said `address_book: 1` for a store that held none.
 #
-# SECOND MOVE (f63419ec -> 09a59eb3), because the first one's deploy proved that resetting the version
-# and firing one request is not a fetch: the live log showed the reset, then the request, then nothing at
-# all for 25 minutes with `address_book: 0`. `process_sync_task` - the only public way to ask - returns
-# `()` and can return WITHOUT contacting the server (`EquivalentSyncInFlight` when the connect-time sync
-# holds the collection; `Deferred` when the connection cannot reach the server yet), both at `debug!`.
-# The component now drives the request from its own supervised loop on a timer while `ix/ab/full` is
-# unset, resets the version immediately before each request instead of racing the bootstrap's write-back,
-# and names the states that must not be silent: no app-state sync key (the phone has to share it), and the
-# per-connection budget spent.
+# SECOND MOVE (09a59eb3). That deploy proved resetting the version and firing ONE request is not a fetch:
+# the log showed the reset, the request, then nothing at all for 25 minutes. `process_sync_task` - the only
+# public way to ask - returns `()` and can return WITHOUT contacting the server (`EquivalentSyncInFlight`
+# while the connect-time sync holds the collection; `Deferred` before the connection can reach the server),
+# both at `debug!`. The component now drives the request from its own supervised loop and names the states
+# that must not be silent (no app-state sync key; budget spent).
 #
-# The bytes here are the build of 350d40d4 in the checkout /home/wa/wt-abook on wa-desktop (rustc 1.99.1,
+# THIRD MOVE (afab865f). That deploy asked the WRONG COLLECTION. Contacts are not in `regular`:
+# `wacore_appstate::schemas::CONTACT` and `schemas::LID_CONTACT` are both declared on
+# `Collection::CriticalUnblockLow`, and `whatsapp-rust` says the same where it writes one
+# ("WAWebContactSync writes ["contact", jid] to critical_unblock_low"). `regular` carries pins, archives,
+# mutes and stars, so a full snapshot of it applies, advances the version, and carries nothing this index
+# reads. The component now asks `critical_unblock_low` only, and the closing line reports what it OBSERVED
+# (the collection, the version, the app-state action events counted and of which kinds) instead of
+# concluding anything about the phone - the previous line claimed the account had no saved contact, which
+# was false. A test asserts the collection against the schema registry, so this cannot drift back.
+#
+# FOURTH MOVE (4e0ddf27), the one that makes the third take effect on the live node. `ix/ab/full` used to be
+# a bare flag, and the third build wrote it after asking `regular`, so the account node's store holds a
+# "book received" mark for a book it never received - and the fixed build would have read it and asked
+# nothing. The mark now stores the collection's own name and is read against `CONTACT_COLLECTION`, so a
+# legacy flag is stale rather than binding.
+#
+# The bytes here are the build of the latest commit of change/abook in the checkout /home/wa/wt-abook on
+# wa-desktop (rustc 1.99.1,
 # wasi-sdk 34). Measured rather than assumed: two builds of that commit in that ONE path are
-# byte-identical (09a59eb3 twice, each with a fresh CARGO_TARGET_DIR), and two checkout paths are NOT
-# equal - the earlier build of this same change measured 8,754,838 / f63419ec in /home/wa/wt-abook against
-# 8,754,778 / 20e0516a in /home/wa/wt-abook-b at one commit, the `-C metadata` of the
-# `wa-whatsapp-index` and `wa-whatsapp-outbox` path dependencies (docs/COMPONENTS.md, "Reproducible
-# builds"). A pin names ONE build: the bundle `artifacts/components-<sha12 of this file>` holds these
-# bytes, each verified against these lines before it was committed. The ten other lines are untouched and
-# carry the exact bytes they already named.
+# byte-identical (4e0ddf27 twice, each with a fresh CARGO_TARGET_DIR), and two checkout paths are NOT
+# equal for a component with a path dependency (the first build of this change measured 8,754,838 /
+# f63419ec in /home/wa/wt-abook against 8,754,778 / 20e0516a in /home/wa/wt-abook-b at one commit) -
+# Cargo's `-C metadata` from the absolute path of `wa-whatsapp-index` and `wa-whatsapp-outbox`
+# (docs/COMPONENTS.md, "Reproducible builds"). A pin names ONE build: the bundle
+# `artifacts/components-<sha12 of this file>` holds these bytes, each verified against these lines before
+# it was committed. The ten other lines are untouched and carry the exact bytes they already named.
 #
 # FORMAT: <name> <sha256> <bytes>. Regenerate a line on the machine that produces the release
 # artifacts, from the reviewed tree:
@@ -153,4 +166,4 @@ model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 4
 selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email ddbe326a5d394a0dc50a0c947740a1364e4cdeda348286666a3ba21569893915 565827
-wa-whatsapp 09a59eb318d12a5b3d939ea760e87a79edce417850310d8a016327c572f7ba54 8759964
+wa-whatsapp 4e0ddf273245b5039e70b1f99ab1467e13dab6b505f1c967077d0d07e1e84cfb 8767529
