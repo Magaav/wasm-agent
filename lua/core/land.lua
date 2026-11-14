@@ -20,12 +20,12 @@
 --     STOP, not a green: a check that fails while agents load the machine and passes alone is a fact a
 --     human decides on, never something this module silently ignores.
 --   * it is honest about what it did not do. A step this node cannot perform (no GitHub credential, no
---     `gh`, a reviewer that is not on main) is recorded `blocked` or `skipped` with the exact command that
---     would finish it - never as done.
+--     `gh`) is recorded `blocked` or `skipped` with the exact command that would finish it - never as done.
 --
--- WHAT IT DOES NOT DO. It invents no review, no signature, no publish and no deployment. Where a channel
--- is not on main yet the step stands in the journal as a TODO naming the file it looks for and the test
--- that enables it.
+-- WHAT IT DOES NOT DO. It invents no signature, no publish and no deployment. Where a channel is not on main
+-- yet the step stands in the journal as a TODO naming the file it looks for and the test that enables it.
+-- The review is NOT such a channel any more: `wa land` runs the reviewer that landed (`wa eval reviewer`)
+-- on every branch before the merge, through the reviewer's own door - see `impl.review`.
 --
 --   wa land --ready                    land every branch with a `READY <branch> <sha>` line
 --   wa land --branches a,b             land exactly these branches
@@ -36,10 +36,11 @@
 --   wa land --resume                   continue the newest unfinished run from its failed step
 --   wa land --run <id> --resume        continue that run
 --   wa land status [--run <id>]        the journal as text (read-only)
---   wa land ready <branch> <sha>       record a READY line for an agent's finished branch
+--   wa land ready <branch> <sha> [--brief <file>]   record a READY line for an agent's finished branch
 --
 -- The runner is one seam (`M.exec`) so a test can script git, the gate and the nodes without a network, a
--- compiler or a fleet; production uses the host's own `exec`.
+-- compiler or a fleet; production uses the host's own `exec`. The review's binary is a second, smaller seam
+-- (`M.review_binary_path`) for the same reason: a test stands a fake reviewer where the binary would be.
 local M = {}
 
 local json = dofile("lua/vendor/json.lua")
@@ -279,9 +280,6 @@ end
 -- arrives after a stopped run is not thrown away with the build.
 M.STEPS = { "collect", "plan", "review", "merge", "gate", "push", "main", "artifacts", "sign", "ship", "publish", "deploy", "report" }
 
--- The two channels the mission names as conditional. Both are looked up in the LANDED TREE, so "is it on
--- main" is answered by the tree being landed and not by this machine's opinion.
-M.REVIEW_SCRIPT = "scripts/review-branch.mjs"
 -- The one command that signs a release's SHA256SUMS, run on whichever host can reach the vault
 -- (`scripts/sign-release.sh` is a thin wrapper over `scripts/lib/release-signing.sh`).
 M.SIGN_SCRIPT = "scripts/sign-release.sh"
@@ -353,8 +351,10 @@ M.ACCOUNT_NODE = "openclaw"
 -- speed: they are the hand-run round of 13/11 (merge + code-mode build 3-5 min, gate 4-6, release 7-9,
 -- sign+publish 2-5, four deploys in series 15-20), split per step and per path, so the first ever plan is
 -- still comparable with what follows it. Every later plan uses the journal's own medians instead.
+-- `review` is 5s because the step only STARTS the reviews now: they run beside the merge and the gate, and the
+-- join is inside `report` (whose seconds carry whatever the landing waited for them at the end).
 M.ESTIMATE_DEFAULTS = {
-  collect = 40, review = 60, plan = 5, merge = 150, gate = 300, push = 30, main = 30,
+  collect = 40, review = 5, plan = 5, merge = 150, gate = 300, push = 30, main = 30,
   artifacts = 480, sign = 150, ship = 120, publish = 180, deploy = 960, report = 5,
 }
 -- Per path, the parts that differ: a Lua-only round signs a small record (seconds) and ships nothing; a
@@ -630,13 +630,22 @@ impl.collect = function(run, options)
   elseif options.ready then
     local box = M.ready_file()
     local text = read(box) or ""
+    -- `READY <branch> <sha>` and, when the box knows one, ` brief=<file>`: the brief is the operator's text for
+    -- the branch and it is what the reviewer reads beside the diff. The LAST line for a branch wins, because the
+    -- box is rewritten when a line is re-recorded.
+    local order, wanted_of = {}, {}
     for line in text:gmatch("[^\r\n]+") do
-      local branch, sha = line:match("^%s*READY%s+(%S+)%s+(%x+)")
-      if branch then wanted[#wanted + 1] = { name = branch, sha = sha } end
+      local branch, sha, rest = line:match("^%s*READY%s+(%S+)%s+(%x+)%s*(.*)$")
+      if branch then
+        local brief = tostring(rest or ""):match("brief=(%S+)")
+        if not wanted_of[branch] then order[#order + 1] = branch end
+        wanted_of[branch] = { name = branch, sha = sha, brief = brief }
+      end
     end
+    for _, branch in ipairs(order) do wanted[#wanted + 1] = wanted_of[branch] end
     if #wanted == 0 then
       return false, { error = "ready_empty", observed = "no `READY <branch> <sha>` line in " .. box,
-        next = "record one: wa land ready change/<name> <sha>" }
+        next = "record one: wa land ready change/<name> <sha> [--brief <file>]" }
     end
   else
     return false, { error = "no_branches", observed = "neither --branches nor --ready was given",
@@ -663,8 +672,9 @@ impl.collect = function(run, options)
         next = "the branch moved after it was declared ready: land the new tip (wa land --branches " .. want.name ..
           ") or find out what pushed to it" }
     end
-    branches[#branches + 1] = { name = want.name, sha = tip, ref = ref }
-    evidence(string.format("%s -> %s (%s)\n", want.name, tip, ref))
+    branches[#branches + 1] = { name = want.name, sha = tip, ref = ref, brief = want.brief }
+    evidence(string.format("%s -> %s (%s)%s\n", want.name, tip, ref,
+      (want.brief and want.brief ~= "") and (" brief " .. want.brief) or ""))
   end
   run.journal.base = base
   run.journal.base_ref = base_ref
@@ -995,34 +1005,265 @@ function M.plan_text(journal)
   return table.concat(lines, "\n")
 end
 
--- review: the reviewer runs on each branch BEFORE it is merged, and its findings are reported without ever
--- blocking. The channel is not on main yet (change/reviewer), so the step detects it in the landed tree
--- instead of assuming it: absent means `skipped` plus a TODO naming the file and the test that turns it on.
+-- review: the landing reviewer (lua/core/harness_evaluator_reviewer.lua), on every branch of the round and
+-- BEFORE that branch is merged, through the ONE door an operator uses - `wa eval reviewer <branch>` (the
+-- same module, the same opt-out switch, the same store). There is no second reviewer and no wrapper script.
+--
+-- Each review is a PROCESS OF ITS OWN, started here and joined at the `report` step, so it runs while the
+-- merge, the gate and everything after them run: `host.exec` returns as soon as the shell exits, so a child
+-- that redirects its own streams outlives that call (measured on this host, 14/11), and the landing does not
+-- sit waiting for a model. Findings are evidence about the branch, never a verdict on it: nothing in this
+-- step, and nothing in the join, can stop a landing.
+--
+-- What it replaces: the step used to look for `scripts/review-branch.mjs` in the landed tree and skip with
+-- "reviewer not on main" - a file that never existed, so the review step would have skipped forever while the
+-- reviewer that DID land (`wa eval reviewer`) ran only when an operator typed it.
+M.REVIEW_WAIT = 900
+
+-- The reviewer's module, loaded the way `wa eval reviewer` loads it: the same file, so the switch, the model
+-- and the store are one implementation. `pcall` because a checkout without it is a sentence to report, not a
+-- crash in the middle of a landing.
+function M.review_engine()
+  local ok, engine = pcall(dofile, "lua/core/harness_evaluator_reviewer.lua")
+  if not ok or type(engine) ~= "table" or type(engine.switch) ~= "function" then
+    return nil, "the reviewer module could not be loaded: " .. tostring(engine)
+  end
+  return engine
+end
+
+-- The binary a review runs with: the one this landing is running as, unless a test names another. A review
+-- started from a door that resolves its own binary could otherwise be a different build from the tree being
+-- landed.
+function M.review_binary()
+  if M.review_binary_path and M.review_binary_path ~= "" then return slashes(M.review_binary_path) end
+  local ok, raw = pcall(host.runtime_info)
+  local info = ok and (type(raw) == "string" and json.decode(raw) or raw) or nil
+  local path = type(info) == "table" and info.binary_path or nil
+  if type(path) == "string" and path ~= "" then return slashes(path) end
+  return nil, "no binary to run the reviewer with (host.runtime_info() names no binary_path)"
+end
+
+-- One file stem per branch under the run's own directory: the reviewer's answer, its log and its exit code
+-- are evidence beside the rest of the round's, not scratch in a temporary directory.
+local function review_stem(run, branch)
+  local slug = tostring(branch or "branch"):lower():gsub("[^a-z0-9._-]", "-"):gsub("%-+", "-")
+  if slug == "" then slug = "branch" end
+  return M.run_dir(run.id) .. "/review/" .. slug
+end
+
+-- Is the review's process still there? `kill -0` says whether the pid exists without touching it.
+function M.review_alive(pid)
+  local number = tonumber(pid)
+  if not number then return false end
+  local probe = M.exec("kill -0 " .. tostring(number) .. " 2>/dev/null && echo alive || echo gone", "", 60)
+  return tostring(probe.stdout or ""):find("alive", 1, true) ~= nil
+end
+
+-- Start ONE review in the background and record what is needed to join it: its branch and tip, the base it
+-- is diffed against, the brief it was given, its pid, its answer file, its log and its exit code.
+--
+-- The answer file is the reviewer's own `--json` (added to that door for exactly this caller): "the review ran,
+-- here are its findings" and "the review could not run, here is why" arrive in the same place, so a landing
+-- never has to read a sentence to learn which happened.
+function M.review_start(run, branch, base, repo, bin)
+  local stem = review_stem(run, branch.name)
+  local job = { branch = branch.name, ref = branch.ref, sha = branch.sha, base = base,
+    brief = branch.brief, json = stem .. ".json", log = stem .. ".log", code_path = stem .. ".code",
+    started_at = now() }
+  M.exec("mkdir -p " .. quote(M.run_dir(run.id) .. "/review"), "", 120)
+  local parts = { quote(bin), "eval", "reviewer", quote(branch.name), "--repo", quote(repo),
+    "--base", quote(base), "--bin", quote(bin), "--json", quote(job.json) }
+  if job.brief and job.brief ~= "" then
+    parts[#parts + 1] = "--brief"
+    parts[#parts + 1] = quote(job.brief)
+  end
+  -- `{ ...; } & echo $!` starts the review, leaves its streams in files (so the shell that started it exits
+  -- at once instead of holding a pipe open) and answers its pid; the trailing `echo $? >` is what tells the
+  -- join that the review finished with which exit, even when it wrote no answer.
+  local command = "{ " .. table.concat(parts, " ") .. " > " .. quote(job.log) .. " 2>&1; echo $? > "
+    .. quote(job.code_path) .. "; } & echo $!"
+  job.command = command
+  local started = M.exec(command, repo, 120)
+  job.pid = tonumber((trim(started.stdout):match("%d+") or ""))
+  if (started.code or 1) ~= 0 or not job.pid then
+    return nil, "the review could not be started: "
+      .. first_line((started.stderr or "") ~= "" and started.stderr or started.stdout)
+  end
+  return job
+end
+
 impl.review = function(run, options)
   local evidence = sink(run, "review")
-  local tree = M.repo()
   local base = run.journal.base
-  local present = git(run, tree, "cat-file -e " .. quote(base .. ":" .. M.REVIEW_SCRIPT)).code == 0
-  if not present then
-    run.journal.todos[#run.journal.todos + 1] = {
-      item = "reviewer", state = "not_on_main", looks_for = M.REVIEW_SCRIPT,
-      test = "scripts/test-land.lua's reviewer case stands a fixture " .. M.REVIEW_SCRIPT ..
-             " in a tree and asserts the findings reach the journal and never stop a landing",
-      enable = "land change/reviewer, then this step runs " .. M.REVIEW_SCRIPT .. " on every branch before the merge",
-    }
-    return true, { state = "skipped", detail = "reviewer not on main (" .. M.REVIEW_SCRIPT .. " absent at " .. base:sub(1, 12) .. ")" }
+  local repo = run.journal.repo or M.repo()
+  local branches = run.journal.branches or {}
+  if not base or #branches == 0 then
+    return true, { state = "skipped", detail = "nothing to review: no branch was collected" }
   end
-  local findings = {}
-  for _, branch in ipairs(run.journal.branches) do
-    local command = "node " .. M.REVIEW_SCRIPT .. " --branch " .. quote(branch.sha) .. " --base " .. quote(base) .. " --json"
-    evidence(command_line("review " .. branch.name, command))
-    local result = M.exec(command, tree, 1800)
-    evidence((result.stdout or "") .. (result.stderr or ""))
-    findings[#findings + 1] = { branch = branch.name, exit_code = result.code,
-      findings = trim(result.stdout):sub(1, 4000) }
+  local engine, engine_error = M.review_engine()
+  if not engine then
+    return true, { state = "skipped", detail = "review unavailable: " .. tostring(engine_error) }
   end
-  run.journal.review = findings
-  return true, { detail = string.format("%d branch(es) reviewed (findings are reported, never blocking)", #findings) }
+  -- The opt-out is the reviewer's OWN switch (`reviewer = off` in the node's config file, or WA_REVIEWER), read
+  -- through the reviewer's own module: a landing must not be a second place where "reviewer = off" can mean
+  -- something else.
+  local switch = engine.switch()
+  if not switch.on then
+    evidence("the reviewer is off (" .. tostring(switch.source) .. " = " .. tostring(switch.value) .. ")\n")
+    return true, { state = "skipped", detail = "reviewer off (" .. tostring(switch.source) .. " = "
+      .. tostring(switch.value) .. "): nothing was reviewed" }
+  end
+  local bin, bin_error = M.review_binary()
+  if not bin then
+    return true, { state = "skipped", detail = "review unavailable: " .. tostring(bin_error) }
+  end
+  -- A resume must not review the same tip twice: a job already recorded for this branch and sha is kept, and
+  -- a job that never got a pid is dropped (it never ran, so it is retried rather than remembered as a review
+  -- that happened).
+  local kept, known = {}, {}
+  for _, job in ipairs(run.journal.review_jobs or {}) do
+    if job.pid then
+      kept[#kept + 1] = job
+      known[job.branch .. "@" .. tostring(job.sha)] = job
+    end
+  end
+  run.journal.review_jobs = kept
+  local started, refused = 0, {}
+  for _, branch in ipairs(branches) do
+    local known_job = known[branch.name .. "@" .. tostring(branch.sha)]
+    if known_job then
+      evidence(string.format("%s is already being reviewed (started %s, pid %s): not started again\n",
+        tostring(branch.name), tostring(known_job.started_at), tostring(known_job.pid)))
+      started = started + 1
+    else
+      local job, problem = M.review_start(run, branch, base, repo, bin)
+      evidence(command_line("review " .. tostring(branch.name), job and job.command or "(not started)"))
+      if job then
+        run.journal.review_jobs[#run.journal.review_jobs + 1] = job
+        started = started + 1
+        evidence(string.format("started pid %s: it answers in %s, its log is %s\n", tostring(job.pid),
+          tostring(job.json), tostring(job.log)))
+      else
+        -- Recorded as a job so the report shows the branch by name with "review unavailable: <reason>" - the
+        -- sentence this step must never replace with silence.
+        run.journal.review_jobs[#run.journal.review_jobs + 1] = { branch = branch.name, sha = branch.sha,
+          started_at = now(), start_failed = tostring(problem) }
+        refused[#refused + 1] = tostring(problem)
+        evidence("review unavailable: " .. tostring(problem) .. "\n")
+      end
+    end
+  end
+  local detail = string.format("%d review(s) started, joined at the report (findings are never blocking)", started)
+  if #refused > 0 then
+    detail = string.format("%d started, %d review unavailable: %s", started, #refused, refused[1])
+  end
+  return true, { state = started > 0 and "started" or "skipped", detail = detail }
+end
+
+-- Join the reviews the review step started: wait for each process (bounded by M.REVIEW_WAIT, because a review
+-- is a model session of minutes and the landing it overlaps usually outlasts it), then write one row per
+-- branch into the journal and into the review step. Called by `report` - the step that runs last and runs even
+-- when the machine stopped - so the findings are in the journal and the report whatever happened.
+--
+-- A review that failed, answered about another commit, or has not finished is a ROW, never a stop and never a
+-- silence: its own words travel as "review unavailable: <reason>".
+function M.review_collect(run)
+  local jobs = run.journal.review_jobs or {}
+  if #jobs == 0 then return nil end
+  local limit = tonumber(M.REVIEW_WAIT) or 900
+  local deadline = now() + limit
+  local function finished(job)
+    if job.start_failed or job.finished then return true end
+    local code = read(job.code_path)
+    if code and trim(code) ~= "" then
+      job.finished, job.exit_code = true, tonumber(trim(code))
+      return true
+    end
+    if job.pid and not M.review_alive(job.pid) then
+      -- Gone without leaving an exit code: the process was killed (or the host cleaned it up with the call
+      -- that started it) and there is nothing to read. Said as such, not as "no findings".
+      job.finished, job.lost = true, true
+      return true
+    end
+    return false
+  end
+  local waiting = true
+  while waiting and now() < deadline do
+    waiting = false
+    for _, job in ipairs(jobs) do
+      if not finished(job) then waiting = true end
+    end
+    if waiting then M.sleep(1) end
+  end
+  -- One last look AFTER the bound, for two reasons: a review that finished while the report waited must not be
+  -- reported as still running, and a process that is gone is known without waiting for anything at all (a
+  -- bound of zero is a caller saying "say what you know now").
+  for _, job in ipairs(jobs) do finished(job) end
+  local rows = {}
+  for _, job in ipairs(jobs) do
+    local row = { branch = job.branch, sha = job.sha, base = job.base, log = job.log,
+      seconds = job.started_at and (now() - job.started_at) or nil }
+    local answer = job.json and json_file(job.json) or nil
+    if job.start_failed then
+      row.state = "unavailable"
+      row.unavailable = "review unavailable: " .. tostring(job.start_failed)
+    elseif answer then
+      row.review_id = answer.review_id
+      row.state = tostring(answer.state or "unknown")
+      row.findings = tonumber(answer.findings)
+      row.answer = tostring(answer.answer or ""):sub(1, 4000)
+      local answered = tostring(answer.sha or "")
+      if answer.ok ~= true or row.state ~= "reviewed" then
+        row.unavailable = "review unavailable: "
+          .. tostring(answer.error or ("the reviewer answered " .. tostring(row.state)))
+      elseif answered ~= "" and answered ~= job.sha then
+        -- The review is about a commit, and a tip that moved under it is not this branch's review.
+        row.unavailable = "review unavailable: the reviewer answered about " .. answered:sub(1, 12)
+          .. ", not " .. tostring(job.sha):sub(1, 12)
+      end
+    elseif job.lost then
+      row.state = "unavailable"
+      row.unavailable = "review unavailable: the review process is gone without an answer: "
+        .. first_line(read(job.log) or "")
+    elseif job.finished then
+      row.state = "unavailable"
+      local tail = tostring(read(job.log) or "")
+      local last = trim(tail:sub(-400)):sub(-200)
+      row.unavailable = "review unavailable: wa eval reviewer exited " .. tostring(job.exit_code or "?")
+        .. (last ~= "" and (": " .. last) or "")
+    else
+      row.state = "running"
+      row.unavailable = "review unavailable: still running after " .. tostring(limit)
+        .. "s - its log is " .. tostring(job.log) .. " and its record arrives in `wa eval reviewer list`"
+    end
+    rows[#rows + 1] = row
+  end
+  run.journal.review = rows
+  local step = step_of(run.journal, "review")
+  local reviewed, findings, missing = 0, 0, {}
+  for _, row in ipairs(rows) do
+    if row.state == "reviewed" and not row.unavailable then
+      reviewed = reviewed + 1
+      findings = findings + (tonumber(row.findings) or 0)
+    else
+      missing[#missing + 1] = tostring(row.unavailable)
+    end
+  end
+  -- The step's own `finished_at`/`seconds` are NOT touched: the plan learns a step's cost from them, and the
+  -- time the report spent joining the reviews is the report's, not the step's.
+  if reviewed > 0 then
+    step.state = "done"
+    step.detail = string.format("%d branch(es) reviewed, %d finding(s)", reviewed, findings)
+  else
+    -- Nothing was reviewed: the sentence IS the detail, so `wa land status` and the report cannot read this as
+    -- a review that happened and found nothing.
+    step.state = "done"
+    step.detail = table.concat(missing, "; ")
+  end
+  if #missing > 0 and reviewed > 0 then
+    step.detail = step.detail .. "; " .. table.concat(missing, "; ")
+  end
+  return rows
 end
 
 -- merge: a fresh worktree cut from the base, then one merge per branch. Conflicts stop the landing and keep
@@ -1834,6 +2075,14 @@ end
 -- report: one summary, written to a file and printed. It runs even when the machine stopped, because the
 -- thing it is for is a human reading what happened.
 impl.report = function(run, options)
+  -- The reviews were started by the `review` step and joined here: this is the one step that runs after every
+  -- other and also after a stop, so it is where findings become evidence. It cannot fail the landing (`pcall`),
+  -- and a join that throws is written down rather than swallowed.
+  local joined, problem = pcall(M.review_collect, run)
+  if not joined then
+    run.journal.review_error = tostring(problem)
+    print("land: report: the reviews could not be joined: " .. tostring(problem))
+  end
   local text = M.report_text(run.journal)
   write(M.report_path(run.id), text)
   print("")
@@ -1960,6 +2209,33 @@ function M.report_text(journal)
       local state = row.ok and "ok" or (row.retry and row.retry.ok and "FLAKY UNDER LOAD" or "failed")
       add(string.format("| %s | %s | %s | %s |", tostring(row.name), state, tostring(row.seconds or "-"), tostring(row.tests or "-")))
     end
+  end
+  -- The reviewer's findings, as evidence about the branch: each row names the review it came from, so the
+  -- operator can mark it (`wa eval reviewer mark <id>#<n>`) and the store keeps the history. A review that could
+  -- not run says so in its own column - never an empty one that reads as "nothing found".
+  if #(journal.review or {}) > 0 then
+    add("")
+    add("## review (findings are reported, never blocking)")
+    add("")
+    add("| branch | review | findings | state |")
+    add("| --- | --- | --- | --- |")
+    for _, row in ipairs(journal.review) do
+      add(string.format("| `%s` | %s | %s | %s |", tostring(row.branch), tostring(row.review_id or "-"),
+        tostring(row.findings or "-"), tostring(row.unavailable or row.state or "-"):gsub("|", "/")))
+    end
+    for _, row in ipairs(journal.review) do
+      if row.answer and row.answer ~= "" then
+        add("")
+        add(string.format("### %s - %s finding(s) (%s)", tostring(row.branch), tostring(row.findings or 0),
+          tostring(row.review_id or "review")))
+        add("")
+        add((tostring(row.answer):gsub("\r", "")))
+      end
+    end
+  end
+  if journal.review_error then
+    add("")
+    add("the reviews could not be joined: " .. tostring(journal.review_error))
   end
   if #(journal.todos or {}) > 0 then
     add("")
@@ -2175,6 +2451,11 @@ function M.dry_run(run, options)
     ("bash scripts/publish-lua-tree.sh --commit <landed> --out <run>/release")
     or (kind == "components" and ("bash scripts/publish-components.sh --out <run>/release")
     or ("WA_RELEASE_SIGN_DEFER=1 bash scripts/publish-node-binaries.sh --commit <landed> --out <run>/release"))
+  -- The review runs BESIDE the merge and the gate (one process per branch, joined by the report), so its line
+  -- says that and not "before the merge": a dry run that read as a serialised step would misreport the cost.
+  print("  " .. action_of("review") .. "      review       " .. (select(1, M.review_binary()) or "wa")
+    .. " eval reviewer <branch> --repo <repo> --base <base> [--brief <file>]; one process per branch,"
+    .. " in the background, joined by the report")
   print("  " .. action_of("artifacts") .. "      artifacts    " .. artifacts_command)
   -- `..` binds tighter than `or`, so the whole signer expression is parenthesised before it is concatenated:
   -- without those brackets a node with no signer concatenated nil (measured: `attempt to concatenate a nil
@@ -2218,22 +2499,42 @@ function M.status_text(journal)
   return table.concat(lines, "\n")
 end
 
-function M.ready_mark(branch, sha)
+function M.ready_mark(branch, sha, brief)
   if type(branch) ~= "string" or branch == "" or branch:find("%s") then
     return false, "branch_invalid"
   end
   if type(sha) ~= "string" or not sha:match("^%x+$") or #sha < 7 then
     return false, "sha_invalid"
   end
-  local existing = read(M.ready_file()) or ""
-  for line in existing:gmatch("[^\r\n]+") do
-    local name = line:match("^%s*READY%s+(%S+)")
-    if name == branch then return true, "already recorded" end
+  -- The brief is the file the reviewer reads beside the diff, and it travels ON the ready line because that
+  -- line is the one place this machine keeps a branch's intent: `READY <branch> <sha> brief=<path>`. It cannot
+  -- hold whitespace (the line is space-separated), and saying so is better than writing a line nothing parses.
+  if brief ~= nil and brief ~= "" then
+    if type(brief) ~= "string" or brief:find("%s") then return false, "brief_invalid: " .. tostring(brief) end
+  else
+    brief = nil
   end
-  local wrote = write(M.ready_file(), existing .. (existing ~= "" and not existing:match("\n$") and "\n" or "") ..
-    "READY " .. branch .. " " .. sha .. "\n")
+  local line = "READY " .. branch .. " " .. sha .. (brief and (" brief=" .. brief) or "")
+  local existing = read(M.ready_file()) or ""
+  local rows, replaced = {}, false
+  for _, row in ipairs(vsplit(existing, "\n")) do
+    local name, recorded = row:match("^%s*READY%s+(%S+)%s+(%x+)")
+    if trim(row) == "" then
+      -- an empty line is not a record: it is dropped rather than carried into the rewrite
+    elseif name == branch then
+      if recorded ~= sha then
+        return false, "ready_box_conflict: " .. branch .. " is recorded at " .. tostring(recorded)
+      end
+      rows[#rows + 1] = line
+      replaced = true
+    else
+      rows[#rows + 1] = trim(row)
+    end
+  end
+  if not replaced then rows[#rows + 1] = line end
+  local wrote = write(M.ready_file(), table.concat(rows, "\n") .. "\n")
   if not wrote then return false, "ready_box_unwritable: " .. M.ready_file() end
-  return true, "recorded"
+  return true, replaced and "recorded (replaced the line)" or "recorded"
 end
 
 -- ---------------------------------------------------------------- the CLI
@@ -2268,10 +2569,17 @@ function M.cli(argv)
     elseif flag == "ready" then
       local branch, sha = argv[index + 1], argv[index + 2]
       if type(branch) ~= "string" or type(sha) ~= "string" then
-        print("wa land ready needs a branch and a sha: wa land ready change/<name> <sha>")
+        print("wa land ready needs a branch and a sha: wa land ready change/<name> <sha> [--brief <file>]")
         return 2
       end
-      local ok, answer = M.ready_mark(branch, sha)
+      -- The brief is the operator's text for the branch, and the ready line is where this machine keeps it: the
+      -- reviewer reads it beside the diff, so a branch declared ready WITH its brief is reviewed against what it
+      -- was for and not only against its diff.
+      local brief = nil
+      for scan = index + 3, #argv do
+        if argv[scan] == "--brief" then brief = argv[scan + 1] end
+      end
+      local ok, answer = M.ready_mark(branch, sha, brief)
       print("wa land ready: " .. tostring(answer) .. (ok and (" - " .. branch .. " " .. sha) or ""))
       return ok and 0 or 1
     elseif flag == "--branches" then
@@ -2317,7 +2625,7 @@ function M.cli(argv)
       print("wa land --ready | --branches a,b [--dry-run] [--no-deploy] [--full] [--resume] [--run <id>]")
       print("wa land --rollback                 put every node's kept pair back (reverse ring order)")
       print("wa land status [--run <id>]        the journal, read-only")
-      print("wa land ready <branch> <sha>       record a READY line for a finished branch")
+      print("wa land ready <branch> <sha> [--brief <file>]   record a READY line for a finished branch")
       print("  --repo <dir> --incoming <remote> --origin <remote> --ring node:mode,... --json")
       print("  --canary <node> --account <node>  which node goes first (default work) and last (default openclaw)")
       print("  --full                 ignore the plan: run every step, even the ones this round does not need")

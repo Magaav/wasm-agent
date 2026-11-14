@@ -150,6 +150,21 @@ local function commit_of(repo, ref)
 end
 M.commit_of = commit_of
 
+-- A branch this checkout only FETCHED lives at `refs/remotes/<remote>/<name>`, and `git rev-parse <name>`
+-- does not answer for it. That is exactly the shape a landing works in: `wa land` fetches every READY branch
+-- into a remote-tracking ref and never makes a local branch of it, so a reviewer that only tried the bare
+-- name would answer "no such branch or commit" for every branch it was asked about (found while wiring the
+-- reviewer into `wa land`, 14/11). The branch name is the name the operator uses, so it resolves here.
+local function remote_branch_commit(repo, name)
+  if not name or name == "" then return nil end
+  local ok, out = git(repo, "for-each-ref --count=1 --format=" .. shquote("%(objectname)") .. " "
+    .. shquote("refs/remotes/*/" .. name))
+  local sha = ok and (out:match("^%x+") or "")
+  if sha ~= "" and #sha >= 7 then return sha end
+  return nil
+end
+M.remote_branch_commit = remote_branch_commit
+
 local function repo_root(cwd)
   local ran = exec("git rev-parse --show-toplevel", cwd or "", 60)
   if ran.status ~= 0 then return nil end
@@ -304,7 +319,7 @@ function M.run(opts)
 
   local repo = opts.repo and opts.repo ~= "" and opts.repo or repo_root(opts.cwd)
   if not repo then return nil, "not inside a git repository, so there is no branch to review" end
-  local sha = commit_of(repo, branch)
+  local sha = commit_of(repo, branch) or remote_branch_commit(repo, branch)
   if not sha then return nil, "no such branch or commit in " .. repo .. ": " .. branch end
   local base_ref, base_sha = resolve_base(repo, opts.base)
   if not base_ref then

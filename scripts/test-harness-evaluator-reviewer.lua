@@ -93,6 +93,17 @@ exec_git(repo, 'checkout -q main')
 check(host.write_file(repo .. '/main-only.txt', 'landed after the branch was cut\n'), 'main moves on')
 exec_git(repo, 'add -A')
 local main_sha = commit(repo, 'main moves on')
+-- A branch this checkout only FETCHED is `refs/remotes/<remote>/<name>`, and `git rev-parse <name>` does not
+-- answer for it. That is exactly how a landing works: `wa land` fetches every READY branch into a
+-- remote-tracking ref and makes no local branch of it, so a reviewer told the branch's NAME must resolve it
+-- through those refs (found while wiring the reviewer into `wa land`, 14/11).
+exec_git(repo, 'update-ref refs/remotes/origin/change/fetched-only ' .. sha)
+check(reviewer.commit_of(repo, 'change/fetched-only') == nil,
+  'a bare name that is only a remote-tracking ref is not a ref of its own')
+check(reviewer.remote_branch_commit(repo, 'change/fetched-only') == sha,
+  'and the reviewer resolves it to the tip the landing collected')
+check(reviewer.remote_branch_commit(repo, 'change/nothing-here') == nil,
+  'while a name that is nowhere resolves nothing (never a guess)')
 local brief_path = home .. '/brief.md'
 local BRIEF = 'BRIEF-MARKER: add feature.txt; nothing else should change.'
 check(host.write_file(brief_path, BRIEF .. '\n'), 'the brief exists')
@@ -348,6 +359,28 @@ check(door_code == 0, 'the door exits 0 with findings, so it cannot block a land
 check(door_text:find('REVIEW change/fixture ' .. sha .. ' findings=2', 1, true) ~= nil,
   'the door prints the final REVIEW line')
 check(door_text:find('BYPASS-MARKER', 1, true) ~= nil, 'the door prints the findings themselves')
+-- The machine-readable answer, in a file the caller names: `wa land` starts this door as a process of its own
+-- and joins it at its report, so the door answers for BOTH outcomes - a review that happened and a review
+-- that could not run - and a landing never has to read a sentence to learn which happened.
+local answer_path = home .. '/answer.json'
+local answer_code = door({ 'eval', 'reviewer', 'change/fixture', '--repo', repo, '--bin', stub,
+  '--brief', brief_path, '--timeout', '60', '--json', answer_path })
+check(answer_code == 0, 'the door answers zero with `--json` too (' .. tostring(answer_code) .. ')')
+local answer_ok, answer = pcall(json.decode, read(answer_path) or '')
+check(answer_ok and type(answer) == 'table', 'the door writes its answer where it was told to')
+check(answer.ok == true and answer.findings == 2, 'and the answer carries the findings as a number')
+check(tostring(answer.sha) == sha, 'and the commit the review is about')
+check(type(answer.review_id) == 'string' and answer.review_id ~= '',
+  'and the review id, so a finding can be marked afterwards')
+check(tostring(answer.answer):find('BYPASS-MARKER', 1, true) ~= nil, 'and the answer text itself')
+local unavailable_path = home .. '/answer-unavailable.json'
+local unavailable_code = door({ 'eval', 'reviewer', 'change/nothing-here', '--repo', repo, '--bin', stub,
+  '--json', unavailable_path })
+check(unavailable_code ~= 0, 'a review that cannot run exits non-zero (' .. tostring(unavailable_code) .. ')')
+local unavailable_ok, unavailable = pcall(json.decode, read(unavailable_path) or '')
+check(unavailable_ok and unavailable.ok == false, 'and still answers in the file, with ok=false')
+check(tostring(unavailable.error):find('no such branch', 1, true) ~= nil,
+  'naming why the review could not run (the sentence a landing reports as `review unavailable: <reason>`)')
 -- The model is one model: an option that would change it is refused rather than silently dropped.
 local model_code, model_text = door({ 'eval', 'reviewer', 'change/fixture', '--repo', repo, '--bin', stub,
   '--model', 'gpt-6.1-sol' })
