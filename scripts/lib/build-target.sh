@@ -315,8 +315,16 @@ EOF
 # to build is never a candidate (it is the work), and nothing outside `<root>/build/target` is
 # considered at all. Prints the bytes freed on stdout; what it deleted, it says on stderr.
 wa_build_cap_enforce() { # <keep path|->
-  local keep=${1:-} cap total oldest bytes freed=0 removed=0 name
+  local keep=${1:-} cap total oldest bytes freed=0 removed=0 name skipped=$'\n' link
   cap=$(wa_build_cap_bytes)
+  # A symlink in the build root is not build output: it is unlinked - the link, never what it names. One
+  # left by an agent on 13/11 (`waarchive-<hash> -> /tmp/waarchive-target`, its target gone) read as the
+  # oldest entry forever, the guard refused it, and the loop below stopped at that first refusal - so the
+  # 30 GB cap evicted nothing for a day and the distro grew to 261 GB (14/11).
+  for link in "$(wa_build_target_root)"/*; do
+    [ -L "$link" ] || continue
+    unlink "$link" 2>/dev/null && printf 'onebuild: unlinked %s (a link in the build root, not build output)\n' "$(basename "$link")" >&2
+  done
   total=$(wa_build_bytes "$(wa_build_target_root)")
   [ "$total" -gt "$cap" ] || { printf '0'; return 0; }
   # Oldest first: "the directory written to longest ago" is the build output a node is least likely to
@@ -324,8 +332,9 @@ wa_build_cap_enforce() { # <keep path|->
   while [ "$total" -gt "$cap" ]; do
     oldest=$(
       for candidate in "$(wa_build_target_root)"/*; do
-        [ -d "$candidate" ] || continue
+        [ -d "$candidate" ] && [ ! -L "$candidate" ] || continue
         [ "$candidate" = "$keep" ] && continue
+        case "$skipped" in *$'\n'"$candidate"$'\n'*) continue ;; esac
         # A build output another process is writing to RIGHT NOW is not old, whatever its mtime says: a
         # successful `flock -n` means nobody holds this dir's build lock, and only then is it a candidate.
         # The check is non-mutating on purpose - creating the lock file here would write into the very
@@ -339,7 +348,13 @@ wa_build_cap_enforce() { # <keep path|->
     )
     [ -n "$oldest" ] || break
     name=$(basename "$oldest")
-    bytes=$(wa_build_delete "$oldest" child) || break
+    # One candidate that cannot go (in use, refused by the guard) is named and passed over - the cap goes
+    # on to the next oldest instead of giving up on all of them.
+    if ! bytes=$(wa_build_delete "$oldest" child); then
+      printf 'onebuild: kept %s (it could not be deleted); trying the next oldest\n' "$name" >&2
+      skipped="$skipped$oldest"$'\n'
+      continue
+    fi
     total=$((total - bytes)); freed=$((freed + bytes)); removed=$((removed + 1))
     printf 'onebuild: over the %s build cap: deleted %s (%s, oldest build output)\n' \
       "$(wa_build_human "$cap")" "$name" "$(wa_build_human "$bytes")" >&2

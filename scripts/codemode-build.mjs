@@ -46,7 +46,11 @@ const targetDir=root=>{
  if(fs.existsSync(script)){
   const r=cp.spawnSync('bash',[script,'prepare',root],{encoding:'utf8',windowsHide:true,timeout:600000});
   const answer=(r.stdout||'').trim().split(/\r?\n/).filter(Boolean).pop();
+  // What the sweep and the cap did is always said (14/11: the cap had silently stopped evicting, and a
+  // successful prepare threw its own report away).
+  for(const line of String(r.stderr||'').split(/\r?\n/))if(line.startsWith('onebuild:'))process.stderr.write(line+'\n');
   if(r.status===0&&answer)return path.resolve(answer);
+  process.stderr.write(`onebuild: the build cap did NOT run (prepare ${r.error?r.error.message:'exit '+r.status}); building in the fallback dir\n`);
   if(r.stderr)process.stderr.write(String(r.stderr));
  }
  return path.join(buildTargetRoot(),treeName(root));
