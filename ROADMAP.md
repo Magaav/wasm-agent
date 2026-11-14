@@ -22,7 +22,13 @@ These are two entry paths into one runtime:
 The fleet console serves these journeys. It is not the product's required first
 screen, and 32 workers are not a prerequisite for helping one customer.
 
-## WhatsApp operator-directed management — 2026-10-17 (source; live proof pending)
+## WhatsApp operator-directed management — 2026-10-17 (source; live proof pending; RETIRED 14/11)
+
+**RETIRED 14/11.** The route described below duplicated the one send surface once the `/approve` gate
+landed, so its CLI, its Lua state machine and its peer export were removed. WhatsApp now has one send
+surface, `mcp_whatsapp_send`, gated by `/approve` ([APPROVE.md](docs/APPROVE.md)); the old name answers
+one sentence ([the retirement pointer](docs/WHATSAPP-OPERATOR-MANAGEMENT.md)). The entry stays as the
+record of what was built and proved.
 
 Distinct selected-chat prepare/approve/send/status CLI/API with separate owner-
 provisioned approval/dispatch capabilities, exact content/recipient/quote binding,
@@ -83,8 +89,8 @@ state observed from the pinned SDK's `events.Receipt` and matched to the exact
 account/generation/chat/message-ID intent — never inferred from time, echo, body or
 display name. Only the SDK's `delivered`/`read` values advance it; `read-self` (the
 recipient disabled read receipts), `sender` (our own other device), `inactive` and
-every other type stay explicitly unknown. `/operator/send` and `/operator/status`
-report the state known AT RETURN TIME without an extra call or a longer send
+every other type stay explicitly unknown. `/operator/send` and `/operator/status` (verbs of the route
+retired 14/11) reported the state known AT RETURN TIME without an extra call or a longer send
 deadline; `/status` adds bounded aggregate counters. Per-intent state survives
 restart and the bounded (256) receipt audit table evicts oldest-first without ever
 dropping the per-intent fact. Receipts cannot settle/resurrect an unknown send and

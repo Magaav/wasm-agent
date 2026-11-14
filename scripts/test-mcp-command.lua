@@ -301,9 +301,20 @@ meta_set('federation.catalog.v2', json.encode({ at = host.now(), peers = {
         description = 'MCP mail / read_messages: Read one mailbox' },
       { name = 'mcp_mail_send_message_deadbeef', effect = 'write',
         description = 'MCP mail / send_message: Send one message' },
+      { name = 'index_read', effect = 'read', description = '[native] Read one index row newest-first' },
+      { name = 'jobs_list', effect = 'read', description = 'List the node jobs' },
+      -- A WhatsApp spelling of any kind - the retired second send path (14/11) and an older build's bare
+      -- read - is not a tool this node can call, so it contributes no row and no tool count.
       { name = 'whatsapp_read', effect = 'read', description = '[native] Read one chat newest-first' },
       { name = 'whatsapp_operator', effect = 'write', description = 'Operator-directed WhatsApp text' },
     } },
+  -- A peer that exports ONLY a retired WhatsApp name: it was the stray "(other exported tools) - 1 tool"
+  -- row the operator pointed at on 14/11, and it must now show nothing at all.
+  ['peer-zombie'] = { name = 'zombie', node_id = 'peer-zombie', at = host.now(),
+    tools = { { name = 'whatsapp_operator', effect = 'write',
+      description = 'Operator-directed WhatsApp text (docs/WHATSAPP-OPERATOR-MANAGEMENT.md): prepare -> approve' } } },
+  -- A peer with no connectors and no exported tools: no row (requirement 3, /mcp).
+  ['peer-empty'] = { name = 'empty', node_id = 'peer-empty', at = host.now(), tools = {}, connectors = {} },
 } }))
 local legacy = command.list(ctx)
 local mail = command.find(legacy, 'legacy:mail')
@@ -313,6 +324,31 @@ check(mail.tools[1].name == federation.local_name('legacy', 'mcp_mail_read_messa
   'and the exact peer name per tool')
 check(command.find(legacy, 'legacy:native') ~= nil, 'its native path is its own connector too')
 check(command.find(legacy, 'legacy:*') ~= nil, 'and a tool matching neither keeps an other-tools group')
+-- The WhatsApp spellings above are still on the peer and still contribute nothing: one tool in the
+-- other-tools group, and no name anywhere in this peer's rows.
+local other = command.find(legacy, 'legacy:*')
+check(other.tool_count == 1 and other.tools[1].tool == 'jobs_list', 'a WhatsApp spelling is not counted as a tool')
+local peer_rows, leaked = 0, {}
+for _, entry in ipairs(legacy.connectors) do
+  if type(entry) == 'table' and entry.peer == 'legacy' then
+    peer_rows = peer_rows + 1
+    for _, tool in ipairs(entry.tools or {}) do
+      if tostring(tool.tool or ''):lower():find('whatsapp', 1, true) then leaked[#leaked + 1] = tool.tool end
+    end
+  end
+end
+check(peer_rows == 3, 'the older peer keeps its three real groups, and only those: ' .. peer_rows)
+check(#leaked == 0, 'no WhatsApp spelling is a row of any peer: ' .. json.encode(leaked))
+-- A peer whose only export is the retired name shows NO row, and neither does a peer with nothing at all.
+local zombies, empties = 0, 0
+for _, entry in ipairs(legacy.connectors) do
+  if type(entry) == 'table' then
+    if entry.peer == 'zombie' then zombies = zombies + 1 end
+    if entry.peer == 'empty' then empties = empties + 1 end
+  end
+end
+check(zombies == 0, 'a peer exporting only a retired WhatsApp name shows no row: ' .. zombies)
+check(empties == 0, 'a peer with no connectors and no exported tools shows no row: ' .. empties)
 check(command.toggle(ctx, 'legacy:mail', false, { call = peer_transport }).error == 'connector_registry_not_reported',
   'a group inferred from an older peer cannot be toggled')
 seed_peer_cache() -- back to the peer that does report its registry, for the sections below

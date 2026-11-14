@@ -1268,8 +1268,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   -- A WhatsApp name from an older build (`whatsapp_read`, `peer_openclaw__whatsapp_read`,
   -- `mcp_whatsapp_native_read_newest_47452e4e`) is refused with the name to use instead - and this check
   -- comes BEFORE the code-mode fence, because that fence would gladly tell the model to call the retired
-  -- name inside a script (`#118`, `lua/core/whatsapp.lua`).
-  if whatsapp_lib.renamed(name) and not whatsapp_lib.tool(name) then
+  -- name inside a script (`#118`, `lua/core/whatsapp.lua`). A RETIRED name (`whatsapp_operator`) takes the
+  -- same door and gets its own one sentence, never a handler.
+  if (whatsapp_lib.renamed(name) or whatsapp_lib.retired_name(name)) and not whatsapp_lib.tool(name) then
     return whatsapp_lib.call(name, args, ctx)
   end
   -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.

@@ -28,8 +28,8 @@ any node. The effect happens there, under that node's own `whatsapp.send` policy
 makes comes back unchanged. Nothing is refused except what routing cannot answer: no node known to
 hold the account, or two of them. Connector tools run only inside code mode: one `codemode` script calls
 `await tools.mcp_whatsapp_read({chat: "Laura"})` (`searchTools("whatsapp")` lists them); `tool_call`
-refuses them. Where a peer has operator configs, `peer_<peer>__whatsapp_operator` is still the
-operator-directed send.
+refuses them. There is no second send route: `peer_<peer>__whatsapp_operator` is retired and answers
+one sentence.
 
 `mcp_whatsapp_send` waits for WhatsApp's own answer and returns it in the same step:
 `{state: "done", id, message_id, served_by}` once the message left, or
@@ -65,23 +65,23 @@ scope, approval and durable effect guards. Generic MCP registration cannot grant
 WhatsApp send capability. Setup and limits: [the service component](../../docs/SERVICE-COMPONENTS.md).
 
 There is no general model send: draft state across phone/linked devices is unknown,
-so the only send is the operator-directed one below. A transcript policy does not
+so the only send is `mcp_whatsapp_send` on the account node. A transcript policy does not
 authorize arbitrary replies. Do not infer self/account from display titles or
 outgoing-only history.
 
-For a direct human-approved new text/reply, use the DISTINCT opt-in operator CLI
-in [operator management](../../docs/WHATSAPP-OPERATOR-MANAGEMENT.md), only from an
-authorized native operator process with separately provisioned approval/dispatch
-FILE references. On a node whose `wa-whatsapp` component holds the linked session,
-`WA_WHATSAPP_OPERATOR_BACKEND=native` runs the same four actions on the Rust/WASI
-outbox instead (`lua/core/whatsapp_operator.lua`); a reply source and the sent echo
-are then read back exactly from the index. No generic MCP, child/event role or
-existing read token grants either route.
+A direct human-approved new text/reply goes out through that one surface, and the
+`/approve` gate decides when it actually leaves: with the gate on, the send answers a
+draft handle instead of a job id and the operator sends, edits or rejects it by hand
+([approve](../../docs/APPROVE.md)); the old `whatsapp_operator` route is retired and
+answers one sentence
+([the pointer](../../docs/WHATSAPP-OPERATOR-MANAGEMENT.md)). No generic MCP, child/event
+role or existing read token grants a send.
 Find/read/search exact recipients; disambiguate identities, never trust a sole
 pushname. Exact content/direct approval need not be requested twice; do not alter
-that content. Preserve the prepared intent ID, compare exact recipient/body/quote,
-approve via trusted operator authority, send once, inspect durable status after
-uncertainty. No new key/retry/reset to escape unknown effects. Missing setup is a
+that content. Compare the exact recipient and body, turn `/approve` on when the
+message should be reviewed first, send once, and inspect the same handle after an
+unknown outcome (a draft handle when the gate holds it). No new key/retry/reset to
+escape unknown effects. Missing setup is a
 functionality/provisioning blocker, not absent human permission. Installation and
 real account use belong to the coordinator; source readiness is not live success.
 

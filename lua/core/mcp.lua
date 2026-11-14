@@ -507,7 +507,8 @@ function M.project(answer)
  if not answer.evidence and not answer.result_json and not answer.result then out.detail=answer end
  return out
 end
--- The WhatsApp facade (M.whatsapp) is gone with the Node bridge it spawned (10/11): sends go through
--- the operator path (lua/core/federation.lua -> scripts/whatsapp-operator.mjs) and reads through the
+-- The WhatsApp facade (M.whatsapp) is gone with the Node bridge it spawned (10/11), and so is the
+-- operator route that briefly replaced its send (retired 14/11, `lua/core/whatsapp.lua` M.RETIRED):
+-- sends go through the one surface (`mcp_whatsapp_send`, gated by /approve) and reads through the
 -- native index or the wa-whatsapp component. There is no MCP server in this process for WhatsApp.
 return M

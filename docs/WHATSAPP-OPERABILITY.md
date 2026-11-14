@@ -9,9 +9,11 @@ sequence below is reference/new-install material, NOT a request to re-pair, repe
 activation or interrupt the running service while real samples arrive.
 36 historical holds remain unresolved; full audio/latency/coverage acceptance is pending.
 
-2026-10-17 update: [operator management](WHATSAPP-OPERATOR-MANAGEMENT.md) adds a
+2026-10-17 update: [operator management](WHATSAPP-OPERATOR-MANAGEMENT.md) added a
 separate explicitly provisioned prepare/approve/send/status CLI, not a responder
-bypass or write grant to existing read clients. Earlier setup/live-acceptance text
+bypass or write grant to existing read clients. 14/11: that CLI is RETIRED - WhatsApp
+has one send surface (`mcp_whatsapp_send`) and the `/approve` gate ([APPROVE.md](APPROVE.md)),
+and the old name answers one sentence. Earlier setup/live-acceptance text
 below is historical source-delivery evidence, not a command to re-pair/reactivate.
 Coordinator now reports generation2 authenticated at127.0.0.1:28787, PT/all-chats,
 activation1792254831; new worker did not independently observe that runtime.
@@ -147,9 +149,10 @@ nothing to install and no unit to enable. What an operator does now is the Rust 
   Measured 13/11 (session b393f280 on node `work`): before this, three `mcp_whatsapp_contacts` calls
   and one `mcp_whatsapp_read` each answered `{"error":"whatsapp_contacts_slow","state":"queued"}`
   with the same local job id, and the run ended without sending anything.
-* **Explicit sends** are the operator path, prepare -> approve -> send -> status
-  ([WHATSAPP-OPERATOR-MANAGEMENT.md](WHATSAPP-OPERATOR-MANAGEMENT.md)), and they are dispatched by the
-  component's outbox.
+* **Explicit sends** are the one surface, `mcp_whatsapp_send`, gated by `/approve`
+  ([APPROVE.md](APPROVE.md)): an outgoing message waits as a draft the operator sends, edits or rejects.
+  It is dispatched by the component's outbox. The older prepare/approve/send/status route is retired
+  ([WHATSAPP-OPERATOR-MANAGEMENT.md](WHATSAPP-OPERATOR-MANAGEMENT.md)).
 * **The recognizer venv** is still a human, setup-time step: its commands and pins are in
   [WHATSAPP-TRANSCRIPTION.md](WHATSAPP-TRANSCRIPTION.md) ("Provisioning the recognizer's venv") and
   `stt/`.

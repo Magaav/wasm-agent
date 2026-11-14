@@ -104,5 +104,5 @@ Measured 2026-11-11 while proving the Rust send from `wasm_the_first`: job id `4
 `5519994939204@s.whatsapp.net`, state `queued`, `attempts: 0`, no worker on that node. It is inert until a
 component is enabled there - which must never happen, because a second component on the account's keys is
 exactly what the "one client per linked device" rule forbids. Do not hand-edit the queue to remove it; an
-operator send belongs on the node that holds the account, through `whatsapp_operator`
-(prepare -> approve -> send -> status).
+operator send belongs on the node that holds the account, through `mcp_whatsapp_send` (the one surface;
+the retired `whatsapp_operator` route prepared nothing and answers one sentence).

@@ -233,17 +233,41 @@ function M.renamed(name)
   return 'mcp_whatsapp_' .. mapped
 end
 
+--- The names this build RETIRED: one sentence, no alias, no backend.
+--
+-- `whatsapp_operator` was a SECOND WhatsApp send path - `prepare -> approve -> send -> status` over an
+-- installed operator profile, offered to a master as `peer_<node>__whatsapp_operator` - documented in
+-- docs/WHATSAPP-OPERATOR-MANAGEMENT.md. Since the `/approve` gate landed on the one surface
+-- (`docs/APPROVE.md`), it could only duplicate `mcp_whatsapp_send`; the operator saw it as a stray row in
+-- `/mcp` and a 13/11 session used it as a detour. Retired 14/11: its Lua state machine, its Node client,
+-- its export and its docs are gone, and this table is what a caller of the old name meets instead.
+--
+-- A retired name is NOT a rename: `M.renamed` maps a spelling of the same question to the tool that
+-- answers it, while these answer one sentence and send nothing.
+M.RETIRED = {
+  ['whatsapp_operator'] = 'retired: use mcp_whatsapp_send; turn on /approve to review drafts first',
+}
+
+--- The one sentence a caller of a retired name needs, or nil. A peer prefix is stripped first, so
+--- `peer_openclaw__whatsapp_operator` is the same retired name as `whatsapp_operator`.
+function M.retired_name(name)
+  name = tostring(name or '')
+  local bare = name:match('^peer_[^_]+__(.+)$') or name
+  return M.RETIRED[bare]
+end
+
 --- Is this name a spelling of the ONE WhatsApp surface?
 ---
 --- True for the exact `mcp_whatsapp_<verb>` names and for every spelling an older build answered - the
 -- bare `whatsapp_read`, the MCP-native `mcp_whatsapp_native_<name>_<hash8>`, and a peer-prefixed
--- `peer_<node>__` spelling of either. The mapping is `M.renamed`, so "the same question under another
--- name" has exactly one definition and the catalogue, the federation export and the refusal cannot
--- disagree about it (`lua/core/federation.lua` keeps every one of them out of a peer's tool list).
+-- `peer_<node>__` spelling of either - and for a retired name, which is answered with one sentence. The
+-- mapping is `M.renamed`, so "the same question under another name" has exactly one definition and the
+-- catalogue, the federation export and the refusal cannot disagree about it (`lua/core/federation.lua`
+-- keeps every one of them out of a peer's tool list).
 function M.surface(name)
   if type(name) ~= 'string' or name == '' then return false end
   if M.tool(name) then return true end
-  return M.renamed(name) ~= nil
+  return M.renamed(name) ~= nil or M.retired_name(name) ~= nil
 end
 
 --- The schemas the model is offered, in catalogue shape (`tools.catalog`).
@@ -1098,6 +1122,13 @@ end
 function M.call(name, args, ctx)
   local tool = M.tool(name) or (type(name) == 'string' and M.by_verb[name]) or nil
   if not tool then
+    -- A retired name is answered before any rename: it has no replacement inside this surface, and the
+    -- sentence says where the send went (`M.RETIRED`).
+    local retired = M.retired_name(name)
+    if retired then
+      return { ok = false, error = 'whatsapp_tool_retired', use = 'mcp_whatsapp_send', effect = 'none',
+        note = retired, retired = retired }
+    end
     local renamed = M.renamed(name)
     if renamed then
       return { ok = false, error = 'whatsapp_tool_renamed', use = renamed, effect = 'none',
