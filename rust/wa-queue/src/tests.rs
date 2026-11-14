@@ -1082,3 +1082,17 @@ fn a_namespaced_kv_keeps_other_data_out_of_the_scan() {
         .iter()
         .all(|(key, _)| key == b"someone-elses-key" || key.starts_with(b"stt/")));
 }
+
+#[test]
+fn cancel_takes_a_queued_job_out_and_refuses_a_held_one() {
+    let f = Fixture::new();
+    let first = f.enqueue("q", b"a");
+    let job = f.queue.cancel(first, "operator").expect("cancel a queued job");
+    assert_eq!(job.state, JobState::Dead);
+    assert_eq!(job.last_error.as_deref(), Some("cancelled: operator"));
+    assert!(matches!(f.queue.take("q", "w", None).expect("take"), TakeOutcome::Empty), "a cancelled job is never taken");
+    let second = f.enqueue("q", b"b");
+    assert_eq!(f.take("q", "w").id, second);
+    assert!(f.queue.cancel(second, "late").is_err(), "a leased job may be on the wire: refused");
+    assert!(f.queue.cancel(first, "again").is_err(), "a settled job is refused");
+}

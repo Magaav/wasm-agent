@@ -138,14 +138,17 @@ M.TOOLS = {
       ids = { type = 'array', minItems = 1, maxItems = 20, items = { type = 'integer', minimum = 1 }, description = 'Resume several jobs in one call: one entry per id, in the order asked. Nothing is sent again.' },
       ['until'] = { type = 'string', enum = { 'all', 'any' }, description = 'With ids: wait until every one is done or failed (default all), or answer as soon as one is.' },
       wait_s = { type = 'integer', minimum = 0, maximum = 300, description = 'How long to wait for the answer (default 60; 0 queues and answers at once).' },
+      cancel = { type = 'integer', minimum = 1, description = 'Cancel a send that is still queued, by its id: it will not go out. One already being sent, or done, cannot be cancelled.' },
     }, additionalProperties = false },
     request = function(args) return { chat = args.chat, text = args.text, reply_to = args.reply_to, mentions = args.mentions } end,
   },
   {
     verb = 'send_status', capability = 'whatsapp_send_status', effect = 'read', hidden = true,
     description = 'Kept for a script written before one send answered its own outcome: the same answer as mcp_whatsapp_send({id, wait_s:0}). No catalogue and no guidance offers it - call mcp_whatsapp_send with the id instead.',
-    parameters = { type = 'object', properties = { id = { type = 'integer', minimum = 1, description = 'The job id a send answered.' } }, required = { 'id' }, additionalProperties = false },
-    request = function(args) return { id = tonumber(args.id) or args.id } end,
+    parameters = { type = 'object', properties = { id = { type = 'integer', minimum = 1, description = 'The job id a send answered.' },
+      cancel = { type = 'boolean', description = 'Take the job out of the queue if no sender holds it yet.' },
+      reason = { type = 'string', maxLength = 160, description = 'Why it was cancelled, kept on the job.' } }, required = { 'id' }, additionalProperties = false },
+    request = function(args) return { id = tonumber(args.id) or args.id, cancel = args.cancel == true or nil, reason = args.reason } end,
   },
   {
     -- The operator's door to the approval gate (docs/APPROVE.md). Hidden: the model is never offered
@@ -750,6 +753,11 @@ function M.settle(id, wait_s, read, options)
     if reason then answer.reason = reason end
     if who() then answer.served_by = who() end
     if type(last) == 'table' and type(last.asked_owner) == 'string' then answer.asked_owner = last.asked_owner end
+    -- Still waiting in the queue after the whole wait, never taken by the sender: say so and give the
+    -- two honest moves (14/11: a send sat `queued` for ever and every read looked like progress).
+    if answer.queue_state == 'queued' and (tonumber(answer.waited_s) or 0) >= 20 then
+      answer.stuck = 'the sender has not picked this up in ' .. tostring(answer.waited_s) .. ' s. Wait more with the resume call, or stop it with mcp_whatsapp_send({cancel: ' .. tostring(id) .. '}). Do not send it again while it is queued: it would go out twice.'
+    end
     return answer
   end
   while true do
@@ -1042,7 +1050,9 @@ function M.send(args, ctx)
       return { ok = false, error = 'whatsapp_send_id_or_message', effect = 'none',
         note = 'with ids this call only waits: pass chat+text to send a message, or ids alone to resume a wait' }
     end
-    return M.settle_many(ids, wait_s, M.status_reader(nil, ctx), wait_options(ctx, M.self_name(), mode))
+    -- A resume asks the node that queued the job - the account node, as the send did (14/11: a resume
+    -- that asked this node first read ITS queue, where the same number is another job or none).
+    return M.settle_many(ids, wait_s, M.status_reader(M.route(ctx), ctx), wait_options(ctx, M.self_name(), mode))
   end
   if args.id ~= nil then
     local id = tonumber(args.id)
@@ -1054,7 +1064,20 @@ function M.send(args, ctx)
       return { ok = false, error = 'whatsapp_send_id_or_message', effect = 'none',
         note = 'with an id this call only waits: pass chat+text to send a message, or id alone to resume a wait' }
     end
-    return M.settle(id, wait_s, M.status_reader(nil, ctx), wait_options(ctx, M.self_name()))
+    return M.settle(id, wait_s, M.status_reader(M.route(ctx), ctx), wait_options(ctx, M.self_name()))
+  end
+  if args.cancel ~= nil then
+    local id = tonumber(args.cancel)
+    if not id or id < 1 or args.chat ~= nil or args.text ~= nil or args.id ~= nil or args.ids ~= nil then
+      return { ok = false, error = 'whatsapp_send_bad_cancel', effect = 'none',
+        note = 'cancel is the id of a queued send, alone: mcp_whatsapp_send({cancel: <id>})' }
+    end
+    local request = { id = id, cancel = true, reason = 'cancelled from ' .. tostring(M.self_name()) }
+    local owner = M.route(ctx)
+    local tool = M.by_verb.send_status
+    local answer = owner and M.forward(owner, tool.name, request, ctx and ctx.remote_call or nil) or M.invoke(tool, request)
+    if type(answer) == 'table' and answer.served_by == nil then answer.served_by = owner or M.self_name() end
+    return answer
   end
   if args.draft ~= nil then
     -- The resume form of a GATED send (docs/APPROVE.md): nothing was queued, a draft is waiting, and

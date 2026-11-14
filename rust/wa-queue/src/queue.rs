@@ -613,6 +613,24 @@ impl Queue {
         self.requeue_with(id, &RequeueOptions::default())
     }
 
+    /// Cancel a job no worker holds yet: it is dead-lettered with `cancelled: <why>` and is never
+    /// taken. A leased job is refused (its worker may be on the wire right now, so "cancelled" could
+    /// be a lie), and so is a settled one - cancelling is only ever the safe direction (14/11, a send
+    /// queued on a node with no sender waited for ever and nothing could stop it).
+    pub fn cancel(&self, id: JobId, why: &str) -> Result<Job> {
+        let now = self.now();
+        let mut job = self.job(id)?.ok_or(QueueError::NotFound)?;
+        if job.state != JobState::Ready {
+            return Err(QueueError::Invalid(format!(
+                "only a queued job no worker holds can be cancelled (job is {})",
+                job.state.as_str()
+            )));
+        }
+        job.last_error = Some(sanitize(&format!("cancelled: {why}")));
+        self.dead_letter(&mut job, now, "cancelled", true)?;
+        Ok(job)
+    }
+
     /// Revive a dead-lettered job. Freshness is only refreshed on request: the "never run stale
     /// work" rule is not something an admin call may bypass by accident.
     pub fn requeue_with(&self, id: JobId, options: &RequeueOptions) -> Result<Job> {
