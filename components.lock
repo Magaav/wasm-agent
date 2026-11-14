@@ -114,9 +114,16 @@
 # concluding anything about the phone - the previous line claimed the account had no saved contact, which
 # was false. A test asserts the collection against the schema registry, so this cannot drift back.
 #
-# The bytes here are the build of a3f1bb67 in the checkout /home/wa/wt-abook on wa-desktop (rustc 1.99.1,
+# FOURTH MOVE (4e0ddf27), the one that makes the third take effect on the live node. `ix/ab/full` used to be
+# a bare flag, and the third build wrote it after asking `regular`, so the account node's store holds a
+# "book received" mark for a book it never received - and the fixed build would have read it and asked
+# nothing. The mark now stores the collection's own name and is read against `CONTACT_COLLECTION`, so a
+# legacy flag is stale rather than binding.
+#
+# The bytes here are the build of the latest commit of change/abook in the checkout /home/wa/wt-abook on
+# wa-desktop (rustc 1.99.1,
 # wasi-sdk 34). Measured rather than assumed: two builds of that commit in that ONE path are
-# byte-identical (afab865f twice, each with a fresh CARGO_TARGET_DIR), and two checkout paths are NOT
+# byte-identical (4e0ddf27 twice, each with a fresh CARGO_TARGET_DIR), and two checkout paths are NOT
 # equal for a component with a path dependency (the first build of this change measured 8,754,838 /
 # f63419ec in /home/wa/wt-abook against 8,754,778 / 20e0516a in /home/wa/wt-abook-b at one commit) -
 # Cargo's `-C metadata` from the absolute path of `wa-whatsapp-index` and `wa-whatsapp-outbox`
@@ -159,4 +166,4 @@ model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 4
 selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email ddbe326a5d394a0dc50a0c947740a1364e4cdeda348286666a3ba21569893915 565827
-wa-whatsapp afab865fe70950442e4a1331a047a72f15cb5a06f164a37cc01bd86b16b91df8 8767444
+wa-whatsapp 4e0ddf273245b5039e70b1f99ab1467e13dab6b505f1c967077d0d07e1e84cfb 8767529
