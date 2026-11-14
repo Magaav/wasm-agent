@@ -2503,6 +2503,116 @@ fn complete_decisions(decisions: &mut [ToolDecision], tool_calls: &[Value]) {
     }
 }
 
+/// What a streamed `function.name` becomes when another delta carries the field. A name arrives once
+/// (so a repeat must not double it) but a provider may split it (so a fragment must not replace it):
+///
+///  - empty, or already the same text, or a repeat of what this name already ends with or starts
+///    with -> unchanged;
+///  - the whole name so far plus more (`ba` then `sh`) -> the name grows to `bash`;
+///  - a later delta carrying the whole name (`ba` then `bash`) -> the whole name wins;
+///  - anything else -> appended, because a name that grew wrong is still visible to the tool loop
+///    (and to the repair net) instead of being silently dropped.
+fn merge_name(accumulated: &str, incoming: &str) -> String {
+    if incoming.is_empty() { return accumulated.to_string(); }
+    if accumulated.is_empty() { return incoming.to_string(); }
+    if accumulated == incoming { return accumulated.to_string(); }
+    if accumulated.ends_with(incoming) { return accumulated.to_string(); }
+    if accumulated.starts_with(incoming) { return accumulated.to_string(); }
+    if incoming.starts_with(accumulated) { return incoming.to_string(); }
+    format!("{accumulated}{incoming}")
+}
+
+/// One tool call, assembled from every delta that carries it.
+///
+/// An OpenAI-compatible stream splits a tool call across deltas: the `id` and the `function.name`
+/// arrive on the first one (measured on opencode-go/DeepSeek, 14/11: `{"index":0,"id":"call_...",
+/// "function":{"name":"bash","arguments":""}}` and then argument fragments only), and a provider
+/// may repeat a field it already sent. Two rules keep that from losing what arrived:
+///
+///  - **A name or an id that arrived is kept.** It is written only when it carries text, so a later
+///    delta that repeats the field as an empty string cannot clear it. Before this rule the second
+///    delta `{"index":0,"function":{"name":"","arguments":"{..."}}` overwrote the name the first
+///    delta delivered, and the call reached the tool loop nameless (`tool_call_name_missing`, node
+///    session 400c7145 on 13/11, 14 calls in a row; session 50f2c555 on 11/11).
+///  - **A call is identified by `index` when the delta carries one, and by `id` when it does not.**
+///    A provider that sends `id` without `index` on a parallel call used to have that call's
+///    fragments appended to call 0 - its name and its arguments landing in another call's slot.
+#[derive(Default)]
+struct ToolCallAssembly {
+    calls: Vec<Value>,
+    decisions: Vec<ToolDecision>,
+    by_id: HashMap<String, usize>,
+    last: Option<usize>,
+}
+
+impl ToolCallAssembly {
+    fn new() -> Self { Self::default() }
+
+    fn slot(&mut self, index: usize) {
+        while self.calls.len() <= index {
+            self.calls.push(json!({"id": "", "type": "function", "function": {"name": "", "arguments": ""}}));
+        }
+        while self.decisions.len() <= index {
+            self.decisions.push(ToolDecision::default());
+        }
+    }
+
+    /// The call this delta belongs to: its own `index`, else the call its `id` already opened, else
+    /// the last call this stream touched (argument fragments that carry neither).
+    fn index_of(&mut self, call: &Value) -> usize {
+        let id = call["id"].as_str().unwrap_or("");
+        let index = match call["index"].as_u64() {
+            Some(index) => {
+                let index = index as usize;
+                if !id.is_empty() {
+                    self.by_id.insert(id.to_string(), index);
+                }
+                index
+            }
+            None if !id.is_empty() => match self.by_id.get(id) {
+                Some(index) => *index,
+                None => {
+                    let index = self.calls.len();
+                    self.by_id.insert(id.to_string(), index);
+                    index
+                }
+            },
+            None => self.last.unwrap_or(0),
+        };
+        self.last = Some(index);
+        self.slot(index);
+        index
+    }
+
+    /// One delta's tool call: its id, its name and its argument fragment. The fragment is returned so
+    /// the caller can feed and publish the provisional decision exactly as before.
+    fn absorb(&mut self, call: &Value) -> (usize, Option<String>) {
+        let index = self.index_of(call);
+        if let Some(id) = call["id"].as_str() {
+            if !id.is_empty() {
+                self.calls[index]["id"] = json!(id);
+                self.decisions[index].id = id.to_string();
+            }
+        }
+        if let Some(name) = call["function"]["name"].as_str() {
+            if !name.is_empty() {
+                let merged = merge_name(
+                    self.calls[index]["function"]["name"].as_str().unwrap_or(""), name);
+                self.calls[index]["function"]["name"] = json!(merged);
+                self.decisions[index].name = merged;
+            }
+        }
+        match call["function"]["arguments"].as_str() {
+            Some(arguments) if !arguments.is_empty() => {
+                let previous = self.calls[index]["function"]["arguments"].as_str().unwrap_or("").to_string();
+                self.calls[index]["function"]["arguments"] = json!(format!("{previous}{arguments}"));
+                (index, Some(arguments.to_string()))
+            }
+            _ => (index, None),
+        }
+    }
+}
+
 fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
@@ -2553,11 +2663,10 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     // its whole budget here answers nothing, and that has to be visible.
     let mut reasoning = String::new();
     let mut finish_reason: Option<String> = None;
-    let mut tool_calls: Vec<Value> = Vec::new();
+    let mut assembly = ToolCallAssembly::new();
     // One provisional decision per tool-call index, assembled from the same deltas that build
     // `tool_calls`. Empty for a text-only answer, which is exactly why a text-only answer emits no
     // `decision` event: nothing here is invented for a call the model did not ask for.
-    let mut decisions: Vec<ToolDecision> = Vec::new();
     let mut usage: Option<Value> = None;
     // Stream-termination telemetry.
     //
@@ -2667,31 +2776,9 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
                 mark_delta("tool_calls", elapsed_ms);
             }
             for call in calls {
-                let index = call["index"].as_u64().unwrap_or(0) as usize;
-                while tool_calls.len() <= index {
-                    tool_calls.push(json!({"id": "", "type": "function", "function": {"name": "", "arguments": ""}}));
-                }
-                while decisions.len() <= index {
-                    decisions.push(ToolDecision::default());
-                }
-                if let Some(id) = call["id"].as_str() {
-                    tool_calls[index]["id"] = json!(id);
-                    decisions[index].id = id.to_string();
-                }
-                if let Some(name) = call["function"]["name"].as_str() {
-                    tool_calls[index]["function"]["name"] = json!(name);
-                    decisions[index].name = name.to_string();
-                }
-                let mut fragment = String::new();
-                if let Some(arguments) = call["function"]["arguments"].as_str() {
-                    if !arguments.is_empty() {
-                        let previous = tool_calls[index]["function"]["arguments"].as_str().unwrap_or("").to_string();
-                        tool_calls[index]["function"]["arguments"] = json!(format!("{previous}{arguments}"));
-                        fragment = arguments.to_string();
-                    }
-                }
-                let decision = &mut decisions[index];
-                if !fragment.is_empty() {
+                let (index, fragment) = assembly.absorb(call);
+                let decision = &mut assembly.decisions[index];
+                if let Some(fragment) = fragment {
                     decision.absorb(&fragment);
                 }
                 if let Some((display_id, previous)) = decision.publish_update(index) {
@@ -2707,8 +2794,9 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     // `[DONE]`) leaves its decisions forming, because those arguments are partial and the tool loop
     // will not execute them. A cancelled or failed read returns above, so it never gets here.
     if finish_reason.is_some() || saw_done {
-        complete_decisions(&mut decisions, &tool_calls);
+        complete_decisions(&mut assembly.decisions, &assembly.calls);
     }
+    let tool_calls: Vec<Value> = assembly.calls.clone();
     Ok(json!({"status": status, "content": content, "commentary": commentary,
         "final_phase": final_phase, "reasoning": reasoning,
         "stream_complete": finish_reason.is_some(), "ttft_ms": ttft_ms, "request_id": request_id,
@@ -4909,5 +4997,109 @@ mod read_file_answers {
         assert_eq!(read_text_file(path.to_str().unwrap(), 13).unwrap(), "hello\nwörld\n");
         assert_eq!(read_text_file(path.to_str().unwrap(), 12).unwrap_err(), "read_file_too_large:13>12");
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// How a streamed tool call is assembled, tested against the bytes the endpoint actually sent.
+///
+/// Two of these fixtures are recorded from opencode-go/DeepSeek on 14/11 (the node's own model,
+/// `deepseek-v4.1-flash`): one two-call turn, and the fourteen-tool request of the "send a beautiful
+/// message to Laura" session whose calls arrived nameless. The other three are the same wire shape
+/// written out for the endings that turn was not recorded with - a name split across deltas, a later
+/// delta repeating the name as an empty string, and parallel calls keyed by `id` alone.
+#[cfg(test)]
+mod tool_call_assembly_tests {
+    use super::*;
+
+    fn recorded(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/provider")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("recorded fixture {} is unreadable: {error}", path.display()))
+    }
+
+    /// Feed one stream through the assembly the way `stream_completion` does: every chunk's tool
+    /// calls, in order, and nothing invented in between.
+    fn assemble(body: &str) -> Vec<Value> {
+        let mut assembly = ToolCallAssembly::new();
+        for line in body.lines() {
+            let Some(data) = line.trim().strip_prefix("data:") else { continue };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" { continue }
+            let chunk: Value = serde_json::from_str(data)
+                .unwrap_or_else(|error| panic!("a recorded chunk is JSON: {error}"));
+            if let Some(calls) = chunk["choices"][0]["delta"]["tool_calls"].as_array() {
+                for call in calls { assembly.absorb(call); }
+            }
+        }
+        assembly.calls
+    }
+
+    fn names(calls: &[Value]) -> Vec<String> {
+        calls.iter().map(|call| call["function"]["name"].as_str().unwrap_or("").to_string()).collect()
+    }
+
+    fn arguments(calls: &[Value]) -> Vec<String> {
+        calls.iter().map(|call| call["function"]["arguments"].as_str().unwrap_or("").to_string()).collect()
+    }
+
+    #[test]
+    fn the_recorded_two_call_turn_keeps_both_names_and_ids() {
+        let calls = assemble(&recorded("opencode-go-parallel-two-calls.sse"));
+        assert_eq!(names(&calls), vec!["bash".to_string(), "read".to_string()]);
+        assert_eq!(calls[0]["id"], json!("call_6de8d3baf10f444aa7090556"));
+        assert_eq!(calls[1]["id"], json!("call_8ec90b68a4744759a68bf395"));
+        assert_eq!(arguments(&calls),
+            vec!["{\"command\":\"echo ok\"}".to_string(), "{\"path\":\"/etc/hostname\"}".to_string()]);
+    }
+
+    /// The session whose calls reached the tool loop nameless: its own wire names both calls.
+    #[test]
+    fn the_recorded_fourteen_tool_turn_keeps_its_names() {
+        let calls = assemble(&recorded("opencode-go-fourteen-tools-laura.sse"));
+        assert_eq!(names(&calls), vec!["recall".to_string(), "tool_search".to_string()]);
+        assert_eq!(arguments(&calls),
+            vec!["{\"query\":\"Laura\"}".to_string(), "{\"query\":\"send message contact\"}".to_string()]);
+    }
+
+    #[test]
+    fn a_name_split_across_deltas_is_assembled_not_replaced() {
+        let calls = assemble(&recorded("name-split-across-deltas.sse"));
+        assert_eq!(names(&calls), vec!["codemode".to_string()]);
+        assert_eq!(arguments(&calls), vec!["{\"code\":\"return 1\"}".to_string()]);
+    }
+
+    /// The loss this file was fixed for: a later delta repeating the field as "" used to overwrite
+    /// the name the first delta delivered.
+    #[test]
+    fn a_later_delta_repeating_an_empty_name_does_not_clear_it() {
+        let calls = assemble(&recorded("name-empty-in-later-deltas.sse"));
+        assert_eq!(names(&calls), vec!["codemode".to_string()]);
+        assert_eq!(arguments(&calls), vec!["{\"code\":\"return 1\"}".to_string()]);
+        assert_eq!(calls[0]["id"], json!("call_empty_0001"));
+    }
+
+    #[test]
+    fn parallel_calls_keyed_only_by_id_stay_separate_calls() {
+        let calls = assemble(&recorded("two-calls-keyed-by-id-only.sse"));
+        assert_eq!(names(&calls), vec!["bash".to_string(), "read".to_string()]);
+        assert_eq!(arguments(&calls),
+            vec!["{\"command\":\"echo ok\"}".to_string(), "{\"path\":\"/etc/hostname\"}".to_string()]);
+        assert_eq!(calls[0]["id"], json!("call_idkey_a"));
+        assert_eq!(calls[1]["id"], json!("call_idkey_b"));
+    }
+
+    #[test]
+    fn a_name_that_arrived_is_never_lost_whatever_the_later_deltas_say() {
+        assert_eq!(merge_name("", "bash"), "bash");
+        assert_eq!(merge_name("bash", ""), "bash");
+        assert_eq!(merge_name("bash", "bash"), "bash", "a repeated name is not doubled");
+        assert_eq!(merge_name("ba", "sh"), "bash", "a split name grows");
+        assert_eq!(merge_name("bash", "sh"), "bash", "an overlapping repeat does not double the tail");
+        assert_eq!(merge_name("ba", "bash"), "bash", "a later delta carrying the whole name wins");
+        assert_eq!(merge_name("bash", "ba"), "bash", "a repeat from the start changes nothing");
+        assert_eq!(merge_name("bash", "rea"), "bashrea", "a different fragment is kept, not dropped");
+        assert_eq!(merge_name("bash", "tool"), "bashtool", "an unexpected fragment is kept, not dropped");
     }
 }
