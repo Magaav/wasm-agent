@@ -2091,7 +2091,8 @@ end
 
 -- Hook points around one tool call (docs/HOOKS.md). This wrapper is the one funnel every tool call
 -- passes - the model's, a subagent's, a probe's, and one made *inside* another call: code mode's
--- `await tools.bash(...)`, `tool_call {name=...}`, a `read_many` item. A nested dispatch is a hook
+-- `await tools.bash(...)`, `tool_call {name=...}`, a `remote {capability:"batch"}` entry that runs
+-- here (`remote_batch` dispatches it through this file). A nested dispatch is a hook
 -- boundary of its own, so `PreToolUse` cannot be bypassed by calling a tool a second way (11/11: the
 -- engine fired only for the outermost call, so a script - the way this node is normally worked -
 -- reached any tool and no hook ever saw it). It is inert with no hooks configured: `hooks.active` is
