@@ -167,73 +167,127 @@ enum ContactJob {
     PushName { chat: String, name: String, at: i64 },
 }
 
-/// Ask WhatsApp for the whole address book, once per store - and first, when the store's own persisted
-/// app-state version is what is hiding it, make that snapshot applicable again.
+/// Bring the phone's address book into the index: one supervised attempt, run from the main loop.
 ///
 /// A linked device is sent the phone's contact catalogue as app-state mutations (the `contact` actions
-/// in the `regular` collection) when it PAIRS, and never again unless it asks; the sync worker then
-/// keeps that collection current with versions. So a node that was paired before this build kept any
-/// contact names would go on answering "no chat in this index carries that name" for every contact the
-/// operator saved, forever, and no message would ever change that - the 13/11 finding exactly.
+/// in the `regular` collection) when it PAIRS, and never again unless it asks. So a node that was paired
+/// before this build kept any contact names has to ask, and the 13/11 fix was that one request.
 ///
-/// One `full_sync` request per store is the whole fix. It is a protocol READ of the account's own
-/// metadata (the same snapshot fetch WhatsApp does for a newly linked device): nothing is written to
-/// the account, nothing is sent to anybody, and `ix/ab/sync` is what keeps it to one request instead of
-/// one per reconnect.
+/// 14/11 showed the request alone is not enough, twice over:
 ///
-/// 14/11 showed that the request alone is not enough, and why. The store persists the collection's
-/// VERSION (`ver/regular`, written through `store.rs`'s `AppSyncStore`) and never its records, so after
-/// a restart the version says v9 while nothing of v9 is in memory; the snapshot the request brings back
-/// is then refused whole - `wacore`'s `snapshot_is_stale` drops any snapshot at or below the persisted
-/// version (`"incoming v9 <= persisted v9"`) - and no contact action is ever dispatched, so no name ever
-/// reaches the index. `index::ensure_address_book` decides that case from the two marks and hands back
-/// `ResetThenAsk`: this function then takes that ONE collection's persisted version back to zero, which
-/// is a standard full app-state resync of it (and of nothing else - no device record, no sync key, no
-/// pairing is reachable from `AppState`), and the snapshot that follows is applied as a fresh baseline.
-async fn request_address_book(client: &Arc<whatsapp_rust::Client>) {
-    let app = AppState(client.clone());
-    let action = match index::ensure_address_book(&IndexKv, &app).await {
-        Ok(action) => action,
-        // Not fatal: the mark that would keep this to one pass is unreadable, so the next connection
-        // asks again - one extra read, never a name missed.
+/// * The store persists the collection's VERSION (`ver/regular`, through `store.rs`'s `AppSyncStore`)
+///   and never its records, so after a restart the version says v9 while nothing of v9 is in memory.
+///   `wacore`'s `snapshot_is_stale` then drops the answer - `"incoming v9 <= persisted v9"` - and no
+///   contact action is ever dispatched. `index::advance_address_book` resets that ONE collection's
+///   persisted version to zero in that case, which is a full app-state resync of it and of nothing else
+///   (no device record, no sync key, no pairing is reachable from [`AppState`]), so the snapshot that
+///   follows is applied as a fresh baseline.
+/// * `process_sync_task` returns `()` and may return WITHOUT contacting the server: a collection another
+///   sync already holds answers `EquivalentSyncInFlight` and returns at `debug!`, and a connection that
+///   cannot reach the server yet answers `Deferred`. The 14/11 night deploy logged
+///   `whole address book requested from the phone (once per store)` and then nothing at all for 25
+///   minutes, with `address_book: 0`. So a request is not an answer, and this loop VERIFIES instead of
+///   trusting: it asks again on a timer while `ix/ab/full` (the index received the book) is unset, and
+///   it names the two states that must not be silent - no app-state key, and the budget spent.
+async fn address_book_tick(state: &mut AddressBookRun, connected: bool) {
+    if !connected {
+        // A dropped connection clears the holder that skipped the request, so the next one starts with
+        // a fresh budget. What is durable is `ix/ab/full`: a store that has the book asks nothing.
+        state.settled = false;
+        state.reset_performed = false;
+        state.next_at = Instant::now();
+        state.budget_cleared = false;
+        return;
+    }
+    if state.settled || Instant::now() < state.next_at {
+        return;
+    }
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else { return };
+    if !state.budget_cleared {
+        // Best effort: a refused write only means this connection retries after the previous budget.
+        let _ = index::clear_address_attempts(&IndexKv).await;
+        state.budget_cleared = true;
+    }
+    let app = AppState(client);
+    let step = match index::advance_address_book(&IndexKv, &app, &mut state.reset_performed).await {
+        Ok(step) => step,
         Err(reason) => {
+            // Not fatal and not silent: the next tick tries again with the same facts.
             say!("index: address book state unreadable reason={reason}");
+            state.next_at = Instant::now() + ADDRESS_RETRY;
             return;
         }
     };
-    if action == index::AddressBookAsk::Done {
-        return;
-    }
-    if action == index::AddressBookAsk::ResetThenAsk {
-        // The count is what the operator sees in a `contacts` answer (`index.address_book`), so the log
-        // line carries it too: a resync that lands shows the number move on the next query.
-        let (held, _) = index::address_count(&IndexKv, index::COUNT_CAP).await.unwrap_or((0, false));
-        say!("index: app-state version reset for the contact collection so the phone's snapshot is applied (address-book rows held: {held})");
-    }
-    let task = whatsapp_rust::sync_task::MajorSyncTask::AppStateSync {
-        name: wacore::appstate::patch_decode::WAPatchName::Regular,
-        full_sync: true,
-    };
-    client.process_sync_task(task).await;
-    match index::mark_address_sync(&IndexKv).await {
-        Ok(()) => say!("index: whole address book requested from the phone (once per store)"),
-        // Not fatal: the request is out, and an unmarked store asks again on the next connection -
-        // which is the right direction to fail in (one extra read, never a name missed).
-        Err(reason) => say!("index: address book requested, sync mark not written reason={reason}"),
+    match step {
+        index::AddressBookStep::Requested { attempts, reset } => {
+            // The count the operator sees in a `contacts` answer is `index.address_book`: carrying it here
+            // is what makes a recovery visible as a number that moves.
+            let (held, _) = index::address_count(&IndexKv, index::COUNT_CAP).await.unwrap_or((0, false));
+            if reset {
+                say!("index: app-state version reset for the contact collection and the full snapshot requested (attempt {attempts}, address-book rows held: {held})");
+            } else {
+                say!("index: full contact snapshot requested from the phone (attempt {attempts}, address-book rows held: {held})");
+            }
+            // The sent request is not the received book. Ask again on a timer until `ix/ab/full` says it
+            // arrived, which is the whole reason this is a loop and not one call at connect time.
+            state.next_at = Instant::now() + ADDRESS_RETRY;
+        }
+        index::AddressBookStep::Received => {
+            state.settled = true;
+            let (held, _) = index::address_count(&IndexKv, index::COUNT_CAP).await.unwrap_or((0, false));
+            say!("index: address book received; the names the phone saved are in the index (address-book rows: {held})");
+        }
+        index::AddressBookStep::SyncedEmpty { version } => {
+            state.settled = true;
+            say!("index: the contact collection synced to v{version} and carried no saved contact: this account has none on the phone");
+        }
+        index::AddressBookStep::KeysMissing => {
+            // Said once, by name, instead of the silence the 14/11 deploy produced. Nothing this node can
+            // do about it either: the key is shared by the phone, and asking again would not produce it.
+            state.settled = true;
+            say!("index: app-state sync key missing for the contact collection; no saved contact can be read until the phone shares it");
+        }
+        index::AddressBookStep::Exhausted { attempts } => {
+            state.settled = true;
+            say!("index: address book not received after {attempts} request(s) on this connection; asking again on the next connection");
+        }
     }
 }
 
-/// The app-state store as the index sees it: one collection's persisted version, and the reset that
-/// takes it back to zero.
+/// How long to wait between attempts at the contact collection: long enough for the answer to a
+/// full-sync request to arrive and be applied, short enough that a skipped request is retried while the
+/// operator is still watching the same minute.
+const ADDRESS_RETRY: Duration = Duration::from_secs(20);
+
+/// This connection's progress at bringing the address book in.
+struct AddressBookRun {
+    /// Nothing more is owed for this connection: the book arrived, the account has none, the key is
+    /// missing, or the budget is spent. Cleared when the connection drops.
+    settled: bool,
+    /// Whether THIS connection reset the collection's version, which is what makes a version above zero
+    /// mean "it synced back" instead of "it is still hidden".
+    reset_performed: bool,
+    /// When to look again.
+    next_at: Instant,
+    /// Whether the per-connection attempt budget was cleared.
+    budget_cleared: bool,
+}
+
+impl AddressBookRun {
+    fn new() -> AddressBookRun {
+        AddressBookRun { settled: false, reset_performed: false, next_at: Instant::now(), budget_cleared: false }
+    }
+}
+
+/// The app-state store as the address book sees it.
 ///
-/// It is a newtype over the client rather than a handle to `whatsapp_rust`'s backend so the two calls
-/// `index::ensure_address_book` is allowed to make are the only ones it CAN make: the device record,
-/// the sync keys and every other collection stay out of reach, which is what makes "this recovers the
-/// address book and cannot touch the identity or the pairing" a property of the code and not a promise
-/// in a comment.
+/// A newtype over the client rather than a handle to `whatsapp_rust`'s backend, so the calls
+/// `index::advance_address_book` is allowed to make are the only ones it CAN make: the device record,
+/// the pairing and every other collection stay out of reach, which is what makes "this recovers the
+/// address book and cannot touch the identity or the pairing" a property of the code.
 struct AppState(Arc<whatsapp_rust::Client>);
 
-impl index::AppStateVersions for AppState {
+impl index::AddressBookAppState for AppState {
     fn persisted_version(&self, collection: &str) -> impl std::future::Future<Output = Result<u64, String>> {
         let backend = self.0.persistence_manager().backend();
         // Owned before the future: the returned future may not borrow its argument.
@@ -263,6 +317,39 @@ impl index::AppStateVersions for AppState {
                 .clear_mutation_macs(&collection)
                 .await
                 .map_err(|error| format!("app state mutation macs: {error}"))
+        }
+    }
+
+    fn has_sync_keys(&self) -> impl std::future::Future<Output = Result<bool, String>> {
+        let backend = self.0.persistence_manager().backend();
+        async move {
+            // The id of the most recent sync key: its absence means NO key at all, which is the state
+            // that turns every snapshot into an undecodable blob. A key that exists but is not the one a
+            // snapshot names is handled by `whatsapp_rust` itself (it requests the missing key from the
+            // phone); what it cannot recover from, and what this answers, is having none.
+            backend
+                .get_latest_sync_key_id()
+                .await
+                .map(|id| id.is_some())
+                .map_err(|error| format!("app state keys: {error}"))
+        }
+    }
+
+    fn request_full_sync(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>> {
+        let client = self.0.clone();
+        let collection = collection.to_string();
+        async move {
+            let name = match collection.as_str() {
+                index::CONTACT_COLLECTION => wacore::appstate::patch_decode::WAPatchName::Regular,
+                other => return Err(format!("unknown app state collection: {other}")),
+            };
+            // The one public way to send the app-state sync IQ. It applies whatever the server answers
+            // through the library's own path - keys, MACs, ltHash, and the `ContactUpdate` events this
+            // index reads - so there is no second decoder to disagree with it. It can also return
+            // without sending anything, which is why the caller verifies by effect and asks again.
+            let task = whatsapp_rust::sync_task::MajorSyncTask::AppStateSync { name, full_sync: true };
+            client.process_sync_task(task).await;
+            Ok(())
         }
     }
 }
@@ -2436,10 +2523,9 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     let mut last_query = Instant::now();
     let mut last_prune = Instant::now();
     let mut last_ocr = Instant::now();
-    // Whether this instance has already settled the address book (`request_address_book`): the store's
-    // own marks (`ix/ab/sync`, `ix/ab/full`, `ix/ab/reset`) are what make it once per store, this is
-    // what makes it once per connection.
-    let mut address_book_asked = false;
+    // Where this connection stands on the phone's address book (`address_book_tick`): the budget and the
+    // timer are per connection, and `ix/ab/full` is what makes the whole thing settle for good.
+    let mut address_book = AddressBookRun::new();
     // Whether the name-side walk has already said it is rebuilding, so a multi-minute rebuild is two
     // lines (start, done) and not one per tick.
     let mut names_announced = false;
@@ -2457,18 +2543,16 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // is the name a `contacts` query finds one tick later, and one written before it is picked up
         // by `card_touch`. Either order answers; this one costs the fewer cards written twice.
         contact_inbox(index.enabled).await;
-        // The whole address book, once for a store that has never received it: a device paired by an
-        // older build was never sent the contact names this index answers from, so the first tick after
-        // a connection asks for them (`request_address_book`), and a store whose collection is
-        // persisted at a version the index never received has that ONE collection's version reset
-        // first, so the snapshot is not dropped as stale. It is asked for HERE and not in the
-        // `on_connected` handler because that handler's future must be `Send` and holding the client
-        // across an await makes it not one.
-        if !address_book_asked && bot() == outbox::Bot::Connected && index.enabled {
-            if let Some(client) = CLIENT.with(|c| c.borrow().clone()) {
-                address_book_asked = true;
-                request_address_book(&client).await;
-            }
+        // The whole address book, supervised: a device paired by an older build was never sent the name
+        // this index answers from, so the first connected tick asks for the whole collection - and asks
+        // AGAIN on a timer, because a request is not an answer (`process_sync_task` can return without
+        // contacting the server at all). It settles on the first of: the index received the book, the
+        // account has no saved contact, no app-state key, or the per-connection budget. It runs HERE and
+        // not in the `on_connected` handler because that handler's future must be `Send` and holding the
+        // client across an await makes it not one.
+        if index.enabled {
+            let connected = bot() == outbox::Bot::Connected;
+            address_book_tick(&mut address_book, connected).await;
         }
         // Then the name side of the same index, from the records already stored: an index that
         // arrived without its cards answers `whatsapp_contacts` with no chat at all until this ran.

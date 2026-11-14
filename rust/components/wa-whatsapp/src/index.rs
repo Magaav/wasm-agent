@@ -341,25 +341,50 @@ pub async fn mark_address_full<S: Store>(store: &S) -> Result<(), String> {
     store.set(key_address_full().as_bytes(), b"1").await
 }
 
-/// `ix/ab/reset` -> a word: this store has already forced ONE full app-state resync of the contact
-/// collection, in the hope that the snapshot it was never able to apply would finally be applied.
+/// `ix/ab/attempts` -> a decimal count: how many full-snapshot requests this connection has spent
+/// while the index still did not hold the book.
 ///
-/// It is what keeps the recovery bounded: a store whose account genuinely has no saved contacts asks
-/// for the collection once, spends the reset, and never asks again. Without it, "no `ix/ab/full` yet"
-/// would be a reason to resync the collection on every boot forever.
-fn key_address_reset() -> String {
-    format!("{PREFIX}ab/reset")
+/// It exists because ASKING IS NOT RECEIVING, and the 14/11 night deploy is why. `process_sync_task`
+/// returns `()` and may return without contacting the server at all: a collection another sync already
+/// holds answers `ReservationSkip::EquivalentSyncInFlight` and returns (a `debug!` line, no retry, no
+/// warning), and a connection that cannot reach the server yet answers `Deferred`. The live log said
+/// `whole address book requested from the phone (once per store)` and then nothing at all for 25
+/// minutes, with `address_book: 0` - one request is not evidence of one answer. This counter is the
+/// bound: a bounded number of real attempts, and a closing line that says how many happened.
+fn key_address_attempts() -> String {
+    format!("{PREFIX}ab/attempts")
 }
 
-/// Has this store already forced its one resync for the contact collection?
-pub async fn address_reset_done<S: Store>(store: &S) -> Result<bool, String> {
-    Ok(store.get(key_address_reset().as_bytes()).await?.is_some())
+/// How many requests this connection has spent.
+pub async fn address_attempts<S: Store>(store: &S) -> Result<u32, String> {
+    Ok(store
+        .get(key_address_attempts().as_bytes())
+        .await?
+        .and_then(|value| String::from_utf8_lossy(&value).parse::<u32>().ok())
+        .unwrap_or(0))
 }
 
-/// Record that it has (see [`key_address_reset`]).
-pub async fn mark_address_reset<S: Store>(store: &S) -> Result<(), String> {
-    store.set(key_address_reset().as_bytes(), b"1").await
+/// Record one more request, and answer the new count. Saturating: this is a bound, not an odometer.
+pub async fn bump_address_attempts<S: Store>(store: &S) -> Result<u32, String> {
+    let next = address_attempts(store).await?.saturating_add(1);
+    store.set(key_address_attempts().as_bytes(), next.to_string().as_bytes()).await?;
+    Ok(next)
 }
+
+/// Forget the spent requests: a NEW connection gets its own budget.
+///
+/// The budget is per connection, not per store, because what it bounds is a connection's chances at
+/// this: the request that was skipped was skipped against work in flight on that connection, and a
+/// reconnect is exactly the event that clears the holder. `ix/ab/full` is what ends the recovery for
+/// good; this only decides how hard one connection tries.
+pub async fn clear_address_attempts<S: Store>(store: &S) -> Result<(), String> {
+    store.del(key_address_attempts().as_bytes()).await
+}
+
+/// Most times one connection asks the phone for the whole contact collection before it stops and says
+/// so. Six is enough to outlast a connect-time sync that is still holding the collection and a
+/// reconnect; few enough that a device whose key will never arrive does not ask forever.
+pub const ADDRESS_ATTEMPT_CAP: u32 = 6;
 
 /// The collection whose `contact` actions carry the phone's address book.
 ///
@@ -369,70 +394,118 @@ pub async fn mark_address_reset<S: Store>(store: &S) -> Result<(), String> {
 /// exactly what a full app-state resync is.
 pub const CONTACT_COLLECTION: &str = "regular";
 
-/// What the first connected tick of a boot must do about the address book.
+/// What one attempt at bringing the address book in must do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AddressBookAsk {
-    /// Ask the phone for the whole collection: this store has never asked.
-    Ask,
-    /// The persisted version already claims a state the index never received, so asking alone would
-    /// be answered with a snapshot that is dropped as stale. Reset the persisted version first (a
-    /// standard full app-state resync), then ask.
-    ResetThenAsk,
-    /// Nothing: a full snapshot has been received, or the one forced resync has been spent.
-    Done,
+pub enum AddressBookStep {
+    /// A full-sync request was issued on this call - after resetting the collection's persisted version
+    /// when that was what hid it. Whether the server ANSWERED is not known here: that is what the next
+    /// step asks, and why asking again is part of the design and not a retry of last resort.
+    Requested { attempts: u32, reset: bool },
+    /// The index holds the book. Nothing is ever owed again for this store.
+    Received,
+    /// The collection synced back to a version above zero after this node reset it, and delivered no
+    /// contact action: the account has no saved contacts. That IS the whole address book, so it is
+    /// recorded as received and the answer stops describing a sync that never happened.
+    SyncedEmpty { version: u64 },
+    /// No app-state sync key is stored. The snapshot cannot be decoded at all, and the key can only
+    /// come from the phone, so this is the one state that must be SAID rather than retried.
+    KeysMissing,
+    /// This connection has spent its requests. Said once, then the next connection gets a fresh budget.
+    Exhausted { attempts: u32 },
 }
 
-/// Decide what this store's address book needs, with no I/O of its own.
+/// The decision, with no I/O of its own: what one attempt must do, given five facts.
 ///
-/// The inputs are the four facts that decide it: the collection's persisted version, whether a full
-/// snapshot ever reached the index, whether the one resync was already spent, and whether the phone
-/// was asked before. The order of the tests is the point, and each line is a measured state:
+/// The order is the point, and each branch is a state measured on the live account:
 ///
-/// * `full` first: a store that received the book needs nothing, whatever else is true of it.
-/// * a version above zero that no snapshot ever delivered (`full == false`) is the 14/11 state, and
-///   asking again would be dropped again - the version is what hides the collection.
-/// * only then the once-per-store ask, which is the 13/11 path for a store that has never asked.
-pub fn address_book_ask(persisted_version: u64, full: bool, reset: bool, asked: bool) -> AddressBookAsk {
+/// * `full` first: a store that received the book - or proved it has none - is finished forever.
+/// * no key: nothing can be decoded, and only the phone can fix it. Said, not retried.
+/// * a reset this process performed, followed by a version above zero, is the collection having synced
+///   back (the processor is the only writer of a version) and carried no contact.
+/// * the budget, so a device that cannot be answered does not ask forever.
+/// * otherwise ask, resetting first when a persisted version is what would get the snapshot dropped as
+///   stale (`wacore`'s `snapshot_is_stale`: `incoming v9 <= persisted v9`).
+pub fn address_book_decision(
+    persisted_version: u64,
+    full: bool,
+    attempts: u32,
+    has_keys: bool,
+    reset_performed: bool,
+) -> AddressBookStep {
     if full {
-        return AddressBookAsk::Done;
+        return AddressBookStep::Received;
     }
-    if persisted_version > 0 && !reset {
-        return AddressBookAsk::ResetThenAsk;
+    if !has_keys {
+        return AddressBookStep::KeysMissing;
     }
-    if asked {
-        return AddressBookAsk::Done;
+    if reset_performed && persisted_version > 0 {
+        return AddressBookStep::SyncedEmpty { version: persisted_version };
     }
-    AddressBookAsk::Ask
+    if attempts >= ADDRESS_ATTEMPT_CAP {
+        return AddressBookStep::Exhausted { attempts };
+    }
+    AddressBookStep::Requested { attempts, reset: persisted_version > 0 }
 }
 
 /// What the index needs from the app-state store, and nothing more.
 ///
-/// Two calls, both about ONE collection's version: the version it persisted, and the write that takes
-/// it back to zero. The device record, the sync keys and the mutation MACs of any other collection are
-/// deliberately not reachable from here - a resync of the address book must never be able to touch the
-/// identity or the pairing, and the way to guarantee that is to have no call for it.
-pub trait AppStateVersions {
+/// Four calls, all about ONE collection: its persisted version, the write that takes it back to zero,
+/// whether a sync key exists to decode an answer with, and the request itself. The device record, the
+/// pairing and every other collection's state are deliberately not reachable from here - a resync of
+/// the address book must never be able to touch the identity or the pairing, and the way to guarantee
+/// that is to have no call for it.
+pub trait AddressBookAppState {
     fn persisted_version(&self, collection: &str) -> impl std::future::Future<Output = Result<u64, String>>;
     /// Reset one collection's local version so the next snapshot is applied as fresh.
     fn reset_collection(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>>;
+    /// Whether any app-state sync key is stored. Without one a snapshot cannot be decoded, and no
+    /// amount of asking produces the key: it is shared by the phone.
+    fn has_sync_keys(&self) -> impl std::future::Future<Output = Result<bool, String>>;
+    /// Ask the server for the collection whole (a full-sync snapshot request, the same IQ a newly
+    /// linked device sends). It may return without sending anything - a collection another sync holds
+    /// is skipped - which is exactly why the caller verifies by effect instead of trusting the return.
+    fn request_full_sync(&self, collection: &str) -> impl std::future::Future<Output = Result<(), String>>;
 }
 
-/// Bring this store's address book to the index, once: reset the persisted version when that is what
-/// is hiding the collection, then answer whether the whole book must be asked for now.
+/// One supervised attempt: decide, reset if that is what the decision says, and ask.
 ///
-/// `Err` is a store that cannot be read or written; the caller keeps its previous state in that case
-/// rather than deciding on half the facts.
-pub async fn ensure_address_book<S: Store, A: AppStateVersions>(store: &S, app: &A) -> Result<AddressBookAsk, String> {
+/// `reset_performed` is the caller's memory of this connection: it is what turns "the version is above
+/// zero" from "still hidden" into "it synced back and carried nothing". `Err` is a store that cannot be
+/// read or written; the caller keeps its previous state rather than deciding on half the facts.
+pub async fn advance_address_book<S: Store, A: AddressBookAppState>(
+    store: &S,
+    app: &A,
+    reset_performed: &mut bool,
+) -> Result<AddressBookStep, String> {
     let full = address_full_done(store).await?;
-    let reset = address_reset_done(store).await?;
-    let asked = address_sync_done(store).await?;
+    let attempts = address_attempts(store).await?;
+    let has_keys = app.has_sync_keys().await?;
     let version = app.persisted_version(CONTACT_COLLECTION).await?;
-    let decision = address_book_ask(version, full, reset, asked);
-    if decision == AddressBookAsk::ResetThenAsk {
-        app.reset_collection(CONTACT_COLLECTION).await?;
-        mark_address_reset(store).await?;
+    let decision = address_book_decision(version, full, attempts, has_keys, *reset_performed);
+    match decision {
+        AddressBookStep::Received | AddressBookStep::KeysMissing | AddressBookStep::Exhausted { .. } => {
+            Ok(decision)
+        }
+        AddressBookStep::SyncedEmpty { .. } => {
+            // The collection is in the index and holds no contact: the phone's address book is empty.
+            // Marking it received is the honest record of that, and it is what stops every later
+            // connection from resetting a collection that has nothing left to deliver.
+            let _ = mark_address_full(store).await;
+            Ok(decision)
+        }
+        AddressBookStep::Requested { reset, .. } => {
+            if reset {
+                app.reset_collection(CONTACT_COLLECTION).await?;
+                *reset_performed = true;
+            }
+            let attempts = bump_address_attempts(store).await?;
+            // Best-effort: `ix/ab/sync` is the diagnostic that says a request was ever made, and a
+            // refused write must not stop the request itself.
+            let _ = mark_address_sync(store).await;
+            app.request_full_sync(CONTACT_COLLECTION).await?;
+            Ok(AddressBookStep::Requested { attempts, reset })
+        }
     }
-    Ok(decision)
 }
 
 /// Most names one card keeps: enough for a person's rename history and a group's active members,
