@@ -40,7 +40,7 @@ local M = {}
 -- character takes two cells, and a combining mark or a zero-width joiner takes none. The emoji
 -- selector U+FE0F (`❤️` is `❤` + it) widens its one-cell base to two in the terminals this runs in
 -- (foot, kitty, Windows Terminal), so it counts as the second cell. Counting those as one shifted every border after them in a
--- table. The ranges are `cell_width` in rust/wa-host/src/terminal_editor.rs, which wraps the
+-- table. The ranges are `cell_width` in rust/wa-term/src/terminal_editor.rs, which wraps the
 -- transcript: the two must agree or a line Lua fitted is wrapped again there. `cli_view.columns`
 -- is this function; `scripts/test-markdown.lua` pins both.
 local function cell(cp)

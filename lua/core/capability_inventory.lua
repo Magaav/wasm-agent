@@ -1,6 +1,6 @@
 -- The node's own capability inventory, as data.
 --
--- The list itself lives in one place: the live registry in `rust/wa-host/src/capabilities.rs`
+-- The list itself lives in one place: the live registry in `rust/wa-capabilities/src/capabilities.rs`
 -- that the interpreter is booted from. This module is only a door: the CLI (`wa capabilities`)
 -- and the codemode sandbox (`capabilities()` / `describe(name)`) both read it here, and `/health`
 -- publishes the same names and the sha256 of the same bytes. There is no second copy to drift,

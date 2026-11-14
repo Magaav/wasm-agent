@@ -45,7 +45,7 @@ landing-queue: #7 GRANTED to a073ee85-... on change/x after waiting 218s (base 2
 ```
 
 The lease is an **OS-held lock**, the repository's own liveness primitive
-(`rust/wa-host/src/resources.rs`, shared through `scripts/lib/sqlite-lease.mjs` with the serial gate's
+(`rust/wa-capabilities/src/resources.rs`, shared through `scripts/lib/sqlite-lease.mjs` with the serial gate's
 lane): an exclusive SQLite lock the kernel drops when the process holding it dies. A pid is evidence,
 never the latch. That is deliberate: lesson `les-dcbabb9d2835` records a killed deploy whose
 `.deploy.lock` held a dead pid and blocked every later deploy for **1h44**, because nothing reclaimed

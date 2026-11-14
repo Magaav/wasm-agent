@@ -366,7 +366,7 @@ elseif command == "access" then
   print(json.encode(args[2] == "log" and access.events() or access.status()))
 elseif command == "capabilities" then
   -- The node's own capability inventory, as data. The list comes from the host registry that
-  -- *registers* the capabilities (`rust/wa-host/src/capabilities.rs`), so this verb cannot disagree
+  -- *registers* the capabilities (`rust/wa-capabilities/src/capabilities.rs`), so this verb cannot disagree
   -- with what the node can actually do; `docs/HOST.md` is checked against that registry by a test.
   -- `--json` is the machine form (what the sandbox's capabilities() answers with), the default is
   -- one line per capability for a reader.

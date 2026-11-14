@@ -36,7 +36,7 @@ wa_modules(op, id, path, session) -> a JSON envelope { status, content_type, bod
 ```
 
 `op` is `list` (or empty) for the listing, `file` for a file. It is registered in
-`rust/wa-host/src/serve.rs` (the `/modules` arms) and loaded by `lua/core/server.lua`, which is the
+`rust/wa-capabilities/src/serve.rs` (the `/modules` arms) and loaded by `lua/core/server.lua`, which is the
 whole of the node's side: the status in the envelope is kept, so 403 and 404 stay the module
 system's decisions, and the content type is mapped onto the static string a reply carries — a type
 the node does not know is served as bytes rather than guessed at.

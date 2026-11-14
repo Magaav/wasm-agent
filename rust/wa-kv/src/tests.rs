@@ -3,7 +3,7 @@
 //!
 //! They are written against `MemoryStore` (no file, no SQLite), because what is being tested here is
 //! the adapter and not the host's database. The host's SQLite `Store` is tested where it lives
-//! (`rust/wa-host/src/state_host.rs`).
+//! (`rust/wa-kernel-runtime/src/state_host.rs`).
 
 use super::*;
 use std::sync::Arc;

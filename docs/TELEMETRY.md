@@ -137,7 +137,7 @@ ring plus the live histograms. That is the whole point: it does not depend on ho
 ## Where the host records
 
 The crate is a library; the host owns the call sites and the clock. That host side is
-`rust/wa-host/src/node_telemetry.rs`, with the recording points in `components.rs`,
+`rust/wa-governance/src/node_telemetry.rs`, with the recording points in `components.rs`,
 `service_components.rs`, `service_components_v2.rs` and `services.rs`. Both service runners record
 the same capability names, so a dashboard does not need to know which contract a component speaks.
 

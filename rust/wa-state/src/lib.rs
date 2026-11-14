@@ -165,7 +165,7 @@ impl From<std::io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Key and value sizes the host's `wa_kv` grant enforces (`rust/wa-host/src/services.rs`). A
+/// Key and value sizes the host's `wa_kv` grant enforces (`rust/wa-kernel-runtime/src/services.rs`). A
 /// migration or an import checks them *before* it writes, so a value the host would refuse can
 /// never leave a half-applied step behind.
 pub const MAX_KEY_BYTES: u64 = 4096;

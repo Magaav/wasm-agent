@@ -1,4 +1,4 @@
--- The CLI's bottom panel (`host.panel`, rust/wa-host/src/terminal_editor.rs `Panel`): a title, a few
+-- The CLI's bottom panel (`host.panel`, rust/wa-term/src/terminal_editor.rs `Panel`): a title, a few
 -- lines, then a list or a field, closed with Esc - the way Claude Code shows `/model` or `/usage`.
 -- `open` blocks until the reader answers and returns `{action = "select", index = n}`,
 -- `{action = "submit", text = ...}`, `{action = "cancel"}` or `{action = "timeout"}`. The panel stays

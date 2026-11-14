@@ -2,7 +2,7 @@
 
 Status 06/11: library built and tested (`rust/wa-bus`, 31 unit tests, no dependencies); WIT in
 [`wit/bus/bus.wit`](../wit/bus/bus.wit) parsed and resolved with wasm-tools 1.263.0, **served** by
-`rust/wa-host/src/bus_host.rs` on `wa:kernel@0.2` (WASI 0.3): one `wa_bus::Bus` per node, the ACL
+`rust/wa-kernel-runtime/src/bus_host.rs` on `wa:kernel@0.2` (WASI 0.3): one `wa_bus::Bus` per node, the ACL
 built from the components' manifest grants, `source` set by the host, a subscription delivered to the
 guest as a `stream<event>`, and `revoke_owner` on stop. See "Integration" below for what is wired and
 what is not.
@@ -157,7 +157,7 @@ it cannot be honoured.
 ## Integration into wa-host (built, with the remaining gaps named)
 
 The upgrade landed (wasmtime 50, `component-model-async`), and items 1-4 below are in
-`rust/wa-host/src/bus_host.rs`; 5 and 6 are partly done, and item 6's `scripts/fast.sh` half is still
+`rust/wa-kernel-runtime/src/bus_host.rs`; 5 and 6 are partly done, and item 6's `scripts/fast.sh` half is still
 open because that file was out of scope for this change.
 
 * What one subscription costs: one pump thread per subscription (`wa-bus-<owner>`) polling its

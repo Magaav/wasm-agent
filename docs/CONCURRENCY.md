@@ -78,7 +78,7 @@ reviewer can see what is not yet covered. Read EXECUTION.md for the contract; re
 where it lives.
 
 Mechanism: `rust/wa-host/src/serve/scheduler.rs`, the admission block in
-`rust/wa-host/src/serve.rs`, `wa_admission`/`wa_identity`/`wa_verify_peer` in
+`rust/wa-capabilities/src/serve.rs`, `wa_admission`/`wa_identity`/`wa_verify_peer` in
 `lua/core/server.lua`, and the runtime's `subagents` module.
 Proof: that module's unit tests, `scripts/test-run-isolation.sh` (hermetic, local
 marker-echoing provider) and the UI check in `scripts/test-ui.ps1`.
@@ -277,7 +277,7 @@ fit at once, and its default is **1**. Two entry points, because the runner diff
 command and is the only supervisor, while `acquire` grants the slot to a caller that already owns the
 gate process - `skills/parallel-evolution/scripts/finish.mjs`, or `scripts/merge-lane.mjs` in its
 disposable clone - blocks while it holds it, spawns nothing, and leaves `release --id <n>` to end the
-claim. Liveness is this repository's own primitive from `rust/wa-host/src/resources.rs`: an exclusive
+claim. Liveness is this repository's own primitive from `rust/wa-capabilities/src/resources.rs`: an exclusive
 SQLite lease the OS releases on death, never a PID timeout. A holder that dies is `abandoned` and its
 slot frees; a holder whose *gate* survives it is `orphaned` and the slot stays held, because a gate still
 burning cores is exactly what must not run twice. A dead claim is reconcilable from the record's own

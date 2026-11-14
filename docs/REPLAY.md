@@ -40,9 +40,9 @@ those, and a replayer answers them from the file instead of doing the work.
 
 | file | seam | interfaces to wrap |
 | --- | --- | --- |
-| `rust/wa-host/src/service_components.rs` | `impl wa::kernel::*::Host` / `HostX` for `State` (bindgen at the top of the file selects `world: "service-component"`) | `websocket` (`HostSocket::connect/send/recv/close`), `http` (`HostPending::start/poll`), `speech` (`HostJob::start/poll`), `kv` (`get/set/delete/delete_prefix/scan`), `log::write` (**see the exclusion below**), `credentials::get`, `lifecycle::stopping/report` (recorded, not replayed) |
-| `rust/wa-host/src/core_component.rs` | `impl wa::kernel::host::Host::call` — the single untyped bridge every `host.*` from the Lua core crosses | one function; the cheapest interception point in the tree |
-| `rust/wa-host/src/components.rs` | `run()` builds the linker with `wasmtime_wasi::p2::add_to_linker_sync`; a request component (`wasi:cli` world) imports no `wa:kernel` | `wasi:clocks/*` and `wasi:random/*` from the `WasiCtx` (see determinism), and the `env`/`file_env`/`config` values the grant injects |
+| `rust/wa-kernel-runtime/src/service_components.rs` | `impl wa::kernel::*::Host` / `HostX` for `State` (bindgen at the top of the file selects `world: "service-component"`) | `websocket` (`HostSocket::connect/send/recv/close`), `http` (`HostPending::start/poll`), `speech` (`HostJob::start/poll`), `kv` (`get/set/delete/delete_prefix/scan`), `log::write` (**see the exclusion below**), `credentials::get`, `lifecycle::stopping/report` (recorded, not replayed) |
+| `rust/wa-capabilities/src/core_component.rs` | `impl wa::kernel::host::Host::call` — the single untyped bridge every `host.*` from the Lua core crosses | one function; the cheapest interception point in the tree |
+| `rust/wa-kernel-runtime/src/components.rs` | `run()` builds the linker with `wasmtime_wasi::p2::add_to_linker_sync`; a request component (`wasi:cli` world) imports no `wa:kernel` | `wasi:clocks/*` and `wasi:random/*` from the `WasiCtx` (see determinism), and the `env`/`file_env`/`config` values the grant injects |
 
 Two rules for the recording wrapper, both learned from what a replay is for:
 
@@ -159,11 +159,11 @@ The exact call sites, so the next change does not have to re-derive them:
 
 | file | seam | call |
 | --- | --- | --- |
-| `rust/wa-host/src/service_components.rs` | every `impl wa::kernel::*::Host` for `State` — and the `HostCallGuard` added by the policy/telemetry wiring is already the one place each answered call passes through | `ring.push(NewRecord { interface: "wa:kernel/<iface>", function, args, result, duration })` **after** the answer, in `seq` order, never instead of it |
-| `rust/wa-host/src/service_components_v2.rs` | the same seam for `wa:kernel@0.2`; the `HostCallGuard` points are the same ones, including the per-frame `websocket.recv` observation a stream item produces | the same push, once per completed `async fn` (and once per frame), after the answer |
-| `rust/wa-host/src/core_component.rs` | `impl wa::kernel::host::Host::call` — the single untyped bridge every `host.*` from the Lua core crosses | the same push; one function, the cheapest interception point in the tree |
-| `rust/wa-host/src/components.rs` | `run()` — a request component (`wasi:cli` world) imports no `wa:kernel` | `wasi:clocks/*` and `wasi:random/*` answers, which is where its non-determinism is |
-| `rust/wa-host/src/services.rs` | the supervisor's restart branch (already carries `restart_reason`) | `replay::save(ring, &dir, &SaveOptions { trigger: Trigger::Crash, .. }, now)` on `trap`/`error` |
+| `rust/wa-kernel-runtime/src/service_components.rs` | every `impl wa::kernel::*::Host` for `State` — and the `HostCallGuard` added by the policy/telemetry wiring is already the one place each answered call passes through | `ring.push(NewRecord { interface: "wa:kernel/<iface>", function, args, result, duration })` **after** the answer, in `seq` order, never instead of it |
+| `rust/wa-kernel-runtime/src/service_components_v2.rs` | the same seam for `wa:kernel@0.2`; the `HostCallGuard` points are the same ones, including the per-frame `websocket.recv` observation a stream item produces | the same push, once per completed `async fn` (and once per frame), after the answer |
+| `rust/wa-capabilities/src/core_component.rs` | `impl wa::kernel::host::Host::call` — the single untyped bridge every `host.*` from the Lua core crosses | the same push; one function, the cheapest interception point in the tree |
+| `rust/wa-kernel-runtime/src/components.rs` | `run()` — a request component (`wasi:cli` world) imports no `wa:kernel` | `wasi:clocks/*` and `wasi:random/*` answers, which is where its non-determinism is |
+| `rust/wa-kernel-runtime/src/services.rs` | the supervisor's restart branch (already carries `restart_reason`) | `replay::save(ring, &dir, &SaveOptions { trigger: Trigger::Crash, .. }, now)` on `trap`/`error` |
 
 Rules that must survive that change (from the sections above, restated where they are enforced):
 record after the answer and never instead of it; a failed host call is recorded **with** its error;
