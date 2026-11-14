@@ -487,6 +487,7 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
       local stripped,wait_s,wait_error=pending_calls.strip(call.args)
       if wait_error then value={error=wait_error,effect='none'};success=false
       else
+      stripped=contract.normalize_names(current['function'].parameters,stripped)
       local _,err=contract.validate(current['function'].parameters,stripped or '{}')
       -- The refusal carries the rejected argument text AND the tool's own schema, so the fix can name
       -- the arguments this tool takes instead of letting the model guess (13/11: `notes_write` answered
@@ -658,6 +659,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
        local stripped,wait_s,wait_error=pending_calls.strip(normalize_args(argument_text))
        if wait_error then value,success={error=wait_error,effect='none'},false
        else
+       stripped=contract.normalize_names(current['function'].parameters,stripped)
        local _,err=contract.validate(current['function'].parameters,stripped or '{}')
        -- the rejected argument text and the tool's own schema travel with the refusal, so the cause and
        -- the accepted names are visible where the refusal is read

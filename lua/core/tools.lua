@@ -390,8 +390,8 @@ M.shared = {
     node = { type = "string", description = "Peer name or node_id (from nodes): read the session on that node." },
     before_seq = { type = "integer", minimum = 1 },
     around_seq = { type = "integer", minimum = 1, description = "Centre on a search hit; includes nonmatching neighbours in chronological order." },
-    before = { type = "integer", minimum = 0, maximum = 20 },
-    after = { type = "integer", minimum = 0, maximum = 20 },
+    before = { type = "integer", minimum = 0, maximum = 20, description = "With around_seq: how many messages before it (a count, not a seq)." },
+    after = { type = "integer", minimum = 0, maximum = 20, description = "With around_seq: how many messages after it (a count, not a seq)." },
     message_ids = { type = "array", minItems = 1, maxItems = 20, items = {type="string"}, description = "Batch selected originals in this session; missing or foreign rows refuse the entire batch." },
     message_id = { type = "string", description = "Exact row, with ownership checked against this session." },
     byte_offset = { type = "integer", minimum = 1, description = "With message_id, page selected view JSON; full preserves the original, tool_calls avoids encrypted reasoning." },
@@ -2303,6 +2303,14 @@ function M.dispatch(memory,name,args,role,ctx,cwd_provenance,same_call)
   if ok then result=refuse(result) end
   if not ok then error(result) end
   return result
+end
+
+-- Every answer carries one status (lua/core/status.lua): stamped here, around the whole dispatcher, so
+-- every return path - refusals, hooks, effects, scripts - gets the same signal without each site saying it.
+do
+  local status = dofile("lua/core/status.lua")
+  local inner = M.dispatch
+  M.dispatch = function(...) return status.stamp(inner(...)) end
 end
 
 return M

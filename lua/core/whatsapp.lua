@@ -704,7 +704,18 @@ function M.status_reader(owner, ctx)
   local call = ctx and ctx.remote_call or nil
   local resolved = owner
   return function(id)
-    if resolved then return M.forward(resolved, tool.name, { id = id }, call) end
+    if resolved then
+      local answer = M.forward(resolved, tool.name, { id = id }, call)
+      -- A job queued on THIS node before sends were routed (job 7, 14/11) is not the owner's: when the
+      -- owner holds no such id and this node's own queue does, that is the job asked about.
+      if type(answer) == 'table' and answer.error == 'whatsapp_send_unknown_id' then
+        local mine = M.invoke(tool, { id = id })
+        if type(mine) == 'table' and mine.error == nil and type(mine.state) == 'string' then
+          mine.served_by = M.self_name(); return mine
+        end
+      end
+      return answer
+    end
     local answer = M.invoke(tool, { id = id })
     if type(answer) ~= 'table' or answer.error ~= 'whatsapp_component_absent' then
       if type(answer) == 'table' and answer.served_by == nil then answer.served_by = M.self_name() end
@@ -743,7 +754,7 @@ function M.settle(id, wait_s, read, options)
     return options.served_by
   end
   local function pending()
-    local answer = { ok = true, state = 'pending', id = id, waited_s = waited_since(started), reads = reads,
+    local answer = { ok = true, status = 202, state = 'pending', id = id, waited_s = waited_since(started), reads = reads,
       resume = 'mcp_whatsapp_send({id:' .. tostring(id) .. ', wait_s:' .. tostring(M.WAIT.default_s) .. '})',
       note = 'queued: the message is not lost - resume with the same tool and the id, which never sends again' }
     if type(last) == 'table' then
@@ -769,7 +780,9 @@ function M.settle(id, wait_s, read, options)
     last = answer
     local state = type(answer.state) == 'string' and answer.state or nil
     if answer.error == nil and state == 'done' then
-      local done = { ok = true, state = 'done', id = id, message_id = answer.message_id,
+      -- status 200 + message_id is the whole proof (operator 14/11: "success + message_id is enough";
+      -- a model that had `done` and a message id still spent eight calls looking for its own message).
+      local done = { ok = true, status = 200, state = 'done', id = id, message_id = answer.message_id,
         waited_s = waited_since(started), reads = reads }
       if answer.attempts ~= nil then done.attempts = answer.attempts end
       if who() then done.served_by = who() end
@@ -777,7 +790,7 @@ function M.settle(id, wait_s, read, options)
       return done
     end
     if answer.error == nil and state and FAILED_STATES[state] then
-      local failed = { ok = true, state = 'failed', id = id, reason = answer.reason or state,
+      local failed = { ok = true, status = 500, state = 'failed', id = id, reason = answer.reason or state,
         waited_s = waited_since(started), reads = reads }
       if answer.attempts ~= nil then failed.attempts = answer.attempts end
       if who() then failed.served_by = who() end
@@ -1076,6 +1089,13 @@ function M.send(args, ctx)
     local owner = M.route(ctx)
     local tool = M.by_verb.send_status
     local answer = owner and M.forward(owner, tool.name, request, ctx and ctx.remote_call or nil) or M.invoke(tool, request)
+    -- The same fallback as a resume: a job left in this node's own queue is cancelled here.
+    if owner and type(answer) == 'table' and answer.error == 'whatsapp_send_unknown_id' then
+      local mine = M.invoke(tool, request)
+      if type(mine) == 'table' and mine.error ~= 'whatsapp_send_unknown_id' and mine.error ~= 'whatsapp_component_absent' then
+        answer = mine; owner = nil
+      end
+    end
     if type(answer) == 'table' and answer.served_by == nil then answer.served_by = owner or M.self_name() end
     return answer
   end

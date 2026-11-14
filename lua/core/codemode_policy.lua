@@ -144,6 +144,7 @@ M.guidance=table.concat({
  'Effects run one at a time and are never replayed: when an effectful call failed or its outcome is unknown, read its state before trying again.',
  'Other wasm-agent nodes: tools.nodes() lists them; tools.remote({node, capability, ...}) runs a capability there. WhatsApp is mcp_whatsapp_* on every node.',
  'Calls are always fresh; reuse an earlier result only by asking for it (results.get).',
+ 'Every answer has a status: 200 done, 202 accepted and still running, 400 fix the call, 403 not allowed, 404 not found, 500 the call was right and it failed - read the error, do not reshape the call.',
 },'\n')
 -- The peers the last federation refresh saw, one line; cache only, so the prompt never waits on them.
 function M.peer_index()
