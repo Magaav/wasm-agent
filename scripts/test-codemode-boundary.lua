@@ -68,9 +68,9 @@ check(#(claims.calls or {})==1,'resource list admitted inside')
 
 -- Connectors: direct or routed calls are pointed at code mode; nested calls pass the gate.
 local direct=tools.dispatch(memory,'mcp_mail_list_messages_deadbeef',{},'master',ctx)
-check(tostring(direct.error):find('codemode_only',1,true) and direct.effect=='none','direct connector call points to code mode')
+check(not tostring(direct.error):find('codemode_only',1,true),'a direct connector call runs as its one-line script, never refused (14/11)')
 local peer=tools.dispatch(memory,'peer_box__mail',{},'master',ctx)
-check(tostring(peer.error):find('codemode_only',1,true),'peer connector also code mode only')
+check(not tostring(peer.error):find('codemode_only',1,true),'a direct peer connector call also runs as its one-line script')
 ctx.codemode_nested=true
 local nested=tools.dispatch(memory,'mcp_mail_list_messages_deadbeef',{},'master',ctx)
 ctx.codemode_nested=nil
@@ -92,7 +92,7 @@ local projected=tools.envelope('master',{session_id=sid,user_id='master',codemod
 tools.all=prior
 local names={};for _,s in ipairs(projected)do names[s['function'].name]=true end
 check(not names.mcp_mail_list_messages_deadbeef and not names.peer_box__fetch,'connectors left out of the outer tool list')
-check(names.web_search,'web stays an outer tool under code mode')
+check(not names.web_search and not names.read,'minimal envelope (14/11): web_search and read are reached inside the script, not as outer tools')
 local prompt=policy.prompt(catalog)
 -- The names in the hint are the CALLABLE ones, verbatim (12bae363: a shortened tool name made the envelope
 -- say `mcp_whatsapp_*` while the callable name carried its peer prefix and pinned hash, and the model spent
@@ -100,12 +100,12 @@ local prompt=policy.prompt(catalog)
 -- model routes by, and the exact name it must call.
 check(prompt:find('- mail: mcp_mail_list_messages_deadbeef',1,true) and prompt:find('- whatsapp: mcp_whatsapp_read_messages_cafebabe',1,true) and prompt:find('- peer box: peer_box__fetch',1,true),'hint lists connectors by their exact callable names: '..prompt:sub(-300))
 check(not prompt:find('- mail: list_messages',1,true),'and never the shortened tool name, which is not callable')
-check(prompt:find('tools.web_search(',1,true) and prompt:find('Default to code mode',1,true),'hint prefers code mode and names web inside it')
-check(prompt:find('preferred programmatic coding path',1,true) and prompt:find('Use ordinary tools for',1,true),'hint carries the routing rule')
+check(prompt:find('Work in code: one `codemode` call',1,true) and prompt:find('tools.<name>(args)',1,true),'hint prefers code mode and says how every tool is reached inside it')
+check(prompt:find('Calling a tool directly also works',1,true),'hint states the one pathway: a direct call runs as the same script')
 check(policy.prompt({catalog[1]})==policy.guidance,'no connectors, no index line')
 -- The model-facing guidance is policy text, not documentation: keep it in step with the fence above, or the
 -- model is told about a rule that no longer exists (31/10: the guidance still promised the retired peer
 -- fence). Both halves are asserted so a one-sided edit fails here.
 check(not policy.guidance:find('ordinary remote calls outside the script',1,true) and not policy.guidance:find('read-only command (git status',1,true),'the routing hint does not describe the retired read-only peer fence')
-check(policy.guidance:find('including write, edit and effectful bash',1,true) and policy.guidance:find('a batch stays read-only',1,true),'the routing hint states the widened peer rule and the batch limit')
+check(policy.guidance:find('tools.remote({node, capability',1,true) and policy.guidance:find('never replayed',1,true),'the routing hint states the peer path and the no-replay rule')
 print(json.encode({ok=true,checks=checks}))

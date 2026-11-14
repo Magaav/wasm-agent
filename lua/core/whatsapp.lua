@@ -1071,12 +1071,18 @@ function M.send(args, ctx)
       note = 'send a message with chat+text, or resume a wait with the id a previous send answered' }
   end
   local tool = M.by_verb.send
-  local queued = M.invoke(tool, args)
-  local owner = nil
+  -- The same decision every other verb takes first (M.call): the fleet says which node holds the account,
+  -- and a node that does not hold it never queues locally. 14/11: node work accepted a send into its own
+  -- outbox (job 7, served_by work) because its local call did not answer component_absent - and nothing on
+  -- work sends WhatsApp, so the message waited forever.
+  local owner = M.route(ctx)
+  local queued = owner == nil and M.invoke(tool, args) or { error = 'whatsapp_component_absent' }
   if queued.error == 'whatsapp_component_absent' then
-    local refusal
-    owner, refusal = route_owner(queued, ctx)
-    if not owner then return refusal end
+    if owner == nil then
+      local refusal
+      owner, refusal = route_owner(queued, ctx)
+      if not owner then return refusal end
+    end
     -- One short remote call, not one long one: the account node queues and answers at once
     -- (`wait_s = 0`), and the wait itself is this node asking for the state, one short read at a time.
     local request = tool.request(args)

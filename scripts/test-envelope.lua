@@ -20,7 +20,14 @@ local function lean_exact(list)
   for name in pairs(declared)do if not known[name] then return false end end
   return true
 end
-check(lean_exact(bootstrap) and #all>#bootstrap,'lean bootstrap with all capabilities retained')
+-- Code mode (14/11, one way to act): codemode plus the control plane only; otherwise the lean set.
+local function code_mode_exact(list)
+  local declared={};for _,item in ipairs(list)do declared[(item['function'] or item).name or '']=true end
+  if not declared.codemode or declared.read or declared.bash or declared.tool_call or declared.tool_search then return false end
+  for name in pairs(declared)do if name~='codemode' and name~='session_worktree' then return false end end
+  return true
+end
+check((code_mode_exact(bootstrap) or lean_exact(bootstrap)) and #all>#bootstrap,'bootstrap: code mode shows codemode and the control plane, else the lean set; all capabilities retained')
 local before=json.encode(bootstrap)
 local unknown=tools.dispatch(memory,'tool_call',{name='web_searchd',arguments={}},'master',ctx)
 check(unknown.error:find('tool_not_available',1,true)==1 and unknown.error:find('web_search',1,true)~=nil,'an unknown name refuses and lists the closest permitted name')

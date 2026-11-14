@@ -9,6 +9,9 @@ local LEAN={time=true,remember=true,recall=true,skill=true,tool_search=true,tool
 -- routing decision that precedes it. A child never receives either: its envelope mode is 'full'
 -- and its profile does not allow them.
 local ORCHESTRATION_FIRST_CLASS={subagent=true,route_task=true}
+-- What stays outside a script in code mode: tools that own the session itself (DIRECT_ONLY in
+-- lua/core/codemode.lua, minus the outer facades tool_call/tool_search that searchTools replaces).
+local CONTROL_PLANE={session_worktree=true}
 function M.bootstrap_mode()
  local mode=host.getenv('WASM_AGENT_BOOTSTRAP_MODE') or 'lean';if mode=='' then mode='lean' end
  if mode~='lean' and mode~='classic' then error('invalid_bootstrap_mode') end;return mode
@@ -52,13 +55,20 @@ function M.orchestration_names()
 end
 function M.bootstrap(catalog,ctx)
  local core=M.bootstrap_mode()=='lean' and LEAN or CLASSIC
+ local code_mode=dofile('lua/core/codemode_policy.lua').enforced(ctx)
  local orchestration=false
  if ctx and not ctx.subagent then
   local ok,mode=pcall(dofile,'lua/core/orchestration_mode.lua')
   if ok then local probed,on=pcall(mode.mode_on,ctx);orchestration=probed and on==true end
  end
  local out={};for _,item in ipairs(catalog)do local name=item['function'].name
-  if core[name] or name=='codemode' or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end end;return out
+  if code_mode then
+   -- Code mode (operator 14/11, "less friction"): one way to act. The model is shown `codemode` and only
+   -- the control-plane tools a script cannot run (session_worktree...); every other tool - and discovery,
+   -- via searchTools - lives inside the script. A direct call to an undeclared tool still runs; a connector
+   -- called directly runs as its one-line script (lua/core/tools.lua, codemode_policy.one_line).
+   if name=='codemode' or (CONTROL_PLANE[name] and core[name]) or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end
+  elseif core[name] or name=='codemode' or (orchestration and ORCHESTRATION_FIRST_CLASS[name]) then out[#out+1]=item end end;return out
 end
 function M.schemas(catalog,ctx)return M.mode(ctx)=='progressive' and M.bootstrap(catalog,ctx) or catalog end
 local function eligible(catalog,ctx)

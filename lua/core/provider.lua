@@ -1507,6 +1507,19 @@ end
 function M.infer_tool(arguments_text, shown, catalog)
   local keys, value = argument_keys(arguments_text)
   if not keys then return nil end
+  -- Code mode shows `codemode` alone (envelope.lua), but the core tools a script calls are callable
+  -- too: they count as offered, so `{command}` is bash here and not shell on a client machine.
+  if name_in("codemode", shown) and type(catalog) == "table" then
+    local core = {}
+    for _, n in ipairs(dofile("lua/core/envelope.lua").core_names()) do core[n] = true end
+    local wider = {}
+    for _, item in ipairs(shown or {}) do wider[#wider + 1] = item end
+    for _, item in ipairs(catalog) do
+      local f = type(item) == "table" and (item["function"] or item) or {}
+      if core[f.name] then wider[#wider + 1] = item end
+    end
+    shown = wider
+  end
   if #keys == 2 and type(value.name) == "string" and value.arguments ~= nil then
     local inner = value.arguments
     local inner_text = type(inner) == "string" and inner
