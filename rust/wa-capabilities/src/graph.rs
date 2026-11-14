@@ -455,11 +455,14 @@ impl Scheduler {
         if low {
             let free = match disk {Some(DiskAnswer::Low(free)) => free, _ => 0};
             let line = format!("graph_rebuild_deferred: low_disk root={} free_bytes={free} floor_bytes={floor}", entry.root.display());
+            // The streak's identity is the root and the floor - not free_bytes, which moves by a few bytes
+            // between two attempts whenever anything else writes, and made the same deferral print again.
+            let key = format!("graph_rebuild_deferred: low_disk root={} floor_bytes={floor}", entry.root.display());
             let mut state = entry.state.lock().unwrap();
             state.stopped = true;
             state.retry_at = None;
-            let report = report_needed(state.reported.as_deref(), &line);
-            if report {state.reported = Some(line.clone());}
+            let report = report_needed(state.reported.as_deref(), &key);
+            if report {state.reported = Some(key);}
             drop(state);
             if report {eprintln!("{line}");}
             return;
