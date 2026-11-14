@@ -1275,7 +1275,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   end
   -- Connectors run only inside code mode when this run has it; a direct or routed call is pointed there.
   if codemode_policy.connector(name) and codemode_policy.enforced(ctx) and not ctx.codemode_nested then
-    return codemode_policy.connector_refusal(name)
+    -- One pathway (operator 14/11): a connector called directly runs as the one-line script it stands
+    -- for, so its inputs, outputs, waits and errors are exactly the in-script ones - no refusal, and no
+    -- second route to keep in sync.
+    return M.dispatch(memory, 'codemode', {code = codemode_policy.one_line(name, args)}, role, ctx, cwd_provenance)
   end
   -- Orchestration mode's floor: a direct effect is the work itself, so it is refused until this
   -- turn has a recorded route ('direct' allows short work here, 'delegate' hands it to a child)
