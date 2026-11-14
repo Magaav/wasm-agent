@@ -90,6 +90,11 @@ local memory = dofile("lua/core/memory.lua")
 memory.setup()
 local telemetry = dofile("lua/core/telemetry.lua")
 telemetry.setup()
+-- The secret sits in a file the call reads, so the leak is real process output on either route: a
+-- direct bash (host.exec, stubbed below) or, under code mode, the one-line script whose bash runs as a
+-- real process (14/11) - and the command line itself never carries the value.
+local leak_file = os.tmpname()
+do local f = assert(io.open(leak_file, "w")); f:write("=== env ===\nWASM_AGENT_LLM_API_KEY=" .. SECRET .. "\n"); f:close() end
 local real_exec = host.exec
 host.exec = function()
   return json.encode({ code = 0, stdout = "=== env ===\nWASM_AGENT_LLM_API_KEY=" .. SECRET, stderr = "" })
@@ -101,7 +106,7 @@ host.http_stream = function()
   if step == 1 then
     return json.encode({ status = 200, content = "", finish_reason = "tool_calls",
       tool_calls = { { id = "c1", type = "function",
-        ["function"] = { name = "bash", arguments = '{"command":"env"}' } } } })
+        ["function"] = { name = "bash", arguments = json.encode({ command = "cat " .. leak_file }) } } } })
   end
   return json.encode({ status = 200, content = "done", finish_reason = "stop", tool_calls = {} })
 end
@@ -111,6 +116,7 @@ agent.stream = true
 local ran = pcall(agent.run, agent, "run env")
 host.exec = real_exec
 host.http_stream = real_stream
+os.remove(leak_file)
 ok(ran, "the end-to-end turn must run")
 local leaked = false
 for _, row in ipairs(memory.session_messages(sid, { all = true })) do

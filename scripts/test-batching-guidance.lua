@@ -71,8 +71,11 @@ local function execute(mode)
   check(json.decode(results[2].content).content=='alpha\n','sibling exact result retained')
   local starts,ends={},{}
   for _,e in ipairs(telemetry.events(sid,0,100).events) do
-    if e.kind=='tool' and e.phase=='start' then starts[#starts+1]=e.payload end
-    if e.kind=='tool' and e.phase=='end' then ends[#ends+1]=e.payload end
+    -- The model's own calls: under code mode a direct read runs as a one-line script, whose inner
+    -- call is telemetry marked nested (14/11, one pathway) - not a second model-level call.
+    local nested=type(e.payload)=='table' and e.payload.nested
+    if e.kind=='tool' and e.phase=='start' and not nested then starts[#starts+1]=e.payload end
+    if e.kind=='tool' and e.phase=='end' and not nested then ends[#ends+1]=e.payload end
   end
   check(#starts==2 and #ends==2,'tool telemetry has matched boundaries')
   check(starts[1].tool_group_id==starts[2].tool_group_id and starts[1].tool_group_size==2

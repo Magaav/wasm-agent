@@ -70,7 +70,8 @@ local sid2=memory.start_session('','steering-read',{user_id='owner'})
 local bot2=agent.new(sid2,function() end,'master','owner','')
 local calls2,read_dispatches=0,0
 local dispatch2=tools.dispatch
-tools.dispatch=function(...) read_dispatches=read_dispatches+1;return dispatch2(...) end
+-- Counts the model's read only: under code mode it runs as a one-line script (read -> codemode -> read).
+tools.dispatch=function(memory,name,args,role,ctx,...) if name=='read' and not (type(ctx)=='table' and ctx.codemode_nested) then read_dispatches=read_dispatches+1 end;return dispatch2(memory,name,args,role,ctx,...) end
 local receipt2
 provider.complete_with=function(_,messages)
   calls2=calls2+1
