@@ -240,6 +240,28 @@ fn status(request: &Value) -> Value {
     if job.queue != outbox::QUEUE {
         return json!({"ok": false, "error": "whatsapp_send_unknown_id", "id": id, "effect": "none"});
     }
+    // `{id, cancel: true}`: take a send out of the queue before the sender picks it up (14/11). Only a
+    // job nobody holds - a leased one may be on the wire, a settled one already happened - and the
+    // answer is the job's state either way, so the caller reads what is true instead of a promise.
+    if request.get("cancel").and_then(Value::as_bool) == Some(true) {
+        let why = request.get("reason").and_then(Value::as_str).unwrap_or("cancelled by the caller");
+        return match queue().cancel(JobId(id), why) {
+            Ok(job) => {
+                let mut answer = outbox::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
+                answer["cancelled"] = Value::Bool(true);
+                answer["effect"] = Value::String("none: the message will not be sent".into());
+                answer
+            }
+            Err(_) => {
+                let mut answer = outbox::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
+                answer["ok"] = Value::Bool(false);
+                answer["cancelled"] = Value::Bool(false);
+                answer["error"] = Value::String("whatsapp_send_not_cancellable".into());
+                answer["note"] = Value::String(format!("only a send still waiting in the queue can be cancelled; this one is {}", job.state.as_str()));
+                answer
+            }
+        };
+    }
     outbox::status(id, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref())
 }
 
@@ -464,6 +486,22 @@ mod tests {
             .unwrap();
         let job = queue.job(other.id).unwrap().unwrap();
         assert_ne!(job.queue, outbox::QUEUE);
+    }
+
+    #[test]
+    fn cancel_stops_a_queued_send_and_refuses_one_already_taken() {
+        let host = host("cancel");
+        let queue = host.queue(COMPONENT);
+        let request = OutboxRequest { chat: "5511999999999@lid".into(), text: "oi".into(), reply_to: None, mentions: Vec::new() };
+        let queued = queue.enqueue(EnqueueRequest::new(outbox::QUEUE, request.encode()).fresh_for(outbox::FRESH_MS).max_attempts(outbox::MAX_ATTEMPTS)).unwrap();
+        let job = queue.cancel(queued.id, "wrong chat").unwrap();
+        let answer = outbox::status(job.id.0, job.state.as_str(), job.attempts, job.result.as_deref(), job.last_error.as_deref());
+        assert_eq!(answer["state"], "dead", "a cancelled send is dead (lua/core/whatsapp.lua reads dead as failed), never pending");
+        assert!(answer["reason"].as_str().unwrap().starts_with("cancelled: wrong chat"));
+        assert!(matches!(queue.take(outbox::QUEUE, WORKER, None).unwrap(), wa_queue::TakeOutcome::Empty), "the sender never takes it");
+        let taken = queue.enqueue(EnqueueRequest::new(outbox::QUEUE, request.encode()).fresh_for(outbox::FRESH_MS).max_attempts(outbox::MAX_ATTEMPTS)).unwrap();
+        let _ = queue.take(outbox::QUEUE, WORKER, None).unwrap();
+        assert!(queue.cancel(taken.id, "late").is_err(), "a send the worker holds may be on the wire");
     }
 
     #[test]

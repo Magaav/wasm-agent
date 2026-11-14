@@ -490,6 +490,7 @@ return {
   ['whatsapp_archive_unavailable']='tools.lua',
   ['whatsapp_component_absent']='whatsapp.lua',
   ['whatsapp_owner_unreachable']='whatsapp.lua',
+  ['whatsapp_send_bad_cancel']='whatsapp.lua',
   ['whatsapp_send_bad_id']='whatsapp.lua',
   ['whatsapp_send_bad_ids']='whatsapp.lua',
   ['whatsapp_send_bad_until']='whatsapp.lua',

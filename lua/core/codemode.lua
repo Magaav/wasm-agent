@@ -729,6 +729,65 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
  return result
 end
 
+-- One reading of a failed script, for both loops (14/11, operator: "the real JS error, line and cause").
+-- The sandbox hands back {name,message,stack} - from the prelude for a runtime error, from the guest's
+-- pending exception for a syntax error - sometimes inside a host sentence. The model gets ONE sentence:
+-- the error, the line of ITS script (the harness prologue is compiled line 1, so script line N is
+-- compiled line N+1), that line's text, and what already ran. A tool's refusal is unwrapped to the
+-- tool's own message and fix instead of three levels of quoted JSON. `error` becomes the first line
+-- of that sentence, and message/fix/input are all set, so the refusal layer keeps them as written.
+local function first_object(text)
+ local at=text:find('{',1,true); if not at then return nil end
+ local ok,value=pcall(json.decode,text:sub(at)); if ok and type(value)=='table' then return value end
+end
+local function script_line(stack,source)
+ if type(stack)~='string' then return nil end
+ local mine=stack:match('^(.-)%sat enter ') or stack
+ local count=select(2,source:gsub('\n',''))+1
+ for line,col in mine:gmatch('codemode%.js:(%d+):(%d+)') do
+  local n=tonumber(line)-1
+  if n>=1 and n<=count then
+   local text;local i=0
+   for row in (source..'\n'):gmatch('([^\n]*)\n') do i=i+1;if i==n then text=row;break end end
+   return n,tonumber(col),text
+  end
+ end
+end
+local function explain(result,source)
+ if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
+ local raw=result.error
+ local err=first_object(raw)
+ if not (err and (err.message or err.name)) then return result end
+ local name=type(err.name)=='string' and err.name or 'Error'
+ local message=type(err.message)=='string' and err.message or ''
+ local fix,code
+ local inner=message:sub(1,1)=='{' and first_object(message) or nil
+ if inner and (inner.message or inner.error) then
+  local tool=inner.tool
+  if not tool then for _,call in ipairs(result.calls or {}) do if call.ok==false then tool=call.name end end end
+  tool=tool or (type(inner.message)=='string' and inner.message:match('refused ([%w_%.]+):')) or 'call'
+  code=type(inner.error)=='string' and inner.error or nil
+  local said=tostring(inner.message or inner.error)
+  message='tools.'..tostring(tool)..' failed: '..said..((code and not said:find(code,1,true)) and (' ('..code..')') or '')
+  fix=type(inner.fix)=='string' and inner.fix or nil
+  name=nil
+ end
+ local line,col,text=script_line(err.stack,source)
+ local where=''
+ if line then where='\nline '..line..(col and (':'..col) or '')..(text and text:find('%S') and (' | '..text:gsub('^%s+',''):sub(1,160)) or '') end
+ local ran={}
+ for _,call in ipairs(result.calls or {}) do if call.ok==true then ran[#ran+1]=tostring(call.name) end end
+ local before=#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.'
+ if raw:find('guest evaluation exception',1,true) then before='The script did not compile, so nothing ran.' end
+ local out={};for k,v in pairs(result) do out[k]=v end
+ out.message=((name and (name..': ') or '')..message..where):sub(1,600)
+ out.error=out.message:match('^[^\n]*'):sub(1,300)
+ out.fix=((fix and (fix..' ') or (line and ('Change line '..line..' and run the script again. ') or 'Correct the script and run it again. '))..before):sub(1,600)
+ out.input=out.input or 'codemode'
+ out.code=code or name
+ out.line=line
+ return out
+end
 -- The router: the run's authority, its scope and its workspace are decided once, then one of the two
 -- loops runs. A component that cannot answer *before the first step* falls back; after that it is a
 -- failure with `effect: unknown`, because the calls it already handed out may have had effects.
@@ -740,6 +799,7 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  -- harness is prepended and appended as TEXT, so it reaches the native guest and the component's guest
  -- alike, and the script's own line 1 is line 2 of what the interpreter compiles
  -- (lua/core/codemode_harness.lua). A copy, so the decorated source never becomes the tool's args.
+ local source=args.code
  args={code=harness.decorate(args.code),timeout_ms=args.timeout_ms}
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
@@ -756,6 +816,7 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  pending_calls.begin(dispatch,popts)
  local function finish(result)
   if type(result)~='table' then return result end
+  result=explain(result,source)
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
   return result

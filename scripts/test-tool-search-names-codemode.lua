@@ -73,6 +73,8 @@ end
 -- (this build embeds QuickJS, so the real transport is the one that runs here).
 local function refusal(value,result)
  if type(value)=='table' and value.error then return value.error end
+ -- A failed script names the refusal code it ended on (14/11, lua/core/codemode.lua explain).
+ if result and type(result.code)=='string' then return result.code end
  local raw=result and result.error
  if type(raw)=='string' then
   local ok,err=pcall(json.decode,raw)
