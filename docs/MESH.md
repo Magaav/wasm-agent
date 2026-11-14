@@ -174,7 +174,7 @@ the same order the reason words below report:
 
 Verbs are three, and they are coarse on purpose (a capability is what runs; the verb is how much
 authority it needs). `read` is the read-only capability set (`read`, `ls`, `grep`,
-`sessions`, `session`, `search_messages`, `recall`, `status`, `health`); `control` is
+`sessions`, `session`, `search_messages`, `recall`, `status`, `health`, `turns`); `control` is
 `bash`, `write`, `edit`, `shell`, `chat`, `client`, `set_role`, `set_model`, `set_provider`,
 `subagent`, `spell_save`, `spell_run`, `access`; everything else is `call`, and a capability nobody
 listed is treated as **`control`** — an unknown name must need the strongest grant, not the weakest.

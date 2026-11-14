@@ -100,7 +100,11 @@ end
 local REMOTE_READ = { read = true, ls = true, grep = true, graph = true,
   tool_result = true, diagnose = true, capabilities = true, nodes = true,
   sessions = true, session = true, search_messages = true,
-  recall = true, memories = true, spell_list = true, spell_get = true, skill = true }
+  recall = true, memories = true, spell_list = true, spell_get = true, skill = true,
+  -- The turn feed's peer half (lua/core/turnfeed.lua): a peer answers its own `<turn>` notes, already
+  -- redacted. A read by construction - the handler opens the ledger for SELECT and writes nothing -
+  -- so it may travel inside a code-mode read set and a `calls` batch like any other read.
+  turns = true }
 M.REMOTE_READ = REMOTE_READ
 function M.remote_read_refusal(capability, args)
   local retired = M.retired(capability)

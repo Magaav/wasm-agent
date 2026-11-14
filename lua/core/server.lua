@@ -916,6 +916,12 @@ local function node_capability(capability, args, caller)
     -- Same-rank access handoff (see lua/core/access.lua). Definitions and approved tiers travel;
     -- credential values never do, and a guest is refused on both ends.
     return dofile("lua/core/access.lua").call(args, caller)
+  elseif capability == "turns" then
+    -- This node's `<turn>` notes, for a master's turn feed (`lua/core/turnfeed.lua`, docs/TURNS.md).
+    -- The peer answers its OWN notes - parsed here, grouped nowhere and redacted before they leave - so
+    -- a master receives the model's words about the harness with third-party text stripped, never a
+    -- transcript. A read in every sense: the ledger is opened for SELECT and nothing is written.
+    return dofile("lua/core/turnfeed.lua").serve(args)
   elseif capability == "status" then
     if args.serving_identity_only then
       local identity,problem=provider.serving_identity(args.model,args.provider)
@@ -1005,7 +1011,7 @@ end
 -- Without one the legacy list is the whole rule, unchanged.
 local MESH_VERBS = {
   read = { read = true, ls = true, grep = true, sessions = true, session = true,
-    search_messages = true, recall = true, status = true, health = true },
+    search_messages = true, recall = true, status = true, health = true, turns = true },
   control = { bash = true, write = true, edit = true, shell = true, chat = true, client = true,
     set_role = true, set_model = true, set_model_less = true, set_provider = true, subagent = true, spell_save = true,
     spell_run = true, access = true, services = true },
@@ -1152,7 +1158,12 @@ local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true
   -- refused a caller `author_of` does not name as master before the branch runs, and
   -- `services.control` refuses a guest/child again on its own. Graded `control` in MESH_VERBS because
   -- stopping a service is the same authority as a shell on this node, not a read.
-  services=true }
+  services=true,
+  -- The turn feed (lua/core/turnfeed.lua, docs/TURNS.md): a master's `wa turns` collects every peer's
+  -- own `<turn>` notes, so the queue is the fleet's rather than the stopping-point's. Read-only by
+  -- construction - the handler opens the ledger for SELECT, redacts before answering and writes
+  -- nothing here - which is why it is graded `read` in MESH_VERBS rather than `control`.
+  turns=true }
 
 -- The list as data, for the wiring guard: it asks this node's own gate what it admits instead of
 -- keeping a copy that could drift. Sorted, so a failure names the same capability on every run.
