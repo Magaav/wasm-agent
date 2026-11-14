@@ -16,12 +16,9 @@ local canonical_guard = dofile("lua/core/canonical_guard.lua")
 -- runtime wall (the shell prelude) has to be added here, not only in init.lua - a WA_SCRIPT run does not
 -- load init.lua, and that is exactly how a test runs.
 local path_guard = dofile("lua/core/path_guard.lua")
-local read_batch = dofile('lua/core/read_batch.lua')
 local mcp = dofile('lua/core/mcp.lua')
 local envelope = dofile('lua/core/envelope.lua')
 local web = dofile('lua/core/web.lua')
-local M = {}
-local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
 local resources = dofile("lua/core/resources.lua")

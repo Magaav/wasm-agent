@@ -20,7 +20,6 @@
 -- Restoring is guarded: undo refuses to clobber a file that no longer looks like what the
 -- run left, and says why. A silent revert that eats someone's newer edit is the failure
 -- this guard exists to prevent.
-local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local M = {}
 

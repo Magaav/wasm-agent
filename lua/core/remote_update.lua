@@ -53,7 +53,6 @@
 -- installing a runtime - rather than inheriting a weaker verb.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
-local platform = dofile('lua/core/platform.lua')
 local nodes = dofile('lua/core/nodes.lua')
 local update = dofile('lua/core/update.lua')
 
