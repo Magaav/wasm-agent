@@ -413,6 +413,32 @@ pub const ADDRESS_ATTEMPT_CAP: u32 = 6;
 /// action itself (`guest`'s contact handler).
 pub const CONTACT_COLLECTION: &str = "critical_unblock_low";
 
+/// The app-state patch a full-sync request must name, derived from the protocol's schema registry.
+///
+/// This is the ONE place the collection this index wants becomes the name a request carries, and the
+/// 14/11 05:50 deploy is why it is a function here instead of a `match` in `guest`: that build logged
+/// `full critical_unblock_low snapshot requested` and every request went out as `regular`, because the
+/// guest matched `CONTACT_COLLECTION` to `WAPatchName::Regular` when its argument changed shape. The
+/// library writes this value straight into the IQ - `attr("name", name.as_str())`
+/// (`whatsapp-rust/src/client/app_state.rs`) - so a wrong mapping here is a wrong request on the wire,
+/// and the answer comes back for the wrong collection (a `regular` snapshot that is then dropped as
+/// stale: `incoming v9 <= persisted v9`).
+///
+/// It maps `schemas::CONTACT.collection` - the collection the protocol declares `contact` on - rather
+/// than a string typed here, and the match is total over the registry's collections, so a new collection
+/// cannot be silently projected to `Regular`.
+pub fn contact_patch_name() -> wacore::appstate::patch_decode::WAPatchName {
+    use wacore::appstate::patch_decode::WAPatchName;
+    use wacore_appstate::schemas::Collection;
+    match wacore_appstate::schemas::CONTACT.collection {
+        Collection::CriticalBlock => WAPatchName::CriticalBlock,
+        Collection::CriticalUnblockLow => WAPatchName::CriticalUnblockLow,
+        Collection::Regular => WAPatchName::Regular,
+        Collection::RegularLow => WAPatchName::RegularLow,
+        Collection::RegularHigh => WAPatchName::RegularHigh,
+    }
+}
+
 /// What one attempt at bringing the address book in must do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AddressBookStep {

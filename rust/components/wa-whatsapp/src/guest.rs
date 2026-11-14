@@ -393,10 +393,14 @@ impl index::AddressBookAppState for AppState {
         let client = self.0.clone();
         let collection = collection.to_string();
         async move {
-            let name = match collection.as_str() {
-                index::CONTACT_COLLECTION => wacore::appstate::patch_decode::WAPatchName::Regular,
-                other => return Err(format!("unknown app state collection: {other}")),
-            };
+            // The collection this request names comes from one place (`index::contact_patch_name`), so it
+            // cannot disagree with the collection this node keeps the book for. The 05:50 deploy is the
+            // reason: this match used to answer `Regular` for `CONTACT_COLLECTION`, so every request went
+            // out for the collection that carries pins and archives, and the answer was dropped as stale.
+            if collection != index::CONTACT_COLLECTION {
+                return Err(format!("unknown app state collection: {collection}"));
+            }
+            let name = index::contact_patch_name();
             // The one public way to send the app-state sync IQ. It applies whatever the server answers
             // through the library's own path - keys, MACs, ltHash, and the `ContactUpdate` events this
             // index reads - so there is no second decoder to disagree with it. It can also return
