@@ -86,7 +86,7 @@ end
 -- not a shortened form: a peer tool's prefix says where it runs and its suffix is a pinned hash, so any
 -- abbreviation is a name the model must then hunt for (session 10/11: "mcp_whatsapp_*" cost six calls of
 -- guessing before the real names were dumped). The group label stays, the name is exact.
--- A connector's call shape on one line: `name({required, optional?})`, at most six arguments (14/11 replay:
+-- A connector's call shape on one line: `name({required, optional?})`, at most eight arguments (14/11 replay:
 -- every first WhatsApp/email call was preceded by a schema lookup, because the index gave names only).
 local function signature(f)
  local p=type(f.parameters)=='table' and f.parameters or {}
@@ -94,10 +94,14 @@ local function signature(f)
  local required={};for _,k in ipairs(type(p.required)=='table' and p.required or {})do required[k]=true end
  local req,opt={},{}
  for k in pairs(props)do if required[k] then req[#req+1]=k else opt[#opt+1]=k..'?' end end
- table.sort(req);table.sort(opt)
+ -- The arguments a first call needs come first (14/11: alphabetical order hid send's chat and text behind
+ -- cancel/draft/id), then the rest alphabetically; at most eight.
+ local FIRST={chat=1,text=2,q=3,query=4,account_id=5,mailbox=6,message_id=7,path=8,command=9,limit=10,id=11}
+ local function rank(a,b) local x,y=FIRST[a:gsub('%?$','')] or 99,FIRST[b:gsub('%?$','')] or 99; if x~=y then return x<y end return a<b end
+ table.sort(req,rank);table.sort(opt,rank)
  local all={};for _,k in ipairs(req)do all[#all+1]=k end;for _,k in ipairs(opt)do all[#all+1]=k end
- local shown=table.concat(all,', ',1,math.min(#all,6))
- if #all>6 then shown=shown..', ...' end
+ local shown=table.concat(all,', ',1,math.min(#all,8))
+ if #all>8 then shown=shown..', ...' end
  return f.name..'({'..shown..'})'
 end
 function M.connector_index(catalog)
