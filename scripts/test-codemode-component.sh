@@ -114,6 +114,17 @@ if codemode_fallback "$home/fallback.other"; then
   echo "  FAILED another component's native fallback is read as codemode's"; failed=$((failed + 1))
 fi
 
+# Session variables on the component path, the same suite unchanged (scripts/test-session-vars.lua): the
+# harness text and the store row are shared, so both loops must keep, delete and list them identically.
+echo "== scripts/test-session-vars.lua (component path: the same suite, unchanged) =="
+vars_seam="$home/vars-seam.log"
+run scripts/test-session-vars.lua "WA_CODEMODE_COMPONENT=1" "WA_CODEMODE_COMPONENT_WASM=$(native "$artifact")" 2>&1 | tee "$vars_seam"
+check "session vars component" "$vars_seam" "${PIPESTATUS[0]}"
+if codemode_fallback "$vars_seam"; then
+  echo "  FAILED the session vars suite fell back to native:"; grep -E '(\]|^) ?codemode: .*served natively' "$vars_seam" | head -3
+  failed=$((failed + 1))
+fi
+
 echo "== scripts/test-codemode-component.lua (parity suite) =="
 parity_log="$home/parity.log"
 run scripts/test-codemode-component.lua "WA_CODEMODE_COMPONENT=1" "WA_CODEMODE_COMPONENT_WASM=$(native "$artifact")" 2>&1 | tee "$parity_log"

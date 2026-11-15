@@ -183,6 +183,7 @@ M.guidance=table.concat({
  'How to work: 1) Gather - one script runs every independent read together (Promise.all) and returns only what you need. 2) Reflect - read the result\'s summary line, one status per call: 200 done, 202 still running, 400 fix that call, 403/404/500 the world said no, so do not reshape it. 3) Act - one script for the effects, each awaited; effects are never replayed, so after an unknown outcome read the state before trying again. 4) Stop at 200 - an effect that answered 200 is done; do not re-read to verify it.',
  'Other wasm-agent nodes: tools.nodes() lists them; tools.remote({node, capability, ...}) runs a capability there. WhatsApp is mcp_whatsapp_* on every node.',
  'Calls are always fresh; reuse an earlier result only by asking for it (results.get).',
+ '`vars.<name> = value` keeps a value for this session across scripts (the vars: line lists them); read it back as `vars.<name>`.',
 },'\n')
 -- The peers the last federation refresh saw, one line; cache only, so the prompt never waits on them.
 function M.peer_index()
