@@ -626,6 +626,8 @@ if command -v node >/dev/null 2>&1; then
   check fast-binary node scripts/test-fast-binary.mjs
   check instructions node scripts/check-instructions.mjs
   check direct-workflow node scripts/test-direct-workflow-instructions.mjs
+  # The mail wrapper's repairs of mail-mcp's API (cursor, account_id, limit range), through the real wrapper.
+  check mcp-mail-repairs node scripts/test-mcp-mail-repairs.mjs
   # The landing queue's own evidence: one lander at a time, FIFO, reclaim of a dead holder, the
   # dirty-canonical refusal, and the upstream-delta classification that decides what is retested.
   # Seconds, self-contained (a fixture repository and a fixture ledger), so it belongs here and not
