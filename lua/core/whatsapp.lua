@@ -1186,6 +1186,27 @@ function M.call(name, args, ctx)
     return { ok = false, error = 'unknown_tool:' .. tostring(name), effect = 'none' }
   end
   args = args or {}
+  -- A chat NAME works wherever a read takes a chat (14/11: search refused "Laura - Sumerbol Comercial
+  -- Bazar" and the model spent two calls finding the JID). The name is resolved once through contacts -
+  -- of equal names the chat talked to last - and the answer says which chat it became. A send stays
+  -- exact-JID only: a guessed recipient is the one mistake a read cannot make.
+  local NAMED = { search = true, read = true, message = true, reactions = true, media = true, download = true, backfill = true }
+  if NAMED[tool.verb] and type(args.chat) == 'string' and args.chat ~= '' and not args.chat:find('@', 1, true) then
+    local lookup = M.call('contacts', { q = args.chat, limit = 5 }, ctx)
+    if type(lookup) ~= 'table' or type(lookup.chat) ~= 'string' or lookup.chat == '' then
+      return { ok = false, error = 'whatsapp_chat_not_found', status = 404, effect = 'none', asked = args.chat,
+        candidates = type(lookup) == 'table' and lookup.candidates or nil,
+        note = 'no chat in the index carries that name: ask mcp_whatsapp_contacts({q}) for what it knows, or pass the exact JID' }
+    end
+    local resolved = {}
+    for key, value in pairs(args) do resolved[key] = value end
+    resolved.chat = lookup.chat
+    local answer = M.call(name, resolved, ctx)
+    if type(answer) == 'table' then
+      answer.resolved_chat = { asked = args.chat, chat = lookup.chat, picked = lookup.picked }
+    end
+    return answer
+  end
   -- Two verbs are more than one capability call: a send queues and then waits for its outcome in the
   -- same step, and the hidden alias is that resume with no wait (operator decision, 11/11).
   if tool.verb == 'send' then return M.send(args, ctx) end
