@@ -134,6 +134,38 @@ local function session_view(output, ref)
   return nil
 end
 
+-- The session's variables as the observation lists them: names and JSON sizes, never values
+-- (`vars: laura (30 B) \194\183 inbox (12 KB)`), at most VARS_SHOWN names and then `+N more`.
+M.VARS_SHOWN = 10
+local function size_text(bytes)
+  bytes = math.floor(tonumber(bytes) or 0)
+  if bytes < 1024 then return bytes .. ' B' end
+  local kb = bytes / 1024
+  if kb < 10 then return (string.format('%.1f', kb):gsub('%.0$', '')) .. ' KB' end
+  if kb < 1024 then return string.format('%d KB', math.floor(kb + 0.5)) end
+  return string.format('%.1f MB', kb / 1024)
+end
+function M.vars_line(vars)
+  if type(vars) ~= 'table' or #vars == 0 then return nil end
+  local parts = {}
+  for index, entry in ipairs(vars) do
+    if index > M.VARS_SHOWN then parts[#parts + 1] = '+' .. (#vars - M.VARS_SHOWN) .. ' more'; break end
+    parts[#parts + 1] = tostring(entry.name) .. ' (' .. size_text(entry.bytes) .. ')'
+  end
+  return table.concat(parts, ' \194\183 ')
+end
+-- The line read back: `{ {name=, size="30 B"} ... }` and how many more there were.
+function M.parse_vars(line)
+  if type(line) ~= 'string' then return nil end
+  local list, more = {}, nil
+  for part in (line .. ' \194\183 '):gmatch('(.-) \194\183 ') do
+    local name, size = part:match('^(%S+) %((.-)%)$')
+    if name then list[#list + 1] = { name = name, size = size }
+    else more = tonumber(part:match('^%+(%d+) more$')) or more end
+  end
+  return list, more
+end
+
 function M.project(name, output)
   -- Encode a non-table only through pcall: a decoded scalar can be `inf` (a numeric
   -- literal too large for a float), and json.encode throws on that *before* the
@@ -158,6 +190,7 @@ function M.project(name, output)
           and not (key=='unexecuted' and type(value)=='table' and next(value)==nil)
           and not (key=='items' and type(value)=='table' and next(value)==nil) then lean[key]=value end
     end
+    lean.vars = M.vars_line(output.vars)
     -- What the script returned, as what it is: an object, named `returned` (14/11: a script that did
     -- `return r` saw `value: "{\"candidates\":...}"`, a JSON string, and the next scripts read r.value from
     -- the TOOL as if every tool answered {value}).
@@ -195,7 +228,7 @@ function M.project(name, output)
     -- Line 1: status, the per-call summary, where the whole result is; line 2: each call's evidence
     -- (sha256:bytes, the order of the summary). Failures keep their structured error; a result carrying
     -- anything else (printed output, a partial presentation) keeps the JSON form.
-    local plain = { ok = true, status = true, summary = true, returned = true, calls = true, full_result = true, sandbox_calls = true }
+    local plain = { ok = true, status = true, summary = true, returned = true, calls = true, full_result = true, sandbox_calls = true, vars = true }
     local simple = lean.ok ~= false and lean.error == nil
     for key in pairs(lean) do if not plain[key] then simple = false end end
     if simple then
@@ -206,6 +239,8 @@ function M.project(name, output)
         if type(call) == 'table' and call.sha256 then evidence[#evidence + 1] = call.sha256 .. ':' .. tostring(call.bytes or 0) end
       end
       if #evidence > 0 then header = header .. '\ncalls: ' .. table.concat(evidence, ' ') end
+      -- The session's variables, names and sizes only (`vars.<name>` in a script reads one back).
+      if lean.vars then header = header .. '\nvars: ' .. lean.vars end
       local body
       if lean.returned == nil then body = '(the script returned nothing)'
       elseif type(lean.returned) == 'string' then body = lean.returned
@@ -217,6 +252,13 @@ function M.project(name, output)
       return header .. '\n\n' .. body
     end
     output = lean
+  end
+  -- A script view in the JSON form names its variables in the same words as the header line.
+  if name == 'codemode' and type(output.vars) == 'table' then
+    local copy = {}
+    for key, value in pairs(output) do copy[key] = value end
+    copy.vars = M.vars_line(output.vars)
+    output = copy
   end
   local encoded = json.encode(output)
   -- A native read page already obeys both limits and carries a byte-exact cursor. A trailing
@@ -295,15 +337,25 @@ end
 -- model-facing view; never rewrite the ledger row. Cache the projection so a
 -- long run does not reparse and rehash the same stored evidence every round.
 -- The one reader of a stored script view (both forms): the JSON object, or - for a script that returned
--- text - {status, summary, full_result = {sha256}, returned = <the text>} read back from the header line.
+-- text - {status, summary, full_result = {sha256}, returned = <the text>} read back from the header line,
+-- plus `vars` ({ {name, size} }) and `vars_more` when the observation listed session variables.
 function M.parse_view(content)
   content = tostring(content or "")
   local ok, decoded = pcall(json.decode, content)
-  if ok and type(decoded) == "table" then return decoded end
+  if ok and type(decoded) == "table" then
+    if type(decoded.vars) == "string" then decoded.vars, decoded.vars_more = M.parse_vars(decoded.vars) end
+    return decoded
+  end
   local first, rest = content:match("^(status %d+[^\n]*)\n(.*)$")
   if not first then return nil end
-  local evidence, text = rest:match("^calls: ([^\n]*)\n\n(.*)$")
-  if not evidence then text = rest:match("^\n(.*)$") or rest end
+  -- After line 1: an optional `calls:` line, an optional `vars:` line, a blank line, the script's text.
+  local body = rest
+  local evidence = body:match("^calls: ([^\n]*)\n")
+  if evidence then body = body:sub(#evidence + 9) end
+  local varsline = body:match("^vars: ([^\n]*)\n")
+  if varsline then body = body:sub(#varsline + 8) end
+  local text = body:match("^\n(.*)$") or body
+  local vars, vars_more = M.parse_vars(varsline)
   local status = tonumber(first:match("^status (%d+)"))
   local sha = first:match("full_result (%x+)$")
   local summary = first:match("^status %d+ \194\183 (.-) \194\183 full_result %x+$")
@@ -318,7 +370,7 @@ function M.parse_view(content)
   end
   local decoded_ok, decoded = pcall(json.decode, text)
   local returned = (decoded_ok and decoded ~= nil) and decoded or text
-  return { ok = true, status = status, summary = summary, full_result = sha and { sha256 = sha } or nil, calls = calls, returned = returned }
+  return { ok = true, status = status, summary = summary, full_result = sha and { sha256 = sha } or nil, calls = calls, returned = returned, vars = vars, vars_more = vars_more }
 end
 
 function M.context_view(name, content)

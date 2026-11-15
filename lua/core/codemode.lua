@@ -869,6 +869,29 @@ end
 -- The router: the run's authority, its scope and its workspace are decided once, then one of the two
 -- loops runs. A component that cannot answer *before the first step* falls back; after that it is a
 -- failure with `effect: unknown`, because the calls it already handed out may have had effects.
+-- The session's variables (`vars.<name>` in a script), read from the session store row both loops
+-- commit: names and JSON sizes only, sorted by name. The guest receives it at start (the total cap and
+-- `Object.keys(vars)`), and the observation lists it after the script (lua/core/tool_output.lua).
+-- A deleted variable was committed as JSON `null` (the component seam refuses the prelude's bare
+-- `[key]` delete, so the guest never sends one) and is dropped from the row here, on either loop.
+local VARS_PREFIX='vars.'
+local function session_vars(memory,scope)
+ local key_of='codemode-store.v1:'..scope
+ local raw=memory.meta_get(key_of)
+ local list={}
+ if not raw then return list end
+ local ok,store=pcall(json.decode,raw)
+ if not ok or type(store)~='table' then return list end
+ local cleared=false
+ for key,value in pairs(store)do
+  local name=type(key)=='string' and key:sub(1,#VARS_PREFIX)==VARS_PREFIX and key:sub(#VARS_PREFIX+1) or nil
+  if name and value=='null' then store[key]=nil;cleared=true
+  elseif name and name:match('^[%a_$][%w_$]*$') and type(value)=='string' then list[#list+1]={name=name,bytes=#value} end
+ end
+ if cleared then memory.meta_set(key_of,json.encode(store)) end
+ table.sort(list,function(a,b)return a.name<b.name end)
+ return list
+end
 local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
  local policy,refusal=dofile('lua/core/codemode_policy.lua').admit(memory,role,ctx)
  if not policy then return {ok=false,error=refusal,calls={},attempts={}} end
@@ -878,9 +901,9 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  -- alike, and the script's own line 1 is line 2 of what the interpreter compiles
  -- (lua/core/codemode_harness.lua). A copy, so the decorated source never becomes the tool's args.
  local source=args.code
- args={code=harness.decorate(args.code),timeout_ms=args.timeout_ms}
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+ args={code=harness.decorate(args.code,session_vars(memory,scope)),timeout_ms=args.timeout_ms}
  -- One handle table for this script, on either loop: a call that outlives its wait answers
  -- {state:"pending", op}, `wait(op)`/`cancel(op)` answer it, and every wait is bounded by what is
  -- left of the script (a wait never outlives the script that started it).
@@ -898,6 +921,9 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
+  -- What the session holds after this script (its writes committed, or none if it failed).
+  local vars=session_vars(memory,scope)
+  if #vars>0 then result.vars=vars end
   return result
  end
  if seam_component() then

@@ -13,6 +13,8 @@
 -- What the layer guarantees (docs/CODEMODE.md):
 --   * a returned Promise, or an array/object containing Promises, is settled before the value is
 --     reported - `return searchTools("*")` answers the list, not `undefined`;
+--   * `vars.<name>` is a session variable kept in the session store (`vars.x = v` writes, `delete
+--     vars.x` or `vars.x = null` drops it), committed when the script finishes;
 --   * calls still in flight when the script body ends are awaited, never reported `unexecuted`;
 --   * a call can be used without `await` where JavaScript allows a value to travel: `return`, `text`,
 --     `store` and `console` settle it, and `Promise.all`/`parallel([...])` still run calls concurrently;
@@ -160,6 +162,49 @@ function text(value){ if(busy===0&&!hasPending(value)){ G.text(value); return; }
 function image(value){ if(busy===0&&!hasPending(value)){ G.image(value); return; } enqueue(async function(){ G.image(await settle(value,new Map(),0)); }); }
 function store(key,value){ if(busy===0&&!hasPending(value)){ G.store(key,value); return; } enqueue(async function(){ G.store(key,await settle(value,new Map(),0)); }); }
 function load(key){ return G.load(key); }
+/* Session variables (docs/CODEMODE.md, "Session variables"): vars.<name> is the session store's key "vars.<name>", so store/load stay the one persistence path. A write commits with the store's: when the script finishes; a script that throws keeps none of them. A delete is written as null, which the core drops from the row (the component seam refuses the prelude's bare [key] delete), so null and undefined both clear a variable. */
+var VAR_PREFIX='vars.';
+var VAR_MAX=65536;
+var VARS_MAX=262144;
+var varName=/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
+var PLAIN=' Keep plain data: objects, arrays, strings, numbers, booleans, null.';
+/* UTF-8 bytes through native calls only: a JavaScript loop over 60 KB of text spends the sandbox's fuel (three 60 KB writes ran it out, 15/11). */
+var asciiOnly=/^[\x00-\x7f]*$/;
+function utf8Bytes(text){ if(asciiOnly.test(text)){ return text.length; } try{ return unescape(encodeURIComponent(text)).length; }catch(error){ return text.length*3; } }
+function makeVars(index){
+ var sizes=Object.create(null);
+ var given=index!==null&&typeof index==='object'&&!arrayIsArray(index)?objectKeys(index):[];
+ for(var position=0;position<given.length;position++){ if(varName.test(given[position])&&typeof index[given[position]]==='number'){ sizes[given[position]]=index[given[position]]; } }
+ /* What this script read or wrote, with the JSON it had: a value changed in place (vars.list.push(x)) is written back when the script ends, so a variable behaves like one. */
+ var held=new Map();
+ function others(name){ var sum=0; var names=objectKeys(sizes); for(var position=0;position<names.length;position++){ if(names[position]!==name){ sum+=sizes[names[position]]; } } return sum; }
+ function check(name){ if(typeof name!=='string'||!varName.test(name)){ throw new TypeError('vars.'+String(name)+' is not a variable name: use an identifier (letters, digits, _ or $, not starting with a digit, at most 64 characters).'); } }
+ function encode(name,value){ var json; try{ json=JSON.stringify(value); }catch(error){ throw new TypeError('vars.'+name+' cannot be kept: the value is not JSON-encodable ('+String(error&&error.message||error)+').'+PLAIN); } if(typeof json!=='string'){ throw new TypeError('vars.'+name+' cannot be kept: a '+typeof value+' is not JSON-encodable.'+PLAIN); } return json; }
+ function remove(name){ G.store(VAR_PREFIX+name,null); delete sizes[name]; held.delete(name); }
+ function write(name,value){
+  if(value===undefined||value===null){ remove(name); return; }
+  var json=encode(name,value);
+  var bytes=utf8Bytes(json);
+  if(bytes>VAR_MAX){ throw new RangeError('vars.'+name+' is '+bytes+' bytes of JSON, more than the '+VAR_MAX+' one variable may hold. Keep the IDs or a summary, or write the data to a file with a tool.'); }
+  var after=others(name)+bytes;
+  if(after>VARS_MAX){ throw new RangeError('vars are full: writing vars.'+name+' would make '+after+' bytes of JSON, more than the '+VARS_MAX+' a session may hold. delete vars.<name> for what you no longer need.'); }
+  G.store(VAR_PREFIX+name,value);
+  sizes[name]=bytes;
+  held.set(name,{ value:value, json:json });
+ }
+ function read(name){ if(held.has(name)){ return held.get(name).value; } if(!(name in sizes)){ return undefined; } var value=G.load(VAR_PREFIX+name); if(value===null||value===undefined){ return undefined; } held.set(name,{ value:value, json:JSON.stringify(value) }); return value; }
+ var proxy=new Proxy({},{
+  get:function(object,property){ if(typeof property!=='string'||!varName.test(property)){ return undefined; } return read(property); },
+  set:function(object,property,value){ check(property); if(busy===0&&!hasPending(value)){ write(property,value); return true; } enqueue(async function(){ write(property,await settle(value,new Map(),0)); }); return true; },
+  deleteProperty:function(object,property){ check(property); remove(property); return true; },
+  has:function(object,property){ return typeof property==='string'&&(property in sizes); },
+  ownKeys:function(){ return objectKeys(sizes).sort(); },
+  getOwnPropertyDescriptor:function(object,property){ if(typeof property!=='string'||!(property in sizes)){ return undefined; } return { value:read(property), writable:true, enumerable:true, configurable:true }; },
+  defineProperty:function(object,property){ throw new TypeError('vars.'+String(property)+': assign vars.<name> = value instead of defining a property.'); }
+ });
+ function flush(){ held.forEach(function(entry,name){ if(name in sizes&&encode(name,entry.value)!==entry.json){ write(name,entry.value); } }); }
+ return { proxy:proxy, flush:flush };
+}
 function makeConsole(raw){
  var out={};
  var levels=['log','info','warn','error','debug'];
@@ -180,11 +225,14 @@ var results=Object.freeze({
  diff:function(before,after){ return track('results.diff('+preview(before)+', '+preview(after)+')',rawResults({ op:'diff', a:before, b:after })); }
 });
 return {
- enter:async function(body){
+ enter:async function(index,body){
+  var vars=makeVars(index);
   /* The script helpers are reachable as tools.<name> too (14/11: tools.searchTools(...) read as "not a tool"): one name, wherever the model reaches for it. */
-  var helpers={ searchTools:makeGlobal('searchTools',G.searchTools), describeTool:makeGlobal('describeTool',G.describeTool), showCall:makeGlobal('showCall',G.showCall), describe:makeGlobal('describe',G.describe), results:results, parallel:parallel };
-  var value=await body(wrapTools(G.tools,helpers),makeConsole(G.console),helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS);
-  return await settleAll(value);
+  var helpers={ searchTools:makeGlobal('searchTools',G.searchTools), describeTool:makeGlobal('describeTool',G.describeTool), showCall:makeGlobal('showCall',G.showCall), describe:makeGlobal('describe',G.describe), results:results, parallel:parallel, vars:vars.proxy };
+  var value=await body(wrapTools(G.tools,helpers),makeConsole(G.console),helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS,vars.proxy);
+  var out=await settleAll(value);
+  vars.flush();
+  return out;
  }
 };
 })(globalThis)
@@ -214,13 +262,28 @@ local ONE = join(SOURCE)
 -- The script runs in its own block, so `const text = ...` (or store, load, image, exit, results, parallel)
 -- shadows the helper instead of being "invalid redefinition of parameter name" (14/11). The brace stays on
 -- line 1, so script line N is still compiled line N+1.
-M.prologue = ONE .. ";return await __h.enter(async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS){{"
+-- The session's variables arrive as `{name: bytes}` on line 1 (names are identifiers and sizes integers,
+-- so the text holds no newline and the script's line numbers do not move).
+local OPEN = ONE .. ";return await __h.enter("
+local BODY = ",async function(tools, console, searchTools, describeTool, showCall, capabilities, describe, results, parallel, text, store, load, image, exit, ALL_TOOLS, vars){{"
+M.prologue = OPEN .. "{}" .. BODY
 M.epilogue = "\n}});"
 
--- The script the node sends: the harness on line 1, the model's code from line 2.
-function M.decorate(code)
+local function index_json(vars)
+  local parts = {}
+  for _, entry in ipairs(type(vars) == "table" and vars or {}) do
+    if type(entry) == "table" and type(entry.name) == "string" and entry.name:match("^[%a_$][%w_$]*$") and tonumber(entry.bytes) then
+      parts[#parts + 1] = '"' .. entry.name .. '":' .. string.format("%d", math.floor(tonumber(entry.bytes)))
+    end
+  end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- The script the node sends: the harness on line 1, the model's code from line 2. `vars` is the
+-- session's variable index, `{ {name=, bytes=} ... }` (lua/core/codemode.lua `session_vars`).
+function M.decorate(code, vars)
   if type(code) ~= "string" then return code end
-  return M.prologue .. "\n" .. code .. M.epilogue
+  return OPEN .. index_json(vars) .. BODY .. "\n" .. code .. M.epilogue
 end
 
 return M

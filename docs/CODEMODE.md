@@ -76,6 +76,37 @@ awareness" (the operator's decision, 11/11). Reuse happens only when a script as
   with `hit`), so the value of explicit reuse is measurable rather than asserted
   (`scripts/test-codemode-reuse.lua`).
 
+## Session variables (15/11)
+
+Each script runs in a fresh sandbox, so a long run re-fetched what an earlier script already had.
+`vars.<name>` keeps plain data for the session, explicitly (a script assigns it) and visibly (every
+observation lists it). It is the session store under the key `vars.<name>` - the same row `store`/`load`
+use, scoped by session, user, role, workspace and profile and kept in `meta` - so there is one
+persistence path, and it survives a fresh sandbox and a process restart. Both loops get it: the harness
+text (`lua/core/codemode_harness.lua`) builds `vars` on the prelude's `store`/`load`, and the index is read
+from the row in the shared `run_script` (`lua/core/codemode.lua`, `session_vars`).
+
+* `vars.x = value` keeps a JSON-encodable value; a function, BigInt or cycle is a `TypeError` naming the key.
+  `delete vars.x` (or `vars.x = null` / `undefined`) removes it. Names are identifiers of at most 64 characters.
+* `vars.x` reads the kept value, or `undefined`; `Object.keys(vars)` and `"x" in vars` answer the session
+  index. A value changed in place (`vars.list.push(item)`) is written back when the script ends.
+* Limits: 64 KB of JSON per variable and 256 KB per session (UTF-8 bytes), each a `RangeError` that names
+  the limit. The prelude's own store limits (256 KB per key, 1 MB per session) still apply around them.
+* **Writes commit when the script succeeds, like every store write** (native: `done.ok`; component:
+  `outcome.ok`). A script that throws keeps none of its variable writes or deletes, so a half-done script
+  never leaves half its state, and the next script sees what the last successful one left.
+* Every script observation lists the variables after line 1 and the `calls:` line:
+  `vars: laura (30 B) · inbox (12 KB) · plan (400 B)` - names and sizes, never values, sorted by name, at
+  most ten then `+N more`, absent when there are none. A view in the JSON form (a failure, a script with no
+  call) carries the same text as the field `vars`. `tool_output.parse_view` reads either back as
+  `vars = { {name, size} }` and `vars_more`.
+* A delete is committed as JSON `null` and the core drops it from the row (`session_vars`), because the
+  component seam refuses the prelude's bare `[key]` write - its spelling of `store(key, undefined)`, which
+  therefore still fails on that path as `codemode_store_protocol_invalid` (a seam fix moves the component
+  bytes, so it waits for a component publish).
+
+`scripts/test-session-vars.lua` holds all of the above against the real sandbox.
+
 ## Pending calls (12/11)
 
 A call that can outlive its wait is the general case, not an exception: a build, `scripts/fast.sh`, a
