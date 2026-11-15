@@ -76,7 +76,39 @@ child.on('error', (error) => fail('mail_binary_unusable', { message: error.messa
 child.stderr.pipe(process.stderr);
 child.on('exit', (code, signal) => { process.exitCode = typeof code === 'number' ? code : (signal ? 1 : 0); });
 
-// Requests are forwarded verbatim except for the write gate; responses flow back untouched.
+// Requests are forwarded verbatim except for the write gate and three repairs of mail-mcp's own API that
+// cost every email task calls (15/11 real-task replays): a search with a cursor drops the filters the
+// cursor already carries (mail-mcp refuses the combination); get_message/raw/attachment take account_id
+// from the message_id when it is missing (mail-mcp refuses a message_id without it although the id names
+// the account); and the tools/list answer states the 1..50 range of a search's limit, which mail-mcp
+// enforces but does not declare. Every other byte flows through unchanged.
+const SEARCH_TOOLS = new Set(['imap_search_messages', 'imap_search_all_mailboxes']);
+const CURSOR_KEEPS = new Set(['account_id', 'mailbox', 'cursor', 'limit', 'include_snippet', 'snippet_max_chars']);
+const BY_MESSAGE_ID = new Set(['imap_get_message', 'imap_get_message_raw', 'imap_get_attachment']);
+const listRequests = new Set();
+export function repairCall(params) {
+  if (!params || typeof params !== 'object' || typeof params.arguments !== 'object' || params.arguments === null) return params;
+  const name = params.name;
+  const args = { ...params.arguments };
+  if (SEARCH_TOOLS.has(name) && typeof args.cursor === 'string' && args.cursor) {
+    for (const key of Object.keys(args)) if (!CURSOR_KEEPS.has(key)) delete args[key];
+  }
+  if (BY_MESSAGE_ID.has(name) && !args.account_id && typeof args.message_id === 'string') {
+    const owner = /^imap:([^:]+):/.exec(args.message_id);
+    if (owner) args.account_id = owner[1];
+  }
+  return { ...params, arguments: args };
+}
+export function repairList(result) {
+  for (const tool of (result && Array.isArray(result.tools) ? result.tools : [])) {
+    const limit = SEARCH_TOOLS.has(tool.name) && tool.inputSchema && tool.inputSchema.properties && tool.inputSchema.properties.limit;
+    if (limit && typeof limit === 'object') {
+      if (limit.minimum === undefined) limit.minimum = 1;
+      if (limit.maximum === undefined) limit.maximum = 50;
+    }
+  }
+  return result;
+}
 let buffer = '';
 const answerLocally = (id, reason, tool) => {
   const reply = { jsonrpc: '2.0', id, error: { code: -32000, message: reason, data: { tool, refused_before_dispatch: true } } };
@@ -97,8 +129,32 @@ process.stdin.on('data', (chunk) => {
       answerLocally(message.id ?? null, 'mail_writes_not_enabled', message.params?.name);
       continue;
     }
+    if (message.method === 'tools/list' && message.id !== undefined) listRequests.add(message.id);
+    if (message.method === 'tools/call') {
+      child.stdin.write(JSON.stringify({ ...message, params: repairCall(message.params) }) + '\n');
+      continue;
+    }
     child.stdin.write(line + '\n');
   }
 });
 process.stdin.on('end', () => { try { child.stdin.end(); } catch { /* already closed */ } });
-child.stdout.pipe(process.stdout);
+// Answers flow back line for line; only a tools/list answer is touched (repairList).
+let outBuffer = '';
+child.stdout.setEncoding('utf8');
+child.stdout.on('data', (chunk) => {
+  outBuffer += chunk;
+  let index;
+  while ((index = outBuffer.indexOf('\n')) >= 0) {
+    const line = outBuffer.slice(0, index);
+    outBuffer = outBuffer.slice(index + 1);
+    let reply = null;
+    try { reply = JSON.parse(line); } catch { process.stdout.write(line + '\n'); continue; }
+    if (reply && listRequests.has(reply.id) && reply.result) {
+      listRequests.delete(reply.id);
+      process.stdout.write(JSON.stringify({ ...reply, result: repairList(reply.result) }) + '\n');
+      continue;
+    }
+    process.stdout.write(line + '\n');
+  }
+});
+child.stdout.on('end', () => { if (outBuffer) process.stdout.write(outBuffer); });
