@@ -31,7 +31,7 @@ provider.complete_with=function(_,messages,schemas)
   return {content='',finish_reason='tool_calls',tool_calls={{id='native-default-call',type='function',['function']={name='codemode',arguments=json.encode({code='const r=await tools.read({path:"sum.txt"}); await tools.edit({path:"sum.txt",edits:[{old_text:r.content,new_text:"a+b"}]}); return (await tools.read({path:"sum.txt"})).content;'})}}}}
  end
  check(rounds==2,'no replay or extra model rounds')
- for _,m in ipairs(messages)do if m.role=='tool' and m.tool_call_id=='native-default-call' then nested=json.decode(m.content) end end
+ for _,m in ipairs(messages)do if m.role=='tool' and m.tool_call_id=='native-default-call' then nested=dofile('lua/core/tool_output.lua').parse_view(m.content) end end
  -- The model's view is the outcome (14/11): summary + calls (their evidence references) + full_result;
  -- the complete result - backend and every attempt included - is the stored file it names.
  check(nested and nested.ok and type(nested.summary)=='string' and nested.attempts==nil and nested.backend==nil,'the script result reaches the agent loop as its lean view: '..json.encode(nested or {}):sub(1,200))
@@ -39,7 +39,8 @@ provider.complete_with=function(_,messages,schemas)
  local complete=full and json.decode(full)
  check(complete and complete.backend=='rust-wasmtime-quickjs-wasi' and #complete.attempts==3,'real native backend result is kept whole in the file the view names')
  check(#nested.calls==3,'all nested results retained')
- for _,call in ipairs(nested.calls)do local bytes=host.read_file(call.evidence.path);check(bytes and host.sha256(bytes)==call.evidence.sha256,'nested original matches exact hash')end
+ -- The view names each nested original by its hash (lighter evidence, 14/11); the file is where tool_result reads it.
+ for _,call in ipairs(nested.calls)do local bytes=host.read_file(dofile('lua/core/paths.lua').data()..'/tool-results/'..call.sha256..'.txt');check(bytes and host.sha256(bytes)==call.sha256 and call.evidence==nil and call.status==200,'nested original matches exact hash')end
  return {content='FIXTURE-DONE',finish_reason='stop',tool_calls={}}
 end
 local bot=agent.new(sid,function()end,'master','master','')

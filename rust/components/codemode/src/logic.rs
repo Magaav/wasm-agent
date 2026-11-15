@@ -459,8 +459,54 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
         }
     }
     matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let found: Vec<Value> = matches.into_iter().take(limit.as_f64().unwrap_or(8.0) as usize).map(|(_, _, value)| value).collect();
+    // Compact, as the native loop answers it (lua/core/codemode.lua, 14/11): name, the description's
+    // first line, parameters without the per-property prose, callable and route. select: keeps the whole.
+    let found: Vec<Value> = matches.into_iter().take(limit.as_f64().unwrap_or(8.0) as usize).map(|(_, _, value)| compact_match(&value)).collect();
     (Value::Array(found), true)
+}
+
+/// One keyword match, compact: what to call and with what - the same object the native loop builds.
+fn compact_match(value: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(name) = value.get("name") { out.insert("name".into(), name.clone()); }
+    let first = value.get("description").and_then(Value::as_str).unwrap_or_default().split('\n').next().unwrap_or_default().to_string();
+    out.insert("description".into(), Value::String(first));
+    if let Some(parameters) = value.get("parameters") { out.insert("parameters".into(), compact_parameters(parameters)); }
+    if let Some(callable) = value.get("callable") { out.insert("callable".into(), callable.clone()); }
+    if let Some(route) = value.get("route") { out.insert("route".into(), route.clone()); }
+    Value::Object(out)
+}
+
+fn compact_parameters(schema: &Value) -> Value {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else { return schema.clone() };
+    let mut props = serde_json::Map::new();
+    for (key, value) in properties {
+        let mut p = serde_json::Map::new();
+        if let Some(kind) = value.get("type") { p.insert("type".into(), kind.clone()); }
+        if let Some(choices) = value.get("enum") { p.insert("enum".into(), choices.clone()); }
+        props.insert(key.clone(), if value.is_object() { Value::Object(p) } else { value.clone() });
+    }
+    let mut out = serde_json::Map::new();
+    if let Some(kind) = schema.get("type") { out.insert("type".into(), kind.clone()); }
+    out.insert("properties".into(), Value::Object(props));
+    if let Some(required) = schema.get("required") { out.insert("required".into(), required.clone()); }
+    Value::Object(out)
+}
+
+/// A connector named without its hash suffix: the one catalogue name that is it plus `_<hex>`, or
+/// none when two stem the same (the native loop's `stem`).
+fn stem(catalogue: &Catalogue, wanted: &str) -> Option<String> {
+    let prefix = format!("{wanted}_");
+    let mut hit: Option<String> = None;
+    for name in catalogue.names() {
+        if let Some(rest) = name.strip_prefix(&prefix) {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) && (catalogue.callable(&name).is_some() || catalogue.fenced(&name).is_some()) {
+                if hit.is_some() { return None; }
+                hit = Some(name.clone());
+            }
+        }
+    }
+    hit
 }
 
 /// One name, one object: what the batch answers for it and what the compatibility alias
@@ -469,6 +515,8 @@ pub fn search_tools(catalogue: &Catalogue, params: &Value) -> (Value, bool) {
 /// cannot see. `None` only when the built-ins were not handed over (an old host): the loop then owns the
 /// answer, exactly as it did before they travelled.
 pub fn select_one(catalogue: &Catalogue, name: &str) -> Option<Value> {
+    let stemmed = if catalogue.callable(name).is_none() && catalogue.fenced(name).is_none() && catalogue.builtin(name).is_none() { stem(catalogue, name) } else { None };
+    let name = stemmed.as_deref().unwrap_or(name);
     if let Some(tool) = catalogue.callable(name) {
         return Some(entry(&tool.name, &tool.schema, &tool.execution, None));
     }
@@ -893,7 +941,8 @@ mod tests {
         assert!(ok);
         let hits = keyword.as_array().unwrap();
         assert!(hits.iter().any(|row| row["name"] == "showCall"), "a built-in is found by keyword: {keyword}");
-        assert_eq!(hits.iter().find(|row| row["name"] == "showCall").unwrap(), &builtin("showCall").entry);
+        // ...compact, like every keyword hit (14/11): what to call, not the whole entry again.
+        assert_eq!(hits.iter().find(|row| row["name"] == "showCall").unwrap(), &compact_match(&builtin("showCall").entry));
         // The hidden alias is element 0 of a one-name batch - same object, every kind of name.
         for name in ["read", "session_worktree", "subagent", "searchTools", "results"] {
             let (batch, ok) = search_tools(&catalogue, &json!([{"names": [name]}]));

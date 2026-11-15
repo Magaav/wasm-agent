@@ -39,4 +39,18 @@ v,ok=codemode.script_value({ok=true,tool_call_issued=true,result={content={{type
 check(ok and type(v.messages)=='table' and #v.messages==2,'a text answer shaped {data, meta} is its data, like structured content')
 v,ok=codemode.script_value({ok=false,error='mcp_rpc_error:-32602:bad'},false)
 check(not ok,'a refusal stays a refusal')
+-- A connector named without its hash suffix is that tool when the stem is unique (a typed hash was wrong, 14/11).
+local stem_name
+for _,t in ipairs(tools.all('master',ctx)) do local n=t['function'].name if n:match('^read$') then stem_name=n end end
+r=run('const s = await searchTools("files read");\nreturn s.length > 0 && s.every(x => x.schema === undefined && typeof x.parameters === "object" && typeof x.name === "string");')
+check(r.ok and tostring(r.value)=='true','a word search is compact: name, parameters, no schema: '..tostring(r.value):sub(1,200))
+-- select: and the script's tools.<name> both resolve a connector named without its hash suffix (unique stem only)
+local cat={{type='function',['function']={name='mcp_google_imap_list_accounts_828ac338',description='List accounts',parameters={type='object',properties={}}}},
+ {type='function',['function']={name='mcp_x_get_aaaa1111',description='a',parameters={type='object',properties={}}}},
+ {type='function',['function']={name='mcp_x_get_bbbb2222',description='b',parameters={type='object',properties={}}}}}
+local lk=codemode.lookup(cat,function() return {status='ok'} end,nil)
+local hit=lk.discover({'select:mcp_google_imap_list_accounts'})
+check(hit[1] and hit[1].name=='mcp_google_imap_list_accounts_828ac338' and hit[1].found~=false,'a unique stem resolves in select: '..json.encode(hit[1]):sub(1,160))
+local two=lk.discover({'select:mcp_x_get'})
+check(two[1] and two[1].found==false,'two tools with one stem stay unresolved')
 print(json.encode({ok=true,checks=checks}))

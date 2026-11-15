@@ -168,8 +168,41 @@ function M.project(name, output)
     elseif lean.value ~= nil then
       lean.returned = lean.value; lean.value = nil
     end
+    -- Evidence the model can use, and only that (14/11: the per-call path, bytes, id and ok were 9% of
+    -- what a real run read). `sha256` is what tool_result / results.get take, `bytes` says whether it is
+    -- worth fetching; status says ok.
+    if type(lean.calls) == 'table' then
+      local light = {}
+      for i, call in ipairs(lean.calls) do
+        if type(call) ~= 'table' then light[i] = call else
+          local evidence = type(call.evidence) == 'table' and call.evidence or {}
+          local item = {}
+          for key, value in pairs(call) do
+            if key ~= 'id' and key ~= 'ok' and key ~= 'evidence' then item[key] = value end
+          end
+          item.sha256 = item.sha256 or evidence.sha256
+          item.bytes = item.bytes or evidence.bytes
+          light[i] = item
+        end
+      end
+      lean.calls = light
+    end
     local ref = M.store(full)
     lean.full_result = {sha256=ref.sha256, bytes=#full}
+    -- A script that returned TEXT gives the model the text itself, the way a shell gives its output -
+    -- not a JSON-quoted string full of \n and \" (14/11: 12% of a real run's bytes were escapes). One
+    -- header line says the status, the per-call summary and where the whole result is.
+    -- Multi-line text only: that is where escaping costs (a one-line string reads the same quoted).
+    if lean.ok ~= false and lean.error == nil and type(lean.returned) == 'string' and lean.returned:find('\n', 1, true) then
+      local header = 'status ' .. tostring(lean.status or 200) .. (lean.summary and (' \194\183 ' .. tostring(lean.summary)) or '')
+        .. ' \194\183 full_result ' .. ref.sha256
+      local text = lean.returned
+      local room = M.MAX_BYTES - #header - 160
+      if #text > room then
+        text = text:sub(1, room) .. '\n[cut at ' .. room .. ' of ' .. #lean.returned .. ' bytes: the whole text is tool_result({sha256:"' .. ref.sha256 .. '"})]'
+      end
+      return header .. '\n\n' .. text
+    end
     output = lean
   end
   local encoded = json.encode(output)
@@ -248,6 +281,20 @@ end
 -- Older transcripts may contain a pre-budget nested result. Rebuild only its
 -- model-facing view; never rewrite the ledger row. Cache the projection so a
 -- long run does not reparse and rehash the same stored evidence every round.
+-- The one reader of a stored script view (both forms): the JSON object, or - for a script that returned
+-- text - {status, summary, full_result = {sha256}, returned = <the text>} read back from the header line.
+function M.parse_view(content)
+  content = tostring(content or "")
+  local ok, decoded = pcall(json.decode, content)
+  if ok and type(decoded) == "table" then return decoded end
+  local header, text = content:match("^(status %d+[^\n]*)\n\n(.*)$")
+  if not header then return nil end
+  local status = tonumber(header:match("^status (%d+)"))
+  local sha = header:match("full_result (%x+)$")
+  local summary = header:match("^status %d+ \194\183 (.-) \194\183 full_result %x+$")
+  return { ok = true, status = status, summary = summary, full_result = sha and { sha256 = sha } or nil, returned = text }
+end
+
 function M.context_view(name, content)
   content=tostring(content or "")
   if #content<=M.MAX_BYTES then return content end
