@@ -107,6 +107,15 @@ end
 function M.connector_index(catalog)
  local groups,order={},{}
  local sigs={}
+ -- What each connector answers (lua/core/return_shapes.lua): ours, then the server's declared
+ -- outputSchema, then the shape learned from this node's real answers - read once per index.
+ local shapes_ok,shapes=pcall(dofile,'lua/core/return_shapes.lua');if not shapes_ok then shapes=nil end
+ local declared,learned
+ if shapes then
+  local d_ok,d=pcall(function() return dofile('lua/core/mcp.lua').output_schemas() end);declared=d_ok and d or {}
+  learned=shapes.load()
+ end
+ local shaped=false
  -- The one surface's *exact* names (#118), loaded once: only the nine `mcp_whatsapp_<verb>` tools are the
  -- family. A connector whose namespace merely begins with `mcp_whatsapp` is still a connector, and is
  -- still listed under its own label.
@@ -126,6 +135,10 @@ function M.connector_index(catalog)
    if not groups[server] then groups[server]={};order[#order+1]=server end
    local list=groups[server];list[#list+1]=name
    sigs[name]=signature(f)
+   if shapes then
+    local suffix=shapes.suffix(f,declared,learned)
+    if suffix~='' then sigs[name]=sigs[name]..suffix;shaped=true end
+   end
   end
  end
  if #order==0 then return nil end
@@ -149,12 +162,17 @@ function M.connector_index(catalog)
    end
   else
    local with={};for i,name in ipairs(list)do with[i]=sigs[name] end
-   local shown=table.concat(with,', ',1,math.min(#with,8))
-   if #list>8 then shown=shown..', +'..(#list-8)..' more' end
+   -- A shape has commas of its own, so a group whose entries carry one is separated by `; `.
+   local sep=', '
+   for _,sig in ipairs(with) do if sig:find(' → ',1,true) then sep='; ';break end end
+   local shown=table.concat(with,sep,1,math.min(#with,8))
+   if #list>8 then shown=shown..sep..'+'..(#list-8)..' more' end
    lines[#lines+1]='- '..server..': '..shown
   end
  end
- return 'Connectors on this node (code mode only; exact callable names with their arguments, ? = optional; await searchTools("select:<name>") gives a full schema):\n'..table.concat(lines,'\n')
+ local head='Connectors on this node (code mode only; exact callable names with their arguments, ? = optional'
+ if shaped then head=head..'; → what the script receives, keys only' end
+ return head..'; await searchTools("select:<name>") gives a full schema):\n'..table.concat(lines,'\n')
 end
 -- Policy text shown to the model. Keep it in step with the fences in lua/core/codemode.lua and
 -- lua/core/tools.lua and with docs/CODEMODE.md: scripts/test-codemode-boundary.lua asserts both the wording
