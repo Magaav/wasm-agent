@@ -347,6 +347,7 @@ return {
   ['runtime_branch_not_integrated']='update.lua',
   ['runtime_fast_forward_failed']='update.lua',
   ['search_page_budget_too_small']='history_search.lua',
+  ['secret_path_denied']='secret_guard.lua',
   ['selection_eol_ambiguous']='file_tools.lua',
   ['selection_hash_mismatch']='file_tools.lua',
   ['selection_line_range_out_of_bounds']='file_tools.lua',
