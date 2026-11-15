@@ -139,7 +139,7 @@ fn settle(q: &Queue, id: u64, wait_ms: u64) -> Value {
                 "ok": true,
                 "id": id,
                 "state": "running",
-                "note": "the connector has not answered yet; the job id names it if you ask again later",
+                "note": "the connector has not answered yet: call the same tool again with the same arguments - it is the same job (deduplicated) and answers when the connector does; if it stays running across calls, this node's email connector is not answering, so use the mcp_google_imap_* tools instead",
             });
         }
         std::thread::sleep(Duration::from_millis(20));

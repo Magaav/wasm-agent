@@ -151,7 +151,10 @@ export async function openMCP(server){
    // A protocol rejection (-32700..-32602) is the server refusing the request: nothing ran, so it does not
    // poison the session - the same rule requestMCP applies. 14/11: `max_bytes` too small (-32602) wedged a
    // working mailbox and every later read answered mcp_connection_uncertain.
-   }catch(error){const rejected=rpc_rejection(error.rpc_error);if((issued&&!rejected)||controller.signal.aborted)poisoned=true;return credentials.redact({ok:false,error:String(error.message||error),rpc_error:error.rpc_error,phase,tool_call_issued:issued&&!rejected,outcome:(issued&&!rejected)?'unknown':'not_submitted'});}
+   // ANY JSON-RPC error reply is the server answering (it parsed the call and refused it), so nothing is in
+   // doubt and the session stays usable; only a lost reply (timeout, transport) is uncertain (14/11 replay:
+   // -32002 'IMAP account default is not configured' wedged the mailbox for two minutes).
+   }catch(error){const rejected=rpc_rejection(error.rpc_error)||!!error.rpc_error;if((issued&&!rejected)||controller.signal.aborted)poisoned=true;return credentials.redact({ok:false,error:String(error.message||error),rpc_error:error.rpc_error,phase,tool_call_issued:issued&&!rejected,outcome:(issued&&!rejected)?'unknown':'not_submitted'});}
    finally{clearTimeout(timer);busy=false;}
   },
   async close(){poisoned=true;timer=setTimeout(()=>controller.abort(),3000);try{await transport.close();}finally{clearTimeout(timer);}},
