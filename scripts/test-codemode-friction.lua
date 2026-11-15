@@ -62,4 +62,14 @@ local shapes=dofile('lua/core/return_shapes.lua')
 check(shapes.suffix(cat[1]['function'],{mcp_google_imap_list_accounts_828ac338={type='object'}},{})=='','a declared shape that says nothing is not printed')
 local learned={mcp_google_imap_list_accounts_828ac338={h=shapes.schema_hash(cat[1]['function'].parameters),t={o={accounts={a='any'}}}}}
 check(shapes.suffix(cat[1]['function'],{mcp_google_imap_list_accounts_828ac338={type='object'}},learned):find('accounts',1,true),'and it does not hide the learned shape')
+-- 15/11: in a group over eight, the tools this node has called come first and the rest are still named.
+local big={}
+for i,verb in ipairs({'alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel','india','zulu'}) do
+ big[i]={type='function',['function']={name='mcp_big_'..verb..'_1234abcd',description='MCP big / '..verb..': x',parameters={type='object',properties={}}}}
+end
+shapes.learn('mcp_big_zulu_1234abcd',big[10]['function'].parameters,{messages={},total=1})
+local bix=policy.connector_index(big)
+local head=bix:match('%- big: (.*)$') or ''
+check(head:find('^mcp_big_zulu%(') ~= nil,'a tool this node has called comes first: '..head:sub(1,120))
+check(head:find('+2 more: mcp_big_hotel, mcp_big_india',1,true),'the tools past eight are still named: '..head:sub(-120))
 print(json.encode({ok=true,checks=checks}))

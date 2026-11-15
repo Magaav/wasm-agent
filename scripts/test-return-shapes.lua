@@ -48,8 +48,8 @@ local function with_declared(map,fn)
  assert(ok,value);return value
 end
 local index=with_declared({mcp_mail_search_deadbeef=declared},function() return policy.connector_index({mail,fresh}) end)
-check(index:find('- mail: mcp_mail_list_labels({}); mcp_mail_search({q}) → {messages:[{from:{address,name},id,subject}],total}',1,true),
- 'the declared shape is printed after the arguments, and a tool with no shape keeps its plain signature: '..index)
+check(index:find('- mail: mcp_mail_search({q}) → {messages:[{from:{address,name},id,subject}],total}; mcp_mail_list_labels({})',1,true),
+ 'the declared shape is printed after the arguments (shaped tools first), and a tool with no shape keeps its plain signature: '..index)
 check(index:find('→ what the script receives, keys only',1,true),'the header says what the arrow means')
 local plain=with_declared({},function() return policy.connector_index({fresh}) end)
 check(plain:find('- mail: mcp_mail_list_labels({})\n',1,true) or plain:sub(-40):find('mcp_mail_list_labels({})',1,true),

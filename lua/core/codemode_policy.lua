@@ -139,6 +139,7 @@ function M.connector_index(catalog)
  local groups,order={},{}
  local sigs={}
  local listed=listed_names(catalog)
+ local known={}
  -- What each connector answers (lua/core/return_shapes.lua): ours, then the server's declared
  -- outputSchema, then the shape learned from this node's real answers - read once per index.
  local shapes_ok,shapes=pcall(dofile,'lua/core/return_shapes.lua');if not shapes_ok then shapes=nil end
@@ -171,7 +172,7 @@ function M.connector_index(catalog)
    if shown_name~=name then sigs[name]=shown_name..sigs[name]:sub(#name+1) end
    if shapes then
     local suffix=shapes.suffix(f,declared,learned)
-    if suffix~='' then sigs[name]=sigs[name]..suffix;shaped=true end
+    if suffix~='' then sigs[name]=sigs[name]..suffix;shaped=true;known[name]=true end
    end
   end
  end
@@ -195,12 +196,25 @@ function M.connector_index(catalog)
     lines[#lines+1]='- '..sigs[name]
    end
   else
+   -- The tools this node knows the answer of (it has called them, or they declare it) come first, so the
+   -- eight full signatures are the ones in use - alphabetical order hid imap_search_messages, the mail
+   -- task's main read, behind "+6 more" while unused ews tools were shown (15/11).
+   table.sort(list,function(a,b)
+    local x,y=known[a] and 0 or 1,known[b] and 0 or 1
+    if x~=y then return x<y end
+    return a<b
+   end)
    local with={};for i,name in ipairs(list)do with[i]=sigs[name] end
    -- A shape has commas of its own, so a group whose entries carry one is separated by `; `.
    local sep=', '
    for _,sig in ipairs(with) do if sig:find(' → ',1,true) then sep='; ';break end end
    local shown=table.concat(with,sep,1,math.min(#with,8))
-   if #list>8 then shown=shown..sep..'+'..(#list-8)..' more' end
+   -- The rest are still NAMED (names only): a name that is not in the index reads as a tool that does
+   -- not exist (#118), and select:<name> gives its schema.
+   if #list>8 then
+    local rest={};for i=9,#list do rest[#rest+1]=listed(list[i]) end
+    shown=shown..sep..'+'..(#list-8)..' more: '..table.concat(rest,', ')
+   end
    lines[#lines+1]='- '..server..': '..shown
   end
  end
