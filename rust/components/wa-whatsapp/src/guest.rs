@@ -1712,6 +1712,117 @@ async fn backfill_names(announced: &mut bool) {
     }
 }
 
+// ---- the address book <-> `@lid` join ----------------------------------------------------------
+// The phone keys a saved contact by its phone number and WhatsApp journals the chat with that person
+// under their `@lid` (15/11: `contacts({q:"Laura <3"})` found nothing although the name was synced).
+// The index joins the two through alias rows (`ix/al/`, `index::learn_alias`); this lane feeds it the
+// two sources the pipeline has outside a message: the cards an index already holds (one resumable
+// walk, `index::join_aliases`) and the LID<->PN mappings `whatsapp-rust` keeps (`lid/<lid>`, learned
+// from usync and peer messages). Logged as counts only.
+
+/// How often the lane looks at `whatsapp-rust`'s mappings once it has caught up.
+const ALIAS_EVERY: Duration = Duration::from_secs(60);
+/// Cards one walk pass reads, and mappings one feed pass checks: each costs a few reads and, only when
+/// something is new, a couple of writes against the same `kv.write` grant as everything else.
+const ALIAS_WALK_PER_TICK: usize = 200;
+const ALIAS_FEED_PER_TICK: usize = 200;
+
+thread_local! {
+    /// The `@lid` users whose mapping this instance already handed to the index: a mapping is checked
+    /// once per run, and a new one the protocol learns is checked on the next pass.
+    static ALIAS_SEEN: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+}
+
+/// This instance's progress on the join.
+struct AliasRun {
+    next_at: Instant,
+    /// The walk over the existing cards reached its end (`ix/bf/alias/done`).
+    walked: bool,
+}
+
+impl AliasRun {
+    fn new() -> AliasRun {
+        AliasRun { next_at: Instant::now(), walked: false }
+    }
+}
+
+/// One user part as the address it names: the store keeps `lid`/`phone_number` as bare user parts.
+fn user_jid(user: &str, server: &str) -> String {
+    if user.contains('@') {
+        user.to_string()
+    } else {
+        format!("{user}@{server}")
+    }
+}
+
+async fn alias_tick(state: &mut AliasRun) {
+    if Instant::now() < state.next_at {
+        return;
+    }
+    state.next_at = Instant::now() + ALIAS_EVERY;
+    if !state.walked {
+        // The walk needs every card, so it waits for the name side to be complete.
+        if !matches!(index::backfill_state(&IndexKv).await, Ok("ready")) {
+            return;
+        }
+        match index::join_aliases(&IndexKv, ALIAS_WALK_PER_TICK).await {
+            Ok(pass) => {
+                if pass.checked > 0 || pass.named > 0 || pass.done {
+                    say!("{}", pass.line("alias walk"));
+                }
+                state.walked = pass.done;
+                if !pass.done {
+                    // More cards to read: the next pass on the next tick, not in a minute.
+                    state.next_at = Instant::now() + TICK;
+                    return;
+                }
+            }
+            Err(reason) => {
+                say!("index: alias walk paused reason={reason}");
+                return;
+            }
+        }
+    }
+    let Some(client) = CLIENT.with(|c| c.borrow().clone()) else { return };
+    let backend = client.persistence_manager().backend();
+    let mappings = match backend.get_all_lid_mappings().await {
+        Ok(mappings) => mappings,
+        Err(_) => {
+            say!("index: LID mappings unreadable this pass");
+            return;
+        }
+    };
+    let fresh: Vec<(String, String)> = ALIAS_SEEN.with(|seen| {
+        let seen = seen.borrow();
+        mappings
+            .iter()
+            .filter(|entry| !seen.contains(&user_jid(&entry.lid, "lid")))
+            .take(ALIAS_FEED_PER_TICK)
+            .map(|entry| (user_jid(&entry.lid, "lid"), user_jid(&entry.phone_number, "s.whatsapp.net")))
+            .collect()
+    });
+    if fresh.is_empty() {
+        return;
+    }
+    match index::learn_aliases(&IndexKv, &fresh).await {
+        Ok(pass) => {
+            ALIAS_SEEN.with(|seen| {
+                let mut seen = seen.borrow_mut();
+                for (lid, _) in &fresh {
+                    seen.insert(lid.clone());
+                }
+            });
+            if pass.learned > 0 || pass.named > 0 {
+                say!("{}", pass.line("LID mappings"));
+            }
+            if fresh.len() >= ALIAS_FEED_PER_TICK {
+                state.next_at = Instant::now() + TICK;
+            }
+        }
+        Err(reason) => say!("index: LID mappings not joined this pass reason={reason}"),
+    }
+}
+
 // ---- OCR lane ---------------------------------------------------------------------------------
 // An image message becomes searchable by what it shows: index lane -> bounded download (the record's
 // own media keys, the same `download_from_params` the query lane uses) -> the kernel's text reader
@@ -2650,6 +2761,8 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
     // Whether the name-side walk has already said it is rebuilding, so a multi-minute rebuild is two
     // lines (start, done) and not one per tick.
     let mut names_announced = false;
+    // Where the address-book <-> `@lid` join stands (`alias_tick`).
+    let mut aliases = AliasRun::new();
     loop {
         for mutation in INBOX_MUTATIONS.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             apply_mutation(mutation).await;
@@ -2679,6 +2792,11 @@ async fn main_loop(language: &str, post: &posting::PostConfig, index: &IndexConf
         // arrived without its cards answers `whatsapp_contacts` with no chat at all until this ran.
         if index.enabled {
             backfill_names(&mut names_announced).await;
+        }
+        // Then the join between the address book (keyed by phone number) and the chats WhatsApp
+        // journals under a `@lid`: a saved name reaches the chat it belongs to whichever key it has.
+        if index.enabled {
+            alias_tick(&mut aliases).await;
         }
         // Then the past: one history sync per tick, bounded by its budget (`history.rs`), so a relink
         // cannot starve the pipeline it arrived in.

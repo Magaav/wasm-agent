@@ -2216,3 +2216,212 @@ fn the_two_contact_collection_snapshots_tell_the_apart_states_apart() {
     assert_eq!(block_on(address_full_done(&delivered)).unwrap(), true);
     assert_eq!(block_on(address_full_done(&missed)).unwrap(), false);
 }
+
+// ---- the address book joins a `@lid` chat through the LID<->PN alias (15/11: `Laura <3`) ---------
+
+const AB_LID: &str = "112682812330099@lid";
+const AB_PN: &str = "5519900000001@s.whatsapp.net";
+const AB_OTHER_LID: &str = "134707371102499@lid";
+
+/// A direct message in a chat WhatsApp journals under the person's `@lid`, with (or without) the
+/// envelope's `sender_alt` naming their phone number.
+fn lid_direct(chat: &str, name: &str, id: &str, ts: i64, alt: &str) -> Record {
+    let mut record = direct(chat, name, id, ts, "oi");
+    record.sender_alt = alt.to_string();
+    record
+}
+
+/// The contact action as the phone sends it for a person saved by number only: keyed by the phone
+/// JID, no `lidJid`.
+fn saved_by_number(pn: &str, name: &str, at: i64) -> AddressBookContact {
+    AddressBookContact { jids: vec![pn.to_string()], name: name.to_string(), numbers: vec![pn.to_string()], at }
+}
+
+/// Every key and value of a store, copied into a fresh one: what a restart reads back from the kv.
+fn reloaded(store: &Memory) -> Memory {
+    let fresh = Memory::new();
+    for (key, value) in block_on(store.scan(b"", None, 1_000_000)).unwrap() {
+        block_on(fresh.set(&key, &value)).unwrap();
+    }
+    fresh
+}
+
+#[test]
+fn a_contact_saved_by_number_names_the_lid_chat_its_envelope_mapped() {
+    let store = Memory::new();
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base(), AB_PN))).unwrap();
+    // The phone's row is keyed by the number; the chat is the `@lid`. Before the join: nothing.
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base() + 1))).unwrap();
+
+    for spelling in ["Laura <3", "laura <3", "LAURA <3", "Laura 3"] {
+        let answer = block_on(contacts(&store, &named(spelling))).unwrap();
+        assert_eq!(answer["chat"], AB_LID, "{spelling}: {answer}");
+        let candidate = &answer["candidates"][0];
+        assert_eq!(candidate["confidence"], "exact", "{spelling}: {answer}");
+        assert_eq!(candidate["matched"], "Laura <3", "{spelling}: {answer}");
+        assert_eq!(candidate["matched_source"], "address_book", "{spelling}: {answer}");
+        assert_eq!(candidate["name"], "Laura <3");
+        assert_eq!(candidate["name_source"], "address_book");
+        let names = candidate["names"].as_array().expect("names");
+        assert!(names.iter().any(|entry| entry["name"] == "Laah Menezes" && entry["source"] == "push_name"), "{candidate}");
+        assert!(names.iter().any(|entry| entry["name"] == "Laura <3" && entry["source"] == "address_book"), "{candidate}");
+    }
+    // The first name alone is a prefix of the saved name, and finds the same chat.
+    let first = block_on(contacts(&store, &named("Laura"))).unwrap();
+    assert_eq!(first["chat"], AB_LID, "{first}");
+    assert_eq!(first["candidates"][0]["confidence"], "prefix", "{first}");
+    assert_eq!(first["candidates"][0]["matched_source"], "address_book", "{first}");
+    // The push name still finds it, and the reader sees the saved name beside it.
+    let push = block_on(contacts(&store, &named("Laah"))).unwrap();
+    assert_eq!(push["chat"], AB_LID, "{push}");
+    assert_eq!(push["candidates"][0]["matched_source"], "push_name");
+    assert_eq!(push["candidates"][0]["name"], "Laura <3");
+    // A rename on the phone replaces the name on the `@lid` chat too.
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura M", base() + 2))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("Laura <3"))).unwrap()["count"], 0);
+    assert_eq!(block_on(contacts(&store, &named("Laura M"))).unwrap()["chat"], AB_LID);
+}
+
+#[test]
+fn a_contact_saved_before_the_first_message_names_the_lid_chat_when_it_arrives() {
+    let store = Memory::new();
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base()))).unwrap();
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base() + 1, AB_PN))).unwrap();
+    let answer = block_on(contacts(&store, &named("Laura <3"))).unwrap();
+    assert_eq!(answer["chat"], AB_LID, "{answer}");
+    assert_eq!(answer["candidates"][0]["matched_source"], "address_book");
+}
+
+#[test]
+fn an_exact_saved_name_outranks_a_partial_push_name() {
+    let store = Memory::new();
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base(), AB_PN))).unwrap();
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base() + 1))).unwrap();
+    // Somebody else, heard from MORE recently, whose push name only starts with the query.
+    block_on(put(&store, &lid_direct(AB_OTHER_LID, "Laura <3 Bazar Comercial", "O1", base() + 60_000, ""))).unwrap();
+
+    let answer = block_on(contacts(&store, &named("Laura <3"))).unwrap();
+    assert_eq!(answer["chat"], AB_LID, "the exact saved name wins over a fresher partial: {answer}");
+    assert_eq!(answer["ambiguous"], false, "{answer}");
+    assert!(answer.get("picked").is_none(), "{answer}");
+    assert_eq!(answer["candidates"][0]["confidence"], "exact");
+    assert_eq!(answer["candidates"][1]["chat"], AB_OTHER_LID);
+    assert_eq!(answer["candidates"][1]["confidence"], "prefix");
+
+    // Two prefixes are equal matches: the existing rule picks the chat heard from most recently.
+    let both = block_on(contacts(&store, &named("Laura"))).unwrap();
+    assert_eq!(both["ambiguous"], true, "{both}");
+    assert_eq!(both["picked"], "most_recent", "{both}");
+    assert_eq!(both["chat"], AB_OTHER_LID, "{both}");
+}
+
+#[test]
+fn the_mapping_whatsapp_rust_keeps_joins_a_lid_chat_and_survives_a_reload() {
+    let store = Memory::new();
+    // No envelope ever carried this chat's number: only the protocol's own mapping knows it.
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base(), ""))).unwrap();
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base() + 1))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("Laura <3"))).unwrap()["count"], 0, "no evidence, no join");
+
+    let pairs = vec![
+        // `get_all_lid_mappings` hands bare user parts; a device part or the legacy server is folded.
+        ("112682812330099:3@lid".to_string(), "5519900000001@c.us".to_string()),
+        // A mapping that joins nothing this index holds is not written.
+        ("999999999999999@lid".to_string(), "5519911111111@s.whatsapp.net".to_string()),
+        // Not a LID/PN pair at all.
+        (AB_LID.to_string(), AB_OTHER_LID.to_string()),
+    ];
+    let pass = block_on(learn_aliases(&store, &pairs)).unwrap();
+    assert_eq!(pass, AliasPass { checked: 2, learned: 1, named: 1, done: false });
+    assert!(!store.keys().iter().any(|key| key.contains("999999999999999")), "an unjoined mapping costs no row");
+    let answer = block_on(contacts(&store, &named("Laura <3"))).unwrap();
+    assert_eq!(answer["chat"], AB_LID, "{answer}");
+    // Its number is now the chat's too.
+    assert_eq!(block_on(contacts(&store, &named("5519900000001"))).unwrap()["chat"], AB_LID);
+    // Known pairs cost a read and write nothing.
+    let again = block_on(learn_aliases(&store, &pairs)).unwrap();
+    assert_eq!((again.learned, again.named), (0, 0));
+
+    // A restart reads the same kv: the alias is a row, so the join holds - for the card as written,
+    // for a rename the phone sends afterwards, and for a card rebuilt from the records.
+    let store = reloaded(&store);
+    assert_eq!(block_on(contacts(&store, &named("Laura <3"))).unwrap()["chat"], AB_LID);
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura M", base() + 2))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("Laura M"))).unwrap()["chat"], AB_LID);
+    block_on(store.del(key_card(AB_LID).as_bytes())).unwrap();
+    block_on(store.del(key_backfill_done().as_bytes())).unwrap();
+    while !block_on(backfill_cards(&store, 100)).unwrap().done {}
+    let rebuilt = block_on(contacts(&store, &named("Laura M"))).unwrap();
+    assert_eq!(rebuilt["chat"], AB_LID, "{rebuilt}");
+    assert_eq!(rebuilt["candidates"][0]["matched_source"], "address_book");
+}
+
+#[test]
+fn the_alias_walk_joins_the_cards_a_deploy_finds() {
+    let store = Memory::new();
+    // The state the 15/11 deploy found: the `@lid` card learned its number from `sender_alt` (so a
+    // digits query found it) and the phone-number row held the saved name, with no alias row between.
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base(), AB_PN))).unwrap();
+    block_on(store.del(key_alias(AB_LID).as_bytes())).unwrap();
+    block_on(store.del(key_alias(AB_PN).as_bytes())).unwrap();
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base() + 1))).unwrap();
+    block_on(put(&store, &direct(LAURA, "Outra", "P1", base() + 2, "oi"))).unwrap();
+    assert_eq!(block_on(contacts(&store, &named("Laura <3"))).unwrap()["count"], 0);
+    assert_eq!(block_on(contacts(&store, &named("5519900000001"))).unwrap()["chat"], AB_LID);
+
+    let mut total = AliasPass::default();
+    let mut passes = 0;
+    loop {
+        let pass = block_on(join_aliases(&store, 1)).unwrap();
+        total.checked += pass.checked;
+        total.learned += pass.learned;
+        total.named += pass.named;
+        passes += 1;
+        assert!(passes < 10, "the walk must end");
+        if pass.done {
+            break;
+        }
+    }
+    assert_eq!((total.checked, total.learned, total.named), (1, 1, 1), "only the `@lid` card is joined");
+    let answer = block_on(contacts(&store, &named("Laura <3"))).unwrap();
+    assert_eq!(answer["chat"], AB_LID, "{answer}");
+    assert_eq!(answer["candidates"][0]["matched_source"], "address_book");
+    // Done is done: a later tick costs one read.
+    assert_eq!(block_on(join_aliases(&store, 1)).unwrap(), AliasPass { done: true, ..Default::default() });
+}
+
+#[test]
+fn a_lid_row_of_its_own_outranks_the_phone_number_row() {
+    let store = Memory::new();
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base(), AB_PN))).unwrap();
+    block_on(set_contact(&store, &AddressBookContact { jids: vec![AB_LID.into()], name: "Laura Direta".into(), numbers: vec![], at: base() + 1 })).unwrap();
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base() + 2))).unwrap();
+    let answer = block_on(contacts(&store, &named("Laura Direta"))).unwrap();
+    assert_eq!(answer["chat"], AB_LID, "{answer}");
+    assert_eq!(block_on(contacts(&store, &named("Laura <3"))).unwrap()["count"], 0);
+}
+
+#[test]
+fn alias_pairs_are_one_lid_and_one_phone_number() {
+    assert_eq!(alias_pair(AB_PN, AB_LID), Some((AB_LID.to_string(), AB_PN.to_string())));
+    assert_eq!(alias_pair("112682812330099:7@lid", "5519900000001:2@s.whatsapp.net"), Some((AB_LID.to_string(), AB_PN.to_string())));
+    assert_eq!(alias_pair(AB_LID, AB_OTHER_LID), None);
+    assert_eq!(alias_pair(AB_PN, AB_PN), None);
+    assert_eq!(alias_pair(AB_LID, ""), None);
+    assert_eq!(alias_pair(AB_LID, CHAT), None, "a group is nobody's alias");
+}
+
+#[test]
+fn alias_log_lines_carry_counts_only() {
+    let store = Memory::new();
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base(), ""))).unwrap();
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base() + 1))).unwrap();
+    let pass = block_on(learn_alias(&store, AB_LID, AB_PN)).unwrap();
+    assert_eq!((pass.learned, pass.named), (1, 1));
+    for line in [pass.line("LID mappings"), pass.line("alias walk"), AliasPass { done: true, ..pass }.line("alias walk")] {
+        for secret in ["112682812330099", "5519900000001", "19900000001", "Laura", "Laah", "@lid", "@s.whatsapp.net"] {
+            assert!(!line.contains(secret), "{line:?} carries {secret:?}");
+        }
+        assert!(line.starts_with("index: "), "{line}");
+    }
+}

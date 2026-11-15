@@ -297,6 +297,29 @@ fn key_address(jid: &str) -> String {
     format!("{PREFIX}ab/{jid}")
 }
 
+/// `ix/al/<jid>` -> the same person's other address: `<lid>@lid` -> `<pn>@s.whatsapp.net` and back.
+///
+/// WhatsApp keys a contact action by the phone number (`<pn>@s.whatsapp.net`) while it journals the
+/// chat with that person under their hidden `@lid`, so the address-book row and the chat card name the
+/// same person under two keys that never meet (15/11: the operator saved `Laura <3`, the row held the
+/// name, and `contacts({q:"Laura <3"})` found nothing because her chat is a `@lid`). This row is the
+/// join, written both ways so either side finds the other with one read. It is only ever written from
+/// evidence: the envelope's `sender_alt` in a direct chat, the LID<->PN mapping `whatsapp-rust` keeps
+/// (`lid/<lid>` in the component store, learned from usync and peer messages), or the phone number a
+/// `@lid` card already carries. It survives a restart because it is a kv row like the card.
+fn key_alias(jid: &str) -> String {
+    format!("{PREFIX}al/{jid}")
+}
+
+/// `ix/bf/alias` -> the last card key the alias walk folded; `ix/bf/alias/done` -> it reached the end.
+fn key_alias_walk() -> String {
+    format!("{PREFIX}bf/alias")
+}
+
+fn key_alias_walk_done() -> String {
+    format!("{PREFIX}bf/alias/done")
+}
+
 /// `ix/ab/sync` -> a word: this store has already asked the phone for its whole address book.
 ///
 /// It exists because WhatsApp sends a linked device the contact catalogue when it pairs and only when
@@ -740,7 +763,13 @@ impl ChatCard {
             if score < 3 && number_query && same_number(&digits_of(text), &wanted) {
                 score = 3;
             }
-            if score > 0 && best.as_ref().is_none_or(|(current, _, _)| score > *current) {
+            // On an equal score the name the operator saved is the one reported: it is the name they
+            // typed, and `matched_source: push_name` about a name they saved themselves reads as a
+            // different person.
+            let better = |current: u8, current_source: &'static str| {
+                score > current || (score == current && source == SOURCE_ADDRESS_BOOK && current_source != SOURCE_ADDRESS_BOOK)
+            };
+            if score > 0 && best.as_ref().is_none_or(|(current, _, current_source)| better(*current, current_source)) {
                 best = Some((score, shown.to_string(), source));
             }
         };
@@ -1125,11 +1154,21 @@ async fn put_card<S: Store>(store: &S, card: &ChatCard) -> Result<(), String> {
 /// so (`name_source: "jid"`).
 async fn card_touch<S: Store>(store: &S, record: &Record) -> Result<(), String> {
     let mut card = card_of(store, &record.chat).await?.unwrap_or_default();
+    let known = card.numbers.clone();
     card_fold(&mut card, record);
+    // The envelope just taught this chat a phone number it did not carry: in a direct chat that is the
+    // person's other address, and it is remembered as the alias the address book joins through. Only
+    // when the number is new, so a busy chat costs no read here after its first message.
+    if card.numbers != known {
+        if let Some((lid, pn)) = direct_alias(record) {
+            remember_alias(store, &lid, &pn).await?;
+        }
+    }
     // The address book first, so a chat this node has never heard from before arrives with the name the
     // operator saved for it rather than with a push name only (13/11: `q: "Laura"` answered 0 for a
     // chat that had been talking for weeks, because the only name the index kept was her push name).
-    if let Some(contact) = address_of(store, &record.chat).await? {
+    // Through the alias too: the row is keyed by the phone number and a `@lid` chat is not (15/11).
+    if let Some(contact) = address_for(store, &card).await? {
         card_contact(&mut card, &contact);
     }
     put_card(store, &card).await
@@ -1217,7 +1256,245 @@ pub async fn set_contact<S: Store>(store: &S, contact: &AddressBookContact) -> R
             put_card(store, &card).await?;
         }
     }
+    // The phone keys the action by the phone number; the chat with that person may be journaled under
+    // their `@lid`. The alias row is what joins the two (15/11, `Laura <3`). A `@lid` that has a row of
+    // its own keeps it: that row names the chat directly and is the stronger evidence.
+    for jid in &jids {
+        if !jid.ends_with("@s.whatsapp.net") {
+            continue;
+        }
+        let Some(lid) = alias_of(store, jid).await? else { continue };
+        if jids.contains(&lid) || address_of(store, &lid).await?.is_some() {
+            continue;
+        }
+        if let Some(mut card) = card_of(store, &lid).await? {
+            if card.group {
+                continue;
+            }
+            card_contact(&mut card, &entry);
+            put_card(store, &card).await?;
+        }
+    }
     Ok(())
+}
+
+// ---- the same person under two addresses: LID <-> PN --------------------------------------------
+
+/// One person address, bare: no device part, the legacy `c.us` spelled `s.whatsapp.net`, and only the
+/// two user servers. Anything else is not an address an alias can be about.
+fn bare_user(jid: &str) -> Option<String> {
+    let (user, server) = jid.trim().split_once('@')?;
+    let user = user.split(':').next().unwrap_or("");
+    let server = if server == "c.us" { "s.whatsapp.net" } else { server };
+    let bare = format!("{user}@{server}");
+    crate::holds::valid_user(&bare).then_some(bare)
+}
+
+/// Two addresses as one `(lid, pn)` pair, in either order, or `None` when they are not exactly one
+/// `@lid` and one `@s.whatsapp.net`.
+pub fn alias_pair(a: &str, b: &str) -> Option<(String, String)> {
+    let (a, b) = (bare_user(a)?, bare_user(b)?);
+    match (a.ends_with("@lid"), b.ends_with("@lid")) {
+        (true, false) => Some((a, b)),
+        (false, true) => Some((b, a)),
+        _ => None,
+    }
+}
+
+/// The alias a direct chat's own message proves: the contact's address and its `sender_alt`. Never an
+/// own message (that alt is the account's) and never a group member's.
+fn direct_alias(record: &Record) -> Option<(String, String)> {
+    if record.own || record.group || record.chat.ends_with("@g.us") || record.sender != record.chat {
+        return None;
+    }
+    alias_pair(&record.chat, &record.sender_alt)
+}
+
+/// The other address this one is known by, when the index learned it.
+async fn alias_of<S: Store>(store: &S, jid: &str) -> Result<Option<String>, String> {
+    let Some(value) = store.get(key_alias(jid).as_bytes()).await? else { return Ok(None) };
+    Ok(String::from_utf8(value).ok().and_then(|text| bare_user(&text)))
+}
+
+/// Write the alias both ways, each only when it is not already there. True when a row was written.
+async fn remember_alias<S: Store>(store: &S, lid: &str, pn: &str) -> Result<bool, String> {
+    let mut wrote = false;
+    if alias_of(store, lid).await?.as_deref() != Some(pn) {
+        store.set(key_alias(lid).as_bytes(), pn.as_bytes()).await?;
+        wrote = true;
+    }
+    if alias_of(store, pn).await?.as_deref() != Some(lid) {
+        store.set(key_alias(pn).as_bytes(), lid.as_bytes()).await?;
+        wrote = true;
+    }
+    Ok(wrote)
+}
+
+/// The address-book row that names this card's person: the row under the chat's own address first,
+/// then - for a `@lid` chat - the row under the phone number its alias names.
+async fn address_for<S: Store>(store: &S, card: &ChatCard) -> Result<Option<AddressBookContact>, String> {
+    if let Some(contact) = address_of(store, &card.chat).await? {
+        return Ok(Some(contact));
+    }
+    if card.group || !card.chat.ends_with("@lid") {
+        return Ok(None);
+    }
+    match alias_of(store, &card.chat).await? {
+        Some(pn) => address_of(store, &pn).await,
+        None => Ok(None),
+    }
+}
+
+/// Fold what an alias joins into the `@lid` chat's card: the phone number, and the name the operator
+/// saved under it. One read-modify-write, and no write when nothing changed. True when the card
+/// gained an address-book name it did not have.
+async fn attach_alias<S: Store>(store: &S, lid: &str, pn: &str) -> Result<bool, String> {
+    let Some(mut card) = card_of(store, lid).await? else { return Ok(false) };
+    if card.group {
+        return Ok(false);
+    }
+    let before = card.clone();
+    card_number(&mut card, &digits_of(pn.split('@').next().unwrap_or("")));
+    if let Some(contact) = address_for(store, &card).await? {
+        card_contact(&mut card, &contact);
+    }
+    if card == before {
+        return Ok(false);
+    }
+    put_card(store, &card).await?;
+    Ok(card.names.iter().any(|name| name.address_book) && !before.names.iter().any(|name| name.address_book))
+}
+
+/// What one alias pass did: counts only, never an address or a name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AliasPass {
+    /// LID<->PN pairs looked at.
+    pub checked: usize,
+    /// Pairs this pass wrote as new alias rows.
+    pub learned: usize,
+    /// `@lid` chats that gained the name the operator saved under the phone number.
+    pub named: usize,
+    /// The walk over the cards reached its end (only [`join_aliases`] sets it).
+    pub done: bool,
+}
+
+impl AliasPass {
+    /// The component's log line for one pass. Counts and a fixed word only: an address or a name
+    /// never reaches a log line (`privacy`).
+    pub fn line(&self, what: &'static str) -> String {
+        format!(
+            "index: {what}: {} LID<->PN pair(s) checked, {} alias(es) learned, {} chat(s) given their saved name{}",
+            self.checked,
+            self.learned,
+            self.named,
+            if self.done { "; walk done" } else { "" }
+        )
+    }
+}
+
+/// Learn one LID<->PN pair and fold it into the `@lid` chat right away.
+pub async fn learn_alias<S: Store>(store: &S, a: &str, b: &str) -> Result<AliasPass, String> {
+    let mut pass = AliasPass::default();
+    let Some((lid, pn)) = alias_pair(a, b) else { return Ok(pass) };
+    pass.checked = 1;
+    pass.learned = remember_alias(store, &lid, &pn).await? as usize;
+    pass.named = attach_alias(store, &lid, &pn).await? as usize;
+    Ok(pass)
+}
+
+/// Learn the pairs `whatsapp-rust`'s own LID<->PN store holds (`get_all_lid_mappings`).
+///
+/// That store learns a mapping from usync and from peer messages, and persists it under `lid/<lid>`;
+/// it is the one source that knows a `@lid` chat's number when none of its envelopes carried a
+/// `sender_alt`. A pair is only kept when it joins something the index has - a chat under that `@lid`
+/// or a contact the operator saved under that number - so the rows written are bounded by what the
+/// index holds, not by how many group members the protocol ever mapped. A pair already known costs
+/// one read.
+pub async fn learn_aliases<S: Store>(store: &S, pairs: &[(String, String)]) -> Result<AliasPass, String> {
+    let mut pass = AliasPass::default();
+    for (a, b) in pairs {
+        let Some((lid, pn)) = alias_pair(a, b) else { continue };
+        pass.checked += 1;
+        if alias_of(store, &lid).await?.as_deref() == Some(pn.as_str()) {
+            continue;
+        }
+        if card_of(store, &lid).await?.is_none() && address_of(store, &pn).await?.is_none() {
+            continue;
+        }
+        let one = learn_alias(store, &lid, &pn).await?;
+        pass.learned += one.learned;
+        pass.named += one.named;
+    }
+    Ok(pass)
+}
+
+/// The phone number a `@lid` card is known by, as the address it would be keyed under: the alias when
+/// there is one, else the first number the card carries that the address book has a row for, else
+/// its first number. A card's numbers are evidence about its person (its envelopes' `sender_alt`, or
+/// the address book itself), never a shared card's guess.
+async fn number_of_card<S: Store>(store: &S, card: &ChatCard) -> Result<Option<String>, String> {
+    if let Some(pn) = alias_of(store, &card.chat).await? {
+        return Ok(Some(pn));
+    }
+    let mut first: Option<String> = None;
+    for number in &card.numbers {
+        let Some(pn) = bare_user(&format!("{number}@s.whatsapp.net")) else { continue };
+        if address_of(store, &pn).await?.is_some() {
+            return Ok(Some(pn));
+        }
+        first.get_or_insert(pn);
+    }
+    Ok(first)
+}
+
+/// Join the cards an index already holds to the address book, once: walk `ix/ct/`, and for every
+/// `@lid` chat that carries a phone number remember the alias and fold the saved name in.
+///
+/// The live paths ([`card_touch`], [`set_contact`], [`learn_aliases`]) keep the join current from
+/// here on; this is for the state a deploy finds, where the `@lid` cards already learned their numbers
+/// from `sender_alt` and the phone-number rows are already written, and nothing would ever bring the
+/// two together until the next message. Bounded and resumable exactly like [`backfill_cards`]: the
+/// cursor lives under the index's prefix, one pass reads at most `budget` cards, a refused write
+/// leaves the cursor where it was (the walk is idempotent), and the end writes a done mark.
+pub async fn join_aliases<S: Store>(store: &S, budget: usize) -> Result<AliasPass, String> {
+    let mut pass = AliasPass::default();
+    if store.get(key_alias_walk_done().as_bytes()).await?.is_some() {
+        pass.done = true;
+        return Ok(pass);
+    }
+    let budget = budget.max(1);
+    let page_size = PAGE.min(budget);
+    let mut cursor = store.get(key_alias_walk().as_bytes()).await?;
+    let mut visited = 0usize;
+    loop {
+        let page = store.scan(format!("{PREFIX}ct/").as_bytes(), cursor.clone(), page_size).await?;
+        let short = page.len() < page_size;
+        for (_, value) in &page {
+            visited += 1;
+            let Ok(card) = serde_json::from_slice::<ChatCard>(value) else { continue };
+            if card.group || !card.chat.ends_with("@lid") {
+                continue;
+            }
+            let Some(pn) = number_of_card(store, &card).await? else { continue };
+            let one = learn_alias(store, &card.chat, &pn).await?;
+            pass.checked += one.checked;
+            pass.learned += one.learned;
+            pass.named += one.named;
+        }
+        if page.is_empty() || short {
+            store.del(key_alias_walk().as_bytes()).await?;
+            store.set(key_alias_walk_done().as_bytes(), b"1").await?;
+            pass.done = true;
+            return Ok(pass);
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        if let Some(key) = &cursor {
+            store.set(key_alias_walk().as_bytes(), key).await?;
+        }
+        if visited >= budget {
+            return Ok(pass);
+        }
+    }
 }
 
 /// Record a push name a contact changed to, for a chat the index knows (`Event::PushNameUpdate`).
@@ -1322,7 +1599,7 @@ pub async fn backfill_cards<S: Store>(store: &S, budget: usize) -> Result<CardsB
             // The address book is not in the records (`ix/ab/` is its own row), so a rebuild that only
             // walked messages would drop every name the phone had synced - the one name the operator
             // actually types. Folded here exactly as `card_touch` folds it on a live message.
-            if let Some(contact) = address_of(store, &chat).await? {
+            if let Some(contact) = address_for(store, &card).await? {
                 card_contact(&mut card, &contact);
             }
             out.visited += rows.len();
