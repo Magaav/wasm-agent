@@ -47,7 +47,13 @@ local function script_value(value,success)
   for _,item in ipairs(result.content) do if type(item)=='table' and item.type=='text' then texts[#texts+1]=tostring(item.text or '') end end
   local text=table.concat(texts,'\n')
   local ok,decoded=pcall(json.decode,text)
-  if ok and type(decoded)=='table' then return decoded,true end
+  -- The same rule as structured content: a server that answers {data, meta, summary} as TEXT (the
+  -- google imap search does) is its data too (14/11: recent.messages was undefined, the model then
+  -- read the raw result files with jq and python for eight calls).
+  if ok and type(decoded)=='table' then
+   if decoded.data~=nil and decoded[1]==nil then return decoded.data,true end
+   return decoded,true
+  end
   return {text=text},true
  end
  if not success and type(value.process_exit_code)=='number' and value.process_exit_code~=0 and value.settled==true
