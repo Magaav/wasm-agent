@@ -211,22 +211,34 @@ end
 -- Policy text shown to the model. Keep it in step with the fences in lua/core/codemode.lua and
 -- lua/core/tools.lua and with docs/CODEMODE.md: scripts/test-codemode-boundary.lua asserts both the wording
 -- and the behaviour, because a stale sentence here tells the model about a rule that no longer exists (31/10).
-M.guidance=table.concat({
+local GUIDANCE_LINES={
  'Work in code: one `codemode` call runs JavaScript in which every tool is `tools.<name>(args)`. Put `await` before a call whose result you use; a call you return is awaited for you. What the script returns comes back to you as `returned`.',
  'Find tools with await searchTools("text"); await searchTools("select:a,b") gives their schemas. Calling a tool directly also works: it runs as the same one-line script.',
  'How to work: 1) Gather - one script runs every independent read together (Promise.all) and returns only what you need. 2) Reflect - read the result\'s summary line, one status per call: 200 done, 202 still running, 400 fix that call, 403/404/500 the world said no, so do not reshape it. 3) Act - one script for the effects, each awaited; effects are never replayed, so after an unknown outcome read the state before trying again. 4) Stop at 200 - an effect that answered 200 is done; do not re-read to verify it.',
  'Other wasm-agent nodes: tools.nodes() lists them; tools.remote({node, capability, ...}) runs a capability there. WhatsApp is mcp_whatsapp_* on every node.',
  'Calls are always fresh; reuse an earlier result only by asking for it (results.get).',
  '`vars.<name> = value` keeps a value for this session across scripts (the vars: line lists them); read it back as `vars.<name>`.',
-},'\n')
+}
+M.guidance=table.concat(GUIDANCE_LINES,'\n')
+-- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): codemode is not declared, so no line may tell the
+-- model to make a codemode call or a direct tool call; the run-block sentence (operator-reviewed,
+-- verbatim) opens the guidance and the rest is unchanged.
+function M.guidance_for(opts)
+ if not (type(opts)=='table' and opts.raw_first) then return M.guidance end
+ local lines={}
+ for i,line in ipairs(GUIDANCE_LINES) do lines[i]=line end
+ lines[1]=dofile('lua/core/raw_code.lua').FIRST_GUIDANCE..' Put `await` before a call whose result you use; a call you return is awaited for you.'
+ lines[2]='Find tools with await searchTools("text"); await searchTools("select:a,b") gives their schemas.'
+ return table.concat(lines,'\n')
+end
 -- The peers the last federation refresh saw, one line; cache only, so the prompt never waits on them.
 function M.peer_index()
  local ok,names=pcall(function()return dofile('lua/core/federation.lua').cached_peers()end)
  if not ok or type(names)~='table' or #names==0 then return nil end
  return 'Peers seen online at the last refresh (tools.nodes() is current): '..table.concat(names,', ',1,math.min(#names,12))..(#names>12 and (', +'..(#names-12)..' more') or '')
 end
-function M.prompt(catalog)
- local lines={M.guidance}
+function M.prompt(catalog,opts)
+ local lines={M.guidance_for(opts)}
  local index=M.connector_index(catalog);if index then lines[#lines+1]=index end
  local peers=M.peer_index();if peers then lines[#lines+1]=peers end
  return table.concat(lines,'\n')

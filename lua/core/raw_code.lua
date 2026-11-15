@@ -25,11 +25,31 @@
 -- one: a plain answer with an ordinary code block in it would be cut at that block. The provider strips
 -- the stop text, so with `stop` a reply that ended (`finish_reason=stop`) inside an open block had its
 -- fence eaten: a run block there is complete, and any other block gets its fence back.
+--
+-- Raw first: `WASM_AGENT_RAW_CODE=first` makes the run block THE way of working (CodeAct style) instead
+-- of an extra. Measured 15/11: with `1` the model saw the sentence in all four A/B sessions and still made
+-- every step a `codemode` tool call, because codemode was declared and its own history showed tool calls.
+-- With `first`:
+--   - `codemode` is not declared to the provider (`M.without_codemode`); the harness still dispatches the
+--     synthesized call exactly as above (one pathway), and a codemode call the model sends anyway still runs;
+--   - the code-mode guidance opens with `M.FIRST_GUIDANCE` instead of the codemode-call wording;
+--   - the request renders each raw-channel call the way the model wrote it (`M.render_history`): the
+--     assistant text is the thought plus its run block, with no tool_calls entry, and the result follows
+--     as a user message `M.OBSERVATION` .. <the exact text the tool row carries>. The STORED rows are
+--     unchanged (assistant tool_call + tool row), so the transcript, evidence, UI and telemetry are too.
+--   - no stop sequence (a stop sequence would cut an ordinary answer at its first code block).
 local json = dofile("lua/vendor/json.lua")
 local M = {}
 
 -- Model-facing. One sentence, appended to the code-mode guidance only while the switch is on.
 M.GUIDANCE = "You may also run a script by ending your message with one ```js run block of plain code instead of a codemode call; it runs the same way."
+
+-- Model-facing (operator-reviewed, verbatim). With `first` it opens the code-mode guidance in place of
+-- the codemode-call sentence (lua/core/codemode_policy.lua, `guidance_for`).
+M.FIRST_GUIDANCE = "Work in code: end your message with one ```js run block; it runs as one script in which every tool is `tools.<name>(args)`, and what it returns comes back to you. A message without a run block is your answer."
+
+-- With `first`, the marker a raw-channel result is sent back under (a user message, no tool pairing).
+M.OBSERVATION = "Observation:\n"
 
 M.STOP = "\n```\n"
 
@@ -37,12 +57,18 @@ function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower()
   if value == "1" or value == "on" or value == "true" then return "on" end
   if value == "stop" then return "stop" end
+  if value == "first" then return "first" end
   return nil
 end
 
 -- Active only where a codemode call could have run: the switch is on and code mode is enabled.
 function M.active(policy)
   return M.mode() ~= nil and type(policy) == "table" and policy.enabled == true
+end
+
+-- Raw first: the run block is the way of working, codemode is not declared, history renders as text.
+function M.first(policy)
+  return M.active(policy) and M.mode() == "first"
 end
 
 function M.stop_sequences(policy)
@@ -130,7 +156,8 @@ function M.take(result, stop_sent)
   if not run.close and not stopped then
     taken.refusal = refusal("raw_code_unterminated",
       "the ```js run block was never closed (the reply ended inside it), so none of it ran",
-      "send the whole script again in one ```js run block that ends with a ``` line, or as a codemode call")
+      "send the whole script again in one ```js run block that ends with a ``` line"
+        .. (M.mode() == "first" and "" or ", or as a codemode call"))
   elseif not code:find("%S") then
     taken.refusal = refusal("raw_code_empty",
       "empty run block: the ```js run block had no code, so nothing ran",
@@ -156,6 +183,93 @@ end
 function M.note(taken)
   if type(taken) ~= "table" or #(taken.notes or {}) == 0 then return nil end
   return "[raw code] " .. table.concat(taken.notes, "; ") .. "."
+end
+
+function M.is_raw(id)
+  return type(id) == "string" and id:sub(1, 9) == "call_raw_"
+end
+
+-- With `first`: the tool list the provider is shown, without `codemode` (the harness still runs it).
+function M.without_codemode(list)
+  if type(list) ~= "table" then return list end
+  local out = {}
+  for _, item in ipairs(list) do
+    if not (type(item) == "table" and type(item["function"]) == "table" and item["function"].name == "codemode") then
+      out[#out + 1] = item
+    end
+  end
+  return out
+end
+
+-- The run block a stored raw-channel call stands for. `closed=false` (the block was refused as
+-- unterminated) renders it as the model sent it: without a closing fence.
+local function run_block(call, closed)
+  local arguments = type(call["function"]) == "table" and call["function"].arguments or ""
+  local ok, decoded = pcall(json.decode, arguments)
+  local code = ok and type(decoded) == "table" and type(decoded.code) == "string" and decoded.code or tostring(arguments)
+  return "```js run\n" .. code .. (closed == false and "" or "\n```")
+end
+
+-- With `first`: the provider messages, with every raw-channel call rendered the way the model wrote it.
+-- Runs on a window whose call/result pairing is already valid (build_context repairs it; the loop
+-- appends calls and results in order), so a raw call's result is among the tool messages right after
+-- it. The assistant message becomes its thought + the run block with no tool_calls entry for that call
+-- (other calls of the same step keep theirs, and their tool results stay first, immediately after the
+-- assistant message, as the provider requires); the raw result becomes a user message `M.OBSERVATION`
+-- .. <the tool message content, byte for byte>. Pure: the caller's list and messages are not changed,
+-- and a list with no raw call comes back as is. Idempotent: a rendered list has no raw call left.
+function M.render_history(messages)
+  if type(messages) ~= "table" then return messages end
+  local any = false
+  for _, message in ipairs(messages) do
+    if message.role == "assistant" and type(message.tool_calls) == "table" then
+      for _, call in ipairs(message.tool_calls) do if M.is_raw(call.id) then any = true end end
+    end
+  end
+  if not any then return messages end
+  local out, index = {}, 1
+  while index <= #messages do
+    local message = messages[index]
+    local raws, keep = {}, {}
+    if message.role == "assistant" and type(message.tool_calls) == "table" then
+      for _, call in ipairs(message.tool_calls) do
+        if M.is_raw(call.id) then raws[#raws + 1] = call else keep[#keep + 1] = call end
+      end
+    end
+    if #raws == 0 then
+      out[#out + 1] = message
+      index = index + 1
+    else
+      local wanted = {}
+      for _, call in ipairs(raws) do wanted[call.id] = true end
+      local results, observations, unterminated = {}, {}, {}
+      index = index + 1
+      while index <= #messages and messages[index].role == "tool" do
+        local result = messages[index]
+        if wanted[result.tool_call_id] then
+          local content = type(result.content) == "string" and result.content or tostring(result.content or "")
+          if content:find("raw_code_unterminated", 1, true) then unterminated[result.tool_call_id] = true end
+          observations[#observations + 1] = { role = "user", content = M.OBSERVATION .. content }
+        else
+          results[#results + 1] = result
+        end
+        index = index + 1
+      end
+      local rendered = {}
+      for key, value in pairs(message) do rendered[key] = value end
+      local text = type(message.content) == "string" and message.content or ""
+      for _, call in ipairs(raws) do
+        local block = run_block(call, not unterminated[call.id])
+        text = text ~= "" and (text .. "\n" .. block) or block
+      end
+      rendered.content = text
+      rendered.tool_calls = #keep > 0 and keep or nil
+      out[#out + 1] = rendered
+      for _, result in ipairs(results) do out[#out + 1] = result end
+      for _, observation in ipairs(observations) do out[#out + 1] = observation end
+    end
+  end
+  return out
 end
 
 return M

@@ -1218,6 +1218,11 @@ end
 -- WASM_AGENT_LLM_SUMMARY_MODEL is set, otherwise the main model).
 function M.complete_with(model, messages, tools, stream, opts)
   opts=opts or {}
+  -- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): a raw-channel call goes out as the assistant text
+  -- the model wrote plus an `Observation:` user message, not as a tool call/result pair. Only the request
+  -- is rendered; the caller's messages (and the stored rows) are untouched. Before the gateway, so a
+  -- gateway-served call sends the same messages.
+  if opts.raw_history then messages = dofile("lua/core/raw_code.lua").render_history(messages) end
   -- The gateway owns the call when it is enabled: it picks the model by task class, enforces the session's
   -- data label against each provider's `allowed_labels`, applies the fallback chain, the breaker and the
   -- budgets, and returns the same result shape this function does. A missing capability or an unset flag

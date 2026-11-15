@@ -526,12 +526,14 @@ local PREAMBLE_GUIDELINE = "When you start a new step with tool calls, first wri
   .. "same step, and do not leave it only in your reasoning: the user does not see reasoning"
 M.PREAMBLE_GUIDELINE = PREAMBLE_GUIDELINE
 
-local function guidelines_for(tool_list, envelope_mode)
+local function guidelines_for(tool_list, envelope_mode, raw_first)
   local have = {}
   for _, tool in ipairs(tool_list or {}) do
     local name = (tool["function"] or {}).name
     if name then have[name] = true end
   end
+  -- WASM_AGENT_RAW_CODE=first: code mode without a declared `codemode`; the scripts still run.
+  if raw_first then have.codemode = true end
   -- Code mode declares `codemode` alone; the core tools are still there, called as tools.<name> inside
   -- the script, so the guidelines that depend on them (shell search, file operations) still apply.
   if have.codemode then
@@ -639,6 +641,9 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
   local sections=dofile('lua/core/prompt_sections.lua')
   session_options=session_options or {}
   local declared=name_set(tool_list)
+  -- WASM_AGENT_RAW_CODE=first: `codemode` is left out of the declared list (the run block replaces the
+  -- call) but code mode is the surface, so every tool is still named as `tools.<name>()`.
+  if session_options.raw_first then declared.codemode=true end
   local available=name_set(session_options.catalog or tool_list)
   for name in pairs(declared) do available[name]=true end
   local generic=render_generic(role,declared,available)
@@ -652,10 +657,16 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
       -- to a preference, and discovery is a call rather than a seventy-line catalogue every request
       -- pays for - that catalogue was ~37% of the envelope (5,686 B, ~1,400 tokens) while telling the
       -- model nothing about how to work.
-      lines[#lines+1]='More than one call, or any filtering or looping, is ONE codemode script that returns only what you need. A single trivial call, or an effect that needs approval or a receipt (a send, a deploy), is a direct call. If code mode refuses a name, fall back to the direct call.'
+      if session_options.raw_first then
+        -- WASM_AGENT_RAW_CODE=first: the script is a run block and no tool call is advertised.
+        lines[#lines+1]='More than one call, or any filtering or looping, is ONE script that returns only what you need.'
+      else
+        lines[#lines+1]='More than one call, or any filtering or looping, is ONE codemode script that returns only what you need. A single trivial call, or an effect that needs approval or a receipt (a send, a deploy), is a direct call. If code mode refuses a name, fall back to the direct call.'
+      end
       lines[#lines+1]='Every tool is a member of `tools`; `ALL_TOOLS` lists them, `capabilities()` is the grant list with each tool\'s workspace status; `searchTools(query)` returns an array of {name, description, callable, route}; `searchTools("select:a,b")` adds each one\'s full schema. Example: `const [a,b]=await Promise.all([tools.read({path:"a"}),tools.read({path:"b"})]); return {a:a.content.length,b:b.content.length};`'
       if #deferred>0 then
-        lines[#lines+1]='The '..#deferred..' other tools this role may call are found with `capabilities()` or `searchTools(query)`; any of them is also callable directly.'
+        lines[#lines+1]='The '..#deferred..' other tools this role may call are found with `capabilities()` or `searchTools(query)`'
+          ..(session_options.raw_first and '.' or '; any of them is also callable directly.')
       end
     else
       lines[#lines+1]='Tools outside your declared list are called with tool_call(name, arguments); tool_search(query) finds one you do not know and loads its definition.'
@@ -670,7 +681,7 @@ local function system_sections(role, agents, agents_path, tool_list, envelope_mo
   elseif tool_list and #tool_list>0 then
     tools_text=tool_index(tool_list,'Available tools:')..'\n\nIn addition to the tools above, you may have access to other tools depending on the project.'
   end
-  local rules={};for _,line in ipairs(guidelines_for(tool_list,envelope_mode))do rules[#rules+1]='- '..line end
+  local rules={};for _,line in ipairs(guidelines_for(tool_list,envelope_mode,session_options.raw_first))do rules[#rules+1]='- '..line end
   local skills_block=dofile('lua/core/skills.lua').prompt_block(envelope_mode=='progressive' and 'search' or nil)
   local stack=sections.render({
     safety=sections.section('safety',SENTINEL_NOTICE),
@@ -1023,6 +1034,13 @@ function M:build_context()
     tool_list,self.envelope_mode = tools.envelope(self.role,code_ctx)
     catalog = tools.all(self.role,code_ctx,memory)
   end
+  -- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): the provider is not shown `codemode`; a run block
+  -- is the way to run a script. The tool loop still dispatches the call the block stands for.
+  local raw_first=raw_code.first(self.codemode_policy)
+  if raw_first then
+    tool_list=raw_code.without_codemode(tool_list)
+    catalog=catalog and raw_code.without_codemode(catalog)
+  end
   self.agents_source = agents_path
   local first, parts, facts
   local orchestration_enabled=self.role~='guest'
@@ -1033,6 +1051,7 @@ function M:build_context()
     first, parts, facts = system_prompt(self.role, agents, agents_path, tool_list,self.envelope_mode,{
       orchestration_enabled=orchestration_enabled,
       codemode=self.codemode_policy.enabled,
+      raw_first=raw_first,
       catalog=catalog,
       workdir=workdir,
     })
@@ -1041,8 +1060,8 @@ function M:build_context()
     -- The routing rule plus the node's connector index, from the full catalogue: the prompt's own
     -- tool list leaves connectors out, so this hint is how an empty context finds them.
     local code_catalog=self.subagent and tool_list or tools.all(self.role,code_ctx,memory)
-    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog)
-    if raw_code.active(self.codemode_policy) then block=block..'\n'..raw_code.GUIDANCE end
+    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog,{raw_first=raw_first})
+    if raw_code.active(self.codemode_policy) and not raw_first then block=block..'\n'..raw_code.GUIDANCE end
     first=first..'\n\n'..block
     parts=parts or {};parts.codemode=host.sha256(block)
   end
@@ -1889,7 +1908,8 @@ function M:run_body(text, images)
   -- answered `capability_not_in_profile` - corrective, not a dead end. Measured: an ordinary run with no
   -- tools is the shape that failed in gate.log, and a blanket refusal also refused the tool-less child
   -- `scripts/test-provider-connection-abort-recovery.lua` runs (self-review, on this branch).
-  if not self.subagent and #tool_list == 0 then
+  -- With WASM_AGENT_RAW_CODE=first an empty declared list still dispatches: a run block runs as codemode.
+  if not self.subagent and #tool_list == 0 and not raw_code.first(self.codemode_policy) then
     local reason
     if self.prefix and self.prefix.frozen then
       reason = "this session's prompt prefix was frozen with an empty tool list "
@@ -2237,6 +2257,9 @@ function M:run_body(text, images)
        on_call_start=self.on_call_start,on_call_end=self.on_call_end,context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
     call_opts.stop = raw_code.stop_sequences(self.codemode_policy)
+    -- WASM_AGENT_RAW_CODE=first: the request renders raw-channel calls as the text the model wrote
+    -- (raw_code.render_history, applied in provider.complete_with); the stored rows are unchanged.
+    call_opts.raw_history = raw_code.first(self.codemode_policy) or nil
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     -- No response headers means no model output reached this process, hence no returned tool call
     -- could have run. Retry only that phase, with a strict operator-controlled bound. The upstream
