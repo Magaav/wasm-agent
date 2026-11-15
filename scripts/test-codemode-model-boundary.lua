@@ -33,7 +33,9 @@ local checks=0;local measurements={};local tool_rows={};local write_count=0
 local function check(v,label)assert(v,label);checks=checks+1 end
 local function safe(text,label)check(not text:find(secret,1,true) and not text:find(short_secret,1,true),label..': no configured value')end
 local function save(name,text)assert(host.write_file(original('lua/core/paths.lua').data()..'/'..name,text))end
-local function raw(ref)local text=assert(host.read_file(ref.path));check(host.sha256(text)==ref.sha256,'exact retained original hash');return text end
+-- The model's view names a nested original by its hash alone (14/11, lighter evidence); the file is
+-- where tool_result reads it.
+local function raw(ref)ref=ref.evidence or ref;local path=ref.path or (original('lua/core/paths.lua').data()..'/tool-results/'..ref.sha256..'.txt');local text=assert(host.read_file(path));check(host.sha256(text)==ref.sha256,'exact retained original hash');return text end
 local function parse(text)return assert(contract.parse(text))end
 local function at(node,path)return assert(contract.at(node,path))end
 local function clean_text(text)return (text:gsub(secret,'<redacted>'):gsub(short_secret,'<redacted>'))end
@@ -71,7 +73,7 @@ local function run(name,tool,args,verify,saved_sid)
   save(name..'-request-'..rounds..'.json',request)
   if rounds==1 then return {content='',finish_reason='tool_calls',tool_calls={{id='boundary-'..name,type='function',['function']={name=tool,arguments=json.encode(args)}}}} end
   check(rounds==2,'exact two mock rounds, no effect replay')
-  for _,message in ipairs(messages)do if message.role=='tool' and message.tool_call_id=='boundary-'..name then content=message.content;observed=json.decode(content) end end
+  for _,message in ipairs(messages)do if message.role=='tool' and message.tool_call_id=='boundary-'..name then content=message.content;observed=dofile('lua/core/tool_output.lua').parse_view(content) end end
   check(observed~=nil,name..' provider tool message exists')
   check(#content<=output.MAX_BYTES,name..' FINAL encoded projected tool content budget')
   measurements[#measurements+1]={name=name,tool_content_bytes=#content,serialized_provider_messages_bytes=#request}
@@ -110,7 +112,7 @@ local function run(name,tool,args,verify,saved_sid)
  end
  local session_content=json.decode(table.concat(session_parts)).content
  check(session_content==content,name..' session projected tool content preserved')
- if tool=='codemode' then verify(json.decode(session_content),parse(session_content),ctx) end
+ if tool=='codemode' then verify(dofile('lua/core/tool_output.lua').parse_view(session_content),parse(session_content),ctx) end
  save(name..'-session.json',json.encode(session_pages))
  tool_rows[#tool_rows+1]={sid=sid,id=row.id,content=content}
  return observed,ctx
@@ -138,12 +140,12 @@ code('small','await tools.read({path:"small.txt",offset:1,limit:3}); await showC
  local shown=r.shown and r.shown[1]
  check(shown and shown.result and type(shown.result.content)=='string' and shown.result.content~='','MODEL_BOUNDARY_CONTENT_REQUIRED: complete must not display empty or missing data')
  check(r.ok and shown.complete and not shown.result.eof,'complete result is not falsely file EOF')
- local original_result=json.decode(raw(r.calls[1].evidence));local item=shown.result;local original_item=original_result
+ local original_result=json.decode(raw(r.calls[1]));local item=shown.result;local original_item=original_result
  check(item.content==clean_text(original_item.content) and item.content:find('END SMALL CAVEAT',1,true),'all authored visible source including caveat')
  check(item.selection==original_item.selection and item.version==original_item.version and json.encode(item.edit_lines)==json.encode(original_item.edit_lines),'actionable selection/source version/edit frame unchanged')
  check(at(t,{'shown',1,'result'}).kind=='object','real model-facing object shape')
  check(r.presentation_sanitized and r.presentation_redacted,'honest sanitized view vs unchanged private original')
- check(raw(r.calls[1].evidence):find(secret,1,true)~=nil,'original still exact/private, not rewritten by redaction')
+ check(raw(r.calls[1]):find(secret,1,true)~=nil,'original still exact/private, not rewritten by redaction')
 end)
 code('typed','await tools.read({path:"typed-fixture"}); await showCall({version:1,call:1});',function(r,t)
  check(r.shown[1].result.metadata.caveat=='LAST TYPED CAVEAT' and r.shown[1].result.metadata.sensitive=='<redacted>','nested metadata traversed/sanitized')
@@ -153,7 +155,7 @@ code('typed','await tools.read({path:"typed-fixture"}); await showCall({version:
 end)
 code('collision','await tools.read({path:"collision-fixture"}); await showCall({version:1,call:1});',function(r)
  check(not r.ok and r.presentation_partial and not r.shown and r.presentation_error:find('key_collision',1,true),'redacted key collision refuses visibly, never complete empty data')
- check(#r.calls==1 and raw(r.calls[1].evidence):find(secret,1,true)~=nil,'collision original retained without replay')
+ check(#r.calls==1 and raw(r.calls[1]):find(secret,1,true)~=nil,'collision original retained without replay')
 end)
 code('caught','try { await tools.read({path:"refused-fixture"}); } catch (_) {} await showCall({version:1,call:1});',function(r)
  local value=r.shown[1].result;check(r.ok and not r.calls[1].ok and value.effect=='none' and value.error=='private refusal <redacted>','caught native failure visible and sanitized')
@@ -193,7 +195,7 @@ code('cached',batch_call({'doc4.txt'})..' await showCall({version:1,call:1});',f
 end,docctx.session_id)
 tools.dispatch=page_guard
 code('expansion','await tools.remote({node:"fixture-peer",capability:"batch",calls:[{capability:"read",path:"expansion-fixture"}]}); await showCall({version:1,call:1});',function(r)
- check(r.calls[1].evidence.bytes<output.MAX_BYTES and r.presentation_partial and not r.shown[1].complete and not r.shown[1].coverage[1].visible,'budget measures FINAL sanitized expansion, not fitting raw bytes')
+ check((r.calls[1].bytes or (r.calls[1].evidence or {}).bytes)<output.MAX_BYTES and r.presentation_partial and not r.shown[1].complete and not r.shown[1].coverage[1].visible,'budget measures FINAL sanitized expansion, not fitting raw bytes')
  check(r.shown[1].metadata.note=='<redacted>' and r.presentation_redacted,'short configured secret sanitized in partial metadata')
 end,doc_ctx.session_id)
 local partial,partialctx=code('partial','try { await tools.remote({node:"fixture-peer",capability:"batch",calls:[{capability:"read",path:"oversize-fixture"}]}); } catch (_) {} await showCall({version:1,call:1});',function(r)
@@ -204,7 +206,7 @@ local partial,partialctx=code('partial','try { await tools.remote({node:"fixture
 end,doc_ctx.session_id)
 -- Retrieve the original using the REAL agent/tool_result boundary. Raw artifact
 -- and byte offsets remain exact; displayed text is subject to normal redaction.
-local ref=partial.calls[1].evidence;local original_bytes=raw(ref);local reads=0
+local ref=partial.calls[1];local original_bytes=raw(ref);local reads=0
 for slot_index,slot in ipairs(partial.shown[1].coverage)do
  local range=assert(slot.unread);local expected=original_bytes:sub(range.offset,range.offset+range.bytes-1)
  local pieces={};local offset=range.offset;local last=offset+range.bytes

@@ -26,4 +26,15 @@ wa.route,wa.invoke=real_route,real_invoke
 local out=dofile('lua/core/tool_output.lua')
 local view=json.decode(out.project('codemode',{ok=true,status=200,summary='search 200',value='{"hits":[1,2]}',attempts={},calls={}}))
 check(type(view.returned)=='table' and #view.returned.hits==2 and view.value==nil,'what the script returned is an object, not a JSON string: '..json.encode(view):sub(1,200))
+-- multi-line text a script returned reaches the model raw, with one header line (no \n or \" escapes)
+local text_view=out.project('codemode',{ok=true,status=200,summary='bash 200',value=json.encode('line one\nline "two"'),attempts={},
+  calls={{id=1,name='bash',ok=true,status=200,evidence={path='/x/ab.txt',sha256='ab',bytes=5}}}})
+check(text_view:match('^status 200 \194\183 bash 200 \194\183 full_result %x+\n\nline one\nline "two"$'),'multi-line text is raw under one header: '..text_view:sub(1,160))
+local parsed=out.parse_view(text_view)
+check(parsed and parsed.status==200 and parsed.returned=='line one\nline "two"' and parsed.summary=='bash 200','and the one reader reads it back')
+-- the evidence the model gets is the hash and size, not the path, id or ok
+local obj_view=json.decode(out.project('codemode',{ok=true,status=200,summary='bash 200',value='{"a":1}',attempts={},
+  calls={{id=1,name='bash',ok=true,status=200,evidence={path='/x/ab.txt',sha256='ab',bytes=5}}}}))
+local c1=obj_view.calls[1]
+check(c1.sha256=='ab' and c1.bytes==5 and c1.status==200 and c1.evidence==nil and c1.id==nil and c1.ok==nil,'evidence is sha256 + bytes: '..json.encode(c1))
 print(json.encode({ok=true,checks=checks}))
