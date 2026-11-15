@@ -86,8 +86,23 @@ end
 -- not a shortened form: a peer tool's prefix says where it runs and its suffix is a pinned hash, so any
 -- abbreviation is a name the model must then hunt for (session 10/11: "mcp_whatsapp_*" cost six calls of
 -- guessing before the real names were dumped). The group label stays, the name is exact.
+-- A connector's call shape on one line: `name({required, optional?})`, at most six arguments (14/11 replay:
+-- every first WhatsApp/email call was preceded by a schema lookup, because the index gave names only).
+local function signature(f)
+ local p=type(f.parameters)=='table' and f.parameters or {}
+ local props=type(p.properties)=='table' and p.properties or {}
+ local required={};for _,k in ipairs(type(p.required)=='table' and p.required or {})do required[k]=true end
+ local req,opt={},{}
+ for k in pairs(props)do if required[k] then req[#req+1]=k else opt[#opt+1]=k..'?' end end
+ table.sort(req);table.sort(opt)
+ local all={};for _,k in ipairs(req)do all[#all+1]=k end;for _,k in ipairs(opt)do all[#all+1]=k end
+ local shown=table.concat(all,', ',1,math.min(#all,6))
+ if #all>6 then shown=shown..', ...' end
+ return f.name..'({'..shown..'})'
+end
 function M.connector_index(catalog)
  local groups,order={},{}
+ local sigs={}
  -- The one surface's *exact* names (#118), loaded once: only the nine `mcp_whatsapp_<verb>` tools are the
  -- family. A connector whose namespace merely begins with `mcp_whatsapp` is still a connector, and is
  -- still listed under its own label.
@@ -106,6 +121,7 @@ function M.connector_index(catalog)
    server=server or name
    if not groups[server] then groups[server]={};order[#order+1]=server end
    local list=groups[server];list[#list+1]=name
+   sigs[name]=signature(f)
   end
  end
  if #order==0 then return nil end
@@ -125,15 +141,16 @@ function M.connector_index(catalog)
   end
   if family then
    for _,name in ipairs(list) do
-    lines[#lines+1]='- '..name..': the one WhatsApp surface, answered here or by the node that holds the account'
+    lines[#lines+1]='- '..sigs[name]
    end
   else
-   local shown=table.concat(list,', ',1,math.min(#list,8))
+   local with={};for i,name in ipairs(list)do with[i]=sigs[name] end
+   local shown=table.concat(with,', ',1,math.min(#with,8))
    if #list>8 then shown=shown..', +'..(#list-8)..' more' end
    lines[#lines+1]='- '..server..': '..shown
   end
  end
- return 'Connectors on this node (code mode only; these are the exact callable names, and searchTools("<connector>") inside a script gives their schemas):\n'..table.concat(lines,'\n')
+ return 'Connectors on this node (code mode only; exact callable names with their arguments, ? = optional; await searchTools("select:<name>") gives a full schema):\n'..table.concat(lines,'\n')
 end
 -- Policy text shown to the model. Keep it in step with the fences in lua/core/codemode.lua and
 -- lua/core/tools.lua and with docs/CODEMODE.md: scripts/test-codemode-boundary.lua asserts both the wording
