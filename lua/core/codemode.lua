@@ -847,9 +847,25 @@ local function script_line(stack,source)
   end
  end
 end
-local function explain(result,source)
+local function explain(result,source,budget)
  if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
  local raw=result.error
+ -- A script that ran out of time says so, with its budget and the way on (14/11 replay: two email
+ -- scripts died on 'codemode_sandbox: sandbox deadline or cancellation' and the model retried variants).
+ local stopped=raw:find('codemode_sandbox: error while executing',1,true)
+ if raw:find('sandbox deadline or cancellation',1,true) or stopped then
+  local ran={}
+  for _,call in ipairs(result.calls or {}) do if call.ok==true then ran[#ran+1]=tostring(call.name) end end
+  local out={};for k,v in pairs(result) do out[k]=v end
+  local ms=tonumber(budget) or 30000
+  out.error=stopped and ('TimeoutError: the script was stopped while computing - an endless loop, or too much work for its '..ms..' ms budget')
+   or ('TimeoutError: the script ran past its '..ms..' ms budget (or the run was stopped)')
+  out.code='TimeoutError'
+  out.message=out.error
+  out.fix='Split the work across scripts, or pass timeout_ms (up to 300000) to codemode. '..(#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.')
+  out.input=out.input or 'codemode'
+  return out
+ end
  local err=first_object(raw)
  if not (err and (err.message or err.name)) then return result end
  local name=type(err.name)=='string' and err.name or 'Error'
@@ -910,7 +926,7 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  pending_calls.begin(dispatch,popts)
  local function finish(result)
   if type(result)~='table' then return result end
-  result=explain(result,source)
+  result=explain(result,source,budget)
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end

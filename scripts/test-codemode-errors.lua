@@ -28,4 +28,7 @@ local absent=run('return String("no_such_tool" in tools);');check(tostring(absen
 
 r=run('const r = tools.time({});\nreturn r.now;')
 check(r.line==2 and tostring(r.error):find('has not resolved yet',1,true),'a missing await points at its line: '..shown(r))
+-- a script past its budget says so, with the budget and the way on
+r=tools.dispatch(memory,'codemode',{code='while (true) {}',timeout_ms=300},'master',ctx)
+check(tostring(r.error):find('^TimeoutError: the script was stopped while computing') and not tostring(r.error):find('backtrace',1,true),'an endless loop is named, without the wasm backtrace: '..shown(r))
 print(json.encode({ok=true,checks=checks}))
