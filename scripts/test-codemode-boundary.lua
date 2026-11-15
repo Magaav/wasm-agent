@@ -41,7 +41,8 @@ check(widened.ok and tostring(widened.value):find('[true,true,true,true,true,tru
 -- ...but discoverable, with its route (29/10): never indistinguishable from "does not exist".
 local found=run('const s=await searchTools("subagent"); const d=await describeTool("session_worktree"); const all=await searchTools("*",{limit:200}); return JSON.stringify({s:s.find(t=>t.name==="subagent"),d,listed:all.filter(t=>t.callable===false).map(t=>t.name)});')
 local fv=found.value;for _=1,2 do if type(fv)=='string' then fv=json.decode(fv) end end;fv=type(fv)=='table' and fv or {}
-check(fv.s and fv.s.callable==false and tostring(fv.s.route):find('Direct call only',1,true) and fv.s.schema,'searchTools finds an outside tool with schema and route: '..json.encode(found):sub(1,400))
+-- A word search is compact (14/11): its parameters, not the whole schema a second time; select: has that.
+check(fv.s and fv.s.callable==false and tostring(fv.s.route):find('Direct call only',1,true) and type(fv.s.parameters)=='table' and fv.s.schema==nil,'searchTools finds an outside tool with its parameters and route: '..json.encode(found):sub(1,400))
 check(fv.d and fv.d.callable==false and fv.d.parameters and tostring(fv.d.route):find('Direct call only',1,true),'describeTool gives an outside tool its schema and route')
 local listed_outside={};for _,n in ipairs(fv.listed or {}) do listed_outside[n]=true end
 check(listed_outside.subagent and listed_outside.tool_call and not listed_outside.remote,'the full listing marks outside tools; remote is callable')

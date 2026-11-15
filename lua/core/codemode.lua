@@ -339,8 +339,25 @@ local function tool_lookup(catalog,execution,dispatch)
  -- shape `describeTool(name)` has always answered, plus the `schema` a batch entry carries. A name the
  -- script cannot see is a MEMBER of the answer (found:false, the reason, the nearest permitted names),
  -- never a throw and never a second envelope, so `.map` works on every form.
+ -- A connector name without its hash suffix names the one tool it stems (14/11: the model typed
+ -- `..._828c338` for `..._828ac338`): `mcp_google_imap_list_accounts` is that tool when exactly one
+ -- catalogue name is it plus `_<hex>`. Two such tools stay unresolved, and the lookup lists them.
+ local function stem(wanted)
+  local hit
+  for _,schema in ipairs(catalog)do
+   local n=schema['function'].name
+   if n:sub(1,#wanted+1)==wanted..'_' and n:sub(#wanted+2):match('^%x+$') then
+    if hit then return nil end
+    hit=n
+   end
+  end
+  return hit
+ end
  local function entry(name,list)
   local wanted=tostring(name)
+  local exact=false
+  for _,schema in ipairs(catalog)do if schema['function'].name==wanted then exact=true break end end
+  if not exact then wanted=stem(wanted) or wanted end
   for _,schema in ipairs(catalog)do
    local f=schema['function']
    if f.name==wanted then
@@ -401,8 +418,24 @@ local function tool_lookup(catalog,execution,dispatch)
    if score>0 then found.score=score;matches[#matches+1]=found end
   end
   table.sort(matches,function(a,b)return a.score==b.score and a.name<b.name or a.score>b.score end)
+  -- A word search answers what to call, compactly (14/11: searchTools("whatsapp") returned ~17 KB of
+  -- full schemas - each twice, as `parameters` and inside `schema` - when the model needed names).
+  -- `parameters` keeps its JSON-schema shape (type, properties, required) without the per-property
+  -- prose; `select:` gives the whole schema.
+  local function compact(schema)
+   if type(schema)~='table' or type(schema.properties)~='table' then return schema end
+   local props={}
+   for key,value in pairs(schema.properties)do
+    props[key]=type(value)=='table' and {type=value.type,enum=value.enum} or value
+   end
+   return {type=schema.type,properties=props,required=schema.required}
+  end
   local found={}
-  for index=1,math.min(limit,#matches)do found[index]=matches[index];found[index].score=nil end
+  for index=1,math.min(limit,#matches)do
+   local m=matches[index]
+   found[index]={name=m.name,description=tostring(m.description or ''):match('^[^\n]*'):sub(1,240),
+     parameters=compact(m.parameters),callable=m.callable,route=m.route}
+  end
   return found,true
  end
  -- `describeTool(name)` - the hidden compatibility alias
