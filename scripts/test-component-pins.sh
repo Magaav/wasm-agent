@@ -408,7 +408,19 @@ judge_bytes() {
     # component whose bytes were correct. The verified file is copied into this run's own directory and
     # every judgement below reads that copy, which nothing else can touch.
     scratch="$(scratch_new "$name")"
-    cp -f "$wasm" "$scratch/$name.wasm" 2>/dev/null || fail "$wasm cannot be copied for judging (it vanished or is unreadable)"
+    # ONE open(), NOT `cp`. GNU `cp` stats the source path, opens it, and REFUSES when the inode it opened
+    # is not the one it stat'ed: `cp: skipping file '...', as it was replaced while being copied`
+    # (coreutils 9.4). In a shared cache that is exactly what another row's `mv -f` of its own verified
+    # download does between the two calls, so a row failed with `cannot be copied for judging` about a
+    # file that was there and correct (measured 15/11 on wa-desktop: 1 of 40 `--self-test` runs, race row
+    # 5, right after its OWN rename; a 1500-iteration cp-vs-rename loop reproduced the message). Nothing
+    # writes the cache in place - every writer renames a private temporary over the name - so a single
+    # open resolves to one complete file, the old one or the new one, and the sha256 of the private copy
+    # below says which. A redirect is that single open; the reason is kept instead of thrown away.
+    local copy_err
+    if ! copy_err="$( { cat < "$wasm" > "$scratch/$name.wasm"; } 2>&1 )"; then
+      fail "$wasm cannot be copied for judging (it vanished or is unreadable): ${copy_err:-no reason given}"
+    fi
     [ "$(sha_file "$scratch/$name.wasm")" = "$sha" ] || fail "$wasm is not the pinned build (pin $sha)"
     if [ "$bytes" != "-" ]; then
       got="$(bytes_in "$scratch/$name.wasm")"

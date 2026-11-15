@@ -117,7 +117,17 @@ printf 'scratch vault up: %%s (key %%s, pid %%s)\n' "$WA_VAULT_ADMIN_URL" "$TEST
 disown 2>/dev/null || true
 ]], tree_root .. "/scripts/lib/test-release-vault.sh", vault .. "/url", vault .. "/token", vault .. "/keys",
     vault .. "/key_id", vault .. "/pid", vault .. "/trusted-keys.txt"))
-  local code, out, err = shell("setsid bash " .. vault .. "/start.sh")
+  -- `setsid -w`, not `setsid`: host.exec runs a command as the leader of its own process group, and a
+  -- group leader is exactly the case where util-linux `setsid` FORKS and its parent returns at once. The
+  -- host then waits only its 1 s cleanup budget for start.sh (which still holds the output pipe, in the
+  -- new session) and answers `code -1, cleanup_incomplete` - so whenever start.sh needed more than a
+  -- second (a loaded machine: the vault start, a curl, three python3 runs) this row printed "SKIP ...
+  -- the scratch wa-vault did not start" with an empty reason and the happy path then failed at `sign`
+  -- (measured 15/11 on wa-desktop, two fast runs in parallel; a probe with a 2 s script: plain `setsid`
+  -- -> code -1 and no stdout, `setsid -w` -> code 0 and the script's output, the detached child alive
+  -- in both). `-w` waits for start.sh and returns its exit status; the vault is still in the new
+  -- session, so the process-group cleanup after this command cannot reach it.
+  local code, out, err = shell("setsid -w bash " .. vault .. "/start.sh")
   if code ~= 0 then
     VAULT_AVAILABLE = false
     print("SKIP test-land: the scratch wa-vault did not start, so the release signature was not exercised: " ..
