@@ -1256,6 +1256,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   -- effect and no uncertainty record: nothing ran, so nothing is unknown.
   local retired = M.retired(name)
   if retired then return { error = retired, tool = tostring(name), effect = "none" } end
+  -- Credentials are never an agent tool's to read (lua/core/secret_guard.lua, 15/11).
+  local secret = dofile("lua/core/secret_guard.lua").check(name, args)
+  if secret then return secret end
   -- A subagent runs only the exact tools its profile named. Checked here as well
   -- as in the schema list it was offered: a model can ask for a tool it was not
   -- offered, and a schema filter that is not re-checked is not a boundary.
