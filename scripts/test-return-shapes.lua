@@ -48,11 +48,11 @@ local function with_declared(map,fn)
  assert(ok,value);return value
 end
 local index=with_declared({mcp_mail_search_deadbeef=declared},function() return policy.connector_index({mail,fresh}) end)
-check(index:find('- mail: mcp_mail_list_labels_deadbeef({}); mcp_mail_search_deadbeef({q}) → {messages:[{from:{address,name},id,subject}],total}',1,true),
+check(index:find('- mail: mcp_mail_list_labels({}); mcp_mail_search({q}) → {messages:[{from:{address,name},id,subject}],total}',1,true),
  'the declared shape is printed after the arguments, and a tool with no shape keeps its plain signature: '..index)
 check(index:find('→ what the script receives, keys only',1,true),'the header says what the arrow means')
 local plain=with_declared({},function() return policy.connector_index({fresh}) end)
-check(plain:find('- mail: mcp_mail_list_labels_deadbeef({})\n',1,true) or plain:sub(-40):find('mcp_mail_list_labels_deadbeef({})',1,true),
+check(plain:find('- mail: mcp_mail_list_labels({})\n',1,true) or plain:sub(-40):find('mcp_mail_list_labels({})',1,true),
  'no shape anywhere: the line is the signature alone: '..plain)
 check(not plain:find('→',1,true),'and the header does not mention shapes: '..plain)
 
@@ -96,7 +96,7 @@ for _,secret in ipairs({'TOPSECRET','alice@example.com','bob@example.com','INBOX
  check(not stored:find(secret,1,true),'the stored shape carries no value and no data-like key ('..secret..'): '..stored)
 end
 local learned_line=policy.connector_index({fake})
-local want='mcp_mail_get_message_deadbeef({id}) → {by_sender:{…},counts:{…},message:{from:{address,name},id,labels:[string],subject},note}'
+local want='mcp_mail_get_message({id}) → {by_sender:{…},counts:{…},message:{from:{address,name},id,labels:[string],subject},note}'
 check(learned_line:find(want,1,true),'the learned shape shows in the index, data-like maps collapsed: '..learned_line)
 
 -- 4. No churn: the same answer, an empty list, a missing field - the row and the index stay the bytes they were.

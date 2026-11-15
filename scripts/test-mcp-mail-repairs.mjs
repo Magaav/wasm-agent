@@ -21,6 +21,8 @@ send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
 send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'imap_search_messages', arguments: { account_id: 'a', mailbox: 'INBOX', cursor: 'c1', last_days: 7, unread_only: true, query: 'x', limit: 30 } } });
 send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'imap_get_message', arguments: { message_id: 'imap:vicscar_zangao:INBOX:2:65039', body_max_chars: 500 } } });
 send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'imap_search_messages', arguments: { account_id: 'a', mailbox: 'INBOX', last_days: 7 } } });
+send({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'imap_search_messages', arguments: { mailbox: 'INBOX', limit: 5 } } });
+send({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'imap_list_accounts', arguments: {} } });
 setTimeout(() => {
   let checks = 0; const ok = (v, m) => { assert.ok(v, m); checks++; };
   const limit = replies.get(1).result.tools[0].inputSchema.properties.limit;
@@ -32,5 +34,11 @@ setTimeout(() => {
   ok(got.account_id === 'vicscar_zangao' && got.body_max_chars === 500, 'account_id comes from the message_id: ' + JSON.stringify(got));
   const plain = replies.get(4).result.echo.arguments;
   ok(plain.last_days === 7, 'a search without a cursor keeps its filters');
+  // One configured account (MAIL_IMAP_TEST_HOST): a read without account_id means it; an explicit one is kept
+  // (id 4), the message_id's account wins (id 3), and a tool that takes no account gets none (15/11).
+  const filled = replies.get(5).result.echo.arguments;
+  ok(filled.account_id === 'test' && filled.limit === 5, 'the only account fills a missing account_id: ' + JSON.stringify(filled));
+  ok(plain.account_id === 'a', 'an explicit account_id is kept');
+  ok(replies.get(6).result.echo.arguments.account_id === undefined, 'list_accounts gets no account_id');
   child.kill(); console.log(JSON.stringify({ ok: true, checks })); process.exit(0);
 }, 1500);

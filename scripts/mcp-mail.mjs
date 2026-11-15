@@ -87,6 +87,16 @@ child.on('exit', (code, signal) => { process.exitCode = typeof code === 'number'
 const SEARCH_TOOLS = new Set(['imap_search_messages', 'imap_search_all_mailboxes']);
 const CURSOR_KEEPS = new Set(['account_id', 'mailbox', 'cursor', 'limit', 'include_snippet', 'snippet_max_chars']);
 const BY_MESSAGE_ID = new Set(['imap_get_message', 'imap_get_message_raw', 'imap_get_attachment']);
+// The configured accounts, from the credential file's KEY NAMES only (mail-mcp's MAIL_IMAP_<ACCOUNT>_HOST);
+// no value is read for this. With exactly one account, a read that omits account_id means that account:
+// mail-mcp declares account_id optional but answers "IMAP account 'default' is not configured" (15/11).
+export function accountIds(keyNames) {
+  const ids = new Set();
+  for (const key of keyNames) { const hit = /^MAIL_IMAP_(.+)_HOST$/.exec(key); if (hit) ids.add(hit[1].toLowerCase()); }
+  return [...ids];
+}
+const ONLY_ACCOUNTS = accountIds(Object.keys(keys));
+const ACCOUNT_READS = new Set([...SEARCH_TOOLS, ...BY_MESSAGE_ID, 'imap_list_mailboxes', 'imap_mailbox_status']);
 export function repairCall(params) {
   if (!params || typeof params !== 'object' || typeof params.arguments !== 'object' || params.arguments === null) return params;
   const name = params.name;
@@ -98,6 +108,7 @@ export function repairCall(params) {
     const owner = /^imap:([^:]+):/.exec(args.message_id);
     if (owner) args.account_id = owner[1];
   }
+  if (ACCOUNT_READS.has(name) && !args.account_id && ONLY_ACCOUNTS.length === 1) args.account_id = ONLY_ACCOUNTS[0];
   return { ...params, arguments: args };
 }
 let buffer = '';
