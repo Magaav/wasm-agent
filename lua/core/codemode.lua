@@ -433,7 +433,7 @@ local function tool_lookup(catalog,execution,dispatch)
   local found={}
   for index=1,math.min(limit,#matches)do
    local m=matches[index]
-   found[index]={name=m.name,description=tostring(m.description or ''):match('^[^\n]*'):sub(1,240),
+   found[index]={name=m.name,description=tostring(m.description or ''):match('^[^\n]*'),
      parameters=compact(m.parameters),callable=m.callable,route=m.route}
   end
   return found,true
