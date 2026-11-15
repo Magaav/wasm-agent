@@ -99,7 +99,7 @@ local prompt=policy.prompt(catalog)
 -- say `mcp_whatsapp_*` while the callable name carried its peer prefix and pinned hash, and the model spent
 -- six calls guessing). The group label is still what groups them, so this asserts both halves: the label the
 -- model routes by, and the exact name it must call.
-check(prompt:find('- mail: mcp_mail_list_messages_deadbeef',1,true) and prompt:find('- whatsapp: mcp_whatsapp_read_messages_cafebabe',1,true) and prompt:find('- peer box: peer_box__fetch',1,true),'hint lists connectors by their exact callable names: '..prompt:sub(-300))
+check(prompt:find('- mail: mcp_mail_list_messages(',1,true) and not prompt:find('deadbeef',1,true) and prompt:find('- whatsapp: mcp_whatsapp_read_messages',1,true) and prompt:find('- peer box: peer_box__fetch',1,true),'hint lists connectors by their exact callable names: '..prompt:sub(-300))
 check(not prompt:find('- mail: list_messages',1,true),'and never the shortened tool name, which is not callable')
 check(prompt:find('Work in code: one `codemode` call',1,true) and prompt:find('tools.<name>(args)',1,true),'hint prefers code mode and says how every tool is reached inside it')
 check(prompt:find('Calling a tool directly also works',1,true),'hint states the one pathway: a direct call runs as the same script')

@@ -104,9 +104,41 @@ local function signature(f)
  if #all>8 then shown=shown..', ...' end
  return f.name..'({'..shown..'})'
 end
+-- The name a connector is listed under: its stem when the stem names exactly one catalogue tool (15/11:
+-- a model that saw `..._828ac338` copied the ews tool's hash onto the imap one). The stem is callable
+-- as is - `tools.<stem>`, `select:<stem>` and a direct call all resolve a unique stem - so the index
+-- shows the shorter name and there is no hash left to copy. Two tools with one stem keep their full names.
+local HASH='_%x%x%x%x%x%x%x%x$'
+local function listed_names(catalog)
+ local count,full={},{}
+ for _,item in ipairs(catalog or {})do
+  local name=(item['function'] or {}).name
+  if type(name)=='string' then
+   full[name]=true
+   local base=name:match('^(.-)'..HASH)
+   if base and base~='' then count[base]=(count[base] or 0)+1 end
+  end
+ end
+ -- A stem that is one of our own WhatsApp names (or a renamed/retired one) is routed to that surface
+ -- before any connector, so such a connector keeps its full name.
+ local ok,wa=pcall(dofile,'lua/core/whatsapp.lua');if not ok or type(wa)~='table' then wa={} end
+ local function ours(base)
+  for _,k in ipairs({'tool','renamed','retired_name'})do
+   if type(wa[k])=='function' then local hit_ok,hit=pcall(wa[k],base);if hit_ok and hit then return true end end
+  end
+  return false
+ end
+ return function(name)
+  local base=name:match('^(.-)'..HASH)
+  if base and base~='' and count[base]==1 and not full[base] and not ours(base) then return base end
+  return name
+ end
+end
+M.listed_name=function(catalog,name) return listed_names(catalog)(name) end
 function M.connector_index(catalog)
  local groups,order={},{}
  local sigs={}
+ local listed=listed_names(catalog)
  -- What each connector answers (lua/core/return_shapes.lua): ours, then the server's declared
  -- outputSchema, then the shape learned from this node's real answers - read once per index.
  local shapes_ok,shapes=pcall(dofile,'lua/core/return_shapes.lua');if not shapes_ok then shapes=nil end
@@ -131,10 +163,12 @@ function M.connector_index(catalog)
    -- One surface, one line per name: the nine `mcp_whatsapp_<verb>` tools are the same family on every
    -- node (#118), so they are grouped under the surface rather than listed as nine unrelated connectors.
    if not server and whatsapp and whatsapp.tool(name) then server='whatsapp' end
-   server=server or name
+   server=server or listed(name)
    if not groups[server] then groups[server]={};order[#order+1]=server end
    local list=groups[server];list[#list+1]=name
    sigs[name]=signature(f)
+   local shown_name=listed(name)
+   if shown_name~=name then sigs[name]=shown_name..sigs[name]:sub(#name+1) end
    if shapes then
     local suffix=shapes.suffix(f,declared,learned)
     if suffix~='' then sigs[name]=sigs[name]..suffix;shaped=true end

@@ -241,13 +241,17 @@ function M.suffix(f, declared, learned)
   if type(name) ~= 'string' then return '' end
   local text = static_returns(name)
   if not text and type(declared) == 'table' and type(declared[name]) == 'table' then
-    text = M.render(M.from_schema(declared[name]))
+    -- A declared schema that says nothing (`any`, or an object with no properties) is no shape: the
+    -- learned one, if any, is better, and an empty arrow only costs tokens (15/11: every mail tool
+    -- showed `-> any` over the shape this node had already learned).
+    local tree = M.from_schema(declared[name])
+    if tree ~= 'any' and not (type(tree) == 'table' and tree.c) then text = M.render(tree) end
   end
   if not text and type(learned) == 'table' then
     local entry = learned[name]
     if type(entry) == 'table' and entry.t ~= nil and entry.h == M.schema_hash(f.parameters) then text = M.render(entry.t) end
   end
-  if not text or text == '' then return '' end
+  if not text or text == '' or text == 'any' then return '' end
   return ' → ' .. text
 end
 

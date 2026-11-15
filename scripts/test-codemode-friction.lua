@@ -53,4 +53,13 @@ local hit=lk.discover({'select:mcp_google_imap_list_accounts'})
 check(hit[1] and hit[1].name=='mcp_google_imap_list_accounts_828ac338' and hit[1].found~=false,'a unique stem resolves in select: '..json.encode(hit[1]):sub(1,160))
 local two=lk.discover({'select:mcp_x_get'})
 check(two[1] and two[1].found==false,'two tools with one stem stay unresolved')
+-- 15/11: the index lists the unique hash-free name, so there is no hash to copy; a wrong hash on a unique
+-- stem is still that tool; two tools with one stem keep their full names.
+local idx=policy.connector_index(cat)
+check(idx:find('mcp_google_imap_list_accounts({})',1,true) and not idx:find('828ac338',1,true),'the index lists the unique stem: '..idx)
+check(idx:find('mcp_x_get_aaaa1111',1,true) and idx:find('mcp_x_get_bbbb2222',1,true),'two tools with one stem keep their full names: '..idx)
+local shapes=dofile('lua/core/return_shapes.lua')
+check(shapes.suffix(cat[1]['function'],{mcp_google_imap_list_accounts_828ac338={type='object'}},{})=='','a declared shape that says nothing is not printed')
+local learned={mcp_google_imap_list_accounts_828ac338={h=shapes.schema_hash(cat[1]['function'].parameters),t={o={accounts={a='any'}}}}}
+check(shapes.suffix(cat[1]['function'],{mcp_google_imap_list_accounts_828ac338={type='object'}},learned):find('accounts',1,true),'and it does not hide the learned shape')
 print(json.encode({ok=true,checks=checks}))
