@@ -158,6 +158,16 @@ function M.project(name, output)
           and not (key=='unexecuted' and type(value)=='table' and next(value)==nil)
           and not (key=='items' and type(value)=='table' and next(value)==nil) then lean[key]=value end
     end
+    -- What the script returned, as what it is: an object, named `returned` (14/11: a script that did
+    -- `return r` saw `value: "{\"candidates\":...}"`, a JSON string, and the next scripts read r.value from
+    -- the TOOL as if every tool answered {value}).
+    if type(lean.value) == 'string' then
+      local parsed_ok, parsed = pcall(json.decode, lean.value)
+      lean.returned = parsed_ok and parsed ~= nil and parsed or lean.value
+      lean.value = nil
+    elseif lean.value ~= nil then
+      lean.returned = lean.value; lean.value = nil
+    end
     local ref = M.store(full)
     lean.full_result = {sha256=ref.sha256, bytes=#full}
     output = lean

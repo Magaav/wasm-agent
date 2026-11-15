@@ -488,6 +488,7 @@ return {
   ['whatsapp_archive_answer_unreadable']='tools.lua',
   ['whatsapp_archive_failed']='tools.lua',
   ['whatsapp_archive_unavailable']='tools.lua',
+  ['whatsapp_chat_not_found']='whatsapp.lua',
   ['whatsapp_component_absent']='whatsapp.lua',
   ['whatsapp_owner_unreachable']='whatsapp.lua',
   ['whatsapp_send_bad_cancel']='whatsapp.lua',
