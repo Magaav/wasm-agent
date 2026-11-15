@@ -189,19 +189,32 @@ function M.project(name, output)
     end
     local ref = M.store(full)
     lean.full_result = {sha256=ref.sha256, bytes=#full}
-    -- A script that returned TEXT gives the model the text itself, the way a shell gives its output -
-    -- not a JSON-quoted string full of \n and \" (14/11: 12% of a real run's bytes were escapes). One
-    -- header line says the status, the per-call summary and where the whole result is.
-    -- Multi-line text only: that is where escaping costs (a one-line string reads the same quoted).
-    if lean.ok ~= false and lean.error == nil and type(lean.returned) == 'string' and lean.returned:find('\n', 1, true) then
+    -- A script's result is a header and EXACTLY what the script returned - raw text, or compact JSON - with
+    -- no wrapper key around it (14/11 replay: a view key named `value`, then `returned`, was read back as
+    -- the shape of the TOOL's answer: r.value, r.returned.messages, "cannot read property 'messages'").
+    -- Line 1: status, the per-call summary, where the whole result is; line 2: each call's evidence
+    -- (sha256:bytes, the order of the summary). Failures keep their structured error; a result carrying
+    -- anything else (printed output, a partial presentation) keeps the JSON form.
+    local plain = { ok = true, status = true, summary = true, returned = true, calls = true, full_result = true, sandbox_calls = true }
+    local simple = lean.ok ~= false and lean.error == nil
+    for key in pairs(lean) do if not plain[key] then simple = false end end
+    if simple then
       local header = 'status ' .. tostring(lean.status or 200) .. (lean.summary and (' \194\183 ' .. tostring(lean.summary)) or '')
         .. ' \194\183 full_result ' .. ref.sha256
-      local text = lean.returned
-      local room = M.MAX_BYTES - #header - 160
-      if #text > room then
-        text = text:sub(1, room) .. '\n[cut at ' .. room .. ' of ' .. #lean.returned .. ' bytes: the whole text is tool_result({sha256:"' .. ref.sha256 .. '"})]'
+      local evidence = {}
+      for _, call in ipairs(type(lean.calls) == 'table' and lean.calls or {}) do
+        if type(call) == 'table' and call.sha256 then evidence[#evidence + 1] = call.sha256 .. ':' .. tostring(call.bytes or 0) end
       end
-      return header .. '\n\n' .. text
+      if #evidence > 0 then header = header .. '\ncalls: ' .. table.concat(evidence, ' ') end
+      local body
+      if lean.returned == nil then body = '(the script returned nothing)'
+      elseif type(lean.returned) == 'string' then body = lean.returned
+      else body = json.encode(lean.returned) end
+      local room = M.MAX_BYTES - #header - 160
+      if #body > room then
+        body = body:sub(1, room) .. '\n[cut at ' .. room .. ' of ' .. #body .. ' bytes: the whole result is tool_result({sha256:"' .. ref.sha256 .. '"})]'
+      end
+      return header .. '\n\n' .. body
     end
     output = lean
   end
@@ -287,12 +300,25 @@ function M.parse_view(content)
   content = tostring(content or "")
   local ok, decoded = pcall(json.decode, content)
   if ok and type(decoded) == "table" then return decoded end
-  local header, text = content:match("^(status %d+[^\n]*)\n\n(.*)$")
-  if not header then return nil end
-  local status = tonumber(header:match("^status (%d+)"))
-  local sha = header:match("full_result (%x+)$")
-  local summary = header:match("^status %d+ \194\183 (.-) \194\183 full_result %x+$")
-  return { ok = true, status = status, summary = summary, full_result = sha and { sha256 = sha } or nil, returned = text }
+  local first, rest = content:match("^(status %d+[^\n]*)\n(.*)$")
+  if not first then return nil end
+  local evidence, text = rest:match("^calls: ([^\n]*)\n\n(.*)$")
+  if not evidence then text = rest:match("^\n(.*)$") or rest end
+  local status = tonumber(first:match("^status (%d+)"))
+  local sha = first:match("full_result (%x+)$")
+  local summary = first:match("^status %d+ \194\183 (.-) \194\183 full_result %x+$")
+  local calls = {}
+  local parts = {}
+  if summary then for part in (summary .. " \194\183 "):gmatch("(.-) \194\183 ") do parts[#parts + 1] = part end end
+  local index = 0
+  for hash, bytes in (evidence or ""):gmatch("(%x+):(%d+)") do
+    index = index + 1
+    local name, code = (parts[index] or ""):match("^(%S+) (%d+)")
+    calls[index] = { name = name, status = tonumber(code), sha256 = hash, bytes = tonumber(bytes) }
+  end
+  local decoded_ok, decoded = pcall(json.decode, text)
+  local returned = (decoded_ok and decoded ~= nil) and decoded or text
+  return { ok = true, status = status, summary = summary, full_result = sha and { sha256 = sha } or nil, calls = calls, returned = returned }
 end
 
 function M.context_view(name, content)
