@@ -451,6 +451,84 @@ local function tool_lookup(catalog,execution,dispatch)
   end}
 end
 
+-- ONE settlement of one guest call, for both loops (15/11): each loop used to carry its own copy of
+-- the global answers, the schema recheck, the wait budget, validation, dispatch, the journal, the
+-- script value, the refusal boundary, the telemetry and the `calls`/`attempts` records, so a fix landed
+-- in one engine and not the other (13/11 `undefined`). A loop now owns only its transport and its own
+-- fence decision; it decodes the guest's call into `call` and delivers what this returns.
+--   s    = {ctx, role, dispatch, popts, current_catalog, journal, calls, attempts, selected, lookup}
+--   call = {id, name (the guest's name), target (as recorded), global (a node global, `params` decoded),
+--           args (the argument text as recorded), refused (the loop's fence answer, if any),
+--           tool + hash (the dispatched name and the schema hash pinned at start), keep_input}
+-- `keep_input` is the one difference the two loops always had, kept as is: the native loop puts the
+-- rejected argument text in the validation refusal itself, the component only in its context, and
+-- `refusal.build` reads those two differently (a long input, a code with a detail). Making them one is
+-- a behaviour change for one engine, so it is a separate decision, not part of this merge.
+local function settle_call(s,call)
+ local value,success,admitted
+ local ctx=s.ctx
+ if call.global then
+  value,success=host_global(call.name,call.params,s.calls,s.selected,s.lookup,ctx,s.journal,s.popts)
+ elseif call.refused then
+  value,success=call.refused,false
+ else
+  local current
+  for _,schema in ipairs(s.current_catalog())do if schema['function'].name==call.tool then current=schema;break end end
+  if not current or host.sha256(json.encode(current))~=call.hash then value,success={error='tool_definition_changed'},false
+  else
+   -- `wait_s` on any call: taken out of the arguments before the tool's own schema sees them,
+   -- because it is a property of this call's *wait* and not an argument of the tool. A call that
+   -- names none keeps its original text and its original answer.
+   local stripped,wait_s,wait_error=pending_calls.strip(normalize_args(call.args))
+   if wait_error then value,success={error=wait_error,effect='none'},false
+   else
+    stripped=contract.normalize_names(current['function'].parameters,stripped)
+    local _,err=contract.validate(current['function'].parameters,stripped or '{}')
+    -- The refusal carries the rejected argument text AND the tool's own schema, so the fix can name
+    -- the arguments this tool takes instead of letting the model guess (13/11: `notes_write` answered
+    -- `notes_text_required` three times before the model found `text`).
+    if err then value,success=refusal.finalize({error=err,input=call.keep_input and stripped or nil},{tool=call.tool,
+      parameters=current['function'].parameters,input=stripped,site='the code-mode script loop'}),false
+    else
+     local params=json.decode(stripped or '{}')
+     local span=telemetry.start(ctx,'tool',{name=call.tool,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
+     live(ctx,{type='codemode_call',id=call.id,name=call.tool,arguments=params,state='running'})
+     local live_started=tonumber(host.now()) or 0
+     local called,result=pcall(pending_calls.invoke,s.dispatch,s.popts,call.tool,params,stripped,wait_s);admitted=true
+     live_settled(ctx,call.id,call.tool,result,called,live_started)
+     if called then
+      value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
+      -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one
+      -- comes back with `prior:{call, age_s, same}`, and the repeat is counted in telemetry.
+      value=session_results.record(ctx,s.journal,{id=call.id,tool=call.tool,args=host.sha256(call.args or '{}'),
+       args_value=params,result=host.sha256(json.encode(value)),ok=success},value)
+      success=type(value)~='table' or (not value.error and value.ok~=false)
+     else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
+     local encoded=json.encode(value);local reference=output.store(encoded)
+     value,success=script_value(value,success)
+     s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
+     telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
+    end
+   end
+  end
+ end
+ -- One boundary per settled call: a refusal from a global, the fence, the schema or a tool leaves
+ -- the loop with its four fields (a value that has them already is returned untouched).
+ -- Discovery answers are DATA, not a refusal of this call: `searchTools`/`describeTool` return
+ -- catalogue entries, and an unknown name is one member of that array (`found=false`, `reason`,
+ -- `suggestions`). They are left untouched here because the same member is produced by the component's
+ -- own Rust (`unknown_tool`), and decorating one side only would make the two loops two different
+ -- answers - scripts/test-codemode-component.lua compares them field for field, and
+ -- scripts/test-tool-search-names-codemode.lua asserts the alias IS its batch element.
+ if not (call.global and (call.name=='searchTools' or call.name=='describeTool')) then
+  value=refusal.finalize(value,{tool=call.name,input=call.args,role=s.role,site='the code-mode script loop'})
+ end
+ local argument_reference=output.store(call.args or '{}');local result_reference=output.store(json.encode(value))
+ local attempt={id=call.id,name=call.name,target=call.target,admitted=admitted or false,ok=success,arguments=argument_reference,result=result_reference}
+ s.attempts[#s.attempts+1]=attempt
+ return value,success,attempt
+end
+
 -- The native path: byte for byte the loop this file has always run. `workspace` and `scope` are the
 -- run's, computed once by `M.run` so both paths agree on them.
 local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,dispatch,execution,workspace,scope,popts)
@@ -504,6 +582,9 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
  end
  local sandbox=response.id;local pending,seen,items,calls,attempts={},{},{},{},{}
  local done
+ -- What `settle_call` settles against: this script's records and this run's dispatch.
+ local state={ctx=ctx,role=role,dispatch=dispatch,popts=popts,current_catalog=current_catalog,journal=journal,
+  calls=calls,attempts=attempts,selected=selected,lookup=lookup}
  local function consume(events)
   for _,e in ipairs(events or {})do
    if e.type=='call' then pending[#pending+1]=e
@@ -523,8 +604,8 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
    local call=table.remove(pending,1)
    if not call then error('codemode_stalled')end
    if seen[call.id] then error('codemode_duplicate_call')end;seen[call.id]=true
-   local value,success,admitted
    local attempt_span=telemetry.start(ctx,'codemode_call',{name=call.name,target=call.target,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
+   local settle={id=call.id,name=call.name,target=call.target,args=call.args}
    if call.target=='global' then
     -- A guest global called with no arguments sends the literal string `undefined`, not `[]`, and the
     -- strict JSON contract refuses it: `capabilities()` - the whole point of the inventory - died
@@ -532,96 +613,20 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
     local global_args=call.args
     if global_args==nil or global_args=='' or global_args=='undefined' then global_args='[]' end
     local ast,err=contract.parse(global_args);if not ast then error(err)end
-    local params=json.decode(global_args)
-    if call.name=='showCall' then
-     value,success=presentation.select(calls,selected,params)
-    elseif call.name=='searchTools' then
-     -- One implementation, shared with the component path (`tool_lookup`): the batch, the listing and
-     -- the keyword form all answer a plain ARRAY here, so `.map` works on whatever was asked for.
-     value,success=lookup.discover(params)
-    elseif call.name=='describeTool' then
-     -- The hidden compatibility alias of `searchTools("select:"..name)[0]`, same object.
-     local name=type(params)=='string' and params or (type(params)=='table' and params[1]) or nil
-     value=lookup.describe(name);success=true
-    elseif call.name=='results' then
-     -- The retained results and this session's journal: `results.get`/`last`/`diff`/`reuse`. Read-only
-     -- over records the node already keeps; it dispatches nothing and admits nothing.
-     value,success=session_results.answer(type(params)=='table' and params[1] or nil,ctx,journal)
-    elseif call.name=='wait' or call.name=='cancel' or call.name=='pending' then
-     -- The one resume and the one stop, answered by the same module the component's loop answers them
-     -- through (`host_global` above): a pending call is a managed operation, and reading it takes no
-     -- lock, so a wait never blocks the script that asked.
-     value,success=host_global(call.name,params,calls,selected,lookup,ctx,journal,popts)
-    elseif call.name=='capabilities' then
-     value,success=lookup.capabilities(params),true
-    elseif call.name=='describe' then
-     -- The host.* inventory, exactly as `wa capabilities --json` prints it and `/health`
-     -- digests it. Read-only metadata over the registry; it admits no call, changes no ceiling.
-     value,success=inventory.global(call.name,params)
-     if value==nil then value={error='codemode_global_not_available'};success=false end
-    else value={error='codemode_global_not_available'};success=false end
+    -- Every global this sandbox registers is answered by `host_global`, the component's answer too.
+    settle.global=true;settle.params=json.decode(global_args)
    elseif call.target=='tool' then
     call.args=normalize_args(call.args) -- the same normalizer the component loop uses (see normalize_args)
+    settle.args=call.args;settle.keep_input=true
+    -- This loop's own fence: the definitions pinned at start, by guest (JS) name.
     local def=definitions[call.name]
     if not def or forbidden[call.name] then
      local out=outside[call.name]
-     value=out and {error='codemode_target_not_available: '..call.name..' runs outside code mode',route=out.route,effect='none'} or {error='codemode_target_not_available'};success=false
-    else
-     local current
-     for _,schema in ipairs(current_catalog())do if schema['function'].name==def.name then current=schema;break end end
-     if not current or host.sha256(json.encode(current))~=def.hash then value={error='tool_definition_changed'};success=false
-     else
-      -- `wait_s` on any call: taken out of the arguments before the tool's own schema sees them,
-      -- because it is a property of this call's *wait* and not an argument of the tool. A call that
-      -- names none keeps its original text and its original answer.
-      local stripped,wait_s,wait_error=pending_calls.strip(call.args)
-      if wait_error then value={error=wait_error,effect='none'};success=false
-      else
-      stripped=contract.normalize_names(current['function'].parameters,stripped)
-      local _,err=contract.validate(current['function'].parameters,stripped or '{}')
-      -- The refusal carries the rejected argument text AND the tool's own schema, so the fix can name
-      -- the arguments this tool takes instead of letting the model guess (13/11: `notes_write` answered
-      -- `notes_text_required` three times before the model found `text`).
-      if err then value=refusal.finalize({error=err,input=stripped},{tool=def.name,
-        parameters=current['function'].parameters,input=stripped,site='the code-mode script loop'});success=false
-      else
-       local params=json.decode(stripped or '{}')
-       local span=telemetry.start(ctx,'tool',{name=def.name,nested=true,codemode_call=call.id,arguments_hash=host.sha256(call.args or '{}')})
-       live(ctx,{type='codemode_call',id=call.id,name=def.name,arguments=params,state='running'})
-       local live_started=tonumber(host.now()) or 0
-       local called,result=pcall(pending_calls.invoke,dispatch,popts,def.name,params,stripped,wait_s);admitted=true
-       live_settled(ctx,call.id,def.name,result,called,live_started)
-       if called then
-        value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
-        -- Journaled before it is encoded: a fresh read-only call that repeats an identical earlier one
-        -- comes back with `prior:{call, age_s, same}`, and the repeat is counted in telemetry.
-        value=session_results.record(ctx,journal,{id=call.id,tool=def.name,args=host.sha256(call.args or '{}'),
-         args_value=params,result=host.sha256(json.encode(value)),ok=success},value)
-        success=type(value)~='table' or (not value.error and value.ok~=false)
-       else value={error=tostring(result),effect='unknown',replay_allowed=false};success=false end
-       local encoded=json.encode(value);local reference=output.store(encoded)
-       value,success=script_value(value,success)
-       calls[#calls+1]={id=call.id,name=def.name,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
-       telemetry.finish(span,{ok=success,name=def.name,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
-      end
-      end
-     end
-    end
+     settle.refused=out and {error='codemode_target_not_available: '..call.name..' runs outside code mode',route=out.route,effect='none'} or {error='codemode_target_not_available'}
+    else settle.tool=def.name;settle.hash=def.hash end
    else error('codemode_target_unknown')end
-   -- One boundary per settled call: a refusal from a global, the fence, the schema or a tool leaves
-   -- this loop with its four fields (a value that has them already is returned untouched).
-   -- Discovery answers are DATA, not a refusal of this call: `searchTools`/`describeTool` return
-   -- catalogue entries, and an unknown name is one member of that array (`found=false`, `reason`,
-   -- `suggestions`). They are left untouched here because the same member is produced by the component's
-   -- own Rust (`unknown_tool`), and decorating one side only would make the two loops two different
-   -- answers - scripts/test-codemode-component.lua compares them field for field, and
-   -- scripts/test-tool-search-names-codemode.lua asserts the alias IS its batch element.
-   if not (call.target=='global' and (call.name=='searchTools' or call.name=='describeTool')) then
-    value=refusal.finalize(value,{tool=call.name,input=call.args,role=role,site='the code-mode script loop'})
-   end
-   local argument_reference=output.store(call.args or '{}');local result_reference=output.store(json.encode(value))
-   attempts[#attempts+1]={id=call.id,name=call.name,target=call.target,admitted=admitted or false,ok=success,arguments=argument_reference,result=result_reference}
-   telemetry.finish(attempt_span,{name=call.name,target=call.target,ok=success,admitted=admitted or false,nested=true,codemode_call=call.id,result_hash=result_reference.sha256})
+   local value,success,attempt=settle_call(state,settle)
+   telemetry.finish(attempt_span,{name=call.name,target=call.target,ok=success,admitted=attempt.admitted,nested=true,codemode_call=call.id,result_hash=attempt.result.sha256})
    local delivered=json.decode(host.quickjs('deliver',json.encode({owner=scope,id=sandbox,call_id=call.id,ok=success,payload=json.encode(value)})))
    consume(delivered.events)
    if not delivered.ok then error(delivered.error)end
@@ -698,6 +703,9 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
  -- The same journal the native loop keeps, for the same scope: `prior`/`{reuse}`/`results` answer
  -- identically whichever loop drove the script (scripts/test-codemode-parity.lua compares the two).
  local journal=session_results.load(memory,scope)
+ -- What `settle_call` settles against, the same shape the native loop hands it.
+ local state={ctx=ctx,role=role,dispatch=dispatch,popts=popts,current_catalog=current_catalog,journal=journal,
+  calls=calls,attempts=attempts,selected=selected,lookup=lookup}
  local function failed(message)
   -- A live script whose component stopped answering: the calls already dispatched may have had
   -- effects, so this is `unknown` and it is never replayed (docs/CODEMODE.md).
@@ -733,59 +741,19 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
     if step.kind=='aborted' then loop_error=tostring(step.reason)
     elseif step.kind=='finished' then outcome=step.outcome;break
     elseif step.kind=='host_global' or step.kind=='call' then
-     local value,success,admitted
+     local global=step.kind=='host_global'
      local argument_text=step.args_json
-     if step.kind=='host_global' then
+     local settle={id=step.id,name=step.name,global=global,args=argument_text,
+      target=(global and 'global') or step.target or 'tool'}
+     if global then
       local called,params=pcall(global_params,argument_text)
       if not called then error(params) end
-      value,success=host_global(step.name,params,calls,selected,lookup,ctx,journal,popts)
+      settle.params=params
      elseif step.refusal then
-      value,success=refusal_value(step.refusal),false
-     else
-      local current
-      for _,schema in ipairs(current_catalog())do if schema['function'].name==step.name then current=schema;break end end
-      if not current or host.sha256(json.encode(current))~=hashes[step.name] then
-       value,success={error='tool_definition_changed'},false
-      else
-       local stripped,wait_s,wait_error=pending_calls.strip(normalize_args(argument_text))
-       if wait_error then value,success={error=wait_error,effect='none'},false
-       else
-       stripped=contract.normalize_names(current['function'].parameters,stripped)
-       local _,err=contract.validate(current['function'].parameters,stripped or '{}')
-       -- the rejected argument text and the tool's own schema travel with the refusal, so the cause and
-       -- the accepted names are visible where the refusal is read
-       if err then value,success=refusal.finalize({error=err},{tool=step.name,
-         parameters=current['function'].parameters,input=stripped,site='the code-mode script loop'}),false
-       else
-        local params=json.decode(stripped or '{}')
-         local span=telemetry.start(ctx,'tool',{name=step.name,nested=true,codemode_call=step.id,arguments_hash=host.sha256(argument_text or '{}')})
-         live(ctx,{type='codemode_call',id=step.id,name=step.name,arguments=params,state='running'})
-         local live_started=tonumber(host.now()) or 0
-         local called,result=pcall(pending_calls.invoke,dispatch,popts,step.name,params,stripped,wait_s)
-         admitted=true
-         live_settled(ctx,step.id,step.name,result,called,live_started)
-         if called then value=result;success=type(value)~='table' or (not value.error and value.ok~=false)
-          value=session_results.record(ctx,journal,{id=step.id,tool=step.name,args=host.sha256(argument_text or '{}'),
-           args_value=params,result=host.sha256(json.encode(value)),ok=success},value)
-          success=type(value)~='table' or (not value.error and value.ok~=false)
-         else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
-         local encoded=json.encode(value);local reference=output.store(encoded)
-         value,success=script_value(value,success)
-         calls[#calls+1]={id=step.id,name=step.name,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
-         telemetry.finish(span,{ok=success,name=step.name,nested=true,codemode_call=step.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
-       end
-      end
-      end
-     end
-     -- The component loop's own boundary, for the refusals that are decided above it: the fence, a
-     -- changed definition, a bad wait budget, a global the node does not answer.
-     if not (step.kind=='host_global' and (step.name=='searchTools' or step.name=='describeTool')) then
-      value=refusal.finalize(value,{tool=step.name,input=argument_text,role=role,
-        site='the code-mode script loop'})
-     end
-     attempts[#attempts+1]={id=step.id,name=step.name,
-      target=(step.kind=='host_global' and 'global') or step.target or 'tool',admitted=admitted or false,
-      ok=success,arguments=output.store(argument_text or '{}'),result=output.store(json.encode(value))}
+      -- The component's own fence decision, handed back as a record; the node words the refusal.
+      settle.refused=refusal_value(step.refusal)
+     else settle.tool=step.name;settle.hash=hashes[step.name] end
+     local value,success=settle_call(state,settle)
      reply={call_id=step.id,ok=success and true or false,payload_json=json.encode(value)}
     else loop_error='codemode_protocol_unknown_step'
     end
