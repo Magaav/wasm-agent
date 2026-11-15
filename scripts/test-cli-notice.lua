@@ -122,7 +122,20 @@ else
   -- `WASM_AGENT_LUA_ROOT` is passed on purpose: the child must read THIS tree's `chat.lua`, which is
   -- the file under test, not the binary's embedded copy.
   local root = host.getenv("WASM_AGENT_LUA_ROOT") or ""
-  local env = "WASM_AGENT_HOME='" .. scratch .. "/home' WA_INSTALL_DIR='" .. install
+  -- THE VIEW IS CHOSEN HERE, NEVER INHERITED. `cli_view.wants_live` picks the live view (frame, footer
+  -- rows, raw-key editor) from WASM_AGENT_CLI_VIEW, NO_COLOR, TERM, COLORTERM, WT_SESSION and
+  -- ORCA_TERMINAL_HANDLE - and a fast-path row inherits all of them from whoever started the run. Started
+  -- from a systemd unit (TERM=dumb) this half got the plain view and passed; started from a login shell
+  -- (`su - wa`, TERM=xterm-256color) it got the live view and failed 3 of 18 every time (measured 15/11
+  -- on wa-desktop with the land50 binary, 2 of 2 runs, and 0 of 2 with TERM=dumb): the pty echoed the
+  -- piped `/exit` before the live editor took the terminal and the editor never acted on it (`timeout 60`
+  -- -> code 124), and the footer's session row - where the notice correctly lives, as half (b) proves -
+  -- is painted on the same stdout this half reads as "the transcript". Only the PLAIN view makes stdout
+  -- the transcript and nothing else, so that is the view this half asks for, explicitly, with the
+  -- variables that could overrule or second-guess it removed. What it proves is unchanged: the #106
+  -- `print` lands in the transcript in either view, and the live view's row is half (b)'s subject.
+  local env = "WASM_AGENT_CLI_VIEW=plain TERM=dumb"
+    .. " WASM_AGENT_HOME='" .. scratch .. "/home' WA_INSTALL_DIR='" .. install
     .. "' WA_UPDATE_CHECK_FIXTURE='" .. feed .. "' WA_UPDATE_CHECK_CACHE='" .. scratch .. "/cache.json'"
     .. " WASM_AGENT_LUA_ROOT='" .. root .. "'"
   -- The child's command, in a file rather than nested in the pty tool's own quoting: the tool below is
@@ -130,7 +143,8 @@ else
   -- like this stops being readable. The scratch is this run's (marked), so the file goes with it.
   local child_sh = scratch .. "/child.sh"
   assert(host.write_file(child_sh,
-    "#!/bin/sh\nexec env -u WA_SCRIPT -u WA_FAST_ROW_ENV " .. env .. " '" .. bin .. "' chat\n"),
+    "#!/bin/sh\nexec env -u WA_SCRIPT -u WA_FAST_ROW_ENV -u NO_COLOR -u COLORTERM -u WT_SESSION"
+      .. " -u ORCA_TERMINAL_HANDLE " .. env .. " '" .. bin .. "' chat\n"),
     "cli notice: could not write the child's command")
   shell("chmod +x '" .. child_sh .. "'")
   -- A READER'S START IS A TERMINAL, and #107 made that load-bearing: a stdin that is not a tty is a
