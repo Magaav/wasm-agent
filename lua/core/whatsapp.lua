@@ -69,6 +69,9 @@ M.TOOLS = {
       limit = bounded(1, 20),
     }, additionalProperties = false },
     request = function(args) return { q = args.q, limit = args.limit } end,
+    -- What a script reads from the answer (rust/components/wa-whatsapp/src/index.rs `contacts`,
+    -- `candidate_json`); the connector index prints it after the arguments (lua/core/return_shapes.lua).
+    returns = '{chat,ambiguous,candidates:[{chat,name,type,confidence,at_local}],count,truncated}',
   },
   {
     verb = 'search', capability = 'whatsapp_search', effect = 'read',
@@ -86,6 +89,8 @@ M.TOOLS = {
     request = function(args)
       return { q = args.q, chat = args.chat, kind = args.kind, ['from'] = args['from'], ['since'] = args['since'], ['until'] = args['until'], limit = args.limit }
     end,
+    -- index.rs `search` + `hit_json` (a hit is `view::message` plus chat_name/score).
+    returns = '{hits:[{id,chat,chat_name,at_local,from:{own,name},text}],count,matched,truncated}',
   },
   {
     verb = 'read', capability = 'whatsapp_read', effect = 'read',
@@ -96,6 +101,8 @@ M.TOOLS = {
       limit = bounded(1, 100),
     }, required = { 'chat' }, additionalProperties = false },
     request = function(args) return { chat = args.chat, before = args.before, limit = args.limit } end,
+    -- index.rs `read`: `view::chat_header` + messages in `view::message`'s shape + the page cursor.
+    returns = '{header:{chat,name,type},messages:[{id,at_local,from:{own,name},text,reply_to:{id,quote}}],has_more,next_before}',
   },
   {
     verb = 'reactions', capability = 'whatsapp_reactions', effect = 'read',

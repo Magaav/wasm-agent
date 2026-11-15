@@ -86,6 +86,9 @@ local session_results=dofile('lua/core/codemode_results.lua')
 -- on the managed operations the node already supervises - this file only names which tool call an
 -- operation is (`lua/core/codemode_pending.lua`).
 local pending_calls=dofile('lua/core/codemode_pending.lua')
+-- What a connector answers, learned from its settled answers for the connector index (keys only).
+local return_shapes=dofile('lua/core/return_shapes.lua')
+local connector_name=dofile('lua/core/codemode_policy.lua').connector
 -- Discovery spellings are parsed in one place: searchTools({names={...}}) and searchTools("select:a,b") are
 -- the same request as tool_search, so the guest cannot drift from the outer facade (07/11).
 local envelope=dofile('lua/core/envelope.lua')
@@ -506,6 +509,8 @@ local function settle_call(s,call)
      else value,success={error=tostring(result),effect='unknown',replay_allowed=false},false end
      local encoded=json.encode(value);local reference=output.store(encoded)
      value,success=script_value(value,success)
+     -- The shape the SCRIPT saw, recorded once per change (lua/core/return_shapes.lua never raises).
+     if success and connector_name(call.tool) then return_shapes.learn(call.tool,current['function'].parameters,value) end
      s.calls[#s.calls+1]={id=call.id,name=call.tool,ok=success,evidence=reference,status=call_status(value),why=call_why(value)}
      telemetry.finish(span,{ok=success,name=call.tool,nested=true,codemode_call=call.id,result_bytes=#encoded,result_hash=host.sha256(encoded)})
     end

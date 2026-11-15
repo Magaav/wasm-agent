@@ -434,6 +434,22 @@ function M.schemas()
  end end
  table.sort(schemas,function(a,b)return a['function'].name<b['function'].name end);return schemas
 end
+-- The `outputSchema` each offered connector tool declared at its last probe, by catalogue name (the
+-- probe keeps the server's whole tool object, `mcp-client-core.mjs`/`components.rs`). Read only to print
+-- a return shape in the connector index (lua/core/return_shapes.lua); never part of the catalogue, so
+-- the declaration hash and what the provider is sent stay exactly as they were.
+function M.output_schemas()
+ local out={}
+ local ready=query("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'",{})
+ if #ready==0 then return out end
+ local store=load_store()
+ for id,row in pairs(store.servers)do if row.enabled and row.probe and row.probe.ok and not M.whatsapp_family(id) then
+  for _,tool in ipairs(row.probe.tools or {})do
+   if row.definition.tools[tool.name] and type(tool.outputSchema)=='table' then out[M.namespace(id,tool.name)]=tool.outputSchema end
+  end
+ end end
+ return out
+end
 function M.resolve_tool(name)
  local store=load_store()
  for id,row in pairs(store.servers)do if row.enabled and row.probe and row.probe.ok and not M.whatsapp_family(id) then
