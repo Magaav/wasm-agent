@@ -24,7 +24,8 @@ send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'imap_search
 setTimeout(() => {
   let checks = 0; const ok = (v, m) => { assert.ok(v, m); checks++; };
   const limit = replies.get(1).result.tools[0].inputSchema.properties.limit;
-  ok(limit.minimum === 1 && limit.maximum === 50, 'tools/list states limit 1..50: ' + JSON.stringify(limit));
+  // The tools/list answer is byte-for-byte the server's: the approval binds these schemas (15/11 regression).
+  ok(limit.minimum === undefined && limit.maximum === undefined && JSON.stringify(limit) === '{"type":"integer"}', 'tools/list is never rewritten: ' + JSON.stringify(limit));
   const paged = replies.get(2).result.echo.arguments;
   ok(paged.cursor === 'c1' && paged.limit === 30 && paged.mailbox === 'INBOX' && paged.last_days === undefined && paged.query === undefined && paged.unread_only === undefined, 'a cursor search drops its filters: ' + JSON.stringify(paged));
   const got = replies.get(3).result.echo.arguments;

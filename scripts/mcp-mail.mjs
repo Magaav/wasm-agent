@@ -81,11 +81,12 @@ child.on('exit', (code, signal) => { process.exitCode = typeof code === 'number'
 // cursor already carries (mail-mcp refuses the combination); get_message/raw/attachment take account_id
 // from the message_id when it is missing (mail-mcp refuses a message_id without it although the id names
 // the account); and the tools/list answer states the 1..50 range of a search's limit, which mail-mcp
-// enforces but does not declare. Every other byte flows through unchanged.
+// enforces but does not declare - NO: the tools/list answer is never rewritten (15/11, fix26): the
+// connector's approval binds the exact tool schemas (mcp_tool_schemas_changed), so a wrapper that edits
+// them refuses every call. Only requests are repaired; every answer flows through unchanged.
 const SEARCH_TOOLS = new Set(['imap_search_messages', 'imap_search_all_mailboxes']);
 const CURSOR_KEEPS = new Set(['account_id', 'mailbox', 'cursor', 'limit', 'include_snippet', 'snippet_max_chars']);
 const BY_MESSAGE_ID = new Set(['imap_get_message', 'imap_get_message_raw', 'imap_get_attachment']);
-const listRequests = new Set();
 export function repairCall(params) {
   if (!params || typeof params !== 'object' || typeof params.arguments !== 'object' || params.arguments === null) return params;
   const name = params.name;
@@ -98,16 +99,6 @@ export function repairCall(params) {
     if (owner) args.account_id = owner[1];
   }
   return { ...params, arguments: args };
-}
-export function repairList(result) {
-  for (const tool of (result && Array.isArray(result.tools) ? result.tools : [])) {
-    const limit = SEARCH_TOOLS.has(tool.name) && tool.inputSchema && tool.inputSchema.properties && tool.inputSchema.properties.limit;
-    if (limit && typeof limit === 'object') {
-      if (limit.minimum === undefined) limit.minimum = 1;
-      if (limit.maximum === undefined) limit.maximum = 50;
-    }
-  }
-  return result;
 }
 let buffer = '';
 const answerLocally = (id, reason, tool) => {
@@ -129,7 +120,6 @@ process.stdin.on('data', (chunk) => {
       answerLocally(message.id ?? null, 'mail_writes_not_enabled', message.params?.name);
       continue;
     }
-    if (message.method === 'tools/list' && message.id !== undefined) listRequests.add(message.id);
     if (message.method === 'tools/call') {
       child.stdin.write(JSON.stringify({ ...message, params: repairCall(message.params) }) + '\n');
       continue;
@@ -138,7 +128,7 @@ process.stdin.on('data', (chunk) => {
   }
 });
 process.stdin.on('end', () => { try { child.stdin.end(); } catch { /* already closed */ } });
-// Answers flow back line for line; only a tools/list answer is touched (repairList).
+// Answers flow back line for line, untouched.
 let outBuffer = '';
 child.stdout.setEncoding('utf8');
 child.stdout.on('data', (chunk) => {
@@ -149,11 +139,6 @@ child.stdout.on('data', (chunk) => {
     outBuffer = outBuffer.slice(index + 1);
     let reply = null;
     try { reply = JSON.parse(line); } catch { process.stdout.write(line + '\n'); continue; }
-    if (reply && listRequests.has(reply.id) && reply.result) {
-      listRequests.delete(reply.id);
-      process.stdout.write(JSON.stringify({ ...reply, result: repairList(reply.result) }) + '\n');
-      continue;
-    }
     process.stdout.write(line + '\n');
   }
 });
