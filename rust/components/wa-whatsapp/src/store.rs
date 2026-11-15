@@ -8,10 +8,13 @@
 //! message secrets) is a cache the protocol rebuilds from the network, kept in memory only.
 //!
 //! Keys: dev | id/<addr> | ses/<addr> | pk/<id> | spk/<id> | sk/<addr> | sync/<hex> | ver/<name> |
-//! mac/<name>/<hex> | lid/<lid> | tc/<jid>.
+//! mac/<name>~<x> (16 blobs per collection, `macshards.rs`; older builds wrote mac/<name>/<hex>, still
+//! read and folded in) | lid/<lid> | tc/<jid>.
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::cell::RefCell;
 use std::sync::Arc;
+use std::time::Duration;
 use wacore::appstate::hash::HashState;
 use wacore::store::error::{Result, StoreError};
 use wacore::store::in_memory::InMemoryBackend;
@@ -19,22 +22,66 @@ use wacore::store::traits::*;
 use wacore::store::Device;
 use wacore_appstate::processor::AppStateMutationMAC;
 
+use crate::macshards::{MacShards, Write};
 use crate::wa::kernel::kv;
+use crate::wa::kernel::types::Error as KError;
 
-fn io(what: &str, error: crate::wa::kernel::types::Error) -> StoreError {
-    StoreError::Io(std::io::Error::other(format!("kv {what} failed: {error:?}")))
+/// The refusal as a `StoreError`, and once on the component log: whatsapp-rust prints a
+/// `StoreError::Io` as the bare words "I/O error", which hid a `kv.write` rate-limit refusal for
+/// days (15/11). The line names the call, the key's kind (`ses`, `mac`, ... - never the rest of the
+/// key, which can carry an address) and the host's reason word.
+fn io(what: &str, key: &str, error: KError) -> StoreError {
+    let kind = key.split(['/', '~']).next().unwrap_or("");
+    println!("store: kv {what} {kind}/... failed: {error:?}");
+    StoreError::Io(std::io::Error::other(format!("kv {what} {kind}/... failed: {error:?}")))
 }
+
+/// `again` is the host saying "the grant's bucket refills within a second" (`gate_verdict`: a
+/// rate limit with `retry_after < 1 s`). Wait and retry, bounded, instead of failing the protocol
+/// step: the index and the store share one `kv.write` budget, and a sync that dies because the
+/// index took the last token just retries the whole snapshot later.
+const AGAIN_WAIT: Duration = Duration::from_millis(250);
+const AGAIN_TRIES: u32 = 40;
+
+async fn patiently<T, F, Fut>(mut call: F) -> std::result::Result<T, KError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, KError>>,
+{
+    let mut tries = 0;
+    loop {
+        match call().await {
+            Err(KError::Again) if tries < AGAIN_TRIES => {
+                tries += 1;
+                crate::wasi::clocks::monotonic_clock::wait_for(AGAIN_WAIT.as_nanos() as u64).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 // Every kv call is awaited: `wa:kernel@0.2` declares them async. The host answers without
 // suspending (a local store), so each await completes in the poll it started in and the replay
 // costs what it did on 0.1.
 async fn put(key: &str, value: &[u8]) -> Result<()> {
-    kv::set(key.as_bytes().to_vec(), value.to_vec()).await.map_err(|e| io("set", e))
+    patiently(|| kv::set(key.as_bytes().to_vec(), value.to_vec())).await.map_err(|e| io("set", key, e))
 }
 async fn del(key: &str) -> Result<()> {
-    kv::delete(key.as_bytes().to_vec()).await.map_err(|e| io("delete", e))
+    patiently(|| kv::delete(key.as_bytes().to_vec())).await.map_err(|e| io("delete", key, e))
 }
 async fn del_prefix(prefix: &str) -> Result<()> {
-    kv::delete_prefix(prefix.as_bytes().to_vec()).await.map(|_| ()).map_err(|e| io("delete-prefix", e))
+    patiently(|| kv::delete_prefix(prefix.as_bytes().to_vec())).await.map(|_| ()).map_err(|e| io("delete-prefix", prefix, e))
+}
+/// Execute a `macshards` plan in order; the caller commits it only when every call succeeded.
+async fn run(writes: &[Write]) -> Result<()> {
+    for write in writes {
+        match write {
+            Write::Set(key, value) => put(key, value).await?,
+            Write::Delete(key) => del(key).await?,
+            Write::DeletePrefix(prefix) => del_prefix(prefix).await?,
+        }
+    }
+    Ok(())
 }
 async fn get(key: &str) -> Option<Vec<u8>> {
     kv::get(key.as_bytes().to_vec()).await.ok().flatten()
@@ -56,17 +103,20 @@ pub async fn stored_device_paired() -> bool {
 
 pub struct PersistentBackend {
     inner: InMemoryBackend,
+    /// The mutation MACs as the kv holds them, sharded (`macshards.rs`). Never borrowed across an
+    /// await: a plan is built, the borrow ends, the writes run, then the plan is committed.
+    macs: RefCell<MacShards>,
 }
 
 impl PersistentBackend {
     /// Open the store and replay everything persisted into memory. Returns the entry count.
     pub async fn open() -> Result<(Self, usize)> {
-        let backend = PersistentBackend { inner: InMemoryBackend::new() };
+        let backend = PersistentBackend { inner: InMemoryBackend::new(), macs: RefCell::new(MacShards::new()) };
         // Replay in pages ordered by key (kv.scan with an exclusive cursor).
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
         let mut cursor: Option<Vec<u8>> = None;
         loop {
-            let page = kv::scan(Vec::new(), cursor.clone(), 1000).await.map_err(|e| io("scan", e))?;
+            let page = kv::scan(Vec::new(), cursor.clone(), 1000).await.map_err(|e| io("scan", "", e))?;
             if page.is_empty() {
                 break;
             }
@@ -77,7 +127,18 @@ impl PersistentBackend {
         entries.sort_by_key(|(k, _)| k != "dev");
         let count = entries.len();
         for (key, value) in entries {
+            if key.starts_with("mac/") {
+                backend.macs.borrow_mut().restore_key(&key, &value);
+                continue;
+            }
             backend.restore(&key, &value).await;
+        }
+        // Which MAC layout is authoritative per collection is only known once every key was seen.
+        let restored = backend.macs.borrow_mut().finish_restore();
+        for (name, macs) in restored {
+            let macs: Vec<AppStateMutationMAC> =
+                macs.into_iter().map(|(index_mac, value_mac)| AppStateMutationMAC { index_mac, value_mac }).collect();
+            let _ = backend.inner.put_mutation_macs(&name, 0, &macs).await;
         }
         Ok((backend, count))
     }
@@ -108,10 +169,6 @@ impl PersistentBackend {
             "ver" => match serde_json::from_slice::<HashState>(v) {
                 Ok(state) => i.set_version(rest, state).await,
                 Err(_) => Ok(()),
-            },
-            "mac" => match rest.rsplit_once('/').and_then(|(name, idx)| Some((name, unhex(idx)?))) {
-                Some((name, index_mac)) => i.put_mutation_macs(name, 0, &[AppStateMutationMAC { index_mac, value_mac: v.to_vec() }]).await,
-                None => Ok(()),
             },
             "lid" => match serde_json::from_slice::<LidPnMappingEntry>(v) {
                 Ok(entry) => i.put_lid_mapping(&entry).await,
@@ -225,23 +282,28 @@ impl AppSyncStore for PersistentBackend {
         put(&format!("ver/{name}"), &json(&state)?).await?;
         self.inner.set_version(name, state).await
     }
+    /// A full snapshot is one call with every MAC of the collection: at most 16 shard writes now,
+    /// where it used to be one `kv.write` per MAC (the 15/11 rate-limit refusal, `macshards.rs`).
     async fn put_mutation_macs(&self, name: &str, version: u64, mutations: &[AppStateMutationMAC]) -> Result<()> {
-        for m in mutations {
-            put(&format!("mac/{name}/{}", hex(&m.index_mac)), &m.value_mac).await?;
-        }
+        let macs: Vec<(Vec<u8>, Vec<u8>)> = mutations.iter().map(|m| (m.index_mac.clone(), m.value_mac.clone())).collect();
+        let plan = self.macs.borrow().plan_put(name, &macs);
+        run(&plan.writes).await?;
+        self.macs.borrow_mut().commit(plan);
         self.inner.put_mutation_macs(name, version, mutations).await
     }
     async fn get_mutation_mac(&self, name: &str, index_mac: &[u8]) -> Result<Option<Vec<u8>>> {
         self.inner.get_mutation_mac(name, index_mac).await
     }
     async fn delete_mutation_macs(&self, name: &str, index_macs: &[Vec<u8>]) -> Result<()> {
-        for idx in index_macs {
-            del(&format!("mac/{name}/{}", hex(idx))).await?;
-        }
+        let plan = self.macs.borrow().plan_delete(name, index_macs);
+        run(&plan.writes).await?;
+        self.macs.borrow_mut().commit(plan);
         self.inner.delete_mutation_macs(name, index_macs).await
     }
     async fn clear_mutation_macs(&self, name: &str) -> Result<()> {
-        del_prefix(&format!("mac/{name}/")).await?;
+        let plan = self.macs.borrow().plan_clear(name);
+        run(&plan.writes).await?;
+        self.macs.borrow_mut().commit(plan);
         self.inner.clear_mutation_macs(name).await
     }
     async fn get_latest_sync_key_id(&self) -> Result<Option<Vec<u8>>> {
@@ -395,3 +457,4 @@ unsafe impl Sync for PersistentBackend {}
 fn _assert_backend(b: PersistentBackend) -> Arc<dyn Backend> {
     Arc::new(b)
 }
+
