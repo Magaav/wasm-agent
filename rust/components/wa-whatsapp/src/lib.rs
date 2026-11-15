@@ -36,6 +36,9 @@ pub mod history;
 /// The message index: every received message and event, in the component's kv, with the keys and the
 /// token normalization a query reads (`docs/SERVICE-COMPONENTS.md`, "The message index").
 pub mod index;
+/// App-state mutation MACs as a few kv blobs per collection (the store's write budget): pure, so
+/// `cargo test` pins the snapshot cost natively while `store.rs` stays wasm-only.
+pub mod macshards;
 /// One inbound message as the index keeps it: every kind, plus the source mutations as events.
 pub mod record;
 /// OCR for image messages: the 20 MiB bound, which record is worth reading, what a permanent answer
