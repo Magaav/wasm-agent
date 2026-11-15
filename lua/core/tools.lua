@@ -1421,6 +1421,28 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- The mailbox index (docs/EMAIL-CONNECTOR.md): a question is a job on `email.query`, answered by the
     -- wa-email component out of its own kv.
     if type(host[name])~='function' then return {error=name..'_unavailable',effect='none'} end
+    -- A node whose wa-email service is not stored, or stored but disabled, has no worker for email.query:
+    -- a job written there is never answered (15/11 replays: email_search sat at 202 'running' and the model
+    -- gave the tool up). That is said at once, with the working way to read mail, and nothing is queued.
+    -- An enabled service keeps the queue path (a CLI process cannot see whether it is running right now).
+    -- A request missing its essentials goes to the host's own validator first, which refuses it before
+    -- anything is queued: fixing the call is the first thing to say.
+    local essentials=true
+    if name=='email_search' then
+      essentials=args.q~=nil or args['from']~=nil or args.subject~=nil or args.mailbox~=nil or args['since']~=nil or args['until']~=nil or args.has_attachment~=nil
+    elseif name=='email_media' then essentials=args.uid~=nil end
+    if essentials then
+      local ok_inv,inv=pcall(function() return dofile('lua/core/services.lua').inventory() end)
+      if ok_inv and type(inv)=='table' and type(inv.services)=='table' then
+        local row
+        for _,service in ipairs(inv.services) do if service.name=='wa-email' then row=service end end
+        if not row or row.enabled==false then
+          return {ok=false,error='email_component_absent',status=404,effect='none',component='wa-email',
+            state=row and 'disabled' or 'not_stored',
+            note='this node runs no wa-email service, so its email index cannot answer: read mail with the mcp_google_imap_* tools (mcp_google_imap_search_messages, mcp_google_imap_get_message)'}
+        end
+      end
+    end
     local request
     if name=='email_search' then
       request={q=args.q,['from']=args['from'],subject=args.subject,mailbox=args.mailbox,['since']=args['since'],['until']=args['until'],has_attachment=args.has_attachment,limit=args.limit}

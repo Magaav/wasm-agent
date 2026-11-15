@@ -90,6 +90,7 @@ return {
   ['duplicate_message_id']='session_view.lua',
   ['edit_applied_but_record_failed']='file_tools.lua',
   ['edits_required_1_to_64']='file_tools.lua',
+  ['email_component_absent']='tools.lua',
   ['empty_model']='provider.lua',
   ['engine_error']='hooks.lua',
   ['envelope_loadout_changed']='envelope.lua',
