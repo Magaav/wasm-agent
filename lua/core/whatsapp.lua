@@ -1190,8 +1190,11 @@ function M.call(name, args, ctx)
   -- Bazar" and the model spent two calls finding the JID). The name is resolved once through contacts -
   -- of equal names the chat talked to last - and the answer says which chat it became. A send stays
   -- exact-JID only: a guessed recipient is the one mistake a read cannot make.
-  local NAMED = { search = true, read = true, message = true, reactions = true, media = true, download = true, backfill = true }
-  if NAMED[tool.verb] and type(args.chat) == 'string' and args.chat ~= '' and not args.chat:find('@', 1, true) then
+  -- `read` is not here: the component resolves a name itself (one pathway). A bare number is not a
+  -- name either - it keeps the exact-JID refusal the schema states.
+  local NAMED = { search = true, message = true, reactions = true, media = true, download = true, backfill = true }
+  if NAMED[tool.verb] and type(args.chat) == 'string' and args.chat ~= '' and not args.chat:find('@', 1, true)
+      and not args.chat:match('^[%d%s%+%-%(%)]+$') then
     local lookup = M.call('contacts', { q = args.chat, limit = 5 }, ctx)
     if type(lookup) ~= 'table' or type(lookup.chat) ~= 'string' or lookup.chat == '' then
       return { ok = false, error = 'whatsapp_chat_not_found', status = 404, effect = 'none', asked = args.chat,
