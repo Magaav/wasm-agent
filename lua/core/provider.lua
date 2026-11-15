@@ -1243,6 +1243,8 @@ function M.complete_with(model, messages, tools, stream, opts)
     body.tool_choice = "auto"
   end
   for key, value in pairs(M.cache_params(opts)) do body[key] = value end
+  -- Only the raw code channel sets this (WASM_AGENT_RAW_CODE=stop, lua/core/raw_code.lua).
+  if opts.stop then body.stop = opts.stop end
   if stream then body.stream=true; body.stream_options={include_usage=true} end
   local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
   local headers, attribution = headers_for(provider, opts.session_id)

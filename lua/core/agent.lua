@@ -25,6 +25,8 @@ local hooks = dofile("lua/core/hooks.lua")
 local done_gate = dofile("lua/core/done_gate.lua")
 local progress_guard = dofile("lua/core/progress_guard.lua")
 local run_failure = dofile("lua/core/run_failure.lua")
+-- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
+local raw_code = dofile("lua/core/raw_code.lua")
 
 -- One place that tells a hook what it is being told about. Ids, names, lengths and bounded views
 -- only: a hook never receives the transcript, a credential or a whole tool result unless the node
@@ -1040,6 +1042,7 @@ function M:build_context()
     -- tool list leaves connectors out, so this hint is how an empty context finds them.
     local code_catalog=self.subagent and tool_list or tools.all(self.role,code_ctx,memory)
     local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog)
+    if raw_code.active(self.codemode_policy) then block=block..'\n'..raw_code.GUIDANCE end
     first=first..'\n\n'..block
     parts=parts or {};parts.codemode=host.sha256(block)
   end
@@ -2233,6 +2236,7 @@ function M:run_body(text, images)
     local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
        on_call_start=self.on_call_start,on_call_end=self.on_call_end,context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
+    call_opts.stop = raw_code.stop_sequences(self.codemode_policy)
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     -- No response headers means no model output reached this process, hence no returned tool call
     -- could have run. Retry only that phase, with a strict operator-controlled bound. The upstream
@@ -2519,6 +2523,14 @@ function M:run_body(text, images)
       end
     end
 
+    -- The raw code channel (lua/core/raw_code.lua, WASM_AGENT_RAW_CODE): a ```js run block in the reply
+    -- is appended here as the codemode call it stands for, so everything below - recording, dispatch,
+    -- redaction, projection, the cut/limit refusal - treats it as that call. Off: nothing is read.
+    local raw_run = raw_code.active(self.codemode_policy)
+      and raw_code.take(result, raw_code.stop_sequences(self.codemode_policy) ~= nil) or nil
+    if raw_run and raw_run.restored_fence then
+      self.emit({ type = "status", text = "the raw-code stop sequence ended the reply at a code fence that was not a run block" })
+    end
     local calls, call_repairs = provider.repair_calls(result.tool_calls or {}, tool_list,
       (self.prefix and self.prefix.catalog) or tools.all(self.role))
     local repaired_calls, recovered_calls = 0, 0
@@ -2831,6 +2843,8 @@ function M:run_body(text, images)
       -- A call the harness repaired was not a call the model can make: nothing runs, and the answer is a
       -- tool error that names the fault and hands its own arguments back (11/11, gate.log 50f2c555).
       local call_repair = call_repairs[call.id]
+      -- A run block the harness refused (unterminated, empty) is answered with that refusal; it never runs.
+      local raw_refusal = raw_run and raw_run.id == call.id and raw_run.refusal or nil
       -- A call whose name was recovered from its arguments is a call, not a fault: it runs below
       -- under that name and its result carries the one-line note. Only a call nothing identifies is
       -- refused (`provider.repair_calls`).
@@ -2879,6 +2893,7 @@ function M:run_body(text, images)
       host.beat()
       pcall(memory.presence_beat, self.session_id)
       local handled, output = pcall(function() if name_error then return name_error end
+        if raw_refusal then return raw_refusal end
         if argument_error then return argument_error end
         if parallel_op then
           if parallel_op.operation_id then
@@ -2980,6 +2995,12 @@ function M:run_body(text, images)
         if output.hook_context then
           content = content .. "\n\n[hook context] " .. tostring(output.hook_context)
         end
+      end
+      -- What the harness had to say about a run block (several blocks, text dropped after it) rides
+      -- with its result, like hook context: the projected view itself is the codemode one.
+      if projected and raw_run and raw_run.id == call.id then
+        local note = raw_code.note(raw_run)
+        if note then content = content .. "\n\n" .. note end
       end
       -- What a navigation call answered (action, found, count): a wrong answer must not be
       -- recorded as a plain success. Enums/booleans/counts only.
