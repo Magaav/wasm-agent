@@ -1896,7 +1896,9 @@ function METHODS:codemode_start(event)
   if not self:transcript() then return end
   -- A code-mode block, not an ordinary topic: it is drawn expanded while it is the newest one and
   -- folds to the summary a newer block leaves it with.
-  if host.transcript_block then pcall(host.transcript_block, true, true) else self:topic(true) end
+  -- No topic row either: the block has no title, so the plain path starts with the code. The host's
+  -- block marker is still asked for (it is what lets a newer block fold this one).
+  if host.transcript_block then pcall(host.transcript_block, true, true) end
   self.pending.block, self.pending.shown = true, true
   local o = self:codemode_opts()
   for _, row in ipairs(codemode_block.rows(self.code, self.limit, o)) do self:write(row .. "\n") end
