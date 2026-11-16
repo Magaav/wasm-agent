@@ -140,3 +140,55 @@ already been bitten by exactly that.
   hash like the Lua tree's "capability digest"?
 * If `mesh.enabled` is off and a customer later enables it, whose pin document wins: the signed one
   shipped in the release, or the newest one the node fetched while disabled?
+
+## Known defect, measured 16/11: a relayed roster call never comes back
+
+This is the reason step 2 below is the first component release and not a nice-to-have. It was found
+while proving the boundary on a live fleet, after both ends had the client gate fix
+(`lua/core/tools.lua`, the "second door").
+
+**Symptom.** A node at roster level 0 that is *not* pinned in a peer's binding tries to drive that
+peer. With the mesh route available the call is dispatched and then never answered:
+
+```
+caller  (avell)   wa call openclaw ls /
+rendezvous        [relay] slow … reason=attached but no answer within the caller's wait waited_ms=45000
+target   (openclaw, wa-serve)  [relay] dispatch … POST /node/call budget_ms=42000 source=relay running=1/3
+                               (no matching [relay] done)
+caller answer     node_status=504 reason=relay_request_timeout verified=false
+```
+
+Without the mesh route the same call refuses in milliseconds with `layer=node reason=unknown_caller
+transport=relay` — that is the *binding* relay deciding by pins, which is the behaviour the gate fix
+was meant to leave behind.
+
+**What is ruled out, by measurement.**
+
+* the host's admission op is not the stall: `{admit:{headers:[["x-wa-mesh","1"]],body:"{}",transport:"relay"}}`
+  answers in 0 s (`mesh_refused/bad_request` for the synthetic body, `mesh_disabled` without `WA_MESH`);
+* the mesh client is not disabled: `host.mesh_call({gate:true})` → `{"enabled":true,"from":"environment
+  WA_MESH"}` on the caller;
+* the target's relay runtime does complete other relayed dispatches (~450 ms, `status=200`) in the same
+  window, so "the relay is down" is not it;
+* `relay::configured` finds a relay from `WASM_AGENT_RELAY` **or** `binding.json`'s `service` when the
+  binding is `active` — a node whose env names no relay still has one, and that is how the caller
+  silently fell back to the binding relay before `WASM_AGENT_RELAY` was set explicitly.
+
+**Where to look next, in order.**
+
+1. `lua/core/binding.lua` `M.serve` → `mesh_relayed_call`: after `host.mesh_call({admit})` answers ok it
+   runs the caller's `/node/call` with the admission in force (`wa_mesh_admit` … `wa_node_call` …
+   `wa_mesh_clear`). A stall with no log line after `[relay] dispatch` is consistent with `wa_node_call`
+   never returning inside that lane.
+2. `rust/wa-mesh/src/admission.rs` `decide` for a `transport=relay` inbound: it is pure computation on
+   the roster (`MeshCall::parse`, roster lookup, hierarchy, grants) — verify with the replay/ticket
+   registries (`replay_window`, `registry`) that no lock is held across the call.
+3. The caller side after the fact: does `mesh_attempt` (`lua/core/nodes.lua`) see the answer, or does it
+   return nil and let `remote_call` fall back to the binding relay? The two cases look identical from
+   the CLI today, and that ambiguity is itself a defect — the refusal should say which carrier failed.
+
+**Reproduction to keep.** `rust/wa-mesh/src/tests_e2e.rs` already builds a fleet of members and a
+server per member (`fleet()`, `start()`, `signed_call()`); the missing test is one where the caller is
+**not** in the target's binding pins and the call arrives with `transport=relay`, asserting: admitted by
+the roster, answered within the budget, and the answer's attestation verifies. Write that test before
+touching the code — it is the difference between fixing this once and chasing it in production again.
