@@ -308,6 +308,14 @@ impl Admitter {
             return unsigned(403, "unknown_caller");
         };
         let header_key = inbound.header("x-wa-pub").unwrap_or_default();
+        // PROBE (remove with the fix): which of the two `bad_signature` arms is answering.
+        eprintln!(
+            "[probe] decide key_eq={} body_len={} key_len={} roster_key_len={}",
+            header_key == caller.public_key,
+            inbound.body.len(),
+            header_key.len(),
+            caller.public_key.len()
+        );
         if header_key != caller.public_key {
             return unsigned(401, "bad_signature");
         }

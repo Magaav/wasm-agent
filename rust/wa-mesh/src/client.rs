@@ -403,6 +403,7 @@ impl<'a> Client<'a> {
         let body = call.encode();
         let ts = wire::now_seconds();
         let signature = self.identity.sign(&MeshCall::call_message(&caller.node_id, ts, &body));
+        let probe_signature = signature.get(..16).unwrap_or_default().to_string();
         let headers = vec![
             ("x-wa-mesh".to_string(), "1".to_string()),
             // The relay drops response headers, so the target is told to seal its answer in the body.
@@ -419,6 +420,14 @@ impl<'a> Client<'a> {
             connect_timeout: self.config.connect_timeout,
             io_timeout: self.config.io_timeout,
         };
+        // PROBE (remove with the fix): what this node signs, so the target's digest can be compared
+        // with it. A mismatch here is the relay/JSON hop re-encoding the signed bytes.
+        eprintln!(
+            "[probe] caller body_sum={} len={} ts={ts} sig={}",
+            body.bytes().map(|b| b as u64).sum::<u64>(),
+            body.len(),
+            probe_signature
+        );
         let outcome = client.send(&target.node_id, "/node/call", &headers, &body, &request_id);
         let elapsed = started.elapsed().as_millis() as u64;
         let attempt = Attempt {
