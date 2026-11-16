@@ -1499,7 +1499,7 @@ do
   -- The script, ONCE: six rows, then the count of what was kept back.
   eq(#first.lines, 8, "all eight script rows, no fold and no heading")
   ok(has(visible(first.lines[6]), "tools.lua"), "and the sixth is its sixth line")
-  ok(has(visible(first.lines[8]), "server.lua"), "the last one is drawn too: " .. visible(first.lines[8]))
+  ok(has(visible(first.lines[8]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[8]))
 
   -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
   -- second row, which is what "streams" has to mean in a transcript that can only append.
@@ -1535,10 +1535,14 @@ do
   ok(has(shown, '{"count":2,"first":"chat.lua"}'), "the value the model received is the result row: " .. shown)
   ok(not has(shown, "/home/agent/.wasm-agent/mcp/requests"), "the evidence envelope's path is not the answer")
   ok(has(shown, "evidence: 2473 B · sha 5f2a1c9d"), "it is named once, under the value: " .. shown)
+  -- The band is padded to the row width; the answer rows are their own width, so only the script
+  -- rows are measured here.
   local widest = 0
-  for _, row in ipairs(rows) do widest = math.max(widest, view_lib.columns(visible(row))) end
-  eq(widest, 80, "every row is exactly the width it was given (the band is padded)")
-  ok(not has(shown, "CodeAct"), "and no row grew a title")
+  for index = 1, 8 do widest = math.max(widest, view_lib.columns(visible(rows[index]))) end
+  eq(widest, 80, "every script row is exactly the width it was given (the band is padded)")
+  local block = {}
+  for index = 1, 8 do block[#block + 1] = visible(rows[index]) end
+  ok(not has(table.concat(block, "\n"), "CodeAct"), "and no script row grew a title")
 
   -- The next code-mode call collapses the one before it to its summary - the running block is the one
   -- that is open (operator, 13/11) - and the host decides, so a pinned block is not folded.
@@ -1560,8 +1564,8 @@ do
     "a running script writes no block to a log (the status line is all): " .. visible(table.concat(plain_written)))
   plain:event({ type = "tool_result", name = "codemode", result = { ok = true, value = { count = 2 } } })
   local text = visible(table.concat(plain_written))
-  ok(has(text, "⏺ Code") and has(text, "tools.ls") and has(text, "… +2 lines"),
-    "the block is written once, with its script and the fold's count: " .. text)
+  ok(has(text, "tools.ls") and has(text, "return {count: hits.length") and not has(text, "… +"),
+    "the block is written once, with the whole script and no fold and no title: " .. text)
   ok(has(text, '{"count":2}'), "and the value under it")
   ok(not has(text, "⏳"), "with no live mark in a log that cannot update it")
 

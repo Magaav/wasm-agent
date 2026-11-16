@@ -548,7 +548,7 @@ function M.summary(model, width, options)
   -- and did it work", and that is one thought.
   -- No modality word in the folded line either: the block above it has none, and the tools are what
   -- the reader is asking about ("what ran, and did it work").
-  local parts = { "\226\143\186", names ~= "" and (names .. " " .. mark) or mark }
+  local parts = { "\226\143\186 " .. (names ~= "" and (names .. " " .. mark) or mark) }
   if model.seconds then parts[#parts + 1] = o.elapsed(model.seconds * 1000) end
   local text = table.concat(parts, " \194\183 ")
   local value = M.hide_evidence(model.value)
