@@ -225,3 +225,25 @@ server per member (`fleet()`, `start()`, `signed_call()`); the missing test is o
 **not** in the target's binding pins and the call arrives with `transport=relay`, asserting: admitted by
 the roster, answered within the budget, and the answer's attestation verifies. Write that test before
 touching the code — it is the difference between fixing this once and chasing it in production again.
+
+**Root cause of the caller side, measured after the pre-admission fix.** With `pre_admit_relayed` in
+place the mesh call no longer hangs — it answers in 16 ms with
+`reason=unreachable:read_failed:Connection reset by peer (os error 104)`. That reset is the honest
+answer to a plaintext client talking to a TLS port: `rust/wa-mesh/src/http.rs` speaks **plain TCP and
+has no TLS crate in `Cargo.toml`** (`grep -c rustls rust/wa-mesh/Cargo.toml` → 0). Pointing
+`WASM_AGENT_RELAY` at `https://rendezvous.colmeio.com` therefore opens a cleartext connection to :443
+and Caddy closes it immediately. The binding relay works because it is the *Lua* hop, which goes
+through `host.http` (TLS-capable); the mesh hop is Rust and is not.
+
+So the mesh relay hop needs one of three things, in order of what I would do:
+
+1. **A plaintext fabric endpoint** (`WASM_AGENT_RELAY=http://<overlay-ip>:8890`): the mesh is meant to
+   run on the fabric (LAN or overlay addresses in the roster), and the public TLS terminator in front of
+   the rendezvous is the *binding* relay's door, not the mesh's. This costs no code.
+2. **TLS in `wa-mesh`** (rustls + `http::request` choosing it by scheme): the general fix, a dependency
+   and ~50 lines, and it makes any https relay usable.
+3. **Route the hop through `host.http`** so one TLS implementation serves both relays — the cleanest
+   seam, the largest change.
+
+Until one of them is done, a mesh call from a node whose roster gives no address always ends at the
+relay hop, and the relay hop cannot be reached over https.
