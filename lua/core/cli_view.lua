@@ -2191,7 +2191,9 @@ function METHODS:event(event)
     -- which is why the heading is printed here and not with the result; only the host's transcript can
     -- hold a row its ticker rewrites while this process is blocked, so the plain layout keeps the old
     -- order (heading with the result) and prints no live line.
-    self:progress("begin", event.name or "tool")
+    -- A code-mode call opens with its code, not with a heading row: `progress("begin")` prints the
+    -- label, which is what put a title above the block.
+    if not is_codemode(event.name, event.arguments) then self:progress("begin", event.name or "tool") end
     if is_codemode(event.name, event.arguments) then
       -- The heading is `⏺ CodeAct · <the tools it calls>`: the modality is named (CodeAct: the model
       -- acts by writing code), the tools say what the script did, and the script itself is never the
