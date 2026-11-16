@@ -476,7 +476,9 @@ local function mesh_relayed_call(headers, body)
   headers['x-wa-mesh-carrier']='relay'
   local pairs_list={}
   for name,value in pairs(headers) do pairs_list[#pairs_list+1]={name,tostring(value)} end
+  print('[mesh] relayed admit start from='..tostring(headers['x-wa-node'] or '?'))
   local ok,raw=pcall(host.mesh_call,json.encode({admit={headers=pairs_list,body=tostring(body or ''),transport='relay'}}))
+  print('[mesh] relayed admit done ok='..tostring(ok)..' len='..tostring(type(raw)=='string' and #raw or -1))
   if not ok or type(raw)~='string' then return nil end
   local decoded=decode(raw)
   if not decoded then return nil end
@@ -485,14 +487,19 @@ local function mesh_relayed_call(headers, body)
     -- The roster said yes: run the caller's own `/node/call` request with that decision in force.
     wa_mesh_admit(json.encode({node_id=decoded.caller_node_id,public_key=decoded.caller_public_key,
       name=decoded.caller_name,level=decoded.caller_level,capability=decoded.capability,request_id=decoded.request_id}))
+    print('[mesh] relayed run start cap='..tostring(decoded.capability or '?'))
     local ran,answer=pcall(wa_node_call,decoded.inner_body or '',inner['x-wa-node'] or '',
       inner['x-wa-pub'] or '',inner['x-wa-ts'] or '',inner['x-wa-sig'] or '')
+    print('[mesh] relayed run done ok='..tostring(ran)..' bytes='..tostring(#tostring(answer or '')))
     wa_mesh_clear()
     local out=ran and tostring(answer) or json.encode({error='internal_error'})
     local i=identity()
     local reply=json.encode({schema=1,request_id=tostring(decoded.request_id or ''),from_node_id=i.node_id,
       ok=true,status=200,body=out,verb=tostring(decoded.verb or '')})
-    return seal_relayed_reply(reply, decoded.caller_node_id) or out
+    print('[mesh] relayed seal start')
+    local sealed = seal_relayed_reply(reply, decoded.caller_node_id)
+    print('[mesh] relayed seal done len='..tostring(type(sealed)=='string' and #sealed or -1))
+    return sealed or out
   end
   if decoded.error=='mesh_legacy' then
     -- No verified roster on this node yet: today's pins decide, with the caller's own request.
