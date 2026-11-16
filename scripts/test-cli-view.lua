@@ -1492,15 +1492,14 @@ do
   view:event({ type = "tool", name = "codemode", arguments = { code = SCRIPT }, call_id = "c0" })
   local first = fake.blocks[#fake.blocks]
   eq(first and first.code, true, "the call opens a CODE-MODE block, the one the host draws expanded")
-  eq(visible(first.lines[1]), "⏺ Code", "its heading, before any inner call has run")
+  ok(not has(visible(first.lines[1]), "CodeAct"), "the block has no title: " .. visible(first.lines[1]))
+  ok(has(visible(first.lines[1]), "tools.ls"), "the first row is the script's own: " .. visible(first.lines[1]))
   ok(not has(visible(table.concat(first.lines, "\n")), "code="), "the heading never carries the code")
 
   -- The script, ONCE: six rows, then the count of what was kept back.
-  eq(#first.lines, 1 + 6 + 1, "the heading, six script rows and the `+N lines` marker")
-  ok(has(visible(first.lines[2]), "tools.ls"), "the first script row is the script's own")
-  ok(has(visible(first.lines[7]), "tools.lua"), "and the sixth is its sixth line")
-  ok(has(visible(first.lines[8]), "… +2 lines"), "the rest is named, not lost: " .. visible(first.lines[8]))
-  ok(not has(visible(table.concat(first.lines, "\n")), "server.lua"), "and it is not drawn a second time")
+  eq(#first.lines, 8, "all eight script rows, no fold and no heading")
+  ok(has(visible(first.lines[6]), "tools.lua"), "and the sixth is its sixth line")
+  ok(has(visible(first.lines[8]), "server.lua"), "the last one is drawn too: " .. visible(first.lines[8]))
 
   -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
   -- second row, which is what "streams" has to mean in a transcript that can only append.
@@ -1510,7 +1509,7 @@ do
   eq(#rows, base + 1, "a call that starts adds one row")
   ok(has(visible(rows[#rows]), "⏳ bash"), "with the ⏳ mark: " .. visible(rows[#rows]))
   ok(has(visible(rows[#rows]), "wc -l lua/core/chat.lua"), "and what it was given")
-  ok(has(visible(rows[1]), "CodeAct · bash"), "the heading names the tool as soon as it is called: " .. visible(rows[1]))
+  ok(has(visible(rows[#rows]), "bash"), "the call row names the tool as soon as it starts")
   view:event({ type = "codemode_call", id = "c1", name = "bash", state = "ok", ms = 250 })
   rows = first.lines
   eq(#rows, base + 1, "settling rewrites that row in place")
@@ -1536,11 +1535,10 @@ do
   ok(has(shown, '{"count":2,"first":"chat.lua"}'), "the value the model received is the result row: " .. shown)
   ok(not has(shown, "/home/agent/.wasm-agent/mcp/requests"), "the evidence envelope's path is not the answer")
   ok(has(shown, "evidence: 2473 B · sha 5f2a1c9d"), "it is named once, under the value: " .. shown)
-  ok(has(visible(rows[1]), "CodeAct · bash, web_read"),
-    "the heading names every tool the script called: " .. visible(rows[1]))
-  ok(has(visible(rows[1]), "1.2s"), "and the call's whole time, right-aligned: " .. visible(rows[1]))
-  eq(view_lib.columns(visible(rows[1])), 80, "on the width it was given")
-  ok(has(rows[1], view_lib.style("error")), "with its step mark in the failure's colour")
+  local widest = 0
+  for _, row in ipairs(rows) do widest = math.max(widest, view_lib.columns(visible(row))) end
+  eq(widest, 80, "every row is exactly the width it was given (the band is padded)")
+  ok(not has(shown, "CodeAct"), "and no row grew a title")
 
   -- The next code-mode call collapses the one before it to its summary - the running block is the one
   -- that is open (operator, 13/11) - and the host decides, so a pinned block is not folded.
@@ -1548,8 +1546,8 @@ do
   view:event({ type = "tool", name = "codemode", arguments = { code = "return 1;" }, call_id = "c9" })
   eq(fake.folds, 1, "the block before it is folded exactly once")
   eq(fake.folded_summary, expected, "to the summary this side built")
-  ok(has(fake.folded_summary, "⏺ CodeAct · bash, web_read ✗ web_http_429"),
-    "which names the tools and the failure: " .. tostring(fake.folded_summary))
+  ok(has(fake.folded_summary, "⏺ bash, web_read ✗ web_http_429"),
+    "which names the tools and the failure, with no modality word: " .. tostring(fake.folded_summary))
   ok(has(fake.folded_summary, "1.2s") and has(fake.folded_summary, '{"count":2,"first":"chat.lua"}'),
     "with its time and the value's first line: " .. tostring(fake.folded_summary))
   eq(fake.blocks[#fake.blocks].code, true, "and the new block is the open one")

@@ -546,7 +546,9 @@ function M.summary(model, width, options)
   local mark = M.verdict(model, o)
   -- The verdict rides with the names (`bash ×3 ✓`), a space apart: the reader is asking "what ran,
   -- and did it work", and that is one thought.
-  local parts = { "\226\143\186 Code", names ~= "" and (names .. " " .. mark) or mark }
+  -- No modality word in the folded line either: the block above it has none, and the tools are what
+  -- the reader is asking about ("what ran, and did it work").
+  local parts = { "\226\143\186", names ~= "" and (names .. " " .. mark) or mark }
   if model.seconds then parts[#parts + 1] = o.elapsed(model.seconds * 1000) end
   local text = table.concat(parts, " \194\183 ")
   local value = M.hide_evidence(model.value)
