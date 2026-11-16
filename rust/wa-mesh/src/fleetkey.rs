@@ -442,6 +442,49 @@ fn change_signer(key: &str, args: &[String]) -> Result<Box<dyn RosterSigner>, St
     )
 }
 
+/// The operator's rule (16/11): "if I am a master in a fabric I can do that; a guest should not."
+///
+/// The fleet key is a capability, not a role — a guest that found the seed could re-sign the whole
+/// mesh, and a master without it could do nothing. Two refusals/warnings close the gap where it can be
+/// closed without moving the key off the operator's machine:
+///
+/// * **A node the roster itself calls a guest (level >= 2) does not sign it.** The level comes from the
+///   signed file the node already trusts, so this needs no network and cannot be talked out of it.
+/// * **A bare key file is said out loud.** The seed is the trust anchor; a copy on a disk is one
+///   `tar`, one backup or one `git add` away from leaving the operator's hands, and the vault keeps it
+///   sealed with every signature audited (docs/MESH.md §1, docs/VAULT.md).
+///
+/// `Some(reason)` refuses the verb; the warning prints and does not refuse, because an operator with a
+/// key file is not doing anything wrong yet — he is one command away from doing it right.
+fn operator_gate(template: &Path, key: Option<&str>) -> Option<String> {
+    if let Some(key) = key {
+        if !key.starts_with("vault:") {
+            eprintln!(
+                "fleet: the fleet seed is a file on this disk ({key}): `wa vault import-ed25519 fleet --from {key} --shred` seals it and audits every signature"
+            );
+        }
+    }
+    let identity = Identity::load(&node_home().join("node.key")).ok()?;
+    let text = std::fs::read_to_string(template).ok()?;
+    let roster: Value = serde_json::from_str(&text).ok()?;
+    let nodes = roster.get("nodes")?.as_array()?;
+    for node in nodes {
+        if node.get("node_id").and_then(Value::as_str) == Some(identity.node_id.as_str()) {
+            let level = node.get("level").and_then(Value::as_u64).unwrap_or(0);
+            if level >= 2 {
+                return Some(format!(
+                    "fleet_guest_cannot_sign: this node is level {level} in the roster it was asked to sign, so it is a guest; changing the mesh is an operator's act (docs/MESH.md §2)"
+                ));
+            }
+            return None;
+        }
+    }
+    eprintln!(
+        "fleet: this node is not in the roster being signed, so its level could not be classified; signing anyway"
+    );
+    None
+}
+
 fn flag_value(args: &[String], name: &str) -> Option<String> {
     let mut iter = args.iter();
     while let Some(argument) = iter.next() {
@@ -464,6 +507,16 @@ pub fn run(args: &[String]) -> Option<i32> {
         return Some(0);
     }
     let now_s = crate::wire::now_seconds();
+    // Before any verb that signs: is this node allowed to be an operator here, and is the seed where it
+    // belongs? `keygen` writes a new key and `show` only reads, so neither passes through the gate.
+    if matches!(sub, "sign" | "revoke" | "rotate" | "anchor") {
+        if let Some(template) = args.get(2).filter(|argument| !argument.starts_with("--")) {
+            if let Some(reason) = operator_gate(Path::new(template), flag_value(args, "--key").as_deref()) {
+                eprintln!("{reason}");
+                return Some(3);
+            }
+        }
+    }
     match sub {
         "keygen" => {
             let Some(out) = flag_value(args, "--out") else {
