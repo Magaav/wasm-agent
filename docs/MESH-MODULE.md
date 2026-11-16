@@ -187,6 +187,39 @@ was meant to leave behind.
    return nil and let `remote_call` fall back to the binding relay? The two cases look identical from
    the CLI today, and that ambiguity is itself a defect — the refusal should say which carrier failed.
 
+
+**Narrowed, second round (instrumented kernel, commit `48b767d`).** The lane log brackets three
+places — dispatch, the budget context, and the Lua `serve` — and the mesh-carrying call is the only
+one that stops:
+
+```
+[relay] dispatch … POST /node/call budget_ms=42000 source=relay running=1/3
+[lane] context before …            ← budget context runs
+[lane] context done …              ← returns in the same millisecond
+(no [lane] serve done …)           ← (lane.serve)(&request) never returns
+[relay] done … status=200 ms=341   (other, non-mesh relayed calls in the same window)
+```
+
+So: the worker starts, the budget context is not the problem, and the stall is **inside the Lua
+`M.serve` for an envelope that carries `x-wa-mesh`**. Everything before that decision is identical for
+the calls that answer in 341 ms.
+
+**The one thing that path does differently**, and therefore the prime suspect: `mesh_relayed_call`
+calls `host.mesh_call({admit: …})` **from inside the node's own relay lane**. In a separate process
+that same op answers in 0 s (measured), so the op itself is fine — what is not proven is calling it
+re-entrantly, from a lane thread that the mesh mount may itself be waiting on. That is exactly the
+"one resolver" seam this page argues for: the admission belongs to the core *before* the lane starts,
+not to a Lua callback made from inside it.
+
+**Fix direction (in order of preference).**
+
+1. Decide in Rust, before the lane: `binding_runtime::dispatch` already parses the request; when
+   `x-wa-mesh: 1`, run `admission::decide` there, and install the result for the call (the Lua side
+   already supports an admission in force — `wa_mesh_admit`/`wa_mesh_clear`). The Lua `M.serve` then
+   runs the inner `/node/call` without calling back into the mesh mount at all.
+2. If (1) proves invasive, the fallback is to make `host.mesh_call({admit})` explicitly safe to call
+   from a lane thread, and to prove it with the e2e test below.
+
 **Reproduction to keep.** `rust/wa-mesh/src/tests_e2e.rs` already builds a fleet of members and a
 server per member (`fleet()`, `start()`, `signed_call()`); the missing test is one where the caller is
 **not** in the target's binding pins and the call arrives with `transport=relay`, asserting: admitted by
