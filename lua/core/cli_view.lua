@@ -1918,7 +1918,8 @@ function METHODS:codemode_settle(event)
   if self:transcript() then
     self:codemode_sync()
     for _, row in ipairs(codemode_block.tail_rows(model, self.limit, o)) do self:write(row .. "\n") end
-    if host.transcript_head then pcall(host.transcript_head, codemode_block.heading(model, self.limit, o)) end
+    -- No heading row on settle either: the block has no title, so there is nothing above the code for
+    -- the host to rewrite (this was the last place the modality word reached the transcript).
     self:topic(false)
     self:write("\n")
   else
