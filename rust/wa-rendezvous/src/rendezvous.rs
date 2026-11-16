@@ -206,12 +206,19 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
                  );
                  CREATE TABLE IF NOT EXISTS role_requests (
                    signature TEXT PRIMARY KEY, at INTEGER
+                 );
+                 -- Operators an administrator added at runtime (`POST /operators`), signed by a key
+                 -- that was an operator when it asked. The environment list stays the root of trust and
+                 -- is never overridden by this table: these rows only ever ADD.
+                 CREATE TABLE IF NOT EXISTS network_operators (
+                   node_id TEXT PRIMARY KEY, added_by TEXT, added_at INTEGER
                  );",
             ) {
                 eprintln!("[rendezvous] schema: {error}");
                 return;
             }
             if let Err(error)=bindings::schema(&connection){eprintln!("[rendezvous] binding schema: {error}");return;}
+            load_runtime_operators(&connection);
             // SQLite has no `ADD COLUMN IF NOT EXISTS`. Existing registries need this once;
             // subsequent starts harmlessly report the duplicate column and continue.
             let _ = connection.execute("ALTER TABLE nodes ADD COLUMN resources TEXT", []);
@@ -374,6 +381,65 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
     }
     if path.starts_with("/bindings/") {
         return bindings::route(&connection,stream,&path,&method,&query,&body,&header);
+    }
+    if path == "/operators" && method == "POST" {
+        // An administrator vouches for one more operator, at runtime, over the wire: signed, audited by
+        // the registry's own log, and additive only. This is the door that used to be a hand edit of
+        // `WASM_AGENT_NETWORK_ADMINS` on the always-on node — the file a node-side hook refuses to an
+        // agent, and the reason a new device could be bound but never allowed to drive anything.
+        let from = header("x-wa-node");
+        let admins = network_admins();
+        if admins.is_empty() {
+            return respond(stream, 403, "{\"error\":\"managed_service_required\"}");
+        }
+        if !verify(&connection, &from, "operators", &header, Some(&body), stream) {
+            return Ok(());
+        }
+        if !admins.contains(&from) {
+            return respond(stream, 403, "{\"error\":\"administrator_required\"}");
+        }
+        let add = payload["add"].as_str().unwrap_or_default();
+        let remove = payload["remove"].as_str().unwrap_or_default();
+        if add.is_empty() && remove.is_empty() {
+            return respond(stream, 400, "{\"error\":\"add_or_remove_required\"}");
+        }
+        if !add.is_empty() {
+            if add.len() != 32 || !add.chars().all(|c| c.is_ascii_hexdigit()) {
+                return respond(stream, 400, "{\"error\":\"node_id_invalid\"}");
+            }
+            if lookup(&connection, add).is_none() {
+                // An operator must be a node this registry knows: the key is the identity, and a
+                // registration that never happened has no key to vouch for.
+                return respond(stream, 404, "{\"error\":\"unknown_node\"}");
+            }
+            let _ = connection.execute(
+                "INSERT INTO network_operators VALUES(?1,?2,?3) ON CONFLICT(node_id) DO NOTHING",
+                rusqlite::params![add, from, now()],
+            );
+            if let Ok(mut extra) = EXTRA_OPERATORS.lock() {
+                if !extra.iter().any(|id| id == add) {
+                    extra.push(add.to_string());
+                }
+            }
+            eprintln!("[rendezvous] operator {} added by administrator {}", &add[..add.len().min(12)], &from[..from.len().min(12)]);
+        }
+        if !remove.is_empty() {
+            let outcome = connection.execute(
+                "DELETE FROM network_operators WHERE node_id = ?1",
+                rusqlite::params![remove],
+            );
+            if let Ok(mut extra) = EXTRA_OPERATORS.lock() {
+                extra.retain(|id| id != remove);
+            }
+            if matches!(outcome, Ok(0)) {
+                // Removing an operator named by the environment is not possible from here, and saying so
+                // is better than a silent success that leaves the caller believing it worked.
+                return respond(stream, 409, "{\"error\":\"operator_from_environment\"}");
+            }
+            eprintln!("[rendezvous] operator {} removed", &remove[..remove.len().min(12)]);
+        }
+        let operators = network_admins();
+        return respond(stream, 200, &json!({"ok": true, "operators": operators}).to_string());
     }
     if path == "/role" && method == "POST" {
         return grant_role(&connection, stream, &payload, &body, &header);
@@ -729,8 +795,45 @@ fn prune(connection: &Connection) -> usize {
 }
 
 fn network_admins() -> Vec<String> {
-    std::env::var("WASM_AGENT_NETWORK_ADMINS").unwrap_or_default()
-        .split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+    let mut list: Vec<String> = std::env::var("WASM_AGENT_NETWORK_ADMINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    // Operators added at runtime (`POST /operators`). The environment list is the root of trust: a row
+    // here can only add, never remove, so a leaked database cannot lock the operator out of his own
+    // registry. Read through a cache the endpoint keeps current.
+    if let Ok(extra) = EXTRA_OPERATORS.lock() {
+        for id in extra.iter() {
+            if !list.contains(id) {
+                list.push(id.clone());
+            }
+        }
+    }
+    list
+}
+
+/// The operator rows this registry loaded at start, plus every one an administrator added since.
+/// Process-wide on purpose: `network_admins()` is asked by nine call sites that carry no connection.
+static EXTRA_OPERATORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn load_runtime_operators(connection: &Connection) {
+    let rows: Vec<String> = connection
+        .prepare("SELECT node_id FROM network_operators")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    if let Ok(mut extra) = EXTRA_OPERATORS.lock() {
+        for id in rows {
+            if !extra.contains(&id) {
+                extra.push(id);
+            }
+        }
+    }
 }
 fn body_hash(bytes: &[u8]) -> String {
     node::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
@@ -798,7 +901,7 @@ fn verify(
         return false;
     };
     if stored != public_key {
-        let _ = respond(stream, 401, "{\"error\":\"bad_signature\"}");
+        let _ = respond(stream, 401, "{\"error\":\"bad_signature_key\"}");
         return false;
     }
     let ts_value: i64 = ts.parse().unwrap_or(0);
@@ -809,7 +912,8 @@ fn verify(
     let mut message = format!("{action}|{node_id}|{ts_value}");
     if let Some(body) = body { message.push_str(&format!("|{}", body_hash(body))); }
     if !node::verify(&stored, &message, &signature) {
-        let _ = respond(stream, 401, "{\"error\":\"bad_signature\"}");
+        eprintln!("[probe] verify_failed action={action} msg_len={} sig_len={}", message.len(), signature.len());
+        let _ = respond(stream, 401, "{\"error\":\"bad_signature_sig\"}");
         return false;
     }
     true

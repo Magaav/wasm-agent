@@ -369,7 +369,7 @@ end
 local TITLE = {
   bash = "Bash", shell = "Bash", read = "Read", write = "Write", edit = "Update", grep = "Search",
   ls = "List", subagent = "Task", skill = "Skill", recall = "Recall", remember = "Remember",
-  search_messages = "Search", remote = "Remote", client = "Client", codemode = "Code",
+  search_messages = "Search", remote = "Remote", client = "Client", codemode = "CodeAct",
 }
 
 -- The tool that actually ran. `tool_call` routes a call to another tool by name, and `remote` runs
@@ -419,7 +419,7 @@ function M.tool_title(name, args, limit)
   -- A code-mode call's heading is `⏺ Code` and nothing else: its tools are named on the heading the
   -- block draws (`lua/core/codemode_block.lua`), and the script is never in a heading (#121 put its
   -- first line there, which made the heading a second copy of the body).
-  if name == "codemode" then return "Code", "" end
+  if name == "codemode" then return "CodeAct", "" end
   limit = math.max(8, (limit or 96) - #label - 2)
   local inside
   if name == "bash" or name == "shell" then
@@ -2183,9 +2183,11 @@ function METHODS:event(event)
     -- order (heading with the result) and prints no live line.
     self:progress("begin", event.name or "tool")
     if is_codemode(event.name, event.arguments) then
-      -- The heading is `⏺ Code · <the tools it calls>`: never the script (#121 put its first line in
+      -- The heading is `⏺ CodeAct · <the tools it calls>`: the modality is named (CodeAct: the model
+      -- acts by writing code), the tools say what the script did, and the script itself is never the
+      -- heading (#121 put its first line in
       -- the parentheses, so the heading was a second copy of the body).
-      self.pending.label, self.pending.inside = "Code", ""
+      self.pending.label, self.pending.inside = "CodeAct", ""
       self:codemode_start(event)
     elseif self:transcript() then
       self:topic(true)

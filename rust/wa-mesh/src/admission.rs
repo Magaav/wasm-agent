@@ -309,6 +309,16 @@ impl Admitter {
         };
         let header_key = inbound.header("x-wa-pub").unwrap_or_default();
         if header_key != caller.public_key {
+            // PROBE: which side of the comparison is wrong, and are there duplicate header names?
+            let names: Vec<String> = inbound.headers.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+            eprintln!(
+                "[probe] key_mismatch header_len={} roster_len={} header_head={} roster_head={} names={}",
+                header_key.len(),
+                caller.public_key.len(),
+                header_key.get(..4).unwrap_or_default(),
+                caller.public_key.get(..4).unwrap_or_default(),
+                names.join(",")
+            );
             return unsigned(401, "bad_signature");
         }
         let ts = match inbound.header("x-wa-ts").and_then(|value| value.parse::<u64>().ok()) {
@@ -316,11 +326,27 @@ impl Admitter {
             None => return unsigned(400, "bad_request"),
         };
         let signature = inbound.header("x-wa-sig").unwrap_or_default();
-        if !crate::identity::verify(
-            &caller.public_key,
-            &MeshCall::call_message(&call.from_node_id, ts, &inbound.body),
-            signature,
-        ) {
+        // PROBE: lengths only (they survive redaction); a trailing space or a truncated value looks
+        // identical in a prefix and fails here.
+        eprintln!(
+            "[probe] sig_len={} msg_len={} from_len={} body_len={}",
+            signature.len(),
+            MeshCall::call_message(&call.from_node_id, ts, &inbound.body).len(),
+            call.from_node_id.len(),
+            inbound.body.len()
+        );
+        let message = MeshCall::call_message(&call.from_node_id, ts, &inbound.body);
+        if !crate::identity::verify(&caller.public_key, &message, signature) {
+            // PROBE: does this signature belong to *another* roster key (two identities on one box),
+            // or does no key verify it at all (the verifier/canonical message is wrong)?
+            let mut matched = String::from("none");
+            for node in roster.nodes.iter() {
+                if crate::identity::verify(&node.public_key, &message, signature) {
+                    matched = node.name.clone();
+                    break;
+                }
+            }
+            eprintln!("[probe] verify_failed sig_len={} matched_other_key={matched}", signature.len());
             return unsigned(401, "bad_signature");
         }
         if !wire::is_fresh(ts, now_s) {

@@ -128,11 +128,8 @@ impl RelayLane{
                     }
                 }).ok();
             }
-            eprintln!("[lane] contest before rid={rid}");
             (lane.context)(Some(cancel.clone()),Some(deadline_ms),format!("relay:{rid}"));
-            eprintln!("[lane] context done rid={rid}");
             let answer=(lane.serve)(&request);
-            eprintln!("[lane] serve done rid={rid} status={}",answer.0);
             (lane.context)(None,None,String::new());
             let elapsed=started.elapsed().as_millis() as u64;
             let _=done_tx.send(());

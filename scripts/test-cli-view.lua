@@ -1458,7 +1458,7 @@ end
 -- (`{"evidence":{"bytes":2473,"path":"/home/agent/.wasm-agent/mcp/requests/..."}}`) instead of the
 -- script's value; and nothing said which tools ran, whether they worked, or how long they took.
 --
--- What it is now, and what this section pins: the heading names the TOOLS (`⏺ Code · bash ×3`, never
+-- What it is now, and what this section pins: the heading names the TOOLS (`⏺ CodeAct · bash ×3`, never
 -- code) with the total right-aligned; the script is shown once, six rows then `… +N lines`; one row
 -- per inner call (`✓`/`✗`/`⏳`, a fan-out collapsed to `bash ×10 ⏳4 ✓5 ✗1`); then the value, with the
 -- evidence envelope hidden and named once under it. The block that is RUNNING is open and streams - a
@@ -1510,7 +1510,7 @@ do
   eq(#rows, base + 1, "a call that starts adds one row")
   ok(has(visible(rows[#rows]), "⏳ bash"), "with the ⏳ mark: " .. visible(rows[#rows]))
   ok(has(visible(rows[#rows]), "wc -l lua/core/chat.lua"), "and what it was given")
-  ok(has(visible(rows[1]), "Code · bash"), "the heading names the tool as soon as it is called: " .. visible(rows[1]))
+  ok(has(visible(rows[1]), "CodeAct · bash"), "the heading names the tool as soon as it is called: " .. visible(rows[1]))
   view:event({ type = "codemode_call", id = "c1", name = "bash", state = "ok", ms = 250 })
   rows = first.lines
   eq(#rows, base + 1, "settling rewrites that row in place")
@@ -1536,7 +1536,7 @@ do
   ok(has(shown, '{"count":2,"first":"chat.lua"}'), "the value the model received is the result row: " .. shown)
   ok(not has(shown, "/home/agent/.wasm-agent/mcp/requests"), "the evidence envelope's path is not the answer")
   ok(has(shown, "evidence: 2473 B · sha 5f2a1c9d"), "it is named once, under the value: " .. shown)
-  ok(has(visible(rows[1]), "Code · bash, web_read"),
+  ok(has(visible(rows[1]), "CodeAct · bash, web_read"),
     "the heading names every tool the script called: " .. visible(rows[1]))
   ok(has(visible(rows[1]), "1.2s"), "and the call's whole time, right-aligned: " .. visible(rows[1]))
   eq(view_lib.columns(visible(rows[1])), 80, "on the width it was given")
@@ -1548,7 +1548,7 @@ do
   view:event({ type = "tool", name = "codemode", arguments = { code = "return 1;" }, call_id = "c9" })
   eq(fake.folds, 1, "the block before it is folded exactly once")
   eq(fake.folded_summary, expected, "to the summary this side built")
-  ok(has(fake.folded_summary, "⏺ Code · bash, web_read ✗ web_http_429"),
+  ok(has(fake.folded_summary, "⏺ CodeAct · bash, web_read ✗ web_http_429"),
     "which names the tools and the failure: " .. tostring(fake.folded_summary))
   ok(has(fake.folded_summary, "1.2s") and has(fake.folded_summary, '{"count":2,"first":"chat.lua"}'),
     "with its time and the value's first line: " .. tostring(fake.folded_summary))

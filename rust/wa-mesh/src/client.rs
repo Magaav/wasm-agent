@@ -438,6 +438,11 @@ impl<'a> Client<'a> {
                     &caller.node_id,
                     now_s,
                 ) {
+                    Err(error) => {
+                        // PROBE: the raw reason the caller's verification of the answer gives.
+                        eprintln!("[probe] answer_open_failed reason={error} raw_head={}", &text[..text.len().min(90)]);
+                        return Err((attempt, error));
+                    }
                     Ok(reply) if reply.request_id == request_id => {
                         if reply.ok {
                             let inner_status = reply.status.unwrap_or(200);

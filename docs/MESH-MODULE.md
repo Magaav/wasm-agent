@@ -247,3 +247,44 @@ So the mesh relay hop needs one of three things, in order of what I would do:
 
 Until one of them is done, a mesh call from a node whose roster gives no address always ends at the
 relay hop, and the relay hop cannot be reached over https.
+
+## What is left before we can say "we control the fabric"
+
+Measured state at the end of 16/11: five nodes up, `work`/`openclaw`/`avell` masters, and every pair in
+the fleet calling every other (verified in all three directions). Elevation works from any master
+(`avell` promoted and demoted `nextcloud`). Adding an operator is now a signed HTTP call instead of a
+hand edit of the always-on node's environment. What is still missing, simplest first:
+
+1. **One verb to add an operator.** `POST /operators` exists; the signed request had to be built by
+   hand (`wa node sign` + `curl`). A `wa network operator add <node-id>` in the CLI is ~30 lines and
+   turns the most dangerous step of onboarding into one auditable command.
+2. **One script for "add a master".** signed add → per-peer re-consent (`unbind`, `bind permanent`,
+   `accept`) with the registry role re-checked → roster revision signed with the fleet key and pushed →
+   verification matrix. Today that sequence is five manual steps per peer, and a re-bind leaves the node
+   `guest` in the registry until its next registration (observed: ~60 s).
+3. **An update path that carries a signature we can verify.** Today the fleet runs ad-hoc builds: avell
+   and openclaw compiled the same commit with different toolchains, and the releases we can consume are
+   unsigned because `release-signing` lives in a vault we cannot reach. Proposal: a **fleet channel** —
+   a manifest signed by a `fleet-release` key in the operator's vault, verified with the same offline
+   pattern as the roster. Then `wa update <node> --binary --commit …` installs something that was signed
+   by us, not by whoever had a toolchain handy.
+4. **Rollback proved, not just available.** `wa update --rollback` and the sentinel's `.prev` exist; a
+   deploy that goes wrong has been rolled back by hand this session (`wa.prev-*`), never by the tool.
+   One rehearsal — install, break it, `--rollback`, verify `/health` and the version — and resilience
+   stops being an assumption.
+5. **No per-peer re-consent.** The frozen pins are the reason a new master costs N re-consents. Either
+   finish the attestation path (the open `bad_signature`), after which the roster alone decides, or add
+   the explicit policy option "authorize against the registry's current operator list" (cheaper, weaker:
+   the node then accepts any operator the registry vouches for).
+6. **The WASI/WIT move, in the order this page already sets.** Signed component pins → `wa:mesh` as
+   release #1 carrying the relay hop and the admission → signature-pinned Lua tree. Until the last one
+   lands, every policy change is a fleet-wide binary rollout — which is exactly what cost 16/11.
+7. **Two single points that no amount of mesh logic fixes.** All traffic is relayed through one host
+   (no roster addresses, no second carrier), and the registry itself runs on that host. The resilience
+   work is: put a DNS name or overlay address per node in the roster, and know what happens when the
+   registry's host is down (today: everything still attached keeps working through the relay it already
+   holds, and nothing new can join).
+
+Items 1–2 are a day. Item 3 is the one that makes updates trustworthy, and 4 is the one that makes them
+safe. 5–6 are the design's own migration. 7 is infrastructure, and it is the only one that survives us
+doing everything else right.

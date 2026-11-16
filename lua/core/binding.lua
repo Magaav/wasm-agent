@@ -443,9 +443,21 @@ local function signed_reply(signature, ts, out)
   return json.encode({reply=out,reply_sig=(signed and signed.signature) or ''})
 end
 
+-- Headers as a lowered map, from either shape a carrier hands over: the **object** `{name: value}`
+-- the relayed envelope carries, and the **array** `[[name, value], …]` a mesh call carries (the Rust
+-- client writes `MeshCall.inner_headers` this way). Reading only one shape loses every header of the
+-- other: the target then finds no `x-wa-mesh`, takes the plain peer path, verifies a mesh envelope as
+-- if it were a call body and answers `bad_signature` (measured 16/11, and the same class as
+-- `header_pairs` in rust/wa-mesh/src/host_call.rs).
 local function lowered(headers)
   local out={}
-  for k,value in pairs(headers or {}) do if type(k)=='string' then out[k:lower()]=tostring(value) end end
+  for k,value in pairs(headers or {}) do
+    if type(k)=='string' then
+      out[k:lower()]=tostring(value)
+    elseif type(value)=='table' and type(value[1])=='string' then
+      out[value[1]:lower()]=tostring(value[2])
+    end
+  end
   return out
 end
 
@@ -485,6 +497,19 @@ local function mesh_admitted_call(preadm, body, headers)
   local ran,answer=pcall(wa_node_call,call.inner_body or '',inner['x-wa-node'] or '',
     inner['x-wa-pub'] or '',inner['x-wa-ts'] or '',inner['x-wa-sig'] or '')
   wa_mesh_clear()
+  -- PROBE (remove with the fix): the inner call's own signature is what the target refuses, so report
+  -- what arrived: field lengths only, never a value.
+  if not ran or (type(answer)=='string' and answer:find('bad_signature',1,true)) then
+    local count=0
+    for _ in pairs(inner) do count=count+1 end
+    answer=json.encode({error='bad_signature',diag={
+      inner_body_len=#tostring(call.inner_body or ''),
+      inner_headers=count,
+      sig_len=#tostring(inner['x-wa-sig'] or ''),
+      pub_len=#tostring(inner['x-wa-pub'] or ''),
+      ts=tostring(inner['x-wa-ts'] or ''),
+      raw_headers=#(type(call.inner_headers)=='table' and call.inner_headers or {})}})
+  end
   local out=ran and tostring(answer) or json.encode({error='internal_error'})
   local i=identity()
   local reply=json.encode({schema=1,request_id=tostring(a.request_id or ''),from_node_id=i.node_id,
@@ -498,9 +523,7 @@ local function mesh_relayed_call(headers, body)
   headers['x-wa-mesh-carrier']='relay'
   local pairs_list={}
   for name,value in pairs(headers) do pairs_list[#pairs_list+1]={name,tostring(value)} end
-  print('[mesh] relayed admit start from='..tostring(headers['x-wa-node'] or '?'))
   local ok,raw=pcall(host.mesh_call,json.encode({admit={headers=pairs_list,body=tostring(body or ''),transport='relay'}}))
-  print('[mesh] relayed admit done ok='..tostring(ok)..' len='..tostring(type(raw)=='string' and #raw or -1))
   if not ok or type(raw)~='string' then return nil end
   local decoded=decode(raw)
   if not decoded then return nil end
@@ -509,18 +532,22 @@ local function mesh_relayed_call(headers, body)
     -- The roster said yes: run the caller's own `/node/call` request with that decision in force.
     wa_mesh_admit(json.encode({node_id=decoded.caller_node_id,public_key=decoded.caller_public_key,
       name=decoded.caller_name,level=decoded.caller_level,capability=decoded.capability,request_id=decoded.request_id}))
-    print('[mesh] relayed run start cap='..tostring(decoded.capability or '?'))
     local ran,answer=pcall(wa_node_call,decoded.inner_body or '',inner['x-wa-node'] or '',
       inner['x-wa-pub'] or '',inner['x-wa-ts'] or '',inner['x-wa-sig'] or '')
-    print('[mesh] relayed run done ok='..tostring(ran)..' bytes='..tostring(#tostring(answer or '')))
     wa_mesh_clear()
+    if not ran or (type(answer)=='string' and answer:find('bad_signature',1,true)) then
+      answer=json.encode({error='bad_signature',diag={
+        inner_body_len=#tostring(decoded.inner_body or ''),
+        sig_len=#tostring(inner['x-wa-sig'] or ''),
+        pub_len=#tostring(inner['x-wa-pub'] or ''),
+        ts=tostring(inner['x-wa-ts'] or ''),
+        node_len=#tostring(inner['x-wa-node'] or '')}})
+    end
     local out=ran and tostring(answer) or json.encode({error='internal_error'})
     local i=identity()
     local reply=json.encode({schema=1,request_id=tostring(decoded.request_id or ''),from_node_id=i.node_id,
       ok=true,status=200,body=out,verb=tostring(decoded.verb or '')})
-    print('[mesh] relayed seal start')
     local sealed = seal_relayed_reply(reply, decoded.caller_node_id)
-    print('[mesh] relayed seal done len='..tostring(type(sealed)=='string' and #sealed or -1))
     return sealed or out
   end
   if decoded.error=='mesh_legacy' then
@@ -695,7 +722,6 @@ function M.serve(raw)
     if type(h)=='table' and tostring(h[1]):lower()=='x-wa-mesh' then meshflag=tostring(h[2]) end
     if type(h)=='table' and tostring(h[1]):lower()=='x-wa-node' then meshflag=meshflag..'/'..tostring(h[2]) end
   end end)
-  print('[serve] enter id='..tostring(r and r.id)..' path='..tostring(r and r.path)..' method='..tostring(r and r.method)..' mesh='..meshflag)
   if not r or type(r.id)~='string' then
     return {status=400,body=json.encode({error='relay_request_unreadable',not_started=true})}
   end
@@ -714,9 +740,16 @@ function M.serve(raw)
     local asked=decode(r.body or '')
     if mesh then body=mesh
     elseif asked and asked.capability=='roster' then body=roster_call(r.body or '',h)
-    else body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '') end
+    else
+      body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '')
+      -- PROBE: the plain path was taken; say why the mesh branch did not.
+      local n=0; for _ in pairs(h or {}) do n=n+1 end
+      local raw=r and r.headers
+      local rawkind=type(raw)=='table' and ((raw[1]~=nil and 'array') or 'object') or type(raw)
+      body=json.encode({error='plain_path_taken',diag={mesh_header=tostring(h['x-wa-mesh']),
+        headers_lowered=n,headers_raw=rawkind,inner=body:sub(1,40)}})
+    end
   end
-  print('[serve] exit id='..tostring(r and r.id)..' status='..tostring(status)..' bytes='..tostring(#tostring(body or '')))
   local elapsed_ms=math.floor((host.now()-started)*1000)
   if deadline_ms and host.now()*1000>=deadline_ms then
     return {status=504,late=true,elapsed_ms=elapsed_ms,body=json.encode({
