@@ -513,8 +513,32 @@ fn main() {
     // The bound transport's worker lane (`rust/wa-rendezvous/src/binding_runtime.rs`): execution and
     // its bound are `wa-capabilities`', the signed answer is this crate's, and only this binary names
     // both. Without it a relayed request would be polled and never run - the tick says so plainly.
+    // A relayed call that carries a mesh envelope is decided *here*, before the lane starts: the lane
+    // used to ask `host.mesh_call({admit})` from inside its own worker and a mesh envelope never came
+    // back (docs/MESH-MODULE.md, "Known defect"). The decision is pure roster computation, so it needs
+    // no interpreter; an admitted call goes to the lane with the admission in a header, a refused one
+    // is answered without starting anything.
+    let lua_serve = binding_runtime::lua_serve(interpreter_factory.clone());
+    let serve: binding_runtime::Serve = std::sync::Arc::new(move |request: &serde_json::Value| {
+        match wa_mesh::host_call::pre_admit_relayed(request) {
+            None => lua_serve(request),
+            Some(Err((status, body))) => (status, body),
+            Some(Ok(admission)) => {
+                let mut admitted = request.clone();
+                let mut headers = admitted.get("headers").cloned().unwrap_or_else(|| serde_json::json!({}));
+                if let Some(map) = headers.as_object_mut() {
+                    map.insert(
+                        "x-wa-mesh-admission".to_string(),
+                        serde_json::Value::String(admission.to_string()),
+                    );
+                }
+                admitted["headers"] = headers;
+                lua_serve(&admitted)
+            }
+        }
+    });
     binding_runtime::set_lane(binding_runtime::RelayLane {
-        serve: binding_runtime::lua_serve(interpreter_factory.clone()),
+        serve,
         context: std::sync::Arc::new(|cancel, deadline, owner| {
             wa_capabilities::serve::install_relay_context(cancel, deadline, owner)
         }),

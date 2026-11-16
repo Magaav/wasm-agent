@@ -691,6 +691,50 @@ fn pairs_json(headers: &[(String, String)]) -> Value {
     )
 }
 
+/// Pre-admission for a **relayed** call, taken before the lane that runs it.
+///
+/// The lane's Lua used to call `host.mesh_call({admit})` from inside the worker, and a mesh envelope
+/// then never answered (measured 16/11: `[relay] dispatch` and `[lane] context done` logged, the
+/// `(lane.serve)` never returning, the caller answered 504 at the bound; non-mesh relayed calls in the
+/// same window answered in ~341 ms). The decision itself is pure computation over this node's roster,
+/// so it belongs here — on the worker thread, outside the Lua — and the lane gets the result instead of
+/// asking for it from inside.
+///
+/// `None` means "not a mesh envelope": today's path, untouched. `Some(Ok(admission))` means admitted,
+/// and the caller is to hand the admission to the lane. `Some(Err((status, body)))` is a refusal that
+/// was already decided: answer it and run nothing.
+pub fn pre_admit_relayed(request: &Value) -> Option<Result<Value, (u16, String)>> {
+    let pairs = header_pairs(request.get("headers").unwrap_or(&Value::Null));
+    if !crate::admission::is_mesh(&pairs) {
+        return None;
+    }
+    let body = request.get("body").and_then(Value::as_str).unwrap_or_default();
+    let paths = Paths::resolve();
+    let admitter = match node_admitter(&paths) {
+        Ok(admitter) => admitter,
+        Err(error) => {
+            return Some(Err((
+                503,
+                json!({"error": "mesh_unavailable", "detail": error}).to_string(),
+            )))
+        }
+    };
+    match admitter.decide(&Inbound::relayed(pairs, body)) {
+        Admission::Allow(allowed) => Some(Ok(json!({
+            "node_id": allowed.call.from.node_id,
+            "public_key": allowed.call.from.public_key,
+            "name": allowed.call.from.name,
+            "level": allowed.call.from.level,
+            "capability": allowed.call.capability,
+            "request_id": allowed.call.request_id,
+            "verb": allowed.verb.as_str(),
+        }))),
+        Admission::Refuse { status, body, .. } => Some(Err((status, body))),
+        // No verified roster on this node yet: the pins decide, which is the lane's own path.
+        Admission::Legacy { .. } => None,
+    }
+}
+
 /// `{admit: {headers, body, transport}}`: what this node's roster says about one inbound envelope.
 ///
 /// This is the node's own admission in Lua (a bound node's relay runtime lives there), so that a

@@ -470,6 +470,28 @@ end
 
 -- A relayed call that carries a mesh envelope, decided by this node's own roster. Returns the body to
 -- send back to the relay, or nil when this is not a mesh call at all (today's path then applies).
+-- A relayed mesh call already decided by the host, on the lane's worker thread and outside this
+-- interpreter (`pre_admit_relayed`, rust/wa-mesh/src/host_call.rs). Nothing here asks the mesh mount
+-- anything: the admission arrives in a header, the run happens with it in force, and the reply is
+-- sealed below. This is the path that used to stall (docs/MESH-MODULE.md, "Known defect").
+local function mesh_admitted_call(preadm, body, headers)
+  local a = decode(preadm)
+  if not a or type(a.node_id) ~= 'string' then return nil end
+  local call = decode(body)
+  if type(call) ~= 'table' then return nil end
+  local inner = inner_lowered(call.inner_headers)
+  wa_mesh_admit(json.encode({node_id=a.node_id,public_key=a.public_key,name=a.name,level=a.level,
+    capability=a.capability,request_id=a.request_id}))
+  local ran,answer=pcall(wa_node_call,call.inner_body or '',inner['x-wa-node'] or '',
+    inner['x-wa-pub'] or '',inner['x-wa-ts'] or '',inner['x-wa-sig'] or '')
+  wa_mesh_clear()
+  local out=ran and tostring(answer) or json.encode({error='internal_error'})
+  local i=identity()
+  local reply=json.encode({schema=1,request_id=tostring(a.request_id or ''),from_node_id=i.node_id,
+    ok=true,status=200,body=out,verb=tostring(a.verb or '')})
+  return seal_relayed_reply(reply, a.node_id) or out
+end
+
 local function mesh_relayed_call(headers, body)
   if tostring(headers['x-wa-mesh'] or '')~='1' then return nil end
   if type(host.mesh_call)~='function' then return nil end
@@ -687,7 +709,8 @@ function M.serve(raw)
     -- A mesh envelope is admitted by this node's roster (when it has a verified one); a `roster`
     -- call installs that roster and is admitted by today's operator pins. Everything else is a
     -- peer capability call, exactly as before.
-    local mesh=mesh_relayed_call(h,r.body or '')
+    local preadm=h['x-wa-mesh-admission']
+    local mesh=preadm and mesh_admitted_call(preadm,r.body or '',h) or mesh_relayed_call(h,r.body or '')
     local asked=decode(r.body or '')
     if mesh then body=mesh
     elseif asked and asked.capability=='roster' then body=roster_call(r.body or '',h)
