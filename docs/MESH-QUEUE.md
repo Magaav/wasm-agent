@@ -153,3 +153,54 @@ complete a call; and the runbook names the failure mode and the recovery.
 - The Conversas & Cia / CDA queue. Different lane, different repo.
 - Anything that edits `/docker/*` on beequeen by hand, or touches another team's service.
 - Building the overlay ourselves: the fleet uses the one it already has.
+
+---
+
+## 8. The CodeAct block, as the operator asked for it — id: `queue-codeact-view`
+
+**The spec, verbatim (Victor, 16/11 23:5x):** no title — "just background like pi background when coding,
+so we know it's inside a sandbox; the background can be highlighted. Also express the full code like pi
+does, but no need to be in bold, so keep the way code is, colored which is nice, the output can be gray.
+We need to make everything stream into the CLI, not suddenly appear — so check everything, commentary,
+thinking and so on."
+
+**Where each part lives today**
+
+| ask | today | change |
+| --- | --- | --- |
+| no title | `codemode_block.rows` starts with `M.heading(...)`; `cli_view:codemode_settle` rewrites that heading with the call's time | drop the heading row and the settle rewrite; the block starts with the code itself |
+| background band = "inside a sandbox" | rows painted `mdCodeBlock` (`d4d4d4`) over the terminal background | add a band style carrying a background (`paint` already takes a style list; `STYLE` needs the `48;5;…` entry) and pad each row to the block width, so the band is a band and not just coloured text |
+| full code, not folded | `M.script_rows(args)` folds past a count and prints `… +N lines`; `cli_view:code_block` still folds at 3 for the wrapper path | render every line of the script in the codemode path; keep the fold only for the wrapper path, if at all |
+| coloured, not bold | syntax colouring exists (`o.syntax(shown, "js", …)`), styles are foreground colours | keep the colours; make sure no `bold` attribute is in the chain |
+| output gray | the answer rows come from `M.tail_rows`/`call_lines` | paint the observation/value rows `dim` (gray), the call lines muted |
+| everything streams | the block is written **once** in `codemode_start`, when the `tool_call` event carries the whole script; thinking and commentary already stream as they arrive | the script cannot stream token by token — the model emits it as one argument, and the harness only sees it complete, exactly as pi does. What *can* stream: the model's thinking/commentary (already), the tool progress line inside the block, and the answer when the call returns. Verify each with a live run and name anything still batched |
+
+**Done when.** A live run on `work` shows: no heading; the whole script on a highlighted band, syntax
+coloured and not bold; the observation in gray; and the transcript shows thinking, commentary, the code
+and the answer each appearing as they happen (with the one honest exception named above). `scripts/test-cli-view.lua`
+passes, including the 80-column rows — or the width invariant is consciously updated in the same change.
+
+**Measured for the "everything streams" part — and the ABI already streams.** WASI 0.3 makes streams the
+core primitive, and this tree already uses them at the boundary:
+
+* `wit/model/model.wit:298` — `chat: async func(request: chat-request) -> result<stream<event>, error>`,
+  and `event` (line 206) already carries `delta(string)`, `reasoning-delta(string)`, `tool-call`,
+  `usage`, `finish`. So the model's text *and* its thinking arrive as a stream today;
+* `wit/bus/bus.wit` — a subscription is a `stream<event>`; `wit/fabric/fabric.wit:221` — `beats` is a
+  `stream<heartbeat>`; `wit/kernel-v2/deps/cli.wit` — `read-via-stream` / `write-via-stream`
+  (`stream<u8>` + `future`);
+* the host side pumps guest streams (`rust/wa-kernel-runtime/src/bus_host.rs`).
+
+So the gap is **not** the ABI, it is one frontend: the CLI. `cli_view.lua` already has the handlers
+(`delta`, `commentary_delta`, `reasoning`), but its run path never subscribes — the comment at line 2314
+says it plainly: *"A CLI run has no sink, so this normally never fires"* — and commentary/thinking fall
+back to whole-block events (`step_phase`, a phase with a duration). The fix is to consume the same
+`stream<event>` the window consumes and print per event; no WIT change is needed for text and reasoning.
+The one thing that needs the contract extended is the **code itself**: `tool-call(tool-call)` arrives
+assembled, so the script appears as one unit. Streaming the code means carrying the argument deltas into
+the event variant (e.g. `tool-call-delta(index, string)`), which the provider already emits and the
+assembler already consumes.
+
+**Why it is a decision and not a sed.** Renaming the block word to `CodeAct` already cost 3 columns and
+broke that invariant once tonight (`got 83, wanted 80`); the band and the full-code rule touch the same
+width arithmetic. Whoever takes this should decide the row width first, then the colours.

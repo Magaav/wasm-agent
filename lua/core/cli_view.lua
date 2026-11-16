@@ -96,6 +96,15 @@ local function fg(hex)
 end
 
 local STYLE = { bold = "\27[1m", italic = "\27[3m", faint = "\27[2m", underline = "\27[4m" }
+
+-- A code-mode block is drawn on a band: the background is what says "this ran inside the sandbox",
+-- the way a fenced block reads in pi. 24-bit like every other role, and a terminal that cannot do it
+-- degrades to no background rather than to garbled text.
+local function bg(hex)
+  return string.format("\27[48;2;%d;%d;%dm",
+    tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16))
+end
+STYLE.codeBand = bg("171717")
 for role, hex in pairs(PALETTE) do STYLE[role] = fg(hex) end
 -- The names the earlier view used, kept because callers and tests use them: each is now a
 -- role rather than a literal, so `green` and `success` cannot drift apart.
@@ -1868,7 +1877,6 @@ function METHODS:codemode_sync()
       pcall(host.transcript_rewrite, index - old - 1, rows[index])
     end
     for index = old + 1, #rows do self:write(rows[index] .. "\n") end
-    if host.transcript_head then pcall(host.transcript_head, codemode_block.heading(model, self.limit, o)) end
   end
   self.code_rows = #rows
 end

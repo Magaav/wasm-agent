@@ -460,21 +460,30 @@ end
 function M.rows(model, width, options)
   local o = M.opts(options)
   width = math.max(20, tonumber(width) or 80)
-  local rows = { M.heading(model, width, o) }
-  local code, code_hidden = M.script_rows(model.args)
+  -- No title: the block is the code, on its band. What the script called is said on the call rows
+  -- inside it (`✓ bash · …`), so a heading above the code only repeated them.
+  local rows = {}
+  local code, code_hidden = M.script_rows(model.args, math.huge)
   for _, line in ipairs(code) do
     -- The row is fitted BEFORE it is highlighted: clipping a string that already carries escape
     -- sequences by width would cut one in half, and a cut token paints the rest of the block.
     local shown = o.clip(line, math.max(8, width - 2))
+    -- The band is padded to the full width so it is a band and not a ragged stripe, and the colour
+    -- of the code is kept: syntax coloured, never bold.
+    local pad = string.rep(" ", math.max(0, math.max(8, width - 2) - #shown))
     if o.live and o.syntax then
-      local parts = {}
+      -- The band is re-applied around every token: `paint` ends each piece with a reset, so a band
+      -- painted once around the row would stop at the first coloured token. Padding to the full width
+      -- is what makes it a band instead of a ragged stripe.
+      local parts = { o.paint("  ", "codeBand") }
       o.syntax(shown, "js", function(piece, style)
         if piece == "" then return end
-        parts[#parts + 1] = o.paint(piece, style or "dim")
+        parts[#parts + 1] = o.paint(piece, { "codeBand", style or "mdCodeBlock" })
       end)
-      rows[#rows + 1] = "  " .. table.concat(parts)
+      parts[#parts + 1] = o.paint(pad, "codeBand")
+      rows[#rows + 1] = table.concat(parts)
     else
-      rows[#rows + 1] = o.paint("  " .. shown, "dim")
+      rows[#rows + 1] = "  " .. shown .. pad
     end
   end
   if code_hidden > 0 then
@@ -503,7 +512,7 @@ function M.tail_rows(model, width, options)
   end
   local lead = "\226\142\191 "
   for index, line in ipairs(value) do
-    local style = model.error and not model.value and "error" or "text"
+    local style = model.error and not model.value and "error" or "dim"
     rows[#rows + 1] = (index == 1 and o.paint(lead, "muted") or "  ")
       .. o.paint(o.clip(line, width - 4), style)
   end
