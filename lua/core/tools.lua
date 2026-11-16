@@ -1215,7 +1215,12 @@ local function remote_batch(memory, args, role, ctx)
     for index, entry in ipairs(entries) do results[index] = one(entry) end
   else
     local ok, status = pcall(nodeslib.operator_status, node)
-    if ok and type(status) == "table" and status.operator_of_peer == false then
+    -- The pins are the door for the legacy path; a node whose mesh is on has a second door, and the
+    -- target is the one that decides (docs/MESH.md §2, "The roster decides what executes"). Refusing on
+    -- the pins alone made that second door unreachable from this CLI: measured 16/11 on `avell` (roster
+    -- level 0, mesh mount up) which refused its own outbound call with `not_peer_operator` before
+    -- anything was sent, so the roster's hierarchy could never be exercised.
+    if ok and type(status) == "table" and status.operator_of_peer == false and not nodeslib.mesh_enabled() then
       return { error = "not_peer_operator", node = node.name, online_nodes = online_nodes(), next = REMOTE_REFUSALS.not_peer_operator, effect = "none" }
     end
     local answer = nodeslib.remote_call(node.node_id or args.node, "batch", { calls = entries })
@@ -2012,7 +2017,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       if ok and type(status) == "table" and status.operator_of_peer == false then
         ok, status = pcall(nodeslib.operator_status, node, { fresh = true })
       end
-      if ok and type(status) == "table" and status.operator_of_peer == false then
+      -- Same second door as the batch path: with the mesh on, the pins no longer answer alone — the
+      -- target does, through the roster it verified. A peer that refuses still answers; a peer whose
+      -- roster does not cover this call answers `mesh_denied`, which is the honest word for it.
+      if ok and type(status) == "table" and status.operator_of_peer == false and not nodeslib.mesh_enabled() then
         result = nodeslib.refusal("node", "unknown_caller", nil, node)
         result.error = "not_peer_operator"
         result.verified = nil
