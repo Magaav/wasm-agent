@@ -725,14 +725,6 @@ pub fn pre_admit_relayed(request: &Value) -> Option<Result<Value, (u16, String)>
         return None;
     }
     let body = request.get("body").and_then(Value::as_str).unwrap_or_default();
-    // PROBE (remove with the fix): what arrived, against what the caller signed.
-    let probe_ts = pairs.iter().find(|(name, _)| name.eq_ignore_ascii_case("x-wa-ts")).map(|(_, v)| v.clone()).unwrap_or_default();
-    let probe_sig = pairs.iter().find(|(name, _)| name.eq_ignore_ascii_case("x-wa-sig")).map(|(_, v)| v[..v.len().min(16)].to_string()).unwrap_or_default();
-    eprintln!(
-        "[probe] target body_sum={} len={} ts={probe_ts} sig={probe_sig}",
-        body.bytes().map(|b| b as u64).sum::<u64>(),
-        body.len()
-    );
     let paths = Paths::resolve();
     let admitter = match node_admitter(&paths) {
         Ok(admitter) => admitter,
