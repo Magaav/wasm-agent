@@ -236,7 +236,9 @@ function M.heading(model, width, o)
   local names = M.head_text(model, o)
   local rest = (names ~= "" and (" \194\183 " .. names) or "")
   local _, style = M.verdict(model, o)
-  return o.paint("\226\143\186", style) .. " " .. o.paint("Code", "bold") .. rest .. pad
+  -- The modality, named: CodeAct is the model acting by writing code (codemode is its runtime; the
+  -- tools named after the dot say what the script did).
+  return o.paint("\226\143\186", style) .. " " .. o.paint("CodeAct", "bold") .. rest .. pad
     .. (right ~= "" and o.paint(right, "dim") or "")
 end
 
