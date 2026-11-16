@@ -671,15 +671,31 @@ fn node_admitter(paths: &Paths) -> Result<Admitter, String> {
     ))
 }
 
+/// Headers as pairs, from either shape they arrive in: the array `[[name, value], …]` a Lua caller
+/// builds, and the **object** `{name: value}` a relay envelope carries (`relay::send` writes a map).
+/// Reading only the array made `pre_admit_relayed` see zero headers on a relayed call and quietly
+/// skip the admission it exists for — the kind of silence that looks like "the feature does not work"
+/// instead of "the reader did not understand the input".
 fn header_pairs(value: &Value) -> Vec<(String, String)> {
-    let Some(entries) = value.as_array() else { return Vec::new() };
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let pair = entry.as_array()?;
-            Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()))
+    if let Some(entries) = value.as_array() {
+        return entries
+            .iter()
+            .filter_map(|entry| {
+                let pair = entry.as_array()?;
+                Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()))
+            })
+            .collect();
+    }
+    let mut pairs: Vec<(String, String)> = value
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+                .collect()
         })
-        .collect()
+        .unwrap_or_default();
+    pairs.sort();
+    pairs
 }
 
 fn pairs_json(headers: &[(String, String)]) -> Value {
