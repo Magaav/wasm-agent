@@ -57,6 +57,58 @@ impl Request {
     }
 }
 
+/// An injected HTTP transport: the node's own TLS-capable client, so this crate keeps no TLS stack.
+///
+/// `wa-mesh` speaks plain TCP (its `request` below) and is used by the rendezvous binary too, which has
+/// no business carrying a TLS implementation. A node, however, needs to reach an `https` relay, and the
+/// node already has one TLS stack (`ureq`, in `wa-capabilities`). So the node injects it — the same
+/// shape as `set_lane` — and this function picks it for `https` while `http` keeps today's client.
+pub trait Transport: Send + Sync {
+    fn post(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        connect_timeout: Duration,
+        io_timeout: Duration,
+        max_body: usize,
+    ) -> Result<Response, String>;
+}
+
+static TRANSPORT: std::sync::OnceLock<std::sync::Arc<dyn Transport>> = std::sync::OnceLock::new();
+
+/// Installs the node's TLS transport. Called once, by the binary that owns both layers.
+pub fn set_transport(transport: std::sync::Arc<dyn Transport>) {
+    let _ = TRANSPORT.set(transport);
+}
+
+pub fn transport() -> Option<std::sync::Arc<dyn Transport>> {
+    TRANSPORT.get().cloned()
+}
+
+/// POST to `url`, choosing the transport by scheme: `https` needs the injected one, `http` is today's
+/// plain client. An `https` URL with nothing injected is a named refusal, never a cleartext write into
+/// a TLS port (measured 16/11: that write is answered with `Connection reset by peer` and looks like a
+/// dead relay instead of a missing TLS client).
+pub fn post_any(
+    url: &str,
+    address: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    connect_timeout: Duration,
+    io_timeout: Duration,
+    max_body: usize,
+) -> Result<Response, String> {
+    if url.starts_with("https://") {
+        return match transport() {
+            Some(transport) => transport.post(url, headers, body, connect_timeout, io_timeout, max_body),
+            None => Err("tls_transport_unavailable: an https relay needs wa_mesh::http::set_transport".into()),
+        };
+    }
+    request(address, "POST", path, headers, body, connect_timeout, io_timeout, max_body)
+}
+
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,

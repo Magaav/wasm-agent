@@ -13,6 +13,7 @@ use wa_capabilities::host::Host;
 use rusqlite::Connection;
 // `wa dev` (docs/SERVICE-COMPONENTS.md): build a component crate and swap the running instance.
 mod dev;
+mod mesh_transport;
 // `wa release verify` (rust/wa-host/src/release.rs): signed releases, checked before this node installs
 // any release asset. Dispatched before the interpreter for the same reason `wa vault` is - a node whose
 // tree is broken must still be able to answer whether a release it was handed is signed by a key it
@@ -518,6 +519,9 @@ fn main() {
     // back (docs/MESH-MODULE.md, "Known defect"). The decision is pure roster computation, so it needs
     // no interpreter; an admitted call goes to the lane with the admission in a header, a refused one
     // is answered without starting anything.
+    // The mesh's relay hop gets this node's TLS stack: `wa-mesh` stays plaintext (the rendezvous binary
+    // shares that crate) and an `https` relay is reachable instead of being written to in cleartext.
+    wa_mesh::http::set_transport(mesh_transport::transport());
     let lua_serve = binding_runtime::lua_serve(interpreter_factory.clone());
     let serve: binding_runtime::Serve = std::sync::Arc::new(move |request: &serde_json::Value| {
         match wa_mesh::host_call::pre_admit_relayed(request) {

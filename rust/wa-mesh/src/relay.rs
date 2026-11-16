@@ -156,10 +156,12 @@ impl<'a> RelayClient<'a> {
             "body": body,
         })
         .to_string();
-        let response = crate::http::request(
+        let path = endpoint.path("/relay/send");
+        let url = format!("{}{}", self.url.trim_end_matches('/'), path);
+        let response = crate::http::post_any(
+            &url,
             &endpoint.address,
-            "POST",
-            &endpoint.path("/relay/send"),
+            &path,
             &[
                 ("content-type".to_string(), "application/json".to_string()),
                 ("x-wa-node".to_string(), self.identity.node_id.clone()),
