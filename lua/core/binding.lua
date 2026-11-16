@@ -667,6 +667,13 @@ end
 -- result is named as a timeout instead of being handed back as a fresh answer.
 function M.serve(raw)
   local r=decode(raw)
+  local hdr=r and r.headers
+  local meshflag='?'
+  pcall(function() for _,h in ipairs(hdr or {}) do
+    if type(h)=='table' and tostring(h[1]):lower()=='x-wa-mesh' then meshflag=tostring(h[2]) end
+    if type(h)=='table' and tostring(h[1]):lower()=='x-wa-node' then meshflag=meshflag..'/'..tostring(h[2]) end
+  end end)
+  print('[serve] enter id='..tostring(r and r.id)..' path='..tostring(r and r.path)..' method='..tostring(r and r.method)..' mesh='..meshflag)
   if not r or type(r.id)~='string' then
     return {status=400,body=json.encode({error='relay_request_unreadable',not_started=true})}
   end
@@ -686,6 +693,7 @@ function M.serve(raw)
     elseif asked and asked.capability=='roster' then body=roster_call(r.body or '',h)
     else body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '') end
   end
+  print('[serve] exit id='..tostring(r and r.id)..' status='..tostring(status)..' bytes='..tostring(#tostring(body or '')))
   local elapsed_ms=math.floor((host.now()-started)*1000)
   if deadline_ms and host.now()*1000>=deadline_ms then
     return {status=504,late=true,elapsed_ms=elapsed_ms,body=json.encode({
