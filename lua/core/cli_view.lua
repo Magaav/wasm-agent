@@ -2206,7 +2206,7 @@ function METHODS:event(event)
       -- "Working: codemode" for both. `call_raw_...` is the id the raw channel mints, so the reader is
       -- told what is happening: the model's own script is running.
       local rc = dofile("lua/core/raw_code.lua")
-      self.pending.raw = (rc.is_raw and rc.is_raw(event.id)) or false
+      self.pending.raw = (rc.is_raw and rc.is_raw(event.id or event.call_id)) or false
       self:codemode_start(event)
     elseif self:transcript() then
       self:topic(true)
