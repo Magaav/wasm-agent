@@ -387,8 +387,13 @@ lua_run() { # <script> <home>
   # sets its own (`scripts/test-vault-routing.lua` points WASM_AGENT_VAULT_URL at a stub it starts).
   # The whole credential lane goes, not just the URL: the per-route override and the local store are two
   # more ways for a test to read the machine it happens to run on.
+  # And the node's own identity and mode (17/11 on avell: a run started THROUGH a node inherits that node's
+  # WASM_AGENT_DB - its real ledger -, WASM_AGENT_IN_TURN, WASM_AGENT_RAW_CODE and WA_MESH; eight rows failed
+  # there and passed everywhere else). A row that tests one of these sets it itself.
   env -u WASM_AGENT_VAULT_URL -u WASM_AGENT_VAULT_DIR -u WASM_AGENT_VAULT_KEYSTORE \
     -u WASM_AGENT_VAULT_PASSPHRASE -u WASM_AGENT_VAULT_OPERATOR_URL -u WASM_AGENT_OPENCODE_GO_VAULT_URL \
+    -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WASM_AGENT_RAW_CODE -u WASM_AGENT_PROVENANCE \
+    -u WA_MESH -u WA_MESH_COMPONENT \
     "${overrides[@]}" \
     WASM_AGENT_LUA_ROOT="$FAST_ROOT" WASM_AGENT_HOME="$home_native" \
     WA_COMPONENTS_DIR="$components" WA_FAST_COMPONENT_SOURCE="$FAST_COMPONENT_SOURCE" \
