@@ -421,8 +421,8 @@ do
   local text = out.text()
   -- Operator 17/11: no "Thinking…" title - the ✻ mark and the thought on one line, the thought gray.
   ok(not has(text, "Thinking\226\128\166"), "thinking has no title row")
-  ok(has(text, view_lib.style("muted") .. "\226\156\187 ") and has(text, view_lib.style("dim") .. "weighing"),
-    "the ✻ mark, then the thought in gray on the same line")
+  ok(not has(text, "\226\156\187") and has(text, view_lib.style("dim") .. "weighing"),
+    "no mark: the thought alone, in gray")
 end
 ok(view_lib.style("commentaryText") == "\27[38;2;255;255;255m", "commentary is white")
 ok(view_lib.PROMPT == "\226\157\175 " and view_lib.columns(view_lib.PROMPT) == 2,
@@ -473,7 +473,7 @@ local thought = recorder()
 local think_view = view_lib.new({ out = thought.out, live = false, now = function() return 7 end, limit = 80 })
 think_view:run_started()
 think_view:event({ type = "reasoning", text = "the reader wants the view fixed, so I will read cli_view.lua first" })
-ok(has(thought.text(), "\226\156\187 the reader wants"), "the reasoning starts on the ✻ line, no title")
+ok(has(thought.text(), "the reader wants") and not has(thought.text(), "\226\156\187"), "the reasoning is printed with no title and no mark")
 ok(has(thought.text(), "read cli_view.lua first"), "and printed in full rather than summarised")
 ok(view_lib.columns(thought.text():match("[^\n]*read[^\n]*") or "") <= 80, "and wrapped to the terminal")
 local blue = recorder()
@@ -481,7 +481,7 @@ local blue_view = view_lib.new({ out = blue.out, live = true, now = function() r
 blue_view:run_started()
 blue_view:event({ type = "reasoning", text = "plain words to read" })
 local tint = view_lib.style("thinkingText")
-ok(has(blue.text(), view_lib.style("muted") .. "\226\156\187 ") and not has(blue.text(), "Thinking\226\128\166"), "live: the ✻ mark, no title")
+ok(not has(blue.text(), "\226\156\187") and not has(blue.text(), "Thinking\226\128\166"), "live: no mark, no title")
 ok(has(blue.text(), view_lib.style("dim") .. "plain words to read"), "and the thought in gray")
 
 -- ---- the commentary, as its own block, like the UI's ✦ commentary topic ----------------
@@ -558,7 +558,7 @@ local sample_view = view_lib.new({ out = sample.out, live = false, now = functio
 sample_view:run_started()
 sample_view:event({ type = "delta", text = "Example:\n```js\nreturn 1;\n```" })
 sample_view:answered("Example:\n```js\nreturn 1;\n```")
-ok(has(sample.text(), "```js\nreturn 1;"), "a code sample in an answer is still shown: " .. sample.text())
+ok(has(sample.text(), "Example:") and has(sample.text(), "return 1;"), "a code sample in an answer is still shown, as a code block: " .. sample.text())
 -- Thinking streamed live is not printed a second time when the step settles.
 local think = recorder()
 local think_view = view_lib.new({ out = think.out, live = false, now = function() return 7 end, limit = 80 })

@@ -160,6 +160,30 @@ end
 local expected = assert(host.read_file(path), 'fixtures/codemode-blocks.txt must be readable from the repository root')
 eq(rendered, expected, 'the rendered blocks are the committed snapshot')
 
+-- A long value folds to ONE row where the host can open it (operator 17/11), and the full rows ride along.
+do
+  local o = opts()
+  o.expandable = true
+  local model = block.new({ code = 'return big;' }, 0)
+  local long = {}
+  for i = 1, 40 do long[#long + 1] = 'item' .. i end
+  block.finish(model, { ok = true, value = { list = long } }, 0.1)
+  local tail = block.tail_rows(model, 80, o)
+  check(#tail >= 1 and tail[1]:find('chars', 1, true) and tail[1]:find('\226\128\166 %+%d+ chars') ~= nil, 'folded to one row ending … +N chars: ' .. tostring(tail[1]))
+  check(tail.expand and tail.expand[1] and tail.expand[1]:find('item40', 1, true), 'and the click shows the whole value')
+  o.expandable = false
+  local plainrows = block.tail_rows(model, 80, o)
+  check(#plainrows > 1 and not plainrows.expand, 'without the host capability the whole value is shown')
+  -- Call rows in their state colour: waiting yellow, done green, failed soft red.
+  local painted = {}
+  local po = opts(); po.paint = function(text, style) painted[#painted + 1] = style; return text end
+  local m2 = block.new({ code = 'x' }, 0)
+  block.begin_call(m2, 'a', 'bash', {}); block.begin_call(m2, 'b', 'read', {})
+  block.settle(m2, 'b', { ok = true, ms = 3 })
+  block.call_lines(m2, 80, po)
+  check(painted[1] == 'callWait' and painted[2] == 'callOk', 'call rows: waiting callWait, done callOk: ' .. table.concat(painted, ','))
+end
+
 -- The snapshot says what it looks like; these say why, so a failure names the rule that broke.
 do
   local o = opts()

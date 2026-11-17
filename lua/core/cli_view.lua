@@ -74,6 +74,9 @@ local PALETTE = {
   -- Thinking is the view's one blue (`borderAccent`, the colour of inline code and links), so it
   -- reads as the agent's own work; commentary is said *to* the reader, so it is plain white.
   dim = "777777", text = "ffffff", thinkingText = "b1b9f9", commentaryText = "ffffff",
+  -- A code-mode script's inner calls (operator 17/11): waiting ⏳ light yellow, done ✓ light green,
+  -- failed ✗ a soft red - never the alarm red for a call that is only waiting.
+  callWait = "e8d58a", callOk = "8fd19e", callFail = "e57373",
   mdHeading = "ffffff", mdLink = "b1b9f9", mdLinkUrl = "777777", mdCode = "b1b9f9",
   mdCodeBlock = "d4d4d4", mdCodeBlockBorder = "777777", mdQuote = "999999",
   mdQuoteBorder = "777777", mdHr = "777777", mdListBullet = "999999",
@@ -1746,29 +1749,97 @@ function METHODS:flow(kind, text)
   text = tostring(text or "")
   if text == "" then return end
   if self.flow_kind ~= kind then
+    self:flow_flush()
     self.flow_held = 0
     if self.flow_kind ~= nil or (self.tail_nl or 1) ~= 0 then self:gap(1) end
     self.flow_kind = kind
-    if kind == "think" then
-      text = text:gsub("^%s+", "")
-      if text == "" then self.flow_kind = nil return end
-      self:write(paint(STAR .. " ", "muted", self.live))
-    else
-      text = text:gsub("^\n+", "")
-      if text == "" then self.flow_kind = nil return end
+    text = kind == "think" and text:gsub("^%s+", "") or text:gsub("^\n+", "")
+    if text == "" then self.flow_kind = nil return end
+  end
+  if kind == "think" then
+    -- Thinking: gray, no mark (operator 17/11). Painted LINE BY LINE: the host keeps colour per line, so
+    -- one paint around a chunk that crosses a newline left the next paragraph's first words in the
+    -- terminal's own colour until the next chunk arrived ("first words blue, then gray").
+    local body, tail = text:match("^(.-)(\n*)$")
+    if body ~= "" then
+      if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)) end
+      self.flow_held = 0
+      local parts, first = {}, true
+      for line in (body .. "\n"):gmatch("([^\n]*)\n") do
+        parts[#parts + 1] = (first and "" or "\n") .. (line ~= "" and paint(line, "dim", self.live) or "")
+        first = false
+      end
+      self:write(table.concat(parts))
     end
+    self.flow_held = (self.flow_held or 0) + #tail
+    return
   end
-  local body, tail = text:match("^(.-)(\n*)$")
-  if body ~= "" then
-    if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)) end
-    self.flow_held = 0
-    self:write(paint(body, kind == "think" and "dim" or "commentaryText", self.live))
+  -- Saying (commentary, the answer): markdown, rendered a complete line at a time (17/11: `**bold**`
+  -- was printed raw). A fence or a table is collected whole first; a partial line waits for its newline.
+  self.say_buf = (self.say_buf or "") .. text
+  while true do
+    local line, rest = self.say_buf:match("^([^\n]*)\n(.*)$")
+    if not line then break end
+    self.say_buf = rest
+    self:say_line(line)
   end
-  self.flow_held = (self.flow_held or 0) + #tail
 end
+
+-- One complete line of what the model is saying, into the markdown block it belongs to.
+function METHODS:say_line(line)
+  local md = self.say_md
+  if md and md.kind == "fence" then
+    md.lines[#md.lines + 1] = line
+    if line:match("^%s*```") then self:say_emit(table.concat(md.lines, "\n")); self.say_md = nil end
+    return
+  end
+  if line:match("^%s*```") then
+    self:say_table_end()
+    self.say_md = { kind = "fence", lines = { line } }
+    return
+  end
+  if line:match("^%s*|") then
+    if not (md and md.kind == "table") then self.say_md = { kind = "table", lines = {} } end
+    self.say_md.lines[#self.say_md.lines + 1] = line
+    return
+  end
+  self:say_table_end()
+  if line:match("^%s*$") then self.flow_held = (self.flow_held or 0) + 1 return end
+  self:say_emit(line)
+end
+
+function METHODS:say_table_end()
+  local md = self.say_md
+  if md and md.kind == "table" then self.say_md = nil; self:say_emit(table.concat(md.lines, "\n")) end
+end
+
+function METHODS:say_emit(text)
+  local rendered = self:markdown(text, {
+    paint = function(plain, style) return paint(plain, style, self.live) end,
+    width = self.limit - 2, indent = "", reflow = self:transcript(), style = "commentaryText",
+  })
+  if rendered == "" then rendered = paint(text, "commentaryText", self.live) end
+  if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)) end
+  self:write(rendered)
+  self.flow_held = 1
+end
+
+-- What is still held: a partial line, an open fence or table. Written as it stands.
+function METHODS:flow_flush()
+  if self.say_buf and self.say_buf ~= "" then
+    local line = self.say_buf
+    self.say_buf = ""
+    self:say_line(line)
+  end
+  local md = self.say_md
+  self.say_md = nil
+  if md then self:say_emit(table.concat(md.lines, "\n")) end
+end
+
 -- A boundary (a code block, the answer's end): the flow is over; held newlines are dropped and the next
 -- writer asks for its own gap.
 function METHODS:flow_end()
+  self:flow_flush()
   self.flow_kind, self.flow_held = nil, 0
 end
 
@@ -1967,6 +2038,8 @@ function METHODS:codemode_opts()
     elapsed = function(ms) return M.elapsed(ms) end,
     encode = function(value) return json.encode(value) end,
     syntax = markdown.scan_code,
+    -- The host can fold a long result to one row that opens on a click (host.transcript_expand).
+    expandable = self:transcript() and host and type(host.transcript_expand) == "function" or false,
   }
 end
 
@@ -2027,7 +2100,12 @@ function METHODS:codemode_settle(event)
   local o = self:codemode_opts()
   if self:transcript() then
     self:codemode_sync()
-    for _, row in ipairs(codemode_block.tail_rows(model, self.limit, o)) do self:write(row .. "\n") end
+    local tail = codemode_block.tail_rows(model, self.limit, o)
+    for index, row in ipairs(tail) do
+      local full = tail.expand and tail.expand[index]
+      if full then pcall(host.transcript_expand, json.encode({ { at = 0, text = full } })) end
+      self:write(row .. "\n")
+    end
     -- No heading row on settle either: the block has no title, so there is nothing above the code for
     -- the host to rewrite (this was the last place the modality word reached the transcript).
     self:topic(false)
@@ -2098,6 +2176,7 @@ M.bulletize = bulletize
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
 function METHODS:answered(reply)
   self:delta_reset(true)
+  self:flow_end()
   self:commentary_flush()
   self:clear()
   if self.deltas == 0 and reply and tostring(reply) ~= "" then
@@ -2292,6 +2371,7 @@ function METHODS:event(event)
     self:paint()
   elseif kind == "tool" then
     self:delta_reset()
+    self:flow_end()
     -- The heading is printed when the result arrives, so its dot can say how it went (green or
     -- red, as Claude Code does); until then the status line names the call.
     self:commentary_flush()
@@ -2418,8 +2498,10 @@ function METHODS:event(event)
     end
   elseif kind == "reasoning" then
     -- Settled thinking: already on screen if it streamed; otherwise written now, the same way.
+    -- It also closes the step's text: what is still held (a last line with no newline) is written now.
     if self.reasoning_streamed then self.reasoning_streamed = nil
     else self:reasoning_block(event.text) end
+    self:flow_flush()
   elseif kind == "commentary" then
     self:commentary_flush()
     self:commentary_block(event.text)
@@ -2428,6 +2510,7 @@ function METHODS:event(event)
   elseif kind == "commentary_end" then
     self:commentary_flush()
   elseif kind == "step_phase" then
+    self:flow_flush()
     -- A chat-completions provider (DeepSeek, OpenCode) carries the step's commentary as the
     -- `content` beside its tool calls; agent.lua classifies it and sends it here as `step_phase`,
     -- not as `commentary`. A CLI run has no delta sink, so unless a peer already streamed it

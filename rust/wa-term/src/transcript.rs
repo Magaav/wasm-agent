@@ -21,12 +21,21 @@ const MAX_LINES: usize = 20_000;
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[38;2;119;119;119m";
 const FOCUS: &str = "\x1b[38;2;255;255;255m";
+/// An expandable line under the pointer: drawn bright, so the reader sees it answers a click.
+const BRIGHT: &str = "\x1b[1m\x1b[38;2;255;255;255m";
+/// Marks an expandable line among a block's copy markers (`rows_with_copies`), so the screen-row map
+/// is built in the one place the copy icons' map is: `\u{1}expand:<block>:<line>`.
+const EXPAND_TAG: &str = "\u{1}expand:";
 
 #[derive(Default, Clone)]
 pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool,
     /// Lines that can be copied, by line index: `{line: content}`. The content is the block's own
     /// text (a fenced block's body), not the drawn rows - the rows carry the border and the icon.
     pub copies: HashMap<usize, String>,
+    /// Lines that expand on a click (a code-mode result folded to one row, operator 17/11): by line
+    /// index, the full text, one row per `\n`. `opened` = the lines the reader has expanded.
+    pub expands: HashMap<usize, String>,
+    pub opened: std::collections::HashSet<usize>,
     /// A code-mode block (`⏺ Code · …`): drawn expanded while it is the running one, and folded to
     /// `summary` - ONE row - once the next one starts (`fold_code`).
     pub code: bool,
@@ -77,14 +86,21 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     /// Where the icon of each copyable line was drawn in the last `view`: screen row -> content.
     /// A mouse press asks this before it asks anything else, so a click on the icon copies and a
     /// click anywhere else starts a selection - one gesture, one meaning.
-    copy_rows: HashMap<usize, String> }
+    copy_rows: HashMap<usize, String>,
+    /// Expandable lines waiting for the next `write` (`expandable`), like `pending_copy`.
+    pending_expand: Vec<(usize, String)>,
+    /// Where each expandable line was drawn in the last `view`: screen row -> (block, line).
+    expand_rows: HashMap<usize, (usize, usize)>,
+    /// The expandable line under the pointer, drawn bright.
+    expand_hover: Option<(usize, usize)> }
 
 impl Default for Transcript {
     fn default() -> Self {
         Transcript { blocks: Vec::new(), focus: None, dirty: false, top: None, freeze: false,
             page_delta: 0, nav: false, live_row: None, pending_copy: Vec::new(),
             copy_rows: HashMap::new(), scrollbar: Scrollbar::Auto, counts: Vec::new(),
-            count_width: 0, bar: false, bar_last: None, bar_hovered: false, bar_grab: None }
+            count_width: 0, bar: false, bar_last: None, bar_hovered: false, bar_grab: None,
+            pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None }
     }
 }
 
@@ -97,6 +113,7 @@ impl Transcript {
     pub fn block(&mut self, topic: bool) {
         self.clear_live();
         self.pending_copy.clear();
+        self.pending_expand.clear();
         if let Some(last) = self.blocks.last_mut() {
             if last.lines.is_empty() {
                 last.topic = topic; last.expanded = false;
@@ -207,6 +224,43 @@ impl Transcript {
         self.pending_copy = markers.iter().map(|(at, text)| (*at, text.clone())).collect();
     }
 
+    /// Mark lines of the NEXT `write` as expandable: `(offset, full text)`. The line is drawn as written
+    /// (one row); a click on it shows the full text in its place, a second click folds it again.
+    pub fn expandable(&mut self, markers: &[(usize, String)]) {
+        self.pending_expand = markers.iter().map(|(at, text)| (*at, text.clone())).collect();
+    }
+
+    /// A press on an expandable line toggles it. Returns whether the press was one.
+    pub fn expand_at(&mut self, row: usize) -> bool {
+        let Some(&(block, line)) = self.expand_rows.get(&row) else { return false };
+        let Some(found) = self.blocks.get_mut(block) else { return false };
+        if !found.opened.remove(&line) { found.opened.insert(line); }
+        if let Some(count) = self.counts.get_mut(block) { *count = None; }
+        self.dirty = true;
+        true
+    }
+
+    /// The pointer moved: the expandable line under it (if any) is drawn bright. Only a change of line
+    /// sets `dirty`, so a moving pointer costs no frame.
+    pub fn expand_hover(&mut self, row: usize) -> bool {
+        let now = self.expand_rows.get(&row).copied();
+        if now == self.expand_hover { return false }
+        self.expand_hover = now;
+        self.dirty = true;
+        true
+    }
+
+    /// One marker of `rows_with_copies`, placed on the screen: a copy icon or an expandable line.
+    fn place(&mut self, row: usize, content: String) {
+        if let Some(key) = content.strip_prefix(EXPAND_TAG) {
+            if let Some((b, l)) = key.split_once(':') {
+                if let (Ok(b), Ok(l)) = (b.parse(), l.parse()) { self.expand_rows.insert(row, (b, l)); }
+            }
+            return;
+        }
+        self.copy_rows.insert(row, content);
+    }
+
     /// The content a mouse press at `(row, col)` copies: the icon cell of a copyable row, and
     /// nothing else. Rows and columns are the ones the last `view` drew (1-based, screen cells), so
     /// a caller reads its own coordinates without translating anything.
@@ -235,6 +289,7 @@ impl Transcript {
         if found.lines[0] != text {
             found.lines[0] = text.to_string();
             found.copies.remove(&0);
+            found.expands.remove(&0);
             self.dirty = true;
         }
         true
@@ -245,6 +300,7 @@ impl Transcript {
     pub fn write(&mut self, text: &str) {
         self.clear_live();
         let markers = std::mem::take(&mut self.pending_copy);
+        let expands = std::mem::take(&mut self.pending_expand);
         if self.blocks.is_empty() { self.blocks.push(Block::default()); }
         let block = self.blocks.last_mut().unwrap();
         let text = text.replace('\r', "");
@@ -263,6 +319,11 @@ impl Transcript {
         for (at, content) in markers {
             if at < produced.max(1) && first + at < block.lines.len() {
                 block.copies.insert(first + at, content);
+            }
+        }
+        for (at, full) in expands {
+            if at < produced.max(1) && first + at < block.lines.len() {
+                block.expands.insert(first + at, full);
             }
         }
         block.open = !closed;
@@ -332,6 +393,18 @@ impl Transcript {
         for (line_index, line) in block.lines.iter().enumerate() {
             let content = block.copies.get(&line_index);
             let start = rows.len();
+            if let Some(full) = block.expands.get(&line_index) {
+                if block.opened.contains(&line_index) {
+                    for part in full.split('\n') { rows.extend(wrap_rows(part, inner)); }
+                } else if self.expand_hover == Some((index, line_index)) {
+                    rows.extend(wrap_rows(&format!("{BRIGHT}{}{RESET}", crate::selection::plain(line)), inner));
+                } else {
+                    rows.extend(wrap_rows(line, inner));
+                }
+                // Every row it now covers answers the click, so a reader can fold it from anywhere.
+                for at in start..rows.len() { copies.push((at, format!("{EXPAND_TAG}{index}:{line_index}"))); }
+                continue;
+            }
             if content.is_some() {
                 // The affordance is part of the row, so the wrap and the click agree about where it
                 // ends: the icon takes its columns from the text and the header wraps two columns
@@ -409,6 +482,7 @@ impl Transcript {
     /// keeping a focused topic on screen.
     pub fn view(&mut self, width: usize, height: usize) -> Vec<String> {
         self.copy_rows.clear();
+        self.expand_rows.clear();
         let (width, height) = (width.max(1), height.max(1));
         // The bar costs a column, and WHICH width the chat wraps at is decided once per change:
         // deciding it afresh each frame would re-wrap the whole chat twice on every keystroke of a
@@ -448,7 +522,7 @@ impl Transcript {
             let skip = tail.len().saturating_sub(height);
             let blank = height.saturating_sub(tail.len());
             for (at, content) in copies {
-                if at >= skip { self.copy_rows.insert(blank + at - skip + 1, content); }
+                if at >= skip { self.place(blank + at - skip + 1, content); }
             }
             let mut shown = vec![String::new(); blank];
             shown.extend(tail.into_iter().skip(skip));
@@ -493,7 +567,7 @@ impl Transcript {
         // Where the icons are on the screen: row 1 is the region's first row, as `render` draws it.
         for (at, content) in copies {
             let row = at as isize - start;
-            if row >= 0 && row < h { self.copy_rows.insert(row as usize + 1, content); }
+            if row >= 0 && row < h { self.place(row as usize + 1, content); }
         }
         let below = whole - (start + h);
         if below > 0 {
@@ -762,6 +836,32 @@ mod tests {
     /// adds to a row is one column at the end (`view`), so a test that compared whole rows would
     /// otherwise be asserting the bar's width in every one of them.
     fn plain(mut t: Transcript) -> Transcript { t.scrollbar = Scrollbar::Hidden; t }
+    #[test]
+    fn an_expandable_line_is_one_row_brightens_under_the_pointer_and_opens_on_a_click() {
+        let mut t = plain(Transcript::default());
+        t.block(false);
+        t.write("before\n");
+        t.expandable(&[(0, "\u{23bf} {\"a\":1,\n  \"b\":2}".to_string())]);
+        t.write("\u{23bf} {\"a\":1,\u{2026} +9 chars\nafter\n");
+        let rows = t.view(40, 3);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[1].contains("+9 chars"), "folded to its one row: {rows:?}");
+        // The pointer on it: drawn bright; off it: plain again.
+        assert!(t.expand_hover(2));
+        let lit = t.view(40, 3);
+        assert!(lit[1].starts_with(BRIGHT), "bright under the pointer: {lit:?}");
+        assert!(t.expand_hover(1));
+        assert!(!t.view(40, 3)[1].starts_with(BRIGHT));
+        // A click opens it in place - the full text, two rows - and a second click folds it again.
+        assert!(!t.expand_at(1), "a press on another row is not an expand");
+        assert!(t.expand_at(2));
+        let open = t.view(40, 4);
+        assert!(open.iter().any(|r| r.contains("\"b\":2")), "opened: {open:?}");
+        assert!(!open.iter().any(|r| r.contains("+9 chars")));
+        let row = (1..=4).find(|&r| t.expand_rows.contains_key(&r)).expect("the opened rows still answer a click");
+        assert!(t.expand_at(row));
+        assert!(t.view(40, 3)[1].contains("+9 chars"), "folded again");
+    }
     #[test]
     fn a_band_too_wide_only_by_its_padding_is_cut_not_wrapped() {
         // The code-mode band, padded to 79 columns, inside a focus border (78) or a narrower screen.

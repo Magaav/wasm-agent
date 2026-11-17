@@ -3206,6 +3206,12 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
             // The copy icon of a fenced block (#114): the transcript knows which cell it drew the
             // affordance on, so a press there is a copy and a press anywhere else is a selection -
             // one gesture, one meaning, no mode to learn.
+            // An expandable line (a folded code-mode result): the press opens or folds it.
+            if state.transcript.expand_at(row) {
+                let frame = layout_frame(state);
+                let _ = wa_term::terminal_editor::write(&frame);
+                return;
+            }
             if let Some(text) = state.transcript.copy_at(row, col) {
                 let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
                 let count = text.chars().count();
@@ -3224,7 +3230,13 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
         }
         // Motion with no button down (`SGR` 35, which `1003` reports): the pointer is on the bar or
         // it is not. Only that flip sets `dirty`, so a moving pointer costs no frame.
-        Mouse::Motion(row, col) => { state.transcript.bar_hover(row, col, width); }
+        Mouse::Motion(row, col) => {
+            state.transcript.bar_hover(row, col, width);
+            if row <= rows && state.transcript.expand_hover(row) {
+                let frame = layout_frame(state);
+                let _ = wa_term::terminal_editor::write(&frame);
+            }
+        }
         Mouse::Drag(row, col) | Mouse::Release(row, col) => {
             // A drag that began on the bar scrolls it, and the button coming up lets the thumb go;
             // anything else is the selection it has always been.
@@ -4012,6 +4024,25 @@ pub extern "C-unwind" fn transcript_copy(l: *mut LuaState) -> c_int {
     let (lock, _) = console_input();
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.transcript.copyable(&markers);
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if markers.is_empty() { 0 } else { 1 }) };
+    1
+}
+
+/// `host.transcript_expand(markers_json)`: lines of the NEXT `transcript_write` that expand on a click
+/// - `[{"at": <line of that write>, "text": "<the full text, one row per \n>"}]`. A code-mode result is
+/// written as one row ending `… +N chars`; the reader hovers it (it brightens) and clicks it to see it all
+/// (operator 17/11).
+pub extern "C-unwind" fn transcript_expand(l: *mut LuaState) -> c_int {
+    let markers: Vec<(usize, String)> = arg_string(l, 1)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| Some((item.get("at")?.as_u64()? as usize, item.get("text")?.as_str()?.to_string())))
+        .collect();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.transcript.expandable(&markers);
     unsafe { wa_host_support::lua::lua_pushboolean(l, if markers.is_empty() { 0 } else { 1 }) };
     1
 }

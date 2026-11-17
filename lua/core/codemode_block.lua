@@ -142,6 +142,7 @@ function M.opts(options)
   return {
     paint = function(text, style) return paint(text, style, live) end,
     live = live,
+    expandable = o.expandable == true,
     columns = columns,
     clip = o.clip or function(text, limit)
       local value = tostring(text or "")
@@ -473,13 +474,12 @@ function M.call_lines(model, width, o)
   o = M.opts(o)
   local rows = {}
   for _, row in ipairs(M.call_rows(model, width, o)) do
-    local mark = row:sub(1, #MARK_NO)
-    local style = (mark == MARK_NO and "error") or (mark == MARK_WAIT and "accent") or "dim"
-    if o.live and mark == MARK_NO then
-      rows[#rows + 1] = "  " .. o.paint(mark, style) .. row:sub(#MARK_NO + 1)
-    else
-      rows[#rows + 1] = o.paint("  " .. row, style)
-    end
+    -- The whole row in its state's colour (operator 17/11): ⏳ waiting light yellow, ✓ light green,
+    -- ✗ soft red. MARK_OK/MARK_NO/MARK_WAIT are 3 bytes each.
+    local mark = row:sub(1, 3)
+    local style = (mark == MARK_NO and "callFail") or (mark == MARK_WAIT and "callWait")
+      or (mark == MARK_OK and "callOk") or "dim"
+    rows[#rows + 1] = o.paint("  " .. row, style)
   end
   return rows
 end
@@ -548,12 +548,23 @@ function M.tail_rows(model, width, options)
   end
   local lead = "\226\142\191 "
   local first = true
+  local style = model.error and not model.value and "error" or "dim"
   for _, line in ipairs(value) do
-    local style = model.error and not model.value and "error" or "dim"
     for _, piece in ipairs(M.wrap(line, width - 5, o)) do
       rows[#rows + 1] = (first and o.paint(lead, "muted") or "  ") .. o.paint(piece, style)
       first = false
     end
+  end
+  -- Folded (operator 17/11): where the host can open a row on a click, a value longer than one row is
+  -- ONE row - its start, then `… +N chars` - and the full rows are what the click shows.
+  if o.expandable and #rows > 1 then
+    local whole = table.concat(value, " ")
+    local room = math.max(8, width - 5 - 16)
+    local shown = M.wrap(whole, room, o)[1] or ""
+    local rest = o.columns(whole) - o.columns(shown)
+    local full = table.concat(rows, "\n")
+    rows = { o.paint(lead, "muted") .. o.paint(shown, style) .. o.paint(" \226\128\166 +" .. rest .. " chars", "muted") }
+    rows.expand = { [1] = full }
   end
   if value_hidden > 0 then
     rows[#rows + 1] = o.paint("  \226\128\166 +" .. value_hidden .. " lines (/console shows all)", "dim")
