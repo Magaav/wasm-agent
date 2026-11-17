@@ -99,7 +99,12 @@ local s7=run('only',{{content='DSML is a format name.'}})
 check(#s7.dispatched==0 and s7.reply=='DSML is a format name.','prose is an answer')
 
 -- 7. switch off: markup is text (nothing changes for nodes without raw code)
-local s8=run(nil,{{content=r2}})
+local s8=run('codemode',{{content=r2}})
 check(#s8.dispatched==0,'switch off: markup is not read')
 
+-- CodeAct is the default (17/11): unset means `only`; `codemode` (or off/0/false/no) is the opt-out.
+raw=nil; check(raw_code.mode()=='only','unset: CodeAct (only) is the default')
+for _,v in ipairs({'codemode','off','0','false','no','CODEMODE',' off '}) do raw=v; check(raw_code.mode()==nil,'opt-out '..v..': codemode') end
+raw='first'; check(raw_code.mode()=='first','first is still first')
+raw=nil
 print(json.encode({ok=true,checks=checks,paid_calls=0}))

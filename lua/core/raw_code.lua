@@ -1,4 +1,5 @@
--- The raw code channel (WASM_AGENT_RAW_CODE, default off, per node).
+-- The raw code channel (WASM_AGENT_RAW_CODE, per node). CodeAct (`only`) is the default since 17/11;
+-- `WASM_AGENT_RAW_CODE=codemode` restores the JSON codemode tool call.
 --
 -- With the switch on, the model may write its script as plain code in one fenced block tagged
 -- ```js run instead of a JSON-escaped `codemode` tool call. Measured on 166 real scripts (15/11):
@@ -72,8 +73,15 @@ function M.without_generic(list)
   return out
 end
 
+-- CodeAct is the DEFAULT (operator 17/11: "codeact is really good, make it default"): with the switch
+-- unset the run block is the only way to act (`only`). The JSON `codemode` tool call is the opt-out:
+-- WASM_AGENT_RAW_CODE=codemode (or off / 0 / false / no).
+M.DEFAULT = "only"
+local OFF = { codemode = true, off = true, ["0"] = true, ["false"] = true, no = true }
 function M.mode()
-  local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower()
+  local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if value == "" then return M.DEFAULT end
+  if OFF[value] then return nil end
   if value == "1" or value == "on" or value == "true" then return "on" end
   if value == "stop" then return "stop" end
   if value == "first" then return "first" end

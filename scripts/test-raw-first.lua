@@ -245,7 +245,7 @@ local on=run('1',{{content='Let me compute.\n```js run\nreturn 6*7;\n```'},{cont
 check(has(declared(on.requests[1]),'codemode'),'1: codemode stays declared')
 check(on.requests[1].messages[1].content:find(raw_code.GUIDANCE,1,true) and not on.requests[1].messages[1].content:find(raw_code.FIRST_GUIDANCE,1,true),'1: the optional sentence, not the first guidance')
 check(not no_raw_pairing(on.requests[2]),'1: the raw call still goes back as a tool call/result pair')
-local off=run(nil,{{content='plain'}})
+local off=run('codemode',{{content='plain'}})
 check(has(declared(off.requests[1]),'codemode') and not json.encode(off.requests[1]):find('js run',1,true),'off: codemode declared, no run-block wording')
 
 print(json.encode({ok=true,checks=checks,paid_calls=0}))

@@ -131,7 +131,7 @@ local fence=run('stop',{{content='see:\n```sh\nls'}})
 check(fence.reply=='see:\n```sh\nls\n```' and #fence.dispatched==0,'an ordinary block the stop sequence cut gets its fence back and stays text')
 
 -- 7. switch off: the same reply is plain text -------------------------------------------------------
-local off=run(nil,{{content='Let me compute.\n```js run\nreturn 6*7;\n```'}})
+local off=run('codemode',{{content='Let me compute.\n```js run\nreturn 6*7;\n```'}})
 check(off.reply=='Let me compute.\n```js run\nreturn 6*7;\n```' and #off.dispatched==0 and off.tool==nil,'switch off: a run block is plain text and nothing runs')
 check(off.requests[1].stop==nil and not off.requests[1].messages[1].content:find(raw_code.GUIDANCE,1,true),'switch off: no stop sequence, no guidance sentence')
 check(not json.encode(off.requests[1]):find('js run',1,true),'switch off: the request never mentions run blocks')
