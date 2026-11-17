@@ -305,6 +305,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("input_commands", Device, crate::host::input_commands, "Set the commands the CLI's slash menu offers"),
     plain!("input_held", Device, crate::host::input_held, "List lines the CLI took but holds as still queued above its status line"),
     plain!("input_take", Device, crate::host::input_take, "Take lines the reader buffered while a run was in flight"),
+    plain!("input_image", Device, crate::host::input_image, "The image pasted with Ctrl+V as [Image #n] in this session (mime + base64)"),
     plain!("input_stop", Device, crate::host::input_stop, "Stop the console line reader"),
     plain!("input_idle", Device, crate::host::input_idle, "Whether the CLI could restart now: empty draft, no panel, nothing queued, no selection"),
     plain!("binary_changed", ReadOnly, crate::host::binary_changed, "Whether this process's wa binary was replaced on disk since it started"),

@@ -501,7 +501,21 @@ function M.run(argv)
     -- will be drawn from, and the reader is not waiting on anything but this turn.
     publish_views({ max_age = local_views.MAX_AGE, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
     view:run_started()
-    local ok, reply = pcall(agent.run, agent, line)
+    -- Images pasted with Ctrl+V (`[Image #n]` in the line, the host keeps the bytes): stored as attachments
+    -- and sent with the message, the same path the UI's pictures take (operator 17/11).
+    local images = {}
+    if host.input_image then
+      for n in tostring(line):gmatch("%[Image #(%d+)%]") do
+        local raw = host.input_image(tonumber(n))
+        local decoded_ok, entry = pcall(json.decode, raw or "")
+        if decoded_ok and type(entry) == "table" then
+          local reference, problem = memory.store_image(entry)
+          if reference then images[#images + 1] = reference
+          else view:line(cli_view.paint("  [Image #" .. n .. "] not sent: " .. tostring(problem), "warning", view.live)) end
+        end
+      end
+    end
+    local ok, reply = pcall(agent.run, agent, line, #images > 0 and images or nil)
     if not ok then
       view:failed(redact.text(tostring(reply)))
     else

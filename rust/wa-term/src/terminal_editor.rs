@@ -118,7 +118,10 @@ pub fn try_raw() -> Option<RawMode> { None }
 pub enum Action { None, Submit(String), Eof, Interrupt, Nav, PageUp, PageDown, Bottom,
     /// The draft's selection, for the host to put on the clipboard (OSC 52): Ctrl+C or Ctrl+Insert with
     /// text selected (operator 17/11: "ctrl+a should select whole text-area so we can copy it").
-    Copy(String) }
+    Copy(String),
+    /// Ctrl+V: the host reads an image from the system clipboard, keeps it, and puts `[Image #n]` in the
+    /// draft (`insert_text`) - what pi and Claude Code do (operator 17/11).
+    PasteImage }
 
 /// A command the slash menu offers: its name (`/login`), whether it takes arguments, and its hint.
 #[derive(Clone, Default)]
@@ -494,6 +497,8 @@ impl Editor {
                 || seq == b"\x1b[27;2;13~" || seq == b"\x1b[13;2~" {
                 self.insert('\n'); self.escape.clear(); return Action::None;
             }
+            // Ctrl+V as the kitty keyboard protocol reports it (`v` = 118).
+            if seq == b"\x1b[118;5u" { self.escape.clear(); return Action::PasteImage; }
             // Ctrl+Z / Ctrl+Shift+Z as the kitty keyboard protocol reports them (`z` = 122, `Z` = 90).
             if seq == b"\x1b[122;5u" { self.escape.clear(); self.restore(true); return Action::None; }
             if seq == b"\x1b[122;6u" || seq == b"\x1b[90;6u" { self.escape.clear(); self.restore(false); return Action::None; }
@@ -576,6 +581,7 @@ impl Editor {
             }
             26 => { self.restore(true); Action::None } // Ctrl+Z: undo (raw mode turned SIGTSTP off)
             25 | 24 => { self.restore(false); Action::None } // Ctrl+Y, and Ctrl+X (operator 17/11): redo
+            22 if !self.paste => Action::PasteImage, // Ctrl+V: an image from the clipboard (the host reads it)
             4 if self.chars.is_empty() => Action::Eof,
             4 => { if !self.delete_selection() && self.cursor < self.chars.len() { self.chars.remove(self.cursor); } Action::None }
             8 | 127 if self.bash && self.chars.is_empty() => { self.bash = false; Action::None }
@@ -630,6 +636,16 @@ impl Editor {
             at += 1;
         }
         Some(at)
+    }
+    /// Text the host puts in the draft at the cursor (an `[Image #n]` token), as one undo step.
+    pub fn insert_text(&mut self, text: &str) {
+        let snapshot = Snapshot { chars: self.chars.clone(), cursor: self.cursor };
+        for ch in text.chars() { self.insert(ch); }
+        if self.undo.len() == UNDO_MAX { self.undo.remove(0); }
+        self.undo.push(snapshot);
+        self.redo.clear();
+        self.group = None;
+        self.group_cursor = self.cursor;
     }
     /// A press in the box: the cursor goes there and the selection ends (a drag then extends from it).
     pub fn click(&mut self, index: usize) { self.anchor = None; self.cursor = index.min(self.chars.len()); }
@@ -1370,6 +1386,21 @@ mod tests {
         let mut e = Editor::default();
         assert_eq!(e.feed(3), Action::Interrupt, "an empty line interrupts the turn");
         assert_eq!(e.feed(3), Action::Eof, "a second Ctrl+C within a second quits");
+    }
+    #[test]
+    fn ctrl_v_asks_for_a_clipboard_image_and_the_token_is_one_step() {
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"look at ");
+        assert_eq!(e.feed(22), Action::PasteImage, "Ctrl+V asks the host for the clipboard image");
+        assert_eq!(type_bytes(&mut e, b"\x1b[118;5u"), Action::PasteImage, "and so does kitty's Ctrl+V");
+        e.insert_text("[Image #1]");
+        assert_eq!(e.text(), "look at [Image #1]");
+        e.feed(26);
+        assert_eq!(e.text(), "look at ", "the inserted token is one undo step");
+        // Inside a bracketed paste, byte 22 is data, never a command.
+        type_bytes(&mut e, b"\x1b[200~a\x16b\x1b[201~");
+        assert!(!e.text().contains("[Image"), "{}", e.text());
     }
     #[test]
     fn home_and_end_move_within_the_line_and_shift_selects() {
