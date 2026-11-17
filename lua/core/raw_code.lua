@@ -165,8 +165,146 @@ function M.retag(text)
   return table.concat(out, "\n")
 end
 
+-- A tool call the model wrote as TEXT, in its own training format, because the request declared no tool
+-- for it (`first`/`only` hide codemode). Measured 17/11 on work (sessions b08de0ed, 02d9236e): DeepSeek
+-- wrote `<｜DSML｜invoke name="js">…code…` and `<｜DSML｜invoke name="bash">` instead of a run block; the
+-- reply had no fence, so it was taken as the ANSWER and the turn ended after one step with nothing run.
+-- The action was clear, so it runs: a code-ish name (js/run/codemode/…) is the script, any other name is
+-- the one-line script `return await tools.<name>(<args>)` (one pathway, same dispatch).
+-- Formats read: DeepSeek DSML (`<｜DSML｜invoke name=…>` + `<｜DSML｜parameter name=… string="true">`),
+-- and Hermes/Qwen `<tool_call>{"name":…,"arguments":{…}}</tool_call>`.
+local CODE_NAMES = { js = true, javascript = true, run = true, code = true, script = true, codemode = true,
+  run_js = true, js_run = true, javascript_run = true, execute = true, execute_code = true, python = false }
+local CODE_PARAMS = { "code", "script", "source", "js", "program" }
+
+local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+
+local function script_for(name, args, body)
+  name = trim(name)
+  if CODE_NAMES[name:lower()] then
+    if type(args) == "table" then
+      for _, key in ipairs(CODE_PARAMS) do
+        if type(args[key]) == "string" then return args[key] end
+      end
+      local only_value, count = nil, 0
+      for _, value in pairs(args) do count = count + 1 only_value = value end
+      if count == 1 and type(only_value) == "string" then return only_value end
+    end
+    local text = trim(body)
+    local ok, decoded = pcall(json.decode, text)
+    if ok and type(decoded) == "table" and type(decoded.code) == "string" then return decoded.code end
+    -- a fence inside the call body is the code it wraps
+    local fenced = text:match("^```[%w ]*\n(.-)\n?```$")
+    return fenced or text
+  end
+  if type(args) ~= "table" then
+    local ok, decoded = pcall(json.decode, trim(body))
+    args = (ok and type(decoded) == "table") and decoded or {}
+  end
+  local target = name:match("^[%a_][%w_]*$") and ("tools." .. name) or ("tools[" .. json.encode(name) .. "]")
+  local encoded = next(args) == nil and "" or json.encode(args)
+  return "return await " .. target .. "(" .. encoded .. ");"
+end
+
+-- Returns { start = <byte where the markup begins>, calls = { {name=, code=} }, format = } or nil.
+-- `unparsed = true` when the markup is there but no call could be read from it.
+function M.native_calls(text)
+  text = tostring(text or "")
+  local plain = text:gsub("\239\189\156", "|") -- U+FF5C FULLWIDTH VERTICAL LINE, DeepSeek's token bar
+  -- DSML: normalise `< | DSML | name` / `</ | DSML | name` to `<DSML:name` / `</DSML:name`.
+  local norm = plain:gsub("<%s*(/?)%s*|%s*DSML%s*|%s*", "<%1DSML:")
+  local dsml_at = norm:find("<DSML:", 1, true)
+  if dsml_at then
+    -- `start` must index the ORIGINAL text: count the bytes before the first marker there.
+    local start = text:find("<%s*\239\189\156%s*DSML") or text:find("<%s*|%s*DSML") or 1
+    local calls = {}
+    local rest = norm:sub(dsml_at)
+    for name, body in rest:gmatch('<DSML:invoke%s+name%s*=%s*"([^"]*)"%s*>(.-)</DSML:invoke>') do
+      calls[#calls + 1] = { name = name, body = body }
+    end
+    if #calls == 0 then
+      -- a reply cut (or a model that never closed the invoke): take the body to the end
+      local name, body = rest:match('<DSML:invoke%s+name%s*=%s*"([^"]*)"%s*>(.*)$')
+      if name then calls[1] = { name = name, body = body:gsub("</?DSML:[%w_]*>%s*$", "") } end
+    end
+    local out = {}
+    for _, call in ipairs(calls) do
+      local args, any = {}, false
+      for pname, attrs, value in call.body:gmatch('<DSML:parameter%s+name%s*=%s*"([^"]*)"([^>]*)>(.-)</DSML:parameter>') do
+        any = true
+        if attrs:find('string%s*=%s*"true"') then
+          args[pname] = value
+        else
+          local ok, decoded = pcall(json.decode, trim(value))
+          if ok and decoded ~= nil then args[pname] = decoded else args[pname] = value end
+        end
+      end
+      -- No parameter element: the body IS the value (observed: code directly inside invoke, then a
+      -- stray `</DSML:parameter>`). Strip every DSML tag left in it.
+      local body = any and "" or call.body:gsub("</?DSML:[^>]*>", "")
+      out[#out + 1] = { name = call.name, code = script_for(call.name, any and args or nil, body) }
+    end
+    return { start = start, calls = out, format = "DSML", unparsed = #out == 0 or nil }
+  end
+  local tc_at = text:find("<tool_call>", 1, true)
+  if tc_at then
+    local out = {}
+    for body in (text:sub(tc_at) .. "</tool_call>"):gmatch("<tool_call>(.-)</tool_call>") do
+      local ok, decoded = pcall(json.decode, trim(body))
+      if ok and type(decoded) == "table" and type(decoded.name) == "string" then
+        local args = decoded.arguments or decoded.parameters or {}
+        if type(args) == "string" then
+          local ok2, d2 = pcall(json.decode, args)
+          args = ok2 and type(d2) == "table" and d2 or { code = args }
+        end
+        out[#out + 1] = { name = decoded.name, code = script_for(decoded.name, args, "") }
+      end
+    end
+    return { start = tc_at, calls = out, format = "tool_call", unparsed = #out == 0 or nil }
+  end
+  return nil
+end
+
+-- The native-markup path of `take`: the calls run as raw-channel codemode calls; the text before the
+-- markup stays as the step's thought.
+local function take_native(result, found)
+  local content = result.content or ""
+  local incomplete = result.stream_complete == false or result.finish_reason == "length"
+  local calls = {}
+  for _, call in ipairs(result.tool_calls or {}) do calls[#calls + 1] = call end
+  local first
+  local items = found.calls
+  if #items == 0 then items = { { name = "", code = "" } } end
+  for _, item in ipairs(items) do
+    local id = "call_raw_" .. (host.uuid():gsub("-", ""))
+    first = first or { id = id, blocks = #items, bytes = #item.code, notes = {}, native = found.format }
+    calls[#calls + 1] = { id = id, type = "function", ["function"] = { name = "codemode", arguments = json.encode({ code = item.code }) } }
+  end
+  result.tool_calls = calls
+  if incomplete then first.incomplete = true return first end
+  if found.unparsed then
+    first.refusal = refusal("raw_code_markup",
+      "your message had " .. found.format .. " tool-call markup but no call could be read from it, so nothing ran",
+      "end your message with one ```js run block; inside it every tool is tools.<name>(args)")
+  else
+    first.notes[#first.notes + 1] = "your " .. found.format .. " call markup ran as a script; a ```js run block is the native form here"
+  end
+  result.content = (content:sub(1, found.start - 1):gsub("%s+$", ""))
+  if result.finish_reason == "stop" or result.finish_reason == nil then
+    result.raw_finish_reason = result.finish_reason
+    result.finish_reason = "tool_calls"
+  end
+  return first
+end
+
 function M.take(result, stop_sent)
   local content = result.content or ""
+  -- Call markup in the text, and no real tool call: in `first`/`only` the model had nothing declared to
+  -- call with, so its own format leaked into the text. A run block, if any, still wins below.
+  local native = (#(result.tool_calls or {}) == 0) and M.native_calls(content) or nil
+  if native and not content:sub(1, native.start - 1):find("```", 1, true) then
+    return take_native(result, native)
+  end
   if not content:find("```", 1, true) then return nil end
   -- `only` mode: code is the *only* way to act, so an untagged ```js fence is the action, not a sample.
   -- Measured 17/11: told "end your message with one ```js run block", the model wrote ```js — a sample by
