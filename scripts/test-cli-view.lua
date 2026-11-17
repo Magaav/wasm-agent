@@ -823,7 +823,7 @@ local session_total = { prompt = 120400, completion = 1000, cached = 90540 }
 editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
 ok(has(running, "\240\159\145\1636\194\183") and not has(running, "\226\154\146\239\184\143")
-  and has(running, "+\226\134\14527.2k \226\134\1471.0k"),
+  and has(running, "\206\14827.2k \226\134\1471.0k"),
   "the status line shows the step, the run's tools, what it added to the context and its output")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
@@ -845,7 +845,7 @@ session_total.prompt = session_total.prompt + 30000
 session_total.completion = session_total.completion + 450
 editor_view:event({ type = "usage", total = session_total, prompt = 30000 })
 local second = table.concat(editor_out, "", second_mark)
-ok(has(second, "+\226\134\1452.8k \226\134\147450"),
+ok(has(second, "\206\1482.8k \226\134\147450"),
   "a later run counts its own context growth and output, not zero")
 editor_view:answered("ok")
 editor_view:screen_off()
