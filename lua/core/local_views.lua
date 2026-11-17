@@ -25,6 +25,8 @@ local M = {}
 -- on the scale of minutes; a rebuild costs one panel's worth of formatting, or nothing when the
 -- roster cache is still warm (`nodes.list({cached = true})`).
 M.MAX_AGE = 60
+-- The client's cap on one stack (rust/wa-cli-views/src/spec.rs, MAX_VIEWS).
+M.MAX_PANELS = 64
 
 -- The views by the command that opens them. Each builder returns
 -- `{command, captured_at, views = {{title, lines, options}, ...}}` - `views[1]` the root, and
@@ -43,7 +45,7 @@ local builders = {
     local ctx = opts.ctx or { user_id = "master", role = "master", session_id = opts.session_id }
     local view = command.list(ctx, { cache_only = true })
     if type(view) ~= "table" or view.ok == false then return nil end
-    return command.views(view)
+    return command.views(view, { max_pages = M.MAX_PANELS })
   end,
   ["/login"] = function(opts)
     local manager = dofile("lua/core/provider_management.lua")
@@ -122,7 +124,9 @@ function M.refresh(opts)
         -- One view that cannot be built must not cost the others their snapshot: `/login` on a node with
         -- no provider state used to stop `/nodes` publishing, and the reader lost a view that worked.
         problem = problem or string.format("%s could not be built: %s", name, tostring(set))
-        M.forget(name)
+        -- Tried: wait max_age like a success. A failure retried at every round boundary paid the whole
+        -- build each round (17/11, work: /mcp refused, rebuilt every round, ~2 s per round).
+        published_at[name] = now
       elseif type(set) ~= "table" then
         -- Nothing to show (no data yet, or a builder that declined): not a failure, and not worth a line on
         -- the reader's screen. It is tried again at the next boundary.
@@ -131,7 +135,7 @@ function M.refresh(opts)
         local done, why = M.publish(name, set)
         if not done then
           problem = problem or string.format("%s was not published: %s", name, tostring(why))
-          M.forget(name)
+          published_at[name] = now
         else
           count = count + 1
         end

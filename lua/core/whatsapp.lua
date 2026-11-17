@@ -307,6 +307,11 @@ end
 --- node's index; a `/mcp` opened twice in a minute asks once.
 M.SERVICE_ROW_TTL_S = 60
 M._service_row = nil
+-- Drop the cached /mcp row (here and in the core store): the next service_row reads afresh.
+function M.reset_service_row()
+  M._service_row = nil
+  dofile('lua/core/reload.lua').state('whatsapp_service_row').last = nil
+end
 
 --- The built-in service as one `/mcp` row: what it is, where the account lives, how it stands, and how
 --- many chats the index knows.
@@ -324,10 +329,17 @@ M._service_row = nil
 function M.service_row(opts)
   opts = opts or {}
   local now = tonumber(host.now()) or 0
-  local cached = M._service_row
+  -- The cache lives in the core's store, not in this module: every `/mcp` build `dofile`s this file
+  -- fresh, so a module-level cache never hit and each build paid a remote contacts call to the account
+  -- node (17/11, work: 1.9 s per /mcp build, at turn start and at every model round).
+  local store = dofile('lua/core/reload.lua').state('whatsapp_service_row')
+  local cached = M._service_row or store.last
   if opts.fresh ~= true and cached and (now - (cached.at or 0)) < M.SERVICE_ROW_TTL_S then
     return cached.row
   end
+  -- `cache_only` (a snapshot taken mid-run, or at a turn's start): no network. The count is the last one
+  -- read, or unknown - the row says which instead of making the model wait for a number on a panel.
+  if opts.cache_only then opts = setmetatable({ counts = false }, { __index = opts }) end
   local holds = M.holds_account()
   local self_name = M.self_name()
   local owner = holds and nil or M.owner(opts.owner_catalog)
@@ -390,7 +402,15 @@ function M.service_row(opts)
       note = 'The account lives on one node; every other node asks it. Sends still pass the operator '
         .. 'policy (rate limit, daily cap, audit) on the node that holds the account.' },
   }
-  M._service_row = { at = now, row = row }
+  if opts.counts == false and cached and cached.row and cached.row.chats and chats == nil then
+    row.chats = cached.row.chats
+    row.count_phrase = cached.row.count_phrase
+  end
+  -- A cache_only row is not stored as fresh: the next full /mcp still reads the real count.
+  if opts.counts ~= false then
+    M._service_row = { at = now, row = row }
+    store.last = M._service_row
+  end
   return row
 end
 

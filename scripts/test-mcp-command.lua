@@ -144,14 +144,23 @@ host.getenv = function(name)
   if name == 'WASM_AGENT_WHATSAPP_OWNER' then return 'openclaw' end
   return getenv(name)
 end
-whatsapp._service_row = nil
-local located = command.list(ctx, {
-  cache_only = true,
-  owner_catalog = function() return { peers = { ['peer-openclaw'] = { name = 'openclaw', node_id = 'peer-openclaw' } } } end,
-  remote_call = function(node, name, args) return { ok = true, served_by = node, index = { chats = 36 } } end,
-})
+whatsapp.reset_service_row()
+local catalog_stub = function() return { peers = { ['peer-openclaw'] = { name = 'openclaw', node_id = 'peer-openclaw' } } } end
+local remote_calls = 0
+local remote_stub = function(node, name, args) remote_calls = remote_calls + 1; return { ok = true, served_by = node, index = { chats = 36 } } end
+-- cache_only (the mid-run / turn-start snapshot) never asks the account node: with nothing read yet the
+-- count is unknown (17/11: this remote read cost 1.9 s before every first model call).
+local blind = command.list(ctx, { cache_only = true, owner_catalog = catalog_stub, remote_call = remote_stub })
+local blind_row = command.find(blind, 'whatsapp')
+check(remote_calls == 0 and blind_row and blind_row.count_phrase == 'chats unknown',
+  'a cache_only list makes no remote call: ' .. tostring(remote_calls) .. ' ' .. tostring(blind_row and blind_row.count_phrase))
+-- A full read asks once; a later cache_only list shows that count without asking again.
+whatsapp.service_row({ owner_catalog = catalog_stub, remote_call = remote_stub })
+check(remote_calls == 1, 'a full read asks the account node once')
+local located = command.list(ctx, { cache_only = true, owner_catalog = catalog_stub, remote_call = remote_stub })
+check(remote_calls == 1, 'and the cached row is reused, also after the module is loaded again')
 host.getenv = getenv
-whatsapp._service_row = nil
+whatsapp.reset_service_row()
 local located_row = command.find(located, 'whatsapp')
 check(located_row and located_row.node_phrase == 'account on openclaw',
   'the row says where the account lives: ' .. tostring(located_row and located_row.node_phrase))
@@ -161,6 +170,27 @@ check(located_row and located_row.count_phrase == '36 chats',
 local located_text = command.text(located, 80)
 check(located_text:find('built-in \u{b7} account on openclaw \u{b7} connected \u{b7} 36 chats', 1, true) ~= nil,
   'the rendered row is one line of four columns: ' .. tostring(located_text:match('[^\n]*built%-in[^\n]*')))
+
+-- Over the client's 64-panel cap (17/11, work: 72 panels, refused whole): the per-tool pages go, every
+-- Tools page still names its tools, and every link points inside the stack.
+do
+  local many = { connectors = {}, counts = {} }
+  for c = 1, 6 do
+    local tools = {}
+    for t = 1, 12 do tools[t] = { name = 'c' .. c .. '_t' .. t, approval = 'read', published = true } end
+    many.connectors[c] = { key = 'c' .. c, id = 'c' .. c, name = 'c' .. c, tools = tools, tool_count = 12, scope = 'local', where = 'this node', state = 'connected' }
+  end
+  local full = command.views(many)
+  local capped = command.views(many, { max_pages = 64 })
+  check(#full.views == 85 and #capped.views == 13, 'capped: list + 2 pages per connector: ' .. #full.views .. ' -> ' .. #capped.views)
+  local tools_page = capped.views[3]
+  check(tools_page and #tools_page.options == 13 and tools_page.options[1].label == 'c1_t1' and tools_page.options[1].page == nil,
+    'the Tools page still names every tool, without a dead link')
+  local inside = true
+  for _, page in ipairs(capped.views) do for _, o in ipairs(page.options or {}) do if o.page and o.page > #capped.views then inside = false end end end
+  check(inside, 'every link of the capped stack points inside it')
+  check(#command.views(view, { max_pages = 64 }).views == #command.views(view).views, 'a stack under the cap is unchanged')
+end
 
 -- The rendered list, at 80 columns: one line per service, and the header counts services, not connectors.
 local rendered = command.text(view, 80)

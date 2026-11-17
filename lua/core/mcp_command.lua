@@ -654,6 +654,12 @@ function M.views(view, opts)
   if #(view.connectors or {}) == 0 then
     list.lines[#list.lines + 1] = 'none: no service is registered on this node, and no peer exports one.'
   end
+  -- A panel stack has a cap (`max_pages`, the client's MAX_VIEWS = 64 for the mid-run snapshot): over it,
+  -- the per-tool pages go and each Tools page still names every tool (17/11, work: 72 panels were refused
+  -- whole, so mid-run /mcp never showed and was rebuilt at every round).
+  local total = 1
+  for _, entry in ipairs(view.connectors or {}) do total = total + 2 + #(entry.tools or {}) end
+  local compact = tonumber(opts.max_pages) ~= nil and total > tonumber(opts.max_pages)
   local index = 1
   for _, entry in ipairs(view.connectors or {}) do
     index = index + 1
@@ -661,7 +667,7 @@ function M.views(view, opts)
     index = index + 1
     local tools_index = index
     local tool_pages = {}
-    for tool_number in ipairs(entry.tools or {}) do
+    for tool_number in ipairs(compact and {} or entry.tools or {}) do
       index = index + 1
       tool_pages[tool_number] = index
     end
@@ -669,7 +675,7 @@ function M.views(view, opts)
     pages[detail_index] = M.detail_page(entry, links, opts)
     pages[tools_index] = M.tools_page(entry, links, detail_index)
     for tool_number, tool in ipairs(entry.tools or {}) do
-      pages[tool_pages[tool_number]] = M.tool_page(tool, entry, detail_index)
+      if tool_pages[tool_number] then pages[tool_pages[tool_number]] = M.tool_page(tool, entry, detail_index) end
     end
     local hint = row_hint(entry)
     if entry.error and tostring(entry.error) ~= '' then
