@@ -88,6 +88,17 @@ cp -p "$TARGET" "$backup" 2>/dev/null || say "no previous binary to back up"
 install -m755 "$tmp/wa" "$TARGET" || die "install_failed"
 say "installed $TARGET (backup $backup)"
 
+# 4b. the Lua tree beside the binary outranks the one compiled into it (wa-host main.rs "An installed Lua
+# tree"): a binary install keeps the tree it finds, so the node runs the OLD Lua while `wa --version`
+# reports the new build. 17/11: four installs of the codeact fix and every one of them executed commit
+# 14963b6f's Lua - presence is not freshness, in the payload too. Move it aside; the way back is `mv`.
+lua_dir="$(dirname "$TARGET")/lua-core"
+if [ -f "$lua_dir/manifest.txt" ]; then
+  stale="$lua_dir.stale.$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$lua_dir" "$stale" || die "cannot_move_stale_lua_tree ($lua_dir)"
+  say "moved aside the installed Lua tree ($(sed -n 's/^commit //p' "$stale/manifest.txt" | head -1)): $stale"
+fi
+
 # 5. restart, prove it, roll back if it does not
 restart() {
   if [ -n "$UNIT" ]; then systemctl --user restart "$UNIT" 2>/dev/null || sudo -n systemctl restart "$UNIT" 2>/dev/null; fi
@@ -115,4 +126,29 @@ if [ "$code" != "200" ]; then
   fi
   die "unhealthy_and_no_backup"
 fi
+# 6. the Lua the node actually loads has to be the one this artifact was built with. `mode()` answering
+# nil for a mode the env declares is the signature of a tree (or a build) that predates the code: it is a
+# check a healthy `/health` cannot make, and the reason a green install shipped a dead fix.
+probe="$tmp/lua.lua"
+cat > "$probe" <<'LUA'
+local ok, raw = pcall(dofile, 'lua/core/raw_code.lua')
+if not ok or type(raw) ~= 'table' or type(raw.mode) ~= 'function' then print('unloadable') return end
+local want = tostring(host.getenv('WASM_AGENT_RAW_CODE') or ''):lower()
+if want == '1' or want == 'true' then want = 'on' end
+if want == '' then print('skip') return end
+local got = tostring(raw.mode())
+print(want == got and 'ok' or ('mismatch: env says ' .. want .. ', this Lua says ' .. got))
+LUA
+verdict=$("$TARGET" --db "$tmp/l.db" >/dev/null 2>&1; WA_SCRIPT="$probe" "$TARGET" --db "$tmp/l.db" 2>/dev/null | tail -1)
+case "$verdict" in
+  ok|skip) say "lua matches this artifact ($verdict)" ;;
+  *)
+    say "LUA MISMATCH after install ($verdict) — rolling back"
+    if [ -f "$backup" ]; then install -m755 "$backup" "$TARGET"; fi
+    if [ -n "${stale:-}" ] && [ -d "$stale" ]; then mv "$stale" "$lua_dir"; fi
+    restart
+    die "rolled_back_lua_mismatch: $verdict"
+    ;;
+esac
+
 say "healthy (200) — installed $(basename "$TARGET") from $URL"
