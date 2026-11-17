@@ -1000,7 +1000,8 @@ function METHODS:status_template()
     if boxed then return "", nil end
     return paint(clip(self.last_summary, self.limit), "dim", self.live), nil
   end
-  local phase = self.pending and M.phase((M.target(self.pending.name, self.pending.arguments))) or self.phase
+  local phase = self.pending and (self.pending.raw and "Running your script"
+    or M.phase((M.target(self.pending.name, self.pending.arguments)))) or self.phase
   local started = self.screen and self.turn and self.turn.started
     or (self.pending and self.pending.started) or (self.turn and self.turn.started)
   local step = self.turn and (self.turn.step_started or self.turn.started)
@@ -2201,6 +2202,11 @@ function METHODS:event(event)
       -- heading (#121 put its first line in
       -- the parentheses, so the heading was a second copy of the body).
       self.pending.label, self.pending.inside = "CodeAct", ""
+      -- A run block is dispatched as a codemode call (one pathway), and the status line used to say
+      -- "Working: codemode" for both. `call_raw_...` is the id the raw channel mints, so the reader is
+      -- told what is happening: the model's own script is running.
+      local rc = dofile("lua/core/raw_code.lua")
+      self.pending.raw = (rc.is_raw and rc.is_raw(event.id)) or false
       self:codemode_start(event)
     elseif self:transcript() then
       self:topic(true)
