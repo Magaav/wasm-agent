@@ -17,6 +17,7 @@
 local env = {}
 local real_getenv = host.getenv
 host.getenv = function(key)
+  if key == "WASM_AGENT_RAW_CODE" then return "codemode" end -- declared tools are what this test counts (CodeAct is the default since 17/11)
   if key == "WASM_AGENT_LLM_API_KEY" then return "test-only" end
   if key == "WASM_AGENT_VAULT_URL" or key == "WASM_AGENT_VAULT_DIR"
       or key == "WASM_AGENT_VAULT_KEYSTORE" or key == "WASM_AGENT_VAULT_PASSPHRASE" then return nil end

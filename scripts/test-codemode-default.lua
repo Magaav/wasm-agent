@@ -2,6 +2,7 @@
 local json=dofile('lua/vendor/json.lua')
 local env=host.getenv;local setting=nil;local asset_override=nil
 host.getenv=function(k)
+ if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end -- the declared-tool path; CodeAct is the default since 17/11
  if k=='WASM_AGENT_CODEMODE' then return setting end
  if k=='WASM_AGENT_CODEMODE_ASSETS' then return asset_override end
  if k=='WASM_AGENT_LLM_API_KEY' then return 'private-fixture' end

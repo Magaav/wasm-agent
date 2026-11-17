@@ -1,3 +1,5 @@
+-- The declared-tool (codemode) path is what this test is about; CodeAct is the default since 17/11.
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
