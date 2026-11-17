@@ -1064,7 +1064,8 @@ function M:build_context()
     catalog=catalog and raw_code.without_codemode(catalog)
   end
   -- `only`: no direct calls at all. The guidance is one sentence, because the list is already empty.
-  if raw_code.only and raw_code.only() then
+  local raw_only = (raw_code.only and raw_code.only()) or false
+  if raw_only then
     tool_list=raw_code.without_generic(tool_list)
     catalog=catalog and raw_code.without_generic(catalog)
   end
@@ -1079,6 +1080,7 @@ function M:build_context()
       orchestration_enabled=orchestration_enabled,
       codemode=self.codemode_policy.enabled,
       raw_first=raw_first,
+      raw_only=raw_only,
       catalog=catalog,
       workdir=workdir,
     })
@@ -1087,8 +1089,11 @@ function M:build_context()
     -- The routing rule plus the node's connector index, from the full catalogue: the prompt's own
     -- tool list leaves connectors out, so this hint is how an empty context finds them.
     local code_catalog=self.subagent and tool_list or tools.all(self.role,code_ctx,memory)
-    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog,{raw_first=raw_first})
-    if raw_code.active(self.codemode_policy) and not raw_first then block=block..'\n'..raw_code.GUIDANCE end
+    local block=dofile('lua/core/codemode_policy.lua').prompt(code_catalog,{raw_first=raw_first,raw_only=raw_only})
+    -- `only` already opened with the run-block sentence; appending "you may also run a script" under it
+    -- offers a choice the node does not have, and the model reads the offer (17/11: DeepSeek answered
+    -- the offer with its own <|DSML|> call syntax instead of a block).
+    if raw_code.active(self.codemode_policy) and not raw_first and not raw_only then block=block..'\n'..raw_code.GUIDANCE end
     first=first..'\n\n'..block
     parts=parts or {};parts.codemode=host.sha256(block)
   end

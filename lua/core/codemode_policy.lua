@@ -238,7 +238,8 @@ M.guidance=table.concat(GUIDANCE_LINES,'\n')
 -- model to make a codemode call or a direct tool call; the run-block sentence (operator-reviewed,
 -- verbatim) opens the guidance and the rest is unchanged.
 function M.guidance_for(opts)
- if not (type(opts)=='table' and opts.raw_first) then return M.guidance end
+ local only = type(opts)=='table' and opts.raw_only
+ if not (type(opts)=='table' and (opts.raw_first or only)) then return M.guidance end
  local lines={}
  for i,line in ipairs(GUIDANCE_LINES) do lines[i]=line end
  lines[1]=dofile('lua/core/raw_code.lua').FIRST_GUIDANCE..' Put `await` before a call whose result you use; a call you return is awaited for you.'
