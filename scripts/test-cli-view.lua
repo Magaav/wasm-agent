@@ -529,6 +529,24 @@ peer_view:event({ type = "step_phase", phase = "commentary", text = "streamed al
 local _, peer_count = peer.text():gsub("streamed already", "")
 ok(peer_count == 1, "text a peer already streamed is not printed again")
 
+-- A model's own call markup in the stream is not shown (it runs as a script): split across deltas,
+-- the text before it is shown, the markup is not, and text with an ordinary `<b>` tag still is.
+local leak = recorder()
+local leak_view = view_lib.new({ out = leak.out, live = false, now = function() return 7 end, limit = 80 })
+leak_view:run_started()
+leak_view:event({ type = "delta", text = "Checking first. <" })
+leak_view:event({ type = "delta", text = "\239\189\156DSML\239\189\156 calls>\n<\239\189\156DSML\239\189\156 invoke name=\"bash\">echo probe" })
+leak_view:event({ type = "tool", name = "codemode", arguments = { code = "return 1;" } })
+ok(has(leak.text(), "Checking first.") and not has(leak.text(), "DSML") and not has(leak.text(), "echo probe"),
+  "streamed call markup is hidden, the text before it is shown: " .. leak.text())
+local tag = recorder()
+local tag_view = view_lib.new({ out = tag.out, live = false, now = function() return 7 end, limit = 80 })
+tag_view:run_started()
+tag_view:event({ type = "delta", text = "a <b" })
+tag_view:event({ type = "delta", text = ">bold</b> end <" })
+tag_view:answered("a <b>bold</b> end <")
+ok(has(tag.text(), "a <b>bold</b> end <"), "ordinary angle brackets still stream, and a held tail is flushed: " .. tag.text())
+
 -- ---- the console -------------------------------------------------------------------
 
 local raw = recorder()

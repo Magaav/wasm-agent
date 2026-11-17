@@ -1698,8 +1698,38 @@ end
 
 -- ---- the events ----------------------------------------------------------------
 
+-- Streamed text up to a model's own tool-call markup (`<｜DSML｜...`, `<tool_call>`): from there on the
+-- step is a call that runs as a script (lua/core/raw_code.lua, native_calls), so the markup is not shown
+-- (17/11: the raw DSML lines were printed live, then the same call ran as a block). A trailing `<...`
+-- without `>` waits for the next piece, so a marker split across deltas is still caught.
+local function markup_at(text)
+  return text:find("<%s*\239\189\156%s*DSML") or text:find("<%s*|%s*DSML") or text:find("<tool_call>", 1, true)
+end
+function METHODS:delta_piece(text)
+  local d = self.dstream or { buf = "", shown = 0 }
+  self.dstream = d
+  if d.hidden then return end
+  d.buf = d.buf .. text
+  local at = markup_at(d.buf)
+  if at then
+    if at - 1 > d.shown then self:write(d.buf:sub(d.shown + 1, at - 1)) end
+    d.shown = #d.buf
+    d.hidden = true
+    return
+  end
+  local hold = d.buf:match("<[^>]*$")
+  local upto = #d.buf - ((hold and #hold <= 32) and #hold or 0)
+  if upto > d.shown then self:write(d.buf:sub(d.shown + 1, upto)); d.shown = upto end
+end
+function METHODS:delta_reset()
+  local d = self.dstream
+  if d and not d.hidden and #d.buf > d.shown then self:write(d.buf:sub(d.shown + 1)) end
+  self.dstream = nil
+end
+
 function METHODS:run_started()
   self.runs = self.runs + 1
+  self.dstream = nil
   self.frame = 0
   self.phase = "Thinking"
   self.pending = nil
@@ -1988,6 +2018,7 @@ M.bulletize = bulletize
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
 function METHODS:answered(reply)
+  self:delta_reset()
   self:commentary_flush()
   self:clear()
   if self.deltas == 0 and reply and tostring(reply) ~= "" then
@@ -2180,6 +2211,7 @@ function METHODS:event(event)
     if self.turn then self.turn.rounds = self.round; self.turn.step_started = self.now() end
     self:paint()
   elseif kind == "tool" then
+    self:delta_reset()
     -- The heading is printed when the result arrives, so its dot can say how it went (green or
     -- red, as Claude Code does); until then the status line names the call.
     self:commentary_flush()
@@ -2335,7 +2367,7 @@ function METHODS:event(event)
     -- The answer, as it arrives. A CLI run used to have no sink, so this never fired and the text
     -- appeared whole when the step settled; the host now forwards the provider's deltas here.
     self.deltas = self.deltas + 1
-    self:write(event.text or "")
+    self:delta_piece(event.text or "")
   elseif kind == "reasoning_delta" then
     -- Thinking, as it arrives, in the view's own blue: the phase line above it says how long, this
     -- says what.
