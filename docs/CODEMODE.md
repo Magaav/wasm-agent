@@ -86,7 +86,11 @@ persistence path, and it survives a fresh sandbox and a process restart. Both lo
 text (`lua/core/codemode_harness.lua`) builds `vars` on the prelude's `store`/`load`, and the index is read
 from the row in the shared `run_script` (`lua/core/codemode.lua`, `session_vars`).
 
-* `vars.x = value` keeps a JSON-encodable value; a function, BigInt or cycle is a `TypeError` naming the key.
+* `vars.x = value` keeps a JSON-encodable value; a BigInt or cycle is a `TypeError` naming the key.
+* `vars.f = (a) => ...` (or `function`) keeps the function's SOURCE (`{$fn: "..."}` in the row) and revives it in
+  each later script with that script's `tools`, `console`, `vars`, `results`, `parallel` and `searchTools` in
+  scope, so a helper is written once per session (17/11). Its closure is not kept; a built-in or tool function
+  (no source) is a `TypeError`.
   `delete vars.x` (or `vars.x = null` / `undefined`) removes it. Names are identifiers of at most 64 characters.
 * `vars.x` reads the kept value, or `undefined`; `Object.keys(vars)` and `"x" in vars` answer the session
   index. A value changed in place (`vars.list.push(item)`) is written back when the script ends.

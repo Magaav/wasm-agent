@@ -182,7 +182,10 @@ function M.project(name, output)
   -- references are what a model passes to tool_result to read a nested original (a real run did); the
   -- `attempts` array (arguments + results again, per call) and the constant backend/context_policy
   -- strings leave the view. The complete result is kept as a file, named by full_result.
-  if name=='codemode' and output.summary~=nil and output.attempts~=nil then
+  -- `summary` is nil when the script made no tool call (only helpers such as searchTools): that script's
+  -- view is lean too (17/11, session b01db30e: a searchTools-only script answered with the whole 8 KB
+  -- envelope - attempts, backend, result-file paths - instead of the schema it returned).
+  if name=='codemode' and output.attempts~=nil and (output.summary~=nil or output.ok~=false) then
     local full = json.encode(output)
     local lean = {}
     for key, value in pairs(output) do

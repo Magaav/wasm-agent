@@ -79,8 +79,15 @@ r,v=run('return ["laura2" in vars, load("vars.laura2")===undefined, load("vars.p
 check(r.ok and v[1]==false and v[2]==true and v[3]==true,'null deletes too, and a deleted variable leaves nothing in the store row: '..tostring(r.value))
 
 -- 3. Values JSON cannot encode, and names that are not identifiers.
-r=run('vars.fn=function(){ return 1; }; return 1;')
-check(not r.ok and err(r):find('vars.fn',1,true) and err(r):find('JSON-encodable',1,true) and err(r):find('TypeError',1,true),'a function is a TypeError naming the key: '..err(r))
+-- A function is kept as its source and revived in the next script with that script's tools in scope.
+r=run('vars.fn=function(x){ return x*2; }; vars.ask=async (q)=>{ const s=await searchTools(q); return typeof s; }; return 1;')
+check(r.ok,'a function is kept: '..err(r))
+r,v=run('return [vars.fn(21), typeof vars.ask, await vars.ask("read")];')
+check(r.ok and v and v[1]==42 and v[2]=='function' and (v[3]=='string' or v[3]=='object'),'a kept function runs in the next script, with searchTools in scope: '..err(r)..' '..json.encode(v))
+r=run('vars.bad=Math.max; return 1;')
+check(not r.ok and err(r):find('vars.bad',1,true) and err(r):find('no source',1,true),'a built-in function is refused, naming the key: '..err(r))
+r=run('delete vars.fn; delete vars.ask; return 1;')
+check(r.ok,'functions are deleted like any variable')
 r=run('vars.big=10n; return 1;')
 check(not r.ok and err(r):find('vars.big',1,true) and err(r):find('JSON-encodable',1,true),'a BigInt is a TypeError naming the key: '..err(r))
 r=run('const a={}; a.self=a; vars.loop=a; return 1;')
@@ -129,10 +136,14 @@ view=output.project('codemode',{ok=true,status=200,summary='search 200',value='"
 check(view:match('^status [^\n]*\nvars: after %(1 B%)[^\n]*\n\nx$')~=nil,'vars: right after line 1 when no call left evidence: '..view)
 parsed=output.parse_view(view)
 check(parsed.returned=='x' and #parsed.vars==3 and #parsed.calls==0,'and parse_view reads it')
--- A script with no call is still a JSON view today; the index is a field there, in the same words.
+-- A script with no tool call (only helpers, or none) gets the lean view too: header, vars:, what it returned -
+-- never the attempts/backend envelope (17/11, b01db30e: a searchTools-only script answered with 8 KB of it).
 r=run('return 7;')
 view=output.project('codemode',r)
-check(json.decode(view).vars=='after (1 B) \194\183 laura (56 B) \194\183 plan (10 B)','a JSON-form view carries the same text: '..view:sub(1,300))
+check(view:match('^status 200 [^\n]*\nvars: after %(1 B%)[^\n]*\n\n7$')~=nil and not view:find('attempts',1,true) and not view:find('backend',1,true),'a no-call script is lean: '..view:sub(1,300))
+r=run('const s=await searchTools("read"); return typeof s;')
+view=output.project('codemode',r)
+check(r.ok and not view:find('"attempts"',1,true) and not view:find('rust-wasmtime',1,true),'a helper-only script is lean: '..view:sub(1,300))
 -- A failed script's view (the JSON form) carries the same index as a field.
 r=run('throw new Error("nope");')
 view=output.project('codemode',r)

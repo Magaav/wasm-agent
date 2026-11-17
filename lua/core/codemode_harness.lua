@@ -171,15 +171,21 @@ var PLAIN=' Keep plain data: objects, arrays, strings, numbers, booleans, null.'
 /* UTF-8 bytes through native calls only: a JavaScript loop over 60 KB of text spends the sandbox's fuel (three 60 KB writes ran it out, 15/11). */
 var asciiOnly=/^[\x00-\x7f]*$/;
 function utf8Bytes(text){ if(asciiOnly.test(text)){ return text.length; } try{ return unescape(encodeURIComponent(text)).length; }catch(error){ return text.length*3; } }
+/* A function kept in vars is its SOURCE ({$fn:"..."}), revived in each script with that script's tools, console, vars, results, parallel and searchTools in scope: a helper defined once is reused across the session (CodeAct state). Its closure is not kept - only what the source names. */
+var fnToString=Function.prototype.toString;
 function makeVars(index){
  var sizes=Object.create(null);
+ var fnScope=null;
+ var proxy;
  var given=index!==null&&typeof index==='object'&&!arrayIsArray(index)?objectKeys(index):[];
  for(var position=0;position<given.length;position++){ if(varName.test(given[position])&&typeof index[given[position]]==='number'){ sizes[given[position]]=index[given[position]]; } }
  /* What this script read or wrote, with the JSON it had: a value changed in place (vars.list.push(x)) is written back when the script ends, so a variable behaves like one. */
  var held=new Map();
  function others(name){ var sum=0; var names=objectKeys(sizes); for(var position=0;position<names.length;position++){ if(names[position]!==name){ sum+=sizes[names[position]]; } } return sum; }
  function check(name){ if(typeof name!=='string'||!varName.test(name)){ throw new TypeError('vars.'+String(name)+' is not a variable name: use an identifier (letters, digits, _ or $, not starting with a digit, at most 64 characters).'); } }
- function encode(name,value){ var json; try{ json=JSON.stringify(value); }catch(error){ throw new TypeError('vars.'+name+' cannot be kept: the value is not JSON-encodable ('+String(error&&error.message||error)+').'+PLAIN); } if(typeof json!=='string'){ throw new TypeError('vars.'+name+' cannot be kept: a '+typeof value+' is not JSON-encodable.'+PLAIN); } return json; }
+ function kept(name,value){ if(typeof value!=='function'){ return value; } var source=fnToString.call(value); if(/\[native code\]\s*\}$/.test(source)){ throw new TypeError('vars.'+name+' cannot be kept: a built-in or tool function has no source. Keep your own function (function or arrow), or plain data.'); } return { $fn:source }; }
+ function revive(name,value){ if(value===null||typeof value!=='object'||typeof value.$fn!=='string'||objectKeys(value).length!==1){ return value; } var s=fnScope||{}; try{ return (new Function('tools','console','vars','results','parallel','searchTools','return ('+value.$fn+');'))(s.tools,s.console,proxy,s.results,s.parallel,s.searchTools); }catch(error){ throw new TypeError('vars.'+name+' holds a function that does not compile here ('+String(error&&error.message||error)+'). Assign it again as a function or arrow expression.'); } }
+ function encode(name,value){ var json; value=kept(name,value); try{ json=JSON.stringify(value); }catch(error){ throw new TypeError('vars.'+name+' cannot be kept: the value is not JSON-encodable ('+String(error&&error.message||error)+').'+PLAIN); } if(typeof json!=='string'){ throw new TypeError('vars.'+name+' cannot be kept: a '+typeof value+' is not JSON-encodable.'+PLAIN); } return json; }
  function remove(name){ G.store(VAR_PREFIX+name,null); delete sizes[name]; held.delete(name); }
  function write(name,value){
   if(value===undefined||value===null){ remove(name); return; }
@@ -188,12 +194,12 @@ function makeVars(index){
   if(bytes>VAR_MAX){ throw new RangeError('vars.'+name+' is '+bytes+' bytes of JSON, more than the '+VAR_MAX+' one variable may hold. Keep the IDs or a summary, or write the data to a file with a tool.'); }
   var after=others(name)+bytes;
   if(after>VARS_MAX){ throw new RangeError('vars are full: writing vars.'+name+' would make '+after+' bytes of JSON, more than the '+VARS_MAX+' a session may hold. delete vars.<name> for what you no longer need.'); }
-  G.store(VAR_PREFIX+name,value);
+  G.store(VAR_PREFIX+name,kept(name,value));
   sizes[name]=bytes;
   held.set(name,{ value:value, json:json });
  }
- function read(name){ if(held.has(name)){ return held.get(name).value; } if(!(name in sizes)){ return undefined; } var value=G.load(VAR_PREFIX+name); if(value===null||value===undefined){ return undefined; } held.set(name,{ value:value, json:JSON.stringify(value) }); return value; }
- var proxy=new Proxy({},{
+ function read(name){ if(held.has(name)){ return held.get(name).value; } if(!(name in sizes)){ return undefined; } var stored=G.load(VAR_PREFIX+name); if(stored===null||stored===undefined){ return undefined; } var value=revive(name,stored); held.set(name,{ value:value, json:JSON.stringify(stored) }); return value; }
+ proxy=new Proxy({},{
   get:function(object,property){ if(typeof property!=='string'||!varName.test(property)){ return undefined; } return read(property); },
   set:function(object,property,value){ check(property); if(busy===0&&!hasPending(value)){ write(property,value); return true; } enqueue(async function(){ write(property,await settle(value,new Map(),0)); }); return true; },
   deleteProperty:function(object,property){ check(property); remove(property); return true; },
@@ -203,7 +209,7 @@ function makeVars(index){
   defineProperty:function(object,property){ throw new TypeError('vars.'+String(property)+': assign vars.<name> = value instead of defining a property.'); }
  });
  function flush(){ held.forEach(function(entry,name){ if(name in sizes&&encode(name,entry.value)!==entry.json){ write(name,entry.value); } }); }
- return { proxy:proxy, flush:flush };
+ return { proxy:proxy, flush:flush, bind:function(scope){ fnScope=scope; } };
 }
 function makeConsole(raw){
  var out={};
@@ -229,7 +235,9 @@ return {
   var vars=makeVars(index);
   /* The script helpers are reachable as tools.<name> too (14/11: tools.searchTools(...) read as "not a tool"): one name, wherever the model reaches for it. */
   var helpers={ searchTools:makeGlobal('searchTools',G.searchTools), describeTool:makeGlobal('describeTool',G.describeTool), showCall:makeGlobal('showCall',G.showCall), describe:makeGlobal('describe',G.describe), results:results, parallel:parallel, vars:vars.proxy };
-  var value=await body(wrapTools(G.tools,helpers),makeConsole(G.console),helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS,vars.proxy);
+  var boundTools=wrapTools(G.tools,helpers), boundConsole=makeConsole(G.console);
+  vars.bind({ tools:boundTools, console:boundConsole, results:results, parallel:parallel, searchTools:helpers.searchTools });
+  var value=await body(boundTools,boundConsole,helpers.searchTools,helpers.describeTool,helpers.showCall,makeGlobal('capabilities',G.capabilities),helpers.describe,results,parallel,text,store,load,image,G.exit,G.ALL_TOOLS,vars.proxy);
   var out=await settleAll(value);
   vars.flush();
   return out;
