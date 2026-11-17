@@ -272,7 +272,6 @@ return {
   ['placement_pending']='orchestrator.lua',
   ['placement_queue_full']='orchestrator.lua',
   ['placement_uncertain_reconcile_before_cancelling']='orchestrator.lua',
-  ['plain_path_taken']='binding.lua',
   ['plugin_not_found']='rust/wa-capabilities/src/plugins.rs',
   ['plugin_pin_invalid']='rust/wa-capabilities/src/plugins.rs',
   ['plugin_pin_unreadable']='rust/wa-capabilities/src/plugins.rs',

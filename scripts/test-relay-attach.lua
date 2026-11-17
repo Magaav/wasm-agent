@@ -111,6 +111,9 @@ for step=1,60 do
       headers={},body=json.encode({capability='status',to_node_id=id.node_id}),
       budget_ms=17000,deadline_ms=(clock*1000)+17000}))
     eq(answered.status,200,'a status call is answered during the slow call')
+    -- The answer is the node's own (17/11: a debug probe replaced every plain relay answer with
+    -- `plain_path_taken`, and a published release took every updated node off the fabric).
+    ok(not tostring(answered.body):find('plain_path_taken',1,true),'the plain path answers with the node call itself: '..tostring(answered.body):sub(1,120))
     eq(clock-before,0,'within the second it arrived in, not after the slow call')
   end
 end

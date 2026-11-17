@@ -742,12 +742,6 @@ function M.serve(raw)
     elseif asked and asked.capability=='roster' then body=roster_call(r.body or '',h)
     else
       body=wa_node_call(r.body or '',h['x-wa-node'] or '',h['x-wa-pub'] or '',h['x-wa-ts'] or '',h['x-wa-sig'] or '')
-      -- PROBE: the plain path was taken; say why the mesh branch did not.
-      local n=0; for _ in pairs(h or {}) do n=n+1 end
-      local raw=r and r.headers
-      local rawkind=type(raw)=='table' and ((raw[1]~=nil and 'array') or 'object') or type(raw)
-      body=json.encode({error='plain_path_taken',diag={mesh_header=tostring(h['x-wa-mesh']),
-        headers_lowered=n,headers_raw=rawkind,inner=body:sub(1,40)}})
     end
   end
   local elapsed_ms=math.floor((host.now()-started)*1000)
