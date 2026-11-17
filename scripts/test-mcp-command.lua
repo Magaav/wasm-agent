@@ -425,4 +425,17 @@ check(report3.note_required == true, 'and the session is still owed the note tha
 check(#prompt_cache.notes(session_ctx, frozen3, report3, {}) == 1, 'which is delivered')
 
 
+-- A peer that did not answer is one line under the list, never a failing row (17/11: "avell listed in the mcp").
+do
+  meta_set('federation.catalog.v2', json.encode({ at = host.now() - 240, peers = {
+    ['node-avell'] = { name = 'avell', node_id = 'node-avell', error = 'peer_unreachable', tools = {} } } }))
+  local silent_view = command.list({ role = 'master' }, { cache_only = true })
+  local rows_for = 0
+  for _, entry in ipairs(silent_view.connectors) do if entry.peer == 'avell' then rows_for = rows_for + 1 end end
+  check(rows_for == 0, 'a silent peer draws no connector row')
+  local set = command.views(silent_view, {})
+  local first = table.concat(set.views[1].lines, '\n')
+  check(first:find('peers not answering: avell (last refresh 4 min ago)', 1, true) ~= nil, 'it is named once on the first page: ' .. first)
+end
+
 print(string.format('mcp command ok (%d checks, 0 skipped; no server spawned, no peer called)', checks))
