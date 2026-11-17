@@ -128,6 +128,16 @@ re-registers on its next heartbeat, granted roles live in `network_roles` and bi
 tables - and administrators are never pruned. An administrator removes a row at once with
 `wa network forget <node-id>` (signed `forget-node`, refused for another admin). Throwaway nodes do not
 register at all: a deploy's scratch proof node runs without `WASM_AGENT_RENDEZVOUS`/`WASM_AGENT_RELAY`.
+**Removing a node for good** (a legacy or lost node, 17/11): `wa network remove <node-id>` on an administrator.
+The fleet key decides first - the node must already be revoked in the verified roster (`wa fleet revoke`,
+then `wa fleet push-roster` per node), or the command refuses with `not_revoked_in_roster`. Then, if the node
+is an operator, it is **retired** (`POST /operators` with `remove` and `retire: true`, signed by another
+administrator; never the caller itself, never the last environment operator; recorded in `retired_operators`
+and kept across restarts; vouching for the id again lifts it), and its row is forgotten. The unit file's
+`WASM_AGENT_NETWORK_ADMINS` stays the root of trust - a retirement only subtracts - so no hand edit of
+`managed.conf` and no restart are needed. Bound nodes that pinned the retired operator keep working: their
+admission does not count an operator the verified roster revoked as a lost vouch (`lua/core/binding.lua`).
+
 Before this, only the key holder could `/forget` its own row, so every deleted worktree, scratch home and
 reinstall left a row nobody could remove (26 rows for 4 real nodes, 04/11).
 

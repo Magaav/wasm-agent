@@ -347,12 +347,14 @@ elseif command == 'bind' or command == 'unbind' or command == 'accept' or comman
   local result=dofile('lua/core/binding_cli.lua').run(command,table.concat(args,' ',2))
   if result.error or result.ok==false then os.exit(1) end
 elseif command == "network" then
-  if not ((args[2] == "role" or args[2] == "forget") and args[3]) then
-    print(json.encode({ error = "usage: wa network role <node-id> master|guest | wa network forget <node-id>" }))
+  if not ((args[2] == "role" or args[2] == "forget" or args[2] == "remove") and args[3]) then
+    print(json.encode({ error = "usage: wa network role <node-id> master|guest | wa network forget <node-id> | wa network remove <node-id>" }))
     os.exit(2)
   end
   local nodes = dofile("lua/core/nodes.lua")
-  local result = args[2] == "forget" and nodes.network_forget(args[3]) or nodes.network_role(args[3], args[4])
+  local result = (args[2] == "forget" and nodes.network_forget(args[3]))
+    or (args[2] == "remove" and nodes.network_remove(args[3]))
+    or nodes.network_role(args[3], args[4])
   print(json.encode(result))
   if result.error then os.exit(1) end
 elseif command == "fleet" then

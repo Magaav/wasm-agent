@@ -236,6 +236,27 @@ async function stop(child) {
   await stop(registry.child); registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:otherAdmin.node_id});
   await until(async()=> (await request(service+'/health')).status===200,'administrator revocation');
   check((await direct(guest,admin,'read',{path:resultFile})).value.error==='unknown_caller','removing an administrator at the service revokes its pinned guest access');
+  // Retiring a legacy ENVIRONMENT operator (operator 17/11): its key is gone, so only another administrator
+  // can take it out of the admin set, and only by saying so (`retire: true`); then its row can be forgotten.
+  const legacy=fixture('legacy-operator');
+  await stop(registry.child); registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:`${otherAdmin.node_id},${legacy.node_id}`});
+  await until(async()=> (await request(service+'/health')).status===200,'registry with a legacy operator');
+  check((await register(service,legacy)).status===200,'the legacy operator is registered');
+  const forgetBody=()=>JSON.stringify({node_id:legacy.node_id,nonce:crypto.randomUUID()});
+  let body=forgetBody();
+  check((await request(service+'/forget','POST',body,headers(otherAdmin,'forget-node',body))).value.error==='admin_not_forgettable','an operator cannot be forgotten while it is one');
+  body=JSON.stringify({remove:legacy.node_id,nonce:crypto.randomUUID()});
+  check((await request(service+'/operators','POST',body,headers(otherAdmin,'operators',body))).value.error==='operator_from_environment','an environment operator is not removed without retire');
+  body=JSON.stringify({remove:otherAdmin.node_id,retire:true,nonce:crypto.randomUUID()});
+  check((await request(service+'/operators','POST',body,headers(otherAdmin,'operators',body))).value.error==='operator_cannot_retire_itself','an operator cannot retire itself');
+  body=JSON.stringify({remove:legacy.node_id,retire:true,nonce:crypto.randomUUID()});
+  check((await request(service+'/operators','POST',body,headers(otherAdmin,'operators',body))).status===200,'another administrator retires the legacy operator');
+  check((await request(service+'/service')).value.operators.length===1,'the service vouches for the remaining operator only');
+  body=forgetBody();
+  check((await request(service+'/forget','POST',body,headers(otherAdmin,'forget-node',body))).status===200,'the retired operator\'s row is forgotten');
+  await stop(registry.child); registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:`${otherAdmin.node_id},${legacy.node_id}`});
+  await until(async()=> (await request(service+'/health')).status===200,'restart after retirement');
+  check((await request(service+'/service')).value.operators.length===1,'the retirement survives a restart');
   console.log(`managed network ok (${checks} checks, 0 skips; isolated service only)`);
   if(!process.argv[3]) console.log('Package/bootstrap checks NOT RUN (no archive supplied).');
 })().catch(error=>{console.error(error.stack);process.exitCode=1;}).finally(async()=>{
