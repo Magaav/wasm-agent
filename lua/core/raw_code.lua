@@ -77,6 +77,10 @@ function M.mode()
   if value == "1" or value == "on" or value == "true" then return "on" end
   if value == "stop" then return "stop" end
   if value == "first" then return "first" end
+  -- Add the mode to the *parser*, not only to the helpers: an unknown value returns nil, and nil means
+  -- "off" everywhere downstream — a mode the parser does not know silently restores the default (17/11:
+  -- `only` was set, `mode()` said nil, codemode was declared again and the model kept sending JSON calls).
+  if value == "only" then return "only" end
   return nil
 end
 
