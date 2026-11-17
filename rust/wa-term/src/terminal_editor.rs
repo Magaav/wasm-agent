@@ -115,7 +115,10 @@ pub struct RawMode;
 pub fn try_raw() -> Option<RawMode> { None }
 
 #[derive(Debug, PartialEq)]
-pub enum Action { None, Submit(String), Eof, Interrupt, Nav, PageUp, PageDown, Bottom }
+pub enum Action { None, Submit(String), Eof, Interrupt, Nav, PageUp, PageDown, Bottom,
+    /// The draft's selection, for the host to put on the clipboard (OSC 52): Ctrl+C or Ctrl+Insert with
+    /// text selected (operator 17/11: "ctrl+a should select whole text-area so we can copy it").
+    Copy(String) }
 
 /// A command the slash menu offers: its name (`/login`), whether it takes arguments, and its hint.
 #[derive(Clone, Default)]
@@ -163,6 +166,9 @@ pub struct Editor {
     /// mode rather than as text - the prompt and the dividers turn pink and the line is submitted as
     /// `!<command>`. Backspace on the empty draft or Esc leaves it.
     pub bash: bool,
+    /// The selection's other end (the cursor is one end): Shift+arrows, Shift+Home/End, Ctrl+A and a mouse
+    /// drag set it; any plain movement clears it; typing, Backspace and Delete replace what it covers.
+    anchor: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -175,7 +181,44 @@ const UNDO_MAX: usize = 200;
 impl Editor {
     fn text(&self) -> String { self.chars.iter().collect() }
     fn replace(&mut self, text: &str) { self.chars = text.chars().collect(); self.cursor = self.chars.len(); }
-    fn insert(&mut self, ch: char) { self.chars.insert(self.cursor, ch); self.cursor += 1; }
+    fn insert(&mut self, ch: char) { self.delete_selection(); self.chars.insert(self.cursor, ch); self.cursor += 1; }
+    /// The selected range `[start, end)`, when there is one.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        let cursor = self.cursor.min(self.chars.len());
+        let anchor = anchor.min(self.chars.len());
+        if anchor == cursor { return None; }
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection().map(|(a, b)| self.chars[a..b].iter().collect())
+    }
+    /// Remove the selected text; true when there was some.
+    fn delete_selection(&mut self) -> bool {
+        let Some((a, b)) = self.selection() else { self.anchor = None; return false };
+        self.chars.drain(a..b);
+        self.cursor = a;
+        self.anchor = None;
+        true
+    }
+    /// Select from `anchor` to `cursor` (a mouse drag in the box: both are draft indices).
+    pub fn select(&mut self, anchor: usize, cursor: usize) {
+        self.anchor = Some(anchor.min(self.chars.len()));
+        self.cursor = cursor.min(self.chars.len());
+    }
+    /// Where the line holding `at` starts / ends (a line is what Shift+Enter or a pasted newline made).
+    fn line_start(&self, at: usize) -> usize {
+        let at = at.min(self.chars.len());
+        self.chars[..at].iter().rposition(|&c| c == '\n').map(|i| i + 1).unwrap_or(0)
+    }
+    fn line_end(&self, at: usize) -> usize {
+        let at = at.min(self.chars.len());
+        self.chars[at..].iter().position(|&c| c == '\n').map(|i| at + i).unwrap_or(self.chars.len())
+    }
+    /// A movement: with `extend` (Shift held) the selection grows from where it started, else it ends.
+    fn moved(&mut self, extend: bool, from: usize) {
+        if extend { if self.anchor.is_none() { self.anchor = Some(from); } } else { self.anchor = None; }
+    }
     /// Nothing typed and not in bash mode: a restart here loses nothing.
     pub fn draft_empty(&self) -> bool { self.chars.is_empty() && !self.bash }
     /// The draft as it is submitted: `!` in front of it in bash mode.
@@ -185,6 +228,7 @@ impl Editor {
         match text.strip_prefix('!') { Some(rest) => { self.bash = true; self.replace(rest); } None => { self.bash = false; self.replace(text); } }
     }
     fn history(&mut self, up: bool) {
+        self.anchor = None;
         if self.history.is_empty() { return; }
         if up {
             let next = self.history_at.map(|n| n.saturating_sub(1)).unwrap_or_else(|| {
@@ -239,7 +283,7 @@ impl Editor {
             else if self.escape.is_empty() && byte >= 32 && byte != 127 { Some(Group::Typing) } else { None };
         let word_break = byte == b' ' && self.cursor > 0 && !self.chars[self.cursor - 1].is_whitespace();
         let extends = kind.is_some() && kind == self.group && self.cursor == self.group_cursor
-            && !(kind == Some(Group::Typing) && word_break);
+            && !(kind == Some(Group::Typing) && word_break) && self.selection().is_none();
         let snapshot = if extends { None } else { Some(Snapshot { chars: self.chars.clone(), cursor: self.cursor }) };
         let was_pasting = self.paste;
         let action = self.feed_inner(byte);
@@ -263,6 +307,7 @@ impl Editor {
     /// Ctrl+Z / Ctrl+Y (and Ctrl+Shift+Z where the terminal reports it): back to the draft before the
     /// last step, or forward again, cursor included. A recalled history entry becomes a plain draft.
     fn restore(&mut self, undo: bool) {
+        self.anchor = None;
         let (from, to) = if undo { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
         let Some(snapshot) = from.pop() else { return };
         to.push(Snapshot { chars: std::mem::replace(&mut self.chars, snapshot.chars), cursor: self.cursor });
@@ -452,6 +497,29 @@ impl Editor {
             // Ctrl+Z / Ctrl+Shift+Z as the kitty keyboard protocol reports them (`z` = 122, `Z` = 90).
             if seq == b"\x1b[122;5u" { self.escape.clear(); self.restore(true); return Action::None; }
             if seq == b"\x1b[122;6u" || seq == b"\x1b[90;6u" { self.escape.clear(); self.restore(false); return Action::None; }
+            // Shift+arrows / Shift+Home/End select (xterm modifier 2), Ctrl+Insert copies (Omarchy's Super+C).
+            let from = self.cursor;
+            if seq == b"\x1b[2;5~" {
+                self.escape.clear();
+                return match self.selected_text() { Some(text) => Action::Copy(text), None => Action::None };
+            }
+            if seq == b"\x1b[1;2D" { self.moved(true, from); self.cursor = self.cursor.saturating_sub(1); self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[1;2C" { self.moved(true, from); self.cursor = (self.cursor + 1).min(self.chars.len()); self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[1;2A" { self.moved(true, from); if !self.move_line(true) { self.cursor = self.line_start(self.cursor); } self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[1;2B" { self.moved(true, from); if !self.move_line(false) { self.cursor = self.line_end(self.cursor); } self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[1;2H" { self.moved(true, from); self.cursor = self.line_start(self.cursor); self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[1;2F" { self.moved(true, from); self.cursor = self.line_end(self.cursor); self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[1;5H" { self.anchor = None; self.cursor = 0; self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[1;5F" { self.anchor = None; self.cursor = self.chars.len(); self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[D" || seq == b"\x1b[C" || seq == b"\x1b[A" || seq == b"\x1b[B"
+                || seq == b"\x1b[H" || seq == b"\x1b[1~" || seq == b"\x1b[F" || seq == b"\x1b[4~" {
+                // A plain movement ends a selection; Left/Right on one land on its edge, as editors do.
+                if let Some((a, b)) = self.selection() {
+                    if seq == b"\x1b[D" { self.anchor = None; self.cursor = a; self.escape.clear(); return Action::None; }
+                    if seq == b"\x1b[C" { self.anchor = None; self.cursor = b; self.escape.clear(); return Action::None; }
+                }
+                self.anchor = None;
+            }
             if seq == b"\x1b[D" { self.cursor = self.cursor.saturating_sub(1); }
             else if seq == b"\x1b[C" { self.cursor = (self.cursor + 1).min(self.chars.len()); }
             // Ctrl+Up leaves the draft for the transcript's topics (Up stays history).
@@ -461,9 +529,10 @@ impl Editor {
             else if seq == b"\x1b[6;5~" { self.escape.clear(); return Action::Bottom; }
             else if seq == b"\x1b[A" { if !self.move_line(true) { self.history(true); } }
             else if seq == b"\x1b[B" { if !self.move_line(false) { self.history(false); } }
-            else if seq == b"\x1b[H" || seq == b"\x1b[1~" { self.cursor = 0; }
-            else if seq == b"\x1b[F" || seq == b"\x1b[4~" { self.cursor = self.chars.len(); }
-            else if seq == b"\x1b[3~" { if self.cursor < self.chars.len() { self.chars.remove(self.cursor); } }
+            // Home/End: the line the cursor is on, not the whole draft (operator 17/11).
+            else if seq == b"\x1b[H" || seq == b"\x1b[1~" { self.cursor = self.line_start(self.cursor); }
+            else if seq == b"\x1b[F" || seq == b"\x1b[4~" { self.cursor = self.line_end(self.cursor); }
+            else if seq == b"\x1b[3~" { if !self.delete_selection() && self.cursor < self.chars.len() { self.chars.remove(self.cursor); } }
             else if (seq.len() < 16 && seq.starts_with(b"\x1b[")
                 && (seq.len() == 2 || !seq.last().is_some_and(|b| (0x40..=0x7e).contains(b))))
                 || (seq.len() == 2 && seq == b"\x1bO") { return Action::None; }
@@ -475,7 +544,7 @@ impl Editor {
         if self.paste && (byte == b'\r' || byte == b'\n') { self.insert('\n'); return Action::None; }
         match byte {
             b'\r' => {
-                let line = self.line(); self.chars.clear(); self.cursor = 0; self.history_at = None; self.bash = false;
+                let line = self.line(); self.chars.clear(); self.cursor = 0; self.history_at = None; self.bash = false; self.anchor = None;
                 if !line.is_empty() && line != "!" && !carries_secret(&line) { self.history.push(line.clone()); }
                 Action::Submit(line)
             }
@@ -484,6 +553,8 @@ impl Editor {
             // terminal's own SIGINT off, so a runaway turn could otherwise only be stopped by killing the
             // terminal); on an empty line a second one within a second leaves. With a draft and no run
             // it only says how to clear or leave - quitting would throw the draft away.
+            // Ctrl+C with text selected copies it (never interrupts, never touches the draft).
+            3 if self.selection().is_some() => Action::Copy(self.selected_text().unwrap_or_default()),
             3 if self.bash && self.chars.is_empty() => { self.bash = false; Action::None }
             3 if !self.chars.is_empty() => {
                 self.last_interrupt = None;
@@ -504,16 +575,17 @@ impl Editor {
                 Action::Interrupt
             }
             26 => { self.restore(true); Action::None } // Ctrl+Z: undo (raw mode turned SIGTSTP off)
-            25 => { self.restore(false); Action::None } // Ctrl+Y: redo
+            25 | 24 => { self.restore(false); Action::None } // Ctrl+Y, and Ctrl+X (operator 17/11): redo
             4 if self.chars.is_empty() => Action::Eof,
-            4 => { if self.cursor < self.chars.len() { self.chars.remove(self.cursor); } Action::None }
+            4 => { if !self.delete_selection() && self.cursor < self.chars.len() { self.chars.remove(self.cursor); } Action::None }
             8 | 127 if self.bash && self.chars.is_empty() => { self.bash = false; Action::None }
-            8 | 127 => { if self.cursor > 0 { self.cursor -= 1; self.chars.remove(self.cursor); } Action::None }
+            8 | 127 => { if !self.delete_selection() && self.cursor > 0 { self.cursor -= 1; self.chars.remove(self.cursor); } Action::None }
             b'!' if self.chars.is_empty() && !self.bash && !self.paste => { self.bash = true; Action::None }
             16 => { self.history(true); Action::None } // Ctrl+P / Ctrl+N: history
             14 => { self.history(false); Action::None }
-            1 => { self.cursor = 0; Action::None } // Ctrl+A / Ctrl+E
-            5 => { self.cursor = self.chars.len(); Action::None }
+            // Ctrl+A selects the whole draft (operator 17/11); Ctrl+E is the end of the line.
+            1 => { if !self.chars.is_empty() { self.anchor = Some(0); self.cursor = self.chars.len(); } Action::None }
+            5 => { self.anchor = None; self.cursor = self.line_end(self.cursor); Action::None }
             11 => { self.chars.truncate(self.cursor); Action::None } // Ctrl+K
             21 => { self.chars.drain(..self.cursor); self.cursor = 0; Action::None } // Ctrl+U
             23 => { // Ctrl+W: delete the preceding word
@@ -536,6 +608,44 @@ impl Editor {
                 Action::None
             }
         }
+    }
+    /// The draft index under a screen cell of the input box (1-based row/col, as mouse reports give them),
+    /// or None outside the box's text rows. The prompt's two columns sit before the text.
+    pub fn index_at(&self, row: usize, col: usize) -> Option<usize> {
+        if !self.drawable() { return None; }
+        let (lines, cursor) = self.layout();
+        let (first, shown, top) = self.frame_geometry(lines.len(), cursor.0);
+        if row <= top || row > top + shown { return None; }
+        let visual = first + (row - top - 1);
+        let starts = self.line_starts();
+        let start = *starts.get(visual)?;
+        let end = starts.get(visual + 1).copied().unwrap_or(self.chars.len());
+        let want = col.saturating_sub(3); // col is 1-based; the prompt takes two cells
+        let mut at = start;
+        let mut used = 0usize;
+        while at < end && self.chars[at] != '\n' {
+            let width = cell_width(self.chars[at]);
+            if used + width > want { break; }
+            used += width;
+            at += 1;
+        }
+        Some(at)
+    }
+    /// A press in the box: the cursor goes there and the selection ends (a drag then extends from it).
+    pub fn click(&mut self, index: usize) { self.anchor = None; self.cursor = index.min(self.chars.len()); }
+    /// The draft index each visual row of `layout` starts at (same wrapping rule), for drawing a selection
+    /// and for turning a mouse position in the box into a draft index.
+    pub fn line_starts(&self) -> Vec<usize> {
+        let available = self.width.saturating_sub(BOX_CHROME);
+        let mut starts = vec![0usize];
+        let mut col = 0usize;
+        for (index, &ch) in self.chars.iter().enumerate() {
+            if ch == '\n' { starts.push(index + 1); col = 0; continue; }
+            let width = cell_width(ch);
+            if col + width > available && col > 0 { starts.push(index); col = 0; }
+            col += width;
+        }
+        starts
     }
     fn layout(&self) -> (Vec<String>, (usize, usize)) {
         let available = self.width.saturating_sub(BOX_CHROME);
@@ -587,6 +697,7 @@ impl Editor {
     pub fn render(&self) -> String {
         if !self.drawable() { return String::new(); }
         let (lines, cursor) = self.layout();
+        let starts = self.line_starts();
         let (first, shown, top) = self.frame_geometry(lines.len(), cursor.0);
         let bottom = self.bottom();
         let items = self.menu_items();
@@ -629,6 +740,18 @@ impl Editor {
                 let placeholder = if self.bash { BASH_PLACEHOLDER } else { PLACEHOLDER };
                 let hint: String = placeholder.chars().take(self.width.saturating_sub(BOX_CHROME)).collect();
                 frame.push_str(&format!("{HINT}{hint}{RESET}"));
+            } else if let Some((a, b)) = self.selection() {
+                // The selection, drawn in reverse video over the characters it covers on this row.
+                let start = starts.get(index).copied().unwrap_or(0);
+                let mut at = start;
+                for ch in text.chars() {
+                    while at < self.chars.len() && self.chars[at] == '\n' && ch != '\n' { at += 1; }
+                    let inside = at >= a && at < b;
+                    if inside { frame.push_str("\x1b[7m"); }
+                    frame.push(ch);
+                    if inside { frame.push_str("\x1b[27m"); }
+                    at += 1;
+                }
             } else {
                 frame.push_str(text);
             }
@@ -1247,6 +1370,41 @@ mod tests {
         let mut e = Editor::default();
         assert_eq!(e.feed(3), Action::Interrupt, "an empty line interrupts the turn");
         assert_eq!(e.feed(3), Action::Eof, "a second Ctrl+C within a second quits");
+    }
+    #[test]
+    fn home_and_end_move_within_the_line_and_shift_selects() {
+        // Operator 17/11: Home/End act on the focused line, Ctrl+A selects all, Shift+arrows select.
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"first line\x1b\rsecond line");
+        assert_eq!(e.cursor, e.chars.len());
+        type_bytes(&mut e, b"\x1b[H");
+        assert_eq!(e.cursor, 11, "Home goes to the start of the second line, not the draft");
+        type_bytes(&mut e, b"\x1b[F");
+        assert_eq!(e.cursor, e.chars.len(), "End goes to the end of that line");
+        type_bytes(&mut e, b"\x1b[A\x1b[F");
+        assert_eq!(e.cursor, 10, "End on the first line stops before its newline");
+        // Shift+Left x4 selects "line", the four characters before the cursor.
+        type_bytes(&mut e, b"\x1b[1;2D\x1b[1;2D\x1b[1;2D\x1b[1;2D");
+        assert_eq!(e.selected_text().as_deref(), Some("line"));
+        // Typing replaces the selection; one undo brings it back.
+        type_bytes(&mut e, b"row");
+        assert_eq!(e.text(), "first row\nsecond line");
+        e.feed(26);
+        assert_eq!(e.text(), "first line\nsecond line", "typing over a selection is one undo step");
+        // Ctrl+A selects everything; Ctrl+C copies it instead of interrupting.
+        e.feed(1);
+        assert_eq!(e.selected_text().as_deref(), Some("first line\nsecond line"));
+        assert!(matches!(e.feed(3), Action::Copy(ref t) if t == "first line\nsecond line"));
+        assert_eq!(e.text(), "first line\nsecond line", "copying never touches the draft");
+        // Ctrl+Insert copies too; Backspace deletes the selection; Ctrl+X redoes.
+        assert!(matches!(type_bytes(&mut e, b"\x1b[2;5~"), Action::Copy(ref t) if t == "first line\nsecond line"), "Ctrl+Insert copies");
+        e.feed(127);
+        assert_eq!(e.text(), "", "Backspace deletes the selection");
+        e.feed(26);
+        assert_eq!(e.text(), "first line\nsecond line");
+        e.feed(24);
+        assert_eq!(e.text(), "", "Ctrl+X redoes");
     }
     #[test]
     fn ctrl_z_undoes_words_and_ctrl_y_redoes() {

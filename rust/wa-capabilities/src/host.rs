@@ -3158,6 +3158,8 @@ struct ConsoleInput {
     mouse_pending: Vec<u8>,
     /// The chat text being selected with the mouse; Ctrl+C copies it (OSC 52).
     selection: Option<Selection>,
+    /// A mouse drag that began in the input box: the draft index it started at (the editor selects to it).
+    box_drag: Option<usize>,
     /// `host.transcript_hold(true)`: writes are kept, not drawn, until the hold ends (a replay).
     transcript_held: bool,
     /// The long tool call's line as this process last drew it (`wa_term::tool_progress`, the host's own
@@ -3202,6 +3204,20 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
             // the thumb, and a press anywhere else is still a selection. `scroll::bar` holds the
             // arithmetic; this is only the routing.
             if state.transcript.bar_press(row, col, width) { return; }
+            // A press in the input box places the cursor; a drag from there selects (operator 17/11).
+            if row > rows && state.nav.is_none() {
+                let hit = state.editor.as_mut().and_then(|input| {
+                    let index = input.index_at(row, col)?;
+                    input.click(index);
+                    Some(index)
+                });
+                if let Some(index) = hit {
+                    state.box_drag = Some(index);
+                    let frame = layout_frame(state);
+                    let _ = wa_term::terminal_editor::write(&frame);
+                }
+                return;
+            }
             if row > rows || state.nav.is_some() { return; }
             // The copy icon of a fenced block (#114): the transcript knows which cell it drew the
             // affordance on, so a press there is a copy and a press anywhere else is a selection -
@@ -3236,6 +3252,16 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                 let frame = layout_frame(state);
                 let _ = wa_term::terminal_editor::write(&frame);
             }
+        }
+        Mouse::Drag(row, col) | Mouse::Release(row, col) if state.box_drag.is_some() => {
+            let anchor = state.box_drag.unwrap_or(0);
+            if let Some(input) = state.editor.as_mut() {
+                if let Some(index) = input.index_at(row, col) { input.select(anchor, index); }
+            }
+            // (the editor borrow ends here; the frame below reads the whole state)
+            if matches!(event, Mouse::Release(..)) { state.box_drag = None; }
+            let frame = layout_frame(state);
+            let _ = wa_term::terminal_editor::write(&frame);
         }
         Mouse::Drag(row, col) | Mouse::Release(row, col) => {
             // A drag that began on the bar scrolls it, and the button coming up lets the thumb go;
@@ -3604,6 +3630,15 @@ fn console_reader() {
                             // The editor put its own notice (`Interrupting…`) in the footer's place; the
                             // frame below draws it. The draft is never touched by Ctrl+C.
                             wa_term::terminal_editor::Action::Interrupt => CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst),
+                            // The draft's selection to the clipboard (Ctrl+C / Ctrl+Insert with text selected):
+                            // OSC 52, the same write the transcript's copy icon makes.
+                            wa_term::terminal_editor::Action::Copy(text) => {
+                                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                                let count = text.chars().count();
+                                if let Some(editor) = state.editor.as_mut() {
+                                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+                                }
+                            }
                             wa_term::terminal_editor::Action::None => {}
                         }
                     }
