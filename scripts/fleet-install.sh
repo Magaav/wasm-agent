@@ -48,7 +48,10 @@ tmp=$(mktemp -d "$stage_parent/.fleet-install.XXXXXX") || die "no_stage_dir"
 trap 'rm -rf "$tmp"' EXIT
 
 say "download $URL"
-curl -fsSL -o "$tmp/wa" "$URL" || die "download_failed"
+# Bounded and retried: 17/11 a download from the work container hung for 10 minutes on a stalled HTTP/2
+# stream, and the install waited with it.
+curl -fsSL --retry 4 --retry-all-errors --connect-timeout 20 --max-time "${DOWNLOAD_TIMEOUT:-300}" \
+  -o "$tmp/wa" "$URL" || die "download_failed"
 
 # 1. the bytes
 if [ -n "$SHA" ]; then
