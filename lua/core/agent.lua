@@ -2965,6 +2965,14 @@ function M:run_body(text, images)
               ..'any later effectful call in the same batch, were not admitted. Re-issue the ones '
               ..'that remain valid.') or nil}
         end
+        -- RAW_CODE=only: `codemode` is not a call here. A model that remembers it (its own history, its
+        -- training) gets an answer it can act on, instead of a script it never wrote as a block.
+        -- Measured 17/11: a fresh session, only-mode on, still answered with a JSON codemode call.
+        if function_.name == "codemode" and not raw_code.is_raw(call.id) and raw_code.only() then
+          return { error = "codemode_only", effect = "none",
+            note = "code is not a tool call on this node: end your message with one ```js run block, and "
+              .. "it runs as a single script where every tool is tools.<name>(args)." }
+        end
         dispatch_ctx.tool_arguments_json=arguments_text
         dispatch_ctx.tool_call_id=call.id
         -- The name the model called, so the dispatcher can tell the model's own call from the inner calls
