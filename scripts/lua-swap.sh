@@ -53,7 +53,7 @@ restart() {
 healthy() {
   [ "$RESTART" = 1 ] || return 0
   local code=000
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 "${HEALTH_WAIT:-150}"); do
     code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$HEALTH" 2>/dev/null || echo 000)
     [ "$code" = 200 ] && return 0
     sleep 1

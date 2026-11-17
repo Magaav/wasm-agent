@@ -33,6 +33,9 @@ while [ $# -gt 0 ]; do
 done
 TARGET=${TARGET:-$HOME/.local/bin/wa}
 HEALTH=${HEALTH:-http://127.0.0.1:8799/health}
+# How long a restarted node gets to answer /health. 30 s was too short: after a pkill the sentinel
+# restarts the node on its own next check, and a boot measured 17/11 took ~80 s - a healthy artifact was
+# rolled back as dead (and the rollback then looked dead too).
 UNIT=${UNIT:-}
 say() { printf 'fleet-install: %s\n' "$*"; }
 die() { printf 'fleet-install: %s\n' "$*" >&2; exit 1; }
@@ -106,7 +109,7 @@ restart() {
 }
 restart
 code=000
-for _ in $(seq 1 30); do
+for _ in $(seq 1 "${HEALTH_WAIT:-150}"); do
   code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$HEALTH" 2>/dev/null || echo 000)
   [ "$code" = "200" ] && break
   sleep 1
@@ -116,7 +119,7 @@ if [ "$code" != "200" ]; then
   if [ -f "$backup" ]; then
     install -m755 "$backup" "$TARGET" && say "restored $backup"
     restart
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "${HEALTH_WAIT:-150}"); do
       code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$HEALTH" 2>/dev/null || echo 000)
       [ "$code" = "200" ] && break
       sleep 1

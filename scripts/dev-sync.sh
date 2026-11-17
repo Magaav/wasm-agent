@@ -5,7 +5,7 @@
 #   bash scripts/dev-sync.sh --docker <container>[:<dir>]      # default dir: ~/wa-dev in the container
 #   bash scripts/dev-sync.sh --ssh <host>[:<dir>]              # default dir: ~/wa-dev on the host
 #   bash scripts/dev-sync.sh --dir <dir>                       # a local directory
-#   ... [--swap]   also run scripts/lua-swap.sh there: the node runs this Lua as its core (~15-30 s,
+#   ... [--swap]   also run scripts/lua-swap.sh there: the node runs this Lua as its core (~15-90 s,
 #                  probed before and after, rolled back on any failure)
 #
 # The three speeds, by what changed (docs/HOTRELOAD.md):
