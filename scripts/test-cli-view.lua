@@ -782,7 +782,15 @@ screen_view:accepted("two\nlines")
 local turn_rows = visible(since(screen_out, mark))
 ok(has(turn_rows, "\226\157\175 two") and has(turn_rows, "  lines"), "a second line sits under the first one's text")
 local bar = since(screen_out, mark):match("\27%[48;2;68;68;68m([^\27]*)") or ""
-ok(view_lib.columns(bar) == screen_view.limit, "the grey bar counts `❯` as one cell, not three bytes: " .. view_lib.columns(bar))
+ok(view_lib.columns(bar) == screen_view.limit - 1, "the grey bar counts `❯` as one cell, not three bytes, and leaves the scrollbar its column: " .. view_lib.columns(bar))
+-- A long line is wrapped, never clipped with … (operator 17/11: what the reader sent is shown in full).
+do
+  local long_mark = #screen_out
+  local said = string.rep("palavra ", 40) .. "fim"
+  screen_view:accepted(said)
+  local rows = visible(since(screen_out, long_mark))
+  ok(has(rows, "fim") and not has(rows, "\226\128\166"), "a long message is wrapped whole, no …: " .. rows:sub(1, 200))
+end
 mark = #screen_out + 1
 screen_view:submitted()
 ok(has(since(screen_out, mark), "\27[12;1H\27[2K\226\157\175 "),
