@@ -88,6 +88,26 @@ function M.run(argument, opts)
     return set
   end
 
+  -- `/mcp <key> share <node> [replace]`: copy this node's connector to a peer, disabled there (operator 17/11).
+  do
+    local share_key, target, flag = rest:match('^(%S+)%s+share%s+(%S+)%s*(%S*)$')
+    if share_key or rest:match('^%S+%s+share%s*$') then
+      if not target then
+        emit('  usage: /mcp <key> share <node> [replace]')
+        return { ok = false, error = 'share_usage' }
+      end
+      local answer = dofile('lua/core/federation.lua').share(target, share_key, { replace = flag == 'replace' })
+      if not answer.ok then
+        emit('  ' .. tostring(share_key) .. ' not shared with ' .. tostring(target) .. ': ' .. refusal(answer)
+          .. (answer.note and (' - ' .. tostring(answer.note)) or ''))
+        return answer
+      end
+      emit(string.format('  %s shared with %s (%d file%s), %s', tostring(share_key), tostring(answer.peer),
+        answer.files or 0, (answer.files == 1) and '' or 's', tostring(answer.note)))
+      return answer
+    end
+  end
+
   local key, verb = rest:match('^(%S+)%s*(%S*)$')
   verb = tostring(verb or '')
   -- `/mcp <key>`: the connector, as a balloon whose root is its page.

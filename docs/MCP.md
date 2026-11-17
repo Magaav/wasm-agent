@@ -103,6 +103,24 @@ node is configured by hand. The catalog refreshes when a node is bound (the bind
 the cache and never waits on the network. A peer on an older build (no `federation` capability) is kept in
 the catalog with its reason and no tools. Guests neither list nor call. Proof: `scripts/test-federation.lua`.
 
+## Credentials by vault reference, and sharing a connector
+
+A stdio definition may name node-vault entries instead of a key file: `"vault_env": {"COLMEIO_TOKEN":
+"colmeio_cloud"}`. At launch the kernel opens the node's vault and puts each value in the client's
+environment (`rust/wa-capabilities/src/operations.rs`); the client hands it to the server under that name.
+The registry, the request file and every transcript hold the NAME only. Only the kernel's own MCP launch
+(`lua/core/mcp.lua`, `lua/core/mcp_session.lua`) may send `vault_env`: the `operation` tool and the HTTP
+operation route strip it, so a model cannot point a program of its own at an entry. A node whose vault does
+not open (`wa vault status`) refuses the launch with `vault_unavailable` rather than starting without the key.
+
+`/mcp <key> share <node> [replace]` copies a connector to a peer (`lua/core/federation.lua`, `import`): its
+definition, plus the script files a custom one runs (built-in scripts ship with every install and are never
+replaced). The peer writes them into its own script directory, moves every path from the sender's home to
+its own, and registers the definition **disabled**. No credential travels: the answer names the vault
+entries to store there (`wa vault set <entry> --stdin`), then `/mcp <key> probe` and `/mcp <key> on`.
+`/mcp`'s first page says which connectors are built-in (they run a shipped script, e.g. Gmail's
+`mcp-mail.mjs`) and which are custom.
+
 ## WhatsApp first
 
 2026-10-17: [operator-directed management](WHATSAPP-OPERATOR-MANAGEMENT.md) was a

@@ -232,6 +232,7 @@ local GUIDANCE_LINES={
  'Other wasm-agent nodes: tools.nodes() lists them; tools.remote({node, capability, ...}) runs a capability there. WhatsApp is mcp_whatsapp_* on every node.',
  'Calls are always fresh; reuse an earlier result only by asking for it (results.get).',
  '`vars` is your session state: whatever you assign to it, functions included, persists across scripts and turns.',
+ 'Use full paths, as given (programs and files); never `~`.',
 }
 M.guidance=table.concat(GUIDANCE_LINES,'\n')
 -- WASM_AGENT_RAW_CODE=first (lua/core/raw_code.lua): codemode is not declared, so no line may tell the

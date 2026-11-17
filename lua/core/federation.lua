@@ -172,6 +172,8 @@ function M.serve(args, caller, dispatch)
     return { ok = true, schema = M.SCHEMA, node_id = identity.node_id, tools = M.exported(), connectors = M.connectors() }
   elseif action == 'control' then
     return M.control_here(args, caller)
+  elseif action == 'import' then
+    return M.import_here(args, caller)
   elseif action == 'call' then
     local name = tostring(args.name or '')
     local exported = false
@@ -215,6 +217,139 @@ function M.control_here(args, caller)
   return { ok = true, schema = M.SCHEMA, node_id = identity.node_id, id = id, enabled = answer.enabled == true,
     revision = revision, tools = M.exported(), connectors = M.connectors(),
     note = 'Applied by this node\'s own registry and recorded here (harness_events kind mcp_control).' }
+end
+
+-- ---------------------------------------------------------------- sharing a connector (operator 17/11)
+--
+-- `/mcp <key> share <node>`: a connector this node runs is copied to a peer - its definition, plus the script
+-- files a custom one runs (a built-in one's scripts ship with every install). The peer writes the files into
+-- its own script directory, moves every path from the sender's home to its own, and registers the
+-- definition DISABLED: it goes live only after it passes a probe there and someone turns it on there. A
+-- credential never travels: a definition names its vault entries (`vault_env`), and the peer's own vault
+-- must hold them (`wa vault set <entry> --stdin` on that node) before the probe can pass.
+local SHARE_FILE_MAX, SHARE_FILES_MAX = 1024 * 1024, 8
+
+local function moved(value, from_home, to_home)
+  if type(value) == 'string' then
+    if from_home == '' or from_home == to_home then return value end
+    local at = value:find(from_home, 1, true)
+    if not at then return value end
+    -- Plain find/replace (a JSON string argument such as `--config-json` carries paths inside it).
+    local out, from = {}, 1
+    while at do
+      out[#out + 1] = value:sub(from, at - 1) .. to_home
+      from = at + #from_home
+      at = value:find(from_home, from, true)
+    end
+    out[#out + 1] = value:sub(from)
+    return table.concat(out)
+  end
+  if type(value) == 'table' then
+    local copy = {}
+    for key, item in pairs(value) do copy[key] = moved(item, from_home, to_home) end
+    return copy
+  end
+  return value
+end
+M._moved = moved
+
+local function script_name(arg)
+  return tostring(arg):match('([^/\\]+%.m?js)$')
+end
+
+function M.import_here(args, caller)
+  local mcp = dofile('lua/core/mcp.lua')
+  local definition = type(args.definition) == 'table' and args.definition or nil
+  if not definition or type(definition.id) ~= 'string' then return { ok = false, error = 'share_definition_missing' } end
+  local directory = mcp.script_dir()
+  if not directory then return { ok = false, error = 'mcp_script_directory_unbound' } end
+  local shipped = {}
+  for _, file in ipairs(mcp.RUNTIME) do shipped[file] = true end
+  local files = type(args.files) == 'table' and args.files or {}
+  if #files > SHARE_FILES_MAX then return { ok = false, error = 'share_too_many_files' } end
+  local written, names = {}, {}
+  for _, file in ipairs(files) do
+    local name = tostring(file.name or '')
+    if not name:match('^[%w_-][%w._-]*%.m?js$') or name:find('..', 1, true) then return { ok = false, error = 'share_file_name_invalid', name = name } end
+    if shipped[name] then return { ok = false, error = 'share_file_is_built_in', name = name } end
+    local content = type(file.content) == 'string' and file.content or nil
+    if not content or #content > SHARE_FILE_MAX or host.sha256(content) ~= file.sha256 then return { ok = false, error = 'share_file_unverified', name = name } end
+    local target = directory .. '/' .. name
+    local existing = host.read_file(target)
+    if existing and existing ~= content and not args.replace then
+      return { ok = false, error = 'share_file_exists_differs', name = name, note = 'share again with replace to overwrite it' }
+    end
+    written[#written + 1] = { target = target, content = content, name = name }
+    names[name] = true
+  end
+  local def = moved(definition, tostring(args.from_home or ''), tostring(host.getenv('HOME') or ''))
+  -- Every script it runs from THIS node's script directory, and the node runtime this node resolves.
+  if type(def.args) == 'table' then
+    for index, arg in ipairs(def.args) do
+      local base = script_name(arg)
+      if base and (shipped[base] or names[base]) then def.args[index] = directory .. '/' .. base end
+    end
+  end
+  if type(def.program) == 'string' and (def.program:match('[/\\]node$') or def.program:match('[/\\]node%.exe$')) then
+    def.program = mcp.node_program()
+  end
+  local inventory = mcp.inventory()
+  for _, server in ipairs(inventory.servers or {}) do
+    if server.id == def.id and not args.replace then
+      return { ok = false, error = 'share_connector_exists', id = def.id, note = 'share again with replace to overwrite it' }
+    end
+  end
+  for _, w in ipairs(written) do
+    if not host.write_file(w.target, w.content) then return { ok = false, error = 'share_file_not_written', name = w.name } end
+  end
+  local ctx = { role = 'master', session_id = 'federation-share:' .. tostring(caller.node_id), peer = caller.node_id }
+  local answer = mcp.control({ action = 'put', definition = def, expected_revision = inventory.revision }, ctx)
+  pcall(function()
+    dofile('lua/core/telemetry.lua').event(ctx.session_id, '', '', 'mcp_control', 'share_import',
+      { connector = def.id, caller = caller.node_id, ok = answer.ok == true, error = answer.error, files = #written })
+  end)
+  if not answer.ok then return answer end
+  local entries = {}
+  for _, entry in pairs(type(def.vault_env) == 'table' and def.vault_env or {}) do entries[#entries + 1] = entry end
+  table.sort(entries)
+  local identity = dofile('lua/core/nodes.lua').identity() or {}
+  return { ok = true, id = def.id, files = #written, disabled = true, vault_entries = entries, node_id = identity.node_id,
+    note = 'registered disabled. On that node: ' .. (#entries > 0 and ('wa vault set ' .. table.concat(entries, ' / ') .. ' --stdin, then ') or '')
+      .. '/mcp ' .. def.id .. ' probe, then /mcp ' .. def.id .. ' on.' }
+end
+
+-- The sending half: this node's definition of `id` and the custom scripts it runs, to `peer_name`.
+function M.share(peer_name, id, opts)
+  opts = opts or {}
+  local mcp = dofile('lua/core/mcp.lua')
+  local row
+  for _, server in ipairs(mcp.inventory().servers or {}) do if server.id == id then row = server end end
+  if not row or type(row.definition) ~= 'table' then return { ok = false, error = 'unknown_mcp_connector', id = id } end
+  local shipped = {}
+  for _, file in ipairs(mcp.RUNTIME) do shipped[file] = true end
+  local files = {}
+  for _, arg in ipairs(type(row.definition.args) == 'table' and row.definition.args or {}) do
+    local base = script_name(arg)
+    if base and not shipped[base] then
+      local content = host.read_file(arg)
+      if not content then return { ok = false, error = 'share_file_unreadable', name = base } end
+      files[#files + 1] = { name = base, content = content, sha256 = host.sha256(content) }
+    end
+  end
+  local node
+  -- `load_cache` is defined further down this file; the public reader is the same cache.
+  for _, peer in pairs((M.cached() or {}).peers or {}) do
+    if peer.name == peer_name or peer.node_id == peer_name then node = peer end
+  end
+  if not node then return { ok = false, error = 'unknown_peer', peer = tostring(peer_name) } end
+  local call = opts.call or function(node_id, capability, payload)
+    return dofile('lua/core/nodes.lua').remote_call(node_id, capability, payload)
+  end
+  local answer = call(node.node_id, 'federation', { action = 'import', definition = row.definition, files = files,
+    from_home = tostring(host.getenv('HOME') or ''), replace = opts.replace == true })
+  if type(answer) ~= 'table' then return { ok = false, error = 'peer_answer_unreadable', peer = node.name } end
+  answer.peer = answer.peer or node.name
+  return answer
 end
 
 -- ---------------------------------------------------------------- local side
