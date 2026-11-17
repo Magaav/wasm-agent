@@ -150,6 +150,21 @@ end
 -- appended to `result.tool_calls`, and the returned table says what the loop must add (`refusal`
 -- instead of running, `notes` for the result). A reply that was cut or hit its output limit keeps its
 -- text whole: the step's own cut/limit path refuses every call it formed, this one included.
+-- `only` mode: an untagged ```js / ```javascript fence becomes a run block, line by line (a pattern over
+-- the whole text is easy to get subtly wrong, and this is two comparisons per line).
+function M.retag(text)
+  local out = {}
+  for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local ticks, info = line:match("^( ? ? ?```+)(.*)$")
+    if ticks then
+      local tag = tostring(info or ""):gsub("%s+$", "")
+      if tag == "js" or tag == "javascript" then line = ticks .. "js run" end
+    end
+    out[#out + 1] = line
+  end
+  return table.concat(out, "\n")
+end
+
 function M.take(result, stop_sent)
   local content = result.content or ""
   if not content:find("```", 1, true) then return nil end
@@ -157,12 +172,7 @@ function M.take(result, stop_sent)
   -- Measured 17/11: told "end your message with one ```js run block", the model wrote ```js — a sample by
   -- the harness's rule, so nothing ran and no tool was left to fall back to. The tag is honoured as
   -- written in `first` mode, where a plain code block can still be an answer.
-  if M.mode() == "only" then
-    content = content:gsub("([
-]?)(```+)([Jj][Ss]|[Jj]avascript)[ 	]*
-", "%1%2%3 run
-")
-  end
+  if M.mode() == "only" then content = M.retag(content) end
   local blocks, lines = M.parse(content)
   local runs = {}
   for _, block in ipairs(blocks) do if block.run then runs[#runs + 1] = block end end
