@@ -1,6 +1,6 @@
 -- On-demand lexical discovery over canonical transcripts; never rewrites history.
 local json=dofile('lua/vendor/json.lua')
-local output=dofile('lua/core/tool_output.lua')
+local output=dofile('lua/core/pure.lua')('lua/core/tool_output.lua')
 local evidence=dofile('lua/core/evidence_view.lua')
 local M={}
 local retrieval={'search_messages','session','sessions','resume_session','recall','memories','tool_result'}

@@ -73,13 +73,13 @@ local function summary_of(calls)
  end
  return table.concat(parts,' · ')
 end
-local output=dofile('lua/core/tool_output.lua')
+local output=dofile('lua/core/pure.lua')('lua/core/tool_output.lua')
 local telemetry=dofile('lua/core/telemetry.lua')
 local presentation=dofile('lua/core/codemode_view.lua')
 -- The ergonomics layer the model's script is wrapped in (natural promises, explicit reuse) and the
 -- per-scope journal that `results`/`{reuse}`/`prior` read. Both are this node's own code, so both
 -- are testable from this tree (`scripts/test-codemode-promises.lua`, `scripts/test-codemode-reuse.lua`).
-local harness=dofile('lua/core/codemode_harness.lua')
+local harness=dofile('lua/core/pure.lua')('lua/core/codemode_harness.lua')
 local session_results=dofile('lua/core/codemode_results.lua')
 -- One pending-call handle for every call (docs/CODEMODE.md, "Pending calls"): a call still running
 -- after its wait answers {state:"pending", op}, and `wait(op)`/`cancel(op)` resume or stop it. Built

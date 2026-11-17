@@ -13,7 +13,7 @@
 -- by hash in the node's tool-results directory (`lua/core/tool_output.lua`), so nothing here copies a
 -- result body - a journal row is a name, two hashes, a time and a verdict.
 local json = dofile("lua/vendor/json.lua")
-local output = dofile("lua/core/tool_output.lua")
+local output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
 local M = {}
 
 M.PREFIX = "codemode-results.v1:"

@@ -1222,7 +1222,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   -- the model wrote plus an `Observation:` user message, not as a tool call/result pair. Only the request
   -- is rendered; the caller's messages (and the stored rows) are untouched. Before the gateway, so a
   -- gateway-served call sends the same messages.
-  if opts.raw_history then messages = dofile("lua/core/raw_code.lua").render_history(messages) end
+  if opts.raw_history then messages = dofile("lua/core/pure.lua")("lua/core/raw_code.lua").render_history(messages) end
   -- The gateway owns the call when it is enabled: it picks the model by task class, enforces the session's
   -- data label against each provider's `allowed_labels`, applies the fallback chain, the breaker and the
   -- budgets, and returns the same result shape this function does. A missing capability or an unset flag

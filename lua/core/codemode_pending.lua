@@ -44,7 +44,7 @@
 -- is answered synchronously and cannot be resumed (named in docs/CODEMODE.md).
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
-local output = dofile("lua/core/tool_output.lua")
+local output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
 local M = {}
 
 -- The wait a call gets when it names none, and the ceiling on any wait. A script's own remaining time

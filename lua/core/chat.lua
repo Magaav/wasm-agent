@@ -491,6 +491,11 @@ function M.run(argv)
   local wake_if_due
 
   local function turn(line)
+    -- The turn boundary: the one moment a `pure` core helper (raw_code, the codemode harness, tool_output)
+    -- is swapped from the reload source - never in the middle of a run (lua/core/reload.lua).
+    for _, notice in ipairs(reload.turn_boundary(host.now())) do
+      view:line(cli_view.paint("  " .. tostring(notice.text), notice.ok and "dim" or "warning", view.live))
+    end
     snapshot_status({ color = view.live, max_age = 300 })
     -- Nothing is blocked yet: a live read of the roster is exactly what a `/nodes` typed in a moment
     -- will be drawn from, and the reader is not waiting on anything but this turn.

@@ -145,7 +145,8 @@ do
   for _, entry in ipairs((entries and entries.entries) or {}) do
     local path = "lua/core/" .. tostring(entry.name)
     if entry.kind == "file" and path:match("%.lua$") then
-      if reload.class(path) ~= "ui" and reload.class(path) ~= "guard" and reload.class(path) ~= "core" then
+      local class = reload.class(path)
+      if class ~= "ui" and class ~= "guard" and class ~= "core" and class ~= "pure" then
         unclassified[#unclassified + 1] = path
       end
     end
@@ -403,6 +404,43 @@ do
   view:run_finished()
   ok(view.turn == nil, "the run finished normally after a reload in the middle of it")
   reload.drop_view(view)
+end
+
+-- ============================================================== 7b. pure helpers swap at a turn boundary
+
+do
+  -- A stateless core helper (`raw_code`) reached the way the core reaches it (`lua/core/pure.lua`): an edit
+  -- in the dev tree is NOT taken mid-run (a tick swaps nothing), IS taken at the turn boundary, a broken copy
+  -- keeps the one that ran, and a guard still reads the node's own copy.
+  reload.configure({ dev = DEV })
+  local handle = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
+  ok(type(handle.mode) == "function", "pure: the handle answers the module's functions")
+  local node_text = assert(host.read_file(root .. "/lua/core/raw_code.lua"))
+  local edited = node_text:gsub("\nreturn M%s*$", "\nM.dev_mark = 'v2'\nreturn M\n")
+  ok(edited ~= node_text, "pure: the test edit applies to raw_code's source")
+  write(DEV .. "/lua/core/raw_code.lua", edited)
+  reload.store.checked = -1
+  reload.tick(host.now() + 10)
+  ok(handle.dev_mark == nil, "pure: a frame tick does not swap a pure module (a run keeps one version)")
+  local notices = reload.turn_boundary(host.now() + 20)
+  ok(handle.dev_mark == "v2", "pure: the turn boundary swaps it in")
+  ok(#notices == 1 and notices[1].ok and tostring(notices[1].text):find("raw_code", 1, true),
+    "pure: and says so once: " .. json.encode(notices))
+  -- A copy that parses but fails its probe (native_calls broken) is refused; the working copy stays.
+  write(DEV .. "/lua/core/raw_code.lua", (edited:gsub("function M%.native_calls%(text%)", "function M.native_calls(text) do return nil end")))
+  notices = reload.turn_boundary(host.now() + 30)
+  ok(handle.dev_mark == "v2" and type(handle.native_calls) == "function"
+    and handle.native_calls('<tool_call>{"name":"js","arguments":{"code":"x"}}</tool_call>') ~= nil,
+    "pure: a copy that fails its probe is refused, the working copy keeps running")
+  ok(#notices == 1 and notices[1].ok == false, "pure: and the refusal is one line: " .. json.encode(notices))
+  -- The guard reads the node's own raw_code, never the dev tree's.
+  local policy = dofile("lua/core/codemode_policy.lua")
+  ok(type(policy.guidance_for) == "function", "the guard still loads")
+  write(DEV .. "/lua/core/raw_code.lua", node_text)
+  reload.turn_boundary(host.now() + 40)
+  ok(handle.dev_mark == nil, "pure: restoring the file restores the module at the next turn")
+  reload.configure({})
+  ok(handle.dev_mark == nil and type(handle.take) == "function", "pure: with no source the node's module answers")
 end
 
 -- ============================================================== 8. the two sources

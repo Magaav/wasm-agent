@@ -1,6 +1,6 @@
 -- Explicit bounded inspection; originals remain in memory and are never rewritten.
 local json = dofile('lua/vendor/json.lua')
-local output = dofile('lua/core/tool_output.lua')
+local output = dofile('lua/core/pure.lua')('lua/core/tool_output.lua')
 local evidence = dofile('lua/core/evidence_view.lua')
 local M = {}
 

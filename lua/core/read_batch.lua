@@ -2,7 +2,7 @@
 -- script's tool_call batch). Never refetch a continuation. It outlived the `*_many` tools that first used
 -- it: the paging is a property of the batch, not of one tool name.
 local json=dofile('lua/vendor/json.lua')
-local output=dofile('lua/core/tool_output.lua')
+local output=dofile('lua/core/pure.lua')('lua/core/tool_output.lua')
 local paths=dofile('lua/core/paths.lua')
 local M={}
 local PREFIX='batch.cursor.v2:'

@@ -9,7 +9,7 @@ local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
-local tool_output = dofile("lua/core/tool_output.lua")
+local tool_output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
 local canonical_guard = dofile("lua/core/canonical_guard.lua")
 -- The path guard, once: `run()` below is where every shell command this tool launches passes, and the
@@ -887,7 +887,7 @@ function M.envelope(role,ctx)
   -- to the next one (measured 17/11: bash hidden, the model called `session_worktree` three times and the
   -- repetition guard stopped the turn). The catalogue still reaches the script through `capabilities()`
   -- and `searchTools()`, so nothing is out of reach — only out of sight at the top level.
-  local raw=dofile('lua/core/raw_code.lua')
+  local raw=dofile('lua/core/pure.lua')('lua/core/raw_code.lua')
   if raw.only and raw.only() then return {}, envelope.mode(ctx) end
   return envelope.schemas(list,ctx),envelope.mode(ctx)
 end

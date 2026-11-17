@@ -14,7 +14,7 @@ local memory = dofile("lua/core/memory.lua")
 local steering = dofile("lua/core/steering.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local context_usage = dofile("lua/core/context_usage.lua")
-local tool_output = dofile("lua/core/tool_output.lua")
+local tool_output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
 local json_contract = dofile("lua/core/json_contract.lua")
 -- The one renderer for a refusal (lua/core/refusal.lua). The dispatcher already applies it to every
 -- table it returns; this file applies it to the two shapes that never reach the dispatcher: a tool that
@@ -26,7 +26,7 @@ local done_gate = dofile("lua/core/done_gate.lua")
 local progress_guard = dofile("lua/core/progress_guard.lua")
 local run_failure = dofile("lua/core/run_failure.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
-local raw_code = dofile("lua/core/raw_code.lua")
+local raw_code = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
 
 -- One place that tells a hook what it is being told about. Ids, names, lengths and bounded views
 -- only: a hook never receives the transcript, a credential or a whole tool result unless the node

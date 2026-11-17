@@ -17,6 +17,7 @@ gets.
 | class | what | reloadable |
 | --- | --- | --- |
 | `ui` | the render (`cli_view`), every command's balloon, the slash-command registry and `/help`, `/status`, markdown and output formatting, tool titles and result views, the wake line, the skills list, the palette, the panel and local-view channels, `/mcp`, `/nodes`, `/model`, `/login`, `/bind` and the rest of the command layer | **yes**, from a reload source |
+| `pure` | stateless core helpers: `raw_code` (the run block and a model's own call markup turned into a call), `codemode_harness` (the JS prelude), `tool_output` (a result as the model reads it) | **yes**, from a reload source, but **only at a turn boundary** (`reload.turn_boundary`, called by the chat before each run), so a run never sees two versions; the core reaches them through `lua/core/pure.lua`, a guard never does |
 | `guard` | the hooks engine, the path guard, the canonical-worktree guard, the progress guard, the code-mode policy, the done gate, the release and payload signature checks, access/binding policy, the vault, `wa land`, `retired`, `redact`, and the reloader itself | never - and never read from a reload source |
 | `core` | everything else under `lua/core`: the agent, memory, the provider, the tools, the ledger | never (it owns the session, the run and the database handle) |
 | `runtime` | the terminal driver (`rust/wa-term`: raw mode, input, screen buffer, transcript, editor), the interpreter and its capability surface (`rust/wa-capabilities`: `host.rs`, `core_component.rs`, `capabilities.rs`), the process that owns the session (`rust/wa-host/src/main.rs`), `disk_cap` (`disk.rs`), the trusted-key verifier | never: compiled in |
@@ -74,6 +75,25 @@ than cold: `cli_view`'s restart-notice cache (`restart_notice`) and `local_views
    interrupting it - which the test proves with a fake stream.
 6. **Nothing costs anything when off.** With no source configured, `M.tick` returns before it asks the host
    anything, and the status line says nothing.
+
+## Pure helpers: core code at a turn boundary (17/11)
+
+Operator 17/11, *"can we make the evolution faster? hotswap fail fallback?"*: the codeact work changed
+`raw_code`, the codemode harness and `tool_output` - core, so every edit was a 3-minute build and an
+install. They hold no state, open no handle and decide no policy, so they get their own class:
+
+- read from the reload source (dev tree or signed payload) like a UI module, with the same load, the same
+  probe (each runs its real work on a fixed input - `native_calls` parses a call, `decorate` wraps a
+  script, `project` renders a result) and the same keep-the-old-copy refusal;
+- swapped **only** by `M.turn_boundary(now)`, which the chat calls before each run: a frame `tick` never
+  swaps one, so a run that is streaming keeps the parser and the harness it started with;
+- reached by the core through `dofile("lua/core/pure.lua")(path)`, a handle whose fields are looked up
+  when used (the agent is loaded before `--dev` is parsed); with no source it is the node's own module;
+- never reached by a guard: `codemode_policy` reads `raw_code` with the plain `dofile`, the node's copy.
+
+`scripts/test-hotreload.lua` section 7b proves each line. What still needs a build: everything `core`
+(the agent loop, memory, the provider, the tools, the ledger) and the Rust runtime. For core Lua there is
+`scripts/lua-swap.sh` (install a Lua tree beside the binary with probe and automatic rollback, ~30 s).
 
 ## The two sources
 

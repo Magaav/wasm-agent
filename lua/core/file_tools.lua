@@ -1,6 +1,6 @@
 -- File mechanics only. Fresh bytes are read on every call; only their line index is cached.
 local json=dofile('lua/vendor/json.lua')
-local output=dofile('lua/core/tool_output.lua')
+local output=dofile('lua/core/pure.lua')('lua/core/tool_output.lua')
 local M={}
 local cache,order,weight={}, {},0
 local hits,builds,fallbacks=0,0,0

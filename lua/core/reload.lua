@@ -122,6 +122,18 @@ local UI = {
   "lua/core/approve.lua",
 }
 
+-- Stateless core helpers (operator 17/11, "make the evolution faster"): they hold no state, open no
+-- handle and decide no policy - they turn text into a call, wrap a script, shape a result for the model.
+-- They come from the reload source like a UI module, are probed the same way and keep the old copy on any
+-- failure, but they swap ONLY at a turn boundary (`M.turn_boundary`, called by the chat before a run):
+-- a run never sees two versions of the parser or the harness. Core callers reach them through
+-- `lua/core/pure.lua`. A guard never does: `codemode_policy` reads its copy with the plain `dofile`.
+local PURE = {
+  "lua/core/raw_code.lua",         -- the run block, and a model's own call markup, turned into a call
+  "lua/core/codemode_harness.lua", -- the JS prelude a script is wrapped in (vars, results, parallel)
+  "lua/core/tool_output.lua",      -- a tool's result as the model reads it
+}
+
 -- Never reloadable, and named one by one rather than by a pattern: a list a reviewer can read is the
 -- point. Each is a guard, a policy or the machinery that decides what may be loaded at all.
 local GUARD = {
@@ -169,14 +181,16 @@ M.RUNTIME = {
 -- not source: a reload cannot reach them at all. Named for the guard test's inventory line.
 M.COMPONENTS = "a WASI component is installed bytes (components.lock), never a reload source"
 
-local ui_set, guard_set = {}, {}
+local ui_set, guard_set, pure_set = {}, {}, {}
 for _, path in ipairs(UI) do ui_set[path] = true end
 for _, path in ipairs(GUARD) do guard_set[path] = true end
+for _, path in ipairs(PURE) do pure_set[path] = true end
 
-M.UI, M.GUARD = UI, GUARD
+M.UI, M.GUARD, M.PURE = UI, GUARD, PURE
 
 -- What a path is, for every path this process can be asked to load:
 --   "ui"      reloadable, may come from a reload source
+--   "pure"    a stateless core helper: from the reload source too, swapped only at a turn boundary
 --   "guard"   never reloadable, always from the node's own source
 --   "core"    the rest of `lua/` (agent, memory, tools, the ledger): not reloadable either
 --   "vendor"  third-party Lua (`lua/vendor`): not reloadable
@@ -186,6 +200,7 @@ function M.class(path)
   path = tostring(path or ""):gsub("\\", "/")
   if ui_set[path] then return "ui" end
   if guard_set[path] then return "guard" end
+  if pure_set[path] then return "pure" end
   for _, prefix in ipairs(M.RUNTIME) do
     if path == prefix or (prefix:sub(-1) == "/" and path:sub(1, #prefix) == prefix) then return "runtime" end
   end
@@ -196,7 +211,10 @@ end
 
 -- Is a reload source ever consulted for this path? One function, so a caller cannot answer it
 -- differently from the loader.
-function M.reloadable(path) return M.class(path) == "ui" end
+function M.reloadable(path)
+  local class = M.class(path)
+  return class == "ui" or class == "pure"
+end
 
 -- ---------------------------------------------------------------------------- the store
 
@@ -407,6 +425,22 @@ end
 -- The module's own self-check, then the render probe. Both run the NEW code, not a description of it:
 -- a syntax error is caught by `load`, and a render that raises is caught here, before the swap.
 local PROBE = {
+  -- The pure helpers run their real work on a fixed input: parsed is not parses-the-model's-reply.
+  ["lua/core/raw_code.lua"] = function(module)
+    assert(type(module.mode) == "function" and type(module.take) == "function", "mode/take")
+    local found = module.native_calls('<tool_call>{"name":"js","arguments":{"code":"return 1;"}}</tool_call>')
+    assert(found and found.calls[1] and found.calls[1].code == "return 1;", "native_calls")
+    local blocks = module.parse("```js run\nreturn 2;\n```")
+    assert(type(blocks) == "table" and blocks[1] and blocks[1].run, "parse")
+  end,
+  ["lua/core/codemode_harness.lua"] = function(module)
+    local text = module.decorate("return 3;", {})
+    assert(type(text) == "string" and text:find("return 3;", 1, true), "decorate")
+  end,
+  ["lua/core/tool_output.lua"] = function(module)
+    local view = module.project("codemode", { ok = true, status = 200, value = '"x"', attempts = {}, calls = {} })
+    assert(type(view) == "string" and view:find("x", 1, true), "project")
+  end,
   ["lua/core/cli_view.lua"] = function(module)
     local view = module.new({ out = function() end, live = false, limit = 80, register = false })
     assert(type(view) == "table", "cli_view.new returned " .. type(view))
@@ -602,7 +636,7 @@ function M.require(path)
     -- one - which is the whole of why the driver and the guards are outside this mechanism.
     error("reload: never_reloadable: " .. path .. " is compiled into this binary", 2)
   end
-  if entry.class ~= "ui" then
+  if entry.class ~= "ui" and entry.class ~= "pure" then
     -- A guard, the core or a vendor file: loaded from the node's own source, now, and never watched.
     local module, problem = load_from(path)
     if not module then error("reload: " .. path .. ": " .. tostring(problem), 2) end
@@ -663,7 +697,7 @@ function M.swap(path)
   path = tostring(path or ""):gsub("\\", "/")
   local entry = loaded[path]
   if not entry then return false, "not_loaded: " .. path end
-  if entry.class ~= "ui" then return false, "never_reloadable: " .. path end
+  if entry.class ~= "ui" and entry.class ~= "pure" then return false, "never_reloadable: " .. path end
   local now = host.now()
   local module, problem, source = load_from(path)
   if not module then return false, fail(entry, problem, now) end
@@ -694,7 +728,7 @@ local function scan()
   if not root then return false end
   local folders = {}
   for path, entry in pairs(loaded) do
-    if entry.class == "ui" and entry.mod then
+    if (entry.class == "ui" or entry.class == "pure") and entry.mod then
       local folder = path:match("^(.*)/[^/]+$")
       if folder then folders[folder] = true end
     end
@@ -709,6 +743,40 @@ local function scan()
   end
   M.store.stamps = stamps
   return true
+end
+
+-- Swap every loaded module of `class` whose file changed since it was read (one notice each).
+local function consider(class, now, notices)
+  for path, entry in pairs(loaded) do
+    if entry.class == class and entry.mod then
+      local stamp = M.store.stamps[path]
+      if stamp then
+        if entry.stamp == nil then
+          entry.stamp = stamp
+        elseif stamp ~= entry.stamp and stamp ~= entry.failed_stamp then
+          local started = now
+          local ok, source = M.swap(path)
+          local elapsed = math.max(0, (host.now() - started) * 1000)
+          if ok then
+            entry.failed_stamp = nil
+            M.store.last = { path = path, source = source, at = started, ms = elapsed }
+            notices[#notices + 1] = { ok = true, path = path, source = source,
+              text = "reloaded " .. path:gsub("^lua/core/", "") .. " (" .. (source or "?") .. ", "
+                .. string.format("%.0f", elapsed) .. " ms)" }
+            M.store.notices[#M.store.notices + 1] = notices[#notices]
+          else
+            -- The stamp that failed is remembered: the same broken file is not re-read and re-reported
+            -- on every frame. The next save changes it and the next tick tries again.
+            entry.failed_stamp = stamp
+            -- `M.swap` already recorded the failure (and its one line) in the store; the notice it
+            -- hands back is the same sentence the caller must draw now.
+            notices[#notices + 1] = { ok = false, text = tostring(source), path = path }
+          end
+        end
+        entry.stamp = stamp
+      end
+    end
+  end
 end
 
 -- The tick. Called at every frame and every command boundary (`cli_view`'s framed methods, and the
@@ -742,36 +810,23 @@ function M.tick(now)
     end
   end
   if not scan() then return notices end
-  for path, entry in pairs(loaded) do
-    if entry.class == "ui" and entry.mod then
-      local stamp = M.store.stamps[path]
-      if stamp then
-        if entry.stamp == nil then
-          entry.stamp = stamp
-        elseif stamp ~= entry.stamp and stamp ~= entry.failed_stamp then
-          local started = now
-          local ok, source = M.swap(path)
-          local elapsed = math.max(0, (host.now() - started) * 1000)
-          if ok then
-            entry.failed_stamp = nil
-            M.store.last = { path = path, source = source, at = started, ms = elapsed }
-            notices[#notices + 1] = { ok = true, path = path, source = source,
-              text = "reloaded " .. path:gsub("^lua/core/", "") .. " (" .. (source or "?") .. ", "
-                .. string.format("%.0f", elapsed) .. " ms)" }
-            M.store.notices[#M.store.notices + 1] = notices[#notices]
-          else
-            -- The stamp that failed is remembered: the same broken file is not re-read and re-reported
-            -- on every frame. The next save changes it and the next tick tries again.
-            entry.failed_stamp = stamp
-            -- `M.swap` already recorded the failure (and its one line) in the store; the notice it
-            -- hands back is the same sentence the caller must draw now.
-            notices[#notices + 1] = { ok = false, text = tostring(source), path = path }
-          end
-        end
-        entry.stamp = stamp
-      end
-    end
+  consider("ui", now, notices)
+  return notices
+end
+
+-- The turn boundary: the one moment a `pure` module is swapped (nothing of a run is in flight). Scans now,
+-- whatever the throttle says - a turn starts once per Enter, never per frame - and answers the same
+-- notices `M.tick` does. A probe failure keeps the copy that ran the last turn.
+function M.turn_boundary(now)
+  local notices = {}
+  if not M.mode() then return notices end
+  now = tonumber(now) or host.now()
+  if M.mode() == "release" then
+    local module = payload_module()
+    if not (module and module.ensure(M.root())) then return notices end
   end
+  if not scan() then return notices end
+  consider("pure", now, notices)
   return notices
 end
 
@@ -781,10 +836,14 @@ end
 -- listed rather than scanned with `pairs` on a directory, so a module added without a decision shows up
 -- as "core" in the test's own report instead of vanishing.
 function M.inventory()
-  local rows, counts = {}, { ui = 0, guard = 0, core = 0, runtime = 0 }
+  local rows, counts = {}, { ui = 0, pure = 0, guard = 0, core = 0, runtime = 0 }
   for _, path in ipairs(UI) do
     rows[#rows + 1] = { path = path, class = "ui", loaded = M.is_loaded(path), source = M.source_of(path) }
     counts.ui = counts.ui + 1
+  end
+  for _, path in ipairs(PURE) do
+    rows[#rows + 1] = { path = path, class = "pure", loaded = M.is_loaded(path), source = M.source_of(path) }
+    counts.pure = counts.pure + 1
   end
   for _, path in ipairs(GUARD) do
     rows[#rows + 1] = { path = path, class = "guard" }
@@ -798,7 +857,7 @@ function M.inventory()
   if entries then
     for _, item in ipairs(entries) do
       local path = "lua/core/" .. tostring(item.name)
-      if item.kind == "file" and path:match("%.lua$") and not ui_set[path] and not guard_set[path] then
+      if item.kind == "file" and path:match("%.lua$") and not ui_set[path] and not guard_set[path] and not pure_set[path] then
         rows[#rows + 1] = { path = path, class = "core" }
         counts.core = counts.core + 1
       end
