@@ -883,8 +883,12 @@ function M.envelope(role,ctx)
   end
   -- WASM_AGENT_RAW_CODE=only: the run block is the only way to act, so the tools a script can express
   -- are not offered as direct calls either. They stay callable inside the script.
+  -- WASM_AGENT_RAW_CODE=only: NOTHING is declared. A list that hides some tools just moves the shortcut
+  -- to the next one (measured 17/11: bash hidden, the model called `session_worktree` three times and the
+  -- repetition guard stopped the turn). The catalogue still reaches the script through `capabilities()`
+  -- and `searchTools()`, so nothing is out of reach — only out of sight at the top level.
   local raw=dofile('lua/core/raw_code.lua')
-  if raw.only and raw.only() then list=raw.without_generic(list) end
+  if raw.only and raw.only() then return {}, envelope.mode(ctx) end
   return envelope.schemas(list,ctx),envelope.mode(ctx)
 end
 
