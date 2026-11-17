@@ -820,6 +820,47 @@ end
 -- Remove another node's registration from the rendezvous (administrators only). The one way to clear a
 -- row whose key is gone - a deleted worktree, a scratch home, a reinstall; such a key can never sign
 -- its own `/forget`. Exact node id only: a display name is self-chosen and may be shared.
+-- Remove a node from the network for good (operator 17/11: a legacy node could be revoked but never left
+-- the directory). The fleet key decides: the node must already be revoked in the VERIFIED roster
+-- (`wa fleet revoke` + `wa fleet push-roster`). Then, at the rendezvous: if it is an operator it is retired
+-- (`POST /operators` remove + retire, signed by this administrator), and its registration is forgotten.
+-- Bound nodes that pinned it as an operator keep working: their admission does not count a pin the roster
+-- revoked as lost (lua/core/binding.lua).
+function M.network_remove(node_id)
+  if type(node_id) ~= "string" or not node_id:match("^%x+$") or #node_id ~= 32 then return { error = "node_id_required" } end
+  if type(host.mesh_call) ~= "function" then return { error = "mesh_unavailable" } end
+  local ok, raw = pcall(host.mesh_call, json.encode({ revoked = true }))
+  local roster = ok and type(raw) == "string" and json.decode(raw) or nil
+  if type(roster) ~= "table" or roster.ok ~= true then
+    return { error = "roster_unverified", detail = roster and roster.error }
+  end
+  local revoked = false
+  for _, id in ipairs(roster.revoked or {}) do if id == node_id then revoked = true end end
+  if not revoked then
+    return { error = "not_revoked_in_roster",
+      fix = "revoke it in the signed roster first: wa fleet revoke <name> --roster <file> --key <fleet key>, then wa fleet push-roster <node> for each node" }
+  end
+  local url = M.rendezvous_url()
+  if url == "" then return { error = "no_rendezvous" } end
+  local base = url:gsub("/+$", "")
+  local steps = {}
+  local body = json.encode({ remove = node_id, retire = true, nonce = host.uuid() })
+  local headers = M.signed_headers("operators", body)
+  if not headers then return { error = "node_identity_unavailable" } end
+  local response = json.decode(host.http("POST", base .. "/operators", json.encode(headers), body)) or {}
+  local status = tonumber(response.status)
+  if status == 200 then steps[#steps + 1] = "operator retired"
+  elseif status == 404 then steps[#steps + 1] = "not an operator"
+  else return { error = "network_remove_operator_refused", status = status, detail = response.body } end
+  local forgot = M.network_forget(node_id)
+  if forgot.error and not (forgot.status == 404) then
+    return { error = forgot.error, status = forgot.status, detail = forgot.detail, done = steps }
+  end
+  steps[#steps + 1] = forgot.error and "registration already gone" or "registration forgotten"
+  M.invalidate()
+  return { ok = true, removed = node_id, steps = steps }
+end
+
 function M.network_forget(node_id)
   if type(node_id) ~= "string" or not node_id:match("^%x+$") then return { error = "node_id_required" } end
   local url = M.rendezvous_url()

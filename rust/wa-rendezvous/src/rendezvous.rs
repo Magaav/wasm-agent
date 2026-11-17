@@ -212,6 +212,13 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
                  -- is never overridden by this table: these rows only ever ADD.
                  CREATE TABLE IF NOT EXISTS network_operators (
                    node_id TEXT PRIMARY KEY, added_by TEXT, added_at INTEGER
+                 );
+                 -- Environment operators an administrator RETIRED (`POST /operators` with `remove` and
+                 -- `retire: true`, operator 17/11): a legacy node whose key is gone can leave the admin set
+                 -- without a hand edit of the unit file. Never the last environment operator, never the
+                 -- caller itself; vouching for the id again (`add`) lifts it.
+                 CREATE TABLE IF NOT EXISTS retired_operators (
+                   node_id TEXT PRIMARY KEY, retired_by TEXT, retired_at INTEGER
                  );",
             ) {
                 eprintln!("[rendezvous] schema: {error}");
@@ -421,6 +428,8 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
                     extra.push(add.to_string());
                 }
             }
+            let _ = connection.execute("DELETE FROM retired_operators WHERE node_id = ?1", rusqlite::params![add]);
+            if let Ok(mut retired) = RETIRED_OPERATORS.lock() { retired.retain(|id| id != add); }
             eprintln!("[rendezvous] operator {} added by administrator {}", &add[..add.len().min(12)], &from[..from.len().min(12)]);
         }
         if !remove.is_empty() {
@@ -432,9 +441,31 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
                 extra.retain(|id| id != remove);
             }
             if matches!(outcome, Ok(0)) {
-                // Removing an operator named by the environment is not possible from here, and saying so
-                // is better than a silent success that leaves the caller believing it worked.
-                return respond(stream, 409, "{\"error\":\"operator_from_environment\"}");
+                // An operator named by the environment is RETIRED, not deleted, and only when asked in so
+                // many words (`retire: true`): the unit file stays the root of trust, this row subtracts.
+                let environment = env_operators();
+                if !environment.iter().any(|id| id == remove) {
+                    return respond(stream, 404, "{\"error\":\"not_an_operator\"}");
+                }
+                if !payload["retire"].as_bool().unwrap_or(false) {
+                    return respond(stream, 409, "{\"error\":\"operator_from_environment\",\"fix\":\"send retire: true to retire it\"}");
+                }
+                if remove == from {
+                    return respond(stream, 409, "{\"error\":\"operator_cannot_retire_itself\"}");
+                }
+                let retired_now: Vec<String> = RETIRED_OPERATORS.lock().map(|list| list.clone()).unwrap_or_default();
+                let remaining = environment.iter().filter(|id| *id != remove && !retired_now.contains(id)).count();
+                if remaining == 0 {
+                    return respond(stream, 409, "{\"error\":\"last_environment_operator\"}");
+                }
+                let _ = connection.execute(
+                    "INSERT INTO retired_operators VALUES(?1,?2,?3) ON CONFLICT(node_id) DO NOTHING",
+                    rusqlite::params![remove, from, now()],
+                );
+                if let Ok(mut retired) = RETIRED_OPERATORS.lock() {
+                    if !retired.iter().any(|id| id == remove) { retired.push(remove.to_string()); }
+                }
+                eprintln!("[rendezvous] environment operator {} retired by administrator {}", &remove[..remove.len().min(12)], &from[..from.len().min(12)]);
             }
             eprintln!("[rendezvous] operator {} removed", &remove[..remove.len().min(12)]);
         }
@@ -802,6 +833,12 @@ fn network_admins() -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
+    // Retired environment operators leave the list (never all of them: `POST /operators` refuses the last).
+    if let Ok(retired) = RETIRED_OPERATORS.lock() {
+        let before = list.clone();
+        list.retain(|id| !retired.contains(id));
+        if list.is_empty() { list = before; } // a database that retired everyone is ignored, not obeyed
+    }
     // Operators added at runtime (`POST /operators`). The environment list is the root of trust: a row
     // here can only add, never remove, so a leaked database cannot lock the operator out of his own
     // registry. Read through a cache the endpoint keeps current.
@@ -818,6 +855,13 @@ fn network_admins() -> Vec<String> {
 /// The operator rows this registry loaded at start, plus every one an administrator added since.
 /// Process-wide on purpose: `network_admins()` is asked by nine call sites that carry no connection.
 static EXTRA_OPERATORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Environment operators an administrator retired (`retired_operators`).
+static RETIRED_OPERATORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn env_operators() -> Vec<String> {
+    std::env::var("WASM_AGENT_NETWORK_ADMINS").unwrap_or_default().split(',').map(str::trim)
+        .filter(|s| !s.is_empty()).map(str::to_string).collect()
+}
 
 fn load_runtime_operators(connection: &Connection) {
     let rows: Vec<String> = connection
@@ -834,6 +878,14 @@ fn load_runtime_operators(connection: &Connection) {
             }
         }
     }
+    let retired: Vec<String> = connection
+        .prepare("SELECT node_id FROM retired_operators")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    if let Ok(mut list) = RETIRED_OPERATORS.lock() { *list = retired; }
 }
 fn body_hash(bytes: &[u8]) -> String {
     node::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())

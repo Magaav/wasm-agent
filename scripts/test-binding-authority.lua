@@ -73,4 +73,27 @@ local failed=binding.tick()
 ok(failed.error=='binding_service_unavailable','an unreadable service is named unavailable, not an authority change')
 mode.down=false
 ok(binding.tick().state=='attached','the binding attaches again once the service answers')
+-- 7. An operator the VERIFIED fleet roster revoked leaves the list as a clean removal (operator 17/11, removing
+-- a legacy node): no loss is reported and a renewal is not refused for it. Not revoked: the loss counts.
+local real_mesh=host.mesh_call
+host.mesh_call=function(text)
+  local ask=json.decode(text)
+  if ask.revoked then return json.encode({ok=true,revoked={second.node_id},fleet='test'}) end
+  return real_mesh and real_mesh(text)
+end
+binding._roster_revoked_cache.at=-1e9
+mode.operators={first}
+tick=binding.tick()
+ok(tick.authority=='same' and #(tick.authority_lost or {})==0,'a roster-revoked operator is not a loss: '..json.encode(tick))
+host.mesh_call=function(text)
+  local ask=json.decode(text)
+  if ask.revoked then return json.encode({ok=false,error='roster_unverified'}) end
+  return real_mesh and real_mesh(text)
+end
+binding._roster_revoked_cache.at=-1e9
+tick=binding.tick()
+ok(tick.authority=='removed','an unverified roster revokes nothing: the loss counts as before')
+host.mesh_call=real_mesh
+mode.operators={first,second}
+binding._roster_revoked_cache.at=-1e9
 print('binding authority ok ('..checks..' checks, 0 skipped)')
