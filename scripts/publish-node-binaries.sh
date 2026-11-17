@@ -607,6 +607,12 @@ else
   # A signature left over from another set is now about other bytes, and shipping it would be a release no
   # node can install. Named here, before anything is printed for upload, instead of being discovered on four
   # nodes.
+  # Under deferral the signature comes afterwards from the vault's host, so one left from ANOTHER build is moved
+  # aside, said, and the build goes on (17/11: the next release refused with exit 6 over the previous commit's
+  # signature). Without deferral it stays a refusal: this run was meant to sign.
+  if [ -f "$OUT/SHA256SUMS.sig" ] && [ "${WA_RELEASE_SIGN_DEFER:-0}" = 1 ] && ! wa_release_verify_sums "$OUT" >/dev/null 2>&1; then
+    mv -f "$OUT/SHA256SUMS.sig" "$OUT/SHA256SUMS.sig.stale" && say "moved a signature over other sums aside: $OUT/SHA256SUMS.sig.stale (WA_RELEASE_SIGN_DEFER=1: the new sums are signed on the vault's host)"
+  fi
   if [ -f "$OUT/SHA256SUMS.sig" ]; then
     wa_release_verify_sums "$OUT" || fail \
       "signature_stale: $OUT/SHA256SUMS.sig is not a signature over the sums just written (they changed after it was made), so nothing is published; sign the new $OUT/SHA256SUMS where the vault is (bash scripts/sign-release.sh $OUT/SHA256SUMS) and run this again" 6

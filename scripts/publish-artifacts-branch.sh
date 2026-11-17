@@ -202,6 +202,10 @@ STAGE="$(mktemp -d "${KEEP:-${TMPDIR:-/tmp}}/wasm-agent-artifacts.XXXXXX")" || f
   echo 'cd "$(dirname "$0")"'
   echo "$create_line"
   echo "# $upload_line"
+  # The pointer wa.colmeio.com/install.sh reads first (scripts/web/install.sh): GitHub's release listing is
+  # not ordered by date (17/11: an edited older release came first and the installer picked it).
+  echo "# The installer's pointer, where this host serves wa.colmeio.com:"
+  echo 'if [ -d /srv/wasm-agent-releases ]; then printf "%s\n" '"$TAG"' > /tmp/latest-node.txt && sudo -n install -m0644 /tmp/latest-node.txt /srv/wasm-agent-releases/latest-node.txt && echo "pointer: '"$TAG"'"; fi'
 } > "$STAGE/PUBLISH.sh" || fail "stage_unwritable: $STAGE/PUBLISH.sh" 2
 chmod +x "$STAGE/PUBLISH.sh"
 
