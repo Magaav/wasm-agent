@@ -1702,32 +1702,52 @@ end
 -- step is a call that runs as a script (lua/core/raw_code.lua, native_calls), so the markup is not shown
 -- (17/11: the raw DSML lines were printed live, then the same call ran as a block). A trailing `<...`
 -- without `>` waits for the next piece, so a marker split across deltas is still caught.
+local function fence_at(text)
+  -- a ```js / ```javascript fence (tagged `run` or not) at the start of a line: the script is drawn by the
+  -- run block, so its streamed copy (and anything after it, which the step drops) is held back
+  for _, lead in ipairs({ "```js", "```javascript" }) do
+    if text:sub(1, #lead) == lead then return 1 end
+    local at = text:find("\n" .. lead, 1, true)
+    if at then return at + 1 end
+  end
+end
 local function markup_at(text)
-  return text:find("<%s*\239\189\156%s*DSML") or text:find("<%s*|%s*DSML") or text:find("<tool_call>", 1, true)
+  local found = text:find("<%s*\239\189\156%s*DSML") or text:find("<%s*|%s*DSML") or text:find("<tool_call>", 1, true)
+  local fence = fence_at(text)
+  if found and fence then return math.min(found, fence) end
+  return found or fence
 end
 function METHODS:delta_piece(text)
   local d = self.dstream or { buf = "", shown = 0 }
   self.dstream = d
-  if d.hidden then return end
+  -- Hidden text is still kept: if the step turns out to be the answer, `delta_reset(true)` writes it.
   d.buf = d.buf .. text
+  if d.hidden then return end
   local at = markup_at(d.buf)
   if at then
     if at - 1 > d.shown then self:write(d.buf:sub(d.shown + 1, at - 1)) end
-    d.shown = #d.buf
+    d.shown = math.max(d.shown, at - 1)
     d.hidden = true
     return
   end
+  -- hold a tail that may still become a marker: `<...` without `>`, or a last line that is a fence prefix
   local hold = d.buf:match("<[^>]*$")
-  local upto = #d.buf - ((hold and #hold <= 32) and #hold or 0)
+  local held = (hold and #hold <= 32) and #hold or 0
+  local last = d.buf:match("\n([^\n]*)$") or d.buf
+  if #last <= 13 and last ~= "" and ("```javascript"):sub(1, #last) == last then held = math.max(held, #last) end
+  local upto = #d.buf - held
   if upto > d.shown then self:write(d.buf:sub(d.shown + 1, upto)); d.shown = upto end
 end
-function METHODS:delta_reset()
+-- `answer`: the step ended as the reply, so whatever was held back (a code block that did not run, a
+-- held tail) is the reader's and is written now. Otherwise (a call ran) the held text was the call.
+function METHODS:delta_reset(answer)
   local d = self.dstream
-  if d and not d.hidden and #d.buf > d.shown then self:write(d.buf:sub(d.shown + 1)) end
+  if d and (answer or not d.hidden) and #d.buf > d.shown then self:write(d.buf:sub(d.shown + 1)) end
   self.dstream = nil
 end
 
 function METHODS:run_started()
+  self.reasoning_streamed = nil
   self.runs = self.runs + 1
   self.dstream = nil
   self.frame = 0
@@ -1917,10 +1937,8 @@ end
 -- In the plain layout (a captured run) nothing is drawn until the answer is in: a log cannot take a
 -- row back, and a `⏳` that never flips is worse than no row.
 function METHODS:codemode_start(event)
-  local previous = self.code_done
-  if previous and self:transcript() and host.transcript_fold then
-    pcall(host.transcript_fold, codemode_block.summary(previous, self.limit, self:codemode_opts()))
-  end
+  -- The block before it stays open, whole (operator 17/11: "each step shows its output completely,
+  -- no more eliding"); it used to fold to its one-row summary here.
   self.code_done = nil
   self.code = codemode_block.new(event.arguments, self.now())
   self.code_rows = 0
@@ -2018,7 +2036,7 @@ M.bulletize = bulletize
 -- The answer, then the numbers for the run that produced it. A reply that already
 -- streamed (a peer or a window run reaching this printer) is not printed twice.
 function METHODS:answered(reply)
-  self:delta_reset()
+  self:delta_reset(true)
   self:commentary_flush()
   self:clear()
   if self.deltas == 0 and reply and tostring(reply) ~= "" then
@@ -2337,7 +2355,12 @@ function METHODS:event(event)
       if self.pending then self:paint() end
     end
   elseif kind == "reasoning" then
-    self:reasoning_block(event.text)
+    if self.reasoning_streamed then
+      self.reasoning_streamed = nil
+      self:write("\n")
+    else
+      self:reasoning_block(event.text)
+    end
   elseif kind == "commentary" then
     self:commentary_flush()
     self:commentary_block(event.text)
@@ -2370,8 +2393,17 @@ function METHODS:event(event)
     self:delta_piece(event.text or "")
   elseif kind == "reasoning_delta" then
     -- Thinking, as it arrives, in the view's own blue: the phase line above it says how long, this
-    -- says what.
-    self:write(paint(event.text or "", "dim", self.live))
+    -- says what. Opened once per step under the same heading the settled block has, and the settled
+    -- `reasoning` event then does not print it a second time (17/11: every thought was shown twice).
+    if not self.reasoning_streamed then
+      self.reasoning_streamed = true
+      if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then
+        self:write(paint(STAR .. " Thinking\226\128\166", "muted", self.live) .. "\n")
+      end
+    end
+    if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then
+      self:write(paint(event.text or "", "dim", self.live))
+    end
   elseif kind == "error" then
     self:clear()
     self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))

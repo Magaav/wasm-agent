@@ -273,10 +273,10 @@ M.shared = {
     id = { type = "string", description = "Existing memory id; replaces that entry." },
     scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
     tags = { type = "array", items = { type = "string" } } }, { "content" }),
-  schema("recall", "Search facts the user asked you to keep. Call it before answering about the user (names, preferences, codewords, settings, accounts) and before saying nothing is stored.", {
+  schema("recall", "Search facts the user asked you to keep. Call it before answering about the user (names, preferences, codewords, settings, accounts) and before saying nothing is stored. Without a query it answers the most recent facts.", {
     query = { type = "string", description = "What to look for, in the user's own words." },
     scope = { type = "string" },
-    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+    limit = { type = "integer", minimum = 1, maximum = 50 } }),
   schema("memories", "List what is stored, most recent first, with each entry's id. Use it when the user asks what you remember or wants the store tidied: reading the ids is how you find what `forget` should remove.", {
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 200 } }),
@@ -1578,6 +1578,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local replaced = (args.id ~= nil and args.id ~= "") or nil
     return { ok = true, id = id, replaced = replaced }
   elseif name == "recall" then
+    -- `recall()` with no words is the natural first move of a model getting its bearings (17/11, session
+    -- 6d9f9d9c: schema_required:arguments.query failed the whole first script): it gets the newest facts.
+    if tostring(args.query or ""):find("%S") == nil then
+      return memory.memories(guest_scope or args.scope, args.limit or 10)
+    end
     if guest_scope then return memory.recall(args.query or "", args.limit or 10, guest_scope, true) end
     return memory.recall(args.query or "", args.limit or 10, args.scope)
   elseif name == "skill" then

@@ -119,4 +119,7 @@ check(memory.apply_entry(newer)==true,'the newer correction replays over the old
 check(row(id2).content:find('ZETAMONDAYS',1,true)~=nil,'the newer entry overwrites the stale text')check(#memory.recall('ZETAFRIDAYS')==0 and #memory.recall('ZETAMONDAYS')==1,'the index follows the correction')
 check(live()==rows_after_journal,'no replay path inserted a second row')
 
+-- recall() with no query answers the newest facts instead of failing the script it is in (17/11, 6d9f9d9c).
+local bare=tools.dispatch(memory,'recall',{},'master',{user_id='master',session_id=''})
+check(type(bare)=='table' and bare.error==nil and #bare>0,'recall() with no query lists recent facts: '..tostring(bare and bare.error))
 print('memory replace ok ('..checks..' checks)')

@@ -529,6 +529,7 @@ peer_view:event({ type = "step_phase", phase = "commentary", text = "streamed al
 local _, peer_count = peer.text():gsub("streamed already", "")
 ok(peer_count == 1, "text a peer already streamed is not printed again")
 
+do
 -- A model's own call markup in the stream is not shown (it runs as a script): split across deltas,
 -- the text before it is shown, the markup is not, and text with an ordinary `<b>` tag still is.
 local leak = recorder()
@@ -539,6 +540,33 @@ leak_view:event({ type = "delta", text = "\239\189\156DSML\239\189\156 calls>\n<
 leak_view:event({ type = "tool", name = "codemode", arguments = { code = "return 1;" } })
 ok(has(leak.text(), "Checking first.") and not has(leak.text(), "DSML") and not has(leak.text(), "echo probe"),
   "streamed call markup is hidden, the text before it is shown: " .. leak.text())
+do
+-- A streamed run block (```js, tagged run or not) is not printed as text: the run view draws the script, and
+-- the text after it (a <turn> note the step drops) is not shown either. A fence split across deltas holds.
+local fence = recorder()
+local fence_view = view_lib.new({ out = fence.out, live = false, now = function() return 7 end, limit = 80 })
+fence_view:run_started()
+fence_view:event({ type = "delta", text = "Looking her up.\n``" })
+fence_view:event({ type = "delta", text = "`js\nconst a = 1;\n```\n<turn>what hurt: nothing</turn>" })
+fence_view:event({ type = "tool", name = "codemode", arguments = { code = "const a = 1;" } })
+ok(has(fence.text(), "Looking her up.") and not has(fence.text(), "```js") and not has(fence.text(), "what hurt"),
+  "a streamed run block and the text after it are not shown as text: " .. fence.text())
+-- The same fence in a reply that ran nothing is the answer: it is written when the answer settles.
+local sample = recorder()
+local sample_view = view_lib.new({ out = sample.out, live = false, now = function() return 7 end, limit = 80 })
+sample_view:run_started()
+sample_view:event({ type = "delta", text = "Example:\n```js\nreturn 1;\n```" })
+sample_view:answered("Example:\n```js\nreturn 1;\n```")
+ok(has(sample.text(), "```js\nreturn 1;"), "a code sample in an answer is still shown: " .. sample.text())
+-- Thinking streamed live is not printed a second time when the step settles.
+local think = recorder()
+local think_view = view_lib.new({ out = think.out, live = false, now = function() return 7 end, limit = 80 })
+think_view:run_started()
+think_view:event({ type = "reasoning_delta", text = "The user wants a curiosity." })
+think_view:event({ type = "reasoning", text = "The user wants a curiosity.", complete = true })
+local _, thoughts = think.text():gsub("The user wants a curiosity", "")
+ok(thoughts == 1, "streamed thinking is shown once, not again as a block: " .. think.text())
+end
 local tag = recorder()
 local tag_view = view_lib.new({ out = tag.out, live = false, now = function() return 7 end, limit = 80 })
 tag_view:run_started()
@@ -546,6 +574,7 @@ tag_view:event({ type = "delta", text = "a <b" })
 tag_view:event({ type = "delta", text = ">bold</b> end <" })
 tag_view:answered("a <b>bold</b> end <")
 ok(has(tag.text(), "a <b>bold</b> end <"), "ordinary angle brackets still stream, and a held tail is flushed: " .. tag.text())
+end
 
 -- ---- the console -------------------------------------------------------------------
 
@@ -1515,9 +1544,13 @@ do
   ok(not has(visible(table.concat(first.lines, "\n")), "code="), "the heading never carries the code")
 
   -- The script, ONCE: six rows, then the count of what was kept back.
-  eq(#first.lines, 8, "all eight script rows, no fold and no heading")
-  ok(has(visible(first.lines[6]), "tools.lua"), "and the sixth is its sixth line")
-  ok(has(visible(first.lines[8]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[8]))
+  -- Eight script lines, the one longer than the band WRAPPED onto a second row (never clipped with …).
+  eq(#first.lines, 9, "all eight script lines, the long one wrapped, no fold and no heading")
+  ok(not has(visible(table.concat(first.lines, "\n")), "\226\128\166"), "nothing is elided with …")
+  ok(has((visible(first.lines[4]):gsub("^  ", ""):gsub("%s+$", "")) .. (visible(first.lines[5]):gsub("^  ", ""):gsub("%s+$", "")),
+    "const out = await Promise.all(hits.map(p => tools.bash({command: 'wc -l ' + p})));"),
+    "the wrapped line is whole across its two rows")
+  ok(has(visible(first.lines[9]), "return {count: hits.length"), "the last one is drawn too: " .. visible(first.lines[9]))
 
   -- One inner call: it appears as it starts (⏳), and its OWN row flips when it settles - never a
   -- second row, which is what "streams" has to mean in a transcript that can only append.
@@ -1526,7 +1559,7 @@ do
   local rows = first.lines
   eq(#rows, base + 1, "a call that starts adds one row")
   ok(has(visible(rows[#rows]), "⏳ bash"), "with the ⏳ mark: " .. visible(rows[#rows]))
-  ok(has(visible(rows[#rows]), "wc -l lua/core/chat.lua"), "and what it was given")
+  ok(not has(visible(rows[#rows]), "\226\128\166"), "the call row has no clipped argument summary (the script shows them whole)")
   ok(has(visible(rows[#rows]), "bash"), "the call row names the tool as soon as it starts")
   view:event({ type = "codemode_call", id = "c1", name = "bash", state = "ok", ms = 250 })
   rows = first.lines
@@ -1556,22 +1589,21 @@ do
   -- The band is padded to the row width; the answer rows are their own width, so only the script
   -- rows are measured here.
   local widest = 0
-  for index = 1, 8 do widest = math.max(widest, view_lib.columns(visible(rows[index]))) end
-  eq(widest, 80, "every script row is exactly the width it was given (the band is padded)")
+  local narrowest = math.huge
+  for index = 1, 9 do
+    widest = math.max(widest, view_lib.columns(visible(rows[index])))
+    narrowest = math.min(narrowest, view_lib.columns(visible(rows[index])))
+  end
+  eq(widest, 79, "every script row is one column short of the screen, so the transcript never wraps it into a blank row")
+  eq(narrowest, 79, "and every row is padded to that width (a band, padded by columns)")
   local block = {}
-  for index = 1, 8 do block[#block + 1] = visible(rows[index]) end
+  for index = 1, 9 do block[#block + 1] = visible(rows[index]) end
   ok(not has(table.concat(block, "\n"), "CodeAct"), "and no script row grew a title")
 
-  -- The next code-mode call collapses the one before it to its summary - the running block is the one
-  -- that is open (operator, 13/11) - and the host decides, so a pinned block is not folded.
-  local expected = blocks.summary(view.code_done, 80, view:codemode_opts())
+  -- The next code-mode call leaves the one before it open and whole (operator 17/11: every step shows its
+  -- output completely; it used to fold to a one-row summary).
   view:event({ type = "tool", name = "codemode", arguments = { code = "return 1;" }, call_id = "c9" })
-  eq(fake.folds, 1, "the block before it is folded exactly once")
-  eq(fake.folded_summary, expected, "to the summary this side built")
-  ok(has(fake.folded_summary, "⏺ bash, web_read ✗ web_http_429"),
-    "which names the tools and the failure, with no modality word: " .. tostring(fake.folded_summary))
-  ok(has(fake.folded_summary, "1.2s") and has(fake.folded_summary, '{"count":2,"first":"chat.lua"}'),
-    "with its time and the value's first line: " .. tostring(fake.folded_summary))
+  eq(fake.folds or 0, 0, "the block before it is not folded")
   eq(fake.blocks[#fake.blocks].code, true, "and the new block is the open one")
 
   -- A captured run has no fold and cannot take a row back: the block is written once, when the answer

@@ -34,7 +34,7 @@ local M = {}
 -- The script's rows under the heading, before the fold names the rest (`… +N lines`).
 M.CODE_ROWS = 6
 -- The value's rows under `⎿`.
-M.RESULT_ROWS = 3
+M.RESULT_ROWS = math.huge -- the whole value (operator 17/11: no more eliding)
 -- One parallel group is one row; a wider fan-out keeps the newest names.
 M.GROUP_NAMES = 3
 -- An evidence envelope is a pointer, not an answer: `path`/`bytes`/`sha256` and nothing else that a
@@ -283,9 +283,11 @@ function M.call_text(call, o, width)
   elseif call.ms then
     facts = " \194\183 " .. o.elapsed(call.ms)
   end
-  local room = (width or 80) - 2 - o.columns(mark) - 1 - o.columns(call.name) - o.columns(facts)
-  local text = mark .. " " .. call.name .. (inside ~= "" and o.clip(inside, math.max(8, room)) or "") .. facts
-  return o.clip(text, math.max(8, (width or 80) - 2))
+  -- No argument summary: the script above already shows every argument whole, and a summary had to be
+  -- clipped (`chat=1126… text=C…`) to keep the call one row - the row the view rewrites in place.
+  inside = ""
+  local text = mark .. " " .. call.name .. facts
+  return o.clip(text, math.max(8, (width or 80) - 3))
 end
 
 -- A fan-out of the same tool is one row, not ten: `bash ×10 ⏳4 ✓5 ✗1`. Ten rows of `✓ bash` say the
@@ -436,6 +438,34 @@ end
 
 -- ---- the block -------------------------------------------------------------------
 
+
+-- `text` cut into rows of at most `limit` display columns, on UTF-8 boundaries, nothing dropped and no
+-- `…` (operator 17/11: "each step shows its output completely"). A row that is exactly as wide as the
+-- transcript is wrapped AGAIN by it, which is what drew a blank band row under every code line - the
+-- caller leaves one column free.
+function M.wrap(text, limit, o)
+  o = M.opts(o)
+  local value = tostring(text or "")
+  limit = math.max(8, tonumber(limit) or 80)
+  if o.columns(value) <= limit then return { value } end
+  local rows, start, used, index = {}, 1, 0, 1
+  while index <= #value do
+    local byte = value:byte(index)
+    local size = (byte >= 240 and 4) or (byte >= 224 and 3) or (byte >= 192 and 2) or 1
+    -- a combining mark / variation selector rides with the character before it
+    local piece = value:sub(index, index + size - 1)
+    local cells = o.columns(piece)
+    if used + cells > limit and index > start then
+      rows[#rows + 1] = value:sub(start, index - 1)
+      start, used = index, 0
+    end
+    used = used + cells
+    index = index + size
+  end
+  if start <= #value then rows[#rows + 1] = value:sub(start) end
+  return rows
+end
+
 -- The call rows as the transcript draws them: one row per call (or per fan-out), the ✓/✗/⏳ mark in
 -- its own colour. This is the row a running block rewrites in place as each call settles
 -- (`host.transcript_rewrite`), so it is built by one function and nothing else.
@@ -464,13 +494,17 @@ function M.rows(model, width, options)
   -- inside it (`✓ bash · …`), so a heading above the code only repeated them.
   local rows = {}
   local code, code_hidden = M.script_rows(model.args, math.huge)
+  local band = math.max(8, width - 3)
+  local pieces = {}
   for _, line in ipairs(code) do
-    -- The row is fitted BEFORE it is highlighted: clipping a string that already carries escape
-    -- sequences by width would cut one in half, and a cut token paints the rest of the block.
-    local shown = o.clip(line, math.max(8, width - 2))
-    -- The band is padded to the full width so it is a band and not a ragged stripe, and the colour
-    -- of the code is kept: syntax coloured, never bold.
-    local pad = string.rep(" ", math.max(0, math.max(8, width - 2) - #shown))
+    -- Wrapped, never clipped, and BEFORE it is highlighted: cutting a string that already carries
+    -- escape sequences would cut one in half, and a cut token paints the rest of the block.
+    for _, piece in ipairs(M.wrap(line, band, o)) do pieces[#pieces + 1] = piece end
+  end
+  for _, shown in ipairs(pieces) do
+    -- The band is padded by display columns (not bytes) to one column short of the screen, so it is a
+    -- band and the transcript never wraps it into an empty second row.
+    local pad = string.rep(" ", math.max(0, band - o.columns(shown)))
     if o.live and o.syntax then
       -- The band is re-applied around every token: `paint` ends each piece with a reset, so a band
       -- painted once around the row would stop at the first coloured token. Padding to the full width
@@ -511,10 +545,13 @@ function M.tail_rows(model, width, options)
     end
   end
   local lead = "\226\142\191 "
-  for index, line in ipairs(value) do
+  local first = true
+  for _, line in ipairs(value) do
     local style = model.error and not model.value and "error" or "dim"
-    rows[#rows + 1] = (index == 1 and o.paint(lead, "muted") or "  ")
-      .. o.paint(o.clip(line, width - 4), style)
+    for _, piece in ipairs(M.wrap(line, width - 5, o)) do
+      rows[#rows + 1] = (first and o.paint(lead, "muted") or "  ") .. o.paint(piece, style)
+      first = false
+    end
   end
   if value_hidden > 0 then
     rows[#rows + 1] = o.paint("  \226\128\166 +" .. value_hidden .. " lines (/console shows all)", "dim")
@@ -523,7 +560,9 @@ function M.tail_rows(model, width, options)
   if evidence == nil and M.hidden_evidence(model) then
     evidence = "evidence: pointer kept (/console has it)"
   end
-  if evidence then rows[#rows + 1] = o.paint("  " .. o.clip(evidence, width - 2), "dim") end
+  if evidence then
+    for _, piece in ipairs(M.wrap(evidence, width - 3, o)) do rows[#rows + 1] = o.paint("  " .. piece, "dim") end
+  end
   return rows
 end
 
