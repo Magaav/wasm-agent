@@ -881,6 +881,10 @@ function M.envelope(role,ctx)
     for _,item in ipairs(list) do if not codemode_policy.connector(item['function'].name) then outer[#outer+1]=item end end
     list=outer
   end
+  -- WASM_AGENT_RAW_CODE=only: the run block is the only way to act, so the tools a script can express
+  -- are not offered as direct calls either. They stay callable inside the script.
+  local raw=dofile('lua/core/raw_code.lua')
+  if raw.only and raw.only() then list=raw.without_generic(list) end
   return envelope.schemas(list,ctx),envelope.mode(ctx)
 end
 

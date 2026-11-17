@@ -1063,6 +1063,11 @@ function M:build_context()
     tool_list=raw_code.without_codemode(tool_list)
     catalog=catalog and raw_code.without_codemode(catalog)
   end
+  -- `only`: no direct calls at all. The guidance is one sentence, because the list is already empty.
+  if raw_code.only and raw_code.only() then
+    tool_list=raw_code.without_generic(tool_list)
+    catalog=catalog and raw_code.without_generic(catalog)
+  end
   self.agents_source = agents_path
   local first, parts, facts
   local orchestration_enabled=self.role~='guest'

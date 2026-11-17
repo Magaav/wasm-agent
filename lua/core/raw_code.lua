@@ -53,6 +53,25 @@ M.OBSERVATION = "Observation:\n"
 
 M.STOP = "\n```\n"
 
+-- `only`: the run block is the *only* way to act. `first` leaves every ordinary tool declared, so a
+-- model that wants one `ls` calls `ls` — measured 17/11, four rounds, three direct calls, zero run
+-- blocks, with `first` on. This mode hides the tools a script can express, so the prompt offers no
+-- shorter path; they stay dispatchable inside the script (`tools.bash(...)`), which is what the tool
+-- loop already does for every capability.
+M.ONLY_GENERIC = { bash = true, read = true, write = true, edit = true, ls = true, grep = true, shell = true }
+
+function M.only() return M.mode() == "only" end
+
+function M.without_generic(list)
+  if type(list) ~= "table" then return list end
+  local out = {}
+  for _, item in ipairs(list) do
+    local name = type(item) == "table" and item["function"] and item["function"].name or nil
+    if not (name and M.ONLY_GENERIC[name]) then out[#out + 1] = item end
+  end
+  return out
+end
+
 function M.mode()
   local value = tostring(host.getenv("WASM_AGENT_RAW_CODE") or ""):lower()
   if value == "1" or value == "on" or value == "true" then return "on" end
@@ -68,7 +87,8 @@ end
 
 -- Raw first: the run block is the way of working, codemode is not declared, history renders as text.
 function M.first(policy)
-  return M.active(policy) and M.mode() == "first"
+  local mode = M.mode()
+  return M.active(policy) and (mode == "first" or mode == "only")
 end
 
 function M.stop_sequences(policy)
