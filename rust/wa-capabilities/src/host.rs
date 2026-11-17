@@ -3264,7 +3264,9 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
         // it is not. Only that flip sets `dirty`, so a moving pointer costs no frame.
         Mouse::Motion(row, col) => {
             state.transcript.bar_hover(row, col, width);
-            if row <= rows && state.transcript.expand_hover(row) {
+            let expand = row <= rows && state.transcript.expand_hover(row);
+            let copy = row <= rows && state.transcript.copy_hover(row, col);
+            if expand || copy {
                 let frame = layout_frame(state);
                 let _ = wa_term::terminal_editor::write(&frame);
             }

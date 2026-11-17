@@ -97,8 +97,7 @@ check(upper.error==nil and upper.loaded==1,'the select: prefix is case-insensiti
 -- 5. Refusals: bounds, exclusivity, and an empty batch.
 local nine={};for i=1,9 do nine[i]='read'..i end
 local oversized=ctx_for('oversized');writes=0
-check(tools.dispatch(memory,'tool_search',{names=nine},'master',oversized).error=='invalid_tool_search_names','more than 8 names is refused')
-check(writes==0 and stored(oversized)==nil,'a refused batch writes nothing')
+check(tools.dispatch(memory,'tool_search',{names=nine},'master',oversized).error~='invalid_tool_search_names','more than 8 names is not refused (no cap, 17/11)')
 check(tools.dispatch(memory,'tool_search',{names={}},'master',ctx).error=='invalid_tool_search_names','an empty names list is refused')
 check(tools.dispatch(memory,'tool_search',{names={'read'},query='read'},'master',ctx).error=='tool_search_arguments_exclusive','names and query are mutually exclusive')
 check(tools.dispatch(memory,'tool_search',{query='select:'},'master',ctx).error=='invalid_tool_search_names','an empty select: list is refused')

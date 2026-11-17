@@ -99,7 +99,10 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     /// Where each expandable line was drawn in the last `view`: screen row -> (block, line).
     expand_rows: HashMap<usize, (usize, usize)>,
     /// The expandable line under the pointer, drawn bright.
-    expand_hover: Option<(usize, usize)> }
+    expand_hover: Option<(usize, usize)>,
+    /// The screen row whose copy icon the pointer is on: drawn bright, so the icon reads as a button
+    /// (operator 17/11 "it does not have a hover effect").
+    copy_hover: Option<usize> }
 
 impl Default for Transcript {
     fn default() -> Self {
@@ -107,7 +110,7 @@ impl Default for Transcript {
             page_delta: 0, nav: false, live_row: None, pending_copy: Vec::new(),
             copy_rows: HashMap::new(), copy_right: HashMap::new(), scrollbar: Scrollbar::Auto, counts: Vec::new(),
             count_width: 0, bar: false, bar_last: None, bar_hovered: false, bar_grab: None,
-            pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None }
+            pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None, copy_hover: None }
     }
 }
 
@@ -265,6 +268,28 @@ impl Transcript {
         self.expand_hover = now;
         self.dirty = true;
         true
+    }
+
+    /// The pointer moved: is it on a copy icon? Only a change sets `dirty` (a moving pointer costs no frame).
+    pub fn copy_hover(&mut self, row: usize, col: usize) -> bool {
+        let now = self.copy_at(row, col).map(|_| row);
+        if now == self.copy_hover { return false }
+        self.copy_hover = now;
+        self.dirty = true;
+        true
+    }
+
+    /// The hovered copy icon, brightened in the rows about to be drawn (bold + bright white, ended with
+    /// the codes that undo only those two, so a band's background stays).
+    fn light_icon(&self, shown: &mut [String]) {
+        let Some(row) = self.copy_hover else { return };
+        if !(self.copy_rows.contains_key(&row) || self.copy_right.contains_key(&row)) { return }
+        if let Some(line) = shown.get_mut(row.saturating_sub(1)) {
+            let icon = COPY_ICON.to_string();
+            if let Some(at) = if self.copy_right.contains_key(&row) { line.rfind(&icon) } else { line.find(&icon) } {
+                line.replace_range(at..at + icon.len(), &format!("\x1b[1;97m{icon}\x1b[22;39m"));
+            }
+        }
     }
 
     /// One marker of `rows_with_copies`, placed on the screen: a copy icon or an expandable line.
@@ -570,6 +595,7 @@ impl Transcript {
             shown.extend(tail.into_iter().skip(skip));
             // Following the bottom: the first row shown is the one `height` above the end.
             let first = total.saturating_sub(shown.len());
+            self.light_icon(&mut shown);
             self.draw_bar(&mut shown, text_width, self.bar, total, first);
             return shown;
         }
@@ -620,6 +646,7 @@ impl Transcript {
         // The bar is sized from the rows this frame actually wrapped: in this path every block is
         // laid out, so that is the whole chat.
         let first = start.max(0) as usize;
+        self.light_icon(&mut shown);
         self.draw_bar(&mut shown, text_width, self.bar, rows.len(), first);
         shown
     }
@@ -907,6 +934,19 @@ mod tests {
     /// adds to a row is one column at the end (`view`), so a test that compared whole rows would
     /// otherwise be asserting the bar's width in every one of them.
     fn plain(mut t: Transcript) -> Transcript { t.scrollbar = Scrollbar::Hidden; t }
+    #[test]
+    fn a_copy_icon_under_the_pointer_is_drawn_bright() {
+        let mut t = plain(Transcript::default());
+        t.copyable(&[(0, "body".to_string())]);
+        t.write("title\nline\n");
+        let _ = t.view(40, 5);
+        let row = (1..=5).find(|r| t.copy_at(*r, 1).is_some()).expect("icon row");
+        assert!(t.copy_hover(row, 1));
+        let shown = t.view(40, 5);
+        assert!(shown[row - 1].contains("\x1b[1;97m\u{29c9}"), "{:?}", shown[row - 1]);
+        assert!(!t.copy_hover(row, 1), "no change, no frame");
+        assert!(t.copy_hover(row, 30));
+    }
     #[test]
     fn the_code_copy_icon_takes_the_last_blank_cell_and_never_covers_code() {
         let band = "\x1b[48;5;236mreturn 1;     \x1b[0m";

@@ -350,6 +350,26 @@ function M.inventory()
   adapters={{id='whatsapp',name='WhatsApp',profile_managed=true,capabilities={'scoped linked-device journal reads','explicit self/target identity','draft visibility unsupported; general sends refused'},note='Linked-device connector only. Private deterministic transcript policy is activated by the operator separately; no generic send authority, Chrome fallback or automatic wake.'}},
   note='Explicit trusted connectors; last probe is not live health. Approved reads may reuse idle-bounded sessions; writes and WhatsApp stay request-scoped. Jobs owns wakes.'}
 end
+-- The model's `mcp` list (operator 17/11): one compact row per connector - what it is, how it starts and
+-- which tools it approved - instead of the inventory, which carried each tool's schema in the probe, the
+-- stale probe and the definition (140 KB for two servers). Schemas are searchTools' job; `id` gives that
+-- one connector's full inventory row.
+function M.summary(id)
+ local inventory=M.inventory();local rows={}
+ for _,server in ipairs(inventory.servers or {})do
+  if id==nil or server.id==id then
+   if id~=nil then return {ok=true,revision=inventory.revision,server=server} end
+   local d=type(server.definition)=='table' and server.definition or {}
+   local tools=type(d.tools)=='table' and d.tools or {}
+   local count=0;for _ in pairs(tools)do count=count+1 end
+   rows[#rows+1]={id=server.id,name=server.name,enabled=server.enabled,transport=d.transport,program=d.program,args=d.args,url=d.url,
+    tools=tools,tool_count=count,status=server.observed_status,revision=server.revision}
+  end
+ end
+ if id~=nil then return fail('unknown_mcp_connector',{id=id}) end
+ return {ok=true,revision=inventory.revision,servers=rows,
+  note='One row per connector. Tool schemas: searchTools("select:<names>"); a connector\'s full row: mcp({action:"list",id}).'}
+end
 function M.control(args,ctx)
  args=args or {};ctx=ctx or {};if ctx.role~='master' and ctx.role~='admin' then return fail('forbidden') end
  if ctx.subagent then return fail('mcp_management_forbidden_for_subagent') end

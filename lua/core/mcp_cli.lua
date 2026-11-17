@@ -92,7 +92,7 @@ function M.run(argument, opts)
   verb = tostring(verb or '')
   -- `/mcp <key>`: the connector, as a balloon whose root is its page.
   if verb == '' then
-    local detail = command.inspect(ctx, key)
+    local detail = command.inspect(ctx, key, opts)
     if not detail.ok then
       emit('  ' .. refusal({ error = detail.error }))
       if detail.keys then emit('  keys: ' .. table.concat(detail.keys, ', ')) end
@@ -150,7 +150,7 @@ function M.run(argument, opts)
   -- Sign in: store the connector's credential as a vault key and probe again. Offered only where the
   -- definition names the key (`secret_env`); a connector with no such key says so rather than pretending.
   if verb == 'login' or verb == 'signin' then
-    local detail = command.inspect(ctx, key)
+    local detail = command.inspect(ctx, key, opts)
     if not detail.ok then
       emit('  ' .. refusal({ error = detail.error }))
       return detail

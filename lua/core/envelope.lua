@@ -116,7 +116,8 @@ local nearest -- defined below; search and the guest route both look it up at ca
 -- those definitions, and "select:a,b,c" is the same request spelled inside one string, for a model
 -- that would rather not nest an array (07/11). The two spellings are one request, parsed here so the
 -- outer facade and code mode cannot drift apart.
-local NAME_LIMIT=8
+-- No cap on how many names one batch loads (operator 17/11: "if the model is asking, let it be free";
+-- a 20-tool catalogue refused whole at 9 names cost a round for nothing).
 local function requested_text(value)
  if type(value)~='string' then return nil end
  local text=value:match('^%s*(.-)%s*$')
@@ -156,7 +157,6 @@ function M.requested_names(args)
  end
  local seen,unique={},{}
  for _,name in ipairs(list)do if not seen[name] then seen[name]=true;unique[#unique+1]=name end end
- if #unique>NAME_LIMIT then return nil,'invalid_tool_search_names' end
  return unique,nil
 end
 function M.search(catalog,args,ctx,describe_execution)
