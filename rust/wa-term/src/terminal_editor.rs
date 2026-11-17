@@ -1426,7 +1426,7 @@ mod tests {
         type_bytes(&mut e, b"\x7f"); assert_eq!(e.text(), "abc de");
         type_bytes(&mut e, b"\x17"); assert_eq!(e.text(), "abc ", "Ctrl+W");
         type_bytes(&mut e, b"\x1b[200~pasted\ntext\x1b[201~"); assert_eq!(e.text(), "abc pasted\ntext");
-        type_bytes(&mut e, b"\x01\x0b"); assert_eq!(e.text(), "", "Ctrl+A then Ctrl+K");
+        type_bytes(&mut e, b"\x1b[1;5H\x0b"); assert_eq!(e.text(), "", "Ctrl+Home (the draft's start; Ctrl+A selects all since 17/11) then Ctrl+K");
         e.feed(26); assert_eq!((e.text().as_str(), e.cursor), ("abc pasted\ntext", 0), "undo the kill, cursor where it was");
         e.feed(26); assert_eq!((e.text().as_str(), e.cursor), ("abc ", 4), "the whole paste is one step");
         e.feed(26); assert_eq!(e.text(), "abc de", "then the Ctrl+W");
@@ -1499,7 +1499,7 @@ mod tests {
         type_bytes(&mut e, b"\x1b[200~hello\nworld\x1b[201~");
         assert_eq!(e.text(), "hello\nworld");
         type_bytes(&mut e, " é".as_bytes()); assert_eq!(e.text(), "hello\nworld é");
-        type_bytes(&mut e, b"\x1b[H\x1b[3~"); assert_eq!(e.text(), "ello\nworld é");
+        type_bytes(&mut e, b"\x1b[1;5H\x1b[3~"); assert_eq!(e.text(), "ello\nworld é");
     }
     #[test]
     fn multiline_is_visible_and_submit_resets_all_rows() {
@@ -1791,7 +1791,7 @@ mod tests {
         type_bytes(&mut e, b"\x1b[A"); assert_eq!(e.cursor, 3, "column kept, clamped to the shorter line");
         type_bytes(&mut e, b"\x1b[A"); assert_eq!(e.text(), "older", "Up on the first line: the previous message");
         type_bytes(&mut e, b"\x1b[B"); assert_eq!(e.text(), "one\ntwo\nthree", "Down on the last line: forward, back to the draft");
-        type_bytes(&mut e, b"\x1b[H\x1b[B"); assert_eq!(e.cursor, 4, "Down from the first line moves a line");
+        type_bytes(&mut e, b"\x1b[1;5H\x1b[B"); assert_eq!(e.cursor, 4, "Down from the first line moves a line");
     }
     #[test]
     fn long_draft_does_not_wrap_terminal() {
