@@ -412,6 +412,25 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     false,
                 )
             };
+            // `vault_env` ({ENV: entry}): the kernel puts a node-vault entry in the child's environment, so a
+            // connector's credential is used by reference and never passes through Lua, a request file or a
+            // transcript (operator 17/11 "its credential should be in the vault"). Only the kernel's own
+            // callers send it (the MCP client and session); the generic operation route strips it.
+            let mut launch = launch;
+            if let Some(map) = args.get("vault_env").and_then(|value| value.as_object()) {
+                static VAULT: std::sync::OnceLock<Option<wa_kernel_runtime::vault_host::VaultService>> = std::sync::OnceLock::new();
+                for (name, entry) in map {
+                    let valid = !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if !valid { return Err(format!("vault_env_invalid_name:{name}")); }
+                    let entry = entry.as_str().ok_or("vault_env_entry_must_be_a_string")?;
+                    let service = VAULT.get_or_init(|| wa_kernel_runtime::vault_host::VaultService::from_env().ok())
+                        .as_ref().ok_or("vault_unavailable: this node's vault does not open (wa vault status)")?;
+                    let value = service.use_by_ref(entry).ok_or_else(|| format!("vault_entry_missing:{entry}: store it with `wa vault set {entry} --stdin`"))?;
+                    launch.env.retain(|(key, _)| key != name);
+                    launch.env.push((name.clone(), value.to_string()));
+                }
+            }
             let id = manager()
                 .start(launch_context(launch, &args["_launch_cwd"]))
                 .map_err(|e| e.to_string())?;

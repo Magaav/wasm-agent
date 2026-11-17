@@ -56,6 +56,19 @@ local function script_candidates()
  return list
 end
 function M.script_candidates()return script_candidates() end
+-- A server's vault entries, for the launch: the kernel puts each value in the CLIENT's environment, and
+-- the client hands a server only the variables its `env` references - so each one is referenced by its own
+-- name here (the definition stays names-only). Nil when the server names none.
+-- Answers (server, vault_env): a COPY of the server when it names entries, so the registry row is never
+-- changed by a launch.
+function M.vault_launch(server)
+ if type(server)~='table' or type(server.vault_env)~='table' or next(server.vault_env)==nil then return server,nil end
+ local copy={};for key,value in pairs(server)do copy[key]=value end
+ local env={};for key,value in pairs(type(server.env)=='table' and server.env or {})do env[key]=value end
+ for key in pairs(server.vault_env)do env[key]=key end
+ copy.env=env
+ return copy,server.vault_env
+end
 -- The MCP runtime the node spawns: these files and nothing else they import. scripts/install.sh,
 -- scripts/install.ps1 and scripts/deploy.sh ship exactly this list, and
 -- scripts/test-mcp-runtime-closure.mjs fails when any of them, or the real import graph, disagrees.
@@ -125,7 +138,7 @@ local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
 function M.validate(def)
  if type(def)~='table' or not valid_id(def.id) then return 'invalid_mcp_id' end
- local allowed={id=true,name=true,transport=true,program=true,args=true,cwd=true,url=true,env=true,headers=true,secret_env=true,timeout_seconds=true,tools=true,component=true,file_env=true,net=true,config=true,native=true}
+ local allowed={id=true,name=true,transport=true,program=true,args=true,cwd=true,url=true,env=true,headers=true,secret_env=true,vault_env=true,timeout_seconds=true,tools=true,component=true,file_env=true,net=true,config=true,native=true}
  for key in pairs(def)do if not allowed[key]then return 'unsupported_mcp_definition_field:'..tostring(key) end end
  if def.name~=nil and (type(def.name)~='string' or #def.name>200)then return 'invalid_mcp_name' end
  if def.transport=='stdio' then
@@ -158,6 +171,15 @@ function M.validate(def)
   if def[field]~=nil then if type(def[field])~='table' then return 'invalid_mcp_references' end
    -- file_env may name the file itself: a path is a location, never the secret.
    for key,name in pairs(def[field])do if type(key)~='string' or type(name)~='string' or not (name:match('^[A-Za-z_][A-Za-z0-9_]*$') or (field=='file_env' and absolute(name) and not name:find('[\r\n%z]')))then return 'mcp_credentials_require_environment_references' end end
+  end
+ end
+ -- `vault_env` ({ENV: entry}, stdio only): the kernel injects that node-vault entry into the server's
+ -- environment at launch (rust operations.rs). Names only here; a value never enters the registry.
+ if def.vault_env~=nil then
+  if def.transport~='stdio' then return 'mcp_vault_env_requires_stdio' end
+  if type(def.vault_env)~='table' then return 'invalid_mcp_vault_env' end
+  for key,entry in pairs(def.vault_env)do
+   if type(key)~='string' or not key:match('^[A-Za-z_][A-Za-z0-9_]*$') or type(entry)~='string' or not entry:match('^[%w._-]+$') then return 'invalid_mcp_vault_env' end
   end
  end
  if def.secret_env~=nil then
@@ -291,9 +313,10 @@ function M.invoke(input,ctx)
  local client=directory..'/mcp-client.mjs';if not host.read_file(client)then return fail('mcp_client_not_installed',{tool_call_issued=false,outcome='not_submitted'}) end
  local request=paths.data()..'/mcp/requests/'..host.uuid()..'.json'
  input.result_file=request..'.result.json'
+ local vault_env;input.server,vault_env=M.vault_launch(input.server)
  if not host.write_file(request,json.encode(input))then return fail('mcp_request_not_written',{tool_call_issued=false,outcome='not_submitted'}) end
  local timeout=input.server.timeout_seconds or 30
- local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control'})))
+ local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control',vault_env=vault_env})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
  local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled'})))

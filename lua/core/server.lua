@@ -590,6 +590,8 @@ function wa_operation(body, session)
   if args.action == "start" then return json.encode({error="start_requires_tool"}) end
   if args.action == "await" then return json.encode({error="await_requires_tool; use bounded wait on the control route"}) end
   args.owner = user.id
+  -- A vault entry reaches a child only from the kernel's own MCP launch, never through this route.
+  args.vault_env = nil
   return host.operation(args.action or "list", json.encode(args))
 end
 
