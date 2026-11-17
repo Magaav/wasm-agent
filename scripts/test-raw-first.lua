@@ -147,7 +147,7 @@ check(not system:find(raw_code.GUIDANCE,1,true),'first: the optional-extra sente
 check(not system:find(OLD_LINE1,1,true) and not system:find(OLD_DIRECT,1,true) and not system:find(OLD_SCRIPT,1,true),
   'first: no sentence tells the model to make a codemode call or a direct call')
 check(not system:find('also callable directly',1,true),'first: the deferred-tools line does not advertise direct calls')
-check(system:find('How to work: 1) Gather',1,true) and system:find('searchTools("select:a,b")',1,true) and system:find('vars.<name> = value',1,true),
+check(system:find('How to work: 1) Gather',1,true) and system:find('searchTools("select:a,b")',1,true) and system:find('`vars` is your session state',1,true),
   'first: the rest of the code-mode guidance is kept')
 check(first.requests[1].stop==nil,'first: no stop sequence')
 check(#first.dispatched==1 and first.dispatched[1]=='return 6*7;','first: the block ran once, as codemode, with exactly its code')
