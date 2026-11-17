@@ -511,10 +511,12 @@ impl Transcript {
             let mut copies: Vec<(usize, String)> = Vec::new();
             for index in (0..self.blocks.len()).rev() {
                 let (mut rows, block_copies) = self.rows_with_copies(index, text_width);
-                if !block_copies.is_empty() {
-                    let before = tail.len();
-                    for (at, content) in block_copies { copies.push((at, content)); if before > 0 { let _ = before; } }
-                }
+                // This block goes ABOVE what is already in `tail`, so every marker found so far moves down
+                // by its rows (17/11: without the shift a click on a newer block's line - a copy icon, an
+                // expandable result - landed on the wrong row, or on none).
+                let shift = rows.len();
+                for (at, _) in copies.iter_mut() { *at += shift; }
+                for (at, content) in block_copies { copies.push((at, content)); }
                 rows.extend(tail);
                 tail = rows;
                 if tail.len() >= height { break; }
@@ -836,6 +838,19 @@ mod tests {
     /// adds to a row is one column at the end (`view`), so a test that compared whole rows would
     /// otherwise be asserting the bar's width in every one of them.
     fn plain(mut t: Transcript) -> Transcript { t.scrollbar = Scrollbar::Hidden; t }
+    #[test]
+    fn a_marker_in_a_newer_block_maps_to_its_own_screen_row() {
+        let mut t = plain(Transcript::default());
+        t.block(false);
+        t.write("one\ntwo\nthree\n");
+        t.block(true);
+        t.expandable(&[(1, "full".to_string())]);
+        t.write("code\nresult\n");
+        let rows = t.view(40, 10);
+        let at = rows.iter().position(|r| r.contains("result")).unwrap() + 1;
+        assert!(t.expand_rows.contains_key(&at), "the press on the result's row is the expand: {:?} at {at}", t.expand_rows);
+        assert!(t.expand_at(at));
+    }
     #[test]
     fn an_expandable_line_is_one_row_brightens_under_the_pointer_and_opens_on_a_click() {
         let mut t = plain(Transcript::default());
