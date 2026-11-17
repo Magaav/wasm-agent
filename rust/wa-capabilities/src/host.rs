@@ -3164,6 +3164,8 @@ struct ConsoleInput {
     selection: Option<Selection>,
     /// A mouse drag that began in the input box: the draft index it started at (the editor selects to it).
     box_drag: Option<usize>,
+    /// Images pasted with Ctrl+V this session, by the number in their `[Image #n]` token: (mime, base64).
+    pasted_images: Vec<(String, String)>,
     /// `host.transcript_hold(true)`: writes are kept, not drawn, until the hold ends (a replay).
     transcript_held: bool,
     /// The long tool call's line as this process last drew it (`wa_term::tool_progress`, the host's own
@@ -3643,6 +3645,19 @@ fn console_reader() {
                                     editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
                                 }
                             }
+                            wa_term::terminal_editor::Action::PasteImage => {
+                                let note = match read_clipboard_image() {
+                                    Ok((mime, bytes)) => {
+                                        let kb = bytes.len() / 1024;
+                                        state.pasted_images.push((mime, base64::engine::general_purpose::STANDARD.encode(&bytes)));
+                                        let token = format!("[Image #{}]", state.pasted_images.len());
+                                        if let Some(editor) = state.editor.as_mut() { editor.insert_text(&token); }
+                                        format!("{token} attached ({kb} KB)")
+                                    }
+                                    Err(reason) => reason,
+                                };
+                                if let Some(editor) = state.editor.as_mut() { editor.notice = note; }
+                            }
                             wa_term::terminal_editor::Action::None => {}
                         }
                     }
@@ -4083,6 +4098,68 @@ pub extern "C-unwind" fn transcript_expand(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.transcript.expandable(&markers);
     unsafe { wa_host_support::lua::lua_pushboolean(l, if markers.is_empty() { 0 } else { 1 }) };
+    1
+}
+
+/// An image from the system clipboard, read where this process runs - the way pi and Claude Code do it:
+/// `wl-paste --list-types` then `wl-paste --type <image type>` on Wayland, `xclip ... -t TARGETS` then
+/// `-t <type> -o` on X11. `WA_CLIPBOARD=off` (a sandbox) never reads the outer clipboard; a host with no
+/// clipboard tool says so. Err is the one-line notice the footer shows.
+fn read_clipboard_image() -> Result<(String, Vec<u8>), String> {
+    if std::env::var("WA_CLIPBOARD").map(|v| v == "off").unwrap_or(false) {
+        return Err("clipboard reading is off here (WA_CLIPBOARD=off)".into());
+    }
+    const TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+    const MAX: usize = 20 * 1024 * 1024;
+    let run = |program: &str, args: &[&str]| -> Option<Vec<u8>> {
+        let out = std::process::Command::new(program).args(args)
+            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+        out.status.success().then_some(out.stdout)
+    };
+    let pick = |listed: &[u8]| -> Option<&'static str> {
+        let text = String::from_utf8_lossy(listed);
+        TYPES.iter().copied().find(|t| text.lines().any(|line| line.trim() == *t))
+    };
+    let mut tried = false;
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Some(listed) = run("wl-paste", &["--list-types"]) {
+            tried = true;
+            if let Some(mime) = pick(&listed) {
+                if let Some(bytes) = run("wl-paste", &["--no-newline", "--type", mime]) {
+                    if !bytes.is_empty() && bytes.len() <= MAX { return Ok((mime.to_string(), bytes)); }
+                    if bytes.len() > MAX { return Err("the clipboard image is over 20 MB".into()); }
+                }
+            }
+        }
+    }
+    if std::env::var_os("DISPLAY").is_some() {
+        if let Some(listed) = run("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"]) {
+            tried = true;
+            if let Some(mime) = pick(&listed) {
+                if let Some(bytes) = run("xclip", &["-selection", "clipboard", "-t", mime, "-o"]) {
+                    if !bytes.is_empty() && bytes.len() <= MAX { return Ok((mime.to_string(), bytes)); }
+                    if bytes.len() > MAX { return Err("the clipboard image is over 20 MB".into()); }
+                }
+            }
+        }
+    }
+    Err(if tried { "no image on the clipboard".into() }
+        else { "no clipboard here: wl-paste (Wayland) or xclip (X11) is needed, on the machine wa chat runs on".into() })
+}
+
+/// `host.input_image(n)`: the image pasted as `[Image #n]` this session, `{"mime","data"}` (base64), or nil.
+pub extern "C-unwind" fn input_image(l: *mut LuaState) -> c_int {
+    let n = arg_integer(l, 1).unwrap_or(0);
+    let (lock, _) = console_input();
+    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if n >= 1 {
+        if let Some((mime, data)) = state.pasted_images.get((n - 1) as usize) {
+            let value = serde_json::json!({ "mime": mime, "data": data }).to_string();
+            unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
+            return 1;
+        }
+    }
+    unsafe { wa_host_support::lua::lua_pushnil(l) };
     1
 }
 
