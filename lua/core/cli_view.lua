@@ -907,7 +907,26 @@ function METHODS:topic(topic)
   if self:transcript() and host.transcript_block then pcall(host.transcript_block, topic and true or false) end
 end
 
+-- How many newlines what this view wrote ends with (escapes ignored): 0 = a line is open, 1 = a line
+-- ended, 2 = one blank line. `gap(n)` asks for exactly n blank lines before what comes next and writes
+-- only what is missing - the ONE spacing rule (operator 17/11: one blank line between the reader's line,
+-- a thought, the commentary, a code block and a status row; never two, never glued).
+local function trailing_newlines(text)
+  local plain = tostring(text or ""):gsub("\27%[[%d;?]*[A-Za-z]", "")
+  if plain == "" then return nil end
+  local tail = plain:match("\n*$")
+  return #tail, #tail == #plain
+end
+function METHODS:gap(blank)
+  local want = (tonumber(blank) or 1) + 1
+  local have = self.tail_nl
+  if have == nil then return end
+  if have < want then self:write(string.rep("\n", want - have)) end
+end
+
 function METHODS:write(text)
+  local count, only = trailing_newlines(text)
+  if count then self.tail_nl = only and ((self.tail_nl or 0) + count) or count end
   -- Output - the transcript, a tool line, an answer - belongs in the region above the status and
   -- input rows, and this is the one place that knows where that region is. Every caller of the
   -- plain writer keeps working unchanged, and the reader's cursor comes back to the row they were
@@ -986,6 +1005,7 @@ end
 
 function METHODS:line(text)
   self:clear()
+  if self.tail_nl == 0 then self:write("\n") end
   self:write(tostring(text or "") .. "\n")
 end
 
@@ -1679,6 +1699,7 @@ function METHODS:accepted(text)
   end
   self:topic(false)
   self:write(table.concat(shown, "\n") .. "\n\n")
+  self.tail_nl = 2
   if self.turn then self:paint(true) end
 end
 
@@ -1717,6 +1738,40 @@ local function markup_at(text)
   if found and fence then return math.min(found, fence) end
   return found or fence
 end
+-- The two streams of a step, written as one flow: thinking (`✻ ` then the thought, gray) and saying
+-- (white). A switch between them, or into a code block, is one blank line. Trailing newlines of a piece
+-- are held until text follows, so a stream never ends with a blank line of its own that a boundary then
+-- doubles (17/11: two blank rows above every code block, "Let me send.Enviando" glued).
+function METHODS:flow(kind, text)
+  text = tostring(text or "")
+  if text == "" then return end
+  if self.flow_kind ~= kind then
+    self.flow_held = 0
+    if self.flow_kind ~= nil or (self.tail_nl or 1) ~= 0 then self:gap(1) end
+    self.flow_kind = kind
+    if kind == "think" then
+      text = text:gsub("^%s+", "")
+      if text == "" then self.flow_kind = nil return end
+      self:write(paint(STAR .. " ", "muted", self.live))
+    else
+      text = text:gsub("^\n+", "")
+      if text == "" then self.flow_kind = nil return end
+    end
+  end
+  local body, tail = text:match("^(.-)(\n*)$")
+  if body ~= "" then
+    if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)) end
+    self.flow_held = 0
+    self:write(paint(body, kind == "think" and "dim" or "commentaryText", self.live))
+  end
+  self.flow_held = (self.flow_held or 0) + #tail
+end
+-- A boundary (a code block, the answer's end): the flow is over; held newlines are dropped and the next
+-- writer asks for its own gap.
+function METHODS:flow_end()
+  self.flow_kind, self.flow_held = nil, 0
+end
+
 function METHODS:delta_piece(text)
   local d = self.dstream or { buf = "", shown = 0 }
   self.dstream = d
@@ -1725,7 +1780,7 @@ function METHODS:delta_piece(text)
   if d.hidden then return end
   local at = markup_at(d.buf)
   if at then
-    if at - 1 > d.shown then self:write(d.buf:sub(d.shown + 1, at - 1)) end
+    if at - 1 > d.shown then self:flow("say", d.buf:sub(d.shown + 1, at - 1)) end
     d.shown = math.max(d.shown, at - 1)
     d.hidden = true
     return
@@ -1736,18 +1791,19 @@ function METHODS:delta_piece(text)
   local last = d.buf:match("\n([^\n]*)$") or d.buf
   if #last <= 13 and last ~= "" and ("```javascript"):sub(1, #last) == last then held = math.max(held, #last) end
   local upto = #d.buf - held
-  if upto > d.shown then self:write(d.buf:sub(d.shown + 1, upto)); d.shown = upto end
+  if upto > d.shown then self:flow("say", d.buf:sub(d.shown + 1, upto)); d.shown = upto end
 end
 -- `answer`: the step ended as the reply, so whatever was held back (a code block that did not run, a
 -- held tail) is the reader's and is written now. Otherwise (a call ran) the held text was the call.
 function METHODS:delta_reset(answer)
   local d = self.dstream
-  if d and (answer or not d.hidden) and #d.buf > d.shown then self:write(d.buf:sub(d.shown + 1)) end
+  if d and (answer or not d.hidden) and #d.buf > d.shown then self:flow("say", d.buf:sub(d.shown + 1)) end
   self.dstream = nil
 end
 
 function METHODS:run_started()
   self.reasoning_streamed = nil
+  self:flow_end()
   self.runs = self.runs + 1
   self.dstream = nil
   self.frame = 0
@@ -1799,6 +1855,7 @@ function METHODS:run_finished()
     -- The run's own numbers, left under it in the transcript: the status line, stopped.
     local now = self.now()
     self:topic(false)
+    if self.tail_nl == 0 then self:write("\n") end
     self:write(paint(self:run_numbers(nil, M.run_clock(now - self.turn.started)), "dim", self.live) .. "\n\n")
   end
   if self.screen and self.screen.footer then
@@ -1947,6 +2004,10 @@ function METHODS:codemode_start(event)
   -- folds to the summary a newer block leaves it with.
   -- No topic row either: the block has no title, so the plain path starts with the code. The host's
   -- block marker is still asked for (it is what lets a newer block fold this one).
+  -- One blank line above the block, written into the block before it (a code block is a topic, and a
+  -- topic's own trailing blank rows are not drawn).
+  self:flow_end()
+  self:gap(1)
   if host.transcript_block then pcall(host.transcript_block, true, true) end
   self.pending.block, self.pending.shown = true, true
   local o = self:codemode_opts()
@@ -2103,7 +2164,8 @@ end
 -- The heading is grey like commentary's (a label, not content) and italic; the body is blue.
 function METHODS:reasoning_block(text)
   if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() == "off" then return end
-  self:topic_block(STAR .. " Thinking\226\128\166", { "italic", "muted" }, text, "thinkingText")
+  self:flow("think", text)
+  self:flow_end()
 end
 
 -- What the model told the reader on the way, before or between tool calls ("I'll read the config
@@ -2355,12 +2417,9 @@ function METHODS:event(event)
       if self.pending then self:paint() end
     end
   elseif kind == "reasoning" then
-    if self.reasoning_streamed then
-      self.reasoning_streamed = nil
-      self:write("\n")
-    else
-      self:reasoning_block(event.text)
-    end
+    -- Settled thinking: already on screen if it streamed; otherwise written now, the same way.
+    if self.reasoning_streamed then self.reasoning_streamed = nil
+    else self:reasoning_block(event.text) end
   elseif kind == "commentary" then
     self:commentary_flush()
     self:commentary_block(event.text)
@@ -2392,18 +2451,9 @@ function METHODS:event(event)
     self.deltas = self.deltas + 1
     self:delta_piece(event.text or "")
   elseif kind == "reasoning_delta" then
-    -- Thinking, as it arrives, in the view's own blue: the phase line above it says how long, this
-    -- says what. Opened once per step under the same heading the settled block has, and the settled
-    -- `reasoning` event then does not print it a second time (17/11: every thought was shown twice).
-    if not self.reasoning_streamed then
-      self.reasoning_streamed = true
-      if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then
-        self:write(paint(STAR .. " Thinking\226\128\166", "muted", self.live) .. "\n")
-      end
-    end
-    if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then
-      self:write(paint(event.text or "", "dim", self.live))
-    end
+    -- Thinking, as it arrives: `✻ ` and the thought in gray on the same line, no title (operator 17/11).
+    self.reasoning_streamed = true
+    if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() ~= "off" then self:flow("think", event.text) end
   elseif kind == "error" then
     self:clear()
     self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))

@@ -494,7 +494,9 @@ function M.rows(model, width, options)
   -- inside it (`✓ bash · …`), so a heading above the code only repeated them.
   local rows = {}
   local code, code_hidden = M.script_rows(model.args, math.huge)
-  local band = math.max(8, width - 3)
+  -- No inset: the code starts at the band's left edge (operator 17/11), and the band ends one column
+  -- short of the screen, where the transcript's scrollbar is drawn.
+  local band = math.max(8, width - 1)
   local pieces = {}
   for _, line in ipairs(code) do
     -- Wrapped, never clipped, and BEFORE it is highlighted: cutting a string that already carries
@@ -509,7 +511,7 @@ function M.rows(model, width, options)
       -- The band is re-applied around every token: `paint` ends each piece with a reset, so a band
       -- painted once around the row would stop at the first coloured token. Padding to the full width
       -- is what makes it a band instead of a ragged stripe.
-      local parts = { o.paint("  ", "codeBand") }
+      local parts = {}
       o.syntax(shown, "js", function(piece, style)
         if piece == "" then return end
         parts[#parts + 1] = o.paint(piece, { "codeBand", style or "mdCodeBlock" })
@@ -517,7 +519,7 @@ function M.rows(model, width, options)
       parts[#parts + 1] = o.paint(pad, "codeBand")
       rows[#rows + 1] = table.concat(parts)
     else
-      rows[#rows + 1] = "  " .. shown .. pad
+      rows[#rows + 1] = shown .. pad
     end
   end
   if code_hidden > 0 then

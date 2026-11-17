@@ -1,113 +1,113 @@
 ### one call ok @ 80x24
-  const files = await tools.ls({path: 'lua/core'});                            
-  await tools.read({path: 'lua/core/chat.lua'});                               
-  return {count: 2, first: 'chat.lua'};                                        
+const files = await tools.ls({path: 'lua/core'});                              
+await tools.read({path: 'lua/core/chat.lua'});                                 
+return {count: 2, first: 'chat.lua'};                                          
   ✓ bash · 210ms
 ⎿ {"count":2,"first":"chat.lua"}
 
 ### one call ok @ 120x40
-  const files = await tools.ls({path: 'lua/core'});                                                                    
-  await tools.read({path: 'lua/core/chat.lua'});                                                                       
-  return {count: 2, first: 'chat.lua'};                                                                                
+const files = await tools.ls({path: 'lua/core'});                                                                      
+await tools.read({path: 'lua/core/chat.lua'});                                                                         
+return {count: 2, first: 'chat.lua'};                                                                                  
   ✓ bash · 210ms
 ⎿ {"count":2,"first":"chat.lua"}
 
 ### one call failed web_http_429 @ 80x24
-  await tools.web_read({url: 'https://example.com'});                          
+await tools.web_read({url: 'https://example.com'});                            
   ✗ web_read · web_http_429
 
 ### one call failed web_http_429 @ 120x40
-  await tools.web_read({url: 'https://example.com'});                                                                  
+await tools.web_read({url: 'https://example.com'});                                                                    
   ✗ web_read · web_http_429
 
 ### promise.all of 10 mixed @ 80x24
-  const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + 
-  p})));                                                                       
-  return out.length;                                                           
+const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + p}
+)));                                                                           
+return out.length;                                                             
   bash ×10 ✓9 ✗1
 ⎿ 10
 
 ### promise.all of 10 mixed @ 120x40
-  const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + p})));                                  
-  return out.length;                                                                                                   
+const out = await Promise.all(paths.map(p => tools.bash({command: 'wc -l ' + p})));                                    
+return out.length;                                                                                                     
   bash ×10 ✓9 ✗1
 ⎿ 10
 
 ### a pending call @ 80x24
-  const r = await tools.mcp_whatsapp_send({to: 'me', text: 'hi'});             
-  return r;                                                                    
+const r = await tools.mcp_whatsapp_send({to: 'me', text: 'hi'});               
+return r;                                                                      
   ⏳ mcp_whatsapp_send · pending op-77
 ⎿ 1
 
 ### a pending call @ 120x40
-  const r = await tools.mcp_whatsapp_send({to: 'me', text: 'hi'});                                                     
-  return r;                                                                                                            
+const r = await tools.mcp_whatsapp_send({to: 'me', text: 'hi'});                                                       
+return r;                                                                                                              
   ⏳ mcp_whatsapp_send · pending op-77
 ⎿ 1
 
 ### two consecutive blocks @ 80x24
 ⏺ bash ✓ · 1.2s → {"count":2,"first":"chat.lua"}
-  const hits = await tools.grep({pattern: 'TODO'});                            
-  return hits.count;                                                           
+const hits = await tools.grep({pattern: 'TODO'});                              
+return hits.count;                                                             
   ✓ grep · 90ms
 ⎿ 4
 
 ### two consecutive blocks @ 120x40
 ⏺ bash ✓ · 1.2s → {"count":2,"first":"chat.lua"}
-  const hits = await tools.grep({pattern: 'TODO'});                                                                    
-  return hits.count;                                                                                                   
+const hits = await tools.grep({pattern: 'TODO'});                                                                      
+return hits.count;                                                                                                     
   ✓ grep · 90ms
 ⎿ 4
 
 ### a pinned block survives a newer one @ 80x24
-  const files = await tools.ls({path: 'lua/core'});                            
-  await tools.read({path: 'lua/core/chat.lua'});                               
-  return {count: 2, first: 'chat.lua'};                                        
+const files = await tools.ls({path: 'lua/core'});                              
+await tools.read({path: 'lua/core/chat.lua'});                                 
+return {count: 2, first: 'chat.lua'};                                          
   ✓ bash · 210ms
 ⎿ {"count":2,"first":"chat.lua"}
-  return 1;                                                                    
+return 1;                                                                      
   ✓ bash · 40ms
 ⎿ 1
 
 ### a pinned block survives a newer one @ 120x40
-  const files = await tools.ls({path: 'lua/core'});                                                                    
-  await tools.read({path: 'lua/core/chat.lua'});                                                                       
-  return {count: 2, first: 'chat.lua'};                                                                                
+const files = await tools.ls({path: 'lua/core'});                                                                      
+await tools.read({path: 'lua/core/chat.lua'});                                                                         
+return {count: 2, first: 'chat.lua'};                                                                                  
   ✓ bash · 210ms
 ⎿ {"count":2,"first":"chat.lua"}
-  return 1;                                                                                                            
+return 1;                                                                                                              
   ✓ bash · 40ms
 ⎿ 1
 
 ### a long script collapsed @ 80x24
-  const v1 = await tools.read({path: 'f1.txt'});                               
-  const v2 = await tools.read({path: 'f2.txt'});                               
-  const v3 = await tools.read({path: 'f3.txt'});                               
-  const v4 = await tools.read({path: 'f4.txt'});                               
-  const v5 = await tools.read({path: 'f5.txt'});                               
-  const v6 = await tools.read({path: 'f6.txt'});                               
-  const v7 = await tools.read({path: 'f7.txt'});                               
-  const v8 = await tools.read({path: 'f8.txt'});                               
-  const v9 = await tools.read({path: 'f9.txt'});                               
-  const v10 = await tools.read({path: 'f10.txt'});                             
-  const v11 = await tools.read({path: 'f11.txt'});                             
-  const v12 = await tools.read({path: 'f12.txt'});                             
-  return v1;                                                                   
+const v1 = await tools.read({path: 'f1.txt'});                                 
+const v2 = await tools.read({path: 'f2.txt'});                                 
+const v3 = await tools.read({path: 'f3.txt'});                                 
+const v4 = await tools.read({path: 'f4.txt'});                                 
+const v5 = await tools.read({path: 'f5.txt'});                                 
+const v6 = await tools.read({path: 'f6.txt'});                                 
+const v7 = await tools.read({path: 'f7.txt'});                                 
+const v8 = await tools.read({path: 'f8.txt'});                                 
+const v9 = await tools.read({path: 'f9.txt'});                                 
+const v10 = await tools.read({path: 'f10.txt'});                               
+const v11 = await tools.read({path: 'f11.txt'});                               
+const v12 = await tools.read({path: 'f12.txt'});                               
+return v1;                                                                     
 ⎿ alpha
 
 ### a long script collapsed @ 120x40
-  const v1 = await tools.read({path: 'f1.txt'});                                                                       
-  const v2 = await tools.read({path: 'f2.txt'});                                                                       
-  const v3 = await tools.read({path: 'f3.txt'});                                                                       
-  const v4 = await tools.read({path: 'f4.txt'});                                                                       
-  const v5 = await tools.read({path: 'f5.txt'});                                                                       
-  const v6 = await tools.read({path: 'f6.txt'});                                                                       
-  const v7 = await tools.read({path: 'f7.txt'});                                                                       
-  const v8 = await tools.read({path: 'f8.txt'});                                                                       
-  const v9 = await tools.read({path: 'f9.txt'});                                                                       
-  const v10 = await tools.read({path: 'f10.txt'});                                                                     
-  const v11 = await tools.read({path: 'f11.txt'});                                                                     
-  const v12 = await tools.read({path: 'f12.txt'});                                                                     
-  return v1;                                                                                                           
+const v1 = await tools.read({path: 'f1.txt'});                                                                         
+const v2 = await tools.read({path: 'f2.txt'});                                                                         
+const v3 = await tools.read({path: 'f3.txt'});                                                                         
+const v4 = await tools.read({path: 'f4.txt'});                                                                         
+const v5 = await tools.read({path: 'f5.txt'});                                                                         
+const v6 = await tools.read({path: 'f6.txt'});                                                                         
+const v7 = await tools.read({path: 'f7.txt'});                                                                         
+const v8 = await tools.read({path: 'f8.txt'});                                                                         
+const v9 = await tools.read({path: 'f9.txt'});                                                                         
+const v10 = await tools.read({path: 'f10.txt'});                                                                       
+const v11 = await tools.read({path: 'f11.txt'});                                                                       
+const v12 = await tools.read({path: 'f12.txt'});                                                                       
+return v1;                                                                                                             
 ⎿ alpha
 

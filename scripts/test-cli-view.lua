@@ -419,9 +419,10 @@ do
   v:reasoning_block("weighing it")
   v:commentary_block("reading it")
   local text = out.text()
-  ok(has(text, view_lib.style("muted") .. "\226\156\187 Thinking") and has(text, view_lib.style("muted") .. "\226\156\166 Commentary"),
-    "the thinking heading is the same grey as commentary's")
-  ok(has(text, view_lib.style("thinkingText") .. "weighing"), "and its body is blue")
+  -- Operator 17/11: no "Thinking…" title - the ✻ mark and the thought on one line, the thought gray.
+  ok(not has(text, "Thinking\226\128\166"), "thinking has no title row")
+  ok(has(text, view_lib.style("muted") .. "\226\156\187 ") and has(text, view_lib.style("dim") .. "weighing"),
+    "the ✻ mark, then the thought in gray on the same line")
 end
 ok(view_lib.style("commentaryText") == "\27[38;2;255;255;255m", "commentary is white")
 ok(view_lib.PROMPT == "\226\157\175 " and view_lib.columns(view_lib.PROMPT) == 2,
@@ -472,7 +473,7 @@ local thought = recorder()
 local think_view = view_lib.new({ out = thought.out, live = false, now = function() return 7 end, limit = 80 })
 think_view:run_started()
 think_view:event({ type = "reasoning", text = "the reader wants the view fixed, so I will read cli_view.lua first" })
-ok(has(thought.text(), "\226\156\187 Thinking\226\128\166"), "the reasoning is announced as thinking")
+ok(has(thought.text(), "\226\156\187 the reader wants"), "the reasoning starts on the ✻ line, no title")
 ok(has(thought.text(), "read cli_view.lua first"), "and printed in full rather than summarised")
 ok(view_lib.columns(thought.text():match("[^\n]*read[^\n]*") or "") <= 80, "and wrapped to the terminal")
 local blue = recorder()
@@ -480,8 +481,8 @@ local blue_view = view_lib.new({ out = blue.out, live = true, now = function() r
 blue_view:run_started()
 blue_view:event({ type = "reasoning", text = "plain words to read" })
 local tint = view_lib.style("thinkingText")
-ok(has(blue.text(), "\27[3m" .. view_lib.style("muted") .. "\226\156\187 Thinking"), "live: the thinking heading is grey italic")
-ok(has(blue.text(), tint .. "plain\27[0m " .. tint .. "words"), "and its body is blue, word by word")
+ok(has(blue.text(), view_lib.style("muted") .. "\226\156\187 ") and not has(blue.text(), "Thinking\226\128\166"), "live: the ✻ mark, no title")
+ok(has(blue.text(), view_lib.style("dim") .. "plain words to read"), "and the thought in gray")
 
 -- ---- the commentary, as its own block, like the UI's ✦ commentary topic ----------------
 

@@ -647,6 +647,21 @@ pub fn wrap_rows(line: &str, width: usize) -> Vec<String> {
     }
     let total: usize = cells.iter().map(|c| c.2).sum();
     if total <= width { return vec![line.to_string()]; }
+    // A row that is too wide only because of trailing spaces (a padded band: the code-mode block pads its
+    // rows to the screen) is cut at the width, never wrapped: the wrap was a whole blank band row under
+    // every code line, and under every row when a focus border took two columns (operator 17/11).
+    let trailing = cells.iter().rev().take_while(|c| c.1 == ' ').count();
+    if total - trailing <= width {
+        let mut row = String::new();
+        let mut cols = 0usize;
+        for cell in &cells {
+            if cols + cell.2 > width { break; }
+            row.push_str(&cell.0); row.push(cell.1); cols += cell.2;
+        }
+        row.push_str(&esc);
+        row.push_str(RESET);
+        return vec![row];
+    }
     let (hang_at, hang) = hanging_indent(&cells);
     // An indent that leaves no room hangs nothing (and one wider than the screen is not kept whole).
     let hang_at = if hang >= width { 0 } else { hang_at };
@@ -747,6 +762,17 @@ mod tests {
     /// adds to a row is one column at the end (`view`), so a test that compared whole rows would
     /// otherwise be asserting the bar's width in every one of them.
     fn plain(mut t: Transcript) -> Transcript { t.scrollbar = Scrollbar::Hidden; t }
+    #[test]
+    fn a_band_too_wide_only_by_its_padding_is_cut_not_wrapped() {
+        // The code-mode band, padded to 79 columns, inside a focus border (78) or a narrower screen.
+        let band = format!("\x1b[48;5;236mconst r = 1;{}\x1b[0m", " ".repeat(67));
+        let rows = wrap_rows(&band, 78);
+        assert_eq!(rows.len(), 1, "no blank second row: {rows:?}");
+        assert_eq!(crate::selection::plain(&rows[0]).chars().count(), 78);
+        // Text that really is too wide still wraps.
+        assert_eq!(wrap_rows("abcdefghij", 4).len(), 3);
+        assert_eq!(wrap_rows("ab  ", 3).len(), 1);
+    }
     #[test]
     fn following_the_bottom_wraps_only_what_is_on_screen_and_draws_the_same() {
         let mut t = plain(Transcript::default());
