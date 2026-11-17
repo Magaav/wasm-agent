@@ -2222,7 +2222,8 @@ function METHODS:event(event)
     -- tool, but with no run there is no status line to name it on, and none must be started.
     if event.quiet then return end
     -- A routed call is phrased as the tool that runs (`Running bash`), not as `tool_call`.
-    self.phase = M.phase((M.target(self.pending.name, event.arguments)))
+    self.phase = self.pending.raw and "Running your script"
+      or M.phase((M.target(self.pending.name, event.arguments)))
     if self.turn then self.turn.tools = self.turn.tools + 1 end
     self.session_tools = (self.session_tools or 0) + 1
     self:paint(true)
