@@ -109,8 +109,11 @@ for _, path in ipairs({ 'lua/core/agent.lua', 'lua/core/tools.lua', 'lua/core/co
   if not ok then print('load_failed ' .. path .. ': ' .. tostring(problem):sub(1, 200)) return end
 end
 local raw = dofile('lua/core/raw_code.lua')
-local found = raw.native_calls and raw.native_calls('<tool_call>{"name":"js","arguments":{"code":"return 1;"}}</tool_call>')
-if not (found and found.calls[1] and found.calls[1].code == 'return 1;') then print('raw_code_parser_broken') return end
+-- The markup parser exists from change/codeact on; a tree without it (main before that) is not refused for it.
+if raw.native_calls then
+  local found = raw.native_calls('<tool_call>{"name":"js","arguments":{"code":"return 1;"}}</tool_call>')
+  if not (found and found.calls[1] and found.calls[1].code == 'return 1;') then print('raw_code_parser_broken') return end
+end
 local want = tostring(host.getenv('WASM_AGENT_RAW_CODE') or ''):lower()
 if want == '1' or want == 'true' then want = 'on' end
 if want ~= '' and tostring(raw.mode()) ~= want then print('mode_mismatch env=' .. want .. ' lua=' .. tostring(raw.mode())) return end

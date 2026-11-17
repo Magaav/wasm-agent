@@ -47,6 +47,14 @@ M.ask = ask
 
 -- ---------------------------------------------------------------- the switch
 
+--- Did the account node refuse? A refusal arrives as `{error=...}` with no `ok` field (a routed call's
+--- `capability_not_granted`, a node that is down), so `ok == false` alone read a refusal as success -
+--- 17/11: "approval is ON" printed while the gate was untouched. Every branch below asks this.
+local function refused(answer)
+  return type(answer) ~= 'table' or answer.ok == false or answer.error ~= nil
+end
+M.refused = refused
+
 --- This node's... no: the ACCOUNT node's policy. `ok` false carries the reason.
 function M.policy(ctx)
   return ask({ action = 'policy' }, ctx)
@@ -66,6 +74,7 @@ end
 function M.list(ctx)
   local answer = ask({ action = 'list' }, ctx)
   if type(answer) ~= 'table' then return { ok = false, error = 'whatsapp_approve_unreadable' } end
+  if answer.error ~= nil then answer.ok = false end
   answer.drafts = answer.drafts or {}
   return answer
 end
@@ -82,7 +91,7 @@ function M.decide(ctx, handle, decision, text, note)
   -- Every settled decision is recorded HERE, whoever asked: the balloon's key, a `/approve` line, the
   -- CLI, and a script that decides a draft of its own. A refusal, and a draft that is still waiting,
   -- record nothing - there is no decision to evaluate.
-  if type(answer) == 'table' and answer.ok ~= false and type(answer.draft) == 'table'
+  if not refused(answer) and type(answer.draft) == 'table'
     and answer.draft.state ~= 'pending' then
     answer.record = M.record(answer.draft, {
       outcome = answer.draft.outcome or answer.draft.state,
@@ -472,7 +481,7 @@ function M.act(io, ctx, action, handle, text)
     say('  the account node did not answer: the draft is still waiting')
     return nil
   end
-  if answer.ok == false then
+  if refused(answer) then
     local detail = answer.detail and (': ' .. tostring(answer.detail)) or ''
     say('  ' .. tostring(answer.error or 'whatsapp_approve_failed') .. detail)
     if answer.draft then say('  the draft is ' .. tostring(answer.draft.state or '?')) end
@@ -522,8 +531,8 @@ function M.review(io, ctx)
   local asked = 0
   while true do
     local rows, listed = M.waiting(ctx)
-    if listed and listed.ok == false then
-      io.say('  ' .. tostring(listed.error or 'whatsapp_approve_unreadable'))
+    if refused(listed) then
+      io.say('  the drafts could not be read: ' .. M.refusal_line(listed or { error = 'whatsapp_approve_unreadable' }))
       return
     end
     if #rows == 0 then
@@ -563,8 +572,8 @@ function M.run(line, io, ctx)
 
   if parsed.action == 'status' then
     local policy = M.policy(ctx)
-    if type(policy) ~= 'table' or policy.ok == false then
-      io.say('  ' .. tostring(policy and policy.error or 'whatsapp_approve_unreadable'))
+    if refused(policy) then
+      io.say('  approval state unknown: ' .. M.refusal_line(policy or { error = 'whatsapp_approve_unreadable' }))
       return policy
     end
     local _, listed = M.waiting(ctx)
@@ -580,7 +589,7 @@ function M.run(line, io, ctx)
 
   if parsed.action == 'list' then
     local answer = M.list(ctx)
-    if type(answer) ~= 'table' or answer.ok == false then
+    if refused(answer) then
       io.say('  ' .. tostring(answer and answer.error or 'whatsapp_approve_unreadable'))
       return answer
     end
@@ -599,7 +608,7 @@ function M.run(line, io, ctx)
   if parsed.action == 'rules' then
     if parsed.mode == 'all' then
       local answer = M.set(ctx, { mode = 'all', chats = {} })
-      if answer and answer.ok ~= false then
+      if not refused(answer) then
         io.say('  every chat is gated: ' .. M.rule_line(answer))
       else
         io.say('  ' .. tostring(answer and answer.error or 'whatsapp_approve_failed'))
@@ -612,7 +621,7 @@ function M.run(line, io, ctx)
       return refusal
     end
     local answer = M.set(ctx, { on = true, mode = parsed.mode, chats = chats })
-    if answer and answer.ok ~= false then
+    if not refused(answer) then
       io.say('  approval is ON: ' .. M.rule_line(answer))
     else
       io.say('  ' .. tostring(answer and answer.error or 'whatsapp_approve_failed'))
@@ -638,7 +647,7 @@ function M.run(line, io, ctx)
       return { ok = false, error = 'whatsapp_approve_usage' }
     end
     local answer = M.set(ctx, { on = on, mode = mode, chats = chats })
-    if type(answer) ~= 'table' or answer.ok == false then
+    if refused(answer) then
       io.say('  ' .. tostring(answer and answer.error or 'whatsapp_approve_failed'))
       return answer
     end

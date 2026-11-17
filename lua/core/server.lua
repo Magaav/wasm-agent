@@ -1125,6 +1125,13 @@ local MANAGED_CAPABILITIES = { status=true, set_role=true, read=true, write=true
   mcp_whatsapp_contacts=true, mcp_whatsapp_search=true, mcp_whatsapp_read=true,
   mcp_whatsapp_reactions=true, mcp_whatsapp_media=true, mcp_whatsapp_download=true,
   mcp_whatsapp_backfill=true, mcp_whatsapp_send=true, mcp_whatsapp_send_status=true,
+  -- The operator's approval gate (docs/APPROVE.md): `/approve on|off|list|review|send|edit|reject` from
+  -- any node is a call to THIS verb on the account node, because the gate lives where the send lands.
+  -- It was never listed here, so every such call from another node was `capability_not_granted` -
+  -- measured 17/11 from work: `/approve on` changed nothing, the CLI misread the refusal as success and
+  -- said "approval is ON", and a send it was supposed to hold went out. Masters only, like every verb
+  -- of this list (`node_capability` refuses a caller `author_of` does not name as master).
+  mcp_whatsapp_approve=true,
   -- Connector federation (lua/core/federation.lua): a master uses every peer's connectors as its
   -- own, run where they live. The handler itself refuses any caller whose role is not master, so
   -- admitting the capability admits masters only - and each tool still runs under the peer's own

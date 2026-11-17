@@ -72,7 +72,39 @@ if type(host.whatsapp_send) ~= "function" or type(host.whatsapp_approve) ~= "fun
   -- A binary that predates the gate cannot be tested for it. Reported in its own words, never as a
   -- pass: "ok" would then read as "the gate was exercised here".
   skip("the gate: this binary has no host.whatsapp_approve beside host.whatsapp_send")
-  print(string.format("%d checks, %d skipped", checks, skipped))
+  -- ---- the account node REFUSES -----------------------------------------------------------------------
+-- 17/11 on work: the account node answered `{error = "capability_not_granted"}` (no `ok` field) and the
+-- CLI printed "approval is ON". A refusal is never a switch that moved.
+do
+  local refusing = {
+    user_id = "master", role = "master",
+    owner_catalog = function()
+      return { peers = { ["acct-node"] = { name = "acct-node", connectors = { { whatsapp_account = true } } } } }
+    end,
+    remote_call = function() return { error = "capability_not_granted", node = "acct-node" } end,
+  }
+  local saved_approve = host.whatsapp_approve
+  host.whatsapp_approve = function()
+    return json.encode({ ok = false, error = "whatsapp_component_absent", owner = "acct-node", effect = "none" })
+  end
+  for _, line in ipairs({ "on", "off", "status", "list" }) do
+    local rio = recorder()
+    approve.run(line, rio, refusing)
+    local text = rio.text()
+    for _, pages in ipairs(rio.shown) do
+      for _, page in ipairs(pages) do for _, l in ipairs(page.lines or {}) do text = text .. "\n" .. tostring(l) end end
+    end
+    ok(not text:find("approval is ON", 1, true) and not text:find("approval is OFF", 1, true),
+      "/approve " .. line .. " never claims a state the node refused: " .. text)
+    ok(text:find("capability_not_granted", 1, true) ~= nil, "/approve " .. line .. " names the refusal: " .. text)
+  end
+  host.whatsapp_approve = saved_approve
+end
+-- And the account node admits the verb from another node (server.lua MANAGED_CAPABILITIES).
+local server_text = assert(host.read_file((host.getenv("WASM_AGENT_LUA_ROOT") or ".") .. "/lua/core/server.lua"))
+ok(server_text:find("mcp_whatsapp_approve=true", 1, true) ~= nil, "the account node admits mcp_whatsapp_approve from a master on another node")
+
+print(string.format("%d checks, %d skipped", checks, skipped))
   return
 end
 
