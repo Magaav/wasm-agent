@@ -829,6 +829,26 @@ function M.subagent_initial_tokens(profile, role, prompt)
     {role="user", content=prompt}}) + estimate_tokens(json.encode(tool_list))
 end
 
+-- The host's way in for a run that has no SSE sink (a CLI run): `serve::write_event` forwards each
+-- provider event to this global while the provider call is on the stack. Installed per run and removed
+-- when the run ends, so a second run in the same process cannot inherit a stale emitter.
+local function install_stream_forwarder(agent)
+  rawset(_G, "wa_stream_event", function(payload)
+    local ok, event = pcall(json.decode, payload)
+    if not ok or type(event) ~= "table" then return end
+    local text = event.text
+    if type(text) ~= "string" or text == "" then return end
+    local kind = tostring(event.type or "")
+    if kind == "delta" then
+      agent.emit({ type = "delta", text = text })
+    elseif kind == "commentary_delta" then
+      agent.emit({ type = "commentary_delta", text = text })
+    elseif kind == "reasoning" then
+      agent.emit({ type = "reasoning_delta", text = text })
+    end
+  end)
+end
+
 function M.new(session_id, on_event, role, user, node, opts)
   role = role or "master"
   user = user or "master"
@@ -857,7 +877,7 @@ function M.new(session_id, on_event, role, user, node, opts)
   -- restart, a wake or another `wa chat` closed is not evidence that nobody is here. A child is not
   -- the session's owner, so it does not claim presence.
   if not opts.subagent then pcall(memory.presence_begin, session_id, { role = role }) end
-  return setmetatable({
+  local agent = setmetatable({
     session_id = session_id,
     role = role,
     user = user,
@@ -874,6 +894,8 @@ function M.new(session_id, on_event, role, user, node, opts)
     -- accidentally acquire child restrictions or vice versa.
     subagent = opts.subagent,
   }, M)
+  install_stream_forwarder(agent)
+  return agent
 end
 
 function M:summary_model()

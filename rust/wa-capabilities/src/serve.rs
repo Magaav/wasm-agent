@@ -1392,6 +1392,47 @@ enum Sink {
 }
 
 thread_local! {
+    /// Where an event goes when the run has **no sink**: a CLI run has no SSE socket, and until this
+    /// existed `write_event` answered `None => {}` — every provider delta was dropped and the model's
+    /// text appeared all at once when the step settled. Installed only around the provider call, on the
+    /// thread that makes it, and cleared on drop.
+    static EVENT_FORWARDER: std::cell::RefCell<Option<std::rc::Rc<dyn Fn(&str)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// A callback that is itself the caller of the callback that emits: forwards nothing.
+    static FORWARDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Forwards events to `f` until the guard drops.
+pub(crate) fn forward_events_to(f: std::rc::Rc<dyn Fn(&str)>) -> crate::serve::ForwardGuard {
+    let previous = EVENT_FORWARDER.with(|cell| cell.borrow().clone());
+    EVENT_FORWARDER.with(|cell| *cell.borrow_mut() = Some(f));
+    crate::serve::ForwardGuard { previous }
+}
+
+pub(crate) struct ForwardGuard {
+    previous: Option<std::rc::Rc<dyn Fn(&str)>>,
+}
+
+impl Drop for ForwardGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        EVENT_FORWARDER.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
+/// Hand one event to the run's forwarder, if it has one. Never recurses into itself.
+fn forward_event(payload: &str) {
+    if FORWARDING.with(|flag| flag.get()) {
+        return;
+    }
+    let forwarder = EVENT_FORWARDER.with(|cell| cell.borrow().clone());
+    let Some(forwarder) = forwarder else { return };
+    FORWARDING.with(|flag| flag.set(true));
+    forwarder(payload);
+    FORWARDING.with(|flag| flag.set(false));
+}
+
+thread_local! {
     /// The sink of the run this node-thread thread is executing right now. `host.stream` runs
     /// on the node-thread's own thread, so a thread-local resolves the run without a global
     /// lookup and cannot resolve to a different run's sink.
@@ -1447,9 +1488,13 @@ pub fn write_event(payload: &str) {
                 let _ = stream.write_all(format!("data: {payload}\n\n").as_bytes());
                 let _ = stream.flush();
             }
+            // No sink: a CLI run. The event still has somewhere to go.
             None => {}
         }
     });
+    if ACTIVE_SINK.with(|cell| cell.borrow().is_none()) {
+        forward_event(payload);
+    }
 }
 
 /// Run `f` collecting any events it emits, and return them as an SSE body. Used for a run

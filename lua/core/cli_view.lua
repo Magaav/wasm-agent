@@ -2325,11 +2325,14 @@ function METHODS:event(event)
   elseif kind == "compact" then
     self:line(paint("! compacted through seq " .. tostring(event.through or "?"), "dim", self.live))
   elseif kind == "delta" then
-    -- A CLI run has no sink, so this normally never fires; if it does (a peer or a window
-    -- run printing here) the text is already the answer and must not be swallowed.
-    self:clear()
+    -- The answer, as it arrives. A CLI run used to have no sink, so this never fired and the text
+    -- appeared whole when the step settled; the host now forwards the provider's deltas here.
     self.deltas = self.deltas + 1
     self:write(event.text or "")
+  elseif kind == "reasoning_delta" then
+    -- Thinking, as it arrives, in the view's own blue: the phase line above it says how long, this
+    -- says what.
+    self:write(paint(event.text or "", "dim", self.live))
   elseif kind == "error" then
     self:clear()
     self:line(paint("! " .. tostring(event.error or "error"), "red", self.live))

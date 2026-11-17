@@ -2111,6 +2111,25 @@ mod ticker_tests {
 /// arguments a bounded preview, completed exactly once when the call is finished. Without them the
 /// window only showed a tool call after it had already executed. See `emit_decision` above for the
 /// per-field contract.
+/// Call the Lua global `wa_stream_event(payload)` from inside a host function.
+///
+/// Same thread and same state as the caller, the way `wa_mesh_admit` is called; the global is absent on
+/// a build whose view predates this, and an absent global is a no-op rather than an error: a node whose
+/// Lua does not define it must still stream to its own sink.
+unsafe fn call_lua_stream_event(l: *mut LuaState, payload: &str) {
+    use wa_host_support::lua::{cstr, lua_getglobal, lua_gettop, lua_pcallk, lua_pushlstring, lua_settop, LUA_OK};
+    if l.is_null() || payload.is_empty() {
+        return;
+    }
+    let base = lua_gettop(l);
+    lua_getglobal(l, cstr("wa_stream_event").as_ptr());
+    lua_pushlstring(l, payload.as_ptr() as *const std::os::raw::c_char, payload.len());
+    if lua_pcallk(l, 1, 0, 0, 0, std::ptr::null_mut()) != LUA_OK {
+        // A view that cannot read the payload must not break the model call.
+    }
+    lua_settop(l, base);
+}
+
 pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
@@ -2124,6 +2143,13 @@ pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
         .and_then(|options| options.get("first_response_seconds").and_then(|value| value.as_u64()))
         .filter(|seconds| (1..=3600).contains(seconds))
         .unwrap_or(0);
+    // A CLI run has no SSE sink, so the deltas this call emits would be dropped. Hand them to the
+    // interpreter instead: `wa_stream_event` (lua/core/cli_view.lua) turns each one into the event the
+    // view already knows how to print. Same thread, same state, guarded against re-entry.
+    let forwarder: std::rc::Rc<dyn Fn(&str)> = std::rc::Rc::new(move |payload: &str| {
+        unsafe { call_lua_stream_event(l, payload) }
+    });
+    let _forwarding = crate::serve::forward_events_to(forwarder);
     let outcome = stream_completion(&method, &url, &headers, &body, first);
     match outcome {
         Ok(value) => push_json(l, &value),
