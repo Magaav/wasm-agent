@@ -153,6 +153,16 @@ end
 function M.take(result, stop_sent)
   local content = result.content or ""
   if not content:find("```", 1, true) then return nil end
+  -- `only` mode: code is the *only* way to act, so an untagged ```js fence is the action, not a sample.
+  -- Measured 17/11: told "end your message with one ```js run block", the model wrote ```js — a sample by
+  -- the harness's rule, so nothing ran and no tool was left to fall back to. The tag is honoured as
+  -- written in `first` mode, where a plain code block can still be an answer.
+  if M.mode() == "only" then
+    content = content:gsub("([
+]?)(```+)([Jj][Ss]|[Jj]avascript)[ 	]*
+", "%1%2%3 run
+")
+  end
   local blocks, lines = M.parse(content)
   local runs = {}
   for _, block in ipairs(blocks) do if block.run then runs[#runs + 1] = block end end
