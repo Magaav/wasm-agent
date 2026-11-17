@@ -4,6 +4,7 @@
 #
 #   bash scripts/lua-swap.sh --tree <checkout> [--bin ~/.local/bin/wa] [--probe file.lua] [--no-restart]
 #   bash scripts/lua-swap.sh --rollback [--bin ~/.local/bin/wa]
+#   --detach     run in its own systemd user scope (when started through the node it restarts)
 #   --label NAME names the tree in its manifest when it is not a git checkout (a synced copy)
 #
 # WHY (operator 17/11, "can we make the evolution faster? hotswap fail fallback?"). A core Lua change (the
@@ -26,7 +27,8 @@
 # A binary install (fleet-install.sh step 4b) moves an installed tree aside, so a tree never outlives the
 # binary it was verified against.
 set -uo pipefail
-TREE=; BIN=${BIN:-$HOME/.local/bin/wa}; PROBE=; RESTART=1; ROLLBACK=0; LABEL=
+TREE=; BIN=${BIN:-$HOME/.local/bin/wa}; PROBE=; RESTART=1; ROLLBACK=0; LABEL=; DETACH=0
+ORIG_ARGS=("$@")
 HEALTH=${HEALTH:-http://127.0.0.1:8799/health}
 while [ $# -gt 0 ]; do
   case $1 in
@@ -36,10 +38,23 @@ while [ $# -gt 0 ]; do
     --no-restart) RESTART=0; shift ;;
     --rollback) ROLLBACK=1; shift ;;
     --label) LABEL=${2:?}; shift 2 ;;
+    --detach) DETACH=1; shift ;;
     *) echo "lua-swap: unknown_option $1" >&2; exit 2 ;;
   esac
 done
 say() { printf 'lua-swap: %s\n' "$*"; }
+# --detach: run in a scope of its own and log to ~/lua-swap.log. Needed when this script is started THROUGH the
+# node it restarts (a remote `wa call <node> bash`): 17/11 on openclaw the restart killed the script after the
+# swap and before its after-swap probe, so nothing could have rolled back. setsid was not enough there.
+if [ "$DETACH" = 1 ] && [ -z "${LUA_SWAP_DETACHED:-}" ]; then
+  args=(); for a in "${ORIG_ARGS[@]}"; do [ "$a" = --detach ] || args+=("$a"); done
+  if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --quiet --collect --unit "lua-swap-$$" \
+      --setenv=LUA_SWAP_DETACHED=1 --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+      bash -c "exec bash '$0' $(printf '%q ' "${args[@]}") >> '$HOME/lua-swap.log' 2>&1"; then
+    echo "lua-swap: detached as user unit lua-swap-$$; log: ~/lua-swap.log"; exit 0
+  fi
+  echo "lua-swap: systemd-run unavailable; running attached" >&2
+fi
 die() { printf 'lua-swap: %s\n' "$*" >&2; exit 1; }
 INSTALL=$(dirname "$BIN")
 LIVE=$INSTALL/lua-core; NEXT=$INSTALL/lua-core.next; PREV=$INSTALL/lua-core.prev

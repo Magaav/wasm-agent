@@ -23,6 +23,7 @@ send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'imap_get_me
 send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'imap_search_messages', arguments: { account_id: 'a', mailbox: 'INBOX', last_days: 7 } } });
 send({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'imap_search_messages', arguments: { mailbox: 'INBOX', limit: 5 } } });
 send({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'imap_list_accounts', arguments: {} } });
+send({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'smtp_verify_account', arguments: {} } });
 setTimeout(() => {
   let checks = 0; const ok = (v, m) => { assert.ok(v, m); checks++; };
   const limit = replies.get(1).result.tools[0].inputSchema.properties.limit;
@@ -40,5 +41,6 @@ setTimeout(() => {
   ok(filled.account_id === 'test' && filled.limit === 5, 'the only account fills a missing account_id: ' + JSON.stringify(filled));
   ok(plain.account_id === 'a', 'an explicit account_id is kept');
   ok(replies.get(6).result.echo.arguments.account_id === undefined, 'list_accounts gets no account_id');
+  ok(replies.get(7).result.echo.arguments.account_id === 'test', 'a verify call gets the only account too (17/11)');
   child.kill(); console.log(JSON.stringify({ ok: true, checks })); process.exit(0);
 }, 1500);

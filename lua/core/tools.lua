@@ -859,14 +859,38 @@ local function show_codemode(role,ctx,memory)
   -- Schema-only legacy callers cannot establish default workspace eligibility.
   return codemode_policy.setting()=='native' and host.quickjs~=nil
 end
+-- The email index tools answer only where a wa-email service is stored and enabled (the dispatcher
+-- refuses them elsewhere with email_component_absent). A tool the node cannot run is not offered: 17/11 on
+-- work the model saw five email_* tools that could only fail. Read once a minute - it is a local read.
+local EMAIL_TOOLS={email_search=true,email_read=true,email_media=true,email_send=true,email_send_status=true}
+local email_seen={at=-1,served=true}
+local function email_served()
+  local now=tonumber(host.now()) or 0
+  if now-email_seen.at<60 then return email_seen.served end
+  local served=true
+  local ok,inv=pcall(function() return dofile('lua/core/services.lua').inventory() end)
+  if ok and type(inv)=='table' and type(inv.services)=='table' then
+    served=false
+    for _,service in ipairs(inv.services) do if service.name=='wa-email' and service.enabled~=false then served=true end end
+  end
+  email_seen.at,email_seen.served=now,served
+  return served
+end
+M.email_served=email_served
+
 function M.all(role,ctx,memory)
   local shown = {}
   local code=show_codemode(role,ctx,memory)
   local orchestration=orchestration_surface(role,ctx)
+  local email=nil
   for _, item in ipairs(M.catalog(role)) do
     local name=item['function'].name
     local visible=not PROMPT_HIDDEN[name] and (name~='codemode' or code)
     if name=='route_task' then visible=orchestration end
+    if visible and EMAIL_TOOLS[name] then
+      if email==nil then email=email_served() end
+      visible=email
+    end
     if visible then shown[#shown + 1] = item end
   end
   return shown

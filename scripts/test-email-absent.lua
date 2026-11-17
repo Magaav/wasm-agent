@@ -11,4 +11,9 @@ check(r.ok==false and r.error=='email_component_absent' and r.status==404 and to
 check(r.state=='not_stored' and r.effect=='none','and nothing was queued')
 local empty=tools.dispatch(memory,'email_search',{},'master',ctx)
 check(empty.error~='email_component_absent','an empty search is the validator refusal first: '..json.encode(empty):sub(1,200))
+-- And a tool the node cannot run is not offered (17/11 sweep on work: five email_* tools that could only fail).
+local offered={}
+for _,item in ipairs(tools.all('master',ctx,memory)) do offered[item['function'].name]=true end
+check(not offered.email_search and not offered.email_send and not offered.email_read,'no stored wa-email: no email_* tool in the list')
+check(offered.mcp_whatsapp_read~=nil or offered.read~=nil,'and the rest of the list is still there')
 print(json.encode({ok=true,checks=checks}))

@@ -96,7 +96,10 @@ export function accountIds(keyNames) {
   return [...ids];
 }
 const ONLY_ACCOUNTS = accountIds(Object.keys(keys));
-const ACCOUNT_READS = new Set([...SEARCH_TOOLS, ...BY_MESSAGE_ID, 'imap_list_mailboxes', 'imap_mailbox_status']);
+// The two verify tools too (17/11 sweep: imap/smtp_verify_account without account_id answered "IMAP account
+// 'default' is not configured" on a node with one account).
+const ACCOUNT_READS = new Set([...SEARCH_TOOLS, ...BY_MESSAGE_ID, 'imap_list_mailboxes', 'imap_mailbox_status',
+  'imap_verify_account', 'smtp_verify_account']);
 export function repairCall(params) {
   if (!params || typeof params !== 'object' || typeof params.arguments !== 'object' || params.arguments === null) return params;
   const name = params.name;
