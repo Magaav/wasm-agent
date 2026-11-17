@@ -50,6 +50,19 @@ end
 -- One registry entry, with every tool it knows about and whether the model is offered it right now.
 -- A tool the operator approved but the last probe did not list is shown too: it is the reason `enable`
 -- refuses (`mcp_approved_tool_missing`), and hiding it would make that refusal look arbitrary.
+-- Built-in or custom (operator 17/11: "/mcp should say if that mcp is native to our agent or added"): a
+-- registry row whose program runs one of the scripts this agent ships (`mcp.RUNTIME`, the files every install
+-- carries) is built-in - Gmail is `mcp-mail.mjs` - and anything else was added on this node.
+local function origin_of(mcp, definition)
+  local shipped = {}
+  for _, file in ipairs(mcp.RUNTIME or {}) do shipped[file] = true end
+  for _, arg in ipairs(type(definition.args) == 'table' and definition.args or {}) do
+    local base = tostring(arg):match('([^/\\]+)$')
+    if base and shipped[base] then return 'built-in' end
+  end
+  return 'custom'
+end
+
 local function local_connector(mcp, server, revision)
   local state, error = local_state(server)
   local definition = server.definition or {}
@@ -133,7 +146,8 @@ local function local_connector(mcp, server, revision)
     -- What it is and where it runs, as columns a reader scans (13/11): `type` is the kind of service,
     -- `node` is its bare home, and `node_phrase` is that home as a clause. Nothing is grouped by node any
     -- more - the node is a column, so a flat list sorted by it stays a flat list.
-    type = 'MCP', node = 'this node', node_phrase = 'on this node',
+    type = origin_of(mcp, definition) .. ' MCP', origin = origin_of(mcp, definition),
+    node = 'this node', node_phrase = 'on this node',
     where = 'this node', scope = 'local', transport = definition.transport or 'unknown',
     state = state, error = error, enabled = server.enabled == true,
     tool_count = published, approved = #sorted_keys(approved), discovered = #(server.probe and server.probe.tools or {}),
@@ -182,7 +196,9 @@ local function peer_connector(peer, connector, exported)
   table.sort(tools, function(a, b) return a.name < b.name end)
   return {
     key = tostring(peer.name) .. ':' .. tostring(connector.id), id = connector.id, peer = peer.name,
-    type = 'MCP', node = tostring(peer.name), node_phrase = 'on ' .. tostring(peer.name),
+    -- A peer on this build says built-in or custom itself; an older one does not, and stays plain `MCP`.
+    type = connector.origin and (tostring(connector.origin) .. ' MCP') or 'MCP', origin = connector.origin,
+    node = tostring(peer.name), node_phrase = 'on ' .. tostring(peer.name),
     node_id = peer.node_id, where = tostring(peer.name), scope = 'peer',
     name = connector.name or connector.id, transport = connector.transport or 'unknown',
     state = connector.state or (connector.enabled and 'enabled' or 'disabled'), error = connector.error,

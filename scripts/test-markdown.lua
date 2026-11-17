@@ -310,4 +310,24 @@ do
   ok(select(2, wrapped:gsub("\n", "")) > 0, "without reflow the paragraph is wrapped as before")
 end
 
+-- A fenced line longer than the card wraps inside it, every continuation behind the border (17/11).
+do
+  local long = string.rep("x", 50)
+  local text = md.render("```json\n" .. long .. "\n```", { width = 30, indent = "" })
+  local rows = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = line end
+  local inside, conts = 0, 0
+  for _, row in ipairs(rows) do
+    if row:find("x", 1, true) then
+      inside = inside + 1
+      ok(row:sub(1, 3) == "\226\148\130", "a fence row starts at the border: " .. row)
+      ok(md.columns(row) <= 30, "a fence row fits the width: " .. md.columns(row))
+      if row:find("\226\134\170", 1, true) then conts = conts + 1 end
+    end
+  end
+  ok(inside == 2 and conts == 1, "50 cells in a 30-wide card: two rows, one marked as a continuation")
+  local _, copies = md.render("```\n" .. long .. "\n```", { width = 30, indent = "" })
+  ok(copies[1] and copies[1].text == long, "the copy is the original line, not the wrapped rows")
+end
+
 print(string.format("markdown ok (%d checks)", checks))

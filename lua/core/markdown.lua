@@ -626,14 +626,30 @@ function M.render(text, opts)
       out[#out + 1] = paint(indent .. "\226\148\140\226\148\128" .. label, "mdCodeBlockBorder")
       copies[#copies + 1] = { at = #out - 1, text = table.concat(body, "\n") }
       local bar = paint(indent .. "\226\148\130 ", "mdCodeBlockBorder")
+      -- A line longer than the card wraps INSIDE it (operator 17/11 "the fence printing breaks"): the
+      -- terminal used to wrap it to column 0, outside the border. Each continuation keeps the border and
+      -- says it continues (`│↪`), so a reader never mistakes a wrapped half for a line of its own.
+      local more = paint(indent .. "\226\148\130", "mdCodeBlockBorder") .. paint("\226\134\170", "dim")
+      local room = math.max(8, width - columns(indent) - 2)
       for _, code_line in ipairs(body) do
-        local parts = { bar }
-        scan_code(code_line, lang, function(piece, style)
-          if piece == "" then return end
-          -- A code block's own colour is the base; a token adds its syntax colour on top.
-          parts[#parts + 1] = paint(piece, style or "mdCodeBlock")
-        end)
-        out[#out + 1] = table.concat(parts)
+        code_line = code_line:gsub("\t", "    ")
+        local pieces, from, used, start = {}, 1, 0, 1
+        while from <= #code_line do
+          local size, cells = char_at(code_line, from)
+          if used + cells > room then pieces[#pieces + 1] = code_line:sub(start, from - 1); start, used = from, 0 end
+          used = used + cells
+          from = from + size
+        end
+        pieces[#pieces + 1] = code_line:sub(start)
+        for number, piece_line in ipairs(pieces) do
+          local parts = { number == 1 and bar or more }
+          scan_code(piece_line, lang, function(piece, style)
+            if piece == "" then return end
+            -- A code block's own colour is the base; a token adds its syntax colour on top.
+            parts[#parts + 1] = paint(piece, style or "mdCodeBlock")
+          end)
+          out[#out + 1] = table.concat(parts)
+        end
       end
       out[#out + 1] = paint(indent .. "\226\148\148\226\148\128", "mdCodeBlockBorder")
       if #out > 0 then out[#out + 1] = "" end

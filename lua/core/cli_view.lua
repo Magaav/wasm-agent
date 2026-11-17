@@ -254,11 +254,14 @@ function M.run_clock(seconds)
   return string.format("%d:%02d:%02d", math.floor(s / 3600), math.floor(s % 3600 / 60), s % 60)
 end
 
--- The footer's session numbers: `↻runs ⚒️tools ↑in ↓out ◔ctx%/window ◇cache-hit%`.
+-- The footer's session numbers: `↻runs Σ↑in ↓out ◔ctx%/window ◇cache-hit%`. `Σ↑` is every request's
+-- input summed (each step resends the context), so it is marked apart from the run line's `+↑` - what
+-- one run ADDED to the context (operator 17/11: "why do these differ?"). No tool count: with code mode
+-- one script makes many calls, so the number said nothing (operator 17/11).
 function M.session_summary(t)
   t = t or {}
-  local parts = { "\226\134\187" .. (t.runs or 0), "\226\154\146\239\184\143" .. (t.tools or 0),
-    "\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
+  local parts = { "\226\134\187" .. (t.runs or 0),
+    "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
   if (tonumber(t.budget) or 0) > 0 then
     parts[#parts + 1] = string.format("\226\151\148%.1f%%/%s", 100 * (t.context or 0) / t.budget, M.tokens(t.budget))
   end
@@ -1040,7 +1043,7 @@ function METHODS:status_template()
   end
   local function compose(shown, live)
     if boxed and self.turn then
-      -- `✶ 👣2·5s ⚒️3 ↑12.4k ↓310 ◷1:51`: the step this run is on and how long it has taken, the
+      -- `✶ 👣2·5s +↑12.4k ↓310 ◷1:51`: the step this run is on and how long it has taken, the
       -- run's tool calls, its input and output tokens, and its whole time. `{s}` and `{T}` are
       -- clocks the host keeps moving while Lua is blocked.
       return with_source("{m}" .. paint(self:run_numbers("{s}", "{T}"), "muted", live), live)
@@ -1463,7 +1466,7 @@ function METHODS:live_footer()
   self:footer_draw()
 end
 
--- `👣steps·step-time ⚒️tools ↑input ↓output ◷run-time` for the current run: input is what the run
+-- `👣steps·step-time +↑input ↓output ◷run-time` for the current run: input is what the run
 -- added to the context (the last call's prompt against the one the run started on), not the sum
 -- of every call's prompt, which re-counts the whole context each step. The two clocks are
 -- passed in (tokens for the host's ticker, or the stopped values once the run has ended). With no
@@ -1473,8 +1476,7 @@ function METHODS:run_numbers(step_clock, run_clock)
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
   return "\240\159\145\163" .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
-    .. " \226\154\146\239\184\143" .. (run.tools or 0)
-    .. " \226\134\145" .. M.tokens(input) .. " \226\134\147" .. M.tokens(output)
+    .. " +\226\134\145" .. M.tokens(input) .. " \226\134\147" .. M.tokens(output)
     .. " \226\151\183" .. run_clock
 end
 

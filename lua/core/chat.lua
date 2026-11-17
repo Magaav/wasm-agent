@@ -1019,6 +1019,10 @@ function M.run(argv)
       local done, problem = pcall(reload.require("lua/core/mcp_cli.lua").run, line:sub(5), {
         print = ui.print, io = ui,
         ctx = { user_id = USER, role = "master", session_id = agent.session_id },
+        -- From the caches, like /status (operator 17/11 "/mcp should be instant"): a full read refreshed
+        -- the federation catalogue when it was older than ten minutes, and offline peers made that 35 s
+        -- on work. The catalogue keeps its own refresh rule; the pages say how old the peers' rows are.
+        cache_only = true,
       })
       if not done then ui.say(redact.text(tostring(problem))) end
     elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then
