@@ -547,7 +547,10 @@ function M.tools_page(entry, links, back)
   local options = {}
   for index, tool in ipairs(entry.tools or {}) do
     options[#options + 1] = {
-      label = tostring(tool.name),
+      -- The tool's own name (`colmeio.cloud.attachments.delete`), not the model-facing one: that one is
+      -- the name cut to 24 characters plus 8 hex of sha256(server+tool) so cut names cannot collide,
+      -- and three different tools read the same up to the hash (17/11). The tool page shows both.
+      label = tostring(tool.tool or tool.name),
       hint = string.format('%s \u{b7} %s', tostring(tool.approval or 'unknown'),
         tool.published and 'callable now' or 'not callable now'),
       page = links.tool[index],

@@ -121,7 +121,10 @@ pub enum Action { None, Submit(String), Eof, Interrupt, Nav, PageUp, PageDown, B
     Copy(String),
     /// Ctrl+V: the host reads an image from the system clipboard, keeps it, and puts `[Image #n]` in the
     /// draft (`insert_text`) - what pi and Claude Code do (operator 17/11).
-    PasteImage }
+    PasteImage,
+    /// A bracketed paste ended; it put draft[start..cursor]. A file path dropped or pasted there is the host's
+    /// to turn into an attachment (an image path becomes `[Image #n]`).
+    Pasted(usize) }
 
 /// A command the slash menu offers: its name (`/login`), whether it takes arguments, and its hint.
 #[derive(Clone, Default)]
@@ -172,6 +175,8 @@ pub struct Editor {
     /// The selection's other end (the cursor is one end): Shift+arrows, Shift+Home/End, Ctrl+A and a mouse
     /// drag set it; any plain movement clears it; typing, Backspace and Delete replace what it covers.
     anchor: Option<usize>,
+    /// Where the current bracketed paste began in the draft.
+    paste_from: usize,
 }
 
 #[derive(Clone)]
@@ -490,8 +495,8 @@ impl Editor {
             let seq = self.escape.as_slice();
             if seq == b"\x1b\x1b" { self.escape.truncate(1); self.escape(); return Action::None; }
             // CSI arrows, Home/End, Delete and bracketed paste boundaries.
-            if seq == b"\x1b[200~" { self.paste = true; self.escape.clear(); return Action::None; }
-            if seq == b"\x1b[201~" { self.paste = false; self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[200~" { self.delete_selection(); self.paste = true; self.paste_from = self.cursor; self.escape.clear(); return Action::None; }
+            if seq == b"\x1b[201~" { self.paste = false; self.escape.clear(); return Action::Pasted(self.paste_from.min(self.cursor)); }
             // Orca on Windows sends ESC CR for Shift+Enter (also Alt+Enter).
             if seq == b"\x1b\r" || seq == b"\x1b\n" || seq == b"\x1b[13;2u"
                 || seq == b"\x1b[27;2;13~" || seq == b"\x1b[13;2~" {
@@ -636,6 +641,22 @@ impl Editor {
             at += 1;
         }
         Some(at)
+    }
+    /// The draft text in `[a, b)`.
+    pub fn slice(&self, a: usize, b: usize) -> String {
+        let (a, b) = (a.min(self.chars.len()), b.min(self.chars.len()));
+        if a >= b { return String::new(); }
+        self.chars[a..b].iter().collect()
+    }
+    /// The cursor, as a draft index.
+    pub fn cursor(&self) -> usize { self.cursor }
+    /// Replace `[a, b)` with `text` (a dropped path becoming its `[Image #n]`); the cursor lands after it.
+    pub fn replace_range(&mut self, a: usize, b: usize, text: &str) {
+        let (a, b) = (a.min(self.chars.len()), b.min(self.chars.len()));
+        if a > b { return; }
+        self.chars.splice(a..b, text.chars());
+        self.cursor = a + text.chars().count();
+        self.anchor = None;
     }
     /// Text the host puts in the draft at the cursor (an `[Image #n]` token), as one undo step.
     pub fn insert_text(&mut self, text: &str) {

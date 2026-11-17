@@ -77,7 +77,7 @@ local PALETTE = {
   -- A code-mode script's inner calls (operator 17/11): waiting ⏳ light yellow, done ✓ light green,
   -- failed ✗ a soft red - never the alarm red for a call that is only waiting.
   callWait = "e8d58a", callOk = "8fd19e", callFail = "e57373",
-  mdHeading = "ffffff", mdLink = "b1b9f9", mdLinkUrl = "777777", mdCode = "b1b9f9",
+  mdHeading = "ffffff", mdLink = "8ab4f8", mdLinkUrl = "8ab4f8", mdCode = "b1b9f9",
   mdCodeBlock = "d4d4d4", mdCodeBlockBorder = "777777", mdQuote = "999999",
   mdQuoteBorder = "777777", mdHr = "777777", mdListBullet = "999999",
   toolDiffAdded = "4eba65", toolDiffRemoved = "ff6b80", toolDiffContext = "999999",
@@ -1821,12 +1821,14 @@ function METHODS:say_table_end()
 end
 
 function METHODS:say_emit(text)
+  -- The held newlines go out FIRST: `markdown` hands the host a fence's copy marker for the NEXT write
+  -- (transcript_copy), and a newline written after it took the marker - no copy icon on fences (17/11).
+  if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)); self.flow_held = 0 end
   local rendered = self:markdown(text, {
     paint = function(plain, style) return paint(plain, style, self.live) end,
     width = self.limit - 2, indent = "", reflow = self:transcript(), style = "commentaryText",
   })
   if rendered == "" then rendered = paint(text, "commentaryText", self.live) end
-  if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)) end
   self:write(rendered)
   self.flow_held = 1
 end
@@ -2156,6 +2158,11 @@ function METHODS:codemode_settle(event)
   local o = self:codemode_opts()
   if self:transcript() then
     self:codemode_sync()
+    -- The copy icon on the block's first row (operator 17/11 "a copy icon on its top"): the script is
+    -- whole only now, so the marker is set here, on the block's first line, never on a later write.
+    local a = model.args or {}
+    local script = (type(a.code) == "string" and a.code) or (type(a.script) == "string" and a.script) or nil
+    if script and script ~= "" and host.transcript_copy_first then pcall(host.transcript_copy_first, script) end
     local tail = codemode_block.tail_rows(model, self.limit, o)
     for index, row in ipairs(tail) do
       local full = tail.expand and tail.expand[index]

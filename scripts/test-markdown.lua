@@ -109,8 +109,12 @@ local _, inline = render("use `dofile` and **bold** and *italic* and [text](http
 ok(inline.role_of("dofile") == "mdCode", "inline code is pi's code colour")
 ok(inline.role_of("bold") == "bold+text", "bold is bold")
 ok(inline.role_of("italic") == "italic", "italic is italic")
-ok(inline.role_of("text") == "mdLink", "a link's label is the link colour")
-ok(inline.role_of("https://example.invalid/x") == "mdLinkUrl", "and its target is the url colour")
+ok(inline.role_of("text") == "underline+mdLink", "a link's label is underlined, in the link colour")
+ok(inline.role_of("https://example.invalid/x") == "underline+mdLinkUrl", "and its target too (17/11: a link reads as one)")
+do
+  local rendered = md.render("a ***bold-italic*** b", { paint = function(t, st) return "<" .. (type(st) == "table" and table.concat(st, "+") or tostring(st)) .. ">" .. t end })
+  ok(rendered:find("<bold+italic+text>bold-italic", 1, true) and not rendered:find("*", 1, true), "***x*** is bold italic, no stray asterisks: " .. rendered)
+end
 
 -- Two bugs this test was written to catch, both of them text loss: a pattern with no capture
 -- (a bare url) has no `first`, so reading only the capture dropped the whole word; and a

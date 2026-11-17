@@ -26,6 +26,11 @@ const BRIGHT: &str = "\x1b[1m\x1b[38;2;255;255;255m";
 /// Marks an expandable line among a block's copy markers (`rows_with_copies`), so the screen-row map
 /// is built in the one place the copy icons' map is: `\u{1}expand:<block>:<line>`.
 const EXPAND_TAG: &str = "\u{1}expand:";
+/// Marks a copy icon drawn at the RIGHT end of a row (a code block's first row: its code keeps the
+/// band's left edge, operator 17/11 "a copy icon on its top"): `{RIGHT_TAG}{col}\u{1}{content}`.
+const RIGHT_TAG: &str = "\u{1}right:";
+/// The right-end copy icon.
+const COPY_ICON: char = '\u{29c9}';
 
 #[derive(Default, Clone)]
 pub struct Block { pub lines: Vec<String>, open: bool, pub topic: bool, pub expanded: bool,
@@ -87,6 +92,8 @@ pub struct Transcript { pub blocks: Vec<Block>, pub focus: Option<usize>, pub di
     /// A mouse press asks this before it asks anything else, so a click on the icon copies and a
     /// click anywhere else starts a selection - one gesture, one meaning.
     copy_rows: HashMap<usize, String>,
+    /// Right-end copy icons of the last view: screen row -> (first column of the icon, content).
+    copy_right: HashMap<usize, (usize, String)>,
     /// Expandable lines waiting for the next `write` (`expandable`), like `pending_copy`.
     pending_expand: Vec<(usize, String)>,
     /// Where each expandable line was drawn in the last `view`: screen row -> (block, line).
@@ -98,7 +105,7 @@ impl Default for Transcript {
     fn default() -> Self {
         Transcript { blocks: Vec::new(), focus: None, dirty: false, top: None, freeze: false,
             page_delta: 0, nav: false, live_row: None, pending_copy: Vec::new(),
-            copy_rows: HashMap::new(), scrollbar: Scrollbar::Auto, counts: Vec::new(),
+            copy_rows: HashMap::new(), copy_right: HashMap::new(), scrollbar: Scrollbar::Auto, counts: Vec::new(),
             count_width: 0, bar: false, bar_last: None, bar_hovered: false, bar_grab: None,
             pending_expand: Vec::new(), expand_rows: HashMap::new(), expand_hover: None }
     }
@@ -230,6 +237,16 @@ impl Transcript {
         self.pending_expand = markers.iter().map(|(at, text)| (*at, text.clone())).collect();
     }
 
+    /// Mark the current block's FIRST line copyable with `text` (a code-mode block: its code is known only once
+    /// the call settles, after its rows streamed). The copy icon is drawn in front of that line.
+    pub fn copy_first(&mut self, text: &str) -> bool {
+        let Some(block) = self.blocks.last_mut() else { return false };
+        if block.lines.is_empty() { return false }
+        block.copies.insert(0, text.to_string());
+        if let Some(count) = self.counts.last_mut() { *count = None; }
+        self.dirty = true;
+        true
+    }
     /// A press on an expandable line toggles it. Returns whether the press was one.
     pub fn expand_at(&mut self, row: usize) -> bool {
         let Some(&(block, line)) = self.expand_rows.get(&row) else { return false };
@@ -258,6 +275,12 @@ impl Transcript {
             }
             return;
         }
+        if let Some(rest) = content.strip_prefix(RIGHT_TAG) {
+            if let Some((col, text)) = rest.split_once('\u{1}') {
+                if let Ok(col) = col.parse() { self.copy_right.insert(row, (col, text.to_string())); }
+            }
+            return;
+        }
         self.copy_rows.insert(row, content);
     }
 
@@ -265,6 +288,9 @@ impl Transcript {
     /// nothing else. Rows and columns are the ones the last `view` drew (1-based, screen cells), so
     /// a caller reads its own coordinates without translating anything.
     pub fn copy_at(&self, row: usize, col: usize) -> Option<String> {
+        if let Some((at, text)) = self.copy_right.get(&row) {
+            if col + 1 >= *at && col <= *at + 2 { return Some(text.clone()) }
+        }
         if col > visible(COPY_PREFIX) { return None }
         self.copy_rows.get(&row).cloned()
     }
@@ -405,6 +431,19 @@ impl Transcript {
                 for at in start..rows.len() { copies.push((at, format!("{EXPAND_TAG}{index}:{line_index}"))); }
                 continue;
             }
+            if content.is_some() && block.code && line_index == 0 {
+                // A code block keeps its code at the band's left edge: the icon takes the last blank
+                // cell of the first row instead (no blank cell = the code fills the row: no icon).
+                let mut wrapped = wrap_rows(line, inner);
+                if let Some(first) = wrapped.first_mut() {
+                    if let Some((with_icon, col)) = icon_at_right(first) {
+                        *first = with_icon;
+                        copies.push((start, format!("{RIGHT_TAG}{}\u{1}{}", col + usize::from(focused), content.expect("checked"))));
+                    }
+                }
+                rows.extend(wrapped);
+                continue;
+            }
             if content.is_some() {
                 // The affordance is part of the row, so the wrap and the click agree about where it
                 // ends: the icon takes its columns from the text and the header wraps two columns
@@ -482,6 +521,7 @@ impl Transcript {
     /// keeping a focused topic on screen.
     pub fn view(&mut self, width: usize, height: usize) -> Vec<String> {
         self.copy_rows.clear();
+        self.copy_right.clear();
         self.expand_rows.clear();
         let (width, height) = (width.max(1), height.max(1));
         // The bar costs a column, and WHICH width the chat wraps at is decided once per change:
@@ -830,6 +870,35 @@ impl NavDecoder {
     pub fn lone_escape(&mut self) -> bool { let lone = self.escape.as_slice() == b"\x1b"; if lone { self.escape.clear(); } lone }
 }
 
+/// `row` with its last visible blank cell turned into the copy icon, kept inside whatever colours the
+/// row paints there (the band's background), and the icon's 1-based column. None when the row ends in
+/// text: the icon never covers code.
+fn icon_at_right(row: &str) -> Option<(String, usize)> {
+    let chars: Vec<char> = row.chars().collect();
+    // The char index of every visible cell, escape sequences skipped.
+    let mut cells: Vec<usize> = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\x1b' {
+            i += 1;
+            if i < chars.len() && chars[i] == '[' { i += 1; while i < chars.len() && !('@'..='~').contains(&chars[i]) { i += 1; } }
+            else if i < chars.len() && chars[i] == ']' { while i < chars.len() && chars[i] != '\x07' && chars[i] != '\\' { i += 1; } }
+            i += 1;
+            continue;
+        }
+        cells.push(i);
+        i += 1;
+    }
+    // Two blank cells at the end at least, so the icon never touches the code.
+    let n = cells.len();
+    if n < 2 || chars[cells[n - 1]] != ' ' || chars[cells[n - 2]] != ' ' { return None }
+    let at = cells[n - 1];
+    let mut out: String = chars[..at].iter().collect();
+    out.push(COPY_ICON);
+    out.extend(chars[at + 1..].iter());
+    Some((out, n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,6 +907,15 @@ mod tests {
     /// adds to a row is one column at the end (`view`), so a test that compared whole rows would
     /// otherwise be asserting the bar's width in every one of them.
     fn plain(mut t: Transcript) -> Transcript { t.scrollbar = Scrollbar::Hidden; t }
+    #[test]
+    fn the_code_copy_icon_takes_the_last_blank_cell_and_never_covers_code() {
+        let band = "\x1b[48;5;236mreturn 1;     \x1b[0m";
+        let (row, col) = icon_at_right(band).expect("blank cells at the end");
+        assert_eq!(col, 14);
+        assert!(row.contains("return 1;    \u{29c9}\x1b[0m"), "{row:?}");
+        assert!(icon_at_right("\x1b[48;5;236mreturn 1;\x1b[0m").is_none());
+        assert!(icon_at_right("x ").is_none());
+    }
     #[test]
     fn a_marker_in_a_newer_block_maps_to_its_own_screen_row() {
         let mut t = plain(Transcript::default());
