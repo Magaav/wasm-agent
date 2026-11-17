@@ -1692,13 +1692,20 @@ function METHODS:accepted(text)
   -- `❯ what you typed`, greyed, the way Claude Code keeps your message in the transcript.
   -- White on a grey bar the width of the screen, the way the message stands out from the replies.
   local shown, first = {}, true
+  -- Every word the reader sent, wrapped - never clipped with `…` (operator 17/11: "user input sent to the
+  -- cli chat content should render fully 100% what he said"). One column is left for the scrollbar.
+  local width = math.max(10, self.limit - 3)
   for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-    local body = (first and PROMPT or "  ") .. clip(line, math.max(10, self.limit - 2))
-    if self.live then
-      body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - columns(body))) .. RESET
+    local pieces = codemode_block.wrap(line, width, { columns = columns })
+    if #pieces == 0 then pieces = { "" } end
+    for _, piece in ipairs(pieces) do
+      local body = (first and PROMPT or "  ") .. piece
+      if self.live then
+        body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - 1 - columns(body))) .. RESET
+      end
+      shown[#shown + 1] = body
+      first = false
     end
-    shown[#shown + 1] = body
-    first = false
   end
   self:topic(false)
   self:write(table.concat(shown, "\n") .. "\n\n")
@@ -1848,12 +1855,22 @@ function METHODS:delta_piece(text)
   self.dstream = d
   -- Hidden text is still kept: if the step turns out to be the answer, `delta_reset(true)` writes it.
   d.buf = d.buf .. text
-  if d.hidden then return end
+  if d.hidden then
+    if d.code then self:code_stream(d) end
+    return
+  end
   local at = markup_at(d.buf)
   if at then
     if at - 1 > d.shown then self:flow("say", d.buf:sub(d.shown + 1, at - 1)) end
     d.shown = math.max(d.shown, at - 1)
     d.hidden = true
+    -- A run block streams AS CODE (operator 17/11: "codeact does not stream, it just prints"): its block
+    -- opens now and every line is drawn on its band as it completes; the call event that follows finds
+    -- the block already on screen and only adds its call rows.
+    if fence_at(d.buf) == at and self:transcript() then
+      d.code = { pos = at, opened = false }
+      self:code_stream(d)
+    end
     return
   end
   -- hold a tail that may still become a marker: `<...` without `>`, or a last line that is a fence prefix
@@ -1864,11 +1881,44 @@ function METHODS:delta_piece(text)
   local upto = #d.buf - held
   if upto > d.shown then self:flow("say", d.buf:sub(d.shown + 1, upto)); d.shown = upto end
 end
+-- The streaming run block: complete lines after the opening fence, each drawn as band rows; the closing
+-- fence ends it (what follows it is dropped by the step, so it is not drawn either).
+function METHODS:code_stream(d)
+  local c = d.code
+  if not c or c.closed then return end
+  while true do
+    local nl = d.buf:find("\n", c.pos, true)
+    if not nl then return end
+    local line = d.buf:sub(c.pos, nl - 1):gsub("\r$", "")
+    c.pos = nl + 1
+    if not c.opened then
+      -- the fence line itself: open the block, one blank line above it
+      c.opened = true
+      self:flow_end()
+      self:gap(1)
+      if host.transcript_block then pcall(host.transcript_block, true, true) end
+      self.code_streamed = true
+    elseif line:match("^%s*```%s*$") then
+      c.closed = true
+      return
+    else
+      local o = self:codemode_opts()
+      for _, row in ipairs(codemode_block.rows(codemode_block.new({ code = line }, self.now()), self.limit, o)) do
+        self:write(row .. "\n")
+      end
+    end
+  end
+end
+
 -- `answer`: the step ended as the reply, so whatever was held back (a code block that did not run, a
 -- held tail) is the reader's and is written now. Otherwise (a call ran) the held text was the call.
 function METHODS:delta_reset(answer)
   local d = self.dstream
-  if d and (answer or not d.hidden) and #d.buf > d.shown then self:flow("say", d.buf:sub(d.shown + 1)) end
+  if d and d.code and d.code.opened then
+    -- the code is already on screen; an answer keeps only what it wrote after the closing fence
+    if answer and d.code.closed and #d.buf >= d.code.pos then self:flow("say", d.buf:sub(d.code.pos)) end
+  elseif d and (answer or not d.hidden) and #d.buf > d.shown then self:flow("say", d.buf:sub(d.shown + 1)) end
+  if answer then self.code_streamed = nil end
   self.dstream = nil
 end
 
@@ -2079,14 +2129,20 @@ function METHODS:codemode_start(event)
   -- block marker is still asked for (it is what lets a newer block fold this one).
   -- One blank line above the block, written into the block before it (a code block is a topic, and a
   -- topic's own trailing blank rows are not drawn).
-  self:flow_end()
-  self:gap(1)
-  if host.transcript_block then pcall(host.transcript_block, true, true) end
   self.pending.block, self.pending.shown = true, true
   local o = self:codemode_opts()
-  for _, row in ipairs(codemode_block.rows(self.code, self.limit, o)) do self:write(row .. "\n") end
-  local live = self:tool_line()
-  if live then self:tool_live(live.text) end
+  if self.code_streamed then
+    -- The script streamed into its block already (code_stream): only the call rows follow.
+    self.code_streamed = nil
+  else
+    self:flow_end()
+    self:gap(1)
+    if host.transcript_block then pcall(host.transcript_block, true, true) end
+    for _, row in ipairs(codemode_block.rows(self.code, self.limit, o)) do self:write(row .. "\n") end
+  end
+  -- No live progress row inside a code block (operator 17/11: "it wages up and down all the cli content ...
+  -- and breaks the right scroll"): that row was taken away and put back around every inner call's row,
+  -- moving everything under it. The block's own call rows already say ⏳/✓/✗ in place.
 end
 
 -- The script's answer: the value under the calls, the heading rewritten with the call's whole time,
