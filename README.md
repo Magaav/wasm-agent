@@ -63,6 +63,8 @@ for the implementation boundary.
 | Tracked file changes | Content-addressed file snapshots, diffs and conflict-aware undo. This does not undo arbitrary shell, network or application effects. |
 | Multiple machines | Node keys, signed peer calls, rendezvous discovery and an outbound relay for NAT'd nodes. |
 | Guest execution | Managed guests pin operator keys, require expiring local consent, reject unrelated callers and support local revocation. The managed registry—not a node's claimed role—controls promotion. Public rollout remains gated. |
+| How the model acts: CodeAct (default) | The model acts by writing code: it ends a message with one ` ```js run ` block, which runs as one sandboxed script where every tool is `tools.<name>(args)`, and the result comes back as an observation. `vars` is session state - whatever a script assigns to it, functions included, persists across scripts and turns. A call the model writes in its own tool markup (DSML, `<tool_call>`) runs the same way instead of ending the turn. [Code mode](docs/CODEMODE.md). |
+| How the model acts: codemode (option) | The same sandbox reached through a declared `codemode` tool call with the script as a JSON argument. Opt in per node with `WASM_AGENT_RAW_CODE=codemode` (also `off`, `0`, `false`, `no`); `first` declares both, with the run block first. |
 | Reusable procedures | Skills for on-demand instructions; spells for repeatable procedures with postconditions; WASM tool plugins. |
 | WhatsApp audio | Persistent linked-device journal and opt-in incoming + own-outgoing original-chat transcription; EN default/PT per-account. [Pipeline](docs/WHATSAPP-TRANSCRIPTION.md). |
 | Supervision | A separate sentinel handles requested restarts/upgrades and budgeted event-triggered wakes. |
@@ -80,6 +82,36 @@ Default transcript retention is **seven days**; debug transcripts are retained.
 Explicit memories are a separate store. Tool artifacts and telemetry have their
 own retention limitations. “Evidence” does not mean unlimited archival storage;
 see [memory](docs/MEMORY.md) and [observability](docs/OBSERVABILITY.md).
+
+## CodeAct and codemode
+
+**CodeAct is the default.** The model does its work as code, in plain blocks - no JSON-escaped tool calls:
+
+````text
+Looking her up and reading the chat in one step.
+
+```js run
+const [who, chat] = await Promise.all([
+  tools.mcp_whatsapp_contacts({ q: "Laura" }),
+  tools.mcp_whatsapp_read({ chat: "112682812330026@lid", limit: 5 }),
+]);
+vars.laura = who.chat;                     // session state: kept for later scripts and turns
+return chat.messages.map(m => m.text);
+```
+````
+
+- one run block per message; the script's return value is the observation the model reads next;
+- `vars.<name>` persists for the session, functions included (`vars.lastMine = async (n) => ...`);
+- a long result is folded to one row in the CLI (`… +N chars`) and opens on a click;
+- the same policy, approvals and audit apply as for any tool call - a run block is dispatched as one.
+
+**codemode is the option.** Set it per node in the node's env (`~/.wasm-agent/env`) and restart:
+
+```sh
+WASM_AGENT_RAW_CODE=codemode   # the model calls the declared `codemode` tool with {code}
+WASM_AGENT_RAW_CODE=first      # both declared; the run block is offered first
+# unset (default)              # CodeAct only: the run block is the way to act
+```
 
 ## Trust before reach
 
