@@ -2425,3 +2425,28 @@ fn alias_log_lines_carry_counts_only() {
         assert!(line.starts_with("index: "), "{line}");
     }
 }
+
+#[test]
+fn one_person_under_a_lid_and_a_number_is_one_candidate() {
+    // 17/11 (operator): `Laura` answered two "Laura ❤️" rows - the `@lid` chat and the phone-number chat
+    // of the same person - and the model had to guess. The index knows the pair, so it is one entity.
+    let store = Memory::new();
+    block_on(put(&store, &direct(AB_PN, "Laah", "P1", base(), "old thread"))).unwrap();
+    block_on(put(&store, &lid_direct(AB_LID, "Laah Menezes", "A1", base() + 10, AB_PN))).unwrap();
+    block_on(set_contact(&store, &saved_by_number(AB_PN, "Laura <3", base() + 20))).unwrap();
+    let answer = block_on(contacts(&store, &named("Laura <3"))).unwrap();
+    assert_eq!(answer["count"], 1, "one person, one candidate: {answer}");
+    assert_eq!(answer["ambiguous"], false, "{answer}");
+    assert_eq!(answer["chat"], AB_LID, "the address the person talks under now: {answer}");
+    let candidate = &answer["candidates"][0];
+    assert_eq!(candidate["alias"], AB_PN, "{candidate}");
+    let same = candidate["same_person"].as_array().expect("same_person");
+    assert_eq!(same.len(), 1);
+    assert_eq!(same[0]["chat"], AB_PN);
+    // Somebody else with the same saved name is still a second person: ambiguity is about people.
+    block_on(put(&store, &direct(LAURA_TWO, "Laura", "Z1", base() + 30, "oi"))).unwrap();
+    block_on(set_contact(&store, &saved_by_number(LAURA_TWO, "Laura <3", base() + 31))).unwrap();
+    let two = block_on(contacts(&store, &named("Laura <3"))).unwrap();
+    assert_eq!(two["count"], 2, "{two}");
+    assert_eq!(two["ambiguous"], true, "{two}");
+}

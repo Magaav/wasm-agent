@@ -1818,9 +1818,42 @@ pub async fn contacts<S: Store>(store: &S, request: &seam::Verified) -> Result<s
     let matches = rank(&all, &query);
     let total = matches.len();
     let kept: Vec<(u8, ChatCard, String, &'static str)> = matches.into_iter().take(request.limit as usize).collect();
-    let top = kept.first().map(|(score, _, _, _)| *score).unwrap_or(0);
-    let top_count = kept.iter().filter(|(score, _, _, _)| *score == top).count();
-    let candidates: Vec<serde_json::Value> = kept.iter().map(|(score, card, matched, source)| candidate_json(*score, card, matched, source)).collect();
+    // One person, one candidate (operator 17/11: "both pointers should point to same entity"). WhatsApp
+    // journals the same person under a phone number AND a hidden `@lid`; the index learned that pair
+    // (`ix/al/`), so a chat whose alias is also in the list is folded into the earlier - better ranked,
+    // then most recent - candidate as `same_person`, and ambiguity is counted over people, not chats.
+    // Before this, `Laura` answered two "Laura ❤️" rows and the model had to guess they were one person.
+    let mut aliases: Vec<Option<String>> = Vec::with_capacity(kept.len());
+    for (_, card, _, _) in &kept {
+        aliases.push(if card.group { None } else { alias_of(store, &card.chat).await? });
+    }
+    let mut folded = vec![false; kept.len()];
+    let mut candidates: Vec<serde_json::Value> = Vec::new();
+    let mut scores: Vec<u8> = Vec::new();
+    for index in 0..kept.len() {
+        if folded[index] { continue; }
+        let (score, card, matched, source) = &kept[index];
+        let mut json = candidate_json(*score, card, matched, source);
+        if let Some(alias) = &aliases[index] {
+            json["alias"] = serde_json::Value::String(alias.clone());
+            let mut same = Vec::new();
+            for other in (index + 1)..kept.len() {
+                if !folded[other] && kept[other].1.chat == *alias {
+                    folded[other] = true;
+                    let card = &kept[other].1;
+                    same.push(serde_json::json!({
+                        "chat": card.chat, "messages": card.rows, "last_at": card.last,
+                        "at_local": crate::view::local(card.last),
+                    }));
+                }
+            }
+            if !same.is_empty() { json["same_person"] = serde_json::Value::Array(same); }
+        }
+        candidates.push(json);
+        scores.push(*score);
+    }
+    let top = scores.first().copied().unwrap_or(0);
+    let top_count = scores.iter().filter(|score| **score == top).count();
     let mut answer = serde_json::json!({
         "q": query,
         "candidates": candidates,
