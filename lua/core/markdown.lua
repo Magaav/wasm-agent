@@ -104,14 +104,17 @@ end
 -- `find_underscore` below applies the flanking rule the patterns cannot express.
 local INLINE = {
   { pattern = "`([^`]+)`", style = "mdCode" },
+  -- `***x***` first (17/11: it rendered as `*x*` in italic - the italic rule took the inner pair).
+  { pattern = "%*%*%*(.-)%*%*%*", style = { "bold", "italic", "text" } },
   { pattern = "%*%*(.-)%*%*", style = { "bold", "text" } },
   { underscore = 2, style = { "bold", "text" } },
   { pattern = "~~(.-)~~", style = "dim" },
   { pattern = "%*([^%*]-)%*", style = "italic" },
   { underscore = 1, style = "italic" },
   { pattern = "%[([^%]]*)%]%(([^%)]*)%)", link = true },
-  { pattern = "<(https?://[^>]+)>", style = "mdLinkUrl" },
-  { pattern = "https?://[%w%._%-/~%?%%&=:#%+@]+", style = "mdLinkUrl" },
+  -- A link reads as one: underlined, light blue (17/11); a click on it copies it (the host).
+  { pattern = "<(https?://[^>]+)>", style = { "underline", "mdLinkUrl" } },
+  { pattern = "https?://[%w%._%-/~%?%%&=:#%+@]+", style = { "underline", "mdLinkUrl" } },
 }
 
 -- One `_` is a word character here, never a delimiter: a run is a delimiter only when at least
@@ -179,10 +182,10 @@ local function inline(text, base)
     end
     local form = found.form
     if form.link then
-      out[#out + 1] = { text = found.first, style = "mdLink" }
+      out[#out + 1] = { text = found.first, style = { "underline", "mdLink" } }
       if found.second and found.second ~= "" then
         out[#out + 1] = { text = " ", style = base }
-        out[#out + 1] = { text = found.second, style = "mdLinkUrl" }
+        out[#out + 1] = { text = found.second, style = { "underline", "mdLinkUrl" } }
       end
     else
       -- A pattern with no capture (a bare url, an autolink's brackets) has no `first`:

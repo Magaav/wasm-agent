@@ -3234,6 +3234,20 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
                 let _ = wa_term::terminal_editor::write(&frame);
                 return;
             }
+            // A link under the pointer: copied (operator 17/11 - "copy it to the clipboard"), same notice.
+            if !state.transcript.bar_active() {
+                let shown = state.transcript.view(width, rows);
+                if let Some(url) = shown.get(row.saturating_sub(1)).and_then(|line| url_at(&wa_term::selection::plain(line), col)) {
+                    let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&url));
+                    let count = url.chars().count();
+                    if let Some(editor) = state.editor.as_mut() {
+                        editor.notice = format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" });
+                    }
+                    let frame = layout_frame(state);
+                    let _ = wa_term::terminal_editor::write(&frame);
+                    return;
+                }
+            }
             if let Some(text) = state.transcript.copy_at(row, col) {
                 let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
                 let count = text.chars().count();
@@ -3444,7 +3458,10 @@ fn refresh_build(state: &mut ConsoleInput) {
 fn refresh_tool_progress(state: &mut ConsoleInput) {
     if state.editor.as_ref().is_none_or(|editor| editor.row == 0) { return }
     let width = state.editor.as_ref().map(|editor| editor.width).unwrap_or(0);
-    let row = wa_term::tool_progress::current(width);
+    let mut row = wa_term::tool_progress::current(width);
+    // Never inside a code-mode block: its call rows already say ⏳/✓/✗ in place, and this row coming and going
+    // under the block moved everything above it up and down (operator 17/11, measured in the TUI).
+    if state.transcript.blocks.last().is_some_and(|block| block.code) { row = String::new(); }
     if row == state.tool_progress { return; }
     state.tool_progress = row;
     let text = if state.tool_progress.is_empty() { None } else { Some(state.tool_progress.as_str()) };
@@ -3643,6 +3660,20 @@ fn console_reader() {
                                 let count = text.chars().count();
                                 if let Some(editor) = state.editor.as_mut() {
                                     editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+                                }
+                            }
+                            wa_term::terminal_editor::Action::Pasted(from) => {
+                                let span = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor()));
+                                if let Some((text, to)) = span {
+                                    if let Some((mime, bytes)) = dropped_image(&text) {
+                                        let kb = bytes.len() / 1024;
+                                        state.pasted_images.push((mime, base64::engine::general_purpose::STANDARD.encode(&bytes)));
+                                        let token = format!("[Image #{}]", state.pasted_images.len());
+                                        if let Some(editor) = state.editor.as_mut() {
+                                            editor.replace_range(from, to, &token);
+                                            editor.notice = format!("{token} attached ({kb} KB)");
+                                        }
+                                    }
                                 }
                             }
                             wa_term::terminal_editor::Action::PasteImage => {
@@ -4145,6 +4176,60 @@ fn read_clipboard_image() -> Result<(String, Vec<u8>), String> {
     }
     Err(if tried { "no image on the clipboard".into() }
         else { "no clipboard here: wl-paste (Wayland) or xclip (X11) is needed, on the machine wa chat runs on".into() })
+}
+
+/// The URL under column `col` (1-based) of a plain screen row, trailing punctuation dropped.
+fn url_at(line: &str, col: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    // the char index under the column (cells, not bytes)
+    let (mut used, mut index) = (0usize, None);
+    for (i, ch) in chars.iter().enumerate() {
+        let w = wa_term::terminal_editor::cell_width_of(*ch).max(1);
+        if col > used && col <= used + w { index = Some(i); break; }
+        used += w;
+    }
+    let index = index?;
+    let text: String = chars.iter().collect();
+    for scheme in ["https://", "http://"] {
+        let mut from = 0usize;
+        while let Some(found) = text[from..].find(scheme) {
+            let start_byte = from + found;
+            let start = text[..start_byte].chars().count();
+            let mut end = start;
+            while end < chars.len() && !chars[end].is_whitespace() && !matches!(chars[end], '<' | '>' | '"' | '\'' | '`' | '│' | ')' | ']') { end += 1; }
+            while end > start && matches!(chars[end - 1], '.' | ',' | ';' | ':' | '!' | '?') { end -= 1; }
+            if index >= start && index < end && end > start + scheme.len() {
+                return Some(chars[start..end].iter().collect());
+            }
+            from = start_byte + scheme.len();
+        }
+    }
+    None
+}
+
+/// A pasted (or dropped) single path to an image file: its mime and bytes. Quotes, `file://` and `%20` are what
+/// terminals and file managers wrap a dropped path in.
+fn dropped_image(text: &str) -> Option<(String, Vec<u8>)> {
+    let mut path = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+    if path.contains('\n') || path.is_empty() { return None; }
+    if let Some(rest) = path.strip_prefix("file://") { path = rest.replace("%20", " "); }
+    let lower = path.to_lowercase();
+    let mime = if lower.ends_with(".png") { "image/png" } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") { "image/jpeg" }
+        else if lower.ends_with(".webp") { "image/webp" } else if lower.ends_with(".gif") { "image/gif" } else { return None };
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > 20 * 1024 * 1024 { return None; }
+    Some((mime.to_string(), std::fs::read(&path).ok()?))
+}
+
+/// `host.transcript_copy_first(text)`: the current block's first line becomes copyable with `text` (a code-mode
+/// block's script, known when its call settles).
+pub extern "C-unwind" fn transcript_copy_first(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = !text.is_empty() && state.transcript.copy_first(&text);
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
 }
 
 /// `host.input_image(n)`: the image pasted as `[Image #n]` this session, `{"mime","data"}` (base64), or nil.
