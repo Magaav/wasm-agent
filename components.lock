@@ -173,4 +173,7 @@ model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 4
 selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
 wa-email ddbe326a5d394a0dc50a0c947740a1364e4cdeda348286666a3ba21569893915 565827
-wa-whatsapp 1aadda8c95b57d76dc1048a87967091c04f145e1d17d7843a00f64912c22abd4 8837543
+# 17/11 repin of wa-whatsapp alone (change/codeact: contacts folds a @lid chat and its phone-number chat
+# into one person): built on avell in /home/victor/wasm-agent/checkout; every other pin is unchanged and
+# its bytes are the ones published in components-033542eb9a37.
+wa-whatsapp 6e083809ec471fff249ac72c581138e81b6d280540979ed817f32c0ecf07b1f6 8840589
