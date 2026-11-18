@@ -863,6 +863,227 @@ on both | `fast path FAILED (13 of 253 checks, 0 skipped, 150s)` and `... 148s`;
   (this round's diff is `scripts/mission.sh`, `scripts/test-mission.sh`, `docs/MISSIONS.md` and this file:
   no Lua, no JS, no release script), and `fast: mission ok` is green in the same run.
 * **unchanged by design, from round 5:** `verify` still refuses only on `active` (`clean` refuses everything
-  but `released`), and the round-4 hole stands - a session settled on the node's word and then woken by
+  but `released`; round 7 changed that - see its item 2), and the round-4 hole stands - a session settled on the node's word and then woken by
   `wa serve` writes with a pid whose cwd is never the mission's, so no presence read in this design sees it.
   This round neither fixes nor widens that.
+
+---
+
+# REPORT — round 7: the five findings of the review of `fc254d6d`, each with a check that is red before the fix
+
+Branch `change/mission-fabric`, rebased onto `origin/main` (`e5ba9089`) from `fc254d6d`; worktree
+`/home/victor/Work/missions/mission-fabric/wt`. Built and tested HERE (avell, x86_64, 16 cores). Committed
+locally, **never pushed**.
+
+The rebase needed a resolution in fifteen of the commits: every one of them touched the root `REPORT.md`, which
+main now has its own copy of. Each resolution keeps **main's** root `REPORT.md` byte for byte, and this round's
+report lives where main's `land-r1` round put reports: `docs/missions/reports/mission-fabric.md`. The branch's
+net diff against `e5ba9089` is `docs/MISSIONS.md`, `scripts/mission.sh`, `scripts/test-mission.sh` and that
+report file - it adds no root REPORT.md and deletes none.
+
+## The fixture, on this tree
+
+`bash scripts/test-mission.sh` -> **`mission fixture: 273 checks ok`**, rc 0, ~65 s (round 6: 240 checks).
+Scratch only, as the round asks: `HOME` and `WASM_AGENT_HOME` are a fresh `mktemp -d` outside
+`~/.wasm-agent` (`TMPDIR` pointed at it, so even `mktemp` inside the fixture stays out), and
+`WASM_AGENT_LUA_ROOT` is this worktree. No check reads or writes the real `~/.wasm-agent`.
+
+## 1. the EXIT sweep killed whatever a pid file named (MUST)
+
+**Finding (test-mission.sh:29-30, round 6).** `cleanup` iterated `"$MISSIONS"/*/run.pid` and `launch.pid` and
+killed the number inside, whoever held it. A killed run leaves those files behind, the kernel re-issues the
+number, and the next fixture's exit sweep SIGTERMs the new holder - on this node that can be a `wa serve`.
+
+**Change.** The sweep is now one function, `pid_sweep`, called by `cleanup`, and it kills
+only a process it can prove is this run's: a pid whose own `/proc/<pid>/cmdline` names this run's scratch dir
+(`"$WORK"` - a runner launched here always does), or a pid registered in `KIDS` whose forking parent is this
+shell (the `sleep` children the fixture puts in mission dirs carry no path in their cmdline, and dropping them
+would bring back the wedged-pipe failure round 2 fixed). A pid file naming anything else is not touched.
+
+**The check, and it is red before the fix.** The new case plants two live processes and two pid files in a scratch
+dir of its own: one whose cmdline names that dir (this fixture's runner), one that names nothing of it
+(`cd /tmp && exec sleep 600`), then runs the very `cleanup` the trap calls, in a subshell with that scratch
+dir as `WORK`.
+
+* before (the same fixture file with round 6's `pid_sweep` body put back):
+  `mission fixture FAILED: the EXIT sweep killed pid 1377961, which no pid file can prove is its own (a number the kernel re-used)`
+* after: both directions pass - the runner it started is killed, the foreign process survives.
+
+## 2. `verify` refused only `active`, so it ran commands beside a possible writer (MUST)
+
+**Finding (mission.sh:890-891).** `[ "$MR_VERDICT" = active ] && die ...` - an `unknown` read (a presence row
+that cannot be placed, a node that could not be asked) and a `stale` leftover went straight to
+`enter "$M"` and ran the command in the worktree, competing with a writer the read could not rule out.
+
+**Change.** The gate is the same one `start` and `clean` use: `[ "$MR_VERDICT" = released ] || refuse ...`.
+It refuses by name through `refuse`, so the state, the reason and the manual command are printed as before.
+A refusal runs nothing and writes no `verify.log` line.
+
+**The check.** A staged mission, then two reads:
+
+* before (round-6 `mission.sh`): `mission fixture FAILED: verify ran its command on an unknown read`
+* after: `refusing [unknown]`, the marker file the command would have created is absent, no `verify.log`;
+  the same mission without the row runs the command (released), and a `stale` leftover refuses too
+  (`refusing [stale]`), while the settled row runs it again.
+
+## 3. `node_presence` returned at the first row it could not place (MUST)
+
+**Finding (mission.sh:276/279/289).** `cannot_tell ...; return 2` on an empty pid, a non-numeric pid, or a live
+pid whose `/proc/<pid>/cwd` will not read. The scan stopped there, so a writer row further down the table was
+never printed, `writers_check` found no writer, and `mission_run` answered `unknown` - the false half of the
+round-6 test comment at `test-mission.sh:833` ("the same rc 2 whatever order the scan meets the rows in"), which
+passed only because the writer row happened to come first.
+
+**Change.** The unplaceable rows are collected in a reason string and the scan goes on; every row is read, writer
+rows are printed as they are found, and one `! cannot-tell` line carrying all the reasons is printed at the end
+with rc 2. A writer row therefore wins in either order, and the reasons are not lost.
+
+**The check, and the comment fixed.** The mixed case now plants the empty-pid row **before** the writer row
+(rowid order is the order sqlite returns), and its comment says what it measures instead of what the code did not
+do.
+
+* before (round-6 `mission.sh`, rows in that order):
+  `mission fixture FAILED: a writer beside a row that cannot be placed must read active, got: 'unknown: ... session abababab-4444-5555-6666-777777777777 has a session_presence row with an empty pid, so the process serving it - and the directory it works in - cannot be told - so whether a process is writing in .../missions/mixed/wt cannot be told ...'`
+* after: `active`, the verdict names the writer, and `start` refuses with it.
+
+## 4. the directories were compared as strings, so a symlinked missions path read as "another directory" (MUST)
+
+**Finding (mission.sh:487/294/514).** `/proc/<pid>/cwd` reports the path a directory really is. With
+`MISSIONS_DIR` reached through a symlink, the compare in `node_presence`, in `alive_launcher` and in
+`launch_alive` said "not this mission" for a process working in it: a writer scored as no writer, a launcher as
+some other program.
+
+**Change.** All three resolve the mission dir (and the worktree) with `cd ... && pwd -P` first.
+`launch_alive` accepts both spellings in the cmdline witness too, since the cmdline names the path `start`
+was handed while `/proc` reports the path it points at.
+
+**The check.** `ln -s "$MISSIONS" "$WORK/link"`, then every call goes through the symlinked path while the writer
+process is started in the real directory.
+
+* before (round-6 `mission.sh`):
+  `mission fixture FAILED: a writer in the real mission dir must read active through a symlinked MISSIONS_DIR, got: 'released: the node answered and lists no session for this mission (no run.lock, no 'wa: session' line, no title match)'`
+* after: `active` through the symlink, `start` refuses `[active]`, and a launcher standing in the real dir
+  (named by `run.pid`) refuses `[launcher]` with its pid.
+
+## 5. `clean` deleted the worktree without the start lock, then deleted the lock file (MUST)
+
+**Finding (mission.sh:902-935).** `clean` ran `mission_run` and then removed the worktree with nothing holding
+`start.flock`: a `start` inside its check-and-launch had already read the files the removal took away, and it
+launched into a tree being cleaned. Then `rm -f "$M/start.flock"` deleted the file the lock lives on - from
+under any holder, and, for the next `start`, a different inode to lock.
+
+**Change.** `clean` takes the same kernel lock first (`exec 9>>"$M/start.flock"`, `flock -n 9`), over the
+whole check-and-remove, and refuses by name while a `start` (or another `clean`) holds it. The file is **not**
+removed any more: this clean holds that lock, and deleting the file it holds leaves the next start locking a
+different inode. The unchanged `demo` case in the fixture now asserts the file stays.
+
+**The check.** A holder takes the lock and sleeps; `clean` on that mission, then:
+
+* before (round-6 `mission.sh`): `mission fixture FAILED: clean removed the worktree while a start held the start lock`
+* after: `refusing`, the refusal names `start.flock`, the worktree and `run.sh` are still there; once the
+  holder exits, the clean runs, removes the worktree and leaves `start.flock` on disk.
+
+## What I ran
+
+| command | result |
+| --- | --- |
+| `bash -n scripts/mission.sh`, `bash -n scripts/test-mission.sh` | clean |
+| `bash scripts/test-mission.sh` on this tree (scratch HOME/`WASM_AGENT_HOME` under `mktemp -d` outside `~/.wasm-agent`, `WASM_AGENT_LUA_ROOT` = this worktree) | **`mission fixture: 273 checks ok`**, rc 0, ~65 s |
+| five probe copies of the same fixture, each with exactly the pre-fix behaviour restored (below) | each red at its own item's check; quotes above |
+| `bash scripts/fast.sh` on this tree, once | `fast path FAILED (1 of 260 checks, 0 skipped, 125s)`: the one red is `scripts/test-provider-stall.lua` ("a provider call gets its own 90s first-response deadline: got \"300\", want \"90\"") - a **pre-existing** red, named in round 6's list of thirteen, and this round's diff touches no Lua and no release script; the `mission` row (which runs this fixture) is green inside that same run |
+
+How the probes were built, so the "before" is not a claim: each is a copy of **this** fixture file with one
+reversal - round-6's sweep body (item 1), or with the round-7 check that would fire earlier put back in its
+round-6 form so the run reaches its own item (the `demo` assertion that clean leaves the lock file, and the
+mixed case's row order), or with the earlier round-7 sections cut. Items 1-4 ran the new fixture against
+`MISSION_UNDER_TEST` = `git show HEAD:scripts/mission.sh` (the round-6 script); item 5 ran the new fixture
+with the round-6 sweep put back in its own `cleanup`. The probe copies were deleted before the commit
+(`git status` carries only the four files).
+
+## Not done, and not verified
+
+* **the real 600 s start cap was not waited for** - unchanged from round 6, and this round did not touch it.
+* **`launch_alive`'s rc 2 is still not exercised** by any fixture: it needs a live pid whose cmdline *and*
+  cwd are unreadable, which a fixture cannot make of its own child. Unchanged from round 6.
+* **`clean`'s lock covers `start` and other `clean`s of the same mission, nothing else.** A `stage`, a
+  `status` or a hand edit can still touch the mission dir while a clean runs; the lock's job is the
+  check-and-remove against the check-and-launch.
+* **the sweep's KIDS rule is deliberately wider than "cmdline names $WORK"**: a direct child of the fixture
+  shell is killed even when its cmdline names no path (the `sleep` children the fixture puts in mission dirs).
+  The reviewer's rule ("kill only pids this test started, and only if `/proc/<pid>/cmdline` names $WORK") would
+  have leaked those and brought back the wedged-pipe failure round 2 fixed; both conditions are checked, and the
+  pid-file half - the one that could kill a reused number - is now strictly the cmdline test.
+* **the doc's own wording was edited in eight places** (below); nothing else in `docs/MISSIONS.md` was touched.
+* **no deploy, no push, no land** - per the round.
+
+## Texts to approve
+
+Operator-facing strings, verbatim (`<...>` marks a value):
+
+1. `clean` refuses while the start lock is held (`scripts/mission.sh`, `die`):
+   `mission: refusing: another 'start' or 'clean' of <name> is inside its check-and-launch right now (flock -n on <mission>/start.flock). Wait for it: 'scripts/mission.sh status <name>' shows what that run did, and the kernel releases that lock when that start exits. There is nothing to clear.`
+2. `clean` with no `flock` on PATH:
+   `mission: no flock on PATH (util-linux): a clean beside a start is a kernel lock, not a guess`
+3. `clean` cannot open the lock file: `mission: cannot open <mission>/start.flock`
+4. `verify` refuses any verdict but `released` (two lines, through `refuse`):
+   `mission: refusing [<state>]: a verify runs a command in <mission>/wt, and this mission's run is not released: <reason>`
+   `mission: clear it by hand: <the command that clears that state>`
+5. the presence read's reason line, whose **shape** changed (one line can now carry several rows, joined with
+   `;`); the three reason texts themselves are unchanged:
+   `! cannot-tell session <id> has a session_presence row with an empty pid, so the process serving it - and the directory it works in - cannot be told;`
+   `! cannot-tell session <id> has a session_presence row whose pid is not a number [<pid>], so the process serving it cannot be looked up at all;`
+   `! cannot-tell pid <pid> (session <id>) is running and /proc/<pid>/cwd cannot be read - another user's process, or hidepid - so the directory it works in cannot be told;`
+
+Documentation (`docs/MISSIONS.md`), changed passages verbatim:
+
+6. fixture row: `scripts/test-mission.sh` (`KIDS` and the reaped sweep in `cleanup`; round 7: the sweep kills
+   only a pid whose own cmdline names the run's scratch dir, or a process this shell forked, so a pid file left by
+   a killed run cannot make it SIGTERM a number the kernel handed to something else - a `wa serve` was the
+   measured candidate)
+7. the second condition of `start`: `... as the answer to *where* (`writers_check`). `/proc` reports the
+   path a directory really is, so both sides of that compare are resolved with `cd ... && pwd -P` first: a
+   missions tree reached through a symlink is one directory with two spellings, and a bare string compare called a
+   writer in it "another directory" (round 7);`
+8. the writer-row verdict: `... The whole table is read before the answer is given, so a writer row decides even
+   when another row of the same read cannot be placed - in either order (round 6 named the writer; round 7
+   stopped the read from returning at the unplaceable row that came first)`
+9. the presence row of the reads table: `... The mission dir and its worktree are resolved with `pwd -P` before
+   that compare, so a symlinked missions path still matches (round 7)`
+10. the clearing table's lock row: `| another `start` - or a `clean` - holds the lock | its refusal names
+    `start.flock` | nothing: the kernel releases it when that `start` (or `clean`) exits. A leftover *file* is
+    not a lock, and is not cleared by hand either |`
+11. the status section: ``verify` and `clean` keep the same rule as `start`: both refuse every verdict but
+    `released` (`clean` since round 5 - a leftover row and a read that could not be made both reached
+    `git worktree remove`; `verify` since round 7 - it runs a command in `wt/`, so `unknown` and `stale` let
+    it run cargo beside a possible writer). `verify` never kills a process, and `clean` takes `start.flock`
+    before it removes anything and keeps the file: deleting the lock a clean holds would hand the next `start` a
+    different inode to lock (round 7).`
+12. section 5 (verify): `It refuses every verdict but `released` (round 7: `active` was its only refusal before,
+    so an `unknown` read or a `stale` leftover ran the command beside a possible writer), so a verify never
+    competes with a session for the same tree. A refusal writes nothing: no `verify.log` line, and the command is
+    not run.`
+13. section 9 (clean): `... takes `start.flock` before it removes anything and refuses while a `start` holds it
+    (round 7: the removal used to take the worktree a start was launching into), removes only the worktree and the
+    runner, prunes, and keeps the branch - its commits are the mission's result. `start.flock` stays on disk: the
+    lock is the kernel's, not the file's.`
+
+Fixture messages (developer-facing, in `scripts/test-mission.sh`), new or changed:
+
+14. `the EXIT sweep killed pid <pid>, which no pid file can prove is its own (a number the kernel re-used)`
+15. `the EXIT sweep left the runner it started (pid <pid>) alive`
+16. `verify ran its command on an unknown read` / `verify ran the command beside an unknown read` /
+    `a refused verify wrote its log` / `the released verify did not run its command` /
+    `verify ran its command on a leftover (stale) run` / `verify ran the command beside a leftover run` /
+    `the settled verify did not run its command`
+17. `the verify case must read unknown first, got: '...'` / `the verify case must read stale, got: '...'`
+18. `a writer in the real mission dir must read active through a symlinked MISSIONS_DIR, got: '...'` /
+    `a start through a symlinked missions dir must refuse beside that writer` /
+    `a launcher standing in the real mission dir must refuse a launch through a symlinked MISSIONS_DIR` /
+    `the symlinked stage did not create the real mission dir`
+19. `clean removed the worktree while a start held the start lock` / `the refused clean removed the worktree
+    anyway` / `the refused clean deleted the mission files anyway` / `clean deleted the lock file it holds` /
+    `clean deleted the start lock file it held` (replacing round 6's `clean left the start lock file`)
+20. the mixed case's comment (the false one at `test-mission.sh:833`) now reads: `... The unplaceable half here
+    is the empty-pid row of item 2, and it is planted BEFORE the writer row on purpose: the node returns these rows
+    in the order they were written, round 6 stopped the scan at the first row it could not place (so this same
+    case passed only because the writer happened to come first), and round 7 reads every row before it answers.`
