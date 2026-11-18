@@ -148,7 +148,14 @@ contains "$out" "2 new violation(s)" "the other two holes are still holes"
 #   * 'e.g. application/json' is a MIME type and 'never JSON' is a denial - neither is a field that
 #     carries a JSON value;
 #   * 'status: func() -> health' beside 'self-id: func() -> node-id' reads two values; only a -id the
-#     poll func TAKES is a handle.
+#     poll func TAKES is a handle;
+#   * 'resource terminal-input;' has no body: it names a resource and its declaration is over, so it
+#     must not push a context (the two in wit/kernel-v2/deps/cli.wit left every later declaration in
+#     that file one block too deep, and the next '}' popped the wrong block);
+#   * 'start: func() -> own<job>' and 'start: func() -> result<borrow<job>, error>' are the start side
+#     of 'resource job { poll }' too: the handle arrives wrapped, not bare;
+#   * 'not empty, JSON text' says the value IS JSON - a negation only denies JSON when it governs the
+#     mention, so a comma between 'not' and 'json' is not a denial.
 mkdir -p "$work/shapes"
 cat > "$work/shapes/shapes.wit" <<'WIT'
 package wa:fixture@0.1.0;
@@ -220,6 +227,119 @@ absent "$out" "node-info" "status: func() -> health beside self-id: func() -> no
 contains "$out" "[interface:ops] poll" "a poll func that TAKES the id is the pair, and still fails"
 listed=$(WIT_LINT_DIR="$work/shapes" WIT_LINT_BASELINE="$work/shapes/no-baseline.txt" bash scripts/wit-lint.sh --list 2>&1 || true)
 contains "$listed" "record:one-line	field payload-json	string	ok" "a field of a one-line record is in the map, so rule 1 can judge it"
+
+# ---- a resource with no body: it names a resource, and its declaration is over --------------------
+# wit/kernel-v2/deps/cli.wit:126 and :138 are 'resource terminal-input;' and 'resource terminal-output;'.
+# The reader pushed both on the context stack and nothing ever popped them, so each declaration after
+# them was read one block too deep and the next '}' closed the wrong block. Both halves are proved here:
+# the context the declarations after it get, and that the name is still recorded - a bodyless resource
+# is still the resource a start func hands out.
+mkdir -p "$work/bodyless"
+cat > "$work/bodyless/bodyless.wit" <<'WIT'
+package wa:fixture@0.1.0;
+
+interface handles {
+    /// The input side of a terminal: a handle with no functions of its own.
+    resource terminal-input;
+
+    get-stdin: func() -> option<terminal-input>;
+}
+
+interface later {
+    /// The JSON body of the request.
+    body: string,
+}
+
+interface jobs {
+    resource job;
+
+    start: func() -> job;
+
+    poll: func() -> result<string, error>;
+}
+
+interface braces {
+    /// A record whose opening brace is on a line of its own.
+    record split
+    {
+        /// The JSON name.
+        name: string,
+    }
+}
+WIT
+out=$(lint "$work/bodyless"); rc=$?
+[ "$rc" = 1 ] && ok || fail "the bodyless fixture must fail on its own holes, exit $rc: $out"
+contains "$out" "3 new violation(s)" "body, poll and name: three holes, and exactly three"
+contains "$out" "[interface:later] body" "a bodyless resource pushes nothing: the interface after it is where it says it is"
+absent "$out" "interface:handles/interface:later" "the interfaces after it are not read as nested inside each other"
+contains "$out" "[interface:jobs] poll" "and the funcs after it belong to their own interface, not to the resource above"
+contains "$out" "beside start handing out resource:job" "the bodyless resource is still a resource: the start func returning it still pairs with the poll"
+contains "$out" "[interface:braces/record:split] name" "a brace alone on its line still opens the block named above it"
+
+# ---- a handle that arrives wrapped: own<job> and borrow<job> are the resource inside them ----------
+# The pair is 'start' at interface level beside the funcs INSIDE the resource it hands out; the return
+# type names that resource through a wrapper, so an unwrap that stopped at option/result read
+# 'own<job>' as a type called 'own<job>' and the pair vanished.
+mkdir -p "$work/wrapped"
+cat > "$work/wrapped/wrapped.wit" <<'WIT'
+package wa:fixture@0.1.0;
+
+interface own-jobs {
+    start: func() -> own<job>;
+    resource job {
+        poll: func() -> result<string, error>;
+    }
+}
+
+interface borrowed-jobs {
+    start: func() -> result<borrow<job>, error>;
+    resource job {
+        poll: func() -> result<string, error>;
+    }
+}
+
+interface plain-jobs {
+    start: func() -> job;
+    resource job {
+        poll: func() -> result<string, error>;
+    }
+}
+WIT
+out=$(lint "$work/wrapped"); rc=$?
+[ "$rc" = 1 ] && ok || fail "the wrapped-handle fixture must fail, exit $rc: $out"
+contains "$out" "3 new violation(s)" "own<job>, borrow<job> inside a result, and the bare job: three pairs, exactly three"
+[ "$(printf '%s' "$out" | grep -c 'beside start handing out resource:job')" = 3 ] && ok || fail "each start hands out the resource it returns, wrapper or not: $out"
+
+# ---- a negation has to govern the mention it denies ------------------------------------------------
+# "never JSON" denies JSON. "not empty, JSON text" does not: the negation governs "empty", and the field
+# carries JSON text. The four denials and the MIME type beside it stay clean, so this is a narrowing of
+# the denial and not a removal of it.
+mkdir -p "$work/negation"
+cat > "$work/negation/negation.wit" <<'WIT'
+package wa:fixture@0.1.0;
+
+interface calls {
+    record args {
+        /// The user's own arguments: not empty, JSON text.
+        args: string,
+        /// The user's own arguments: never JSON.
+        raw: string,
+        /// The framing is never JSON: a framed byte stream.
+        framing: string,
+        /// The media type this header carries, e.g. application/json.
+        content-type: string,
+        /// Carries no JSON: the bytes are framed.
+        bytes: string,
+    }
+}
+WIT
+out=$(lint "$work/negation"); rc=$?
+[ "$rc" = 1 ] && ok || fail "the negation fixture must fail on the clause that IS JSON, exit $rc: $out"
+contains "$out" "args: string" "'not empty, JSON text' says the value is JSON, and the negation does not govern it"
+contains "$out" "1 new violation(s)" "and it is the only one: the denials and the MIME type are not violations"
+absent "$out" "framing" "a clause that says the framing is never JSON is a denial"
+absent "$out" "content-type" "a MIME type is not a value this field holds"
+absent "$out" "bytes" "carries no JSON is a denial"
 
 # ---- a parameter's baseline key carries its function --------------------------------------------
 # WIT has no per-parameter doc, so 'run(config: string)' and 'reload(config: string)' can be documented

@@ -37,7 +37,11 @@
 #     hand out a handle.
 #   * a start-ish func at interface level that hands out a resource is a sibling of that resource's
 #     own funcs: 'start: func() -> job' beside 'resource job { poll }' is the pair the rule exists
-#     for, even though the two funcs sit in different blocks.
+#     for, even though the two funcs sit in different blocks. The handle may arrive wrapped: own<job>
+#     and borrow<job> are the resource inside them.
+#   * only an open brace opens a block. 'resource terminal-input;' is a resource with no funcs of its
+#     own: it is recorded as a resource and its declaration is over, so the declarations after it keep
+#     the context they are in. A brace alone on its line still opens the block named above it.
 #
 # WHAT THIS DOES NOT COVER, said here because a verdict read for more than it says is worse than no
 # verdict:
@@ -107,7 +111,11 @@ function stripMimes(text) {
 // A clause that denies JSON ("never JSON", "carries no JSON", "isn't a JSON value") is not a clause
 // that says a value IS JSON. The mention is skipped clause by clause, never the whole doc: "a FILE
 // name, never a value" and "the args are JSON, never a stringified blob" both have to read right.
-const NEGATION = /\b(?:never|not|no|none|without|neither|nor|isn't|aren't|wasn't|doesn't|don't|does not|do not|must not|rather than)\b[^.;:!]{0,40}?\bjson\b/i;
+// A negation has to GOVERN the mention to deny it: the words between the negator and "json" may not
+// cross a comma or a bracket, because 'not empty, JSON text' says the value IS JSON (non-empty JSON
+// text) while 'carries no JSON' says it is not - reading the first as a denial was the hole. The gap
+// stays capped so a negator at the far end of a long clause is not read as this mention's.
+const NEGATION = /\b(?:never|not|no|none|without|neither|nor|isn't|aren't|wasn't|doesn't|don't|does not|do not|must not|rather than)\b[^.;:!,()]{0,40}?\bjson\b/i;
 function jsonClauses(text) {
   const clean = stripMimes(stripFilenames(text));
   const out = [];
@@ -134,10 +142,14 @@ function splitTop(text) {
   if (cur.trim()) out.push(cur.trim());
   return out;
 }
+// A handle crosses a seam wrapped: 'own<job>' and 'borrow<job>' are the resource NAMED INSIDE them, so
+// 'start: func() -> own<job>' beside 'resource job { poll }' is the start/poll pair, and a parameter
+// typed own<string> is still the string rule 1 judges.
+const WRAPPER = /^(?:option|result|own|borrow)<(.*)>$/;
 function unwrap(type) {
   let t = String(type).trim();
   for (;;) {
-    const m = t.match(/^(?:option|result)<(.*)>$/);
+    const m = t.match(WRAPPER);
     if (!m) return t;
     t = splitTop(m[1])[0].trim();
   }
@@ -172,14 +184,18 @@ const POLLISH = /^(?:status|poll)$|^(?:await|wait)-/;
 // end anything.
 function lineEvents(text, startDepth) {
   const events = []; let cur = '', depth = startDepth || 0, prev = '';
-  const flush = (end) => { const t = cur.trim(); cur = ''; if (t) events.push({ kind: 'text', text: t, end }); };
+  const flush = (end) => { const t = cur.trim(); cur = ''; if (!t) return false; events.push({ kind: 'text', text: t, end }); return true; };
   for (const ch of String(text)) {
     if (ch === '<' || ch === '(') depth++;
     else if (ch === ')') { if (depth > 0) depth--; }
     else if (ch === '>' && prev !== '-') { if (depth > 0) depth--; }
     if (depth === 0 && (ch === '{' || ch === '}')) {
-      flush(ch);
+      const hadText = flush(ch);
+      // A brace with nothing before it on the line still OPENS the block the declaration above it names
+      // ('record r' on one line, the brace on the next), so it emits an event of its own rather than
+      // leaving the declaration below to swallow whatever comes next.
       if (ch === '}') events.push({ kind: 'close' });
+      else if (!hadText) events.push({ kind: 'text', text: '', end: '{' });
       prev = ch; continue;
     }
     if (depth === 0 && (ch === ',' || ch === ';')) { flush(ch); prev = ch; continue; }
@@ -209,14 +225,18 @@ for (const file of files) {
     return { name: param.slice(0, at).trim().replace(/^%/, ''), type: param.slice(at + 1).trim() };
   }
 
-  // One declaration, complete: an opener, a type alias, a func or a field.
-  function declare(text, line, docLines) {
+  // One declaration, complete: an opener, a type alias, a func or a field. 'end' is the punctuation
+  // that ended it, and only an open brace OPENS a block: 'resource terminal-input;' names a resource and
+  // is over, and pushing it left the context of every later declaration in the file one level too deep
+  // (the two bodyless resources in wit/kernel-v2/deps/cli.wit did exactly that, so the funcs after them
+  // were read inside a resource they are not in, and the block that closed popped the wrong one).
+  function declare(text, line, docLines, end = '') {
     const trimmed = String(text).trim();
     if (!trimmed) { doc = []; return; }
     const opened = trimmed.match(/^(interface|resource|record|variant|enum|flags|world)\s+([a-z0-9-]+)/);
     if (opened) {
       if (opened[1] === 'resource') resourceNames.add(opened[2]);
-      stack.push(opened[1] + ':' + opened[2]);
+      if (end === '{') stack.push(opened[1] + ':' + opened[2]);
       doc = [];
       return;
     }
@@ -295,9 +315,11 @@ for (const file of files) {
         doc = [];
         continue;
       }
-      if (!pending) pending = { text: ev.text, line: i + 1, doc: doc.slice(), depth: 0 };
-      else pending.text += ' ' + ev.text;
-      if (ev.end) { declare(pending.text, pending.line, pending.doc); pending = null; }
+      // An event with no text of its own is a brace alone on its line: it ends the declaration standing
+      // above it (the block that brace opens) and adds no word to it.
+      if (!pending) { if (!ev.text) continue; pending = { text: ev.text, line: i + 1, doc: doc.slice(), depth: 0 }; }
+      else if (ev.text) pending.text += ' ' + ev.text;
+      if (ev.end) { declare(pending.text, pending.line, pending.doc, ev.end); pending = null; }
     }
     if (pending) pending.depth = scanned.depth;
   }

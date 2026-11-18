@@ -21,6 +21,8 @@
 #      reverse; one that clears either threshold is not (ARCHITECTURE.md: "never sooner than 30 days or
 #      100 commits" - the earlier of the two ends the cooldown, so both must be short to block) - and a
 #      decision whose commit count CANNOT be read is inside, never outside, a cooldown nobody verified;
+#      a record with NO DATE is unverified the same way: flagged by name, never read as "the 30 days
+#      have passed" (its age came out null and every 'too soon' comparison was false);
 #   6. the exit code is 0 with every one of those flags set - these are flags, not failures.
 #
 #   bash scripts/test-module-report.sh
@@ -146,6 +148,21 @@ contains "$out" "crate:b: split on $recent" "the recent split is printed with it
 contains "$out" "rebuild 41s -> 6s" "and with its measurement"
 contains "$out" "crate:c: merge on $old" "the old merge is printed too"
 [ "$(printf '%s' "$out" | grep -c 'FLAG too soon to reverse')" = 1 ] && ok || fail "exactly one decision is inside the cooldown (3 days AND 4 commits), and the 60-day one is not: $out"
+
+# ---- 5b. a decision nobody can date is UNVERIFIED, not cleared -----------------------------------
+# Its age is unknown, so it says nothing about the cooldown - and a report that prints it without a flag
+# reads it as a decision that has aged out. The commit count IS readable here (the fixture's first
+# commit), so this is the date alone: 8 commits ago and no date is still unverified, not "8 < 100, so
+# almost inside".
+printf '{"decision":{"kind":"split","commit":"%s","measurement":"no date on this one"}}\n' "$first" > "$work/rust/a/module.json"
+out=$(report)
+contains "$out" "crate:a: split on ?" "a decision with no date says '?' where its date would be"
+contains "$out" "FLAG unverified: no date in the record, so its cooldown cannot be read" "and it is flagged unverified instead of silently clear"
+contains "$out" "1 with no date, flagged unverified" "the decision line counts it, so a reader sees it without reading every row"
+contains "$out" "no date on this one" "the record's own measurement is still printed for it"
+absent "$out" "split on ?)" "a dateless record gets no empty age bracket: '?)' read as '0 days ago'"
+[ "$(printf '%s' "$out" | grep -c 'FLAG too soon to reverse')" = 1 ] && ok || fail "the dateless record is not ALSO reported as inside the cooldown: exactly one decision is, and it is the 3-day one: $out"
+rm -f "$work/rust/a/module.json"
 
 # ---- 6. this tree: the report runs here and its map is the tree's --------------------------------
 out=$(node scripts/module-report.mjs --rows 3 2>&1); rc=$?

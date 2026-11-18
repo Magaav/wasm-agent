@@ -264,8 +264,12 @@ for (const mod of modules) {
   // Both ends of the cooldown have to be short for a reversal to be too soon - but an UNKNOWN commit
   // count is not a satisfied one: without git (or without a commit in the record) the count is
   // unverified, and a report that reads that as "clear" is the fail-open this flag exists to stop.
-  const tooSoon = days !== null && days < COOLDOWN_DAYS && (since === null || since < COOLDOWN_COMMITS);
-  decisions.push({ mod: mod.kind + ':' + mod.name, days, since, tooSoon, decision: mod.decision });
+  // A record with NO DATE is unverified the same way, and was the other half of that fail-open: the age
+  // came out null and 'days < COOLDOWN_DAYS' was false, so a decision nobody could date read as one
+  // that had cleared the 30 days. It is neither inside nor outside: it is FLAGGED, by name, here.
+  const unverified = days === null;
+  const tooSoon = !unverified && days < COOLDOWN_DAYS && (since === null || since < COOLDOWN_COMMITS);
+  decisions.push({ mod: mod.kind + ':' + mod.name, days, since, unverified, tooSoon, decision: mod.decision });
 }
 
 // ---- the report ----------------------------------------------------------------------------------
@@ -313,13 +317,20 @@ if (heldBack.length) {
 if (!mergeCandidates.length && hottest.length) {
   p('module-report:   hottest: ' + hottest.map((r) => r.pair + ' ' + r.n + '/' + r.of).join('; '));
 }
+const unverifiedCount = decisions.filter((d) => d.unverified).length;
 p('module-report: decision  ' + decisions.length + ' recorded; cooldown ' + COOLDOWN_DAYS + ' day(s) or ' +
-  COOLDOWN_COMMITS + ' commit(s) (a reversal needs a new measurement before then)');
+  COOLDOWN_COMMITS + ' commit(s) (a reversal needs a new measurement before then)' +
+  (unverifiedCount ? '; ' + unverifiedCount + ' with no date, flagged unverified' : ''));
 for (const d of decisions) {
+  // The age is printed only when it is known: a record with no date (or one whose commit count cannot
+  // be read) has nothing to say in brackets, and printing an empty pair of them read as "0 days ago".
+  const aged = [];
+  if (d.days !== null) aged.push(d.days + ' day(s) ago');
+  if (d.since !== null) aged.push(d.since + ' commit(s) ago');
   p('module-report:   ' + d.mod + ': ' + (d.decision.kind || '?') + ' on ' + (d.decision.date || '?') +
-    (d.days !== null ? ' (' + d.days + ' day(s) ago' : '') +
-    (d.since !== null ? ', ' + d.since + ' commit(s) ago' : '') + ')' +
+    (aged.length ? ' (' + aged.join(', ') + ')' : '') +
     (d.decision.measurement ? ' - ' + d.decision.measurement : '') +
+    (d.unverified ? '   [FLAG unverified: no date in the record, so its cooldown cannot be read]' : '') +
     (d.tooSoon ? '   [FLAG too soon to reverse]' : ''));
 }
 console.log(out.join('\n'));
