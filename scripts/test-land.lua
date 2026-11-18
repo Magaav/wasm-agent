@@ -1105,23 +1105,168 @@ local refused, _, refused_err = shell("bash -c '. scripts/lib/fast-rows.sh && wa
 eq(refused, 2, "a request naming the declared row is refused, so nothing runs")
 contains(refused_err, "fast_narrow:unknown_row", "by the name the two measured landings hit")
 
--- 18c-3. `--full` means the whole suite: no WA_FAST_ROWS file, and every check.
-must("mkdir -p " .. land.run_dir("rows-narrowed") .. " " .. land.run_dir("rows-full"), "rows dirs")
-local narrowed_run = { id = "rows-narrowed", journal = { plan = { rows = { "scripts/test-agent-live.lua" }, full = false } } }
-local rows_file = land.gate_rows_file(narrowed_run, {})
-ok(rows_file ~= nil, "a narrowed round gets a WA_FAST_ROWS file")
-contains(read_file(rows_file) or "", "scripts/test-agent-live.lua", "holding the rows the plan chose")
-eq(land.gate_rows_file({ id = "rows-full", journal = narrowed_run.journal }, { full = true }), nil,
+-- 18c-3. `--full` means the whole suite: no WA_FAST_ROWS file, and every check. The rows file itself is
+-- proved against the MERGED TREE (18c-4 below), so these cases carry a real one.
+must("mkdir -p " .. land.run_dir("rows-full") .. " " .. land.run_dir("rows-plan-full"), "rows dirs")
+local narrowed_plan = { plan = { rows = { "scripts/test-agent-live.lua" }, full = false } }
+eq(land.gate_rows_file({ id = "rows-full", tree = repo, journal = narrowed_plan }, { full = true }), nil,
   "--full writes no rows file")
 eq(read_file(land.run_dir("rows-full") .. "/gate-rows.txt"), nil, "and none exists on disk for that round")
-eq(land.gate_rows_file({ id = "rows-plan-full", journal = { plan = { rows = {}, full = true } } }, {}), nil,
+eq(land.gate_rows_file({ id = "rows-plan-full", tree = repo, journal = { plan = { rows = {}, full = true } } }, {}), nil,
   "a plan that already runs the whole suite writes none either")
-eq(land.gate_rows_file({ id = "rows-docs", journal = { plan = { rows = {}, full = false } } }, {}), nil,
-  "so does a plan with no row at all")
 local full_checks, full_why = land.gate_checks({ journal = { plan = { checks = { "fast" } } } }, { full = true })
 eq(#full_checks, #land.DEFAULT_CHECKS, "--full runs every gate check, not the narrowed set")
 contains(full_why, "--full", "and the gate says so")
+-- 18c-4. The rows file is proved against the MERGED TREE, never the planner's checkout.
+--
+-- WHY. The plan is made before anything is merged, from the operator's checkout (journal.repo);
+-- scripts/fast.sh runs in the merged worktree (run.tree). The two lists disagree in both directions and each
+-- disagreement was a broken gate:
+--
+--   * a branch that ADDS scripts/test-new.lua is not a row the planner's checkout has, so the plan said "not a
+--     gate row" and the branch's own new test never ran - a narrowed gate that silently dropped the row the
+--     change brought with it;
+--   * a branch that ADDS an exclude line (or DELETES a row) left the plan requesting a row the merged tree's
+--     runner refuses: fast_narrow:unknown_row, and the whole round gated on zero tests.
+--
+-- The merged tree is built the way impl.merge builds one: a worktree of the base with the branch merged in.
+local rows_ref = must("git -C " .. repo .. " rev-parse --abbrev-ref HEAD")
+local rows_base = must("git -C " .. repo .. " rev-parse HEAD")
+local function merged_row_tree(name, edit)
+  local branch = "change/" .. name
+  must("git -C " .. repo .. " checkout -q -B " .. branch .. " " .. rows_base, "branch " .. branch)
+  edit()
+  must("git -C " .. repo .. " add -A && git -C " .. repo .. " commit -q -m " .. name, "commit " .. name)
+  local sha = must("git -C " .. repo .. " rev-parse HEAD")
+  local tree = fixture .. "/merged-" .. name
+  must("git -C " .. repo .. " worktree add --quiet -b land-" .. name .. " " .. tree .. " " .. rows_base,
+    "worktree for " .. name)
+  must("git -C " .. tree .. " merge --no-ff --no-edit -m " .. name .. " " .. sha, "merge " .. name)
+  -- The planner's checkout keeps the base: it must NOT hold what only the branch has.
+  must("git -C " .. repo .. " checkout -q --detach " .. rows_base, "leave the base checked out")
+  return sha, tree
+end
+local function rows_run(id, tree, sha, rows)
+  must("mkdir -p " .. land.run_dir(id), "run dir " .. id)
+  return { id = id, tree = tree, journal = { repo = repo, base = rows_base,
+    branches = { { name = "change/x", sha = sha } }, plan = { rows = rows, checks = { "fast" }, full = false } } }
+end
 
+-- The branch ADDS a test row. The planner's checkout cannot see it...
+local added_sha, added_tree = merged_row_tree("newrow", function()
+  write_file(repo .. "/scripts/test-new-agent-row.lua", "-- mentions lua/core/agent.lua\n")
+end)
+local planner_run = { id = "rows-planner", journal = { repo = repo, base = rows_base,
+  branches = { { name = "change/newrow", sha = added_sha } } } }
+local planner_rows, planner_not = land.gate_rows(planner_run, { "lua/core/agent.lua", "scripts/test-new-agent-row.lua" })
+eq(table.concat(planner_rows, " "), "scripts/test-agent-live.lua",
+  "the planner's checkout maps the changed module to the one runnable row it has")
+local planner_why = {}
+for _, entry in ipairs(planner_not) do planner_why[entry.path] = entry.why end
+contains(planner_why["scripts/test-new-agent-row.lua"] or "", "not a row this fast path runs",
+  "and reports the branch's own new row as not a gate row, by name")
+-- ...and the gate asks for it anyway, because the merged tree HAS it as a row.
+local added_run = rows_run("rows-added", added_tree, added_sha, { "scripts/test-agent-live.lua" })
+local added_file, added_failed, added_notes = land.gate_rows_file(added_run, {})
+ok(added_file ~= nil and not added_failed, "a narrowed round gets a WA_FAST_ROWS file")
+local added_text = read_file(added_file) or ""
+contains(added_text, "scripts/test-agent-live.lua", "holding the rows the plan chose")
+contains(added_text, "scripts/test-new-agent-row.lua", "AND the row the branch added, which the planner's checkout cannot see")
+contains(table.concat(added_notes, " | "), "scripts/test-new-agent-row.lua", "and the evidence names what it asks for")
+must("bash -c '. scripts/lib/fast-rows.sh && wa_fast_row_candidates' > " .. fixture .. "/candidates-added.txt",
+  "the merged tree's candidate list", added_tree)
+local added_code, added_out, added_err = shell("bash -c '. scripts/lib/fast-rows.sh && wa_fast_row_filter " ..
+  fixture .. "/candidates-added.txt " .. added_file .. "'", added_tree)
+eq(added_code, 0, "the merged tree's own filter accepts the request (" .. tostring(added_err) .. ")")
+contains(added_out, "scripts/test-new-agent-row.lua", "so the branch's own new row really runs")
+
+-- The branch ADDS an exclude line: a row the plan asked for is no longer a row the merged tree can run.
+local excluded_sha, excluded_tree = merged_row_tree("excluder", function()
+  write_file(repo .. "/scripts/fast-path.exclude",
+    "scripts/test-agent-thing.lua  # needs a ledger the fast path has not got\n" ..
+    "scripts/test-agent-unrunnable.lua  # needs a real raw terminal\n" ..
+    "scripts/test-agent-live.lua  # this round excludes it\n")
+end)
+-- One runnable row left: it is requested, the excluded one is dropped BY NAME.
+local two_run = rows_run("rows-two", excluded_tree, excluded_sha,
+  { "scripts/test-agent-live.lua", "scripts/test-fast-row-environment.lua" })
+local two_file, two_failed, two_notes = land.gate_rows_file(two_run, {})
+ok(two_file ~= nil and not two_failed, "a round with one runnable row left is still narrowed")
+local two_text = read_file(two_file) or ""
+contains(two_text, "scripts/test-fast-row-environment.lua", "the runnable row is requested")
+ok(two_text:find("scripts/test-agent-live.lua", 1, true) == nil,
+  "the row the merged tree excludes is NOT requested (got " .. two_text .. ")")
+local two_why = table.concat(two_notes, " | ")
+contains(two_why, "scripts/test-agent-live.lua", "the dropped row is named in the evidence")
+contains(two_why, "this round excludes it", "with the ledger's own reason")
+-- Nothing left: no rows file at all, so the whole suite runs.
+local none_run = rows_run("rows-none", excluded_tree, excluded_sha, { "scripts/test-agent-live.lua" })
+local none_file, _, none_notes = land.gate_rows_file(none_run, {})
+eq(none_file, nil, "a round whose only row the merged tree excludes writes no rows file")
+eq(read_file(land.run_dir("rows-none") .. "/gate-rows.txt"), nil, "and none exists on disk")
+local none_why = table.concat(none_notes, " | ")
+contains(none_why, "the whole suite runs", "the gate says the whole suite runs")
+contains(none_why, "scripts/test-agent-live.lua", "and names the row it dropped")
+-- The stale list the plan would have written is exactly what the merged tree refuses: this is the failure.
+write_file(fixture .. "/rows-stale.txt", "scripts/test-agent-live.lua\n")
+must("bash -c '. scripts/lib/fast-rows.sh && wa_fast_row_candidates' > " .. fixture .. "/candidates-excluded.txt",
+  "the excluded tree's candidate list", excluded_tree)
+local stale_code, _, stale_err = shell("bash -c '. scripts/lib/fast-rows.sh && wa_fast_row_filter " ..
+  fixture .. "/candidates-excluded.txt " .. fixture .. "/rows-stale.txt'", excluded_tree)
+eq(stale_code, 2, "the pre-merge request really is refused, so nothing would run")
+contains(stale_err, "fast_narrow:unknown_row", "by the name this case prevents")
+-- And no merged tree at all is no proof of anything: the whole suite runs.
+local no_tree, _, no_tree_notes = land.gate_rows_file({ id = "rows-notree", journal = narrowed_plan }, {})
+eq(no_tree, nil, "without a merged tree no row is proved runnable")
+contains(table.concat(no_tree_notes or {}, " | "), "the whole suite runs", "and the gate says so")
+must("git -C " .. repo .. " checkout -q " .. rows_ref, "restore the fixture checkout")
+
+-- 18c-5. The fast check ALWAYS carries WA_FAST_ROWS, empty when the round narrowed nothing: scripts/fast.sh
+-- narrows only on a NON-EMPTY WA_FAST_ROWS ([ -n "$WA_FAST_ROWS" ]), so one inherited from the environment
+-- would narrow a --full run that wrote no rows file - a run executing less than it said, obeying somebody
+-- else's plan.
+eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, nil),
+  "WA_FAST_ROWS= bash scripts/fast.sh", "no rows file means an EMPTY WA_FAST_ROWS, not an absent one")
+eq(land.gate_command({ name = "fast", command = "bash scripts/fast.sh" }, "/tmp/rows.txt"),
+  "WA_FAST_ROWS='/tmp/rows.txt' bash scripts/fast.sh", "a narrowed round names its file")
+eq(land.gate_command({ name = "cargo-codemode", command = "cargo test" }, nil), "cargo test",
+  "and no other check is touched")
+local env_probe = fixture .. "/rows-env.sh"
+write_file(env_probe, "#!/usr/bin/env bash\nprintf '%s\n' \"$WA_FAST_ROWS\"\n")
+eq(must("env WA_FAST_ROWS=" .. fixture .. "/inherited.txt bash " .. env_probe), fixture .. "/inherited.txt",
+  "an inherited WA_FAST_ROWS really does reach a check that does not set it")
+eq(must("env WA_FAST_ROWS=" .. fixture .. "/inherited.txt " ..
+  land.gate_command({ name = "fast", command = "bash " .. env_probe }, nil)), "",
+  "and the empty assignment the gate always makes removes it")
+-- At the gate: the command it actually runs, on both paths.
+local saved_gate_exec = land.exec
+local gate_commands = {}
+-- Only the gate's own checks are answered here (they are held to their command); everything else - the row
+-- inventory the rows file is proved with, the git calls - still runs for real.
+local function is_gate_check(command)
+  for _, marker in ipairs({ "scripts/fast.sh", "scripts/test-codemode-component.sh", "cargo test", "sync-prompt-docs" }) do
+    if command:find(marker, 1, true) then return true end
+  end
+  return false
+end
+land.exec = function(command, cwd, timeout)
+  if not is_gate_check(command) then return saved_gate_exec(command, cwd, timeout) end
+  gate_commands[#gate_commands + 1] = command
+  return { code = 0, stdout = "test result: ok. 3 passed\n", stderr = "" }
+end
+local saved_weight = land.weight_decorator
+land.weight_decorator = ""
+eq(land.impl.gate(added_run, {}), true, "a narrowed gate runs")
+eq(gate_commands[1], "WA_FAST_ROWS='" .. land.run_dir("rows-added") .. "/gate-rows.txt' bash scripts/fast.sh",
+  "the narrowed gate runs the fast check with the round's rows file (got " .. tostring(gate_commands[1]) .. ")")
+gate_commands = {}
+eq(land.impl.gate(added_run, { full = true }), true, "a --full gate runs")
+eq(gate_commands[1], "WA_FAST_ROWS= bash scripts/fast.sh",
+  "--full runs the fast check with WA_FAST_ROWS EMPTY (got " .. tostring(gate_commands[1]) .. ")")
+contains(read_file(land.evidence_path("rows-added", "gate")) or "", "WA_FAST_ROWS=",
+  "and the evidence logs the command that ran, not one it might have run")
+land.exec = saved_gate_exec
+land.weight_decorator = saved_weight
 
 -- 18d. The deploy's waves: canary alone, the middle together, the account node last.
 local function wave_names(plan)

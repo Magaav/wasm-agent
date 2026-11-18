@@ -1408,19 +1408,79 @@ local function passed_tests(text)
   return total
 end
 
--- <run> <options> -> path, failed: the WA_FAST_ROWS file this round narrows `scripts/fast.sh` with, or nil when
--- nothing narrows it. `--full` means the WHOLE suite, so a full round writes no rows file at all; neither does a
--- plan that already runs everything (`plan.full`), a docs-only plan (no row maps to a document) or a round whose
--- checks were named by hand (`--checks`). The file is written next to the evidence, so the command in the log is
--- the command that ran.
+-- <check> <rows_file> -> the command this round runs the check with. `fast` ALWAYS carries a WA_FAST_ROWS
+-- assignment: the file when the round narrowed, and an EMPTY value when it did not. Empty is not the same as
+-- absent - `scripts/fast.sh` narrows on `[ -n "${WA_FAST_ROWS:-}" ]` - so a WA_FAST_ROWS inherited from the
+-- environment would narrow a round that wrote no file: a `--full` run would execute less than it said, obeying
+-- somebody else's plan. Every other check runs untouched.
+function M.gate_command(check, rows_file)
+  if check.name ~= "fast" then return check.command end
+  return "WA_FAST_ROWS=" .. (rows_file and quote(rows_file) or "") .. " " .. check.command
+end
+
+-- <run> <options> -> path, failed, notes: the WA_FAST_ROWS file this round narrows `scripts/fast.sh` with, or
+-- nil when nothing narrows it. `--full` means the WHOLE suite, so a full round writes no rows file at all;
+-- neither does a plan that already runs everything (`plan.full`), a docs-only plan (no row maps to a document)
+-- or a round whose checks were named by hand (`--checks`). The file is written next to the evidence, so the
+-- command in the log is the command that ran. `notes` is what the gate logs: every row it did NOT ask for and
+-- why, and the line that says the whole suite runs.
+--
+-- The list is proved against the MERGED TREE (`run.tree`), never against the planner's checkout. The plan is
+-- made before anything is merged, from the operator's checkout (`journal.repo`), so the two trees can disagree
+-- in both directions and each disagreement was a broken gate:
+--
+--   * a branch that ADDS `scripts/test-new.lua` is not a row the planner's checkout has, so the plan reports it
+--     "not a gate row" and the branch's own new test never runs - a narrowed gate that silently drops the row
+--     the change brought with it;
+--   * a branch that ADDS an exclude line (or DELETES a row) leaves the planner requesting a row the merged
+--     tree's runner refuses - `fast_narrow:unknown_row`, the whole round gated on zero tests.
+--
+-- So the candidates are read where `scripts/fast.sh` will run them, and only what that inventory proves is
+-- requested: the plan's rows and every changed `scripts/test-*.lua` that exists there, minus whatever the
+-- merged tree declares not run. Anything dropped is named in `notes` (evidence, by name - never a silence), and
+-- a round with no row left in the merged tree runs the whole suite.
 function M.gate_rows_file(run, options)
   local plan = run.journal and run.journal.plan
   if options.checks or options.full or not plan or plan.full then return nil end
-  local rows = plan.rows or {}
-  if #rows == 0 then return nil end
+  local tree = run.tree
+  if not tree or tostring(tree) == "" then
+    return nil, false, { "no merged tree is known, so no row can be proved runnable: the whole suite runs" }
+  end
+  local inventory = M.row_inventory(slashes(tree))
+  local known = inventory.known or {}
+  local rows, seen, dropped = {}, {}, {}
+  local function keep(path, source)
+    path = trim(path)
+    if path == "" or seen[path] then return end
+    if not path:match("^scripts/test%-[%w%._%-]+%.lua$") then return end
+    seen[path] = true
+    if not known[path] then
+      dropped[#dropped + 1] = { path = path, source = source,
+        why = (inventory.skips or {})[path] or inventory.why or "not a row this fast path runs in the merged tree" }
+      return
+    end
+    rows[#rows + 1] = path
+  end
+  for _, row in ipairs(plan.rows or {}) do keep(row, "the plan asked for it") end
+  -- A row the branch ADDS or DELETES is only visible here: the planner's checkout has the old list.
+  for _, path in ipairs(M.changed_paths(run)) do keep(path, "this round changes it") end
+  table.sort(rows)
+  local notes = {}
+  for _, entry in ipairs(dropped) do
+    notes[#notes + 1] = "not asking for " .. entry.path .. " (" .. entry.source .. "): " .. entry.why
+  end
+  if #rows == 0 then
+    notes[#notes + 1] = "no row the merged tree can run is left" ..
+      (#dropped > 0 and (" (" .. #dropped .. " dropped)") or "") .. "; the whole suite runs"
+    return nil, false, notes
+  end
   local path = M.run_dir(run.id) .. "/gate-rows.txt"
-  if not write(path, table.concat(rows, "\n") .. "\n") then return nil, true end
-  return path
+  if not write(path, table.concat(rows, "\n") .. "\n") then
+    notes[#notes + 1] = "the row list could not be written; every Lua row will run"
+    return nil, true, notes
+  end
+  notes[#notes + 1] = string.format("%d row(s) of the merged tree: %s", #rows, table.concat(rows, " "))
+  return path, false, notes
 end
 
 impl.gate = function(run, options)
@@ -1432,20 +1492,21 @@ impl.gate = function(run, options)
   -- writes none (M.gate_rows_file). The file is written next to the evidence, so the command in the log is the
   -- command that ran.
   local checks, why = M.gate_checks(run, options)
-  local rows_file, rows_file_failed = M.gate_rows_file(run, options)
-  if rows_file_failed then evidence("the row list could not be written; every Lua row will run\n") end
+  local rows_file, rows_file_failed, rows_notes = M.gate_rows_file(run, options)
+  local notes = rows_notes or {}
+  for _, note in ipairs(notes) do evidence("gate rows: " .. tostring(note) .. "\n") end
+  if rows_file_failed and #notes == 0 then evidence("gate rows: the row list could not be written; every Lua row will run\n") end
   run.journal.gate_checks = why
   local decorator = M.weight()
   run.journal.gate_weight = decorator ~= "" and decorator or "none (no weight could be applied)"
   local rows = {}
   for _, check in ipairs(checks) do
-    local command = check.command
-    if rows_file and check.name == "fast" then
-      command = "WA_FAST_ROWS=" .. quote(rows_file) .. " " .. command
-    end
+    -- The fast check ALWAYS gets the assignment (M.gate_command): the round's file, or an empty value so a
+    -- WA_FAST_ROWS inherited from the environment cannot narrow a run that wrote none.
+    local command = M.gate_command(check, rows_file)
     command = (decorator ~= "" and (decorator .. " " .. quote(command))) or command
     local cwd = check.cwd and (slashes(tree) .. "/" .. check.cwd) or slashes(tree)
-    evidence(command_line(check.name, check.command, decorator))
+    evidence(command_line(check.name, command))
     local started = now()
     local result = M.exec(command, cwd, check.timeout or 1800)
     local seconds = now() - started
@@ -1474,7 +1535,7 @@ impl.gate = function(run, options)
     if not row.ok then
       -- Alone, once. No other check runs beside it, so "it passes alone" is a statement about load.
       local retry_started = now()
-      evidence(command_line(check.name .. " (alone, after a failure)", check.command, decorator))
+      evidence(command_line(check.name .. " (alone, after a failure)", command))
       local retry = M.exec(command, cwd, check.timeout or 1800)
       local retry_tests = passed_tests((retry.stdout or "") .. (retry.stderr or ""))
       evidence((retry.stdout or "") .. (retry.stderr or ""))
