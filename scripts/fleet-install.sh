@@ -381,6 +381,7 @@ if [ -n "${NODE_PIN_LIB:-}" ]; then
   [ -n "$PIN_REPORT" ] && say "$PIN_REPORT"
   if [ "$PIN_STATE" != 0 ]; then
     if [ "$FORCE" = 1 ] && [ -n "$REASON" ]; then
+      ANCESTRY_STATE=override
       say "OVERRIDE, recorded: $NODE_NAME is pinned and this install does not release it; going on because --force --reason says so"
       say "force_requested rule=node_pinned reason=$REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     else

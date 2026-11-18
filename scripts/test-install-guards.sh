@@ -64,9 +64,14 @@ for candidate_port in 18911 18912 18913 18914 18915; do
 done
 [ -n "$PORT" ] && ok "a local /health is serving on 127.0.0.1:$PORT" || bad "could not start a local /health server"
 
+# WASM_AGENT_HOME: the node's own pin store lives under it (scripts/lib/node-pins.sh), and a scratch one keeps
+# this test away from whatever this machine is actually pinned to.
+FLEET_HOME=""
 fleet() { # <install-dir> <artifact> <args...> -> FLEET_OUT, FLEET_RC
   local dir="$1" artifact="$2"; shift 2
-  FLEET_OUT="$(HEALTH="http://127.0.0.1:${PORT:-9}/health" HEALTH_WAIT=2 \
+  # env, not a bare assignment: ${FLEET_HOME:+...} is one word, and "VAR=value command" only works when it is a
+  # command-prefix assignment rather than an argument.
+  FLEET_OUT="$(env HEALTH="http://127.0.0.1:${PORT:-9}/health" HEALTH_WAIT=2 ${FLEET_HOME:+WASM_AGENT_HOME=$FLEET_HOME} \
     bash "$ROOT/scripts/fleet-install.sh" "file://$artifact" --bin "$dir/wa" "$@" 2>&1)"
   FLEET_RC=$?
 }
@@ -124,6 +129,36 @@ shows "...and recorded who/why/when" "$FLEET_OUT" "force_requested reason=the ol
 shows "the install record carries the override" "$(cat "$D/installed.txt" 2>/dev/null)" "ancestry=override"
 shows "...with the reason" "$(cat "$D/installed.txt" 2>/dev/null)" "ancestry_override=the older release is what this node must run"
 shows "...and the commit the artifact reports" "$(cat "$D/installed.txt" 2>/dev/null)" "commit=$(printf '2%.0s' $(seq 1 40))"
+
+echo "test-install-guards: fleet-install.sh - the node's OWN pin refuses the install"
+# A pin in the coordinator's store gates requests made through that coordinator; an install started HERE read
+# nothing, which is how the three hand-made rollbacks of 18/11 were undone. The node keeps its own copy, and this
+# is the path that reads it. The pin names the node by its NAME and its ID, and both spellings find it.
+FLEET_HOME="$WORK/pinhome"; mkdir -p "$FLEET_HOME/.wasm-agent"
+printf 'testnode\n' > "$FLEET_HOME/.wasm-agent/node.name"
+printf 'schema=wasm-agent-pins/1\nid=aaaa1111\nnode=testnode\nnode_id=node-77\nkind=rollback\nstate=active\ncommit=unknown\nrolled_back_from=%s\nreason=held where the operator put it\nawait=%s\n\n' \
+  "$(printf '4%.0s' $(seq 1 40))" "$(printf '4%.0s' $(seq 1 40))" > "$FLEET_HOME/.wasm-agent/pins.txt"
+E="$WORK/e"; mkdir -p "$E"
+stub "$E/wa" "$(printf '5%.0s' $(seq 1 40))" false 0
+fleet "$E" "$WORK/artifact-ok" --reason "an ordinary fleet install"
+[ "$FLEET_RC" != 0 ] && ok "it refused (exit $FLEET_RC)" || bad "fleet-install moved a node that carries its own pin"
+shows "the refusal is by name" "$FLEET_OUT" "node_pinned"
+shows "it quotes the pin" "$FLEET_OUT" "held where the operator put it"
+shows "it names the ways out" "$FLEET_OUT" "--unpin"
+FLEET_HOME="$WORK/pinhome-by-id"; mkdir -p "$FLEET_HOME/.wasm-agent"
+printf 'othername\n' > "$FLEET_HOME/.wasm-agent/node.name"
+printf 'schema=wasm-agent-pins/1\nid=bbbb2222\nnode=somebody-else\nnode_id=othername\nkind=pin\nstate=active\ncommit=unknown\nreason=found by the id\n\n' > "$FLEET_HOME/.wasm-agent/pins.txt"
+F2="$WORK/e2"; mkdir -p "$F2"
+stub "$F2/wa" "$(printf '6%.0s' $(seq 1 40))" false 0
+fleet "$F2" "$WORK/artifact-ok" --reason "an ordinary fleet install"
+[ "$FLEET_RC" != 0 ] && ok "a pin is found by the node id even when the name does not match" || bad "a pin recorded under the node id was not found"
+shows "...and the refusal names it" "$FLEET_OUT" "found by the id"
+FLEET_HOME="$WORK/pinhome"
+fleet "$E" "$WORK/artifact-ok" --force --reason "the operator decides this node moves anyway"
+same "--force --reason installs over the node's own pin -> 0" "$FLEET_RC" "0"
+shows "...saying the override out loud" "$FLEET_OUT" "OVERRIDE, recorded"
+shows "...and the install record carries it" "$(cat "$E/installed.txt" 2>/dev/null)" "ancestry=override"
+FLEET_HOME=""
 
 echo "test-install-guards: upgrade.sh and bootstrap.sh ask the same question (structural)"
 # These two cannot be run here without building a node (they install one), so what is asserted is that they route
