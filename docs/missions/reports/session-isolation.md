@@ -149,6 +149,12 @@ The CLI prints that sentence on its session line; `wa_admission` returns it as `
 **Test**: the "finding 6" section of `scripts/test-session-isolation.lua` (a presence row from pid 999999 on
 the newest thread; the run does not resume it and says why; with the row gone the thread is resumed again).
 
+**The tolerance, said out loud**: the row is believed for 900 s, the same window `finish_session` already
+uses for "this session is live". That is a real trade-off and not a hidden one: a process that is killed
+without `presence_end` keeps its claim for up to fifteen minutes, so an anonymous run in that window starts
+a new thread (and says so) instead of resuming the orphaned one. The alternative - trusting no row at all -
+is the leak this finding is about. The original thread is still reachable by name: `wa chat --session <id>`.
+
 ## 7. MEDIUM - one session cannot take every operation slot
 
 **Was** (`wa-operation/src/lib.rs:27,404-415`): `MAX_ACTIVE = 8` node-wide, so one session could hold all
