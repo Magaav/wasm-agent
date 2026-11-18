@@ -111,6 +111,22 @@ deploy "$DEADINSTALL"
 shows "with no answer from the binary the record is used, and named" "$DEPLOY_OUT" "could not be asked"
 shows "...and it still refuses, because the record is newer than this tree" "$DEPLOY_OUT" "downgrade refused(node_not_contained)"
 
+echo "test-deploy-ancestry: a record that is not about these bytes is not evidence"
+# The shape measured on this machine and on work on 18/11: the record says commit=14963b6f and sha256=4248d61b,
+# the bytes are fc6a9d80, and 14963b6f is an ancestor of main - so a record-based guard let a deploy of main
+# replace a build of 8 unlanded commits. A record naming another sha256 is provably not this binary's.
+STALE="$WORK/stale-install"; mkdir -p "$STALE"
+printf '#!/bin/sh\nexit 1\n' > "$STALE/wa"; chmod +x "$STALE/wa"; cp "$STALE/wa" "$STALE/wa-sentinel"
+printf 'commit=%s\nsha256=%s\nvia=deploy.sh\n' "$HEAD" "$(printf 'deadbeef%.0s' 1 2 3 4 5 6 7 8)" > "$STALE/installed.txt"
+deploy "$STALE" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "it deployed over a record that describes other bytes"
+shows "the refusal is by name" "$DEPLOY_OUT" "downgrade_unprovable(record_not_this_binary)"
+shows "it names the sha256 the record carries" "$DEPLOY_OUT" "deadbeefdead"
+shows "and the sha256 the binary actually is" "$DEPLOY_OUT" "sha256sum < "
+deploy "$STALE" --force --reason "I know what is on that node"
+hides "with --force --reason it goes on" "$DEPLOY_OUT" "downgrade_unprovable"
+shows "...and the unverified ancestry is recorded" "$(cat "$STALE/deploy.log" 2>/dev/null)" "ancestry_unverified=yes"
+
 echo "test-deploy-ancestry: the source of the rule is one file, shipped beside the running copy"
 grep -q 'install-record.sh' "$ROOT/scripts/deploy.sh" && ok "deploy.sh ships and sources the one ancestry verdict" || bad "deploy.sh does not use scripts/lib/install-record.sh"
 grep -q 'wa_ancestry_verdict' "$ROOT/scripts/upgrade.sh" && ok "upgrade.sh asks the same verdict" || bad "upgrade.sh has its own idea of a downgrade"

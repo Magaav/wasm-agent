@@ -117,6 +117,27 @@ wa_build_branch_hint() {
   git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null | head -1 || true
 }
 
+# wa_record_describes <install-dir> <binary> -> 0 the record's sha256 is this binary's, 1 it is another binary's,
+# 2 the record names no sha256 (nothing to compare).
+#
+# WHY THIS EXISTS. The guard asks the running binary what it is (wa --build-info). A binary older than that flag
+# cannot answer, and the record is then the only evidence - and the record can be a lie. MEASURED 18/11 on this
+# machine's own node and on work: installed.txt said commit=14963b6f and sha256=4248d61b while the bytes are
+# fc6a9d80, and 14963b6f IS an ancestor of main, so the guard let a deploy of main replace a build of 8 unlanded
+# commits. But a record that names another sha256 is provably not about these bytes: its commit= says nothing
+# about what is running, and the guard must not read it as if it did.
+wa_record_describes() {
+  local dir="${1:-}" binary="${2:-}" recorded actual
+  [ -n "$dir" ] && [ -n "$binary" ] && [ -f "$binary" ] || return 2
+  recorded="$(sed -n 's/^sha256=//p' "$dir/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  [ -n "$recorded" ] || return 2
+  command -v sha256sum >/dev/null 2>&1 || return 2
+  actual="$(sha256sum < "$binary" 2>/dev/null | awk '{print $1}')"
+  [ -n "$actual" ] || return 2
+  [ "$recorded" = "$actual" ] && return 0
+  return 1
+}
+
 # ---- may this replace that? ------------------------------------------------------------------------
 
 # wa_ancestry_verdict <repository|""> <target-commit|""> <running-commit> <target-binary|"">

@@ -552,11 +552,29 @@ if [ -n "$RUNNING_BIN" ] && RUNNING_INFO="$(wa_build_info "$RUNNING_BIN")"; then
   fi
 fi
 INSTALLED_COMMIT=""
+RECORD_IS_THESE_BYTES=unknown
 if [ -z "$RUNNING_COMMIT" ]; then
   INSTALLED_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
   [ "$INSTALLED_COMMIT" = unknown ] && INSTALLED_COMMIT=""
   RUNNING_COMMIT="$INSTALLED_COMMIT"
   RUNNING_WHY="the install record names it (the binary could not be asked)"
+  # ...AND ONLY IF THE RECORD IS ABOUT THESE BYTES. A record that names another sha256 is provably not this
+  # binary's: its commit= says nothing about what is running, and reading it as if it did is exactly how a
+  # deploy of main replaced a build of 8 unlanded commits on this machine and on work (18/11): the record said
+  # 14963b6f, an ancestor of main, and the bytes were something else entirely.
+  if [ -n "$RUNNING_BIN" ]; then
+    wa_record_describes "$INSTALL_DIR" "$RUNNING_BIN"
+    case $? in
+      0) RECORD_IS_THESE_BYTES=yes ;;
+      1) RECORD_IS_THESE_BYTES=no
+         if [ "${FORCE:-0}" != 1 ]; then
+           fail "downgrade_unprovable(record_not_this_binary): $INSTALL_DIR/installed.txt names sha256 $(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | cut -c1-12) but the binary at $RUNNING_BIN is $(sha256sum < "$RUNNING_BIN" 2>/dev/null | cut -c1-12), so the record's commit=$(printf '%s' "$INSTALLED_COMMIT" | cut -c1-12) describes bytes that are no longer here and nothing can say whether this tree $COMMIT contains what IS running. Nothing was built and nothing was installed. Ask the node what it runs (wa --build-info needs a binary that has it: rebuild or roll it back first), or pass --force --reason <text> and the override is recorded."
+         fi
+         note "the install record is not these bytes (recorded sha256 != the binary's); its commit= is not evidence, and --force --reason was given: ancestry_unverified=yes"
+         RUNNING_COMMIT=""
+         ANCESTRY_UNVERIFIED=yes ;;
+    esac
+  fi
 fi
 if [ -z "$RUNNING_COMMIT" ]; then
   # Two different reasons, and neither is a downgrade: no record at all is a first install, while a record
