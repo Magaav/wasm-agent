@@ -5,6 +5,11 @@
 # also the starting map for the fabric seam's own work (REPORT.md has the full table, including the
 # shapes these two rules cannot see).
 #
+# A line is "<rule> <file> <context> <name>", and a PARAMETER's name carries its function
+# ("run.config", not "config"): WIT has no per-parameter doc, so two funcs of one interface can each
+# take a "config: string" documented the same way, and a key that named only the parameter would accept
+# the second one as already recorded (scripts/test-wit-lint.sh proves it does not).
+#
 # RULE 1 - a string that carries JSON and does not say so in its name.
 #
 # journal-entry.payload carries the replication row a peer applies: JSON by nature (the journal's own
@@ -19,8 +24,9 @@ json-name selfloop/deps/kernel/kernel.wit interface:sql/record:journal-entry pay
 #
 # wa:kernel/service.run takes the registry definition's config object as JSON text (word for word:
 # one parameter, the whole config). Every service component in this tree implements the signature, so
-# the name moves when the signature does; until then the doc says the type, and rule 1 records it.
-json-name kernel/kernel.wit interface:service config
+# the name moves when the signature does; until then the doc says the type, and rule 1 records it -
+# for THIS function's parameter, which is what the "run.config" key says.
+json-name kernel/kernel.wit interface:service run.config
 #
 # RULE 2 - a polling func beside an operation handle.
 #

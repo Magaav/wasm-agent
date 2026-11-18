@@ -115,12 +115,12 @@ contains "$out" "3 new violation(s)" "the three holes, and exactly three: kind: 
 cat > "$work/dirty/baseline.txt" <<'BASE'
 # the three this fixture has, recorded the way main's own file records them
 json-name dirty.wit interface:tools/record:call args
-json-name dirty.wit interface:tools config
+json-name dirty.wit interface:tools run.config
 poll-without-future dirty.wit interface:tools status
 BASE
 out=$(lint "$work/dirty" "$work/dirty/baseline.txt"); rc=$?
 [ "$rc" = 0 ] && ok || fail "a recorded baseline must be accepted, exit $rc: $out"
-contains "$out" "3 baselined, 0 new" "the baseline is counted as accepted, not as a pass over nothing"
+contains "$out" "3 baselined (2 json-name, 1 poll-without-future), 0 new" "the baseline is counted as accepted, not as a pass over nothing, and by the rule it recorded"
 
 # ... and a baseline line the check no longer flags is a failure: the file must shrink.
 out=$(lint "$work/clean" "$work/dirty/baseline.txt"); rc=$?
@@ -137,11 +137,120 @@ out=$(lint "$work/marked"); rc=$?
 absent "$out" "status" "legacy wrapper over <future-func> accepts the polling func"
 contains "$out" "2 new violation(s)" "the other two holes are still holes"
 
+# ---- the shapes that escaped the reader, and the false positives it raised -----------------------
+# Each of these is a hole a review found in the first version of this check:
+#   * a func split over two lines ('status:' then 'func(...)') and a %-escaped name (%poll) were not
+#     funcs at all, so rule 2 never saw them;
+#   * 'start: func() -> job' at interface level beside 'resource job { poll }' is the pair the rule is
+#     about, and the two funcs are not siblings in the text;
+#   * 'record r { args: string, payload-json: string }' hid both fields AND left the record open, so
+#     every later declaration was attributed to it; a comma-separated field list was skipped whole;
+#   * 'e.g. application/json' is a MIME type and 'never JSON' is a denial - neither is a field that
+#     carries a JSON value;
+#   * 'status: func() -> health' beside 'self-id: func() -> node-id' reads two values; only a -id the
+#     poll func TAKES is a handle.
+mkdir -p "$work/shapes"
+cat > "$work/shapes/shapes.wit" <<'WIT'
+package wa:fixture@0.1.0;
+
+interface shapes {
+    type operation-id = string;
+
+    submit: func(kind: string) -> result<operation-id, error>;
+
+    /// The placement's state.
+    status:
+        func(id: operation-id) -> result<string, error>;
+
+    %poll: func(id: operation-id) -> result<string, error>;
+
+    /// The call, on one line with its record.
+    record one-line { args: string, payload-json: string }
+
+    /// A record whose last two fields share a line with its closing brace.
+    record comma {
+        /// The tool's JSON schema.
+        schema: string, id: u32 }
+
+    /// A record AFTER the one-liners: it belongs to the interface, not to the record above it.
+    record later {
+        /// The JSON body.
+        payload: string,
+    }
+
+    /// What the transport says about itself.
+    record media {
+        /// The media type this header carries, e.g. application/json.
+        content-type: string,
+        /// The framing is never JSON: a framed byte stream.
+        framing: string,
+    }
+}
+
+interface node-info {
+    self-id: func() -> node-id;
+    status: func() -> health;
+}
+
+interface ops {
+    type op-id = string;
+    submit: func(kind: string) -> result<op-id, error>;
+    poll: func(id: op-id) -> result<string, error>;
+}
+
+interface jobs {
+    start: func() -> job;
+    resource job {
+        poll: func() -> result<string, error>;
+    }
+}
+WIT
+out=$(lint "$work/shapes"); rc=$?
+[ "$rc" = 1 ] && ok || fail "the shapes fixture must fail, exit $rc: $out"
+contains "$out" "6 new violation(s)" "the split status, the %poll, the interface-level start/job pair, the comma field, the later field and the id-taking poll: six, and exactly six"
+contains "$out" "[interface:shapes] status" "a func split over two lines is a func"
+contains "$out" "[interface:shapes] poll" "a %-escaped name is the name without its %"
+contains "$out" "beside start handing out resource:job" "start at interface level is a sibling of the funcs inside its resource"
+contains "$out" "[interface:shapes/record:comma] schema" "a field on a line that also closes its record is still a field"
+contains "$out" "[interface:shapes/record:later] payload" "the one-line record was CLOSED: the next record belongs to the interface"
+absent "$out" "record:one-line/record:later" "a one-line record does not stay open and swallow later declarations"
+absent "$out" "content-type" "a MIME type is not a field that carries a JSON value"
+absent "$out" "framing" "a doc that says a field is never JSON does not make it JSON"
+absent "$out" "node-info" "status: func() -> health beside self-id: func() -> node-id reads two values"
+contains "$out" "[interface:ops] poll" "a poll func that TAKES the id is the pair, and still fails"
+listed=$(WIT_LINT_DIR="$work/shapes" WIT_LINT_BASELINE="$work/shapes/no-baseline.txt" bash scripts/wit-lint.sh --list 2>&1 || true)
+contains "$listed" "record:one-line	field payload-json	string	ok" "a field of a one-line record is in the map, so rule 1 can judge it"
+
+# ---- a parameter's baseline key carries its function --------------------------------------------
+# WIT has no per-parameter doc, so 'run(config: string)' and 'reload(config: string)' can be documented
+# identically in one interface. A key that named only the parameter would let the second one through
+# as already recorded - the hole this proves closed.
+mkdir -p "$work/member"
+cat > "$work/member/member.wit" <<'WIT'
+package wa:fixture@0.1.0;
+
+interface svc {
+    /// config is the non-secret configuration object (JSON text) from the registry definition.
+    run: func(config: string) -> result<_, string>;
+    /// config is the non-secret configuration object (JSON text) from the registry definition.
+    reload: func(config: string) -> result<_, string>;
+}
+WIT
+printf 'json-name member.wit interface:svc run.config\n' > "$work/member/run-only.txt"
+out=$(lint "$work/member" "$work/member/run-only.txt"); rc=$?
+[ "$rc" = 1 ] && ok || fail "a baselined parameter of one func must not cover another func's, exit $rc: $out"
+contains "$out" "reload.config" "the new func's parameter is the one that fails"
+contains "$out" "1 new violation(s)" "run.config is accepted and reload.config is not"
+printf 'json-name member.wit interface:svc config\n' > "$work/member/bare.txt"
+out=$(lint "$work/member" "$work/member/bare.txt"); rc=$?
+[ "$rc" = 1 ] && ok || fail "a key without its function must not accept anything, exit $rc: $out"
+contains "$out" "2 new violation(s)" "a parameter key with no function in it matches neither parameter"
+
 # ---- this tree: the check passes here, and the names it accepts are named ------------------------
 out=$(bash scripts/wit-lint.sh 2>&1); rc=$?
 [ "$rc" = 0 ] && ok || fail "the tree's own wit/ must pass, exit $rc: $out"
 contains "$out" "wit-lint ok" "the tree's verdict line"
-contains "$out" "5 baselined" "the five shapes main has are the five this tree records (three JSON-carrying names, two poll funcs)"
+contains "$out" "5 baselined (3 json-name, 2 poll-without-future)" "the five shapes main has are the five this tree records, and the two kinds are counted apart (three JSON-carrying names, two poll funcs)"
 listed=$(bash scripts/wit-lint.sh --list 2>&1)
 for expected in "codemode.wit	interface:types/record:tool-facts	field schema-json" \
                 "hooks.wit	interface:types/record:decision	field updated-input-json" \
