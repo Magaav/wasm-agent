@@ -17,7 +17,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -97,6 +97,14 @@ if [ "$FAST_BIN_ACTION" = refuse ]; then fast_binary_refuse; fi
       // what fast.sh's own docs recommend on a machine that cannot build - turned every `refused`
       // expectation into `use` (measured 11/11). Scenario 4 passes WA_BIN back in explicitly.
       WA_BIN: "",
+      // ...and the same rule for the build directory: a caller that exports CARGO_TARGET_DIR has named a
+      // directory for THIS checkout, and every scenario here builds its own fixture tree with a stub
+      // binary stamped at the fixture's commit. Inherited, the resolver looks in the caller's directory
+      // first (fast-binary.sh: "a caller that names CARGO_TARGET_DIR keeps it"), finds a binary built
+      // from another tree and refuses - 9 of 28 checks failed on avell 18/11 for a row that was green
+      // the moment the variable was unset. Scenario 7 passes one back in explicitly, so the behaviour
+      // itself stays covered.
+      CARGO_TARGET_DIR: "",
       PATH: extraEnv.PATH ?? process.env.PATH,
       WA_FAST_SKIP_BUILD: "1",
       ...extraEnv,
@@ -188,6 +196,20 @@ try {
     check(result.action === "use", `the documented override uses it, got action=${result.action}`);
     check(result.banner.includes("stale") && result.banner.includes("WA_FAST_ALLOW_STALE_BINARY=1"),
       `the override is printed, not silent: ${result.banner}`);
+  }
+
+  // 7. A caller that names CARGO_TARGET_DIR keeps it - the rule scenarios 1-5 must not exercise by
+  // accident. That directory is where the tree's build lands, so the binary inside it is the tree's own
+  // and is judged by its stamp like any other.
+  {
+    const { repo, head } = fixture({ treeBinary: false });
+    const named = join(repo, "..", "named-" + basename(repo));
+    stubBinary(join(named, "release", "wa"), { commit: head, sha: "n" });
+    const result = plan(repo, { CARGO_TARGET_DIR: named });
+    check(result.action === "use", `a named target directory is used, got action=${result.action} (${result.why})`);
+    check(result.source === "tree", `and the binary in it is the tree's, got source=${result.source}`);
+    check(result.verdict === "fresh", `judged by its stamp, got ${result.verdict} (${result.why})`);
+    check(result.bin === join(named, "release", "wa"), `the named directory's binary runs, got ${result.bin}`);
   }
 
   // 6. End to end: the real script's first line is the resolution, and it carries a verdict.
