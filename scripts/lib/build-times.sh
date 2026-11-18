@@ -16,6 +16,10 @@
 # tenths of a second, and that is the honest reading of an incremental build: the cost of the change,
 # not of a cold tree. The two are never confused because the note says how many units the compiler
 # actually built (0 = nothing to do, a warm row).
+#
+# AND A BUILD THAT FAILED IS NOT A WARM ROW. It compiled nothing because it stopped, not because there
+# was nothing to do, so the note is told the exit code and says "build failed (exit N)". Without it the
+# line under a red row read "warm, nothing to compile" - the one sentence a failure must never print.
 wa_build_times_file=
 wa_build_times_init() { # <path>
   wa_build_times_file=$1
@@ -31,9 +35,12 @@ wa_build_time_units() { # <cargo log> -> units the compiler built (0 = nothing t
   count=$(grep -c '^ *Compiling ' "${1:-/nonexistent}" 2>/dev/null) || count=0
   printf '%s' "${count:-0}"
 }
-wa_build_time_note() { # <cargo log>
-  local units
+wa_build_time_note() { # <cargo log> [exit code of that build]
+  local units code
   units=$(wa_build_time_units "${1:-/nonexistent}")
+  code=${2:-0}
+  # The exit code first: a failed build has no unit count worth reading, and "warm" is not what happened.
+  if [ "$code" != 0 ]; then printf 'build failed (exit %s)' "$code"; return 0; fi
   if [ "$units" = 0 ]; then printf 'warm, nothing to compile'; else printf '%s unit(s) compiled' "$units"; fi
 }
 # Printed even when the ledger is empty: a run that compiled nothing says so, because a summary that is

@@ -612,19 +612,18 @@ else
   printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh"
   if [ -z "$crates" ]; then echo "fast: rust - no crate touched"; fi
   for crate in $crates; do
-    # THE BUILD, measured as the build the tests themselves need - never a second one. This used to
-    # run 'cargo build --release -p <crate>' and then the row below ran 'cargo test' in the profile it
-    # needs: for wa-sentinel that is two profiles and two compiles of the same source, and even where
-    # the profile matched it measured a release build the tests did not consume. 'cargo test --no-run'
-    # in the tests' own profile compiles exactly what the row below runs and the row then reuses it, so
-    # the number the module claim rests on is the cost of the crate's test build and is paid once
-    # (ARCHITECTURE.md, "Modules over the monolith"). The seconds the tests then take stay the row's
-    # own measurement, as before.
+    # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
+    # --no-run' in the tests' own profile compiles exactly what the row below runs, and the row then
+    # reuses that compile, so the number the module claim rests on is the cost of the crate's test build
+    # and is paid once (ARCHITECTURE.md, "Modules over the monolith"). The seconds the tests then take
+    # are the row's own measurement.
     if [ "$crate" = wa-sentinel ]; then test_args="--manifest-path rust/wa-sentinel/Cargo.toml"
     else test_args="--release --manifest-path rust/Cargo.toml -p $crate"; fi
-    bstart=$(fast_now_ms)
-    CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || true
-    wa_build_time_record crate "$crate" "$(( $(fast_now_ms) - bstart ))" "$(wa_build_time_note "$work/build-$crate.log")"
+    bstart=$(fast_now_ms); build_rc=0
+    # The exit code is KEPT, not discarded: a build that failed compiled nothing, and the note must say
+    # so rather than print the warm row's sentence under a red one (scripts/lib/build-times.sh).
+    CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
+    wa_build_time_record crate "$crate" "$(( $(fast_now_ms) - bstart ))" "$(wa_build_time_note "$work/build-$crate.log" "$build_rc")"
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
       CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1

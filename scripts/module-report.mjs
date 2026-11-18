@@ -247,6 +247,11 @@ const heldBack = overLine.filter((r) => r.win);
 const hottest = ranked.slice(0, 3);
 
 // ---- the decision record: the cooldown, made visible ---------------------------------------------
+// WHY a record is unverified matters to the reader: a missing 'date' field is not the same fact as a
+// 'date' that is there and does not parse ('18/11/2026', '2026-13-01', 'soon'). The first sends the
+// author looking for a field to add; the second, for the value they already wrote and got wrong. Both
+// leave the age unknown, so both stay unverified - only the sentence differs.
+const NO_DATE = 'no date in the record';
 function daysSince(date) {
   const then = Date.parse(date + 'T00:00:00Z');
   if (Number.isNaN(then)) return null;
@@ -259,7 +264,12 @@ function commitsSince(commit) {
 const decisions = [];
 for (const mod of modules) {
   if (!mod.decision) continue;
-  const days = mod.decision.date ? daysSince(mod.decision.date) : null;
+  // A date that is THERE but does not parse is not a missing date: it is unverified for another reason,
+  // and the flag names it (the value included) instead of sending the reader after a field that exists.
+  const rawDate = mod.decision.date === undefined || mod.decision.date === null
+    ? '' : String(mod.decision.date);
+  const days = rawDate ? daysSince(rawDate) : null;
+  const reason = days !== null ? '' : (rawDate ? "the record's date does not parse: " + rawDate : NO_DATE);
   const since = commitsSince(mod.decision.commit);
   // Both ends of the cooldown have to be short for a reversal to be too soon - but an UNKNOWN commit
   // count is not a satisfied one: without git (or without a commit in the record) the count is
@@ -269,7 +279,7 @@ for (const mod of modules) {
   // that had cleared the 30 days. It is neither inside nor outside: it is FLAGGED, by name, here.
   const unverified = days === null;
   const tooSoon = !unverified && days < COOLDOWN_DAYS && (since === null || since < COOLDOWN_COMMITS);
-  decisions.push({ mod: mod.kind + ':' + mod.name, days, since, unverified, tooSoon, decision: mod.decision });
+  decisions.push({ mod: mod.kind + ':' + mod.name, days, since, unverified, reason, tooSoon, decision: mod.decision });
 }
 
 // ---- the report ----------------------------------------------------------------------------------
@@ -320,7 +330,7 @@ if (!mergeCandidates.length && hottest.length) {
 const unverifiedCount = decisions.filter((d) => d.unverified).length;
 p('module-report: decision  ' + decisions.length + ' recorded; cooldown ' + COOLDOWN_DAYS + ' day(s) or ' +
   COOLDOWN_COMMITS + ' commit(s) (a reversal needs a new measurement before then)' +
-  (unverifiedCount ? '; ' + unverifiedCount + ' with no date, flagged unverified' : ''));
+  (unverifiedCount ? '; ' + unverifiedCount + ' with no readable date, flagged unverified' : ''));
 for (const d of decisions) {
   // The age is printed only when it is known: a record with no date (or one whose commit count cannot
   // be read) has nothing to say in brackets, and printing an empty pair of them read as "0 days ago".
@@ -330,7 +340,7 @@ for (const d of decisions) {
   p('module-report:   ' + d.mod + ': ' + (d.decision.kind || '?') + ' on ' + (d.decision.date || '?') +
     (aged.length ? ' (' + aged.join(', ') + ')' : '') +
     (d.decision.measurement ? ' - ' + d.decision.measurement : '') +
-    (d.unverified ? '   [FLAG unverified: no date in the record, so its cooldown cannot be read]' : '') +
+    (d.unverified ? '   [FLAG unverified: ' + d.reason + ', so its cooldown cannot be read]' : '') +
     (d.tooSoon ? '   [FLAG too soon to reverse]' : ''));
 }
 console.log(out.join('\n'));

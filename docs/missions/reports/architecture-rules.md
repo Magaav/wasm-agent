@@ -89,20 +89,24 @@ Nested crates, measured: `rust/wa-fake-kernel` read **2383** lines and now reads
 `rust/wa-fake-kernel/fixture` keeps its own row at 176. The tree's whole size total moved by exactly that:
 206674 -> 206498 (-176), so no other module's size changed.
 
-## What this round did NOT verify, and one thing it could not run
+## What this round did NOT verify, and the one thing it left unmeasured
 
-* **The Rust compile (item 6) was not run.** This node has no Rust toolchain: `command -v cargo` is empty,
-  `pacman -Qs '^rust'` finds no package, there is no `/usr/bin/rustc` and no `~/.cargo` - although
-  `/home/victor/wasm-agent/target/m-architecture-rules` holds 3.6 GB of artifacts from when it did. So
-  `cargo test --no-run` was **not** timed here and the claim "the row below reuses the compile" rests on
-  the argument shape, not on a measurement: the same manifest, the same profile and the same package in both
-  invocations, asserted by `scripts/test-fast-build-timing.sh`. On a node with the toolchain, the check that
-  settles it is `cargo test --no-run -p <crate>` followed by the row's `cargo test` - the second must
-  report nothing to compile.
-* `fast.sh` itself was not run end to end (it needs the toolchain for the Rust rows, and a binary with
-  code-mode assets for the rest - `REPORT.md` section 7.1 records that failure mode). What was run:
-  `bash -n scripts/fast.sh`, the new static fixture, and the two clock cases (`fast_now_ms` read 53 ms
-  across a 50 ms sleep, and 1758999999000 against a date that answers the BSD way).
+* **The Rust compile (item 6) was not run in this round.** The claim "the row below reuses the compile"
+  rested on the argument shape and on nothing else: the same manifest, the same profile and the same package
+  in both invocations, asserted by `scripts/test-fast-build-timing.sh`. That is all a static check can
+  say, and it was measured afterwards - in section 5 of the fix round below, and again on a later head
+  (734 ms -> 68 ms, `wa-fleetview`). The check that settles it is `cargo test --no-run -p <crate>`
+  followed by the row's own `cargo test`: the second must report nothing to compile. (This bullet used
+  to assert that this node has no Rust toolchain at all. It does today - `command -v cargo` answers
+  `/home/victor/wasm-agent/toolchain/cargo/bin/cargo`, cargo 1.100.0 - so the sentence was not true of
+  the node any more, and it contradicted section 5 twelve lines below. I cannot tell from here when it
+  stopped being true, only that the second review of this file was right to call the pair of statements a
+  contradiction.)
+* `fast.sh` itself was not run end to end in this round (it needs the toolchain for the Rust rows, and a
+  binary with code-mode assets for the rest - `REPORT.md` section 7.1 records that failure mode). What
+  was run: `bash -n scripts/fast.sh`, the new static fixture, and the two clock cases
+  (`fast_now_ms` read 53 ms across a 50 ms sleep, and 1758999999000 against a date that answers the BSD
+  way).
 * Nothing was pushed, and no deploy was attempted.
 
 ## The honesty line on the two judgement calls
@@ -331,3 +335,185 @@ was fixed here: they are reported, attributed and left where they are.
   they were red before this round's first edit.
 * `scripts/test-orphan-tests.mjs` was run (no test file was added by this round): `orphan-tests ok (195
   wired, 47 orphaned and declared with a reason)`.
+
+
+---
+
+# The second review round on a0926dcd - six items, rebased onto main
+
+Reviewed head `a0926dcd`, branch `change/architecture-rules`, worktree
+`/home/victor/Work/missions/architecture-rules/wt`, this node's build root
+`/home/victor/wasm-agent/target/m-architecture-rules`. **Rebased onto `origin/main`
+(`e5ba9089`) first**: 11 commits replayed, and the root `REPORT.md` add/add conflict resolved by
+dropping this branch's copy - the tree carries main's `REPORT.md` and nothing of ours
+(`git diff origin/main --stat -- REPORT.md` is empty). This file is the round's only report.
+`ARCHITECTURE.md` is byte-identical to what the branch carried before the rebase:
+`git diff origin/main -- ARCHITECTURE.md` shows the approved addition itself (10 lines) and no other
+change. **Nothing pushed.**
+
+| # | what was wrong | what it does now | the fixture that fails without it |
+| --- | --- | --- | --- |
+| 1 | the root `REPORT.md` was an add/add conflict with the one main already has | dropped at the rebase, in all six commits that add it | `git diff origin/main --stat -- REPORT.md` (empty) |
+| 2 | `cargo test --no-run ... \|\| true`, then the note read cargo's log, so a build that FAILED printed "warm, nothing to compile" | the exit code is kept (`\|\| build_rc=$?`) and `wa_build_time_note` is told it: "build failed (exit N)" | `scripts/test-fast-build-timing.sh` section 3, and the three notes quoted below |
+| 3 | a `date` that is there and does not parse was flagged "no date in the record" | "the record's date does not parse: 18/11/2026" | `scripts/test-module-report.sh` section 5c, and the pair quoted below |
+| 4 | the round-1 section asserted the compile was never timed, twelve lines above the section that times it | it says what THAT round could not do and points at the measurement; the pair is measured again here | quoted below, and `command -v cargo` on this node |
+| 5 | every line starting with `export`/`import` went into the use-statement accumulator: world-level funcs were never funcs, and an inline `import x: interface {` pushed nothing while its own `}` popped the world | the keyword is stripped and the func under it is judged; a named block is pushed and popped by its own brace | `scripts/test-wit-lint.sh`: `world.wit` (4 holes, with their contexts) and `world-clean.wit` (0) |
+| 6 | a comment described what an earlier commit of this branch used to do | it says what the row does | `rg 'build --release' scripts/fast.sh` (no match) |
+
+Each item below is quoted from a run on this node. The suites were run with a scratch home (`HOME`,
+`TMPDIR` and `WASM_AGENT_HOME` under one `mktemp -d`, `WASM_AGENT_LUA_ROOT` the
+worktree); none of them writes under the real `~/.wasm-agent` and none reads `paths.data()`.
+
+## 2. a build that failed is not a warm row
+
+The note that used to lose the exit code, on a log that ends in a compile error
+(`scripts/lib/build-times.sh`, called with an exit code the old row never had):
+
+```
+old note, exit 1, failed log: warm, nothing to compile
+new note, exit 1, failed log: build failed (exit 1)
+new note, exit 0, same warm log: warm, nothing to compile
+```
+
+The test that fails without it (`scripts/test-fast-build-timing.sh` section 3), against the old files:
+
+```
+fast-build-timing FAILED: the build row must keep cargo's exit code (|| build_rc=$?), not swallow it with '|| true'
+```
+
+and the note itself is exercised for 0 units, 2 units, exit 1, exit 101 and exit 2 on a two-unit log, where
+the exit code outranks the unit count: a failed build's units are not a measurement.
+
+## 3. the reason a decision is unverified
+
+One module, `"date": "18/11/2026"` - a value that is there, and unreadable - old report then new:
+
+```
+old: module-report:   crate:x: split on 18/11/2026 - a date nobody can read   [FLAG unverified: no date in the record, so its cooldown cannot be read]
+new: module-report:   crate:x: split on 18/11/2026 - a date nobody can read   [FLAG unverified: the record's date does not parse: 18/11/2026, so its cooldown cannot be read]
+```
+
+and the decision line, which counted it as a MISSING date:
+
+```
+old: ... ; 1 with no date, flagged unverified
+new: ... ; 1 with no readable date, flagged unverified
+```
+
+`no date in the record` is still what a record with no `date` field says - both are unverified,
+and neither is ever read as "cleared"; only the sentence a reader acts on differs. The fixture
+(`scripts/test-module-report.sh` section 5c) asserts all four halves: the value printed where the date
+would be, the reason with the value in it, the absence of the missing-field sentence, and that an
+unparseable date is never ALSO reported as inside the cooldown.
+
+## 4. the sentence that contradicted itself
+
+The first section of this file said the compile "was **not** timed here ... this node has no Rust
+toolchain", and the fix round 130 lines below ran it and quoted `0 lines starting with "   Compiling"`
+on the second invocation. Both statements cannot stand in one file. The first section now says what that
+round could not do, that the claim rested on the argument shape, and where it was measured.
+
+Measured again in this round, with the very invocations `scripts/fast.sh` runs (same manifest, same
+profile, same build root), after `touch rust/wa-fleetview/src/lib.rs` so the crate itself had to be
+built:
+
+```
+$ CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-architecture-rules cargo test --no-run --offline --release --manifest-path rust/Cargo.toml -p wa-fleetview
+   Compiling wa-fleetview v0.1.0 (/home/victor/Work/missions/architecture-rules/wt/rust/wa-fleetview)
+    Finished `release` profile [optimized] target(s) in 0.72s
+  # 734 ms wall, 1 line starting with "   Compiling"
+
+$ CARGO_TARGET_DIR=<the same> cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-fleetview
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (...the same executable...)
+  # 68 ms wall, 0 lines starting with "   Compiling"
+```
+
+The same pair on `wa-keystore`: 494 ms and 1 unit compiled, then 427 ms and 0 units, 13 tests passing.
+So the number the build-time row records is the compile the row below it reuses, and it is paid once.
+
+## 5. world-level funcs are funcs, and an inline interface is a block
+
+`wit/kernel/host.wit:84`, `:92` and `:97` are `export run: func(...)`,
+`export call: func(...)` and `export reset: func()` inside `world core-component`. The reader
+sent every line beginning with `export`/`import` into the use-statement accumulator, so those
+three were never funcs: rule 1 never read `entry: string` or `name: string`, and rule 2 never
+saw them beside one another. The same accumulator swallowed an inline `import x: interface { ... }`:
+its brace pushed nothing, so its own `}` popped the WORLD, and every declaration after it was read
+outside the world it sits in. One fixture, the old reader then the new one:
+
+```
+=== BEFORE (HEAD's reader):
+FAIL wit-lint: world.wit:22 [world:core-component] open.config: the doc comment says it is JSON, and config: string does not carry -json in the name
+wit-lint: 1 new violation(s), 0 stale baseline line(s), 0 baselined
+exit=1
+
+=== AFTER (this round's reader):
+FAIL wit-lint: world.wit:11 [world:core-component] run.args: the doc comment says it is JSON, and args: string does not carry -json in the name
+FAIL wit-lint: world.wit:22 [world:core-component/interface:handles] open.config: the doc comment says it is JSON, and config: string does not carry -json in the name
+FAIL wit-lint: world.wit:26 [world:core-component] last.payload: the doc comment says it is JSON, and payload: string does not carry -json in the name
+FAIL wit-lint: world.wit:16 [world:core-component] status: status sits beside submit handing out operation-id: return a future/stream instead, or mark the doc "legacy wrapper over <future-func>"
+wit-lint: 4 new violation(s), 0 stale baseline line(s), 0 baselined
+exit=1
+```
+
+Four facts, each one an assertion in `scripts/test-wit-lint.sh`: the exported func is a func (its
+parameter is judged); a world-level `status` is the polling func the rule exists for, beside the
+`submit` that hands out the operation id; the inline interface's funcs are read INSIDE it
+(`world:core-component/interface:handles`); and `last`, declared AFTER that inline interface,
+still has the world's context - the world was not popped. A second fixture, `world-clean.wit`, is a
+world of references only (`import types; export service; include other-world;`) and reports 0 new:
+naming an interface is not a violation, so the fix widens what is read without widening what fails.
+
+On the tree, `bash scripts/wit-lint.sh` before and after this reader, `0 new` in both:
+
+```
+old reader: wit-lint ok (25 wit files, 463 string field(s)/parameter(s), 18 named *-json, 6 polling func(s): 5 baselined (...), 0 new)
+new reader: wit-lint ok (25 wit files, 465 string field(s)/parameter(s), 18 named *-json, 6 polling func(s): 5 baselined (...), 0 new)
+```
+
+- the two new names are `host.wit`'s `run.entry` and `call.name`, the world-level string
+  parameters rule 1 can now see. Neither carries JSON, so neither is a violation and the baseline does not
+  grow.
+
+## 6. the comment about an earlier commit
+
+`scripts/fast.sh`'s build row said "This used to run 'cargo build --release -p <crate>' and then the
+row below ran 'cargo test' in the profile it needs: for wa-sentinel that is two profiles and two compiles of
+the same source...". The history of a branch is not the explanation of a row: the comment now says what the
+row does and why, and `rg 'build --release' scripts/fast.sh` finds nothing.
+
+## What this round ran, and what it did not
+
+* `scripts/test-wit-lint.sh`: **71 checks, 0 skipped** (61 before this round's fixture).
+* `scripts/test-module-report.sh`: **47 checks, 0 skipped** (42 before).
+* `scripts/test-fast-build-timing.sh`: **20 checks, 0 skipped** (13 before).
+* `bash scripts/wit-lint.sh`: ok, 465 strings, 5 baselined, 0 new;
+  `node scripts/module-report.mjs` on this tree: 76 modules, 43 with a build time from the recorded
+  baseline.
+* The compile pair above, twice, on this node.
+* **NOT run:** `bash scripts/fast.sh` end to end. It takes ~620 s and this round's change touches three
+  rows, all of them run directly and quoted here. The 16 rows that the earlier run recorded as failing are
+  the ones the section above already attributed to the base tree; this round's diff is 13 files
+  (`git diff --stat origin/main`): `ARCHITECTURE.md`, three under `docs/` (none of them a prompt
+  doc), and nine under `scripts/`, while those rows read `lua/`, `rust/` and the prompt docs.
+* Nothing pushed; no deploy; no landing-queue run.
+
+## Texts to approve
+
+Every new or changed model- or operator-facing string, verbatim:
+
+1. `build failed (exit %s)` - new, `scripts/lib/build-times.sh`, printed in the fast path's
+   build-time summary where a failed build used to print the warm sentence. In place:
+   `fast:   crate     wa-x                                 0.7s  build failed (exit 101)`
+2. `the record's date does not parse: <value>` - new reason inside the existing flag, so the whole
+   line now reads `[FLAG unverified: the record's date does not parse: 18/11/2026, so its cooldown cannot
+   be read]` (`scripts/module-report.mjs`). The unchanged sibling for a missing field is
+   `[FLAG unverified: no date in the record, so its cooldown cannot be read]`.
+3. `N with no readable date, flagged unverified` - replaces `N with no date, flagged
+   unverified` on the report's decision line (`scripts/module-report.mjs`), because a date that does
+   not parse is not an absent one.
+
+Nothing else a model or an operator reads changed: the wit-lint's own messages are unchanged
+(`wit-lint ok (...)`, the `FAIL wit-lint: ...` lines, the `--list` format), and
+`scripts/fast.sh`'s other lines are untouched.

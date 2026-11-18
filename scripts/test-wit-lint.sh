@@ -16,7 +16,11 @@
 #     parameter, while "`config` is the non-secret configuration object (JSON text)" must flag it;
 #   * an op-id-returning `submit` beside a `poll` fails, and fails no longer once the poll's doc carries
 #     the marker - the same tree, one line of doc, both verdicts. That is the before/after the rules
-#     and the baseline exist for, and it is proved here rather than asserted.
+#     and the baseline exist for, and it is proved here rather than asserted;
+#   * a WORLD ITEM is read like any other declaration: `export run: func(args: string)` is a func both
+#     rules judge, and an inline `import x: interface {...}` opens a block whose own `}` closes it -
+#     not the world around it. `world.wit` fails with four holes and their contexts;
+#     `world-clean.wit` (a world of references only) does not.
 #
 #   bash scripts/test-wit-lint.sh
 #
@@ -365,6 +369,74 @@ printf 'json-name member.wit interface:svc config\n' > "$work/member/bare.txt"
 out=$(lint "$work/member" "$work/member/bare.txt"); rc=$?
 [ "$rc" = 1 ] && ok || fail "a key without its function must not accept anything, exit $rc: $out"
 contains "$out" "2 new violation(s)" "a parameter key with no function in it matches neither parameter"
+
+# ---- a world item: an exported func is a func, and an inline interface is a block, not the world's end
+# wit/kernel/host.wit ends with three world-level funcs ('export run: func(entry: string,
+# args: list<string>)', ':92' and ':97'). Every line starting with export/import used to be accumulated
+# as a use statement until its ';', so those three were never funcs at all: rule 1 never read their
+# parameters and rule 2 never saw them beside one another. The same accumulator swallowed an inline
+# 'import x: interface {...}': its brace pushed nothing, so its own '}' popped the WORLD, and every
+# declaration after it was read outside the world it sits in. Both halves are proved here, and the
+# clean world beside them proves the shape itself is not a violation.
+mkdir -p "$work/world"
+cat > "$work/world/world.wit" <<'WIT'
+package wa:fixture@0.1.0;
+
+interface types {
+    type operation-id = string;
+}
+
+world core-component {
+    import types;
+
+    /// Run the entry with the args the caller passes: the args are the user's own JSON text.
+    export run: func(args: string) -> result<_, string>;
+
+    export submit: func() -> operation-id;
+
+    /// The placement's state, for the caller that still polls it.
+    export status: func(id: operation-id) -> result<string, error>;
+
+    import wa:kernel/log@0.1.0;
+
+    import handles: interface {
+        /// config is the non-secret configuration object (JSON text) from the registry definition.
+        open: func(config: string) -> result<_, string>;
+    }
+
+    /// The last answer: the payload is the JSON text of the last one.
+    export last: func(payload: string) -> result<_, string>;
+
+    export stop: func();
+}
+WIT
+out=$(lint "$work/world"); rc=$?
+[ "$rc" = 1 ] && ok || fail "the world fixture must fail, exit $rc: $out"
+contains "$out" "4 new violation(s)" "the exported funcs and the inline interface: four holes, and exactly four"
+contains "$out" "[world:core-component] run.args" "a world-level 'export run: func(args: string)' is a func, and rule 1 judges its parameter"
+contains "$out" "[world:core-component] status" "a world-level status is the polling func rule 2 exists for"
+contains "$out" "beside submit handing out operation-id" "and the handle it sits beside is read in the world, not skipped with it"
+contains "$out" "[world:core-component/interface:handles] open.config" "an inline 'import handles: interface {...}' is a block: its funcs are read INSIDE it"
+contains "$out" "[world:core-component] last.payload" "and its '}' closed that block, not the world: the declaration after it is still the world's"
+absent "$out" "[world:core-component/interface:handles] last" "the world did not end at the inline interface"
+
+mkdir -p "$work/world-clean"
+cat > "$work/world-clean/clean.wit" <<'WIT'
+package wa:fixture@0.1.0;
+
+interface service {
+    ping: func() -> result<u32, string>;
+}
+
+world svc {
+    import types;
+    export service;
+    include other-world;
+}
+WIT
+out=$(lint "$work/world-clean"); rc=$?
+[ "$rc" = 0 ] && ok || fail "a world of references alone is not a violation, exit $rc: $out"
+contains "$out" "0 new" "import/export/include of an existing interface declare nothing and are judged as nothing"
 
 # ---- this tree: the check passes here, and the names it accepts are named ------------------------
 out=$(bash scripts/wit-lint.sh 2>&1); rc=$?

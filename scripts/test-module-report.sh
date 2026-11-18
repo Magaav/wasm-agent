@@ -158,10 +158,24 @@ printf '{"decision":{"kind":"split","commit":"%s","measurement":"no date on this
 out=$(report)
 contains "$out" "crate:a: split on ?" "a decision with no date says '?' where its date would be"
 contains "$out" "FLAG unverified: no date in the record, so its cooldown cannot be read" "and it is flagged unverified instead of silently clear"
-contains "$out" "1 with no date, flagged unverified" "the decision line counts it, so a reader sees it without reading every row"
+contains "$out" "1 with no readable date, flagged unverified" "the decision line counts it, so a reader sees it without reading every row"
 contains "$out" "no date on this one" "the record's own measurement is still printed for it"
 absent "$out" "split on ?)" "a dateless record gets no empty age bracket: '?)' read as '0 days ago'"
 [ "$(printf '%s' "$out" | grep -c 'FLAG too soon to reverse')" = 1 ] && ok || fail "the dateless record is not ALSO reported as inside the cooldown: exactly one decision is, and it is the 3-day one: $out"
+rm -f "$work/rust/a/module.json"
+
+# ---- 5c. a date that is THERE and does not parse is unverified for its own reason -----------------
+# "no date in the record" is the right sentence for a missing field and the wrong one for a value that
+# is there and unreadable ('18/11/2026' - day first, the way most of the world writes a date): it sends
+# the author looking for a field to add instead of the value they already wrote and got wrong. Both are
+# unverified, neither is "cleared", and the flag says which.
+printf '{"decision":{"kind":"split","date":"18/11/2026","commit":"%s","measurement":"a date that does not parse"}}\n' "$first" > "$work/rust/a/module.json"
+out=$(report)
+contains "$out" "crate:a: split on 18/11/2026" "the value is printed where its date would be"
+contains "$out" "FLAG unverified: the record's date does not parse: 18/11/2026, so its cooldown cannot be read" "an unparseable date is flagged with the reason and the value"
+absent "$out" "no date in the record" "a record WITH a date is not told it has none: that sentence sends the reader after a field that is there"
+contains "$out" "with no readable date, flagged unverified" "the decision line counts it as unreadable, not as missing"
+[ "$(printf '%s' "$out" | grep -c 'FLAG too soon to reverse')" = 1 ] && ok || fail "an unparseable date is unverified, never inside the cooldown: exactly one decision is (the 3-day one): $out"
 rm -f "$work/rust/a/module.json"
 
 # ---- 6. this tree: the report runs here and its map is the tree's --------------------------------

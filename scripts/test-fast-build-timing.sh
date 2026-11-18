@@ -76,6 +76,40 @@ delta=$(bash -c '
   a=$(fast_now_ms); sleep 0.05; b=$(fast_now_ms); echo $(( b - a ))')
 [ "$delta" -ge 30 ] && ok || fail "fast_now_ms must count milliseconds, a 50ms sleep read $delta ms"
 
+# ---- 3. a build that FAILED says so -------------------------------------------------------------
+# The row used to swallow cargo's exit with '|| true' and then ask the note what it built: a build that
+# failed compiled nothing, so the note answered "warm, nothing to compile" - the one sentence a failure
+# must never print, directly above the row that then fails for that same compile. The exit code is kept
+# and handed to the note.
+grep -qF 'cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?' "$src" \
+  && ok || fail "the build row must keep cargo's exit code (|| build_rc=\$?), not swallow it with '|| true'"
+grep -qF 'wa_build_time_note "$work/build-$crate.log" "$build_rc"' "$src" \
+  && ok || fail "the note must be told the exit code it is describing"
+note() { bash -c 'source scripts/lib/build-times.sh; wa_build_time_note "$1" "$2"' _ "$1" "${2:-}"; }
+case "$(note /dev/null 0)" in
+  'warm, nothing to compile') ok ;;
+  *) fail "a warm build still reads 'warm, nothing to compile', got '$(note /dev/null 0)'" ;;
+esac
+case "$(note /dev/null 1)" in
+  'build failed (exit 1)') ok ;;
+  *) fail "a build that exited 1 must read 'build failed (exit 1)', got '$(note /dev/null 1)'" ;;
+esac
+case "$(note /dev/null 101)" in
+  'build failed (exit 101)') ok ;;
+  *) fail "the exit code is the builder's own (101 is a rustc panic), got '$(note /dev/null 101)'" ;;
+esac
+blog=$(mktemp "${TMPDIR:-/tmp}/wa-build-log-XXXXXX")
+trap 'rm -f "$blog"' EXIT
+printf '   Compiling wa-a v0.1.0\n   Compiling wa-b v0.1.0\n' > "$blog"
+case "$(note "$blog" 0)" in
+  '2 unit(s) compiled') ok ;;
+  *) fail "a build that compiled two units says so, got '$(note "$blog" 0)'" ;;
+esac
+case "$(note "$blog" 2)" in
+  'build failed (exit 2)') ok ;;
+  *) fail "the exit code outranks the unit count: a failed build's units are not a measurement, got '$(note "$blog" 2)'" ;;
+esac
+
 if ! command -v cargo >/dev/null 2>&1; then
   echo "fast-build-timing: cargo is not on PATH, so the compile these rows describe was NOT run here"
   skipped=$((skipped + 1))

@@ -42,6 +42,11 @@
 #   * only an open brace opens a block. 'resource terminal-input;' is a resource with no funcs of its
 #     own: it is recorded as a resource and its declaration is over, so the declarations after it keep
 #     the context they are in. A brace alone on its line still opens the block named above it.
+#   * a WORLD ITEM is read, not skipped. 'export run: func(entry: string)' is a func: a caller passes
+#     those values across the seam and reads its return, so both rules judge it, under the world's own
+#     context. 'import x: interface {...}' opens a block of its own, which is pushed and popped by its
+#     own '}', or the world around it would be the block that closes. 'import wa:kernel/log@0.1.0;',
+#     'export service;' and 'include other-world;' name something and declare nothing.
 #
 # WHAT THIS DOES NOT COVER, said here because a verdict read for more than it says is worse than no
 # verdict:
@@ -241,6 +246,19 @@ for (const file of files) {
       return;
     }
     if (/^type\s+%?[a-z0-9-]+\s*=/.test(trimmed)) { doc = []; return; }
+    // A world item's NAMED BLOCK: 'import x: interface {...}' (or 'export y: resource {...}') is, after
+    // its keyword, exactly 'x: interface' - and the brace that ends that text opens the block it names.
+    // Without this it pushed nothing and its own '}' popped the WORLD, so every declaration after an
+    // inline interface was read outside the world it sits in.
+    const blockName = trimmed.match(/^%?([a-z0-9-]+)\s*:\s*(interface|resource|record|variant|enum|flags|world)$/);
+    if (blockName) {
+      if (end === '{') {
+        if (blockName[2] === 'resource') resourceNames.add(blockName[1]);
+        stack.push(blockName[2] + ':' + blockName[1]);
+      }
+      doc = [];
+      return;
+    }
     // static can sit on either side of the colon (start: static func(...)), so both are allowed; the
     // % of a %status name is WIT's keyword escape and not part of the name.
     const fname = trimmed.match(/^(?:static\s+)?%?([a-z][a-z0-9-]*)\s*:\s*(?:static\s+)?(?:async\s+)?func\b/);
@@ -301,13 +319,21 @@ for (const file of files) {
     if (/^@[a-z][a-z0-9-]*\s*\([^)]*\)\s*$/.test(code)) continue;
     // use types.{error}; is a USE LIST, not a block: its braces must not open and close one, or the
     // interface around it is popped here and every later declaration is attributed to nothing.
-    if (/^(?:use|include|export|import)\b/.test(code) || (pending && pending.stmt === 'use')) {
+    // 'include other-world;' is that same shape. An 'import'/'export' is NOT: a world item's func is a
+    // func and its inline interface is a block, and accumulating those lines here until their ';' lost
+    // both - 'export run: func(...)' was never a func, and an inline 'import x: interface {' pushed
+    // nothing while its own '}' popped the world around it.
+    if (/^(?:use|include)\b/.test(code) || (pending && pending.stmt === 'use')) {
       if (!pending) pending = { text: code, line: i + 1, doc: doc.slice(), stmt: 'use', depth: 0 };
       else pending.text += ' ' + code;
       if (/;\s*$/.test(pending.text)) { declare(pending.text, pending.line, pending.doc); pending = null; }
       continue;
     }
-    const scanned = lineEvents(code, pending ? pending.depth : 0);
+    // A world item's keyword is the world's business, not part of the declaration under it:
+    // 'export run: func(args: string)' is the func 'run: func(args: string)', and 'import x: interface'
+    // (its brace still to come) is the block 'x: interface' that the brace opens.
+    const item = code.match(/^(?:export|import)\s+(?=%?[a-z0-9-]+\s*:)/);
+    const scanned = lineEvents(item ? code.slice(item[0].length) : code, pending ? pending.depth : 0);
     for (const ev of scanned.events) {
       if (ev.kind === 'close') {
         if (pending) { declare(pending.text, pending.line, pending.doc); pending = null; }
