@@ -251,7 +251,7 @@ if git clone -q --shared "$ROOT" "$SHAREDTREE" 2>/dev/null; then
   shows "it says nothing was built or installed" "$DEPLOY_OUT" "Nothing was built and nothing was installed"
   same "nothing was installed" "$([ -x "$FRESH/wa" ] && echo yes || echo no)" "no"
   deploy_in "$SHAREDTREE" "$FRESH" --force --reason "a test node, this branch is mine"
-  hides "with --force --reason it goes on" "$DEPLOY_OUT" "commit_not_on_pushed_branch"
+  hides "with --force --reason it goes on" "$DEPLOY_OUT" "refused(commit_not_on_pushed_branch)"
   shows "...and the override is recorded" "$(cat "$FRESH/deploy.log" 2>/dev/null)" "commit_not_on_pushed_branch accepted with --force --reason"
 else
   bad "could not clone this checkout for the unshared-commit case"
