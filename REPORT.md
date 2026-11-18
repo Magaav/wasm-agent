@@ -1454,8 +1454,11 @@ fast path ok (262 checks, 0 skipped, 186s)
 
 The same 262 as round 1 and no new red: the additions are checks INSIDE rows (the gate counts rows and contract
 checks, not a row's internal assertions), so a row-level count that stayed at 262 is the expected shape, not a
-measurement that skipped anything. The run measured this tree's content (the working tree at the time); the commits
-below change no bytes of it, and `git status` is clean after them. One compiler warning remains and is not this
+measurement that skipped anything. The run measured the content these commits contain, and that is checkable rather than asserted:
+`git diff --name-only f529e61d HEAD` names exactly the seven code files this round changed (`REPORT.md` aside,
+which no check reads), `git status --porcelain` is empty, and `git diff --quiet HEAD -- .` confirms the working
+tree the gate ran on is the committed tree byte for byte. The binary stamp reads `f529e61d` because the
+commits were made after the run; a fresh `fast.sh` would rebuild it and measure the same bytes. One compiler warning remains and is not this
 round's: `warning: function connect is never used --> wa-mesh/src/http.rs:475` (a file this round did not touch).
 
 ### What this round did not do
