@@ -43,6 +43,7 @@ for required in dirname date mkdir sed tr wc uname git; do
 done
 
 REQUIRE_MAIN=0
+FORCE="${FORCE:-0}"
 REASON=""
 SESSION=""
 PROMPT=""
@@ -50,6 +51,10 @@ REQUEST_ID=""
 EXPECTED_SHA=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    # --force exists for one decision and one only: replacing a running commit that the target does not
+    # contain. It is worthless without --reason, because an override nobody can read later is how the three
+    # unrecorded rollbacks of 18/11 happened in the first place.
+    --force) FORCE=1; shift ;;
     --require-main) REQUIRE_MAIN=1; shift ;;
     --request-id) REQUEST_ID="${2:-}"; shift 2 ;;
     --expected-sha) EXPECTED_SHA="${2:-}"; shift 2 ;;
@@ -70,9 +75,14 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
-for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped runtime-binding; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
+# The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh). A deploy
+# without it could only write a record from its own intention, which is the failure of 18/11, so its absence
+# is a refusal and not a degradation.
+command -v wa_record_install >/dev/null 2>&1 && command -v wa_ancestry_verdict >/dev/null 2>&1 \
+  || { echo "deploy: refused(install_record_lib_missing): scripts/lib/install-record.sh is not beside this script; it is what writes installed.txt from the binary and what asks whether a deploy would go backwards. Nothing was built and nothing was installed." >&2; exit 2; }
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
 # A deploy without the lib still writes a usable record: no phases is `[]`, never an absent field a reader
 # has to distinguish from an old record's.
@@ -512,26 +522,74 @@ echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 # failed, nothing was recorded, and the only way to see it was to compare hashes by hand.
 #
 # The rule is ancestry, not equality. A deploy may move the install forward, or install the same commit
-# again, but not to a commit that does not contain what is installed. A deliberate rollback is still
-# possible - it is upgrade.sh's job, which takes an explicit binary, so the intent is on the command line
-# instead of being inferred from whichever branch happens to be checked out.
-INSTALLED_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
-if [ -z "$INSTALLED_COMMIT" ]; then
-  # Nothing to compare against, and the two reasons are different things: no record at all is a first
-  # install, while a record without a commit= line is a record that does not say. Neither is a downgrade.
-  # Refusing because the answer is unknown would block the first install on a machine that never had one.
-  if [ -f "$INSTALL_DIR/installed.txt" ]; then
-    note "$INSTALL_DIR/installed.txt names no commit; cannot tell what is installed, so this is not treated as a downgrade"
+# again, but not to a commit that does not contain what is running. A deliberate rollback is still possible,
+# and it is now a recorded act: `wa update <node> --rollback` restores the previous pair and writes a pin
+# (lua/core/pins.lua), so the intent is on the record instead of being inferred from whichever branch is
+# checked out.
+#
+# WHAT IS RUNNING IS ASKED OF THE RUNNING BINARY, NOT READ OUT OF installed.txt.
+#
+# MEASURED 18/11: the node on `work` ran a build of 8 commits that were on no landed branch, and its
+# installed.txt said commit=14963b6f - a record written by the party that MEANT to install. A sentinel deploy
+# of main compared this tree against that record, saw an ancestor, and replaced the node, removing features
+# that had been working. The record was never the witness; the binary is (`wa --build-info`, compiled in by
+# rust/wa-host/build.rs). So the question is asked of the binary, and the record is only a fallback for an
+# install older than --build-info - named as such, never silently trusted.
+RUNNING_COMMIT=""
+RUNNING_WHY="the running binary could not be asked"
+RUNNING_BIN=""
+for candidate in "$INSTALL_DIR/wa" "$INSTALL_DIR/wa.exe"; do
+  [ -x "$candidate" ] && { RUNNING_BIN="$candidate"; break; }
+done
+if [ -n "$RUNNING_BIN" ] && RUNNING_INFO="$(wa_build_info "$RUNNING_BIN")"; then
+  RUNNING_COMMIT="$(wa_build_field "$RUNNING_INFO" commit)"
+  [ "$RUNNING_COMMIT" = unknown ] && RUNNING_COMMIT=""
+  RUNNING_WHY="the running binary reports it"
+  if [ -n "$RUNNING_COMMIT" ]; then
+    note "running binary: commit ${RUNNING_COMMIT:0:12} (tree $(wa_build_field "$RUNNING_INFO" tree | cut -c1-12), dirty $(wa_build_field "$RUNNING_INFO" dirty)) - asked of the binary, not read from installed.txt"
   else
-    echo "deploy: no install record at $INSTALL_DIR/installed.txt - first install, not a downgrade"
+    note "the running binary cannot name its own commit (a build with no git and no stamp); falling back to the install record"
   fi
-elif ! git cat-file -e "${INSTALLED_COMMIT}^{commit}" 2>/dev/null; then
-  # A commit this tree does not have: a shallow clone, a different repository, or a branch that was never
-  # fetched. Say which case it is and carry on. The gate cannot compare what it cannot resolve, and a refusal
-  # here would be a refusal about its own ignorance rather than about the deploy.
-  note "the install records commit $INSTALLED_COMMIT, which this tree does not have (shallow clone, different repository, or an unfetched branch); cannot tell whether this would be a downgrade"
-elif ! git merge-base --is-ancestor "$INSTALLED_COMMIT" HEAD 2>/dev/null; then
-  fail "downgrade refused: the install is commit $INSTALLED_COMMIT and this tree is $COMMIT, which does not contain it - deploying would replace newer work with older work"
+fi
+INSTALLED_COMMIT=""
+if [ -z "$RUNNING_COMMIT" ]; then
+  INSTALLED_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  [ "$INSTALLED_COMMIT" = unknown ] && INSTALLED_COMMIT=""
+  RUNNING_COMMIT="$INSTALLED_COMMIT"
+  RUNNING_WHY="the install record names it (the binary could not be asked)"
+fi
+if [ -z "$RUNNING_COMMIT" ]; then
+  # Two different reasons, and neither is a downgrade: no record at all is a first install, while a record
+  # whose binary cannot say what it is, is a record that does not say. Refusing because the answer is unknown
+  # would block the first install on a machine that never had one.
+  echo "deploy: nothing running here names a commit ($RUNNING_WHY) - not treated as a downgrade"
+else
+  WA_ANCESTRY_TARGET="$COMMIT"
+  wa_ancestry_verdict "$ROOT" "$WA_ANCESTRY_TARGET" "$RUNNING_COMMIT" ""
+  ANCESTRY_VERDICT=$?
+  case "$ANCESTRY_VERDICT" in
+    0) : ;;
+    1)
+      # A KNOWN loss, and the refusal names it: which commit is running, which tree is the target, and the
+      # commits the target does not have - the list an operator needs to decide whether they mean it.
+      if [ "${FORCE:-0}" = 1 ]; then
+        if [ -z "${REASON:-}" ]; then
+          fail "refused(override_reason_required): --force replaces running commit $RUNNING_COMMIT with $COMMIT, which does not contain it, and the commits that would be lost are printed above - say why with --reason <text>; nothing was built and nothing was installed"
+        fi
+        ANCESTRY_OVERRIDE="$REASON"
+        # Recorded here as well as in installed.txt, because a deploy that dies before its record step still
+        # has to answer "who let this through, and why" - deploy.log is append-only and survives the swap.
+        note "ancestry_override=$(printf '%s' "$REASON" | tr '\r\n' '  ') ancestry_replaced=$RUNNING_COMMIT ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown)"
+        note "OVERRIDE, recorded: $COMMIT does not contain running commit $RUNNING_COMMIT; the deploy goes on because --force --reason says so"
+      else
+        fail "downgrade refused(node_not_contained): the running binary is commit $RUNNING_COMMIT ($RUNNING_WHY; ${WA_ANCESTRY_LOST_COUNT:-?} commit(s) would be lost) and this tree $COMMIT does not contain it - replacing would remove work that is running now. Lost commits, newest first:
+${WA_ANCESTRY_LOST:-  (the lost commits could not be listed)}
+Nothing was built and nothing was installed. To go back on purpose use 'wa update <node> --rollback' (it restores the previous pair and records a pin), or pass --force --reason <text> to deploy this tree anyway (recorded in installed.txt)."
+      fi ;;
+    *)
+      note "cannot tell whether this deploy would go backwards: $WA_ANCESTRY_WHY (not treated as a downgrade, and recorded as ancestry_unverified=yes)" ;;
+  esac
+  if [ "$ANCESTRY_VERDICT" = 2 ]; then ANCESTRY_UNVERIFIED=yes; fi
 fi
 
 # 3c. Lua fast path (docs/KERNEL.md, 05/11). Half of all changes touch only files nothing compiles
@@ -1522,18 +1580,41 @@ UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk 
 # served 2f02b4c's build, and the only trace of the death was a line on a detached process's stdout. What
 # killed that run is at the ship_file rule below.
 record_installed() {
-  local record_tmp reason_line record_commit
+  local record_tmp reason_line record_commit record_tree record_dirty record_build record_expected
   record_tmp="$INSTALL_DIR/.installed.txt.deploy.$$"
   reason_line="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
-  # Which commit the record NAMES. A prebuilt install names the 40-hex id the manifest was verified
-  # against (node-binaries.sh compares source_commit to the full id; `node-<sha12>` is only the release's
-  # name, and twelve hex can collide), so `commit=` is a full id there. The build path keeps writing the
-  # short id it has always written: its ancestor and record checks read it the same way, and changing that
-  # shape is not this rule's business.
-  record_commit="$COMMIT"
+  # WHICH COMMIT THE RECORD NAMES IS THE INSTALLED BINARY'S OWN ANSWER.
+  #
+  # `wa --build-info` reports the commit, the tree and the dirtiness the binary was compiled from
+  # (rust/wa-host/build.rs), so the record is written from the bytes rather than from this deploy's
+  # intention. MEASURED 18/11: installed.txt said commit=14963b6f for bytes built from 8 commits that were on
+  # no landed branch - the record named what the caller meant, and every reader downstream believed it.
+  #
+  # Which id this deploy EXPECTS is still a fact worth checking, so it is stated and compared: this commit for
+  # a build, the release manifest's source commit for a prebuilt install, and the binary's existing commit
+  # for a Lua fast-path deploy (which installs no binary at all).
+  record_expected="$COMMIT"
   case "${BINARY_PROVENANCE:-}" in
-    prebuilt-*) [ -n "${BINARY_COMMIT:-}" ] && record_commit="$BINARY_COMMIT" ;;
+    prebuilt-*) [ -n "${BINARY_COMMIT:-}" ] && record_expected="$BINARY_COMMIT" ;;
   esac
+  [ "${LUA_FAST:-0}" = 1 ] && [ -n "${INSTALLED_BINARY_COMMIT:-}" ] && record_expected="$INSTALLED_BINARY_COMMIT"
+  record_commit=""; record_tree=unknown; record_dirty=unknown; record_build=absent
+  INSTALLED_BIN_FOR_RECORD="$INSTALL_DIR/wa"
+  [ -f "$INSTALL_DIR/wa.exe" ] && INSTALLED_BIN_FOR_RECORD="$INSTALL_DIR/wa.exe"
+  if RECORD_INFO="$(wa_build_info "$INSTALLED_BIN_FOR_RECORD")"; then
+    record_build=yes
+    record_commit="$(wa_build_field "$RECORD_INFO" commit)"
+    record_tree="$(wa_build_field "$RECORD_INFO" tree)"
+    record_dirty="$(wa_build_field "$RECORD_INFO" dirty)"
+  fi
+  [ "$record_commit" = unknown ] && record_commit=""
+  if [ -z "$record_commit" ]; then
+    # No guess: a binary that cannot say what it is, is recorded as unknown, and the record says why.
+    record_commit=unknown
+    note "the installed binary cannot report its own build (build_info=absent): installed.txt records commit=unknown, not this deploy's intention"
+  elif [ "$record_commit" != "$record_expected" ]; then
+    fail "refused(build_commit_mismatch): the binary installed at $INSTALLED_BIN_FOR_RECORD reports commit ${record_commit:0:12} but this deploy meant to install ${record_expected:0:12} - the bytes are not the commit they were taken for (a stale build artifact, a reused target directory, or a mislabelled release). Nothing was recorded over the previous record."
+  fi
   # A prebuilt record's commit= is the manifest's 40-hex identity or it is not a record of a verified
   # install: a short id is a name that can collide, and it would be the id the checks downstream compare.
   # Checked BEFORE the write, so a record no reader can act on is never the one that lands.
@@ -1552,10 +1633,25 @@ record_installed() {
   # runs the node from. A record that cannot say that is a record a later reader has to guess about - and
   # `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
   printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nsource_worktree=%s\nbuild_pin=%s\nat=%s\nreason=%s\n' \
-    "$record_commit" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
+    "$record_commit" "$BRANCH" "$record_dirty" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
     "${SOURCE_ROOT:-$ROOT}" "${BUILD_PIN:-unpinned}" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason_line" \
     > "$record_tmp" || fail "node installed, but installed.txt could not be written"
+  # The identity the binary reported, beside the ids above: with build_info=yes a reader can see that commit=
+  # is the bytes' own answer rather than this deploy's intention, and an ancestry override is a record instead
+  # of a verbal agreement (tree= is the git tree of that build, and it is what a re-built record compares).
+  {
+    printf 'tree=%s\nbuild_info=%s\n' "$record_tree" "$record_build"
+    if [ -n "${ANCESTRY_OVERRIDE:-}" ]; then
+      printf 'ancestry_override=%s\nancestry_override_by=%s\nancestry_override_at=%s\nancestry_replaced=%s\n' \
+        "$(printf '%s' "$ANCESTRY_OVERRIDE" | tr '\r\n' '  ')" "$(id -un 2>/dev/null || echo unknown)" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${RUNNING_COMMIT:-unknown}"
+    fi
+    if [ "${ANCESTRY_UNVERIFIED:-}" = yes ]; then
+      printf 'ancestry_unverified=yes\nancestry_note=%s\n' "$(printf '%s' "${WA_ANCESTRY_WHY:-}" | tr '\r\n' '  ')"
+    fi
+    true
+  } >> "$record_tmp" || fail "node installed, but the ancestry and build-identity lines could not be written"
   # `source_provenance=clean-built-by-deploy` keeps its meaning - the bytes are a clean build of exactly
   # this commit, verified by this deploy (pinned, hashed, proved on a scratch port), never an unverified
   # hand-placed binary - and WHERE the build ran is a separate fact, because a reader that conflates the
@@ -1778,6 +1874,10 @@ if [ -f "$LIB_SRC" ]; then
   ship_file "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" "scripts/lib/service-target.sh beside deploy.sh"
 fi
 # deploy.sh and upgrade.sh source it: an installed copy run by the sentinel needs it beside them.
+# The one writer of installed.txt and the one ancestry verdict, beside deploy.sh AND beside
+# rollback-node.sh: a rollback runs on a node with no checkout, no network and possibly no healthy node, and it
+# still has to write a record that is the restored binary's own answer.
+ship_file "$ROOT/scripts/lib/install-record.sh" "$INSTALL_DIR/scripts/lib/install-record.sh" "scripts/lib/install-record.sh beside deploy.sh and rollback-node.sh (the record written from the binary, and the ancestry verdict)"
 ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard.sh" "scripts/lib/turn-guard.sh beside deploy.sh"
 # ...and the build's progress file and requirement check, which it sources too (29/10).
 ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-status.sh" "scripts/lib/build-status.sh beside deploy.sh"

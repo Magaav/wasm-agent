@@ -55,6 +55,8 @@ local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local nodes = dofile('lua/core/nodes.lua')
 local update = dofile('lua/core/update.lua')
+-- The pins store (lua/core/pins.lua): a node held where an operator put it is not a node to move forward.
+local pins = dofile('lua/core/pins.lua')
 
 local M = {}
 
@@ -766,6 +768,31 @@ end
 -- what says which session is owed the one notice.
 function M.request(call, selector, options)
   options = type(options) == 'table' and options or {}
+  -- A PINNED NODE DOES NOT MOVE FORWARD, and this is the moment the decision is made: a request is a deploy
+  -- asked for. The pin is the record an operator wrote when they put a node somewhere on purpose
+  -- (lua/core/pins.lua); without this gate the next ordinary deploy quietly undid it - measured 18/11, three
+  -- hand-made rollbacks and not one of them survived the next deploy.
+  --
+  -- Two ways out, both explicit: the pin named an awaited commit and this target contains it (then the pin is
+  -- doing its job and releases), or the caller says --force with a reason, which is recorded by the pin
+  -- history and in this request's own audit record. A rollback is never gated: going back is what a pin is
+  -- for, and refusing it would trap a node on the wrong bytes.
+  local node_key = trim(selector)
+  local pin_in_force = pins.active(node_key)
+  local wants_back = options.rollback == true or trim(options.mode) == 'rollback'
+  if pin_in_force and options.force ~= true and not wants_back then
+    local target = trim(options.commit)
+    local released = nil
+    if target ~= '' then released = pins.released(pin_in_force, target, '') end
+    if not (released and released.released == true) then
+      return {
+        ok = false, error = 'node_pinned', node = node_key, pin = pin_in_force,
+        observed = pins.summary_line(pin_in_force) .. (released and released.why and ('; ' .. tostring(released.why)) or ''),
+        message = 'the node carries an active pin, so this deploy was refused: a pin is a record that the node was put somewhere on purpose.',
+        next = 'move it on purpose: "wa update ' .. node_key .. ' --unpin --reason <text>", or name the target with --to <commit> when it contains the awaited fix, or say --force --reason <text> and it is recorded',
+      }
+    end
+  end
   local args = { action = 'request', reason = trim(options.reason), session = trim(options.session) }
   if trim(options.commit) ~= '' then args.commit = trim(options.commit) end
   if options.rendezvous == true then args.rendezvous = true end
@@ -789,7 +816,29 @@ function M.request(call, selector, options)
     reply.record = record_id
   end
   reply.node = reply.node or tostring(reply.target_node and reply.target_node.name or selector)
-  reply.summary = M.summary(reply)
+  -- GOING BACK IS A RECORD. A rollback or an explicit --to pins the node where it now is, after the peer has
+  -- answered - so a pin never names a move that was refused, and the next ordinary deploy reads it. The pin
+  -- is part of the answer (reply.pin); a pin that could not be written is named in reply.pin_problem rather
+  -- than dropped, because the move did happen and the missing record is the thing left to fix.
+  local kind_name = trim(reply.kind or (args.rollback and 'rollback' or 'node'))
+  if reply.ok and (kind_name == 'rollback' or options.pin == 'to') then
+    local written, problem = pins.set({
+      node = node_key,
+      kind = kind_name == 'rollback' and 'rollback' or 'to',
+      commit = trim(options.commit) ~= '' and trim(options.commit) or 'unknown',
+      reason = trim(options.reason) ~= '' and trim(options.reason)
+        or (kind_name == 'rollback' and 'rolled back on purpose' or 'moved to a named commit on purpose'),
+      until_ = trim(options.until_), await = trim(options.await),
+    })
+    if written then
+      reply.pin = written
+      reply.summary = M.summary(reply) .. ' | pin: ' .. tostring(written.summary)
+    else
+      reply.pin_problem = problem
+      reply.summary = M.summary(reply) .. ' | pin NOT recorded: ' .. tostring(problem and problem.error or 'unknown')
+    end
+  end
+  reply.summary = reply.summary or M.summary(reply)
   return reply
 end
 
@@ -884,6 +933,19 @@ function M.cli(argv)
     elseif flag == '--binary' then options.mode = 'binary'; index = index + 1
     elseif flag == '--tree' then options.mode = 'tree'; index = index + 1
     elseif flag == '--rollback' then options.rollback = true; index = index + 1
+    elseif flag == '--force' then options.force = true; index = index + 1
+    elseif flag == '--unpin' then options.unpin = true; index = index + 1
+    elseif flag == '--pin' then options.pin = true; index = index + 1
+    elseif flag == '--to' or flag == '--until' or flag == '--await' then
+      local value = argv[index + 1]
+      if type(value) ~= 'string' or value == '' or value:sub(1, 2) == '--' then
+        print('wa update: ' .. flag .. ' needs a value')
+        return 1
+      end
+      if flag == '--to' then options.commit = value; options.pin = 'to'
+      elseif flag == '--until' then options.until_ = value
+      else options.await = value end
+      index = index + 2
     elseif flag == '--status' or flag == '--watch' then options.status = true; index = index + 1
     elseif flag == '--commit' or flag == '--id' or flag == '--reason' or flag == '--session' or flag == '--node' then
       local key = flag:sub(3)
@@ -912,7 +974,37 @@ function M.cli(argv)
     if ambient ~= '' then options.session = ambient end
   end
   local reply
-  if options.status then reply = M.status(nodes.remote_call, selector, options)
+  if options.unpin then
+    -- Clearing a pin is the operator's own act and it needs no peer: it is a record in this node's store
+    -- (lua/core/pins.lua), and the node is left exactly where it is.
+    local cleared, problem = pins.clear(selector, { reason = options.reason })
+    if not cleared then
+      reply = { ok = false, node = selector, error = tostring(problem and problem.error or 'pin_not_cleared'),
+        observed = tostring(problem and problem.observed or '') }
+    else
+      reply = { ok = true, status = 'unpinned', node = selector, pin = cleared,
+        message = 'unpinned ' .. tostring(selector) .. ': ordinary deploys may move it again',
+        summary = 'unpinned ' .. tostring(selector) .. ' (was pinned to ' .. tostring(cleared.commit or 'unknown'):sub(1, 12) .. '; ' .. tostring(cleared.reason or '') .. ')' }
+    end
+  elseif options.pin == true then
+    -- Record-only: with --commit it records that commit, without one it records that nobody can name the
+    -- bytes yet (a binary older than --build-info). It never deploys - this is the form used to write a pin
+    -- for a move that already happened by hand, which is how the three 18/11 rollbacks were recorded.
+    local written, problem = pins.set({
+      node = selector, kind = 'pin',
+      commit = trim(options.commit),
+      reason = trim(options.reason),
+      until_ = trim(options.until_), await = trim(options.await),
+    })
+    if not written then
+      reply = { ok = false, node = selector, error = tostring(problem and problem.error or 'pin_not_written'),
+        observed = tostring(problem and problem.observed or '') }
+    else
+      reply = { ok = true, status = 'pinned', node = selector, pin = written,
+        message = 'recorded: ' .. tostring(selector) .. ' is pinned. Nothing was deployed and the node was not touched.',
+        summary = 'pinned ' .. tostring(selector) .. ': ' .. tostring(written.summary) }
+    end
+  elseif options.status then reply = M.status(nodes.remote_call, selector, options)
   else reply = M.request(nodes.remote_call, selector, options) end
   if as_json then
     print(json.encode(reply))

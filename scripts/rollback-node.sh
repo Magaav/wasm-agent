@@ -28,6 +28,14 @@ say() { printf 'rollback-node: %s\n' "$*"; }
 fail() { printf 'rollback-node: %s\n' "$*" >&2; exit "${2:-4}"; }
 
 INSTALL="${WA_INSTALL_DIR:-$HOME/.local/bin}"
+# The one writer of installed.txt and the one probe that asks a binary what it is
+# (scripts/lib/install-record.sh). It ships beside this script (<install>/scripts/lib/), because the node
+# this acts on may have no checkout, no network and no healthy node - only the install it is restoring.
+for rollback_lib in "${WA_INSTALL_RECORD_LIB:-}" "$(dirname "$0")/lib/install-record.sh"; do
+  [ -n "$rollback_lib" ] && [ -f "$rollback_lib" ] && . "$rollback_lib" && break
+done
+command -v wa_build_info >/dev/null 2>&1 \
+  || { printf 'rollback-node: refused(install_record_lib_missing): scripts/lib/install-record.sh is not beside this script, and it is what makes the record the restored binary'"'"'s own answer; nothing was restored\n' >&2; exit 4; }
 FROM=""
 REASON=""
 RESTART=1
@@ -80,14 +88,37 @@ done
 VERSION="$("$INSTALL/wa" --version 2>&1 | head -1)"
 [ -n "$VERSION" ] || fail "rollback_does_not_run: $INSTALL/wa --version answered nothing; the copy is still in $FROM" 5
 
+# THE RECORD IS THE RESTORED BINARY'S OWN ANSWER. A rollback writes installed.txt by copying the older
+# record - and that record was itself somebody's claim, which is exactly how a node came to run a build of 8
+# unlanded commits under commit=14963b6f (18/11). So the identity fields come from `wa --build-info` of the
+# binary that is now installed, and the rollback's own facts (what it replaced, why) are appended beside them.
+wa_record_install "$INSTALL" "$INSTALL/wa" \
+  "via=rollback-node.sh" \
+  "rollback_of=${was:-unknown}" \
+  "rollback_from=$FROM" \
+  "rollback_reason=$REASON" \
+  "rollback_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "source_provenance=rollback-restored-pair" \
+  "record_role=final" \
+  || say 'installed.txt was not rewritten; the binaries were restored (the record still names the pair that was replaced)'
 if [ -f "$FROM/installed.txt" ]; then
-  { cat "$FROM/installed.txt"
-    printf 'rolled_back_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'rollback_of=%s\n' "${was:-unknown}"
-    printf 'rollback_reason=%s\n' "$REASON"; } > "$INSTALL/installed.txt.tmp" \
-    && mv -f "$INSTALL/installed.txt.tmp" "$INSTALL/installed.txt" \
-    || say 'installed.txt was not rewritten; the binaries were restored'
+  # The rest of the older record (its release tag, manifest digest, upgrade hash) is still true of these
+  # bytes and is not something this script can re-derive, so it is carried over - the identity lines above
+  # are not, because they are the binary's to say.
+  while IFS= read -r line; do
+    case "$line" in
+      commit=*|tree=*|dirty=*|build_info=*|build_source=*|built_epoch=*|contains_commits=*|recorded_utc=*|via=*|rollback_*=|source_provenance=*|record_role=*|branch=*|'') continue ;;
+    esac
+    printf '%s\n' "$line"
+  done < "$FROM/installed.txt" >> "$INSTALL/installed.txt.carried" 2>/dev/null || true
+  if [ -s "$INSTALL/installed.txt.carried" ]; then
+    cat "$INSTALL/installed.txt.carried" >> "$INSTALL/installed.txt" && rm -f "$INSTALL/installed.txt.carried" \
+      || say 'the older record'"'"'s extra fields were not carried over; the identity fields are the restored binary'"'"'s'
+  else
+    rm -f "$INSTALL/installed.txt.carried"
+  fi
 fi
+say "record: installed.txt now names the restored binary's own build ($(sed -n 's/^commit=//p' "$INSTALL/installed.txt" | head -1))"
 say "restored: $VERSION"
 
 if [ "$RESTART" = 1 ]; then

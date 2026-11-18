@@ -58,6 +58,7 @@ while [ "$#" -gt 0 ]; do
     --no-service) service=0; shift ;;
     --adopt) adopt=1; shift ;;
     --force) force=1; shift ;;
+    --reason) reason=${2:?reason text}; shift 2 ;;
     --rollback) rollback=1; shift ;;
     -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "bootstrap: unknown_option: $1" >&2; exit 2 ;;
@@ -81,6 +82,18 @@ for candidate in "${WA_RELEASE_SIGNING_LIB:-}" \
 done
 [ -n "$WA_BOOTSTRAP_LIB" ] || fail "release_signing_lib_missing: no scripts/lib/release-signing.sh beside $(dirname -- "$0")/../lib (a release-installed updater needs it: it is what verifies the releases it installs)"
 . "$WA_BOOTSTRAP_LIB"
+# The record writer and the ancestry verdict (scripts/lib/install-record.sh), beside the signing lib: a
+# release install has no checkout at all, so the binary's own build identity and its own embedded ancestry are
+# the only witnesses it has. Absent, this script refuses rather than writing the index's claim as if it were a
+# fact - that claim is how an install record said commit=14963b6f for other bytes (18/11).
+WA_INSTALL_RECORD_LIB=""
+for candidate in "${WA_INSTALL_RECORD_LIB_OVERRIDE:-}" \
+                 "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/lib/install-record.sh" \
+                 "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/install-record.sh"; do
+  [ -n "$candidate" ] && [ -f "$candidate" ] && { WA_INSTALL_RECORD_LIB="$candidate"; break; }
+done
+[ -n "$WA_INSTALL_RECORD_LIB" ] || fail "install_record_lib_missing: no scripts/lib/install-record.sh beside $(dirname -- "$0")/../lib (it is what writes installed.txt from the binary, and what asks whether this bundle would move the node backwards)"
+. "$WA_INSTALL_RECORD_LIB"
 
 # ---- 0a. rollback: the one action that must work with no network and no index --------------------
 #
@@ -257,6 +270,44 @@ if [ "$state" != current ] || [ "$check" = 1 ]; then
     [ "$(od -An -tx1 -j18 -N1 "$bundle/$f" | tr -d ' ')" = "$elf_machine" ] || fail "elf_machine_mismatch: $f is not built for $target"
   done
   ran=$("$bundle/wa" --version 2>&1) || fail "candidate_does_not_run: wa --version failed on this machine ($libc${glibc:+ $glibc}, bundle $target): $(printf '%s' "$ran" | head -2 | tr '\n' ' ')"
+  # AND IT REPORTS ITS OWN BUILD. The index names the commit the bundle was built from; the binary knows. On
+  # 18/11 a node ran a build of 8 commits that were on no landed branch under the record commit=14963b6f, so
+  # the record is taken from the bytes here, and a bundle whose bytes are not the commit the index names is a
+  # mislabelled release that installs nothing.
+  if CANDIDATE_INFO="$(wa_build_info "$bundle/wa")"; then
+    candidate_commit="$(wa_build_field "$CANDIDATE_INFO" commit)"
+    case "$candidate_commit" in
+      ''|unknown) fail "candidate_names_no_commit: this bundle's binary cannot report its own build, so neither the record nor an ancestry check can name it; nothing was installed" ;;
+    esac
+    [ "${candidate_commit:0:8}" = "${commit:0:8}" ] \
+      || fail "release_commit_mismatch: the index names commit ${commit:0:12} and this bundle's binary reports ${candidate_commit:0:12}; the release is mislabelled and nothing was installed"
+    say "candidate reports its own build: ${candidate_commit:0:12} (tree $(wa_build_field "$CANDIDATE_INFO" tree | cut -c1-12), dirty $(wa_build_field "$CANDIDATE_INFO" dirty))"
+  else
+    fail "candidate_names_no_commit: wa --build-info answered nothing on this bundle's binary (a build older than the flag); a release this node cannot identify installs nothing"
+  fi
+  # A BUNDLE THAT DOES NOT CONTAIN WHAT IS RUNNING IS A DOWNGRADE. A release install has no checkout at all, so
+  # there is no git to ask: the candidate binary carries its own ancestry (`wa --contains`, compiled in by
+  # rust/wa-host/build.rs), and that is the one witness available. Refused by name unless the operator says
+  # --force --reason <text>, which is then recorded in installed.txt.
+  if [ "$check" != 1 ] && [ -x "$prefix/wa" ] && RUNNING_INFO="$(wa_build_info "$prefix/wa")"; then
+    RUNNING_COMMIT="$(wa_build_field "$RUNNING_INFO" commit)"
+    [ "$RUNNING_COMMIT" = unknown ] && RUNNING_COMMIT=""
+    if [ -n "$RUNNING_COMMIT" ] && [ "$RUNNING_COMMIT" != "$candidate_commit" ]; then
+      wa_ancestry_verdict "" "$candidate_commit" "$RUNNING_COMMIT" "$bundle/wa"
+      case $? in
+        0) ANCESTRY_CHECKED=yes
+           say "ancestry ok: this bundle contains the running commit ${RUNNING_COMMIT:0:12}" ;;
+        1) if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
+             ANCESTRY_CHECKED=override
+             say "OVERRIDE, recorded: ${candidate_commit:0:12} does not contain running commit ${RUNNING_COMMIT:0:12}; going on because --force --reason says so"
+           else
+             fail "downgrade_refused: this bundle (${candidate_commit:0:12}) does not contain the RUNNING commit ${RUNNING_COMMIT:0:12}, so installing it would remove work that is running now (${WA_ANCESTRY_WHY:-reason unknown}). Nothing was installed. To go back on purpose use the sentinel's `wa update <node> --rollback` (it records a pin), or say --force --reason <text> and the override is recorded"
+           fi ;;
+        *) ANCESTRY_CHECKED=unknown
+           say "cannot tell whether this bundle goes backwards: ${WA_ANCESTRY_WHY:-unknown}; carrying on and recording ancestry_unverified=yes" ;;
+      esac
+    fi
+  fi
   say "verified: $(mval wa_version) - every member matches"
 fi
 
@@ -305,13 +356,26 @@ if [ "$state" != current ]; then
     mv "$prefix/$d.new" "$prefix/$d" && rm -rf "$prefix/$d.old"
   done
   {
-    echo "commit=${commit:0:8}"
+    # THE RECORD IS THE INSTALLED BINARY'S OWN ANSWER (`wa --build-info`), not the index entry's claim and not
+    # this script's intention. Checked against the index above, before anything was replaced.
+    echo "commit=${candidate_commit}"
     echo "branch=main"
-    echo "dirty=0"
+    if RECORD_INFO="$(wa_build_info "$prefix/wa")"; then
+      echo "tree=$(wa_build_field "$RECORD_INFO" tree)"
+      echo "dirty=$(wa_build_field "$RECORD_INFO" dirty)"
+      echo "build_info=yes"
+      echo "contains_commits=$(wa_build_field "$RECORD_INFO" ancestors)"
+    else
+      echo "tree=$(wa_build_field "$CANDIDATE_INFO" tree)"
+      echo "dirty=$(wa_build_field "$CANDIDATE_INFO" dirty)"
+      echo "build_info=staged"
+      echo "contains_commits=$(wa_build_field "$CANDIDATE_INFO" ancestors)"
+    fi
     echo "sha256=$(sha256sum "$prefix/wa" | cut -d' ' -f1)"
     echo "sentinel_sha256=$(sha256sum "$prefix/wa-sentinel" | cut -d' ' -f1)"
     echo "release=$tag"
     echo "source_commit=$commit"
+    echo "ancestry_checked=${ANCESTRY_CHECKED:-no}"
     echo "manifest_sha256=$manifest_sha"
     echo "target=$target"
     echo "install_dir=$prefix"

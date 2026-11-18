@@ -26,6 +26,8 @@ local json = dofile("lua/vendor/json.lua")
 local platform = dofile("lua/core/platform.lua")
 local paths = dofile("lua/core/paths.lua")
 local release = dofile("lua/core/release.lua")
+-- The pins store (lua/core/pins.lua): the one record of "this node was put here on purpose".
+local pins = dofile("lua/core/pins.lua")
 local hooks = dofile("lua/core/hooks.lua")
 
 -- The sentinel owns the other side of replacement, so it is also the only actor that can prove the
@@ -366,6 +368,26 @@ function M.verdict(facts)
   end
   -- The last question before the answer that costs something: a request nothing can perform must not
   -- be written, and an answer of "queued" must not be given for one.
+  -- A PINNED NODE DOES NOT MOVE ITSELF FORWARD EITHER. The pin is this node's own record that it was put
+  -- where it is on purpose (lua/core/pins.lua); a local update that ignored it would undo the rollback an
+  -- operator recorded, which is the failure the remote path is gated against in the same words.
+  if not options.force then
+    local ok_name, local_name = pcall(function() return dofile("lua/core/nodes.lua").node_name() end)
+    local pin = ok_name and pins.active(tostring(local_name or "")) or nil
+    if pin then
+      local target = trim(git(facts.tree or "", "rev-parse HEAD") or "")
+      local released = target ~= "" and pins.released(pin, target, facts.tree or "") or nil
+      if not (released and released.released == true) then
+        return {
+          ok = false, status = "node_pinned", error = "node_pinned", tree = facts.tree, pin = pin,
+          observed = pins.summary_line(pin) .. (released and released.why and ("; " .. tostring(released.why)) or ""),
+          message = "this node carries an active pin, so its own update was refused.",
+          next = "wa update <node> --unpin --reason <text> when it may move, or --force --reason <text> to move it anyway (recorded)",
+          installed_commit = facts.installed_commit, candidate = facts.candidate,
+        }
+      end
+    end
+  end
   local blocked = M.preconditions(facts)
   if blocked then return blocked end
   return {

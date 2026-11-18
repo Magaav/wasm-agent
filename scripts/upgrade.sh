@@ -65,6 +65,14 @@ SERVICE_LIB="$ROOT/scripts/lib/service-target.sh"
 . "$SERVICE_LIB"
 HOME_DIR="$(wa_config_dir)"
 INSTALLED="$INSTALL_DIR/$EXE"
+# The one writer of installed.txt and the one ancestry verdict (scripts/lib/install-record.sh): this script
+# places bytes it did not build, so the only honest source for "which commit is installed" is the binary
+# itself. A missing lib is a refusal, never a silent fallback to the caller's belief.
+for upgrade_lib in "$ROOT/scripts/lib/install-record.sh" "$(dirname "$0")/lib/install-record.sh"; do
+  [ -f "$upgrade_lib" ] && . "$upgrade_lib" && break
+done
+command -v wa_build_info >/dev/null 2>&1 \
+  || { say "refused(install_record_lib_missing): scripts/lib/install-record.sh is not beside this script, and it is what makes installed.txt the binary's own answer; nothing was installed"; exit 2; }
 UI_DIR="${WA_UI_DIR:-$INSTALL_DIR/ui}"
 RUNTIME_ROOT="${WA_RUNTIME_WORKTREE:-$ROOT}"
 if [ -z "${WA_RUNTIME_WORKTREE:-}" ] && [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
@@ -144,7 +152,21 @@ if [ -n "$SOURCE_ROOT" ]; then
   SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ -z "${WA_SOURCE_UI_DIR:-}" ] && [ -d "$SOURCE_ROOT/ui" ]; then SOURCE_UI="$SOURCE_ROOT/ui"; fi
 fi
-PREVIOUS_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+# WHO SAYS WHAT IS INSTALLED: the installed binary, asked for its own build (`wa --build-info`, compiled in
+# by rust/wa-host/build.rs). The record is only a fallback for an install older than that flag, and it is
+# named as a fallback. MEASURED 18/11: an installed.txt said commit=14963b6f for bytes built from 8 commits
+# that were on no landed branch - every check downstream compared against the record, so nothing noticed.
+PREVIOUS_COMMIT=""
+PREVIOUS_SOURCE="none"
+if [ -x "$INSTALLED" ] && PREVIOUS_INFO="$(wa_build_info "$INSTALLED")"; then
+  PREVIOUS_COMMIT="$(wa_build_field "$PREVIOUS_INFO" commit)"
+  [ "$PREVIOUS_COMMIT" = unknown ] && PREVIOUS_COMMIT=""
+  [ -n "$PREVIOUS_COMMIT" ] && PREVIOUS_SOURCE="binary"
+fi
+if [ -z "$PREVIOUS_COMMIT" ]; then
+  PREVIOUS_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+  [ -n "$PREVIOUS_COMMIT" ] && PREVIOUS_SOURCE="record"
+fi
 # The record as THIS script found it, captured once. `record_install` runs twice in one upgrade (after the
 # swap, and again as the last write), and the second call used to re-read the file it had just written - so
 # its `sha256=` named the bytes being placed and the identity branch below borrowed `commit=` from the
@@ -168,11 +190,26 @@ if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] \
   say "candidate has no source checkout to compare with installed commit $PREVIOUS_COMMIT; set WA_ALLOW_UNVERIFIED_UPGRADE=1 only for an intentional operator override"
   exit 2
 fi
-if [ -n "$SOURCE_COMMIT" ] && [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] \
-    && git -C "$SOURCE_ROOT" cat-file -e "$PREVIOUS_COMMIT^{commit}" 2>/dev/null \
-    && ! git -C "$SOURCE_ROOT" merge-base --is-ancestor "$PREVIOUS_COMMIT" "$SOURCE_COMMIT"; then
-  say "refusing a candidate from $SOURCE_COMMIT: it does not contain installed commit $PREVIOUS_COMMIT"
-  exit 2
+# A candidate that does not contain what is RUNNING is a downgrade, and the refusal lists what it would
+# lose. The verdict and the wording come from scripts/lib/install-record.sh, which is also what deploy.sh,
+# fleet-install.sh and bootstrap.sh ask - one rule, whichever script is replacing the node.
+if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ]; then
+  wa_ancestry_verdict "${SOURCE_ROOT:-}" "${SOURCE_COMMIT:-}" "$PREVIOUS_COMMIT" "${NEW:-$INSTALLED}"
+  ANCESTRY=$?
+  case "$ANCESTRY" in
+    0) ;;
+    1)
+      if [ -n "${WA_UPGRADE_FORCE_REASON:-}" ]; then
+        UPGRADE_ANCESTRY_OVERRIDE="$WA_UPGRADE_FORCE_REASON"
+        say "OVERRIDE, recorded: ${SOURCE_COMMIT:-the candidate} does not contain running commit ${PREVIOUS_COMMIT:0:12}; going on because WA_UPGRADE_FORCE_REASON says so"
+      else
+        say "refusing a candidate from ${SOURCE_COMMIT:-unknown}: it does not contain the RUNNING commit ${PREVIOUS_COMMIT} (${PREVIOUS_SOURCE} says so; ${WA_ANCESTRY_LOST_COUNT:-?} commit(s) would be lost)"
+        printf '%s\n' "${WA_ANCESTRY_LOST:-  (the lost commits could not be listed)}" | sed 's/^/  lost: /'
+        say "nothing was installed. To go back on purpose: 'wa update <node> --rollback' (restores the previous pair and records a pin), or set WA_UPGRADE_FORCE_REASON=<text> and the override is recorded"
+        exit 2
+      fi ;;
+    *) say "cannot tell whether this candidate goes backwards: ${WA_ANCESTRY_WHY:-unknown}; carrying on, and the record says ancestry_unverified=yes" ;;
+  esac
 fi
 
 file_hash() { [ -f "$1" ] && sha256sum < "$1" 2>/dev/null | awk '{print $1}' || true; }
@@ -185,7 +222,20 @@ record_install() {
   upgrade_hash="$(file_hash "$INSTALL_DIR/scripts/upgrade.sh")"
   [ -n "$upgrade_hash" ] || upgrade_hash=missing
   [ -n "$hash" ] || return 1
-  commit=unknown; branch=unknown
+  branch=unknown; dirty=unknown; tree=unknown; build=absent
+  # THE IDENTITY IS THE BYTES'. `wa --build-info` of the binary this upgrade just placed is the only honest
+  # source for commit=; the previous record's commit and the checkout's HEAD are beliefs about OTHER bytes.
+  # MEASURED 18/11: an installed.txt said commit=14963b6f while the node ran a build of 8 commits that were on
+  # no landed branch, and the next deploy trusted it.
+  commit=""
+  if UPGRADE_INFO="$(wa_build_info "$INSTALLED")"; then
+    commit="$(wa_build_field "$UPGRADE_INFO" commit)"
+    tree="$(wa_build_field "$UPGRADE_INFO" tree)"
+    dirty="$(wa_build_field "$UPGRADE_INFO" dirty)"
+    build=yes
+  fi
+  [ "$commit" = unknown ] && commit=""
+  [ -n "$commit" ] || { commit=unknown; say "the installed binary cannot report its own build (build_info=absent): the record says commit=unknown rather than guessing"; }
   # A sentinel upgrade knows the exact installed bytes, but cannot prove that a
   # separately built binary corresponds to the checkout's current HEAD.
   source_hint="${SOURCE_COMMIT:-unknown}"
@@ -237,8 +287,17 @@ record_install() {
   fi
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$INSTALL_DIR/.installed.txt.$$"
-  printf 'commit=%s\nbranch=%s\ndirty=unknown\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_commit_hint=%s\nsource_provenance=%s\nrecord_role=%s\nvia=%s\nat=%s\nreason=%s\n' \
-    "$commit" "$branch" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$provenance" "$role" "$via" "$stamp" "$reason" > "$record" \
+  printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_commit_hint=%s\nsource_provenance=%s\nrecord_role=%s\nvia=%s\nat=%s\nreason=%s\n' \
+    "$commit" "$branch" "$dirty" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$provenance" "$role" "$via" "$stamp" "$reason" > "$record"
+  {
+    printf 'tree=%s\nbuild_info=%s\n' "$tree" "$build"
+    if [ -n "${UPGRADE_ANCESTRY_OVERRIDE:-}" ]; then
+      printf 'ancestry_override=%s\nancestry_override_by=%s\nancestry_override_at=%s\n' \
+        "$(printf '%s' "$UPGRADE_ANCESTRY_OVERRIDE" | tr '\r\n' '  ')" "$(id -un 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+    if [ "${ANCESTRY:-0}" = 2 ]; then printf 'ancestry_unverified=yes\n'; fi
+    true
+  } >> "$record" \
     && mv -f "$record" "$INSTALL_DIR/installed.txt"
 }
 

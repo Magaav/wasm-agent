@@ -33,6 +33,8 @@ while [ $# -gt 0 ]; do
     --pub) PUB=${2:?}; shift 2 ;;
     --manifest) MANIFEST=${2:?}; shift 2 ;;
     --bin) TARGET=${2:?}; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --reason) REASON=${2:?reason text}; shift 2 ;;
     *) echo "fleet-install: unknown_option $1" >&2; exit 2 ;;
   esac
 done
@@ -42,6 +44,16 @@ HEALTH=${HEALTH:-http://127.0.0.1:8799/health}
 # restarts the node on its own next check, and a boot measured 17/11 took ~80 s - a healthy artifact was
 # rolled back as dead (and the rollback then looked dead too).
 UNIT=${UNIT:-}
+FORCE=0; REASON=""
+# The record writer and the ancestry verdict (scripts/lib/install-record.sh): this script installs bytes it
+# did not build, so only the binary can say which commit they are (18/11: a record named a commit the bytes
+# were not).
+HERE="$(cd "$(dirname "$0")" && pwd)"
+for fi_lib in "${WA_INSTALL_RECORD_LIB:-}" "$HERE/lib/install-record.sh" "$HERE/../scripts/lib/install-record.sh"; do
+  [ -n "$fi_lib" ] && [ -f "$fi_lib" ] && . "$fi_lib" && break
+done
+command -v wa_build_info >/dev/null 2>&1 \
+  || { printf 'fleet-install: install_record_lib_missing: scripts/lib/install-record.sh is not beside this script; it is what writes installed.txt from the binary and what asks whether this artifact goes backwards; nothing was installed\n' >&2; exit 2; }
 say() { printf 'fleet-install: %s\n' "$*"; }
 die() { printf 'fleet-install: %s\n' "$*" >&2; exit 1; }
 
@@ -269,6 +281,44 @@ if ! "$tmp/wa" --version >/dev/null 2>&1; then
 fi
 say "runs here: $("$tmp/wa" --version)"
 
+# 3b. WHICH COMMIT ARE THESE BYTES, AND DO THEY CONTAIN WHAT IS RUNNING?
+#
+# The artifact's name is a claim; `wa --build-info` is the answer (rust/wa-host/build.rs). And an artifact
+# that does not contain the commit the node runs now is a downgrade: it is refused by name, listing what
+# would be lost, unless the operator says --force --reason <text> - which the record then carries.
+CANDIDATE_COMMIT=""; CANDIDATE_TREE=""; CANDIDATE_DIRTY=""; RECORD_BUILD=absent
+if CANDIDATE_INFO="$(wa_build_info "$tmp/wa")"; then
+  RECORD_BUILD=yes
+  CANDIDATE_COMMIT="$(wa_build_field "$CANDIDATE_INFO" commit)"
+  CANDIDATE_TREE="$(wa_build_field "$CANDIDATE_INFO" tree)"
+  CANDIDATE_DIRTY="$(wa_build_field "$CANDIDATE_INFO" dirty)"
+  [ "$CANDIDATE_COMMIT" = unknown ] && CANDIDATE_COMMIT=""
+fi
+if [ -z "$CANDIDATE_COMMIT" ]; then
+  say "WARNING: this artifact cannot report its own build (older than --build-info); the record will say commit=unknown rather than what this script meant to install"
+else
+  say "artifact reports its own build: ${CANDIDATE_COMMIT:0:12} (tree ${CANDIDATE_TREE:0:12}, dirty $CANDIDATE_DIRTY)"
+fi
+RUNNING_COMMIT=""
+if [ -x "$TARGET" ] && RUNNING_INFO="$(wa_build_info "$TARGET")"; then
+  RUNNING_COMMIT="$(wa_build_field "$RUNNING_INFO" commit)"
+  [ "$RUNNING_COMMIT" = unknown ] && RUNNING_COMMIT=""
+fi
+ANCESTRY_STATE=unknown
+if [ -n "$RUNNING_COMMIT" ] && [ -n "$CANDIDATE_COMMIT" ]; then
+  wa_ancestry_verdict "" "$CANDIDATE_COMMIT" "$RUNNING_COMMIT" "$tmp/wa"
+  case $? in
+    0) ANCESTRY_STATE=yes ;;
+    1) if [ "$FORCE" = 1 ] && [ -n "$REASON" ]; then
+         ANCESTRY_STATE=override
+         say "OVERRIDE, recorded: ${CANDIDATE_COMMIT:0:12} does not contain running commit ${RUNNING_COMMIT:0:12}; going on because --force --reason says so"
+       else
+         die "downgrade_refused: this artifact (${CANDIDATE_COMMIT:0:12}) does not contain the RUNNING commit ${RUNNING_COMMIT:0:12} (${WA_ANCESTRY_WHY:-reason unknown}) - installing it would remove work that is running now. Nothing was replaced. To go back on purpose: 'wa update <node> --rollback' (records a pin), or --force --reason <text>"
+       fi ;;
+    *) say "cannot tell whether this artifact goes backwards: ${WA_ANCESTRY_WHY:-unknown}; carrying on and recording ancestry_unverified=yes" ;;
+  esac
+fi
+
 # 4. backup and swap
 backup="$TARGET.prev.$(date -u +%Y%m%dT%H%M%SZ)"
 cp -p "$TARGET" "$backup" 2>/dev/null || say "no previous binary to back up"
@@ -338,4 +388,21 @@ case "$verdict" in
     ;;
 esac
 
-say "healthy (200) — installed $(basename "$TARGET") from $URL"
+# 7. the record, written FROM the binary that is now installed. This script installed bytes and cannot say
+# which commit they are; the binary can (rust/wa-host/build.rs), and a record written from anything else is the
+# belief that made an installed.txt say commit=14963b6f for other bytes on 18/11.
+record_dir="$(dirname "$TARGET")"
+{
+  [ -n "${CANDIDATE_COMMIT:-}" ] && printf 'source_commit=%s\n' "$CANDIDATE_COMMIT"
+  printf 'artifact_url=%s\n' "$URL"
+  [ -n "$SHA" ] && printf 'artifact_sha256=%s\n' "$SHA"
+  printf 'previous_binary=%s\n' "${backup:-none}"
+  printf 'ancestry=%s\n' "$ANCESTRY_STATE"
+  [ "$ANCESTRY_STATE" = override ] && printf 'ancestry_override=%s\nancestry_override_by=%s\n' "$(printf '%s' "$REASON" | tr '\r\n' '  ')" "$(id -un 2>/dev/null || echo unknown)"
+  printf 'via=fleet-install.sh\nat=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  true
+} > "$tmp/record_extra" 2>/dev/null || true
+mapfile -t RECORD_EXTRA < "$tmp/record_extra" 2>/dev/null || RECORD_EXTRA=()
+wa_record_install "$record_dir" "$TARGET" "${RECORD_EXTRA[@]}" \
+  || say "the binary is installed and healthy, but installed.txt was not rewritten: it still names the previous pair"
+say "healthy (200) — installed $(basename "$TARGET") from $URL (record: $(sed -n 's/^commit=//p' "$record_dir/installed.txt" 2>/dev/null | head -1))"
