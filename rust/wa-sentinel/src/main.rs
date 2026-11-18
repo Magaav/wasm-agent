@@ -2155,6 +2155,9 @@ fn perform(request: &Value) -> Result<String> {
     // A FORCE IS A REASON OR IT IS NOTHING, checked again here because a request file outlives the process that
     // wrote it: the parser refuses it too, and neither check trusts the other (round-3 item 5).
     let forced = request.get("force").and_then(Value::as_bool) == Some(true);
+    if forced && verb != "deploy" {
+        bail!("force_is_deploy_only: --force belongs to deploy, and this request asks for {verb:?}; nothing was performed.");
+    }
     if forced {
         if request.get("expected_sha").is_some() {
             bail!("forced_protocol_deploy_refused: the exact-source deploy protocol has no force: it installs the published canonical main and nothing else. Nothing was started.");
@@ -2803,6 +2806,9 @@ fn request(args: &[String]) -> Result<()> {
     if verb=="run"{validate_run_continuation(&Value::Object(fields.clone()))?;}
     // THE FORCE NEEDS ITS REASON, at the door: a request file whose only possible outcome is "refused for want of
     // a reason" is durable state created by a question (round-3 item 5).
+    if fields.get("force").and_then(Value::as_bool)==Some(true) && verb!="deploy" {
+        bail!("force_is_deploy_only: --force belongs to deploy, and this request asks for {verb:?}; no request was written.");
+    }
     if fields.get("force").and_then(Value::as_bool)==Some(true)
         && fields.get("reason").and_then(Value::as_str).map(|text| text.trim().is_empty()).unwrap_or(true) {
         bail!("override_reason_required: --force overrides a refusal that exists to protect what is running or where the node was put on purpose, and an override nobody can read later is not a decision anyone can review. Say why: --force --reason <text>. No request was written.");
@@ -4017,6 +4023,9 @@ mod forced_deploy_tests {
         assert!(error.contains("No request was written"), "{error}");
         let wrong_verb = request(&argv(&["restart", "--force"])).unwrap_err().to_string();
         assert!(wrong_verb.contains("only for deploy"), "{wrong_verb}");
+        let wrong_verb_perform = perform(&json!({"verb":"restart","force":true,"reason":"say so"}))
+            .unwrap_err().to_string();
+        assert!(wrong_verb_perform.contains("force_is_deploy_only"), "{wrong_verb_perform}");
         let performed = perform(&json!({"verb":"deploy","force":true})).unwrap_err().to_string();
         assert!(performed.contains("override_reason_required"), "{performed}");
         // The exact-source protocol installs published canonical main and nothing else, so a force has no meaning
