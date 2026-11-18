@@ -90,17 +90,22 @@ M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-ses
 -- each side's test pins the same fixture digest (scripts/test-mcp-vault-approval.lua). Every field is
 -- percent-escaped, so a newline, a space or a tab inside an argument cannot forge a line of it.
 --
--- v2 (this round) added the cwd and the plain (non-vault) environment, and replaced "every absolute
--- argument with a script extension" with the CLOSURE of the code the connector can load (M.vault_manifest
--- below): a relative script, an extensionless program, a package runner and an imported module were each
--- a way to run bytes the digest never named. A connector whose code cannot be closed this way is REFUSED
--- rather than approved with a digest that only looks complete.
-M.APPROVAL_FORM='mcp-vault-approval/v2'
+-- v2 added the cwd and the plain (non-vault) environment, and replaced "every absolute argument with a
+-- script extension" with the CLOSURE of the code the connector can load. v3 (round 6) closes the rest of
+-- that closure: the INTERPRETER the launch actually spawns (node_program, not the definition's program),
+-- every argument resolved from the connector's own directory, and the scripts a wrapper RUNS - with inline
+-- code, computed execs, child_process and a computed Worker refused by name (M.vault_manifest below). A
+-- connector whose code cannot be closed this way is REFUSED rather than approved with a digest that only
+-- looks complete.
+M.APPROVAL_FORM='mcp-vault-approval/v3'
 -- Bounds: an approval is re-read before every call, and a connector that needs more than this is one
 -- whose coverage cannot be proven cheaply, so it is refused by name instead.
 M.MAX_FILES=2048
 M.MAX_FILE_BYTES=16*1024*1024
 M.MAX_TOTAL_BYTES=64*1024*1024
+-- A binary (a program, or the interpreter) is hashed in chunks and never parsed: bounded higher than a
+-- script because a node binary is a hundred megabytes, and lower than what an approval could call cheap.
+M.MAX_BINARY_BYTES=512*1024*1024
 local function approval_field(text)
  return (tostring(text):gsub('[^%w%._~/:@+,=%-]', function(ch) return string.format('%%%02X', ch:byte()) end))
 end
@@ -212,9 +217,19 @@ local function module_refs(kind,content)
   for spec in content:gmatch('import%s*[\'\"]([^\'\"]+)[\'\"]')do refs[#refs+1]=spec end
   for spec in content:gmatch('import%s*%(%s*[\'\"]([^\'\"]+)[\'\"]%s*%)')do refs[#refs+1]=spec end
   for spec in content:gmatch('require%s*%(%s*[\'\"]([^\'\"]+)[\'\"]%s*%)')do refs[#refs+1]=spec end
+  -- A Worker or a new URL is a module too, when it names one: a literal target is followed like an
+  -- import, and a computed one is refused below.
+  for spec in content:gmatch('Worker%s*%(%s*[\'\"]([^\'\"]+)[\'\"]')do refs[#refs+1]=spec end
+  for spec in content:gmatch('Worker%s*%(%s*new%s+URL%s*%(%s*[\'\"]([^\'\"]+)[\'\"]')do refs[#refs+1]=spec end
  elseif kind=='sh' then
   for target in content:gmatch('[%s;]source%s+([^%s;]+)')do refs[#refs+1]=target end
   for target in content:gmatch('[\n;]%s*%.%s+([^%s;]+)')do refs[#refs+1]=target end
+  -- A wrapper that RUNS another script names that script, so it is followed (and hashed) rather than
+  -- refused: exec ./inner.sh, bash ./inner.sh.
+  for target in content:gmatch('[%s;]exec%s+([^%s;|&]+)')do refs[#refs+1]=target end
+  for _,shell in ipairs({'bash','sh','dash','zsh','ksh'})do
+   for target in content:gmatch('[%s;]'..shell..'%s+([^%s;|&%-][^%s;|&]*)')do refs[#refs+1]=target end
+  end
  end
  return refs
 end
@@ -238,6 +253,157 @@ local function resolve_local(base,spec)
  end
  return nil
 end
+-- ---- what a launch can RUN, decided by facts on disk rather than by a name (round 6) --------------
+--
+-- Three holes are closed here, and each was a way to run bytes the digest never named:
+--
+--   1. the INTERPRETER. node_program() answers WA_NODE, then the copy the installer provisions beside the
+--      node, then the bare name node. That process is the one the vault values are put in, and it was
+--      neither hashed nor, when it lives in <data>/node, out of the agent's reach. It is resolved through
+--      its realpath and hashed into the approval unless it is the PLATFORM's own: root-owned and not
+--      group/other-writable, which a package manager upgrades and the agent cannot;
+--   2. an ARGUMENT that names a file. looks_like_path needed a slash or a script extension, so
+--      program /usr/bin/node, args {server}, cwd /home/u/conn ran ./server.js unhashed. Every argument is
+--      resolved the way node resolves it - from the connector's own directory, with the extensions node
+--      implies - and what exists is hashed. An argument that may name a file and cannot be resolved is
+--      REFUSED: a file that is not there at approval time can be there at launch;
+--   3. a script that RUNS another script. A wrapper that execs a second script, or sources it, is
+--      FOLLOWED (the target is a file, so it is hashed in turn); an inline string (node -e, sh -c, eval),
+--      a command substitution, a computed exec, child_process and a computed Worker are REFUSED by name,
+--      because no digest of files can name a string that is evaluated.
+--
+-- The node's own MCP runtime is exempt from the child_process rule and from nothing else: it is the
+-- harness that spawns the connector, its bytes are in the digest, and the request seal in
+-- rust/wa-capabilities/src/operations.rs is what checks the program it spawns against the approval.
+local RUNTIME_NAME={}
+for _,name in ipairs(M.RUNTIME)do RUNTIME_NAME[name]=true end
+-- The Node program that runs the MCP runtime. An explicit WA_NODE wins; after that, the copy the
+-- installer provisions beside the node (<install>/node, <data>/node, node.exe on Windows), because a
+-- device whose PATH has no Node was a device where every MCP tool refused. path_kind is a stat, never a
+-- read: this must not load a hundred megabytes of binary into Lua to answer a path question.
+local function node_program()
+ local override=host.getenv('WA_NODE');if override and override~='' then return override end
+ local relative=platform.os()=='windows' and '/node/node.exe' or '/node/bin/node'
+ local bases={}
+ local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then bases[#bases+1]=install end
+ local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then bases[#bases+1]=data end
+ for _,base in ipairs(bases) do
+  local program=base..relative
+  if host.path_kind(program)=='file' then return program end
+ end
+ return 'node'
+end
+-- host.path_facts: the realpath and the identity a permission decision needs. nil when the host cannot
+-- answer - never a guess, because a guess here means trusting a file nobody hashed.
+local function path_facts(path)
+ local raw=host.path_facts and host.path_facts(tostring(path or ''))
+ local facts=raw and decode(raw)
+ return type(facts)=='table' and facts or nil
+end
+-- Windows has no uid to read here: the prefix list is the answer there, and docs/VAULT.md says so.
+local function unix_facts(facts)return facts~=nil and facts.unix==true and type(facts.uid)=='number' end
+-- The mode bits a package manager's upgrade leaves behind. nil means "this host cannot say".
+local function root_owned(facts)
+ if not unix_facts(facts) then return nil end
+ if facts.uid~=0 then return false end
+ local mode=tonumber(facts.mode) or 0
+ local group,other=math.floor(mode/8)%8,mode%8
+ if math.floor(group/2)%2==1 or math.floor(other/2)%2==1 then return false end
+ return true
+end
+local function parent_dir(path)
+ local trimmed=tostring(path or ''):gsub('/+$','')
+ return (trimmed:match('^(.*)/[^/]+$')) or ''
+end
+-- A path is the PLATFORM's when it is under a platform root AND root-owned AND not group/other-writable,
+-- with every directory above it the same: a writable directory lets anyone replace the file inside it.
+-- (Round 6: /usr/local/bin and /opt/homebrew belong to the user on macOS, so a homebrew interpreter was
+-- called the platform's and received the vault values unhashed.)
+local function platform_owned(path)
+ if not platform_root(path) then return false end
+ local facts=path_facts(path)
+ if not facts or facts.kind~='file' then return false end
+ if not unix_facts(facts) then return true end
+ local real=tostring(facts.path or path)
+ if root_owned(facts)==false then return false end
+ local dir,guard=parent_dir(real),0
+ while dir~='' and dir~='/' and guard<64 do
+  local parents=path_facts(dir)
+  if not parents or root_owned(parents)==false then return false end
+  dir=parent_dir(dir);guard=guard+1
+ end
+ return true
+end
+-- The interpreter as a FILE: node_program() may answer a bare name (node), which the kernel resolves
+-- through PATH when it spawns; the digest has to resolve it the same way, or it names nothing at all.
+local function interpreter_path()
+ local program=normalize(tostring(node_program() or ''))
+ if program=='' then return nil end
+ if program:find('/') then return program end
+ for dir in tostring(host.getenv('PATH') or ''):gmatch('[^:;]+') do
+  local candidate=normalize(dir..'/'..program)
+  if host.path_kind(candidate)=='file' then return candidate end
+ end
+ return nil
+end
+-- Exported for the tests that pin the ownership rule (scripts/test-mcp-vault-approval.lua).
+M.platform_owned=platform_owned
+-- Where node would find a file an argument names: the connector's own directory, then the extensions node
+-- implies. nil when nothing is there - and a relative name with no directory to resolve it from is nil
+-- too, because the launch's own cwd is not the approval's to assume.
+local function resolve_argument(cwd,value)
+ if not absolute_path(value) and (type(cwd)~='string' or cwd=='') then return nil end
+ return resolve_local(type(cwd)=='string' and cwd or '',value)
+end
+-- The interpreter family, from the program's own name: the flags that mean "run this string" differ.
+local INTERPRETERS={node='js',nodejs='js',bun='js',deno='js',qjs='js',quickjs='js',
+ sh='sh',bash='sh',dash='sh',zsh='sh',ksh='sh'}
+local INLINE_FLAGS={js={['-e']=true,['--eval']=true,['-p']=true,['--print']=true},
+ sh={['-c']=true,['--command']=true}}
+-- Options that name a FILE rather than a value: their argument is hashed, or refused.
+local PATH_OPTIONS={['--require']=true,['-r']=true,['--import']=true,['--loader']=true,
+ ['--experimental-loader']=true,['--env-file']=true,['--config']=true}
+local function interpreter_family(program)
+ local name=basename(tostring(program or '')):lower():gsub('%.exe$','')
+ if INTERPRETERS[name] then return INTERPRETERS[name] end
+ if SCRIPT_EXT[(name:match('%.([%w]+)$') or ''):lower()] then return 'script' end
+ return 'unknown'
+end
+local function inline_flag(program,value)
+ local flags=INLINE_FLAGS[interpreter_family(program)]
+ if flags and flags[value] then return true end
+ return false
+end
+-- What a digest of FILES cannot follow: a string it would evaluate, a process it would start, a module
+-- whose name is chosen while it runs. Refused by name, in the connector's own code.
+local QUOTE_CLASS='['..string.char(39)..string.char(34)..']'
+local function refused_construct(kind,content,path)
+ if kind=='js' then
+  if content:find('child_process',1,true) and not RUNTIME_NAME[basename(path)] then
+   return 'it starts a process (child_process), whose program no digest names'
+  end
+  if content:find('worker_threads',1,true) and not content:find('Worker%s*%(%s*'..QUOTE_CLASS)
+   and not content:find('Worker%s*%(%s*new%s+URL') then
+   return 'it starts a Worker whose target is not a literal module it names'
+  end
+  if content:find('process%.dlopen') then return 'it loads a native addon by handle (process.dlopen)' end
+  if content:find('%f[%w]eval%s*%(') then return 'it evaluates a string as code (eval)' end
+  if content:find('new%s+Function%s*%(') then return 'it builds a function from a string (new Function)' end
+ elseif kind=='sh' then
+  local value_after_exec='['..string.char(39)..string.char(34)..'%$]'
+  if content:find('%f[%w]eval%s') then return 'it evaluates a string as shell code (eval)' end
+  if content:find('%f[%w]exec%s+'..value_after_exec) then
+   return 'it execs a script chosen while it runs (exec of a value)'
+  end
+  for _,shell in ipairs({'bash','sh','dash','zsh','ksh'})do
+   if content:find('%f[%w]'..shell..'%s+%-c') then return 'it runs inline shell code ('..shell..' -c)' end
+  end
+  if content:find('%$%(') or content:find(string.char(96),1,true) then
+   return 'it runs a command substitution, whose code no digest names'
+  end
+ end
+ return nil
+end
 -- The manifest an approval records, and the one a launch is checked against: the paths in a stable order,
 -- each file's sha256 as it is NOW, the arguments in order, the vault names sorted, and the reasons
 -- coverage could not be proven (`problems`, empty when it could).
@@ -249,8 +415,27 @@ function M.vault_manifest(definition,directory)
   if type(path)~='string' or path=='' then return end
   path=normalize(path)
   if seen[path] then return end
-  if host.path_kind(path)~='file' then
+  local facts=path_facts(path)
+  if not facts or facts.kind~='file' then
    problems[#problems+1]='a file it runs cannot be read ('..path..')'
+   return
+  end
+  local size=tonumber(facts.size) or 0
+  -- A program or an interpreter is a BINARY: its bytes are hashed and never parsed, because there is no
+  -- module system to follow inside one, and host.file_sha256 reads it in chunks rather than loading it.
+  if size>M.MAX_FILE_BYTES then
+   if size>M.MAX_BINARY_BYTES or #files>=M.MAX_FILES then
+    problems[#problems+1]='its code is larger than an approval can cover ('..path..')'
+    return
+   end
+   local href=host.file_sha256 and host.file_sha256(path)
+   if type(href)~='string' or href=='' then
+    problems[#problems+1]='a file it runs cannot be hashed ('..path..')'
+    return
+   end
+   -- Not added to the total: that budget bounds the TEXT this manifest holds and parses, and a binary is
+   -- neither (a node binary is larger than the whole budget and is hashed in chunks).
+   seen[path]=true;files[#files+1]={path=path,sha256=href}
    return
   end
   local content=host.read_file(path)
@@ -267,6 +452,8 @@ function M.vault_manifest(definition,directory)
    return
   end
   total=total+#content
+  -- The digest is over the bytes PARSED here; the kernel hashes the file again from disk, so a rewrite
+  -- between the two is a mismatch rather than a launch (operations.rs, recheck_after_spawn).
   seen[path]=true;files[#files+1]={path=path,sha256=host.sha256(content)}
   queue[#queue+1]={path=path,content=content,kind=kind}
  end
@@ -282,23 +469,57 @@ function M.vault_manifest(definition,directory)
   problems[#problems+1]='its program is a package runner ('..name..'), whose code comes from a cache or a registry rather than from files this approval can name'
  elseif not absolute_path(program) then
   problems[#problems+1]='its program is not an absolute path ('..program..'): a bare name is resolved through PATH, which this digest does not name'
- elseif not platform_root(program) then
+ elseif not platform_owned(program) then
   add(program)
  end
- -- The arguments: a path is covered when it is absolute and exists; a relative one is resolved from the
- -- connector's cwd and cannot be.
+ -- The interpreter the launch SPAWNS is node_program(), not the definition's program, and it is the
+ -- process the vault values are put in. Its realpath is covered by the digest, or the connector cannot be
+ -- approved: WA_NODE may name anything, and <data>/node belongs to the agent's own user.
+ local interpreter=interpreter_path()
+ if not interpreter then
+  problems[#problems+1]='its interpreter cannot be found ('..tostring(node_program())..'), so no file this digest could hash runs it'
+ elseif platform_owned(interpreter) then
+  -- The platform's own interpreter: a package manager replaces it, never the agent, so its bytes are not
+  -- this connector's to hash on every call.
+ else
+  local facts=path_facts(interpreter)
+  if not facts or facts.kind~='file' then
+   problems[#problems+1]='its interpreter cannot be read ('..interpreter..')'
+  else add(tostring(facts.path or interpreter)) end
+ end
+ -- The arguments. Every one of them is a file the launch may read until it is proved otherwise: node
+ -- takes the script first, then whatever that script is told, and a bare word (server) is a file beside
+ -- the connector when one is there - which is the shape this digest used to skip (round 6).
  local args={}
+ local cwd_value=tostring(list.cwd or '')
+ local pending_option=''
  for _,arg in ipairs(type(list.args)=='table' and list.args or {})do
   local value=tostring(arg);args[#args+1]=value
-  if looks_like_path(value) then
-   if not absolute_path(value) then
-    problems[#problems+1]='an argument is a path resolved from its own directory ('..value..'): only an absolute path can be covered'
-   elseif host.path_kind(normalize(value))=='file' then
-    add(value)
+  local is_option=value:sub(1,1)=='-' and #value>1
+  if is_option and inline_flag(program,value) then
+   problems[#problems+1]='it runs inline code ('..value..'), and no digest of files can name a string it evaluates'
+  elseif is_option then
+   local name,inline=value:match('^(%-%-[%w%-]+)=(.*)$')
+   pending_option=name or value
+   if name and PATH_OPTIONS[name] then
+    local target=resolve_argument(cwd_value,inline)
+    if target then add(target)
+    else problems[#problems+1]='an argument names a file that cannot be found ('..inline..' after '..name..')' end
    end
-   -- An absolute path that is not there yet is neither a problem nor a hole: when a file appears there,
-   -- the manifest the gate recomputes changes and the approval goes stale, and the kernel refuses a path
-   -- argument its file list does not name. What is covered is what exists.
+  else
+   local target=resolve_argument(cwd_value,value)
+   if target then add(target)
+   elseif pending_option~='' and not PATH_OPTIONS[pending_option] then
+    -- The value of an option (--mode stdio): node reads it as a value, not as a file.
+   elseif pending_option~='' then
+    problems[#problems+1]='an argument names a file that cannot be found ('..value..' after '..pending_option..')'
+   elseif looks_like_path(value) then
+    problems[#problems+1]='an argument is a path resolved from its own directory ('..value..'): only an absolute path can be covered'
+   else
+    problems[#problems+1]='an argument may name a file this digest cannot resolve ('..value..' from '
+      ..(cwd_value~='' and cwd_value or 'no directory')..'): give its absolute path'
+   end
+   pending_option=''
   end
  end
  -- The closure: what each covered file loads in turn.
@@ -310,6 +531,8 @@ function M.vault_manifest(definition,directory)
   if computed then
    problems[#problems+1]='a script loads code by a computed name ('..computed..' in '..entry.path..')'
   end
+  local refused=refused_construct(entry.kind,entry.content,entry.path)
+  if refused then problems[#problems+1]=refused..' ('..entry.path..')' end
   for _,spec in ipairs(module_refs(entry.kind,entry.content))do
    if platform_module(spec) then
    elseif spec:sub(1,1)=='.' or spec:sub(1,1)=='/' or spec:sub(1,5)=='file:' then
@@ -361,18 +584,6 @@ end
 -- installer provisions beside the node (`<install>/node`, `<data>/node`, `node.exe` on Windows), because a
 -- device whose PATH has no Node was a device where every MCP tool refused. `path_kind` is a stat, never a
 -- read: this must not load a hundred megabytes of binary into Lua to answer a path question.
-local function node_program()
- local override=host.getenv('WA_NODE');if override and override~='' then return override end
- local relative=platform.os()=='windows' and '/node/node.exe' or '/node/bin/node'
- local bases={}
- local install=host.getenv('WA_INSTALL_DIR');if install and install~='' then bases[#bases+1]=install end
- local okdata,data=pcall(paths.data);if okdata and type(data)=='string' then bases[#bases+1]=data end
- for _,base in ipairs(bases) do
-  local program=base..relative
-  if host.path_kind(program)=='file' then return program end
- end
- return 'node'
-end
 function M.node_program()return node_program() end
 -- The read sessions launch the same runtime: they used `WA_NODE or 'node'`, so on a node with no
 -- system Node (the sandbox image) every reused read failed `program_not_found_on_path` while a probe,
@@ -457,8 +668,9 @@ local function vault_gate(row, ctx, id)
  -- the model can read, before a process is started at all.
  local approved=row.vault_approval
  -- A row approved before approvals named their form predates the digest that says what they cover (the
- -- cwd and the plain environment are v2's, and so is the closure of the code): it is refused with that
- -- sentence, not with a mismatch the operator cannot act on.
+ -- cwd and the plain environment are v2's, the closure of the code is v2's, the interpreter and the
+ -- resolved arguments are v3's): it is refused with that sentence, not with a mismatch the operator
+ -- cannot act on.
  if type(approved)~='table' or type(approved.sha256)~='string' or approved.sha256=='' or tostring(approved.form or '')~=M.APPROVAL_FORM then
   return fail(VAULT_APPROVAL_MISSING,{id=id,outcome='not_submitted',tool_call_issued=false,
    note='this connector\'s approval predates the digest that says what it covers, so nothing was launched and no value was read.'..approve_again(id)})

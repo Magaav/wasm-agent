@@ -53,7 +53,8 @@ fn vault_value_with<T>(slot: &std::sync::Mutex<Option<T>>, open: impl FnOnce() -
 //
 // (docs/VAULT.md, 18/11.) A `vault_env` definition is the operator's, and the approval is a digest over
 // what the launch IS: the program, the directory it runs in, its arguments, the plain environment it
-// asks for, EVERY file it can run or load (v2: the closure of what those files import in turn) and the
+// asks for, EVERY file it can run or load (v3: the closure of what those files import in turn, the
+// interpreter the launch spawns, and every argument resolved from the connector's own directory) and the
 // vault names it asks for. Until this existed the approval was one boolean in memory.db while
 // the scripts it runs live in a directory the agent can write, so an approved connector's script could
 // be replaced afterwards and the value handed to the new code. The digest is recomputed HERE, from the
@@ -74,9 +75,10 @@ fn approval_field(text: &str) -> String {
 }
 
 /// The form of the canonical text. A row approved under an older one is refused rather than compared
-/// against a digest it could never match: v2 covers the launch's directory and its plain (non-vault)
-/// environment as well as its bytes, and v2's file list is the CLOSURE of the code the connector loads.
-const APPROVAL_FORM: &str = "mcp-vault-approval/v2";
+/// against a digest it could never match: v2 added the launch's directory and its plain (non-vault)
+/// environment, and v3 adds the interpreter the launch spawns and the arguments resolved from its own
+/// directory; the file list is the CLOSURE of the code the connector loads.
+const APPROVAL_FORM: &str = "mcp-vault-approval/v3";
 
 fn approval_text(program: &str, cwd: &str, env: &[(String, String)], args: &[String],
                  files: &[(String, String)], vault: &[String]) -> String {
@@ -121,9 +123,9 @@ fn is_script_path(value: &str) -> bool {
 // named. The console refuses to APPROVE such a connector (lua/core/mcp.lua, M.vault_manifest's
 // 'problems'); the same shapes are refused here, from the bytes on disk, so an approval that predates
 // the rule cannot launch either.
-const PLATFORM_ROOTS: [&str; 14] = ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/lib/",
+const PLATFORM_ROOTS: [&str; 15] = ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/lib/",
     "/usr/lib64/", "/usr/libexec/", "/lib/", "/lib64/", "/usr/local/bin/", "/usr/local/sbin/",
-    "/opt/homebrew/", "/nix/store/", "/snap/"];
+    "/opt/homebrew/", "/nix/store/", "/snap/", "/System/"];
 const PACKAGE_RUNNERS: [&str; 8] = ["npx", "uvx", "bunx", "pipx", "npm", "pnpm", "yarn", "corepack"];
 const SCRIPT_EXTENSIONS: [&str; 11] = ["mjs", "cjs", "js", "lua", "sh", "bash", "py", "rb", "pl", "ps1", "bat"];
 
@@ -138,11 +140,167 @@ fn basename(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_lowercase()
 }
 
-/// A program under one of these is the platform's (the interpreter the connector runs ON), not the
-/// connector's own code: /usr/bin/node is replaced by a package manager, never by the agent.
+/// A program under one of these is a CANDIDATE for being the platform's (the interpreter the connector
+/// runs ON), not the connector's own code: /usr/bin/node is replaced by a package manager, never by the
+/// agent. A prefix alone is not the answer - see platform_owned below.
 fn platform_root(path: &str) -> bool {
     let normalized = path.replace('\\', "/").to_lowercase();
     PLATFORM_ROOTS.iter().any(|root| normalized.starts_with(root))
+}
+
+/// The directory above a normalized absolute path.
+fn parent_of(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) => "/".into(),
+        Some(index) => trimmed[..index].to_string(),
+        None => String::new(),
+    }
+}
+
+/// Root-owned and not group/other-writable: what a package manager's upgrade leaves behind. On a host
+/// with no uid to read (Windows) the prefix rule is the answer, and docs/VAULT.md says so.
+fn owned_by_root(path: &str) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != 0 { return false; }
+        if metadata.mode() & 0o022 != 0 { return false; }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
+/// The platform's own program: under a platform root, root-owned, not group/other-writable, and every
+/// directory above it the same (a writable directory lets anyone replace the file inside it).
+///
+/// This round's fifth finding: /usr/local/bin and /opt/homebrew belong to the USER on macOS, so a
+/// homebrew interpreter was called the platform's and received the vault values unhashed.
+fn platform_owned(path: &str) -> bool {
+    if !platform_root(path) { return false; }
+    let real = real_path(path);
+    if !owned_by_root(&real) { return false; }
+    let mut dir = parent_of(&real);
+    let mut guard = 0;
+    while !dir.is_empty() && dir != "/" && guard < 64 {
+        if !owned_by_root(&dir) { return false; }
+        dir = parent_of(&dir);
+        guard += 1;
+    }
+    true
+}
+
+/// A path with symlinks resolved and separators normalized: the form two sides of a comparison must
+/// agree on, because /tmp is a symlink on some machines and the digest names what is really there.
+fn real_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| path.replace('\\', "/"))
+}
+
+/// Where node would find a file an argument names: the connector's own directory, then the extensions
+/// node implies. None when nothing is there, or when a relative name has no directory to resolve it from
+/// (the launch's own cwd is not the approval's to assume).
+fn resolve_argument(cwd: &str, value: &str) -> Option<String> {
+    const IMPLIED: [&str; 6] = [".mjs", ".js", ".cjs", "/index.mjs", "/index.js", "/index.cjs"];
+    let target = if is_absolute_path(value) {
+        value.replace('\\', "/")
+    } else if cwd.is_empty() {
+        return None;
+    } else {
+        format!("{}/{}", cwd.trim_end_matches('/'), value)
+    };
+    if std::path::Path::new(&target).is_file() { return Some(target); }
+    let named_extension = std::path::Path::new(&target).extension().is_some();
+    if !named_extension {
+        for extension in IMPLIED {
+            let candidate = format!("{target}{extension}");
+            if std::path::Path::new(&candidate).is_file() { return Some(candidate); }
+        }
+    }
+    None
+}
+
+/// The interpreter family, from the program's own name: the flags that mean "run this string" differ.
+fn interpreter_family(program: &str) -> &'static str {
+    let name = basename(program);
+    match name.trim_end_matches(".exe") {
+        "node" | "nodejs" | "bun" | "deno" | "qjs" | "quickjs" => "js",
+        "sh" | "bash" | "dash" | "zsh" | "ksh" => "sh",
+        _ => "unknown",
+    }
+}
+
+/// An option that names a FILE rather than a value.
+fn path_option(name: &str) -> bool {
+    matches!(name, "--require" | "-r" | "--import" | "--loader" | "--experimental-loader"
+        | "--env-file" | "--config")
+}
+
+/// A flag that makes the interpreter run a STRING: the one shape no digest of files can name.
+fn inline_flag(program: &str, value: &str) -> bool {
+    match interpreter_family(program) {
+        "js" => matches!(value, "-e" | "--eval" | "-p" | "--print"),
+        "sh" => matches!(value, "-c" | "--command"),
+        _ => false,
+    }
+}
+
+/// This round's second and third findings, from the approval's own data: every argument is resolved the
+/// way node resolves it, and each one that names a file must be a file the approval covers. An argument
+/// that may name a file and cannot be resolved is refused, because a file that is not there when the
+/// operator approved the connector can be there when it launches. An inline string is refused outright.
+fn argument_problem(cwd: &str, program: &str, args: &[String], covered: &[String]) -> Result<(), String> {
+    let mut pending = String::new();
+    for value in args {
+        let option = value.starts_with('-') && value.len() > 1;
+        if option && inline_flag(program, value) {
+            return Err(format!("vault_approval_inline_code:{value}: this connector runs inline code ({value}), which no digest of files can name, so nothing was launched and no value was read. Give it a script file: /mcp <id> probe, then /mcp <id> on"));
+        }
+        if option {
+            let (name, inline) = match value.split_once('=') {
+                Some((name, inline)) if name.starts_with("--") => (name.to_string(), Some(inline.to_string())),
+                _ => (value.clone(), None),
+            };
+            if let Some(inline) = inline {
+                if path_option(&name) {
+                    let Some(target) = resolve_argument(cwd, &inline) else {
+                        return Err(format!("vault_approval_file_not_found:{inline}: this connector names a file ({inline}, after {name}) that is not there, so nothing was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"));
+                    };
+                    if !covered.iter().any(|path| real_path(path) == real_path(&target)) {
+                        return Err(format!("vault_approval_argument_not_covered:{target}: this connector runs a file the approval does not name, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
+                    }
+                }
+            }
+            pending = name;
+            continue;
+        }
+        let target = resolve_argument(cwd, value);
+        match target {
+            Some(target) => {
+                if !covered.iter().any(|path| real_path(path) == real_path(&target)) {
+                    return Err(format!("vault_approval_argument_not_covered:{target}: this connector runs a file the approval does not name, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
+                }
+            }
+            None if !pending.is_empty() && !path_option(&pending) => {}
+            None if !pending.is_empty() => {
+                return Err(format!("vault_approval_file_not_found:{value}: this connector names a file ({value}, after {pending}) that is not there, so nothing was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"));
+            }
+            None if looks_like_path(value) => {
+                return Err(format!("vault_approval_path_not_absolute:{value}: this connector runs a path relative to its own directory, which the digest cannot name, so nothing was launched and no value was read. Name its absolute path: /mcp <id> probe, then /mcp <id> on"));
+            }
+            None => {
+                return Err(format!("vault_approval_argument_unresolved:{value}: this connector's argument may name a file this digest cannot resolve from its own directory, so nothing was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"));
+            }
+        }
+        pending.clear();
+    }
+    Ok(())
 }
 
 /// A path-shaped argument is one the launch could read: it has a separator, or it carries a script
@@ -170,7 +328,12 @@ fn program_shape_problem(program: &str) -> Option<String> {
 /// Nothing is launched and no value is read unless the launch matches the approval the operator gave.
 /// Each refusal names what is wrong and what to do, because the reader of a refusal is the one who can
 /// approve the connector again.
-fn approval_problem(approval: &Value, launch: &Spec) -> Result<(), String> {
+/// The bytes the approval was checked against, path and sha256, so the same bytes can be checked AGAIN
+/// after the spawn (recheck_after_spawn): the window between this hash and the child's open is the one
+/// this round's fourth finding names.
+type VerifiedFiles = Vec<(String, String)>;
+
+fn approval_problem(approval: &Value, launch: &Spec) -> Result<VerifiedFiles, String> {
     let expected = approval["sha256"].as_str().unwrap_or_default().trim().to_string();
     if expected.is_empty() {
         return Err("vault_approval_required: this connector names a vault entry but carries no approval digest, so no value was read and nothing was launched. A vault connector is approved at the operator's own terminal: /mcp <id> probe, then /mcp <id> on".into());
@@ -216,19 +379,39 @@ fn approval_problem(approval: &Value, launch: &Spec) -> Result<(), String> {
     // ... and the same for the connector's own command: a relative path is resolved from its cwd, and a
     // program outside the platform's roots is its own code.
     if let Some(problem) = program_shape_problem(&program) { return Err(problem); }
-    for arg in args.iter().filter(|arg| looks_like_path(arg)) {
-        if !is_absolute_path(arg) {
-            return Err(format!("vault_approval_path_not_absolute:{arg}: this connector runs a path relative to its own directory, which the digest cannot name, so nothing was launched and no value was read. Name its absolute path: /mcp <id> probe, then /mcp <id> on"));
-        }
-    }
-    if !platform_root(&program) && !files.iter().any(|(path, _)| path == &program) {
+    // Every argument, resolved the way node resolves it: the file a bare word names is a file this
+    // launch runs, and an inline string is a file no digest can name (argument_problem).
+    let covered: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
+    argument_problem(&cwd, &program, &args, &covered)?;
+    if !platform_owned(&program) && !files.iter().any(|(path, _)| path == &program) {
         return Err(format!("vault_approval_program_not_covered:{program}: this connector's own program is not a file the approval names, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
+    }
+    // The interpreter the launch SPAWNS is the process the values are put in, and it is not always the
+    // definition's program (node_program in lua/core/mcp.lua): it must be the platform's own or a file
+    // this approval names. WA_NODE may name anything, and <data>/node belongs to the agent's user.
+    let spawned = real_path(&launch.program);
+    if !platform_owned(&spawned) && !files.iter().any(|(path, _)| real_path(path) == spawned) {
+        return Err(format!("vault_approval_interpreter_not_covered:{spawned}: the interpreter this launch puts the value in is neither the platform's own nor a file the approval names, so nothing was launched and no value was read. Name it at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
     let digest = sha256_hex(approval_text(&program, &cwd, &env, &args, &files, &vault).as_bytes());
     if !digest.eq_ignore_ascii_case(&expected) {
         return Err(format!("vault_approval_mismatch: this connector's program, arguments or scripts changed after the operator approved it, so nothing was launched and no value was read (approved {expected}, now {digest}). Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
-    Ok(())
+    Ok(files)
+}
+
+/// The same files, hashed AGAIN after the spawn: a rewrite in the window between the check and the
+/// child's first open is not caught by either hash alone, so the operation is killed and its result is
+/// never read. It does not make the window zero (the child may already have run); docs/VAULT.md says
+/// exactly that, and what remains is a rewrite that must land inside a few milliseconds.
+fn recheck_after_spawn(files: &VerifiedFiles) -> Option<String> {
+    for (path, expected) in files.iter() {
+        match crate::host::file_digest(path) {
+            Ok(now) if now.eq_ignore_ascii_case(expected) => {}
+            _ => return Some(format!("vault_approval_changed_since_check:{path}: a file this connector runs changed between the check and the launch, so the operation was killed and no value was used. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on")),
+        }
+    }
+    None
 }
 
 // ---- the request file the child reads, and why the kernel has to seal it ------------------------
@@ -308,15 +491,14 @@ fn request_server_problem(bytes: &[u8], approval: &Value) -> Result<(), String> 
     }
     if let Some(problem) = program_shape_problem(program) { return Err(problem); }
     let files = string_list(approval.get("files"));
-    for arg in args.iter().filter(|arg| looks_like_path(arg)) {
-        if !is_absolute_path(arg) {
-            return Err(format!("vault_request_path_not_absolute:{arg}: this request runs a path relative to the connector's own directory, which the approval cannot name, so nothing was launched and no value was read. Name its absolute path: /mcp <id> probe, then /mcp <id> on"));
-        }
-        if std::path::Path::new(arg).is_file() && !files.iter().any(|path| path == arg) {
-            return Err(format!("vault_request_file_not_covered:{arg}: this request runs a file the approval does not name, so nothing was launched and no value was read. Approve the connector again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
-        }
+    // The same resolution the console applies when it records the approval, in this request's own words:
+    // the file a bare argument names is a file this request runs (a bare word is a file beside the
+    // connector when one is there), and an inline string is refused.
+    if let Err(problem) = argument_problem(cwd, program, &args, &files) {
+        return Err(problem.replacen("vault_approval_", "vault_request_", 1)
+            .replace("this connector", "this request"));
     }
-    if !platform_root(program) && !files.iter().any(|path| path == program) {
+    if !platform_owned(program) && !files.iter().any(|path| path == program) {
         return Err(format!("vault_request_program_not_covered:{program}: this request's program is not a file the approval names, so nothing was launched and no value was read. Approve the connector again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
     Ok(())
@@ -760,10 +942,12 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // callers send it (the MCP client and session); the generic operation route strips it.
             let mut launch = launch;
             let vault_launch = args.get("vault_env").and_then(|value| value.as_object()).is_some();
+            let mut verified: VerifiedFiles = Vec::new();
             if let Some(map) = args.get("vault_env").and_then(|value| value.as_object()) {
                 // The approval comes FIRST: a launch whose program, arguments or scripts no longer
-                // match what the operator approved reads no value at all (docs/VAULT.md).
-                approval_problem(args.get("vault_approval").unwrap_or(&Value::Null), &launch)?;
+                // match what the operator approved reads no value at all (docs/VAULT.md). It answers the
+                // bytes it verified, so the same bytes are checked again after the spawn.
+                verified = approval_problem(args.get("vault_approval").unwrap_or(&Value::Null), &launch)?;
                 for (name, entry) in map {
                     let valid = !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -781,6 +965,14 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             let id = manager()
                 .start(launch_context(launch, &args["_launch_cwd"]))
                 .map_err(|e| e.to_string())?;
+            // The files were hashed BEFORE this spawn and the child opens them after it: a rewrite that
+            // lands in that window is caught by neither hash alone. The same bytes are hashed again now,
+            // and a mismatch kills the operation instead of returning its result (this round's fourth
+            // finding; docs/VAULT.md states the residual window rather than denying it).
+            if let Some(problem) = recheck_after_spawn(&verified) {
+                let _ = manager().cancel(&id);
+                return Err(problem);
+            }
             let state = manager().snapshot(&id).map_err(|e| e.to_string())?;
             let mut receipt = json!({"operation_id":id,"state":"accepted","settled":false,"note":"Launch receipt, not execution success. Observe this operation; do not launch it again. Keep background commands in the foreground of this shell (or use wait)."});
             // No silent deadline. A caller that named one gets `timeout_source: caller`; a caller that did
@@ -1211,11 +1403,11 @@ mod vault_approval_tests {
               ("/home/agent/scripts/lib/other.mjs".into(), "bb".repeat(32))],
             &["FIXTURE_TOKEN".into(), "SECOND_ONE".into()],
         );
-        assert!(text.starts_with("mcp-vault-approval/v2\nprogram /usr/bin/node\ncwd /home/agent/work%20tree\n"), "{text}");
+        assert!(text.starts_with("mcp-vault-approval/v3\nprogram /usr/bin/node\ncwd /home/agent/work%20tree\n"), "{text}");
         assert!(text.contains("\nenv LANG=LC_ALL\nenv MAIL_USER=MAIL_USER\narg "), "the plain environment is sorted by name: {text}");
         assert!(text.contains("\narg a%20b\n"), "a space is escaped, not a separator: {text}");
         assert_eq!(sha256_hex(text.as_bytes()),
-            "7f39ce1281d1d72569286777c962d21ba85bef383c4bf77d1e883ffe4135b75b",
+            "f45cc25f36c7315cbccfc17c5c1e37b5a9e99f02dff27911130bf5e80b5b8aec",
             "the digest the Lua side pins for the same fixture");
     }
 
@@ -1429,5 +1621,96 @@ mod vault_approval_tests {
         assert!(seal_request(&mut bare, &approval, true).unwrap_err().starts_with("vault_request_unnamed:"));
         assert!(seal_request(&mut bare, &approval, false).is_ok(), "a plain launch needs no request file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- round 6: the interpreter, the arguments, the ownership of a platform root, the recheck ----
+    //
+    // Each of these fails on 6596aecc. They are the four shapes the review named, from the approval's own
+    // data, so they hold for a launch the console never touched.
+
+    /// Findings 1 and 5: the process the vault values are put in is the interpreter the launch SPAWNS,
+    /// which is not always the definition's program, and "/usr/bin is the platform's" is a claim about
+    /// OWNERSHIP - a path prefix alone called /usr/local/bin the platform's on a machine where the user
+    /// owns it.
+    #[test]
+    fn the_interpreter_the_launch_spawns_is_the_platforms_own_or_in_the_digest() {
+        let owned = scratch("user-owned-node", "#!/bin/sh\nexit 0\n");
+        let ours = super::real_path(&owned.to_string_lossy());
+        // A file this user owns is never the platform's, and a platform prefix cannot make it so.
+        assert!(!super::owned_by_root(&ours), "a file this user owns is not root-owned: {ours}");
+        assert!(!super::platform_owned(&ours), "and a path the platform does not own is not platform_owned");
+        // The real thing is: a root-owned, not group/other-writable system program and its directories.
+        assert!(super::owned_by_root("/usr/bin"), "/usr/bin is root-owned and not writable by us");
+        assert!(super::platform_owned("/usr/bin/env"), "/usr/bin/env is the platform's own");
+        assert!(!super::platform_owned("/usr/local/bin/wasm-agent-nothing-here"),
+            "a path that is not there is not the platform's");
+        assert!(super::PLATFORM_ROOTS.contains(&"/System/"), "the Lua and Rust lists agree (/System/)");
+
+        // The definition names the platform's node; the launch is told to spawn a file this user owns,
+        // which nobody hashed - the WA_NODE shape, and <data>/node after it.
+        let approved = approval("/usr/bin/node", "", &[], &[], &[], &["TOKEN"]);
+        let refused = approval_problem(&approved, &spec(&ours, &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_interpreter_not_covered:"), "{refused}");
+        assert!(refused.contains(&ours), "the refusal names the interpreter: {refused}");
+        // Covered by the digest, the same launch reads the value.
+        let covered = approval("/usr/bin/node", "", &[], &[], &[&owned], &["TOKEN"]);
+        assert!(approval_problem(&covered, &spec(&ours, &[])).is_ok(),
+            "{:?}", approval_problem(&covered, &spec(&ours, &[])));
+        let _ = std::fs::remove_file(&owned);
+    }
+
+    /// Finding 2: program /usr/bin/node, args ["server"], cwd /home/u/conn runs ./server.js, and
+    /// looks_like_path saw nothing because "server" has no slash and no extension.
+    #[test]
+    fn an_argument_is_resolved_from_the_connectors_own_directory() {
+        let dir = std::env::temp_dir().join(format!("wa-vault-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let script = dir.join("server.js");
+        std::fs::write(&script, "export const run = 1;\n").expect("the script a bare word names");
+        let cwd = dir.to_string_lossy().to_string();
+        let bare = vec!["server".to_string()];
+        // Named by the digest, the bare word launches.
+        let named = approval("/usr/bin/node", &cwd, &[], &bare, &[&script], &["TOKEN"]);
+        assert!(approval_problem(&named, &spec("/usr/bin/node", &bare)).is_ok(),
+            "{:?}", approval_problem(&named, &spec("/usr/bin/node", &bare)));
+        // Not named, it is a file this launch runs and the approval does not cover.
+        let unnamed = approval("/usr/bin/node", &cwd, &[], &bare, &[], &["TOKEN"]);
+        let refused = approval_problem(&unnamed, &spec("/usr/bin/node", &bare)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_argument_not_covered:"), "{refused}");
+        assert!(refused.contains("server.js"), "the refusal names the resolved file: {refused}");
+        // A file that is not there cannot be resolved, so the argument is refused by name: it can appear
+        // between the approval and the launch.
+        let absent = vec!["absent".to_string()];
+        let unresolved = approval("/usr/bin/node", &cwd, &[], &absent, &[], &["TOKEN"]);
+        let refused = approval_problem(&unresolved, &spec("/usr/bin/node", &absent)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_argument_unresolved:absent:"), "{refused}");
+        // An inline string is code no digest of files can name.
+        let inline = vec!["-e".to_string(), "console.log(process.env.TOKEN)".to_string()];
+        let run = approval("/usr/bin/node", &cwd, &[], &inline, &[], &["TOKEN"]);
+        let refused = approval_problem(&run, &spec("/usr/bin/node", &inline)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_inline_code:-e:"), "{refused}");
+        // The value of an option is a value, not a file: --mode stdio stays approvable.
+        let option_value = vec![script.to_string_lossy().to_string(), "--mode".to_string(), "stdio".to_string()];
+        let ok = approval("/usr/bin/node", &cwd, &[], &option_value, &[&script], &["TOKEN"]);
+        assert!(approval_problem(&ok, &spec("/usr/bin/node", &option_value)).is_ok(),
+            "{:?}", approval_problem(&ok, &spec("/usr/bin/node", &option_value)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finding 4: the code files were hashed before the spawn and never again, so a rewrite that lands
+    /// between the hash and the child's open was caught by nothing. The same bytes are now hashed after
+    /// the spawn, and a mismatch kills the operation.
+    #[test]
+    fn a_rewrite_between_the_check_and_the_spawn_is_caught() {
+        let script = scratch("recheck.mjs", "export const ok = 1;\n");
+        let verified = vec![(super::real_path(&script.to_string_lossy()),
+            sha256_hex(&std::fs::read(&script).expect("the script")))];
+        assert!(super::recheck_after_spawn(&verified).is_none(), "the approved bytes are still there");
+        std::fs::write(&script, "export const ok = 2;\n").expect("rewrite");
+        let refused = super::recheck_after_spawn(&verified).expect("a rewrite is a mismatch");
+        assert!(refused.starts_with("vault_approval_changed_since_check:"), "{refused}");
+        // Not reading it is not passing it: a file that vanished is a mismatch too.
+        std::fs::remove_file(&script).expect("remove");
+        assert!(super::recheck_after_spawn(&verified).is_some(), "a file that cannot be read is a mismatch");
     }
 }

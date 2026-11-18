@@ -124,16 +124,38 @@ entries to store there (`wa vault set <entry> --stdin`), then `/mcp <key> probe`
 ### What an approval covers, and what the kernel re-checks
 
 An operator's `/mcp <key> probe` (or `on`) is the approval, and it is a digest rather than a boolean since
-18/11 (form `mcp-vault-approval/v2` since 19/11): the row records a SHA-256 over the launch - the program,
+18/11 (form `mcp-vault-approval/v3` since 20/11): the row records a SHA-256 over the launch - the program,
 the directory it runs in, the plain (non-vault) environment it asks for, its arguments in order, **every
-file the connector can run or load** (this node's MCP runtime in the script directory, the connector's own
-program when it is not a platform one, and the closure of what those files import in turn) and the vault
-environment names it asks for (`M.vault_manifest` in `lua/core/mcp.lua`).
+file the launch can run or load**, and the vault environment names it asks for (`M.vault_manifest` in
+`lua/core/mcp.lua`). "Every file" means, and means only:
 
-What is NOT covered cannot be approved: a relative script (`conn.mjs`), a program that is a bare name
-(`node`), a package runner (`npx`, `uvx`...), an import of a bare package or by a computed name, and a
-Python/Ruby/Perl/PowerShell/Lua script are each refused by name (`mcp_vault_code_not_covered`, with the
-reasons) instead of being hashed and left open. `docs/VAULT.md` lists them.
+* this node's MCP runtime in the script directory: the files that actually speak MCP for a connector;
+* the connector's own program, when it is not the platform's. A platform program is one under
+  `/usr/bin`, `/bin`, `/usr/lib`, `/nix/store`, `/snap`, `/System`... that is ROOT-OWNED and not
+  group/other-writable, with every directory above it the same; on Windows the prefix list alone is the
+  rule. `/usr/local/bin` and `/opt/homebrew` belong to the USER on macOS, so a homebrew interpreter is a
+  file this digest hashes;
+* **the interpreter the launch actually spawns** - `WA_NODE`, then the copy the installer provisions, then
+  `node` on `PATH`, resolved through `PATH` and through its realpath - unless that file is the
+  platform's own. That process is the one the vault values are put in, so it is a file the digest names or
+  there is no approval. `<data>/node` is also a `secret_guard` root, so an agent tool cannot replace it;
+* every argument, resolved the way node resolves it: from the connector's own directory when the definition
+  names one, with the extensions node implies (`.mjs`, `.js`, `.cjs`, `/index.*`). So
+  `program /usr/bin/node, args ["server"], cwd /home/u/conn` covers `/home/u/conn/server.js`. The value
+  of an option (`--mode stdio`) is a value, not a file;
+* what those files run in turn: a JS `import` / `require` / `new Worker('literal')` of a local path, a
+  shell `source` / `. ` of a path, and a wrapper that RUNS another script (`exec ./inner.sh`,
+  `bash ./inner.sh`).
+
+What cannot be covered is REFUSED by name (`mcp_vault_code_not_covered`, whose `problems` list says why),
+never hashed and left open: an argument that may name a file and cannot be resolved (a file that is not
+there at approval time can be there at launch), inline code (`node -e`, `sh -c`, `eval`), a shell
+command substitution, an `exec` of a value, a connector's own `child_process` / `Worker` /
+`process.dlopen` / `new Function`, a package runner (`npx`, `uvx`...), an import of a bare package or
+by a computed name, and a Python, Ruby, Perl, PowerShell or Lua script. The node's own MCP runtime is
+exempt from the `child_process` rule and from nothing else: it IS the harness that spawns the connector,
+its bytes are in the digest, and the request seal below is what checks the program it spawns.
+`docs/VAULT.md` has the full list.
 
 Three checks use the digest, and either of the first two refuses:
 
@@ -145,13 +167,28 @@ Three checks use the digest, and either of the first two refuses:
   a value - `vault_approval_required`, `vault_approval_digest_form`,
   `vault_approval_unreadable:<path>`, `vault_approval_script_not_covered:<path>`,
   `vault_approval_program_not_covered:<path>`, `vault_approval_program_not_absolute:<path>`,
-  `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>` or
-  `vault_approval_mismatch`. Nothing is launched and no value is read;
+  `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>`,
+  `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
+  `vault_approval_file_not_found:<value>`, `vault_approval_inline_code:<flag>`,
+  `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`. Nothing is
+  launched and no value is read. The same files are hashed AGAIN once the launch has started
+  (`vault_approval_changed_since_check:<path>`): an operation whose bytes changed in between is
+  killed and its result is never returned;
 * the request file the child reads is checked against the same approval and sealed (next section).
 
-Editing a connector's script, an argument, its cwd or the environment it asks for after the approval
-therefore voids it, and so does a deploy that replaces the MCP runtime: a vault connector asks for the
-operator's probe/on again after an upgrade.
+Editing a connector's script, an argument, its cwd, the environment it asks for or the interpreter the
+node spawns after the approval therefore voids it, and so does a deploy that replaces the MCP runtime or an
+upgrade of the interpreter: a vault connector asks for the operator's probe/on again.
+
+**What the digest does not promise.** It is a statement about FILES at two moments - before the spawn and
+again just after it - not a sandbox. The hash and the child's `open(2)` are not one atomic step, so a
+rewrite that lands between them is caught only if it happens before the second hash, and the operation is
+then killed with whatever it already did; the window is milliseconds and it is not zero. A platform-owned
+interpreter is trusted by ownership (root-owned, not group/other-writable), never hashed, so a package
+manager that replaces it is outside the digest. On Windows there is no uid to read, so the prefix list
+alone decides what is the platform's. A binary's bytes are hashed and not parsed: what a compiled program
+does at run time is not priced here. And the agent and the node still run as one uid, so an approval ROW
+can still be forged by hand (the residual hole `docs/VAULT.md` states).
 
 ### The request the child reads, and why it is sealed
 

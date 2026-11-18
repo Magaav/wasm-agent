@@ -8,6 +8,21 @@
 -- so the launch is captured and refused.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
+-- ---- the scratch-home guard (round 6) ---------------------------------------------------------
+-- This test writes under paths.data(). It refuses to run unless that is a SCRATCH home: WASM_AGENT_HOME
+-- must be set (the runner's own directory), the data directory must be under it, and a data directory
+-- that already holds a node's keys or secrets is a REAL node - never this test's to write in.
+local function refuse_real_home()
+  local scratch = tostring(host.getenv('WASM_AGENT_HOME') or '')
+  local data = dofile('lua/core/paths.lua').data()
+  local live = host.path_kind(data .. '/keys') == 'dir' or host.path_kind(data .. '/secrets') == 'dir'
+  if scratch == '' or data:find(scratch, 1, true) ~= 1 or live then
+    print('SKIP refusing to write under ' .. data .. ' (set WASM_AGENT_HOME to a scratch directory)')
+    os.exit(77)
+  end
+end
+refuse_real_home()
+
 assert(json.decode(host.sql_exec('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)', '[]')).ok)
 dofile('lua/core/memory.lua').setup()
 local mcp = dofile('lua/core/mcp.lua')
@@ -21,7 +36,13 @@ end
 local dir = paths.data() .. '/request-shape-' .. tostring(host.uuid()):sub(1, 8)
 for _, name in ipairs(mcp.RUNTIME) do assert(host.write_file(dir .. '/' .. name, '// runtime stub: ' .. name .. '\n')) end
 local real_getenv = host.getenv
-host.getenv = function(name) if name == 'WA_MCP_SCRIPT_DIR' then return dir end return real_getenv(name) end
+local node_fixture = dir .. '/node-fixture'
+assert(host.write_file(node_fixture, '#!/bin/sh\nexit 0\n'), 'the interpreter fixture')
+host.getenv = function(name)
+  if name == 'WA_MCP_SCRIPT_DIR' then return dir end
+  if name == 'WA_NODE' then return node_fixture end
+  return real_getenv(name)
+end
 local connector = dir .. '/conn.mjs'
 assert(host.write_file(connector, 'export const run = 1;\n'))
 

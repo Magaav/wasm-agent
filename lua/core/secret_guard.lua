@@ -27,7 +27,12 @@ local M = {}
 M.ROOTS = { '.wasm-agent/secrets', '.wasm-agent/keys', '.wasm-agent/node.key',
   '.config/wasm-agent-sandbox', 'wasm-agent-sandbox/vault',
   '.wasm-agent/memory.db', '.wasm-agent/scripts', '.local/bin/scripts', 'wasm-agent-sandbox/scripts',
-  '.wasm-agent/mcp/'..'requests' }
+  '.wasm-agent/mcp/'..'requests',
+  -- 20/11 (round 6): the interpreter the installer provisions (<data>/node/bin/node). It is the process a
+  -- vault connector's values are put in, so a file the agent can rewrite is a file that can read them; the
+  -- approval hashes it (docs/VAULT.md), and this is the tool-level half - a binary the agent cannot reach
+  -- is also a binary it cannot replace with something it wrote.
+  '.wasm-agent/node' }
 
 -- The same rule for the directories this node RESOLVES rather than assumes: the data directory the host
 -- reports and the script directory the MCP runtime is actually launched from. A fixed list cannot know
@@ -103,12 +108,15 @@ M.NOTES = {
     .. 'writes it, so the bytes that were approved are the bytes that run',
   request = "these are the kernel's own per-launch request and seed files: a launch is spawned from the "
     .. 'bytes the kernel read and approved, so an agent tool neither reads nor writes them',
+  runtime = 'this is the interpreter the node runs its connectors on: the process a vault value is put in, '
+    .. 'so an agent tool neither reads nor writes it',
 }
 local function note_for(root)
   local value = tostring(root or ''):lower()
   if value:find('memory%.db') then return M.NOTES.store end
   if value:find('mcp/'..'requests', 1, true) then return M.NOTES.request end
   if value:find('scripts', 1, true) then return M.NOTES.code end
+  if value:find('.wasm-agent/node', 1, true) then return M.NOTES.runtime end
   return M.NOTE
 end
 

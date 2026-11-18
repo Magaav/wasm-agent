@@ -960,3 +960,324 @@ home, which is what the review measured - a session started in HOME had all of H
     the coverage reasons quoted inside mcp_vault_code_not_covered (a relative path, a bare program, a package
     runner, a package import, a computed import, an unfollowable language, a file that cannot be read, code
     larger than an approval can cover).
+
+---
+
+# Round 6 - review of 6596aecc (18/11): every file the launch can run is in the digest
+
+Round 5 closed the request-file gap; this round closes the rest of "every file it can run or load is in
+the digest", which was not met. Nothing was pushed. All work happened on avell, in
+@/home/victor/Work/missions/codeact-fix/wt@ (branch @change/codeact-fix@), with
+@CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-codeact-fix@ and the pinned code-mode assets this node
+already had (@WA_CODEMODE_BUILD_ASSETS=/home/victor/Work/missions/codeact-fix/codemode-assets@).
+
+**Rebase first, as instructed.** @git fetch origin && git rebase origin/main@ (e5ba9089). Eighteen commits
+replayed; the two conflicts the review named were the only ones: the root @REPORT.md@ (add/add) is now
+DELETED from this branch on every replayed commit, so the branch adds none, and @docs/HOST.md@ keeps this
+branch's @transcript_copy_first@ device. No root @REPORT.md@ is in this tree (@ls REPORT.md@: no such file).
+
+| # | item | fix | the test that fails before and passes after |
+|---|------|-----|----------------------------------------------|
+| 1 | HIGH: the node interpreter (@WA_NODE@, @<data>/node/bin/node@, bare @node@) receives the vault values unhashed, and @<data>/node@ was not a guard root | the interpreter the launch spawns is resolved through @PATH@ and its realpath and hashed into the approval unless the platform owns it; @.wasm-agent/node@ is a @secret_guard@ root | probe @finding1@ (base @false@, here @true@) + @the_interpreter_the_launch_spawns_is_the_platforms_own_or_in_the_digest@ (new) |
+| 2 | HIGH: @looks_like_path@ needs a slash or a script extension, so @args ["server"]@ ran @./server.js@ unhashed | every argument resolved as node resolves it (connector cwd, implied extensions) and hashed; unresolvable refused | probe @finding2@ (base @false@, here @true@) + @an_argument_is_resolved_from_the_connectors_own_directory@ (new) |
+| 3 | HIGH: only @source@/@.@ followed; wrapper exec, JS @child_process@/@Worker@, inline @node -e@/@bash -c@ uncovered | named @exec@/@bash <file>@/@new Worker('literal')@ followed; inline code, command substitution, @exec@ of a value, @child_process@, @process.dlopen@, @new Function@ refused; the runtime exempt from the process rule only | probe @finding3@ x2 (base @false@/@false@, here @true@/@true@) + section 6 of @test-mcp-vault-approval.lua@ |
+| 4 | MEDIUM: code files hashed before the spawn and never re-checked | @approval_problem@ returns the bytes it verified; @recheck_after_spawn@ hashes them again after @manager().start@ and KILLS the operation on a mismatch | @a_rewrite_between_the_check_and_the_spawn_is_caught@ (new; on the base the function does not exist) |
+| 5 | MEDIUM: @/usr/local/bin@ and @/opt/homebrew@ are user-owned on macOS | a path is the platform's only when root-owned, not group/other-writable, and every directory above it the same (the prefix list only on Windows) | @the_interpreter_the_launch_spawns_is_the_platforms_own_or_in_the_digest@ + the @mcp.platform_owned@ probe (the base has no such rule) |
+| 6 | MUST: four tests were in nobody's gate, and two write under @paths.data()@ | the four rows are in @scripts/test.sh@ (and every @scripts/test-*.lua@ is a fast-path candidate); each refuses to run unless @WASM_AGENT_HOME@ is a scratch home holding no @keys@/@secrets@ | @bash scripts/fast.sh@ with the four rows: see "Tests run"; the guard is quoted below |
+| 7 | LOW: the two platform-root lists disagreed | @/System/@ is in both (@PLATFORM_ROOTS@ in Rust, @PLATFORM_ROOTS@ in @mcp.lua@), asserted by the new Rust test | @the_interpreter_the_launch_spawns_is_the_platforms_own_or_in_the_digest@ |
+| 8 | rebase: @REPORT.md@ add/add; @docs/HOST.md@ | root @REPORT.md@ deleted on every replayed commit; the branch's @transcript_copy_first@ device kept | the rebase runs clean, @REPORT.md@ absent, @grep -c transcript_copy_first docs/HOST.md@ = 1 |
+
+The approval form is now @mcp-vault-approval/v3@ on both sides (one canonical text, two implementations,
+each side's test pins the same fixture digest @f45cc25f...@): a row approved under v2 is refused BY NAME
+(@mcp_vault_approval_missing@ / @vault_approval_digest_form@) and the operator approves again, rather than
+being compared against a text it could never match.
+
+## 1. The interpreter the launch spawns (HIGH)
+
+The hole. The console launches @node --request-file <f>@ where the program is @M.node_program()@ -
+@WA_NODE@, then @<install>/node/bin/node@, then @<data>/node/bin/node@, then the bare name @node@ - and the
+kernel puts the vault values in THAT process's environment (@operations.rs@, @control("start")@). The
+approval hashed the definition's program instead, so @WA_NODE=/tmp/x@, a rewritten
+@<data>/node/bin/node@, or a @node@ that is a user-owned shim on @PATH@ was code no digest named.
+@<data>/node@ was also not in @secret_guard.ROOTS@, so an agent tool could replace it.
+
+The fix. @M.vault_manifest@ resolves the interpreter through @PATH@ (@interpreter_path@) and its realpath
+(@host.path_facts@) and:
+
+* the platform's own is not hashed - ownership decides, not a prefix (item 5);
+* anything else is hashed into the file list, by bytes read in chunks (@host.file_sha256@), so a
+  hundred-megabyte binary never passes through Lua; a binary does not spend the script-bytes budget;
+* the kernel checks the same thing from the launch itself: @vault_approval_interpreter_not_covered:<path>@
+  when @launch.program@ (realpath) is neither the platform's own nor a file the approval names.
+
+The evidence - one probe, two trees, and the cwd decides which @lua/core/mcp.lua@ @dofile@ finds:
+
+@
+--- base tree (f0afd356) ---
+finding1_the_interpreter_is_in_the_digest=false
+--- this tree (round 6) ---
+finding1_the_interpreter_is_in_the_digest=true
+@
+
+The Rust half, on the base tree (base-only probes appended to a scratch worktree at f0afd356, never
+committed), asks the kernel the same question:
+
+@
+thread 'operations::round6_base_probes::finding_1_the_interpreter_the_launch_spawns_must_be_covered' panicked at wa-capabilities/src/operations.rs:1471:9:
+BASE HOLE: the launch spawns a user-owned interpreter while the approval names none: Ok(())
+@
+
+Here, the same launch is refused: @cargo test -p wa-capabilities vault_approval@ -> 13 passed, including
+@the_interpreter_the_launch_spawns_is_the_platforms_own_or_in_the_digest@.
+
+## 2. An argument that names a file (HIGH)
+
+The hole: @looks_like_path@ answered only for a slash or a known script extension, so
+@program /usr/bin/node, args ["server"], cwd /home/u/conn@ ran @/home/u/conn/server.js@ and the digest named
+nothing.
+
+The fix: @resolve_argument@ (Lua and Rust, the same rule): a name is resolved from the connector's own cwd
+with the extensions node implies (@.mjs@, @.js@, @.cjs@, @/index.*@); what exists is hashed; an argument that
+may name a file and cannot be resolved is REFUSED (a file that is not there when the operator approves can
+be there at launch). The value of an option (@--mode stdio@) is a value, not a file; an option that names a
+file (@--require@, @-r@, @--import@, @--loader@, @--env-file@, @--config@) has its value resolved and
+hashed. Inline code (@-e@/@--eval@/@-p@/@--print@ for a JS interpreter, @-c@/@--command@ for a shell) is
+refused by name.
+
+Evidence: probe @finding2@ - @false@ on the base, @true@ here; the base Rust probe:
+
+@
+thread 'operations::round6_base_probes::finding_2_a_bare_argument_naming_a_file_must_be_covered' panicked at wa-capabilities/src/operations.rs:1485:9:
+BASE HOLE: ./server.js runs while the approval names no such file: Ok(())
+@
+
+Here @an_argument_is_resolved_from_the_connectors_own_directory@ passes all five cases: named and covered,
+resolved-but-not-covered (@vault_approval_argument_not_covered@), unresolvable
+(@vault_approval_argument_unresolved@), inline (@vault_approval_inline_code@), and an option's value
+(@--mode stdio@ stays approvable).
+
+## 3. What a script runs in turn (HIGH)
+
+The hole: the closure followed only @source@/@.@ (shell) and literal imports (JS), so a wrapper that
+@exec@ed a second script, a JS @child_process@/@Worker@, a @.node@ addon by handle and inline @node -e@ /
+@bash -c@ were code the digest never named.
+
+The fix, in the closure (@M.vault_manifest@):
+
+* FOLLOWED, so hashed in turn: @import@/@require@ of a local path, @new Worker('literal')@ (and
+  @new Worker(new URL('literal', import.meta.url))@), shell @source@/@.@, @exec ./inner.sh@,
+  @bash ./inner.sh@;
+* REFUSED by name, with the file, as a coverage problem: @child_process@, a @Worker@ whose target is not a
+  literal, @process.dlopen@, @eval(@, @new Function(@, shell @eval@, @sh -c@ / @bash -c@, a command
+  substitution (@$(@ and backtick) and an @exec@ of a value - no digest of files can name a string that is
+  evaluated;
+* the node's OWN runtime (@M.RUNTIME@, eight files, every one hashed) is exempt from the @child_process@
+  rule and from nothing else: it IS the harness that spawns the connector, and the request seal checks the
+  program it spawns. The test's @mcp-client-core.mjs@ stub now carries a real
+  @import { spawn } from 'node:child_process'@, so the exemption is proved rather than assumed.
+
+Evidence: probes @finding3_a_connector_that_spawns_is_refused@ and
+@finding3_an_exec_of_a_named_script_is_followed@ - @false@/@false@ on the base, @true@/@true@ here.
+
+## 4. The bytes the child actually opens (MEDIUM)
+
+The hole: the code files were hashed before the spawn and never again, so a rewrite landing between the
+hash and the child's @open(2)@ was caught by neither.
+
+The fix: @approval_problem@ answers the @(path, sha256)@ list it verified; @control("start")@ hashes those
+same files again immediately after @manager().start@ and, on a difference or an unreadable file, CANCELS the
+operation and returns @vault_approval_changed_since_check:<path>@ - its result is never returned.
+
+What it does not do is stated in @docs/VAULT.md@ and @docs/MCP.md@: the two hashes are not one atomic step,
+the window is milliseconds and it is not zero, and the operation may already have run when it is killed.
+
+Evidence: @a_rewrite_between_the_check_and_the_spawn_is_caught@ writes, hashes, rewrites and asserts the
+mismatch (passes here). The base has no such check at all:
+@git show f0afd356:rust/wa-capabilities/src/operations.rs | grep -c recheck_after_spawn@ = 0 - which is the
+"before" this item can have, and it is the honest one.
+
+## 5. Ownership, not a prefix (MEDIUM)
+
+The hole: @/usr/local/bin@ and @/opt/homebrew@ were platform roots, and on macOS both belong to the user, so
+a homebrew interpreter was "the platform's" and received values unhashed.
+
+The fix: a path is the platform's only when it is under a root AND root-owned AND not group/other-writable,
+with every directory above it the same (@host.path_facts@ in Lua; @owned_by_root@ + @platform_owned@ in
+Rust). On Windows there is no uid to read, so the prefix list alone decides - said in both docs.
+
+Evidence: the new Rust test asserts @owned_by_root("/usr/bin")@, @platform_owned("/usr/bin/env")@,
+@!platform_owned(<a user-owned temp file>)@ and that @/System/@ is in the list; the Lua test asserts the
+same through the exported @mcp.platform_owned@ (probe @finding5_the_ownership_rule_is_exported@: @false@ on
+the base, @true@ here).
+
+## 6. The four rows, and the guard (MUST)
+
+@scripts/test.sh@ now runs them, all in one scratch home:
+
+@
+WA_SCRIPT=$WASM_AGENT_LUA_ROOT/scripts/test-mcp-vault-approval.lua WASM_AGENT_HOME=$MCP_VAULT_HOME wa --db ... | grep 'mcp vault approval ok'
+WA_SCRIPT=$WASM_AGENT_LUA_ROOT/scripts/test-secret-guard.lua      WASM_AGENT_HOME=$MCP_VAULT_HOME wa --db ... | grep 'secret guard ok'
+WA_SCRIPT=$WASM_AGENT_LUA_ROOT/scripts/test-mcp-request-shape.lua WASM_AGENT_HOME=$MCP_VAULT_HOME wa --db ... | grep 'mcp request shape ok'
+WA_SCRIPT=$WASM_AGENT_LUA_ROOT/scripts/test-mcp-share.lua         WASM_AGENT_HOME=$MCP_VAULT_HOME wa --db ... | grep 'mcp share ok'
+@
+
+All four are also candidates of the narrowed fast path (@scripts/lib/fast-rows.sh@ lists every
+@scripts/test-*.lua@ not in @scripts/fast-path.exclude@).
+
+The guard, the same in all four (exit 77 with a @SKIP@ line):
+
+@lua
+local scratch = tostring(host.getenv('WASM_AGENT_HOME') or '')
+local data = dofile('lua/core/paths.lua').data()
+local live = host.path_kind(data .. '/keys') == 'dir' or host.path_kind(data .. '/secrets') == 'dir'
+if scratch == '' or data:find(scratch, 1, true) ~= 1 or live then
+  print('SKIP refusing to write under ' .. data .. ' (set WASM_AGENT_HOME to a scratch directory)')
+  os.exit(77)
+end
+@
+
+Why the "real home" test is that one: the host sets @HOME@ to @WASM_AGENT_HOME@ for the interpreter, so the
+naive @data == HOME .. '/.wasm-agent'@ test is always true and skipped every run (measured: it did, on the
+first attempt, and the run printed @SKIP@ at once). A live node is recognised by what only a live node has -
+its @keys@ / @secrets@ directories - plus the requirement that @WASM_AGENT_HOME@ was set at all.
+
+Two more hermeticity fixes those rows needed: @test-mcp-share.lua@, pointed at a script directory without
+the runtime, resolved the CHECKOUT's @scripts/@ and wrote @mcp-shared-fixture.mjs@ into it (measured, and
+removed) - it now writes the runtime stubs and makes its own script directory when @WA_MCP_SCRIPT_DIR@ is
+unset; and @test-secret-guard.lua@ used a @data@ variable before declaring it and printed a JSON line where
+the gate greps an ok line (both fixed; it now also asserts the interpreter root).
+
+## 7. The two platform-root lists (LOW)
+
+@/System/@ is in @PLATFORM_ROOTS@ on both sides, and a Rust test asserts it, so the two lists cannot drift
+apart again without a failure.
+
+## 8. The rebase
+
+@REPORT.md@ is deleted on every replayed commit (it was add/add against main's own), so this branch adds
+none; @docs/HOST.md@ keeps @transcript_copy_first device@ next to @transcript_copy@. @git status@ was clean
+right after the rebase, and @git log --oneline -3@ shows the round-5 commit on top of main's @e5ba9089@.
+
+## Tests run
+
+@
+cd /home/victor/Work/missions/codeact-fix/wt/rust
+CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-codeact-fix WA_CODEMODE_ALLOW_EMPTY=1 \
+  cargo test --offline -p wa-capabilities vault_approval -- --test-threads=4
+  -> test result: ok. 13 passed; 0 failed   (10 were there before; +3 for items 1, 2 and 4)
+  
+WA_FAST_ROWS=<the four rows> bash scripts/fast.sh
+  -> binary built from this tree (b4653a4e, sha256 ced0a34e9ebf...), 6 of 231 Lua rows
+  fast: lua 6/6 passed (56 excluded: scripts/fast-path.exclude)
+  fast: rust wa-capabilities ok (35s)
+  fast: prompt-docs ok, instructions ok, landing-queue ok, orphan-tests ok (every contract check still runs)
+  fast result ok (42 checks, 0 failed, 0 skipped)
+  fast path ok (42 checks, 0 skipped, 132s)
+@
+
+The four rows by hand, each in its own @mktemp -d@ home:
+
+@
+mcp vault approval ok (64 checks)
+secret guard ok (36 checks)
+mcp request shape ok (11 checks)
+mcp share ok (44 checks)
+@
+
+## Texts to approve (verbatim)
+
+New or changed text a model or the operator can read. Nothing else in the refusal vocabulary changed:
+@mcp_vault_env_requires_operator@, @mcp_vault_approval_missing@, @mcp_vault_approval_stale@,
+@mcp_vault_code_not_covered@ and every @vault_approval_*@ / @vault_request_*@ / @mcp_request_*@ sentence
+from rounds 1-5 keep their words.
+
+The form: @mcp-vault-approval/v3@ (was /v2).
+
+New @vault_approval_*@ refusals (Rust, from the bytes and the launch):
+
+@
+vault_approval_inline_code:<flag>
+  "this connector runs inline code (<flag>), which no digest of files can name, so nothing was launched and
+   no value was read. Give it a script file: /mcp <id> probe, then /mcp <id> on"
+vault_approval_argument_unresolved:<value>
+  "this connector's argument may name a file this digest cannot resolve from its own directory, so nothing
+   was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"
+vault_approval_argument_not_covered:<path>
+  "this connector runs a file the approval does not name, so nothing was launched and no value was read.
+   Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"
+vault_approval_file_not_found:<value>
+  "this connector names a file (<value>, after <option>) that is not there, so nothing was launched and no
+   value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"
+vault_approval_interpreter_not_covered:<path>
+  "the interpreter this launch puts the value in is neither the platform's own nor a file the approval
+   names, so nothing was launched and no value was read. Name it at the operator's terminal:
+   /mcp <id> probe, then /mcp <id> on"
+vault_approval_changed_since_check:<path>
+  "a file this connector runs changed between the check and the launch, so the operation was killed and no
+   value was used. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"
+@
+
+The same argument and interpreter rules answer on the request path in the request's own words:
+@vault_request_inline_code@, @vault_request_argument_unresolved@, @vault_request_argument_not_covered@,
+@vault_request_file_not_found@ - the code name is the only change; the sentence is the one above with
+"this request" for "this connector".
+
+New coverage reasons inside @mcp_vault_code_not_covered@'s @problems@ list (Lua):
+
+@
+"its interpreter cannot be found (<program>), so no file this digest could hash runs it"
+"its interpreter cannot be read (<path>)"
+"an argument may name a file this digest cannot resolve (<value> from <dir>): give its absolute path"
+"an argument names a file that cannot be found (<value> after <option>)"
+"it runs inline code (<flag>), and no digest of files can name a string it evaluates"
+"it starts a process (child_process), whose program no digest names"
+"it starts a Worker whose target is not a literal module it names"
+"it loads a native addon by handle (process.dlopen)"
+"it evaluates a string as code (eval)"
+"it builds a function from a string (new Function)"
+"it evaluates a string as shell code (eval)"
+"it execs a script chosen while it runs (exec of a value)"
+"it runs inline shell code (<shell> -c)"
+"it runs a command substitution, whose code no digest names"
+"a file it runs cannot be hashed (<path>)"
+@
+
+(the existing "a file it runs cannot be read (<path>)", "its code is larger than an approval can cover
+(<path>)", "an argument is a path resolved from its own directory (<value>): only an absolute path can be
+covered", and the package / import / language reasons are unchanged).
+
+The new secret root, and its note (@secret_guard.NOTES.runtime@):
+
+@
+root: '.wasm-agent/node'
+note: "this is the interpreter the node runs its connectors on: the process a vault value is put in, so an
+       agent tool neither reads nor writes it"
+@
+
+Two new host capabilities, with their one-line descriptions in the capability inventory and docs/HOST.md:
+
+@
+path_facts     "A path's realpath, kind, size and (on unix) owner and mode bits, as JSON"
+file_sha256    "SHA-256 of a file's bytes, read in chunks; nil plus a named reason when it cannot be read"
+@
+
+Docs: the "what an approval covers" section of @docs/MCP.md@ and of @docs/VAULT.md@ is rewritten to say
+exactly what is covered, and a paragraph of its own - "What the digest does not promise" - says what it does
+not: the two hashes are not atomic, a platform interpreter is trusted by ownership rather than hashed, on
+Windows the prefix list decides, a binary is hashed and not parsed, and an approval row can still be forged
+by a hand that can write @memory.db@.
+
+## Not run, and limits
+
+* No deploy, no push, and no other node: the build and every run are on avell.
+* The full @scripts/test.sh@ gate was not run end to end (it is the nightly, ~50 minutes, plus the release
+  build and the components this tree needs): the four new rows ran by hand and through @scripts/fast.sh@,
+  and @cargo test -p wa-capabilities@ ran in full.
+* The vault itself is never opened by any test here: every vault test stubs @host.operation@ or refuses at
+  the gate before a value is read, so "a value is never read" is proved at the refusal, not against a live
+  vault.
+* @test-mcp-vault-approval.lua@ hashes a fixture interpreter it owns; a real hundred-megabyte node binary is
+  hashed through @host.file_sha256@, which the probe above exercised on @/usr/bin/env@, not on a node build.
+* The macOS half of item 5 (/usr/local/bin, /opt/homebrew user-owned) follows from the uid and mode bits and
+  is asserted here by rule on this Linux node - a user-owned file is not the platform's, a root-owned
+  directory is - not on a macOS host.

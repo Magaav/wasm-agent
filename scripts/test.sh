@@ -1203,6 +1203,25 @@ MCP_NODE="$(command -v node)"
 if command -v cygpath >/dev/null 2>&1; then MCP_NODE="$(cygpath -m "$MCP_NODE")"; fi
 MCP_TEST_SOURCE="$WASM_AGENT_LUA_ROOT" WA_NODE="$MCP_NODE" WA_MCP_SCRIPT_DIR="$WASM_AGENT_LUA_ROOT/scripts" \
   WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp.lua" "$BIN" --db "$DB.mcp" | grep 'mcp native ok'
+# A connector that names a vault entry is approved by the OPERATOR, and the approval is a digest over
+# every file its launch can run (docs/VAULT.md, rounds 5-6): the request file the child reads, the
+# interpreter the values are put in, every argument resolved from the connector's own directory, and
+# what those files run in turn. Four rows, each in its own scratch home - they WRITE under paths.data()
+# (runtime stubs, connector scripts) and each refuses to run outside a scratch WASM_AGENT_HOME rather
+# than write into a live node's. They were in the tree and in nobody's gate until round 6.
+MCP_VAULT_HOME="$(mktemp -d)"
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-vault-approval.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/ledger.db" | grep 'mcp vault approval ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-secret-guard.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/guard.db" | grep 'secret guard ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-request-shape.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/shape.db" | grep 'mcp request shape ok'
+# A peer's share writes scripts, so the row makes its own scratch script directory under that home:
+# pointed at the checkout, it wrote mcp-shared-fixture.mjs into scripts/ and approved a file it did not
+# own (measured 20/11, which is why it was not a gate row before).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-share.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/share.db" | grep 'mcp share ok'
+rm -rf "$MCP_VAULT_HOME"
 # Component MCP transport (docs/COMPONENTS.md): the mcp-echo fixture when a wasm32-wasip2 toolchain is
 # here; without one the definition/refusal checks still run and the script says what it skipped.
 COMPONENTS_PROOF="$WASM_AGENT_HOME/components-proof"

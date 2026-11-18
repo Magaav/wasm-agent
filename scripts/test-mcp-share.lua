@@ -1,6 +1,22 @@
 -- Sharing a connector between nodes (operator 17/11, `/mcp <key> share <node>`) and its credential by vault
 -- reference. In-process: the "peer" is this same node's import half, reached through `opts.call`, with its
 -- script directory a temp directory (WA_MCP_SCRIPT_DIR). No network, no vault, no server spawned.
+
+-- ---- the scratch-home guard (round 6) ---------------------------------------------------------
+-- This test writes under paths.data(). It refuses to run unless that is a SCRATCH home: WASM_AGENT_HOME
+-- must be set (the runner's own directory), the data directory must be under it, and a data directory
+-- that already holds a node's keys or secrets is a REAL node - never this test's to write in.
+local function refuse_real_home()
+  local scratch = tostring(host.getenv('WASM_AGENT_HOME') or '')
+  local data = dofile('lua/core/paths.lua').data()
+  local live = host.path_kind(data .. '/keys') == 'dir' or host.path_kind(data .. '/secrets') == 'dir'
+  if scratch == '' or data:find(scratch, 1, true) ~= 1 or live then
+    print('SKIP refusing to write under ' .. data .. ' (set WASM_AGENT_HOME to a scratch directory)')
+    os.exit(77)
+  end
+end
+refuse_real_home()
+
 local json = dofile('lua/vendor/json.lua')
 assert(json.decode(host.sql_exec('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)', '[]')).ok)
 dofile('lua/core/memory.lua').setup()
@@ -9,8 +25,25 @@ local federation = dofile('lua/core/federation.lua')
 local checks, failed = 0, 0
 local function ok(value, label) checks = checks + 1; if not value then failed = failed + 1; print('FAIL ' .. label) end end
 
-local dir = assert(host.getenv('WA_MCP_SCRIPT_DIR'), 'WA_MCP_SCRIPT_DIR')
+-- The script directory is a scratch one: given none, this test makes its own under paths.data() and
+-- answers it as WA_MCP_SCRIPT_DIR, so the row runs from the gate, from the fast path or by hand - and
+-- never writes into the checkout's scripts/ (round 6).
+local dir = tostring(host.getenv('WA_MCP_SCRIPT_DIR') or '')
+if dir == '' then
+  dir = dofile('lua/core/paths.lua').data() .. '/mcp/share-scripts-' .. tostring(host.uuid()):sub(1, 8)
+  local real = host.getenv
+  host.getenv = function(name) if name == 'WA_MCP_SCRIPT_DIR' then return dir end return real(name) end
+end
 local home = tostring(host.getenv('HOME'))
+-- This directory must HOLD the runtime (all of M.RUNTIME), or script_dir() skips it and answers the
+-- checkout's own scripts - where this test would then write, and where an approval would name a file the
+-- test does not own. Round 6 wires this row into the gate, so it is hermetic first.
+local NEWLINE = string.char(10)
+for _, name in ipairs(mcp.RUNTIME) do
+  assert(host.write_file(dir .. '/' .. name, '// runtime stub: ' .. name), 'a runtime stub: ' .. name)
+end
+local node_fixture = dir .. '/node-fixture'
+assert(host.write_file(node_fixture, '#!/bin/sh' .. NEWLINE .. 'exit 0' .. NEWLINE), 'the interpreter fixture')
 
 -- 1. paths move from the sender's home to this one, inside JSON strings too.
 local moved = federation._moved({ args = { '/home/agent/x/a.mjs', '{"token_file":"/home/agent/k.key"}' }, n = 1 }, '/home/agent', '/home/victor')
@@ -114,11 +147,12 @@ ok(in_registry('vault-fixture') == nil, 'the refused definition is not in the re
 -- disabled and unapproved.
 -- A shared connector's program is rewritten to THIS node's node (federation.import_here), and round 5
 -- refuses to approve a program that is a bare name: a name on PATH is code the digest cannot name. This
--- test has no provisioned node, so node_program() would answer 'node'; a real node answers an absolute
--- path (WA_NODE, or the node the installer provisions), which is what it answers here.
+-- test has no provisioned node, so node_program() would answer 'node' and the manifest resolves it through
+-- PATH, hashing whatever that is; WA_NODE names a file this test owns instead (round 6: the interpreter the
+-- launch spawns is part of the digest), which is what a real node's WA_NODE or provisioned copy answers.
 local real_getenv = host.getenv
 host.getenv = function(name)
-  if name == 'WA_NODE' then return '/usr/bin/node' end
+  if name == 'WA_NODE' then return node_fixture end
   return real_getenv(name)
 end
 local shared_vault = { id = 'vault-shared', name = 'Shared vault fixture', transport = 'stdio', program = '/usr/bin/node',

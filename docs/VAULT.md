@@ -472,30 +472,55 @@ node's vault and puts each value in the child's environment at launch, by refere
 (`rust/wa-capabilities/src/operations.rs`, `docs/MCP.md`). The entry NAME travels through Lua, the
 definition and the request file; the value never does.
 
-**The approval is a digest, not a flag (18/11; form v2, 19/11).** Only the operator may start such a
+**The approval is a digest, not a flag (18/11; form v3, 20/11).** Only the operator may start such a
 connector (`/mcp <id> probe`, then `/mcp <id> on` at their own terminal), and that act records a SHA-256
 over what the launch IS: the program, the directory it runs in, the plain (non-vault) environment it asks
-for, its arguments in order, **every file it can run or load**, and the vault names it asks for.
+for, its arguments in order, **every file the launch can run or load**, and the vault names it asks for.
 
-"Every file it can run or load" is the CLOSURE of the code, not a list of names with a script extension
-(that was v1, and it was not true: a relative `conn.mjs`, an extensionless program and every imported
-module were never hashed):
+"Every file the launch can run or load" is the CLOSURE of the code, decided by what a launch RUNS rather
+than by a name's extension (v1 was a list of names carrying a script extension, and it was not true: a
+relative `conn.mjs`, an extensionless program and every imported module were never hashed):
 
-* the program, unless it lives under a platform root (`/usr/bin`, `/bin`, `/usr/lib`, `/nix/store`,
-  `/snap`, `/usr/local/bin`, `/opt/homebrew`...): `/usr/bin/node` is the interpreter the connector runs
-  ON; a program anywhere else - `~/bin/conn`, `<install>/bin/mail-mcp`, with an extension, without one,
-  a script or a compiled binary - is the connector's own code and is hashed;
-* every argument that is a path and exists as a file, so `--config /etc/conn.json` is covered too, and
-  each of those files' own local `import`/`require` (JavaScript) or `source`/`.` (shell), and theirs in
-  turn;
+* the program, unless it is the PLATFORM's - a path under `/usr/bin`, `/bin`, `/usr/lib`,
+  `/usr/lib64`, `/usr/libexec`, `/usr/sbin`, `/nix/store`, `/snap`, `/System`, `/opt/homebrew`,
+  `/usr/local/bin`... that is root-owned and not group/other-writable, with every directory above it the
+  same (`host.path_facts`; on Windows the prefix list alone decides, because there is no uid to read).
+  `/usr/local/bin` and `/opt/homebrew` belong to the USER on macOS, so an interpreter installed there is
+  not the platform's and is hashed. A program anywhere else - `~/bin/conn`, `<install>/bin/mail-mcp`,
+  with an extension or without, a script or a compiled binary - is the connector's own code;
+* **the interpreter the launch actually spawns** (`M.node_program()`: `WA_NODE`, then the copy the
+  installer provisions, then `node` on `PATH`), resolved through `PATH` and through its realpath. That
+  process is the one the vault values are put in, and v2 covered the DEFINITION's program instead, so
+  `WA_NODE=/tmp/x` or a rewritten `<data>/node/bin/node` was code no approval named. It is hashed unless it
+  is the platform's own, and its bytes are hashed in chunks (`host.file_sha256`): a node binary is a
+  hundred megabytes and never passes through Lua. `<data>/node` is a `secret_guard` root as well, so an
+  agent tool can neither read it nor replace it;
+* every ARGUMENT, resolved the way node resolves it - from the connector's own directory when the
+  definition names one, with the extensions node implies (`.mjs`, `.js`, `.cjs`, `/index.*`) - and
+  each file that exists is hashed. `program /usr/bin/node, args ["server"], cwd /home/u/conn` runs
+  `/home/u/conn/server.js`, which v2 never saw because `server` has no slash and no extension. The value
+  of an option (`--mode stdio`) is a value, not a file; an option that names a file (`--require`, `-r`,
+  `--import`, `--loader`, `--env-file`, `--config`) has its value resolved and hashed;
+* what those files run in turn: an `import`/`require` of a local path, a `new Worker('literal')`, a
+  shell `source`/`.` of a path, and a wrapper that RUNS another script (`exec ./inner.sh`,
+  `bash ./inner.sh`);
 * the node's MCP runtime (`M.RUNTIME` in `lua/core/mcp.lua`), which is what actually speaks MCP for a
   custom connector.
 
 A connector whose code cannot be closed is REFUSED rather than approved with a digest that only looks
 complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason):
 
-* a relative path (`conn.mjs`, `./conn.mjs`): node resolves it from the connector's own directory, which
-  the digest names but does not contain;
+* an argument that may name a file and cannot be resolved (`server` with no cwd to resolve it from, or a
+  name that is not there): a file that does not exist when the operator approves can exist when the
+  connector launches;
+* inline code (`node -e`, `sh -c`, `eval`, `new Function`), a shell command substitution, and an
+  `exec` of a value: no digest of files can name a string that is evaluated;
+* a script that starts a process itself (`child_process`) or loads an addon by handle
+  (`process.dlopen`). The node's OWN MCP runtime is exempt from this one rule and from no other: it is the
+  harness that spawns the connector, its bytes are in the digest, and the request seal below is what checks
+  the program it spawns;
+* a relative path (`conn.mjs`, `./conn.mjs`) that is not resolved above: node resolves it from the
+  connector's own directory, which the digest names but does not contain;
 * a program that is a bare name (`node`): it is resolved through PATH, and a name is not a file;
 * a package runner (`npx`, `uvx`, `bunx`, `pnpm`, `yarn`, `pipx`, `corepack`): its code comes from a
   cache or a registry;
@@ -503,25 +528,31 @@ complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason)
   computed (`import(name)`): the digest can name neither;
 * a Python, Ruby, Perl, PowerShell or Lua script as the connector's own program or as an argument: those
   module systems load files this digest cannot follow. JavaScript (followed through its imports) and shell
-  (followed through `source`/`.` of absolute paths) are the two it can follow.
+  (followed through `source`/`.`/`exec` of paths) are the two it can follow.
 
-So a connector that names a vault entry names an ABSOLUTE program and absolute paths. On a node whose
-`node` is not provisioned (`WA_NODE` unset and no `<install>/node`), `M.node_program()` answers the bare
-name `node`; a vault connector whose program `/mcp <key> share` rewrote to that cannot be approved until
-the node names its interpreter by its absolute path - the refusal says which form is wrong.
+So a connector that names a vault entry names an ABSOLUTE program, absolute paths, or paths its own named
+cwd resolves - and the interpreter the node spawns is either the platform's own or a file this digest
+names. On a node whose `node` is only on `PATH`, the interpreter is resolved through `PATH` once, at
+approval time: a `PATH` that changes afterwards makes the approval stale rather than silently selecting a
+different interpreter.
 
 Three places check it, and any one of them refuses:
 
 * `lua/core/mcp.lua` recomputes it before a call, a probe or an enable - `mcp_vault_approval_stale` when a
-  script, an argument, the cwd or the environment changed after the operator approved it;
-  `mcp_vault_approval_missing` for a row approved before this form (a v1 digest is refused by name rather
-  than compared against a text it could never match); `mcp_vault_code_not_covered` for the forms above;
+  script, an argument, the cwd, the environment or the interpreter changed after the operator approved it;
+  `mcp_vault_approval_missing` for a row approved before this form (an older digest is refused by name
+  rather than compared against a text it could never match); `mcp_vault_code_not_covered` for the forms
+  above;
 * `rust/wa-capabilities/src/operations.rs` recomputes it from the bytes on disk immediately before it reads
   a value - `vault_approval_required`, `vault_approval_digest_form`,
   `vault_approval_unreadable:<path>`, `vault_approval_script_not_covered:<path>`,
   `vault_approval_program_not_covered:<path>`, `vault_approval_program_not_absolute:<path>`,
-  `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>` or
-  `vault_approval_mismatch`;
+  `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>`,
+  `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
+  `vault_approval_file_not_found:<value>`, `vault_approval_inline_code:<flag>`,
+  `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`, and after the spawn it
+  hashes those same files again (`vault_approval_changed_since_check:<path>`, which kills the operation and
+  returns no result);
 * the request file the child is about to read is checked against the same approval and sealed -
   `vault_request_program_mismatch`, `vault_request_arguments_mismatch`,
   `vault_request_cwd_mismatch`, `vault_request_environment_mismatch`,
@@ -531,9 +562,19 @@ Three places check it, and any one of them refuses:
 
 Nothing is launched and no value is read when any of them refuses.
 
-So editing a connector's script, changing an argument, moving its cwd or adding an environment name after
-the approval voids the approval, and so does a deploy that replaces the MCP runtime: a vault connector
-asks for the operator's probe/on again after an upgrade.
+So editing a connector's script, an argument, its cwd, the environment it asks for or the interpreter the
+node spawns after the approval voids the approval, and so does a deploy that replaces the MCP runtime or an
+upgrade of the interpreter: a vault connector asks for the operator's probe/on again after an upgrade.
+
+**What the digest does not promise (20/11).** It is a statement about FILES at two moments - before the
+spawn and again just after it - not a sandbox. The hash and the child's `open(2)` are not one atomic step:
+a rewrite that lands between them is caught only if it happens before the second hash, and the operation is
+then killed with whatever it already did. The window is milliseconds and it is not zero. A platform-owned
+interpreter is trusted by OWNERSHIP (root-owned, not group/other-writable), never hashed, so a package
+manager that replaces it sits outside the digest. On Windows there is no uid to read, so the prefix list
+alone decides what is the platform's. A binary is hashed and never parsed: what a compiled program does at
+run time is not priced here. And the approval can still be forged by a hand that can write `memory.db` -
+the residual hole the last section states.
 
 **The request the child reads is sealed (19/11).** `lua/core/mcp.lua` writes the whole launch to
 `<data>/mcp/requests/<uuid>.json` - the file `scripts/mcp-client.mjs` spawns `server.program`,

@@ -132,6 +132,12 @@ pub const REGISTRY: &[Capability] = &[
     plain!("read_image_base64", ReadOnly, crate::host::read_image_base64, "Read a bounded PNG/JPEG/WebP/GIF as base64 with its MIME type"),
     plain!("write_file", WritesFiles, crate::host::write_file, "Create or overwrite a text file"),
     plain!("path_kind", ReadOnly, crate::host::path_kind, "Classify a path as file/dir/missing/other without reading it"),
+    // What a path IS, for the one decision that must not be made from a name: whether a program is the
+    // platform's (root-owned, not group/other-writable) or the connector's own code. and the sha256 of a
+    // file read in chunks, so an approval can name a binary's bytes without loading them into Lua
+    // (docs/VAULT.md, the vault approval).
+    plain!("path_facts", ReadOnly, crate::host::path_facts, "A path's realpath, kind, size and (on unix) owner and mode bits, as JSON"),
+    plain!("file_sha256", ReadOnly, crate::host::file_sha256, "SHA-256 of a file's bytes, read in chunks; nil plus a named reason when it cannot be read"),
     plain!("list_dir", ReadOnly, crate::host::list_dir, "List one directory's entries"),
     plain!("grep", ReadOnly, crate::host::grep, "Literal substring search over a directory or file with bounded, counted results"),
     // ---- the code graph ----------------------------------------------------------------------

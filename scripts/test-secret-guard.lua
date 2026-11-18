@@ -1,5 +1,21 @@
 -- The agent's tools refuse the secret roots; everything else is untouched (15/11).
 local json=dofile('lua/vendor/json.lua')
+
+-- ---- the scratch-home guard (round 6) ---------------------------------------------------------
+-- This test writes under paths.data(). It refuses to run unless that is a SCRATCH home: WASM_AGENT_HOME
+-- must be set (the runner's own directory), the data directory must be under it, and a data directory
+-- that already holds a node's keys or secrets is a REAL node - never this test's to write in.
+local function refuse_real_home()
+  local scratch = tostring(host.getenv('WASM_AGENT_HOME') or '')
+  local data = dofile('lua/core/paths.lua').data()
+  local live = host.path_kind(data .. '/keys') == 'dir' or host.path_kind(data .. '/secrets') == 'dir'
+  if scratch == '' or data:find(scratch, 1, true) ~= 1 or live then
+    print('SKIP refusing to write under ' .. data .. ' (set WASM_AGENT_HOME to a scratch directory)')
+    os.exit(77)
+  end
+end
+refuse_real_home()
+local data = dofile('lua/core/paths.lua').data()
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
 local sg=dofile('lua/core/secret_guard.lua')
@@ -66,11 +82,25 @@ check(request_note ~= sg.NOTE and request_note:find('launch') ~= nil,
   'and the launch request its own: ' .. request_note)
 check(sg.NOTE:find('credentials are reachable only through their connectors', 1, true) ~= nil,
   'the credentials note itself is unchanged')
+-- 20/11 (round 6): the interpreter the installer provisions (<data>/node/bin/node) is the process a vault
+-- value is put in. The approval hashes it; this is the tool-level half, so an agent cannot replace the
+-- interpreter with something it wrote.
+for _, c in ipairs({
+  {'read', {path = '~/.wasm-agent/node/bin/node'}},
+  {'write', {path = '~/.wasm-agent/node/bin/node', content = 'x'}},
+  {'bash', {command = 'cp /tmp/x ~/.wasm-agent/node/bin/node'}},
+}) do
+  local r = call(c[1], c[2])
+  check(r.error == 'secret_path_denied' and r.root ~= nil,
+    'refused: ' .. c[1] .. ' ' .. json.encode(c[2]) .. ' -> ' .. json.encode(r))
+end
+local runtime_note = note('read', {path = '~/.wasm-agent/node/bin/node'})
+check(runtime_note ~= sg.NOTE and runtime_note:find('interpreter') ~= nil,
+  'the interpreter has a note of its own: ' .. runtime_note)
 
-local data = dofile('lua/core/paths.lua').data()
 check(sg.check('write', {path = data .. '/memory.db'}) ~= nil, 'the resolved data directory is covered: ' .. data)
 check(sg.check('read', {path = data .. '/scripts/mcp-client.mjs'}) ~= nil, 'and its script directory')
 check(sg.check('write', {path = '/tmp/an-ordinary-note.txt', content='x'}) == nil,
   'an ordinary file outside every root is still allowed')
 
-print(json.encode({ok=true,checks=checks}))
+print(string.format('secret guard ok (%d checks)', checks))

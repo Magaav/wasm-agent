@@ -785,6 +785,97 @@ pub extern "C-unwind" fn path_kind(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.path_facts(path) -> JSON: what a path IS on disk, including the identity a permission decision
+/// needs - the realpath (symlinks resolved), the kind, and on unix the owner and the mode bits.
+///
+/// Why a capability rather than a shelled-out stat: the vault approval decides whether a program is the
+/// PLATFORM's (replaced by a package manager, never by the agent) or the connector's own code, and that
+/// answer is "root-owned and not group/other-writable" (this round; docs/VAULT.md). A path prefix alone
+/// called /usr/local/bin the platform's on a machine where that directory belongs to the user, and the
+/// interpreter under it received the vault values unhashed. A stat run through a shell would differ per
+/// platform and be spoofable through PATH; this reads the metadata the kernel reports.
+///
+/// Not a Lua table, like every other JSON-answering capability here: a caller decodes it with
+/// lua/vendor/json.lua. A path that does not exist answers {"kind":"missing", ...} - an answer, not nil -
+/// so a caller cannot mistake "cannot see it" for "it is fine".
+#[no_mangle]
+    /// host.path_facts(path) -> one JSON string: {path: realpath, kind, size, unix, uid?, gid?, mode?}
+pub extern "C-unwind" fn path_facts(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    push_json(l, &path_facts_value(&path));
+    1
+}
+
+pub(crate) fn path_facts_value(path: &str) -> serde_json::Value {
+    let real = std::fs::canonicalize(path).ok().map(|value| value.to_string_lossy().replace('\\', "/"));
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let mut value = json!({
+                "path": real.unwrap_or_else(|| path.replace('\\', "/")),
+                "kind": if metadata.is_file() { "file" } else if metadata.is_dir() { "dir" } else { "other" },
+                "size": metadata.len(),
+                "unix": cfg!(unix),
+            });
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                value["uid"] = json!(metadata.uid());
+                value["gid"] = json!(metadata.gid());
+                value["mode"] = json!(metadata.mode() & 0o7777);
+            }
+            value
+        }
+        Err(error) => json!({"path": path, "kind": "missing", "unix": cfg!(unix),
+            "error": format!("{:?}", error.kind())}),
+    }
+}
+
+/// host.file_sha256(path) -> hex, or nil plus a named reason.
+///
+/// host.sha256 hashes a STRING this interpreter already holds, and host.read_file is bounded (a
+/// connector's interpreter is a hundred-megabyte binary that must never pass through Lua): hashing a file
+/// by path, in fixed-size chunks, is what lets an approval name the interpreter's bytes. The bound is on
+/// the file's size before a byte is read, so a huge or growing file is a refusal rather than an allocation.
+#[no_mangle]
+    /// host.file_sha256(path) -> the sha256 of a file's bytes as hex, nil+reason when it cannot be read
+pub extern "C-unwind" fn file_sha256(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    match file_digest(&path) {
+        Ok(hex) => {
+            unsafe { lua_pushlstring(l, hex.as_ptr() as *const c_char, hex.len()) };
+            1
+        }
+        Err(reason) => {
+            unsafe { wa_host_support::lua::lua_pushnil(l) };
+            unsafe { lua_pushlstring(l, reason.as_ptr() as *const c_char, reason.len()) };
+            2
+        }
+    }
+}
+
+/// A file's sha256, read in chunks; bounded by FILE_DIGEST_MAX_BYTES.
+pub(crate) const FILE_DIGEST_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+pub(crate) fn file_digest(path: &str) -> Result<String, String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|error| format!("unreadable: {error}"))?;
+    if let Ok(metadata) = file.metadata() {
+        if metadata.len() > FILE_DIGEST_MAX_BYTES {
+            return Err(format!("too_large: {} bytes", metadata.len()));
+        }
+    }
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => context.update(&buffer[..read]),
+            Err(error) => return Err(format!("unreadable: {error}")),
+        }
+    }
+    Ok(context.finish().as_ref().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// Identify the image formats the provider path accepts from their bytes, never
 /// from an extension supplied by a file name.
 fn supported_image_mime(bytes: &[u8]) -> Option<&'static str> {
