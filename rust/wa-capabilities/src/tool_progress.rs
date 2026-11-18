@@ -5,12 +5,17 @@
 //! blocks the node-thread inside `host.exec`, so neither Lua nor the view can poll while the call
 //! runs. The operation supervisor's own wait loop is awake every 100 ms, and it already owns the
 //! operation's output files - so it reads the tail there, at most four times a second, and publishes
-//! the facts to `$WASM_AGENT_DATA/tool-progress.json`. Every surface then reads one file:
+//! the facts to **that session's own file**, `<data>/tool-progress/<session key>.json`
+//! (`wa_tool_progress::progress_path`). Every surface then reads the file of the session it is:
 //!
-//!   * `wa_term::tool_progress` for the native editor's session-status-content row (drawn by the
-//!     host's ticker, which is awake while Lua is blocked);
+//!   * `wa_term::tool_progress` for the native editor's row (drawn by the host's ticker, which is
+//!     awake while Lua is blocked);
 //!   * `lua/core/tool_progress.lua` for the CLI's own layout and its transcript line;
 //!   * the window, which reads `/health` + `/operation` itself and renders the same wording.
+//!
+//! One file per session, not one per node (session isolation, finding 1): the row carries the last
+//! line of the owner's stdout, so a reader that opened somebody else's file was reading somebody
+//! else's output. A reader draws only its own; the others are `node: N ops elsewhere`.
 //!
 //! Three bounds, because this runs inside somebody else's wait loop:
 //!
@@ -39,9 +44,22 @@ const CHUNK: u64 = 32 * 1024;
 /// The tail of each stream, for the first read of a call that has already written a lot.
 const FIRST_READ: u64 = 8 * 1024;
 
-struct Live { id: String, tracker: Tracker, cursor: u64, errors: u64 }
-static LIVE: Mutex<Option<Live>> = Mutex::new(None);
-static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+/// One call in flight, and **whose** call it is.
+struct Live { id: String, owner: String, tracker: Tracker, cursor: u64, errors: u64 }
+
+/// One slot per owning session, and one throttle per session.
+///
+/// This used to be a single slot and a single throttle for the whole process (session isolation,
+/// finding 1). Two sessions running at once therefore shared one row: the second call replaced the
+/// first one's tail, the file had no owner, and every reader drew whatever had been written last - with
+/// the owner's last stdout line in it. The slot is keyed by owner (the session the operation belongs
+/// to, `Spec::owner`) and the file it publishes to is that session's own
+/// (`wa_tool_progress::progress_path`).
+static LIVES: Mutex<Vec<Live>> = Mutex::new(Vec::new());
+static LAST: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+/// The most calls this process will track at once. `MAX_ACTIVE` operations is 8, so 16 covers two
+/// sessions' worth of hand-offs without letting a long-lived process accumulate slots.
+const MAX_LIVE: usize = 16;
 
 pub fn now_epoch() -> f64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
@@ -72,24 +90,49 @@ fn read_since(path: &str, cursor: u64) -> Option<(String, u64)> {
 /// runner writes its results to **stdout**. They are fed stderr first, so that when both wrote, the
 /// newest line the row falls back to is the one on stdout - what a reader watching a terminal would
 /// have seen last - while a build that says nothing on stdout still shows its compile progress.
-pub fn tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_path: &str) -> Option<Value> {
+pub fn tick(id: &str, tool: &str, started_at: f64, stdout_path: &str, stderr_path: &str, owner: &str) -> Option<Value> {
+    // An owner nobody can name is nobody's row: publish nothing rather than a row no session can claim
+    // (unknown is not yes). Every caller passes the operation's own `owner`, which for a session's work
+    // is that session's id (`operations::configure_spec`).
+    let key = wa_tool_progress::owner_key(owner)?;
     {
+        let now = Instant::now();
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|at| at.elapsed() < Duration::from_millis(INTERVAL_MS)) { return None; }
-        *last = Some(Instant::now());
+        match last.iter_mut().find(|(name, _)| *name == key) {
+            Some((_, at)) => {
+                if at.elapsed() < Duration::from_millis(INTERVAL_MS) { return None; }
+                *at = now;
+            }
+            None => {
+                if last.len() >= MAX_LIVE {
+                    let oldest = last.iter().enumerate().min_by_key(|(_, (_, at))| *at).map(|(index, _)| index);
+                    if let Some(oldest) = oldest { last.remove(oldest); }
+                }
+                last.push((key.clone(), now));
+            }
+        }
     }
     let now = now_epoch();
-    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let current = match live.as_mut() {
-        Some(current) if current.id == id => current,
-        _ => {
-            *live = Some(Live { id: id.to_string(), tracker: Tracker::new(tool, started_at), cursor: 0, errors: 0 });
-            live.as_mut().expect("just set")
+    let mut lives = LIVES.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = |id: &str, owner: &str| Live {
+        id: id.to_string(), owner: owner.to_string(), tracker: Tracker::new(tool, started_at), cursor: 0, errors: 0,
+    };
+    let index = match lives.iter().position(|live| live.owner == owner) {
+        Some(index) => index,
+        None => {
+            if lives.len() >= MAX_LIVE { lives.remove(0); }
+            lives.push(fresh(id, owner));
+            lives.len() - 1
         }
     };
+    if lives[index].id != id {
+        // The same session started another call: its old row is that call's, so it goes with it.
+        lives[index] = fresh(id, owner);
+    }
+    let current = &mut lives[index];
     feed(current, stdout_path, stderr_path, now);
     let facts = current.tracker.facts(now, &wa_tool_progress::env_secrets());
-    let _ = wa_term::tool_progress::publish(&facts);
+    let _ = wa_term::tool_progress::publish(owner, &facts);
     Some(facts)
 }
 
@@ -108,10 +151,15 @@ fn feed(current: &mut Live, stdout_path: &str, stderr_path: &str, now: f64) {
 /// The call is over (settled, cancelled or failed): the row goes away. Not on a timer - the operation
 /// record is what says the call ended, so the row cannot outlive it by more than the freshness window.
 pub fn finish(id: &str) {
-    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let mine = live.as_ref().is_some_and(|current| current.id == id);
-    if mine { *live = None; }
-    if mine { wa_term::tool_progress::finish(); }
+    let mut lives = LIVES.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(index) = lives.iter().position(|live| live.id == id) else { return };
+    let ended = lives.remove(index);
+    // Its own throttle goes with it, so the session's next call is not throttled by the last one.
+    if let Some(key) = wa_tool_progress::owner_key(&ended.owner) {
+        LAST.lock().unwrap_or_else(|e| e.into_inner()).retain(|(name, _)| *name != key);
+    }
+    // Only THAT session's file is removed: a settled call never blanks another session's row.
+    wa_term::tool_progress::finish(&ended.owner);
 }
 
 #[cfg(test)]
@@ -163,7 +211,7 @@ mod tests {
         let (out, err) = (dir.join("stdout"), dir.join("stderr"));
         std::fs::write(&out, "").unwrap();
         std::fs::write(&err, "").unwrap();
-        let mut live = Live { id: "op-1".into(), tracker: Tracker::new("bash", 0.0), cursor: 0, errors: 0 };
+        let mut live = Live { id: "op-1".into(), owner: "session-a".into(), tracker: Tracker::new("bash", 0.0), cursor: 0, errors: 0 };
         // The build speaks on stderr only: that is the row.
         std::fs::write(&err, "    Building [=====>    ] 143/412: serde_json, syn
 ").unwrap();

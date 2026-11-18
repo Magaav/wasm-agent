@@ -2671,7 +2671,10 @@ async function refreshOperationProgress(health, running) {
     ? running.node_thread_id
     : (running.worker_id != null ? running.worker_id : running.id);
   if (nodeThreadId != null) owners.push("worker:" + nodeThreadId);
-  const operation = (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
+  // This window's own work, by the session that owns it - and only failing that by the run/worker id an
+  // older node reports (session isolation, finding 9: another session's operation is not "mine").
+  const operation = (health.operations || []).find((entry) => entry.session && entry.session === chatSession)
+    || (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
   // No operation for this run any more: the call ended (or never started), so the row is not its.
   if (!operation) { clearToolProgress(); return; }
   const bytes = Number(operation.output_bytes) || 0;
@@ -2682,7 +2685,7 @@ async function refreshOperationProgress(health, running) {
         method: "POST",
         headers: apiHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ action: "read", id: operation.operation_id, stream: "stdout",
-          offset: Math.max(0, bytes - 2048), limit: 2048 }),
+          session_id: chatSession, offset: Math.max(0, bytes - 2048), limit: 2048 }),
       });
       if (response.ok) {
         const page = await response.json();
@@ -7198,7 +7201,9 @@ function nodeHealth(maxAge = 0) {
   healthFlight=request;
   request.promise=(async()=>{
     try {
-      const response=await apiFetch('health',{headers:apiHeaders()});
+      // The caller's own session, so `operations[]` is this conversation's work and nothing else
+      // (session isolation, finding 9). The node-wide count is `operations_elsewhere`.
+      const response=await apiFetch('health?session_id='+encodeURIComponent(chatSession||''),{headers:apiHeaders()});
       const value=response.ok?await response.json():null;
       if(scope===activeNode+':'+session+':'+chatSession+':'+conversationEpoch) healthSample={scope,at:Date.now(),value};
       return value;

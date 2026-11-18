@@ -10,6 +10,38 @@ fn legacy_writer_helper() {
     atomic_json(&root.join(&id).join("state.json.before-reconcile-fixture"),&state).unwrap();
     std::thread::sleep(Duration::from_secs(30));
 }
+/// An operation that recorded no directory is relevant only to the session that ran it (session
+/// isolation, finding 8). It used to be relevant to EVERY path - `cwd=''` matched the query unconditionally
+/// - so one session's empty-cwd operation blocked another session's worktree release, and nothing in the
+/// answer said whose it was.
+#[test]
+fn an_operation_that_recorded_no_directory_is_relevant_only_to_its_session() {
+    let root = std::env::temp_dir().join(format!("wa-relevant-session-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let index = crate::index::Index::open(&root).unwrap();
+    for (id, session) in [("op-ano", "session-a"), ("op-bno", "session-b")] {
+        // Unsettled, no effective_cwd and no cwd: the shape an operation has when its owner process died
+        // before it could record one.
+        index.record(&json!({"operation_id":id,"session":session,"state":"accepted","settled":false})).unwrap();
+    }
+    let ids = |answer: Value| -> Vec<String> {
+        answer["operations"].as_array().unwrap().iter()
+            .filter_map(|entry| entry["operation_id"].as_str().map(str::to_string)).collect()
+    };
+    let mine = ids(index.relevant("/work/tree", "", 16, "session-a", false).unwrap());
+    assert!(mine.contains(&"op-ano".to_string()), "the session's own empty-cwd operation is relevant: {mine:?}");
+    assert!(!mine.contains(&"op-bno".to_string()), "another session's is not: {mine:?}");
+    // The operator's node scope is what reaches the others.
+    let node = ids(index.relevant("/work/tree", "", 16, "session-a", true).unwrap());
+    assert!(node.contains(&"op-bno".to_string()), "a node scope sees every session's: {node:?}");
+    // A sessionless caller sees neither session's rows, and a caller with no session claims nothing.
+    let anonymous = ids(index.relevant("/work/tree", "", 16, "", false).unwrap());
+    assert!(!anonymous.contains(&"op-ano".to_string()) && !anonymous.contains(&"op-bno".to_string()),
+        "an unnamed caller is not handed a session's operation: {anonymous:?}");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn legacy_adjudication_preserves_unknown_outcome_and_requires_independent_native_evidence() {
     use ring::{rand::SystemRandom,signature::{Ed25519KeyPair,KeyPair}};
@@ -53,12 +85,12 @@ fn legacy_adjudication_preserves_unknown_outcome_and_requires_independent_native
     assert!(m.adjudicate_legacy(&replaced).unwrap_err().to_string().contains("bundle_moved"));
     assert_eq!(receipt["original_execution_outcome"],"unknown");assert_eq!(receipt["never_replay"],true);
     assert_eq!(fs::read(root.join(&id).join("state.json")).unwrap(),raw);
-    assert!(m.relevant("*","",1).unwrap()["operations"].as_array().unwrap().is_empty());
+    assert!(m.relevant("*","",1,"",true).unwrap()["operations"].as_array().unwrap().is_empty());
     let mut bad=args.clone();bad["review"]["signature"]=json!("00");assert!(m.adjudicate_legacy(&bad).is_err());
     bad=args.clone();bad["originals"]=json!([]);assert!(m.adjudicate_legacy(&bad).is_err());
     fs::write(evidence.join("original-preserved.json"),"changed effect evidence").unwrap();
     assert!(m.allocation_safety(&args).is_err());
-    assert_eq!(m.relevant("*","",1).unwrap()["operations"][0]["operation_id"],id);
+    assert_eq!(m.relevant("*","",1,"",true).unwrap()["operations"][0]["operation_id"],id);
     drop(m);remove_fixture(root);remove_fixture(evidence);
 }
 #[test]
@@ -74,8 +106,8 @@ fn effective_cwd_prevents_self_blocking_unrelated_workspace() {
     assert!(state["owner_process_id"].is_number());
     assert!(state["owner_boot"].as_str().unwrap().starts_with("boot-"));
     let unrelated = root.join("unrelated");
-    assert!(m.relevant(&unrelated.to_string_lossy(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
-    assert_eq!(m.relevant(state["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"][0]["operation_id"], id);
+    assert!(m.relevant(&unrelated.to_string_lossy(), "", 1, "", true).unwrap()["operations"].as_array().unwrap().is_empty());
+    assert_eq!(m.relevant(state["effective_cwd"].as_str().unwrap(), "", 1, "", true).unwrap()["operations"][0]["operation_id"], id);
     m.cancel(&id).unwrap(); settled(&m, &id);
     drop(m); remove_fixture(root);
 }
@@ -90,10 +122,10 @@ fn migration_preserves_uncertain_originals_and_is_bounded_after_import() {
         fs::create_dir_all(root.join(format!("op-history-{i}"))).unwrap();
         atomic_json(&root.join(format!("op-history-{i}/state.json")), &json!({"settled":true,"cleanup":"terminated","cwd":"elsewhere"})).unwrap();
     }
-    assert!(m.relevant("target", "", 1).unwrap_err().to_string().contains("import_required"));
+    assert!(m.relevant("target", "", 1, "", true).unwrap_err().to_string().contains("import_required"));
     assert!(m.import_index("").is_err());
     assert_eq!(m.import_index("Fixture legacy writers stopped; inspected original states").unwrap()["imported"], 1001);
-    let result = m.relevant("target", "", 1).unwrap();
+    let result = m.relevant("target", "", 1, "", true).unwrap();
     assert_eq!(result["operations"].as_array().unwrap().len(), 1);
     assert_eq!(result["operations"][0]["operation_id"], "op-legacy");
     assert_eq!(result["operations"][0]["originals"][0]["state"], original);
@@ -103,7 +135,7 @@ fn migration_preserves_uncertain_originals_and_is_bounded_after_import() {
     // Query does not open settled files again. Missing historical evidence cannot
     // become an apparent empty operation directory or trigger a full release scan.
     fs::remove_file(root.join("op-history-0/state.json")).unwrap();
-    assert_eq!(m.relevant("target", "", 1).unwrap()["operations"][0]["operation_id"], "op-legacy");
+    assert_eq!(m.relevant("target", "", 1, "", true).unwrap()["operations"][0]["operation_id"], "op-legacy");
     drop(m); remove_fixture(root);
 }
 #[test]
@@ -125,7 +157,7 @@ fn reconciliation_requires_dead_owner_exact_state_and_effect_evidence() {
     args["expected_state"] = serde_json::from_slice(&before).unwrap();
     assert_eq!(other.reconcile(&args).unwrap()["reconciled"], true);
     assert_eq!(fs::read(root.join(&id).join("state.json")).unwrap(), before);
-    assert!(other.relevant(args["expected_state"]["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
+    assert!(other.relevant(args["expected_state"]["effective_cwd"].as_str().unwrap(), "", 1, "", true).unwrap()["operations"].as_array().unwrap().is_empty());
     drop(other); remove_fixture(root);
 }
 #[test]
@@ -191,7 +223,7 @@ fn reconciliation_raw_json_preserves_nulls_and_exact_state_checks() {
     assert_eq!(fs::read(&file).unwrap(), before);
     assert_eq!(other.reconcile(&args).unwrap()["reconciled"], true);
     assert_eq!(fs::read(&file).unwrap(), before);
-    assert!(other.relevant(state["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
+    assert!(other.relevant(state["effective_cwd"].as_str().unwrap(), "", 1, "", true).unwrap()["operations"].as_array().unwrap().is_empty());
     drop(other); remove_fixture(root);
 }
 fn fixture() -> (Manager, PathBuf) {

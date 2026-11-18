@@ -934,7 +934,15 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  -- (lua/core/codemode_harness.lua). A copy, so the decorated source never becomes the tool's args.
  local source=args.code
  local workspace=memory.session_workspace and memory.session_workspace(ctx.session_id) or nil
- local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
+ -- The scope key this script's variables and pending handles live under. It carried the session
+ -- straight from ctx.session_id, and a nil session simply vanished from the encoded table - so EVERY
+ -- sessionless call shared one store and one pending index, and one caller's vars and handles were
+ -- another's (session isolation, finding 10). A call with no session now gets its own key: it can neither
+ -- read nor collide with anybody else's, and its own state does not survive the call, which is the honest
+ -- answer for a caller that cannot be named.
+ local session_key=type(ctx.session_id)=='string' and ctx.session_id~='' and ctx.session_id
+   or ('no-session:'..tostring(host.uuid and host.uuid() or '')..':'..tostring(host.now and host.now() or 0))
+ local scope=host.sha256(json.encode({session=session_key,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
  args={code=harness.decorate(args.code,session_vars(memory,scope)),timeout_ms=args.timeout_ms}
  -- One handle table for this script, on either loop: a call that outlives its wait answers
  -- {state:"pending", op} and wait(op)/cancel(op) answer it. A wait is bounded by its own wait_s and by

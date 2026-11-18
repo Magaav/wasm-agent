@@ -1319,8 +1319,12 @@ function METHODS:session_content()
   if self.session_notice and self.session_notice ~= "" then
     return { text = self.session_notice, kind = "notice" }
   end
-  -- No third claimant: a tool call's progress is not a session notice, and this row is not where a
-  -- tool speaks (Victor, 2026-11-10).
+  -- The one thing this row says about OTHER sessions: a count. A running call's progress is still not a
+  -- session notice (Victor, 2026-11-10) - its own row lives inside its own block in the transcript - but
+  -- "the node is busy" is not another session's tool and not a line of its output: it is a number, drawn
+  -- dim, with no name and no text (session isolation, finding 1).
+  local elsewhere = self:elsewhere_row()
+  if elsewhere then return { text = elsewhere, kind = "progress" } end
   return nil
 end
 
@@ -1338,11 +1342,31 @@ function M.emphasise(text, words)
   return text
 end
 
+-- How many other sessions are running a call right now, as the one aggregate line - or nil. Read at most
+-- once a quarter second (the host publishes at most four times a second), because this row is asked on
+-- every frame.
+function METHODS:elsewhere_row()
+  if self.console or not self.live then return nil end
+  local module = self.tool_progress
+  if not module then
+    local ok, loaded = pcall(dofile, 'lua/core/tool_progress.lua')
+    if not ok or type(loaded) ~= 'table' then return nil end
+    module = loaded; self.tool_progress = module
+  end
+  if not module.elsewhere then return nil end
+  local ms = math.floor(self:now() * 1000)
+  if self.elsewhere_at and (ms - self.elsewhere_at) < 250 then return self.elsewhere_text end
+  local ok, count = pcall(module.elsewhere, { session = self.session_id, now = self.now() })
+  self.elsewhere_at = ms
+  self.elsewhere_text = (ok and (tonumber(count) or 0) > 0) and module.elsewhere_text(count) or nil
+  return self.elsewhere_text
+end
+
 -- The colour of each kind of line: the notice is the warning yellow, a loader (a build) is the
 -- border accent, and a result is success or error. A tool call has no kind here at all - its line
 -- lives in its own block in the transcript.
 local SESSION_ROLES = { building = "borderAccent", installed = "success", failed = "error",
-  notice = "warning" }
+  notice = "warning", progress = "dim" }
 function M.session_role(kind)
   return SESSION_ROLES[tostring(kind or "")] or "warning"
 end
@@ -2113,7 +2137,9 @@ end
 function METHODS:tool_line()
   local module = self.tool_progress
   if not module then return nil end
-  local ok, value = pcall(module.status, { now = self.now(), limit = self.limit })
+  -- The reader's own session: the live row is that session's file and no other's (session isolation,
+  -- finding 1).
+  local ok, value = pcall(module.status, { now = self.now(), limit = self.limit, session = self.session_id })
   if not ok or type(value) ~= 'table' or type(value.text) ~= 'string' or value.text == "" then return nil end
   return value
 end

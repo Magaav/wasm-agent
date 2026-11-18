@@ -179,16 +179,65 @@ pub fn env_secrets() -> Vec<String> {
     values
 }
 
-/// Where the live file goes: `$WASM_AGENT_DATA`, else `$WASM_AGENT_HOME/.wasm-agent`, else
+/// Where the node's data goes: `$WASM_AGENT_DATA`, else `$WASM_AGENT_HOME/.wasm-agent`, else
 /// `$HOME/.wasm-agent` - the three tiers `scripts/lib/build-status.sh` uses for the build loader.
 /// The host writes it and every renderer reads it, which is what lets the CLI, the window and the
 /// native editor agree about a call none of them can poll while Lua is blocked.
-pub fn data_path() -> std::path::PathBuf {
+pub fn data_dir() -> std::path::PathBuf {
     let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     let data = env("WASM_AGENT_DATA").or_else(|| env("WASM_AGENT_HOME").map(|home| format!("{home}/.wasm-agent")))
         .or_else(|| env("HOME").map(|home| format!("{home}/.wasm-agent")))
         .unwrap_or_else(|| ".wasm-agent".to_string());
-    std::path::Path::new(&data).join("tool-progress.json")
+    std::path::PathBuf::from(data)
+}
+
+/// Where the live files go: **one file per owning session**, under `<data>/tool-progress/`.
+///
+/// It used to be one file for the whole node (`<data>/tool-progress.json`): one slot, one throttle,
+/// no owner. Three consequences, all measured by the session-isolation audit (18/11, finding 1): a row
+/// could only ever describe "the call this process happened to see"; every session's reader drew
+/// whatever had been written last; and `finish` blanked every reader's row at once. Worst of all the
+/// row carries the last line of the owner's stdout, so the leak was content and not only a label.
+///
+/// A file per owner is what makes "a reader draws only its own" possible: the reader resolves its own
+/// file from its own session id and never opens another session's. What is left for the others is a
+/// count ([elsewhere]), which carries no name and no text.
+pub fn progress_dir() -> std::path::PathBuf { data_dir().join("tool-progress") }
+
+/// The file name for an owner (a session id): every byte outside `A-Za-z0-9._-` percent-encoded, so
+/// two owners cannot collide onto one file and the name is safe on every filesystem.
+///
+/// `lua/core/tool_progress.lua`'s `M.key` computes the same key: the host writes the file, the CLI
+/// reads it, and `scripts/test-tool-progress.lua` pins the two implementations against one table.
+///
+/// `None` for an empty owner (a call nobody can claim is drawn by nobody - unknown is not yes) and for
+/// a key too long for a file name: a truncated key would silently share a row with another owner, so a
+/// key that does not fit publishes nothing instead.
+pub fn owner_key(owner: &str) -> Option<String> {
+    if owner.is_empty() { return None; }
+    let mut key = String::with_capacity(owner.len());
+    for byte in owner.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            key.push(byte as char);
+        } else {
+            key.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    if key.len() > 120 { return None; }
+    Some(key)
+}
+
+/// `<data>/tool-progress/<key>.json` for the owning session, or `None` when it has no usable key.
+pub fn progress_path(owner: &str) -> Option<std::path::PathBuf> {
+    owner_key(owner).map(|key| progress_dir().join(format!("{key}.json")))
+}
+
+/// The one line a reader draws for work that is **not** its own: a count, and nothing else.
+///
+/// No tool name, no session id, no line of anybody's output. The aggregate exists so a reader can tell
+/// "the node is busy" from "the node is idle", not so it can learn what another session is doing.
+pub fn elsewhere(count: usize) -> String {
+    if count == 1 { "node: 1 op elsewhere".to_string() } else { format!("node: {count} ops elsewhere") }
 }
 
 /// What the output's own dialect says, newest line first. Rendered as a bar when the line carries
@@ -747,9 +796,40 @@ mod tests {
     }
 
     #[test]
-    fn the_live_file_lives_where_the_build_loader_does() {
+    fn the_live_files_live_where_the_build_loader_does() {
         // The three tiers of scripts/lib/build-status.sh, in the order they win. Not asserted against
         // the process environment: this crate is also used from a node whose env it must not mutate.
-        assert!(data_path().ends_with("tool-progress.json"));
+        assert!(progress_dir().ends_with("tool-progress"));
+        assert!(progress_path("s-1").expect("a key").ends_with("tool-progress/s-1.json"));
+    }
+
+    // ---- one file per session (session isolation, finding 1) -----------------------------------
+    #[test]
+    fn an_owners_key_is_its_session_id_and_two_sessions_never_share_a_file() {
+        // A session id is a uuid: the key is the id itself, so the file is readable by a person
+        // looking at the directory.
+        assert_eq!(owner_key("3f9a1c2e-0b7d-4e51-9a3c-1d2b3c4d5e6f").as_deref(),
+            Some("3f9a1c2e-0b7d-4e51-9a3c-1d2b3c4d5e6f"));
+        // An owner with a separator in it cannot escape the directory, and cannot look like another.
+        assert_eq!(owner_key("worker:7").as_deref(), Some("worker%3A7"));
+        assert_eq!(owner_key("peer/work").as_deref(), Some("peer%2Fwork"));
+        assert_eq!(owner_key("a b").as_deref(), Some("a%20b"));
+        assert_ne!(owner_key("a/b"), owner_key("a_b"), "two owners, two files");
+        // An empty owner is nobody's row, and a key too long for a file name is refused rather than
+        // truncated onto another owner's name.
+        assert_eq!(owner_key(""), None);
+        assert_eq!(progress_path(""), None);
+        assert_eq!(owner_key(&"s".repeat(121)), None);
+        assert!(owner_key(&"s".repeat(120)).is_some());
+        assert_ne!(progress_path("s-1"), progress_path("s-2"));
+    }
+
+    #[test]
+    fn the_aggregate_is_a_count_with_no_name_and_no_text() {
+        assert_eq!(elsewhere(1), "node: 1 op elsewhere");
+        assert_eq!(elsewhere(3), "node: 3 ops elsewhere");
+        // What the aggregate must never be: a tool name, a session id, a line of output.
+        let line = elsewhere(2);
+        assert!(!line.contains("bash") && !line.contains('\u{27f3}'));
     }
 }

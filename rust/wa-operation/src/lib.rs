@@ -21,6 +21,44 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Names a tool or operation child must **never** inherit from the node's own environment.
+///
+/// The node's environment holds its provider credentials and its admin tokens, and `Command` passes the
+/// environment on unless somebody says otherwise - so the `bash` tool, an `operation start` and a hook
+/// command could read the node's own keys with `env`, print them into their output (which is captured in
+/// a transcript) and use them. That is session isolation's finding 5, and the fix is here because this is
+/// the one boundary every tool child crosses (`Spec::env` is *added* on top - a tool explicitly granted a
+/// name gets it back by naming it in `spec.env`, which is applied after the removal).
+///
+/// The list is a policy, not a secret: a `*_API_KEY` name is denied by shape, and the rest by exact name.
+/// Anything added here must also be named in `docs/missions/reports/session-isolation.md`.
+pub const DENY_ENV: &[&str] = &[
+    "WA_VAULT_ADMIN_TOKEN",
+    "WASM_AGENT_VAULT_ADMIN_TOKEN",
+    "WASM_AGENT_PROMPT_CACHE_KEY",
+    "WASM_AGENT_LLM_API_KEY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+];
+
+/// Is this environment name one the node keeps to itself? Exact names above, plus every provider key,
+/// which is the one shape that keeps working when a new provider appears.
+pub(crate) fn denied_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if upper == "API_KEY" || upper.ends_with("_API_KEY") { return true; }
+    DENY_ENV.iter().any(|denied| *denied == upper)
+}
+
+/// Remove the denied names from a child's inherited environment. Called by both platform spawns before
+/// `spec.env` is applied, so a granted name can still be handed over explicitly.
+#[allow(dead_code)]
+pub(crate) fn scrub_inherited_env(command: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy().to_string();
+        if denied_env(&name) { command.env_remove(&name); }
+    }
+}
+
 const CLEANUP_MS: u64 = 1000;
 /// How many operations one node tracks at once, live or not yet retired (18/11 round 2, finding 6).
 ///
@@ -34,6 +72,15 @@ const MAX_TRACKED: usize = 128;
 pub const COMMAND_OUTPUT_IDLE_MS: u64 = 100;
 const VIEW_BYTES: usize = 24 * 1024;
 const MAX_ACTIVE: usize = 8;
+/// How many of those slots ONE session may hold.
+///
+/// The cap was node-wide only, so a single session could take all 8 and every other session's shell was
+/// refused `operation_capacity` until one of them settled - and a read-MCP session holds a slot for up to
+/// 3600 s (session isolation, finding 7). Two slots stay out of every session's reach: they are what the
+/// node's own control and short reads run in, which is the property that makes "cancel the runaway" still
+/// possible while the runaway holds its share. The queue itself is untouched: this is an admission check,
+/// not a scheduler.
+const PER_SESSION_MAX: usize = MAX_ACTIVE - 2;
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct Spec {
@@ -49,6 +96,14 @@ pub struct Spec {
     pub timeout: Duration,
     pub output_limit: usize,
     pub owner: String,
+    /// The **session** that asked for this work, when one did, recorded beside the owner.
+    ///
+    /// `owner` is the runtime's own identity for the work (`run:<run id>` for a served run,
+    /// `worker:<n>` for a shell outside one, a child session's id for a subagent task). None of those
+    /// is the conversation the work was asked in, and the conversation is what owns the surface
+    /// (session isolation, findings 1 and 2): another session may not read, wait on or cancel it. Empty
+    /// means nobody can claim it, and an operation nobody can claim is nobody's - unknown is not yes.
+    pub session: String,
     /// When a foreground shell exits leaving live descendants, adopt them as a running
     /// operation instead of failing. Off by default: a deliberately started operation is
     /// already background, and only the `bash` tool wants this.
@@ -71,6 +126,7 @@ impl Spec {
             timeout: Duration::from_secs(300),
             output_limit: 8 * 1024 * 1024,
             owner: String::new(),
+            session: String::new(),
             promote_descendants: false,
             background: false,
         }
@@ -528,6 +584,23 @@ impl Manager {
         if entries.len() >= limit {
             return Err(error("operation_registry_full"));
         }
+        let mut mine = 0usize;
+        for entry in entries.values() {
+            let state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state["settled"].as_bool().unwrap_or(false) { continue; }
+            if !spec.session.is_empty() && state["session"].as_str() == Some(spec.session.as_str()) {
+                mine += 1;
+            }
+        }
+        // Node capacity is the supervisor's queue (Slot::acquire below): a new operation waits there
+        // instead of being refused. What is refused HERE is one session taking more than its share, so
+        // the rest of the node keeps working while it holds one - and the refusal says whose share it
+        // is (session isolation, finding 7). One admission path: retire, ceiling, share, then queue.
+        if mine >= PER_SESSION_MAX {
+            return Err(error(format!(
+                "operation_capacity_shared: this session already holds {mine} operation slots (its share is {PER_SESSION_MAX} of {MAX_ACTIVE}); settle or cancel one, or wait for it to finish"
+            )));
+        }
         let id = format!(
             "op-{}-{}-{}",
             SystemTime::now()
@@ -538,7 +611,7 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"cpu_priority":Process::priority(spec.background),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        let mut state = json!({"operation_id":id,"owner":spec.owner,"session":spec.session,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"cpu_priority":Process::priority(spec.background),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
         if let Some(requested) = &spec.cwd_requested {
             state["cwd_requested"] = json!(requested);
         }
@@ -657,8 +730,8 @@ impl Manager {
         Ok(self.index.get().unwrap().clone())
     }
     pub fn import_index(&self, evidence: &str) -> io::Result<Value> { self.index()?.import(evidence) }
-    pub fn relevant(&self, cwd: &str, after: &str, limit: usize) -> io::Result<Value> {
-        self.index()?.relevant(cwd, after, limit)
+    pub fn relevant(&self, cwd: &str, after: &str, limit: usize, session: &str, node_wide: bool) -> io::Result<Value> {
+        self.index()?.relevant(cwd, after, limit, session, node_wide)
     }
     pub fn reconcile(&self, args: &Value) -> io::Result<Value> { self.index()?.reconcile(args) }
     pub fn adjudicate_legacy(&self,args:&Value)->io::Result<Value>{self.index()?.adjudicate_legacy(args)}

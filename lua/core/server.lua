@@ -201,8 +201,11 @@ function wa_admission(session, node, body)
   -- No thread: the run resumes the newest open conversation for (user, node), exactly as `agent_for`
   -- will. Returning the real id is what lets the scheduler enforce affinity; without it the key would be
   -- empty and two unnamed runs could write one transcript.
-  local chosen = memory.ensure_session(user.id, node, "chat")
-  return json.encode({ ok = true, user = users.public(user), role = role, conversation = chosen, remote = false })
+  local chosen, thread_note = memory.ensure_session(user.id, node, "chat")
+  -- A run with no thread id never resumes a conversation a live process is serving: it starts its own and
+  -- says which one was busy (session isolation, finding 6).
+  return json.encode({ ok = true, user = users.public(user), role = role, conversation = chosen, remote = false,
+    thread_note = thread_note })
 end
 
 -- Identity only, for a control route that is owner-scoped but must not be admitted as a run and must
@@ -590,6 +593,16 @@ function wa_operation(body, session)
   -- Starting arbitrary work is a tool capability, not an engine read/control endpoint.
   if args.action == "start" then return json.encode({error="start_requires_tool"}) end
   if args.action == "await" then return json.encode({error="await_requires_tool; use bounded wait on the control route"}) end
+  -- This route reads ONE session's operations - the conversation the caller names in `session_id` - and
+  -- the node's only when it explicitly asks for the node scope, which is the operator's, is audited, and
+  -- is what a fleet view uses (session isolation, findings 2 and 9). Without that it answered with every
+  -- operation on the node, and the ids are guessable.
+  local session_id = type(args.session_id) == "string" and args.session_id or ""
+  local grant, refusal = dofile('lua/core/session_scope.lua').grant(memory, args,
+    { session_id = session_id }, user.role, user.id, "operation")
+  if refusal then return json.encode(refusal) end
+  args.session = grant.session or ""
+  args.node_scope = grant.node == true
   args.owner = user.id
   -- A vault entry reaches a child only from the kernel's own MCP launch, never through this route -
   -- and neither does the approval that accompanies it (docs/VAULT.md).
@@ -977,6 +990,21 @@ local function node_capability(capability, args, caller)
       placement=args.placement,
     })
   end
+  -- A peer acts in ITS OWN peer-session scope (session isolation, finding 3).
+  --
+  -- This dispatch used to carry no session at all: so every operation, memory write and workspace a peer
+  -- asked for on this node was recorded with no session, and - once surfaces are owned by a session -
+  -- belonged to nobody in particular. The peer's scope is derived from the VERIFIED caller, never from the
+  -- request: a peer that names a `session_id` here cannot adopt another conversation on this node, which
+  -- is exactly the leak the finding measured. One thread per peer is by design and stays so.
+  local peer_session = "peer:" .. tostring(caller.node_id or "unknown")
+  -- Node scope over the mesh is not ours to give: it is this node's policy's (a grant that names the peer),
+  -- and no such grant surface exists yet - so a peer asking for one is refused by name rather than served,
+  -- which is the honest answer while the grant does not exist.
+  if type(args) == "table" and args.scope == "node" then
+    return { error = "peer_node_scope_not_granted", effect = "none", caller = tostring(caller.node_id or ""),
+      note = "a node-wide scope over the mesh needs this node's explicit grant to that peer; none is configured, so the request is refused rather than served" }
+  end
   -- The caller's role, not a hard-coded one: `verify_peer` proved it is a master, and passing
   -- the proof through means a future caller that is not a master cannot inherit these tools by
   -- accident - it would have to be granted, not merely un-refused.
@@ -984,6 +1012,7 @@ local function node_capability(capability, args, caller)
     user_id = author,
     node_id = nodeslib.node_name(),
     peer_call = true,
+    session_id = peer_session,
   })
 end
 
@@ -1757,8 +1786,12 @@ function wa_model(node, session, chat_session)
   end
   local settings = provider.settings()
   local user=users.current(session)
-  local record=chat_session and chat_session~="" and memory.session(chat_session) or memory.latest_session(user.id,node or "")
-  local observation={available=false,scope="unavailable on this node"}
+  -- The status is the NAMED conversation's and nobody else's (session isolation, finding 9). It used to
+  -- fall back to the user's newest session, so a window that named no conversation was shown another
+  -- session's telemetry - and every session here is the operator's own user, which is exactly why the
+  -- fallback looked harmless. No session named: the answer says so.
+  local record=chat_session and chat_session~="" and memory.session(chat_session) or nil
+  local observation={available=false,scope=record and "unavailable on this node" or "no session"}
   if require_master(session) and record then observation=telemetry.snapshot(record.id) end
   local budget=provider.budget(settings.model)
   local providers = {}

@@ -871,6 +871,13 @@ fn launch_context(mut spec: Spec, context: &Value) -> Spec {
     spec.cwd_requested = context["requested"].as_str().map(String::from);
     spec.cwd_source = context["source"].as_str().map(String::from);
     spec.require_cwd = context["required"] == true;
+    // WHOSE work this is (session isolation, finding 2). The session that asked travels with the
+    // request (`lua/core/tools.lua`'s `launch_cwd`), so the record says which conversation owns the
+    // operation and another session's `status`/`read`/`wait`/`cancel` can be refused by it. Empty is
+    // left empty - an operation nobody names is nobody's, rather than everybody's.
+    if spec.session.is_empty() {
+        spec.session = context["session"].as_str().unwrap_or("").to_string();
+    }
     spec
 }
 /// One tick of a long call's row (`docs/TOOL-PROGRESS.md`): the tail of the operation's two output
@@ -883,9 +890,13 @@ fn launch_context(mut spec: Spec, context: &Value) -> Spec {
 fn progress_tick(state: &Value, tool: &str) {
     let Some(id) = state["operation_id"].as_str() else { return };
     let Some(stdout) = state["stdout_path"].as_str() else { return };
+    // Whose call this is: the session that asked for the operation, recorded on it. The row is published
+    // to that session's own file, so another session's reader can neither draw it nor read its output
+    // (session isolation, finding 1). No session, no row: a call nobody can name is nobody's.
+    let Some(owner) = state["session"].as_str().filter(|session| !session.is_empty()) else { return };
     let stderr = state["stderr_path"].as_str().unwrap_or("");
     let elapsed = state["elapsed_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
-    crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr);
+    crate::tool_progress::tick(id, tool, crate::tool_progress::now_epoch() - elapsed, stdout, stderr, owner);
 }
 
 pub fn foreground(
@@ -982,8 +993,65 @@ pub fn foreground(
         crate::serve::beat();
     }
 }
+/// Who is asking, and how far they may reach.
+///
+/// An operation's `owner` has been recorded since the runtime existed and was never compared with the
+/// caller: `list` answered with every operation on the node, and `status`, `read`, `wait`, `await` and
+/// `cancel` answered for any id - and the ids are guessable (`op-<micros>-<pid>-<n>`), so "you cannot
+/// find it" was not a boundary either (session isolation, finding 2). Lua decides *who* the session is
+/// and whether it holds a node scope (`lua/core/session_scope.lua`); this decides what the runtime does
+/// with that answer, which is the half that must not be skippable by a caller that forgets.
+pub(crate) struct Caller { session: String, node: bool }
+
+impl Caller {
+    pub(crate) fn from(args: &Value) -> Self {
+        Self {
+            session: args["session"].as_str().unwrap_or("").to_string(),
+            node: args["node_scope"] == true,
+        }
+    }
+    /// The node's own supervisor (the sentinel's node-wide reads) names no session and no node scope:
+    /// it is the one caller that is not a session at all.
+    pub(crate) fn node_wide(&self) -> bool { self.node }
+    /// An operation is the caller's when the caller IS a session and the operation recorded that same
+    /// session. An operation whose session is empty (or that only recorded the runtime's `owner`) belongs
+    /// to nobody the caller can claim: unknown is not yes.
+    pub(crate) fn owns(&self, state: &Value) -> bool {
+        if self.node { return true; }
+        let owner = state["session"].as_str().unwrap_or("");
+        // A session may act on what it recorded, and on nothing else - and a session can never claim an
+        // operation that recorded no session at all.
+        if self.session.is_empty() {
+            // Two nameless callers are not two sessions: an operation that recorded no session belongs to
+            // the caller that also has none (a script, the node's own supervisor at a terminal, a route
+            // that is not a conversation). Isolating them from each other would break the node's own
+            // tooling without protecting anybody.
+            return owner.is_empty();
+        }
+        owner == self.session
+    }
+    /// The refusal, named: what it is, whose it is, and the one way to reach it.
+    pub(crate) fn refusal(&self, id: &str) -> Value {
+        json!({
+            "operation_id": id,
+            "error": "operation_not_yours",
+            "effect": "none",
+            "not_your_operation": true,
+            "note": format!("operation {id} is not your operation: another session owns it. Only an explicit node scope (scope:\"node\", operator only) may read or act on it."),
+        })
+    }
+}
+
+/// `Some(state)` when the caller may act on `id`, `Some` from `snapshot` only if it owns it. `None`
+/// means "not yours" and the caller answers with [Caller::refusal].
+pub(crate) fn owned(caller: &Caller, id: &str) -> Result<Option<Value>, String> {
+    let state = manager().snapshot(id).map_err(|e| e.to_string())?;
+    Ok(if caller.owns(&state) { Some(state) } else { None })
+}
+
 pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<Value, String> {
     let id = args["id"].as_str().unwrap_or("");
+    let caller = Caller::from(args);
     let result = match action {
         "start" => {
             if args.get("replay_of").is_some(){return Err("operation_replay_forbidden: inspect original and make a separately authorized decision".into());}
@@ -1063,8 +1131,14 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // command line: check it against the same approval and seal the exact bytes the child must
             // read (the first hole of this round, docs/VAULT.md).
             seal_request(&mut launch, args.get("vault_approval").unwrap_or(&Value::Null), vault_launch)?;
+            let mut admitted = launch_context(launch, &args["_launch_cwd"]);
+            // The session that asked owns what it started, even when the launch context did not carry it
+            // (`launch_cwd` does; a caller that passes its own provenance may not).
+            if admitted.session.is_empty() {
+                admitted.session = args["session"].as_str().unwrap_or("").to_string();
+            }
             let id = manager()
-                .start(launch_context(launch, &args["_launch_cwd"]))
+                .start(admitted)
                 .map_err(|e| e.to_string())?;
             // The files were hashed BEFORE this spawn and the child opens them after it: a rewrite that
             // lands in that window is caught by neither hash alone. The same bytes are hashed again now,
@@ -1100,14 +1174,53 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             }
             return Ok(receipt);
         }
-        "list" => return Ok(manager().list()),
-        "relevant" => manager().relevant(
-            args["cwd"].as_str().unwrap_or(""),
-            args["after"].as_str().unwrap_or(""),
-            args["limit"].as_u64().unwrap_or(64).min(256) as usize,
-        ),
+        // Every operation this session owns, and a count of the ones it does not. It used to answer
+        // with every operation on the node, which is how one session's build showed up as another's
+        // (session isolation, finding 2).
+        "list" => {
+            let mut mine = Vec::new();
+            let mut elsewhere = 0usize;
+            if let Some(items) = manager().list().as_array() {
+                for state in items.clone() {
+                    if caller.owns(&state) { mine.push(state) } else { elsewhere += 1 }
+                }
+            }
+            let count = mine.len();
+            let note = if elsewhere == 0 { String::new() } else {
+                format!("{elsewhere} other operation(s) on this node belong to other sessions; an explicit node scope (scope:\"node\", operator only) is the only way to see them")
+            };
+            return Ok(json!({"ok":true,"operations":mine,"operations_count":count,
+                "operations_elsewhere":elsewhere,"node_scope":caller.node_wide(),"note":note}));
+        }
+        // Relevance is a question about a *path*; `"*"` is the question about the whole node, so it is
+        // the operator's alone (session isolation, findings 2 and 8).
+        "relevant" => {
+            let cwd = args["cwd"].as_str().unwrap_or("");
+            if cwd == "*" && !caller.node_wide() {
+                return Ok(json!({"ok":false,"error":"relevant_node_scope_required","effect":"none",
+                    "note":"relevant with cwd:\"*\" asks about every path on the node: it needs an explicit node scope (scope:\"node\", operator only)"}));
+            }
+            manager().relevant(cwd, args["after"].as_str().unwrap_or(""), args["limit"].as_u64().unwrap_or(64).min(256) as usize,
+                    caller.session.as_str(), caller.node_wide())
+                .map(|mut answer| {
+                    // The session travels into relevance so an operation that recorded no directory is
+                    // relevant only to the session that ran it (session isolation, finding 8).
+                    answer["session"] = json!(caller.session);
+                    answer
+                })
+        }
         "index" => manager().import_index(args["evidence"].as_str().unwrap_or("")),
-        "reconcile" => manager().reconcile(args),
+        "reconcile" => {
+            // A reconciliation settles an operation whose owning PROCESS is gone - there is no session
+            // left to compare against, and the caller is deciding about effects it did not run. That is
+            // the operator's action, so it needs the explicit node scope, which is audited in Lua
+            // (session isolation, finding 2).
+            if !caller.node_wide() {
+                return Ok(json!({"ok":false,"error":"reconcile_node_scope_required","effect":"none",
+                    "note":"reconciling settles an operation whose owner process is gone, so the request names no live session: it needs an explicit node scope (scope:\"node\", operator only)"}));
+            }
+            manager().reconcile(args)
+        }
         "quarantine_retire" => {
             if crate::serve::in_turn() || std::env::var("WASM_AGENT_IN_TURN").as_deref()==Ok("1") || std::env::var("WA_QUARANTINE_EXECUTOR").as_deref()!=Ok("1") {return Err("quarantine_requires_explicit_external_executor".into());}
             manager().quarantine_retire(args)
@@ -1118,12 +1231,21 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         },
         "allocation_safety" => manager().allocation_safety(args),
         "identity" => manager().identity(),
-        "status" => manager().snapshot(id),
+        // Owned by the session that started it, or refused by name (session isolation, finding 2).
+        "status" => match owned(&caller, id)? {
+            Some(state) => Ok(state),
+            None => Ok(caller.refusal(id)),
+        },
         // Nobody is waiting for this operation any more: lower its CPU priority now that the fact is
         // known (18/11 round 3, item 5). The answer is the operation's state, with the priority it now
         // runs at; a failure to renice is recorded on that state, never turned into a failed call.
-        "background" => manager().background(id),
+        // The same ownership rule as every other action: another session's operation is refused by name.
+        "background" => match owned(&caller, id)? {
+            Some(_) => manager().background(id),
+            None => Ok(caller.refusal(id)),
+        },
         "await" => {
+            if owned(&caller, id)?.is_none() { return Ok(caller.refusal(id)); }
             // Foreground bash can complete while its adopted descendants remain supervised.
             // Default to the command boundary for those operations; explicit operation start
             // and wait_for=settled retain full process-tree settlement semantics.
@@ -1163,6 +1285,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             }
         }
         "cancel" => {
+            if owned(&caller, id)?.is_none() { return Ok(caller.refusal(id)); }
             let stopped = manager().cancel(id);
             // A cancelled call is over: its row goes with it.
             crate::tool_progress::finish(id);
@@ -1172,6 +1295,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         // `operation` tool's own loop, the window's `/operation` read): refresh the row while it
         // waits, so a long call that the model is watching says what it is doing.
         "wait" => {
+            if owned(&caller, id)?.is_none() { return Ok(caller.refusal(id)); }
             let budget = Duration::from_millis(args["wait_ms"].as_u64().unwrap_or(1000).min(10000));
             let started = std::time::Instant::now();
             loop {
@@ -1183,19 +1307,56 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 if started.elapsed() >= budget { return Ok(state); }
             }
         }
-        "read" => manager().read(
-            id,
-            args["stream"].as_str().unwrap_or("stdout"),
-            args["offset"].as_u64().unwrap_or(0),
-            args["limit"].as_u64().unwrap_or(8192) as usize,
-        ),
+        // An operation's output IS its content: reading another session's stdout is the leak this whole
+        // check exists to close, so the read is refused before a byte of the file is opened.
+        "read" => match owned(&caller, id)? {
+            Some(_) => manager().read(
+                id,
+                args["stream"].as_str().unwrap_or("stdout"),
+                args["offset"].as_u64().unwrap_or(0),
+                args["limit"].as_u64().unwrap_or(8192) as usize,
+            ),
+            None => Ok(caller.refusal(id)),
+        },
         _ => return Err("unknown_operation_action".into()),
     };
     result.map_err(|e| e.to_string())
 }
+/// One operation as a viewer may see it: the numbers, never the output. `session` is the conversation
+/// that owns it, so a viewer can tell its own work from the node's without reading anybody's tail.
+fn health_row(state: &Value) -> Value {
+    json!({"operation_id":state["operation_id"],"owner":state["owner"],"session":state["session"],
+        "state":state["state"],"elapsed_ms":state["elapsed_ms"],"timeout_ms":state["timeout_ms"],
+        "cleanup_budget_ms":state["cleanup_budget_ms"],"overdue":state["overdue"],
+        "output_bytes":state["output_bytes"]})
+}
+
+/// The node's own view: every unsettled operation. This is the supervisor's question ("is anything
+/// overdue?") and it names no viewer, so it stays node-wide - the sentinel reads it, and the id/owner
+/// it carries is a fact about this node, not about a session's work.
 pub fn health() -> Value {
     let entries = manager().list();
-    json!(entries.as_array().unwrap().iter().filter(|s|s["settled"]!=true).map(|s|json!({"operation_id":s["operation_id"],"owner":s["owner"],"state":s["state"],"elapsed_ms":s["elapsed_ms"],"timeout_ms":s["timeout_ms"],"cleanup_budget_ms":s["cleanup_budget_ms"],"overdue":s["overdue"],"output_bytes":s["output_bytes"]})).collect::<Vec<_>>())
+    json!(entries.as_array().unwrap().iter().filter(|s|s["settled"]!=true).map(health_row).collect::<Vec<_>>())
+}
+
+/// One session's view: the operations IT owns, and how many others are running.
+///
+/// `/health` answered with every operation on the node and no owner filter, so a window drew another
+/// session's operation as its own - and, with one row per node (finding 1), the tail of its output too
+/// (session isolation, finding 9). The aggregate is a count: no id, no owner, no session of anybody
+/// else's.
+pub fn health_scope(session: &str) -> Value {
+    let caller = Caller { session: session.to_string(), node: session.is_empty() };
+    let mut mine = Vec::new();
+    let mut elsewhere = 0usize;
+    if let Some(items) = manager().list().as_array() {
+        for state in items {
+            if state["settled"] == true { continue }
+            if caller.owns(state) { mine.push(health_row(state)) } else { elsewhere += 1 }
+        }
+    }
+    json!({"session": session, "operations": mine, "operations_elsewhere": elsewhere,
+        "operations_scope": if session.is_empty() { "node" } else { "session" }})
 }
 
 /// What a deadline can honestly say.

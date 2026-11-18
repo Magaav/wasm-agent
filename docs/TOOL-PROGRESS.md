@@ -50,12 +50,20 @@ already owns the operation's output files, so it reads the tail there — at mos
 to:
 
 ```text
-$WASM_AGENT_DATA/tool-progress.json      # else $WASM_AGENT_HOME/.wasm-agent, else ~/.wasm-agent
+$WASM_AGENT_DATA/tool-progress/<session key>.json   # else $WASM_AGENT_HOME/.wasm-agent, else ~/.wasm-agent
 {state: running|done, tool, started_at, at, last_output_at,
  detail: {kind: bar, label, done, total, percent} | {kind: text, text}}
 ```
 
-Every surface reads that one file, so they cannot disagree:
+**One file per session, not one per node** (18/11, session isolation finding 1). The row carries the last
+line of the owner's stdout, so a single node-wide file meant every reader drew whoever had written last —
+a content leak, not only a wrong label. The file's name is the owning session's id percent-encoded
+(`wa_tool_progress::owner_key`, and `tool_progress.key` in Lua — one algorithm, pinned on both sides), and
+a reader resolves **its own** file from **its own** session: another session's row is never opened. What a
+session may know about the rest is one dim count, `node: N ops elsewhere`, taken from the directory listing
+by age alone. `finish` removes that session's file and nobody else's.
+
+Every surface reads the file of the session it is, so they cannot disagree:
 
 * `rust/wa-term/src/tool_progress.rs` — the sentence the call's own row draws, rendered by the host's
   ticker, which is awake while Lua is blocked;

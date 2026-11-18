@@ -3657,7 +3657,10 @@ fn refresh_build(state: &mut ConsoleInput) {
 fn refresh_tool_progress(state: &mut ConsoleInput) {
     if state.editor.as_ref().is_none_or(|editor| editor.row == 0) { return }
     let width = state.editor.as_ref().map(|editor| editor.width).unwrap_or(0);
-    let mut row = wa_term::tool_progress::current(width);
+    // The row is this session's own, or the dim aggregate of the others: never another session's
+    // tool name and never a line of its output (session isolation, finding 1).
+    let session = crate::subagents::current_owner().unwrap_or_default();
+    let mut row = wa_term::tool_progress::current(width, &session);
     // Never inside a code-mode block: its call rows already say ⏳/✓/✗ in place, and this row coming and going
     // under the block moved everything above it up and down (operator 17/11, measured in the TUI).
     if state.transcript.blocks.last().is_some_and(|block| block.code) { row = String::new(); }

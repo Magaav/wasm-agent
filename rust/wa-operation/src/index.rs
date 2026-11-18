@@ -87,7 +87,13 @@ impl Index {
         tx.commit().map_err(error)?;
         Ok(json!({"ok":true,"imported":imported,"note":"Original evidence retained; unknown effects were not settled."}))
     }
-    pub fn relevant(&self, cwd: &str, after: &str, limit: usize) -> io::Result<Value> {
+    /// Operations that may be relevant to `cwd`, from the durable index.
+    ///
+    /// `session` is the session asking, and `node_wide` says whether it holds the node scope. An
+    /// operation that recorded no directory used to be relevant to *every* path - so another session's
+    /// empty-cwd operation blocked this session's worktree release (session isolation, finding 8). Such a
+    /// row is now relevant only to the session that ran it, unless the caller holds the node scope.
+    pub fn relevant(&self, cwd: &str, after: &str, limit: usize, session: &str, node_wide: bool) -> io::Result<Value> {
         if cwd.is_empty() { return Err(error("effective_cwd_required")); }
         let target = path_key(cwd);
         let db = self.db.lock().map_err(error)?;
@@ -99,13 +105,20 @@ impl Index {
         // and wildcard paths ambiguous. Empty legacy attribution is always relevant.
         let prefix = format!("{target}/");
         let upper = format!("{target}0");
-        let mut query = db.prepare("SELECT id,state,originals FROM operations o WHERE blocked=1 AND id>? AND (?='*' OR cwd='' OR cwd=? OR (cwd>=? AND cwd<?)) AND NOT EXISTS(SELECT 1 FROM reconciliation r WHERE r.id=o.id AND r.expected=o.state) ORDER BY id LIMIT 257").map_err(error)?;
-        let rows = query.query_map(params![after,target,target,prefix,upper], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).map_err(error)?;
+        let mut query = db.prepare("SELECT id,state,originals,cwd FROM operations o WHERE blocked=1 AND id>? AND (?='*' OR cwd='' OR cwd=? OR (cwd>=? AND cwd<?)) AND NOT EXISTS(SELECT 1 FROM reconciliation r WHERE r.id=o.id AND r.expected=o.state) ORDER BY id LIMIT 257").map_err(error)?;
+        let rows = query.query_map(params![after,target,target,prefix,upper], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))).map_err(error)?;
         let mut operations = Vec::new();
         let mut examined=0;let mut last=String::new();let mut quarantined=0;
         for row in rows {
-            let (id, state, originals) = row.map_err(error)?;
+            let (id, state, originals, recorded_cwd) = row.map_err(error)?;
             examined+=1;last=id.clone();
+            if recorded_cwd.is_empty() && !node_wide {
+                // An operation that recorded no directory names no path, so it is relevant to the session
+                // that ran it and to nothing else (finding 8). Reading it is still possible through its id.
+                let owned = serde_json::from_str::<Value>(&state).ok()
+                    .and_then(|value| value["session"].as_str().map(str::to_string));
+                if owned.as_deref() != Some(session) || session.is_empty() { continue; }
+            }
             let risk=db.query_row("SELECT args FROM risk_quarantine WHERE id=? AND expected=?",params![id,state],|r|r.get::<_,String>(0)).optional().map_err(error)?;
             if let Some(raw)=risk {
                 let args:Value=serde_json::from_str(&raw).map_err(error)?;

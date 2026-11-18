@@ -574,6 +574,29 @@ function M.memories(scope, limit)
   return rows
 end
 
+-- The scope a stored memory lives in, or nil when there is no such live row.
+--
+-- A reader needs this to answer "may I delete this?" without loading the content: `forget` took an id and
+-- deleted whatever it named, including a fact in a scope the caller could not read (session isolation,
+-- finding 10). Ownership is the scope: a guest's memories are `user:<id>`, the shared ones are `global`
+-- and the operator's.
+function M.scope_of(memory_id)
+  if type(memory_id) ~= "string" or memory_id == "" then return nil end
+  local rows = query("SELECT scope FROM memories WHERE id=? AND deleted_at IS NULL", {memory_id})
+  return rows[1] and rows[1].scope or nil
+end
+
+-- May this caller delete this fact? The SCOPE decides, exactly as it does for reading: a caller with a
+-- scope deletes only from that scope, and a caller with none (the operator) may delete anything. An id that
+-- names no live row is not deletable by a scoped caller either - an id is not an authorization (session
+-- isolation, finding 10).
+function M.may_delete(memory_id, caller_scope)
+  local scope = M.scope_of(memory_id)
+  if not scope then return false, "memory_not_found" end
+  if caller_scope and scope ~= caller_scope then return false, "forget_forbidden_scope" end
+  return true
+end
+
 function M.forget(memory_id)
   local forgotten = seam_or_native("forget", { id = tostring(memory_id or ""), origin = seam_origin() })
   if type(forgotten) == "table" then return forgotten.retired == true end
@@ -668,7 +691,28 @@ function M.ensure_session(user_id, node_id, title)
     "SELECT id FROM sessions WHERE user_id=? AND node_id=? AND ended_at IS NULL " ..
     "AND parent_session_id IS NULL AND (objective IS NULL OR (objective<>'subagent' AND objective<>'remote')) " ..
     "ORDER BY started_at DESC LIMIT 1", {user_id, node_id})
-  if #rows > 0 then return rows[1].id end
+  if #rows > 0 then
+    local newest = rows[1].id
+    -- NEVER attach a run to a thread a live process is serving (session isolation, finding 6).
+    --
+    -- The newest open row is not evidence that nobody is in it: `presence_begin` is the claim a live
+    -- interpreter takes, and `presence_live` is what "this session is live" means on this node
+    -- (`finish_session` already refuses to close a row under another live process for the same reason).
+    -- A run with no thread id used to resume that row anyway, so two conversations wrote ONE transcript:
+    -- their messages interleaved and each one's tool results landed under the other's turns.
+    local live = M.presence_live(newest, 900)
+    if not live then return newest end
+    local who = M.process_identity()
+    -- The caller's own process may already hold it (a second turn in the same interpreter): that is not
+    -- a second writer, so it keeps its thread.
+    if who.pid ~= 0 and tonumber(live.pid) == who.pid and (live.boot == nil or live.boot == who.boot) then
+      return newest
+    end
+    -- Busy: start a new thread, and SAY which one and why (the second return is the sentence).
+    local started = M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })
+    return started, "thread_busy: the newest open conversation " .. tostring(newest) ..
+      " is being served by pid " .. tostring(live.pid) .. ", so this run started " .. tostring(started)
+  end
   return M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })
 end
 
@@ -927,6 +971,8 @@ end
 M.presence_table = presence_table
 local function process_identity()
   if presence_identity then return presence_identity end
+  -- Published on the module (`M.process_identity`) so a reader ABOVE this line can ask who it is without
+  -- a second implementation of the same question: `ensure_session` compares a presence row's pid with it.
   local identity = { pid = 0, boot = "" }
   local ok, raw = pcall(host.runtime_info)
   local info = ok and type(raw) == "string" and (json.decode(raw) or {}) or {}

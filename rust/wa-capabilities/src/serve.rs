@@ -1112,13 +1112,19 @@ fn core_health() -> serde_json::Value {
     }
 }
 
-fn health_body() -> Vec<u8> {
+fn health_body(session: &str) -> Vec<u8> {
     // The aggregate answers one question: *can this node do work?* Work happens on node-thread 0 - runs and
     // every route that changes something - so the aggregate is node-thread 0's age, and a wedged run node-thread is
     // still reported as the node being stalled even while a read node-thread answers reads. Which lane is wedged
     // is a per-node-thread question, answered by the array below.
+    // Two views of the same facts (session isolation, finding 9): `operations` is what the CALLER may
+    // see - the caller's own session when one is named, the whole node when none is (the sentinel's
+    // supervisor question) - and `operations_elsewhere` is a count of the rest. `operation_overdue` is
+    // asked node-wide, because a wedged operation is the node's problem whoever owns it.
     let operations = crate::operations::health();
     let operation_overdue = operations.as_array().is_some_and(|items|items.iter().any(|s|s["overdue"]==true));
+    let scope = crate::operations::health_scope(session);
+    let operations = scope["operations"].clone();
     let age_ms = live_node_thread_ids().into_iter().map(node_thread_age_ms).max().unwrap_or(0);
     let stalled = age_ms >= stall_seconds() * 1000 || operation_overdue;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
@@ -1283,6 +1289,9 @@ fn health_body() -> Vec<u8> {
             "ws_bound_closes": wa_kernel_runtime::service_io::ws_bound_closes(),
         },
         "operations": operations,
+        // Whose operations those are, and how many others are running: a count, no ids (finding 9).
+        "operations_scope": scope["operations_scope"],
+        "operations_elsewhere": scope["operations_elsewhere"],
         "operation_overdue": operation_overdue,
         "current": current,
         "node_threads_count": node_thread_count(),
@@ -3395,7 +3404,8 @@ fn ui_file(ui: &std::path::Path, relative: &str) -> Option<std::path::PathBuf> {
 fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     let (route, _query) = split_path(&request.path);
     if route == "/health" {
-        return Some((200, "application/json", health_body()));
+        let session = query_value(&_query, "session_id");
+        return Some((200, "application/json", health_body(session.as_str())));
     }
     if route == "/version" {
         return Some((200, "application/json", version_body(ui).into_bytes()));
@@ -3562,7 +3572,7 @@ fn dispatch(
 
     let reply = match route.as_str() {
         "/version" => (200, "application/json", version_body(ui).into_bytes()),
-        "/health" => (200, "application/json", health_body()),
+        "/health" => (200, "application/json", health_body(&query_value(&query, "session_id"))),
         "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session, &query_value(&query,"session_id")]).into_bytes()),
         "/observability/events" => (200,"application/json",call("wa_observability_events",&[&query_value(&query,"id"),&query_value(&query,"cursor"),&query_value(&query,"since"),session,node.as_str()]).into_bytes()),
         "/me" => (200, "application/json", call("wa_me", &[session]).into_bytes()),

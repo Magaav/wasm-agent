@@ -1162,9 +1162,12 @@ end
 
 local function launch_cwd(memory, ctx, requested)
   local workspace = memory and ctx.session_id and memory.session_workspace and memory.session_workspace(ctx.session_id)
+  -- `session` is not a launch detail: it is WHOSE work this is. The operation record carries it, so the
+  -- shell an agent starts belongs to the session that asked and to no other (session isolation,
+  -- findings 1 and 2). An empty value stays empty - a call nobody names is nobody's.
   return {requested=requested or "", source=(requested and requested~="") and "explicit" or
     ((session_cwd(memory,ctx) or "")~="" and "session_workspace" or "node"),
-    required=workspace and workspace.required == true or false}
+    required=workspace and workspace.required == true or false, session=(ctx and ctx.session_id) or ""}
 end
 
 local function run(command, timeout_seconds, cwd, provenance)
@@ -1546,6 +1549,14 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
+    -- WHOSE operation this is, and whether this caller may reach past its own (session isolation,
+    -- finding 2; lua/core/session_scope.lua). The owner has always been stamped here and never
+    -- compared, so `list` answered with every operation on the node and `status`/`read`/`wait`/
+    -- `cancel` answered for any id - and the ids are guessable (`op-<micros>-<pid>-<n>`). The
+    -- session travels with every action so the runtime can refuse a call it does not own, and
+    -- `scope:"node"` - the operator's alone, audited - is the one way to act beyond it.
+    local grant, refusal = dofile('lua/core/session_scope.lua').grant(memory, args, ctx, role, user_id, name)
+    if refusal then return refusal end
     args.owner = ctx.session_id or user_id
     -- A vault entry reaches a child only through the kernel's own MCP launch (lua/core/mcp.lua), never a
     -- tool call: a model that could name an entry here could start a program that prints it. The
@@ -1553,6 +1564,8 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- record, not a field a caller supplies.
     args.vault_env = nil
     args.vault_approval = nil
+    args.session = grant.session or ""
+    args.node_scope = grant.node == true
     if args.action == "start" then
       -- An explicit start is backgrounded by definition - the caller gets a receipt and moves on - so
       -- it runs at low CPU priority unless a caller that DOES wait for a while says otherwise
@@ -1680,6 +1693,14 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     return memory.memories(guest_scope or args.scope, args.limit or 50)
   elseif name == "forget" then
     if not args.id or args.id == "" then return { error = "id_required" } end
+    -- Deleting is reading's sibling: an id is not an authorization (session isolation, finding 10). The
+    -- scope the fact lives in decides, and a guest may only delete what it could have read - its own
+    -- `user:<id>`. An id that names no live row answers the same way a wrong one does.
+    local allowed, why = memory.may_delete and memory.may_delete(args.id, guest_scope) or true, nil
+    if not allowed then
+      return { error = why or "forget_forbidden_scope", effect = "none", id = args.id,
+        note = "this memory is not in a scope you may delete from; a scoped caller deletes only its own facts" }
+    end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
   elseif name == 'codemode' then
     if not is_master(role) then return {error='forbidden_for_role:'..role} end
