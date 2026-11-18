@@ -117,7 +117,17 @@ fn generate_build_info() {
         .unwrap_or_default();
     ancestors.sort();
     ancestors.dedup();
-    let complete = !ancestors.is_empty() && ancestors.iter().any(|line| line == &commit);
+    // A SHALLOW BUILD CLONE CARRIES ONLY PART OF THE HISTORY. MEASURED: a build from a `--depth 1` clone
+    // embedded ancestors=137 and claimed ancestors_complete=true, so `--contains <commit>` answered "no"
+    // (exit 1, the verdict a deploy refuses on) for every commit older than the cut - a list that is merely
+    // incomplete was answering a question about the whole history. The answer "not contained" from an
+    // incomplete list is UNKNOWN, never "no", so completeness is decided here and applied by the binary itself
+    // (rust/wa-host/src/build_info.rs: contains -> Unknown("no_ancestry_embedded") when it is false).
+    let shallow = matches!(git_raw(&["rev-parse", "--is-shallow-repository"]).as_deref(), Some("true"));
+    if shallow {
+        println!("cargo:warning=this build checkout is shallow: the binary's ancestry is incomplete, so wa --contains answers unknown (2) rather than no (1); a deploy guard that reads it refuses instead of assuming.");
+    }
+    let complete = !shallow && !ancestors.is_empty() && ancestors.iter().any(|line| line == &commit);
     let built_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs()).unwrap_or(0);
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();

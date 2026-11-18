@@ -83,8 +83,71 @@ shows "and the commits that would be lost are listed" "$WA_ANCESTRY_LOST" "featu
 same "the count is stated" "$WA_ANCESTRY_LOST_COUNT" "1"
 wa_ancestry_verdict "$REPO" "$NEWER" "$BASE"; same "target contains running -> 0" "$?" "0"
 wa_ancestry_verdict "$REPO" "$NEWER" "$NEWER"; same "target is the running commit -> 0" "$?" "0"
-wa_ancestry_verdict "$REPO" "$NEWER" deadbeefdeadbeefdeadbeefdeadbeefdeadbeef; same "a commit this tree does not have -> 2" "$?" "2"
 wa_ancestry_verdict "$REPO" "$NEWER" ""; same "no running commit -> 2 (a first install is not a downgrade)" "$?" "2"
+
+echo "test-install-record: the 18/11 case - the running commit is missing from the deployer's history"
+# THE CASE THE GUARD USED TO FAIL OPEN ON. A deployer's checkout that does not carry the running commit used to
+# answer 2 ("cannot tell") for every cause at once, and every caller then only noted it and installed. Two
+# different facts hide behind that shape, and only one of them is ignorance.
+ABSENT=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+wa_ancestry_verdict "$REPO" "$NEWER" "$ABSENT"
+same "a FULL history that does not carry the running commit -> 1 (refuse)" "$?" "1"
+shows "and the refusal names the running commit" "$WA_ANCESTRY_LOST" "deadbeefdead"
+shows "...saying it is on no branch here" "$WA_ANCESTRY_WHY" "not in this history"
+
+# A SHALLOW checkout of the same repository. It cannot see the running commit either, but now for a reason that
+# is ignorance rather than evidence, and "cannot tell" is the right answer there - which the callers refuse.
+SHALLOW="$WORK/shallow"
+if git clone -q --depth 1 "file://$REPO" "$SHALLOW" 2>/dev/null; then
+  SHEAD="$(git -C "$SHALLOW" rev-parse HEAD)"
+  same "the fixture is really shallow" "$(git -C "$SHALLOW" rev-parse --is-shallow-repository)" "true"
+  wa_ancestry_verdict "$SHALLOW" "$SHEAD" "$ABSENT"
+  same "a shallow clone missing the running commit -> 2 (unknown, which the callers refuse)" "$?" "2"
+  shows "and it says why, and what to do" "$WA_ANCESTRY_WHY" "shallow"
+
+  # ...AND THE RUNNING BINARY CAN SETTLE IT WITHOUT A CHECKOUT: if the running build reports that it already
+  # contains the target, the target cannot contain the running build. That answer turns the unknown into a
+  # refusal, which is the whole point of asking the bytes.
+  LT="$WORK/contains-target-wa"   # answers --contains 1111... with 0 (its own ancestry names that commit)
+  cat > "$LT" <<'LTEOF'
+#!/bin/sh
+case "$1" in
+  --build-info) printf 'commit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+dirty=false
+ancestors_complete=true
+' ;;
+  --contains) exit 0 ;;   # "yes, my ancestry contains whatever you asked about" - the answer that settles it
+esac
+exit 2
+LTEOF
+  chmod +x "$LT"
+  wa_ancestry_verdict "$SHALLOW" "$SHEAD" "$ABSENT" "" "$LT"
+  same "the running binary contains the target -> 1, even from a shallow clone" "$?" "1"
+  shows "and it says which answer settled it" "$WA_ANCESTRY_WHY" "already contains the target commit"
+
+  # A shallow clone also has to stop a 'not an ancestor' answer from being read as a downgrade when the walk
+  # from the running commit hit the boundary: the target here is an OLD commit, the running one is the head,
+  # and the links between them are below the cut.
+  DEEP="$WORK/deep"; git init -q "$DEEP"
+  git -C "$DEEP" config user.email test@example.com; git -C "$DEEP" config user.name test
+  for n in 1 2 3 4 5; do printf 'n%s\n' "$n" > "$DEEP/f$n"; git -C "$DEEP" add "f$n"; git -C "$DEEP" commit -qm "commit $n"; done
+  CUT="$(git -C "$DEEP" rev-parse HEAD)"
+  FIRST="$(git -C "$DEEP" rev-list --max-parents=0 HEAD)"
+  SH2="$WORK/shallow2"
+  if git clone -q --depth 1 "file://$DEEP" "$SH2" 2>/dev/null; then
+    git -C "$SH2" config user.email test@example.com; git -C "$SH2" config user.name test
+    wa_ancestry_truncated "$SH2" "$CUT"
+    same "the walk from the shallow head reaches the boundary -> truncated" "$?" "0"
+    wa_ancestry_verdict "$SH2" "$FIRST" "$CUT"
+    same "so 'not an ancestor' there is 2 (unknown), not 1" "$?" "2"
+  else
+    bad "could not make a shallow clone of the local repository (the file:// transport was refused)"
+  fi
+else
+  bad "could not make a shallow clone of the fixture repository (the file:// transport was refused)"
+fi
+wa_ancestry_verdict "$REPO" "$NEWER" deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+same "...and the full-history case with the fixture stub is still 1" "$?" "1"
 wa_ancestry_verdict "" "" 1111222233334444555566667777888899990000 "$STUB"
 same "a release install: the candidate binary answers for itself -> 0" "$?" "0"
 wa_ancestry_verdict "" "" 9999888877776666555544443333222211110000 "$STUB"
@@ -106,6 +169,35 @@ if [ -x "$REALBIN" ]; then
 else
   echo "  skip the real binary (none at $REALBIN)"
 fi
+
+echo "test-install-record: who says what is running (wa_running_identity)"
+# The same question on every install path: the binary first, the record only when the record is about THESE
+# bytes, and "nothing is installed" kept distinct from "nothing can tell".
+ID="$WORK/identity"; mkdir -p "$ID"
+wa_running_identity "$ID"
+same "an empty directory is a first install, not ignorance" "$WA_RUNNING_SOURCE" "none"
+same "...with no commit claimed" "$WA_RUNNING_COMMIT" ""
+cp "$STUB" "$ID/wa"
+wa_running_identity "$ID"
+same "the binary names the commit" "$WA_RUNNING_SOURCE" "binary"
+same "...and it is the binary's" "$WA_RUNNING_COMMIT" "1111222233334444555566667777888899990000"
+same "...and dirty is asked too" "$WA_RUNNING_DIRTY" "false"
+# a record that is about other bytes, beside a binary that cannot answer: its commit= is NOT what is running
+DEADID="$WORK/identity-dead"; mkdir -p "$DEADID"
+printf '#!/bin/sh\nexit 1\n' > "$DEADID/wa"; chmod +x "$DEADID/wa"
+printf 'commit=%s\nsha256=%s\n' "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)" "$(printf 'b%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)" > "$DEADID/installed.txt"
+wa_running_identity "$DEADID"
+same "a record naming other bytes is not evidence" "$WA_RUNNING_RECORD_IS_BYTES" "no"
+same "...so no commit is claimed" "$WA_RUNNING_COMMIT" ""
+same "...and the source is named as the mismatch it is" "$WA_RUNNING_SOURCE" "record_mismatch"
+shows "the sentence says the record is about other bytes" "$WA_RUNNING_WHY" "other bytes"
+# the same record, when it IS about these bytes: a fallback, named as one
+GOODID="$WORK/identity-good"; mkdir -p "$GOODID"
+printf '#!/bin/sh\nexit 1\n' > "$GOODID/wa"; chmod +x "$GOODID/wa"
+printf 'commit=%s\nsha256=%s\n' "$(printf 'c%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)" "$(sha256sum < "$GOODID/wa" | awk '{print $1}')" > "$GOODID/installed.txt"
+wa_running_identity "$GOODID"
+same "a record that IS these bytes is the fallback" "$WA_RUNNING_SOURCE" "record"
+same "...and its commit is used" "$WA_RUNNING_COMMIT" "$(printf 'c%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
 
 echo "test-install-record: every install path writes through this library"
 for path in scripts/deploy.sh scripts/upgrade.sh scripts/fleet-install.sh scripts/linux/bootstrap.sh scripts/rollback-node.sh; do

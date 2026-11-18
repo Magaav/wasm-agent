@@ -64,6 +64,15 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+# --force WITHOUT A REASON IS NOT AN OVERRIDE, IT IS AN UNRECORDED ONE, and the check is here rather than at
+# each gate for one reason: an argument that cannot be honoured is refused before ANY work is done (no source
+# resolution, no build, no install), and a gate that is added later cannot forget it. Measured 18/11: three
+# rollbacks and one replacement that nobody recorded, because the tool let the intent through and the reason
+# stayed in someone's head.
+if [ "$FORCE" = 1 ] && [ -z "${REASON// /}" ]; then
+  echo "deploy: refused(override_reason_required): --force overrides a refusal that exists to protect what is running, and an override nobody can read later is not a decision anyone can review. Say why: --force --reason <text>. Nothing was resolved, built or installed." >&2
+  exit 2
+fi
 
 INSTALL_DIR=""
 # Which directory does this machine run its node from? `WA_INSTALL_DIR` is a caller's explicit statement;
@@ -535,56 +544,77 @@ echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 # that had been working. The record was never the witness; the binary is (`wa --build-info`, compiled in by
 # rust/wa-host/build.rs). So the question is asked of the binary, and the record is only a fallback for an
 # install older than --build-info - named as such, never silently trusted.
-RUNNING_COMMIT=""
-RUNNING_WHY="the running binary could not be asked"
-RUNNING_BIN=""
-for candidate in "$INSTALL_DIR/wa" "$INSTALL_DIR/wa.exe"; do
-  [ -x "$candidate" ] && { RUNNING_BIN="$candidate"; break; }
-done
-if [ -n "$RUNNING_BIN" ] && RUNNING_INFO="$(wa_build_info "$RUNNING_BIN")"; then
-  RUNNING_COMMIT="$(wa_build_field "$RUNNING_INFO" commit)"
-  [ "$RUNNING_COMMIT" = unknown ] && RUNNING_COMMIT=""
-  RUNNING_WHY="the running binary reports it"
-  if [ -n "$RUNNING_COMMIT" ]; then
-    note "running binary: commit ${RUNNING_COMMIT:0:12} (tree $(wa_build_field "$RUNNING_INFO" tree | cut -c1-12), dirty $(wa_build_field "$RUNNING_INFO" dirty)) - asked of the binary, not read from installed.txt"
-  else
-    note "the running binary cannot name its own commit (a build with no git and no stamp); falling back to the install record"
-  fi
+wa_running_identity "$INSTALL_DIR"
+RUNNING_BIN="$WA_RUNNING_BIN"
+RUNNING_COMMIT="$WA_RUNNING_COMMIT"
+RUNNING_DIRTY="$WA_RUNNING_DIRTY"
+RUNNING_SOURCE="$WA_RUNNING_SOURCE"
+RUNNING_WHY="$WA_RUNNING_WHY"
+RECORD_IS_THESE_BYTES="$WA_RUNNING_RECORD_IS_BYTES"
+INSTALLED_COMMIT="$WA_RUNNING_RECORD_COMMIT"
+if [ "$RUNNING_SOURCE" = binary ]; then
+  note "running binary: commit ${RUNNING_COMMIT:0:12} (tree $(wa_build_field "$(wa_build_info "$RUNNING_BIN" 2>/dev/null)" tree | cut -c1-12), dirty $RUNNING_DIRTY) - asked of the binary, not read from installed.txt"
+elif [ "$RUNNING_SOURCE" = record ]; then
+  note "the running binary cannot name its own commit; the install record names commit ${RUNNING_COMMIT:0:12} for THESE bytes (its sha256 is the binary's) - recorded as a fallback, not as the witness"
 fi
-INSTALLED_COMMIT=""
-RECORD_IS_THESE_BYTES=unknown
-if [ -z "$RUNNING_COMMIT" ]; then
-  INSTALLED_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
-  [ "$INSTALLED_COMMIT" = unknown ] && INSTALLED_COMMIT=""
-  RUNNING_COMMIT="$INSTALLED_COMMIT"
-  RUNNING_WHY="the install record names it (the binary could not be asked)"
-  # ...AND ONLY IF THE RECORD IS ABOUT THESE BYTES. A record that names another sha256 is provably not this
-  # binary's: its commit= says nothing about what is running, and reading it as if it did is exactly how a
-  # deploy of main replaced a build of 8 unlanded commits on this machine and on work (18/11): the record said
-  # 14963b6f, an ancestor of main, and the bytes were something else entirely.
-  if [ -n "$RUNNING_BIN" ]; then
-    wa_record_describes "$INSTALL_DIR" "$RUNNING_BIN"
-    case $? in
-      0) RECORD_IS_THESE_BYTES=yes ;;
-      1) RECORD_IS_THESE_BYTES=no
-         if [ "${FORCE:-0}" != 1 ]; then
-           fail "downgrade_unprovable(record_not_this_binary): $INSTALL_DIR/installed.txt names sha256 $(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | cut -c1-12) but the binary at $RUNNING_BIN is $(sha256sum < "$RUNNING_BIN" 2>/dev/null | cut -c1-12), so the record's commit=$(printf '%s' "$INSTALLED_COMMIT" | cut -c1-12) describes bytes that are no longer here and nothing can say whether this tree $COMMIT contains what IS running. Nothing was built and nothing was installed. Ask the node what it runs (wa --build-info needs a binary that has it: rebuild or roll it back first), or pass --force --reason <text> and the override is recorded."
-         fi
-         note "the install record is not these bytes (recorded sha256 != the binary's); its commit= is not evidence, and --force --reason was given: ancestry_unverified=yes"
-         RUNNING_COMMIT=""
-         ANCESTRY_UNVERIFIED=yes ;;
-    esac
+# ...AND THE RECORD IS ONLY EVIDENCE IF IT IS ABOUT THESE BYTES. A record that names another sha256 is
+# provably not this binary's: its commit= says nothing about what is running, and reading it as if it did is
+# exactly how a deploy of main replaced a build of 8 unlanded commits on this machine and on work (18/11):
+# the record said 14963b6f, an ancestor of main, and the bytes were something else entirely.
+if [ "$RUNNING_SOURCE" = record_mismatch ]; then
+  if [ "${FORCE:-0}" != 1 ] || [ -z "${REASON:-}" ]; then
+    fail "downgrade_unprovable(record_not_this_binary): $INSTALL_DIR/installed.txt names sha256 $(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | cut -c1-12) but the binary at $RUNNING_BIN is $(sha256sum < "$RUNNING_BIN" 2>/dev/null | cut -c1-12), so the record's commit=$(printf '%s' "$INSTALLED_COMMIT" | cut -c1-12) describes bytes that are no longer here and nothing can say whether this tree $COMMIT contains what IS running. Nothing was built and nothing was installed. Ask the node what it runs (wa --build-info needs a binary that has it: rebuild or roll it back first), or pass --force --reason <text> and the override is recorded."
   fi
+  note "the install record is not these bytes (recorded sha256 != the binary's); its commit= is not evidence, and --force --reason was given: ancestry_unverified=yes"
+  note "ancestry_unverified=yes overrode=record_not_this_binary ancestry_replaced=$(printf '%s' "$INSTALLED_COMMIT" | cut -c1-40) ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown)"
+  RUNNING_COMMIT=""
+  ANCESTRY_UNVERIFIED=yes
+fi
+# A --force that is used is recorded with everything a reader needs: who, when, why, and what it overrode.
+# It is written before the decision, so a deploy that dies between here and the record step still answers
+# "who let this through" (deploy.log is append-only and survives the swap).
+if [ "${FORCE:-0}" = 1 ]; then
+  note "force_requested reason=$(printf '%s' "${REASON:-}" | tr '\r\n' '  ') by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
 if [ -z "$RUNNING_COMMIT" ]; then
-  # Two different reasons, and neither is a downgrade: no record at all is a first install, while a record
-  # whose binary cannot say what it is, is a record that does not say. Refusing because the answer is unknown
-  # would block the first install on a machine that never had one.
-  echo "deploy: nothing running here names a commit ($RUNNING_WHY) - not treated as a downgrade"
+  # Neither a downgrade nor a refusal: no record at all is a first install, and a binary that cannot name
+  # its commit on a machine that has no record either is a machine that has nothing to lose. (A record whose
+  # bytes are not these was refused above.)
+  echo "deploy: nothing running here names a commit ($RUNNING_WHY) - this is a first install, not a downgrade"
 else
+  # A RUNNING BINARY THAT WAS BUILT FROM A DIRTY TREE. Its bytes are a commit PLUS uncommitted changes, and no
+  # commit anywhere contains those changes - so replacing it loses work that exists on that machine only. The
+  # commit-level ancestry question cannot see that at all (the target contains the commit, and the local edits
+  # go anyway), which is why it is asked here, before the verdict, and refuses on its own ground.
+  if [ "$RUNNING_DIRTY" = true ]; then
+    if [ "${FORCE:-0}" != 1 ] || [ -z "${REASON:-}" ]; then
+      fail "downgrade refused(dirty_running_binary): the binary at $RUNNING_BIN reports commit $RUNNING_COMMIT with dirty=true - it was built from a tree with uncommitted changes, so those bytes are that commit PLUS edits that no commit contains. Replacing it destroys them, and no rollback can bring them back. Nothing was built and nothing was installed. Commit the changes in that tree and rebuild (then the ancestry question is answerable), or pass --force --reason <text> to lose them on purpose (recorded in deploy.log and installed.txt)."
+    fi
+    note "dirty_running_binary accepted with --force --reason: ancestry_unverified=yes running_dirty=true ancestry_replaced=$RUNNING_COMMIT ancestry_target=$COMMIT"
+    ANCESTRY_UNVERIFIED=yes
+  elif [ "$RUNNING_DIRTY" = unknown ] && [ "$RUNNING_SOURCE" = binary ]; then
+    # The binary answered --build-info but not the dirty field: a partial answer is not a clean one.
+    if [ "${FORCE:-0}" != 1 ] || [ -z "${REASON:-}" ]; then
+      fail "refused(ancestry_unknown): the running binary at $RUNNING_BIN reports commit $RUNNING_COMMIT but cannot say whether it was built from a clean tree (dirty=unknown), so nothing can say whether replacing it loses uncommitted work. Nothing was built and nothing was installed. Ask it directly (wa --build-info), or pass --force --reason <text> and the deploy goes on (recorded)."
+    fi
+    note "ancestry_unverified=yes overrode=running_dirty_unknown ancestry_running=$RUNNING_COMMIT ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown)"
+    ANCESTRY_UNVERIFIED=yes
+  fi
   WA_ANCESTRY_TARGET="$COMMIT"
-  wa_ancestry_verdict "$ROOT" "$WA_ANCESTRY_TARGET" "$RUNNING_COMMIT" ""
+  wa_ancestry_verdict "$ROOT" "$WA_ANCESTRY_TARGET" "$RUNNING_COMMIT" "" "$RUNNING_BIN"
   ANCESTRY_VERDICT=$?
+  # A checkout that does not carry the running commit is the 18/11 shape: this deployer's clone had never seen
+  # the node's build. One bounded fetch is cheaper than a refusal, and the verdict is asked again afterwards; a
+  # fetch that cannot reach the commit leaves the answer exactly as unknown as it was.
+  if [ "$ANCESTRY_VERDICT" = 2 ] && ! git -C "$ROOT" cat-file -e "$RUNNING_COMMIT^{commit}" 2>/dev/null; then
+    if wa_ancestry_fetch_missing "$ROOT" "$RUNNING_COMMIT"; then
+      note "this checkout did not carry running commit $RUNNING_COMMIT; fetched its history and asked the verdict again"
+      wa_ancestry_verdict "$ROOT" "$WA_ANCESTRY_TARGET" "$RUNNING_COMMIT" "" "$RUNNING_BIN"
+      ANCESTRY_VERDICT=$?
+    else
+      note "running commit $RUNNING_COMMIT is not in $ROOT and could not be fetched; the verdict is asked of what is here"
+    fi
+  fi
   case "$ANCESTRY_VERDICT" in
     0) : ;;
     1)
@@ -605,9 +635,18 @@ ${WA_ANCESTRY_LOST:-  (the lost commits could not be listed)}
 Nothing was built and nothing was installed. To go back on purpose use 'wa update <node> --rollback' (it restores the previous pair and records a pin), or pass --force --reason <text> to deploy this tree anyway (recorded in installed.txt)."
       fi ;;
     *)
-      note "cannot tell whether this deploy would go backwards: $WA_ANCESTRY_WHY (not treated as a downgrade, and recorded as ancestry_unverified=yes)" ;;
+      # UNKNOWN REFUSES. This used to be a note and the deploy went on - which is exactly the 18/11 hole: the
+      # running commit was absent from this checkout, the verdict was "cannot tell", and main was installed
+      # over a build of 8 commits that nothing here had ever seen. A deploy that cannot show what it would
+      # lose does not get to lose it.
+      if [ "${FORCE:-0}" = 1 ] && [ -n "${REASON:-}" ]; then
+        ANCESTRY_UNVERIFIED=yes
+        note "ancestry_unverified=yes overrode=ancestry_unknown ancestry_running=$RUNNING_COMMIT ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown) ancestry_note=$(printf '%s' "${WA_ANCESTRY_WHY:-unknown}" | tr '\r\n' '  ')"
+        note "OVERRIDE, recorded: nothing here could establish what this deploy would lose (${WA_ANCESTRY_WHY:-unknown}); the deploy goes on because --force --reason says so"
+      else
+        fail "refused(ancestry_unknown): nothing here can establish whether this deploy would go backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing}. The running commit is ${RUNNING_COMMIT:-unknown} ($RUNNING_WHY) and this tree is $COMMIT. An unknown is refused, not assumed away: nothing was built and nothing was installed. Make it answerable (fetch the history that carries the running commit: git -C $ROOT fetch --unshallow; or ask the node: wa --build-info on $RUNNING_BIN), or pass --force --reason <text> and the override is recorded in deploy.log and installed.txt."
+      fi ;;
   esac
-  if [ "$ANCESTRY_VERDICT" = 2 ]; then ANCESTRY_UNVERIFIED=yes; fi
 fi
 
 # 3c. Lua fast path (docs/KERNEL.md, 05/11). Half of all changes touch only files nothing compiles

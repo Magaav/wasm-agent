@@ -127,6 +127,111 @@ deploy "$STALE" --force --reason "I know what is on that node"
 hides "with --force --reason it goes on" "$DEPLOY_OUT" "downgrade_unprovable"
 shows "...and the unverified ancestry is recorded" "$(cat "$STALE/deploy.log" 2>/dev/null)" "ancestry_unverified=yes"
 
+
+echo "test-deploy-ancestry: the exact 18/11 case - the running commit is not in this history at all"
+# MEASURED 18/11: the node ran a build of 8 commits that were on no landed branch, its installed.txt said
+# commit=14963b6f (an ANCESTOR of main, so the old record-based guard saw a safe deploy), and the deployer's
+# checkout had never seen the running commit at all. That answered "cannot tell" for every cause at once, and
+# deploy.sh only noted it and installed. It must refuse, and name the commit that is running.
+OTHER="$WORK/other-repo"; mkdir -p "$OTHER"
+git -C "$OTHER" init -q; git -C "$OTHER" config user.email test@example.com; git -C "$OTHER" config user.name test
+printf 'x\n' > "$OTHER/x"; git -C "$OTHER" add x; git -C "$OTHER" commit -qm 'the running build, on no branch here'
+FOREIGN="$(git -C "$OTHER" rev-parse HEAD)"
+MISSING="$WORK/missing-install"; mkdir -p "$MISSING"
+{ echo '#!/bin/sh'; echo 'case "$1" in';
+  echo "  --build-info) printf 'version=9.9.9\\ncommit=$FOREIGN\\ntree=$TREE_SHA\\ndirty=false\\nsource=git\\nbuilt_epoch=1\\nancestors=8\\nancestors_complete=true\\n' ;;";
+  echo '  --contains) exit 1 ;;';
+  echo "  --version) echo 'wasm-agent 9.9.9' ;;";
+  echo '  *) exit 0 ;;'; echo 'esac'; } > "$MISSING/wa"
+chmod +x "$MISSING/wa"; cp "$MISSING/wa" "$MISSING/wa-sentinel"
+# the record claims an ancestor of this tree, which is exactly what made the belief look safe
+printf 'commit=%s\nvia=deploy.sh\nrecord_role=final\n' "$HEAD" > "$MISSING/installed.txt"
+MISSING_BEFORE="$(cat "$MISSING/installed.txt")"
+deploy "$MISSING" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "it deployed over a running build this history has never seen"
+shows "the refusal names the rule" "$DEPLOY_OUT" "downgrade refused(node_not_contained)"
+shows "it names the running commit" "$DEPLOY_OUT" "$(printf '%s' "$FOREIGN" | cut -c1-12)"
+shows "it says the commit is not in this history" "$DEPLOY_OUT" "not in this history"
+hides "it did not go on to install" "$DEPLOY_OUT" "OVERRIDE, recorded"
+same "the install record was not touched" "$(cat "$MISSING/installed.txt")" "$MISSING_BEFORE"
+deploy "$MISSING" --force --reason "I know that node runs a build this clone has never seen"
+hides "with --force --reason it goes on" "$DEPLOY_OUT" "downgrade refused"
+
+echo "test-deploy-ancestry: an unknown refuses too (a shallow checkout cannot tell)"
+# The other half of the same hole: a checkout that is SHALLOW has real ignorance about what a deploy would
+# lose, and a verdict of 2 was a note, not a stop. It is a stop now, unless the operator says --force --reason.
+SHALLOWTREE="$WORK/shallow-tree"
+if git clone -q --depth 1 "file://$ROOT" "$SHALLOWTREE" 2>/dev/null; then
+  same "the fixture checkout is shallow" "$(git -C "$SHALLOWTREE" rev-parse --is-shallow-repository)" "true"
+  SHEAD="$(git -C "$SHALLOWTREE" rev-parse HEAD)"
+  git -C "$SHALLOWTREE" update-ref refs/remotes/origin/main "$SHEAD"
+  UNKNOWN="$WORK/unknown-install"; mkdir -p "$UNKNOWN"
+  { echo '#!/bin/sh'; echo 'case "$1" in';
+    echo "  --build-info) printf 'version=9.9.9\\ncommit=$FOREIGN\\ntree=$TREE_SHA\\ndirty=false\\nsource=git\\nbuilt_epoch=1\\nancestors=8\\nancestors_complete=false\\n' ;;";
+    echo '  --contains) exit 2 ;;   # an incomplete ancestry: "I cannot tell", not "no"';
+    echo "  --version) echo 'wasm-agent 9.9.9' ;;";
+    echo '  *) exit 0 ;;'; echo 'esac'; } > "$UNKNOWN/wa"
+  chmod +x "$UNKNOWN/wa"; cp "$UNKNOWN/wa" "$UNKNOWN/wa-sentinel"
+  printf 'commit=%s\nvia=deploy.sh\n' "$FOREIGN" > "$UNKNOWN/installed.txt"
+  UNKNOWN_BEFORE="$(cat "$UNKNOWN/installed.txt")"
+  # the tree under test is the shallow one, so the deploy is that checkout's own
+  deploy_in() { # <tree> <install-dir> <args...>
+    local tree="$1" dir="$2"; shift 2
+    rm -f "$WORK/out" "$WORK/rc"
+    setsid --fork env -u WASM_AGENT_IN_TURN -u WA_SESSION_ID PATH="$SHIM:$PATH" \
+      WA_PORT=18799 WA_CLIENT_PORT=18800 WA_INSTALL_DIR="$dir" WA_DEPLOY_PREBUILT_ONLY=1 \
+      bash -c 'timeout 300 bash "$1" "${@:2}" >"'$WORK'/out" 2>&1; echo $? > "'$WORK'/rc"' runner \
+        "$tree/scripts/deploy.sh" "$@" >/dev/null 2>&1
+    local waited=0
+    while [ ! -f "$WORK/rc" ] && [ "$waited" -lt 300 ]; do sleep 1; waited=$((waited + 1)); done
+    DEPLOY_OUT="$(cat "$WORK/out" 2>/dev/null)"
+    DEPLOY_RC="$(cat "$WORK/rc" 2>/dev/null || echo timeout)"
+  }
+  deploy_in "$SHALLOWTREE" "$UNKNOWN" --reason "an ordinary deploy"
+  [ "$DEPLOY_RC" != 0 ] && ok "an unknown verdict refused (exit $DEPLOY_RC)" || bad "a deploy went on where nothing could tell what would be lost"
+  shows "the refusal is by name" "$DEPLOY_OUT" "refused(ancestry_unknown)"
+  shows "it says the checkout is shallow" "$DEPLOY_OUT" "shallow"
+  shows "it says what would make it answerable" "$DEPLOY_OUT" "fetch --unshallow"
+  same "the install record was not touched" "$(cat "$UNKNOWN/installed.txt")" "$UNKNOWN_BEFORE"
+  deploy_in "$SHALLOWTREE" "$UNKNOWN" --force --reason "the node's build is on no branch and I accept the loss"
+  hides "with --force --reason it goes on" "$DEPLOY_OUT" "refused(ancestry_unknown)"
+  shows "...and the override names what it overrode" "$(cat "$UNKNOWN/deploy.log" 2>/dev/null)" "overrode=ancestry_unknown"
+else
+  bad "could not make a shallow clone of this checkout (file:// transport refused)"
+fi
+
+echo "test-deploy-ancestry: a running binary built from a dirty tree is not replaceable for free"
+# dirty=true means those bytes are a commit PLUS uncommitted edits, and the commit-level ancestry question
+# cannot see them at all: the target contains the commit, and the edits go anyway.
+DIRTY="$WORK/dirty-install"; mkdir -p "$DIRTY"
+{ echo '#!/bin/sh'; echo 'case "$1" in';
+  echo "  --build-info) printf 'version=9.9.9\\ncommit=$HEAD\\ntree=$TREE_SHA\\ndirty=true\\nsource=git\\nbuilt_epoch=1\\nancestors=3\\nancestors_complete=true\\n' ;;";
+  echo '  --contains) exit 0 ;;';
+  echo "  --version) echo 'wasm-agent 9.9.9' ;;";
+  echo '  *) exit 0 ;;'; echo 'esac'; } > "$DIRTY/wa"
+chmod +x "$DIRTY/wa"; cp "$DIRTY/wa" "$DIRTY/wa-sentinel"
+printf 'commit=%s\nvia=deploy.sh\n' "$HEAD" > "$DIRTY/installed.txt"
+DIRTY_BEFORE="$(cat "$DIRTY/installed.txt")"
+deploy "$DIRTY" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "it replaced bytes that carry uncommitted work"
+shows "the refusal is by name" "$DEPLOY_OUT" "downgrade refused(dirty_running_binary)"
+same "the install record was not touched" "$(cat "$DIRTY/installed.txt")" "$DIRTY_BEFORE"
+deploy "$DIRTY" --force --reason "the uncommitted edits on that node are mine to lose"
+hides "with --force --reason it goes on" "$DEPLOY_OUT" "dirty_running_binary"
+shows "...and the override is a record" "$(cat "$DIRTY/deploy.log" 2>/dev/null)" "running_dirty=true"
+
+echo "test-deploy-ancestry: every force is recorded, and a force without a reason is refused before any work"
+shows "the reason is in deploy.log as its own line" "$(cat "$INSTALL/deploy.log" 2>/dev/null)" "force_requested reason=retiring the feature on purpose"
+shows "...with who asked" "$(cat "$INSTALL/deploy.log" 2>/dev/null)" "by="
+shows "...and when" "$(cat "$INSTALL/deploy.log" 2>/dev/null)" "at=20"
+deploy "$INSTALL" --force
+shows "the parse-time refusal names the rule" "$DEPLOY_OUT" "override_reason_required"
+shows "...and says nothing was resolved or built" "$DEPLOY_OUT" "Nothing was resolved, built or installed"
+case "$DEPLOY_OUT" in
+  *"running binary:"*|*"installed.txt"*) bad "the refusal happened after the deploy had started reading the install" ;;
+  *) ok "it refused before touching the install (no ancestry work was done)" ;;
+esac
+
 echo "test-deploy-ancestry: the source of the rule is one file, shipped beside the running copy"
 grep -q 'install-record.sh' "$ROOT/scripts/deploy.sh" && ok "deploy.sh ships and sources the one ancestry verdict" || bad "deploy.sh does not use scripts/lib/install-record.sh"
 grep -q 'wa_ancestry_verdict' "$ROOT/scripts/upgrade.sh" && ok "upgrade.sh asks the same verdict" || bad "upgrade.sh has its own idea of a downgrade"
