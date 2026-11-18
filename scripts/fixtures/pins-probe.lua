@@ -59,3 +59,46 @@ local in_missing = false
 for _, field in ipairs(bare.missing or {}) do if field == 'pins' then in_missing = true end end
 say('fleet_peer_pins_absent', bare.pins_absent == true and 'yes' or 'no')
 say('fleet_peer_pins_not_missing', in_missing and 'listed' or 'not-listed')
+
+-- ---- item 6: a pin is found by the name it was written under AND by the node's id ----------------
+-- A rollback records the node the operator named ("work"); the node's own store records its name and its
+-- node_id. A gate that compared one spelling would miss the pin, so both are asked.
+local edge = pins.set({ node = 'edge', node_id = 'aabbccddeeff0011', commit = '7777777777777777777777777777777777777777',
+  reason = 'held under a name and an id' })
+say('edge_set', edge and 'ok' or 'refused')
+say('edge_by_name', tostring(pins.active('edge') ~= nil))
+say('edge_by_id', tostring(pins.active('', 'aabbccddeeff0011') ~= nil))
+say('edge_by_name_and_id', tostring(pins.active('edge', 'aabbccddeeff0011') ~= nil))
+say('edge_by_other_id', tostring(pins.active('another-node', 'ffffffffffffffff') ~= nil))
+say('edge_record_carries_id', edge and edge.node_id or 'missing')
+
+-- ---- item 5: a target that CONTAINS the awaited commit releases the pin ------------------------
+-- "Release" used to require target == await exactly, so a pin whose awaited fix landed in a descendant never
+-- released: the pin blocked its own fix and only --unpin by hand could move the node.
+local handle = io.popen('mktemp -d')
+local repo = handle and handle:read('*a') or ''
+if handle then handle:close() end
+repo = (repo:gsub('%s+$', ''))
+local function sh(command) local h = io.popen(command .. ' 2>/dev/null'); if not h then return '' end local out = h:read('*a') or ''; h:close(); return (out:gsub('%s+$', '')) end
+local function ok_git() return repo ~= '' and sh("cd '" .. repo .. "' && git init -q && git config user.email t@example.com && git config user.name t && printf a > f && git add f && git commit -qm one && git rev-parse HEAD") ~= '' end
+if ok_git() then
+  local first = sh("git -C '" .. repo .. "' rev-parse HEAD")
+  sh("cd '" .. repo .. "' && printf b > g && git add g && git commit -qm two")
+  local second = sh("git -C '" .. repo .. "' rev-parse HEAD")
+  local held = pins.set({ node = 'edge2', commit = 'unknown', rolled_back_from = first, await = first,
+    reason = 'rolled back from that commit', kind = 'rollback' })
+  say('contain_repo', 'yes')
+  say('contain_pin_await', held and held.await or 'missing')
+  say('contain_pin_from', first)
+  local by_containment = pins.released(held, second, repo)
+  say('released_by_containment', by_containment and tostring(by_containment.released) or 'unknown')
+  say('released_by_containment_why', by_containment and tostring(by_containment.why) or '')
+  local unrelated = pins.released(held, first, repo)
+  say('released_by_the_awaited_commit_itself', unrelated and tostring(unrelated.released) or 'unknown')
+  local no_tree = pins.released(held, second, '')
+  say('no_tree_is_unknown', no_tree == nil and 'unknown' or tostring(no_tree.released))
+  -- the escape hatch is one sentence an operator can act on
+  say('escape_mentions_unpin', tostring(pins.escape_hatch('edge')):find('--unpin', 1, true) ~= nil and 'yes' or 'no')
+else
+  say('contain_repo', 'no git')
+end

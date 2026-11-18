@@ -427,6 +427,17 @@ end
 -- install), never set by the module itself.
 function M.facts() return update.facts(M.facts_options or {}) end
 
+-- The checkout a pin's release question is asked of. "Does this target contain the awaited commit?" is a git
+-- question, and the coordinator's own runtime tree is where a target commit is resolved; asking it of an empty
+-- path (which this call used to do: pins.released(pin, target, '')) can only answer "cannot tell", so no pin
+-- ever released by ancestry. A node with no tree answers "cannot tell" too, and that is reported, never read
+-- as released.
+local function release_tree()
+  local ok, tree = pcall(function() return nodes.worktree() end)
+  if ok and type(tree) == 'string' then return slashes(tree) end
+  return ''
+end
+
 function M.serve(args, caller)
   args = type(args) == 'table' and args or {}
   local author = nodes.author_of(caller)
@@ -500,11 +511,37 @@ function M.admit(args, caller)
       return { error = 'audit_record_not_written', effect = 'unknown', capability = M.CAPABILITY, record = record.id,
         request = done.request, note = 'the rollback was queued but this node could not write the record that names who asked for it' }
     end
+    -- THE NODE KEEPS ITS OWN COPY OF THE PIN (item 6). A pin that lives only in the coordinator's store protects
+    -- the node from requests made through that coordinator, and from nothing else: a deploy started ON the node -
+    -- its own `wa update`, its sentinel's tree deploy, a hand-run upgrade.sh, fleet-install.sh or bootstrap.sh -
+    -- never reads the coordinator's file. So a rollback writes the same record into the node's own pins.txt, under
+    -- its own name AND its own node_id (an operator addresses it by either; pins.active matches both).
+    --
+    -- commit=unknown is honest here: what the rollback restores is named by installed.txt once rollback-node.sh
+    -- has run, and this record is refreshed with that commit when the outcome is read back. The commit it is
+    -- going BACK FROM is known now, and that is the pin's default awaited commit.
+    local own_identity = nodes.identity() or {}
+    local own_name = tostring(nodes.node_name() or '')
+    local own_id = tostring(own_identity.node_id or '')
+    local from_commit = tostring(record.replaced_commit or '')
+    local node_pin, node_pin_problem = pins.set({
+      node = own_name ~= '' and own_name or own_id,
+      node_id = own_id,
+      kind = 'rollback',
+      commit = 'unknown',
+      rolled_back_from = from_commit,
+      await = trim(args.await) ~= '' and trim(args.await) or from_commit,
+      until_ = trim(args['until']),
+      reason = reason ~= '' and reason
+        or ('rolled back by a request from ' .. tostring(record.requester.name ~= '' and record.requester.name or record.requester.node_id)),
+    })
     local identity = nodes.identity() or {}
     return {
       ok = true, status = 'queued', record = record.id, kind = kind,
       commit = record.target_commit, door = done.door, request = done.request,
       sentinel_request_id = record.sentinel_request_id,
+      pin = node_pin, pin_problem = node_pin_problem,
+      pin_next = 'this node stays where it is until the pin is released: ' .. pins.escape_hatch(own_name ~= '' and own_name or own_id),
       target_node = { node_id = tostring(identity.node_id or ''), name = tostring(nodes.node_name() or '') },
       requester = record.requester.name ~= '' and record.requester.name or record.requester.node_id,
       requested_at = record.requested_at,
@@ -575,6 +612,25 @@ function M.admit(args, caller)
   }
 end
 
+-- The node's own pin, refreshed with the commit the rollback actually restored. The queued record could only
+-- say commit=unknown (rollback-node.sh had not run yet); reading the outcome is the moment the node knows which
+-- commit it is on, and a pin that names it is a record an operator can compare with installed.txt.
+-- Idempotent: the same commit twice writes nothing.
+local function pin_restored_commit(restored)
+  local commit = trim(restored)
+  if commit == '' or commit == 'unknown' then return nil end
+  local own_identity = nodes.identity() or {}
+  local own_name = tostring(nodes.node_name() or '')
+  local own_id = tostring(own_identity.node_id or '')
+  local key = own_name ~= '' and own_name or own_id
+  local active = pins.active(key, own_id)
+  if not active or trim(active.kind) ~= 'rollback' then return nil end
+  if trim(active.commit) == commit then return active end
+  return pins.set({ node = key, node_id = own_id, kind = 'rollback', commit = commit,
+    rolled_back_from = trim(active.rolled_back_from), await = trim(active.await),
+    until_ = trim(active.until_), reason = trim(active.reason) })
+end
+
 -- What the peer can prove about one request, from files that survive the install it performs.
 local function outcome_of(record)
   local facts = M.facts()
@@ -604,8 +660,9 @@ local function outcome_of(record)
         -- A rollback's own record is the install record it rewrote: report what is installed now, so
         -- "installed" is a commit an operator can compare, not just the word.
         local restored = update.installed_record(facts.install)
+        pin_restored_commit(restored.commit)
         return settled('installed', tostring(done.detail or (what .. ' settled')),
-          { installed_commit = restored.commit })
+          { installed_commit = restored.commit, pin = pin_restored_commit(restored.commit) })
       end
       return settled('failed', tostring(done.detail or (what .. ' did not settle')))
     end
@@ -778,24 +835,68 @@ function M.request(call, selector, options)
   -- history and in this request's own audit record. A rollback is never gated: going back is what a pin is
   -- for, and refusing it would trap a node on the wrong bytes.
   local node_key = trim(selector)
-  local pin_in_force = pins.active(node_key)
+  -- ALIASES BEFORE THE GATE. A node answers to its name and to its node_id, and the pin may have been written
+  -- under either (a rollback records the node the operator named; the node's own store records the id). Resolve
+  -- the selector first and gate on both, or a pin written under one spelling would not gate a request made with
+  -- the other - which is exactly how a pin becomes a decoration.
+  local resolved = nodes.find and nodes.find(selector) or nil
+  local node_id = resolved and tostring(resolved.node_id or '') or ''
+  local pin_in_force = pins.active(node_key, node_id)
   local wants_back = options.rollback == true or trim(options.mode) == 'rollback'
-  if pin_in_force and options.force ~= true and not wants_back then
+  local force_note = nil
+  if pin_in_force and not wants_back then
     local target = trim(options.commit)
     local released = nil
-    if target ~= '' then released = pins.released(pin_in_force, target, '') end
-    if not (released and released.released == true) then
+    if target ~= '' then released = pins.released(pin_in_force, target, release_tree()) end
+    if released and released.released == true then
+      -- THE PIN DID ITS JOB AND RELEASES, as a record: the ledger then says when and why the node was let go,
+      -- instead of the pin being silently ignored. A plain "wa update <node>" to a target that contains the
+      -- awaited commit is the ordinary way out of a pin, and it used to be impossible.
+      local cleared, problem = pins.clear(node_key, { node_id = node_id, kind = 'released',
+        reason = 'released by a target that ' .. tostring(released.why) })
+      if cleared then
+        pin_in_force = nil
+      else
+        return {
+          ok = false, error = 'pin_release_not_recorded', node = node_key, pin = pin_in_force,
+          observed = tostring(problem and problem.error or 'unknown'),
+          message = 'this deploy would release the pin and the release could not be recorded, so nothing was asked of the node.',
+          next = pins.escape_hatch(node_key),
+        }
+      end
+    elseif options.force == true then
+      -- A FORCE IS ONLY AN OVERRIDE WHEN IT SAYS WHY. The bypass used to be "force ~= true", so --force with no
+      -- --reason moved a pinned node and left nothing behind saying who did it or why.
+      if trim(options.reason) == '' then
+        return {
+          ok = false, error = 'override_reason_required', node = node_key, pin = pin_in_force,
+          observed = pins.summary_line(pin_in_force),
+          message = '--force overrides a pin, which is a record that this node was put somewhere on purpose, and an override nobody can read later is not a decision anyone can review.',
+          next = 'say why: --force --reason <text> (recorded in the pin history and in this request), or ' .. pins.escape_hatch(node_key),
+        }
+      end
+      force_note = 'forced past pin ' .. tostring(pin_in_force.id or '?') .. ': ' .. trim(options.reason)
+      pins.set({ node = node_key, node_id = node_id, kind = 'force', state = 'active',
+        commit = trim(pin_in_force.commit), binary_sha256 = trim(pin_in_force.binary_sha256),
+        reason = 'FORCED PAST: ' .. trim(options.reason) .. ' (pin ' .. tostring(pin_in_force.id or '?') .. ': ' .. tostring(pin_in_force.reason or '') .. ')',
+        await = trim(pin_in_force.await), until_ = trim(pin_in_force.until_) })
+    else
       return {
         ok = false, error = 'node_pinned', node = node_key, pin = pin_in_force,
         observed = pins.summary_line(pin_in_force) .. (released and released.why and ('; ' .. tostring(released.why)) or ''),
         message = 'the node carries an active pin, so this deploy was refused: a pin is a record that the node was put somewhere on purpose.',
-        next = 'move it on purpose: "wa update ' .. node_key .. ' --unpin --reason <text>", or name the target with --to <commit> when it contains the awaited fix, or say --force --reason <text> and it is recorded',
+        next = 'move it on purpose: ' .. pins.escape_hatch(node_key),
       }
     end
   end
   local args = { action = 'request', reason = trim(options.reason), session = trim(options.session) }
   if trim(options.commit) ~= '' then args.commit = trim(options.commit) end
   if options.rendezvous == true then args.rendezvous = true end
+  -- The pin this move will write is the SAME record on both sides (item 6: the target node keeps its own copy),
+  -- so the awaited commit travels with the request instead of being invented again on the node.
+  if trim(options.await) ~= '' then args.await = trim(options.await) end
+  if trim(options.until_) ~= '' then args['until'] = trim(options.until_) end
+  if force_note then args.force_note = force_note end
   -- One verb, four modes: a tree deploy (default), a binary-only install, a rollback, or the rendezvous.
   local mode = trim(options.mode)
   if mode ~= '' and mode ~= 'tree' then args.mode = mode end
@@ -822,17 +923,30 @@ function M.request(call, selector, options)
   -- than dropped, because the move did happen and the missing record is the thing left to fix.
   local kind_name = trim(reply.kind or (args.rollback and 'rollback' or 'node'))
   if reply.ok and (kind_name == 'rollback' or options.pin == 'to') then
+    -- WHAT A ROLLBACK PIN NAMES. It used to write commit=unknown with no await, so the pin could never release
+    -- by an awaited commit and its only way out was --unpin by hand - a pin that blocked its own fix.
+    --
+    -- The commit a rollback goes BACK FROM is the one that was installed a moment ago, and the peer reports it
+    -- (reply.commit is the replaced commit for a rollback). That is the pin's default "await": the history went
+    -- back from it, and a target that CONTAINS it is the operator's own statement that the way forward is open
+    -- again. --await and --until override the default; --to still names the commit the node is held at.
+    local from_commit = trim(options.commit)
+    if from_commit == '' and kind_name == 'rollback' then from_commit = trim(reply.commit) end
+    local await_default = trim(options.await)
+    if await_default == '' and kind_name == 'rollback' then await_default = from_commit end
     local written, problem = pins.set({
-      node = node_key,
+      node = node_key, node_id = node_id,
       kind = kind_name == 'rollback' and 'rollback' or 'to',
       commit = trim(options.commit) ~= '' and trim(options.commit) or 'unknown',
+      rolled_back_from = kind_name == 'rollback' and from_commit or '',
       reason = trim(options.reason) ~= '' and trim(options.reason)
         or (kind_name == 'rollback' and 'rolled back on purpose' or 'moved to a named commit on purpose'),
-      until_ = trim(options.until_), await = trim(options.await),
+      until_ = trim(options.until_), await = await_default,
     })
     if written then
       reply.pin = written
       reply.summary = M.summary(reply) .. ' | pin: ' .. tostring(written.summary)
+      reply.pin_next = 'this node stays where it is: ' .. pins.escape_hatch(node_key)
     else
       reply.pin_problem = problem
       reply.summary = M.summary(reply) .. ' | pin NOT recorded: ' .. tostring(problem and problem.error or 'unknown')

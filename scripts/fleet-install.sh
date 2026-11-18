@@ -54,6 +54,15 @@ for fi_lib in "${WA_INSTALL_RECORD_LIB:-}" "$HERE/lib/install-record.sh" "$HERE/
 done
 command -v wa_build_info >/dev/null 2>&1 \
   || { printf 'fleet-install: install_record_lib_missing: scripts/lib/install-record.sh is not beside this script; it is what writes installed.txt from the binary and what asks whether this artifact goes backwards; nothing was installed\n' >&2; exit 2; }
+# The node's own pin store (scripts/lib/node-pins.sh): where a rollback wrote "this node stays here" on THIS node.
+NODE_PIN_LIB=""
+for nl in "${WA_NODE_PINS_LIB:-}" "$HERE/lib/node-pins.sh" "$HERE/../scripts/lib/node-pins.sh"; do
+  [ -n "$nl" ] && [ -f "$nl" ] && { NODE_PIN_LIB="$nl"; break; }
+done
+if [ -n "$NODE_PIN_LIB" ]; then . "$NODE_PIN_LIB"; else
+  printf 'fleet-install: node_pins_lib_missing: scripts/lib/node-pins.sh is not beside this script, so this node cannot read its own pin; nothing was installed\n' >&2
+  exit 2
+fi
 say() { printf 'fleet-install: %s\n' "$*"; }
 die() { printf 'fleet-install: %s\n' "$*" >&2; exit 1; }
 
@@ -358,6 +367,26 @@ else
          die "refused(ancestry_unknown): nothing can establish whether this artifact goes backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing}. Nothing was replaced. Make it answerable (an artifact built by the current build.rs carries its own ancestry), or pass --force --reason <text> and the override is recorded."
        fi ;;
   esac
+fi
+
+PIN_TARGET="${CANDIDATE_COMMIT:-}"; PIN_TREE=""
+# THE NODE'S OWN PIN. A pin in the coordinator's store gates requests made THROUGH the coordinator; an install
+# started here never reads that store, so the node keeps its own copy (written by a rollback, see
+# lua/core/remote_update.lua and scripts/lib/node-pins.sh) and it is read before anything is replaced.
+# "Cannot tell" is not a release: only a target that IS the pinned commit, IS the awaited commit, or
+# CONTAINS it releases the pin, and that release is said out loud.
+if [ -n "${NODE_PIN_LIB:-}" ]; then
+  NODE_NAME="$(wa_node_name)"
+  PIN_STATE=0; PIN_REPORT="$(wa_node_pin_gate "$NODE_NAME" "" "${PIN_TARGET:-}" "${PIN_TREE:-}" 2>&1)" || PIN_STATE=$?
+  [ -n "$PIN_REPORT" ] && say "$PIN_REPORT"
+  if [ "$PIN_STATE" != 0 ]; then
+    if [ "$FORCE" = 1 ] && [ -n "$REASON" ]; then
+      say "OVERRIDE, recorded: $NODE_NAME is pinned and this install does not release it; going on because --force --reason says so"
+      say "force_requested rule=node_pinned reason=$REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      die "node_pinned: $NODE_NAME carries an active pin, so this install was refused - a pin is a record that the node was put somewhere on purpose, and an ordinary install is exactly what undoes it (measured 18/11: three hand-made rollbacks did not survive the next one). Nothing was replaced. $(wa_pin_escape "$NODE_NAME")"
+    fi
+  fi
 fi
 
 # 4. backup and swap

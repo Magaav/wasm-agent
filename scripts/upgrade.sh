@@ -73,6 +73,15 @@ for upgrade_lib in "$ROOT/scripts/lib/install-record.sh" "$(dirname "$0")/lib/in
 done
 command -v wa_build_info >/dev/null 2>&1 \
   || { say "refused(install_record_lib_missing): scripts/lib/install-record.sh is not beside this script, and it is what makes installed.txt the binary's own answer; nothing was installed"; exit 2; }
+# The node's own pin (scripts/lib/node-pins.sh): what a rollback wrote on THIS node, which the coordinator's store
+# cannot protect an install started here from.
+WA_NODE_PINS_LIB=""
+for upgrade_pin_lib in "$ROOT/scripts/lib/node-pins.sh" "$(dirname "$0")/lib/node-pins.sh"; do
+  [ -f "$upgrade_pin_lib" ] && { WA_NODE_PINS_LIB="$upgrade_pin_lib"; break; }
+done
+[ -n "$WA_NODE_PINS_LIB" ] \
+  || { say "refused(node_pins_lib_missing): scripts/lib/node-pins.sh is not beside this script, and it is what reads this node's own pin; nothing was installed"; exit 2; }
+. "$WA_NODE_PINS_LIB"
 UI_DIR="${WA_UI_DIR:-$INSTALL_DIR/ui}"
 RUNTIME_ROOT="${WA_RUNTIME_WORKTREE:-$ROOT}"
 if [ -z "${WA_RUNTIME_WORKTREE:-}" ] && [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
@@ -231,6 +240,25 @@ if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ]; then
       # verdict it could not reach, and that is the 18/11 hole in one line.
       pre_upgrade_refuse "ancestry_unknown" "nothing can establish whether this candidate goes backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing} (running commit ${PREVIOUS_COMMIT:-unknown}, ${PREVIOUS_WHY:-source unknown})" ;;
   esac
+fi
+
+# A PINNED NODE DOES NOT MOVE FORWARD FOR AN ORDINARY UPGRADE. The coordinator's gate covers `wa update <node>`;
+# this one covers the install started ON the node - an upgrade run by the sentinel, by deploy.sh, or by an
+# operator at a shell - because a pin that only one of them honours is a pin the next path around it undoes.
+NODE_NAME="$(wa_node_name)"
+PIN_STATE=0; PIN_REPORT="$(wa_node_pin_gate "$NODE_NAME" "" "${SOURCE_COMMIT:-}" "${SOURCE_ROOT:-}" 2>&1)" || PIN_STATE=$?
+[ -n "$PIN_REPORT" ] && say "$PIN_REPORT"
+if [ "$PIN_STATE" != 0 ]; then
+  if [ -n "${WA_UPGRADE_FORCE_REASON:-}" ]; then
+    UPGRADE_ANCESTRY_OVERRIDE="$WA_UPGRADE_FORCE_REASON"
+    UPGRADE_PIN_OVERRIDDEN=yes
+    say "OVERRIDE, recorded: $NODE_NAME is pinned and this install does not release it; going on because WA_UPGRADE_FORCE_REASON says so"
+    say "force_requested rule=node_pinned reason=$WA_UPGRADE_FORCE_REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  else
+    say "refused(node_pinned): $NODE_NAME carries an active pin, so this upgrade was refused - a pin is a record that the node was put somewhere on purpose, and an ordinary install is exactly what undoes it (measured 18/11: three hand-made rollbacks did not survive the next one)."
+    say "nothing was installed, and the running pair is untouched. $(wa_pin_escape "$NODE_NAME")"
+    exit 2
+  fi
 fi
 
 file_hash() { [ -f "$1" ] && sha256sum < "$1" 2>/dev/null | awk '{print $1}' || true; }

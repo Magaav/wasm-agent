@@ -22,7 +22,8 @@
 #   bash scripts/publish-components.sh --repo DIR --out DIR
 #
 # Exit codes: 0 ok; 2 missing tool/lock/artifacts; 5 an artifact is not the pinned one (the line that
-# would pin it is printed); 6 an artifact's size is not the pinned one.
+# would pin it is printed); 6 an artifact's size is not the pinned one; 7 the commit is not on a branch the
+# remote has (nothing is published; ALLOW_UNPUSHED_COMMIT=1 is the named exception).
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 REPO_ROOT="$ROOT"
@@ -48,6 +49,26 @@ lock_sha="$(wa_component_lock_sha "$REPO_ROOT")" || fail "components_lock_unread
 tag="$(wa_component_release_tag "$REPO_ROOT")" || fail "components_lock_unreadable: $REPO_ROOT/components.lock"
 slug="$(wa_component_release_repo "$REPO_ROOT")"
 commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+
+# ONLY A SHARED COMMIT MAY BE PUBLISHED, and "shared" is asked of the incoming repository (scripts/lib/
+# shared-commit.sh: git ls-remote), not of this clone's memories of a fetch. The notes printed below name the
+# commit these artifacts were built from; a commit the remote does not have names a bundle nobody else can
+# reproduce or review, and shipping one is the 18/11 failure in its original form - an artifact indistinguishable
+# from a landed one that carried work on no branch. ALLOW_UNPUSHED_COMMIT=1 is the named, printed exception.
+. "$ROOT/scripts/lib/shared-commit.sh"
+if [ "$commit" = unknown ]; then
+  say "this bundle's repository has no commit ($REPO_ROOT is not a checkout); the notes will say source unknown"
+elif [ "${ALLOW_UNPUSHED_COMMIT:-}" != 1 ]; then
+  branches="$(wa_commit_shared "$REPO_ROOT" "$commit" origin)"
+  shared_rc=$?
+  case "$shared_rc" in
+    0) say "commit ${commit:0:12} is on a pushed branch: $(printf '%s' "$branches" | head -1)" ;;
+    1) fail "commit_not_on_pushed_branch: ${commit:0:12} is reachable from no branch the REMOTE has (git ls-remote --heads origin in $REPO_ROOT). Publishing a bundle for a commit nobody else has puts artifacts on nodes that no landed branch can reproduce, and the next deploy of main removes what they carry (18/11). Push the branch, or set ALLOW_UNPUSHED_COMMIT=1 for a development bundle." 7 ;;
+    *) fail "commit_not_on_pushed_branch: could not ask the remote whether ${commit:0:12} is on a branch it has (git ls-remote --heads origin failed, or a head it reported has never been fetched here). An unanswerable question is a refusal. Fix the remote (git remote -v; git fetch origin), or set ALLOW_UNPUSHED_COMMIT=1 for a development bundle." 7 ;;
+  esac
+else
+  say "ALLOW_UNPUSHED_COMMIT=1: publishing a bundle for ${commit:0:12} with no proof that any branch on the remote contains it (a development bundle)"
+fi
 
 # Which components: exactly the names components.lock pins, in the lock's own order. Nothing here
 # guesses a component: a wasm that is not pinned cannot be published by this script.

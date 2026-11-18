@@ -26,11 +26,12 @@ pub const COMMIT_SOURCE: &str = SOURCE;
 /// be written by copying fields and a reader needs no parser beyond `sed -n 's/^key=//p'`.
 pub fn render() -> String {
     format!(
-        "version={VERSION}\ncommit={}\ntree={}\ndirty={}\nsource={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\n",
+        "version={VERSION}\ncommit={}\ntree={}\ndirty={}\nsource={}\nsource_shared={}\nbuilt_epoch={}\nancestors={}\nancestors_complete={}\n",
         if COMMIT.is_empty() { "unknown" } else { COMMIT },
         if TREE.is_empty() { "unknown" } else { TREE },
         DIRTY,
         COMMIT_SOURCE,
+        SOURCE_SHARED,
         BUILT_EPOCH,
         ANCESTORS.len(),
         if ANCESTORS_COMPLETE { "true" } else { "false" },
@@ -98,7 +99,7 @@ mod tests {
     #[test]
     fn render_names_every_field_the_records_read() {
         let document = render();
-        for key in ["version=", "commit=", "tree=", "dirty=", "source=", "built_epoch=", "ancestors=", "ancestors_complete="] {
+        for key in ["version=", "commit=", "tree=", "dirty=", "source=", "source_shared=", "built_epoch=", "ancestors=", "ancestors_complete="] {
             assert!(document.lines().any(|line| line.starts_with(key)), "missing {key} in:\n{document}");
         }
         assert!(document.ends_with('\n'), "the document is line-oriented");

@@ -29,11 +29,13 @@ if [ ! -x "$WABIN" ]; then
 fi
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 HOME_DIR="$WORK/home"; mkdir -p "$HOME_DIR"
-wa() { WASM_AGENT_HOME="$HOME_DIR" "$WABIN" --db "$HOME_DIR/probe.db" "$@"; }
+# WASM_AGENT_LUA_ROOT: the Lua under test is THIS tree's, not the copy compiled into whatever binary happens to
+# be built here. A pins test that ran the binary's embedded core would pass about the code of an older commit.
+wa() { WASM_AGENT_LUA_ROOT="$ROOT" WASM_AGENT_HOME="$HOME_DIR" "$WABIN" --db "$HOME_DIR/probe.db" "$@"; }
 echo "test-node-pins: $WABIN (store under $HOME_DIR)"
 
 echo "test-node-pins: the store"
-OUT="$(cd "$ROOT" && WASM_AGENT_HOME="$HOME_DIR" WA_SCRIPT="$ROOT/scripts/fixtures/pins-probe.lua" "$WABIN" --db "$HOME_DIR/probe.db" 2>&1)"
+OUT="$(cd "$ROOT" && WASM_AGENT_LUA_ROOT="$ROOT" WASM_AGENT_HOME="$HOME_DIR" WA_SCRIPT="$ROOT/scripts/fixtures/pins-probe.lua" "$WABIN" --db "$HOME_DIR/probe.db" 2>&1)"
 value() { printf '%s\n' "$OUT" | sed -n "s/^$1=//p" | head -1; }
 shows "the probe ran" "$OUT" "path="
 same "a pin records the commit" "$(value active_commit)" "1111111111111111111111111111111111111111"
@@ -54,6 +56,23 @@ same "after clearing the node is not pinned" "$(value after_clear_active)" "none
 same "the clear carries its reason" "$(value clear_reason)" "the fix landed"
 same "a pin without a reason is refused" "$(value no_reason)" "refused"
 same "and the refusal is by name" "$(value no_reason_error)" "pin_reason_required"
+
+echo "test-node-pins: the pin is found by the name OR the node id (aliases resolve before the gate)"
+same "a pin set under a name and an id" "$(value edge_set)" "ok"
+same "it is found by the name" "$(value edge_by_name)" "true"
+same "it is found by the node id alone" "$(value edge_by_id)" "true"
+same "and by both" "$(value edge_by_name_and_id)" "true"
+same "a different id does not match it" "$(value edge_by_other_id)" "false"
+same "...and the record carries the id it was written for" "$(value edge_record_carries_id)" "aabbccddeeff0011"
+
+echo "test-node-pins: a target that CONTAINS the awaited commit releases the pin"
+same "the fixture repository is there" "$(value contain_repo)" "yes"
+same "a rollback pin records the commit it went back from as its await" "$(value contain_pin_await)" "$(value contain_pin_from)"
+same "a descendant of the awaited commit releases it" "$(value released_by_containment)" "true"
+shows "...and says so by containment" "$(value released_by_containment_why)" "contains"
+same "the awaited commit itself releases it" "$(value released_by_the_awaited_commit_itself)" "true"
+same "with no checkout the answer is unknown, never released" "$(value no_tree_is_unknown)" "unknown"
+same "the escape hatch names --unpin" "$(value escape_mentions_unpin)" "yes"
 
 echo "test-node-pins: the fleet view"
 same "the report lists the pins" "$(value fleet_pins)" "1"
@@ -79,6 +98,16 @@ shows "the refusal is by name" "$(cat "$WORK/deploy.out")" "node_pinned"
 shows "it quotes the pin" "$(cat "$WORK/deploy.out")" "glibc 2.30 binary until release-glibc lands"
 shows "it names the ways out" "$(cat "$WORK/deploy.out")" "--unpin"
 shows "...including the recorded override" "$(cat "$WORK/deploy.out")" "--force --reason"
+
+echo "test-node-pins: --force without a reason does not move a pinned node"
+wa update mail --force > "$WORK/force-bare.out" 2>&1
+rc=$?
+[ "$rc" != 0 ] && ok "it refused (exit $rc)" || bad "a bare --force moved a pinned node"
+shows "the refusal is by name" "$(cat "$WORK/force-bare.out")" "override_reason_required"
+shows "...and says the override has to be readable later" "$(cat "$WORK/force-bare.out")" "why"
+wa update mail --force --reason "the operator means it" > "$WORK/force-ok.out" 2>&1
+shows "with --force --reason the gate is satisfied (the request reaches the transport)" "$(cat "$WORK/force-ok.out")" "unknown_node"
+shows "...and the force is recorded in the pin history" "$(cat "$PINFILE")" "FORCED PAST: the operator means it"
 case "$(cat "$WORK/deploy.out")" in
   *"no_prebuilt_binary"*|*"sentinel"*|*"mesh"*) bad "the gate let the request through to the transport" ;;
   *) ok "nothing reached the transport: the gate refused first" ;;

@@ -521,6 +521,29 @@ fi
 
 echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 
+# 2d. IS THIS TREE'S COMMIT ON A BRANCH THE REMOTE HAS? (scripts/lib/shared-commit.sh - the same answer every
+# publisher asks, and `git ls-remote` is what answers it: a local refs/remotes/* ref is a memory of a fetch, not
+# something anybody else can see.) MEASURED 18/11: a node ran a build of 8 commits that were on no landed branch,
+# shipped from a detached HEAD; the artifact looked landed and the next deploy of main removed the features.
+# Asked here, BEFORE the build, so a refusal leaves the node untouched instead of stopping halfway through an
+# install (the wave ship step runs after the files are placed).
+UNSHARED_COMMIT=0
+if [ -f "$ROOT/scripts/lib/shared-commit.sh" ]; then
+  . "$ROOT/scripts/lib/shared-commit.sh"
+  SHARED_BRANCHES="$(wa_commit_shared "$ROOT" "$COMMIT" "${WA_DEPLOY_REMOTE:-origin}")"; SHARED_RC=$?
+  case "$SHARED_RC" in
+    0) note "commit ${COMMIT:0:12} is on a pushed branch: $(printf '%s' "$SHARED_BRANCHES" | head -1)" ;;
+    *)
+      UNSHARED_COMMIT=1
+      if [ "${FORCE:-0}" = 1 ] && [ -n "${REASON:-}" ]; then
+        note "commit_not_on_pushed_branch accepted with --force --reason: ${COMMIT:0:12} is on no branch the remote has ($([ "$SHARED_RC" = 1 ] && echo 'the remote says no' || echo 'the remote could not be asked')); by=$(id -un 2>/dev/null || echo unknown)"
+      else
+        fail "refused(commit_not_on_pushed_branch): ${COMMIT:0:12} is on no branch the remote has ($([ "$SHARED_RC" = 1 ] && echo "git ls-remote --heads ${WA_DEPLOY_REMOTE:-origin} answers: no branch contains it" || echo 'the remote could not be asked, and an unanswerable question is a refusal')). Installing it would put a build on a node that no landed branch can reproduce or review - the 18/11 shape - and the next deploy of main would silently remove whatever it carries. Nothing was built and nothing was installed. Push the branch (git push ${WA_DEPLOY_REMOTE:-origin} $BRANCH), or pass --force --reason <text> and the override is recorded."
+      fi ;;
+  esac
+else
+  note "scripts/lib/shared-commit.sh is not beside this script, so nothing asked whether $COMMIT is shared"
+fi
 # 3. Never replace something better with something worse.
 #
 # The gap this closes, and it was not hypothetical. Rules 1 and 2 ask about *this* tree - is it clean, does
@@ -2136,7 +2159,11 @@ WAVE_SHIP="$ROOT/scripts/ship-wave.mjs"; WAVE_ROOT="$ROOT"; WAVE_INSTALL="$INSTA
 if command -v cygpath >/dev/null 2>&1; then
   WAVE_SHIP="$(cygpath -w "$WAVE_SHIP")"; WAVE_ROOT="$(cygpath -w "$WAVE_ROOT")"; WAVE_INSTALL="$(cygpath -w "$WAVE_INSTALL")"
 fi
-node "$WAVE_SHIP" "$WAVE_ROOT" "$WAVE_INSTALL" || fail "node installed, but wave continuation scripts are not import-closed"
+# The ship step asks the same shared-commit question (scripts/ship-wave.mjs). This deploy has already answered it
+# above, with --force --reason if the operator gave one, so its own decision travels as this variable - the check
+# is not skipped, it is the same answer.
+WA_SHIP_REQUIRE_SHARED=1 WA_ALLOW_UNSHARED_SHIP="$([ "$UNSHARED_COMMIT" = 1 ] && [ "${FORCE:-0}" = 1 ] && [ -n "${REASON:-}" ] && echo 1 || echo 0)" \
+  node "$WAVE_SHIP" "$WAVE_ROOT" "$WAVE_INSTALL" || fail "node installed, but wave continuation scripts are not import-closed"
 
 record_installed
 echo "deploy: installed $COMMIT ($HASH)"

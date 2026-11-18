@@ -37,7 +37,7 @@ INFO="$("$WABIN" --build-info 2>&1)"
 field() { printf '%s\n' "$INFO" | sed -n "s/^$1=//p" | head -1; }
 
 # 1. Every field the records are written from is present.
-for key in version commit tree dirty source built_epoch ancestors ancestors_complete; do
+for key in version commit tree dirty source source_shared built_epoch ancestors ancestors_complete; do
   [ -n "$(field "$key")" ] && ok "the document names $key ($(field "$key" | cut -c1-24))" || bad "the document has no $key="
 done
 
@@ -58,14 +58,32 @@ else
 fi
 [ "$(field ancestors)" -ge 1 ] 2>/dev/null && ok "the binary carries $(field ancestors) ancestors" || bad "no ancestors embedded (contains_commits=$(field ancestors))"
 
+# 2b. THE ANCESTRY IS COMPLETE ONLY WHEN THE BUILD CHECKOUT WAS NOT SHALLOW, and an incomplete list must answer
+#     "unknown" (2) for a commit it does not carry, never "no" (1): "no" is the verdict a deploy refuses on, and a
+#     truncated history cannot honestly produce it. MEASURED: a build from a --depth 1 clone embedded
+#     ancestors=137 and claimed ancestors_complete=true, so every commit older than the cut looked like a
+#     downgrade and every install of an old release would have been refused.
+if [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = true ] && [ "$(field source)" = git ]; then
+  same "a shallow build reports ancestors_complete=false" "$(field ancestors_complete)" "false"
+  "$WABIN" --contains 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1
+  same "...and 'not contained' from an incomplete list is 2 (unknown), not 1" "$?" "2"
+else
+  ok "this build checkout is not shallow (or the build was stamped), so the incomplete-ancestry case is not exercised here"
+fi
+
 # 3. --contains answers, and its EXIT CODE is the contract.
 "$WABIN" --contains "$(field commit)" >/dev/null 2>&1
 same "contains its own commit -> 0" "$?" "0"
 "$WABIN" --contains "$(printf '%s' "$(field commit)" | cut -c1-12)" >/dev/null 2>&1
 same "contains an abbreviated own commit -> 0" "$?" "0"
-# a commit that no history can contain: the verdict a deploy refuses on
+# a commit that no history can contain: the verdict a deploy refuses on - when the ancestry the binary carries
+# is complete. From an incomplete one the honest answer is 2, and this asserts whichever the binary says of itself.
 "$WABIN" --contains 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1
-same "does not contain an absent commit -> 1" "$?" "1"
+if [ "$(field ancestors_complete)" = true ]; then
+  same "does not contain an absent commit -> 1" "$?" "1"
+else
+  same "does not contain an absent commit, from an incomplete list -> 2 (unknown, never 'no')" "$?" "2"
+fi
 "$WABIN" --contains not-a-commit >/dev/null 2>&1
 same "a malformed id is unknown -> 2" "$?" "2"
 "$WABIN" --contains abc >/dev/null 2>&1

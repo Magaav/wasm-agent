@@ -223,24 +223,49 @@ fi
 # like a landed one, and the next ordinary deploy of main removed the features it carried. Nothing in the
 # publishing path had ever asked whether the commit it built was one anybody else could see.
 #
-# The rule is the cheap one that would have caught it: the commit must be reachable from a remote-tracking
-# branch, i.e. from a branch that has been pushed. A detached HEAD is not refused as such (a `fetch` into
-# FETCH_HEAD is one, and it is how a publisher with no checkout works) - but the commit it points at must be on
-# a pushed branch, so an unreviewed local build cannot be published at all.
+# The rule is the cheap one that would have caught it: the commit must be reachable from a branch on the
+# INCOMING repository. A detached HEAD is not refused as such (a `fetch` into FETCH_HEAD is one, and it is how
+# a publisher with no checkout works) - but the commit it points at must be on a pushed branch, so an
+# unreviewed local build cannot be published at all.
+#
+# AND THE QUESTION IS ASKED OF THE REMOTE, NOT OF THIS CLONE. This check used to be
+# `git for-each-ref --contains ... refs/remotes/`, which accepts any local remote-tracking ref: one left
+# behind by a fetch, one naming a branch the remote has since deleted, one created by hand. scripts/lib/
+# shared-commit.sh asks `git ls-remote` instead and answers shared (0), not shared (1) or cannot tell (2); both
+# of the last two refuse here.
 #
 # ALLOW_UNPUSHED_COMMIT=1 exists for a development artifact that is installed nowhere. It is named here, it is
 # printed when it is used, and the manifest records it as unpushed=yes so a node can refuse it by reading.
-if [ "${ALLOW_UNPUSHED_COMMIT:-}" != 1 ]; then
-  pushed="$(git -C "$ROOT" for-each-ref --contains "$COMMIT" --format='%(refname:short)' refs/remotes/ 2>/dev/null | grep -v '/HEAD$' | head -5)"
-  if [ -z "$pushed" ]; then
-    local_branches="$(git -C "$ROOT" for-each-ref --contains "$COMMIT" --format='%(refname:short)' refs/heads/ 2>/dev/null | head -5 | tr '\n' ' ')"
-    detail=""
-    [ -n "$local_branches" ] && detail=" (local branches that contain it: $local_branches)"
-    fail "commit_not_on_pushed_branch: ${COMMIT:0:12} is reachable from no remote-tracking branch in $ROOT$detail. A build of a commit nobody else has cannot be published: it would carry work no landed branch contains, and the next deploy of main would silently remove it (18/11). Push the branch (git push origin <branch>), or set ALLOW_UNPUSHED_COMMIT=1 for a development artifact that is installed nowhere."
-  fi
-  say "commit ${COMMIT:0:12} is on a pushed branch: $(printf '%s' "$pushed" | head -1)"
+# The one shared answer about "does the remote have this commit?" (scripts/lib/shared-commit.sh). Sourced from
+# THIS script's own tree, not from --repo: the tree being published may be a fixture or another checkout, and a
+# missing lib there would silently leave the question unasked (a "command not found" that went on to publish).
+SHARED_COMMIT_LIB=""
+for shared_lib in "$(dirname "$0")/lib/shared-commit.sh" "$ROOT/scripts/lib/shared-commit.sh"; do
+  [ -f "$shared_lib" ] && { SHARED_COMMIT_LIB="$shared_lib"; break; }
+done
+[ -n "$SHARED_COMMIT_LIB" ] || fail "shared_commit_lib_missing: scripts/lib/shared-commit.sh is not beside this script, and it is what asks the remote whether a commit may be published; nothing was published"
+. "$SHARED_COMMIT_LIB"
+PUSHED_BRANCHES=""
+if [ "${ALLOW_UNPUSHED_COMMIT:-}" != 1 ] && [ "$LOCAL" = 1 ]; then
+  # A --local artifact is a test build that can never be published (publish_local_refused below), so the
+  # remote question is not asked of it - and it is said out loud rather than skipped quietly.
+  say "--local: ${COMMIT:0:12} is a test artifact, so the remote reachability check is not asked (it is never published)"
+  PUSHED_BRANCHES="local-only"
+elif [ "${ALLOW_UNPUSHED_COMMIT:-}" != 1 ]; then
+  PUSHED_BRANCHES="$(wa_commit_shared "$ROOT" "$COMMIT" origin)"
+  shared_rc=$?
+  case "$shared_rc" in
+    0) say "commit ${COMMIT:0:12} is on a pushed branch: $(printf '%s' "$PUSHED_BRANCHES" | head -1)" ;;
+    1) local_branches="$(git -C "$ROOT" for-each-ref --contains "$COMMIT" --format='%(refname:short)' refs/heads/ 2>/dev/null | head -5 | tr '\n' ' ')"
+       detail=""
+       [ -n "$local_branches" ] && detail=" (local branches that contain it: $local_branches)"
+       fail "commit_not_on_pushed_branch: ${COMMIT:0:12} is reachable from no branch the REMOTE has ('git ls-remote --heads origin' in $ROOT)$detail. A build of a commit nobody else has cannot be published: it would carry work no landed branch contains, and the next deploy of main would silently remove it (18/11). Push the branch (git push origin <branch>), or set ALLOW_UNPUSHED_COMMIT=1 for a development artifact that is installed nowhere." ;;
+    *) fail "commit_not_on_pushed_branch: could not ask the remote whether ${COMMIT:0:12} is on a branch it has (git ls-remote --heads origin failed, or this clone has not fetched a head it reported). An unanswerable question is a refusal, not a pass: an artifact that cannot be shown to be shared is the 18/11 failure. Fix the remote (git remote -v; git fetch origin), or set ALLOW_UNPUSHED_COMMIT=1 for a development artifact that is installed nowhere." ;;
+  esac
+  PUSHED_BRANCHES="$(printf '%s' "$PUSHED_BRANCHES" | tr ' ' '\n' | grep -v '^$' | head -5 | tr '\n' ' ')"
 else
   say "ALLOW_UNPUSHED_COMMIT=1: publishing ${COMMIT:0:12} without proof that it is on a pushed branch (a development artifact; the manifest records unpushed=yes)"
+  PUSHED_BRANCHES="unpushed"
 fi
 if [ -z "$(git -C "$ROOT" branch --show-current 2>/dev/null)" ]; then
   say "HEAD is detached at $(git -C "$ROOT" rev-parse --short HEAD); ${COMMIT:0:12} is being published because a pushed branch contains it"
@@ -390,8 +415,9 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     echo "source_commit=$COMMIT"
     echo "source_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null || echo unknown)"
     # Where this commit lives, so a node can tell a landed build from a development one with no checkout: the
-    # branches (remote, or none) that contain it.
-    echo "pushed_branches=$(git -C "$ROOT" for-each-ref --contains "$COMMIT" --format='%(refname:short)' refs/remotes/ 2>/dev/null | grep -v '/HEAD$' | tr '\n' ' ' | sed 's/ $//')"
+    # branches THE REMOTE reported as containing it (scripts/lib/shared-commit.sh asked git ls-remote; a local
+    # refs/remotes/* ref is a memory of a fetch, not an answer from the repository that holds the artifact).
+    echo "pushed_branches=$PUSHED_BRANCHES"
     echo "unpushed=${ALLOW_UNPUSHED_COMMIT:+yes}"
     echo "compiled_inputs=$digest"
     echo "rustc_version=$(rustc --version 2>/dev/null | sed 's/^rustc //')"

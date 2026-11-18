@@ -94,6 +94,15 @@ for candidate in "${WA_INSTALL_RECORD_LIB_OVERRIDE:-}" \
 done
 [ -n "$WA_INSTALL_RECORD_LIB" ] || fail "install_record_lib_missing: no scripts/lib/install-record.sh beside $(dirname -- "$0")/../lib (it is what writes installed.txt from the binary, and what asks whether this bundle would move the node backwards)"
 . "$WA_INSTALL_RECORD_LIB"
+# The node's own pin store (scripts/lib/node-pins.sh): where a rollback wrote "this node stays here" on THIS node.
+WA_NODE_PINS_LIB=""
+for candidate in "${WA_NODE_PINS_LIB_OVERRIDE:-}" \
+                 "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/lib/node-pins.sh" \
+                 "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/node-pins.sh"; do
+  [ -n "$candidate" ] && [ -f "$candidate" ] && { WA_NODE_PINS_LIB="$candidate"; break; }
+done
+[ -n "$WA_NODE_PINS_LIB" ] || fail "node_pins_lib_missing: no scripts/lib/node-pins.sh beside $(dirname -- "$0")/../lib (it is what reads this node's own pin, which a rollback writes)"
+. "$WA_NODE_PINS_LIB"
 
 # ---- 0a. rollback: the one action that must work with no network and no index --------------------
 #
@@ -353,6 +362,25 @@ if [ "$state" != current ] || [ "$check" = 1 ]; then
   else
     ANCESTRY_CHECKED=yes
     say "the bundle is the running commit (${RUNNING_COMMIT:0:12}): nothing to compare"
+  fi
+  # A release install has no checkout, so the pin's release question is answered from the commits it was given:
+  # PIN_TREE stays empty and "cannot tell" is a pin that holds.
+  PIN_TARGET="${candidate_commit:-}"; PIN_TREE=""
+  # THE NODE'S OWN PIN. A pin in the coordinator's store gates requests made THROUGH that coordinator; an install
+  # started here never reads that store, so the node keeps its own copy (written by a rollback: lua/core/
+  # remote_update.lua, read by scripts/lib/node-pins.sh) and it is read before anything is replaced.
+  # Only a target that IS the pinned commit, IS the awaited commit, or CONTAINS it releases the pin; anything
+  # this reader cannot decide stays pinned, and the way out is named in the refusal.
+  NODE_NAME="$(wa_node_name)"
+  PIN_STATE=0; PIN_REPORT="$(wa_node_pin_gate "$NODE_NAME" "" "${PIN_TARGET:-}" "${PIN_TREE:-}" 2>&1)" || PIN_STATE=$?
+  [ -n "$PIN_REPORT" ] && say "$PIN_REPORT"
+  if [ "$PIN_STATE" != 0 ]; then
+    if [ "force" = 1 ] && [ -n "reason" ]; then
+      say "OVERRIDE, recorded: $NODE_NAME is pinned and this install does not release it; going on because --force --reason says so"
+      say "force_requested rule=node_pinned reason=${reasonVar} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      fail "node_pinned: $NODE_NAME carries an active pin, so this install was refused - a pin is a record that the node was put somewhere on purpose, and an ordinary install is exactly what undoes it (measured 18/11: three hand-made rollbacks did not survive the next one). Nothing was replaced. $(wa_pin_escape "$NODE_NAME")"
+    fi
   fi
   say "verified: $(mval wa_version) - every member matches"
 fi

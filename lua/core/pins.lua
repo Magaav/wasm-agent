@@ -78,14 +78,30 @@ function M.records()
   return M.parse(read(M.path()) or '')
 end
 
+-- Does a record name this node? A node answers to its NAME and to its node_id, and a pin written under one
+-- has to gate a request that addresses it by the other: MEASURED, a rollback records the node as "work" while
+-- `wa update <node_id>` and the node's own store know only the id, so a gate that compared one spelling would
+-- miss the pin entirely.
+local function names_node(record, node, node_id)
+  local want_node, want_id = trim(node), trim(node_id)
+  local have_node, have_id = trim(record.node), trim(record.node_id)
+  if want_node ~= '' and (have_node == want_node or have_id == want_node) then return true end
+  if want_id ~= '' and (have_id == want_id or have_node == want_id) then return true end
+  return false
+end
+
 -- The pin in force for a node: the LAST record written for it, when that record says active. History is
 -- kept, so "when was this node pinned, by whom, and why" is answerable after the fact.
-function M.active(node)
+--
+-- The second argument is the node's id, and it is what makes ALIASES safe: a pin written for "work" must gate
+-- a request addressed to work's node_id, and a pin the node wrote for itself (its own store, item 6) names the
+-- id. Callers resolve the selector first (nodes.find) and pass both.
+function M.active(node, node_id)
   local wanted = trim(node)
-  if wanted == '' then return nil end
+  if wanted == '' and trim(node_id) == '' then return nil end
   local latest = nil
   for _, record in ipairs(M.records()) do
-    if trim(record.node) == wanted and trim(record.state) ~= '' then latest = record end
+    if names_node(record, wanted, node_id) and trim(record.state) ~= '' then latest = record end
   end
   if latest and trim(latest.state) == 'active' then return latest end
   return nil
@@ -111,7 +127,7 @@ local function caller_name()
 end
 
 local function field_block(record)
-  local order = { 'id', 'node', 'kind', 'state', 'commit', 'binary_sha256', 'reason', 'by', 'at', 'until_', 'await', 'supersedes' }
+  local order = { 'id', 'node', 'node_id', 'kind', 'state', 'commit', 'binary_sha256', 'rolled_back_from', 'reason', 'by', 'at', 'until_', 'await', 'supersedes' }
   local lines = { 'schema=' .. M.SCHEMA }
   for _, key in ipairs(order) do
     if record[key] ~= nil and record[key] ~= '' then
@@ -156,10 +172,14 @@ function M.set(fields)
   local at = stamp()
   local previous = M.active(node)
   local record = {
-    id = new_id(node, at), node = node, state = 'active',
+    id = new_id(node, at), node = node, node_id = trim(fields.node_id), state = 'active',
     kind = trim(fields.kind) ~= '' and trim(fields.kind) or 'pin',
     commit = trim(fields.commit) ~= '' and trim(fields.commit) or 'unknown',
     binary_sha256 = trim(fields.binary_sha256),
+    -- The commit a rollback went BACK from. It is the pin's default "await": the reason a pin must not become a
+    -- permanent trap is that the history it went back from keeps moving, and a target that contains that commit
+    -- is the operator's own statement that the way forward is open again.
+    rolled_back_from = trim(fields.rolled_back_from),
     reason = reason, by = trim(fields.by) ~= '' and trim(fields.by) or caller_name(), at = at,
     until_ = trim(fields.until_), await = trim(fields.await),
     supersedes = previous and previous.id or '',
@@ -175,12 +195,14 @@ end
 function M.clear(node, opts)
   opts = type(opts) == 'table' and opts or {}
   node = trim(node)
-  local current = M.active(node)
+  local current = M.active(node, opts.node_id)
   if not current then return nil, { error = 'node_not_pinned', observed = tostring(node) .. ' carries no active pin; nothing was cleared' } end
   local at = stamp()
   local record = {
-    id = new_id(node, at), node = node, kind = 'unpin', state = 'cleared',
-    commit = current.commit, reason = trim(opts.reason) ~= '' and trim(opts.reason) or 'unpinned',
+    id = new_id(node, at), node = node, node_id = trim(opts.node_id) ~= '' and trim(opts.node_id) or trim(current.node_id),
+    kind = trim(opts.kind) ~= '' and trim(opts.kind) or 'unpin', state = 'cleared',
+    commit = current.commit, rolled_back_from = current.rolled_back_from,
+    reason = trim(opts.reason) ~= '' and trim(opts.reason) or 'unpinned',
     by = trim(opts.by) ~= '' and trim(opts.by) or caller_name(), at = at, supersedes = current.id,
   }
   local written, problem = M.write(record)
@@ -199,10 +221,20 @@ function M.overdue(record, now)
   return (now or os.time()) > deadline, 'date'
 end
 
--- Does a target release this pin? Two ways, and both are the operator's own statement: the target is the
--- pinned commit itself, or the pin named the commit whose landing it awaits and the target contains it.
--- Containment is asked of git in the node's runtime tree; with no tree the answer is "cannot tell", which
--- is reported as unknown and never as released.
+-- Does a target release this pin? Three ways, and each is the operator's own statement:
+--
+--   * the target IS the pinned commit (re-installing where the node already is);
+--   * the target IS the awaited commit; or
+--   * the target CONTAINS the awaited commit.
+--
+-- The third is the one that was missing, and it is the one that matters: a pin whose awaited fix landed in a
+-- commit that is not the commit being deployed could never release, so the pin blocked its own fix and the only
+-- way out was --unpin by hand. MEASURED: a rollback pin whose "await" was the commit the node was rolled back
+-- from never released, because "release" required target == await exactly and the target is normally a
+-- descendant of it.
+--
+-- Containment is asked of git in the node's runtime tree; with no tree the answer is "cannot tell" (nil), which
+-- every caller reports as unknown and never as released.
 function M.released(record, target_commit, tree)
   if type(record) ~= 'table' then return nil end
   local target = trim(target_commit)
@@ -210,7 +242,8 @@ function M.released(record, target_commit, tree)
   if target ~= '' and (pinned == target) then return { released = true, why = 'the target is the pinned commit' } end
   local await = trim(record.await)
   if await == '' then return { released = false, why = 'the pin names no awaited commit' } end
-  if target ~= '' and await == target then return { released = true, why = 'the target is the awaited commit' } end
+  if target ~= '' and await == target then return { released = true, why = 'the target is the awaited commit ' .. await:sub(1, 12) } end
+  if target == '' then return nil end
   if trim(tree) == '' then return nil end
   local quoted = await:gsub("'", "'\\''")
   local command = "git -C '" .. slashes(tree):gsub("'", "'\\''") .. "' merge-base --is-ancestor '" .. quoted .. "' '" .. target:gsub("'", "'\\''") .. "' 2>/dev/null"
@@ -222,6 +255,15 @@ function M.released(record, target_commit, tree)
   if ok_close == nil then return nil end
   if exit_code == 0 then return { released = true, why = 'the target contains the awaited commit ' .. await:sub(1, 12) } end
   return { released = false, why = 'the target does not contain the awaited commit ' .. await:sub(1, 12) }
+end
+
+-- How to get out of a pin, in the words the CLI accepts. One sentence, because the refusal that quotes it is the
+-- only place an operator meets a pin they did not write.
+function M.escape_hatch(node)
+  local name = trim(node) ~= '' and trim(node) or '<node>'
+  return "wa update " .. name .. " --unpin --reason <text> (releases it and records why); "
+    .. "or deploy a target that contains the awaited commit (that releases it by itself); "
+    .. "or --force --reason <text> on the move you mean (recorded)"
 end
 
 function M.summary_line(record)

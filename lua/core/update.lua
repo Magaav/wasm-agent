@@ -340,7 +340,11 @@ end
 -- written only to fail. That is the one precondition this module checks, because it is the one it
 -- already knows; the rest belong to `deploy.sh`, and two implementations of the same precondition
 -- are two things to keep in step.
-function M.verdict(facts)
+function M.verdict(facts, options)
+  -- `options` was read here without ever being a parameter: this function referenced an UNDEFINED GLOBAL, so the
+  -- pin check below raised "attempt to index a nil value (global 'options')" on every /update that reached it and
+  -- the local update path could not answer at all. The parameter is explicit now, and every caller passes it.
+  options = type(options) == 'table' and options or {}
   if not facts.tree then
     return {
       ok = false, status = "no_runtime_tree", error = "no_runtime_tree",
@@ -371,18 +375,31 @@ function M.verdict(facts)
   -- A PINNED NODE DOES NOT MOVE ITSELF FORWARD EITHER. The pin is this node's own record that it was put
   -- where it is on purpose (lua/core/pins.lua); a local update that ignored it would undo the rollback an
   -- operator recorded, which is the failure the remote path is gated against in the same words.
-  if not options.force then
-    local ok_name, local_name = pcall(function() return dofile("lua/core/nodes.lua").node_name() end)
-    local pin = ok_name and pins.active(tostring(local_name or "")) or nil
-    if pin then
-      local target = trim(git(facts.tree or "", "rev-parse HEAD") or "")
-      local released = target ~= "" and pins.released(pin, target, facts.tree or "") or nil
-      if not (released and released.released == true) then
+  local ok_name, local_name = pcall(function() return dofile("lua/core/nodes.lua").node_name() end)
+  local ok_identity, identity = pcall(function() return dofile("lua/core/nodes.lua").identity() end)
+  local local_id = (ok_identity and type(identity) == "table") and tostring(identity.node_id or "") or ""
+  -- A node answers to its name AND its id, and a pin written under either has to gate this path: the node's own
+  -- store names both, and an operator may have recorded only one of them.
+  local pin = pins.active(ok_name and tostring(local_name or "") or "", local_id)
+  if pin then
+    local target = trim(git(facts.tree or "", "rev-parse HEAD") or "")
+    local released = target ~= "" and pins.released(pin, target, facts.tree or "") or nil
+    if not (released and released.released == true) then
+      if options.force == true and trim(options.reason) == "" then
+        return {
+          ok = false, status = "override_reason_required", error = "override_reason_required", tree = facts.tree, pin = pin,
+          observed = pins.summary_line(pin),
+          message = "this node carries an active pin, and --force overrides a record that says it was put somewhere on purpose: say why.",
+          next = "say why (recorded): --force --reason <text>, or " .. pins.escape_hatch(local_name),
+          installed_commit = facts.installed_commit, candidate = facts.candidate,
+        }
+      end
+      if options.force ~= true then
         return {
           ok = false, status = "node_pinned", error = "node_pinned", tree = facts.tree, pin = pin,
           observed = pins.summary_line(pin) .. (released and released.why and ("; " .. tostring(released.why)) or ""),
           message = "this node carries an active pin, so its own update was refused.",
-          next = "wa update <node> --unpin --reason <text> when it may move, or --force --reason <text> to move it anyway (recorded)",
+          next = pins.escape_hatch(local_name),
           installed_commit = facts.installed_commit, candidate = facts.candidate,
         }
       end
@@ -746,7 +763,7 @@ function M.run(options)
       }
     end
   end
-  local verdict = decorate(M.verdict(facts), facts)
+  local verdict = decorate(M.verdict(facts, options), facts)
   if verdict.status ~= "queue" then
     return verdict
   end

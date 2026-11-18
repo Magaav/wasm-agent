@@ -138,5 +138,22 @@ done
 grep -q 'wa_record_describes' "$ROOT/scripts/lib/install-record.sh" && ok "the record-vs-bytes check is the shared one" || bad "no shared record-vs-bytes check"
 if grep -qE '^FORCE=0; REASON=""' "$ROOT/scripts/fleet-install.sh"; then bad "fleet-install.sh still wipes --force/--reason after parsing them"; else ok "fleet-install.sh keeps the --force/--reason it parsed"; fi
 
+
+echo "test-install-guards: no backticks inside a double-quoted message (they run)"
+# bootstrap.sh refused a downgrade with:  fail "... the sentinel's `wa update <node> --rollback` (it records a pin) ..."
+# Between DOUBLE quotes that is a command substitution: the refusal RAN 'wa update <node> --rollback' as a command
+# and put its output in the middle of the sentence, on the one path where the node is already in trouble. A
+# message is quoted with ' or with escaped backticks; it is never executed.
+FIXTURE="$WORK/backtick-fixture.sh"
+printf '%s\n' 'fail "use the sentinel'"'"'s `wa update <node> --rollback` (it records a pin)"' > "$FIXTURE"
+if grep -qE '(fail|say|die|note|printf|echo) "[^"]*`' "$FIXTURE"; then ok "the check catches the shape that was shipped"; else bad "the check does not catch a backtick inside a double-quoted message"; fi
+if grep -nE '(fail|say|die|note|printf|echo) "[^"]*`' "$ROOT"/scripts/deploy.sh "$ROOT"/scripts/upgrade.sh \
+     "$ROOT"/scripts/fleet-install.sh "$ROOT"/scripts/linux/bootstrap.sh "$ROOT"/scripts/publish-node-binaries.sh \
+     "$ROOT"/scripts/publish-components.sh "$ROOT"/scripts/rollback-node.sh "$ROOT"/scripts/lib/*.sh 2>/dev/null; then
+  bad "an installer still runs a command inside a message (backticks in double quotes)"
+else
+  ok "no installer message runs a command"
+fi
+
 printf 'test-install-guards: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
