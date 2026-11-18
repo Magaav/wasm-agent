@@ -3166,6 +3166,11 @@ struct ConsoleInput {
     box_drag: Option<usize>,
     /// Images pasted with Ctrl+V this session, by the number in their `[Image #n]` token: (mime, base64).
     pasted_images: Vec<(String, String)>,
+    /// The image tokens this host itself put into the draft in progress, and the ones that survived
+    /// into the line submitted last. `host.input_image` answers only for the second list: a
+    /// `[Image #n]` typed by hand, or left over from an earlier draft, attaches nothing.
+    draft_images: Vec<usize>,
+    submitted_images: Vec<usize>,
     /// `host.transcript_hold(true)`: writes are kept, not drawn, until the hold ends (a replay).
     transcript_held: bool,
     /// The long tool call's line as this process last drew it (`wa_term::tool_progress`, the host's own
@@ -3237,7 +3242,7 @@ fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
             // A link under the pointer: copied (operator 17/11 - "copy it to the clipboard"), same notice.
             if !state.transcript.bar_active() {
                 let shown = state.transcript.view(width, rows);
-                if let Some(url) = shown.get(row.saturating_sub(1)).and_then(|line| url_at(&wa_term::selection::plain(line), col)) {
+                if let Some(url) = shown.get(row.saturating_sub(1)).and_then(|line| wa_term::links::at(&wa_term::selection::plain(line), col)) {
                     let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&url));
                     let count = url.chars().count();
                     if let Some(editor) = state.editor.as_mut() {
@@ -3648,6 +3653,10 @@ fn console_reader() {
                                 }
                                 CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
                                 state.transcript.to_bottom();
+                                // The image tokens this draft carries, and only those: the next
+                                // draft starts with none, so `[Image #1]` typed into it is text.
+                                state.submitted_images = submitted_tokens(&state.draft_images, &text);
+                                state.draft_images.clear();
                                 state.lines.push(text);
                                 sync_queued(&mut state);
                             }
@@ -3664,13 +3673,15 @@ fn console_reader() {
                                     editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
                                 }
                             }
+                            // A dropped (or pasted) path to an image file, and Ctrl+V on a
+                            // clipboard image: the same attachment inserted the same way. One
+                            // function decides the token number, keeps the bytes and records that
+                            // this draft carries it; the two arms differ only in what they replace.
                             wa_term::terminal_editor::Action::Pasted(from) => {
                                 let span = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor()));
                                 if let Some((text, to)) = span {
                                     if let Some((mime, bytes)) = dropped_image(&text) {
-                                        let kb = bytes.len() / 1024;
-                                        state.pasted_images.push((mime, base64::engine::general_purpose::STANDARD.encode(&bytes)));
-                                        let token = format!("[Image #{}]", state.pasted_images.len());
+                                        let (token, kb) = attach_image(&mut state, &mime, bytes);
                                         if let Some(editor) = state.editor.as_mut() {
                                             editor.replace_range(from, to, &token);
                                             editor.notice = format!("{token} attached ({kb} KB)");
@@ -3681,9 +3692,7 @@ fn console_reader() {
                             wa_term::terminal_editor::Action::PasteImage => {
                                 let note = match read_clipboard_image() {
                                     Ok((mime, bytes)) => {
-                                        let kb = bytes.len() / 1024;
-                                        state.pasted_images.push((mime, base64::engine::general_purpose::STANDARD.encode(&bytes)));
-                                        let token = format!("[Image #{}]", state.pasted_images.len());
+                                        let (token, kb) = attach_image(&mut state, &mime, bytes);
                                         if let Some(editor) = state.editor.as_mut() { editor.insert_text(&token); }
                                         format!("{token} attached ({kb} KB)")
                                     }
@@ -4134,44 +4143,63 @@ pub extern "C-unwind" fn transcript_expand(l: *mut LuaState) -> c_int {
     1
 }
 
-/// An image from the system clipboard, read where this process runs - the way pi and Claude Code do it:
-/// `wl-paste --list-types` then `wl-paste --type <image type>` on Wayland, `xclip ... -t TARGETS` then
-/// `-t <type> -o` on X11. `WA_CLIPBOARD=off` (a sandbox) never reads the outer clipboard; a host with no
-/// clipboard tool says so. Err is the one-line notice the footer shows.
-fn read_clipboard_image() -> Result<(String, Vec<u8>), String> {
-    if std::env::var("WA_CLIPBOARD").map(|v| v == "off").unwrap_or(false) {
+/// What this process can see of the system clipboard: the switch that turns reading off, and which
+/// of the two display servers is reachable.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ClipboardHost {
+    off: bool,
+    wayland: bool,
+    x11: bool,
+}
+
+impl ClipboardHost {
+    fn from_env() -> Self {
+        ClipboardHost {
+            off: std::env::var("WA_CLIPBOARD").map(|value| value == "off").unwrap_or(false),
+            wayland: std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            x11: std::env::var_os("DISPLAY").is_some(),
+        }
+    }
+}
+
+/// The image types asked of a clipboard, in preference order, and the size a paste may be. Both are
+/// data rather than literals inside the reader so the rules can be tested without a clipboard.
+const CLIPBOARD_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const CLIPBOARD_MAX: usize = 20 * 1024 * 1024;
+
+/// The first type this node understands from a clipboard's own type list.
+fn pick_clipboard_type(listed: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(listed);
+    CLIPBOARD_TYPES.iter().copied().find(|kind| text.lines().any(|line| line.trim() == *kind))
+}
+
+/// The reader, given the host it sees and the way it runs a clipboard tool: `wl-paste --list-types`
+/// then `wl-paste --type <type>` on Wayland, `xclip ... -t TARGETS` then `-t <type> -o` on X11. The
+/// one-line notice the footer shows is the error.
+fn read_clipboard_image_with(host: ClipboardHost, run: impl Fn(&str, &[&str]) -> Option<Vec<u8>>)
+    -> Result<(String, Vec<u8>), String> {
+    if host.off {
         return Err("clipboard reading is off here (WA_CLIPBOARD=off)".into());
     }
-    const TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-    const MAX: usize = 20 * 1024 * 1024;
-    let run = |program: &str, args: &[&str]| -> Option<Vec<u8>> {
-        let out = std::process::Command::new(program).args(args)
-            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
-        out.status.success().then_some(out.stdout)
-    };
-    let pick = |listed: &[u8]| -> Option<&'static str> {
-        let text = String::from_utf8_lossy(listed);
-        TYPES.iter().copied().find(|t| text.lines().any(|line| line.trim() == *t))
-    };
     let mut tried = false;
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+    if host.wayland {
         if let Some(listed) = run("wl-paste", &["--list-types"]) {
             tried = true;
-            if let Some(mime) = pick(&listed) {
-                if let Some(bytes) = run("wl-paste", &["--no-newline", "--type", mime]) {
-                    if !bytes.is_empty() && bytes.len() <= MAX { return Ok((mime.to_string(), bytes)); }
-                    if bytes.len() > MAX { return Err("the clipboard image is over 20 MB".into()); }
+            if let Some(kind) = pick_clipboard_type(&listed) {
+                if let Some(bytes) = run("wl-paste", &["--no-newline", "--type", kind]) {
+                    if bytes.len() > CLIPBOARD_MAX { return Err("the clipboard image is over 20 MB".into()); }
+                    if !bytes.is_empty() { return clipboard_image(bytes); }
                 }
             }
         }
     }
-    if std::env::var_os("DISPLAY").is_some() {
+    if host.x11 {
         if let Some(listed) = run("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"]) {
             tried = true;
-            if let Some(mime) = pick(&listed) {
-                if let Some(bytes) = run("xclip", &["-selection", "clipboard", "-t", mime, "-o"]) {
-                    if !bytes.is_empty() && bytes.len() <= MAX { return Ok((mime.to_string(), bytes)); }
-                    if bytes.len() > MAX { return Err("the clipboard image is over 20 MB".into()); }
+            if let Some(kind) = pick_clipboard_type(&listed) {
+                if let Some(bytes) = run("xclip", &["-selection", "clipboard", "-t", kind, "-o"]) {
+                    if bytes.len() > CLIPBOARD_MAX { return Err("the clipboard image is over 20 MB".into()); }
+                    if !bytes.is_empty() { return clipboard_image(bytes); }
                 }
             }
         }
@@ -4180,47 +4208,100 @@ fn read_clipboard_image() -> Result<(String, Vec<u8>), String> {
         else { "no clipboard here: wl-paste (Wayland) or xclip (X11) is needed, on the machine wa chat runs on".into() })
 }
 
-/// The URL under column `col` (1-based) of a plain screen row, trailing punctuation dropped.
-fn url_at(line: &str, col: usize) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    // the char index under the column (cells, not bytes)
-    let (mut used, mut index) = (0usize, None);
-    for (i, ch) in chars.iter().enumerate() {
-        let w = wa_term::terminal_editor::cell_width_of(*ch).max(1);
-        if col > used && col <= used + w { index = Some(i); break; }
-        used += w;
+/// A clipboard payload as an attachment: the BYTES say which image it is, and a payload that is not
+/// one of them is refused instead of being attached under a name it does not match.
+fn clipboard_image(bytes: Vec<u8>) -> Result<(String, Vec<u8>), String> {
+    match sniff_image(&bytes) {
+        Some(mime) => Ok((mime.to_string(), bytes)),
+        None => Err("the clipboard says it holds an image, but its bytes are not a PNG, JPEG, WebP or GIF".into()),
     }
-    let index = index?;
-    let text: String = chars.iter().collect();
-    for scheme in ["https://", "http://"] {
-        let mut from = 0usize;
-        while let Some(found) = text[from..].find(scheme) {
-            let start_byte = from + found;
-            let start = text[..start_byte].chars().count();
-            let mut end = start;
-            while end < chars.len() && !chars[end].is_whitespace() && !matches!(chars[end], '<' | '>' | '"' | '\'' | '`' | '│' | ')' | ']') { end += 1; }
-            while end > start && matches!(chars[end - 1], '.' | ',' | ';' | ':' | '!' | '?') { end -= 1; }
-            if index >= start && index < end && end > start + scheme.len() {
-                return Some(chars[start..end].iter().collect());
-            }
-            from = start_byte + scheme.len();
-        }
-    }
+}
+
+/// An image from the system clipboard, read where this process runs - the way pi and Claude Code do
+/// it. Err is the one-line notice the footer shows.
+fn read_clipboard_image() -> Result<(String, Vec<u8>), String> {
+    read_clipboard_image_with(ClipboardHost::from_env(), |program, args| {
+        let out = std::process::Command::new(program).args(args)
+            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+        out.status.success().then_some(out.stdout)
+    })
+}
+
+/// The image types this node attaches, decided by the payload's own first bytes and never by a file
+/// name: a path is text a terminal, a file manager or a page hands us, while the bytes are the image.
+pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { return Some("image/png"); }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) { return Some("image/jpeg"); }
+    if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" { return Some("image/webp"); }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { return Some("image/gif"); }
     None
 }
 
-/// A pasted (or dropped) single path to an image file: its mime and bytes. Quotes, `file://` and `%20` are what
-/// terminals and file managers wrap a dropped path in.
+/// The largest image this node keeps for a message: it holds the bytes and the provider bills for
+/// them, so a huge drop is refused rather than sent.
+const IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The directories an attached image may come from: this node's home (which is WASM_AGENT_HOME when
+/// set), the user's home, the working directory and the temporary directory. Anything else is
+/// outside, and a symlink is followed before the question is asked - which is the point, since a link
+/// is exactly how a path that looks local reads a private file.
+fn image_roots() -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    let mut add = |root: String| {
+        if root.trim().is_empty() { return; }
+        let path = std::path::PathBuf::from(root);
+        let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+        if !roots.contains(&resolved) { roots.push(resolved); }
+    };
+    add(wa_host_support::paths::resolve_home());
+    add(std::env::var("HOME").unwrap_or_default());
+    if let Ok(cwd) = std::env::current_dir() { add(cwd.to_string_lossy().to_string()); }
+    add(std::env::temp_dir().to_string_lossy().to_string());
+    roots
+}
+
+/// The path an attachment may read, or None. Symlinks are resolved first (so a link out of an
+/// allowed directory is refused by where it LANDS, not by where it appears to be), then the resolved
+/// path must sit inside one of [image_roots].
+fn attachment_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    if image_roots().iter().any(|root| resolved.starts_with(root)) { Some(resolved) } else { None }
+}
+
+/// A pasted (or dropped) single path to an image file: its mime and bytes, or None. Quotes,
+/// `file://` and `%20` are what terminals and file managers wrap a dropped path in.
+///
+/// Three refusals beyond "is it a file": the path must resolve inside an allowed directory
+/// ([attachment_path]); the size must be bounded ([IMAGE_MAX_BYTES]); and the BYTES must be a PNG,
+/// JPEG, WebP or GIF ([sniff_image]). The last one is what the extension used to stand for, and an
+/// extension is only a name.
 fn dropped_image(text: &str) -> Option<(String, Vec<u8>)> {
     let mut path = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
     if path.contains('\n') || path.is_empty() { return None; }
     if let Some(rest) = path.strip_prefix("file://") { path = rest.replace("%20", " "); }
-    let lower = path.to_lowercase();
-    let mime = if lower.ends_with(".png") { "image/png" } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") { "image/jpeg" }
-        else if lower.ends_with(".webp") { "image/webp" } else if lower.ends_with(".gif") { "image/gif" } else { return None };
-    let meta = std::fs::metadata(&path).ok()?;
-    if !meta.is_file() || meta.len() == 0 || meta.len() > 20 * 1024 * 1024 { return None; }
-    Some((mime.to_string(), std::fs::read(&path).ok()?))
+    let resolved = attachment_path(std::path::Path::new(&path))?;
+    let meta = std::fs::metadata(&resolved).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > IMAGE_MAX_BYTES { return None; }
+    let bytes = std::fs::read(&resolved).ok()?;
+    let mime = sniff_image(&bytes)?;
+    Some((mime.to_string(), bytes))
+}
+
+/// Keep one image for this session and answer the token that names it plus the size said in KB. The
+/// only place a token is minted, so a dropped path and a Ctrl+V paste cannot number or record their
+/// image differently.
+fn attach_image(state: &mut ConsoleInput, mime: &str, bytes: Vec<u8>) -> (String, usize) {
+    let kb = bytes.len() / 1024;
+    state.pasted_images.push((mime.to_string(), base64::engine::general_purpose::STANDARD.encode(&bytes)));
+    let number = state.pasted_images.len();
+    state.draft_images.push(number);
+    (format!("[Image #{number}]"), kb)
+}
+
+/// The tokens of `inserted` that the submitted line still carries: an image the reader deleted from
+/// the draft is not sent, and an `[Image #n]` the reader typed is not in `inserted` at all.
+fn submitted_tokens(inserted: &[usize], text: &str) -> Vec<usize> {
+    inserted.iter().copied().filter(|number| text.contains(&format!("[Image #{number}]"))).collect()
 }
 
 /// `host.transcript_copy_first(text)`: the current block's first line becomes copyable with `text` (a code-mode
@@ -4234,12 +4315,31 @@ pub extern "C-unwind" fn transcript_copy_first(l: *mut LuaState) -> c_int {
     1
 }
 
-/// `host.input_image(n)`: the image pasted as `[Image #n]` this session, `{"mime","data"}` (base64), or nil.
+/// `host.link_span(text)`: the first bare URL in `text` as "start,stop", 1-based byte offsets
+/// inclusive (Lua string positions), or nil. This is THE URL detector (`wa_term::links`): the renderer
+/// (`lua/core/markdown.lua`) underlines what this answers, and a click copies what a lookup in the same
+/// function answers, so the two can no longer disagree about where a link ends. Two numbers in one
+/// string rather than a table: the only caller slices the line with them.
+pub extern "C-unwind" fn link_span(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    match wa_term::links::first_bytes(&text) {
+        Some((start, end)) => {
+            let answer = format!("{},{}", start + 1, end);
+            unsafe { lua_pushlstring(l, answer.as_ptr() as *const c_char, answer.len()) };
+        }
+        None => unsafe { wa_host_support::lua::lua_pushnil(l) },
+    }
+    1
+}
+
+/// `host.input_image(n)`: the image the line just submitted carried as `[Image #n]`,
+/// `{"mime","data"}` (base64), or nil. The gate is the draft that inserted it: a token typed by hand,
+/// or one left over from an earlier message, names no image and answers nil.
 pub extern "C-unwind" fn input_image(l: *mut LuaState) -> c_int {
     let n = arg_integer(l, 1).unwrap_or(0);
     let (lock, _) = console_input();
     let state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    if n >= 1 {
+    if n >= 1 && state.submitted_images.contains(&(n as usize)) {
         if let Some((mime, data)) = state.pasted_images.get((n - 1) as usize) {
             let value = serde_json::json!({ "mime": mime, "data": data }).to_string();
             unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
@@ -5383,5 +5483,132 @@ mod tool_call_assembly_tests {
         assert_eq!(merge_name("bash", "ba"), "bash", "a repeat from the start changes nothing");
         assert_eq!(merge_name("bash", "rea"), "bashrea", "a different fragment is kept, not dropped");
         assert_eq!(merge_name("bash", "tool"), "bashtool", "an unexpected fragment is kept, not dropped");
+    }
+}
+
+#[cfg(test)]
+mod image_and_token_tests {
+    use super::*;
+
+    /// A tiny but real PNG header: the bytes a sniff reads, not a whole image.
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR";
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10];
+    const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00";
+    const WEBP: &[u8] = b"RIFF\x24\x00\x00\x00WEBPVP8 ";
+
+    #[test]
+    fn the_bytes_decide_the_type_and_a_name_does_not() {
+        assert_eq!(sniff_image(PNG), Some("image/png"));
+        assert_eq!(sniff_image(JPEG), Some("image/jpeg"));
+        assert_eq!(sniff_image(GIF), Some("image/gif"));
+        assert_eq!(sniff_image(WEBP), Some("image/webp"));
+        assert_eq!(sniff_image(b"#!/bin/sh\necho not an image\n"), None);
+        assert_eq!(sniff_image(b"RIFF"), None, "a truncated RIFF is not a WebP");
+        assert_eq!(sniff_image(b""), None);
+    }
+
+    fn scratch(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wa-attach-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("scratch file");
+        path
+    }
+
+    #[test]
+    fn a_dropped_path_is_read_when_it_is_an_image_in_an_allowed_directory() {
+        let path = scratch("shot.png", PNG);
+        let (mime, bytes) = dropped_image(&path.to_string_lossy()).expect("an attached image");
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, PNG);
+        let quoted = format!("'{}'", path.to_string_lossy());
+        assert!(dropped_image(&quoted).is_some(), "a shell-quoted path is the same path");
+        let uri = format!("file://{}", path.to_string_lossy());
+        assert!(dropped_image(&uri).is_some(), "so is a file:// URI");
+    }
+
+    #[test]
+    fn a_file_whose_bytes_are_not_an_image_is_refused_whatever_it_is_called() {
+        let path = scratch("lie.png", b"#!/bin/sh\nrm -rf /\n");
+        assert!(dropped_image(&path.to_string_lossy()).is_none(), "the extension is not evidence");
+    }
+
+    #[test]
+    fn an_empty_or_absent_path_is_refused() {
+        assert!(dropped_image("").is_none());
+        assert!(dropped_image("two\nlines").is_none());
+        assert!(dropped_image("/nonexistent/wasm-agent/shot.png").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_lands_outside_the_allowed_directories_is_refused() {
+        let secret = scratch("outside.png", PNG);
+        let link = std::env::temp_dir().join(format!("wa-attach-link-{}.png", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/etc/hostname", &link).expect("symlink");
+        assert!(dropped_image(&link.to_string_lossy()).is_none(),
+            "a link out of the allowed directories is refused by where it lands");
+        let inside = std::env::temp_dir().join(format!("wa-attach-inside-{}.png", std::process::id()));
+        let _ = std::fs::remove_file(&inside);
+        std::os::unix::fs::symlink(&secret, &inside).expect("symlink");
+        assert!(dropped_image(&inside.to_string_lossy()).is_some(),
+            "a link that lands inside them is the image it points at");
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&inside);
+    }
+
+    #[test]
+    fn the_clipboard_reader_says_why_it_cannot_read_instead_of_pretending() {
+        let off = ClipboardHost { off: true, wayland: true, x11: true };
+        assert_eq!(read_clipboard_image_with(off, |_, _| Some(PNG.to_vec())).unwrap_err(),
+            "clipboard reading is off here (WA_CLIPBOARD=off)");
+        let none = ClipboardHost::default();
+        assert!(read_clipboard_image_with(none, |_, _| Some(PNG.to_vec())).unwrap_err()
+            .contains("no clipboard here"));
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let (mime, bytes) = read_clipboard_image_with(wayland, |program, args| {
+            assert_eq!(program, "wl-paste");
+            if args.contains(&"--list-types") { Some(b"text/plain\nimage/png\n".to_vec()) } else { Some(PNG.to_vec()) }
+        }).expect("a clipboard image");
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, PNG);
+    }
+
+    #[test]
+    fn a_clipboard_that_announces_an_image_it_does_not_hold_is_refused() {
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let refused = read_clipboard_image_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { Some(b"image/png\n".to_vec()) } else { Some(b"not an image".to_vec()) }
+        });
+        assert!(refused.unwrap_err().contains("not a PNG, JPEG, WebP or GIF"));
+    }
+
+    #[test]
+    fn a_clipboard_type_the_node_does_not_understand_is_not_read() {
+        assert_eq!(pick_clipboard_type(b"text/html\nimage/svg+xml\n"), None);
+        assert_eq!(pick_clipboard_type(b"image/svg+xml\nimage/gif\n"), Some("image/gif"));
+    }
+
+    #[test]
+    fn only_the_tokens_this_draft_inserted_survive_into_the_message() {
+        // Two images pasted, the first deleted from the draft, a third token typed by hand.
+        assert_eq!(submitted_tokens(&[1, 2], "look [Image #2] and [Image #3]"), vec![2]);
+        assert_eq!(submitted_tokens(&[], "typed [Image #1] by hand"), Vec::<usize>::new());
+        assert_eq!(submitted_tokens(&[1], "[Image #1]"), vec![1]);
+        assert_eq!(submitted_tokens(&[1], "[Image #10] is not [Image #1]"), vec![1]);
+    }
+
+    #[test]
+    fn the_attachment_mints_one_token_number_and_records_it_for_this_draft() {
+        let mut state = ConsoleInput::default();
+        let (token, kb) = attach_image(&mut state, "image/png", vec![0u8; 4096]);
+        assert_eq!(token, "[Image #1]");
+        assert_eq!(kb, 4);
+        let (token, _) = attach_image(&mut state, "image/gif", GIF.to_vec());
+        assert_eq!(token, "[Image #2]");
+        assert_eq!(state.draft_images, vec![1, 2]);
+        assert_eq!(state.pasted_images.len(), 2);
+        assert_eq!(state.pasted_images[1].0, "image/gif");
     }
 }

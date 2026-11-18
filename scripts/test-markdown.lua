@@ -50,6 +50,13 @@ local function recorder()
     for _, piece in ipairs(pieces) do out[#out + 1] = piece.text end
     return table.concat(out)
   end
+  -- Every piece carrying a style, concatenated: what a reader would see painted that way. A role that a
+  -- pattern extends by one character (a link that swallowed its full stop) is exactly what this shows.
+  function rec.styled(style)
+    local out = {}
+    for _, piece in ipairs(pieces) do if piece.style == style then out[#out + 1] = piece.text end end
+    return table.concat(out)
+  end
   return rec
 end
 
@@ -123,6 +130,15 @@ end
 local _, bare = render("see https://example.invalid/x for more")
 ok(has(bare.text(), "https://example.invalid/x"), "a bare url is kept, not swallowed")
 ok(has(bare.text(), "for more"), "and the words after it survive")
+-- The bare-URL detector is the HOST one (host.link_span, rust/wa-term/src/links.rs): the renderer and the
+-- click that copies a link ask one function, so a link underlined here is exactly the string a click on it
+-- copies. A sentence's full stop and a wrapping bracket are not part of it, which is the pair the old
+-- Lua pattern and the click used to disagree about.
+local _, punctuated = render("see https://example.invalid/x. and (https://example.invalid/y) too")
+ok(punctuated.styled("underline+mdLinkUrl") == "https://example.invalid/xhttps://example.invalid/y",
+  "the links are underlined exactly, without the full stop or the bracket: " .. punctuated.styled("underline+mdLinkUrl"))
+ok(has(punctuated.text(), "https://example.invalid/x. and "), "the full stop is text, not link")
+ok(has(punctuated.text(), "(https://example.invalid/y)"), "the bracket is text too")
 local _, spaced = render("a **b** c")
 ok(has(spaced.text(), "a b c"), "the spaces around an inline token are not lost")
 ok(not has(spaced.text(), "abc"), "and two words are never glued into one")

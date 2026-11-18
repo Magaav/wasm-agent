@@ -507,6 +507,10 @@ impl Editor {
             // Ctrl+Z / Ctrl+Shift+Z as the kitty keyboard protocol reports them (`z` = 122, `Z` = 90).
             if seq == b"\x1b[122;5u" { self.escape.clear(); self.restore(true); return Action::None; }
             if seq == b"\x1b[122;6u" || seq == b"\x1b[90;6u" { self.escape.clear(); self.restore(false); return Action::None; }
+            // Ctrl+X and Ctrl+Y as the kitty keyboard protocol reports them (x = 120, y = 121): redo
+            // and undo, the same actions their C0 bytes (24, 25) carry. Without these two lines a
+            // terminal that reports Ctrl+X that way (foot reports Ctrl+V so, v = 118) swallowed it.
+            if seq == b"\x1b[120;5u" || seq == b"\x1b[121;5u" { self.escape.clear(); self.restore(false); return Action::None; }
             // Shift+arrows / Shift+Home/End select (xterm modifier 2), Ctrl+Insert copies (Omarchy's Super+C).
             let from = self.cursor;
             if seq == b"\x1b[2;5~" {
@@ -597,14 +601,19 @@ impl Editor {
             // Ctrl+A selects the whole draft (operator 17/11); Ctrl+E is the end of the line.
             1 => { if !self.chars.is_empty() { self.anchor = Some(0); self.cursor = self.chars.len(); } Action::None }
             5 => { self.anchor = None; self.cursor = self.line_end(self.cursor); Action::None }
-            11 => { self.chars.truncate(self.cursor); Action::None } // Ctrl+K
-            21 => { self.chars.drain(..self.cursor); self.cursor = 0; Action::None } // Ctrl+U
-            23 => { // Ctrl+W: delete the preceding word
-                while self.cursor > 0 && self.chars[self.cursor - 1].is_whitespace() {
-                    self.cursor -= 1; self.chars.remove(self.cursor);
-                }
-                while self.cursor > 0 && !self.chars[self.cursor - 1].is_whitespace() {
-                    self.cursor -= 1; self.chars.remove(self.cursor);
+            // Ctrl+K / Ctrl+U / Ctrl+W with a selection act on the SELECTION: every editor kills what
+            // is selected, and with nothing selected these stay the line and word kills they always
+            // were.
+            11 => { if !self.delete_selection() { self.chars.truncate(self.cursor); } Action::None }
+            21 => { if !self.delete_selection() { self.chars.drain(..self.cursor); self.cursor = 0; } Action::None }
+            23 => { // Ctrl+W: the selection, or else the preceding word
+                if !self.delete_selection() {
+                    while self.cursor > 0 && self.chars[self.cursor - 1].is_whitespace() {
+                        self.cursor -= 1; self.chars.remove(self.cursor);
+                    }
+                    while self.cursor > 0 && !self.chars[self.cursor - 1].is_whitespace() {
+                        self.cursor -= 1; self.chars.remove(self.cursor);
+                    }
                 }
                 Action::None
             }
@@ -1907,6 +1916,124 @@ mod tests {
                 None => assert!(drawn.is_empty(), "{name}: nothing claims the row, so nothing is drawn (got {drawn:?})"),
             }
         }
+    }
+
+    /// The screen row the draft is drawn on, for an editor whose box sits at the bottom of an
+    /// otherwise empty screen (no session row, no wakes row) with a draft of N text rows.
+    fn draft_row(editor: &Editor, lines: usize) -> usize {
+        editor.bottom() - lines
+    }
+
+    #[test]
+    fn kill_keys_act_on_the_selection_when_there_is_one() {
+        // Ctrl+K / Ctrl+U / Ctrl+W with text selected kill the selection, the way every editor does.
+        // Without a selection they stay the line and word kills they were.
+        for (key, label) in [(11u8, "Ctrl+K"), (21, "Ctrl+U"), (23, "Ctrl+W")] {
+            let mut e = Editor::default();
+            e.width = 80;
+            type_bytes(&mut e, b"one two three");
+            e.select(4, 7); // "two"
+            assert_eq!(e.selected_text().as_deref(), Some("two"), "{label} starts from a selection");
+            e.feed(key);
+            assert_eq!(e.text(), "one  three", "{label} removes the selection, not the rest of the line");
+            assert_eq!(e.cursor, 4, "{label} leaves the cursor where the selection began");
+            assert_eq!(e.selection(), None, "{label} ends the selection");
+            e.feed(26);
+            assert_eq!(e.text(), "one two three", "{label} is one undo step");
+        }
+        // A selection made backwards behaves the same.
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"alpha beta gamma");
+        e.select(10, 6); // "beta", selected right to left
+        e.feed(21);
+        assert_eq!(e.text(), "alpha  gamma", "Ctrl+U with a backwards selection kills it, not the prefix");
+        // With nothing selected the three keys are unchanged.
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"abc def\x1b[D\x1b[D\x1b[D\x1b[D");
+        e.feed(11);
+        assert_eq!(e.text(), "abc", "Ctrl+K truncates at the cursor");
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"abc def\x1b[D\x1b[D\x1b[D\x1b[D");
+        e.feed(21);
+        assert_eq!(e.text(), " def", "Ctrl+U kills the prefix and keeps what follows the cursor");
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"abc def");
+        e.feed(23);
+        assert_eq!(e.text(), "abc ", "Ctrl+W kills the preceding word");
+    }
+
+    #[test]
+    fn ctrl_x_and_ctrl_y_are_undo_and_redo_on_the_byte_and_from_kitty() {
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"hello world");
+        e.feed(26);
+        assert_eq!(e.text(), "hello", "Ctrl+Z (byte 26) undoes");
+        e.feed(24);
+        assert_eq!(e.text(), "hello world", "Ctrl+X (byte 24) redoes");
+        e.feed(26);
+        assert_eq!(e.text(), "hello");
+        assert_eq!(type_bytes(&mut e, b"\x1b[121;5u"), Action::None, "kitty's Ctrl+Y is a key, not text");
+        assert_eq!(e.text(), "hello world", "kitty's Ctrl+Y redoes");
+        assert!(!e.text().contains("121"), "and it never lands in the draft");
+        e.feed(26);
+        assert_eq!(e.text(), "hello");
+        assert_eq!(type_bytes(&mut e, b"\x1b[120;5u"), Action::None, "kitty's Ctrl+X is a key, not text");
+        assert_eq!(e.text(), "hello world", "kitty's Ctrl+X redoes, as byte 24 does");
+        assert!(!e.text().contains("120"), "and it never lands in the draft");
+    }
+
+    #[test]
+    fn index_at_maps_a_cell_to_a_draft_index_and_never_splits_a_wide_character() {
+        // The mouse drag in the input box turns a screen cell into a draft index (host.rs,
+        // handle_mouse). A wide character is two cells and ONE index: a press on either half must land
+        // on the character, never inside it.
+        let mut e = Editor::default();
+        e.row = 20;
+        e.width = 80;
+        e.height = 4;
+        type_bytes(&mut e, "\u{4f60}\u{597d}ab".as_bytes());
+        let row = draft_row(&e, 1);
+        assert_eq!(e.index_at(row, 3), Some(0), "the first cell of the wide character");
+        assert_eq!(e.index_at(row, 4), Some(0), "and its second cell: both are one index");
+        assert_eq!(e.index_at(row, 5), Some(1), "the second wide character");
+        assert_eq!(e.index_at(row, 6), Some(1));
+        assert_eq!(e.index_at(row, 7), Some(2), "an ASCII character is one cell");
+        assert_eq!(e.index_at(row, 8), Some(3));
+        assert_eq!(e.index_at(row, 9), Some(4), "past the end of the text is the end of the draft");
+        assert_eq!(e.index_at(row - 1, 3), None, "above the box there is no index");
+        assert_eq!(e.index_at(row + 1, 3), None, "and below it the border is not text");
+    }
+
+    #[test]
+    fn a_mouse_drag_over_the_box_selects_between_the_two_cells() {
+        // The two halves of a drag, as host.rs drives them: a press turns its cell into an index and
+        // calls click(); the drag turns the cell under the pointer into one and calls select().
+        let mut e = Editor::default();
+        e.row = 20;
+        e.width = 80;
+        e.height = 4;
+        type_bytes(&mut e, b"select this word");
+        let row = draft_row(&e, 1);
+        let anchor = e.index_at(row, 3).expect("the press lands in the text");
+        e.click(anchor);
+        assert_eq!(e.selection(), None, "a press alone selects nothing");
+        e.select(anchor, e.index_at(row, 9).expect("so does the drag"));
+        assert_eq!(e.selected_text().as_deref(), Some("select"), "the drag selects what it crossed");
+        // Dragging to a cell left of the press selects to the left.
+        let back = e.index_at(row, 14).expect("the far cell");
+        e.select(back, anchor);
+        assert_eq!(e.selected_text().as_deref(), Some("select this"), "dragging backwards selects to the left");
+        // A release on the press's own cell selects nothing (host.rs clears it the same way).
+        e.click(anchor);
+        e.select(anchor, anchor);
+        assert_eq!(e.selection(), None);
+        // With no selection Ctrl+C is what it was: no copy, and (between runs) a note about the draft.
+        assert_eq!(e.feed(3), Action::None, "an empty drag leaves Ctrl+C to interrupt, not to copy");
     }
 
 }

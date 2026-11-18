@@ -51,8 +51,15 @@ ok(answer.vault_entries and answer.vault_entries[1] == 'fixture_token' and tostr
 ok(federation.import_here({ definition = base, files = {} }, { node_id = 'peer-test' }).error == 'share_connector_exists', 'an existing id is not overwritten without replace')
 local other = 'export const other = 2;\n'
 ok(federation.import_here({ definition = { id = 'x2', name = 'X', transport = 'stdio', program = '/usr/bin/node', args = {}, tools = { a = 'read' } },
-  files = { { name = 'mcp-shared-fixture.mjs', content = other, sha256 = host.sha256(other) } } }, { node_id = 'p' }).error == 'share_file_exists_differs',
-  'a different file of the same name is not overwritten without replace')
+  files = { { name = 'mcp-shared-fixture.mjs', content = other, sha256 = host.sha256(other) } } }, { node_id = 'p' }).error == 'share_file_in_use',
+  'a script another registered connector runs is not taken over, not even by another connector id')
+-- And replace is the receiving operator's decision, never a field a peer sets: with no operator on this
+-- call, a replace is refused before any byte is written (18/11: a peer rewrote an enabled connector's
+-- script this way).
+local replaced = federation.import_here({ definition = base, replace = true,
+  files = { { name = 'mcp-own-fixture.mjs', content = script, sha256 = host.sha256(script) } } }, { node_id = 'p' })
+ok(replaced.error == 'share_replace_requires_operator', 'a peer replace is refused: ' .. json.encode(replaced))
+ok(not host.read_file(dir .. '/mcp-own-fixture.mjs'), 'the refused replace wrote nothing')
 ok(federation.import_here({ definition = base, replace = true,
   files = { { name = 'mcp-client.mjs', content = script, sha256 = host.sha256(script) } } }, { node_id = 'p' }).error == 'share_file_is_built_in',
   'a built-in script is never replaced by a share')
@@ -80,6 +87,47 @@ ok(federation.share('nobody', 'shared-fixture').error == 'unknown_peer', 'an unk
 local tools_src = host.read_file('lua/core/tools.lua') or ''
 ok(tools_src:find('args.vault_env = nil', 1, true) ~= nil, 'the operation tool strips vault_env')
 ok((host.read_file('lua/core/server.lua') or ''):find('args.vault_env = nil', 1, true) ~= nil, 'the operation route strips vault_env')
+
+-- 7. vault_env is the OPERATOR's: the kernel injects the value into whatever program the definition
+-- names, so a model may not write such a definition, a peer's import of one lands inert, and neither can
+-- be launched until the operator approves it at its own terminal (18/11).
+local model = { role = 'master', session_id = 'model-session' }
+local operator = { role = 'master', session_id = 'operator-session', operator = true }
+local wanted = { id = 'vault-fixture', name = 'Vault fixture', transport = 'stdio', program = '/bin/sh',
+  args = { '-c', 'echo $FIXTURE_TOKEN > /tmp/wasm-agent-vault-fixture' }, tools = { echo = 'read' },
+  vault_env = { FIXTURE_TOKEN = 'fixture_token' } }
+local put = mcp.control({ action = 'put', definition = wanted, expected_revision = mcp.inventory().revision }, model)
+ok(put.ok == false and put.error == 'mcp_vault_env_requires_operator', 'a model put carrying vault_env is refused: ' .. json.encode(put))
+ok(not host.read_file('/tmp/wasm-agent-vault-fixture'), 'the refused definition launched nothing')
+local in_registry = function(id)
+  for _, server in ipairs(mcp.inventory().servers) do if server.id == id then return server end end
+  return nil
+end
+ok(in_registry('vault-fixture') == nil, 'the refused definition is not in the registry')
+-- The same definition imported from a peer LANDS (a shared connector is meant to arrive names-only) but
+-- disabled and unapproved.
+local shared_vault = { id = 'vault-shared', name = 'Shared vault fixture', transport = 'stdio', program = '/usr/bin/node',
+  args = { dir .. '/mcp-shared-fixture.mjs' }, tools = { echo = 'read' }, timeout_seconds = 5,
+  vault_env = { FIXTURE_TOKEN = 'fixture_token' } }
+local landed = federation.import_here({ definition = shared_vault, files = {} }, { node_id = 'peer-vault' })
+ok(landed.ok == true and landed.disabled == true, 'a peer import carrying vault_env lands, disabled: ' .. json.encode(landed))
+local shared_row = in_registry('vault-shared')
+ok(shared_row and shared_row.enabled == false and not shared_row.vault_approved, 'the imported connector is inert, not approved')
+local probe = mcp.control({ action = 'probe', id = 'vault-shared', expected_revision = mcp.inventory().revision }, model)
+ok(probe.ok == false and probe.error == 'mcp_vault_env_requires_operator', 'its probe is refused until the operator approves: ' .. json.encode(probe))
+local enable = mcp.control({ action = 'enable', id = 'vault-shared', expected_revision = mcp.inventory().revision }, model)
+ok(enable.ok == false and enable.error == 'mcp_vault_env_requires_operator', 'so is a model enable: ' .. json.encode(enable))
+-- The operator's own probe (the CLI's ctx, and nothing else sets ctx.operator) is what approves it. The
+-- launch then fails for reasons of its own here - this test has no vault and no Node runtime - and that is
+-- the point: the gate is gone, and the secret is still nowhere in the answer.
+local approved = mcp.control({ action = 'probe', id = 'vault-shared', expected_revision = mcp.inventory().revision }, operator)
+ok(approved.error ~= 'mcp_vault_env_requires_operator', 'the operator probe is not refused by the gate: '
+  .. tostring(approved.error) .. ' ' .. tostring(approved.detail))
+local after = in_registry('vault-shared')
+ok(after and after.vault_approved == true, 'the operator probe is the approval')
+ok(after and after.definition.vault_env and after.definition.vault_env.FIXTURE_TOKEN == 'fixture_token',
+  'the entry stays a name on the row')
+ok(not json.encode(after):find('secret', 1, true), 'no value reaches the registry')
 
 if failed > 0 then print(string.format('mcp share: %d failed of %d checks', failed, checks)); os.exit(1) end
 print(string.format('mcp share ok (%d checks)', checks))

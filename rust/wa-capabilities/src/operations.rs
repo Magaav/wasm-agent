@@ -3,6 +3,37 @@ use serde_json::{json, Value};
 use std::{sync::OnceLock, time::Duration};
 use wa_operation::{Manager, Spec};
 
+/// The kernel's vault, opened on first use and kept for the life of the process. A FAILED open is not
+/// kept: this slot used to be a OnceLock of an Option, so the first None - a keystore created a moment
+/// later, a policy file the operator fixed, a keyring that became available - was cached as "no vault
+/// here" for the rest of the process, and every connector naming a vault_env entry answered
+/// vault_unavailable until the node restarted. The slot now holds a vault only when there is one, so
+/// a launch retries an open that failed and a node that recovers needs no restart.
+static VAULT: std::sync::Mutex<Option<wa_kernel_runtime::vault_host::VaultService>> = std::sync::Mutex::new(None);
+
+/// Fill the slot with open() if it is empty, and say whether it holds something. The opener is a
+/// parameter so the retry rule is testable without a vault: a failure is tried again on the next
+/// call, a success is not re-opened.
+fn ensure_cached<T>(slot: &std::sync::Mutex<Option<T>>, open: impl FnOnce() -> Option<T>) -> bool {
+    let mut guard = match slot.lock() { Ok(guard) => guard, Err(poisoned) => poisoned.into_inner() };
+    if guard.is_none() { *guard = open(); }
+    guard.is_some()
+}
+
+/// One vault entry's value for a child's environment. The entry NAME travels through Lua and the
+/// definition; the value is put in the child's environment here and never returned to the
+/// interpreter, a request file or a transcript.
+fn vault_value(entry: &str) -> Result<String, String> {
+    let mut guard = match VAULT.lock() { Ok(guard) => guard, Err(poisoned) => poisoned.into_inner() };
+    if guard.is_none() {
+        if let Ok(service) = wa_kernel_runtime::vault_host::VaultService::from_env() { *guard = Some(service); }
+    }
+    let service = guard.as_ref()
+        .ok_or("vault_unavailable: this node's vault does not open (wa vault status)")?;
+    service.use_by_ref(entry).map(|value| value.to_string())
+        .ok_or_else(|| format!("vault_entry_missing:{entry}: store it with `wa vault set {entry} --stdin`"))
+}
+
 fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
     let code = state["process_exit_code"].as_i64().unwrap_or(-1);
     if let Ok(page) = manager.read(id, "stdout", 0, 24 * 1024) {
@@ -418,17 +449,14 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // callers send it (the MCP client and session); the generic operation route strips it.
             let mut launch = launch;
             if let Some(map) = args.get("vault_env").and_then(|value| value.as_object()) {
-                static VAULT: std::sync::OnceLock<Option<wa_kernel_runtime::vault_host::VaultService>> = std::sync::OnceLock::new();
                 for (name, entry) in map {
                     let valid = !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
                     if !valid { return Err(format!("vault_env_invalid_name:{name}")); }
                     let entry = entry.as_str().ok_or("vault_env_entry_must_be_a_string")?;
-                    let service = VAULT.get_or_init(|| wa_kernel_runtime::vault_host::VaultService::from_env().ok())
-                        .as_ref().ok_or("vault_unavailable: this node's vault does not open (wa vault status)")?;
-                    let value = service.use_by_ref(entry).ok_or_else(|| format!("vault_entry_missing:{entry}: store it with `wa vault set {entry} --stdin`"))?;
+                    let value = vault_value(entry)?;
                     launch.env.retain(|(key, _)| key != name);
-                    launch.env.push((name.clone(), value.to_string()));
+                    launch.env.push((name.clone(), value));
                 }
             }
             let id = manager()
@@ -743,5 +771,38 @@ mod operation_deadline_tests {
         let error = operation_kind(&json!({"kind": "everything"}), "git status").unwrap_err();
         assert!(error.starts_with("operation_kind_unknown:everything"), "{error}");
         assert!(error.contains("expected one of command, build, test, deploy"), "{error}");
+    }
+}
+
+/// The vault slot's retry rule, without a vault: what a launch does the second time an open failed.
+#[cfg(test)]
+mod vault_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_failed_open_is_tried_again_on_the_next_call() {
+        let slot: std::sync::Mutex<Option<u8>> = std::sync::Mutex::new(None);
+        let attempts = AtomicUsize::new(0);
+        // The first launch: the vault does not open (the keystore is not there yet).
+        let open_failing = || { attempts.fetch_add(1, Ordering::SeqCst); None };
+        assert!(!ensure_cached(&slot, open_failing), "the launch is told there is no vault");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        // The second launch: it opens now. The failure was NOT remembered, which is the whole fix.
+        let open_working = || { attempts.fetch_add(1, Ordering::SeqCst); Some(7u8) };
+        assert!(ensure_cached(&slot, open_working), "the next launch opens the vault, no restart needed");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(*slot.lock().unwrap(), Some(7));
+    }
+
+    #[test]
+    fn a_vault_that_opened_is_not_reopened_on_every_launch() {
+        let slot: std::sync::Mutex<Option<u8>> = std::sync::Mutex::new(Some(1));
+        let attempts = AtomicUsize::new(0);
+        let open = || { attempts.fetch_add(1, Ordering::SeqCst); Some(2u8) };
+        assert!(ensure_cached(&slot, open));
+        assert!(ensure_cached(&slot, open));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "an open vault is reused, never reopened");
+        assert_eq!(*slot.lock().unwrap(), Some(1), "and the second opener never runs");
     }
 }

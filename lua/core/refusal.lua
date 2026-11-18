@@ -258,7 +258,7 @@ local CODES={
  invalid_tool_search_limit={message='the `limit` given to `searchTools` is outside the range it accepts ({origin}).',
   fix='send `limit` between 1 and 200 for a listing, or between 1 and 8 for a batch of names.'},
  invalid_tool_search_names={message='`searchTools` was given a batch of names it cannot use: it must be a non-empty array of exact names ({origin}).',
-  fix='send `{names:["read","bash"]}` - 1 to 8 exact tool names.'},
+  fix='send `{names:["read","bash"]}` - a list of exact tool names, as many as the script needs.'},
  tool_search_arguments_exclusive={message='`searchTools` was given a query and a batch of names at the same time ({origin}).',
   fix='send either `searchTools("text")` or `searchTools({names:[...]})`, never both.'},
  codemode_pending_limit={message='this script already holds the maximum number of open pending calls ({origin}).',

@@ -267,6 +267,30 @@ function M.import_here(args, caller)
   for _, file in ipairs(mcp.RUNTIME) do shipped[file] = true end
   local files = type(args.files) == 'table' and args.files or {}
   if #files > SHARE_FILES_MAX then return { ok = false, error = 'share_too_many_files' } end
+  -- Which scripts does a REGISTERED connector already run? A share may add scripts; it may never take
+  -- over one another connector runs (18/11: a peer's import with replace: true rewrote the script of a
+  -- connector this node had already enabled, so the enabled connector ran the peer's code), and replace
+  -- itself is the operator's decision on the receiving node, not a field a peer sets.
+  local owned = {}
+  for _, server in ipairs(mcp.inventory().servers or {}) do
+    if server.id ~= definition.id then
+      local running = type(server.definition) == 'table' and server.definition or {}
+      local function claim(arg)
+        local base = script_name(arg)
+        if base and not shipped[base] then owned[base] = owned[base] or server.id end
+      end
+      claim(type(running.program) == 'string' and running.program or '')
+      for _, arg in ipairs(type(running.args) == 'table' and running.args or {}) do claim(arg) end
+    end
+  end
+  local function in_use(name)
+    local by = owned[name]
+    if not by then return nil end
+    return { ok = false, error = 'share_file_in_use', name = name, connector = by,
+      note = 'a registered connector (' .. by .. ') runs that script: this node replaces it only by the '
+        .. "operator's own hand - turn that connector off and remove it (/mcp " .. by .. ' off), or share '
+        .. 'under another file name' }
+  end
   local written, names = {}, {}
   for _, file in ipairs(files) do
     local name = tostring(file.name or '')
@@ -274,6 +298,13 @@ function M.import_here(args, caller)
     if shipped[name] then return { ok = false, error = 'share_file_is_built_in', name = name } end
     local content = type(file.content) == 'string' and file.content or nil
     if not content or #content > SHARE_FILE_MAX or host.sha256(content) ~= file.sha256 then return { ok = false, error = 'share_file_unverified', name = name } end
+    local used = in_use(name)
+    if used then return used end
+    if args.replace and not (type(caller) == 'table' and caller.operator == true) then
+      return { ok = false, error = 'share_replace_requires_operator', name = name,
+        note = 'replace overwrites a script this node already has, so it is a decision for the operator here: '
+          .. 'remove the connector (/mcp ' .. definition.id .. ' off, then remove) and let it be shared again' }
+    end
     local target = directory .. '/' .. name
     local existing = host.read_file(target)
     if existing and existing ~= content and not args.replace then

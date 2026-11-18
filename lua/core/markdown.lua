@@ -102,6 +102,20 @@ end
 -- Underscore emphasis is not a pattern: CommonMark forbids it inside a word, and that is
 -- exactly where a tool name lives (`peer_openclaw__mcp_whatsapp_native_read_newest_...`).
 -- `find_underscore` below applies the flanking rule the patterns cannot express.
+-- The bare URL is not a pattern here: it is the HOST detector, the same function that answers which
+-- link a click copies (rust/wa-term/src/links.rs, host.rs url_at). One implementation, so the two can no
+-- longer disagree about where a link ends - they did: this table pattern kept a trailing dot that the
+-- click dropped, and its character class stopped at a + that the click accepted.
+local LINK = { style = { "underline", "mdLinkUrl" } }
+local function link_span(rest)
+  if type(host) ~= "table" or type(host.link_span) ~= "function" then return nil end
+  local ok, raw = pcall(host.link_span, rest)
+  if not ok or type(raw) ~= "string" then return nil end
+  local first, stop = raw:match("^(%d+),(%d+)$")
+  if not first then return nil end
+  return tonumber(first), tonumber(stop)
+end
+
 local INLINE = {
   { pattern = "`([^`]+)`", style = "mdCode" },
   -- `***x***` first (17/11: it rendered as `*x*` in italic - the italic rule took the inner pair).
@@ -114,7 +128,6 @@ local INLINE = {
   { pattern = "%[([^%]]*)%]%(([^%)]*)%)", link = true },
   -- A link reads as one: underlined, light blue (17/11); a click on it copies it (the host).
   { pattern = "<(https?://[^>]+)>", style = { "underline", "mdLinkUrl" } },
-  { pattern = "https?://[%w%._%-/~%?%%&=:#%+@]+", style = { "underline", "mdLinkUrl" } },
 }
 
 -- One `_` is a word character here, never a delimiter: a run is a delimiter only when at least
@@ -174,6 +187,13 @@ local function inline(text, base)
       end
       if start and (at == nil or start < at) then
         at, found = start, { start = start, stop = stop, first = first, second = second, form = form }
+      end
+    end
+    -- The bare URL, on the same footing as the patterns above: it wins only when it starts earlier.
+    do
+      local start, stop = link_span(rest)
+      if start and (at == nil or start < at) then
+        at, found = start, { start = start, stop = stop, form = LINK }
       end
     end
     if not at then break end

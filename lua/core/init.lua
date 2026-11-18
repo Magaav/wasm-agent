@@ -347,14 +347,26 @@ elseif command == 'bind' or command == 'unbind' or command == 'accept' or comman
   local result=dofile('lua/core/binding_cli.lua').run(command,table.concat(args,' ',2))
   if result.error or result.ok==false then os.exit(1) end
 elseif command == "network" then
-  if not ((args[2] == "role" or args[2] == "forget" or args[2] == "remove") and args[3]) then
-    print(json.encode({ error = "usage: wa network role <node-id> master|guest | wa network forget <node-id> | wa network remove <node-id>" }))
+  local verb, target = args[2], args[3]
+  if not (target and (verb == "role" or verb == "forget" or verb == "remove" or verb == "approve")) then
+    print(json.encode({ error = "usage: wa network role <node-id> master|guest | wa network forget <node-id>"
+      .. " | wa network remove <node-id> [--nonce <n>] [--approval <json>]"
+      .. " | wa network approve <node-id> --for <node-id> --nonce <n>" }))
     os.exit(2)
   end
+  -- --flag value pairs after the node id. "wa network remove" needs them: a retirement is two
+  -- administrators' decision, and the second signature is what --approval carries.
+  local flags, index = {}, 4
+  while index <= #args do
+    local word = tostring(args[index])
+    if word:sub(1, 2) == "--" then flags[word:sub(3)] = args[index + 1]; index = index + 2
+    else index = index + 1 end
+  end
   local nodes = dofile("lua/core/nodes.lua")
-  local result = (args[2] == "forget" and nodes.network_forget(args[3]))
-    or (args[2] == "remove" and nodes.network_remove(args[3]))
-    or nodes.network_role(args[3], args[4])
+  local result = (verb == "forget" and nodes.network_forget(target))
+    or (verb == "remove" and nodes.network_remove(target, { nonce = flags.nonce, approval = flags.approval }))
+    or (verb == "approve" and nodes.network_approve_retire(target, flags["for"], flags.nonce))
+    or nodes.network_role(target, flags.role or args[4])
   print(json.encode(result))
   if result.error then os.exit(1) end
 elseif command == "fleet" then

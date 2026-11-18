@@ -17,6 +17,7 @@
 // so the lint is allowed once here, with the reason.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod build_status;
+pub mod links;
 pub mod scroll;
 pub mod selection;
 pub mod terminal_editor;

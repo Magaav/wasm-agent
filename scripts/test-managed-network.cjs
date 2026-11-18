@@ -236,27 +236,59 @@ async function stop(child) {
   await stop(registry.child); registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:otherAdmin.node_id});
   await until(async()=> (await request(service+'/health')).status===200,'administrator revocation');
   check((await direct(guest,admin,'read',{path:resultFile})).value.error==='unknown_caller','removing an administrator at the service revokes its pinned guest access');
-  // Retiring a legacy ENVIRONMENT operator (operator 17/11): its key is gone, so only another administrator
-  // can take it out of the admin set, and only by saying so (`retire: true`); then its row can be forgotten.
+  // Retiring a legacy ENVIRONMENT operator (operator 17/11): its key is gone, so another administrator
+  // asks and a THIRD one signs the retirement itself (18/11: one administrator alone could empty the
+  // fleet's own operator list, because the roster's revocation gate is the asking node's own and the
+  // registry took any administrator's word). Then its row can be forgotten.
   const legacy=fixture('legacy-operator');
-  await stop(registry.child); registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:`${otherAdmin.node_id},${legacy.node_id}`});
+  await stop(registry.child);
+  registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:otherAdmin.node_id+','+legacy.node_id});
   await until(async()=> (await request(service+'/health')).status===200,'registry with a legacy operator');
   check((await register(service,legacy)).status===200,'the legacy operator is registered');
+  // "admin" is vouched for at runtime: a key the registry adds, not one of the environment's operators.
+  {
+    const body=JSON.stringify({add:admin.node_id,nonce:crypto.randomUUID()});
+    check((await request(service+'/operators','POST',body,headers(otherAdmin,'operators',body))).status===200,'an environment operator vouches for a runtime administrator');
+  }
+  const newNonce=()=>crypto.randomUUID();
+  function approval(signer,target,caller,nonce) {
+    const ts=now();
+    return {node_id:signer.node_id,ts,signature:signature(signer,'retire|'+target+'|'+caller+'|'+nonce+'|'+ts)};
+  }
+  function retire(by,target,nonce,approve) {
+    const body=JSON.stringify(Object.assign({remove:target,retire:true,nonce},approve?{approval:approve}:{}));
+    return request(service+'/operators','POST',body,headers(by,'operators',body));
+  }
   const forgetBody=()=>JSON.stringify({node_id:legacy.node_id,nonce:crypto.randomUUID()});
   let retireBody=forgetBody();
   check((await request(service+'/forget','POST',retireBody,headers(otherAdmin,'forget-node',retireBody))).value.error==='admin_not_forgettable','an operator cannot be forgotten while it is one');
-  retireBody=JSON.stringify({remove:legacy.node_id,nonce:crypto.randomUUID()});
-  check((await request(service+'/operators','POST',retireBody,headers(otherAdmin,'operators',retireBody))).value.error==='operator_from_environment','an environment operator is not removed without retire');
-  retireBody=JSON.stringify({remove:otherAdmin.node_id,retire:true,nonce:crypto.randomUUID()});
-  check((await request(service+'/operators','POST',retireBody,headers(otherAdmin,'operators',retireBody))).value.error==='operator_cannot_retire_itself','an operator cannot retire itself');
-  retireBody=JSON.stringify({remove:legacy.node_id,retire:true,nonce:crypto.randomUUID()});
-  check((await request(service+'/operators','POST',retireBody,headers(otherAdmin,'operators',retireBody))).status===200,'another administrator retires the legacy operator');
-  check((await request(service+'/service')).value.operators.length===1,'the service vouches for the remaining operator only');
+  check((await retire(otherAdmin,legacy.node_id,newNonce())).value.error==='approval_required','a retirement without a second administrator signature is refused');
+  check((await retire(otherAdmin,otherAdmin.node_id,newNonce(),approval(legacy,otherAdmin.node_id,otherAdmin.node_id,'n'))).value.error==='operator_cannot_retire_itself','an operator cannot retire itself');
+  let n=newNonce();
+  check((await retire(otherAdmin,legacy.node_id,n,approval(otherAdmin,legacy.node_id,otherAdmin.node_id,n))).value.error==='approval_self',
+    'the calling administrator cannot be its own approver');
+  check((await retire(otherAdmin,legacy.node_id,n,approval(guest,legacy.node_id,otherAdmin.node_id,n))).value.error==='approval_not_an_administrator',
+    'a customer signature is not an approval');
+  check((await retire(otherAdmin,legacy.node_id,n,approval(admin,legacy.node_id,otherAdmin.node_id,'another-nonce'))).value.error==='approval_bad_signature',
+    'an approval signed for another retirement does not carry over');
+  n=newNonce();
+  check((await retire(otherAdmin,legacy.node_id,n,approval(admin,legacy.node_id,otherAdmin.node_id,n))).status===200,
+    'a third administrator signature retires the legacy operator');
+  check((await request(service+'/service')).value.operators.length===2,'the service vouches for the two operators still standing');
   retireBody=forgetBody();
-  check((await request(service+'/forget','POST',retireBody,headers(otherAdmin,'forget-node',retireBody))).status===200,'the retired operator\'s row is forgotten');
-  await stop(registry.child); registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:`${otherAdmin.node_id},${legacy.node_id}`});
+  check((await request(service+'/forget','POST',retireBody,headers(otherAdmin,'forget-node',retireBody))).status===200,'the retired operator row is forgotten');
+  // Retire-all, as a runtime administrator: it may shorten the list only while an environment operator
+  // signs each step, and never past the last one.
+  n=newNonce();
+  check((await retire(admin,otherAdmin.node_id,n,approval(admin,otherAdmin,admin.node_id,n))).value.error==='approval_self',
+    'the runtime administrator cannot approve its own sweep');
+  check((await retire(admin,otherAdmin.node_id,n,approval(legacy,otherAdmin,admin.node_id,n))).value.error==='approval_not_an_administrator',
+    'a retired operator signature is not an approval');
+  check((await request(service+'/service')).value.operators.length===2,'the failed sweep changed nothing');
+  await stop(registry.child);
+  registry.child=start(registry,registry.args,{WASM_AGENT_NETWORK_ADMINS:otherAdmin.node_id+','+legacy.node_id});
   await until(async()=> (await request(service+'/health')).status===200,'restart after retirement');
-  check((await request(service+'/service')).value.operators.length===1,'the retirement survives a restart');
+  check((await request(service+'/service')).value.operators.length===2,'the retirement survives a restart, and so does the list');
   console.log(`managed network ok (${checks} checks, 0 skips; isolated service only)`);
   if(!process.argv[3]) console.log('Package/bootstrap checks NOT RUN (no archive supplied).');
 })().catch(error=>{console.error(error.stack);process.exitCode=1;}).finally(async()=>{

@@ -1018,7 +1018,10 @@ function M.run(argv)
       -- told by the existing [session update] note.
       local done, problem = pcall(reload.require("lua/core/mcp_cli.lua").run, line:sub(5), {
         print = ui.print, io = ui,
-        ctx = { user_id = USER, role = "master", session_id = agent.session_id },
+        -- operator = true: this is the human at this terminal typing /mcp, and one thing the registry
+        -- lets only them do is start a connector that makes the kernel inject a vault value
+        -- (lua/core/mcp.lua, vault_gate). A model's own mcp tool never carries this flag.
+        ctx = { user_id = USER, role = "master", session_id = agent.session_id, operator = true },
         -- From the caches, like /status (operator 17/11 "/mcp should be instant"): a full read refreshed
         -- the federation catalogue when it was older than ten minutes, and offline peers made that 35 s
         -- on work. The catalogue keeps its own refresh rule; the pages say how old the peers' rows are.

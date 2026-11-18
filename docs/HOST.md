@@ -787,6 +787,7 @@ input_commands       device
 input_editor         device
 input_held           device
 input_idle           device
+input_image          device
 input_start          device
 input_stop           device
 input_take           device
@@ -794,6 +795,7 @@ invoke               runs a process
 isatty               device
 jobs                 writes files
 list_dir             read-only
+link_span            read-only
 local_view           device
 log                  device
 mark_db_ready        writes files
@@ -840,6 +842,7 @@ terminal_write       device
 ticker               device
 transcript_block     device
 transcript_copy      device
+transcript_copy_first device
 transcript_expand    device
 transcript_fold      device
 transcript_head      device

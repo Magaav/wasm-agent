@@ -826,7 +826,41 @@ end
 -- (`POST /operators` remove + retire, signed by this administrator), and its registration is forgotten.
 -- Bound nodes that pinned it as an operator keep working: their admission does not count a pin the roster
 -- revoked as lost (lua/core/binding.lua).
-function M.network_remove(node_id)
+-- The message a second administrator signs to approve one retirement. The registry rebuilds it itself
+-- (rust/wa-rendezvous, retirement_message), so this is the same sentence on both sides.
+local function retirement_message(target, caller, nonce, ts)
+  return table.concat({ "retire", target, caller, nonce, tostring(ts) }, "|")
+end
+
+-- "wa network approve <node-id> --for <caller-node-id> --nonce <nonce>": the second signature a
+-- retirement needs, produced on ANOTHER administrator's node than the one that will ask. It signs this
+-- exact retirement - the target, the asking administrator, the nonce and the time - so an approval
+-- cannot be reused for another node, by another caller, or much later. Prints the approval to hand to
+-- "wa network remove".
+function M.network_approve_retire(target, caller, nonce)
+  if type(target) ~= "string" or #target ~= 32 or not target:match("^%x+$") then return { error = "node_id_required" } end
+  if type(caller) ~= "string" or #caller ~= 32 or not caller:match("^%x+$") then
+    return { error = "caller_id_required", fix = "name the administrator that will ask: --for <its node id>" }
+  end
+  if type(nonce) ~= "string" or nonce == "" then
+    return { error = "nonce_required", fix = "use the nonce the removing node printed with its refusal" }
+  end
+  if caller == target then return { error = "approval_target", fix = "a node cannot approve its own retirement" } end
+  local identity = M.identity()
+  if not identity or not identity.node_id then return { error = "node_identity_unavailable" } end
+  if identity.node_id == caller then
+    return { error = "approval_self", fix = "run this on a DIFFERENT administrator node: a retirement is two administrators' decision" }
+  end
+  local ts = math.floor(host.now())
+  local signed = json.decode(host.sign(retirement_message(target, caller, nonce, ts)))
+  if not signed or not signed.signature then return { error = "sign_failed" } end
+  return { ok = true, approval = { node_id = identity.node_id, ts = ts, signature = signed.signature },
+    target = target, caller = caller, nonce = nonce,
+    next = "on the asking node: wa network remove " .. target .. " --nonce " .. nonce
+      .. " --approval '" .. json.encode({ node_id = identity.node_id, ts = ts, signature = signed.signature }) .. "'" }
+end
+
+function M.network_remove(node_id, opts)
   if type(node_id) ~= "string" or not node_id:match("^%x+$") or #node_id ~= 32 then return { error = "node_id_required" } end
   if type(host.mesh_call) ~= "function" then return { error = "mesh_unavailable" } end
   local ok, raw = pcall(host.mesh_call, json.encode({ revoked = true }))
@@ -844,14 +878,33 @@ function M.network_remove(node_id)
   if url == "" then return { error = "no_rendezvous" } end
   local base = url:gsub("/+$", "")
   local steps = {}
-  local body = json.encode({ remove = node_id, retire = true, nonce = host.uuid() })
+  -- The retirement is two administrators' decision (rust/wa-rendezvous, approval_problem): this
+  -- administrator signs the request, and a SECOND one signs this exact retirement. The nonce is what
+  -- ties the two signatures to one retirement, so it is chosen here and named in the refusal when the
+  -- operator has not collected the approval yet.
+  local nonce = tostring(opts.nonce or host.uuid())
+  local approval = opts.approval
+  if type(approval) == "string" then approval = json.decode(approval) or nil end
+  if type(approval) ~= "table" or type(approval.signature) ~= "string" then
+    local identity = M.identity() or {}
+    return { error = "approval_required", nonce = nonce,
+      fix = "a retirement needs another administrator's signature: on ANOTHER administrator node run "
+        .. "wa network approve " .. node_id .. " --for " .. tostring(identity.node_id or "<this node>")
+        .. " --nonce " .. nonce .. ", then repeat this command with --nonce " .. nonce
+        .. " --approval '<the approval it printed>'" }
+  end
+  local body = json.encode({ remove = node_id, retire = true, nonce = nonce, approval = approval })
   local headers = M.signed_headers("operators", body)
   if not headers then return { error = "node_identity_unavailable" } end
   local response = json.decode(host.http("POST", base .. "/operators", json.encode(headers), body)) or {}
   local status = tonumber(response.status)
   if status == 200 then steps[#steps + 1] = "operator retired"
   elseif status == 404 then steps[#steps + 1] = "not an operator"
-  else return { error = "network_remove_operator_refused", status = status, detail = response.body } end
+  else
+    local reason = json.decode(tostring(response.body or "")) or {}
+    return { error = "network_remove_operator_refused", status = status, detail = response.body,
+      nonce = nonce, reason = reason.error }
+  end
   local forgot = M.network_forget(node_id)
   if forgot.error and not (forgot.status == 404) then
     return { error = forgot.error, status = forgot.status, detail = forgot.detail, done = steps }

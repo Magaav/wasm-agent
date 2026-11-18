@@ -136,6 +136,36 @@ end
 function M.mail_program()return mail_program() end
 local function valid_id(id)return type(id)=='string' and #id<=24 and id:match('^[a-z][a-z0-9_-]*$') end
 local function dense(list,maximum)if type(list)~='table' or #list>maximum then return false end;for key,value in pairs(list)do if type(key)~='number' or key<1 or key>#list or key%1~=0 or type(value)~='string' then return false end end;return true end
+-- A definition that names vault entries is the OPERATOR's, and it stays inert until the operator says
+-- so. vault_env is not a credential reference like env: the kernel injects the VALUE into whatever
+-- program the definition names, at launch (rust operations.rs). A model that could put
+-- {transport='stdio', program='/bin/sh', args={'-c','echo $X >/tmp/x'}, vault_env={X='github'}} and then
+-- probe it would read any vault entry the operator has stored, through a connector nobody approved (18/11,
+-- and the same hole through a peer-imported definition). So:
+--
+--   * a model's put carrying vault_env is refused by name, and a peer's import of one is registered
+--     DISABLED and unapproved - it can be inspected, never launched;
+--   * probe and enable of such a row refuse until an OPERATOR acts (ctx.operator, set by the CLI's own
+--     /mcp command and by nothing else), and that act is what approves it;
+--   * a call through an unapproved row is refused too, so an approval is the only way a value is used.
+--
+-- Removing the entries is not the alternative: a shared connector is meant to arrive names-only and get
+-- its value from the receiving node's vault (/mcp <key> share <node>), which is what the operator then
+-- approves.
+local VAULT_ENV_OPERATOR = 'mcp_vault_env_requires_operator'
+
+function M.names_vault(definition)
+ return type(definition)=='table' and type(definition.vault_env)=='table' and next(definition.vault_env)~=nil
+end
+
+-- The refusal every unapproved launch of a vault connector answers. One sentence, because the model that
+-- reads it must not be able to change the outcome: the operator approves at the terminal.
+local function vault_gate(row, ctx, id)
+ if not M.names_vault(row and row.definition) or (row and row.vault_approved==true) or (ctx and ctx.operator) then return nil end
+ return fail(VAULT_ENV_OPERATOR,{id=id,outcome='not_submitted',tool_call_issued=false,
+  note='this connector names a vault entry (vault_env), so only the operator can start it: /mcp '..tostring(id)
+    ..' probe (or on) at the operator\'s own terminal. Nothing was launched.'})
+end
 function M.validate(def)
  if type(def)~='table' or not valid_id(def.id) then return 'invalid_mcp_id' end
  local allowed={id=true,name=true,transport=true,program=true,args=true,cwd=true,url=true,env=true,headers=true,secret_env=true,vault_env=true,timeout_seconds=true,tools=true,component=true,file_env=true,net=true,config=true,native=true}
@@ -365,8 +395,12 @@ function M.inventory()
    last_call=nil
    observed='retired: the Go connector was removed on 11/11; WhatsApp is mcp_whatsapp_*'
   end
+  -- vault_approved: the operator has started this connector at its own terminal, which is what lets the
+  -- kernel inject the entry it names (M.names_vault). Carried here so /mcp can say which state a connector
+  -- that names vault entries is in; absent for every definition that names none.
   servers[#servers+1]={id=id,name=row.definition.name or id,definition=definition,enabled=row.enabled==true,revision=row.revision,
-   probe=probe,probe_stale=row.probe_stale,last_call=last_call,session_mode='read-reuse/write-request',observed_status=observed}
+   probe=probe,probe_stale=row.probe_stale,last_call=last_call,session_mode='read-reuse/write-request',observed_status=observed,
+   vault_approved=(M.names_vault(row.definition) and (row.vault_approved==true or nil)) or nil}
  end
  table.sort(servers,function(a,b)return a.id<b.id end)
  return {ok=true,revision=store.revision,servers=servers,templates={},can_manage=true,schema_faults=M.SCHEMA_FAULTS,
@@ -401,7 +435,19 @@ function M.control(args,ctx)
  if args.expected_revision~=store.revision then return fail('mcp_store_revision_changed',{revision=store.revision}) end
  if action=='put' then
   local problem=M.validate(args.definition);if problem then return fail(problem) end
-  return mutate(raw,function(current)local old=current.servers[args.definition.id];current.servers[args.definition.id]={definition=args.definition,enabled=false,revision=(old and old.revision or 0)+1};return {ok=true,id=args.definition.id,enabled=false}end)
+  local vault=M.names_vault(args.definition)
+  -- Read it the other way round: no operator context and no peer means a MODEL asked. A definition that
+  -- makes the kernel inject a vault value is never a model's to write.
+  if vault and not ctx.operator and not ctx.peer then return vault_gate({definition=args.definition},ctx,args.definition.id) end
+  return mutate(raw,function(current)
+   local old=current.servers[args.definition.id]
+   -- Inert either way: even the operator's own definition carries no approval until the operator starts it
+   -- (/mcp <id> probe, then on), so a registry written by an older binary - or by a peer's import - cannot
+   -- become a launch path by itself.
+   current.servers[args.definition.id]={definition=args.definition,enabled=false,vault_approved=false,revision=(old and old.revision or 0)+1}
+   return {ok=true,id=args.definition.id,enabled=false,vault_env=vault or nil,
+    note=(vault and ('names a vault entry: inert until the operator approves it (/mcp '..args.definition.id..' probe, then on)') or nil)}
+  end)
  end
  local row=store.servers[args.id];if not row then return fail('unknown_mcp_server') end
  if action=='remove' then
@@ -411,18 +457,36 @@ function M.control(args,ctx)
   return mutate(raw,function(current)current.servers[args.id]=nil;return {ok=true,id=args.id,removed=true}end)
  end
  if action=='enable' or action=='disable' then
+  if action=='enable' then
+   local gate=vault_gate(row,ctx,args.id);if gate then return gate end
+  end
   if action=='enable' and (not row.probe or row.probe.ok~=true or not row.probe.schema_hash)then return fail('mcp_probe_required') end
   if action=='enable' then
    local found,total={},0;for _,tool in ipairs(row.probe.tools or {})do if row.definition.tools[tool.name] then found[tool.name]=true;total=total+#(tool.input_schema_json or '')+#tostring(tool.description or '') end end
    for name in pairs(row.definition.tools)do if not found[name] then return fail('mcp_approved_tool_missing:'..name) end end
    if total>131072 then return fail('mcp_selected_schema_budget_exceeded',{bytes=total,maximum=131072}) end
   end
-  return mutate(raw,function(current)current.servers[args.id].enabled=action=='enable';if action=='enable' then current.servers[args.id].probe_stale=nil end;return {ok=true,id=args.id,enabled=action=='enable'}end)
+  return mutate(raw,function(current)
+   current.servers[args.id].enabled=action=='enable'
+   if action=='enable' then
+    current.servers[args.id].probe_stale=nil
+    -- The operator's own "on" is the approval a vault connector waits for.
+    if ctx.operator and M.names_vault(row.definition) then current.servers[args.id].vault_approved=true end
+   end
+   return {ok=true,id=args.id,enabled=action=='enable',vault_approved=current.servers[args.id].vault_approved==true or nil}
+  end)
  elseif action=='probe' then
+  -- The gate is BEFORE invoke: an unapproved vault connector is never launched, so the value is never
+  -- handed to a program a model chose.
+  local gate=vault_gate(row,ctx,args.id);if gate then return gate end
   local answer=M.invoke({action='probe',server=row.definition},ctx)
   -- A fresh probe is the one operation that may replace the cached catalogue, so it is also what clears a
   -- staleness note: the next call is measured against the list this probe just read.
-  local saved=mutate(raw,function(current)current.servers[args.id].probe=answer;current.servers[args.id].probe_stale=nil;current.servers[args.id].enabled=false;return {ok=true} end)
+  local saved=mutate(raw,function(current)
+   current.servers[args.id].probe=answer;current.servers[args.id].probe_stale=nil;current.servers[args.id].enabled=false
+   if ctx.operator and M.names_vault(row.definition) then current.servers[args.id].vault_approved=true end
+   return {ok=true}
+  end)
   if not saved.ok then answer.registry_observation_error=saved.error end
   return answer
  end
@@ -538,6 +602,9 @@ function M.record_call(entry,answer)
 end
 function M.call(name,args,ctx)
  local id,row,tool=M.resolve_tool(name);if not id then return fail('mcp_tool_not_approved') end
+ -- Defence in depth: enable already refuses an unapproved vault connector, so a row that reaches here was
+ -- approved by an operator - unless the registry was written before this gate existed. Then it refuses.
+ local unapproved=vault_gate(row,ctx,id);if unapproved then return unapproved end
  local options={action='call',server=row.definition,tool=tool.name,schema_hash=row.probe.schema_hash}
  if row.definition.tools[tool.name]=='read' then
   options.persistent_read=true;options.read_tools={}
