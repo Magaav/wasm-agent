@@ -517,3 +517,56 @@ when this section was written, and it is the fast path's own precondition rather
   `docs/missions/reports/<name>.md` (the second path is new, and the fixture's demo mission checks it).
   `report` still quotes only `REPORT.md`.
 
+
+## Independent verification (session a8fcaf0d), and a second writer measured live
+
+Everything below was run on this worktree on 18/11 between 13:19 and 13:46 against the committed tree
+`fd751adb`, by a session other than the one that wrote the section above; nothing is copied from it.
+
+| check | how | result |
+| --- | --- | --- |
+| the fixture passes, and still exits through a pipe | `bash scripts/test-mission.sh 2>&1 | tail -5` | `mission fixture: 158 checks ok`, returned at once |
+| `start` takes no option | `scripts/mission.sh start <name> --force` | `mission: start takes a name and nothing else: there is no --force ...` |
+| the lock is what excludes | `/tmp` copy with the `flock -n 9` line removed | FAILED: `two starts 100 ms apart must make ONE launch, made 2` |
+| the launcher window is gated | `/tmp` copy with the `alive_launcher` gate skipped | FAILED: `a live launcher that has not named its session must refuse a launch` |
+| one gate, not several | `/tmp` copy where every verdict but `released` is permitted | FAILED: `a second start must refuse while the node still runs that session` |
+| a session with no run row | `/tmp` copy where the no-run-row branch answers `released` | FAILED: `an unfinished session with no age and an unprobeable lease must refuse` |
+| the writer the harness started | `/tmp` copy with the presence read skipped | FAILED: `a live process with the mission dir as its cwd must read active` |
+
+Each mutation is a copy under `/tmp/mf-r4/mut/`, run as `MISSION_UNDER_TEST=<copy> bash scripts/test-mission.sh`:
+no file in the tree was edited to produce a red.
+
+### The round's own collision: two writers again, and why the presence read cannot see the second
+
+This worktree had two live sessions at once while the round was implemented, from 13:17 to 13:38:
+
+- the session that wrote the section above (`6a48d01d`). Its CLI printed `wa: session 6a48d01d-... failed`
+  into `err.log` at 13:11:46 - the line sits immediately before this session's first stderr output - and its
+  node-side run kept writing afterwards: a header splice at 13:17, `run_failed: provider_stalled` at
+  13:20:26, a `[self-wake ...]` line at 13:21:28, the `test-mission.sh` splice at 13:22, the docs edit at
+  13:32, the commit at 13:38;
+- this session (`a8fcaf0d`, CLI pid 3117832, parent `run.sh` 3117825, started 13:11:46).
+
+The fact the fourth read cannot see: `session_presence` names pid `616163` for `6a48d01d` (3 s old when
+read at 13:23), and 13 sessions share that pid. `/proc/616163` is neither a launcher nor a mission runner:
+it is `wa serve --port 8799 --client-port 8800 --ui ...`, cwd `/home/victor`. So a turn run inside the
+node's own process writes into this worktree while `writers_check` - which asks the node for the pid it
+recorded for the session and reads *that* pid's cwd - finds no writer: the pid's cwd is the server's, never
+the mission's.
+
+What that means for `start`, as narrowly as the evidence allows: "the node says every session of this
+mission is settled" is a statement about *now*. A wake can begin a new run of the same session minutes after
+a launch was lawfully allowed (`failed` at 13:11:46, writing again by 13:17), and the presence read does not
+catch a run served by `wa serve`. That is the 18/11 shape arriving through a door the four reads do not
+cover, and this round's fixtures cannot reproduce it: they model the CLI's exit, not the server's own turn.
+
+What I did **not** verify: which gate let *this* session's launch through at 13:11:46. This mission
+directory holds no `lease.log` and no `run.lock` for it, so there is no record to read, and I do not claim
+`start` was wrong. What I did verify is that the recorded state was damaged before the round began: at 10:02
+the directory gained four stray directories - `== lease file:`, `MISSION=demo`, `RUNNER=999999necho`,
+`WORKTREE=` - the lines of a `run.lock`/`lease.log` turned into directory names by something that wrote into
+the real mission dir instead of a fixture's own `mktemp -d` root. Follow-up, not done here: `stage` and
+`test-mission.sh` should refuse a `MISSIONS_DIR` that is not under the fixture's own work root.
+
+The tree was clean at `fd751adb` from 13:38 on; while the other run was active this session wrote only under
+`/tmp/mf-r4/`, and this section plus one measurements row in `docs/MISSIONS.md` are its only edits.
