@@ -421,17 +421,17 @@ every gate in this repository was green without running one of them). Now:
 
 | test | full gate (`scripts/test.sh`) | fast path (`scripts/fast.sh`) | measured standalone |
 | --- | --- | --- | --- |
-| `test-install-record.sh` | yes, `WA_BIN=$BIN` | yes | 4 s, 81 checks |
-| `test-install-guards.sh` | yes | yes | 2 s, 70 checks |
-| `test-deploy-ancestry.sh` | yes | **no, and here is why** | 28 s, 89 checks |
-| `test-node-pins.sh` | yes, `WA_BIN=$BIN` | yes | 2 s, 87 checks |
-| `test-publish-shared-commit.sh` | yes | yes | 2 s, 43 checks |
+| `test-install-record.sh` | yes, `WA_BIN=$BIN` | yes | 5 s, 81 checks |
+| `test-install-guards.sh` | yes | yes | 1 s, 70 checks |
+| `test-deploy-ancestry.sh` | yes | **no, and here is why** | 31 s, 89 checks |
+| `test-node-pins.sh` | yes, `WA_BIN=$BIN` | yes | 3 s, 87 checks |
+| `test-publish-shared-commit.sh` | yes | yes | 1 s, 43 checks |
 | `test-bootstrap-gate.sh` | yes | yes | 1 s, 35 checks |
-| `test-build-info.sh` | yes, `WA_BIN=$BIN` | yes | 0 s, 24 checks |
+| `test-build-info.sh` | yes, `WA_BIN=$BIN` | yes | 1 s, 24 checks |
 
 `test-deploy-ancestry.sh` is deliberately not a fast-path row: it runs a real `deploy.sh` detached (`setsid
---fork`) once per case, 28 s measured, and it is the only one of the seven whose cost is not seconds. The fast
-path is the landing gate; 28 s per round for a rule the full gate already owns is the wrong trade, and the
+--fork`) once per case, 31 s measured, and it is the only one of the seven whose cost is not seconds. The fast
+path is the landing gate; half a minute per round for a rule the full gate already owns is the wrong trade, and the
 number is here so the choice can be reviewed rather than discovered. The merge lane runs `scripts/test.sh`, so
 it inherits all seven.
 
@@ -460,7 +460,7 @@ install: `test-deploy-ancestry.sh` needs `setsid` and `git`, `test-install-guard
 | `test-node-pins.sh` | 87 checks, 0 failed |
 | `test-publish-shared-commit.sh` | 43 checks, 0 failed |
 | `test-bootstrap-gate.sh` | 35 checks, 0 failed |
-| `test-build-info.sh` | 24 checks, 0 failed (against a debug `wa` rebuilt from this tree) |
+| `test-build-info.sh` | 24 checks, 0 failed (against a debug `wa` rebuilt from this tree; it fails against a binary built before the last commit BY DESIGN - the whole point is that the bytes name the commit they were built from) |
 | `test-glibc-floor.sh` | 112 checks, 0 failed (built-artifact sweep skipped: `WA_GLIBC_ARTIFACT_DIR` unset) |
 | `test-update-ring.sh` | 26 checks, 0 failed |
 | `test-deploy-downgrade.sh` | 0 failed (it delegates to `test-deploy-ancestry.sh`: one rule, one test) |
