@@ -17,10 +17,16 @@ check(tostring(denied.message):find('workspace_wave_admission_refused:wave_regis
 check(tostring(denied.message):find('node scripts/wave-entry.mjs register <repo> <wave-config.json> <attestation.json>',1,true)~=nil,
   'ITEM 4: and the one command that fixes it: '..tostring(denied.message))
 
--- 2. a top-level operator session works in place -----------------------------------------------------
+-- 2. a top-level operator session proceeds, unregistered ------------------------------------------------
+-- "In place" was the claim here, and it was false at both call sites: the session works in its own linked
+-- worktree (review of 18/11, item 1 of this round). The verdict says what is actually missing.
 local admitted=workspaces.wave_admission_outcome('wave_registration_required',{operator_session=true})
-check(admitted.ok==true and admitted.in_place==true,
-  'ITEM 4: the operator session on a node with no wave authority is admitted in place')
+check(admitted.ok==true and admitted.unregistered==true,
+  'ITEM 4: the operator session on a node with no wave authority proceeds')
+check(tostring(admitted.note):find('linked worktree',1,true)~=nil,
+  'ITEM 4: and the sentence says where it works, instead of "in place": '..tostring(admitted.note))
+check(tostring(admitted.note):find('works in place',1,true)==nil,
+  'ITEM 4: it does not claim to work in the source checkout: '..tostring(admitted.note))
 check(tostring(admitted.note):find('node scripts/wave-entry.mjs register',1,true)~=nil,
   'ITEM 4: and the registration is still named, so the node can be given an owner: '..tostring(admitted.note))
 
@@ -42,7 +48,9 @@ check(source:find("'workspace_wave_admission_refused:'..tostring",1,true)==nil,
 -- 5. the registration is documented where an operator looks -------------------------------------------
 local docs=host.read_file('docs/WAVE-CONVERGENCE.md')
 check(docs~=nil and docs:find('wave-entry.mjs register',1,true)~=nil,'ITEM 4: docs/WAVE-CONVERGENCE.md documents the registration')
-check(docs~=nil and docs:find('absent_operator_in_place',1,true)~=nil,
+check(docs~=nil and docs:find('absent_operator_unregistered',1,true)~=nil,
   'ITEM 4: and what a session does on a node that has none')
+check(docs~=nil and docs:find('default_user',1,true)~=nil,
+  'ITEM 4: including which principal counts as the operator (review of 18/11, item 1)')
 
 print(json.encode({ok=true,checks=checks}))

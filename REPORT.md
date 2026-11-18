@@ -140,3 +140,160 @@ moved to the offered envelope, which is the narrower fix the item asked for.
 - The full `scripts/fast.sh` suite (and the gate): both build the tree's `wa` with cargo; no toolchain here.
 - Items 6, 7, 8: no code, no test run.
 - Nothing was deployed, pushed or run against a real node: this branch only.
+
+---
+
+# Round 2 — independent review of `62c3c064` (measured 18/11 on avell)
+
+Seven findings. Each is fixed here with a row that **fails on 62c3c064 and passes on this commit**; the
+"before" column was measured by unpacking the old commit into `/tmp/hf-before` (`git archive 62c3c064 | tar -x`)
+and running the *same* row against it with `WASM_AGENT_LUA_ROOT=/tmp/hf-before`. Nothing pushed, nothing
+deployed, no node state touched: every row runs in its own `mktemp -d` home with the provider stubbed.
+
+## How the rows were run
+
+```
+h=$(mktemp -d); env -u WASM_AGENT_VAULT_URL -u WASM_AGENT_VAULT_DIR -u WASM_AGENT_VAULT_KEYSTORE \
+  -u WASM_AGENT_VAULT_PASSPHRASE -u WASM_AGENT_DB -u WASM_AGENT_IN_TURN -u WASM_AGENT_RAW_CODE -u WA_MESH \
+  WASM_AGENT_LUA_ROOT=$PWD WASM_AGENT_HOME=$h WA_COMPONENTS_DIR=$h/.wasm-agent/components \
+  WASM_AGENT_RENDEZVOUS= WASM_AGENT_RELAY= WASM_AGENT_MANAGED=0 WA_SCRIPT=scripts/<row>.lua \
+  timeout 300 wa --db $h/t.db
+```
+
+`cargo` **is** on this node now (`cargo 1.100.0`, `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/mission`), so
+the round-1 note "this node has no Rust toolchain" no longer applies — but this round changes no Rust, and every
+row is Lua, shell or Node, so no build was run. Nothing here is a claim about a compiled change.
+
+## Results
+
+| # | finding | row | on 62c3c064 | now |
+|---|---------|-----|-------------|-----|
+| 1 | BLOCKER: remote sessions and any principal counted as the operator | `scripts/test-wave-operator-session.lua` | `ITEM 4 (allocated): a remote session: it does not skip wave admission` | `{"checks":28,"ok":true}` |
+| 2 | BLOCKER: the operator path crashes while allocating; "in place" is false | `scripts/test-wave-operator-session.lua` | `workspaces.lua:409: attempt to index a nil value (global 'start_state')` | same row, green (case 4) |
+| 3 | BLOCKER: with code mode off every plain js-fenced sample became a failing codemode call | `scripts/test-raw-code-answer.lua` | `ITEM 1: the sample is not dispatched as code (dispatched 1)` | `{"checks":11,"ok":true,"paid_calls":0}` |
+| 4 | `unexecuted` failed normal answers (an md example, a list item's fence, a plain js fence under `only`) | `scripts/test-raw-code-answer.lua` | `ITEM 2: an example inside a md block does not fail the answer: run_block_not_executed: … line 6 …` and `ITEM 2: a fence inside a list item …: it is indented 4 spaces` | same row, green (cases 2 and 3) |
+| 5 | deploy no longer re-checks the runtime binding before install | `scripts/test-deploy-runtime-recheck.sh` | `ITEM 9: the preflight answer is not kept in WA_RUNTIME_PREFLIGHT` | `deploy runtime re-check ok (11 checks)` |
+| 6 | a failed uncertainty mark is silent when the release succeeds | `scripts/test-run-claim-release.lua` | `ITEM 5: a failed uncertainty mark is reported on its own …` | `{"checks":10,"ok":true}` |
+| 7 | the real-host end-to-end claim test was replaced by a fake host | `scripts/test-run-claim-release-live.lua` (restored) | file absent (deleted by 62c3c064) | `ok run-claim-release: 7 checks` against the real claim store |
+
+Findings 1 and 2 are one row because they are one function: `ensure` decides who is admitted and then runs the
+allocation that admission allows, and the old code crashed in the second half before the first could be
+observed for the operator itself.
+
+## What each fix is
+
+### 1 + 2. Who is the operator, and does the operator path survive? — `lua/core/workspaces.lua`
+
+`operator_session` required three facts and read one of them:
+
+- `objective` was read as `~= 'subagent'`, which admits every other value — including `remote`, the objective
+  `lua/core/session_watch.lua` gives a session **another node** started. That session is the other node's
+  operator asking over the mesh, and it skipped wave admission on this node's shared repository. Only an empty
+  objective is this node's own conversation.
+- `user_id` was never read at all, so a root session of **any** principal was the operator as far as the rule
+  could tell. It is now the node's owner principal (`users.json` `default_user`, `master` out of the box, read
+  through `lua/core/users.lua`), and an unreadable owner admits nobody (`node_owner()` returns nil → false).
+  This is the same rule `memory.ensure_session` already applied from the other side, when it refuses to hand a
+  `remote` thread to a local `wa chat`.
+
+The allocation path set `start_state.wave_admission` **before** `local start_state` existed: the one path the
+exception is for died with `attempt to index a nil value (global 'start_state')` (measured, above), and the
+table built four lines later would have dropped the fact anyway. The decision is now carried in a local
+(`absent_admission`) and written **after** the table exists.
+
+The verdict no longer says "works in place", which was false at both call sites — the session gets its own
+linked worktree, never the source checkout. It says `proceeds unregistered - it still works in its own linked
+worktree, never in the source checkout`, the verdict's field is `unregistered`, the binding records
+`start_state.wave_admission = "absent_operator_unregistered"` (was `absent_operator_in_place`) and the journal
+keeps `{unregistered=true, reason=…}`. `docs/WAVE-CONVERGENCE.md` says the same three facts, and
+`scripts/test-wave-registration-refusal.lua` asserts the wording and the field.
+
+### 3 + 4. A normal answer is not an action — `lua/core/raw_code.lua`, `lua/core/agent.lua`
+
+- `M.take(result, stop_sent, policy)`: the re-tag of an untagged ```js fence now asks `M.only(policy)`, not
+  `M.mode()`. `only` is the default **mode** on every node, including one whose code mode is `off`; there the
+  re-tag turned every ordinary sample in an answer into a codemode call, and dispatch refused it
+  `codemode_not_enabled`. Outside `only(policy)` only a block the model itself tagged `js run` acts.
+- `M.unexecuted(text, policy)`: it scanned **every line**, inside other blocks included. It now decides with
+  `M.parse` (a fence inside any parsed block is that block's text — a ```js run example inside a ````md block),
+  skips a fence inside a list item (`list_content_column`: a fence up to three spaces inside its container is
+  valid CommonMark), and asks the policy for the `only` clause. What is left is the miss the check exists for:
+  a fence the parser could have seen and did not (indented 4+ spaces at the top level, unclosed) still fails
+  the turn by name — case 4 of the row proves the guard was not simply switched off.
+
+### 5. Deploy re-checks the binding after the build — `scripts/deploy.sh`, `scripts/lib/runtime-binding.sh`
+
+The preflight exported `WA_RUNTIME_WORKTREE`, so the install-time block read a value that was already set and
+skipped itself: the "clean and equal to main" re-check after the build — the half that catches a second worktree
+appearing while cargo ran — was gone, silently. Now the preflight answer is kept in `WA_RUNTIME_PREFLIGHT` and
+not exported; step 6 asks the binding script again, and `wa_runtime_binding_recheck` (new, shipped beside
+`deploy.sh` by `ship_file`, and sourced by the same loop as the other libs) refuses when the two answers differ,
+naming both and saying nothing was installed. An operator who sets `WA_RUNTIME_WORKTREE` explicitly still
+chooses it: no preflight answer, nothing to compare.
+
+### 6. A failed uncertainty mark is said out loud — `lua/core/agent.lua`
+
+When `resources.uncertain` failed and `resources.finish` succeeded, nobody heard it: `finish` deleted the claim
+**and** its uncertainty, and the sentence "both facts are reported" was false. The uncertainty failure now emits
+its own `resource_uncertain_failed` error event (and a `run/uncertain_failed` telemetry event) before the
+release, which still runs on every path.
+
+### 7. The real-host claim test is back — `scripts/test-run-claim-release-live.lua`
+
+62c3c064 replaced the end-to-end test with a fake host whose `reconcile` frees the key unchecked. That fake is
+worth keeping — it can inject a **failed** uncertainty write, which the real store will not do on demand — so
+both live side by side: the fake-host row in `scripts/test-run-claim-release.lua`, and the real-host row
+restored verbatim under its own name. It passes here: the failed turn released `session:<id>`, the next run's
+claim was admitted, and the guard's stop released it too (7 checks).
+
+## Corrections to the round-1 section above
+
+- §4 said the operator session "works in place" and the binding records `absent_operator_in_place`: both were
+  wrong and are fixed in round 2 (finding 2). The recorded value is `absent_operator_unregistered`, and the
+  session works in its own linked worktree.
+- §9 said `deploy.sh` "exports `WA_RUNTIME_WORKTREE` so the installing phase does not decide it again". That
+  export is exactly what removed the install-time re-check; it is gone (finding 5).
+- §2 said `unexecuted` "finds a run-block attempt the parser never turned into a call (a 4-space indented block,
+  a block inside another block, an unclosed one)" — the middle case was a false positive on the model's own
+  prose; the rule is now "a fence outside every parsed block, not inside a list item" (finding 4).
+- §1's "the block is answered by name (`codemode_not_enabled`)" still holds for a block the model **tagged**
+  `js run`; it no longer happens to an untagged sample in an answer (finding 3).
+
+## Regression rows run against this tree's Lua (all green)
+
+```
+test-wave-operator-session      {"checks":28,"ok":true}
+test-raw-code-answer           {"checks":11,"ok":true,"paid_calls":0}
+test-run-claim-release         {"checks":10,"ok":true}
+test-run-claim-release-live    ok run-claim-release: 7 checks
+test-wave-registration-refusal {"checks":15,"ok":true}
+test-codeact-default           {"checks":12,"ok":true,"paid_calls":0}
+test-raw-code                  {"checks":34,"ok":true,"paid_calls":0}
+test-raw-first                 {"checks":47,"ok":true,"paid_calls":0}
+test-raw-native                {"checks":23,"ok":true,"paid_calls":0}
+test-codemode-default          {"checks":39,"ok":true,"paid_calls":0,"rounds":2}
+test-codemode-blocks           codemode blocks ok (31 checks)
+test-codemode-promises         codemode natural promises ok (31 checks; real sandbox)
+test-codemode-boundary         {"checks":33,"ok":true}
+test-envelope                  envelope ok (97 checks)
+test-toolname-repair           toolname repair: 33 checks, 0 failed, 0 skipped
+test-session-worktree-status   {"checks":15,"ok":true}
+```
+
+Node/shell checks: `node scripts/check-deploy-shipped.mjs` (179 checks), `node scripts/check-deploy-docs.mjs`
+(6 checks), `bash scripts/test-deploy-runtime-recheck.sh` (11 checks).
+
+## What was not verified, and what is known red
+
+- **The full deploy was not run** (it builds for minutes, installs and restarts the node). Finding 5 is proved in
+  two halves: the comparison is executed case by case (`scripts/lib/runtime-binding.sh`), and the wiring in
+  `deploy.sh` is asserted as structure — the preflight keeps its answer in its own variable, nothing exports
+  `WA_RUNTIME_WORKTREE` before step 6, and step 6 calls the comparison with both answers after the install
+  phase. Reaching step 6 for real is a build plus an install, which no test may do to this machine.
+- `scripts/test-codemode-native.lua` is red here and red on `62c3c064` **and** on `62c3c064^` (origin/main
+  `74d48431`) under this runner: `#tools.envelope == 11` is not what this environment produces (it produces 1,
+  `codemode`). It is a proof-environment test (`WA_CODEMODE_PROOF_*`, `scripts/test-codemode-component.sh`), not
+  a regression from this round, and I did not change it — editing the number without its proof environment
+  would hide whatever it is meant to catch.
+- The full gate (`scripts/fast.sh`) was not run: it builds and runs the whole suite, which is beyond this
+  review's scope, and every file touched here is covered by a row above.

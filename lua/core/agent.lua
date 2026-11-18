@@ -1749,6 +1749,16 @@ function M:run(text, images)
   -- whose uncertainty write failed kept `session:<id>` claimed, so the next `--resume` was answered
   -- run_resource_refused (18/11). Both facts are reported; neither cancels the other.
   local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
+  if marked.ok~=true then
+    -- Its own line, before the release. The release is unconditional, so a failed uncertainty mark used
+    -- to be heard only when the release failed too: with a successful "finish" the claim went, and the fact
+    -- that nobody recorded WHY the run was uncertain went with it, silently - the comment above said "both
+    -- facts are reported" and one of them was not (review of 18/11, item 5). What is lost here is the
+    -- durable note, not the claim; say exactly that, and let the release happen: it is the next line and it
+    -- runs on every path.
+    self.emit({type="error",error="resource_uncertain_failed: "..json.encode(marked)})
+    telemetry.event(self.session_id,self.run_id,"","run","uncertain_failed",{error=json.encode(marked)})
+  end
   local released=resources.finish(resource_ctx)
   if not released.ok then
     released.uncertain=marked.ok~=true and marked or nil
@@ -2597,7 +2607,7 @@ function M:run_body(text, images)
     -- cannot run is answered by name (codemode_not_enabled), never left in the text as the answer.
     local raw_channel = raw_code.mode() ~= nil
     local raw_run = raw_channel
-      and raw_code.take(result, raw_code.stop_sequences(self.codemode_policy) ~= nil) or nil
+      and raw_code.take(result, raw_code.stop_sequences(self.codemode_policy) ~= nil, self.codemode_policy) or nil
     if raw_run and raw_run.restored_fence then
       self.emit({ type = "status", text = "the raw-code stop sequence ended the reply at a code fence that was not a run block" })
     end
@@ -2633,7 +2643,7 @@ function M:run_body(text, images)
     -- the parser did not see ended the turn with `0 tools` and rc 0). The turn fails by name, so a
     -- scripted `wa chat --once` returns non-zero instead of reporting a silent success.
     if raw_channel and #calls == 0 then
-      local missed = raw_code.unexecuted(result.content or "", raw_code.mode())
+      local missed = raw_code.unexecuted(result.content or "", self.codemode_policy)
       if missed then
         local reason = "run_block_not_executed: " .. missed.reason
         local span = trace[#trace]

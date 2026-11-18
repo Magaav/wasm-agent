@@ -85,9 +85,21 @@ check(held['session:'..done]==nil,'ITEM 5: a settled run holds no session claim:
 -- 3. a FAILED run releases it too, even when marking the run uncertain fails ---------------------------
 clear();actions={};uncertain_fails=true
 local failed_sid=memory.start_session('','claim-failed',{user_id='master',node_id='',title='failed'})
+local failed_events={}
 host.http_stream=function() error('fixture provider down') end
-local ran,failure=pcall(function() return agent.new(failed_sid,function() end,'master','master',''):run('work') end)
+local ran,failure=pcall(function()
+  return agent.new(failed_sid,function(event) failed_events[#failed_events+1]=event end,'master','master',''):run('work')
+end)
 check(not ran,'ITEM 5: the run that could not reach its provider failed: '..tostring(failure):sub(1,120))
+-- Review of 18/11, item 5: with the release succeeding, the failed uncertainty mark used to be heard by
+-- nobody - the claim was deleted and the fact that nobody recorded WHY the run was uncertain went with it.
+local uncertain_heard=nil
+for _,event in ipairs(failed_events) do
+  if tostring(event.error or ''):find('resource_uncertain_failed',1,true)~=nil then uncertain_heard=event.error end
+end
+check(uncertain_heard~=nil,
+  'ITEM 5: a failed uncertainty mark is reported on its own, not only when the release fails too: '..
+  json.encode(failed_events):sub(1,300))
 check(held['session:'..failed_sid]==nil,
   'ITEM 5: a failed run leaves no claim behind, even when its uncertainty write failed: '..json.encode(held['session:'..failed_sid]))
 check(table.concat(actions,','):find('finish',1,true)~=nil,'ITEM 5: the release was asked for: '..table.concat(actions,','))

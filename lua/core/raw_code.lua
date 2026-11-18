@@ -188,7 +188,8 @@ end
 -- instead of running, `notes` for the result). A reply that was cut or hit its output limit keeps its
 -- text whole: the step's own cut/limit path refuses every call it formed, this one included.
 -- `only` mode: an untagged ```js / ```javascript fence becomes a run block, line by line (a pattern over
--- the whole text is easy to get subtly wrong, and this is two comparisons per line).
+-- the whole text is easy to get subtly wrong, and this is two comparisons per line). Only where a codemode
+-- call could actually run - see `M.take`, which is the only caller.
 function M.retag(text)
   local out = {}
   for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
@@ -202,25 +203,64 @@ function M.retag(text)
   return table.concat(out, "\n")
 end
 
--- A run block the parser did not turn into a call is still an action the model asked for. Returns the
--- first one it can see ({line, text, reason}) so the loop can fail the turn by name instead of recording
--- the block as the answer (18/11: a 4-space indented block ended the turn with `0 tools` and rc 0).
-function M.unexecuted(text, mode)
-  local lines = lines_of(tostring(text or ''))
+-- A fence inside a list item: CommonMark lets a fenced block sit up to three spaces inside its container, so
+-- a fence at column 4 or more is still a real code block when a list item opens at or before that column.
+-- Returns that item's content column, or nil when the fence is not inside one. The parser cannot answer this
+-- (it does not track containers), so the one reader that has to tell "the model's prose" from "the model's
+-- action" answers it here.
+local function list_content_column(lines, index)
+  for position = index - 1, 1, -1 do
+    local text = lines[position].text
+    if text:find('%S') then
+      local lead, body = text:match('^(%s*)(%S.*)$')
+      local marker, spaces = body:match('^([-*+])( +)')
+      if not marker then marker, spaces = body:match('^(%d+[.)])( +)') end
+      if marker then return #lead + #marker + #spaces end
+      if #lead < 4 then return nil end -- a paragraph (or a shallower continuation): no list item opens here
+    end
+  end
+  return nil
+end
+
+-- A run block the parser did not turn into a call is still an action the model asked for - if the reply meant
+-- it as one. Returns the first such block ({line, text, reason}) so the loop can fail the turn by name instead
+-- of recording the block as the answer (18/11: a 4-space indented block ended the turn with `0 tools` and
+-- rc 0). `policy` is the codemode policy, exactly as `M.take` gets it: an untagged ```js is only an action
+-- where code mode could run it.
+--
+-- Three shapes are the model's TEXT, and failing an answer over them is worse than the miss this exists for
+-- (review of 18/11). They were all failures, because every line was scanned on its own:
+--   - a fence inside a block the parser DID read: a ```js run example inside a ````md block is that block's
+--     content, and `M.parse` already says so - so the answer is decided by `M.parse`, not by a line scan;
+--   - a fence inside a list item (`list_content_column`): valid CommonMark, a documented sample;
+--   - a plain ```js in an answer on a node whose code mode is OFF: `only` is the default mode even there, but
+--     nothing could run the block, so it was never an action (`M.only(policy)`, not `M.mode()`).
+-- What is left - a fence the parser could have seen and did not - is the miss this was written for.
+function M.unexecuted(text, policy)
+  text = tostring(text or '')
+  local lines = lines_of(text)
+  local inside = {}
+  for _, block in ipairs((M.parse(text))) do
+    for index = block.open, block.close or #lines do inside[index] = true end
+  end
+  local only = M.only(policy)
   for index, line in ipairs(lines) do
-    local indent, mark, info = line.text:match('^([ \t]*)([`~]+)(.*)$')
-    if mark then
-      local char = mark:sub(1, 1)
-      local tag = tostring(info or ''):lower():gsub('%s+$', '')
-      local intended = mark == string.rep(char, #mark) and #mark >= 3
-        and (tag == 'js run' or tag == 'javascript run' or (mode == 'only' and (tag == 'js' or tag == 'javascript')))
-      if intended then
-        local why = #indent > 3
-          and string.format('it is indented %d spaces, so it is an indented code block and not a fence', #indent)
-          or 'it is inside another block, or its fence never closes'
-        return { line = index, text = line.text, reason = string.format(
-          'the %sjs run block at line %d did not run: %s; write it at the start of a line, as %sjs run ... %s',
-          string.rep(char, 3), index, why, string.rep(char, 3), string.rep(char, 3)) }
+    if not inside[index] then
+      local indent, mark, info = line.text:match('^([ \t]*)([`~]+)(.*)$')
+      if mark then
+        local char = mark:sub(1, 1)
+        local tag = tostring(info or ''):lower():gsub('%s+$', '')
+        local intended = mark == string.rep(char, #mark) and #mark >= 3
+          and (tag == 'js run' or tag == 'javascript run' or (only and (tag == 'js' or tag == 'javascript')))
+        local column = intended and #indent > 3 and list_content_column(lines, index) or nil
+        if intended and not (column and #indent >= column) then
+          local why = #indent > 3
+            and string.format('it is indented %d spaces, so it is an indented code block and not a fence', #indent)
+            or 'it is inside another block, or its fence never closes'
+          return { line = index, text = line.text, reason = string.format(
+            'the %sjs run block at line %d did not run: %s; write it at the start of a line, as %sjs run ... %s',
+            string.rep(char, 3), index, why, string.rep(char, 3), string.rep(char, 3)) }
+        end
       end
     end
   end
@@ -359,7 +399,7 @@ local function take_native(result, found)
   return first
 end
 
-function M.take(result, stop_sent)
+function M.take(result, stop_sent, policy)
   local content = result.content or ""
   -- Call markup in the text, and no real tool call: in `first`/`only` the model had nothing declared to
   -- call with, so its own format leaked into the text. A run block, if any, still wins below.
@@ -372,7 +412,13 @@ function M.take(result, stop_sent)
   -- Measured 17/11: told "end your message with one ```js run block", the model wrote ```js — a sample by
   -- the harness's rule, so nothing ran and no tool was left to fall back to. The tag is honoured as
   -- written in `first` mode, where a plain code block can still be an answer.
-  if M.mode() == "only" then content = M.retag(content) end
+  --
+  -- `M.only(policy)`, and NOT `M.mode() == "only"` (review of 18/11, item 1). `only` is the default mode on
+  -- every node, including one whose code mode is OFF: there the retag turned every ordinary ```js sample in an
+  -- answer into a codemode call, and the call was refused `codemode_not_enabled`. A block is re-tagged as the
+  -- step's action only where a codemode call could run; everywhere else only a block the model itself tagged
+  -- `js run` acts, as the rules above say.
+  if M.only(policy) then content = M.retag(content) end
   local blocks, lines = M.parse(content)
   local runs = {}
   for _, block in ipairs(blocks) do if block.run then runs[#runs + 1] = block end end

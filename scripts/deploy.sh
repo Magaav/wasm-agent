@@ -70,7 +70,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
-for wa_lib_part in build-status build-requirements deploy-components node-binaries retire-unshipped; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries retire-unshipped runtime-binding; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
@@ -386,6 +386,12 @@ done
 #     the installing phase, after ~4 minutes of build and prove, so a second worktree on branch main cost the
 #     whole build to learn one fact. The same script decides it in both places, and its message names every
 #     candidate path. With WA_RUNTIME_WORKTREE set explicitly the operator has chosen, so nothing is decided.
+#
+#     The answer is kept in WA_RUNTIME_PREFLIGHT and NOT exported as WA_RUNTIME_WORKTREE (review of 18/11,
+#     item 9). Exporting it made the install-time check below read a value that was already set and skip
+#     itself - the "clean and equal to main" re-check after the build, which is the half that catches a second
+#     worktree appearing while cargo ran. Step 6 asks the question again and compares the two answers.
+WA_RUNTIME_PREFLIGHT=""
 if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
   BINDING_PREFLIGHT_SCRIPT="${SOURCE_ROOT:-$ROOT}/scripts/runtime-install-binding.mjs"
   BINDING_PREFLIGHT_REPO="${SOURCE_ROOT:-$ROOT}"
@@ -393,11 +399,10 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
     BINDING_PREFLIGHT_SCRIPT="$(cygpath -w "$BINDING_PREFLIGHT_SCRIPT")"
     BINDING_PREFLIGHT_REPO="$(cygpath -w "$BINDING_PREFLIGHT_REPO")"
   fi
-  if ! WA_RUNTIME_WORKTREE="$(node "$BINDING_PREFLIGHT_SCRIPT" "$BINDING_PREFLIGHT_REPO" 2>&1)"; then
-    fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_WORKTREE"
+  if ! WA_RUNTIME_PREFLIGHT="$(node "$BINDING_PREFLIGHT_SCRIPT" "$BINDING_PREFLIGHT_REPO" 2>&1)"; then
+    fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_PREFLIGHT"
   fi
-  export WA_RUNTIME_WORKTREE
-  note "runtime worktree resolved before the build: $WA_RUNTIME_WORKTREE"
+  note "runtime worktree resolved before the build: $WA_RUNTIME_PREFLIGHT"
 fi
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
@@ -1258,6 +1263,11 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
   fi
   WA_RUNTIME_WORKTREE="$(node "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
     || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE"
+  # The same question asked again, now that the build is done, and compared with the preflight answer: the
+  # binding must still be clean and equal to main, and it must still be the tree step 0c chose. Comparison
+  # lives in scripts/lib/runtime-binding.sh so it can be tested without a build (review of 18/11, item 9).
+  BINDING_RECHECK="$(wa_runtime_binding_recheck "$WA_RUNTIME_PREFLIGHT" "$WA_RUNTIME_WORKTREE")" \
+    || fail "$BINDING_RECHECK"
 fi
 [ -d "$WA_RUNTIME_WORKTREE" ] || fail "runtime worktree does not exist"
 RUNTIME_PATH="$(cd "$WA_RUNTIME_WORKTREE" && pwd)"
@@ -1744,6 +1754,9 @@ ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-st
 ship_file "$ROOT/scripts/lib/deploy-lock.sh" "$INSTALL_DIR/scripts/lib/deploy-lock.sh" "scripts/lib/deploy-lock.sh beside deploy.sh (the build lock a dead holder cannot block)"
 ship_file "$ROOT/scripts/lib/deploy-signal.sh" "$INSTALL_DIR/scripts/lib/deploy-signal.sh" "scripts/lib/deploy-signal.sh beside deploy.sh (the deploy-pending signal)"
 ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/build-requirements.sh" "scripts/lib/build-requirements.sh beside deploy.sh"
+# ...and the runtime-binding re-check: an installed copy of this script is what the sentinel runs, and it has to
+# be able to ask the binding question a second time (review of 18/11, item 9).
+ship_file "$ROOT/scripts/lib/runtime-binding.sh" "$INSTALL_DIR/scripts/lib/runtime-binding.sh" "scripts/lib/runtime-binding.sh beside deploy.sh (the install-time binding re-check)"
 
 ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/deploy-components.sh" "scripts/lib/deploy-components.sh beside deploy.sh"
 # ...and the node-binary resolver, for the same reason the component lib is shipped: `request deploy` runs the

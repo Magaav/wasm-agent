@@ -600,10 +600,16 @@ historical state-file reads, not features shipped per hour.
 repository has no `registration.json` in it. That refusal is not a dead end, and who is admitted depends
 on what the session is:
 
-- **A top-level operator session** (`wa chat` by the human on this node) works in place. There is no wave
-  for it to belong to, so its binding records `start_state.wave_admission = "absent_operator_in_place"`
-  and its tools run in its own checkout, unchanged. It is never refused for the missing registration,
-  because an operator who cannot work on their own node has no way to fix anything.
+- **A top-level operator session** (`wa chat` by the human on this node) proceeds. There is no wave for it
+  to belong to, so its binding records `start_state.wave_admission = "absent_operator_unregistered"` and it
+  works in its own linked worktree, as every session does - it is not moved into the source checkout. It is
+  never refused for the missing registration, because an operator who cannot work on their own node has no
+  way to fix anything. "Operator session" is three facts, all of them required: no parent and no fork parent,
+  an **empty** `objective` (a `remote` session is another node's operator asking over the mesh, and a
+  `subagent` is a step of somebody's work), and the session's `user_id` is this node's owner principal
+  (`users.json` `default_user`, `master` out of the box). Before the review of 18/11 the objective was read
+  as "not `subagent`" and the principal was not read at all, so a remote caller skipped wave admission on
+  this node's shared repository.
 - **A child or delegated session** still refuses: it is part of a shared wave, and a wave with no owner
   cannot say who may land. The refusal carries the reason and the one command that fixes it:
 
