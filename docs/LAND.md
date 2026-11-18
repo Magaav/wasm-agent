@@ -106,6 +106,23 @@ on zero tests, which stopped two landings of the same round (land-20261118T17224
 land-20261118T173351Z-2a481142). `--full` means the whole suite: it writes no rows file at all and runs every
 check.
 
+The file is proved in the **merged tree**, where `scripts/fast.sh` runs - not in the operator's checkout the
+plan was made from. Those two trees differ by exactly what the round is landing, and each difference was a
+broken gate: a branch that adds `scripts/test-new.lua` is a row the planner's checkout does not have, so the
+plan called it "not a gate row" and the branch's own new test never ran; a branch that adds an exclude line (or
+deletes a row) had the plan asking for a row the merged tree's runner refuses, which is `fast_narrow:unknown_row`
+with zero tests run. So the gate asks for the plan's rows plus every changed `scripts/test-*.lua` the merged tree
+has as a row, drops what that tree's inventory no longer runs (each one named in the gate's evidence, with the
+reason), and runs the whole suite when nothing is left. The fast check always carries a `WA_FAST_ROWS`
+assignment - the file, or an empty value when the round narrowed nothing - so a `WA_FAST_ROWS` inherited from the
+environment cannot narrow a `--full` run that wrote no file.
+
+A `git diff` that fails is not a round that changed nothing. The changed-path list the plan and the rows file are
+built from now carries a note naming the branch whose diff could not be read, and every caller that would narrow
+work on it takes the whole thing: the plan is the full path with every check and no rows file, and the gate writes
+no rows file at all - the whole suite runs, and the evidence says which diff failed, so an unreadable git costs
+time, never coverage.
+
 `scripts/lib/fast-rows.sh` is where a narrowing is stopped from meaning less than a full run: the always-on
 core rows are added whatever the request says (the row-environment probe, and `scripts/test-land.lua`), the
 contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by name, and an

@@ -1,8 +1,15 @@
-# land-gate-fix - `wa land`'s gate names rows `fast.sh` cannot run
+# land-gate-fix - `wa land`'s gate: the rows `fast.sh` can run, proved in the tree it runs in
 
 Branch `change/land-gate-fix` in this worktree (`/home/victor/Work/missions/land-gate-fix/wt`), based on
-`change/land-r1` (`4145b7f7`). Built and tested HERE (avell, x86_64, 16 cores). Committed locally; **never
-pushed**.
+`change/land-r1` (`4145b7f7`); round 2 starts on this branch's own head `17da9ef0`. Built and tested HERE
+(avell, x86_64, 16 cores). Committed locally; **never pushed**.
+
+Three rounds, one mission. **Round 1** (sections 1-5) made the plan request only rows the runner accepts.
+**Round 2** (sections 6-11) proves that list in the merged tree the gate actually runs in - so a branch's own new
+test runs and an exclude the branch adds cannot re-create `fast_narrow:unknown_row` - and stops an inherited
+`WA_FAST_ROWS` from narrowing a `--full` run. **Round 3** (sections 12-15) rebases onto `origin/main` `e5ba9089`,
+leaves the root `REPORT.md` exactly as main has it (this file is the whole report), and makes a `git diff` that
+fails name itself instead of narrowing a gate in silence.
 
 ## 1. The failure, as it was measured
 
@@ -87,3 +94,219 @@ on the real candidate list, which is the step that failed.
 - `scripts/fast.sh` full run not executed (see above); the two touched rows and the doc check were;
 - the gate's `fast` row itself was not run through a real `wa land` round: the end-to-end proof here is the
   planner -> rows file -> real filter chain on the exact failed paths, plus the fixture cases in `test-land.lua`.
+
+---
+
+# Round 2: the merged tree, and `WA_FAST_ROWS` from the environment
+
+Round 2 starts on this branch's own head `17da9ef0` (round 1 above is the history of the same branch). It closes
+the two holes the review of `17da9ef0` named: the rows file is now proved **in the tree the gate runs**, and the
+fast check can no longer be narrowed by an inherited environment variable.
+
+## 6. Defect 1: the plan is proved in the operator's checkout, the run happens in the merged tree
+
+Round 1 made the plan request only rows `scripts/fast.sh` accepts - but it asked **the wrong tree**. In the
+pre-round file, `M.row_inventory` ran `wa_fast_row_candidates` with `cwd = journal.repo` (land.lua:766) and the
+naming scan's `grep -rlF <module> scripts/test-*.lua` ran there too (land.lua:827). `journal.repo` is the
+operator's checkout, which does not contain the round at all. The runner runs somewhere else: `impl.gate` gives
+the `fast` check `cwd = run.tree`, the worktree `impl.merge` cuts from the base and merges the branches into
+(land.lua:1446). The two trees differ by exactly what the round is landing, and the difference broke the gate in
+both directions:
+
+- **A row the branch adds is silently dropped.** A branch that adds `scripts/test-new.lua` has no such row in the
+  planner's checkout, so `M.gate_rows` reported it "not a gate row" - and on a round that narrowed *anything
+  else* (`plan.full` is false) the branch's own new test was never requested, never ran, and nothing said so
+  beyond a plan line that read like a refusal.
+- **A row the branch removes is requested anyway.** A branch that adds a `scripts/fast-path.exclude` line (or
+  deletes a test) leaves the plan asking for a row the merged tree's runner can no longer execute:
+  `wa_fast_row_filter` refuses the whole request - `fast_narrow:unknown_row` - and the round is gated on zero
+  tests, which is the failure round 1 was meant to have removed.
+
+## 7. Defect 2: an inherited `WA_FAST_ROWS` narrows a `--full` run
+
+Pre-round `impl.gate` (land.lua:1443-1445) prefixed `WA_FAST_ROWS=<file>` only when the round had written a rows
+file. `--full` writes none by design, so the fast check inherited whatever `WA_FAST_ROWS` the landing itself was
+started with, and `scripts/fast.sh` narrows on a NON-EMPTY value (`[ -n "${WA_FAST_ROWS:-}" ]`). A `--full` run
+could therefore execute a narrowed set, obeying a plan that was not its own, while its report said "the whole
+suite".
+
+## 8. What changed
+
+| file | change |
+| --- | --- |
+| `lua/core/land.lua` | `M.gate_rows_file(run, options)` now returns `path, failed, notes` and proves the list in `run.tree`: it reads `wa_fast_row_candidates` there, keeps the plan's rows **and** every changed `scripts/test-*.lua` that tree has as a row, and drops what the tree's `scripts/fast-path.exclude` keeps out. Every drop is named in `notes` ("not asking for <path> (the plan asked for it|this round changes it): <reason>"); a round with no row left, or no merged tree at all, writes no file and runs the whole suite. New `M.gate_command(check, rows_file)` gives the `fast` check its `WA_FAST_ROWS` **always** - the file, or an empty value - and leaves every other check untouched. `impl.gate` logs the notes and the exact command it runs (the evidence used to print the check's command *without* its `WA_FAST_ROWS` prefix). |
+| `scripts/test-land.lua` | 18c-3 reworked onto a real merged tree; new **18c-4** (both scenarios, against worktrees built the way `impl.merge` builds them - a worktree of the base with the branch merged in - and fed to the **real** `wa_fast_row_filter`); new **18c-5** (`WA_FAST_ROWS` always set, proved through `env` and through `impl.gate`'s own command). 266 -> **294** checks. |
+| `docs/LAND.md`, `skills/fast-path/SKILL.md` | the merged-tree rule, the by-name drop and the always-set `WA_FAST_ROWS`. |
+
+What the gate now writes in its own evidence (measured, from 18c-4's fixture run):
+
+    gate rows: 2 row(s) of the merged tree: scripts/test-agent-live.lua scripts/test-new-agent-row.lua
+    $ [fast] WA_FAST_ROWS='<run>/gate-rows.txt' bash scripts/fast.sh
+    ...
+    $ [fast] WA_FAST_ROWS= bash scripts/fast.sh
+
+and, for the excluded row (18c-4, second scenario):
+
+    gate rows: not asking for scripts/test-agent-live.lua (the plan asked for it): this round excludes it
+    gate rows: no row the merged tree can run is left (1 dropped); the whole suite runs
+
+## 9. The two scenarios, as they were run
+
+The fixture carries the REAL `scripts/lib/fast-rows.sh` and a real `scripts/fast-path.exclude`; the merged trees
+are real git worktrees. Three proofs, all in `scripts/test-land.lua`:
+
+1. **The branch adds a row.** `change/newrow` adds `scripts/test-new-agent-row.lua`; the planner's checkout is
+   left at the base without it. `M.gate_rows` in that checkout maps the changed module to
+   `scripts/test-agent-live.lua` and reports the new row as "not a gate row" - the defect, reproduced.
+   `M.gate_rows_file` on the merged tree writes **both** rows, and the merged tree's own
+   `wa_fast_row_filter` accepts the file (exit 0) and lists the new row as one it would run.
+2. **The branch adds an exclude.** The merged tree excludes `scripts/test-agent-live.lua`. With a second
+   requested row still runnable, the file holds only that one and the evidence names the dropped row with the
+   ledger's own reason; with the excluded row as the only request, no file is written at all ("the whole suite
+   runs"). The pre-merge request that would have named it is fed to the same real filter and **refused** (exit 2,
+   `fast_narrow:unknown_row`), so the case proves the failure it prevents.
+3. **`WA_FAST_ROWS` is never absent.** `M.gate_command` answers `WA_FAST_ROWS= bash scripts/fast.sh` with no
+   rows file and `WA_FAST_ROWS='<file>' ...` with one, and leaves other checks alone; run through `env` with an
+   inherited `WA_FAST_ROWS`, the empty assignment removes it while a command that does not set it still sees the
+   inherited value. At the gate itself (`impl.gate`, real rows file, checks stubbed), the fast check's command is
+   `WA_FAST_ROWS='<run>/gate-rows.txt' bash scripts/fast.sh` when narrowed and `WA_FAST_ROWS= bash scripts/fast.sh`
+   for `--full`, and the evidence logs that same command.
+
+## 10. What was run, and against what
+
+Both rows ran the way `scripts/fast.sh` runs a row: own scratch `HOME`/`WASM_AGENT_HOME`, the node's credential
+lane and identity variables removed, `WA_FAST_ROWS` cleared, `WASM_AGENT_LUA_ROOT` = this worktree - never the
+live `~/.wasm-agent`.
+
+| row | head `17da9ef0` | this change |
+| --- | --- | --- |
+| `scripts/test-land.lua` | `land ok (266 checks)` | `land ok (294 checks)` |
+| `scripts/test-fast-rows.sh` | `fast-rows ok (30 checks)` | `fast-rows ok (30 checks)` (untouched) |
+| `scripts/sync-prompt-docs.sh --check` | - | `ok (4 blocks current)` |
+
+**The new checks are not vacuous.** With the pre-round `lua/core/land.lua` restored byte for byte
+(`b789d616…`, the file at `17da9ef0`) and the same new `scripts/test-land.lua`, the row fails at the first
+scenario-1 assertion:
+
+    lua error: check failed: AND the row the branch added, which the planner's checkout cannot see
+    (looked for scripts/test-new-agent-row.lua in scripts/test-agent-live.lua)
+
+and the file was then restored (sha `2606985e…`, unchanged afterwards).
+
+**One unexplained observation, named as such:** of 24 runs of `scripts/test-fast-rows.sh` during this round, ONE
+(the first) failed at its check 37, "test-land.lua is not in the narrowed run", while printing a list that
+contains `scripts/test-land.lua`; the other 23 passed (`fast-rows ok (30 checks)`), and a 200-iteration replay
+of that exact `printf | grep -qx` pipeline under `pipefail` produced no failure. Neither that script nor
+`scripts/lib/fast-rows.sh` is touched by this change (the row reads `lua/core/land.lua` only to look for
+`wa_fast_row_candidates`, which is still there). I did not establish the cause, so it is recorded as an observed
+flake, not as a pass.
+
+## 11. What is not done / open
+
+- not pushed, not landed, no deploy - per the mission;
+- `bash scripts/fast.sh` as a whole was **not** run (it builds the tree binary and every component); the rows it
+  would narrow to were run directly through its own filter, which is the step that failed in the two measured
+  landings;
+- no real `wa land` round with a narrowed plan was run end to end: the pipeline cases in `test-land.lua` pass
+  `--checks`, so the narrowing path is proved by the merged-tree fixtures above plus `impl.gate`'s own recorded
+  command, not by a live gate over a real Lua change;
+- the row was run against the installed `wa` (0.1.0) with this tree's Lua, not against a release build of this
+  tree;
+- `luac` on this box is 5.5 and rejects a pre-existing construct in `M.changed_paths`; syntax was checked with
+  `lua5.4 -e 'loadfile(...)'` for both touched Lua files.
+
+---
+
+# Round 3: the rebase onto main, the root report, and a `git diff` that fails
+
+## 12. The two instructed changes, and how each was verified
+
+**The rebase.** `git rebase origin/main` onto `e5ba9089` ("land land5/final: merge change/land-gate-fix") replayed
+the branch's one commit `7a83e263` as `03bc9322` with no conflict and no change of content; the rebase reported
+"Successfully rebased and updated refs/heads/change/land-gate-fix". `e5ba9089` already contains round 2's base
+`17da9ef0`, so the merge base was `17da9ef0` and the branch now stands on `origin/main` as two commits - round 2's
+replayed `03bc9322` and this round's on top - and its diff against `origin/main` is those two and nothing else.
+
+**The root `REPORT.md`.** At `7a83e263` the root `REPORT.md` and this file were byte-identical (214 lines each;
+`diff <(git show HEAD:REPORT.md) <(git show HEAD:docs/missions/reports/land-gate-fix.md)` printed nothing), so
+everything the branch added to the root file was already here, word for word. The root file was therefore restored
+to `origin/main`'s copy (`git checkout origin/main -- REPORT.md`) rather than rewritten: nothing was paraphrased
+or dropped, and `git diff --numstat origin/main` no longer lists `REPORT.md` at all.
+
+## 13. The LOW: `M.changed_paths` answers with a name, not with silence
+
+`M.changed_paths` parsed `git diff --name-only` stdout and never looked at `listing.code`. A diff that failed - a
+base that is not an object, a missing branch tip, a git that errors - returned an empty list, and "no paths" is
+the same answer as "nothing changed" for both of its narrowing callers:
+
+- `impl.plan` read it as `plan_no_changes` and refused the round ("the collected branches introduce no path"),
+  which is a lie about a branch that does change files;
+- `M.gate_rows_file` calls the same function to catch a row the branch ADDS or DELETES (the round-2 fix), so a
+  broken diff quietly asked for one row fewer - a narrowed gate that drops coverage, with no line anywhere.
+
+What changed: `M.changed_paths` returns `paths, notes`, one note per branch whose diff could not be read, naming
+the branch, the exact `git diff` and git's own first stderr line. Every caller that narrows on the list treats a
+note as a stop and takes the whole thing:
+
+| caller | before | now |
+| --- | --- | --- |
+| `impl.plan` / `M.plan_preview` | "no changes", round refused | the plan is the FULL path: category `compiled`, classifier `unreadable`, every check, no rows file, and the plan's own `why` line names every failed diff |
+| `M.gate_rows_file` | one row fewer, silently | no rows file; the evidence carries the failure and `the whole suite runs` |
+
+`impl.plan` now refuses with `plan_no_changes` only when there is neither a path nor a note, and the plan's first
+line stops printing a file count it does not have:
+
+    land: plan: the changed paths could not be read -> compiled
+    land:   compiled 0, component 0, lua 0, docs 0 (classified by unreadable)
+    land:   the changed paths of change/unreadable could not be read (git diff 0000000000000000000000000000000000000000 0fa613515ce8c97bc518cee808f5e74f3ccca95f: fatal: bad object 0000000000000000000000000000000000000000), so the paths this round changes are unknown
+    land:   gate: cargo-codemode cargo-wa-whatsapp codemode-component fast prompt-docs (the whole suite)
+    land:   no row inventory: the paths this round changes could not be read, so no row is proved sufficient
+
+Those lines are the round's own evidence file (`plan.log` of the `plan-unreadable` case in `scripts/test-land.lua`,
+read back after the run), not a sketch of it.
+
+## 14. What was run, and against what
+
+The rows ran the way `scripts/fast.sh` runs a row: own scratch `HOME`/`WASM_AGENT_HOME`, the node's credential
+lane and identity variables removed, `WA_FAST_ROWS` cleared, `WASM_AGENT_LUA_ROOT` = this worktree - never the
+live `~/.wasm-agent`.
+
+All three columns were measured this round, each in its own extracted tree (`git archive <commit>` into a scratch
+directory) with its own scratch home - the round-2 numbers this report carried before were not taken on trust:
+
+| row | `origin/main` `e5ba9089` | this branch before round 3 (`03bc9322`) | this change |
+| --- | --- | --- | --- |
+| `scripts/test-land.lua` | `land ok (266 checks)` | `land ok (294 checks)` | `land ok (313 checks)` |
+| `scripts/test-fast-rows.sh` | `fast-rows ok (30 checks)` | `fast-rows ok (30 checks)` | `fast-rows ok (30 checks)` (file untouched) |
+| `scripts/sync-prompt-docs.sh --check` | not run there | not run there | `ok (4 blocks current)` |
+
+`origin/main` measures 266 and not 294 because **main does not contain round 2's commit**: `e5ba9089` merged
+`17da9ef0`, so the `scripts/test-land.lua` it carries is round 1's. The 19 checks between 294 and 313 are the new
+**18c-6** cases - two measured counts, not an estimate - and they assert the note list, the gate's refusal to
+write a rows file, the plan's full path and its printed first line, `impl.plan`'s answer and evidence, and - as
+the control - that a diff which works still reports no note.
+
+**The new checks are not vacuous.** With `HEAD`'s `lua/core/land.lua` (`2606985e…`) restored and the same new
+`scripts/test-land.lua`, the row stops at its first new assertion:
+
+    lua error: [string "scripts/test-land.lua"]:1282: attempt to get length of a nil value (local 'broken_notes')
+
+which is the defect itself - the pre-change function returns one value and there is no note list to read. The file
+was then restored (`e5360fe3…`, unchanged afterwards) and the row went green again.
+
+## 15. What is not done / open
+
+- not pushed, not landed, no deploy - per the mission;
+- the root `REPORT.md` carries no round-3 text **by instruction**: the standing harness note asks for a
+  `REPORT.md` in the worktree root, and this round's instruction is narrower (the root file must have no diff to
+  main). The root file is main's copy, byte for byte, and this file is the whole report;
+- `bash scripts/fast.sh` as a whole was not run; the row was run through its own environment contract, which is
+  the step the gate narrows;
+- the failing-diff case is proved with a base that is not a git object (`fatal: bad object`). The per-branch half
+  of the case - one branch readable, one not - is covered by construction (the note list is built per branch) but
+  was not driven end to end;
+- no real `wa land` round was run with a broken diff: `test-land.lua` drives `impl.plan` and `M.gate_rows_file`
+  directly, not a live gate;
+- `luac` 5.5.1 rejects this tree at `lua/core/land.lua:723: attempt to assign to const variable 'path'`, which is
+  pre-existing (the same rejection at `HEAD`, line 711, on a loop this round only indented); syntax was checked
+  with `lua5.4 -e 'loadfile(...)'` for both touched Lua files.
