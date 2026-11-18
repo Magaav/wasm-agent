@@ -521,3 +521,175 @@ know the tree was moved under it once.
   Item 8's cache and seam tests do compile against the base and are red there (the service URL is returned as a
   direct address, which is what the failing rows above and the measured file show).
 * Nothing was deployed or pushed: this branch only, committed locally.
+
+# Second pass — falsification of each item, the base-vs-after counts, and two holes item 8 still had
+
+Same day, same node (avell), same base 62c3c064. The section above ("Items 6, 7, 8 — delivered") was
+written by a session that ran **in this same worktree at the same time as this one**; that is worth
+recording, because it cost a measurement: a `git stash` taken here to measure the base was raced by the
+other session's changes, and the "base" run came back with the new modules in its test list. The base row
+below was re-measured with the source state verified by `grep` before the run
+(`grep -c 'mod withdraw_tests' main.rs` → 0 and `grep -c is_direct_address roster.rs` → 0), and the
+contaminated run was thrown away. Two sessions in one worktree can stash and pop each other's files; the
+number that survived is the one whose source state was checked.
+
+## The base, re-measured
+
+| suite | base 62c3c064 (stashed, verified) | this change |
+|-------|----------------------------------|-------------|
+| wa-sentinel, `cargo test --manifest-path wa-sentinel/Cargo.toml -- --test-threads=1` | 110 passed, **5 failed** | 121 passed, the **same 5 failed** |
+| wa-mesh-core, `cargo test -p wa-mesh-core` | — | **29** passed, 0 failed (the row above says 30; this run does not reproduce it) |
+| wa-mesh, `cargo test -p wa-mesh --lib` | 72 passed, **2 failed** (76 total) | 74 passed, the **same 2 failed** (77 total) |
+
+The five wa-sentinel failures, pre-existing and named so nobody looks for them again — they fail
+identically on the stashed base:
+
+~~~
+deploy_outcome_tests::the_sentinel_spawns_waits_and_reports_a_deploy_end_to_end
+deploy_visibility_tests::a_failing_deploy_leaves_its_message_in_the_capture
+node_script_tests::javascript_requests_run_native_node_and_preflight_before_any_operation
+node_script_tests::job_run_prepare_and_pipeline_use_the_same_native_node_dispatch
+role_tests::the_watcher_records_its_own_owner_where_a_later_stop_reads_it
+~~~
+
+The two wa-mesh ones, also pre-existing (stashed base: 2 passed, 2 failed — the same two):
+
+~~~
+tests_relay::a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url
+  relay_answer_unreadable:unknown field 'error', expected one of 'schema','ts','from_node_id','reply','signature'
+  raw_head={"error":"unknown_caller"}   -> left "mesh_relay_failed", right "mesh_refused"
+tests_relay::the_roster_decides_on_the_relay_path_too_and_an_existing_operator_bootstraps_it
+  t has not been pushed a roster yet
+~~~
+
+## Each item's test, falsified: it fails without the fix
+
+Keep the test, disable exactly the guard the fix adds, run the test, restore the file. After the four
+runs the tree was byte-identical to before them (`git diff | sha256sum` =
+1f17d8d2e9b79c3bd59b93f898f30df8a08c9da325d7739ad694c9e3e3c3d829, before and after).
+
+### 6 — without the claimed-lane refusal, without next_step
+
+~~~
+--- disable the claimed check in withdraw_request (if false {):
+thread 'withdraw_tests::a_claimed_request_is_refused_by_name_and_nothing_moves' panicked at src/withdraw_tests.rs:124:5:
+the refusal names the state: withdraw_unknown_request: no request 1700000000000000000-4242-00000000000000000000 is queued; nothing was moved and 'wa-sentinel status' lists the ids that are
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 125 filtered out
+
+--- drop the next-step clause from pending_lines (the status line as it was):
+thread 'withdraw_tests::status_names_the_unblock_and_the_withdraw_for_a_held_request' panicked at src/withdraw_tests.rs:147:5:
+the line names the request the operator has to name:   waiting  deploy  target commit 0123456789abcdef0123456789abcdef01234567  queued 2023-11-14T22:13:20Z (2m ago)  held: node busy
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 125 filtered out
+~~~
+
+The same three commands measured on a scratch home with the base binary built from the stash and with
+this tree's binary (WASM_AGENT_HOME=/tmp/sentinel-cli-home, one queued deploy):
+
+~~~
+BEFORE  wa-sentinel status
+  requests:  1 waiting, 0 done, 0 failed
+    waiting  deploy  target commit 0123456789abcdef0123456789abcdef01234567  queued 2023-11-14T22:13:20Z (1099d ago)  held: node busy; no watcher is running, so nothing would perform it
+BEFORE  wa-sentinel request withdraw 1700000000000000000-4242-00000000000000000000 --reason no-longer-needed
+  sentinel: unknown request verb "withdraw"; no request was written. The verbs are: restart, recover, wake, deploy, run, spell, stop
+  rc=1     lanes after: requests: 1700000000000000000-...json   withdrawn: (does not exist)
+BEFORE  wa-sentinel request --help | grep -c withdraw   ->  0
+
+AFTER   wa-sentinel status
+    waiting  deploy  target commit 0123...4567  queued 2023-11-14T22:13:20Z (1099d ago)  held: node busy; no watcher is running, so nothing would perform it; next: end the turn (no further tool calls) so the node goes idle, and the next watcher tick runs it; or withdraw it: wa-sentinel request withdraw 1700000000000000000-4242-00000000000000000000
+AFTER   wa-sentinel request withdraw 1700000000000000000-4242-00000000000000000000 --reason no-longer-needed
+  withdrawn deploy 1700000000000000000-4242-00000000000000000000: moved to /tmp/sentinel-cli-home/.wasm-agent/sentinel/withdrawn/1700000000000000000-4242-00000000000000000000.json; no watcher tick can claim it now
+  rc=0     lanes after: requests: (empty)   withdrawn: 1700000000000000000-...json
+AFTER   wa-sentinel request --help | grep -c withdraw   ->  1
+~~~
+
+### 7 — with the old rule (audit on every pass), and with no grace
+
+~~~
+--- Verdict::Quiet audits again (what the watcher did on every tick):
+thread 'observation_tests::a_missing_file_is_reported_once_however_many_ticks_go_by' panicked at src/observation_tests.rs:91:5:
+one problem, one line - not one per tick: [... 50 identical lines for one id ...]
+50 occurrences of "cannot be observed: missing" in that one failure - one per tick, the measured defect
+at 1/10000 the scale of work's 523,067 lines
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 125 filtered out
+
+--- retire on the first report instead of after the grace:
+thread 'observation_tests::a_missing_file_is_reported_once_however_many_ticks_go_by' panicked at src/observation_tests.rs:98:5:
+nothing is retired inside the grace
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 125 filtered out
+~~~
+
+The old code path, for the record (main.rs, the watcher tick before this change) — one audit line per
+directory per tick, forever:
+
+~~~
+if let Err(error)=sentinel_return::observe(id) {audit("return-observation-problem",id,&error.to_string());}
+~~~
+
+### 8 — with the store's rule removed
+
+~~~
+--- push_address accepts anything again (the rule disabled):
+thread 'cache::tests::a_service_url_is_never_a_peers_direct_address' panicked at wa-mesh-core/src/cache.rs:386:9:
+a service URL is not an address: ["https://rendezvous.colmeio.com"]
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out
+~~~
+
+## Two holes item 8 still had, closed in this commit
+
+The first pass claimed "the one door every writer uses". Reading every write while measuring found two
+paths around it, both now closed and both asserted:
+
+1. **An unknown peer.** `PeerCache::record_success` has a branch for a node the cache has never seen, and
+   it inserted `addresses: vec![address]` directly, without the rule — so the first answer from a new
+   peer arriving at a service URL would store the URL where the checked doors would have refused it. It
+   now builds the entry and calls `push_address`. The test walks it:
+   `record_success(unseen, "https://rendezvous.colmeio.com:443")` keeps `last_ok_ms` and stores no
+   address (`a service URL is not an address, not even for a peer seen once`).
+2. **A scheme with an explicit port.** `is_direct_address` delegated to the roster's `check_address`,
+   which reads the **last** colon: `"http://10.0.0.4:8891"` satisfies `host:port` while naming a URL, and
+   a relay written as `https://rendezvous.colmeio.com:443` is exactly that shape. The rule now refuses a
+   scheme before the shape, and then requires the alphabet of an address
+   (`[A-Za-z0-9.:-_[]%]`) so a path separator cannot pass as a host. Asserted in
+   `the_direct_address_rule_is_the_one_the_roster_signs_with`: `http://10.0.0.4:8891`,
+   `https://rendezvous.colmeio.com:443` and `10.0.0.4:8891/path` are not direct addresses.
+
+## The fast suite
+
+`bash scripts/fast.sh --jobs 8` on this node, this tree. Its first acts are what the earlier section
+could not do at all: it built this tree's `wa` with cargo and stamped it —
+
+~~~
+fast: binary /home/victor/wasm-agent/target/mission/release/wa (build 2d2c0e2dfe3d, tree 2d2c0e2dfe3d, fresh: built from this tree) sha256=af18f880f020
+fast: env: node v26.13.1 (node:sqlite yes), cargo 1.100.0, wasi-sdk absent, lua 5.4.9
+fast: components SKIPPED (graph hooks memory selfloop mesh codemode svc-echo): error: component graph needs wasi-sdk (C inside); set WASI_SDK=<dir>
+~~~
+
+```
+fast: lua 218/224 passed (56 excluded: scripts/fast-path.exclude)
+fast: 43 named skip(s) inside passing rows
+fast result FAILED (257 checks, 14 failed, 0 skipped)
+fast path FAILED (14 of 257 checks, 0 skipped, 297s)
+```
+
+All 14, classified, with how each was decided:
+
+| check | verdict |
+|-------|---------|
+| 6 Lua rows: test-codemode-model-boundary, test-host-return-docs, test-orchestration-mode, test-observability, test-remote-call-shape, test-skill-discovery | **pre-existing on 62c3c064.** Re-run one by one against the **installed** node binary (build 2e6fab41, not this tree's) with this tree's Lua, so the binary is not the cause: all six fail identically ("mode-on declares subagent and route_task from the start", "opt-in short index retains every full tool schema", "ripgrep shell fallback disclosure rule", "preamble guideline in the progressive prompt", "host return docs: 1 of 10 checks failed", "MODEL_BOUNDARY_CONTENT_REQUIRED"). This branch changes no lua/, scripts/ or docs/ file (`git diff --stat 62c3c064 HEAD -- lua scripts docs` is empty), so those rows run the same bytes as the base |
+| rust wa-sentinel: the 5 tests named above | **pre-existing**, measured on the stashed base (110/5 → 121/5, same five) |
+| rust wa-mesh: the 2 relay tests named above | **pre-existing**, measured on the stashed base (2 passed / 2 failed, the same two) |
+| prompt-docs (stale generated blocks: docs/ENVELOPE.md tool-catalogue) | **pre-existing**: docs/ and lua/ are identical to the base commit |
+| orphan-tests (scripts/test-runtime-binding-preflight.mjs orphaned) | **pre-existing**: that file is 62c3c064's (item 9 of the section above), which declares no harness entry |
+| publish-artifacts | **the check, not the branch**: it compares `ls-tree | sort` in the ambient locale against a list written in C order. LANG=en_US.UTF-8 here, so `sort` answers "node-2d2c0e2dfe3d.manifest PUBLISH.sh ..." while the expected string starts "PUBLISH.sh SHA256SUMS ..."; with `LC_ALL=C` the same two names sort the other way round. Nothing in this branch touches releases/ |
+| land-signing | **the machine**: WA_RELEASE_SIGN_DEFER=1 and no vault here, so there is no signature to publish (the row says so itself) |
+| fast-binary (`build 2d2c0e2dfe3d is not this tree (d9911177d0c7)`) | **this run's fault, not the tree's**: the two commits of this second pass were still uncommitted while the suite ran, so the tree hash was not the binary's. Re-run after the commit below |
+| component-pins | **open, and the only one that is ours to answer.** rust/components/mesh declares `wa-mesh-core = { path = "../../wa-mesh-core" }`, so a change to wa-mesh-core is a change to a pinned component's inputs and components.lock's mesh pin (42872bbc..., 209612 bytes) must move. Rebuilding it needs wasi-sdk, which this node does not have (`WASI_SDK` unset, no wasi-sdk directory, and the suite reports "components SKIPPED (graph hooks memory selfloop mesh codemode svc-echo): error: component graph needs wasi-sdk"). I did **not** write `Components-Unchanged: mesh ...`: I cannot show the guest's bytes are the same, and a trailer that says so would be a claim I did not measure. So the pin is stale until someone with wasi-sdk runs `scripts/publish-components.sh` for mesh |
+
+## What is still open
+
+- **The mesh component pin** (above): the only landing gate this change leaves red for a real reason, and it
+  cannot be cleared on this node.
+- The 13 other failures are pre-existing on 62c3c064 or properties of this machine, each named above; none
+  is fixed here, because none is item 6, 7 or 8.
+- Nothing was pushed, deployed or run against a live node or watcher; every row is a scratch home.
+

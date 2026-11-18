@@ -229,19 +229,21 @@ impl PeerCache {
                 push_address(entry, address);
             }
         } else {
-            self.peers.insert(
-                node_id.to_string(),
-                CachedPeer {
-                    node_id: node_id.to_string(),
-                    name: String::new(),
-                    level: 0,
-                    public_key: String::new(),
-                    addresses: vec![address.to_string()],
-                    source: Source::Learned,
-                    last_ok_ms: now_ms,
-                    last_error: String::new(),
-                },
-            );
+            // A peer the cache has not seen before: the entry is made through the same door as every other
+            // writer, so an unknown peer is not the one exception that stores a service URL (the first
+            // version of this rule left exactly this path open).
+            let mut entry = CachedPeer {
+                node_id: node_id.to_string(),
+                name: String::new(),
+                level: 0,
+                public_key: String::new(),
+                addresses: Vec::new(),
+                source: Source::Learned,
+                last_ok_ms: now_ms,
+                last_error: String::new(),
+            };
+            push_address(&mut entry, address);
+            self.peers.insert(node_id.to_string(), entry);
         }
     }
 
@@ -407,6 +409,14 @@ mod tests {
         .to_string();
         let loaded = PeerCache::parse(&poisoned).expect("the measured file still parses");
         assert!(loaded.addresses(oracle).is_empty(), "an address this build would not store is not dialled either");
+
+        // ...and the door a peer the cache has never seen comes in by: an unknown node whose first answer
+        // arrived at a service URL keeps the fact that it answered, and no address to dial.
+        let unseen = "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4";
+        cache.record_success(unseen, "https://rendezvous.colmeio.com:443", 1_762_000_300);
+        let entry = cache.peer(unseen).expect("the peer is remembered as reachable");
+        assert_eq!(entry.last_ok_ms, 1_762_000_300);
+        assert!(entry.addresses.is_empty(), "a service URL is not an address, not even for a peer seen once: {:?}", entry.addresses);
     }
 
     #[test]
@@ -414,7 +424,20 @@ mod tests {
         for good in ["10.0.0.4:8891", "oracle.example.net:8891", "[fe80::1]:8891", "localhost:8799"] {
             assert!(RosterNode::is_direct_address(good), "{good} is a direct address");
         }
-        for bad in ["https://rendezvous.colmeio.com", "rendezvous.colmeio.com", "10.0.0.4", "10.0.0.4:", ":8891", "http://10.0.0.4:8891/x", ""] {
+        for bad in [
+            "https://rendezvous.colmeio.com",
+            "rendezvous.colmeio.com",
+            "10.0.0.4",
+            "10.0.0.4:",
+            ":8891",
+            "http://10.0.0.4:8891/x",
+            // A scheme with an explicit port satisfies "host:port" when only the last colon is read, and it is
+            // still a service URL - the shape a relay is most likely to be written in.
+            "http://10.0.0.4:8891",
+            "https://rendezvous.colmeio.com:443",
+            "10.0.0.4:8891/path",
+            "",
+        ] {
             assert!(!RosterNode::is_direct_address(bad), "{bad} is not a direct address");
         }
     }

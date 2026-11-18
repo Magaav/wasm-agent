@@ -165,6 +165,15 @@ impl RosterNode {
     /// because a relayed call succeeded - and every direct call to `avell` first failed
     /// `resolve_failed:invalid port value` before the relay carried it.
     pub fn is_direct_address(address: &str) -> bool {
+        // A scheme is the mark of a *service*: "http://10.0.0.4:8891" satisfies "host:port" when only the last
+        // colon is read, while naming a URL - and a relay is exactly the service most likely to be written
+        // with an explicit port. So the shape is checked and then the alphabet: a direct address is a host
+        // (letters, digits, dots, dashes, a bracketed IPv6 literal with its zone) and a port, and no separator
+        // of a URL is in that set.
+        let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, ':' | '.' | '-' | '[' | ']' | '_' | '%');
+        if !address.chars().all(allowed) {
+            return false;
+        }
         check_address(address).is_ok()
     }
 
