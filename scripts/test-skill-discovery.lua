@@ -1,4 +1,11 @@
 -- Metadata discovery is not execution; complete skill bodies and policy remain.
+-- The declared-tool (codemode) surface is what this row is about: the prompt's guidelines and its
+-- skill contract exist beside the tools a run is given. CodeAct is the default since 17/11
+-- (lua/core/raw_code.lua, M.DEFAULT), so the row names the surface it is written against.
+-- The row names its surface: codemode for the cases below, nil (the node's default, CodeAct) for the
+-- variant at the end. A pin covering the whole file left the default surface untested (18/11, item 3).
+local raw_surface='codemode'
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
@@ -75,4 +82,41 @@ for _,s in ipairs(tools.all('master'))do
 end
 local all=tools.dispatch(memory,'skill',{query='*',limit=8},'master',ctx)
 check(all.matches>10 and all.skills[1] and all.has_more,'complete visible catalogue remains enumerable')
+-- ---- THE DEFAULT SURFACE (CodeAct), through a real run ---------------------------------------------
+-- Row 3 of the 18/11 review: the rule this row is about has to survive the surface the node actually
+-- runs, and a prompt assembled by hand is not that surface. CodeAct (the default: raw_code M.DEFAULT is
+-- only) declares nothing to the provider - the tools are still there as tools.<name> inside the script,
+-- which is exactly what this guideline is about (lua/core/agent.lua, guidelines_for). So the row runs
+-- the real agent loop with a stubbed provider - no network, no paid call - and reads the system
+-- message the provider was actually given.
+raw_surface=nil
+local tick=string.char(96)
+local previous_getenv=host.getenv
+host.getenv=function(k)
+  if k=='WASM_AGENT_PROVIDER' then return 'opencode-go' end
+  if k=='WASM_AGENT_LLM_API_KEY' then return 'codeact-discovery-fixture' end
+  if k=='WASM_AGENT_LLM_MODEL' then return 'deepseek-v4.1-flash' end
+  if k=='WASM_AGENT_PI_MODELS_STORE' then return 'missing-test-store' end
+  if k=='WASM_AGENT_CONTEXT_BUDGET' then return '0' end
+  if k=='WASM_AGENT_MAX_TOOL_ROUNDS' then return '4' end
+  return previous_getenv(k)
+end
+local sent={}
+local previous_stream=host.http_stream
+host.http_stream=function(_,_,_,body)
+  sent[#sent+1]=json.decode(body)
+  return json.encode({status=200,content='found it',stream_complete=true,finish_reason='stop',
+    usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},tool_calls={}})
+end
+local run_sid=memory.start_session('','codeact-discovery',{user_id='master',node_id='',title='codeact-discovery'})
+local run_ok,run_reply=pcall(function() return agent.new(run_sid,function() end,'master','master',''):run('discover the whatsapp skill') end)
+host.http_stream=previous_stream
+host.getenv=previous_getenv
+check(run_ok,'the default-surface run completed: '..tostring(run_reply))
+local declared=sent[1] and #((sent[1].tools) or {}) or -1
+check(declared==0,'the run declared no tool at all ('..declared..'), so it ran on the CodeAct surface')
+local run_system=''
+for _,message in ipairs((sent[1] or {}).messages or {}) do if message.role=='system' then run_system=message.content end end
+check(run_system:find('final answer so '..tick..'rg'..tick..' can be installed',1,true)~=nil,'ripgrep shell fallback disclosure rule on the DEFAULT CodeAct surface')
+check(run_system:find(skills.usage(),1,true)~=nil,'and the complete shared skill policy is stated there too')
 print('skill discovery ok ('..checks..' checks, 0 skipped; no provider or paid calls)')

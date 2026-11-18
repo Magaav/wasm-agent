@@ -125,7 +125,7 @@ runs on the client too, while `bash` runs on this node.
 | --- | --- | --- |
 | `time` | - | Ask this node's OS clock (local time with its offset) |
 | `remember` | `content` `id?` `scope?` `tags?` | Store a fact the user asked you to keep |
-| `recall` | `query` `limit?` `scope?` | Look up stored facts before answering about the user |
+| `recall` | `limit?` `query?` `scope?` | Look up stored facts before answering about the user |
 | `memories` | `limit?` `scope?` | List stored facts, with their ids |
 | `wake` | `reason` `at?` `every_seconds?` `in_seconds?` `on?` `probe?` `prompt?` | Schedule your own next turn (time, event or repeating) |
 | `wake_list` | `all?` | List your pending self-wakes |

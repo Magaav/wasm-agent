@@ -180,7 +180,12 @@ contains "$out" "PUBLISHREADY artifacts/node-$SHORT $readback source=$COMMIT" "t
 parents="$(git --git-dir="$WORK/dropbox.git" rev-list --parents -n1 "$readback" | wc -w | tr -d '[:space:]')"
 [ "$parents" = 1 ] || fail "the artifacts commit is not an orphan (rev-list --parents lists $parents ids)"
 ok
-files="$(git --git-dir="$WORK/dropbox.git" ls-tree -r --name-only "$readback" | sort | tr '\n' ' ')"
+# LC_ALL=C: the list below is compared to a literal written in byte order, and the ambient collation here
+# is en_US.UTF-8, whose sort ignores case - "node-<sha>.manifest" then sorts BEFORE "PUBLISH.sh" and the
+# row failed on avell 18/11 reading 'the commit holds node-... PUBLISH.sh ...'; under LC_ALL=C the same
+# commit, read the same way, is green (measured). The commit's CONTENTS are what this check is about, so
+# the order has to be the one the literal names.
+files="$(git --git-dir="$WORK/dropbox.git" ls-tree -r --name-only "$readback" | LC_ALL=C sort | tr '\n' ' ')"
 # The signed sums ship WITH the binaries they name (change/sign), and the flat form SHA256SUMS is part of
 # the set too - the shipped PUBLISH.sh names it, and measured 13/11 the ref held PUBLISH.sh, the manifest
 # and the payloads while that line asked for a file the commit did not hold: a publish that fails on a

@@ -878,6 +878,23 @@ local function email_served()
 end
 M.email_served=email_served
 
+-- Whether this session has a worktree to inspect or bind. A session that needs none is not offered
+-- `session_worktree`: on a node with no wave registration the model called it three times in a row
+-- instead of working (18/11), and a tool that answers nothing is worse than absent. It stays
+-- dispatchable, so a caller that names it by hand is still answered.
+local function offers_worktree(ctx, memory)
+  if not ctx or not ctx.session_id then return false end
+  memory = memory or dofile('lua/core/memory.lua')
+  local ok, workspace = pcall(memory.session_workspace, ctx.session_id)
+  if ok and type(workspace) == 'table' then
+    if workspace.required == true then return true end
+    local state = tostring(workspace.state or '')
+    if state ~= '' and state ~= 'unbound' then return true end
+  end
+  local bound_ok, bound = pcall(memory.session_worktree, ctx.session_id)
+  return bound_ok and type(bound) == 'string' and bound ~= ''
+end
+
 function M.all(role,ctx,memory)
   local shown = {}
   local code=show_codemode(role,ctx,memory)
@@ -899,6 +916,18 @@ end
 function M.envelope(role,ctx)
   ctx=ctx or {};ctx.role=role or 'guest'
   local list=M.all(role,ctx,dofile('lua/core/memory.lua'))
+  -- A session that needs no worktree is NOT OFFERED the tool that binds one (item 3, 18/11): with no
+  -- workspace to inspect, `status` answered nothing a model could act on and it called the tool three
+  -- times in a row until the repetition guard ended the turn. It stays in the catalogue, so
+  -- `searchTools` and a caller that names it still reach it: out of sight at the top level, not out of
+  -- reach (the same rule as the outer facades, 29/10).
+  if not offers_worktree(ctx,nil) then
+    local kept={}
+    for _,item in ipairs(list) do
+      if ((item['function'] or {}).name or '')~='session_worktree' then kept[#kept+1]=item end
+    end
+    list=kept
+  end
   -- With code mode on, connectors are reached through it alone; the prompt names them in its hint.
   if codemode_policy.enforced(ctx) then
     local outer={}
@@ -912,7 +941,9 @@ function M.envelope(role,ctx)
   -- repetition guard stopped the turn). The catalogue still reaches the script through `capabilities()`
   -- and `searchTools()`, so nothing is out of reach — only out of sight at the top level.
   local raw=dofile('lua/core/pure.lua')('lua/core/raw_code.lua')
-  if raw.only and raw.only() then return {}, envelope.mode(ctx) end
+  -- The empty surface is a promise the channel can run a block; without the channel the ordinary tools
+  -- stay declared, so a node with code mode off still has a way to act (18/11).
+  if raw.only and raw.only(ctx.codemode_policy) then return {}, envelope.mode(ctx) end
   return envelope.schemas(list,ctx),envelope.mode(ctx)
 end
 
@@ -1950,7 +1981,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     local workspace = memory.session_workspace(id)
     local action = args.action or "status"
     if action == "status" then
-      return { session_id = id, worktree = memory.session_worktree(id), workspace = workspace,
+      -- One line first: what is bound and what to do next. The struct alone answered neither, which is
+      -- why a model called status three times in a row until the guard ended the turn (18/11).
+      return { status_line = workspaces.status_line(memory, id),
+        session_id = id, worktree = memory.session_worktree(id), workspace = workspace,
         recovery = workspaces.recovery_hint(memory, id) }
     elseif action=='release' then
       local released,why,detail=workspaces.release(memory,id,user_id)

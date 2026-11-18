@@ -101,8 +101,10 @@ fn a_waiting_request_is_one_line_of_facts() {
     assert_eq!(
         line,
         "  waiting  deploy  target commit 0123456789abcdef0123456789abcdef01234567  \
-queued 2023-11-14T22:13:20Z (2m ago)  held: node busy",
-        "the line must carry verb, commit, queue time and the hold reason"
+queued 2023-11-14T22:13:20Z (2m ago)  held: node busy; next: end the turn (no further tool calls) so the node \
+goes idle, and the next watcher tick runs it; or withdraw it: wa-sentinel request withdraw \
+1700000000000000000-4242-00000000000000000000",
+        "the line must carry verb, commit, queue time, the hold reason and what to do about it"
     );
     assert!(!line.contains('\n'), "one request, one line: {line:?}");
 }

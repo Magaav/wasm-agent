@@ -83,12 +83,21 @@ fn validated_ack(binding:&Value,now:u64) -> Result<(Value,u64,Option<Value>)> {
     let ack:Value=serde_json::from_slice(&std::fs::read(dir.join("ack.json")).context("ack_missing; unknown, never replay")?)
         .context("ack_corrupt; unknown, never replay")?;
     let object=ack.as_object().context("ack_not_object; unknown, never replay")?;
+    // The phase is ONE word, defined once: deploy_protocol::record writes the same value into ack.json and
+    // state.json, so every phase that function may record has to be readable here. "withdrawn" is the one a
+    // watcher never writes and an operator's withdrawal does - main::withdraw_request calls record() before any
+    // tick has run, so this file does not exist yet and record() creates it with that phase. Refusing the word
+    // here rejected the deploy's own immutable acknowledgement on every pass ("ack_identity_or_revision_mismatch;
+    // unknown, never replay"): observe_due wrote an unknown journal, delivered nothing, and the session that
+    // asked waited for ever for a deploy that could never happen. Accepting the phase is not this function
+    // deciding an outcome - observed_phase maps a withdrawn directory to the same terminal report it gives a
+    // failed one, and that report is what the session is owed.
     if object.len()!=9 || object.keys().any(|k| !["schema","id","expected_sha","session","owner","queued_at","phase","detail","at"].contains(&k.as_str()))
         || ack["schema"]!=1 || ack["id"]!=binding["id"] || ack["expected_sha"]!=intent["expected_sha"]
         || ack["session"]!=intent["session"] || ack["session"]!=binding["parent"]
         || ack["owner"]!=intent["owner"] || (intent.get("owner").is_some() && ack["owner"]!=binding["owner"])
         || ack["queued_at"]!=intent["queued_at"] || !ack["detail"].is_string()
-        || !["held","spawned","failed","unknown","verified"].contains(&ack["phase"].as_str().unwrap_or("")) {
+        || !["held","spawned","failed","unknown","verified","withdrawn"].contains(&ack["phase"].as_str().unwrap_or("")) {
         bail!("ack_identity_or_revision_mismatch; unknown, never replay");
     }
     let at=ack["at"].as_u64().context("ack_timestamp_unsupported; unknown, never replay")?;
@@ -157,6 +166,14 @@ fn observed_phase(binding:&Value,state:&Value,now:u64) -> (String,String) {
         return ("unknown".into(),"state_identity_or_timestamp_mismatch; reconcile, never replay".into());
     }
     if state["phase"]=="failed" {return ("failed".into(),state["detail"].as_str().unwrap_or("effect failed").into());}
+    // A protocol deploy the operator withdrew before it ran (main::withdraw_request records the phase). Nothing was
+    // attempted and nothing ever will be, so the asking session has to hear a TERMINAL answer: anything else leaves
+    // it waiting for a deploy that cannot happen. The phase a return event carries is a closed vocabulary - the
+    // hook that consumes it (scripts/sentinel-return-hook.mjs) refuses any other word - so the terminal word here
+    // is "failed", and the detail says exactly what happened, in the words the legacy deploy door already uses.
+    if state["phase"]=="withdrawn" {
+        return ("failed".into(),state["detail"].as_str().unwrap_or("withdrawn by the operator before the sentinel performed it; nothing was installed").into());
+    }
     let dir=sentinel_dir().join("deploy-protocol").join(id);
     if dir.join("result.json").exists() {
         let result:Value=std::fs::read(dir.join("result.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
@@ -278,6 +295,25 @@ pub(crate) fn observe_all() -> Value {
     let results:Vec<Value>=entries.iter().map(|id|observe_one(id)).collect();
     let skipped:Vec<&Value>=results.iter().filter(|record|record["ok"]!=true).collect();
     json!({"ok": skipped.is_empty(), "observed": results.len()-skipped.len(), "skipped": skipped, "records": results})
+}
+
+/// Whether the engine's own schedule would observe this directory at `now`.
+///
+/// `observe_at` answers `Ok(())` both when it observed a directory and when it deliberately did nothing because
+/// the directory's ten-second cadence - or its backoff after a failure - is not due yet. A caller that cannot tell
+/// those apart learns the wrong fact: the observation lane used to *forget* a problem on every deferral, so the
+/// next real attempt found nothing remembered and reported the same problem again, and a runtime problem that
+/// never cleared wrote a line every backoff period for ever - "one line per (id, problem)" at a term's length
+/// instead of a tick's. This is that distinction, computed from the same two files and the same rule.
+pub(crate) fn due(id:&str,now:u64) -> bool {
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    if let Ok(Some(cursor))=read_schedule(&dir.join("observation.json")) {
+        if cursor["next_at"].as_u64().unwrap_or(0)>now {return false;}
+    }
+    if let Ok(Some(poll))=read_schedule(&dir.join("observation-poll.json")) {
+        if poll["id"]==id && poll["next_at"].as_u64().unwrap_or(0)>now {return false;}
+    }
+    true
 }
 
 pub(crate) fn observe_at(id:&str,now:u64) -> Result<()> {

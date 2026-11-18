@@ -51,6 +51,75 @@ local function complete_listing(result, what)
   return text
 end
 
+-- The one command that establishes wave authority for a shared repository (item 4, 18/11). The refusal
+-- used to be six words (`wave_registration_required`) with no way out, so the only exit was moving the
+-- queue file by hand.
+M.WAVE_REGISTER_COMMAND = 'node scripts/wave-entry.mjs register <repo> <wave-config.json> <attestation.json>'
+
+-- The principal this node belongs to: `users.json`'s `default_user` (`master` out of the box), the account
+-- a local-first node serves its operator with (`lua/core/users.lua`). Read when asked, never assumed, and nil
+-- when it cannot be read - a caller that cannot name the owner must not admit anyone.
+local function node_owner()
+  local loadable, users = pcall(dofile, 'lua/core/users.lua')
+  if not loadable or type(users) ~= 'table' or type(users.default_user) ~= 'function' then return nil end
+  local resolved, user = pcall(users.default_user)
+  if not resolved or type(user) ~= 'table' then return nil end
+  local id = tostring(user.id or '')
+  return id ~= '' and id or nil
+end
+
+-- Whether this session is THIS node's operator conversation (`wa chat` by the operator, or a session it
+-- started directly), which may work where the node has no wave authority at all. Each clause is a fact about
+-- who is asking, and two of them were missing (18/11 review):
+--   - `objective` names the starter. It was read as `~= 'subagent'`, which admits every OTHER value too -
+--     including `remote`, the objective `lua/core/session_watch.lua` gives a session another node started.
+--     That session is the other node's operator asking over the mesh, and it skipped wave admission on this
+--     node's shared repository. The first fix then demanded an EMPTY objective, and that refused the node's own
+--     conversation: every real operator session is created with objective "chat" (`chat.lua` for a bare
+--     `wa chat`, `commands.new_session` for `/new`, `agent.lua` for `--session` start-if-missing,
+--     `memory.ensure_session`'s title, `subagents.lua` for a parent thread), so the exception could not be
+--     reached by any code - only by the review's own hand-built `objective = ''` session. It is "chat" (or the
+--     empty objective of a hand-started session) that is this node's own conversation, and nothing else.
+--   - the principal was never checked at all, so a root session of ANY account (a guest, or a principal
+--     another node sent) was the operator as far as this rule could tell. It is the node's owner - the same
+--     rule `memory.ensure_session` already applies from the other side, when it refuses to adopt a `remote`
+--     thread just because it is the newest open one.
+local function operator_session(session)
+  if not session then return false end
+  if tostring(session.parent_session_id or '') ~= '' or tostring(session.fork_parent_id or '') ~= '' then return false end
+  local objective = tostring(session.objective or '')
+  if objective ~= '' and objective ~= 'chat' then return false end
+  local owner = node_owner()
+  if not owner then return false end
+  return tostring(session.user_id or '') == owner
+end
+
+-- One admission refusal as a value: what happened, whether this session proceeds anyway, and the sentence a
+-- reader acts on. A node with NO registration is not the same fact as a wave that refuses: the operator's own
+-- session on such a node keeps working (said out loud, and recorded on its binding), while a child still
+-- refuses because it is part of a shared wave that has no owner.
+--
+-- "Works in place" was the wording here, and it was false at both call sites: the session gets its own linked
+-- worktree (or already has one), never the source checkout. What is missing is the wave REGISTRATION, not the
+-- worktree, so the sentence says that and the binding records `absent_operator_unregistered`.
+function M.wave_admission_outcome(reason, options)
+  options = options or {}
+  local text = tostring(reason or '')
+  local absent = text:find('wave_registration_required', 1, true) ~= nil
+  if absent and options.operator_session then
+    return { ok = true, unregistered = true,
+      note = 'no wave authority on this node (' .. text .. '): this top-level operator session proceeds'
+        .. ' unregistered - it still works in its own linked worktree, never in the source checkout;'
+        .. ' register the repository with ' .. M.WAVE_REGISTER_COMMAND .. ' to give its waves an owner' }
+  end
+  local message = 'workspace_wave_admission_refused:' .. text
+  if absent then
+    message = message .. ' - the shared wave store exists without a registration for this repository;'
+      .. ' establish it with: ' .. M.WAVE_REGISTER_COMMAND
+  end
+  return { ok = false, code = 'workspace_wave_admission_refused', message = message }
+end
+
 local function wave_admission(root,phase)
   local lua_root=host.getenv('WASM_AGENT_LUA_ROOT')
   local entry=(lua_root and lua_root~='') and (lua_root..'/scripts/wave-entry.mjs') or (dofile('lua/core/update.lua').install_dir()..'/scripts/wave-entry.mjs')
@@ -229,6 +298,37 @@ local function inspect_source(memory, user_id, node_id, source_session_id)
     (why_not ~= "" and why_not or "workspace_source_empty")
 end
 
+-- One line: what this session's tools are bound to, and what to do next. Written for both readers at
+-- once - the operator and the model - because `status` used to return a structure whose every field was
+-- empty for a session that needs no worktree, and a model called it three times in a row (18/11).
+function M.status_line(memory, session_id)
+  local workspace = memory.session_workspace(session_id)
+  local bound = tostring(memory.session_worktree(session_id) or '')
+  local state = tostring(workspace and workspace.state or '')
+  local reason = tostring(workspace and workspace.error or '')
+  local function commit(value) local text = tostring(value or '') return text == '' and 'unknown' or text:sub(1, 12) end
+  if workspace and workspace.required == true then
+    if state == 'allocated' then
+      return string.format('workspace allocated: %s on branch %s (base %s); nothing to bind - work there',
+        tostring(workspace.worktree or ''), tostring(workspace.branch or workspace.workspace_branch or ''),
+        commit(workspace.base_commit or workspace.workspace_base_commit))
+    elseif state == 'pending' or state == 'allocating' or state == 'unknown' then
+      return string.format('workspace %s%s; next: session_worktree action=recover finishes the allocation',
+        state, reason ~= '' and (': ' .. reason) or '')
+    elseif state == 'failed' then
+      return string.format('workspace failed: %s; next: fix that cause, then session_worktree action=allocate',
+        reason ~= '' and reason or 'no reason recorded')
+    end
+    return string.format('workspace %s%s; next: session_worktree action=recover', state,
+      reason ~= '' and (': ' .. reason) or '')
+  end
+  if bound ~= '' then
+    return string.format('bound to %s (not a managed workspace); next: work there, or session_worktree action=clear',
+      bound)
+  end
+  return "no workspace required: this session's tools run in the node's own directory; nothing to bind, keep working"
+end
+
 -- The same decision `ensure` makes, taken before this node creates the child's session.
 function M.preflight_source(memory, source_session_id, user_id, node_id)
   return inspect_source(memory, user_id, node_id, source_session_id)
@@ -306,7 +406,15 @@ function M.ensure(memory, session_id, source_session_id, options)
   if workspace.state == "allocated" then
     local admitted,why=true,nil
     if not direct_owner then admitted,why=wave_admission(workspace.start_state.source_root,'produce') end
-    if not admitted then return nil,'workspace_wave_admission_refused:'..tostring(why) end
+    if not admitted then
+      local verdict=M.wave_admission_outcome(why,{operator_session=operator_session(session)})
+      if not verdict.ok then return nil,verdict.message end
+      -- Admitted without the shared wave, and recorded on the binding: a session working unregistered is a
+      -- fact the next reader has to be able to see.
+      workspace.start_state=workspace.start_state or {}
+      workspace.start_state.wave_admission='absent_operator_unregistered'
+      pcall(memory.journal,'wave_admission',session_id,{unregistered=true,reason=tostring(why)})
+    end
     local valid, err = verify_binding(memory, session_id, workspace)
     if valid then return workspace end
     mark(memory, session_id, workspace, "failed", err)
@@ -330,10 +438,15 @@ function M.ensure(memory, session_id, source_session_id, options)
   -- used by producer/merge public entrypoints. No arbitrary alternate store.
   local admitted,admission_why=true,nil
   if not direct_owner then admitted,admission_why=wave_admission(root,'allocate') end
+  local absent_admission=false
   if not admitted then
-    local why='workspace_wave_admission_refused:'..tostring(admission_why)
-    mark(memory,session_id,workspace,'failed',why)
-    return nil,why
+    local verdict=M.wave_admission_outcome(admission_why,{operator_session=operator_session(session)})
+    if not verdict.ok then mark(memory,session_id,workspace,'failed',verdict.message) return nil,verdict.message end
+    -- Recorded below, on `start_state` itself. This assignment used to sit HERE, before `local start_state`
+    -- existed, so a top-level operator session on a node with no registration made `ensure` die with
+    -- `attempt to index a nil value (global 'start_state')`; and the table built a few lines later would
+    -- have dropped the fact anyway.
+    absent_admission=true
   end
   local dirty = tostring(inspected.status or "")
   local start_state = {
@@ -347,6 +460,7 @@ function M.ensure(memory, session_id, source_session_id, options)
     source_dirty = dirty ~= "", uncommitted_policy = "refuse",
     inspected_at = host.now(),
   }
+  if absent_admission then start_state.wave_admission='absent_operator_unregistered' end
   workspace.source_path = inspected.path
   workspace.base_commit = start_state.base_commit
   workspace.start_state = start_state

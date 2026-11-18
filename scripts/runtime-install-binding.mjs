@@ -25,7 +25,9 @@ export function canonicalRuntime(repo,expectedHead='HEAD',mainRef=process.env.WA
   if(head!==main)throw Error(`deploy source must be the exact fetched ${mainRef} before canonical runtime binding`);
   const candidates=worktreeBlocks(repo).filter(lines=>lines.includes('branch refs/heads/main'))
     .map(lines=>lines.find(line=>line.startsWith('worktree '))?.slice(9));
-  if(candidates.length!==1||!candidates[0])throw Error('exactly one canonical main checkout is required; no actor tree was moved');
+  // The refusal names EVERY candidate (item 9, 18/11): the operator had two worktrees on branch main and
+  // was told only that one was required, after waiting four minutes for a build it never needed.
+  if(candidates.length!==1||!candidates[0])throw Error(`exactly one canonical main checkout is required; found ${candidates.length} on branch refs/heads/main (${candidates.length?candidates.join(', '):'none'}) - a runtime binding is installed from exactly one tree, so remove or re-point the extra checkout(s); no actor tree was moved`);
   const root=fs.realpathSync(candidates[0]);
   if(git(root,'rev-parse','HEAD')!==main||git(root,'status','--porcelain'))throw Error(`canonical main checkout must be clean and equal to fetched ${mainRef}`);
   return path.resolve(root);

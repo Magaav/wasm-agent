@@ -98,6 +98,14 @@ when a code-mode path changed, the WhatsApp crate's tests when its crate changed
 `WA_FAST_ROWS` list of the Lua rows the changed modules touch (a row whose own text mentions the module,
 proved by `grep` in the tree, not guessed from a name). A change no row maps to runs the whole suite.
 
+The plan draws that list from the runner's own inventory - `wa_fast_row_candidates` in
+`scripts/lib/fast-rows.sh`, the function `scripts/fast.sh` builds its `lua.list` with - so it can only request
+a row the run would execute. A changed path whose row the ledger declares not run is reported in the plan as
+`not a gate row: <reason>` and never requested: asking for it is `fast_narrow:unknown_row` and a round gated
+on zero tests, which stopped two landings of the same round (land-20261118T172243Z-666a59cf,
+land-20261118T173351Z-2a481142). `--full` means the whole suite: it writes no rows file at all and runs every
+check.
+
 `scripts/lib/fast-rows.sh` is where a narrowing is stopped from meaning less than a full run: the always-on
 core rows are added whatever the request says (the row-environment probe, and `scripts/test-land.lua`), the
 contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by name, and an

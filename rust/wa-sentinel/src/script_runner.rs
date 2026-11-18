@@ -12,13 +12,26 @@ fn executable(path: &Path) -> bool {
     #[cfg(not(unix))] { true }
 }
 
+/// The path an approved script's interpreter is launched from: absolute, and **never canonicalized**.
+///
+/// `std::fs::canonicalize` resolves the last symlink as well, and a version manager's shim *is* a symlink
+/// to the manager: on this node `~/.local/share/mise/shims/node -> /usr/bin/mise`, so the canonicalized
+/// "node" was `mise` itself, which answered its own usage text and exit 1 to every approved script
+/// (measured on avell, 18/11: both `node_script_tests` rows failed with `code=1` and mise's help in the
+/// operation's stdout). A shim picks the interpreter from its **own name**, so the name has to survive
+/// resolution; what the callers need from canonicalization is only that the file launched is the one
+/// checked, and an absolute path already gives that.
+fn launch_path(path: &Path) -> Result<PathBuf> {
+    std::path::absolute(path).with_context(|| format!("resolve {}", path.display()))
+}
+
 fn resolve_node(explicit: Option<OsString>, search: Option<OsString>, fallbacks: &[PathBuf]) -> Result<PathBuf> {
     if let Some(value) = explicit {
         let path = PathBuf::from(value);
         if !path.is_absolute() || !executable(&path) {
             bail!("node_runtime_unavailable: WA_SENTINEL_NODE must name an absolute executable file; no shell fallback");
         }
-        return std::fs::canonicalize(path).context("resolve WA_SENTINEL_NODE");
+        return launch_path(&path).context("resolve WA_SENTINEL_NODE");
     }
     let name = if cfg!(windows) { "node.exe" } else { "node" };
     // Do not search cwd via an empty/relative PATH entry. Resolve once, then launch the exact file.
@@ -27,7 +40,7 @@ fn resolve_node(explicit: Option<OsString>, search: Option<OsString>, fallbacks:
         .chain(fallbacks.iter().cloned());
     for path in candidates {
         if executable(&path) {
-            return std::fs::canonicalize(path).context("resolve Node executable");
+            return launch_path(&path).context("resolve Node executable");
         }
     }
     bail!("node_runtime_unavailable: install Node on the sentinel PATH or set WA_SENTINEL_NODE to its absolute executable; no shell fallback")
@@ -91,10 +104,25 @@ mod tests {
             assert!(resolve_node(Some(fake.clone().into_os_string()), None, &[]).is_err());
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let resolved = std::fs::canonicalize(&fake).unwrap();
+        let resolved = std::path::absolute(&fake).unwrap();
         assert_eq!(resolve_node(Some(fake.clone().into_os_string()), None, &[]).unwrap(), resolved);
         assert_eq!(resolve_node(None, Some(std::env::join_paths([&root]).unwrap()), &[]).unwrap(), resolved);
         assert_eq!(resolve_node(None, None, &[fake.clone()]).unwrap(), resolved);
+        // A version manager's shim is a symlink to the manager, and the shim chooses the interpreter by its
+        // own name: the resolution must hand back the shim, never what it points at. Measured on avell
+        // 18/11: `~/.local/share/mise/shims/node -> /usr/bin/mise`, canonicalized, launched mise, and both
+        // node_script_tests rows failed with mise's usage text and exit 1 in the operation's stdout.
+        let manager = root.join("version-manager");
+        std::fs::write(&manager, "fixture manager, never launched").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let shim = root.join("shim-node");
+            std::os::unix::fs::symlink(&manager, &shim).unwrap();
+            let chosen = resolve_node(Some(shim.clone().into_os_string()), None, &[]).unwrap();
+            assert_eq!(chosen, std::path::absolute(&shim).unwrap(), "the shim decides which interpreter runs");
+            assert_ne!(chosen, std::fs::canonicalize(&manager).unwrap(), "never the manager it points at");
+        }
         assert!(resolve_node(Some("node".into()), None, &[fake.clone()]).is_err(), "invalid explicit override must not fall back");
         assert!(resolve_node(Some(root.join("absent").into_os_string()), None, &[fake]).is_err());
         assert!(resolve_node(None, Some(std::env::join_paths([Path::new(""), Path::new(".")]).unwrap()), &[]).is_err());

@@ -33,8 +33,11 @@ It runs, in parallel where it can:
 in that file plus the always-on core rows (the row-environment probe and `scripts/test-land.lua`); the contract
 checks are not narrowable, an unknown row refuses the run by name and an empty request is refused too
 (`scripts/lib/fast-rows.sh`). `wa land` writes that file from the plan - the rows whose text mentions a module
-the round changed - so a Lua-only landing pays for its own rows instead of all of them. A narrowed run prints
-how many rows it ran and how many it did not, so it never reads like a full one.
+the round changed - so a Lua-only landing pays for its own rows instead of all of them. The plan requests only
+the rows the runner's own inventory lists (`wa_fast_row_candidates`), and a row `scripts/fast-path.exclude`
+declares not run is reported as `not a gate row: <reason>`, never requested. A narrowed run prints how many
+rows it ran and how many it did not, so it never reads like a full one; `wa land --full` writes no rows file and
+runs the whole suite.
 
 A pass with a `SKIP` row is reported as skipped, never as a run that tested it: the reasons are
 printed under the counts. A machine-only failure (`cannot fork`, exit 125/126) is retried once,

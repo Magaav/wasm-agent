@@ -3,6 +3,58 @@
   "why": "The JS/CJS test scripts no harness names, each with the reason it is not wired. scripts/test-orphan-tests.mjs fails when a new orphan appears undeclared, when a declared file is gone, or when a declared one becomes wired (delete that entry - the list only shrinks). A wired script is named by a harness (scripts/fast.sh, scripts/test.sh, scripts/wave-release.mjs) or by another test.",
   "entries": [
     {
+      "file": "scripts/test-build-cap-skip.sh",
+      "reason": "hermetic and cheap (a scratch build directory and three file timestamps) but no gate row runs it: it pins the 14/11 build-cap eviction loop, and adding it to a harness is the follow-up this entry records instead of leaving the omission silent"
+    },
+    {
+      "file": "scripts/test-core-module-cache.sh",
+      "reason": "needs a built kernel binary and the profile-crossing probe for the compiled-module cache (docs/KERNEL.md, A2.7): a per-change proof, not a landing row, because it rebuilds and measures guest crossings"
+    },
+    {
+      "file": "scripts/test-devloop.sh",
+      "reason": "needs the wasm32-wasip2 toolchain and rebuilds a real component three times (wa dev --once, watch, --restart): too slow and too toolchain-dependent for a landing gate, run by hand when the dev loop changes"
+    },
+    {
+      "file": "scripts/test-fabric.sh",
+      "reason": "a cargo driver for wa-fabric own tests plus wa-queue, minutes long: those crates' unit tests run in the Rust rows, and this script is the by-hand fabric run against a loopback rendezvous"
+    },
+    {
+      "file": "scripts/test-kernel-swap.sh",
+      "reason": "starts the real node under wa-watchdog and swaps a real kernel under a connected client: it replaces the running binary's kernel, so it is run by hand on a machine it may disturb, never on a landing"
+    },
+    {
+      "file": "scripts/test-linux-launcher.sh",
+      "reason": "hermetic fixture (a local file: repository and a stub bootstrap.sh) for the paste-able Linux launcher line, kept for the release channel; no gate row runs it, and adding one is the follow-up this entry records"
+    },
+    {
+      "file": "scripts/test-mcp-command-scope.sh",
+      "reason": "a branch-scoped driver: it runs only the suites a /mcp change moves, against WA_BIN or a wa on PATH, and says so in its own header; wiring it into a gate would run those suites twice"
+    },
+    {
+      "file": "scripts/test-mesh.sh",
+      "reason": "runs cargo test and clippy -p wa-mesh plus the Lua admission proof (docs/MESH.md): minutes and a loopback rendezvous, so the crate's tests sit in the Rust rows and this is the full by-hand mesh run"
+    },
+    {
+      "file": "scripts/test-on-stale.sh",
+      "reason": "feeds fixed /health payloads and installed.txt to the onStale decision: it needs an installed node's record layout to test against, which a checkout without an install cannot supply"
+    },
+    {
+      "file": "scripts/test-sentinel-e2e.sh",
+      "reason": "the end-to-end sentinel test: it writes a real request, lets a turn die when the node stops, and needs the node to come back - one real turn and one real restart, which no landing may perform"
+    },
+    {
+      "file": "scripts/test-serve-turn-all-on.sh",
+      "reason": "starts a node from this tree with every feature on and spends one real turn against a stub model: hermetic on loopback, but it boots a node and takes a port, so it is a by-hand proof rather than a landing row"
+    },
+    {
+      "file": "scripts/test-stt-live-role.sh",
+      "reason": "three real wa processes on localhost, a fake recognizer, and a worker role switched three times while notes flow: needs the built binary and the speech route, and takes minutes"
+    },
+    {
+      "file": "scripts/test-telemetry-sink.sh",
+      "reason": "cargo tests plus a wasm component build and two measurement runs (a 10k-event burst and an RSS/latency comparison): a benchmark, not a gate row"
+    },
+    {
       "file": "scripts/test-agent-benchmark-blind-reference.mjs",
       "reason": "argument driver: a benchmark/proof script that needs a fresh evidence root (and sometimes a candidate binary); run by the benchmark procedure, never on a landing"
     },

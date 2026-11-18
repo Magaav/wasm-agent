@@ -70,7 +70,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
-for wa_lib_part in build-status build-requirements deploy-components node-binaries retire-unshipped; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped runtime-binding; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
@@ -381,6 +381,29 @@ while :; do
   [ $((TREE_WAITED % 60)) -eq 0 ] && note "still waiting for a quiet canonical tree after ${TREE_WAITED}s"
 done
 [ "$TREE_WAITED" = "0" ] || note "canonical tree is quiet after ${TREE_WAITED}s (origin/main ${MAIN_NOW:0:12}); continuing"
+
+# 0c. The canonical runtime binding is decided HERE, before the build (item 9, 18/11). It used to be resolved in
+#     the installing phase, after ~4 minutes of build and prove, so a second worktree on branch main cost the
+#     whole build to learn one fact. The same script decides it in both places, and its message names every
+#     candidate path. With WA_RUNTIME_WORKTREE set explicitly the operator has chosen, so nothing is decided.
+#
+#     The answer is kept in WA_RUNTIME_PREFLIGHT and NOT exported as WA_RUNTIME_WORKTREE (review of 18/11,
+#     item 9). Exporting it made the install-time check below read a value that was already set and skip
+#     itself - the "clean and equal to main" re-check after the build, which is the half that catches a second
+#     worktree appearing while cargo ran. Step 6 asks the question again and compares the two answers.
+WA_RUNTIME_PREFLIGHT=""
+if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
+  BINDING_PREFLIGHT_SCRIPT="${SOURCE_ROOT:-$ROOT}/scripts/runtime-install-binding.mjs"
+  BINDING_PREFLIGHT_REPO="${SOURCE_ROOT:-$ROOT}"
+  if command -v cygpath >/dev/null 2>&1; then
+    BINDING_PREFLIGHT_SCRIPT="$(cygpath -w "$BINDING_PREFLIGHT_SCRIPT")"
+    BINDING_PREFLIGHT_REPO="$(cygpath -w "$BINDING_PREFLIGHT_REPO")"
+  fi
+  if ! WA_RUNTIME_PREFLIGHT="$(node "$BINDING_PREFLIGHT_SCRIPT" "$BINDING_PREFLIGHT_REPO" 2>&1)"; then
+    fail "canonical runtime binding refused before anything was built: $WA_RUNTIME_PREFLIGHT"
+  fi
+  note "runtime worktree resolved before the build: $WA_RUNTIME_PREFLIGHT"
+fi
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.
@@ -1002,6 +1025,36 @@ fi
 #    that is serving.
 fi
 
+# THE BYTES AGAINST THIS HOST'S LIBC, before they are EXECUTED, proved, swapped or recorded - here, right
+# after NEW and NEW_SENTINEL are final on all three paths (Lua fast, published binary, built here) and
+# before the first line that runs either of them. A binary whose symbol versions name a newer glibc than
+# this host runs cannot start here at all: 18/11, mail (glibc 2.35) ran a published binary built against
+# 2.39, the sentinel retried 424 times on "GLIBC_2.39 not found", and the node was down for two days with no
+# channel left to fix it. This deploy can be the one that INSTALLS such a binary - from a release another
+# machine published - so it asks the question the release's manifest promises (`glibc_floor=`) but cannot
+# prove for THIS host, in the bytes, before anything is replaced. The supervisor is checked too: a node whose
+# sentinel cannot start cannot be rolled back either.
+#
+# WHY HERE AND NOT AFTER THE PROOFS (found in the review of a9b60cc9): the checks below RUN the candidate -
+# `--capability-digest` a few lines down, then `--lua-tree`, then the graph proof - and a binary that needs a
+# newer glibc dies at the first of them with "the binary being installed cannot state its capability digest".
+# That sentence is true and useless: it reports a broken artifact where the cause is a host that is too old,
+# and it hides the one refusal an operator can act on (publish this commit with a lower floor). The guard
+# answers first, so `glibc_floor_exceeded` is what a too-new binary gets.
+# wa-deploy-glibc-guard: begin
+if command -v wa_glibc_guard >/dev/null 2>&1; then
+  for glibc_candidate in "$NEW" "${NEW_SENTINEL:-}"; do
+    [ -n "$glibc_candidate" ] || continue
+    [ -f "$glibc_candidate" ] || continue
+    if ! glibc_refusal="$(wa_glibc_guard "$glibc_candidate" "$(basename "$glibc_candidate")")"; then
+      fail "refused(glibc_floor_exceeded): $glibc_refusal"
+    fi
+  done
+else
+  note "scripts/lib/glibc-floor.sh is not beside this deploy, so the artifact's glibc floor was not measured against this host; the scratch proof below still refuses a binary this host cannot run"
+fi
+# wa-deploy-glibc-guard: end
+
 # 3d. The Lua tree, on every deploy (fast or full): lua/core + lua/vendor (.lua, .sql) and the two
 #     embedded AGENTS docs, pinned, with the capability digest of the binary being installed. The binary
 #     prefers it over its compiled-in copy only when everything verifies; installing it on full builds
@@ -1240,6 +1293,11 @@ if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
   fi
   WA_RUNTIME_WORKTREE="$(node "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
     || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE"
+  # The same question asked again, now that the build is done, and compared with the preflight answer: the
+  # binding must still be clean and equal to main, and it must still be the tree step 0c chose. Comparison
+  # lives in scripts/lib/runtime-binding.sh so it can be tested without a build (review of 18/11, item 9).
+  BINDING_RECHECK="$(wa_runtime_binding_recheck "$WA_RUNTIME_PREFLIGHT" "$WA_RUNTIME_WORKTREE")" \
+    || fail "$BINDING_RECHECK"
 fi
 [ -d "$WA_RUNTIME_WORKTREE" ] || fail "runtime worktree does not exist"
 RUNTIME_PATH="$(cd "$WA_RUNTIME_WORKTREE" && pwd)"
@@ -1726,6 +1784,9 @@ ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-st
 ship_file "$ROOT/scripts/lib/deploy-lock.sh" "$INSTALL_DIR/scripts/lib/deploy-lock.sh" "scripts/lib/deploy-lock.sh beside deploy.sh (the build lock a dead holder cannot block)"
 ship_file "$ROOT/scripts/lib/deploy-signal.sh" "$INSTALL_DIR/scripts/lib/deploy-signal.sh" "scripts/lib/deploy-signal.sh beside deploy.sh (the deploy-pending signal)"
 ship_file "$ROOT/scripts/lib/build-requirements.sh" "$INSTALL_DIR/scripts/lib/build-requirements.sh" "scripts/lib/build-requirements.sh beside deploy.sh"
+# ...and the runtime-binding re-check: an installed copy of this script is what the sentinel runs, and it has to
+# be able to ask the binding question a second time (review of 18/11, item 9).
+ship_file "$ROOT/scripts/lib/runtime-binding.sh" "$INSTALL_DIR/scripts/lib/runtime-binding.sh" "scripts/lib/runtime-binding.sh beside deploy.sh (the install-time binding re-check)"
 
 ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/deploy-components.sh" "scripts/lib/deploy-components.sh beside deploy.sh"
 # ...and the node-binary resolver, for the same reason the component lib is shipped: `request deploy` runs the
@@ -1733,6 +1794,10 @@ ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/dep
 # node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2
 # cores, no disk for ~600 crates) cannot do. Measured 06/11: the prebuilt path was reached only from the tree.
 ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-binaries.sh" "scripts/lib/node-binaries.sh beside deploy.sh"
+# ...and the glibc floor, which both deploy.sh and upgrade.sh source (scripts/lib/glibc-floor.sh): an
+# installed copy that cannot measure the artifact's floor against this host's libc is the copy that would
+# install a binary the node cannot start.
+ship_file "$ROOT/scripts/lib/glibc-floor.sh" "$INSTALL_DIR/scripts/lib/glibc-floor.sh" "scripts/lib/glibc-floor.sh beside deploy.sh (the artifact's glibc floor against this host's)"
 # ...and the shipped-Lua-tree definition, which the staging above uses: an installed deploy without it would
 # stage no tree at all (lua-tree.sh is where "which files" lives now).
 ship_file "$ROOT/scripts/lib/lua-tree.sh" "$INSTALL_DIR/scripts/lib/lua-tree.sh" "scripts/lib/lua-tree.sh beside deploy.sh (which files the Lua tree is)"

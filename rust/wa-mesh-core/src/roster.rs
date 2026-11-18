@@ -155,6 +155,28 @@ impl RosterNode {
         self.revoked_at != 0 && self.revoked_at <= now_s
     }
 
+    /// Whether a string is a **direct** address: the `host:port` a node dials itself. Not a service URL, not
+    /// a bare host, nothing with a scheme.
+    ///
+    /// This is the one rule for that question, so the roster (which refuses a bad address when it is signed
+    /// and when it is verified) and the peer cache (which must never store a service as a peer's direct
+    /// address) cannot disagree. Measured on `work` 2026-11-18: the peer cache held
+    /// `avell -> ["https://rendezvous.colmeio.com"]` - the *relay* the node reaches its fleet through, recorded
+    /// because a relayed call succeeded - and every direct call to `avell` first failed
+    /// `resolve_failed:invalid port value` before the relay carried it.
+    pub fn is_direct_address(address: &str) -> bool {
+        // A scheme is the mark of a *service*: "http://10.0.0.4:8891" satisfies "host:port" when only the last
+        // colon is read, while naming a URL - and a relay is exactly the service most likely to be written
+        // with an explicit port. So the shape is checked and then the alphabet: a direct address is a host
+        // (letters, digits, dots, dashes, a bracketed IPv6 literal with its zone) and a port, and no separator
+        // of a URL is in that set.
+        let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, ':' | '.' | '-' | '[' | ']' | '_' | '%');
+        if !address.chars().all(allowed) {
+            return false;
+        }
+        check_address(address).is_ok()
+    }
+
     /// How cheap this address is to try, for the attempt order: a private or link-local address is
     /// one LAN round trip, a public one is the open internet. Lower is tried first.
     pub fn address_rank(address: &str) -> u8 {

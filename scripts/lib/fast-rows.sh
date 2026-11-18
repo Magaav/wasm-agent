@@ -23,6 +23,33 @@ wa_fast_core_rows() {
   printf '%s\n' scripts/test-fast-row-environment.lua scripts/test-land.lua
 }
 
+# The rows this tree's fast path would run, one repo-relative path per line, cwd = the tree root: every
+# scripts/test-*.lua except the ones scripts/fast-path.exclude declares not run. This is the ONE row
+# inventory - scripts/fast.sh builds its lua.list with it, and wa land's planner (lua/core/land.lua,
+# M.row_inventory) draws every row it requests from it. A planner that keeps its own idea of "runnable" asks
+# for a row this runner refuses, which is a whole round gated on zero tests (fast_narrow:unknown_row,
+# measured land-20261118T172243Z-666a59cf and land-20261118T173351Z-2a481142).
+wa_fast_row_candidates() {
+  local excluded f
+  excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
+  for f in scripts/test-*.lua; do
+    [ -f "$f" ] || continue
+    printf '%s\n' "$excluded" | grep -qxF "$f" || printf '%s\n' "$f"
+  done
+}
+
+# The complement of wa_fast_row_candidates as 'row<TAB>why': every row scripts/fast-path.exclude keeps out of
+# the run, with the comment that says why (the same sed pattern, so the two lists cannot disagree). wa land
+# prints these in its plan as "not a gate row: <reason>" instead of requesting them.
+wa_fast_row_skips() {
+  local row line
+  while IFS= read -r line; do
+    row="${line%%	*}"
+    [ -f "$row" ] || continue
+    printf '%s\n' "$line"
+  done < <(sed -n 's/^\(scripts\/test-[^ #]*\.lua\)[[:space:]]*\(#\)\{0,1\}[[:space:]]*\(.*\)$/\1	\3/p' scripts/fast-path.exclude 2>/dev/null)
+}
+
 # <candidate-list-file> <request-file> -> the rows to run, one per line, core first, on stdout.
 # 2 with `fast_narrow:<what>` on stderr when the request asks for a row this run cannot execute.
 wa_fast_row_filter() {

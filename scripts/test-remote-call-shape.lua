@@ -6,8 +6,13 @@ local json=dofile('lua/vendor/json.lua')
 local real_getenv=host.getenv
 local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='fixture-key',
   WASM_AGENT_LLM_MODEL='deepseek-v4.1-flash',WASM_AGENT_PI_MODELS_STORE='missing-test-store',
-  WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_MAX_TOOL_ROUNDS='3',WASM_AGENT_ENVELOPE_MODE='full'}
-host.getenv=function(k) if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
+  WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_MAX_TOOL_ROUNDS='3',WASM_AGENT_ENVELOPE_MODE='full',
+  }
+-- The row names its surface: codemode for the cases below (the declared tool surface the guideline
+-- was written against), and nil - the node's default, CodeAct - for the variant in section 7. A pin
+-- that covered the whole file left the default surface untested (review of 18/11, item 3).
+local raw_surface='codemode'
+host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
 host.http=function() error('network forbidden in this fixture') end
 host.http_stream=host.http
 local memory=dofile('lua/core/memory.lua');memory.setup()
@@ -131,6 +136,29 @@ check(progressive:find(agent.PREAMBLE_GUIDELINE,1,true),'preamble guideline in t
 check(progressive:find('tool_call(name="remote", arguments={"node":',1,true),'flat remote shape in the progressive tools section')
 check(not agent.system_prompt('master',nil,nil,{},'full'):find(agent.PREAMBLE_GUIDELINE,1,true),'no tools, no preamble rule')
 
+-- The DEFAULT surface, through a real run (review of 18/11, row 2's CodeAct variant): CodeAct declares
+-- nothing and the run block is the only way to act, so the step-preamble rule is exactly what a run of
+-- bare tool lines lacks - the red this row fixed was a live session, not a property of the declared-tool
+-- surface. A prompt assembled by hand is not that surface: this runs the real loop with a stubbed
+-- provider and reads the system message it was given.
+raw_surface=nil
+local codeact_sent={}
+local previous_stream=host.http_stream
+host.http_stream=function(_,_,_,body)
+  codeact_sent[#codeact_sent+1]=json.decode(body)
+  return json.encode({status=200,content='done',stream_complete=true,finish_reason='stop',
+    usage={prompt_tokens=10,completion_tokens=5,total_tokens=15},tool_calls={}})
+end
+local codeact_sid=memory.start_session('','codeact-shape',{user_id='master',node_id='',title='codeact-shape'})
+local codeact_ok,codeact_reply=pcall(function() return agent.new(codeact_sid,function() end,'master','master',''):run('read it') end)
+host.http_stream=previous_stream
+raw_surface='codemode'
+check(codeact_ok,'the default-surface run completed: '..tostring(codeact_reply))
+local codeact_declared=codeact_sent[1] and #((codeact_sent[1].tools) or {}) or -1
+check(codeact_declared==0,'the run declared no tool at all ('..codeact_declared..'), so it ran on the CodeAct surface')
+local codeact_system=''
+for _,message in ipairs((codeact_sent[1] or {}).messages or {}) do if message.role=='system' then codeact_system=message.content end end
+check(codeact_system:find(agent.PREAMBLE_GUIDELINE,1,true)~=nil,'preamble guideline on the DEFAULT CodeAct surface')
 -- 8. Agent loop: OpenAI-chat-style content + tool_calls is stored and emitted as commentary, and a
 -- truncated call runs once completed.
 local step,sent=0,{}

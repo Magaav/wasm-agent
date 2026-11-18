@@ -53,6 +53,11 @@ impl Fixture {
         fixture.set("WA_INSTALL_DIR", fixture.install.display().to_string());
         fixture.unset("WA_SENTINEL_DEPLOY_TIMEOUT");
         fixture.set("WASM_AGENT_PROVENANCE", "operator".to_string());
+        // Nothing outside owns the watcher here: the `none` case the code names (main.rs, `record_owner`).
+        // Without it the fixture inherits the control group of whoever ran the suite - this node runs the
+        // suite inside `wa-serve.service`, so the deploy is refused as "inside wa-serve.service, which
+        // cannot be shown to own it" (measured on avell 18/11) and the end-to-end wiring is never reached.
+        fixture.set("WA_SENTINEL_SUPERVISOR", "none".to_string());
         fixture
     }
 

@@ -46,3 +46,5 @@ Relay ALL original subagent feedback with attribution, including criticism and n
 entries; never silently omit feedback, and ask for a missing report after settlement only.
 Preserve useful pre-delegation reasoning/checks, and keep internal evaluation out of
 guest/WhatsApp/third-party outward replies.
+
+Orchestrating missions: follow `docs/MISSIONS.md` and run them only through `scripts/mission.sh` (stage, start, status, report, verify, clean). The queue and every brief live in `docs/missions/`; read `docs/missions/QUEUE.md` first and update it when a mission changes state.

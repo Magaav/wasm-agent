@@ -32,7 +32,10 @@ fn javascript_requests_run_native_node_and_preflight_before_any_operation() {
         std::fs::write(&script, text).unwrap();
         let canonical = approved_script(script.to_str().unwrap()).unwrap();
         let (program, args) = run_script_command(&canonical).unwrap();
-        assert_eq!(std::fs::canonicalize(program).unwrap(), node);
+        // The interpreter launched is the one resolved, BY THE PATH IT WAS RESOLVED AT: a version manager's
+        // shim decides which node runs from its own name, so canonicalizing it here would assert the bug
+        // this fixture exists to catch (measured on avell 18/11: the canonicalized shim launched mise).
+        assert_eq!(program, node.display().to_string(), "the resolved node is what runs");
         assert_eq!(args.len(), 2); assert_eq!(args[0], "--");
         assert!(args[1].contains("space & ü")); assert!(!args[1].starts_with(r"\\?\"));
         let claim = sentinel_dir().join(format!("claimed/{name}.json"));

@@ -751,19 +751,63 @@ function M.classify(run, paths)
   return { category = word, counts = counts, classifier = "land-classify.sh", files = class_of }
 end
 
--- <run> <paths> -> the Lua rows a narrowed fast-path run should execute (`scripts/fast.sh` adds its
--- never-dropped core rows itself, so this list is a REQUEST). A row is affected when the round changed it,
--- when its own name names a changed module (`lua/core/agent.lua` -> `scripts/test-agent*.lua`), or when its
--- text mentions the changed path - a dependency proved by the file, not guessed from the name. No row and a
--- non-doc change means the suite runs whole, which the plan reports as `full`.
+-- <repo> -> {list, known, skips, why}: the rows this tree's fast path WOULD run, read from the one inventory
+-- that defines them - `wa_fast_row_candidates` / `wa_fast_row_skips` in scripts/lib/fast-rows.sh, the same
+-- functions scripts/fast.sh builds its `lua.list` with. `skips` carries the reason each declared row is not
+-- run, so a plan can report it by name; `why` is set when the inventory cannot be read at all, and then no row
+-- is proved necessary and the round runs the whole suite (the answer a missing classifier already gets).
+--
+-- A planner with its own idea of "runnable" is what asked for `scripts/test-agent-benchmark-runtime-route.lua`
+-- (the file exists, but the ledger declares it not run), got `fast_narrow:unknown_row` and failed a whole gate
+-- with 0 tests run: measured twice on the same 90-path round, land-20261118T172243Z-666a59cf and
+-- land-20261118T173351Z-2a481142.
+function M.row_inventory(repo)
+  local listing = M.exec("bash -c " .. quote(". ./scripts/lib/fast-rows.sh || exit 3; wa_fast_row_candidates"), repo, 120)
+  if (listing.code or 1) ~= 0 then
+    return { list = {}, known = {}, skips = {},
+      why = "the row inventory (scripts/lib/fast-rows.sh) could not be read in this tree: " ..
+        first_line(tostring(listing.stderr ~= "" and listing.stderr or listing.stdout)) }
+  end
+  local list, known = {}, {}
+  for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+    local row = trim(line)
+    if row ~= "" and not known[row] then known[row] = true; list[#list + 1] = row end
+  end
+  local skips = {}
+  local declared = M.exec("bash -c " .. quote(". ./scripts/lib/fast-rows.sh 2>/dev/null || exit 0; wa_fast_row_skips"), repo, 120)
+  for line in tostring(declared.stdout or ""):gmatch("[^\r\n]+") do
+    local row, why = line:match("^(%S+)\t(.*)$")
+    if row and not known[row] then
+      why = trim(why or "")
+      if why == "" then why = "declared not run in scripts/fast-path.exclude" end
+      skips[row] = why
+    end
+  end
+  return { list = list, known = known, skips = skips }
+end
+
+-- <run> <paths> -> rows, not_rows, why: the Lua rows a narrowed fast-path run should execute (`scripts/fast.sh`
+-- adds its never-dropped core rows itself, so this list is a REQUEST). A row is affected when the round changed
+-- it, when its own name names a changed module (`lua/core/agent.lua` -> `scripts/test-agent*.lua`), or when its
+-- text mentions the changed path - a dependency proved by the file, not guessed from the name. Only a row the
+-- runner would run may be requested: an affected row that is declared not run comes back in `not_rows` with its
+-- reason, so the plan prints "not a gate row: <reason>" and asks for nothing the filter would refuse. No row and
+-- a non-doc change means the suite runs whole, which the plan reports as `full`.
 function M.gate_rows(run, paths)
   local repo = run.journal.repo or M.repo()
-  local rows, seen = {}, {}
+  local rows, not_rows, seen = {}, {}, {}
+  local inventory = M.row_inventory(repo)
   local function add(path)
     path = trim(path)
     if path == "" or seen[path] then return end
     if not path:match("^scripts/test%-[%w%._%-]+%.lua$") then return end
-    seen[path] = true; rows[#rows + 1] = path
+    seen[path] = true
+    if not (inventory.known or {})[path] then
+      not_rows[#not_rows + 1] = { path = path,
+        why = (inventory.skips or {})[path] or inventory.why or "not a row this fast path runs" }
+      return
+    end
+    rows[#rows + 1] = path
   end
   local modules = {}
   for _, path in ipairs(paths) do
@@ -771,12 +815,13 @@ function M.gate_rows(run, paths)
     if path:match("^lua/.+%.lua$") then modules[#modules + 1] = path end
   end
   if #modules > 0 then
-    local listing = M.exec("ls -1 scripts/test-*.lua 2>/dev/null", repo, 60)
+    -- The naming scan reads every test file in the tree - the rows this fast path runs AND the ones it declares
+    -- not run - so an affected row that is declared not run is REPORTED (the naming is how it was found) while
+    -- only the runnable ones can be requested. add() is the one gate between the two lists.
     local named = {}
-    for line in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
-      local candidate = trim(line)
-      if (candidate:gsub("^scripts/", "")):match("^test%-") then named[#named + 1] = candidate end
-    end
+    for _, row in ipairs(inventory.list or {}) do named[#named + 1] = row end
+    for row in pairs(inventory.skips or {}) do named[#named + 1] = row end
+    table.sort(named)
     for _, module in ipairs(modules) do
       local base_name = module:match("([^/]+)%.lua$") or ""
       if base_name ~= "" then
@@ -790,7 +835,8 @@ function M.gate_rows(run, paths)
     end
   end
   table.sort(rows)
-  return rows
+  table.sort(not_rows, function(a, b) return a.path < b.path end)
+  return rows, not_rows, inventory.why
 end
 
 -- <run> -> {list, why}: the gate's checks for this round. The always-on two (`fast`, `prompt-docs`) are never
@@ -798,6 +844,8 @@ end
 -- plan is `full` runs every check.
 function M.gate_checks(run, options)
   if options.checks then return options.checks, #options.checks .. " check(s), named with --checks" end
+  -- `--full` is the whole suite and every check: a human's escape hatch cannot mean half of one.
+  if options.full then return M.DEFAULT_CHECKS, "every check (--full)" end
   local plan = run.journal.plan
   if not plan or plan.full then return M.DEFAULT_CHECKS, "every check (no narrower set was proved)" end
   local wanted = {}
@@ -910,8 +958,10 @@ end
 -- for `--dry-run`: one implementation, so a printed plan and the plan a round obeys cannot differ.
 function M.build_plan(run, paths)
   local classified = M.classify(run, paths)
-  local rows = M.gate_rows(run, paths)
-  local full = (#rows == 0 and classified.category ~= "docs-only")
+  local rows, not_rows, rows_why = M.gate_rows(run, paths)
+  -- A round with no provable row - and a round whose row inventory could not be read at all - runs the whole
+  -- suite. A docs-only change narrows nothing either way: its gate is the suite, without a rows file.
+  local full = (classified.category ~= "docs-only") and (#rows == 0 or rows_why ~= nil)
   local checks = M.gate_checks_for(paths)
   local names = {}
   for _, check in ipairs(M.DEFAULT_CHECKS) do
@@ -928,7 +978,8 @@ function M.build_plan(run, paths)
   local estimate = M.estimate(classified.category)
   return { category = classified.category, files = #paths, counts = classified.counts or {},
     classifier = classified.classifier, why = classified.why, steps = M.plan_steps(classified.category),
-    checks = names, rows = rows, full = full, expected_seconds = estimate.seconds,
+    checks = names, rows = rows, not_rows = not_rows, rows_why = rows_why, full = full,
+    expected_seconds = estimate.seconds,
     expected_from = estimate.from, per_step = estimate.per_step }
 end
 
@@ -994,7 +1045,14 @@ function M.plan_text(journal)
   if plan.why then add("land:   " .. tostring(plan.why)) end
   local rows = plan.rows or {}
   add(string.format("land:   gate: %s%s", table.concat(plan.checks or {}, " "),
-    plan.full and "" or (" over " .. tostring(#rows) .. " Lua row(s) of the suite")))
+    plan.full and " (the whole suite)" or (" over " .. tostring(#rows) .. " Lua row(s) of the suite")))
+  -- The rows this plan considered and may NOT ask for, each with the reason: an affected row the fast path
+  -- declares not run is reported here, never requested - requesting one is `fast_narrow:unknown_row` and a
+  -- round gated on zero tests.
+  for _, skipped in ipairs(plan.not_rows or {}) do
+    add("land:   not a gate row: " .. tostring(skipped.path) .. " (" .. tostring(skipped.why) .. ")")
+  end
+  if plan.rows_why then add("land:   no row inventory: " .. tostring(plan.rows_why)) end
   for _, name in ipairs(M.STEPS) do
     local step = (plan.steps or {})[name]
     if step then
@@ -1350,23 +1408,32 @@ local function passed_tests(text)
   return total
 end
 
+-- <run> <options> -> path, failed: the WA_FAST_ROWS file this round narrows `scripts/fast.sh` with, or nil when
+-- nothing narrows it. `--full` means the WHOLE suite, so a full round writes no rows file at all; neither does a
+-- plan that already runs everything (`plan.full`), a docs-only plan (no row maps to a document) or a round whose
+-- checks were named by hand (`--checks`). The file is written next to the evidence, so the command in the log is
+-- the command that ran.
+function M.gate_rows_file(run, options)
+  local plan = run.journal and run.journal.plan
+  if options.checks or options.full or not plan or plan.full then return nil end
+  local rows = plan.rows or {}
+  if #rows == 0 then return nil end
+  local path = M.run_dir(run.id) .. "/gate-rows.txt"
+  if not write(path, table.concat(rows, "\n") .. "\n") then return nil, true end
+  return path
+end
+
 impl.gate = function(run, options)
   local evidence = sink(run, "gate")
   local tree = run.tree
   -- Which checks: the plan's set (M.gate_checks), which is never smaller than the always-on core, and - when
-  -- the plan mapped rows - a WA_FAST_ROWS file for `scripts/fast.sh` so a Lua-only round runs the rows its
-  -- changed modules touch instead of all ~140. The rows file is written here, next to the evidence, so the
-  -- command in the log is the command that ran.
+  -- the plan mapped rows and the round is not full - a WA_FAST_ROWS file for `scripts/fast.sh` so a Lua-only
+  -- round runs the rows its changed modules touch instead of all ~200. `--full` means the whole suite, so it
+  -- writes none (M.gate_rows_file). The file is written next to the evidence, so the command in the log is the
+  -- command that ran.
   local checks, why = M.gate_checks(run, options)
-  local rows_file = nil
-  if not options.checks and run.journal.plan and run.journal.plan.rows and #run.journal.plan.rows > 0
-     and not run.journal.plan.full then
-    rows_file = M.run_dir(run.id) .. "/gate-rows.txt"
-    if not write(rows_file, table.concat(run.journal.plan.rows, "\n") .. "\n") then
-      rows_file = nil
-      evidence("the row list could not be written; every Lua row will run\n")
-    end
-  end
+  local rows_file, rows_file_failed = M.gate_rows_file(run, options)
+  if rows_file_failed then evidence("the row list could not be written; every Lua row will run\n") end
   run.journal.gate_checks = why
   local decorator = M.weight()
   run.journal.gate_weight = decorator ~= "" and decorator or "none (no weight could be applied)"
@@ -2628,7 +2695,7 @@ function M.cli(argv)
       print("wa land ready <branch> <sha> [--brief <file>]   record a READY line for a finished branch")
       print("  --repo <dir> --incoming <remote> --origin <remote> --ring node:mode,... --json")
       print("  --canary <node> --account <node>  which node goes first (default work) and last (default openclaw)")
-      print("  --full                 ignore the plan: run every step, even the ones this round does not need")
+      print("  --full                 ignore the plan: run every step and the whole suite (no narrowed rows)")
       print("  --signer <node|local>   where the release is signed (default: the node whose WA_VAULT_ADMIN_URL is set)")
       return 0
     else

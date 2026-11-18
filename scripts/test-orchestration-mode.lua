@@ -1,4 +1,12 @@
 -- Mode permission is deterministic; delegation decisions belong to coordinator inference.
+-- The declared-tool surface is what `mode-on declares subagent and route_task` is about; CodeAct is
+-- the default since 17/11 (lua/core/raw_code.lua, M.DEFAULT), which declares nothing.
+-- THE ROW NAMES ITS SURFACE: the declared-tool cases below run against codemode, and the variants at the
+-- end run against nil - the node's DEFAULT surface (CodeAct, raw_code M.DEFAULT = only). A pin that
+-- covered the whole file made the default surface untested by the very row that added it (review of
+-- 18/11, item 3).
+local raw_surface='codemode'
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return raw_surface end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local mode=dofile('lua/core/orchestration_mode.lua')
@@ -127,4 +135,51 @@ check(direct_result.error~='orchestration_route_required' and direct_result.erro
 check(tools.dispatch(memory,'route_task',{route='direct',task='x'},'master',direct_ctx).error=='orchestration_mode_not_enabled','route_task refuses without the mode')
 check(tools.dispatch(memory,'route_task',{route='direct',task='x'},'master',{session_id=sid,subagent={allowed={route_task=true}}}).error=='orchestration_operator_only','a child cannot record a route')
 if host.read_file and pcall(host.read_file,direct_write) then os.remove(direct_write) end
+-- ---- THE DEFAULT SURFACE (CodeAct): the same mode, on the surface the node actually runs ------------
+-- Nothing is declared there (tools.envelope is empty), so a run block is the only way to act. If the
+-- coordinator's two mode tools were unreachable from it, the mode would be a prompt with no way to
+-- follow it, and every floor refusal's handoff.tool == 'subagent' would name a tool the model cannot call.
+raw_surface=nil
+local raw_code=dofile('lua/core/raw_code.lua')
+check(raw_code.mode()=='only' and raw_code.only(nil),'the default surface is CodeAct (raw_code M.DEFAULT = only)')
+local codeact_declared={}
+for _,item in ipairs(tools.envelope('master',{role='master',user_id='master',session_id=sid})) do codeact_declared[#codeact_declared+1]=item['function'].name end
+check(#codeact_declared==0,'CodeAct declares no tool at all, so the run block is the surface: '..table.concat(codeact_declared,','))
+local codeact_policy=dofile('lua/core/codemode_policy.lua')
+local codeact=dofile('lua/core/codemode.lua')
+local probe_sid=memory.start_session('','codeact-surface',{user_id='master'})
+local probe_ctx={role='master',user_id='master',session_id=probe_sid}
+codeact_policy.pin(memory,'master',probe_ctx)
+if not codeact_policy.enforced(probe_ctx) then
+  print('SKIP the CodeAct surface: code mode is not admitted on this node (codemode_policy.enforced is false), so no script can run')
+else
+  check(mode.control({mode_action='toggle',revision=0},probe_ctx).ok,'orchestration mode is on for the CodeAct session')
+  local function script(body) return tools.dispatch(memory,'codemode',{code=body},'master',probe_ctx) end
+  -- route_task: the decision the floor demands, made inside the one surface that exists.
+  local routed=script('var r=await tools.route_task({route:"delegate",task:"implement the connector patch with tests"}); text(JSON.stringify(r)); return r.ok;')
+  local attempt=routed.attempts and routed.attempts[1] or {}
+  check(attempt.name=='route_task' and attempt.admitted==true,'route_task is callable from a run block on the default surface: '..json.encode(routed):sub(1,300))
+  local row=routed.items and routed.items[1]
+  local verdict=row and row.text and json.decode(row.text) or {}
+  check(verdict.ok==true and verdict.route=='delegate','and it records the route there: '..tostring(row and row.text))
+  local recorded=mode.routing(probe_sid)
+  check(recorded and recorded.route=='delegate','the route the script made is the turn own route')
+  -- subagent: one reviewable call, never a step inside a script (codemode.DIRECT_ONLY). What this asserts
+  -- is that the refusal NAMES it and says what to do instead: a coordinator that hits "not a function"
+  -- learns nothing, and the delegate handoff it was given names this exact tool.
+  local spawned=script('var r=await tools.subagent({profile:"orchestration-worker",prompt:"x"}); return 1;')
+  check(spawned.ok==false and type(spawned.error)=='string'
+    and spawned.error:find('codemode_target_not_available',1,true)~=nil
+    and type(spawned.fix)=='string' and spawned.fix:find('ordinary tool call',1,true)~=nil,
+    'subagent is refused from a script by name, with the fix: '..tostring(spawned.error)..' / '..tostring(spawned.fix))
+  check(type(codeact.DIRECT_ONLY.subagent)=='string' and codeact.DIRECT_ONLY.subagent:find('never a step inside a script',1,true)~=nil,
+    'and the reviewed list that refuses it says why')
+  -- The direct call the refusal points at reaches the tool itself on this surface (its own guard answers),
+  -- which is what makes the handoff actionable when nothing is declared.
+  local off_sid=memory.start_session('','codeact-direct',{user_id='master'})
+  local off_ctx={role='master',user_id='master',session_id=off_sid,tool_call_id='call-1',tool_call_name='subagent'}
+  local reached=tools.dispatch(memory,'subagent',{action='start',profile=mode.PROFILE,prompt='x'},'master',off_ctx)
+  check(reached.items==nil and reached.attempts==nil,'the direct call is dispatched to the tool, not wrapped in a script: '..json.encode(reached):sub(1,200))
+  check(reached.error=='orchestration_mode_not_enabled','and its own guard answers on this surface: '..json.encode(reached):sub(1,200))
+end
 print('orchestration mode ok ('..checks..' checks, 0 skipped; no inference)')

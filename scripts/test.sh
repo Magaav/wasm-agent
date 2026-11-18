@@ -484,6 +484,10 @@ gate_run bash scripts/test-deploy-components-shipped.sh
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
 gate_run bash scripts/test-node-binaries.sh
+# The glibc floor at both ends: the bytes an artifact needs against the libc the installing host has
+# (18/11, mail: a published binary needed GLIBC_2.39 on a glibc 2.35 node and was down two days). Hermetic -
+# fixture ELFs, a stand-in host version, and the three installers' own refusals.
+gate_run bash scripts/test-glibc-floor.sh
 # Ring 1 of docs/TORUS.md: the binary decision (content-addressed first), the phases a deploy record
 # carries, and the structure that keeps the reuse path free of a download. Shell, so it runs here and
 # not in the fast path's Lua rows; it is hermetic and takes about 2 seconds.
@@ -1125,6 +1129,13 @@ gate_run node scripts/test-graph-impact-paging.cjs "$HISTORY_BIN" "$IMPACT_EVIDE
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-owner.lua" "$BIN" --db "$DB.session-owner" | grep 'session owner ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
+# WHO counts as this node's operator session, through the real constructors: a bare `wa chat` and `/new` build
+# their sessions with objective "chat" (`chat.lua`, `commands.new_session`), so a rule that only accepted an empty
+# objective refused the node's own conversation and admitted nobody else. A `remote` session (another node's
+# operator, over the mesh) and a root session of another principal still refuse on a node with no wave registration.
+# It was written by the 18/11 review and named by no harness until the 18/11 round-3 review: a test nobody runs is
+# a comment. It owns a scratch git repository and a stub wave entrypoint, so it needs no node state and no network.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-wave-operator-session.lua" "$BIN" --db "$DB.wave-operator-session" | grep 'wave operator session ok'
 gate_run node scripts/test-session-workspaces.cjs "$BIN"
 gate_run node scripts/test-workspace-root-recovery.cjs "$BIN"
 # A placed child arrives at a node that never saw its parent, so the source it forks from is the tree
@@ -2122,6 +2133,11 @@ gate_run bash scripts/test-deploy-preconditions.sh
 # must finish (the 2026-10-02 deploy died there and left `commit=unknown` while serving 2f02b4c).
 gate_run bash scripts/test-deploy-record.sh
 gate_run bash scripts/test-deploy-self-ship.sh
+# The install-time re-check of the canonical runtime binding (review of 18/11, item 9). It was written and
+# then named by no harness - so the defect it pins could come back with every gate green - and the orphan
+# ledger did not see it either, because it only looked at .mjs/.cjs/.js test scripts. Both halves are here
+# now: the row below, and the ledger's own extension to .sh test files.
+gate_run bash scripts/test-deploy-runtime-recheck.sh
 # The residue pass on the deploy record: the on-main rule may not be waived by WA_INSTALL_DIR (it was), the
 # knob is read by value (0 used to be ON), and a killed run's staged copies are collected under a bound
 # (a 248 MB sentinel image could sit there for ever). check-deploy-docs fails when the doc, the skill and the

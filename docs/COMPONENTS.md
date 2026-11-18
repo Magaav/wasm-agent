@@ -173,8 +173,20 @@ create` line, paths relative to that commit's root), pushes it, and reads the re
 The build is `cargo zigbuild --release --offline --locked -p wa-host --target
 <triple>.2.31` (and the same for `wa-sentinel`). `.2.31` is zig's glibc floor: it links against no
 symbol newer than glibc 2.31, so the binary runs on Ubuntu 20.04 and everything newer - and the script
-reads the floor back out of the bytes (`GLIBC_2.x` symbol versions) and refuses a binary that needs
-more than the manifest claims. Every member is verified before anything is printed for upload: sha256,
+reads the floor back out of the bytes (`GLIBC_2.x` symbol versions, `wa_glibc_max_symbol` in
+`scripts/lib/glibc-floor.sh`) and refuses a binary that needs more than the manifest claims. The same
+function, in the same lib, is what `scripts/fleet-install.sh`, `scripts/upgrade.sh` and `scripts/deploy.sh`
+refuse a binary with against the host's own `ldd --version` (docs/INSTALL.md, "The glibc floor").
+`scripts/fleet-install.sh` carries the four functions inside itself, because that script is also handed out
+as one file (over `curl`, or on a node with no lib beside it) and a floor check that refused for want of its
+lib would be off exactly where it is needed: `scripts/test-glibc-floor.sh` diffs the two copies and fails on
+one differing byte, so there is one implementation and not a second one that drifts. It sources no lib at
+all - not relatively, not from `$0`, not from `BASH_SOURCE` - because under `curl ... | bash` `$0` is
+`bash` and a `$(dirname "$0")/lib` lookup is a read of the caller's current directory; the test
+plants a `./lib/glibc-floor.sh` in the cwd and proves it is never read. A host whose `sort`
+has no `-V`, or ignores it, is "unknown" there - the comparison is printed as `glibc_floor_unknown:` and the
+bytes are allowed through, rather than the whole fleet being refused by a tool that cannot order versions. Every
+member is verified before anything is printed for upload: sha256,
 size, ELF machine (`b7` aarch64, `3e` x86_64). The candidate is executed when the host can run it
 (natively, or through `--runner 'wsl -d Ubuntu --'`); when it cannot, the line says `run: SKIPPED`, and
 the deploy proves the binary on the node before installing it.
@@ -300,6 +312,13 @@ prebuilt step, the step installs `rust/wa-sentinel/target/release/wa-sentinel` e
 is), because `request deploy` runs that installed copy: without it the copy notes "no node-binaries
 helper" and builds, which is the one thing the node this path exists for cannot do.
 
+`bash scripts/test-glibc-floor.sh` proves the floor both halves of that pin share (docs/INSTALL.md, "The
+glibc floor"): the measurement, the publisher's refusal above it, and the three installers' refusal
+against the host's own `ldd --version` before anything is swapped or - in `deploy.sh` - before the candidate
+is executed at all. It also measures the byte scan against `readelf -V`'s `.gnu.version_r` on real linked
+binaries (and on the built artifacts when `WA_GLIBC_ARTIFACT_DIR` names them), which is the check that a
+`GLIBC_x.y` string sitting in the payload as text would fail.
+
 `bash scripts/test-deploy-node-binaries.sh` and `bash scripts/test-node-binaries.sh` prove both halves
 with no network, no cargo, no zig, no node and no `gh` (a shim records any call): the plan, the cache,
 the cache hit with the release gone, every refusal, the disk-conditioned fallback, the publisher's
@@ -331,6 +350,65 @@ is recomputed from the current install record so the indicator disappears after 
 waiting for a request. `git` is consulted only for local ancestry (`merge-base --is-ancestor`),
 which is what tells a tree ahead of `origin/main` (no banner) from one behind it (banner). Details
 and knobs: `docs/RELEASE-UPDATE.md`.
+## Provisioning wasi-sdk on a build node
+
+`graph` (tree-sitter + SQLite) and `agent-core` (the vendored Lua, `scripts/build-agent-core.sh`) are
+the components with C inside, so a node that builds them needs a wasm C toolchain. The version is
+whatever the pins were measured with, and `components.lock` names it in prose: **wasi-sdk 34**. The
+tree does not pin the SDK *artifact*: measured 18/11, there is no sha256 for a wasi-sdk tarball in
+`scripts/`, `config/`, the lock or a CI file, and the upstream release publishes no checksum file
+either - so the tarball is identified by its release tag, its asset name, and the sha256 measured on
+the node that installed it. Record that number here (or in your own report) when you provision: a
+different number is a different SDK, not a newer one.
+
+On a Linux x86_64 build node (avell, 18/11), with no sudo. The whole toolchain on avell lives under
+`~/wasm-agent/toolchain` beside `cargo`, `rustup` and `zig`, so the SDK goes there too:
+
+```
+cd ~/wasm-agent/toolchain
+mkdir -p downloads && cd downloads
+curl -fL -O https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
+sha256sum wasi-sdk-34.0-x86_64-linux.tar.gz
+# b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4   (192,383,077 bytes)
+mkdir -p ../wasi-sdk-34
+tar xzf wasi-sdk-34.0-x86_64-linux.tar.gz -C ../wasi-sdk-34 --strip-components=1
+../wasi-sdk-34/bin/clang --version      # clang version 23.1.0-wasi-sdk
+cat ../wasi-sdk-34/VERSION              # 34.0, wasi-libc 2e6fb9d8ee0c, llvm 23.1.0
+test -d ../wasi-sdk-34/share/wasi-sysroot && echo sysroot ok   # 632 MB unpacked
+```
+
+The release carries `arm64-linux`, `riscv64-linux`, `x86_64-macos`, `arm64-windows` and the rest of
+the same version; the architecture is in the asset name, and the SDK is only ever a *build* input -
+the artifact it produces is one portable `.wasm`.
+
+**Make it findable, or pass it.** `scripts/build-components.sh` and `scripts/build-agent-core.sh`
+look for the SDK at `$WASI_SDK`, then `~/wasi-sdk*`, then `/opt/wasi-sdk*`; `scripts/fast.sh` reports
+the version from `$WASI_SDK_PATH` or the same two globs. An install under `~/wasm-agent/toolchain/`
+is none of those, so link it where the globs look (what avell does) - or export
+`WASI_SDK=~/wasm-agent/toolchain/wasi-sdk-34 WASI_SDK_PATH=...` in the shell that builds:
+
+```
+ln -sfn ~/wasm-agent/toolchain/wasi-sdk-34 ~/wasi-sdk-34
+bash scripts/build-components.sh graph mesh      # finds it; no export needed
+```
+
+The directory name is the version the fast path prints: `fast.sh` reports first line of
+`<sdk>/VERSION` (or `basename` minus `wasi-sdk-` when there is none), so the env line reads
+`wasi-sdk 34.0`. What the SDK is used for, exactly: `build-components.sh` exports
+`CC_wasm32_wasip1`/`CC_wasm32_wasip2`/`AR_*` from `<sdk>/bin` and
+`WASI_SYSROOT=<sdk>/share/wasi-sysroot`, refuses a component whose manifest says
+`needs_wasi_sdk` when there is no sysroot, and remaps `<sdk>` out of the C sources'
+`__FILE__` (`-ffile-prefix-map`, "Reproducible builds" below) - so where the SDK sits does not
+enter the bytes.
+
+Two things it does **not** buy you: a component without C (`mesh`, `hooks`, `memory`, `selfloop`,
+`codemode`) builds without it - measured 18/11 on avell, `bash scripts/build-components.sh mesh`
+with `WASI_SDK` unset succeeds and installs the same 211,918 bytes - and the *pinned* bytes are still
+the build of one machine (a repin is `scripts/publish-components.sh --from <the bytes>`, not a
+rebuild on another node). What it buys is the rows `scripts/fast.sh` and `scripts/test.sh` otherwise
+skip: with no SDK the fast path prints `fast: components SKIPPED (graph hooks memory selfloop mesh
+codemode svc-echo): error: component graph needs wasi-sdk` and every seam suite runs as a SKIP.
+
 ## Reproducible builds: the checkout path is not an input
 
 Same source, same toolchain, same bytes - wherever the tree is checked out. What embedded absolute

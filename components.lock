@@ -168,7 +168,17 @@ codemode 191818ce6fff35110cca98239a5f10a4c4e24d9f3f85b0ce86c370899a680e62 215594
 graph 54779c7d61e163145c69ec4502397a4adf0d75c544c883639989affb6574288a 8186393
 hooks f5fef7083eedac3269aecb50590297935be53e522d282f70bfa97e4bfa7e3e30 215897
 memory 51815e2d8d9595df6b2188097d5a97d97545be69a7804f46a54c8767cb8307f5 207332
-mesh 42872bbcd609f2e835dbd8e4f7ccdc857f4f313d7dd8aab0020a998c6910bff7 209612
+# 18/11 repin of mesh alone (change/components-toolchain: wa-mesh-core's peer-address rule - the
+# direct-address check in `cache.rs` and the observation it adds in `roster.rs` - and the guard's
+# `*_many` removal it shares with `wa-grant-policy`): the component path-depends on `wa-mesh-core`,
+# so those sources are its inputs and the pin can only be the build that carries them. Built on avell
+# in /home/victor/Work/missions/components-toolchain/wt with wasi-sdk 34
+# (~/wasm-agent/toolchain/wasi-sdk-34, docs/COMPONENTS.md "Provisioning wasi-sdk on a build node"),
+# installed by `scripts/build-components.sh mesh`, and the line below is what
+# `scripts/publish-components.sh --from <artifacts>` measured and printed. Every other pin is
+# unchanged and its bytes are the ones published in components-fcd4661c1eb2; nothing was published
+# for this lock.
+mesh 53c0e385bb3d4c21e2e874c57e907f22f27bc98edbc5e03d02e409a37a842489 211918
 model-gateway 0f04dabcda7417917a01b3761824b160874ce6eb0a1b32d2caba759bf4f3103d 404558
 selfloop 880aef087fa43d284a05b7b17627efe78dafae46d62b83fc2f0c60a780f33894 247771
 telemetry-sink 33ee82c5be016d8a834dd8c1269e7dfefa892a71546366f49e6f8396d9633138 152728
