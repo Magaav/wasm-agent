@@ -59,6 +59,16 @@ syspath="/usr/bin:/bin"
 # without pretending a fixture binary runs: `true` answers for it. The run gate itself is proved by
 # scripts/test-node-binaries.sh.
 export WA_PUBLISH_RUNNER=true
+# THE COMMIT THIS FIXTURE PUBLISHES IS THE CHECKOUT'S OWN HEAD (git rev-parse HEAD, below), and in a landing gate
+# that commit is by definition not pushed yet - the gate runs BEFORE the push. The publisher refuses to publish a
+# commit no branch on the remote has (18/11, scripts/lib/shared-commit.sh asks the remote itself), and it names
+# the exception for a set that is installed nowhere: ALLOW_UNPUSHED_COMMIT=1 with a reason, which the manifest
+# then records as unpushed=yes beside it. That is what a fixture release is, so that is what this row uses; the
+# refusal is proved against a real remote by scripts/test-publish-shared-commit.sh and
+# scripts/test-deploy-ancestry.sh, and nothing here is loosened by the exception - the transport, the pins and the
+# signature are all checked exactly as before.
+export ALLOW_UNPUSHED_COMMIT=1
+export ALLOW_UNPUSHED_REASON="a fixture release for scripts/test-publish-artifacts.sh: two ELF headers and a manifest this test writes, installed on no node"
 # ---- tool shims: `zig`, `cargo-zigbuild`, `rustup`, and a `gh` that records being called -----------
 mkdir -p "$WORK/bin" "$WORK/nozig/bin"
 cat > "$WORK/bin/zig" <<'SHIM'

@@ -40,20 +40,49 @@ export HOME="$SCRATCH_HOME"
 export WASM_AGENT_HOME="$SCRATCH_HOME"
 # CHECKED, NOT ASSUMED. Every fleet-install.sh run goes through this, so an edit that unsets HOME or points it back
 # at the operator's is a refusal by name rather than a quiet read of a real $HOME/.wasm-agent.
+#
+# A SCRATCH HOME IS ONE THIS TEST MADE, and that is the question - not "is this path outside the real
+# ~/.wasm-agent". The first rule was the second question, and it refused the test's own fixture: WORK is a
+# 'mktemp -d', and on a landing gate TMPDIR is the node's own ~/.wasm-agent/tmp, so the scratch home this file
+# creates is legitimately under the real agent home. Measured 18/11 in the land gate: the row died on its FIRST
+# line with "HOME is .../.wasm-agent/tmp/tmp.X/scratch-home, which is the real home of this machine", forty
+# lines of assertions never ran, and install-guards exited 2. What must never be a scratch home is the
+# operator's $HOME itself, or the real agent home (~/.wasm-agent) itself, or a path inside it that this test did
+# not create - and those still refuse, by name, and are checked below so the carve-out cannot widen into "this
+# test runs on the operator's pins".
+scratch_home_is_scratch() { # <path> -> 0 a home this test made; 1 the operator's, or the real agent home itself
+  local path="${1%/}" real="${REAL_HOME%/}" scratch="${WORK%/}"
+  [ -n "$path" ] || return 1
+  case "$path" in
+    "$real"|"$real"/.wasm-agent) return 1 ;;
+    "$real"/.wasm-agent/*)
+      # Under the real agent home: scratch only when it is inside the directory this test made.
+      case "$path" in "$scratch"|"$scratch"/*) return 0 ;; *) return 1 ;; esac ;;
+  esac
+  return 0
+}
 scratch_home_required() {
-  local real="${REAL_HOME%/}"
-  case "${HOME:-}" in
-    ''|"$real"|"$real"/.wasm-agent|"$real"/.wasm-agent/*)
-      printf 'refused(test_needs_scratch_home): HOME is %s, which is the real home of this machine. This test reads a node pin store and must never read %s/.wasm-agent. Nothing was installed.\n' "${HOME:-unset}" "${REAL_HOME:-?}" >&2
-      exit 2 ;;
-  esac
-  case "${WASM_AGENT_HOME:-}" in
-    ''|"$real"|"$real"/.wasm-agent|"$real"/.wasm-agent/*)
-      printf 'refused(test_needs_scratch_home): WASM_AGENT_HOME is %s, which is the real agent home of this machine. Set it to a scratch directory. Nothing was installed.\n' "${WASM_AGENT_HOME:-unset}" >&2
-      exit 2 ;;
-  esac
+  if ! scratch_home_is_scratch "${HOME:-}"; then
+    printf 'refused(test_needs_scratch_home): HOME is %s, which is the real home of this machine. This test reads a node pin store and must never read %s/.wasm-agent. Nothing was installed.\n' "${HOME:-unset}" "${REAL_HOME:-?}" >&2
+    exit 2
+  fi
+  if ! scratch_home_is_scratch "${WASM_AGENT_HOME:-}"; then
+    printf 'refused(test_needs_scratch_home): WASM_AGENT_HOME is %s, which is the real agent home of this machine. Set it to a scratch directory. Nothing was installed.\n' "${WASM_AGENT_HOME:-unset}" >&2
+    exit 2
+  fi
 }
 scratch_home_required
+# THE GUARD IS CHECKED TOO, or the carve-out above could be widened by an edit nobody notices: the operator's own
+# home and the real agent home still refuse. Each probe runs in a subshell, so this run goes on afterwards.
+if [ -n "${REAL_HOME:-}" ]; then
+  for probe in "${REAL_HOME%/}" "${REAL_HOME%/}/.wasm-agent"; do
+    if ( HOME="$probe" WASM_AGENT_HOME="$SCRATCH_HOME" scratch_home_required ) 2>/dev/null; then
+      bad "the scratch-home guard accepted the real home: $probe"
+    else
+      ok "the scratch-home guard still refuses $probe"
+    fi
+  done
+fi
 SHIM="$WORK/bin"; mkdir -p "$SHIM"
 # pkill is shadowed so a passing run cannot touch this machine's node; systemctl answers "no service here".
 printf '#!/bin/sh\nexit 0\n' > "$SHIM/pkill"; chmod +x "$SHIM/pkill"

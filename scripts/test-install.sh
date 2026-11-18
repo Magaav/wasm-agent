@@ -82,6 +82,32 @@ SH
 sign_release() { python3 "$ROOT/scripts/lib/release-fixture-sign.py" "$1" --key A >/dev/null 2>&1; }
 export WA_RELEASE_KEYS="$ROOT/tests/fixtures/release-sign/keys.txt"
 
+# A NODE BINARY THAT REPORTS ITS OWN BUILD, compiled here: an ELF of this machine (the core checks the machine
+# byte), answering --version, --build-info and --contains. A release install has no checkout, so the binary's own
+# identity and its own embedded ancestry are the only witnesses scripts/linux/bootstrap.sh has: a stand-in like
+# /bin/true is refused with candidate_names_no_commit, "a release this node cannot identify installs nothing".
+# Same shape as the fixture scripts/test-bootstrap-gate.sh builds, and the same price - a host without a C
+# compiler skips the real chain below by name instead of passing it.
+cat > "$T/wa_stub.c" <<'STUB_C'
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+  if (argc > 1 && strcmp(argv[1], "--build-info") == 0) {
+    printf("version=%s\ncommit=%s\ntree=unknown\ndirty=false\nsource=git\nbuilt_epoch=1\nancestors=3\nancestors_complete=true\n",
+           STUB_VERSION, STUB_COMMIT);
+    return 0;
+  }
+  if (argc > 1 && strcmp(argv[1], "--contains") == 0) return 0;
+  printf("wasm-agent %s\n", STUB_VERSION);
+  return 0;
+}
+STUB_C
+stub_binary() { # <path> <version-label> <commit>
+  { printf '#define STUB_VERSION "%s"\n#define STUB_COMMIT "%s"\n' "$2" "$3"; cat "$T/wa_stub.c"; } > "$T/wa_stub.$$.c"
+  cc -O0 -o "$1" "$T/wa_stub.$$.c" || { rm -f "$T/wa_stub.$$.c"; bad 'could not compile the fixture binary' "$1"; return 1; }
+  rm -f "$T/wa_stub.$$.c"
+  chmod +x "$1"
+}
 mkbundle() { # NAME TAG COMMIT [append-bytes] -> prints the manifest sha256; archive at $T/rel-NAME/NAME.tar.gz
   local name=$1
   local tag=$2
@@ -89,7 +115,14 @@ mkbundle() { # NAME TAG COMMIT [append-bytes] -> prints the manifest sha256; arc
   local extra=${4:-}
   local dir="$T/src/$name"
   rm -rf "$dir"; mkdir -p "$dir/ui" "$dir/scripts/linux"
-  cp /bin/true "$dir/wa"; cp /bin/true "$dir/wa-sentinel"
+  # THE BUNDLE'S BINARY ANSWERS FOR ITSELF. A release install has no checkout, so the binary's own build
+  # identity and its own embedded ancestry are the only witnesses the core has: an ordinary stand-in (`/bin/true`)
+  # is refused with candidate_names_no_commit, "a release this node cannot identify installs nothing", and the
+  # ancestry question against what is running is answered from `wa --contains` (scripts/linux/bootstrap.sh).
+  # So the fixture says the commit its bundle claims, in the shape rust/wa-host/build.rs writes it, and answers
+  # --contains 0 the way a build that contains the running commit would.
+  stub_binary "$dir/wa" "$tag" "$commit"
+  cp "$dir/wa" "$dir/wa-sentinel"
   # A second release must differ in its BYTES, or "the update happened" could pass without a swap.
   [ -n "$extra" ] && printf '%s' "$extra" >> "$dir/wa"
   printf '<html>\n' > "$dir/ui/index.html"
@@ -130,10 +163,17 @@ mkbase() { # DIR COMMIT INDEXFILE...
   local dir=$1 commit=$2; shift 2
   mkdir -p "$dir/$commit/scripts/linux" "$dir/$commit/releases" "$dir/main/releases"
   cp "$ROOT/scripts/linux/bootstrap.sh" "$dir/$commit/scripts/linux/bootstrap.sh"
-  # The core verifies the release it installs, so the tree it is fetched from carries the verifier in the
-  # repository's own layout - exactly what scripts/install.sh downloads beside the core.
+  # The core verifies the release it installs and writes the node's own record, so the tree it is fetched from
+  # carries the libs in the repository's own layout - EXACTLY the ones scripts/install.sh downloads beside the
+  # core, and no more. A base carrying a superset would pass this row while a real install, asking the front
+  # door for two files, died at "bootstrap: install_record_lib_missing" (measured 18/11, the round that made the
+  # core need install-record.sh and node-pins.sh). The list is read out of the front door itself, so a second
+  # copy of it cannot drift; if that line changes shape this row refuses instead of testing a base nobody serves.
+  local core_libs libfile
+  core_libs="$(sed -n 's/^ *for libfile in \(.*\); do$/\1/p' "$FRONT" | head -1)"
+  [ -n "$core_libs" ] || { echo "test-install: cannot read the core's lib list out of $FRONT" >&2; exit 2; }
   mkdir -p "$dir/$commit/scripts/lib"
-  cp "$ROOT/scripts/lib/release-signing.sh" "$ROOT/scripts/lib/release_verify.py" "$dir/$commit/scripts/lib/"
+  for libfile in $core_libs; do cp "$ROOT/scripts/lib/$libfile" "$dir/$commit/scripts/lib/"; done
   cp "$FRONT" "$dir/$commit/scripts/install.sh"
   local f
   for f in "$@"; do
@@ -302,6 +342,17 @@ else bad 'android join refusal' "$out"; fi
 # ====================================================================================================
 # 3. one path: install -> re-run -> update -> rollback, against the REAL core
 # ====================================================================================================
+# ...which needs a C compiler for the payload (see stub_binary). Named, not assumed: the matrix above has run,
+# and a host without one reports the chain as SKIPPED - a skip is a pass with a hole in it, never a pass.
+if ! command -v cc >/dev/null 2>&1; then
+  printf 'SKIP test-install: no C compiler on this host, so the real install chain was not run (its payload has to be an ELF of this machine that reports its own build)\n'
+  if [ "$failed" -gt 0 ]; then
+    printf 'install front door: %s failed of %s checks\n' "$failed" "$((pass+failed))"
+    exit 1
+  fi
+  printf 'install front door ok (%s checks), the real chain SKIPPED (no C compiler)\n' "$pass"
+  exit 0
+fi
 # The real core is run with file: bundles. `--no-service` keeps systemd out of it, `WA_LINUX_RELEASE_INDEX_URL`
 # points the core at the fixture index the front door's base names, and a fake Node keeps the MCP runtime
 # step from downloading one.

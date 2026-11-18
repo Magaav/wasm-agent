@@ -95,6 +95,12 @@ fixture="$WORK/fixture"
 mkdir -p "$fixture/scripts/lib" "$fixture/config" "$fixture/lua/core" "$fixture/lua/vendor"
 cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/lua-tree.sh" "$ROOT/scripts/lib/release-signing.sh" \
    "$ROOT/scripts/lib/release_verify.py" "$ROOT/scripts/lib/build-requirements.sh" "$fixture/scripts/lib/"
+# ...and the one answer to "does the remote have this commit?" (scripts/lib/shared-commit.sh), which the
+# publisher sources before it will publish anything. Measured 18/11, merging the round that added it: the
+# publisher refused with shared_commit_lib_missing on this fixture's FIRST call, because the libs copied here
+# are a list and the publisher had grown a new dependency. A fixture that mirrors a list of files has to
+# mirror the whole requirement, or the row tests a publisher nobody runs.
+cp "$ROOT/scripts/lib/shared-commit.sh" "$fixture/scripts/lib/"
 # ...and the glibc floor, which publish-node-binaries.sh sources before it will read a manifest's
 # glibc_floor= back out of the artifact it is publishing (change/release-glibc). A fixture without it is
 # refused as glibc_floor_lib_missing before this row's first assertion, which then reads as a signing failure
@@ -108,8 +114,15 @@ printf '{}\n' > "$fixture/lua/vendor/json.lua"
 printf '# orchestrator\n' > "$fixture/AGENTS.orchestrator.md"
 printf '# subagents\n' > "$fixture/AGENTS.subagents.md"
 "$WORK/bin/sign-fixture" --keys "$fixture/config/release-keys.txt" > "$WORK/key-id"
+# THE FIXTURE HAS A REAL REMOTE, WITH THE COMMIT ON A BRANCH IT PUSHED. The publisher asks the remote itself
+# (`git ls-remote --heads origin`, scripts/lib/shared-commit.sh) whether the commit it is being asked to publish
+# is on a branch anybody else can see, and a local `refs/remotes/origin/main` made with update-ref is a memory of
+# a fetch rather than an answer - it is exactly the ref the rule stopped trusting (18/11). A bare repository in
+# $WORK, and a real push to it, is the honest fixture: hermetic, offline, and answerable.
+git init -q --bare "$WORK/origin.git"
 ( cd "$fixture" && git init -q -b main && git config core.autocrlf false && git config user.email t@t \
-    && git config user.name t && git add -A && git commit -qm base && git update-ref refs/remotes/origin/main HEAD ) \
+    && git config user.name t && git add -A && git commit -qm base \
+    && git remote add origin "$WORK/origin.git" && git push -q origin main ) \
   >/dev/null 2>&1 || fail "could not build the git fixture"
 FIXTURE_SHA="$(git -C "$fixture" rev-parse HEAD)"
 SHORT="${FIXTURE_SHA:0:12}"

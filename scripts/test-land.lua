@@ -700,16 +700,41 @@ for _, row in ipairs(deploy_requests) do
 end
 eq(table.concat(rollback_order, ","), "openclaw,nextcloud,mail,work", "the rollback runs the ring in reverse")
 eq(table.concat(rollback_modes, ","), "rollback,rollback,rollback,rollback", "every request asks for a rollback")
+-- THE ROLLBACK PINNED EVERY NODE IT PUT BACK, and an ordinary deploy is then refused by name: a pin is the
+-- record that a node was moved somewhere on purpose, and the way out is the operator's own
+-- `wa update <node> --unpin --reason <text>` (lua/core/remote_update.lua; pins.lua's escape_hatch). So the cases
+-- below start where an operator leaves the machine after a rollback - the way forward said out loud - and this is
+-- that step, on the store that gates them. Without it every later deploy in this file is a node_pinned refusal,
+-- which is the rule working, not the row failing.
+local pins = dofile("lua/core/pins.lua")
+for _, node in ipairs({ "openclaw", "nextcloud", "mail", "work" }) do
+  local active = pins.active(node)
+  ok(active ~= nil, "the rollback left a pin on " .. node .. " (a rollback is a move on purpose)")
+  local cleared = pins.clear(node, { reason = "the rollback case is over: this fixture moves the ring again" })
+  ok(cleared ~= nil, "and the operator's release clears it on " .. node)
+  ok(pins.active(node) == nil, "so " .. node .. " may move again")
+end
 
 -- ---------------------------------------------------------------- case 8: the rollback script itself
 local rollback_script = tree_root .. "/scripts/rollback-node.sh"
 ok(read_file(rollback_script) ~= nil, "the rollback script this node ships is here: " .. rollback_script)
 local install = fixture .. "/install"
 must("mkdir -p " .. install .. "/rollback", "make the install directory")
-write_file(install .. "/wa", "#!/usr/bin/env bash\nprintf 'wa 2.0-new\\n'\n")
-write_file(install .. "/wa-sentinel", "#!/usr/bin/env bash\nprintf 'sentinel 2.0-new\\n'\n")
-write_file(install .. "/rollback/wa", "#!/usr/bin/env bash\nprintf 'wa 1.9-old\\n'\n")
-write_file(install .. "/rollback/wa-sentinel", "#!/usr/bin/env bash\nprintf 'sentinel 1.9-old\\n'\n")
+-- THE PAIR ANSWERS --build-info, because the record a rollback writes is the RESTORED BINARY'S OWN answer
+-- (scripts/lib/install-record.sh: the identity fields come from the binary and only from the binary, which is
+-- how a node stopped running 8 unlanded commits under a landed commit's name, 18/11). A stub that answered only
+-- --version is recorded as commit=unknown - the honest record of a binary nobody can identify - and that is a
+-- different case, proved by scripts/test-install-record.sh. This fixture keeps a pair it can identify.
+local function stub_binary(path, text, commit)
+  write_file(path, "#!/usr/bin/env bash\ncase $1 in\n"
+    .. "  --build-info) printf 'version=" .. text .. "\\ncommit=" .. commit
+    .. "\\ntree=unknown\\ndirty=false\\nsource=git\\nbuilt_epoch=1\\nancestors=3\\nancestors_complete=true\\n' ;;\n"
+    .. "  *) printf '" .. text .. "\\n' ;;\nesac\n")
+end
+stub_binary(install .. "/wa", "wa 2.0-new", string.rep("a", 40))
+stub_binary(install .. "/wa-sentinel", "sentinel 2.0-new", string.rep("a", 40))
+stub_binary(install .. "/rollback/wa", "wa 1.9-old", string.rep("b", 40))
+stub_binary(install .. "/rollback/wa-sentinel", "sentinel 1.9-old", string.rep("b", 40))
 write_file(install .. "/installed.txt", "commit=" .. string.rep("a", 40) .. "\nbinary_source=prebuilt-release\n")
 write_file(install .. "/rollback/installed.txt", "commit=" .. string.rep("b", 40) .. "\nbinary_source=prebuilt-release\n")
 must("chmod +x " .. install .. "/wa " .. install .. "/wa-sentinel " .. install .. "/rollback/wa " .. install .. "/rollback/wa-sentinel", "exec bits")

@@ -267,20 +267,27 @@ PY
     CORE_REF=$REF
     say "platform: $os $arch"
   fi
-  # The core is fetched AS ITS OWN PATH under the scratch directory, not as `$tmp/core`: the updater it runs
-  # verifies release signatures with `scripts/lib/release-signing.sh` beside it, so the layout has to be the
-  # repository's (scripts/linux/../lib). Two small files travel with it, from the same commit - the anchor is
-  # the same one the core already had (the index pin), and a release's assets are still verified against a
-  # key that is NOT in that release.
+  # The core is fetched AS ITS OWN PATH under the scratch directory, not as `$tmp/core`: the core sources the
+  # libs beside it, so the layout has to be the repository's (scripts/linux/../lib). EVERY lib it sources has to
+  # travel with it, from the same commit - the anchor is the same one the core already had (the index pin), and
+  # a release's assets are still verified against a key that is NOT in that release.
+  #
+  # THE LIST IS THE CORE'S OWN REQUIREMENT, and it is not only the signing pair: `scripts/linux/bootstrap.sh`
+  # refuses by name without release-signing.sh (the verifier), install-record.sh (the record written from the
+  # binary, and the ancestry verdict) and node-pins.sh (this node's own pin, which a rollback writes). Measured
+  # 18/11, merging the round that made the core need the last two: EVERY Linux install died at
+  # "bootstrap: install_record_lib_missing", because this list still named two files and nothing had asked
+  # whether the front door carried what the core had grown to need. scripts/test-install.sh reads this list out
+  # of this line, so the fixture base carries exactly what a real base is asked for.
   core_url="$BASE/$CORE_REF/$CORE_PATH"
   mkdir -p "$tmp/$(dirname "$CORE_PATH")" "$tmp/scripts/lib"
   fetch "$core_url" "$tmp/$CORE_PATH" || die "core_unreachable: $core_url"
-  # Only the Linux core verifies a release's signature (the phone's bundle is installed by its own updater),
-  # so only that channel needs the verifier beside it.
+  # Only the Linux core verifies a release's signature and writes the node's own record (the phone's bundle is
+  # installed by its own updater), so only that channel needs the libs beside it.
   if [ "$os" = linux ]; then
-    for libfile in release-signing.sh release_verify.py; do
+    for libfile in release-signing.sh release_verify.py install-record.sh node-pins.sh; do
       fetch "$BASE/$CORE_REF/scripts/lib/$libfile" "$tmp/scripts/lib/$libfile" \
-        || die "release_signing_lib_unreachable: $BASE/$CORE_REF/scripts/lib/$libfile (the core verifies release signatures; without it nothing would be installed)"
+        || die "core_lib_unreachable: $BASE/$CORE_REF/scripts/lib/$libfile (the core sources this file beside itself; without it nothing would be installed)"
     done
   fi
   got_sha=$(sha256sum "$tmp/$CORE_PATH" | cut -d' ' -f1)
