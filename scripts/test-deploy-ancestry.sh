@@ -29,6 +29,13 @@ same() { [ "$2" = "$3" ] && ok "$1 ($2)" || bad "$1: got '$2' want '$3'"; }
 shows() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: '$3' not found in: $(printf '%s' "$2" | tail -4 | tr '\n' '|')" ;; esac; }
 hides() { case "$2" in *"$3"*) bad "$1: '$3' should not be there" ;; *) ok "$1" ;; esac; }
 
+# THE FIXTURE NEEDS A DETACHER AND GIT. `setsid --fork` keeps the deploy off this turn's process tree (deploy.sh
+# refuses to replace the node its own turn runs on), and the whole case is built out of local clones. A host
+# without them says so instead of failing inside a half-started deploy.
+if ! command -v setsid >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+  echo "SKIP test-deploy-ancestry: no setsid/git on this host (the fixture runs deploy.sh detached from this turn)"
+  exit 0
+fi
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 TREE="$WORK/tree"; INSTALL="$WORK/install"; SHIM="$WORK/bin"
 # The node's own config directory: deploy.sh reads its pin store (scripts/lib/node-pins.sh) from here, so a case

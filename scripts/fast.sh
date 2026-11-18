@@ -701,6 +701,19 @@ fi
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
 check deploy-prune bash scripts/test-deploy-prune.sh
 check publish-artifacts bash scripts/test-publish-artifacts.sh
+# THE DEPLOY'S ANCESTRY AND ITS RECORD (round 4 of the deploy-ancestry review). Seven files were written with
+# that fix and named by no harness, so every gate here was green without running one of them; the full gate now
+# runs all seven (scripts/test.sh) and these are the ones measured at seconds - a landing round that touches the
+# install path should not need the hour-long gate to learn whether the machine can still tell what is running.
+# test-deploy-ancestry.sh is NOT here: it runs a real deploy.sh detached (setsid --fork) per case, 28 s measured,
+# and the guard it proves is in the full gate. The measurement and the reason are in
+# docs/missions/reports/deploy-ancestry.md.
+WA_BIN="$bin" check install-record bash scripts/test-install-record.sh
+check install-guards bash scripts/test-install-guards.sh
+WA_BIN="$bin" check node-pins bash scripts/test-node-pins.sh
+check publish-shared-commit bash scripts/test-publish-shared-commit.sh
+check bootstrap-gate bash scripts/test-bootstrap-gate.sh
+WA_BIN="$bin" check build-info bash scripts/test-build-info.sh
 # The fastlane's two halves, both seconds and self-contained. The row list a narrowed run executes: the core
 # rows are never dropped, an unknown row is a refusal and an empty request runs nothing (scripts/lib/fast-rows.sh,
 # the one place a plan could make a green run mean less). And the signing chain a round depends on: the

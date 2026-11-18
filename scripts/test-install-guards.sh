@@ -59,6 +59,13 @@ SHIM="$WORK/bin"; mkdir -p "$SHIM"
 printf '#!/bin/sh\nexit 0\n' > "$SHIM/pkill"; chmod +x "$SHIM/pkill"
 printf '#!/bin/sh\nexit 1\n' > "$SHIM/systemctl"; chmod +x "$SHIM/systemctl"
 export PATH="$SHIM:$PATH"
+# The fleet path below is driven end to end: curl fetches the artifact from a file:// URL and the /health server
+# is python3's. A host without them cannot run this file, and says so rather than failing inside a half-run
+# installer (the same convention the bootstrap gate uses for its C compiler).
+if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  echo "SKIP test-install-guards: no curl/python3 on this host (the fleet fixture fetches the artifact and serves /health)"
+  exit 0
+fi
 
 H40="$(printf 'a%.0s' $(seq 1 40))"
 # A stub standing in for a node binary: it reports a build, answers --contains with an exit code, and answers the

@@ -169,11 +169,17 @@ contains "$out" "artifact_does_not_run_here" "it reaches the exec test instead"
 [ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the installed binary was replaced by an artifact that does not run"
 ok
 
-# A copy of the script with NO lib beside it is exactly the shape a node gets from `curl ... fleet-install.sh`,
+# A copy of the script with NO FLOOR lib beside it is the shape a node gets from `curl ... fleet-install.sh`,
 # and the floor check has to work there: the block travels inside the script. (Before this, that copy refused
 # every install with glibc_floor_lib_missing - a gate that was off precisely where it was needed.)
-mkdir -p "$WORK/lonely"
+#
+# Round 4: "no lib" means no glibc-floor.sh, not no libs at all. Since round 3 of the deploy-ancestry review
+# fleet-install.sh REFUSES to install without install-record.sh and node-pins.sh (the identity of the bytes and
+# the node's own pin are not optional - a gate with a skip path is the hole those rounds closed), and it refuses
+# BEFORE any floor check can run. So the fixture ships those two and withholds the one file this case is about.
+mkdir -p "$WORK/lonely/lib"
 cp "$FLEET" "$WORK/lonely/fleet-install.sh"
+cp "$ROOT/scripts/lib/install-record.sh" "$ROOT/scripts/lib/node-pins.sh" "$WORK/lonely/lib/"
 out="$(WA_GLIBC_HOST=2.35 TARGET="$step/bin/wa" bash "$WORK/lonely/fleet-install.sh" "file://$step/art/wa-needs-2.39" 2>&1)"; rc=$?
 expect_status 1 "$rc" "a standalone fleet-install.sh (no lib beside it) with a 2.39 artifact on a 2.35 host"
 contains "$out" "glibc_floor_exceeded:" "the standalone copy makes the floor check itself"
@@ -199,10 +205,13 @@ candidate="$WORK/candidate"; mkelf "$candidate" 3e GLIBC_2.2.5 GLIBC_2.39; chmod
 # A fixture tree stands in for the checkout, with ONE stubbed lib: turn-guard.sh. upgrade.sh refuses to run
 # inside a turn on the node it would replace (correctly - that is the node this suite is running in), and
 # that refusal is about the caller, not about the bytes; the glibc guard is what this case is measuring.
-# Everything else upgrade.sh sources is the real file.
+# Everything else upgrade.sh sources is the real file - including install-record.sh and node-pins.sh, which since
+# round 3 it REFUSES to run without (the identity of the bytes and this node's own pin are not optional), so a
+# fixture that withheld them would measure that refusal instead of the floor.
 fake="$WORK/fakeroot"; mkdir -p "$fake/scripts/lib"
 cp "$UPGRADE" "$fake/scripts/upgrade.sh"
-cp "$ROOT/scripts/lib/glibc-floor.sh" "$ROOT/scripts/lib/service-target.sh" "$fake/scripts/lib/"
+cp "$ROOT/scripts/lib/glibc-floor.sh" "$ROOT/scripts/lib/service-target.sh" \
+   "$ROOT/scripts/lib/install-record.sh" "$ROOT/scripts/lib/node-pins.sh" "$fake/scripts/lib/"
 printf 'turn_owner() { :; }\nsentinel_supervises() { return 1; }\n' > "$fake/scripts/lib/turn-guard.sh"
 out="$(WA_INSTALL_DIR="$inst" WA_GLIBC_HOST=2.35 bash "$fake/scripts/upgrade.sh" "$candidate" 2>&1)"; rc=$?
 expect_status 3 "$rc" "upgrade.sh with a candidate needing GLIBC_2.39 on a 2.35 host"
@@ -412,6 +421,10 @@ done
 # the pipe (`bash -s`, the `curl | bash` shape) and a bare relative invocation (`bash fleet-install.sh`,
 # the same `./` hole by another door).
 mkdir -p "$WORK/plant/lib"
+# Round 4: this shape also needs the two libs fleet-install.sh will NOT run without since round 3
+# (install-record.sh and node-pins.sh: the identity of the bytes and this node's own pin). They are the REAL
+# files; only glibc-floor.sh is the plant, because only it carries the floor check this case is about.
+cp "$ROOT/scripts/lib/install-record.sh" "$ROOT/scripts/lib/node-pins.sh" "$WORK/plant/lib/"
 cat > "$WORK/plant/lib/glibc-floor.sh" <<'PLANT'
 # The guard a cwd can put in front of the real one: it says it was read, and it lets everything through.
 printf 'PLANTED_LIB_SOURCED: a cwd lib was sourced by fleet-install.sh\n' >&2
@@ -436,6 +449,20 @@ expect_status 1 "$rc" "a bare relative path (bash fleet-install.sh) in the same 
 absent "$out" "PLANTED_LIB_SOURCED" "the planted cwd lib is not sourced by a relative invocation either"
 contains "$out" "glibc_floor_exceeded:" "the inline block refuses there too"
 [ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the relative-path run replaced the installed binary"
+ok
+
+# ---- 8b. a copy with NO libs at all refuses, and says which one it needs (round-3 rule, restated here)
+# The curl shape above carries the libs beside it because the installer cannot do its job without them. The
+# shape that carries NONE is the one this project must never accept: an installer that cannot identify the
+# bytes it is replacing, and cannot read the node's own pin, must not replace anything. That is what round 3
+# of the deploy-ancestry review asked for, so it is asserted here rather than left as a side effect of a
+# fixture that happens to have the files in place.
+mkdir -p "$WORK/nolibs"
+cp "$FLEET" "$WORK/nolibs/fleet-install.sh"
+out="$(cd "$WORK/nolibs" && WA_GLIBC_HOST=2.35 TARGET="$step/bin/wa" bash -s "file://$step/art/wa-needs-2.39" 2>&1 < fleet-install.sh)"; rc=$?
+expect_status 2 "$rc" "a copy with no libs beside it refuses instead of installing"
+contains "$out" "install_record_lib_missing" "it names the lib it cannot work without"
+[ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the libless copy replaced the installed binary"
 ok
 
 # ---- 9. the scan against the ELF's own answer ------------------------------------------------------

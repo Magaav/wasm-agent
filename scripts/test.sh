@@ -449,6 +449,19 @@ elif [ "$SERVICE_TARGET_STATUS" != "0" ]; then
   echo "FAIL: the deploy service-target fixture did not pass (exit $SERVICE_TARGET_STATUS)" >&2
   exit 1
 fi
+# ---- the ancestry, the record, the pins, and the two overrides --------------------------------------------
+# Round 4 of the deploy-ancestry review: seven files were written WITH a fix and named by no harness, so every
+# gate in this repository was green without running one of them (scripts/test-orphan-tests.mjs reported them as
+# orphans, which is the ledger doing its job). Each is hermetic - no network, no cargo, no node binary unless
+# WA_BIN hands it the one this run already built - and each exists for the same reason: an install must never
+# decide about bytes it cannot name, and must refuse rather than guess.
+WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
+gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
+gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards
+WA_BIN="$BIN" gate_run bash scripts/test-node-pins.sh                 # a rollback is a record, and it gates the next move
+gate_run bash scripts/test-publish-shared-commit.sh                   # a published commit is one the remote can see
+gate_run bash scripts/test-bootstrap-gate.sh                          # the release-install path honours its override
+WA_BIN="$BIN" gate_run bash scripts/test-build-info.sh                # the bytes answer for themselves (--build-info)
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
