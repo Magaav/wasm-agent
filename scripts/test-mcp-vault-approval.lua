@@ -356,6 +356,129 @@ ok(has(problems_text(spawner_manifest), 'child_process'),
 ok(not has(problems_text(with_interpreter), 'child_process'),
   'the node\'s own runtime is not refused for spawning the connector: ' .. problems_text(with_interpreter))
 
+-- ---- 7. round 7: node's own order, the ambiguity, the interpreters, the child's PATH -----------
+-- Every check below reads M.vault_manifest, the one function the operator's probe/on, a call and the
+-- kernel's own re-check all go through. Each of them fails on 3abec8c5 (the round-6 tree).
+local function interpreter_definition(program, args)
+  return { id = 'vault-interpreter', name = 'Interpreter', transport = 'stdio', program = program,
+    args = args or { connector }, cwd = dir, tools = { echo = 'write' },
+    vault_env = { FIXTURE_TOKEN = 'fixture_token' }, timeout_seconds = 5 }
+end
+local function word_definition(cwd, args)
+  return { id = 'vault-word', name = 'Word', transport = 'stdio', program = '/usr/bin/node',
+    args = args, cwd = cwd, tools = { echo = 'write' },
+    vault_env = { FIXTURE_TOKEN = 'fixture_token' }, timeout_seconds = 5 }
+end
+-- 1. A name with no extension is resolved in NODE's own order (exact, .js, .json, .node, then the
+-- directory), and a name more than one file answers to is REFUSED: which one runs would be node's
+-- priority rather than the operator's approval.
+local order_one = dir .. '/order-one'
+assert(host.write_file(order_one .. '/server.js', 'export const run = 1;\n'), 'server.js')
+local word = manifest_of(word_definition(order_one, { 'server' }))
+ok(covered_by(word)[order_one .. '/server.js'] == true,
+  'the file node runs for a bare word is the file the digest names: ' .. problems_text(word))
+-- A .mjs beside it is NOT an answer to the word (node does not imply .mjs): the approval still holds,
+-- and node runs the .js the digest names.
+assert(host.write_file(order_one .. '/server.mjs', 'export const run = 2;\n'), 'server.mjs')
+local beside = manifest_of(word_definition(order_one, { 'server' }))
+ok(#beside.problems == 0 and covered_by(beside)[order_one .. '/server.js'] == true,
+  'a .mjs beside the .js neither resolves nor changes the digest: ' .. problems_text(beside))
+-- Only the .mjs is there: node runs nothing, so the word resolves to nothing - the round-6 answer named
+-- alone.mjs and handed it the value.
+local order_mjs = dir .. '/order-mjs'
+assert(host.write_file(order_mjs .. '/alone.mjs', 'export const run = 3;\n'), 'alone.mjs')
+local alone = manifest_of(word_definition(order_mjs, { 'alone' }))
+ok(has(problems_text(alone), 'may name a file this digest cannot resolve'),
+  'a .mjs is not implied, so a word only it answers to is refused: ' .. problems_text(alone))
+-- Two files that answer to one word: refused by name, and the refusal names both.
+local order_two = dir .. '/order-two'
+assert(host.write_file(order_two .. '/server.js', 'export const run = 4;\n'), 'server.js')
+assert(host.write_file(order_two .. '/server.json', '{}'), 'server.json')
+local two = manifest_of(word_definition(order_two, { 'server' }))
+ok(has(problems_text(two), 'more than one file node could run') and has(problems_text(two), 'server.json'),
+  'two files answering to one word are refused, not one of them silently: ' .. problems_text(two))
+-- The directory a word names is resolved by its index file, which is hashed in turn.
+local order_dir = dir .. '/order-dir'
+assert(host.write_file(order_dir .. '/pkg/index.js', 'export const run = 5;\n'), 'pkg/index.js')
+local folder = manifest_of(word_definition(order_dir, { 'pkg' }))
+ok(#folder.problems == 0 and covered_by(folder)[order_dir .. '/pkg/index.js'] == true,
+  'a directory is resolved by its index file: ' .. problems_text(folder))
+
+-- 2. The INTERPRETER families: only JavaScript and shell are followed. Every other one loads a module or
+-- a package from a search path this digest cannot name, so the program itself is refused.
+for _, interpreter in ipairs({ '/usr/bin/python3', '/usr/bin/python3.11', '/usr/bin/python2.7',
+    '/usr/bin/perl', '/usr/bin/perl5.36', '/usr/bin/ruby3.2', '/usr/bin/php8.2', '/usr/bin/lua5.4',
+    '/usr/bin/deno', '/usr/bin/bun', '/usr/bin/java', '/usr/bin/pwsh' }) do
+  local manifest = manifest_of(interpreter_definition(interpreter))
+  ok(has(problems_text(manifest), 'an interpreter this digest cannot follow'),
+    interpreter .. ' is refused as a program: ' .. problems_text(manifest))
+end
+-- The two families the digest DOES follow stay approvable: node, and the POSIX shells.
+eq(#(manifest_of(interpreter_definition('/usr/bin/node')).problems or {}), 0,
+  'node is followed: ' .. problems_text(manifest_of(interpreter_definition('/usr/bin/node'))))
+local shell_manifest = manifest_of(interpreter_definition('/bin/sh', { wrapper }))
+eq(#(shell_manifest.problems or {}), 0, 'a POSIX shell is followed: ' .. problems_text(shell_manifest))
+-- python3 -m and python3 -c are code, not a value; so is a code option given to a program the digest
+-- cannot classify at all ("refuse unknown interpreters with code options").
+local runner = dir .. '/runner'
+assert(host.write_file(runner, '#!/bin/sh\nexit 0\n'), 'an unclassifiable program')
+ok(has(problems_text(manifest_of(interpreter_definition(runner, { '-c', 'echo hi' }))), 'inline code'),
+  'a code option on a program it cannot classify is inline code')
+ok(has(problems_text(manifest_of(interpreter_definition(runner, { '-m', 'http.server' }))), 'inline code'),
+  'and so is -m')
+-- node -r names a FILE, and that stays a file: the family it does follow decides.
+eq(#(manifest_of(interpreter_definition('/usr/bin/node', { '-r', lib, connector })).problems or {}), 0,
+  'node -r is a file the digest hashes: '
+   .. problems_text(manifest_of(interpreter_definition('/usr/bin/node', { '-r', lib, connector }))))
+
+-- 3. require('vm') and runInThisContext are eval's twins: a compiled script is a string, not a file.
+local vm_import = dir .. '/vm-import.mjs'
+assert(host.write_file(vm_import, "import vm from 'node:vm';\nvm.runInThisContext('1');\n"))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_import }))), 'vm'),
+  'an import of node:vm is refused like eval')
+local vm_require = dir .. '/vm-require.mjs'
+assert(host.write_file(vm_require, "const vm = require('vm');\nvm.runInThisContext('1');\n"))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_require }))), 'vm'),
+  'require(vm) is refused too')
+local vm_context = dir .. '/vm-context.mjs'
+assert(host.write_file(vm_context, 'export const go = (code) => runInThisContext(code);\n'))
+ok(has(problems_text(manifest_of(interpreter_definition('/usr/bin/node', { vm_context }))), 'vm'),
+  'runInThisContext is refused even without the module name in the file')
+
+-- 4. The interpreter is resolved with the PATH the CHILD gets, not the one host.getenv answers: the
+-- kernel resolves a bare program name against the process PATH (host.executable_on_path) while
+-- host.getenv reads the host's config first. A digest that named the other file named nothing a launch
+-- reads, so the approval is refused instead.
+ok(type(host.executable_on_path) == 'function',
+  'the host can resolve a bare name the way the launch does (host.executable_on_path)')
+local child_node = dir .. '/child-bin/node'
+local decoy_node = dir .. '/decoy-bin/node'
+assert(host.write_file(child_node, '#!/bin/sh\nexit 0\n'), 'the interpreter on the child PATH')
+assert(host.write_file(decoy_node, '#!/bin/sh\nexit 0\n'), 'the interpreter on the config PATH')
+local active_getenv = host.getenv
+local real_on_path = host.executable_on_path
+host.getenv = function(name)
+  if name == 'WA_NODE' or name == 'WA_INSTALL_DIR' then return nil end
+  if name == 'PATH' then return dir .. '/decoy-bin' end
+  return active_getenv(name)
+end
+host.executable_on_path = function(name)
+  if name == 'node' then return child_node end
+  return real_on_path(name)
+end
+local from_child_path = manifest_of(interpreter_definition('/usr/bin/node'))
+ok(covered_by(from_child_path)[child_node] == true,
+  'the interpreter the child will start is the file the digest names: ' .. problems_text(from_child_path))
+ok(covered_by(from_child_path)[decoy_node] ~= true,
+  'and the one the config PATH names is not, because no launch runs it')
+-- A host that cannot answer does not get to guess: the approval is refused instead.
+host.executable_on_path = function() return nil end
+local cannot_answer = manifest_of(interpreter_definition('/usr/bin/node'))
+ok(has(problems_text(cannot_answer), 'interpreter cannot be found'),
+  'a host that cannot resolve the interpreter refuses rather than names a guess: ' .. problems_text(cannot_answer))
+host.executable_on_path = real_on_path
+host.getenv = active_getenv
+
 host.getenv = real_getenv
 host.operation = real_operation
 

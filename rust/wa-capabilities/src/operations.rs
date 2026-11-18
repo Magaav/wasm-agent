@@ -203,37 +203,114 @@ fn real_path(path: &str) -> String {
         .unwrap_or_else(|_| path.replace('\\', "/"))
 }
 
-/// Where node would find a file an argument names: the connector's own directory, then the extensions
-/// node implies. None when nothing is there, or when a relative name has no directory to resolve it from
-/// (the launch's own cwd is not the approval's to assume).
-fn resolve_argument(cwd: &str, value: &str) -> Option<String> {
-    const IMPLIED: [&str; 6] = [".mjs", ".js", ".cjs", "/index.mjs", "/index.js", "/index.cjs"];
+/// What a name an argument carries resolves to.
+///
+/// Round 7: the list of implied extensions was .mjs, .js, .cjs, /index.* - not node's own order, and not
+/// even the extensions node implies. Measured on node 26: `node ./a` with only a.mjs beside it fails with
+/// "Cannot find module", and with a.mjs AND a.js it runs a.js. So the old list could name a file nothing
+/// runs, and a file that does run stayed unhashed - the value went to the file the digest never saw.
+#[derive(Debug)]
+enum Resolved {
+    One(String),
+    /// More than one file answers to the same name: which one runs is node's priority, not the approval's,
+    /// so the launch is refused rather than resolved (approving `server` with only server.js there, and
+    /// adding server.mjs afterwards, must not hand the value to the file nobody hashed).
+    Ambiguous(Vec<String>),
+    /// Nothing is there, or a relative name has no directory to resolve it from (the launch's own cwd is
+    /// not the approval's to assume).
+    None,
+}
+
+/// The extensions node implies for a name with none, in node's own order (lib/internal/modules/cjs/loader:
+/// the exact name, then these), and the files a directory it names is read from.
+const NODE_FILE_EXT: [&str; 3] = [".js", ".json", ".node"];
+const NODE_INDEX_EXT: [&str; 3] = ["/index.js", "/index.json", "/index.node"];
+
+fn push_file(found: &mut Vec<String>, path: &str) {
+    if std::path::Path::new(path).is_file() { found.push(path.to_string()); }
+}
+
+/// The package.json main of a directory, resolved the way the name that named the directory is resolved.
+fn package_main(dir: &str, depth: u32, found: &mut Vec<String>) {
+    if depth > 2 { return; }
+    let Ok(text) = std::fs::read_to_string(format!("{dir}/package.json")) else { return };
+    let Ok(document) = serde_json::from_str::<Value>(&text) else { return };
+    let Some(main) = document["main"].as_str().filter(|value| !value.is_empty()) else { return };
+    let target = if is_absolute_path(main) {
+        main.replace('\\', "/")
+    } else {
+        format!("{}/{}", dir.trim_end_matches('/'), main)
+    };
+    push_file(found, &target);
+    for extension in NODE_FILE_EXT { push_file(found, &format!("{target}{extension}")); }
+    if std::path::Path::new(&target).is_dir() {
+        for extension in NODE_INDEX_EXT { push_file(found, &format!("{target}{extension}")); }
+        package_main(&target, depth + 1, found);
+    }
+}
+
+/// Every file node would consider for this name, in node's own order.
+fn node_candidates(target: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    push_file(&mut found, target);
+    if std::path::Path::new(target).extension().is_none() {
+        for extension in NODE_FILE_EXT { push_file(&mut found, &format!("{target}{extension}")); }
+    }
+    if std::path::Path::new(target).is_dir() {
+        package_main(target, 0, &mut found);
+        for extension in NODE_INDEX_EXT { push_file(&mut found, &format!("{target}{extension}")); }
+    }
+    found
+}
+
+fn resolve_argument(cwd: &str, value: &str) -> Resolved {
     let target = if is_absolute_path(value) {
         value.replace('\\', "/")
     } else if cwd.is_empty() {
-        return None;
+        return Resolved::None;
     } else {
         format!("{}/{}", cwd.trim_end_matches('/'), value)
     };
-    if std::path::Path::new(&target).is_file() { return Some(target); }
-    let named_extension = std::path::Path::new(&target).extension().is_some();
-    if !named_extension {
-        for extension in IMPLIED {
-            let candidate = format!("{target}{extension}");
-            if std::path::Path::new(&candidate).is_file() { return Some(candidate); }
-        }
-    }
-    None
+    let mut found = node_candidates(&target);
+    if found.len() == 1 { return Resolved::One(found.remove(0)); }
+    if found.len() > 1 { return Resolved::Ambiguous(found); }
+    Resolved::None
+}
+
+/// One file answers to the name, or the launch is refused: two files that both answer to it are a launch
+/// whose program is chosen by node's priority rather than by the digest the operator gave.
+fn ambiguous_refusal(value: &str, found: &[String]) -> String {
+    format!("vault_approval_argument_ambiguous:{value}: more than one file answers to this name ({}), so which one this launch runs is node's own choice rather than the approval's, and nothing was launched and no value was read. Name the file it must run by its absolute path: /mcp <id> probe, then /mcp <id> on", found.join(", "))
 }
 
 /// The interpreter family, from the program's own name: the flags that mean "run this string" differ.
+///
+/// Round 7: bun, deno, qjs and quickjs were in the JavaScript family, so `bun -e` looked followed - their
+/// module systems are not the one this digest follows (a remote URL, a lockfile's tree, a compiled blob).
 fn interpreter_family(program: &str) -> &'static str {
     let name = basename(program);
     match name.trim_end_matches(".exe") {
-        "node" | "nodejs" | "bun" | "deno" | "qjs" | "quickjs" => "js",
+        "node" | "nodejs" => "js",
         "sh" | "bash" | "dash" | "zsh" | "ksh" => "sh",
+        other if unfollowed_interpreter(other).is_some() => "other",
         _ => "unknown",
     }
+}
+
+/// Interpreters whose module system this digest cannot follow: each loads a module or a package from a
+/// search path (a python package, a ruby gem, a perl module, a lua rock) that is not a file an approval
+/// names. The same list is in lua/core/mcp.lua, and docs/VAULT.md names it.
+const UNFOLLOWED_INTERPRETERS: [&str; 33] = ["python", "python2", "python3", "pypy", "pypy3", "perl",
+    "ruby", "php", "lua", "luajit", "tclsh", "expect", "deno", "bun", "qjs", "quickjs", "ts-node", "tsx",
+    "java", "jjs", "pwsh", "powershell", "julia", "elixir", "escript", "erl", "rscript", "groovy",
+    "scala", "kotlin", "swift", "dotnet", "mono"];
+
+/// The interpreter a program name is, when the digest cannot follow what it loads. A versioned name is the
+/// same interpreter (python3.11, perl5.36, ruby3.2, php8.2), which is why the trailing digits and dots are
+/// not part of the answer.
+fn unfollowed_interpreter(name: &str) -> Option<&'static str> {
+    let stem = name.trim_end_matches(|character: char| character.is_ascii_digit() || character == '.');
+    UNFOLLOWED_INTERPRETERS.iter().find(|known| **known == stem || **known == name).copied()
 }
 
 /// An option that names a FILE rather than a value.
@@ -242,12 +319,18 @@ fn path_option(name: &str) -> bool {
         | "--env-file" | "--config")
 }
 
+/// Options that make an INTERPRETER run code this digest cannot name: a string it evaluates, or a module
+/// it loads from its own search path. For a program the digest follows, the family's own list decides (a
+/// node `-r` is a file, below); for one it cannot classify, every one of these is code.
+const CODE_FLAGS: [&str; 13] = ["-c", "-e", "-E", "-m", "-p", "-r", "--eval", "--print", "--command",
+    "-command", "-encodedcommand", "--module", "--require"];
+
 /// A flag that makes the interpreter run a STRING: the one shape no digest of files can name.
 fn inline_flag(program: &str, value: &str) -> bool {
     match interpreter_family(program) {
         "js" => matches!(value, "-e" | "--eval" | "-p" | "--print"),
         "sh" => matches!(value, "-c" | "--command"),
-        _ => false,
+        _ => CODE_FLAGS.contains(&value),
     }
 }
 
@@ -269,8 +352,10 @@ fn argument_problem(cwd: &str, program: &str, args: &[String], covered: &[String
             };
             if let Some(inline) = inline {
                 if path_option(&name) {
-                    let Some(target) = resolve_argument(cwd, &inline) else {
-                        return Err(format!("vault_approval_file_not_found:{inline}: this connector names a file ({inline}, after {name}) that is not there, so nothing was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"));
+                    let target = match resolve_argument(cwd, &inline) {
+                        Resolved::One(target) => target,
+                        Resolved::Ambiguous(found) => return Err(ambiguous_refusal(&inline, &found)),
+                        Resolved::None => return Err(format!("vault_approval_file_not_found:{inline}: this connector names a file ({inline}, after {name}) that is not there, so nothing was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on")),
                     };
                     if !covered.iter().any(|path| real_path(path) == real_path(&target)) {
                         return Err(format!("vault_approval_argument_not_covered:{target}: this connector runs a file the approval does not name, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
@@ -280,21 +365,21 @@ fn argument_problem(cwd: &str, program: &str, args: &[String], covered: &[String
             pending = name;
             continue;
         }
-        let target = resolve_argument(cwd, value);
-        match target {
-            Some(target) => {
+        match resolve_argument(cwd, value) {
+            Resolved::One(target) => {
                 if !covered.iter().any(|path| real_path(path) == real_path(&target)) {
                     return Err(format!("vault_approval_argument_not_covered:{target}: this connector runs a file the approval does not name, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
                 }
             }
-            None if !pending.is_empty() && !path_option(&pending) => {}
-            None if !pending.is_empty() => {
+            Resolved::Ambiguous(found) => return Err(ambiguous_refusal(value, &found)),
+            Resolved::None if !pending.is_empty() && !path_option(&pending) => {}
+            Resolved::None if !pending.is_empty() => {
                 return Err(format!("vault_approval_file_not_found:{value}: this connector names a file ({value}, after {pending}) that is not there, so nothing was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"));
             }
-            None if looks_like_path(value) => {
+            Resolved::None if looks_like_path(value) => {
                 return Err(format!("vault_approval_path_not_absolute:{value}: this connector runs a path relative to its own directory, which the digest cannot name, so nothing was launched and no value was read. Name its absolute path: /mcp <id> probe, then /mcp <id> on"));
             }
-            None => {
+            Resolved::None => {
                 return Err(format!("vault_approval_argument_unresolved:{value}: this connector's argument may name a file this digest cannot resolve from its own directory, so nothing was launched and no value was read. Give its absolute path: /mcp <id> probe, then /mcp <id> on"));
             }
         }
@@ -321,6 +406,9 @@ fn program_shape_problem(program: &str) -> Option<String> {
     }
     if !is_absolute_path(program) {
         return Some(format!("vault_approval_program_not_absolute:{program}: this connector's program is a bare name, which is resolved through PATH rather than named by the digest, so nothing was launched and no value was read. Name the absolute path of its interpreter or binary: /mcp <id> probe, then /mcp <id> on"));
+    }
+    if let Some(interpreter) = unfollowed_interpreter(name.trim_end_matches(".exe")) {
+        return Some(format!("vault_approval_interpreter_unfollowed:{program}: this connector's program is an interpreter ({interpreter}) whose modules and packages this digest cannot follow, so nothing was launched and no value was read. Run it under node or a POSIX shell, or name the connector's own program at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
     }
     None
 }
@@ -408,7 +496,7 @@ fn recheck_after_spawn(files: &VerifiedFiles) -> Option<String> {
     for (path, expected) in files.iter() {
         match crate::host::file_digest(path) {
             Ok(now) if now.eq_ignore_ascii_case(expected) => {}
-            _ => return Some(format!("vault_approval_changed_since_check:{path}: a file this connector runs changed between the check and the launch, so the operation was killed and no value was used. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on")),
+            _ => return Some(format!("vault_approval_changed_since_check:{path}: a file this connector runs changed between the check and the launch, so the operation was killed - the value had already been put in its environment at launch, so treat it as exposed and rotate it if this change was not yours. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on")),
         }
     }
     None
@@ -918,7 +1006,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     name
                 } else {
                     if name.contains('/') || name.contains('\\') {return Err("program_requires_native_absolute_path_or_path_name".into());}
-                    crate::host::executable_on_path(&name).ok_or("program_not_found_on_path")?
+                    crate::host::which_on_path(&name).ok_or("program_not_found_on_path")?
                 };
                 let argv=args["args"].as_array().ok_or("program_args_required")?.iter()
                     .map(|arg|arg.as_str().map(String::from).ok_or("program_args_must_be_strings"))
@@ -1695,6 +1783,116 @@ mod vault_approval_tests {
         assert!(approval_problem(&ok, &spec("/usr/bin/node", &option_value)).is_ok(),
             "{:?}", approval_problem(&ok, &spec("/usr/bin/node", &option_value)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- round 7: node's own order, the ambiguity, the interpreters the digest cannot follow ----
+
+    /// Finding 1: the implied extensions were .mjs, .js, .cjs, /index.* - neither node's order nor even the
+    /// extensions node implies. `node ./a` with only a.mjs beside it does not run (measured on node 26), so
+    /// the digest named a file nothing runs; with a.mjs AND a.js it runs a.js, which the digest had not
+    /// hashed. node's order is matched (exact, .js, .json, .node, then the directory), and a name more than
+    /// one file answers to is refused rather than resolved by node's priority.
+    #[test]
+    fn a_name_is_resolved_in_nodes_own_order_and_an_ambiguous_one_is_refused() {
+        let dir = std::env::temp_dir().join(format!("wa-vault-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let cwd = dir.to_string_lossy().to_string();
+        let server_js = dir.join("server.js");
+        std::fs::write(&server_js, "export const run = 1;
+").expect("server.js");
+        let word = vec!["server".to_string()];
+        // The one file that answers to the word is covered, and a launch naming it is accepted.
+        let named = approval("/usr/bin/node", &cwd, &[], &word, &[&server_js], &["TOKEN"]);
+        assert!(approval_problem(&named, &spec("/usr/bin/node", &word)).is_ok(),
+            "{:?}", approval_problem(&named, &spec("/usr/bin/node", &word)));
+        // A second file that answers to the SAME word makes it ambiguous: the launch is refused by name,
+        // and the refusal names both files, because neither of them is "the" file the operator approved.
+        let server_json = dir.join("server.json");
+        std::fs::write(&server_json, "{}").expect("server.json");
+        let refused = approval_problem(&named, &spec("/usr/bin/node", &word)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_argument_ambiguous:server:"), "{refused}");
+        assert!(refused.contains("server.js") && refused.contains("server.json"), "{refused}");
+        std::fs::remove_file(&server_json).expect("remove server.json");
+        // .mjs is NOT implied: with only alone.mjs there, node runs nothing, so the word resolves to
+        // nothing either - the round-6 answer named alone.mjs and handed it the value.
+        let alone = dir.join("alone");
+        std::fs::create_dir_all(&alone).expect("scratch dir");
+        std::fs::write(alone.join("alone.mjs"), "export const run = 3;
+").expect("alone.mjs");
+        let alone_cwd = alone.to_string_lossy().to_string();
+        let word_alone = vec!["alone".to_string()];
+        let unresolved = approval("/usr/bin/node", &alone_cwd, &[], &word_alone, &[], &["TOKEN"]);
+        let refused = approval_problem(&unresolved, &spec("/usr/bin/node", &word_alone)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_argument_unresolved:alone:"), "{refused}");
+        // A .mjs beside the .js is not an answer to the word: node runs server.js, which the digest names,
+        // so the approval still holds.
+        let server_mjs = dir.join("server.mjs");
+        std::fs::write(&server_mjs, "export const run = 2;
+").expect("server.mjs");
+        assert!(approval_problem(&named, &spec("/usr/bin/node", &word)).is_ok(),
+            "{:?}", approval_problem(&named, &spec("/usr/bin/node", &word)));
+        // A directory is resolved by its index file, which is hashed in turn.
+        let package_dir = dir.join("pkg");
+        std::fs::create_dir_all(&package_dir).expect("scratch dir");
+        let index = package_dir.join("index.js");
+        std::fs::write(&index, "export const run = 4;
+").expect("index.js");
+        let folder = vec!["pkg".to_string()];
+        let covered = approval("/usr/bin/node", &cwd, &[], &folder, &[&index], &["TOKEN"]);
+        assert!(approval_problem(&covered, &spec("/usr/bin/node", &folder)).is_ok(),
+            "{:?}", approval_problem(&covered, &spec("/usr/bin/node", &folder)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finding 2: the interpreter families covered only JavaScript and shell, so python3 -c, perl -e,
+    /// ruby -e and every interpreter's own module system passed - the program was the platform's and the
+    /// code was a string nothing hashed. A program that IS such an interpreter is refused by name, and a
+    /// code option given to a program the digest cannot classify is refused as inline code.
+    #[test]
+    fn an_interpreter_this_digest_cannot_follow_is_refused_by_name() {
+        for program in ["/usr/bin/python3", "/usr/bin/python3.11", "/usr/bin/perl", "/usr/bin/ruby3.2",
+                        "/usr/local/bin/deno", "/opt/bun", "/usr/bin/php8.2", "/usr/bin/lua5.4"] {
+            let refused = super::program_shape_problem(program).expect("an unfollowed interpreter");
+            assert!(refused.starts_with("vault_approval_interpreter_unfollowed:"), "{program}: {refused}");
+            assert!(refused.contains("/mcp <id> probe"), "the way to approve it again is in it: {refused}");
+        }
+        // The two families the digest DOES follow stay approvable as programs.
+        assert!(super::program_shape_problem("/usr/bin/node").is_none());
+        assert!(super::program_shape_problem("/bin/sh").is_none());
+        // A code option given to a program the digest cannot classify is code, not a value.
+        let runner = scratch("runner", "#!/bin/sh
+exit 0
+").to_string_lossy().to_string();
+        let inline = vec!["-c".to_string(), "print(1)".to_string()];
+        let coded = approval(&runner, "", &[], &inline, &[], &["TOKEN"]);
+        let refused = approval_problem(&coded, &spec(&runner, &inline)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_inline_code:-c:"), "{refused}");
+        // What node's own family names as a file stays a file (--require/-r), not inline code.
+        let loads = scratch("loads.mjs", "export const load = 1;
+");
+        let require = vec!["-r".to_string(), loads.to_string_lossy().to_string()];
+        let path_option = approval("/usr/bin/node", "", &[], &require, &[&loads], &["TOKEN"]);
+        assert!(approval_problem(&path_option, &spec("/usr/bin/node", &require)).is_ok(),
+            "{:?}", approval_problem(&path_option, &spec("/usr/bin/node", &require)));
+        let _ = std::fs::remove_file(&runner);
+    }
+
+    /// Finding 3: the refusal said "no value was used", and it was not true - the value was put in the
+    /// child's environment before the spawn, so a file rewritten between the check and the launch had
+    /// already received it. The sentence is the operator's and it is compared verbatim here, so a later
+    /// edit that softens it fails this test.
+    #[test]
+    fn a_change_after_the_check_names_the_value_as_exposed() {
+        let script = scratch("exposed.mjs", "export const ok = 1;
+");
+        let verified = vec![(super::real_path(&script.to_string_lossy()),
+            sha256_hex(&std::fs::read(&script).expect("the script")))];
+        std::fs::write(&script, "export const ok = 2;
+").expect("rewrite");
+        let refused = super::recheck_after_spawn(&verified).expect("a rewrite is a mismatch");
+        let expected = format!("vault_approval_changed_since_check:{}: a file this connector runs changed between the check and the launch, so the operation was killed - the value had already been put in its environment at launch, so treat it as exposed and rotate it if this change was not yours. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on", super::real_path(&script.to_string_lossy()));
+        assert_eq!(refused, expected);
+        let _ = std::fs::remove_file(&script);
     }
 
     /// Finding 4: the code files were hashed before the spawn and never again, so a rewrite that lands

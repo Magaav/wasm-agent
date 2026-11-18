@@ -98,6 +98,35 @@ pub extern "C-unwind" fn getenv(l: *mut LuaState) -> c_int {
     }
 }
 
+/// host.executable_on_path(name) -> absolute path, or nil.
+///
+/// The file the kernel will actually START for a bare program name (node), resolved against the PATH a
+/// spawned child inherits - never against the PATH host.getenv answers, which is the config's first. An
+/// approval has to name the interpreter the launch spawns, and a digest that named one node while the
+/// child ran another named no file at all (round 7). A name with a separator is not a name to resolve,
+/// and a name that is not there is nil rather than a guess.
+#[no_mangle]
+    /// host.executable_on_path(name) -> the file a bare name resolves to on the PATH a child inherits
+pub extern "C-unwind" fn executable_on_path(l: *mut LuaState) -> c_int {
+    let name = arg_string(l, 1).unwrap_or_default();
+    let name = if cfg!(windows) && !name.ends_with(".exe") { format!("{name}.exe") } else { name };
+    let resolved = if name.is_empty() || name.contains('/') || name.contains('\\') {
+        None
+    } else {
+        which_on_path(&name)
+    };
+    match resolved {
+        Some(path) => {
+            unsafe { lua_pushlstring(l, path.as_ptr() as *const c_char, path.len()) };
+            1
+        }
+        None => {
+            unsafe { wa_host_support::lua::lua_pushnil(l) };
+            1
+        }
+    }
+}
+
 /// host.paths() -> { home, config, data, cache, temp }
 ///
 /// Platform-neutral directories, so the Lua core never has to know about
@@ -138,16 +167,13 @@ pub extern "C-unwind" fn canonical_path(l: *mut LuaState) -> c_int {
     1
 }
 
-/// The shell `host.exec` runs commands with.
+/// A bare name resolved through the PROCESS environment's PATH - the one a spawned child inherits, and
+/// the one the kernel uses to start a program (operations.rs, the `program` branch of `start`).
 ///
-/// The model speaks POSIX: `ls`, `pwd`, `tail`, `grep`, single quotes, `$VAR`.
-/// pi resolves this by requiring bash on Windows - Git Bash, Cygwin, MSYS2, WSL -
-/// and refusing to start without it. We did the opposite, running `cmd /C`, so
-/// every one of those came back "is not recognized as an internal or external
-/// command" and the model, which cannot see the difference, tried variants of the
-/// same idea until its budget was gone. That was mistaken for the model being bad
-/// at tool calls; it was answering in the wrong language.
-pub(crate) fn executable_on_path(name: &str) -> Option<String> {
+/// host.executable_on_path below is the same answer from Lua, and it is not the same as
+/// host.getenv("PATH"): that reads the host's config overrides first (resolved_env), so a node whose
+/// config sets a PATH named one interpreter while the child ran another (round 7).
+pub(crate) fn which_on_path(name: &str) -> Option<String> {
     let path = std::env::var("PATH").ok()?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
@@ -158,6 +184,15 @@ pub(crate) fn executable_on_path(name: &str) -> Option<String> {
     None
 }
 
+/// The shell `host.exec` runs commands with.
+///
+/// The model speaks POSIX: `ls`, `pwd`, `tail`, `grep`, single quotes, `$VAR`.
+/// pi resolves this by requiring bash on Windows - Git Bash, Cygwin, MSYS2, WSL -
+/// and refusing to start without it. We did the opposite, running `cmd /C`, so
+/// every one of those came back "is not recognized as an internal or external
+/// command" and the model, which cannot see the difference, tried variants of the
+/// same idea until its budget was gone. That was mistaken for the model being bad
+/// at tool calls; it was answering in the wrong language.
 fn shell_config() -> &'static (String, String) {
     static SHELL: OnceLock<(String, String)> = OnceLock::new();
     SHELL.get_or_init(|| {
@@ -177,7 +212,7 @@ fn shell_config() -> &'static (String, String) {
                 r"C:\Program Files (x86)\Git\bin\bash.exe".to_string(),
             ];
             for name in ["bash.exe", "sh.exe"] {
-                if let Some(found) = executable_on_path(name) {
+                if let Some(found) = which_on_path(name) {
                     candidates.push(found);
                 }
             }
@@ -193,7 +228,7 @@ fn shell_config() -> &'static (String, String) {
                 return (name.to_string(), "-c".to_string());
             }
         }
-        if let Some(found) = executable_on_path("bash") {
+        if let Some(found) = which_on_path("bash") {
             return (found, "-c".to_string());
         }
         ("sh".to_string(), "-c".to_string())

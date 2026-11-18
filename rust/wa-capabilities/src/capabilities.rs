@@ -113,6 +113,9 @@ pub const REGISTRY: &[Capability] = &[
     plain!("mark_db_ready", WritesFiles, crate::host::mark_db_ready, "Record that the ledger schema migration has run"),
     // ---- paths, environment and the process --------------------------------------------------
     plain!("getenv", ReadOnly, crate::host::getenv, "Read one environment value as the host resolved it (config file first, then the process)"),
+    // The PATH a spawned child gets is the process's, not the config's: the approval has to name the
+    // interpreter the kernel actually starts (docs/VAULT.md, round 7).
+    plain!("executable_on_path", ReadOnly, crate::host::executable_on_path, "The file a bare program name resolves to on the PATH a spawned child inherits"),
     plain!("paths", ReadOnly, crate::host::paths, "The resolved home/config/data/cache/temp directories; never build a path by hand"),
     plain!("canonical_path", ReadOnly, crate::host::canonical_path, "Canonicalise a path without requiring it to exist"),
     plain!("platform", ReadOnly, crate::host::platform, "This node's platform, architecture and executable family"),

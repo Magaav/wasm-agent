@@ -96,7 +96,9 @@ M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-ses
 -- every argument resolved from the connector's own directory, and the scripts a wrapper RUNS - with inline
 -- code, computed execs, child_process and a computed Worker refused by name (M.vault_manifest below). A
 -- connector whose code cannot be closed this way is REFUSED rather than approved with a digest that only
--- looks complete.
+-- looks complete. Round 7 finishes that judgement: node's own resolution order for a name, with an
+-- ambiguous one refused rather than resolved; a program that IS an interpreter the digest cannot follow;
+-- vm next to eval; and the interpreter resolved with the PATH the child gets, not the Lua process's.
 M.APPROVAL_FORM='mcp-vault-approval/v3'
 -- Bounds: an approval is re-read before every call, and a connector that needs more than this is one
 -- whose coverage cannot be proven cheaply, so it is refused by name instead.
@@ -241,21 +243,60 @@ local function computed_import(kind,content)
  if content:find('require%s*%(%s*[^%s\'\"]') then return 'require' end
  return nil
 end
-local RESOLVE_EXT={'.mjs','.js','.cjs','/index.mjs','/index.js','/index.cjs'}
+-- What node itself considers for a name, in node's own order (lib/internal/modules/cjs/loader): the exact
+-- name, then .js, .json, .node, then the directory it may name - package.json's main, and its index files.
+-- .mjs and .cjs are NOT implied (measured on node 26: `node ./a` with only a.mjs beside it fails with
+-- "Cannot find module"), so the round-6 list (.mjs, .js, .cjs, /index.*) could name a file nothing runs -
+-- while `node ./a` with a.js beside it ran a file that list had not hashed (round 7).
+local NODE_FILE_EXT={'.js','.json','.node'}
+local NODE_INDEX_EXT={'/index.js','/index.json','/index.node'}
+local function push_candidate(found,path)
+ if host.path_kind(path)=='file' then found[#found+1]=path end
+end
+-- package.json's main, resolved the way the name that named the directory is resolved.
+local function package_main(dir,depth,found)
+ if depth>2 then return end
+ local raw=host.read_file(dir..'/package.json')
+ if type(raw)~='string' then return end
+ local ok,decoded=pcall(decode,raw)
+ local main=ok and type(decoded)=='table' and decoded.main
+ if type(main)~='string' or main=='' then return end
+ local target=absolute_path(main) and normalize(main) or normalize(dir..'/'..main)
+ push_candidate(found,target)
+ for _,ext in ipairs(NODE_FILE_EXT)do push_candidate(found,target..ext) end
+ if host.path_kind(target)=='dir' then
+  for _,ext in ipairs(NODE_INDEX_EXT)do push_candidate(found,target..ext) end
+  package_main(target,depth+1,found)
+ end
+end
+local function node_candidates(target)
+ local found={}
+ push_candidate(found,target)
+ if not target:match('%.%w+$') then
+  for _,ext in ipairs(NODE_FILE_EXT)do push_candidate(found,target..ext) end
+ end
+ if host.path_kind(target)=='dir' then
+  package_main(target,0,found)
+  for _,ext in ipairs(NODE_INDEX_EXT)do push_candidate(found,target..ext) end
+ end
+ return found
+end
+-- The one file node would run for this name - or nil and, when more than one file answers to it, those
+-- files. That second answer is the round-7 rule: approving `server` while only server.js is there and
+-- adding server.json afterwards is a REFUSAL, not a digest that names one file and a launch that runs the
+-- other one, chosen by node's priority rather than by the operator's approval.
 local function resolve_local(base,spec)
  if spec:sub(1,5)=='file:' then spec=spec:sub(6):gsub('^//','') end
  local candidate=absolute_path(spec) and normalize(spec) or normalize(base..'/'..spec)
- if host.path_kind(candidate)=='file' then return candidate end
- if not candidate:match('%.%w+$') then
-  for _,ext in ipairs(RESOLVE_EXT)do
-   if host.path_kind(candidate..ext)=='file' then return candidate..ext end
-  end
- end
+ local found=node_candidates(candidate)
+ if #found==1 then return found[1] end
+ if #found>1 then return nil,found end
  return nil
 end
--- ---- what a launch can RUN, decided by facts on disk rather than by a name (round 6) --------------
+-- ---- what a launch can RUN, decided by facts on disk rather than by a name (rounds 6-7) -----------
 --
--- Three holes are closed here, and each was a way to run bytes the digest never named:
+-- Three holes were closed here in round 6 and a fourth in round 7, and each was a way to run bytes the
+-- digest never named:
 --
 --   1. the INTERPRETER. node_program() answers WA_NODE, then the copy the installer provisions beside the
 --      node, then the bare name node. That process is the one the vault values are put in, and it was
@@ -272,6 +313,9 @@ end
 --      a command substitution, a computed exec, child_process and a computed Worker are REFUSED by name,
 --      because no digest of files can name a string that is evaluated.
 --
+--   4. (round 7) the INTERPRETER family itself: a program that is python3, perl, ruby, php, lua, deno,
+--      bun or any other name in UNFOLLOWED_INTERPRETERS loads modules this digest cannot name; a name
+--      more than one file answers to is refused; require('vm')/runInThisContext is eval's twin.
 -- The node's own MCP runtime is exempt from the child_process rule and from nothing else: it is the
 -- harness that spawns the connector, its bytes are in the digest, and the request seal in
 -- rust/wa-capabilities/src/operations.rs is what checks the program it spawns against the approval.
@@ -336,15 +380,19 @@ local function platform_owned(path)
 end
 -- The interpreter as a FILE: node_program() may answer a bare name (node), which the kernel resolves
 -- through PATH when it spawns; the digest has to resolve it the same way, or it names nothing at all.
+-- Round 7: "the same way" is host.executable_on_path - the PROCESS PATH a spawned child inherits, which is
+-- the PATH operations.rs resolves a bare program against when it starts one. host.getenv('PATH') answers
+-- the host's CONFIG first, so a node whose config set a PATH named one interpreter while the child ran
+-- another, and the approval then named a file no launch reads. A host that cannot answer gives nil, which
+-- refuses the approval instead of naming a guess.
 local function interpreter_path()
  local program=normalize(tostring(node_program() or ''))
  if program=='' then return nil end
  if program:find('/') then return program end
- for dir in tostring(host.getenv('PATH') or ''):gmatch('[^:;]+') do
-  local candidate=normalize(dir..'/'..program)
-  if host.path_kind(candidate)=='file' then return candidate end
- end
- return nil
+ if type(host.executable_on_path)~='function' then return nil end
+ local found=host.executable_on_path(program)
+ if type(found)~='string' or found=='' then return nil end
+ return normalize(found)
 end
 -- Exported for the tests that pin the ownership rule (scripts/test-mcp-vault-approval.lua).
 M.platform_owned=platform_owned
@@ -355,11 +403,44 @@ local function resolve_argument(cwd,value)
  if not absolute_path(value) and (type(cwd)~='string' or cwd=='') then return nil end
  return resolve_local(type(cwd)=='string' and cwd or '',value)
 end
+-- More than one file answers to a name: which one runs is node's own priority, not the operator's
+-- approval, so a connector that names such a word is refused rather than approved with one of them.
+local function ambiguous_argument(value,found)
+ return 'an argument names more than one file node could run ('..value..' -> '..table.concat(found,', ')
+  ..'), so the digest cannot say which one it covers'
+end
 -- The interpreter family, from the program's own name: the flags that mean "run this string" differ.
-local INTERPRETERS={node='js',nodejs='js',bun='js',deno='js',qjs='js',quickjs='js',
- sh='sh',bash='sh',dash='sh',zsh='sh',ksh='sh'}
+-- Two families are FOLLOWED, because what they load is files this digest can name: JavaScript (node,
+-- nodejs) through its imports, and POSIX shell (sh, bash, dash, zsh, ksh) through source, . and exec of a
+-- path. Round 7: bun, deno, qjs and quickjs were in the JavaScript family, so `bun -e` looked followed -
+-- their module systems are not the one this digest follows (a remote URL, a lockfile's tree, a compiled
+-- blob), and a python3, perl or ruby program was refused only by whatever script it happened to name.
+local INTERPRETERS={node='js',nodejs='js',sh='sh',bash='sh',dash='sh',zsh='sh',ksh='sh'}
+-- Interpreters whose module system this digest cannot follow: each loads a module or a package from a
+-- search path (a python package, a ruby gem, a perl module, a lua rock) that is not a file an approval
+-- names. The same list is in rust/wa-capabilities/src/operations.rs, and docs/VAULT.md names it.
+local UNFOLLOWED_INTERPRETERS={'python','python2','python3','pypy','pypy3','perl','ruby','php','lua',
+ 'luajit','tclsh','expect','deno','bun','qjs','quickjs','ts-node','tsx','java','jjs','pwsh','powershell',
+ 'julia','elixir','escript','erl','rscript','groovy','scala','kotlin','swift','dotnet','mono'}
+-- A versioned name is the same interpreter (python3.11, perl5.36, ruby3.2, php8.2).
+local function unfollowed_interpreter(program)
+ local name=basename(tostring(program or '')):lower():gsub('%.exe$','')
+ if INTERPRETERS[name] then return nil end
+ local stem=name:gsub('[%d%.]+$','')
+ for _,known in ipairs(UNFOLLOWED_INTERPRETERS)do
+  if known==stem or known==name then return known end
+ end
+ return nil
+end
 local INLINE_FLAGS={js={['-e']=true,['--eval']=true,['-p']=true,['--print']=true},
  sh={['-c']=true,['--command']=true}}
+-- Options that make an INTERPRETER run code this digest cannot name: a string it evaluates, or a module it
+-- loads from its own search path. For a program the digest follows, the family's own list decides (node -r
+-- is a file, below); for one it cannot classify, every one of these is code ("refuse unknown interpreters
+-- with code options", round 7).
+local CODE_FLAGS={['-c']=true,['-e']=true,['-E']=true,['-m']=true,['-p']=true,['-r']=true,
+ ['--eval']=true,['--print']=true,['--command']=true,['-command']=true,['-encodedcommand']=true,
+ ['--module']=true,['--require']=true}
 -- Options that name a FILE rather than a value: their argument is hashed, or refused.
 local PATH_OPTIONS={['--require']=true,['-r']=true,['--import']=true,['--loader']=true,
  ['--experimental-loader']=true,['--env-file']=true,['--config']=true}
@@ -367,12 +448,12 @@ local function interpreter_family(program)
  local name=basename(tostring(program or '')):lower():gsub('%.exe$','')
  if INTERPRETERS[name] then return INTERPRETERS[name] end
  if SCRIPT_EXT[(name:match('%.([%w]+)$') or ''):lower()] then return 'script' end
+ if unfollowed_interpreter(name) then return 'other' end
  return 'unknown'
 end
 local function inline_flag(program,value)
- local flags=INLINE_FLAGS[interpreter_family(program)]
- if flags and flags[value] then return true end
- return false
+ local flags=INLINE_FLAGS[interpreter_family(program)] or CODE_FLAGS
+ return flags[value]==true
 end
 -- What a digest of FILES cannot follow: a string it would evaluate, a process it would start, a module
 -- whose name is chosen while it runs. Refused by name, in the connector's own code.
@@ -388,6 +469,17 @@ local function refused_construct(kind,content,path)
   end
   if content:find('process%.dlopen') then return 'it loads a native addon by handle (process.dlopen)' end
   if content:find('%f[%w]eval%s*%(') then return 'it evaluates a string as code (eval)' end
+  -- Round 7: eval's twin. A compiled script is a string as much as eval's argument is, and the module is
+  -- node's own, so nothing else in this file refused it.
+  if content:find('require%s*%(%s*'..QUOTE_CLASS..'node:vm'..QUOTE_CLASS)
+   or content:find('require%s*%(%s*'..QUOTE_CLASS..'vm'..QUOTE_CLASS)
+   or content:find('from%s*'..QUOTE_CLASS..'node:vm'..QUOTE_CLASS)
+   or content:find('from%s*'..QUOTE_CLASS..'vm'..QUOTE_CLASS)
+   or content:find('%f[%w]runInThisContext%s*%(') or content:find('%f[%w]runInNewContext%s*%(')
+   or content:find('%f[%w]runInContext%s*%(') or content:find('vm%.Script%s*%(')
+   or content:find('vm%.compileFunction%s*%(') then
+   return 'it evaluates a string as code (vm: runInThisContext, vm.Script), whose source no digest of files names'
+  end
   if content:find('new%s+Function%s*%(') then return 'it builds a function from a string (new Function)' end
  elseif kind=='sh' then
   local value_after_exec='['..string.char(39)..string.char(34)..'%$]'
@@ -469,6 +561,11 @@ function M.vault_manifest(definition,directory)
   problems[#problems+1]='its program is a package runner ('..name..'), whose code comes from a cache or a registry rather than from files this approval can name'
  elseif not absolute_path(program) then
   problems[#problems+1]='its program is not an absolute path ('..program..'): a bare name is resolved through PATH, which this digest does not name'
+ elseif unfollowed_interpreter(program) then
+  -- Round 7: the program itself is an interpreter whose module system this digest cannot follow, so a
+  -- python3 connector was approved on whatever .py file it named - and `python3 -c` on nothing at all.
+  problems[#problems+1]='its program is an interpreter this digest cannot follow ('
+   ..unfollowed_interpreter(program)..'), whose modules and packages this approval cannot name'
  elseif not platform_owned(program) then
   add(program)
  end
@@ -502,13 +599,15 @@ function M.vault_manifest(definition,directory)
    local name,inline=value:match('^(%-%-[%w%-]+)=(.*)$')
    pending_option=name or value
    if name and PATH_OPTIONS[name] then
-    local target=resolve_argument(cwd_value,inline)
+    local target,ambiguous=resolve_argument(cwd_value,inline)
     if target then add(target)
+    elseif ambiguous then problems[#problems+1]=ambiguous_argument(inline,ambiguous)
     else problems[#problems+1]='an argument names a file that cannot be found ('..inline..' after '..name..')' end
    end
   else
-   local target=resolve_argument(cwd_value,value)
+   local target,ambiguous=resolve_argument(cwd_value,value)
    if target then add(target)
+   elseif ambiguous then problems[#problems+1]=ambiguous_argument(value,ambiguous)
    elseif pending_option~='' and not PATH_OPTIONS[pending_option] then
     -- The value of an option (--mode stdio): node reads it as a value, not as a file.
    elseif pending_option~='' then
@@ -536,8 +635,11 @@ function M.vault_manifest(definition,directory)
   for _,spec in ipairs(module_refs(entry.kind,entry.content))do
    if platform_module(spec) then
    elseif spec:sub(1,1)=='.' or spec:sub(1,1)=='/' or spec:sub(1,5)=='file:' then
-    local target=resolve_local(dirname(entry.path),spec)
-    if not target then
+    local target,ambiguous=resolve_local(dirname(entry.path),spec)
+    if ambiguous then
+     problems[#problems+1]='a script loads a name more than one file answers to ('
+      ..spec..' in '..entry.path..' -> '..table.concat(ambiguous,', ')..')'
+    elseif not target then
      problems[#problems+1]='a script loads a file that cannot be found ('..spec..' in '..entry.path..')'
     else add(target) end
    else

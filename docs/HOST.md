@@ -757,6 +757,7 @@ editor_notice        device
 enqueue_completion   writes files
 exec                 runs a process
 exec_timeout         read-only
+executable_on_path   read-only
 fabric_admin         writes files
 fabric_call          writes files
 fabric_deliver       read-only

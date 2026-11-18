@@ -489,18 +489,27 @@ relative `conn.mjs`, an extensionless program and every imported module were nev
   not the platform's and is hashed. A program anywhere else - `~/bin/conn`, `<install>/bin/mail-mcp`,
   with an extension or without, a script or a compiled binary - is the connector's own code;
 * **the interpreter the launch actually spawns** (`M.node_program()`: `WA_NODE`, then the copy the
-  installer provisions, then `node` on `PATH`), resolved through `PATH` and through its realpath. That
+  installer provisions, then `node` on `PATH`), resolved through the PROCESS `PATH` - the one a spawned child
+  inherits, `host.executable_on_path`, which is the same function the kernel resolves a bare program name
+  with - and through its realpath. Not `host.getenv("PATH")`, which answers the host's config first and named
+  one node while the child ran another. That
   process is the one the vault values are put in, and v2 covered the DEFINITION's program instead, so
   `WA_NODE=/tmp/x` or a rewritten `<data>/node/bin/node` was code no approval named. It is hashed unless it
   is the platform's own, and its bytes are hashed in chunks (`host.file_sha256`): a node binary is a
   hundred megabytes and never passes through Lua. `<data>/node` is a `secret_guard` root as well, so an
   agent tool can neither read it nor replace it;
 * every ARGUMENT, resolved the way node resolves it - from the connector's own directory when the
-  definition names one, with the extensions node implies (`.mjs`, `.js`, `.cjs`, `/index.*`) - and
-  each file that exists is hashed. `program /usr/bin/node, args ["server"], cwd /home/u/conn` runs
-  `/home/u/conn/server.js`, which v2 never saw because `server` has no slash and no extension. The value
-  of an option (`--mode stdio`) is a value, not a file; an option that names a file (`--require`, `-r`,
-  `--import`, `--loader`, `--env-file`, `--config`) has its value resolved and hashed;
+  definition names one, and in node's own order: the exact name, then `.js`, `.json`, `.node`, then the
+  directory it may name (`package.json`'s `main`, then `index.js`/`index.json`/`index.node`) - and every
+  file that exists is hashed. `.mjs` and `.cjs` are NOT implied (measured on node 26: `node ./a` with
+  only `a.mjs` beside it fails with "Cannot find module"), so a digest that named `a.mjs` for the word
+  `a` named a file nothing runs - while `node ./a` with `a.js` beside it ran a file that list had not
+  hashed. `program /usr/bin/node, args ["server"], cwd /home/u/conn` runs `/home/u/conn/server.js`, which
+  v2 never saw because `server` has no slash and no extension - and when MORE than one file answers to
+  that word, the connector is REFUSED (`vault_approval_argument_ambiguous:<value>`), because which one
+  runs would be node's priority rather than the operator's approval. The value of an option
+  (`--mode stdio`) is a value, not a file; an option that names a file (`--require`, `-r`, `--import`,
+  `--loader`, `--env-file`, `--config`) has its value resolved and hashed;
 * what those files run in turn: an `import`/`require` of a local path, a `new Worker('literal')`, a
   shell `source`/`.` of a path, and a wrapper that RUNS another script (`exec ./inner.sh`,
   `bash ./inner.sh`);
@@ -513,8 +522,9 @@ complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason)
 * an argument that may name a file and cannot be resolved (`server` with no cwd to resolve it from, or a
   name that is not there): a file that does not exist when the operator approves can exist when the
   connector launches;
-* inline code (`node -e`, `sh -c`, `eval`, `new Function`), a shell command substitution, and an
-  `exec` of a value: no digest of files can name a string that is evaluated;
+* inline code (`node -e`, `sh -c`, `eval`, `new Function`, `require('vm')` and `runInThisContext`), a
+  shell command substitution, and an `exec` of a value: no digest of files can name a string that is
+  evaluated;
 * a script that starts a process itself (`child_process`) or loads an addon by handle
   (`process.dlopen`). The node's OWN MCP runtime is exempt from this one rule and from no other: it is the
   harness that spawns the connector, its bytes are in the digest, and the request seal below is what checks
@@ -526,15 +536,29 @@ complete (`mcp_vault_code_not_covered`, whose `problems` list names each reason)
   cache or a registry;
 * an import of a bare package (`import x from 'left-pad'`, i.e. `node_modules`) or an import whose name is
   computed (`import(name)`): the digest can name neither;
-* a Python, Ruby, Perl, PowerShell or Lua script as the connector's own program or as an argument: those
-  module systems load files this digest cannot follow. JavaScript (followed through its imports) and shell
-  (followed through `source`/`.`/`exec` of paths) are the two it can follow.
+* a PROGRAM that IS an interpreter this digest cannot follow: `python`, `python2`, `python3`, `pypy`,
+  `pypy3`, `perl`, `ruby`, `php`, `lua`, `luajit`, `tclsh`, `expect`, `deno`, `bun`, `qjs`,
+  `quickjs`, `ts-node`, `tsx`, `java`, `jjs`, `pwsh`, `powershell`, `julia`, `elixir`,
+  `escript`, `erl`, `rscript`, `groovy`, `scala`, `kotlin`, `swift`, `dotnet`, `mono` - the same list
+  as `UNFOLLOWED_INTERPRETERS` in `lua/core/mcp.lua` and `rust/wa-capabilities/src/operations.rs`, matched
+  with or without a version (`python3.11`, `perl5.36`, `ruby3.2`, `php8.2`). Each of them loads a
+  module or a package from a search path - a python package, a ruby gem, a perl module, a lua rock - that
+  is not a file this approval can name, so the program itself is refused
+  (`vault_approval_interpreter_unfollowed:<program>`) rather than approved on whatever script it names.
+  JavaScript (`node`, `nodejs` - followed through its imports) and POSIX shell (`sh`, `bash`, `dash`,
+  `zsh`, `ksh` - followed through `source`/`.`/`exec` of paths) are the two it can follow. `bun` and
+  `deno` are not among them: a remote URL or a lockfile's tree is not a file the digest names;
+* an option that makes an interpreter run code this digest cannot name - `-c`, `-e`, `-E`, `-m`, `-p`,
+  `-r`, `--eval`, `--print`, `--command`, `-command`, `-encodedcommand`, `--module`, `--require` - when the
+  program is one this digest cannot classify (`vault_approval_inline_code:<flag>`). For the two families it
+  does follow its own list decides: `node -r file` names a FILE and is hashed, `sh -c` is inline code;
 
 So a connector that names a vault entry names an ABSOLUTE program, absolute paths, or paths its own named
 cwd resolves - and the interpreter the node spawns is either the platform's own or a file this digest
-names. On a node whose `node` is only on `PATH`, the interpreter is resolved through `PATH` once, at
-approval time: a `PATH` that changes afterwards makes the approval stale rather than silently selecting a
-different interpreter.
+names. On a node whose `node` is only on `PATH`, the interpreter is resolved ONCE, at approval time,
+through the PROCESS `PATH` a spawned child inherits (`host.executable_on_path`, the function the kernel
+resolves a bare program name with) - and a host that cannot answer that question refuses the approval
+rather than naming a guess. The `host.getenv("PATH")` form is not used: it answers the config first.
 
 Three places check it, and any one of them refuses:
 
@@ -549,10 +573,12 @@ Three places check it, and any one of them refuses:
   `vault_approval_program_not_covered:<path>`, `vault_approval_program_not_absolute:<path>`,
   `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>`,
   `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
-  `vault_approval_file_not_found:<value>`, `vault_approval_inline_code:<flag>`,
+  `vault_approval_argument_ambiguous:<value>`, `vault_approval_file_not_found:<value>`,
+  `vault_approval_inline_code:<flag>`, `vault_approval_interpreter_unfollowed:<program>`,
   `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`, and after the spawn it
-  hashes those same files again (`vault_approval_changed_since_check:<path>`, which kills the operation and
-  returns no result);
+  hashes those same files again (`vault_approval_changed_since_check:<path>`, which kills the operation - the
+  value had already been put in the child's environment at launch, so the refusal says to treat it as
+  exposed and to rotate it);
 * the request file the child is about to read is checked against the same approval and sealed -
   `vault_request_program_mismatch`, `vault_request_arguments_mismatch`,
   `vault_request_cwd_mismatch`, `vault_request_environment_mismatch`,

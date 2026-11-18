@@ -136,23 +136,27 @@ file the launch can run or load**, and the vault environment names it asks for (
   rule. `/usr/local/bin` and `/opt/homebrew` belong to the USER on macOS, so a homebrew interpreter is a
   file this digest hashes;
 * **the interpreter the launch actually spawns** - `WA_NODE`, then the copy the installer provisions, then
-  `node` on `PATH`, resolved through `PATH` and through its realpath - unless that file is the
-  platform's own. That process is the one the vault values are put in, so it is a file the digest names or
+  `node` on `PATH`, resolved through the PROCESS `PATH` a spawned child inherits
+  (`host.executable_on_path`, the function the kernel starts a bare program name with) and through its
+  realpath - unless that file is the platform's own. That process is the one the vault values are put in, so it is a file the digest names or
   there is no approval. `<data>/node` is also a `secret_guard` root, so an agent tool cannot replace it;
 * every argument, resolved the way node resolves it: from the connector's own directory when the definition
-  names one, with the extensions node implies (`.mjs`, `.js`, `.cjs`, `/index.*`). So
-  `program /usr/bin/node, args ["server"], cwd /home/u/conn` covers `/home/u/conn/server.js`. The value
-  of an option (`--mode stdio`) is a value, not a file;
+  names one, and in node's own order - the exact name, `.js`, `.json`, `.node`, then the directory
+  (`package.json`'s `main`, then the index files). So `program /usr/bin/node, args ["server"], cwd
+  /home/u/conn` covers `/home/u/conn/server.js`, and `.mjs`/`.cjs` are not implied. The value of an
+  option (`--mode stdio`) is a value, not a file;
 * what those files run in turn: a JS `import` / `require` / `new Worker('literal')` of a local path, a
   shell `source` / `. ` of a path, and a wrapper that RUNS another script (`exec ./inner.sh`,
   `bash ./inner.sh`).
 
 What cannot be covered is REFUSED by name (`mcp_vault_code_not_covered`, whose `problems` list says why),
 never hashed and left open: an argument that may name a file and cannot be resolved (a file that is not
-there at approval time can be there at launch), inline code (`node -e`, `sh -c`, `eval`), a shell
-command substitution, an `exec` of a value, a connector's own `child_process` / `Worker` /
-`process.dlopen` / `new Function`, a package runner (`npx`, `uvx`...), an import of a bare package or
-by a computed name, and a Python, Ruby, Perl, PowerShell or Lua script. The node's own MCP runtime is
+there at approval time can be there at launch), a name MORE than one file answers to (which one runs would
+be node's priority, not the approval's), inline code (`node -e`, `sh -c`, `eval`, `new Function`,
+`require('vm')`/`runInThisContext`), a shell command substitution, an `exec` of a value, a connector's own
+`child_process` / `Worker` / `process.dlopen`, a package runner (`npx`, `uvx`...), an import of a
+bare package or by a computed name, and a PROGRAM that is an interpreter this digest cannot follow
+(`python*`, `perl`, `ruby`, `php`, `lua`, `deno`, `bun`, `java`...; `docs/VAULT.md` has the list). The node's own MCP runtime is
 exempt from the `child_process` rule and from nothing else: it IS the harness that spawns the connector,
 its bytes are in the digest, and the request seal below is what checks the program it spawns.
 `docs/VAULT.md` has the full list.
@@ -169,11 +173,13 @@ Three checks use the digest, and either of the first two refuses:
   `vault_approval_program_not_covered:<path>`, `vault_approval_program_not_absolute:<path>`,
   `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>`,
   `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
-  `vault_approval_file_not_found:<value>`, `vault_approval_inline_code:<flag>`,
+  `vault_approval_argument_ambiguous:<value>`, `vault_approval_file_not_found:<value>`,
+  `vault_approval_inline_code:<flag>`, `vault_approval_interpreter_unfollowed:<program>`,
   `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`. Nothing is
   launched and no value is read. The same files are hashed AGAIN once the launch has started
-  (`vault_approval_changed_since_check:<path>`): an operation whose bytes changed in between is
-  killed and its result is never returned;
+  (`vault_approval_changed_since_check:<path>`): an operation whose bytes changed in between is killed
+  and its result is never returned - and the refusal says the value had already been put in the child's
+  environment at launch, so it is to be treated as exposed and rotated;
 * the request file the child reads is checked against the same approval and sealed (next section).
 
 Editing a connector's script, an argument, its cwd, the environment it asks for or the interpreter the
