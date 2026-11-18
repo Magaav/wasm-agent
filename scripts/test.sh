@@ -484,6 +484,10 @@ gate_run bash scripts/test-deploy-components-shipped.sh
 # scripts/deploy.sh) and the publish side (--check, --from, every way a manifest can be wrong).
 gate_run bash scripts/test-deploy-node-binaries.sh
 gate_run bash scripts/test-node-binaries.sh
+# The glibc floor at both ends: the bytes an artifact needs against the libc the installing host has
+# (18/11, mail: a published binary needed GLIBC_2.39 on a glibc 2.35 node and was down two days). Hermetic -
+# fixture ELFs, a stand-in host version, and the three installers' own refusals.
+gate_run bash scripts/test-glibc-floor.sh
 # Ring 1 of docs/TORUS.md: the binary decision (content-addressed first), the phases a deploy record
 # carries, and the structure that keeps the reuse path free of a download. Shell, so it runs here and
 # not in the fast path's Lua rows; it is hermetic and takes about 2 seconds.

@@ -70,7 +70,7 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
-for wa_lib_part in build-status build-requirements deploy-components node-binaries retire-unshipped; do
+for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
 command -v wa_status >/dev/null 2>&1 || { wa_status() { :; }; wa_status_follow() { :; }; wa_status_unfollow() { :; }; wa_status_compiled() { :; }; wa_phase() { :; }; }
@@ -1134,6 +1134,25 @@ rm -rf "$COMPONENT_PROOF_HOME"
 [ "$COMPONENT_PROOF" = "1" ] || fail "refused(component_proof_failed): the graph proof did not print its verdict; nothing installed"
 echo "deploy: the candidate binary answers graph calls through the staged component"
 
+# THE BYTES AGAINST THIS HOST'S LIBC, before they are proved, swapped or recorded. A binary whose symbol
+# versions name a newer glibc than this host runs cannot start here at all: 18/11, mail (glibc 2.35) ran a
+# published binary built against 2.39, the sentinel retried 424 times on "GLIBC_2.39 not found", and the node
+# was down for two days with no channel left to fix it. This deploy can be the one that INSTALLS such a
+# binary - from a release another machine published - so it asks the question the release's manifest promises
+# (`glibc_floor=`) but cannot prove for THIS host, in the bytes, before anything is replaced. The supervisor
+# is checked too: a node whose sentinel cannot start cannot be rolled back either.
+if command -v wa_glibc_guard >/dev/null 2>&1; then
+  for glibc_candidate in "$NEW" "${NEW_SENTINEL:-}"; do
+    [ -n "$glibc_candidate" ] || continue
+    [ -f "$glibc_candidate" ] || continue
+    if ! glibc_refusal="$(wa_glibc_guard "$glibc_candidate" "$(basename "$glibc_candidate")")"; then
+      fail "refused(glibc_floor_exceeded): $glibc_refusal"
+    fi
+  done
+else
+  note "scripts/lib/glibc-floor.sh is not beside this deploy, so the artifact's glibc floor was not measured against this host; the scratch proof below still refuses a binary this host cannot run"
+fi
+
 wa_phase proving
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
@@ -1733,6 +1752,10 @@ ship_file "$ROOT/scripts/lib/deploy-components.sh" "$INSTALL_DIR/scripts/lib/dep
 # node-binaries helper" and builds the tree, which is the one thing a node without a toolchain (openclaw, 2
 # cores, no disk for ~600 crates) cannot do. Measured 06/11: the prebuilt path was reached only from the tree.
 ship_file "$ROOT/scripts/lib/node-binaries.sh" "$INSTALL_DIR/scripts/lib/node-binaries.sh" "scripts/lib/node-binaries.sh beside deploy.sh"
+# ...and the glibc floor, which both deploy.sh and upgrade.sh source (scripts/lib/glibc-floor.sh): an
+# installed copy that cannot measure the artifact's floor against this host's libc is the copy that would
+# install a binary the node cannot start.
+ship_file "$ROOT/scripts/lib/glibc-floor.sh" "$INSTALL_DIR/scripts/lib/glibc-floor.sh" "scripts/lib/glibc-floor.sh beside deploy.sh (the artifact's glibc floor against this host's)"
 # ...and the shipped-Lua-tree definition, which the staging above uses: an installed deploy without it would
 # stage no tree at all (lua-tree.sh is where "which files" lives now).
 ship_file "$ROOT/scripts/lib/lua-tree.sh" "$INSTALL_DIR/scripts/lib/lua-tree.sh" "scripts/lib/lua-tree.sh beside deploy.sh (which files the Lua tree is)"

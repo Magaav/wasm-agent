@@ -115,6 +115,73 @@ The refusal is a feature: the failure mode it replaces is a download that 404s h
 installer that download an asset for the wrong libc. The front door asks the channel question before any
 download, and answers it in the operator's words.
 
+## The glibc floor: what a release binary may need, and what a host must have
+
+A glibc-linked `wa` needs the symbol versions it was linked against, and a host whose glibc is older
+refuses it at exec time in one line - `GLIBC_2.39 not found`. That is a node that cannot start, and because
+the node *is* the channel you would fix it through, there is no way back in.
+
+**Measured 18/11**: mail (Ubuntu aarch64, glibc **2.35**) was down for two days. The binary installed the
+day before needed **GLIBC_2.39** - it had been built on a host whose glibc is 2.39 and linked against it -
+and the sentinel retried `GLIBC_2.39 not found` 424 times. The binary it replaced needed GLIBC_2.30.
+
+**The floor is 2.31**, and it is a property of the build, not a hope. `scripts/publish-node-binaries.sh`
+builds both Linux targets with `cargo zigbuild --target <triple>.2.31` (zig links against no symbol newer
+than glibc 2.31), and then **reads the floor back out of each artifact's own bytes**: the newest
+`GLIBC_2.x` symbol in a payload must not be above the floor its manifest claims, or the release is refused
+before anything is printed for upload (`glibc_floor_exceeded`). `--glibc <major>.<minor>` moves the floor;
+the read-back is what keeps the pin honest. docs/COMPONENTS.md has the build numbers.
+
+**The measured fleet** - `ldd --version` on each host, and the newest `GLIBC_` symbol in the `wa` that host
+actually runs (read 19/11, one command each, no build):
+
+| host | arch / OS | glibc (`ldd --version`) | installed `wa` needs | runs a 2.31-floor binary |
+| --- | --- | --- | --- | --- |
+| avell (this node) | x86_64, Arch | 2.44 | GLIBC_2.30 | yes |
+| openclaw | aarch64, Ubuntu 24.04 | 2.39 | GLIBC_2.30 | yes |
+| mail | aarch64, Ubuntu 22.04 | 2.35 | GLIBC_2.30 | yes |
+| nextcloud | - | not measured (node offline 19/11) | - | unknown; its git is of the 2.25 era, i.e. **below the floor** |
+
+So the floor covers every host that could be measured, with margin, and 2.30 is what the fleet is actually
+running today. A host older than 2.31 - the nextcloud box, on the one reading available for it - cannot run
+a 2.31-floor binary, and the point of the two checks below is that it is **told so in a sentence** and keeps
+the binary it has, instead of dying on a restart for a reason nobody can read.
+
+### Both ends refuse, by name, before anything is replaced
+
+The install side asks the question of the bytes in front of it and of the host it is on
+(`scripts/lib/glibc-floor.sh`, one measurement shared with the publisher):
+
+| step | when it refuses | what is left behind |
+| --- | --- | --- |
+| `scripts/fleet-install.sh` | after the download and its sha/signature, **before** the exec test, the backup and the swap | the installed binary, byte for byte, and no `.prev` |
+| `scripts/upgrade.sh` | after the signature gate, **before** the scratch proof, the `.pre-upgrade` backup and the swap | the running node and its binary |
+| `scripts/deploy.sh` | **before** the prove phase, for the node *and* its supervisor (a sentinel that cannot start cannot roll a node back either) | the running node, its binary and its record |
+
+The sentence names both versions and where the host's came from:
+
+```
+glibc_floor_exceeded: wa needs GLIBC_2.39 and this host has glibc 2.35 (ldd --version), so it was refused
+before anything was replaced and the installed binary was left alone. The artifact was linked against a
+newer libc than this node runs: publish it with a floor this fleet can run (cargo zigbuild --target
+<triple>.<floor>), or install a static musl build
+```
+
+A host whose libc is **not glibc** (musl, and every non-Linux host a deploy runs on) has no version to
+compare with, so the check stands aside rather than guessing - `ldd --version` answering "musl libc" is
+"unknown", not "satisfied" - and the exec/health proof downstream is what answers there.
+
+A host below the floor is not left without options: publish the same commit with a lower floor
+(`--glibc 2.27`), or install the static musl bundle from `releases/index-linux.json` (the `-musl` rows),
+which needs no glibc at all.
+
+`bash scripts/test-glibc-floor.sh` pins all of it (52 checks, no network, no node, no cargo): the
+measurement reads `GLIBC_2.2.5` as *older* than `GLIBC_2.31`; a fixture artifact that needs 2.39 is refused
+by all three installers with both versions in the output and the installed binary unchanged; the same
+artifact at 2.31 gets *past* that step (so the guard is not a blanket refusal); a script copy without its lib
+refuses instead of installing blind; and the guard's line in `deploy.sh`/`upgrade.sh` is checked to be
+before the proof, the backup and the swap.
+
 ## What this replaced, and what went away with it
 
 Before 12/11 `scripts/install.sh` installed a **client**: an `ssh -t <host> wasm-agent "$@"` wrapper named

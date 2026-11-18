@@ -28,6 +28,14 @@ say() { printf '  %s\n' "$*"; }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # A node cannot replace itself; a CLI turn may, through the sentinel (scripts/lib/turn-guard.sh).
 . "$ROOT/scripts/lib/turn-guard.sh" 2>/dev/null || . "$(dirname "$0")/lib/turn-guard.sh"
+# The glibc floor this candidate was built for, against the libc this host runs. Sourced from beside this
+# script the same way turn-guard.sh is (an installed copy has its libs shipped beside it), and used below
+# before anything is staged or proved.
+if [ -f "$ROOT/scripts/lib/glibc-floor.sh" ]; then
+  . "$ROOT/scripts/lib/glibc-floor.sh"
+elif [ -f "$(dirname "$0")/lib/glibc-floor.sh" ]; then
+  . "$(dirname "$0")/lib/glibc-floor.sh"
+fi
 TURN_OWNER="$(turn_owner)"
 case "$TURN_OWNER" in
   node|unknown)
@@ -110,6 +118,21 @@ if [ -n "$RELEASE_DIR" ]; then
 elif [ -n "${WA_UPGRADE_RELEASE_TAG:-}" ]; then
   say "refused: WA_UPGRADE_RELEASE_TAG=$WA_UPGRADE_RELEASE_TAG says these bytes came from release $WA_UPGRADE_RELEASE_TAG, and no signed sums were given (--release DIR, or WA_UPGRADE_RELEASE=DIR); nothing was staged"
   exit 3
+fi
+
+# THE CANDIDATE AGAINST THIS HOST'S LIBC, before the prove gate and long before the swap. A binary that
+# needs a newer glibc than this host has cannot start here at all - 18/11, mail: commit 14963b6f needed
+# GLIBC_2.39 on a glibc 2.35 node, the sentinel retried 424 times, and the node was down for two days. The
+# scratch proof below would refuse those bytes too, as "did not answer /health on a scratch port", which
+# reads like a slow machine; this says which version the artifact needs and which the host has, and it runs
+# before the backup and the swap so the running node is untouched.
+if command -v wa_glibc_guard >/dev/null 2>&1; then
+  if ! glibc_refusal="$(wa_glibc_guard "$NEW" "$(basename "$NEW")")"; then
+    say "refused: $glibc_refusal"
+    exit 3
+  fi
+else
+  say "warning: scripts/lib/glibc-floor.sh is missing beside this upgrade, so the candidate's glibc floor was not measured; the scratch proof below still refuses a binary this host cannot run"
 fi
 
 # The sentinel runs the copy beside the installed binary, so ROOT is the install

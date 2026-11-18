@@ -173,8 +173,11 @@ create` line, paths relative to that commit's root), pushes it, and reads the re
 The build is `cargo zigbuild --release --offline --locked -p wa-host --target
 <triple>.2.31` (and the same for `wa-sentinel`). `.2.31` is zig's glibc floor: it links against no
 symbol newer than glibc 2.31, so the binary runs on Ubuntu 20.04 and everything newer - and the script
-reads the floor back out of the bytes (`GLIBC_2.x` symbol versions) and refuses a binary that needs
-more than the manifest claims. Every member is verified before anything is printed for upload: sha256,
+reads the floor back out of the bytes (`GLIBC_2.x` symbol versions, `wa_glibc_max_symbol` in
+`scripts/lib/glibc-floor.sh`) and refuses a binary that needs more than the manifest claims. The same
+function, in the same lib, is what `scripts/fleet-install.sh`, `scripts/upgrade.sh` and `scripts/deploy.sh`
+refuse a binary with against the host's own `ldd --version` (docs/INSTALL.md, "The glibc floor"). Every
+member is verified before anything is printed for upload: sha256,
 size, ELF machine (`b7` aarch64, `3e` x86_64). The candidate is executed when the host can run it
 (natively, or through `--runner 'wsl -d Ubuntu --'`); when it cannot, the line says `run: SKIPPED`, and
 the deploy proves the binary on the node before installing it.

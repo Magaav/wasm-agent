@@ -94,6 +94,19 @@ while [ "$#" -gt 0 ]; do
     *) fail "unknown_option: $1" ;;
   esac
 done
+# The floor is a version, and it is spelled into a cargo-zigbuild target (`<triple>.$GLIBC_FLOOR`) and read
+# back out of the artifact below: a typo would build for a target name zig does not know, or claim a pin the
+# read-back refuses. Both are refusals, but this one names the typo.
+glibc_floor_ok=0
+case "$GLIBC_FLOOR" in
+  # digits, exactly one dot, digits on both sides - and nothing else ("2.3l" and "2.3.1" both look like a
+  # version to a loose glob, and both are wrong in different ways). Two patterns, because one glob cannot
+  # say "one dot and no other character" without also accepting "2.3.4".
+  *[!0-9.]*|*.*.*|.*|*.) glibc_floor_ok=0 ;;
+  *.*) glibc_floor_ok=1 ;;
+esac
+[ "$glibc_floor_ok" = 1 ] \
+  || fail "glibc_floor_malformed: --glibc '$GLIBC_FLOOR' is not <major>.<minor> (the build and the read-back both use it as a version)"
 # `--repo` is how the tests point this at a fixture tree; the real tree is the default.
 # `git rev-parse`, not `[ -d .git ]`: in a linked worktree (this project's topology,
 # skills/git-orchestrator) `.git` is a FILE holding `gitdir: ...`, so a directory test refuses every lane
@@ -101,6 +114,11 @@ done
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail "not_a_checkout: $ROOT"
 . "$ROOT/scripts/lib/node-binaries.sh"
 . "$ROOT/scripts/lib/build-requirements.sh"
+# The glibc floor measurement, shared with the three installers (scripts/lib/glibc-floor.sh): the number this
+# script refuses to publish above and the number an installer refuses to run are the same measurement of the
+# same bytes, or the pin is a promise nobody checks.
+[ -f "$ROOT/scripts/lib/glibc-floor.sh" ] || fail "glibc_floor_lib_missing: $ROOT/scripts/lib/glibc-floor.sh (the floor a manifest claims is read back out of the artifact with it)"
+. "$ROOT/scripts/lib/glibc-floor.sh"
 
 # ---- the toolchain this script owns, not the caller's shell --------------------------------------
 #
@@ -500,9 +518,12 @@ for triple in $MANIFEST_TRIPLES; do
     [ -z "$want_machine" ] || [ "$shape" = "elf:$want_machine" ] \
       || fail "machine_mismatch: $name is $shape, $triple needs elf:$want_machine" 5
     # The floor the manifest claims, read back from the symbol versions the linker actually left: a
-    # binary that needs a newer glibc than the pin says installs on a node that cannot run it.
-    newest="$(grep -a -o 'GLIBC_2\.[0-9]\+' "$file" 2>/dev/null | sed 's/^GLIBC_//' | sort -uV | tail -1)"
-    if [ -n "$newest" ] && [ "$newest" != "$GLIBC_FLOOR" ] && [ "$(printf '%s\n%s\n' "$GLIBC_FLOOR" "$newest" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
+    # binary that needs a newer glibc than the pin says installs on a node that cannot run it (18/11: a
+    # published binary needed GLIBC_2.39, was installed on a 2.35 node, and the node was down for two days).
+    # The measurement is `wa_glibc_max_symbol` and not a second copy of it, so the publisher and the
+    # installers cannot disagree about the same bytes.
+    newest="$(wa_glibc_max_symbol "$file")"
+    if [ -n "$newest" ] && ! wa_glibc_covers "$GLIBC_FLOOR" "$newest"; then
       fail "glibc_floor_exceeded: $name needs GLIBC_$newest, the pin says $GLIBC_FLOOR" 5
     fi
     say "verified $name: $actual ($bytes bytes, $shape${newest:+, glibc <= $newest})"

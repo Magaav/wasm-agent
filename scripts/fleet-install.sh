@@ -8,7 +8,11 @@
 # 1. **sha256** — the bytes are the ones that were published, not whatever a proxy served.
 # 2. **the signature (optional)** — a manifest signed by the operator's `fleet-release` key, verified
 #    offline with the node's own ed25519 (`wa` + `host.verify`), the same pattern the roster uses.
-# 3. **it runs here, before anything is replaced** — `--version` on the downloaded file. On 17/11 a
+# 3. **the glibc floor, named** — the newest `GLIBC_<version>` symbol in the artifact against this host's
+#    `ldd --version` (`scripts/lib/glibc-floor.sh`). The exec test below catches this class too, but it
+#    catches it as "the artifact does not run here: GLIBC_2.39 not found", one line of a failure that took
+#    two days to read on mail (18/11). This step names both versions before anything is executed.
+# 3b. **it runs here, before anything is replaced** — `--version` on the downloaded file. On 17/11 a
 #    native build (glibc 2.39) was installed on two hosts whose glibc is 2.31 and 2.35; both nodes died
 #    on restart and could not be reached at all, because the node *is* the channel you would fix it
 #    through. A three-second exec test turns that into a refusal with the old binary still in place.
@@ -39,6 +43,18 @@ HEALTH=${HEALTH:-http://127.0.0.1:8799/health}
 UNIT=${UNIT:-}
 say() { printf 'fleet-install: %s\n' "$*"; }
 die() { printf 'fleet-install: %s\n' "$*" >&2; exit 1; }
+
+# The glibc floor measurement is shared with the publisher and the other two installers
+# (scripts/lib/glibc-floor.sh), and a copy of this script without it cannot make the check - which is a
+# refusal here, not a note: a fleet install that skips the floor is exactly the install that killed mail.
+glibc_floor_lib="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/glibc-floor.sh"
+if [ -f "$glibc_floor_lib" ]; then
+  . "$glibc_floor_lib"
+else
+  printf 'fleet-install: glibc_floor_lib_missing: %s\n' "$glibc_floor_lib" >&2
+  printf 'fleet-install: this script cannot read the artifact\047s glibc floor without it (ship scripts/lib/glibc-floor.sh beside it); nothing was downloaded and nothing was replaced\n' >&2
+  exit 1
+fi
 
 # The staging directory is beside the target, not in /tmp: a node whose /tmp is mounted `noexec` would
 # refuse every binary as "does not run here", and the guard would cry wolf until nobody believed it.
@@ -80,7 +96,12 @@ LUA
   say "signature ok"
 fi
 
-# 3. does it run HERE, before anything is replaced
+# 3. the glibc floor this artifact was built for, against the libc this host runs
+if ! glibc_refusal="$(wa_glibc_guard "$tmp/wa" "$(basename "$TARGET")")"; then
+  die "$glibc_refusal — nothing was replaced"
+fi
+
+# 3b. does it run HERE, before anything is replaced
 chmod +x "$tmp/wa"
 if ! "$tmp/wa" --version >/dev/null 2>&1; then
   detail=$("$tmp/wa" --version 2>&1 | head -1)
