@@ -1317,6 +1317,8 @@ Before: `fast path FAILED (12 of 261 checks, 0 skipped, 149s)`. After: `fast pat
 exit 0. The gate's own skip grammar was not touched: nothing is skipped, nothing is excused, and every check the
 landing gate runs - the Lua rows, the three Rust crates, `prompt-docs`, and the contract rows - is green on this node.
 
+Re-run at HEAD after this report was committed (\`02f1782a\`, docs only, so the binary stayed fresh): \`fast path ok (262 checks, 0 skipped, 165s)\`, exit 0 - the tree this branch leaves behind is green, not only the one the first green run measured.
+
 ## Commits (local, on change/green-main, not pushed)
 
 ```
