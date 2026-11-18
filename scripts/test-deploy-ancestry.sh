@@ -324,7 +324,7 @@ hides "nothing was built" "$DEPLOY_OUT" "deploy: building"
 shows "and it says so" "$DEPLOY_OUT" "Nothing was built and nothing was installed"
 shows "the way out names --unpin" "$DEPLOY_OUT" "--unpin --reason"
 deploy "$PINFRESH" --force --reason "the operator released this pin on purpose"
-hides "with --force --reason the gate opens" "$DEPLOY_OUT" "node_pinned"
+hides "with --force --reason the gate opens" "$DEPLOY_OUT" "node_pinned: fixture-node"
 shows "...and the force is recorded with its rule" "$(cat "$PINFRESH/deploy.log" 2>/dev/null)" "force_requested rule=node_pinned"
 rm -f "$AGENT_HOME/.wasm-agent/pins.txt"
 
