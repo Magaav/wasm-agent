@@ -48,6 +48,12 @@ orphan-tests ok (195 wired, 47 orphaned and declared with a reason)
 All three selftests passed on the base commit too (`daf92db0`, before any edit in this round), so none of
 the fixtures it adds is covering a pre-existing failure, and no pre-existing failure is being called a fix.
 
+**One pre-existing failure, named:** `bash scripts/sync-prompt-docs.sh --check` fails on
+`docs/ENVELOPE.md: tool-catalogue`, and it fails the same way on `daf92db0` (run in a throwaway worktree of
+the base). The block is generated from this node's live tool catalogue, which changed today, so the doc is
+stale about the machine rather than about this branch; nothing in this round touches it.
+
+
 ### The reader, measured against the tree instead of argued about
 
 The old reader and the new one were both run with `--list --every string field` (a temporary
