@@ -55,7 +55,11 @@ const ROOT = path.resolve(flag('root', path.resolve(HERE, '..')));
 // The build-time ledger scripts/lib/build-times.sh fills during a fast run. A run outside the fast path
 // falls back to the ledger recorded with the baseline (docs/measurements/module-build-times.tsv), so the
 // build column still says what each module cost to compile instead of a column of '-'.
-const TIMINGS = flag('timings', path.resolve(ROOT, 'docs', 'measurements', 'module-build-times.tsv'));
+const TIMINGS_ARG = flag('timings', '');
+const TIMINGS = TIMINGS_ARG || path.resolve(ROOT, 'docs', 'measurements', 'module-build-times.tsv');
+const TIMINGS_SOURCE = TIMINGS_ARG
+  ? 'this run\u2019s ledger'
+  : 'the recorded baseline (' + path.relative(ROOT, TIMINGS) + ')';
 // 0 = every module, which is the report's contract: per module, its size, its build time and its win
 // line. A narrowed view is the reader's choice (`--rows N`), never the default - a map that hides rows is
 // quoted later as if the hidden ones did not exist.
@@ -227,8 +231,10 @@ p('module-report: ' + modules.length + ' modules = ' + count('crate') + ' crate(
 p('module-report: win       ' + withWin + '/' + modules.length + ' state a measured win; ' +
   (noWin.length ? noWin.length + ' flagged (no manifest or no `win` line)' : 'none flagged'));
 const built = modules.filter((m) => m.ms !== null);
-p('module-report: build     ' + built.length + '/' + modules.length + ' measured in this run' +
-  (built.length ? '' : ' (- means not compiled here, not fast)'));
+// The ledger is this run's own when scripts/fast.sh passed one, and the recorded baseline otherwise; the
+// line says which, because "a build time" from nowhere is a remembered figure, not a measurement.
+p('module-report: build     ' + built.length + '/' + modules.length + ' with a build time from ' +
+  TIMINGS_SOURCE + (built.length ? '' : ' (- means not compiled here, not fast)'));
 p('module-report:   ' + 'module'.padEnd(34) + 'lines'.padStart(9) + '  build   win');
 const sorted = [...modules].sort((a, b) => b.lines - a.lines);
 const shown = ROWS > 0 ? sorted.slice(0, ROWS) : sorted;

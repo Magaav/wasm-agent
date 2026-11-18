@@ -96,12 +96,12 @@ contains "$out" "FLAG no win" "a row with no win says so where a reader looks: o
 timings="$work/timings.tsv"
 printf 'crate\ta\t1200\t1 unit(s) compiled\ncrate\tb\t400\t0 units, warm\n' > "$timings"
 out=$(report --no-git --timings "$timings")
-contains "$out" "build     2/5 measured in this run" "the ledger's two rows are counted as measured"
+contains "$out" "build     2/5 with a build time from this run" "the ledger's two rows are counted as measured, and the line says which ledger it read"
 contains "$out" "1.2s" "milliseconds are printed as seconds"
 contains "$out" "0.4s" "and so is the warm row"
 absent "$out" "1200" "the raw millisecond count is not printed"
 out=$(report --no-git)
-contains "$out" "build     0/5 measured in this run (- means not compiled here, not fast)" "with no ledger nothing claims a build time"
+contains "$out" "build     0/5 with a build time from the recorded baseline (docs/measurements/module-build-times.tsv) (- means not compiled here, not fast)" "with no --timings the report reads the recorded baseline and names it; nothing claims a build time it does not have"
 
 # ---- 4. co-change: over 70% is a merge candidate, under it is not ---------------------------------
 out=$(report)
