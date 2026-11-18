@@ -664,6 +664,12 @@ if command -v node >/dev/null 2>&1; then
   # arguments the core is handed, the installer pin, and install -> re-run -> update -> rollback against
   # file: fixtures. No network, no systemd, no built binary - seconds.
   check install-front-door bash scripts/test-install.sh
+  # The canonical runtime binding is decided in PREFLIGHT, before anything is built, and a refusal names
+  # every worktree that is on branch main (measured 18/11: a deploy refused after ~4 minutes of build with
+  # "exactly one canonical main checkout is required" and named neither path the operator had to choose
+  # between). The row arrived with that fix and no harness named it, so the preflight the deploy depends
+  # on was itself unchecked by every gate: the orphan ledger said so and nothing else ran it.
+  check runtime-binding-preflight node scripts/test-runtime-binding-preflight.mjs
   # A scripted `wa chat` (`wa chat "<prompt>"` from a script, `x | wa chat`, or `--once`) must run its
   # turn(s), release the session and EXIT with the run's status - and a session whose run is in flight
   # must be steerable with `wa steer` instead of killed (docs/SCRIPTED-RUNS.md). It drives the real
