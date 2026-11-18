@@ -87,20 +87,28 @@ policy, which this mission was not asked to do.
 **Test**: no test - see "What is not verified" (a peer call needs a signed peer on the mesh; nothing on this
 node fabricates one).
 
-## 4. HIGH - subagents are scoped per user, not per session (**NOT DONE**)
+## 4. HIGH - a child agent belongs to the session tree that started it
 
-`rust/wa-capabilities/src/subagents.rs:666,678,702,734,782` and `lua/core/subagents.lua:655-800` still key a
-child by `owner_user = ctx.user_id`, so one session can list, message, steer or cancel another session's
-child when both run as the same user - which is every session on this node, since they all carry the
-operator's credential.
+**Was** (`rust/wa-capabilities/src/subagents.rs:666,678,702,734,782`; `lua/core/subagents.lua:655-800`): every
+action was authorized by `owner_user = ctx.user_id` alone, so one session could read, list, message, steer
+or cancel another session's child whenever both ran as the same user - which is EVERY session on this node,
+because they all carry the operator's credential. The user was never the right key: the conversation is.
 
-**What is missing**: the manager records `owner_user` and no parent session, so scoping needs (a) a
-`parent_session` on each child record (Rust, `subagents.rs`), (b) the tree walk that makes "a session
-controls its own descendants" checkable (parent -> child -> grandchild), (c) the same filter on every action
-in `lua/core/subagents.lua`'s `control`, and (d) the node scope for the operator. That is a change to the
-child manager's record shape and to the peer `subagent` capability's contract, and it is larger than the
-rest of this mission put together; doing half of it would leave a filter that looks like a boundary and is
-not. It is left undone, named here, rather than claimed.
+**Now**: the record already carried `parent_session_id` (`subagents.lua` has been writing
+`parent_session_id = ctx.session_id` at start all along); what was missing was the use of it.
+`in_session_tree(tasks, task, owner, session)` is the one rule: the task's user must match, and the caller's
+session must be the task's parent session or an ancestor of it, so a session controls its own descendants
+(a child, and a grandchild that child started) and nothing else. It is applied by `find` (status/result/
+events), `list`, `lookup_session`, `continue_session`, `await_task` and `cancel`, bounded to 64 steps so a
+malformed chain answers "no" instead of looping. `lua/core/subagents.lua` passes `session = ctx.session_id`
+on every action. A caller that names no session keeps the user scope (a script, the node's control routes
+and the peer capability's own path are not sessions); the operator's node scope over the mesh is the item
+below that still needs a grant surface.
+
+**Test**: `wa-capabilities`'s
+`a_child_belongs_to_the_session_that_started_it` - one child, ownered by `alice` and parented by
+`session-a`: `session-a` reads, lists and cancels it; `session-b` (the SAME user) can do none of the three;
+a sessionless caller still can; a different user cannot.
 
 ## 5. HIGH - a tool child never inherits the node's own secrets
 
@@ -208,10 +216,11 @@ rights, node-wide MCP approvals, and the peer chat thread per peer (`server.lua:
 
 ## 12. What is not verified, and what is not done
 
-* **Finding 4 (subagents)** - not done; see above. This is the one HIGH finding this branch leaves open.
 * **Finding 3's grant surface** - the peer scope is implemented; the explicit mesh grant does not exist, so a
   peer asking for the node scope is refused. Nothing on this node fabricates a signed peer, so the peer path
   has no test.
+* **Finding 4's node scope** - a session controls its own descendants; the operator's node-wide view of every
+  child on the node is the same missing grant surface, not a second hole.
 * **`/health` end to end** - the filtering is a Rust function with a unit-level shape and the route passes
   `session_id`; no HTTP request was made in this session's tests.
 * **codemode's nil-session key** - implemented, not exercised (empty code-mode assets in this build).
@@ -279,6 +288,11 @@ canaries for finding 5. Binary: `/home/victor/wasm-agent/target/m-session-isolat
     test result: ok. 41 passed; 0 failed; 1 ignored
     test result: ok. 133 passed; 0 failed; 0 ignored
     test result: ok. 17 passed; 0 failed; 0 ignored
+
+### Rust, `wa-capabilities` (the subagent manager's own tests, finding 4)
+
+    $ cargo test -p wa-capabilities --lib subagents
+    test result: ok. 24 passed; 0 failed; 0 ignored
 
 `scripts/test-subagents-profiles.lua` refuses to run without its isolated wrapper
 (`policy_fixture_requires_isolated_wrapper`) - a pre-existing requirement of that row, not a failure of this
