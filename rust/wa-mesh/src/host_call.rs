@@ -966,12 +966,37 @@ pub fn dry_run(request: &Value) -> Value {
 }
 
 /// `host.mesh_call(request_json)` — see [`dispatch`].
+/// `{"revoked": true}`: the node ids the VERIFIED roster revokes now. The binding's admission asks this
+/// (operator 17/11, removing a legacy node): an operator the fleet key revoked may leave the rendezvous's
+/// operator list without that loss detaching every bound node. An unverified or missing roster answers
+/// `ok: false` and the caller treats every loss as before.
+fn revoked_answer() -> Value {
+    let paths = Paths::resolve();
+    let policy = match MeshPolicy::from_policy_file(&paths.policy) {
+        Ok(policy) => policy,
+        Err(error) => return json!({"ok": false, "error": "policy_unreadable", "detail": error.0}),
+    };
+    let paths = paths.with_policy(&policy);
+    let roster = match Roster::from_file(&paths.roster) {
+        Ok(roster) => roster,
+        Err(error) => return json!({"ok": false, "error": "roster_unreadable", "detail": error.0}),
+    };
+    let now_s = wire::now_seconds();
+    if let Err(error) = crate::seam::verify_roster(&roster, &policy.roster_key, now_s) {
+        return json!({"ok": false, "error": "roster_unverified", "detail": error.0});
+    }
+    let revoked: Vec<&str> = roster.nodes.iter().filter(|node| node.is_revoked(now_s)).map(|node| node.node_id.as_str()).collect();
+    json!({"ok": true, "revoked": revoked, "fleet": roster.fleet})
+}
+
 pub extern "C-unwind" fn mesh_call(l: *mut LuaState) -> c_int {
     let text = arg_string(l, 1).unwrap_or_else(|| "{}".into());
     let answer = match serde_json::from_str::<Value>(&text) {
         Ok(request) => {
             if request.get("dry_run").and_then(Value::as_bool).unwrap_or(false) {
                 dry_run(&request)
+            } else if request.get("revoked").and_then(Value::as_bool).unwrap_or(false) {
+                revoked_answer()
             } else {
                 dispatch(&request)
             }

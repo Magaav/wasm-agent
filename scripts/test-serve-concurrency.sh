@@ -246,6 +246,10 @@ tools_code="$(curl -s -m 5 -o "$WORK/pool-tools.json" -w '%{http_code}' "http://
 # stayed green because nothing asserted it. A 404 here is that bug; a non-200 under a wedged node-thread 0
 # is the read-route bug.
 efficiency_code="$(curl -s -m 5 -o "$WORK/pool-efficiency.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/efficiency" 2>/dev/null)"
+# `/keybindings` is the route the window's `/keybindings` calls, and the same class of bug applies: a
+# route whose handler the window needs and nothing asserts. A 404 is the route gone; a 200 has to carry
+# the console's own rows (the table in rust/wa-term/src/keymap.rs), so an empty answer is a failure too.
+keybindings_code="$(curl -s -m 5 -o "$WORK/pool-keybindings.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/keybindings" 2>/dev/null)"
 write_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null)"
 grown_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
 # Now leave it alone: the node-thread that answered that read has nothing to do, and must go away again.
@@ -280,6 +284,16 @@ case "$efficiency_code" in
   200) echo "  ok: /efficiency exists and is a read" ;;
   404) echo "  FAIL: /efficiency has no handler - a merge dropped the route and the gate did not notice"; exit 1 ;;
   *) echo "  FAIL: /efficiency was not answered as a read (got ${efficiency_code:-none})"; exit 1 ;;
+esac
+case "$keybindings_code" in
+  200)
+    if grep -q 'Ctrl+X' "$WORK/pool-keybindings.json" && grep -q 'WA_TUI_KEYS' "$WORK/pool-keybindings.json"; then
+      echo "  ok: /keybindings answers the console's own rows (Ctrl+X, the fullscreen keys)"
+    else
+      echo "  FAIL: /keybindings answered 200 without the console's rows"; exit 1
+    fi ;;
+  404) echo "  FAIL: /keybindings has no handler - the window's command has nothing to call"; exit 1 ;;
+  *) echo "  FAIL: /keybindings was not answered as a read (got ${keybindings_code:-none})"; exit 1 ;;
 esac
 case "$write_code" in
   503) echo "  ok: a request that needs the stalled node-thread is refused, not left hanging" ;;

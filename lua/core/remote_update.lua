@@ -55,11 +55,16 @@ local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local nodes = dofile('lua/core/nodes.lua')
 local update = dofile('lua/core/update.lua')
+-- The pins store (lua/core/pins.lua): a node held where an operator put it is not a node to move forward.
+local pins = dofile('lua/core/pins.lua')
 
 local M = {}
 
 M.CAPABILITY = 'update'
-M.ACTIONS = { 'request', 'status', 'check' }
+-- 'unpin' is the peer half of `wa update <node> --unpin`: the node's OWN pin store is the one that gates
+-- the installs started on it, and a release that only cleared the coordinator's copy left the node refusing
+-- every install with "node_pinned" while the operator had been told it was free (round-3 item 5).
+M.ACTIONS = { 'request', 'status', 'check', 'unpin' }
 
 -- Where a peer keeps the audit record and the outcome of each remote request. One file per
 -- request, named after the record id the master is given back: a record that two processes write
@@ -262,6 +267,10 @@ local function request_node(record)
   local request = {
     skip_source_sync = true,
     expected_commit = record.target_commit,
+    -- A forced request is honoured by THIS node's pin gate (lua/core/update.lua M.verdict) and carried into the
+    -- Sentinel request it writes, so the installer that runs afterwards is the one that was forced and not a
+    -- fresh ordinary deploy that refuses on the same pin one step later.
+    force = record.forced == true,
     -- This call is a signed master request the binding/roster already admitted (see `serve`), not a
     -- child shell: `update.run` clears the child marker for the one sentinel command it writes.
     signed_request = true,
@@ -425,6 +434,17 @@ end
 -- install), never set by the module itself.
 function M.facts() return update.facts(M.facts_options or {}) end
 
+-- The checkout a pin's release question is asked of. "Does this target contain the awaited commit?" is a git
+-- question, and the coordinator's own runtime tree is where a target commit is resolved; asking it of an empty
+-- path (which this call used to do: pins.released(pin, target, '')) can only answer "cannot tell", so no pin
+-- ever released by ancestry. A node with no tree answers "cannot tell" too, and that is reported, never read
+-- as released.
+local function release_tree()
+  local ok, tree = pcall(function() return nodes.worktree() end)
+  if ok and type(tree) == 'string' then return slashes(tree) end
+  return ''
+end
+
 function M.serve(args, caller)
   args = type(args) == 'table' and args or {}
   local author = nodes.author_of(caller)
@@ -438,6 +458,7 @@ function M.serve(args, caller)
   if action == 'request' then return M.admit(args, caller) end
   if action == 'status' then return M.read_status(args, caller) end
   if action == 'check' then return M.check(args, caller) end
+  if action == 'unpin' then return M.unpin(args, caller) end
   return { error = 'unknown_update_action', action = tostring(args.action or ''), allowed = M.ACTIONS, effect = 'none' }
 end
 
@@ -459,6 +480,16 @@ function M.admit(args, caller)
   local kind = rollback and 'rollback' or (rendezvous and 'rendezvous' or (mode == 'binary' and 'binary' or 'node'))
   local reason = trim(args.reason)
   if #reason > 400 then return { error = 'reason_too_long', effect = 'none', limit = 400 } end
+  -- A FORCE IS A REASON OR IT IS NOTHING. The coordinator sends force_note when it moves a pinned node with
+  -- --force --reason, and until now NO NODE READ IT: the flag was decoration, the force was invisible in the
+  -- node's own record, and the install below refused on the node's own pin anyway. The node honours a forced
+  -- deploy now - and only with a reason, which it writes down (round-3 item 5).
+  local force_note = trim(args.force_note)
+  if force_note ~= '' and reason == '' then
+    return { error = 'override_reason_required', effect = 'none', capability = M.CAPABILITY, observed = force_note,
+      message = 'a forced deploy must say why: --force --reason <text>, and the reason is recorded on this node and in this request. Nothing was queued.' }
+  end
+  local forced = force_note ~= ''
   local facts = M.facts()
   -- A rollback is the one action that must work on a node whose tree is behind or broken (the install
   -- shipped scripts/rollback-node.sh beside the binary for exactly that), so it does not require a tree and
@@ -468,6 +499,13 @@ function M.admit(args, caller)
       observed = 'this node has no runtime-worktree.txt and does not run from a checkout, so there is no tree to move to a commit' }
   end
   local record = new_record(kind, '', reason, caller, args)
+  if forced then
+    record.forced = true
+    record.force_note = force_note
+    record.override_reason = reason
+    if emit then pcall(emit, { type = 'log', message = 'remote-update forced: ' .. tostring(record.id) .. ' (' ..
+      tostring(record.requester and record.requester.name or '?') .. ') forced past the pin: ' .. reason }) end
+  end
   record.server.install = facts.install
   record.server.tree = facts.tree and slashes(facts.tree) or nil
   if rollback then
@@ -498,11 +536,42 @@ function M.admit(args, caller)
       return { error = 'audit_record_not_written', effect = 'unknown', capability = M.CAPABILITY, record = record.id,
         request = done.request, note = 'the rollback was queued but this node could not write the record that names who asked for it' }
     end
+    -- THE NODE KEEPS ITS OWN COPY OF THE PIN (item 6). A pin that lives only in the coordinator's store protects
+    -- the node from requests made through that coordinator, and from nothing else: a deploy started ON the node -
+    -- its own `wa update`, its sentinel's tree deploy, a hand-run upgrade.sh, fleet-install.sh or bootstrap.sh -
+    -- never reads the coordinator's file. So a rollback writes the same record into the node's own pins.txt, under
+    -- its own name AND its own node_id (an operator addresses it by either; pins.active matches both).
+    --
+    -- commit=unknown is honest here: what the rollback restores is named by installed.txt once rollback-node.sh
+    -- has run, and this record is refreshed with that commit when the outcome is read back. The commit it went
+    -- BACK FROM is recorded as rolled_back_from, for a reader - it is NOT an awaited commit (item 2).
+    local own_identity = nodes.identity() or {}
+    local own_name = tostring(nodes.node_name() or '')
+    local own_id = tostring(own_identity.node_id or '')
+    local from_commit = tostring(record.replaced_commit or '')
+    local node_pin, node_pin_problem = pins.set({
+      node = own_name ~= '' and own_name or own_id,
+      node_id = own_id,
+      kind = 'rollback',
+      commit = 'unknown',
+      rolled_back_from = from_commit,
+      -- NO DEFAULT AWAITED COMMIT (round-3 item 2). This used to default await to the commit the rollback went
+      -- BACK FROM - which is the history that CONTAINS the change the rollback was about. The next ordinary
+      -- deploy of main contains it, so the pin released itself on exactly the move it existed to stop, and the
+      -- record looked right while doing it. rolled_back_from is kept for display; an awaited commit is only ever
+      -- the one an operator names (--await), and the way out of a pin with no await is --unpin with a reason.
+      await = trim(args.await),
+      until_ = trim(args['until']),
+      reason = reason ~= '' and reason
+        or ('rolled back by a request from ' .. tostring(record.requester.name ~= '' and record.requester.name or record.requester.node_id)),
+    })
     local identity = nodes.identity() or {}
     return {
       ok = true, status = 'queued', record = record.id, kind = kind,
       commit = record.target_commit, door = done.door, request = done.request,
       sentinel_request_id = record.sentinel_request_id,
+      pin = node_pin, pin_problem = node_pin_problem,
+      pin_next = 'this node stays where it is until the pin is released: ' .. pins.escape_hatch(own_name ~= '' and own_name or own_id),
       target_node = { node_id = tostring(identity.node_id or ''), name = tostring(nodes.node_name() or '') },
       requester = record.requester.name ~= '' and record.requester.name or record.requester.node_id,
       requested_at = record.requested_at,
@@ -573,6 +642,25 @@ function M.admit(args, caller)
   }
 end
 
+-- The node's own pin, refreshed with the commit the rollback actually restored. The queued record could only
+-- say commit=unknown (rollback-node.sh had not run yet); reading the outcome is the moment the node knows which
+-- commit it is on, and a pin that names it is a record an operator can compare with installed.txt.
+-- Idempotent: the same commit twice writes nothing.
+local function pin_restored_commit(restored)
+  local commit = trim(restored)
+  if commit == '' or commit == 'unknown' then return nil end
+  local own_identity = nodes.identity() or {}
+  local own_name = tostring(nodes.node_name() or '')
+  local own_id = tostring(own_identity.node_id or '')
+  local key = own_name ~= '' and own_name or own_id
+  local active = pins.active(key, own_id)
+  if not active or trim(active.kind) ~= 'rollback' then return nil end
+  if trim(active.commit) == commit then return active end
+  return pins.set({ node = key, node_id = own_id, kind = 'rollback', commit = commit,
+    rolled_back_from = trim(active.rolled_back_from), await = trim(active.await),
+    until_ = trim(active.until_), reason = trim(active.reason) })
+end
+
 -- What the peer can prove about one request, from files that survive the install it performs.
 local function outcome_of(record)
   local facts = M.facts()
@@ -602,8 +690,9 @@ local function outcome_of(record)
         -- A rollback's own record is the install record it rewrote: report what is installed now, so
         -- "installed" is a commit an operator can compare, not just the word.
         local restored = update.installed_record(facts.install)
+        pin_restored_commit(restored.commit)
         return settled('installed', tostring(done.detail or (what .. ' settled')),
-          { installed_commit = restored.commit })
+          { installed_commit = restored.commit, pin = pin_restored_commit(restored.commit) })
       end
       return settled('failed', tostring(done.detail or (what .. ' did not settle')))
     end
@@ -712,6 +801,56 @@ function M.check(args, caller)
   }
 end
 
+-- Release the pin on THIS node, on purpose and on the record.
+--
+-- WHY THIS IS A PEER ACTION AND NOT A FILE EDIT. A pin is read by the script that installs (scripts/lib/
+-- node-pins.sh, from deploy.sh, upgrade.sh, fleet-install.sh and bootstrap.sh) and by this node's own update
+-- path (lua/core/update.lua). A coordinator that cleared only its own store told the operator "unpinned: ordinary
+-- deploys may move it again" while the node's own record still refused every install started ON the node - the
+-- message overclaimed and the pin stayed (round-3 item 5). So the release travels to the store that gates the
+-- node, names the node it is about, and carries a reason that is written into the record.
+function M.unpin(args, caller)
+  local author = nodes.author_of(caller)
+  if not author then
+    return { error = 'forbidden_role', effect = 'none', capability = M.CAPABILITY,
+      note = 'only a node the binding or the roster names as a master may release a pin on this node' }
+  end
+  local reason = trim(args.reason)
+  if reason == '' then
+    return { ok = false, error = 'unpin_reason_required', effect = 'none', node = tostring(nodes.node_name() or ''),
+      message = 'releasing a pin is a decision nobody can review if it does not say why: pass --reason <text>. Nothing was released and nothing was changed.' }
+  end
+  if #reason > 400 then return { ok = false, error = 'reason_too_long', effect = 'none', limit = 400 } end
+  local own_identity = nodes.identity() or {}
+  local own_name = tostring(nodes.node_name() or '')
+  local own_id = tostring(own_identity.node_id or '')
+  local key = own_name ~= '' and own_name or own_id
+  local active = pins.active(key, own_id)
+  if not active then
+    return { ok = true, status = 'not_pinned', released = false, node = key,
+      message = 'this node (' .. tostring(key) .. ') carries no active pin in its own store: nothing was released, and nothing was changed.' }
+  end
+  local who = tostring(caller and (caller.name or '') or '')
+  if who == '' then who = tostring(caller and caller.node_id or '') end
+  if who == '' then who = 'an unnamed master' end
+  local cleared, problem = pins.clear(key, { node_id = own_id, kind = 'unpin',
+    reason = 'released on request by ' .. who .. ': ' .. reason })
+  if not cleared then
+    return { ok = false, error = 'pin_not_clearable', node = key,
+      observed = tostring(problem and problem.error or 'unknown'),
+      message = 'the release could not be written, so the pin on this node is still in force. Nothing was changed.' }
+  end
+  if emit then pcall(emit, { type = 'log', message = 'node-pin released on ' .. tostring(key) .. ': was pinned to ' ..
+    tostring(active.commit or 'unknown') .. ' (pin ' .. tostring(active.id or '?') .. '), released on request by ' ..
+    who .. ': ' .. reason }) end
+  return { ok = true, status = 'unpinned', released = true, node = key, node_id = own_id,
+    released_pin = { id = tostring(active.id or ''), commit = tostring(active.commit or 'unknown'),
+                     reason = tostring(active.reason or ''), await = tostring(active.await or '') },
+    reason = reason,
+    message = 'released the pin on this node (' .. tostring(key) .. '): it was pinned to ' ..
+      tostring(active.commit or 'unknown'):sub(1, 12) .. ' (pin ' .. tostring(active.id or '?') .. '); why: ' .. reason }
+end
+
 -- ---------------------------------------------------------------- the master half
 --
 -- `call` is the signed peer call (`nodes.remote_call`, injected so a test can answer it without a
@@ -766,9 +905,84 @@ end
 -- what says which session is owed the one notice.
 function M.request(call, selector, options)
   options = type(options) == 'table' and options or {}
+  -- A PINNED NODE DOES NOT MOVE FORWARD, and this is the moment the decision is made: a request is a deploy
+  -- asked for. The pin is the record an operator wrote when they put a node somewhere on purpose
+  -- (lua/core/pins.lua); without this gate the next ordinary deploy quietly undid it - measured 18/11, three
+  -- hand-made rollbacks and not one of them survived the next deploy.
+  --
+  -- Two ways out, both explicit: the pin named an awaited commit and this target contains it (then the pin is
+  -- doing its job and releases), or the caller says --force with a reason, which is recorded by the pin
+  -- history and in this request's own audit record. A rollback is never gated: going back is what a pin is
+  -- for, and refusing it would trap a node on the wrong bytes.
+  local node_key = trim(selector)
+  -- ALIASES BEFORE THE GATE. A node answers to its name and to its node_id, and the pin may have been written
+  -- under either (a rollback records the node the operator named; the node's own store records the id). Resolve
+  -- the selector first and gate on both, or a pin written under one spelling would not gate a request made with
+  -- the other - which is exactly how a pin becomes a decoration.
+  local ok_find, resolved = pcall(function() return nodes.find(selector) end)
+  local node_id = (ok_find and type(resolved) == 'table') and tostring(resolved.node_id or '') or ''
+  local pin_in_force = pins.active(node_key, node_id)
+  local wants_back = options.rollback == true or trim(options.mode) == 'rollback'
+  local force_note = nil
+  if pin_in_force and not wants_back then
+    local target = trim(options.commit)
+    local released = nil
+    if target ~= '' then released = pins.released(pin_in_force, target, release_tree()) end
+    if released and released.released == true then
+      -- THE PIN DID ITS JOB AND RELEASES, as a record: the ledger then says when and why the node was let go,
+      -- instead of the pin being silently ignored. A plain "wa update <node>" to a target that contains the
+      -- awaited commit is the ordinary way out of a pin, and it used to be impossible.
+      local cleared, problem = pins.clear(node_key, { node_id = node_id, kind = 'released',
+        reason = 'released by a target that ' .. tostring(released.why) })
+      if cleared then
+        pin_in_force = nil
+      else
+        return {
+          ok = false, error = 'pin_release_not_recorded', node = node_key, pin = pin_in_force,
+          observed = tostring(problem and problem.error or 'unknown'),
+          message = 'this deploy would release the pin and the release could not be recorded, so nothing was asked of the node.',
+          next = pins.escape_hatch(node_key, pin_in_force),
+        }
+      end
+    elseif options.force == true then
+      -- A FORCE IS ONLY AN OVERRIDE WHEN IT SAYS WHY. The bypass used to be "force ~= true", so --force with no
+      -- --reason moved a pinned node and left nothing behind saying who did it or why.
+      if trim(options.reason) == '' then
+        return {
+          ok = false, error = 'override_reason_required', node = node_key, pin = pin_in_force,
+          observed = pins.summary_line(pin_in_force),
+          message = '--force overrides a pin, which is a record that this node was put somewhere on purpose, and an override nobody can read later is not a decision anyone can review.',
+          next = 'say why: --force --reason <text> (recorded in the pin history and in this request), or ' .. pins.escape_hatch(node_key, pin_in_force),
+        }
+      end
+      force_note = 'forced past pin ' .. tostring(pin_in_force.id or '?') .. ': ' .. trim(options.reason)
+      pins.set({ node = node_key, node_id = node_id, kind = 'force', state = 'active',
+        commit = trim(pin_in_force.commit), binary_sha256 = trim(pin_in_force.binary_sha256),
+        reason = 'FORCED PAST: ' .. trim(options.reason) .. ' (pin ' .. tostring(pin_in_force.id or '?') .. ': ' .. tostring(pin_in_force.reason or '') .. ')',
+        await = trim(pin_in_force.await), until_ = trim(pin_in_force.until_) })
+    else
+      -- AN ORDINARY UPDATE IS NOT A RELEASE, AND IT SAYS SO. With no --commit there is no target here to compare
+      -- with the pin's awaited commit, so nothing about this move can release it; a pin with no awaited commit
+      -- cannot be released by ANY deploy. Claiming otherwise would be the fail-open this whole file is about
+      -- (round-3 item 6).
+      local no_target = target == '' and (' An ordinary `wa update ' .. node_key ..
+        '` with no --commit names no target to compare, so it releases nothing: the pin stays in force after it.') or ''
+      return {
+        ok = false, error = 'node_pinned', node = node_key, pin = pin_in_force,
+        observed = pins.summary_line(pin_in_force) .. (released and released.why and ('; ' .. tostring(released.why)) or ''),
+        message = 'the node carries an active pin, so this deploy was refused: a pin is a record that the node was put somewhere on purpose.' .. no_target,
+        next = 'move it on purpose: ' .. pins.escape_hatch(node_key, pin_in_force),
+      }
+    end
+  end
   local args = { action = 'request', reason = trim(options.reason), session = trim(options.session) }
   if trim(options.commit) ~= '' then args.commit = trim(options.commit) end
   if options.rendezvous == true then args.rendezvous = true end
+  -- The pin this move will write is the SAME record on both sides (item 6: the target node keeps its own copy),
+  -- so the awaited commit travels with the request instead of being invented again on the node.
+  if trim(options.await) ~= '' then args.await = trim(options.await) end
+  if trim(options.until_) ~= '' then args['until'] = trim(options.until_) end
+  if force_note then args.force_note = force_note end
   -- One verb, four modes: a tree deploy (default), a binary-only install, a rollback, or the rendezvous.
   local mode = trim(options.mode)
   if mode ~= '' and mode ~= 'tree' then args.mode = mode end
@@ -789,7 +1003,43 @@ function M.request(call, selector, options)
     reply.record = record_id
   end
   reply.node = reply.node or tostring(reply.target_node and reply.target_node.name or selector)
-  reply.summary = M.summary(reply)
+  -- GOING BACK IS A RECORD. A rollback or an explicit --to pins the node where it now is, after the peer has
+  -- answered - so a pin never names a move that was refused, and the next ordinary deploy reads it. The pin
+  -- is part of the answer (reply.pin); a pin that could not be written is named in reply.pin_problem rather
+  -- than dropped, because the move did happen and the missing record is the thing left to fix.
+  local kind_name = trim(reply.kind or (args.rollback and 'rollback' or 'node'))
+  if reply.ok and (kind_name == 'rollback' or options.pin == 'to') then
+    -- WHAT A ROLLBACK PIN NAMES. It used to write commit=unknown with no await, so the pin could never release
+    -- by an awaited commit and its only way out was --unpin by hand - a pin that blocked its own fix.
+    --
+    -- The commit a rollback goes BACK FROM is the one that was installed a moment ago, and the peer reports it
+    -- (reply.commit is the replaced commit for a rollback). It is recorded as rolled_back_from and shown in the
+    -- pin's own sentence, and it is NOT the awaited commit: the operator names that with --await, because only
+    -- the operator can say which landing makes the way forward open again (round-3 item 2).
+    local from_commit = trim(options.commit)
+    if from_commit == '' and kind_name == 'rollback' then from_commit = trim(reply.commit) end
+    -- NO DEFAULT AWAIT (round-3 item 2): only an operator-named --await releases a pin by ancestry, so a
+    -- rollback's pin cannot release itself on the deploy that carries the commit it rolled back from.
+    local await_default = trim(options.await)
+    local written, problem = pins.set({
+      node = node_key, node_id = node_id,
+      kind = kind_name == 'rollback' and 'rollback' or 'to',
+      commit = trim(options.commit) ~= '' and trim(options.commit) or 'unknown',
+      rolled_back_from = kind_name == 'rollback' and from_commit or '',
+      reason = trim(options.reason) ~= '' and trim(options.reason)
+        or (kind_name == 'rollback' and 'rolled back on purpose' or 'moved to a named commit on purpose'),
+      until_ = trim(options.until_), await = await_default,
+    })
+    if written then
+      reply.pin = written
+      reply.summary = M.summary(reply) .. ' | pin: ' .. tostring(written.summary)
+      reply.pin_next = 'this node stays where it is: ' .. pins.escape_hatch(node_key, written)
+    else
+      reply.pin_problem = problem
+      reply.summary = M.summary(reply) .. ' | pin NOT recorded: ' .. tostring(problem and problem.error or 'unknown')
+    end
+  end
+  reply.summary = reply.summary or M.summary(reply)
   return reply
 end
 
@@ -884,6 +1134,20 @@ function M.cli(argv)
     elseif flag == '--binary' then options.mode = 'binary'; index = index + 1
     elseif flag == '--tree' then options.mode = 'tree'; index = index + 1
     elseif flag == '--rollback' then options.rollback = true; index = index + 1
+    elseif flag == '--force' then options.force = true; index = index + 1
+    elseif flag == '--unpin' then options.unpin = true; index = index + 1
+    elseif flag == '--pin' then options.pin = true; index = index + 1
+    elseif flag == '--to' or flag == '--until' or flag == '--await' or flag == '--bytes' then
+      local value = argv[index + 1]
+      if type(value) ~= 'string' or value == '' or value:sub(1, 2) == '--' then
+        print('wa update: ' .. flag .. ' needs a value')
+        return 1
+      end
+      if flag == '--to' then options.commit = value; options.pin = 'to'
+      elseif flag == '--until' then options.until_ = value
+      elseif flag == '--bytes' then options.bytes = value
+      else options.await = value end
+      index = index + 2
     elseif flag == '--status' or flag == '--watch' then options.status = true; index = index + 1
     elseif flag == '--commit' or flag == '--id' or flag == '--reason' or flag == '--session' or flag == '--node' then
       local key = flag:sub(3)
@@ -897,7 +1161,14 @@ function M.cli(argv)
     elseif flag == '--help' or flag == '-h' then
       print('wa update <node> [--commit <sha>] [--binary|--tree] [--rendezvous] [--reason <text>] [--session <id>] [--json]')
       print('wa update <node> --status [--id <record>] [--json]')
-      print('wa update <node> --rollback   put back the pair that node\'s last install replaced')
+      print('wa update <node> --rollback   put back the pair that node\'s last install replaced, and PIN it there')
+      print('wa update <node> --to <sha>   move it to that commit on purpose, and PIN it there')
+      print('wa update <node> --pin [--commit <sha>] [--bytes <sha256>]   record a pin only; nothing is deployed')
+      print('wa update <node> --unpin --reason <text>                     release the pin here AND on the node; says what was released')
+      print('  --reason <text>  why. Required for --pin, --unpin and --force; it is stored with the record')
+      print('  --until <text>   an optional condition or date; a date that has passed is reported OVERDUE')
+      print('  --await <sha>    the commit whose landing releases the pin; a target that contains it is not blocked')
+      print('  --force          do the move anyway. A pinned node and a known downgrade both refuse without it')
       print('wa update                 update this node (the local deploy request)')
       print('  --binary   install the published release only (a node with no toolchain; never builds there)')
       print('  --tree     the default: the node\'s own Sentinel deploys its tree (build or published binary)')
@@ -912,7 +1183,82 @@ function M.cli(argv)
     if ambient ~= '' then options.session = ambient end
   end
   local reply
-  if options.status then reply = M.status(nodes.remote_call, selector, options)
+  if options.unpin then
+    -- UNPIN NAMES THE NODE, SAYS WHY, AND REACHES THE NODE'S OWN STORE (round-3 item 5).
+    --
+    -- What this used to do: clear the COORDINATOR's store only, take no reason, and answer "unpinned <node>:
+    -- ordinary deploys may move it again". Both halves of that were wrong. A pin is written twice - here, and in
+    -- the node's own pins.txt by its own rollback - and the install scripts read the NODE's copy, so the node went
+    -- on refusing every install started on it while the operator had been told it was free. And a release with no
+    -- reason is a decision nobody can review, which is the rule every other override in this tree follows.
+    local reason = trim(options.reason)
+    if reason == '' then
+      reply = { ok = false, node = selector, error = 'unpin_reason_required',
+        message = 'releasing a pin is a decision nobody can review if it does not say why, and this one is written into the node\'s own record.',
+        next = 'say why: wa update ' .. tostring(selector) .. ' --unpin --reason <text>; nothing was released' }
+    elseif #reason > 400 then
+      reply = { ok = false, node = selector, error = 'reason_too_long', limit = 400 }
+    else
+      -- 1. this coordinator's own store: what the deploy gate here reads.
+      local here, here_problem = pins.clear(selector, { reason = reason, kind = 'unpin' })
+      local here_text
+      if here then
+        here_text = 'this coordinator\'s store: released (it was pinned to ' ..
+          tostring(here.commit or 'unknown'):sub(1, 12) .. ')'
+      else
+        here_text = 'this coordinator\'s store: nothing to release (' ..
+          tostring(here_problem and here_problem.error or 'no pin') .. ')'
+      end
+      -- 2. the node's own store, through the capability the node serves. A release that does not arrive is
+      -- reported as exactly that; the message never says the node may move when it may not.
+      local peer = nodes.remote_call(selector, M.CAPABILITY, { action = 'unpin', reason = reason })
+      local peer_text, peer_ok
+      if type(peer) ~= 'table' then
+        peer_ok = false
+        peer_text = 'the node did NOT answer, so its own pin is still in force'
+      elseif peer.error then
+        peer_ok = false
+        peer_text = 'the node refused (' .. tostring(peer.error) .. ')' ..
+          (peer.message and (' - ' .. tostring(peer.message)) or '') .. ', so its own pin is still in force'
+      elseif peer.released == true then
+        peer_ok = true
+        peer_text = 'the node\'s own store: ' .. tostring(peer.message or 'released')
+      else
+        peer_ok = true
+        peer_text = 'the node\'s own store: nothing to release (' .. tostring(peer.status or 'no pin') .. ')'
+      end
+      reply = { ok = peer_ok, status = peer_ok and 'unpinned' or 'partly_released', node = selector,
+        pin = here, peer = peer, reason = reason,
+        message = 'unpin ' .. tostring(selector) .. ': ' .. here_text .. '; ' .. peer_text,
+        summary = 'unpin ' .. tostring(selector) .. ': ' .. here_text .. '; ' .. peer_text }
+      if not peer_ok then
+        reply.error = 'node_pin_not_released'
+        reply.next = 'the node keeps refusing installs while its own pin stands: fix the path to it (wa nodes), or run wa update ' ..
+          tostring(selector) .. ' --unpin --reason <text> ON that node. This coordinator\'s copy was cleared; the node\'s was not.'
+      end
+    end
+  elseif options.pin == true then
+    -- Record-only: with --commit it records that commit, without one it records that nobody can name the
+    -- bytes yet (a binary older than --build-info). It never deploys - this is the form used to write a pin
+    -- for a move that already happened by hand, which is how the three 18/11 rollbacks were recorded.
+    local written, problem = pins.set({
+      node = selector, kind = 'pin',
+      commit = trim(options.commit),
+      -- A binary older than --build-info cannot name a commit, and the record it left beside itself is a
+      -- claim. The bytes can still be named by their sha256, so a pin that cannot name a commit names those.
+      binary_sha256 = trim(options.bytes),
+      reason = trim(options.reason),
+      until_ = trim(options.until_), await = trim(options.await),
+    })
+    if not written then
+      reply = { ok = false, node = selector, error = tostring(problem and problem.error or 'pin_not_written'),
+        observed = tostring(problem and problem.observed or '') }
+    else
+      reply = { ok = true, status = 'pinned', node = selector, pin = written,
+        message = 'recorded: ' .. tostring(selector) .. ' is pinned. Nothing was deployed and the node was not touched.',
+        summary = 'pinned ' .. tostring(selector) .. ': ' .. tostring(written.summary) }
+    end
+  elseif options.status then reply = M.status(nodes.remote_call, selector, options)
   else reply = M.request(nodes.remote_call, selector, options) end
   if as_json then
     print(json.encode(reply))
@@ -929,7 +1275,10 @@ function M.cli(argv)
       print('next: ask again with the same --id; queued is not installed')
     end
   else
-    print(M.summary(reply))
+    -- A reply that wrote a pin carries the pin's own sentence (lua/core/pins.lua's summary_line): "pinned X: ...
+    -- until ... (OVERDUE)" says more than the generic deploy summary, and the message says what did NOT happen.
+    print(reply.summary or M.summary(reply))
+    if reply.pin and reply.message then print(reply.message) end
     if reply.record then print('record ' .. tostring(reply.record) .. (options.session and (' for session ' .. options.session) or '')) end
     if reply.next then print('next: ' .. tostring(reply.next)) end
   end

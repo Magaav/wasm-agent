@@ -109,7 +109,7 @@ local exclusive,exclusive_result=run({query='read',names={'grep'}})
 check(refusal(exclusive,exclusive_result)=='tool_search_arguments_exclusive','query and names are mutually exclusive in a script')
 local nine={};for i=1,9 do nine[i]='read'..i end
 local nine_value,nine_result=run({names=nine})
-check(refusal(nine_value,nine_result)=='invalid_tool_search_names','more than 8 names is refused in a script')
+check(refusal(nine_value,nine_result)~='invalid_tool_search_names','more than 8 names is not refused in a script (no cap, 17/11)')
 local empty_value,empty_result=run({names={}})
 check(refusal(empty_value,empty_result)=='invalid_tool_search_names','an empty guest batch is refused')
 

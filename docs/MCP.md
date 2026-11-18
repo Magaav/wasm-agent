@@ -103,6 +103,126 @@ node is configured by hand. The catalog refreshes when a node is bound (the bind
 the cache and never waits on the network. A peer on an older build (no `federation` capability) is kept in
 the catalog with its reason and no tools. Guests neither list nor call. Proof: `scripts/test-federation.lua`.
 
+## Credentials by vault reference, and sharing a connector
+
+A stdio definition may name node-vault entries instead of a key file: `"vault_env": {"COLMEIO_TOKEN":
+"colmeio_cloud"}`. At launch the kernel opens the node's vault and puts each value in the client's
+environment (`rust/wa-capabilities/src/operations.rs`); the client hands it to the server under that name.
+The registry, the request file and every transcript hold the NAME only. Only the kernel's own MCP launch
+(`lua/core/mcp.lua`, `lua/core/mcp_session.lua`) may send `vault_env`: the `operation` tool and the HTTP
+operation route strip it, so a model cannot point a program of its own at an entry. A node whose vault does
+not open (`wa vault status`) refuses the launch with `vault_unavailable` rather than starting without the key.
+
+`/mcp <key> share <node> [replace]` copies a connector to a peer (`lua/core/federation.lua`, `import`): its
+definition, plus the script files a custom one runs (built-in scripts ship with every install and are never
+replaced). The peer writes them into its own script directory, moves every path from the sender's home to
+its own, and registers the definition **disabled**. No credential travels: the answer names the vault
+entries to store there (`wa vault set <entry> --stdin`), then `/mcp <key> probe` and `/mcp <key> on`.
+`/mcp`'s first page says which connectors are built-in (they run a shipped script, e.g. Gmail's
+`mcp-mail.mjs`) and which are custom.
+
+### What an approval covers, and what the kernel re-checks
+
+An operator's `/mcp <key> probe` (or `on`) is the approval, and it is a digest rather than a boolean since
+18/11 (form `mcp-vault-approval/v3` since 20/11): the row records a SHA-256 over the launch - the program,
+the directory it runs in, the plain (non-vault) environment it asks for, its arguments in order, **every
+file the launch can run or load**, and the vault environment names it asks for (`M.vault_manifest` in
+`lua/core/mcp.lua`). "Every file" means, and means only:
+
+* this node's MCP runtime in the script directory: the files that actually speak MCP for a connector;
+* the connector's own program, when it is not the platform's. A platform program is one under
+  `/usr/bin`, `/bin`, `/usr/lib`, `/nix/store`, `/snap`, `/System`... that is ROOT-OWNED and not
+  group/other-writable, with every directory above it the same; on Windows the prefix list alone is the
+  rule. `/usr/local/bin` and `/opt/homebrew` belong to the USER on macOS, so a homebrew interpreter is a
+  file this digest hashes;
+* **the interpreter the launch actually spawns** - `WA_NODE`, then the copy the installer provisions, then
+  `node` on `PATH`, resolved through the PROCESS `PATH` a spawned child inherits
+  (`host.executable_on_path`, the function the kernel starts a bare program name with) and through its
+  realpath - unless that file is the platform's own. That process is the one the vault values are put in, so it is a file the digest names or
+  there is no approval. `<data>/node` is also a `secret_guard` root, so an agent tool cannot replace it;
+* every argument, resolved the way node resolves it: from the connector's own directory when the definition
+  names one, and in node's own order - the exact name, `.js`, `.json`, `.node`, then the directory
+  (`package.json`'s `main`, then the index files). So `program /usr/bin/node, args ["server"], cwd
+  /home/u/conn` covers `/home/u/conn/server.js`, and `.mjs`/`.cjs` are not implied. The value of an
+  option (`--mode stdio`) is a value, not a file;
+* what those files run in turn: a JS `import` / `require` / `new Worker('literal')` of a local path, a
+  shell `source` / `. ` of a path, and a wrapper that RUNS another script (`exec ./inner.sh`,
+  `bash ./inner.sh`).
+
+What cannot be covered is REFUSED by name (`mcp_vault_code_not_covered`, whose `problems` list says why),
+never hashed and left open: an argument that may name a file and cannot be resolved (a file that is not
+there at approval time can be there at launch), a name MORE than one file answers to (which one runs would
+be node's priority, not the approval's), inline code (`node -e`, `sh -c`, `eval`, `new Function`,
+`require('vm')`/`runInThisContext`), a shell command substitution, an `exec` of a value, a connector's own
+`child_process` / `Worker` / `process.dlopen`, a package runner (`npx`, `uvx`...), an import of a
+bare package or by a computed name, and a PROGRAM that is an interpreter this digest cannot follow
+(`python*`, `perl`, `ruby`, `php`, `lua`, `deno`, `bun`, `java`...; `docs/VAULT.md` has the list). The node's own MCP runtime is
+exempt from the `child_process` rule and from nothing else: it IS the harness that spawns the connector,
+its bytes are in the digest, and the request seal below is what checks the program it spawns.
+`docs/VAULT.md` has the full list.
+
+Three checks use the digest, and either of the first two refuses:
+
+* the console gate recomputes it before a call, a probe or an enable - `mcp_vault_approval_stale` when a
+  script, an argument, the cwd or the environment changed after the operator approved it,
+  `mcp_vault_approval_missing` for a row approved before this form, `mcp_vault_code_not_covered` for a
+  connector whose code cannot be closed;
+* `rust/wa-capabilities/src/operations.rs` recomputes it from the bytes on disk immediately before it reads
+  a value - `vault_approval_required`, `vault_approval_digest_form`,
+  `vault_approval_unreadable:<path>`, `vault_approval_script_not_covered:<path>`,
+  `vault_approval_program_not_covered:<path>`, `vault_approval_program_not_absolute:<path>`,
+  `vault_approval_package_runner:<path>`, `vault_approval_path_not_absolute:<path>`,
+  `vault_approval_argument_unresolved:<value>`, `vault_approval_argument_not_covered:<path>`,
+  `vault_approval_argument_ambiguous:<value>`, `vault_approval_file_not_found:<value>`,
+  `vault_approval_inline_code:<flag>`, `vault_approval_interpreter_unfollowed:<program>`,
+  `vault_approval_interpreter_not_covered:<path>` or `vault_approval_mismatch`. Nothing is
+  launched and no value is read. The same files are hashed AGAIN once the launch has started
+  (`vault_approval_changed_since_check:<path>`): an operation whose bytes changed in between is killed
+  and its result is never returned - and the refusal says the value had already been put in the child's
+  environment at launch, so it is to be treated as exposed and rotated;
+* the request file the child reads is checked against the same approval and sealed (next section).
+
+Editing a connector's script, an argument, its cwd, the environment it asks for or the interpreter the
+node spawns after the approval therefore voids it, and so does a deploy that replaces the MCP runtime or an
+upgrade of the interpreter: a vault connector asks for the operator's probe/on again.
+
+**What the digest does not promise.** It is a statement about FILES at two moments - before the spawn and
+again just after it - not a sandbox. The hash and the child's `open(2)` are not one atomic step, so a
+rewrite that lands between them is caught only if it happens before the second hash, and the operation is
+then killed with whatever it already did; the window is milliseconds and it is not zero. A platform-owned
+interpreter is trusted by ownership (root-owned, not group/other-writable), never hashed, so a package
+manager that replaces it is outside the digest. On Windows there is no uid to read, so the prefix list
+alone decides what is the platform's. A binary's bytes are hashed and not parsed: what a compiled program
+does at run time is not priced here. And the agent and the node still run as one uid, so an approval ROW
+can still be forged by hand (the residual hole `docs/VAULT.md` states).
+
+### The request the child reads, and why it is sealed
+
+A request-scoped call is a file: `lua/core/mcp.lua` writes the whole launch to
+`<data>/mcp/requests/<uuid>.json`, and `scripts/mcp-client.mjs` spawns `server.program`,
+`server.args` and `server.cwd` FROM that file, with the vault values in its environment. A read session
+has the same shape (`<uuid>.seed.json`, `scripts/mcp-session.mjs`). The approval covers the CONNECTOR's
+command, so the kernel checks that the file names exactly it:
+
+* `seal_request` (kernel) refuses `vault_request_program_mismatch`, `vault_request_arguments_mismatch`,
+  `vault_request_cwd_mismatch`, `vault_request_environment_mismatch`,
+  `vault_request_file_not_covered:<path>`, `vault_request_program_not_covered:<path>`,
+  `vault_request_path_not_absolute`,
+  `vault_request_transport_not_checked`, `vault_request_unreadable` or `vault_request_unnamed`, and hands
+  the child the sha256 of the exact bytes it read (`WA_MCP_REQUEST_FILE`, `WA_MCP_REQUEST_SHA256`);
+* the child hashes the bytes IT read, once, and refuses `mcp_request_not_approved`,
+  `mcp_request_path_mismatch` or `mcp_request_changed_since_approval` before anything is spawned or
+  connected - so a rewrite between the kernel's check and the child's read is refused rather than run.
+
+`<data>/mcp/requests` is in `lua/core/secret_guard.lua`'s roots as well, with a note that says what it
+is instead of the credentials sentence, so the plain routes to it are refused to the agent's own tools.
+
+**What this does not fix.** The agent runs as the node's uid, so the row itself is still reachable by a
+route the tool-level guard does not see (a deliberately obfuscated shell write; the plain routes are
+refused, `lua/core/secret_guard.lua`) and an approval can be FORGED with a matching digest. The complete fix
+is an operator-SIGNED approval, verified against a key that does not live in the store under check (the
+separate-uid vault) - a follow-up, named in [VAULT.md](VAULT.md), not claimed here.
+
 ## WhatsApp first
 
 2026-10-17: [operator-directed management](WHATSAPP-OPERATOR-MANAGEMENT.md) was a

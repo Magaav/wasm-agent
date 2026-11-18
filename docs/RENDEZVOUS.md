@@ -128,6 +128,37 @@ re-registers on its next heartbeat, granted roles live in `network_roles` and bi
 tables - and administrators are never pruned. An administrator removes a row at once with
 `wa network forget <node-id>` (signed `forget-node`, refused for another admin). Throwaway nodes do not
 register at all: a deploy's scratch proof node runs without `WASM_AGENT_RENDEZVOUS`/`WASM_AGENT_RELAY`.
+**Removing a node for good** (a legacy or lost node, 17/11): `wa network remove <node-id>` on an administrator.
+The fleet key decides first - the node must already be revoked in the verified roster (`wa fleet revoke`,
+then `wa fleet push-roster` per node), or the command refuses with `not_revoked_in_roster`. Then, if the node
+is an operator, it is **retired** (`POST /operators` with `remove` and `retire: true`, signed by another
+administrator; never the caller itself, never the last environment operator; recorded in `retired_operators`
+and kept across restarts; vouching for the id again lifts it), and its row is forgotten. A retirement is
+**two administrators' decision** (18/11): the caller signs the request and a *different* administrator signs
+this exact retirement - target, caller, nonce and time - which the registry verifies itself
+(`approval_problem`). The roster's revocation gate above lives on the node that asks; this is the gate the
+registry can enforce for every caller, so one compromised or leaked administrator key can never empty the
+fleet's own operator list. A caller that is *not* one of the environment's operators needs an environment
+operator's signature for that reason, and a caller never counts as "who is left behind". The stored row
+carries the approval, and a row whose approval does not verify is ignored on start: the database alone
+retires nobody.
+
+A stored retirement is checked against the ENVIRONMENT, not against the row's own database (18/11): the
+approver must be one of `WASM_AGENT_NETWORK_ADMINS`, its public key must be the one
+`WASM_AGENT_NETWORK_ADMIN_KEYS` names for it (`<node-id>=<hex public key>`, comma-separated), and the
+approval's timestamp must be inside the same 900 s window of the retirement's own `retired_at`. Before
+that, the approver's key came from the `nodes` table — the same database the row lives in — so anyone who
+could write the registry could retire an environment operator by putting their own key under an
+administrator's id. With `WASM_AGENT_NETWORK_ADMIN_KEYS` unset, no stored approval can be verified and no
+retirement is applied (the log says so once at start): the safe direction, because the point of the proof
+is that a row alone retires nobody. An upgrade therefore needs the key list in the registry's environment
+file beside the admin ids. The operator collects the second signature on another administrator node:
+`wa network approve <node-id> --for <asking-node-id> --nonce <nonce>` prints it, and
+`wa network remove <node-id> --nonce <nonce> --approval '<json>'` sends it. The unit file's
+`WASM_AGENT_NETWORK_ADMINS` stays the root of trust - a retirement only subtracts - so no hand edit of
+`managed.conf` and no restart are needed. Bound nodes that pinned the retired operator keep working: their
+admission does not count an operator the verified roster revoked as a lost vouch (`lua/core/binding.lua`).
+
 Before this, only the key holder could `/forget` its own row, so every deleted worktree, scratch home and
 reinstall left a row nobody could remove (26 rows for 4 real nodes, 04/11).
 

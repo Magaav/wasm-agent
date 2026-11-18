@@ -162,7 +162,23 @@ for crate in rust/components/*/; do
   if grep -q '"needs_wasi_sdk"[[:space:]]*:[[:space:]]*true' "$crate/manifest.json" && [ -z "${WASI_SYSROOT:-}" ]; then
     echo "error: component $name needs wasi-sdk (C inside); set WASI_SDK=<dir>" >&2; exit 2
   fi
-  cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >/dev/null
+  # THE BUILD, timed. A component is a module because a change to it compiles and ships on
+  # its own (ARCHITECTURE.md, "Modules over the monolith"), and the fast path prints what each of
+  # these cost. The compiler output is kept so the failure path can show it and so the units it
+  # built can be counted: 0 units is a warm cache hit, not a fast build.
+  build_log=$(mktemp "${TMPDIR:-/tmp}/wa-component-build-XXXXXX")
+  build_started=$(date +%s%N)
+  if ! cargo build --manifest-path "$crate/Cargo.toml" --target "$TARGET" --release ${WA_COMPONENTS_OFFLINE:+--offline} >"$build_log" 2>&1; then
+    cat "$build_log" >&2; rm -f "$build_log"
+    echo "error: component $name did not compile" >&2
+    exit 1
+  fi
+  build_ms=$(( ($(date +%s%N)-build_started)/1000000 ))
+  build_units=$(grep -c "^ *Compiling " "$build_log" 2>/dev/null) || build_units=0
+  rm -f "$build_log"
+  # One line per component for a caller that wants the numbers (scripts/fast.sh summary):
+  # name, milliseconds, units compiled. /dev/null when nobody asked, so this changes nothing else.
+  printf "%s\t%s\t%s\n" "$name" "$build_ms" "$build_units" >> "${WA_COMPONENT_BUILD_TIMINGS:-/dev/null}" 2>/dev/null || true
   # Cargo's artifact directory: `CARGO_TARGET_DIR` when the caller set one (the fast path, the job
   # harness), else THIS tree's child of the node's one build root (`scripts/lib/build-target.sh`,
   # docs/ONEROOT.md) - never a `target/` beside each component crate, which is one more folder per

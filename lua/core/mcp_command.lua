@@ -50,6 +50,19 @@ end
 -- One registry entry, with every tool it knows about and whether the model is offered it right now.
 -- A tool the operator approved but the last probe did not list is shown too: it is the reason `enable`
 -- refuses (`mcp_approved_tool_missing`), and hiding it would make that refusal look arbitrary.
+-- Built-in or custom (operator 17/11: "/mcp should say if that mcp is native to our agent or added"): a
+-- registry row whose program runs one of the scripts this agent ships (`mcp.RUNTIME`, the files every install
+-- carries) is built-in - Gmail is `mcp-mail.mjs` - and anything else was added on this node.
+local function origin_of(mcp, definition)
+  local shipped = {}
+  for _, file in ipairs(mcp.RUNTIME or {}) do shipped[file] = true end
+  for _, arg in ipairs(type(definition.args) == 'table' and definition.args or {}) do
+    local base = tostring(arg):match('([^/\\]+)$')
+    if base and shipped[base] then return 'built-in' end
+  end
+  return 'custom'
+end
+
 local function local_connector(mcp, server, revision)
   local state, error = local_state(server)
   local definition = server.definition or {}
@@ -133,7 +146,8 @@ local function local_connector(mcp, server, revision)
     -- What it is and where it runs, as columns a reader scans (13/11): `type` is the kind of service,
     -- `node` is its bare home, and `node_phrase` is that home as a clause. Nothing is grouped by node any
     -- more - the node is a column, so a flat list sorted by it stays a flat list.
-    type = 'MCP', node = 'this node', node_phrase = 'on this node',
+    type = origin_of(mcp, definition) .. ' MCP', origin = origin_of(mcp, definition),
+    node = 'this node', node_phrase = 'on this node',
     where = 'this node', scope = 'local', transport = definition.transport or 'unknown',
     state = state, error = error, enabled = server.enabled == true,
     tool_count = published, approved = #sorted_keys(approved), discovered = #(server.probe and server.probe.tools or {}),
@@ -182,7 +196,9 @@ local function peer_connector(peer, connector, exported)
   table.sort(tools, function(a, b) return a.name < b.name end)
   return {
     key = tostring(peer.name) .. ':' .. tostring(connector.id), id = connector.id, peer = peer.name,
-    type = 'MCP', node = tostring(peer.name), node_phrase = 'on ' .. tostring(peer.name),
+    -- A peer on this build says built-in or custom itself; an older one does not, and stays plain `MCP`.
+    type = connector.origin and (tostring(connector.origin) .. ' MCP') or 'MCP', origin = connector.origin,
+    node = tostring(peer.name), node_phrase = 'on ' .. tostring(peer.name),
     node_id = peer.node_id, where = tostring(peer.name), scope = 'peer',
     name = connector.name or connector.id, transport = connector.transport or 'unknown',
     state = connector.state or (connector.enabled and 'enabled' or 'disabled'), error = connector.error,
@@ -209,7 +225,7 @@ function M.peer_connectors(opts)
     return federation().catalog()
   end)
   if not ok or type(cache) ~= 'table' then return {}, { ok = false, error = 'federation_cache_unreadable' } end
-  local list = {}
+  local list, silent = {}, {}
   local peers = {}
   for _, peer in pairs(cache.peers or {}) do peers[#peers + 1] = peer end
   table.sort(peers, function(a, b) return tostring(a.name) < tostring(b.name) end)
@@ -274,18 +290,13 @@ function M.peer_connectors(opts)
         }
       end
     elseif #(peer.tools or {}) == 0 and peer.error then
-      list[#list + 1] = {
-        key = tostring(peer.name) .. ':*', id = '*', peer = peer.name, node_id = peer.node_id,
-        where = tostring(peer.name), scope = 'peer', name = tostring(peer.name) .. ' (no answer)',
-        transport = 'unknown', state = 'failing', error = tostring(peer.error), enabled = false,
-        tool_count = 0, approved = 0, discovered = 0, tools = {},
-        policy = { tier = 'mcp', managed_by = tostring(peer.name),
-          approval = 'unknown: the peer answered with an error', note = tostring(peer.error) },
-        note = 'connector_registry_not_reported',
-      }
+      -- A node that did not answer is not a connector (operator 17/11: "avell listed in the mcp" - a
+      -- restart during the refresh drew it as a failing row). It is named once under the list instead.
+      silent[#silent + 1] = tostring(peer.name)
     end
   end
-  return list, { ok = true, at = cache.at }
+  table.sort(silent)
+  return list, { ok = true, at = cache.at, silent = silent }
 end
 
 -- The list `/mcp` prints and the window renders. `read_only` is the guest's answer: the same inventory,
@@ -325,7 +336,7 @@ function M.list(ctx, opts)
   return {
     ok = true, connectors = connectors, read_only = read_only, role = role,
     revision = registry and registry.revision, registry_error = registry and registry.error,
-    peers_at = peers_meta and peers_meta.at,
+    peers_at = peers_meta and peers_meta.at, peers_silent = peers_meta and peers_meta.silent,
     counts = { connectors = #connectors, services = #connectors, built_in = built_in,
       mcp = #connectors - built_in, here = #local_list, from_peers = #peer_list,
       enabled = enabled, tools = tools },
@@ -547,7 +558,10 @@ function M.tools_page(entry, links, back)
   local options = {}
   for index, tool in ipairs(entry.tools or {}) do
     options[#options + 1] = {
-      label = tostring(tool.name),
+      -- The tool's own name (`colmeio.cloud.attachments.delete`), not the model-facing one: that one is
+      -- the name cut to 24 characters plus 8 hex of sha256(server+tool) so cut names cannot collide,
+      -- and three different tools read the same up to the hash (17/11). The tool page shows both.
+      label = tostring(tool.tool or tool.name),
       hint = string.format('%s \u{b7} %s', tostring(tool.approval or 'unknown'),
         tool.published and 'callable now' or 'not callable now'),
       page = links.tool[index],
@@ -653,6 +667,12 @@ function M.views(view, opts)
   pages[1] = list
   if #(view.connectors or {}) == 0 then
     list.lines[#list.lines + 1] = 'none: no service is registered on this node, and no peer exports one.'
+  end
+  -- Peers that did not answer the last refresh: one line, not rows posing as connectors.
+  if type(view.peers_silent) == 'table' and #view.peers_silent > 0 then
+    local age = tonumber(view.peers_at) and math.max(0, math.floor(((tonumber(host.now()) or 0) - view.peers_at) / 60)) or nil
+    list.lines[#list.lines + 1] = 'peers not answering: ' .. table.concat(view.peers_silent, ', ')
+      .. (age and string.format(' (last refresh %d min ago)', age) or '')
   end
   -- A panel stack has a cap (`max_pages`, the client's MAX_VIEWS = 64 for the mid-run snapshot): over it,
   -- the per-tool pages go and each Tools page still names every tool (17/11, work: 72 panels were refused

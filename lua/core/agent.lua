@@ -25,6 +25,9 @@ local hooks = dofile("lua/core/hooks.lua")
 local done_gate = dofile("lua/core/done_gate.lua")
 local progress_guard = dofile("lua/core/progress_guard.lua")
 local run_failure = dofile("lua/core/run_failure.lua")
+-- A tool result is a fact the harness produces (18/11, session 100c54ab): the detector that keeps a
+-- message imitating one from becoming the answer.
+local fake_answer = dofile("lua/core/fake_answer.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
 local raw_code = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
 
@@ -1826,6 +1829,10 @@ function M:run_body(text, images)
   -- with a compacted context, and a second failure is surfaced rather than looped.
   self.overflow_recovery_attempted = false
   self.stream_cuts = 0 -- re-drives of a cut stream in this run (provider.stream_cut_retries)
+  -- The imitation streak is per run, and a run is one turn (18/11 round 2, finding 2): a counter that
+  -- survived its run failed a model for imitations it had already answered for, on evidence that only
+  -- existed in the previous turn.
+  self.fake_answer_repeats = 0
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   -- A full disk fails in the middle of a turn (SQLITE_FULL, a torn write). Say so before it does, but do
@@ -2204,6 +2211,10 @@ function M:run_body(text, images)
     return #rows
   end
   local round = 0
+  -- Between the step that was a fabrication and the turn row that records it: the notice goes into the
+  -- ledger AFTER the stripped message it is about (18/11 round 2, finding 4), and the removed markup
+  -- rides with that row as the evidence (finding 3).
+  local fake_notice, fabricated_step
   while true do
     round = round + 1
     -- The deploy pause (lua/core/deploy_pause.lua). This is the step boundary: between decisions,
@@ -2326,11 +2337,26 @@ function M:run_body(text, images)
       local retry_child = child_status()
       if retry_child and retry_child.cancelled then result = "subagent_cancelled"; break end
       response_attempt = response_attempt + 1
-      self.emit({ type = "status", text = "provider did not start a response in time - retrying " ..
-        tostring(response_attempt) .. "/" .. tostring(response_retries) })
+      -- The replay waits (18/11): it used to leave immediately, hit the same dead gateway within
+      -- milliseconds and read as if nothing had been retried at all. The wait is said in the run, so a
+      -- reader sees the retry happening instead of only its outcome.
+      local wait_ms = provider.response_timeout_backoff_ms(response_attempt)
+      self.emit({ type = "status", text = string.format(
+        "provider did not start a response in time - retrying in %ds (%d/%d)",
+        math.floor(wait_ms / 1000), response_attempt, response_retries) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
-        reason="receive_response_timeout",attempt=response_attempt,limit=response_retries,
+        reason="receive_response_timeout",attempt=response_attempt,limit=response_retries,wait_ms=wait_ms,
+        deadline_seconds=provider.first_response_seconds(context_tokens),
         context_estimate=context_tokens})
+      local waited_ms = 0
+      while waited_ms < wait_ms do
+        if foreground_cancelled() then result = "run_cancelled" break end
+        local retry_child = child_status()
+        if retry_child and retry_child.cancelled then result = "subagent_cancelled" break end
+        host.sleep(math.min(250, wait_ms - waited_ms))
+        waited_ms = waited_ms + 250
+      end
+      if result == "run_cancelled" or result == "subagent_cancelled" then break end
       if consume_steering()>0 then
         context_tokens,context_source=self:context_tokens(messages)
         if capacity>0 and context_tokens>=capacity then error('context_overflow: steering exceeds capacity; transcript preserved') end
@@ -2340,6 +2366,12 @@ function M:run_body(text, images)
       end
       call_opts.attempt = response_attempt + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+    end
+    -- Bounded and COUNTED: a stall that survived its replays says so in the failure itself, instead of
+    -- looking like the first stalled request of the run.
+    if not ok and response_attempt > 0 and provider.is_response_timeout(tostring(result)) then
+      result = tostring(result) .. string.format(
+        " [first-response deadline expired again after %d bounded replay(s) of the same request]", response_attempt)
     end
     -- Rate limits, 5xx, dropped connections and streams that died before showing anything are
     -- replayed with exponential backoff. A stream that ended early *after* visible text or with tool
@@ -2729,6 +2761,81 @@ function M:run_body(text, images)
     messages[#messages + 1] = assistant
 
     if #calls == 0 then
+      -- A tool result is a fact the harness produces, never text a model writes (18/11, session
+      -- 100c54ab: three times in one session the turn's *answer* was markup imitating one). A message
+      -- that contains that markup is not an answer: the markup is stripped from the recorded content,
+      -- the model is handed its next step, and the event is recorded. A model that repeats it
+      -- MAX_REPEATS times in a row fails the turn BY NAME instead of "answering" with the fabrication
+      -- (lua/core/fake_answer.lua).
+      local fabricated = fake_answer.scan(result.content)
+      if fabricated then
+        self.fake_answer_repeats = (self.fake_answer_repeats or 0) + 1
+        local repeats = self.fake_answer_repeats
+        -- The evidence is the markup itself, verbatim (18/11 round 2, finding 3): the event and the
+        -- step's trace entry carry what was taken out of the message, not only a bounded quote, so a
+        -- reader of the run record can see exactly what the model wrote. Bounded at the source and
+        -- counted rather than dropped (18/11 round 3, item 6): the row says how many bytes the whole
+        -- markup had even when only the first of them are kept.
+        local removed = fabricated.removed or ""
+        local removed_bytes = tonumber(fabricated.removed_bytes) or #removed
+        local dropped = tonumber(fabricated.removed_dropped_bytes) or 0
+        telemetry.event(self.session_id, self.run_id, "", "fake_tool_result", "step", {
+          round = round, repeats = repeats, limit = fake_answer.MAX_REPEATS,
+          tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
+          excerpt = fabricated.excerpt:sub(1, 200), removed = removed,
+          removed_count = #(fabricated.removed_blocks or {}),
+          removed_bytes = removed_bytes, removed_dropped_bytes = dropped, tool = fabricated.tool })
+        trace[#trace + 1] = { kind = "fake_tool_result", ok = false, round = round, repeats = repeats,
+          tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
+          excerpt = fabricated.excerpt:sub(1, 200), removed = removed,
+          removed_bytes = removed_bytes, removed_dropped_bytes = dropped, tool = fabricated.tool }
+        result.content = fabricated.stripped
+        reply = ""
+        decision_phase = "fake_tool_result"
+        self.emit({ type = "status", text = string.format(
+          "the model wrote a tool result instead of calling one (%s) - that is not an answer; continuing (%d/%d)",
+          table.concat(fabricated.tags, ", "), repeats, fake_answer.MAX_REPEATS) })
+        if repeats >= fake_answer.MAX_REPEATS then
+          self.pending_failure = { trace = trace, round = round, attempts = repeats,
+            changes = changeset.summary(self.changes) }
+          telemetry.event(self.session_id, self.run_id, "", "fake_tool_result", "end",
+            { outcome = "failed", repeats = repeats })
+          error(fake_answer.failure(repeats), 0)
+        end
+        -- How THIS session can call the tool the markup named: the same spelling rule the prompt uses
+        -- (tool_ref above), read from this request's own tool list and this role's catalogue. nil when
+        -- the markup names no tool we can place, and the notice then says "the tool" instead of
+        -- naming a door that is not here (18/11 round 2, finding 8).
+        local ref
+        if fabricated.tool then
+          local declared, available = {}, {}
+          for _, schema in ipairs(self.tool_list or {}) do
+            if type(schema) == "table" and type(schema["function"]) == "table" then
+              declared[schema["function"].name] = true
+            end
+          end
+          for _, schema in ipairs(tools.all(self.role) or {}) do
+            if type(schema) == "table" and type(schema["function"]) == "table" then
+              available[schema["function"].name] = true
+            end
+          end
+          ref = tool_ref(fabricated.tool, declared, available)
+        end
+        local notice = fake_answer.notice(fabricated, ref)
+        -- The notice is a durable row, not only a transient message: a reader who opens this session
+        -- later (or a resumed run that rebuilds its context from the ledger) must see why the run
+        -- continued past the model's own stop, and the phase marks it as the harness speaking. It is
+        -- written with the assistant row it is about, not before it (finding 4).
+        fake_notice = notice
+        -- This step's row carries the run trace, because that is where the removed markup is kept
+        -- verbatim (finding 3): a normal step does not store its trace, and this one must.
+        fabricated_step = true
+        messages[#messages + 1] = { role = "user", content = notice }
+        goto after_answer
+      end
+      -- NOT reset here: a round that is neither an answer nor a detected fake (a steering continuation,
+      -- a step the provider re-drove) must not hand the counter back, or a model that alternates markers
+      -- would never reach the bound. The counter is per run, and a run is one turn.
       reply = result.content or ""
       reply_reasoning = result.reasoning or ""
       reply_reasoning_items = result.reasoning_items
@@ -2901,11 +3008,23 @@ function M:run_body(text, images)
         end
       end
     end
+    ::after_answer::
     record_turn(self, {
       id = assistant_id, role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
       reasoning=result.reasoning or "", phase=decision_phase ~= "" and decision_phase or result.final_phase or "",
       reasoning_items=result.reasoning_items,
+      -- The removed markup rides in this row's trace, verbatim: messages.trace and the journal row
+      -- both carry it, so the evidence is in the run record and not only in the status line
+      -- (18/11 round 2, finding 3). A column of its own would be a schema change for one field.
+      trace = fabricated_step and trace or nil,
     })
+    fabricated_step = nil
+    -- The harness notice about that row, in the order it happened: the stripped message first, then
+    -- the sentence the model was handed (18/11 round 2, finding 4).
+    if fake_notice then
+      record_turn(self, { role = "user", content = fake_notice, phase = fake_answer.CODE, debug = self.debug })
+      fake_notice = nil
+    end
     -- The same classification, live. The window has already drawn this step's streamed text in the
     -- answer's place; this tells it to move that text into the run topic that holds the decision
     -- rows, at the moment the step's completion is known - not a round later, and not only when the
@@ -2988,10 +3107,16 @@ function M:run_body(text, images)
           batching_guidance=batching_mode,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
       pcall(memory.presence_beat, self.session_id)
+      -- Was the tool actually reached? A call the harness refused before dispatch (a repair, a fence,
+      -- a steering veto) did not run, so it does not end the imitation streak below.
+      local dispatched = false
       local handled, output = pcall(function() if name_error then return name_error end
         if raw_refusal then return raw_refusal end
         if argument_error then return argument_error end
         if parallel_op then
+          -- The batch was launched, so this call really ran: it ends the imitation streak like any
+          -- other (18/11 round 2, finding 2).
+          dispatched = true
           if parallel_op.operation_id then
             return tools.await_parallel_bash(parallel_op.operation_id, self.role, dispatch_ctx)
           end
@@ -3024,9 +3149,15 @@ function M:run_body(text, images)
         -- The name the model called, so the dispatcher can tell the model's own call from the inner calls
         -- a facade (tool_call) makes with this same ctx (lua/core/tools.lua, one pathway).
         dispatch_ctx.tool_call_name=function_.name
+        dispatched = true
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
       host.beat()
+      if dispatched then
+        -- A real tool call is the model doing what the notice asked it to do, so the imitation streak
+        -- ends here instead of counting against the next step (18/11 round 2, finding 2).
+        self.fake_answer_repeats = 0
+      end
       if not handled then
         -- A raise is not a refusal with a code: the message carries the tool's own words and names the
         -- line that raised (refusal.lua renders it as a cause, never as an unknown code).

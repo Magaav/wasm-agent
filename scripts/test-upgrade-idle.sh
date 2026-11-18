@@ -22,12 +22,23 @@ case "$(uname -s 2>/dev/null)" in
   *) WA_NAME=wa ;;
 esac
 NEW="$WORK/candidate-${WA_NAME}"
-printf '#!/bin/sh\nexit 0\n' > "$NEW"
+# The candidate NAMES ITS OWN BUILD (round-3 item 8: upgrade.sh asks the candidate's bytes, not the checkout's
+# HEAD - and a candidate that cannot answer is refused as candidate_commit_unknown, before it waits for
+# anything). A stub that only exits 0 would be refused here, which is the rule working.
+cat > "$NEW" <<'WASH'
+#!/bin/sh
+case "$1" in
+  --build-info) printf 'version=9.9.9\ncommit=1111111111111111111111111111111111111111\ntree=2222222222222222222222222222222222222222\ndirty=false\nsource=git\nbuilt_epoch=1795000000\nancestors=1\nancestors_complete=true\n' ;;
+  --version) echo 'wasm-agent 9.9.9' ;;
+  *) exit 0 ;;
+esac
+WASH
 chmod +x "$NEW"
 cp -f "$NEW" "$INST/$WA_NAME"
 HASH="$(sha256sum < "$NEW" | awk '{print $1}')"
-# `commit=unknown` skips the downgrade guard, which cannot compare against an unknown commit.
-printf 'commit=unknown\nsource_commit_hint=unknown\nsha256=%s\n' "$HASH" > "$INST/installed.txt"
+# The record is the binary's own answer (and its sha256 is the binary's), so the running commit IS known: the
+# candidate is the same commit, so no ancestry question is asked and the wait is reached immediately.
+printf 'commit=1111111111111111111111111111111111111111\ntree=2222222222222222222222222222222222222222\ndirty=false\nsha256=%s\n' "$HASH" > "$INST/installed.txt"
 # The proof cache is the candidate's hash: a build that already answered is not proved again, so the
 # wait is reached immediately instead of after a scratch node starts.
 printf '%s\n' "$HASH" > "$INST/.upgrade-proof"

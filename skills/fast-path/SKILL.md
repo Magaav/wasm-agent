@@ -37,7 +37,16 @@ the round changed - so a Lua-only landing pays for its own rows instead of all o
 the rows the runner's own inventory lists (`wa_fast_row_candidates`), and a row `scripts/fast-path.exclude`
 declares not run is reported as `not a gate row: <reason>`, never requested. A narrowed run prints how many
 rows it ran and how many it did not, so it never reads like a full one; `wa land --full` writes no rows file and
-runs the whole suite.
+runs the whole suite, with `WA_FAST_ROWS` set to an EMPTY value so one inherited from the environment cannot
+narrow it.
+
+The list is proved in the merged tree, where this runner actually runs: `wa land` plans before it merges, from
+the operator's checkout, so the gate re-reads `wa_fast_row_candidates` in the tree it is about to test and asks
+for the plan's rows plus every changed `scripts/test-*.lua` that tree has - a branch's own new test therefore
+runs - while a row the tree's `scripts/fast-path.exclude` now excludes is dropped by name in the gate's evidence
+instead of being requested (`fast_narrow:unknown_row`). A `git diff` that fails is not a round that changed
+nothing: the list carries a note naming the branch whose diff could not be read, the plan takes the full path, and
+no rows file is written - the whole suite runs, and the evidence says why.
 
 A pass with a `SKIP` row is reported as skipped, never as a run that tested it: the reasons are
 printed under the counts. A machine-only failure (`cannot fork`, exit 125/126) is retried once,

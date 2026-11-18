@@ -757,11 +757,13 @@ editor_notice        device
 enqueue_completion   writes files
 exec                 runs a process
 exec_timeout         read-only
+executable_on_path   read-only
 fabric_admin         writes files
 fabric_call          writes files
 fabric_deliver       read-only
 fabric_pending       read-only
 features             read-only
+file_sha256          read-only
 getenv               read-only
 graph_caps           read-only
 graph_explain        read-only
@@ -787,13 +789,16 @@ input_commands       device
 input_editor         device
 input_held           device
 input_idle           device
+input_image          device
 input_start          device
 input_stop           device
 input_take           device
 invoke               runs a process
 isatty               device
 jobs                 writes files
+keybindings          read-only
 list_dir             read-only
+link_span            read-only
 local_view           device
 log                  device
 mark_db_ready        writes files
@@ -805,6 +810,7 @@ node_identity        read-only
 now                  read-only
 operation            runs a process
 panel                device
+path_facts           read-only
 path_kind            read-only
 paths                read-only
 platform             read-only
@@ -840,6 +846,7 @@ terminal_write       device
 ticker               device
 transcript_block     device
 transcript_copy      device
+transcript_copy_first device
 transcript_expand    device
 transcript_fold      device
 transcript_head      device

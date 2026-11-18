@@ -280,16 +280,37 @@ fast_binary_build() {
   . "$ROOT/scripts/lib/build-target.sh" || { FAST_BIN_WHY="$FAST_BIN_WHY; the node's build resolver (scripts/lib/build-target.sh) cannot be loaded"; return 1; }
   log=$(mktemp "${TMPDIR:-/tmp}/wa-fast-build-XXXXXX" 2>/dev/null) || log=/dev/null
   echo "fast: building this tree's binary (cargo build --release --offline, target $(fast_binary_target_dir))${assets:+ with code-mode assets}"
+  # IS THIS COMMIT ON A BRANCH ANYBODY ELSE CAN SEE? Asked of the remote (scripts/lib/shared-commit.sh), not of
+  # this clone's remote-tracking refs, and RECORDED IN THE BUILD rather than refused: this is the day-to-day
+  # developer build, and this repository lands a change AFTER building it, so refusing here would refuse every
+  # unlanded branch - including the one being landed. What must not happen is that the fact disappears: the
+  # binary carries source_shared=yes|no|unknown (rust/wa-host/build.rs), and the paths that PUBLISH or INSTALL
+  # refuse an artifact that says no (scripts/publish-node-binaries.sh refuses to publish one at all).
+  local fast_shared_branches='' fast_shared_rc=0
+  FAST_BIN_SHARED=unknown
+  if [ -f "$ROOT/scripts/lib/shared-commit.sh" ]; then
+    . "$ROOT/scripts/lib/shared-commit.sh"
+    fast_shared_branches="$(wa_commit_shared "$ROOT" "$(git rev-parse HEAD)" origin)" || fast_shared_rc=$?
+    case "$fast_shared_rc" in
+      0) FAST_BIN_SHARED=yes
+         echo "fast: $(git rev-parse --short=12 HEAD) is on a pushed branch: $(printf '%s' "$fast_shared_branches" | head -1)" ;;
+      1) FAST_BIN_SHARED=no
+         echo "fast: $(git rev-parse --short=12 HEAD) is on NO branch the remote has: this binary records source_shared=no and cannot be published (scripts/publish-node-binaries.sh refuses it)" ;;
+      *) echo "fast: could not ask the remote whether $(git rev-parse --short=12 HEAD) is on a branch it has; the binary records source_shared=unknown" ;;
+    esac
+  fi
   if [ -n "$assets" ]; then
     wa_build_run "$ROOT" env \
       WA_BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)" \
       WA_BUILD_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
+      WA_BUILD_SOURCE_SHARED="${FAST_BIN_SHARED:-unknown}" \
       WA_CODEMODE_BUILD_ASSETS="$assets" \
       cargo build --release --offline --manifest-path rust/Cargo.toml > "$log" 2>&1
   else
     wa_build_run "$ROOT" env \
       WA_BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)" \
       WA_BUILD_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
+      WA_BUILD_SOURCE_SHARED="${FAST_BIN_SHARED:-unknown}" \
       WA_CODEMODE_ALLOW_EMPTY=1 \
       cargo build --release --offline --manifest-path rust/Cargo.toml > "$log" 2>&1
   fi

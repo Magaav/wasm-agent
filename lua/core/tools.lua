@@ -349,7 +349,7 @@ M.shared = {
     source = { type = "string", maxLength = 200, description = "add: where the lesson came from (a node name, an incident id)." } }, { "action" }),
   schema("fleetview", "One read-only call for the whole fabric: every node's online/last_seen, version/commit, health, disk, components and the features they carry, running operations and jobs, and recent incidents from telemetry and lessons. Unknown facts are named in each node's `missing` and left absent - never a zero - so read `missing` before concluding a node is healthy. Changes nothing.", {
     lessons = { type = "boolean", description = "Attach matching lessons to the nodes they name (default true)." } }),
-  schema('tool_search','Find tools by keyword, or load an exact list: `query` for keywords, or `names` to load several known tools at once with names=[...] (1-8 exact tool names; query="select:a,b,c" is the same request). Each permitted name is loaded and pinned like a keyword hit; a name that is unknown or not permitted comes back in `missing` with the nearest permitted names instead. A tool you already know needs no search: call it with tool_call.',{query={type='string',maxLength=256,description='Keywords. Or "select:a,b,c" - the batch spelling of names.'},names={type='array',minItems=1,maxItems=8,items={type='string',maxLength=256},description='Exact tool names to load in one atomic batch (limit does not truncate it); exclusive with query.'},limit={type='integer',minimum=1,maximum=8}},{}),
+  schema('tool_search','Find tools by keyword, or load an exact list: `query` for keywords, or `names` to load several known tools at once with names=[...] (exact tool names, as many as you need; query="select:a,b,c" is the same request). Each permitted name is loaded and pinned like a keyword hit; a name that is unknown or not permitted comes back in `missing` with the nearest permitted names instead. A tool you already know needs no search: call it with tool_call.',{query={type='string',maxLength=256,description='Keywords. Or "select:a,b,c" - the batch spelling of names.'},names={type='array',minItems=1,items={type='string',maxLength=256},description='Exact tool names to load in one atomic batch (limit does not truncate it); exclusive with query.'},limit={type='integer',minimum=1,maximum=8}},{}),
   schema('tool_call','Call any permitted tool by `name` with `arguments`. checked=true validates the arguments against its schema first. `calls` runs 1-8 known independent pure reads in one call (serially); `cursor` pages a large batch result.',{name={type='string'},arguments={type='object'},checked={type='boolean'},calls={type='array',minItems=1,maxItems=8,items={type='object',properties={name={type='string'},arguments={type='object'}},required={'name','arguments'}}},cursor={type='string'}}),
   schema("subagent", "Start and supervise a child agent on a bounded task, with its own context, transcript and a restricted tool profile (`profiles` lists approved ones; a profile only narrows your tools). `start` returns a receipt, not a result: collect with `await` (one bounded wait) or `status`/`result`, stop with `cancel`. Reuse the exact recorded subagent/dispatch or native attempt ID for `status`: one direct lookup, not `list` rediscovery. Never guess or strip a `child:` session name into an ID; if the ID is missing, use `lookup_session` with its `conversation_id`. A placed task in state `unknown` may or may not have arrived: only `reconcile` may retry or cancel it. `session` reads the child's conversation; `message` queues its next turn. `message`, `steer` and `steer_session` require a non-empty `idempotency_key`; reuse it only for the same request.", {
     action = { type = "string", enum = { "start", "status", "list", "lookup_session", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "events", "fleet" } },
@@ -430,7 +430,8 @@ M.admin = {
     command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. `await` on work adopted by foreground bash defaults to the shell command result after output reaches EOF or is idle for 100ms; descendants remain supervised and may still produce output. Set wait_for=`settled` to await their full operation. Explicitly started operations always await full settlement. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
-    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
+    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel", "background"},
+      description = "background only lowers a running operation's CPU priority once nobody is waiting for it; code mode does that by itself when a call goes pending." },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
@@ -1445,6 +1446,9 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   end
   if name=='mcp' then
     local control={role=role,subagent=ctx.subagent,session_id=ctx.session_id,cwd=session_cwd(memory,ctx)}
+    if (args.action==nil or args.action=='list') and (role=='master' or role=='admin') and not ctx.subagent then
+      return mcp.summary(args.id)
+    end
     return mcp.control(args,control)
   end
   if name=='services' then
@@ -1543,7 +1547,17 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
     args.owner = ctx.session_id or user_id
+    -- A vault entry reaches a child only through the kernel's own MCP launch (lua/core/mcp.lua), never a
+    -- tool call: a model that could name an entry here could start a program that prints it. The
+    -- approval that goes with it (docs/VAULT.md) is stripped for the same reason - it is the operator's
+    -- record, not a field a caller supplies.
+    args.vault_env = nil
+    args.vault_approval = nil
     if args.action == "start" then
+      -- An explicit start is backgrounded by definition - the caller gets a receipt and moves on - so
+      -- it runs at low CPU priority unless a caller that DOES wait for a while says otherwise
+      -- (18/11 round 2, finding 9).
+      if args.background == nil then args.background = true end
       args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
       if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end
       -- The same two walls `bash` has had since the 11/11 home wipe: the text is refused before
@@ -1743,7 +1757,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       -- model chose this call group; policy, session cwd and the commit review still run here.
       -- The `operation` start is this same bash call, not a second one: `same_call`.
       return M.dispatch(memory, "operation", { action = "start", command = args.command,
-        cwd = cwd, timeout_seconds = timeout }, role, ctx, launch_cwd(memory,ctx,requested_cwd), true)
+        cwd = cwd, timeout_seconds = timeout,
+        -- Low CPU priority is for work nobody is waiting for (18/11 round 2, finding 9): the code-mode
+        -- pending layer says whether this call is backgrounded, and a call the script is actively
+        -- awaiting keeps the node's own priority.
+        background = ctx.background_operation == true }, role, ctx, launch_cwd(memory,ctx,requested_cwd), true)
     end
     local provenance = launch_cwd(memory,ctx,requested_cwd)
     -- The name the reader knows this call by, for the session-status-content row while the command

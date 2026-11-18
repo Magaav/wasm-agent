@@ -905,13 +905,29 @@ end
 -- in minutes rather than after three long attempts (measured 10/11, session a073ee85: a 12-minute
 -- stall, three `timeout: receive response` failures, and an empty assistant row). 0 disables the
 -- per-call deadline and leaves the process-wide timeouts in charge.
-function M.first_response_seconds()
+--
+-- 18/11 (session 100c54ab): a flat 90 s was the wrong shape. The provider reads the prompt before it
+-- writes the first token, so the honest wait grows with the request: what is generous for a 4k-token
+-- request is a FALSE stall on a 200k-token one, and the run then died of a deadline this process had
+-- set too tight. The deadline is the base (90 s, or the operator's
+-- WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS) plus one second for every extra TOKENS_PER_SECOND of
+-- context past FREE_TOKENS, capped - so it scales with the request instead of being one number for
+-- every request, and a request that is genuinely dead still surfaces in minutes.
+M.FIRST_RESPONSE_BASE_SECONDS = 90
+M.FIRST_RESPONSE_CEILING_SECONDS = 300
+M.FIRST_RESPONSE_FREE_TOKENS = 32000
+M.FIRST_RESPONSE_TOKENS_PER_SECOND = 4000
+function M.first_response_seconds(context_tokens)
+  local base = M.FIRST_RESPONSE_BASE_SECONDS
   local raw = host.getenv("WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS")
-  if raw == nil or raw == "" then return 90 end
-  local value = tonumber(raw)
-  if value == nil then return 90 end
-  if value <= 0 then return 0 end
-  return math.max(10, math.floor(value))
+  local value = (raw ~= nil and raw ~= "") and tonumber(raw) or nil
+  if value ~= nil then
+    if value <= 0 then return 0 end
+    base = math.max(10, math.floor(value))
+  end
+  local tokens = tonumber(context_tokens) or 0
+  local extra = math.ceil(math.max(0, tokens - M.FIRST_RESPONSE_FREE_TOKENS) / M.FIRST_RESPONSE_TOKENS_PER_SECOND)
+  return math.min(M.FIRST_RESPONSE_CEILING_SECONDS, base + extra)
 end
 
 -- The host marks a call that hit this deadline with `provider_stalled`; the marker survives the
@@ -927,7 +943,7 @@ M.STALLED_TOPIC = "wa.provider.stalled"
 function M.announce_stalled(problem, opts)
   local fact = { schema = M.STALLED_TOPIC, schema_version = 1,
     session_id = opts and opts.session_id or nil, run_id = opts and opts.run_id or nil,
-    deadline_seconds = M.first_response_seconds(),
+    deadline_seconds = M.first_response_seconds(opts and opts.context_tokens),
     detail = tostring(problem or ""):sub(1, 400), at = math.floor(host.now() * 1000) }
   if host.bus_publish then pcall(host.bus_publish, M.STALLED_TOPIC, json.encode(fact)) end
   local ok, answer = pcall(function()
@@ -937,9 +953,22 @@ function M.announce_stalled(problem, opts)
   return ok and type(answer) == "table" and answer.ok == true
 end
 
+-- The one predicate the response-timeout replay and the failure message agree on: this request got no
+-- response headers before its first-response deadline, so no tool call can have come back from it and
+-- nothing was dispatched. Two shapes count as that fact:
+--
+--   * the transport's own words ("timeout: receive response" - ureq's TimeoutReason::RecvResponse);
+--   * the host's marker ("provider_stalled", host.rs), whatever words the transport used: the marker is
+--     added exactly when the per-call deadline expired, which is the case this replay exists for. A
+--     gateway or an edge that words its silence differently used to slip past the old predicate and end
+--     the turn with no replay at all - the measured "nothing was retried" (18/11).
+--
+-- A CONNECT timeout is neither: nothing was sent, so it belongs to the patient connection bucket below.
 function M.is_response_timeout(problem)
   local text=tostring(problem or ""):lower()
-  return text:find("provider_error: timeout: receive response", 1, true) ~= nil
+  if text:find("timeout: connect",1,true) or text:find("connect: timeout",1,true) then return false end
+  if text:find("provider_error: timeout: receive response", 1, true) then return true end
+  return text:find("provider_stalled", 1, true) ~= nil
 end
 
 function M.response_timeout_retries()
@@ -948,6 +977,15 @@ function M.response_timeout_retries()
   local count = tonumber(raw)
   if not count then return 1 end
   return math.max(0, math.min(3, math.floor(count)))
+end
+
+-- The wait before the replay. It used to be zero: the second attempt left within milliseconds of the
+-- first, hit the same dead gateway, and the run read as if nothing had been retried at all (18/11).
+-- 2, 4, 8 s, jittered and capped, the same shape as the other provider waits here - a gateway that
+-- stalled once is usually busy, and asking again immediately only spends the second deadline.
+function M.response_timeout_backoff_ms(attempt)
+  local seconds = math.min(8, 2 ^ math.max(1, tonumber(attempt) or 1))
+  return math.floor(seconds * 1000 * (0.75 + math.random() * 0.5))
 end
 
 -- A failure the provider may not repeat if asked again a little later: rate limiting, an overloaded
@@ -1284,7 +1322,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   local ok,result=pcall(function()
   if stream then
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized,
-      json.encode({ first_response_seconds = M.first_response_seconds() })))
+      json.encode({ first_response_seconds = M.first_response_seconds(opts.context_tokens) })))
     record_serving_http(provider,body.model,result,serving_request_binding)
     if result.error then
       local problem = redact.text("provider_error: " .. tostring(result.error))

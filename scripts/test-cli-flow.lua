@@ -47,6 +47,13 @@ local doubled
 for index = 2, #rows do if blank(rows[index]) and blank(rows[index - 1]) and index < #rows then doubled = index break end end
 ok(doubled == nil, "never two blank rows in a row (row " .. tostring(doubled) .. ")")
 ok(find("^42$") ~= nil, "the answer is its own row")
+-- The run block streamed into its block as code (17/11 "codeact does not stream") and is drawn once.
+local seen = 0
+for _, row in ipairs(rows) do if row:find("^return 6 %* 7;") then seen = seen + 1 end end
+ok(seen == 1, "the streamed script is drawn exactly once, got " .. seen)
+local code_block
+for _, block in ipairs(blocks) do if block.code then code_block = block end end
+ok(code_block and code_block.rows[1]:find("^return 6 %* 7;") ~= nil, "it is the code block's first row")
 
 -- Commentary and the answer are markdown, rendered as they stream (17/11: `**What I verified**` printed raw).
 do

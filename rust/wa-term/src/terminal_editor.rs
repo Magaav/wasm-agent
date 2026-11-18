@@ -1,6 +1,7 @@
 //! The interactive CLI's input row. This is a terminal capability, not agent logic:
 //! Lua decides what to do with submitted lines. A reader thread owns keystrokes so it
 //! can redraw a draft even while Lua is blocked in the model or a tool.
+use crate::keymap;
 use std::io::{self, Write};
 use std::sync::Mutex;
 
@@ -115,7 +116,16 @@ pub struct RawMode;
 pub fn try_raw() -> Option<RawMode> { None }
 
 #[derive(Debug, PartialEq)]
-pub enum Action { None, Submit(String), Eof, Interrupt, Nav, PageUp, PageDown, Bottom }
+pub enum Action { None, Submit(String), Eof, Interrupt, Nav, PageUp, PageDown, Bottom,
+    /// The draft's selection, for the host to put on the clipboard (OSC 52): Ctrl+C or Ctrl+Insert with
+    /// text selected (operator 17/11: "ctrl+a should select whole text-area so we can copy it").
+    Copy(String),
+    /// Ctrl+V: the host reads an image from the system clipboard, keeps it, and puts `[Image #n]` in the
+    /// draft (`insert_text`) - what pi and Claude Code do (operator 17/11).
+    PasteImage,
+    /// A bracketed paste ended; it put draft[start..cursor]. A file path dropped or pasted there is the host's
+    /// to turn into an attachment (an image path becomes `[Image #n]`).
+    Pasted(usize) }
 
 /// A command the slash menu offers: its name (`/login`), whether it takes arguments, and its hint.
 #[derive(Clone, Default)]
@@ -163,6 +173,11 @@ pub struct Editor {
     /// mode rather than as text - the prompt and the dividers turn pink and the line is submitted as
     /// `!<command>`. Backspace on the empty draft or Esc leaves it.
     pub bash: bool,
+    /// The selection's other end (the cursor is one end): Shift+arrows, Shift+Home/End, Ctrl+A and a mouse
+    /// drag set it; any plain movement clears it; typing, Backspace and Delete replace what it covers.
+    anchor: Option<usize>,
+    /// Where the current bracketed paste began in the draft.
+    paste_from: usize,
 }
 
 #[derive(Clone)]
@@ -175,7 +190,44 @@ const UNDO_MAX: usize = 200;
 impl Editor {
     fn text(&self) -> String { self.chars.iter().collect() }
     fn replace(&mut self, text: &str) { self.chars = text.chars().collect(); self.cursor = self.chars.len(); }
-    fn insert(&mut self, ch: char) { self.chars.insert(self.cursor, ch); self.cursor += 1; }
+    fn insert(&mut self, ch: char) { self.delete_selection(); self.chars.insert(self.cursor, ch); self.cursor += 1; }
+    /// The selected range `[start, end)`, when there is one.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        let cursor = self.cursor.min(self.chars.len());
+        let anchor = anchor.min(self.chars.len());
+        if anchor == cursor { return None; }
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection().map(|(a, b)| self.chars[a..b].iter().collect())
+    }
+    /// Remove the selected text; true when there was some.
+    fn delete_selection(&mut self) -> bool {
+        let Some((a, b)) = self.selection() else { self.anchor = None; return false };
+        self.chars.drain(a..b);
+        self.cursor = a;
+        self.anchor = None;
+        true
+    }
+    /// Select from `anchor` to `cursor` (a mouse drag in the box: both are draft indices).
+    pub fn select(&mut self, anchor: usize, cursor: usize) {
+        self.anchor = Some(anchor.min(self.chars.len()));
+        self.cursor = cursor.min(self.chars.len());
+    }
+    /// Where the line holding `at` starts / ends (a line is what Shift+Enter or a pasted newline made).
+    fn line_start(&self, at: usize) -> usize {
+        let at = at.min(self.chars.len());
+        self.chars[..at].iter().rposition(|&c| c == '\n').map(|i| i + 1).unwrap_or(0)
+    }
+    fn line_end(&self, at: usize) -> usize {
+        let at = at.min(self.chars.len());
+        self.chars[at..].iter().position(|&c| c == '\n').map(|i| at + i).unwrap_or(self.chars.len())
+    }
+    /// A movement: with `extend` (Shift held) the selection grows from where it started, else it ends.
+    fn moved(&mut self, extend: bool, from: usize) {
+        if extend { if self.anchor.is_none() { self.anchor = Some(from); } } else { self.anchor = None; }
+    }
     /// Nothing typed and not in bash mode: a restart here loses nothing.
     pub fn draft_empty(&self) -> bool { self.chars.is_empty() && !self.bash }
     /// The draft as it is submitted: `!` in front of it in bash mode.
@@ -185,6 +237,7 @@ impl Editor {
         match text.strip_prefix('!') { Some(rest) => { self.bash = true; self.replace(rest); } None => { self.bash = false; self.replace(text); } }
     }
     fn history(&mut self, up: bool) {
+        self.anchor = None;
         if self.history.is_empty() { return; }
         if up {
             let next = self.history_at.map(|n| n.saturating_sub(1)).unwrap_or_else(|| {
@@ -239,7 +292,7 @@ impl Editor {
             else if self.escape.is_empty() && byte >= 32 && byte != 127 { Some(Group::Typing) } else { None };
         let word_break = byte == b' ' && self.cursor > 0 && !self.chars[self.cursor - 1].is_whitespace();
         let extends = kind.is_some() && kind == self.group && self.cursor == self.group_cursor
-            && !(kind == Some(Group::Typing) && word_break);
+            && !(kind == Some(Group::Typing) && word_break) && self.selection().is_none();
         let snapshot = if extends { None } else { Some(Snapshot { chars: self.chars.clone(), cursor: self.cursor }) };
         let was_pasting = self.paste;
         let action = self.feed_inner(byte);
@@ -263,6 +316,7 @@ impl Editor {
     /// Ctrl+Z / Ctrl+Y (and Ctrl+Shift+Z where the terminal reports it): back to the draft before the
     /// last step, or forward again, cursor included. A recalled history entry becomes a plain draft.
     fn restore(&mut self, undo: bool) {
+        self.anchor = None;
         let (from, to) = if undo { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
         let Some(snapshot) = from.pop() else { return };
         to.push(Snapshot { chars: std::mem::replace(&mut self.chars, snapshot.chars), cursor: self.cursor });
@@ -289,26 +343,36 @@ impl Editor {
     fn menu_key(&mut self, byte: u8) -> Option<Action> {
         let items = self.menu_items();
         if items.is_empty() { return None; }
-        let sequence = |e: &Self, tail: &[u8]| e.escape.len() == 2 && e.escape[0] == 0x1b && e.escape[1] == b'[' && tail.contains(&byte);
-        if sequence(self, b"AB") {
+        // The menu's keys are rows of the same table (the Menu surface): the arrow that moves the
+        // selection is the row the table calls Up/Down here, and the two keys the menu also owns are
+        // Tab and Enter.
+        if !self.escape.is_empty() {
+            let mut sequence = self.escape.clone();
+            sequence.push(byte);
+            let act = keymap::menu_seq(&sequence)?;
             self.escape.clear();
             let n = items.len();
-            self.menu_at = if byte == b'A' { (self.menu_at + n - 1) % n } else { (self.menu_at + 1) % n };
+            self.menu_at = match act {
+                keymap::MenuAct::MovePrev => (self.menu_at + n - 1) % n,
+                keymap::MenuAct::MoveNext => (self.menu_at + 1) % n,
+                _ => return None,
+            };
             return Some(Action::None);
         }
-        if !self.escape.is_empty() || self.paste { return None; }
+        if self.paste { return None; }
+        let act = keymap::menu_byte(byte)?;
         let chosen = self.commands[items[self.menu_at.min(items.len() - 1)]].clone();
-        match byte {
-            b'\t' => {
+        match act {
+            keymap::MenuAct::Complete => {
                 let text = if chosen.args { format!("{} ", chosen.name) } else { chosen.name.clone() };
                 self.replace(&text); self.menu_hidden = chosen.args;
                 Some(Action::None)
             }
-            b'\r' if chosen.args && self.text() != chosen.name => {
+            keymap::MenuAct::Run if chosen.args && self.text() != chosen.name => {
                 let text = format!("{} ", chosen.name); self.replace(&text); self.menu_hidden = true;
                 Some(Action::None)
             }
-            b'\r' => {
+            keymap::MenuAct::Run => {
                 let line = chosen.name.clone();
                 self.chars.clear(); self.cursor = 0; self.history_at = None; self.menu_at = 0;
                 self.history.push(line.clone());
@@ -335,9 +399,15 @@ impl Editor {
     pub fn escape(&mut self) -> bool {
         let lone = self.escape.as_slice() == b"\x1b";
         if lone { self.escape.clear(); }
+        if self.escape_closes() { return true; }
+        lone
+    }
+    /// What Esc does inside the draft once the key itself is established (the terminal sent nothing
+    /// after it): close the slash menu, else leave bash mode. True when it closed something.
+    fn escape_closes(&mut self) -> bool {
         if self.menu_rows() > 0 { self.menu_hidden = true; return true; }
         if self.bash { self.bash = false; return true; }
-        lone
+        false
     }
     /// The box's bottom border: the row above the footer, one higher while the session-status-content
     /// line has something to say - the line sits between the box and the footer (Victor, 08/11).
@@ -395,8 +465,18 @@ impl Editor {
         if notice.is_empty() { return String::new(); }
         let text = clip_cells(notice, self.width);
         if std::env::var_os("NO_COLOR").is_some() { return text; }
-        // The command the reader types is bold, the way Claude Code words it: `Run: **wa update**`.
-        let text = text.replacen("wa update", &format!("\x1b[1mwa update\x1b[22m{NOTICE_ROW}"), 1);
+        // The commands in the sentence are bold - BOTH of them (Victor, 18/11): the notice reads
+        // `Update available (<sha>) — /update here, or wa update in a terminal`, and the two things a
+        // reader can do with it are those two. The words are `update_banner.COMMANDS`' list on the Lua
+        // side, and this is the same emphasis in the renderer that owns the row when the native editor
+        // does (a plain row, one colour, two bold words).
+        let mut text = text.to_string();
+        for word in ["/update", "wa update"] {
+            if let Some(at) = text.find(word) {
+                let end = at + word.len();
+                text = format!("{}\x1b[1m{word}\x1b[22m{}", &text[..at], &text[end..]);
+            }
+        }
         format!("{NOTICE_ROW}{text}{RESET}")
     }
     /// The output region's last row: everything the bottom furniture draws is above it. The run's
@@ -433,109 +513,208 @@ impl Editor {
     fn feed_key(&mut self, byte: u8) -> Action {
         if !self.escape.is_empty() {
             self.escape.push(byte);
-            // ESC followed by anything that cannot start a sequence (a lone Esc, or Alt+key) is not an
-            // escape sequence: drop the ESC and keep the key - it used to swallow the next keystroke.
-            if self.escape.len() == 2 && !matches!(byte, b'[' | b'O' | b'\r' | b'\n' | 0x1b) {
+            // Every key the draft answers is a row of the table in `keymap`; this decoder only decides
+            // when the bytes are one. An exact row performs its act, a prefix of a row waits for the
+            // rest, and anything else is swallowed - an escape sequence nobody binds must never be
+            // typed into the reader's prompt.
+            if let Some(act) = keymap::draft_seq(&self.escape) {
+                // Esc twice is the key itself, and its buffer still holds both bytes.
+                if act == keymap::DraftAct::Escape { self.escape.clear(); self.escape_closes(); return Action::None; }
                 self.escape.clear();
-                return self.feed_inner(byte);
+                return self.perform(act);
             }
-            let seq = self.escape.as_slice();
-            if seq == b"\x1b\x1b" { self.escape.truncate(1); self.escape(); return Action::None; }
-            // CSI arrows, Home/End, Delete and bracketed paste boundaries.
-            if seq == b"\x1b[200~" { self.paste = true; self.escape.clear(); return Action::None; }
-            if seq == b"\x1b[201~" { self.paste = false; self.escape.clear(); return Action::None; }
-            // Orca on Windows sends ESC CR for Shift+Enter (also Alt+Enter).
-            if seq == b"\x1b\r" || seq == b"\x1b\n" || seq == b"\x1b[13;2u"
-                || seq == b"\x1b[27;2;13~" || seq == b"\x1b[13;2~" {
-                self.insert('\n'); self.escape.clear(); return Action::None;
-            }
-            // Ctrl+Z / Ctrl+Shift+Z as the kitty keyboard protocol reports them (`z` = 122, `Z` = 90).
-            if seq == b"\x1b[122;5u" { self.escape.clear(); self.restore(true); return Action::None; }
-            if seq == b"\x1b[122;6u" || seq == b"\x1b[90;6u" { self.escape.clear(); self.restore(false); return Action::None; }
-            if seq == b"\x1b[D" { self.cursor = self.cursor.saturating_sub(1); }
-            else if seq == b"\x1b[C" { self.cursor = (self.cursor + 1).min(self.chars.len()); }
-            // Ctrl+Up leaves the draft for the transcript's topics (Up stays history).
-            else if seq == b"\x1b[1;5A" { self.escape.clear(); return Action::Nav; }
-            else if seq == b"\x1b[5~" { self.escape.clear(); return Action::PageUp; }
-            else if seq == b"\x1b[6~" { self.escape.clear(); return Action::PageDown; }
-            else if seq == b"\x1b[6;5~" { self.escape.clear(); return Action::Bottom; }
-            else if seq == b"\x1b[A" { if !self.move_line(true) { self.history(true); } }
-            else if seq == b"\x1b[B" { if !self.move_line(false) { self.history(false); } }
-            else if seq == b"\x1b[H" || seq == b"\x1b[1~" { self.cursor = 0; }
-            else if seq == b"\x1b[F" || seq == b"\x1b[4~" { self.cursor = self.chars.len(); }
-            else if seq == b"\x1b[3~" { if self.cursor < self.chars.len() { self.chars.remove(self.cursor); } }
-            else if (seq.len() < 16 && seq.starts_with(b"\x1b[")
-                && (seq.len() == 2 || !seq.last().is_some_and(|b| (0x40..=0x7e).contains(b))))
-                || (seq.len() == 2 && seq == b"\x1bO") { return Action::None; }
-            // Unknown complete escape is ignored, never inserted into the user's prompt.
+            if keymap::draft_prefix(&self.escape) { return Action::None; }
+            // ESC + one byte that begins no row is Alt+<key>: drop the ESC and keep the key.
+            if self.escape.len() == 2 { self.escape.clear(); return self.feed_inner(byte); }
+            // An escape sequence nobody binds: swallow it to its final byte, never insert it.
+            if self.escape.len() <= 16 && !(0x40..=0x7e).contains(&byte) { return Action::None; }
             self.escape.clear();
             return Action::None;
         }
-        if byte == 0x1b { self.escape.push(byte); return Action::None; }
-        if self.paste && (byte == b'\r' || byte == b'\n') { self.insert('\n'); return Action::None; }
-        match byte {
-            b'\r' => {
-                let line = self.line(); self.chars.clear(); self.cursor = 0; self.history_at = None; self.bash = false;
+        if let Some(act) = keymap::draft_byte(byte) {
+            if act != keymap::DraftAct::Type { return self.perform(act); }
+        } else if byte < 32 || byte == 127 {
+            return Action::None; // a control key nobody binds
+        }
+        // Any other character goes into the draft (the terminal sends it as UTF-8, byte by byte).
+        self.utf8.push(byte);
+        match std::str::from_utf8(&self.utf8) {
+            Ok(text) => { let chars: Vec<char> = text.chars().collect(); self.utf8.clear(); for c in chars { self.insert(c); } }
+            Err(error) if error.error_len().is_some() || self.utf8.len() > 4 => self.utf8.clear(),
+            Err(_) => {}
+        }
+        Action::None
+    }
+
+    /// What a row of the table says the key does. The match is exhaustive: an act the table names
+    /// cannot be left unimplemented, and a behaviour with no act cannot be reached by a key at all.
+    fn perform(&mut self, act: keymap::DraftAct) -> Action {
+        use keymap::DraftAct as A;
+        match act {
+            A::Submit => {
+                let line = self.line(); self.chars.clear(); self.cursor = 0; self.history_at = None; self.bash = false; self.anchor = None;
                 if !line.is_empty() && line != "!" && !carries_secret(&line) { self.history.push(line.clone()); }
                 Action::Submit(line)
             }
-            b'\n' => { self.insert('\n'); Action::None } // Ctrl+J: multiline without submitting
+            A::Newline => { self.insert('\n'); Action::None } // Ctrl+J / Shift+Enter
+            // A lone Esc only starts the sequence buffer: the console asks the terminal whether
+            // anything follows it, and calls escape() when nothing does.
+            A::Escape => { if self.escape.is_empty() { self.escape.push(0x1b); } Action::None }
             // Ctrl+C never touches the draft. During a run it interrupts the turn (raw mode turned the
-            // terminal's own SIGINT off, so a runaway turn could otherwise only be stopped by killing the
-            // terminal); on an empty line a second one within a second leaves. With a draft and no run
-            // it only says how to clear or leave - quitting would throw the draft away.
-            3 if self.bash && self.chars.is_empty() => { self.bash = false; Action::None }
-            3 if !self.chars.is_empty() => {
-                self.last_interrupt = None;
-                if self.status {
-                    self.notice = "Interrupting\u{2026} (draft kept)".into();
-                    Action::Interrupt
+            // terminal's own SIGINT off, so a runaway turn could otherwise only be stopped by killing
+            // the terminal); on an empty line a second one within a second leaves. With a draft and no
+            // run it only says how to clear or leave - quitting would throw the draft away. Ctrl+C with
+            // text selected copies it (never interrupts, never touches the draft).
+            A::Interrupt => {
+                if self.selection().is_some() { return Action::Copy(self.selected_text().unwrap_or_default()); }
+                if self.bash && self.chars.is_empty() { self.bash = false; return Action::None; }
+                if !self.chars.is_empty() {
+                    self.last_interrupt = None;
+                    if self.status {
+                        self.notice = "Interrupting\u{2026} (draft kept)".into();
+                        Action::Interrupt
+                    } else {
+                        self.notice = "Draft kept \u{b7} ctrl+u clears it \u{b7} ctrl+z undoes".into();
+                        Action::None
+                    }
                 } else {
-                    self.notice = "Draft kept \u{b7} ctrl+u clears it \u{b7} ctrl+z undoes".into();
-                    Action::None
+                    let now = std::time::Instant::now();
+                    let twice = self.last_interrupt.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(1));
+                    self.last_interrupt = Some(now);
+                    if twice { return Action::Eof; }
+                    self.notice = if self.status { "Interrupting\u{2026} (ctrl+c again to quit)" } else { "ctrl+c again to quit" }.into();
+                    Action::Interrupt
                 }
             }
-            3 => {
-                let now = std::time::Instant::now();
-                let twice = self.last_interrupt.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(1));
-                self.last_interrupt = Some(now);
-                if twice { return Action::Eof; }
-                self.notice = if self.status { "Interrupting\u{2026} (ctrl+c again to quit)" } else { "ctrl+c again to quit" }.into();
-                Action::Interrupt
+            A::Copy => match self.selected_text() { Some(text) => Action::Copy(text), None => Action::None },
+            A::DeleteForward => { if !self.delete_selection() && self.cursor < self.chars.len() { self.chars.remove(self.cursor); } Action::None }
+            A::Backspace => {
+                if self.bash && self.chars.is_empty() { self.bash = false; }
+                else if !self.delete_selection() && self.cursor > 0 { self.cursor -= 1; self.chars.remove(self.cursor); }
+                Action::None
             }
-            26 => { self.restore(true); Action::None } // Ctrl+Z: undo (raw mode turned SIGTSTP off)
-            25 => { self.restore(false); Action::None } // Ctrl+Y: redo
-            4 if self.chars.is_empty() => Action::Eof,
-            4 => { if self.cursor < self.chars.len() { self.chars.remove(self.cursor); } Action::None }
-            8 | 127 if self.bash && self.chars.is_empty() => { self.bash = false; Action::None }
-            8 | 127 => { if self.cursor > 0 { self.cursor -= 1; self.chars.remove(self.cursor); } Action::None }
-            b'!' if self.chars.is_empty() && !self.bash && !self.paste => { self.bash = true; Action::None }
-            16 => { self.history(true); Action::None } // Ctrl+P / Ctrl+N: history
-            14 => { self.history(false); Action::None }
-            1 => { self.cursor = 0; Action::None } // Ctrl+A / Ctrl+E
-            5 => { self.cursor = self.chars.len(); Action::None }
-            11 => { self.chars.truncate(self.cursor); Action::None } // Ctrl+K
-            21 => { self.chars.drain(..self.cursor); self.cursor = 0; Action::None } // Ctrl+U
-            23 => { // Ctrl+W: delete the preceding word
-                while self.cursor > 0 && self.chars[self.cursor - 1].is_whitespace() {
-                    self.cursor -= 1; self.chars.remove(self.cursor);
-                }
-                while self.cursor > 0 && !self.chars[self.cursor - 1].is_whitespace() {
-                    self.cursor -= 1; self.chars.remove(self.cursor);
+            A::DeleteForwardOrLeave => {
+                if self.chars.is_empty() { return Action::Eof; }
+                if !self.delete_selection() && self.cursor < self.chars.len() { self.chars.remove(self.cursor); }
+                Action::None
+            }
+            // Ctrl+K / Ctrl+U / Ctrl+W with a selection act on the SELECTION: every editor kills what is
+            // selected, and with nothing selected these stay the line and word kills they always were.
+            A::KillLine => { if !self.delete_selection() { self.chars.truncate(self.cursor); } Action::None }
+            A::KillToStart => { if !self.delete_selection() { self.chars.drain(..self.cursor); self.cursor = 0; } Action::None }
+            A::KillWord => {
+                if !self.delete_selection() {
+                    while self.cursor > 0 && self.chars[self.cursor - 1].is_whitespace() { self.cursor -= 1; self.chars.remove(self.cursor); }
+                    while self.cursor > 0 && !self.chars[self.cursor - 1].is_whitespace() { self.cursor -= 1; self.chars.remove(self.cursor); }
                 }
                 Action::None
             }
-            0..=31 => Action::None,
-            _ => {
-                self.utf8.push(byte);
-                match std::str::from_utf8(&self.utf8) {
-                    Ok(text) => { let chars: Vec<char> = text.chars().collect(); self.utf8.clear(); for c in chars { self.insert(c); } }
-                    Err(error) if error.error_len().is_some() || self.utf8.len() > 4 => self.utf8.clear(),
-                    Err(_) => {}
-                }
+            A::SelectAll => { if !self.chars.is_empty() { self.anchor = Some(0); self.cursor = self.chars.len(); } Action::None }
+            A::Undo => { self.restore(true); Action::None } // raw mode turned SIGTSTP off
+            A::Redo => { self.restore(false); Action::None }
+            A::PasteImage => if self.paste { Action::None } else { Action::PasteImage },
+            A::PasteStart => { self.delete_selection(); self.paste = true; self.paste_from = self.cursor; Action::None }
+            A::PasteEnd => { self.paste = false; Action::Pasted(self.paste_from.min(self.cursor)) }
+            // A plain movement ends a selection; Left/Right land on its edge, as every editor does.
+            A::Left => {
+                if let Some((a, _)) = self.selection() { self.cursor = a; } else { self.cursor = self.cursor.saturating_sub(1); }
+                self.anchor = None;
                 Action::None
             }
+            A::Right => {
+                if let Some((_, b)) = self.selection() { self.cursor = b; } else { self.cursor = (self.cursor + 1).min(self.chars.len()); }
+                self.anchor = None;
+                Action::None
+            }
+            A::Up => { self.anchor = None; if !self.move_line(true) { self.history(true); } Action::None }
+            A::Down => { self.anchor = None; if !self.move_line(false) { self.history(false); } Action::None }
+            // Home/End act on the line the cursor is on, not the whole draft (operator 17/11).
+            A::LineStart => { self.anchor = None; self.cursor = self.line_start(self.cursor); Action::None }
+            A::LineEnd => { self.anchor = None; self.cursor = self.line_end(self.cursor); Action::None }
+            A::DocStart => { self.anchor = None; self.cursor = 0; Action::None }
+            A::DocEnd => { self.anchor = None; self.cursor = self.chars.len(); Action::None }
+            A::ExtendLeft => { self.moved(true, self.cursor); self.cursor = self.cursor.saturating_sub(1); Action::None }
+            A::ExtendRight => { self.moved(true, self.cursor); self.cursor = (self.cursor + 1).min(self.chars.len()); Action::None }
+            A::ExtendUp => { self.moved(true, self.cursor); if !self.move_line(true) { self.cursor = self.line_start(self.cursor); } Action::None }
+            A::ExtendDown => { self.moved(true, self.cursor); if !self.move_line(false) { self.cursor = self.line_end(self.cursor); } Action::None }
+            A::ExtendLineStart => { self.moved(true, self.cursor); self.cursor = self.line_start(self.cursor); Action::None }
+            A::ExtendLineEnd => { self.moved(true, self.cursor); self.cursor = self.line_end(self.cursor); Action::None }
+            A::HistoryPrev => { self.history(true); Action::None }
+            A::HistoryNext => { self.history(false); Action::None }
+            A::PageUp => Action::PageUp,
+            A::PageDown => Action::PageDown,
+            A::Bottom => Action::Bottom,
+            A::Nav => Action::Nav,
+            // The first `!` of an empty draft is the mode; anywhere else it is a character.
+            A::BashMode => { if self.chars.is_empty() && !self.bash && !self.paste { self.bash = true; } else { self.insert('!'); } Action::None }
+            // feed_key types the byte itself: the row is what makes "any other character" a fact the
+            // list can state, not a behaviour this match has to re-state.
+            A::Type => Action::None,
         }
+    }
+    /// The draft index under a screen cell of the input box (1-based row/col, as mouse reports give them),
+    /// or None outside the box's text rows. The prompt's two columns sit before the text.
+    pub fn index_at(&self, row: usize, col: usize) -> Option<usize> {
+        if !self.drawable() { return None; }
+        let (lines, cursor) = self.layout();
+        let (first, shown, top) = self.frame_geometry(lines.len(), cursor.0);
+        if row <= top || row > top + shown { return None; }
+        let visual = first + (row - top - 1);
+        let starts = self.line_starts();
+        let start = *starts.get(visual)?;
+        let end = starts.get(visual + 1).copied().unwrap_or(self.chars.len());
+        let want = col.saturating_sub(3); // col is 1-based; the prompt takes two cells
+        let mut at = start;
+        let mut used = 0usize;
+        while at < end && self.chars[at] != '\n' {
+            let width = cell_width(self.chars[at]);
+            if used + width > want { break; }
+            used += width;
+            at += 1;
+        }
+        Some(at)
+    }
+    /// The draft text in `[a, b)`.
+    pub fn slice(&self, a: usize, b: usize) -> String {
+        let (a, b) = (a.min(self.chars.len()), b.min(self.chars.len()));
+        if a >= b { return String::new(); }
+        self.chars[a..b].iter().collect()
+    }
+    /// The cursor, as a draft index.
+    pub fn cursor(&self) -> usize { self.cursor }
+    /// Replace `[a, b)` with `text` (a dropped path becoming its `[Image #n]`); the cursor lands after it.
+    pub fn replace_range(&mut self, a: usize, b: usize, text: &str) {
+        let (a, b) = (a.min(self.chars.len()), b.min(self.chars.len()));
+        if a > b { return; }
+        self.chars.splice(a..b, text.chars());
+        self.cursor = a + text.chars().count();
+        self.anchor = None;
+    }
+    /// Text the host puts in the draft at the cursor (an `[Image #n]` token), as one undo step.
+    pub fn insert_text(&mut self, text: &str) {
+        let snapshot = Snapshot { chars: self.chars.clone(), cursor: self.cursor };
+        for ch in text.chars() { self.insert(ch); }
+        if self.undo.len() == UNDO_MAX { self.undo.remove(0); }
+        self.undo.push(snapshot);
+        self.redo.clear();
+        self.group = None;
+        self.group_cursor = self.cursor;
+    }
+    /// A press in the box: the cursor goes there and the selection ends (a drag then extends from it).
+    pub fn click(&mut self, index: usize) { self.anchor = None; self.cursor = index.min(self.chars.len()); }
+    /// The draft index each visual row of `layout` starts at (same wrapping rule), for drawing a selection
+    /// and for turning a mouse position in the box into a draft index.
+    pub fn line_starts(&self) -> Vec<usize> {
+        let available = self.width.saturating_sub(BOX_CHROME);
+        let mut starts = vec![0usize];
+        let mut col = 0usize;
+        for (index, &ch) in self.chars.iter().enumerate() {
+            if ch == '\n' { starts.push(index + 1); col = 0; continue; }
+            let width = cell_width(ch);
+            if col + width > available && col > 0 { starts.push(index); col = 0; }
+            col += width;
+        }
+        starts
     }
     fn layout(&self) -> (Vec<String>, (usize, usize)) {
         let available = self.width.saturating_sub(BOX_CHROME);
@@ -587,6 +766,7 @@ impl Editor {
     pub fn render(&self) -> String {
         if !self.drawable() { return String::new(); }
         let (lines, cursor) = self.layout();
+        let starts = self.line_starts();
         let (first, shown, top) = self.frame_geometry(lines.len(), cursor.0);
         let bottom = self.bottom();
         let items = self.menu_items();
@@ -629,6 +809,18 @@ impl Editor {
                 let placeholder = if self.bash { BASH_PLACEHOLDER } else { PLACEHOLDER };
                 let hint: String = placeholder.chars().take(self.width.saturating_sub(BOX_CHROME)).collect();
                 frame.push_str(&format!("{HINT}{hint}{RESET}"));
+            } else if let Some((a, b)) = self.selection() {
+                // The selection, drawn in reverse video over the characters it covers on this row.
+                let start = starts.get(index).copied().unwrap_or(0);
+                let mut at = start;
+                for ch in text.chars() {
+                    while at < self.chars.len() && self.chars[at] == '\n' && ch != '\n' { at += 1; }
+                    let inside = at >= a && at < b;
+                    if inside { frame.push_str("\x1b[7m"); }
+                    frame.push(ch);
+                    if inside { frame.push_str("\x1b[27m"); }
+                    at += 1;
+                }
             } else {
                 frame.push_str(text);
             }
@@ -785,29 +977,50 @@ impl Panel {
     pub fn feed(&mut self, byte: u8) {
         if !self.escape.is_empty() {
             self.escape.push(byte);
-            let seq = self.escape.as_slice();
-            if seq == b"\x1b\x1b" { return self.escape(); }
-            if seq.len() == 2 && !matches!(byte, b'[' | b'O') { self.escape.clear(); return; } // Alt+key: ignored
-            if seq == b"\x1b[200~" { self.paste = true; self.escape.clear(); return; }
-            if seq == b"\x1b[201~" { self.paste = false; self.escape.clear(); return; }
-            if seq.len() >= 3 && (0x40..=0x7e).contains(&byte) {
-                if !self.options.is_empty() && (seq == b"\x1b[A" || seq == b"\x1bOA") {
-                    self.selected = (self.selected + self.options.len() - 1) % self.options.len();
-                } else if !self.options.is_empty() && (seq == b"\x1b[B" || seq == b"\x1bOB") {
-                    self.selected = (self.selected + 1) % self.options.len();
-                } else if (seq == b"\x1b[D" || seq == b"\x1bOD") && self.text.is_empty() {
-                    // Left goes back, as Esc does - unless there is typed text a reader may be editing.
-                    return self.escape();
-                }
-                self.escape.clear();
-            } else if seq.len() > 16 { self.escape.clear(); }
+            let sequence = self.escape.clone();
+            // The page's keys are rows of the same table (`keymap`, surface Panel): an exact sequence is its act,
+            // an unknown one is swallowed to its final byte and never typed into the field.
+            if let Some(act) = keymap::panel_seq(&sequence) { self.escape.clear(); self.perform(act, byte); return; }
+            if sequence.len() == 2 && !matches!(byte, b'[' | b'O') { self.escape.clear(); return; } // Alt+key: ignored
+            if sequence.len() >= 3 && (0x40..=0x7e).contains(&byte) { self.escape.clear(); return; }
+            if sequence.len() > 16 { self.escape.clear(); }
             return;
         }
-        match byte {
-            0x1b => self.escape.push(byte),
-            3 => self.escape(),
-            b'\r' | b'\n' if self.paste => {}
-            b'\r' | b'\n' => {
+        if byte == 0x1b { self.escape.push(byte); return; } // the first byte of every sequence
+        if let Some(act) = keymap::panel_byte(byte) { self.perform(act, byte); return; }
+        // A page with no field offers its options: 1-9, and the letters the page itself named. With a
+        // field, every printable byte is the text being typed.
+        if self.input.is_none() {
+            if let Some(act) = keymap::panel_digit(byte) { self.perform(act, byte); return; }
+            if !self.options.is_empty() {
+                if let Some(act) = keymap::panel_letter() { self.perform(act, byte); return; }
+            }
+        }
+        if byte < 32 || byte == 127 { return; }
+        if self.input.is_none() { return; }
+        self.utf8.push(byte);
+        match std::str::from_utf8(&self.utf8) {
+            // `spaces` is the difference between a field for a name and a field for a sentence: a
+            // draft's spaces are part of the message.
+            Ok(text) => {
+                let chars: Vec<char> = if self.spaces { text.chars().filter(|c| !c.is_control()).collect() }
+                    else { text.chars().filter(|c| !c.is_whitespace()).collect() };
+                self.utf8.clear();
+                self.text.extend(chars);
+            }
+            Err(error) if error.error_len().is_some() || self.utf8.len() > 4 => self.utf8.clear(),
+            Err(_) => {}
+        }
+    }
+
+    /// What a row of the table says a key does to this page. Exhaustive, as the draft's own match is.
+    fn perform(&mut self, act: keymap::PanelAct, byte: u8) {
+        use keymap::PanelAct as A;
+        match act {
+            A::Prev => { if !self.options.is_empty() { self.selected = (self.selected + self.options.len() - 1) % self.options.len(); } }
+            A::Next => { if !self.options.is_empty() { self.selected = (self.selected + 1) % self.options.len(); } }
+            A::Back => { if self.text.is_empty() { self.escape(); } } // Left goes back unless a field has text
+            A::Choose => {
                 if self.input.is_some() {
                     let text: String = self.text.iter().collect();
                     self.finish(serde_json::json!({"action": "submit", "text": text.trim()}));
@@ -817,16 +1030,17 @@ impl Panel {
                     self.escape(); // a panel that only shows something: Enter closes it too
                 }
             }
-            8 | 127 if self.input.is_some() => { self.text.pop(); }
-            21 if self.input.is_some() => self.text.clear(),
-            b'1'..=b'9' if self.input.is_none() && ((byte - b'0') as usize) <= self.options.len() => {
-                self.selected = (byte - b'1') as usize;
-                self.finish(serde_json::json!({"action": "select", "index": self.selected + 1}));
+            A::Cancel => self.escape(),
+            A::ChooseDigit => {
+                let index = (byte - b'0') as usize;
+                if index <= self.options.len() {
+                    self.selected = index - 1;
+                    self.finish(serde_json::json!({"action": "select", "index": index}));
+                }
             }
             // A letter this page named as a shortcut (`keys`): [e] edits, [r] rejects, and a letter no
-            // page named is still not a key. Only where there is a list and no field, so a page with
-            // a field keeps every printable byte for the text being typed.
-            _ if self.input.is_none() && !self.options.is_empty() => {
+            // page named is still not a key.
+            A::ChooseLetter => {
                 let letter = byte.to_ascii_lowercase();
                 if let Some((_, index)) = self.keys.iter().find(|(named, _)| *named == letter) {
                     if *index >= 1 && *index <= self.options.len() {
@@ -835,23 +1049,8 @@ impl Panel {
                     }
                 }
             }
-            0..=31 => {}
-            _ if self.input.is_some() => {
-                self.utf8.push(byte);
-                match std::str::from_utf8(&self.utf8) {
-                    // `spaces` is the difference between a field for a name and a field for a
-                    // sentence: a draft's spaces are part of the message.
-                    Ok(text) => {
-                        let chars: Vec<char> = if self.spaces { text.chars().filter(|c| !c.is_control()).collect() }
-                            else { text.chars().filter(|c| !c.is_whitespace()).collect() };
-                        self.utf8.clear();
-                        self.text.extend(chars);
-                    }
-                    Err(error) if error.error_len().is_some() || self.utf8.len() > 4 => self.utf8.clear(),
-                    Err(_) => {}
-                }
-            }
-            _ => {}
+            A::Backspace => { if self.input.is_some() { self.text.pop(); } }
+            A::ClearField => { if self.input.is_some() { self.text.clear(); } }
         }
     }
 
@@ -1135,19 +1334,19 @@ mod tests {
     #[test]
     fn at_80x24_the_fact_is_on_its_own_row_and_the_status_bar_keeps_its_numbers() {
         let mut editor = editor_at(80);
-        editor.footer = "\u{21bb}3 \u{2692}2 \u{2191}9 \u{2193}4 \u{25c7}0.31%".into();
+        editor.footer = "\u{f0450}3 \u{2692}2 \u{2191}9 \u{2193}4 \u{f01bc}0.31%".into();
         editor.footer_right = "stub-model".into();
         // Without a wake: no wake text anywhere, and the status bar keeps its numbers and its model.
         let plain = rows_by_number(&editor.render());
         assert!(plain.values().all(|row| !row.contains("wakes")), "no wake text anywhere: {plain:?}");
         let bar = plain.get(&editor.footer_row()).cloned().unwrap_or_default();
-        assert!(bar.contains("\u{21bb}3") && bar.contains("stub-model"), "the status bar: {bar:?}");
+        assert!(bar.contains("\u{f0450}3") && bar.contains("stub-model"), "the status bar: {bar:?}");
 
         // With a wake: one more row, directly above the status bar, and the numbers are untouched.
         editor.wakes = "\u{23f0} 2 wakes \u{b7} next 14:05".into();
         let with = rows_by_number(&editor.render());
         let bar = with.get(&24).cloned().unwrap_or_default();
-        assert!(bar.contains("\u{21bb}3") && bar.contains("stub-model"),
+        assert!(bar.contains("\u{f0450}3") && bar.contains("stub-model"),
             "the status bar keeps the numbers and the model: {bar:?}");
         assert!(!bar.contains("wakes"), "and no wake text on it: {bar:?}");
         let above = with.get(&23).cloned().unwrap_or_default();
@@ -1249,6 +1448,56 @@ mod tests {
         assert_eq!(e.feed(3), Action::Eof, "a second Ctrl+C within a second quits");
     }
     #[test]
+    fn ctrl_v_asks_for_a_clipboard_image_and_the_token_is_one_step() {
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"look at ");
+        assert_eq!(e.feed(22), Action::PasteImage, "Ctrl+V asks the host for the clipboard image");
+        assert_eq!(type_bytes(&mut e, b"\x1b[118;5u"), Action::PasteImage, "and so does kitty's Ctrl+V");
+        e.insert_text("[Image #1]");
+        assert_eq!(e.text(), "look at [Image #1]");
+        e.feed(26);
+        assert_eq!(e.text(), "look at ", "the inserted token is one undo step");
+        // Inside a bracketed paste, byte 22 is data, never a command.
+        type_bytes(&mut e, b"\x1b[200~a\x16b\x1b[201~");
+        assert!(!e.text().contains("[Image"), "{}", e.text());
+    }
+    #[test]
+    fn home_and_end_move_within_the_line_and_shift_selects() {
+        // Operator 17/11: Home/End act on the focused line, Ctrl+A selects all, Shift+arrows select.
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"first line\x1b\rsecond line");
+        assert_eq!(e.cursor, e.chars.len());
+        type_bytes(&mut e, b"\x1b[H");
+        assert_eq!(e.cursor, 11, "Home goes to the start of the second line, not the draft");
+        type_bytes(&mut e, b"\x1b[F");
+        assert_eq!(e.cursor, e.chars.len(), "End goes to the end of that line");
+        type_bytes(&mut e, b"\x1b[A\x1b[F");
+        assert_eq!(e.cursor, 10, "End on the first line stops before its newline");
+        // Shift+Left x4 selects "line", the four characters before the cursor.
+        type_bytes(&mut e, b"\x1b[1;2D\x1b[1;2D\x1b[1;2D\x1b[1;2D");
+        assert_eq!(e.selected_text().as_deref(), Some("line"));
+        // Typing replaces the selection; one undo brings it back.
+        type_bytes(&mut e, b"row");
+        assert_eq!(e.text(), "first row\nsecond line");
+        e.feed(26);
+        assert_eq!(e.text(), "first line\nsecond line", "typing over a selection is one undo step");
+        // Ctrl+A selects everything; Ctrl+C copies it instead of interrupting.
+        e.feed(1);
+        assert_eq!(e.selected_text().as_deref(), Some("first line\nsecond line"));
+        assert!(matches!(e.feed(3), Action::Copy(ref t) if t == "first line\nsecond line"));
+        assert_eq!(e.text(), "first line\nsecond line", "copying never touches the draft");
+        // Ctrl+Insert copies too; Backspace deletes the selection; Ctrl+X redoes.
+        assert!(matches!(type_bytes(&mut e, b"\x1b[2;5~"), Action::Copy(ref t) if t == "first line\nsecond line"), "Ctrl+Insert copies");
+        e.feed(127);
+        assert_eq!(e.text(), "", "Backspace deletes the selection");
+        e.feed(26);
+        assert_eq!(e.text(), "first line\nsecond line");
+        e.feed(24);
+        assert_eq!(e.text(), "", "Ctrl+X redoes");
+    }
+    #[test]
     fn ctrl_z_undoes_words_and_ctrl_y_redoes() {
         let mut e = Editor::default();
         type_bytes(&mut e, b"hello world");
@@ -1268,7 +1517,7 @@ mod tests {
         type_bytes(&mut e, b"\x7f"); assert_eq!(e.text(), "abc de");
         type_bytes(&mut e, b"\x17"); assert_eq!(e.text(), "abc ", "Ctrl+W");
         type_bytes(&mut e, b"\x1b[200~pasted\ntext\x1b[201~"); assert_eq!(e.text(), "abc pasted\ntext");
-        type_bytes(&mut e, b"\x01\x0b"); assert_eq!(e.text(), "", "Ctrl+A then Ctrl+K");
+        type_bytes(&mut e, b"\x1b[1;5H\x0b"); assert_eq!(e.text(), "", "Ctrl+Home (the draft's start; Ctrl+A selects all since 17/11) then Ctrl+K");
         e.feed(26); assert_eq!((e.text().as_str(), e.cursor), ("abc pasted\ntext", 0), "undo the kill, cursor where it was");
         e.feed(26); assert_eq!((e.text().as_str(), e.cursor), ("abc ", 4), "the whole paste is one step");
         e.feed(26); assert_eq!(e.text(), "abc de", "then the Ctrl+W");
@@ -1297,6 +1546,39 @@ mod tests {
         type_bytes(&mut e, b"abc");
         assert!(e.render().contains("\x1b[19;1H\x1b[2K\u{276f} abc"));
         assert_eq!(e.cursor_frame(), "\x1b[19;6H", "the cursor counts cells, not bytes");
+    }
+    /// The CLI's two status rows name their glyphs in `lua/core/cli_view.lua`'s `GLYPH` table, and this
+    /// crate is the one that LAYS THOSE ROWS OUT - the box, its divider, the footer - so the widths that
+    /// matter are the ones this function gives. Victor's terminal (18/11, JetBrainsMono Nerd Font) has
+    /// every one of these, and draws it in ONE cell: a character measured two here moves every number
+    /// after it, and a character the font does NOT have (the `\u{25d1}` and `\u{25f7}` these replaced) is
+    /// drawn from a fallback face at another size, which is the defect this test keeps out.
+    #[test]
+    fn the_status_bar_glyphs_are_one_cell_each() {
+        let glyphs = [
+            ("\u{f0766}", "the context ball, 0% to 3%"),
+            ("\u{f0a9f}", "the context ball, 3% to 50%"),
+            ("\u{f0aa1}", "the context ball, 50% to 75%"),
+            ("\u{f0aa3}", "the context ball, 75% to 100%"),
+            ("\u{f0aa5}", "the full context ball, 100% and past the window"),
+            ("\u{f0dfa}", "the run's steps"),
+            ("\u{f051b}", "the run's elapsed clock"),
+            ("\u{f0450}", "the session's turns"),
+            ("\u{f01bc}", "the cache-hit rate"),
+        ];
+        for (glyph, what) in glyphs {
+            assert_eq!(glyph.chars().count(), 1, "{what}: one character, not a sequence");
+            assert_eq!(cell_width_of(glyph.chars().next().unwrap()), 1,
+                "{what} takes exactly one terminal cell: {glyph:?}");
+        }
+        // The row they sit on is one cell per character, so its column count is its character count -
+        // which is what keeps `\u{394}` and `\u{2191}` in the columns the next redraw expects, whatever
+        // the clocks are doing.
+        let bar = "\u{f0dfa}2\u{b7}5s \u{394}12.3k \u{2191}4.6k \u{2193}310 \u{f051b}1:51";
+        assert_eq!(bar.chars().count(), 29, "the sample row: {bar:?}");
+        assert_eq!(bar.chars().map(cell_width_of).sum::<usize>(), bar.chars().count(),
+            "no character of the status row is zero or two cells: {bar:?}");
+        assert_eq!(clip_cells(bar, 40), bar, "and it fits the 40 cells it asks for, whole");
     }
     #[test]
     fn a_queued_steer_sits_above_the_status_line() {
@@ -1341,7 +1623,7 @@ mod tests {
         type_bytes(&mut e, b"\x1b[200~hello\nworld\x1b[201~");
         assert_eq!(e.text(), "hello\nworld");
         type_bytes(&mut e, " é".as_bytes()); assert_eq!(e.text(), "hello\nworld é");
-        type_bytes(&mut e, b"\x1b[H\x1b[3~"); assert_eq!(e.text(), "ello\nworld é");
+        type_bytes(&mut e, b"\x1b[1;5H\x1b[3~"); assert_eq!(e.text(), "ello\nworld é");
     }
     #[test]
     fn multiline_is_visible_and_submit_resets_all_rows() {
@@ -1402,7 +1684,9 @@ mod tests {
     // session notices; the build loader replaces the notice on that same line; empty takes no line at
     // all. These are the twin of `lua/core/cli_view.lua`'s render tests (`scripts/test-cli-view.lua`)
     // and of the `build_status` ones: three renderers, one layout rule.
-    const SESSION_NOTICE: &str = "Update available (cccccccccccc): run wa update or /update";
+    // The sentence `lua/core/update_banner.lua` owns (M.LINE), with a sha in it.
+    const SESSION_NOTICE: &str =
+        "Update available (cccccccccccc) — /update here, or wa update in a terminal";
 
     #[test]
     fn no_notice_is_no_row_and_the_box_keeps_it() {
@@ -1417,7 +1701,9 @@ mod tests {
 
     #[test]
     fn the_notice_is_one_yellow_row_below_the_text_area_and_above_the_status_bar() {
-        let mut e = Editor::default(); e.row = 29; e.width = 60; e.height = 3;
+        // Wide enough for the whole sentence: at 60 columns the second command is clipped away, and
+        // this test is about the emphasis, not the clip (a_narrow_row_truncates_and_never_wraps).
+        let mut e = Editor::default(); e.row = 29; e.width = 90; e.height = 3;
         e.session_notice = SESSION_NOTICE.into();
         assert_eq!((e.bottom(), e.session_row(), e.out_bottom()), (28, 29, 25),
             "the row under the box, the box one row higher, the chat one row shorter");
@@ -1425,6 +1711,11 @@ mod tests {
         assert!(row.starts_with(crate::build_status::NOTICE), "painted the warning yellow: {row:?}");
         assert!(row.ends_with("\x1b[0m"));
         assert!(crate::selection::plain(&row) == SESSION_NOTICE, "the sentence is unchanged");
+        // Both commands are bold, and nothing else is (Victor, 18/11): `/update` here, `wa update` in a
+        // terminal. The list is `update_banner.COMMANDS` on the Lua side; this is the same emphasis.
+        assert!(row.contains("\x1b[1m/update\x1b[22m"), "the /update word is bold: {row:?}");
+        assert!(row.contains("\x1b[1mwa update\x1b[22m"), "and so is wa update: {row:?}");
+        assert_eq!(row.matches("\x1b[1m").count(), 2, "two bold words, not three: {row:?}");
         let frame = e.render();
         assert!(frame.contains(&format!("\x1b[29;1H\x1b[2K{row}")), "drawn on the row under the box");
         assert_eq!(e.footer_row(), 30, "with the status bar still on the last row");
@@ -1633,7 +1924,7 @@ mod tests {
         type_bytes(&mut e, b"\x1b[A"); assert_eq!(e.cursor, 3, "column kept, clamped to the shorter line");
         type_bytes(&mut e, b"\x1b[A"); assert_eq!(e.text(), "older", "Up on the first line: the previous message");
         type_bytes(&mut e, b"\x1b[B"); assert_eq!(e.text(), "one\ntwo\nthree", "Down on the last line: forward, back to the draft");
-        type_bytes(&mut e, b"\x1b[H\x1b[B"); assert_eq!(e.cursor, 4, "Down from the first line moves a line");
+        type_bytes(&mut e, b"\x1b[1;5H\x1b[B"); assert_eq!(e.cursor, 4, "Down from the first line moves a line");
     }
     #[test]
     fn long_draft_does_not_wrap_terminal() {
@@ -1697,6 +1988,161 @@ mod tests {
                 None => assert!(drawn.is_empty(), "{name}: nothing claims the row, so nothing is drawn (got {drawn:?})"),
             }
         }
+    }
+
+    /// The screen row the draft is drawn on, for an editor whose box sits at the bottom of an
+    /// otherwise empty screen (no session row, no wakes row) with a draft of N text rows.
+    fn draft_row(editor: &Editor, lines: usize) -> usize {
+        editor.bottom() - lines
+    }
+
+    #[test]
+    fn kill_keys_act_on_the_selection_when_there_is_one() {
+        // Ctrl+K / Ctrl+U / Ctrl+W with text selected kill the selection, the way every editor does.
+        // Without a selection they stay the line and word kills they were.
+        for (key, label) in [(11u8, "Ctrl+K"), (21, "Ctrl+U"), (23, "Ctrl+W")] {
+            let mut e = Editor::default();
+            e.width = 80;
+            type_bytes(&mut e, b"one two three");
+            e.select(4, 7); // "two"
+            assert_eq!(e.selected_text().as_deref(), Some("two"), "{label} starts from a selection");
+            e.feed(key);
+            assert_eq!(e.text(), "one  three", "{label} removes the selection, not the rest of the line");
+            assert_eq!(e.cursor, 4, "{label} leaves the cursor where the selection began");
+            assert_eq!(e.selection(), None, "{label} ends the selection");
+            e.feed(26);
+            assert_eq!(e.text(), "one two three", "{label} is one undo step");
+        }
+        // A selection made backwards behaves the same.
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"alpha beta gamma");
+        e.select(10, 6); // "beta", selected right to left
+        e.feed(21);
+        assert_eq!(e.text(), "alpha  gamma", "Ctrl+U with a backwards selection kills it, not the prefix");
+        // With nothing selected the three keys are unchanged.
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"abc def\x1b[D\x1b[D\x1b[D\x1b[D");
+        e.feed(11);
+        assert_eq!(e.text(), "abc", "Ctrl+K truncates at the cursor");
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"abc def\x1b[D\x1b[D\x1b[D\x1b[D");
+        e.feed(21);
+        assert_eq!(e.text(), " def", "Ctrl+U kills the prefix and keeps what follows the cursor");
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"abc def");
+        e.feed(23);
+        assert_eq!(e.text(), "abc ", "Ctrl+W kills the preceding word");
+    }
+
+    #[test]
+    fn ctrl_x_and_ctrl_y_are_undo_and_redo_on_the_byte_and_from_kitty() {
+        let mut e = Editor::default();
+        e.width = 80;
+        type_bytes(&mut e, b"hello world");
+        e.feed(26);
+        assert_eq!(e.text(), "hello", "Ctrl+Z (byte 26) undoes");
+        e.feed(24);
+        assert_eq!(e.text(), "hello world", "Ctrl+X (byte 24) redoes");
+        e.feed(26);
+        assert_eq!(e.text(), "hello");
+        assert_eq!(type_bytes(&mut e, b"\x1b[121;5u"), Action::None, "kitty's Ctrl+Y is a key, not text");
+        assert_eq!(e.text(), "hello world", "kitty's Ctrl+Y redoes");
+        assert!(!e.text().contains("121"), "and it never lands in the draft");
+        e.feed(26);
+        assert_eq!(e.text(), "hello");
+        assert_eq!(type_bytes(&mut e, b"\x1b[120;5u"), Action::None, "kitty's Ctrl+X is a key, not text");
+        assert_eq!(e.text(), "hello world", "kitty's Ctrl+X redoes, as byte 24 does");
+        assert!(!e.text().contains("120"), "and it never lands in the draft");
+    }
+
+    #[test]
+
+    /// The other direction of the table's promise: a key the dispatcher handles must be a row.
+    /// Every control byte with no row leaves the draft exactly as it was, any other character is
+    /// text (the row that says so), and an escape sequence nobody binds is swallowed whole - so a
+    /// binding added here and not to KEYMAP fails this test instead of drifting out of /keybindings.
+    #[test]
+    fn no_key_outside_the_table_does_anything() {
+        for byte in 0u8..=127 {
+            if crate::keymap::draft_byte(byte).is_some() { continue; }
+            let mut e = Editor::default();
+            type_bytes(&mut e, b"abc");
+            let before = (e.text(), e.cursor(), e.bash, e.selected_text());
+            let action = e.feed(byte);
+            if byte >= 32 && byte != 127 {
+                assert_eq!(e.text(), format!("abc{}", byte as char), "{} is a character, and it types", byte);
+                assert_eq!(action, Action::None, "{} types, so it reports nothing", byte);
+            } else {
+                assert_eq!((e.text(), e.cursor(), e.bash, e.selected_text()), before,
+                    "the control byte {byte} changed the draft but is not a row in /keybindings");
+                assert_eq!(action, Action::None, "the control byte {byte} answers {action:?} but is not a row in /keybindings");
+            }
+        }
+    }
+
+    /// A terminal sends more sequences than a draft binds (a colour set, an unknown key). None of
+    /// their bytes may reach the prompt, and none may become a key: the table names the keys, and
+    /// everything else is swallowed to its final byte.
+    #[test]
+    fn an_escape_sequence_nobody_binds_is_swallowed() {
+        let mut e = Editor::default();
+        type_bytes(&mut e, b"ab");
+        for sequence in [b"\x1b[38;5;9m".as_slice(), b"\x1b[99~", b"\x1b[1;9P", b"\x1bOz", b"\x1b[13;9u"] {
+            type_bytes(&mut e, sequence);
+            assert_eq!(e.text(), "ab", "{:?} left bytes in the draft", String::from_utf8_lossy(sequence));
+        }
+        assert_eq!(e.escape.len(), 0, "and the decoder is not stuck mid-sequence");
+    }
+    fn index_at_maps_a_cell_to_a_draft_index_and_never_splits_a_wide_character() {
+        // The mouse drag in the input box turns a screen cell into a draft index (host.rs,
+        // handle_mouse). A wide character is two cells and ONE index: a press on either half must land
+        // on the character, never inside it.
+        let mut e = Editor::default();
+        e.row = 20;
+        e.width = 80;
+        e.height = 4;
+        type_bytes(&mut e, "\u{4f60}\u{597d}ab".as_bytes());
+        let row = draft_row(&e, 1);
+        assert_eq!(e.index_at(row, 3), Some(0), "the first cell of the wide character");
+        assert_eq!(e.index_at(row, 4), Some(0), "and its second cell: both are one index");
+        assert_eq!(e.index_at(row, 5), Some(1), "the second wide character");
+        assert_eq!(e.index_at(row, 6), Some(1));
+        assert_eq!(e.index_at(row, 7), Some(2), "an ASCII character is one cell");
+        assert_eq!(e.index_at(row, 8), Some(3));
+        assert_eq!(e.index_at(row, 9), Some(4), "past the end of the text is the end of the draft");
+        assert_eq!(e.index_at(row - 1, 3), None, "above the box there is no index");
+        assert_eq!(e.index_at(row + 1, 3), None, "and below it the border is not text");
+    }
+
+    #[test]
+    fn a_mouse_drag_over_the_box_selects_between_the_two_cells() {
+        // The two halves of a drag, as host.rs drives them: a press turns its cell into an index and
+        // calls click(); the drag turns the cell under the pointer into one and calls select().
+        let mut e = Editor::default();
+        e.row = 20;
+        e.width = 80;
+        e.height = 4;
+        type_bytes(&mut e, b"select this word");
+        let row = draft_row(&e, 1);
+        let anchor = e.index_at(row, 3).expect("the press lands in the text");
+        e.click(anchor);
+        assert_eq!(e.selection(), None, "a press alone selects nothing");
+        e.select(anchor, e.index_at(row, 9).expect("so does the drag"));
+        assert_eq!(e.selected_text().as_deref(), Some("select"), "the drag selects what it crossed");
+        // Dragging to a cell left of the press selects to the left.
+        let back = e.index_at(row, 14).expect("the far cell");
+        e.select(back, anchor);
+        assert_eq!(e.selected_text().as_deref(), Some("select this"), "dragging backwards selects to the left");
+        // A release on the press's own cell selects nothing (host.rs clears it the same way).
+        e.click(anchor);
+        e.select(anchor, anchor);
+        assert_eq!(e.selection(), None);
+        // With no selection Ctrl+C is what it was: no copy, and (between runs) a note about the draft.
+        assert_eq!(e.feed(3), Action::None, "an empty drag leaves Ctrl+C to interrupt, not to copy");
     }
 
 }

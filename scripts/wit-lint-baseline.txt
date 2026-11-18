@@ -1,0 +1,40 @@
+# The WIT shapes main already has, and why each one stays.
+#
+# scripts/wit-lint.sh accepts exactly this list, and FAILS on a line here that it no longer flags - so
+# this file only shrinks, and a rule that binds new code does not break old code to prove itself. It is
+# also the starting map for the fabric seam's own work (REPORT.md has the full table, including the
+# shapes these two rules cannot see).
+#
+# A line is "<rule> <file> <context> <name>", and a PARAMETER's name carries its function
+# ("run.config", not "config"): WIT has no per-parameter doc, so two funcs of one interface can each
+# take a "config: string" documented the same way, and a key that named only the parameter would accept
+# the second one as already recorded (scripts/test-wit-lint.sh proves it does not).
+#
+# RULE 1 - a string that carries JSON and does not say so in its name.
+#
+# journal-entry.payload carries the replication row a peer applies: JSON by nature (the journal's own
+# record, the same shape the native path writes) and named payload since the journal existed -
+# lua/core/memory.lua writes that key and the Rust writer reads it. Renaming it is a wire change in
+# wa:kernel/sql v0.1, which memory and selfloop VENDOR under wit/*/deps/kernel/, so it moves when that
+# interface moves rather than in a change about the rule. Both copies are listed because this tree
+# reads both; wit/memory/deps/kernel/kernel.wit has the same field with NO doc comment on it, which is
+# why rule 1 cannot see that third copy (the check reads what a file says).
+json-name kernel/sql.wit interface:sql/record:journal-entry payload
+json-name selfloop/deps/kernel/kernel.wit interface:sql/record:journal-entry payload
+#
+# wa:kernel/service.run takes the registry definition's config object as JSON text (word for word:
+# one parameter, the whole config). Every service component in this tree implements the signature, so
+# the name moves when the signature does; until then the doc says the type, and rule 1 records it -
+# for THIS function's parameter, which is what the "run.config" key says.
+json-name kernel/kernel.wit interface:service run.config
+#
+# RULE 2 - a polling func beside an operation handle.
+#
+# kernel v0.1 is the ABI components in this tree still import: wa:kernel/http's pending and
+# wa:kernel/speech's job hand out a resource and the guest POLLS it. kernel v0.2 (wit/kernel-v2) is
+# the async shape - send is async, the body is a stream, the transcript a future - and it is what new
+# components are built against, so these two are the pair the rule exists to stop spreading. They are
+# not marked legacy wrapper over <future-func> because v0.1 has no future func to point at; the marker
+# is for a seam that has one.
+poll-without-future kernel/kernel.wit interface:http/resource:pending poll
+poll-without-future kernel/kernel.wit interface:speech/resource:job poll

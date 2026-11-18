@@ -1,4 +1,4 @@
--- "Update available (<short sha>): run wa update or /update" - the banner Claude Code and pi show.
+-- The update banner - the sentence M.LINE below defines, and the only place it is written down.
 --
 -- This is NOT `lua/core/release.lua`. That module compares release *tags* (`v0.2.0`); this one
 -- answers the question the sentence asks: can this machine install something newer, and what is it?
@@ -64,10 +64,36 @@ M.TARGETS = {
   x86_64 = "x86_64-unknown-linux-gnu", amd64 = "x86_64-unknown-linux-gnu",
   aarch64 = "aarch64-unknown-linux-gnu", arm64 = "aarch64-unknown-linux-gnu",
 }
--- "Update available (abc123456789): run wa update or /update" - one wording, used by the CLI footer,
--- the session-start line and the window, so the three surfaces cannot drift (docs/RELEASE-UPDATE.md).
--- 14/11 (operator): worded as Claude Code words it, and shown calm - one static line on its own row.
-M.LINE = "Update available! Run: wa update"
+-- ONE definition of the sentence (operator, 18/11), for every surface that shows it:
+--
+--   Update available (<sha>) \226\128\148 /update here, or wa update in a terminal
+--
+-- `%s` is the twelve-hex id of the update. This is the CLI footer's line, the session-start line and
+-- the window's (`banner.line` in the node's /update answer) - one wording, so the three surfaces cannot
+-- drift (docs/RELEASE-UPDATE.md). Nothing else restates the sentence: the comments in chat.lua,
+-- cli_view.lua and server.lua point HERE rather than quoting a sentence of their own, which is how
+-- three wordings of one fact used to disagree.
+--
+-- The two commands it names are the only things a reader can DO with it, so both are rendered BOLD:
+-- `M.COMMANDS` is the list, read by the CLI's row (`METHODS:session_line`) and by the native editor's
+-- (`wa_term::terminal_editor::Editor::session_content`), and the line keeps the warning yellow.
+M.LINE = "Update available (%s) \226\128\148 /update here, or wa update in a terminal"
+M.COMMANDS = { "/update", "wa update" }
+
+-- TODO(deploy-ancestry pins, not on this branch): when a deploy can be held by an ancestry pin, the
+-- notice says so INSTEAD, in the same row and the same yellow:
+--
+--   Pinned to <build> (<reason>) \226\128\148 update held; /update --unpin to release
+--
+-- The words to emphasise are then `/update --unpin` (the list above, swapped by whichever sentence is
+-- chosen), and the pin's reason is the deploy's own fact, never a sentence written here. Until the pins
+-- exist there is nothing to print, so nothing is printed: a second wording with no data behind it is
+-- exactly the drift this module exists to stop.
+
+-- The sentence with its sha: the one place `%s` is filled, so no caller formats M.LINE itself.
+function M.line(sha)
+  return string.format(M.LINE, tostring(sha or "?"))
+end
 
 local function trim(text)
   return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
@@ -460,7 +486,7 @@ function M.verdict(identity, feed, comparison, reason, meta)
   if type(feed) == "table" and #feed > 0 then verdict.window = #feed end
   local installed = tostring((identity and identity.sha12) or "?")
   if verdict.state == "behind" and latest and latest.sha12 then
-    verdict.line = string.format(M.LINE, latest.sha12)
+    verdict.line = M.line(latest.sha12)
     verdict.message = "installed " .. installed .. " is behind " ..
       (meta.channel == "tree" and "origin/main " or "the newest installable release ") .. tostring(latest.tag or latest.sha12)
   elseif verdict.state == "current" then
@@ -910,7 +936,9 @@ function M.session_content(options)
   if fact then return fact end
   local notice = trim(o.notice)
   if notice == "" then return nil end
-  return { kind = "notice", text = notice }
+  -- `commands` travels with the text: the renderers bold what the sentence asks the reader to type, and
+  -- which words those are is this module's answer (M.COMMANDS), never a copy inside a renderer.
+  return { kind = "notice", text = notice, commands = M.COMMANDS }
 end
 
 -- Cache only: what the window asks for on load. The served node's housekeeping tick keeps the cache

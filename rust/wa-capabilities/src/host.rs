@@ -98,6 +98,35 @@ pub extern "C-unwind" fn getenv(l: *mut LuaState) -> c_int {
     }
 }
 
+/// host.executable_on_path(name) -> absolute path, or nil.
+///
+/// The file the kernel will actually START for a bare program name (node), resolved against the PATH a
+/// spawned child inherits - never against the PATH host.getenv answers, which is the config's first. An
+/// approval has to name the interpreter the launch spawns, and a digest that named one node while the
+/// child ran another named no file at all (round 7). A name with a separator is not a name to resolve,
+/// and a name that is not there is nil rather than a guess.
+#[no_mangle]
+    /// host.executable_on_path(name) -> the file a bare name resolves to on the PATH a child inherits
+pub extern "C-unwind" fn executable_on_path(l: *mut LuaState) -> c_int {
+    let name = arg_string(l, 1).unwrap_or_default();
+    let name = if cfg!(windows) && !name.ends_with(".exe") { format!("{name}.exe") } else { name };
+    let resolved = if name.is_empty() || name.contains('/') || name.contains('\\') {
+        None
+    } else {
+        which_on_path(&name)
+    };
+    match resolved {
+        Some(path) => {
+            unsafe { lua_pushlstring(l, path.as_ptr() as *const c_char, path.len()) };
+            1
+        }
+        None => {
+            unsafe { wa_host_support::lua::lua_pushnil(l) };
+            1
+        }
+    }
+}
+
 /// host.paths() -> { home, config, data, cache, temp }
 ///
 /// Platform-neutral directories, so the Lua core never has to know about
@@ -138,16 +167,13 @@ pub extern "C-unwind" fn canonical_path(l: *mut LuaState) -> c_int {
     1
 }
 
-/// The shell `host.exec` runs commands with.
+/// A bare name resolved through the PROCESS environment's PATH - the one a spawned child inherits, and
+/// the one the kernel uses to start a program (operations.rs, the `program` branch of `start`).
 ///
-/// The model speaks POSIX: `ls`, `pwd`, `tail`, `grep`, single quotes, `$VAR`.
-/// pi resolves this by requiring bash on Windows - Git Bash, Cygwin, MSYS2, WSL -
-/// and refusing to start without it. We did the opposite, running `cmd /C`, so
-/// every one of those came back "is not recognized as an internal or external
-/// command" and the model, which cannot see the difference, tried variants of the
-/// same idea until its budget was gone. That was mistaken for the model being bad
-/// at tool calls; it was answering in the wrong language.
-pub(crate) fn executable_on_path(name: &str) -> Option<String> {
+/// host.executable_on_path below is the same answer from Lua, and it is not the same as
+/// host.getenv("PATH"): that reads the host's config overrides first (resolved_env), so a node whose
+/// config sets a PATH named one interpreter while the child ran another (round 7).
+pub(crate) fn which_on_path(name: &str) -> Option<String> {
     let path = std::env::var("PATH").ok()?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
@@ -158,6 +184,15 @@ pub(crate) fn executable_on_path(name: &str) -> Option<String> {
     None
 }
 
+/// The shell `host.exec` runs commands with.
+///
+/// The model speaks POSIX: `ls`, `pwd`, `tail`, `grep`, single quotes, `$VAR`.
+/// pi resolves this by requiring bash on Windows - Git Bash, Cygwin, MSYS2, WSL -
+/// and refusing to start without it. We did the opposite, running `cmd /C`, so
+/// every one of those came back "is not recognized as an internal or external
+/// command" and the model, which cannot see the difference, tried variants of the
+/// same idea until its budget was gone. That was mistaken for the model being bad
+/// at tool calls; it was answering in the wrong language.
 fn shell_config() -> &'static (String, String) {
     static SHELL: OnceLock<(String, String)> = OnceLock::new();
     SHELL.get_or_init(|| {
@@ -177,7 +212,7 @@ fn shell_config() -> &'static (String, String) {
                 r"C:\Program Files (x86)\Git\bin\bash.exe".to_string(),
             ];
             for name in ["bash.exe", "sh.exe"] {
-                if let Some(found) = executable_on_path(name) {
+                if let Some(found) = which_on_path(name) {
                     candidates.push(found);
                 }
             }
@@ -193,7 +228,7 @@ fn shell_config() -> &'static (String, String) {
                 return (name.to_string(), "-c".to_string());
             }
         }
-        if let Some(found) = executable_on_path("bash") {
+        if let Some(found) = which_on_path("bash") {
             return (found, "-c".to_string());
         }
         ("sh".to_string(), "-c".to_string())
@@ -783,6 +818,97 @@ pub extern "C-unwind" fn path_kind(l: *mut LuaState) -> c_int {
     };
     unsafe { lua_pushlstring(l, kind.as_ptr() as *const c_char, kind.len()) };
     1
+}
+
+/// host.path_facts(path) -> JSON: what a path IS on disk, including the identity a permission decision
+/// needs - the realpath (symlinks resolved), the kind, and on unix the owner and the mode bits.
+///
+/// Why a capability rather than a shelled-out stat: the vault approval decides whether a program is the
+/// PLATFORM's (replaced by a package manager, never by the agent) or the connector's own code, and that
+/// answer is "root-owned and not group/other-writable" (this round; docs/VAULT.md). A path prefix alone
+/// called /usr/local/bin the platform's on a machine where that directory belongs to the user, and the
+/// interpreter under it received the vault values unhashed. A stat run through a shell would differ per
+/// platform and be spoofable through PATH; this reads the metadata the kernel reports.
+///
+/// Not a Lua table, like every other JSON-answering capability here: a caller decodes it with
+/// lua/vendor/json.lua. A path that does not exist answers {"kind":"missing", ...} - an answer, not nil -
+/// so a caller cannot mistake "cannot see it" for "it is fine".
+#[no_mangle]
+    /// host.path_facts(path) -> one JSON string: {path: realpath, kind, size, unix, uid?, gid?, mode?}
+pub extern "C-unwind" fn path_facts(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    push_json(l, &path_facts_value(&path));
+    1
+}
+
+pub(crate) fn path_facts_value(path: &str) -> serde_json::Value {
+    let real = std::fs::canonicalize(path).ok().map(|value| value.to_string_lossy().replace('\\', "/"));
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let mut value = json!({
+                "path": real.unwrap_or_else(|| path.replace('\\', "/")),
+                "kind": if metadata.is_file() { "file" } else if metadata.is_dir() { "dir" } else { "other" },
+                "size": metadata.len(),
+                "unix": cfg!(unix),
+            });
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                value["uid"] = json!(metadata.uid());
+                value["gid"] = json!(metadata.gid());
+                value["mode"] = json!(metadata.mode() & 0o7777);
+            }
+            value
+        }
+        Err(error) => json!({"path": path, "kind": "missing", "unix": cfg!(unix),
+            "error": format!("{:?}", error.kind())}),
+    }
+}
+
+/// host.file_sha256(path) -> hex, or nil plus a named reason.
+///
+/// host.sha256 hashes a STRING this interpreter already holds, and host.read_file is bounded (a
+/// connector's interpreter is a hundred-megabyte binary that must never pass through Lua): hashing a file
+/// by path, in fixed-size chunks, is what lets an approval name the interpreter's bytes. The bound is on
+/// the file's size before a byte is read, so a huge or growing file is a refusal rather than an allocation.
+#[no_mangle]
+    /// host.file_sha256(path) -> the sha256 of a file's bytes as hex, nil+reason when it cannot be read
+pub extern "C-unwind" fn file_sha256(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    match file_digest(&path) {
+        Ok(hex) => {
+            unsafe { lua_pushlstring(l, hex.as_ptr() as *const c_char, hex.len()) };
+            1
+        }
+        Err(reason) => {
+            unsafe { wa_host_support::lua::lua_pushnil(l) };
+            unsafe { lua_pushlstring(l, reason.as_ptr() as *const c_char, reason.len()) };
+            2
+        }
+    }
+}
+
+/// A file's sha256, read in chunks; bounded by FILE_DIGEST_MAX_BYTES.
+pub(crate) const FILE_DIGEST_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+pub(crate) fn file_digest(path: &str) -> Result<String, String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|error| format!("unreadable: {error}"))?;
+    if let Ok(metadata) = file.metadata() {
+        if metadata.len() > FILE_DIGEST_MAX_BYTES {
+            return Err(format!("too_large: {} bytes", metadata.len()));
+        }
+    }
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => context.update(&buffer[..read]),
+            Err(error) => return Err(format!("unreadable: {error}")),
+        }
+    }
+    Ok(context.finish().as_ref().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Identify the image formats the provider path accepts from their bytes, never
@@ -2643,6 +2769,25 @@ impl ToolCallAssembly {
     }
 }
 
+/// Is this send() error a STALL, and therefore safe to replay?
+///
+/// A stall is one fact (18/11 round 2, finding 5): the request was written and no byte of the response
+/// - not even its status line - arrived before the per-call deadline. ureq names that case exactly,
+/// and nothing else does, so a refused connection, a TLS failure, an unresolvable host and a connect
+/// timeout keep their own names and are never replayed as stalls (a connect that timed out never sent
+/// the request; it belongs to the patient connection bucket, lua/core/provider.lua).
+///
+/// The marker is added ONLY for that case. It used to be added to every send() error, which turned
+/// every transport failure into provider_stalled and made the failure layer's name a lie.
+fn stall_marker(error: &ureq::Error, first_response_seconds: u64) -> Option<String> {
+    if first_response_seconds == 0 { return None; }
+    match error {
+        ureq::Error::Timeout(ureq::Timeout::RecvResponse) => Some(format!(
+            " (provider_stalled: no response within {first_response_seconds}s)")),
+        _ => None,
+    }
+}
+
 fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
@@ -2664,12 +2809,11 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         request = request.header(key, value);
     }
     let response = request.send(body.as_bytes()).map_err(|error| {
-        // Keep the transport's own words (the retry predicates match on them), and add the one fact
-        // they cannot carry: this call had a deadline of its own, and it expired.
-        if first_response_seconds > 0 {
-            format!("{error} (provider_stalled: no response within {first_response_seconds}s)")
-        } else {
-            error.to_string()
+        // Keep the transport's own words - the retry predicates and the failure layer match on them -
+        // and add the stall marker only where it is true (stall_marker above).
+        match stall_marker(&error, first_response_seconds) {
+            Some(marker) => format!("{error}{marker}"),
+            None => error.to_string(),
         }
     })?;
     let status = response.status().as_u16();
@@ -3162,6 +3306,15 @@ struct ConsoleInput {
     mouse_pending: Vec<u8>,
     /// The chat text being selected with the mouse; Ctrl+C copies it (OSC 52).
     selection: Option<Selection>,
+    /// A mouse drag that began in the input box: the draft index it started at (the editor selects to it).
+    box_drag: Option<usize>,
+    /// Images pasted with Ctrl+V this session, by the number in their `[Image #n]` token: (mime, base64).
+    pasted_images: Vec<(String, String)>,
+    /// The image tokens this host itself put into the draft in progress, and the ones that survived
+    /// into the line submitted last. `host.input_image` answers only for the second list: a
+    /// `[Image #n]` typed by hand, or left over from an earlier draft, attaches nothing.
+    draft_images: Vec<usize>,
+    submitted_images: Vec<usize>,
     /// `host.transcript_hold(true)`: writes are kept, not drawn, until the hold ends (a replay).
     transcript_held: bool,
     /// The long tool call's line as this process last drew it (`wa_term::tool_progress`, the host's own
@@ -3192,62 +3345,150 @@ fn clear_selection(state: &mut ConsoleInput) {
 
 /// One mouse report from the terminal. Ignored while a panel is open (it owns the screen's bottom).
 fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
+    use wa_term::keymap::{self, Gesture, Pose};
     use wa_term::selection::Mouse;
     if state.panel.is_some() { return; }
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
     let (width, rows) = (editor.width, output_rows(None, editor));
+    // Which gestures a pointer event means, and in which order they are tried, is the table's answer
+    // (wa_term::keymap, the Mouse surface) - the same table /keybindings prints. A press a link
+    // claims is a link copy because the table lists LinkCopy before the transcript's selection.
     match event {
-        Mouse::WheelUp => { clear_selection(state); state.transcript.page(3); }
-        Mouse::WheelDown => { clear_selection(state); state.transcript.page(-3); }
+        Mouse::WheelUp | Mouse::WheelDown => {
+            let up = matches!(event, Mouse::WheelUp);
+            for gesture in keymap::gestures(Pose::Wheel) {
+                if let Gesture::Wheel = gesture {
+                    clear_selection(state);
+                    state.transcript.page(if up { 3 } else { -3 });
+                    return;
+                }
+            }
+        }
         Mouse::Press(row, col) => {
             clear_selection(state);
-            // The scrollbar's own gesture, before the selection's: a press in the bar's column
-            // (the screen's last one, while the bar is drawn there) jumps the view there and grabs
-            // the thumb, and a press anywhere else is still a selection. `scroll::bar` holds the
-            // arithmetic; this is only the routing.
-            if state.transcript.bar_press(row, col, width) { return; }
-            if row > rows || state.nav.is_some() { return; }
-            // The copy icon of a fenced block (#114): the transcript knows which cell it drew the
-            // affordance on, so a press there is a copy and a press anywhere else is a selection -
-            // one gesture, one meaning, no mode to learn.
-            // An expandable line (a folded code-mode result): the press opens or folds it.
-            if state.transcript.expand_at(row) {
-                let frame = layout_frame(state);
-                let _ = wa_term::terminal_editor::write(&frame);
-                return;
-            }
-            if let Some(text) = state.transcript.copy_at(row, col) {
-                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
-                let count = text.chars().count();
-                if let Some(editor) = state.editor.as_mut() {
-                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+            let over_transcript = row <= rows && state.nav.is_none();
+            for gesture in keymap::gestures(Pose::Press) {
+                match gesture {
+                    // The scrollbar's own gesture, before the selection's: a press in the bar's column
+                    // (the screen's last one, while the bar is drawn there) jumps the view there and
+                    // grabs the thumb, and a press anywhere else is still a selection.
+                    Gesture::BarJump => { if state.transcript.bar_press(row, col, width) { return; } }
+                    // A press in the input box places the cursor; a drag from there selects
+                    // (operator 17/11).
+                    Gesture::DraftPress => {
+                        if row > rows && state.nav.is_none() {
+                            let hit = state.editor.as_mut().and_then(|input| {
+                                let index = input.index_at(row, col)?;
+                                input.click(index);
+                                Some(index)
+                            });
+                            if let Some(index) = hit {
+                                state.box_drag = Some(index);
+                                let frame = layout_frame(state);
+                                let _ = wa_term::terminal_editor::write(&frame);
+                            }
+                            return;
+                        }
+                    }
+                    // An expandable line (a folded code-mode result): the press opens or folds it.
+                    Gesture::ExpandToggle => {
+                        if !over_transcript { return; }
+                        if state.transcript.expand_at(row) {
+                            let frame = layout_frame(state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            return;
+                        }
+                    }
+                    // A link under the pointer: copied (operator 17/11 - "copy it to the clipboard").
+                    Gesture::LinkCopy => {
+                        if !over_transcript { return; }
+                        if !state.transcript.bar_active() {
+                            let shown = state.transcript.view(width, rows);
+                            if let Some(url) = shown.get(row.saturating_sub(1))
+                                .and_then(|line| wa_term::links::at(&wa_term::selection::plain(line), col))
+                            {
+                                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&url));
+                                let count = url.chars().count();
+                                if let Some(editor) = state.editor.as_mut() {
+                                    editor.notice = format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" });
+                                }
+                                let frame = layout_frame(state);
+                                let _ = wa_term::terminal_editor::write(&frame);
+                                return;
+                            }
+                        }
+                    }
+                    // The copy icon of a fenced block (#114): the transcript knows which cell it drew
+                    // the affordance on, so a press there is a copy and a press anywhere else is a
+                    // selection - one gesture, one meaning, no mode to learn.
+                    Gesture::BlockCopy => {
+                        if !over_transcript { return; }
+                        if let Some(text) = state.transcript.copy_at(row, col) {
+                            let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                            let count = text.chars().count();
+                            if let Some(editor) = state.editor.as_mut() {
+                                editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+                            }
+                            let frame = layout_frame(state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            return;
+                        }
+                    }
+                    Gesture::TranscriptSelection => {
+                        if !over_transcript { return; }
+                        let following = state.transcript.following();
+                        state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
+                        let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| wa_term::selection::plain(r)).collect();
+                        state.selection = Some(Selection { anchor: (row, col), head: (row, col), rows: shown, following });
+                        state.transcript.dirty = true;
+                        return;
+                    }
+                    _ => {}
                 }
-                let frame = layout_frame(state);
-                let _ = wa_term::terminal_editor::write(&frame);
-                return;
             }
-            let following = state.transcript.following();
-            state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
-            let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| wa_term::selection::plain(r)).collect();
-            state.selection = Some(Selection { anchor: (row, col), head: (row, col), rows: shown, following });
-            state.transcript.dirty = true;
         }
-        // Motion with no button down (`SGR` 35, which `1003` reports): the pointer is on the bar or
-        // it is not. Only that flip sets `dirty`, so a moving pointer costs no frame.
+        // Motion with no button down (SGR 35, which 1003 reports): the pointer is on the bar or it is
+        // not. Only that flip sets dirty, so a moving pointer costs no frame.
         Mouse::Motion(row, col) => {
-            state.transcript.bar_hover(row, col, width);
-            if row <= rows && state.transcript.expand_hover(row) {
-                let frame = layout_frame(state);
-                let _ = wa_term::terminal_editor::write(&frame);
+            for gesture in keymap::gestures(Pose::Motion) {
+                if let Gesture::Hover = gesture {
+                    state.transcript.bar_hover(row, col, width);
+                    let expand = row <= rows && state.transcript.expand_hover(row);
+                    let copy = row <= rows && state.transcript.copy_hover(row, col);
+                    if expand || copy {
+                        let frame = layout_frame(state);
+                        let _ = wa_term::terminal_editor::write(&frame);
+                    }
+                    return;
+                }
             }
         }
         Mouse::Drag(row, col) | Mouse::Release(row, col) => {
-            // A drag that began on the bar scrolls it, and the button coming up lets the thumb go;
-            // anything else is the selection it has always been.
-            if matches!(event, Mouse::Release(..)) {
-                if state.transcript.bar_release() { return; }
-            } else if state.transcript.bar_drag(row) {
-                return;
+            // The draft's own drag comes first (it began in the box), then the bar's thumb; anything
+            // else is the transcript's selection, which is the gesture that always applies.
+            for gesture in keymap::gestures(if matches!(event, Mouse::Release(..)) { Pose::Release } else { Pose::Drag }) {
+                match gesture {
+                    Gesture::SelectDrag if state.box_drag.is_some() => {
+                        let anchor = state.box_drag.unwrap_or(0);
+                        if let Some(input) = state.editor.as_mut() {
+                            if let Some(index) = input.index_at(row, col) { input.select(anchor, index); }
+                        }
+                        // (the editor borrow ends here; the frame below reads the whole state)
+                        if matches!(event, Mouse::Release(..)) { state.box_drag = None; }
+                        let frame = layout_frame(state);
+                        let _ = wa_term::terminal_editor::write(&frame);
+                        return;
+                    }
+                    // A drag that began on the bar scrolls it, and the button coming up lets the thumb go.
+                    Gesture::BarJump => {
+                        if matches!(event, Mouse::Release(..)) {
+                            if state.transcript.bar_release() { return; }
+                        } else if state.transcript.bar_drag(row) {
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
             }
             let Some(selection) = state.selection.as_mut() else { return; };
             selection.head = (row.clamp(1, selection.rows.len().max(1)), col);
@@ -3416,7 +3657,10 @@ fn refresh_build(state: &mut ConsoleInput) {
 fn refresh_tool_progress(state: &mut ConsoleInput) {
     if state.editor.as_ref().is_none_or(|editor| editor.row == 0) { return }
     let width = state.editor.as_ref().map(|editor| editor.width).unwrap_or(0);
-    let row = wa_term::tool_progress::current(width);
+    let mut row = wa_term::tool_progress::current(width);
+    // Never inside a code-mode block: its call rows already say ⏳/✓/✗ in place, and this row coming and going
+    // under the block moved everything above it up and down (operator 17/11, measured in the TUI).
+    if state.transcript.blocks.last().is_some_and(|block| block.code) { row = String::new(); }
     if row == state.tool_progress { return; }
     state.tool_progress = row;
     let text = if state.tool_progress.is_empty() { None } else { Some(state.tool_progress.as_str()) };
@@ -3514,15 +3758,18 @@ fn console_reader() {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
                         // Ctrl+O pins a block expanded, so the code-mode block that follows cannot
                         // collapse it (and the same key lets it go). It is the transcript's key: the
-                        // draft has no binding for it, so it is taken here before the editor.
-                        if byte == 0x0f && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
+                        // draft has no row for it, so it is taken here before the editor. Which byte
+                        // that is, is the keymap's answer (Console surface), not this loop's.
+                        if wa_term::keymap::console_byte(byte) == Some(wa_term::keymap::HostAct::Pin)
+                            && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
                             let frame = layout_frame(&mut state);
                             let _ = wa_term::terminal_editor::write(&frame);
                             continue;
                         }
                         // Ctrl+C with a selection copies it; any other key ends the selection first.
                         if state.selection.is_some() {
-                            if byte == 3 && copy_selection(&mut state) { continue; }
+                            if wa_term::keymap::console_byte(byte) == Some(wa_term::keymap::HostAct::CopySelection)
+                                && copy_selection(&mut state) { continue; }
                             clear_selection(&mut state);
                         }
                         if let Some(nav) = state.nav.as_mut() {
@@ -3601,6 +3848,10 @@ fn console_reader() {
                                 }
                                 CLI_INTERRUPT.store(false, std::sync::atomic::Ordering::SeqCst);
                                 state.transcript.to_bottom();
+                                // The image tokens this draft carries, and only those: the next
+                                // draft starts with none, so `[Image #1]` typed into it is text.
+                                state.submitted_images = submitted_tokens(&state.draft_images, &text);
+                                state.draft_images.clear();
                                 state.lines.push(text);
                                 sync_queued(&mut state);
                             }
@@ -3608,6 +3859,42 @@ fn console_reader() {
                             // The editor put its own notice (`Interrupting…`) in the footer's place; the
                             // frame below draws it. The draft is never touched by Ctrl+C.
                             wa_term::terminal_editor::Action::Interrupt => CLI_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst),
+                            // The draft's selection to the clipboard (Ctrl+C / Ctrl+Insert with text selected):
+                            // OSC 52, the same write the transcript's copy icon makes.
+                            wa_term::terminal_editor::Action::Copy(text) => {
+                                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                                let count = text.chars().count();
+                                if let Some(editor) = state.editor.as_mut() {
+                                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+                                }
+                            }
+                            // A dropped (or pasted) path to an image file, and Ctrl+V on a
+                            // clipboard image: the same attachment inserted the same way. One
+                            // function decides the token number, keeps the bytes and records that
+                            // this draft carries it; the two arms differ only in what they replace.
+                            wa_term::terminal_editor::Action::Pasted(from) => {
+                                let span = state.editor.as_ref().map(|e| (e.slice(from, e.cursor()), e.cursor()));
+                                if let Some((text, to)) = span {
+                                    if let Some((mime, bytes)) = dropped_image(&text) {
+                                        let (token, kb) = attach_image(&mut state, &mime, bytes);
+                                        if let Some(editor) = state.editor.as_mut() {
+                                            editor.replace_range(from, to, &token);
+                                            editor.notice = format!("{token} attached ({kb} KB)");
+                                        }
+                                    }
+                                }
+                            }
+                            wa_term::terminal_editor::Action::PasteImage => {
+                                let note = match read_clipboard_image() {
+                                    Ok((mime, bytes)) => {
+                                        let (token, kb) = attach_image(&mut state, &mime, bytes);
+                                        if let Some(editor) = state.editor.as_mut() { editor.insert_text(&token); }
+                                        format!("{token} attached ({kb} KB)")
+                                    }
+                                    Err(reason) => reason,
+                                };
+                                if let Some(editor) = state.editor.as_mut() { editor.notice = note; }
+                            }
                             wa_term::terminal_editor::Action::None => {}
                         }
                     }
@@ -3616,7 +3903,8 @@ fn console_reader() {
                     // that is really the start of its end marker would leave the draft stuck in paste mode.
                     let pasting = state.panel.as_ref().map(|panel| panel.pasting())
                         .or_else(|| state.editor.as_ref().map(|input| input.pasting())).unwrap_or(false);
-                    if !state.eof && keys.last() == Some(&0x1b) && !pasting && !byte_ready(120) {
+                    let escape = wa_term::keymap::console_escape();
+                    if !state.eof && escape.is_some() && keys.last().copied() == escape && !pasting && !byte_ready(120) {
                         if let Some(panel) = state.panel.as_mut() { panel.escape(); }
                         else if let Some(nav) = state.nav.as_mut() {
                             if nav.lone_escape() { state.transcript.sync(); state.nav = None; }
@@ -4048,6 +4336,264 @@ pub extern "C-unwind" fn transcript_expand(l: *mut LuaState) -> c_int {
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     state.transcript.expandable(&markers);
     unsafe { wa_host_support::lua::lua_pushboolean(l, if markers.is_empty() { 0 } else { 1 }) };
+    1
+}
+
+/// What this process can see of the system clipboard: the switch that turns reading off, and which
+/// of the two display servers is reachable.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ClipboardHost {
+    off: bool,
+    wayland: bool,
+    x11: bool,
+}
+
+impl ClipboardHost {
+    fn from_env() -> Self {
+        ClipboardHost {
+            off: std::env::var("WA_CLIPBOARD").map(|value| value == "off").unwrap_or(false),
+            wayland: std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            x11: std::env::var_os("DISPLAY").is_some(),
+        }
+    }
+}
+
+/// The image types asked of a clipboard, in preference order, and the size a paste may be. Both are
+/// data rather than literals inside the reader so the rules can be tested without a clipboard.
+const CLIPBOARD_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const CLIPBOARD_MAX: usize = 20 * 1024 * 1024;
+
+/// The first type this node understands from a clipboard's own type list.
+fn pick_clipboard_type(listed: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(listed);
+    CLIPBOARD_TYPES.iter().copied().find(|kind| text.lines().any(|line| line.trim() == *kind))
+}
+
+/// The reader, given the host it sees and the way it runs a clipboard tool: `wl-paste --list-types`
+/// then `wl-paste --type <type>` on Wayland, `xclip ... -t TARGETS` then `-t <type> -o` on X11. The
+/// one-line notice the footer shows is the error.
+fn read_clipboard_image_with(host: ClipboardHost, run: impl Fn(&str, &[&str]) -> Option<Vec<u8>>)
+    -> Result<(String, Vec<u8>), String> {
+    if host.off {
+        return Err("clipboard reading is off here (WA_CLIPBOARD=off)".into());
+    }
+    let mut tried = false;
+    if host.wayland {
+        if let Some(listed) = run("wl-paste", &["--list-types"]) {
+            tried = true;
+            if let Some(kind) = pick_clipboard_type(&listed) {
+                if let Some(bytes) = run("wl-paste", &["--no-newline", "--type", kind]) {
+                    if bytes.len() > CLIPBOARD_MAX { return Err("the clipboard image is over 20 MB".into()); }
+                    if !bytes.is_empty() { return clipboard_image(bytes); }
+                }
+            }
+        }
+    }
+    if host.x11 {
+        if let Some(listed) = run("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"]) {
+            tried = true;
+            if let Some(kind) = pick_clipboard_type(&listed) {
+                if let Some(bytes) = run("xclip", &["-selection", "clipboard", "-t", kind, "-o"]) {
+                    if bytes.len() > CLIPBOARD_MAX { return Err("the clipboard image is over 20 MB".into()); }
+                    if !bytes.is_empty() { return clipboard_image(bytes); }
+                }
+            }
+        }
+    }
+    Err(if tried { "no image on the clipboard".into() }
+        else { "no clipboard here: wl-paste (Wayland) or xclip (X11) is needed, on the machine wa chat runs on".into() })
+}
+
+/// A clipboard payload as an attachment: the BYTES say which image it is, and a payload that is not
+/// one of them is refused instead of being attached under a name it does not match.
+fn clipboard_image(bytes: Vec<u8>) -> Result<(String, Vec<u8>), String> {
+    match sniff_image(&bytes) {
+        Some(mime) => Ok((mime.to_string(), bytes)),
+        None => Err("the clipboard says it holds an image, but its bytes are not a PNG, JPEG, WebP or GIF".into()),
+    }
+}
+
+/// An image from the system clipboard, read where this process runs - the way pi and Claude Code do
+/// it. Err is the one-line notice the footer shows.
+fn read_clipboard_image() -> Result<(String, Vec<u8>), String> {
+    read_clipboard_image_with(ClipboardHost::from_env(), |program, args| {
+        let out = std::process::Command::new(program).args(args)
+            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+        out.status.success().then_some(out.stdout)
+    })
+}
+
+/// The image types this node attaches, decided by the payload's own first bytes and never by a file
+/// name: a path is text a terminal, a file manager or a page hands us, while the bytes are the image.
+pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { return Some("image/png"); }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) { return Some("image/jpeg"); }
+    if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" { return Some("image/webp"); }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { return Some("image/gif"); }
+    None
+}
+
+/// The largest image this node keeps for a message: it holds the bytes and the provider bills for
+/// them, so a huge drop is refused rather than sent.
+const IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The one directory a dropped image may come from when it is not inside the session's own folders:
+/// `WA_IMAGE_DROP_DIR` when the operator names one, else `<state>/attachments` (`docs/ONEROOT.md` - one
+/// root everything an agent creates lives under, so one `wa clean` covers it). It is the explicit place
+/// to drop a screenshot the agent should attach.
+fn image_drop_dir_with(configured: Option<&str>) -> std::path::PathBuf {
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => wa_host_support::paths::state_root().join("attachments"),
+    }
+}
+
+fn image_drop_dir() -> std::path::PathBuf {
+    image_drop_dir_with(std::env::var("WA_IMAGE_DROP_DIR").ok().as_deref())
+}
+
+/// The directories an attached image may come from: the SESSION's own folders and one explicit drop
+/// directory. It used to be all of HOME plus the temporary directory, which is every file the user owns
+/// and every scratch file on the machine - a dropped path was a way to read any of them into a message
+/// (review, 18/11). What a session actually needs is where it was started (the tree it works in, and a
+/// screenshot of it), the node's own state root (scratch and tool-results), and the drop directory.
+///
+/// A symlink is still followed before the question is asked - that is the point of resolving first,
+/// since a link is exactly how a path that looks local reads a private file.
+fn image_roots() -> Vec<std::path::PathBuf> {
+    image_roots_in(std::env::current_dir().ok(), std::path::PathBuf::from(wa_host_support::paths::resolve_home()))
+}
+
+/// The same list with the session's directory and the home injected, so the question can be asked about
+/// a directory a test chose. The process's working directory is the session's own folder - UNLESS it is
+/// the user's home, which is the review's point: a session started in HOME is the session with every
+/// private file one path away, so the exclusion is about the DIRECTORY and not about how it was named
+/// (round 5, LOW). What such a session still gets is the node's state root and the drop directory.
+fn image_roots_in(cwd: Option<std::path::PathBuf>, home: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    let resolve = |path: std::path::PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    let mut add = |root: std::path::PathBuf| {
+        let resolved = resolve(root);
+        if !roots.contains(&resolved) { roots.push(resolved); }
+    };
+    let home = resolve(home);
+    if let Some(cwd) = cwd {
+        let cwd = resolve(cwd);
+        if cwd != home { add(cwd); }
+    }
+    add(wa_host_support::paths::state_root());
+    add(image_drop_dir());
+    roots
+}
+
+/// The path an attachment may read, or None, inside `roots`. Symlinks are resolved first (so a link
+/// out of an allowed directory is refused by where it LANDS, not by where it appears to be).
+fn attachment_path_in(path: &std::path::Path, roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    if roots.iter().any(|root| resolved.starts_with(root)) { Some(resolved) } else { None }
+}
+
+fn attachment_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    attachment_path_in(path, &image_roots())
+}
+
+/// A pasted (or dropped) single path to an image file: its mime and bytes, or None. Quotes,
+/// `file://` and `%20` are what terminals and file managers wrap a dropped path in.
+///
+/// Three refusals beyond "is it a file": the path must resolve inside an allowed directory
+/// ([attachment_path]); the size must be bounded ([IMAGE_MAX_BYTES]); and the BYTES must be a PNG,
+/// JPEG, WebP or GIF ([sniff_image]). The last one is what the extension used to stand for, and an
+/// extension is only a name.
+fn dropped_image(text: &str) -> Option<(String, Vec<u8>)> {
+    dropped_image_in(text, &image_roots())
+}
+
+/// The same, with the allowed directories injected: the tests need a directory they created, and the
+/// launch path needs the real list. One reader, one set of refusals.
+fn dropped_image_in(text: &str, roots: &[std::path::PathBuf]) -> Option<(String, Vec<u8>)> {
+    let mut path = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+    if path.contains('\n') || path.is_empty() { return None; }
+    if let Some(rest) = path.strip_prefix("file://") { path = rest.replace("%20", " "); }
+    let resolved = attachment_path_in(std::path::Path::new(&path), roots)?;
+    let meta = std::fs::metadata(&resolved).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > IMAGE_MAX_BYTES { return None; }
+    let bytes = std::fs::read(&resolved).ok()?;
+    let mime = sniff_image(&bytes)?;
+    Some((mime.to_string(), bytes))
+}
+
+/// Keep one image for this session and answer the token that names it plus the size said in KB. The
+/// only place a token is minted, so a dropped path and a Ctrl+V paste cannot number or record their
+/// image differently.
+fn attach_image(state: &mut ConsoleInput, mime: &str, bytes: Vec<u8>) -> (String, usize) {
+    let kb = bytes.len() / 1024;
+    state.pasted_images.push((mime.to_string(), base64::engine::general_purpose::STANDARD.encode(&bytes)));
+    let number = state.pasted_images.len();
+    state.draft_images.push(number);
+    (format!("[Image #{number}]"), kb)
+}
+
+/// The tokens of `inserted` that the submitted line still carries: an image the reader deleted from
+/// the draft is not sent, and an `[Image #n]` the reader typed is not in `inserted` at all.
+fn submitted_tokens(inserted: &[usize], text: &str) -> Vec<usize> {
+    inserted.iter().copied().filter(|number| text.contains(&format!("[Image #{number}]"))).collect()
+}
+
+/// `host.transcript_copy_first(text)`: the current block's first line becomes copyable with `text` (a code-mode
+/// block's script, known when its call settles).
+pub extern "C-unwind" fn transcript_copy_first(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = !text.is_empty() && state.transcript.copy_first(&text);
+    unsafe { wa_host_support::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
+/// `host.link_span(text)`: the first bare URL in `text` as "start,stop", 1-based byte offsets
+/// inclusive (Lua string positions), or nil. This is THE URL detector (`wa_term::links`): the renderer
+/// (`lua/core/markdown.lua`) underlines what this answers, and a click copies what a lookup in the same
+/// function answers, so the two can no longer disagree about where a link ends. Two numbers in one
+/// string rather than a table: the only caller slices the line with them.
+pub extern "C-unwind" fn link_span(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    match wa_term::links::first_bytes(&text) {
+        Some((start, end)) => {
+            let answer = format!("{},{}", start + 1, end);
+            unsafe { lua_pushlstring(l, answer.as_ptr() as *const c_char, answer.len()) };
+        }
+        None => unsafe { wa_host_support::lua::lua_pushnil(l) },
+    }
+    1
+}
+
+/// `host.keybindings()`: every special key the console handles, as JSON - one row per binding,
+/// `{surface, title, group, key, does}`, in the order `/keybindings` prints them. The rows come from
+/// `wa_term::keymap`, which is the table the editor, the slash menu, the transcript's blocks, a
+/// panel, the pointer and this reader thread all dispatch on, and the fullscreen console's rows come
+/// from the settings it obeys (`WA_TUI_KEYS`) - so the list a reader is shown is generated from the
+/// behaviour, never written beside it.
+pub extern "C-unwind" fn keybindings(l: *mut LuaState) -> c_int {
+    let answer = wa_term::keymap::json();
+    unsafe { lua_pushlstring(l, answer.as_ptr() as *const c_char, answer.len()) };
+    1
+}
+
+/// `host.input_image(n)`: the image the line just submitted carried as `[Image #n]`,
+/// `{"mime","data"}` (base64), or nil. The gate is the draft that inserted it: a token typed by hand,
+/// or one left over from an earlier message, names no image and answers nil.
+pub extern "C-unwind" fn input_image(l: *mut LuaState) -> c_int {
+    let n = arg_integer(l, 1).unwrap_or(0);
+    let (lock, _) = console_input();
+    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if n >= 1 && state.submitted_images.contains(&(n as usize)) {
+        if let Some((mime, data)) = state.pasted_images.get((n - 1) as usize) {
+            let value = serde_json::json!({ "mime": mime, "data": data }).to_string();
+            unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
+            return 1;
+        }
+    }
+    unsafe { wa_host_support::lua::lua_pushnil(l) };
     1
 }
 
@@ -5173,6 +5719,30 @@ mod tool_call_assembly_tests {
         assert_eq!(calls[1]["id"], json!("call_idkey_b"));
     }
 
+    /// 18/11 round 2, finding 5: only a RecvResponse timeout is a stall.
+    #[test]
+    fn only_a_response_header_timeout_is_a_stall() {
+        let stall = ureq::Error::Timeout(ureq::Timeout::RecvResponse);
+        assert_eq!(stall_marker(&stall, 90).as_deref(),
+            Some(" (provider_stalled: no response within 90s)"),
+            "no response headers before the deadline is the one stall, and it is safe to replay");
+        // Every other transport failure keeps its own name and is never replayed as a stall.
+        let others = [
+            ureq::Error::Timeout(ureq::Timeout::Connect),
+            ureq::Error::Timeout(ureq::Timeout::SendRequest),
+            ureq::Error::Timeout(ureq::Timeout::RecvBody),
+            ureq::Error::Timeout(ureq::Timeout::Global),
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")),
+        ];
+        for error in others {
+            assert_eq!(stall_marker(&error, 90), None, "not a stall: {error}");
+        }
+        // The operator's off switch (0 = no per-call deadline) marks nothing at all.
+        assert_eq!(stall_marker(&stall, 0), None, "no deadline, no stall");
+    }
+
     #[test]
     fn a_name_that_arrived_is_never_lost_whatever_the_later_deltas_say() {
         assert_eq!(merge_name("", "bash"), "bash");
@@ -5184,5 +5754,192 @@ mod tool_call_assembly_tests {
         assert_eq!(merge_name("bash", "ba"), "bash", "a repeat from the start changes nothing");
         assert_eq!(merge_name("bash", "rea"), "bashrea", "a different fragment is kept, not dropped");
         assert_eq!(merge_name("bash", "tool"), "bashtool", "an unexpected fragment is kept, not dropped");
+    }
+}
+
+#[cfg(test)]
+mod image_and_token_tests {
+    use super::*;
+
+    /// A tiny but real PNG header: the bytes a sniff reads, not a whole image.
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR";
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10];
+    const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00";
+    const WEBP: &[u8] = b"RIFF\x24\x00\x00\x00WEBPVP8 ";
+
+    #[test]
+    fn the_bytes_decide_the_type_and_a_name_does_not() {
+        assert_eq!(sniff_image(PNG), Some("image/png"));
+        assert_eq!(sniff_image(JPEG), Some("image/jpeg"));
+        assert_eq!(sniff_image(GIF), Some("image/gif"));
+        assert_eq!(sniff_image(WEBP), Some("image/webp"));
+        assert_eq!(sniff_image(b"#!/bin/sh\necho not an image\n"), None);
+        assert_eq!(sniff_image(b"RIFF"), None, "a truncated RIFF is not a WebP");
+        assert_eq!(sniff_image(b""), None);
+    }
+
+    /// A directory this test owns, used as the ONLY allowed root: the real list is the node's own, and a
+    /// test that wrote into it would be a test that polluted the machine it ran on.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wa-attach-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+    fn scratch(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("scratch file");
+        path
+    }
+    fn allowed(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        vec![std::fs::canonicalize(dir).expect("a real directory")]
+    }
+
+    #[test]
+    fn a_dropped_path_is_read_when_it_is_an_image_in_an_allowed_directory() {
+        let dir = scratch_dir("read");
+        let path = scratch(&dir, "shot.png", PNG);
+        let roots = allowed(&dir);
+        let (mime, bytes) = dropped_image_in(&path.to_string_lossy(), &roots).expect("an attached image");
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, PNG);
+        let quoted = format!("'{}'", path.to_string_lossy());
+        assert!(dropped_image_in(&quoted, &roots).is_some(), "a shell-quoted path is the same path");
+        let uri = format!("file://{}", path.to_string_lossy());
+        assert!(dropped_image_in(&uri, &roots).is_some(), "so is a file:// URI");
+    }
+
+    #[test]
+    fn a_file_whose_bytes_are_not_an_image_is_refused_whatever_it_is_called() {
+        let dir = scratch_dir("lie");
+        let path = scratch(&dir, "lie.png", b"#!/bin/sh\nrm -rf /\n");
+        assert!(dropped_image_in(&path.to_string_lossy(), &allowed(&dir)).is_none(),
+            "the extension is not evidence");
+    }
+
+    #[test]
+    fn an_empty_or_absent_path_is_refused() {
+        let roots: Vec<std::path::PathBuf> = Vec::new();
+        assert!(dropped_image_in("", &roots).is_none());
+        assert!(dropped_image_in("two\nlines", &roots).is_none());
+        assert!(dropped_image_in("/nonexistent/wasm-agent/shot.png", &roots).is_none());
+    }
+
+    // The review's LOW (18/11): the roots were all of HOME plus the machine's temp dir, so a dropped
+    // path was a way to read any of them into a message. They are now the session's folders and one
+    // explicit, configurable drop directory.
+    // Round 5's LOW: when the process's directory IS the user's home, the cwd root handed all of HOME
+    // back - the same list, under another name.
+    #[test]
+    fn a_session_started_in_home_does_not_get_home_back_through_its_own_directory() {
+        let home = scratch_dir("home");
+        let canonical = std::fs::canonicalize(&home).unwrap_or(home.clone());
+        let roots = super::image_roots_in(Some(home.clone()), home.clone());
+        assert!(!roots.iter().any(|root| root == &canonical), "HOME is not an image root: {roots:?}");
+        assert_eq!(roots, super::image_roots_in(Some(home.clone()), home.clone()), "and it is stable");
+        // A directory of the session's own is still allowed, which is what the root is for.
+        let work = scratch_dir("work");
+        let work_roots = super::image_roots_in(Some(work.clone()), home.clone());
+        let work = std::fs::canonicalize(&work).unwrap_or(work);
+        assert!(work_roots.iter().any(|root| root == &work), "the session's own folder: {work_roots:?}");
+    }
+
+    #[test]
+    fn the_allowed_directories_are_the_sessions_folders_and_one_drop_dir() {
+        let canonical = |path: std::path::PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
+        let roots = image_roots();
+        let cwd = canonical(std::env::current_dir().expect("a working directory"));
+        let state = canonical(wa_host_support::paths::state_root());
+        let home = canonical(std::path::PathBuf::from(wa_host_support::paths::resolve_home()));
+        let temp = canonical(std::env::temp_dir());
+        assert!(roots.iter().any(|root| root == &cwd), "the session's own folder is allowed: {roots:?}");
+        assert!(roots.iter().any(|root| root == &state), "the node's state root is allowed: {roots:?}");
+        assert!(roots.iter().any(|root| root == &canonical(image_drop_dir())), "the drop dir is allowed");
+        assert!(!roots.iter().any(|root| root == &home) || home == cwd || home == state,
+            "all of HOME is not an image root any more: {roots:?}");
+        assert!(!roots.iter().any(|root| root == &temp) || temp == cwd || temp.starts_with(&state),
+            "nor is the machine's temp directory: {roots:?}");
+    }
+
+    #[test]
+    fn the_drop_directory_is_configurable_and_defaults_under_the_state_root() {
+        assert_eq!(image_drop_dir_with(Some("/srv/wa-drop")), std::path::PathBuf::from("/srv/wa-drop"));
+        assert_eq!(image_drop_dir_with(Some("   ")), wa_host_support::paths::state_root().join("attachments"),
+            "a blank setting is no setting");
+        assert_eq!(image_drop_dir_with(None), wa_host_support::paths::state_root().join("attachments"));
+        // Whatever it is configured to, it is an allowed root on its own: that is what it is for.
+        let dir = scratch_dir("drop");
+        let path = scratch(&dir, "dropped.png", PNG);
+        assert!(dropped_image_in(&path.to_string_lossy(), &allowed(&dir)).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_lands_outside_the_allowed_directories_is_refused() {
+        let dir = scratch_dir("link");
+        let secret = scratch(&dir, "outside.png", PNG);
+        let roots = allowed(&dir);
+        let link = dir.join("link.png");
+        std::os::unix::fs::symlink("/etc/hostname", &link).expect("symlink");
+        assert!(dropped_image_in(&link.to_string_lossy(), &roots).is_none(),
+            "a link out of the allowed directories is refused by where it lands");
+        std::fs::remove_file(&link).expect("remove the link");
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink");
+        assert!(dropped_image_in(&link.to_string_lossy(), &roots).is_some(),
+            "a link that lands inside them is the image it points at");
+        let _ = std::fs::remove_file(&link);
+    }
+
+    #[test]
+    fn the_clipboard_reader_says_why_it_cannot_read_instead_of_pretending() {
+        let off = ClipboardHost { off: true, wayland: true, x11: true };
+        assert_eq!(read_clipboard_image_with(off, |_, _| Some(PNG.to_vec())).unwrap_err(),
+            "clipboard reading is off here (WA_CLIPBOARD=off)");
+        let none = ClipboardHost::default();
+        assert!(read_clipboard_image_with(none, |_, _| Some(PNG.to_vec())).unwrap_err()
+            .contains("no clipboard here"));
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let (mime, bytes) = read_clipboard_image_with(wayland, |program, args| {
+            assert_eq!(program, "wl-paste");
+            if args.contains(&"--list-types") { Some(b"text/plain\nimage/png\n".to_vec()) } else { Some(PNG.to_vec()) }
+        }).expect("a clipboard image");
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, PNG);
+    }
+
+    #[test]
+    fn a_clipboard_that_announces_an_image_it_does_not_hold_is_refused() {
+        let wayland = ClipboardHost { off: false, wayland: true, x11: false };
+        let refused = read_clipboard_image_with(wayland, |_, args| {
+            if args.contains(&"--list-types") { Some(b"image/png\n".to_vec()) } else { Some(b"not an image".to_vec()) }
+        });
+        assert!(refused.unwrap_err().contains("not a PNG, JPEG, WebP or GIF"));
+    }
+
+    #[test]
+    fn a_clipboard_type_the_node_does_not_understand_is_not_read() {
+        assert_eq!(pick_clipboard_type(b"text/html\nimage/svg+xml\n"), None);
+        assert_eq!(pick_clipboard_type(b"image/svg+xml\nimage/gif\n"), Some("image/gif"));
+    }
+
+    #[test]
+    fn only_the_tokens_this_draft_inserted_survive_into_the_message() {
+        // Two images pasted, the first deleted from the draft, a third token typed by hand.
+        assert_eq!(submitted_tokens(&[1, 2], "look [Image #2] and [Image #3]"), vec![2]);
+        assert_eq!(submitted_tokens(&[], "typed [Image #1] by hand"), Vec::<usize>::new());
+        assert_eq!(submitted_tokens(&[1], "[Image #1]"), vec![1]);
+        assert_eq!(submitted_tokens(&[1], "[Image #10] is not [Image #1]"), vec![1]);
+    }
+
+    #[test]
+    fn the_attachment_mints_one_token_number_and_records_it_for_this_draft() {
+        let mut state = ConsoleInput::default();
+        let (token, kb) = attach_image(&mut state, "image/png", vec![0u8; 4096]);
+        assert_eq!(token, "[Image #1]");
+        assert_eq!(kb, 4);
+        let (token, _) = attach_image(&mut state, "image/gif", GIF.to_vec());
+        assert_eq!(token, "[Image #2]");
+        assert_eq!(state.draft_images, vec![1, 2]);
+        assert_eq!(state.pasted_images.len(), 2);
+        assert_eq!(state.pasted_images[1].0, "image/gif");
     }
 }

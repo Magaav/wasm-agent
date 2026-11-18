@@ -449,6 +449,19 @@ elif [ "$SERVICE_TARGET_STATUS" != "0" ]; then
   echo "FAIL: the deploy service-target fixture did not pass (exit $SERVICE_TARGET_STATUS)" >&2
   exit 1
 fi
+# ---- the ancestry, the record, the pins, and the two overrides --------------------------------------------
+# Round 4 of the deploy-ancestry review: seven files were written WITH a fix and named by no harness, so every
+# gate in this repository was green without running one of them (scripts/test-orphan-tests.mjs reported them as
+# orphans, which is the ledger doing its job). Each is hermetic - no network, no cargo, no node binary unless
+# WA_BIN hands it the one this run already built - and each exists for the same reason: an install must never
+# decide about bytes it cannot name, and must refuse rather than guess.
+WA_BIN="$BIN" gate_run bash scripts/test-install-record.sh            # installed.txt is the binary's own answer
+gate_run bash scripts/test-install-guards.sh                          # every installer refuses an unprovable identity
+gate_run bash scripts/test-deploy-ancestry.sh                         # a deploy never silently goes backwards
+WA_BIN="$BIN" gate_run bash scripts/test-node-pins.sh                 # a rollback is a record, and it gates the next move
+gate_run bash scripts/test-publish-shared-commit.sh                   # a published commit is one the remote can see
+gate_run bash scripts/test-bootstrap-gate.sh                          # the release-install path honours its override
+WA_BIN="$BIN" gate_run bash scripts/test-build-info.sh                # the bytes answer for themselves (--build-info)
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
@@ -1203,6 +1216,25 @@ MCP_NODE="$(command -v node)"
 if command -v cygpath >/dev/null 2>&1; then MCP_NODE="$(cygpath -m "$MCP_NODE")"; fi
 MCP_TEST_SOURCE="$WASM_AGENT_LUA_ROOT" WA_NODE="$MCP_NODE" WA_MCP_SCRIPT_DIR="$WASM_AGENT_LUA_ROOT/scripts" \
   WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp.lua" "$BIN" --db "$DB.mcp" | grep 'mcp native ok'
+# A connector that names a vault entry is approved by the OPERATOR, and the approval is a digest over
+# every file its launch can run (docs/VAULT.md, rounds 5-6): the request file the child reads, the
+# interpreter the values are put in, every argument resolved from the connector's own directory, and
+# what those files run in turn. Four rows, each in its own scratch home - they WRITE under paths.data()
+# (runtime stubs, connector scripts) and each refuses to run outside a scratch WASM_AGENT_HOME rather
+# than write into a live node's. They were in the tree and in nobody's gate until round 6.
+MCP_VAULT_HOME="$(mktemp -d)"
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-vault-approval.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/ledger.db" | grep 'mcp vault approval ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-secret-guard.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/guard.db" | grep 'secret guard ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-request-shape.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/shape.db" | grep 'mcp request shape ok'
+# A peer's share writes scripts, so the row makes its own scratch script directory under that home:
+# pointed at the checkout, it wrote mcp-shared-fixture.mjs into scripts/ and approved a file it did not
+# own (measured 20/11, which is why it was not a gate row before).
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-mcp-share.lua" WASM_AGENT_HOME="$MCP_VAULT_HOME" \
+  "$BIN" --db "$MCP_VAULT_HOME/share.db" | grep 'mcp share ok'
+rm -rf "$MCP_VAULT_HOME"
 # Component MCP transport (docs/COMPONENTS.md): the mcp-echo fixture when a wasm32-wasip2 toolchain is
 # here; without one the definition/refusal checks still run and the script says what it skipped.
 COMPONENTS_PROOF="$WASM_AGENT_HOME/components-proof"
@@ -1302,7 +1334,7 @@ if AGENT_CORE="$(env -u CARGO_TARGET_DIR bash scripts/build-agent-core.sh 2>/dev
 else
   echo "note: agent-core not built (no wasi-sdk); core-component checks skipped"
 fi
-gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-connector-http.mjs scripts/test-whatsapp-transcript-watchdog.mjs
+gate_run node --test --test-reporter=tap scripts/test-mcp.mjs scripts/test-mcp-session.mjs scripts/test-mcp-request-seal.mjs scripts/test-web.mjs scripts/test-mcp-runtime-closure.mjs scripts/test-whatsapp-connector-http.mjs scripts/test-whatsapp-transcript-watchdog.mjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-envelope.lua" "$BIN" --db "$DB.envelope" | grep 'envelope ok'
 MCP_RECOVERY_BIN="$BIN"
 if command -v cygpath >/dev/null 2>&1; then MCP_RECOVERY_BIN="$(cygpath -m "$BIN")"; fi
@@ -1663,6 +1695,11 @@ WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown 
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# /keybindings prints the table the console dispatches on (rust/wa-term/src/keymap.rs): the rows come
+# from host.keybindings, the module names no key itself, /help points at it, and the REPL, the mid-run
+# view and the node's route exist. The other direction - that every row is dispatched and nothing else
+# is - is Rust's (keymap.rs), so a missing row and an orphan row are both failures, not drift.
+WA_SCRIPT=scripts/test-keybindings.lua "$BIN" --db "$DB.keybindings" | grep "checks, 0 failed"
 WA_SCRIPT=scripts/test-continue.lua "$BIN" --db "$DB.continue" | grep "continue ok"
 
 # The status line must keep moving while the interpreter is blocked, and the timer therefore

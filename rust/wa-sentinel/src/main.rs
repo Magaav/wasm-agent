@@ -1615,29 +1615,34 @@ fn to_msys_path(path: &Path) -> String {
 pub(crate) fn verb_deploy(id: &str, session: &str, prompt: &str, reason: &str) -> Result<String> {
     let script = resolve_deploy_script()?;
     let capture = deploy_capture_path();
-    verb_deploy_script(&script, id, session, prompt, reason, &capture)
+    verb_deploy_script(&script, id, session, prompt, reason, &capture, false)
+}
+
+/// The installer's arguments for a deploy. Pure, so the two facts that make a forced deploy honest - the flag
+/// and the reason beside it - can be asserted without starting anything.
+///
+/// A FORCE THAT REACHES NO INSTALLER IS NOT A FORCE (round-3 item 5). deploy.sh refuses a pinned node before it
+/// builds, and upgrade.sh refuses it again; both honour --force only together with --reason. A sentinel that
+/// dropped the flag turned "forced deploy" into an ordinary one that refused a step later, with a message about a
+/// pin the operator had just overridden.
+pub(crate) fn deploy_installer_args(script_arg:&str, id:&str, session:&str, prompt:&str, reason:&str, force:bool) -> Vec<String> {
+    let mut args = vec![script_arg.to_string(), "--reason".to_string(), reason.to_string()];
+    if force && !reason.trim().is_empty() { args.push("--force".to_string()); }
+    if !id.is_empty() { args.push("--request-id".to_string()); args.push(id.to_string()); }
+    if !session.is_empty() { args.push("--session".to_string()); args.push(session.to_string()); }
+    if !prompt.is_empty() { args.push("--prompt".to_string()); args.push(prompt.to_string()); }
+    args
 }
 
 /// The deploy itself, with the script and the capture named by the caller - which is what lets the evidence
 /// be proved on a machine that does not deploy (`deploy_visibility_tests`).
-pub(crate) fn verb_deploy_script(script: &Path, id: &str, session: &str, prompt: &str, reason: &str, capture: &Path) -> Result<String> {
+pub(crate) fn verb_deploy_script(script: &Path, id: &str, session: &str, prompt: &str, reason: &str, capture: &Path, force: bool) -> Result<String> {
     queue::step("deploying", "running deploy.sh detached");
     let (interpreter, script_arg) = shell_for(script);
-    let mut args = vec![script_arg, "--reason".to_string(), reason.to_string()];
     // The request id, on both doors: it is what makes `deploy-result.json` attributable to *this* deploy, so
-    // the installer's own verdict can still be read after the sentinel that spawned it is gone.
-    if !id.is_empty() {
-        args.push("--request-id".to_string());
-        args.push(id.to_string());
-    }
-    if !session.is_empty() {
-        args.push("--session".to_string());
-        args.push(session.to_string());
-    }
-    if !prompt.is_empty() {
-        args.push("--prompt".to_string());
-        args.push(prompt.to_string());
-    }
+    // the installer's own verdict can still be read after the sentinel that spawned it is gone. The force and its
+    // reason travel together (deploy_installer_args).
+    let args = deploy_installer_args(&script_arg, id, session, prompt, reason, force);
     let started = start_deploy_detached(script, capture, reason, &interpreter, &args)?;
     audit("deploy", &format!("{} {started}", script.display()), reason);
     // What this returns is a launch receipt, and it says so. The outcome arrives as a notice in `session`,
@@ -1856,6 +1861,11 @@ fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
             // a sentinel that obeyed it ran a month-old installer for ever. The pin still wins when it is
             // at least as new as the shipped copy.
             if let Some(shipped) = std::env::current_exe().ok().and_then(|me| me.parent().map(|d| d.join("scripts").join(file))) {
+                // Round-4 item 8: this is main's comparison, unchanged. A round-3 draft made "cannot compare" mean
+                // "the shipped copy wins" (a three-valued shipped_wins with its own test). That is a behaviour
+                // change nobody asked for, it was outside this mission's brief, and no test shows it is needed:
+                // the fail-open it was meant to close is a pin whose mtime cannot be read, which the audit line
+                // below already makes visible whenever the comparison says the shipped copy is newer. Reverted.
                 let newer = |a: &Path, b: &Path| -> bool {
                     match (std::fs::metadata(a).and_then(|m| m.modified()), std::fs::metadata(b).and_then(|m| m.modified())) {
                         (Ok(x), Ok(y)) => x > y, _ => false }
@@ -2131,6 +2141,20 @@ fn perform(request: &Value) -> Result<String> {
     }
     let verb = request.get("verb").and_then(Value::as_str).unwrap_or("");
     let reason = request.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)");
+    // A FORCE IS A REASON OR IT IS NOTHING, checked again here because a request file outlives the process that
+    // wrote it: the parser refuses it too, and neither check trusts the other (round-3 item 5).
+    let forced = request.get("force").and_then(Value::as_bool) == Some(true);
+    if forced && verb != "deploy" {
+        bail!("force_is_deploy_only: --force belongs to deploy, and this request asks for {verb:?}; nothing was performed.");
+    }
+    if forced {
+        if request.get("expected_sha").is_some() {
+            bail!("forced_protocol_deploy_refused: the exact-source deploy protocol has no force: it installs the published canonical main and nothing else. Nothing was started.");
+        }
+        if reason.trim().is_empty() || reason == "(no reason given)" {
+            bail!("override_reason_required: a forced deploy must say why (--force --reason <text>), and the reason is recorded in the installer and in the audit log. Nothing was started.");
+        }
+    }
     // The second installer path is gone: `upgrade` used to run upgrade.sh under a supervised
     // operation, which killed the node it had just started. Refused by name, before any effect,
     // wherever a legacy request or a direct caller reaches this function.
@@ -2164,7 +2188,10 @@ fn perform(request: &Value) -> Result<String> {
                 let args = vec![script_arg, "--request-id".into(), request["id"].as_str().unwrap_or("").into(),
                     "--expected-sha".into(), sha.into(), "--reason".into(), reason.into()];
                 start_deploy_detached(&script, &deploy_capture_path(), reason, &interpreter, &args)
-            } else { verb_deploy(request["id"].as_str().unwrap_or(""), session, prompt, reason) }
+            } else {
+                let script = resolve_deploy_script()?;
+                verb_deploy_script(&script, request["id"].as_str().unwrap_or(""), session, prompt, reason, &deploy_capture_path(), forced)
+            }
         }
         "run" => {
             validate_run_continuation(request)?;
@@ -2678,6 +2705,7 @@ fn print_request_help() {
     println!("  --script <path>                  the allow-listed script to run (run)");
     println!("  --file <path>                    the exported spell plan (spell)");
     println!("  --if-no-pending                  deploy only: write nothing when a deploy request is already queued");
+    println!("  --force                          deploy only: override a pin/downgrade refusal; needs --reason <text>");
     println!();
     println!();
     println!("  withdraw <id> [--reason <text>]  take a queued or held request out of the queue (a claimed one is refused:");
@@ -2746,6 +2774,14 @@ fn request(args: &[String]) -> Result<()> {
     let mut index = 1;
     while index < args.len() {
         if args[index]=="--if-no-pending" {dedupe_deploy=true;index+=1;continue;}
+        // A flag, not a value: `--force` says "override the pin/downgrade refusal", and it is only meaningful
+        // for the installer. Refused for every other verb, before any file exists.
+        if args[index]=="--force" {
+            if verb!="deploy" {bail!("--force is supported only for deploy; no request written");}
+            if fields.contains_key("force") {bail!("duplicate request option; no request written");}
+            fields.insert("force".into(), json!(true));
+            index+=1;continue;
+        }
         if !args[index].starts_with("--") { bail!("request option must start with --; no request written"); }
         let key = args[index].trim_start_matches("--").to_string();
         if !["reason","session","owner","prompt","script","file","expected-sha"].contains(&key.as_str()) {
@@ -2757,6 +2793,18 @@ fn request(args: &[String]) -> Result<()> {
         index += 2;
     }
     if verb=="run"{validate_run_continuation(&Value::Object(fields.clone()))?;}
+    // THE FORCE NEEDS ITS REASON, at the door: a request file whose only possible outcome is "refused for want of
+    // a reason" is durable state created by a question (round-3 item 5).
+    if fields.get("force").and_then(Value::as_bool)==Some(true) && verb!="deploy" {
+        bail!("force_is_deploy_only: --force belongs to deploy, and this request asks for {verb:?}; no request was written.");
+    }
+    if fields.get("force").and_then(Value::as_bool)==Some(true)
+        && fields.get("reason").and_then(Value::as_str).map(|text| text.trim().is_empty()).unwrap_or(true) {
+        bail!("override_reason_required: --force overrides a refusal that exists to protect what is running or where the node was put on purpose, and an override nobody can read later is not a decision anyone can review. Say why: --force --reason <text>. No request was written.");
+    }
+    if fields.get("force").and_then(Value::as_bool)==Some(true) && fields.contains_key("expected-sha") {
+        bail!("forced_protocol_deploy_refused: the exact-source deploy protocol has no force: it installs the published canonical main and nothing else. No request was written.");
+    }
     // An installer cannot be run through the `run` door and still be reported. `run` settles the *script's*
     // own exit under a 302s supervised operation, while `deploy.sh` replaces the node - and the watcher -
     // from inside it, so its exit is not its result and the operation can be stopped by the swap it performs.
@@ -3921,6 +3969,47 @@ mod deploy_visibility_tests;
 #[cfg(test)]
 #[path = "role_tests.rs"]
 mod role_tests;
+
+/// A forced deploy is a reason or it is nothing: the flag reaches the installer with the reason beside it, and a
+/// request that cannot carry both is refused before a file exists (round-3 item 5).
+#[cfg(test)]
+mod forced_deploy_tests {
+    use super::*;
+
+    fn argv(list: &[&str]) -> Vec<String> { list.iter().map(|value| value.to_string()).collect() }
+
+    #[test]
+    fn the_force_reaches_the_installer_with_its_reason() {
+        let forced = deploy_installer_args("/x/scripts/deploy.sh", "id-1", "", "", "retiring a feature", true);
+        assert_eq!(forced.iter().filter(|arg| *arg == "--force").count(), 1, "{forced:?}");
+        assert!(forced.windows(2).any(|pair| pair[0] == "--reason" && pair[1] == "retiring a feature"), "{forced:?}");
+        let ordinary = deploy_installer_args("/x/scripts/deploy.sh", "id-1", "", "", "an ordinary deploy", false);
+        assert!(!ordinary.iter().any(|arg| arg == "--force"), "{ordinary:?}");
+        let blank = deploy_installer_args("/x/scripts/deploy.sh", "id-1", "", "", "   ", true);
+        assert!(!blank.iter().any(|arg| arg == "--force"), "a force with no reason must not reach the installer: {blank:?}");
+    }
+
+
+    #[test]
+    fn a_forced_deploy_without_a_reason_is_refused_before_a_file_exists() {
+        let error = request(&argv(&["deploy", "--force"])).unwrap_err().to_string();
+        assert!(error.contains("override_reason_required"), "{error}");
+        assert!(error.contains("No request was written"), "{error}");
+        let wrong_verb = request(&argv(&["restart", "--force"])).unwrap_err().to_string();
+        assert!(wrong_verb.contains("only for deploy"), "{wrong_verb}");
+        let wrong_verb_perform = perform(&json!({"verb":"restart","force":true,"reason":"say so"}))
+            .unwrap_err().to_string();
+        assert!(wrong_verb_perform.contains("force_is_deploy_only"), "{wrong_verb_perform}");
+        let performed = perform(&json!({"verb":"deploy","force":true})).unwrap_err().to_string();
+        assert!(performed.contains("override_reason_required"), "{performed}");
+        // The exact-source protocol installs published canonical main and nothing else, so a force has no meaning
+        // there; it is refused at the door rather than dropped from the intent.
+        let sha = "a".repeat(40);
+        let protocol = request(&argv(&["deploy","--force","--reason","say so","--expected-sha",&sha]))
+            .unwrap_err().to_string();
+        assert!(protocol.contains("forced_protocol_deploy_refused"), "{protocol}");
+    }
+}
 
 #[cfg(test)]
 mod self_update_tests {

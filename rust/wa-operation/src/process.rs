@@ -1,6 +1,19 @@
 //! Nonblocking output and process containment. No reader threads, read_to_end, or unbounded wait.
 use crate::Spec;
 use std::io;
+/// The niceness an operation's command runs at (18/11, item 1.6): one step below the node's own, so a
+/// long build, a test suite or a promoted background call cannot starve the session that is waiting on
+/// it. It is a niceness, so raising it never needs privilege and an idle node still runs the command at
+/// full speed - the command only yields when something else wants the CPU. WASM_AGENT_OPERATION_NICE
+/// overrides it; 0 keeps the inherited priority.
+#[cfg(unix)]
+pub fn operation_nice() -> i32 {
+    std::env::var("WASM_AGENT_OPERATION_NICE")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .map(|nice| nice.clamp(0, 19))
+        .unwrap_or(10)
+}
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod platform;
@@ -33,6 +46,19 @@ impl Process {
         }
         for (k, v) in &spec.env {
             command.env(k, v);
+        }
+        // Low CPU priority for the command (see operation_nice), and ONLY for a backgrounded one
+        // (18/11 round 2, finding 9): a call the caller is actively awaiting keeps the node's own
+        // priority, so a foreground build runs as fast as the node can run it. Best effort on purpose:
+        // an environment that refuses the call leaves the command at the node's own priority.
+        let nice = if spec.background { operation_nice() } else { 0 };
+        if nice > 0 {
+            unsafe {
+                command.pre_exec(move || {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+                    Ok(())
+                });
+            }
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take();
@@ -90,6 +116,43 @@ impl Process {
     pub fn auxiliary_cleanup(&self) -> &[String] { &[] }
     pub fn containment() -> &'static str {
         "posix_process_group"
+    }
+    /// Lower a RUNNING operation's CPU priority, after the fact (18/11 round 3, item 5).
+    ///
+    /// A call that has gone pending is work nobody is waiting for any more, and that is the only fact
+    /// that should put it one step below the node. The command is its own process group (spawn sets
+    /// process_group(0)), so ONE PRIO_PGRP call covers the shell and everything it started. Best
+    /// effort in the sense that matters: a group that has already exited is not an error about the
+    /// work, and a node that refuses the call keeps the priority it had - the caller records that.
+    pub fn demote(pid: u32) -> io::Result<()> {
+        let nice = operation_nice();
+        if nice <= 0 {
+            return Ok(());
+        }
+        if unsafe { libc::setpriority(libc::PRIO_PGRP, pid, nice) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        // The leader itself, in case it is already a session of its own.
+        unsafe {
+            libc::setpriority(libc::PRIO_PROCESS, pid, nice);
+        }
+        Ok(())
+    }
+    /// The priority name the record carries after a demote (see priority()).
+    pub fn demoted_priority() -> String {
+        Self::priority(true)
+    }
+    /// What the operation's own record says about the CPU priority it runs at: the node's own for a
+    /// call somebody waits for, one step lower for a backgrounded one.
+    pub fn priority(background: bool) -> String {
+        match if background { operation_nice() } else { 0 } {
+            0 => "default".to_string(),
+            nice => format!("nice+{nice}"),
+        }
     }
     pub fn read(&mut self, stderr: bool, buffer: &mut [u8]) -> io::Result<Option<usize>> {
         use std::io::Read;

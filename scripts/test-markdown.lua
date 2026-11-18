@@ -50,6 +50,13 @@ local function recorder()
     for _, piece in ipairs(pieces) do out[#out + 1] = piece.text end
     return table.concat(out)
   end
+  -- Every piece carrying a style, concatenated: what a reader would see painted that way. A role that a
+  -- pattern extends by one character (a link that swallowed its full stop) is exactly what this shows.
+  function rec.styled(style)
+    local out = {}
+    for _, piece in ipairs(pieces) do if piece.style == style then out[#out + 1] = piece.text end end
+    return table.concat(out)
+  end
   return rec
 end
 
@@ -109,8 +116,12 @@ local _, inline = render("use `dofile` and **bold** and *italic* and [text](http
 ok(inline.role_of("dofile") == "mdCode", "inline code is pi's code colour")
 ok(inline.role_of("bold") == "bold+text", "bold is bold")
 ok(inline.role_of("italic") == "italic", "italic is italic")
-ok(inline.role_of("text") == "mdLink", "a link's label is the link colour")
-ok(inline.role_of("https://example.invalid/x") == "mdLinkUrl", "and its target is the url colour")
+ok(inline.role_of("text") == "underline+mdLink", "a link's label is underlined, in the link colour")
+ok(inline.role_of("https://example.invalid/x") == "underline+mdLinkUrl", "and its target too (17/11: a link reads as one)")
+do
+  local rendered = md.render("a ***bold-italic*** b", { paint = function(t, st) return "<" .. (type(st) == "table" and table.concat(st, "+") or tostring(st)) .. ">" .. t end })
+  ok(rendered:find("<bold+italic+text>bold-italic", 1, true) and not rendered:find("*", 1, true), "***x*** is bold italic, no stray asterisks: " .. rendered)
+end
 
 -- Two bugs this test was written to catch, both of them text loss: a pattern with no capture
 -- (a bare url) has no `first`, so reading only the capture dropped the whole word; and a
@@ -119,6 +130,15 @@ ok(inline.role_of("https://example.invalid/x") == "mdLinkUrl", "and its target i
 local _, bare = render("see https://example.invalid/x for more")
 ok(has(bare.text(), "https://example.invalid/x"), "a bare url is kept, not swallowed")
 ok(has(bare.text(), "for more"), "and the words after it survive")
+-- The bare-URL detector is the HOST one (host.link_span, rust/wa-term/src/links.rs): the renderer and the
+-- click that copies a link ask one function, so a link underlined here is exactly the string a click on it
+-- copies. A sentence's full stop and a wrapping bracket are not part of it, which is the pair the old
+-- Lua pattern and the click used to disagree about.
+local _, punctuated = render("see https://example.invalid/x. and (https://example.invalid/y) too")
+ok(punctuated.styled("underline+mdLinkUrl") == "https://example.invalid/xhttps://example.invalid/y",
+  "the links are underlined exactly, without the full stop or the bracket: " .. punctuated.styled("underline+mdLinkUrl"))
+ok(has(punctuated.text(), "https://example.invalid/x. and "), "the full stop is text, not link")
+ok(has(punctuated.text(), "(https://example.invalid/y)"), "the bracket is text too")
 local _, spaced = render("a **b** c")
 ok(has(spaced.text(), "a b c"), "the spaces around an inline token are not lost")
 ok(not has(spaced.text(), "abc"), "and two words are never glued into one")
@@ -304,6 +324,26 @@ do
   ok(has(text, "\226\148\140"), "reflow: a table is still a box")
   local wrapped = md.render(words, { width = 30, indent = "" })
   ok(select(2, wrapped:gsub("\n", "")) > 0, "without reflow the paragraph is wrapped as before")
+end
+
+-- A fenced line longer than the card wraps inside it, every continuation behind the border (17/11).
+do
+  local long = string.rep("x", 50)
+  local text = md.render("```json\n" .. long .. "\n```", { width = 30, indent = "" })
+  local rows = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = line end
+  local inside, conts = 0, 0
+  for _, row in ipairs(rows) do
+    if row:find("x", 1, true) then
+      inside = inside + 1
+      ok(row:sub(1, 3) == "\226\148\130", "a fence row starts at the border: " .. row)
+      ok(md.columns(row) <= 30, "a fence row fits the width: " .. md.columns(row))
+      if row:find("\226\134\170", 1, true) then conts = conts + 1 end
+    end
+  end
+  ok(inside == 2 and conts == 1, "50 cells in a 30-wide card: two rows, one marked as a continuation")
+  local _, copies = md.render("```\n" .. long .. "\n```", { width = 30, indent = "" })
+  ok(copies[1] and copies[1].text == long, "the copy is the original line, not the wrapped rows")
 end
 
 print(string.format("markdown ok (%d checks)", checks))

@@ -33,6 +33,8 @@ while [ $# -gt 0 ]; do
     --pub) PUB=${2:?}; shift 2 ;;
     --manifest) MANIFEST=${2:?}; shift 2 ;;
     --bin) TARGET=${2:?}; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --reason) REASON=${2:?reason text}; shift 2 ;;
     *) echo "fleet-install: unknown_option $1" >&2; exit 2 ;;
   esac
 done
@@ -42,6 +44,25 @@ HEALTH=${HEALTH:-http://127.0.0.1:8799/health}
 # restarts the node on its own next check, and a boot measured 17/11 took ~80 s - a healthy artifact was
 # rolled back as dead (and the rollback then looked dead too).
 UNIT=${UNIT:-}
+FORCE=${FORCE:-0}; REASON=${REASON:-}
+# The record writer and the ancestry verdict (scripts/lib/install-record.sh): this script installs bytes it
+# did not build, so only the binary can say which commit they are (18/11: a record named a commit the bytes
+# were not).
+HERE="$(cd "$(dirname "$0")" && pwd)"
+for fi_lib in "${WA_INSTALL_RECORD_LIB:-}" "$HERE/lib/install-record.sh" "$HERE/../scripts/lib/install-record.sh"; do
+  [ -n "$fi_lib" ] && [ -f "$fi_lib" ] && . "$fi_lib" && break
+done
+command -v wa_build_info >/dev/null 2>&1 \
+  || { printf 'fleet-install: install_record_lib_missing: scripts/lib/install-record.sh is not beside this script; it is what writes installed.txt from the binary and what asks whether this artifact goes backwards; nothing was installed\n' >&2; exit 2; }
+# The node's own pin store (scripts/lib/node-pins.sh): where a rollback wrote "this node stays here" on THIS node.
+NODE_PIN_LIB=""
+for nl in "${WA_NODE_PINS_LIB:-}" "$HERE/lib/node-pins.sh" "$HERE/../scripts/lib/node-pins.sh"; do
+  [ -n "$nl" ] && [ -f "$nl" ] && { NODE_PIN_LIB="$nl"; break; }
+done
+if [ -n "$NODE_PIN_LIB" ]; then . "$NODE_PIN_LIB"; else
+  printf 'fleet-install: node_pins_lib_missing: scripts/lib/node-pins.sh is not beside this script, so this node cannot read its own pin; nothing was installed\n' >&2
+  exit 2
+fi
 say() { printf 'fleet-install: %s\n' "$*"; }
 die() { printf 'fleet-install: %s\n' "$*" >&2; exit 1; }
 
@@ -269,6 +290,121 @@ if ! "$tmp/wa" --version >/dev/null 2>&1; then
 fi
 say "runs here: $("$tmp/wa" --version)"
 
+# 3b. WHICH COMMIT ARE THESE BYTES, AND DO THEY CONTAIN WHAT IS RUNNING?
+#
+# The artifact's name is a claim; `wa --build-info` is the answer (rust/wa-host/build.rs). And an artifact
+# that does not contain the commit the node runs now is a downgrade: it is refused by name, listing what
+# would be lost, unless the operator says --force --reason <text> - which the record then carries.
+CANDIDATE_COMMIT=""; CANDIDATE_TREE=""; CANDIDATE_DIRTY=""; RECORD_BUILD=absent
+if CANDIDATE_INFO="$(wa_build_info "$tmp/wa")"; then
+  RECORD_BUILD=yes
+  CANDIDATE_COMMIT="$(wa_build_field "$CANDIDATE_INFO" commit)"
+  CANDIDATE_TREE="$(wa_build_field "$CANDIDATE_INFO" tree)"
+  CANDIDATE_DIRTY="$(wa_build_field "$CANDIDATE_INFO" dirty)"
+  [ "$CANDIDATE_COMMIT" = unknown ] && CANDIDATE_COMMIT=""
+fi
+if [ -z "$CANDIDATE_COMMIT" ]; then
+  say "WARNING: this artifact cannot report its own build (older than --build-info); the record will say commit=unknown rather than what this script meant to install"
+else
+  say "artifact reports its own build: ${CANDIDATE_COMMIT:0:12} (tree ${CANDIDATE_TREE:0:12}, dirty $CANDIDATE_DIRTY)"
+fi
+# WHAT IS RUNNING HERE, asked of the binary first and of the record only when the record is about THESE bytes
+# (wa_running_identity, scripts/lib/install-record.sh). This script used to ask only the binary and treat "it
+# cannot say" as free passage, so a node whose binary predates --build-info was replaced with no ancestry
+# question at all, and a record naming another sha256 was never noticed.
+wa_running_identity "$(dirname "$TARGET")"
+RUNNING_COMMIT="$WA_RUNNING_COMMIT"; RUNNING_SOURCE="$WA_RUNNING_SOURCE"
+RUNNING_WHY="$WA_RUNNING_WHY"; RUNNING_DIRTY="$WA_RUNNING_DIRTY"
+if [ -z "$WA_RUNNING_BIN" ] && [ -x "$TARGET" ] && RUNNING_INFO="$(wa_build_info "$TARGET")"; then
+  RUNNING_COMMIT="$(wa_build_field "$RUNNING_INFO" commit)"
+  [ "$RUNNING_COMMIT" = unknown ] && RUNNING_COMMIT=""
+  RUNNING_DIRTY="$(wa_build_field "$RUNNING_INFO" dirty)"; [ -n "$RUNNING_DIRTY" ] || RUNNING_DIRTY=unknown
+  RUNNING_SOURCE="binary"; RUNNING_WHY="the running binary reports it"
+fi
+say "running here: ${RUNNING_COMMIT:-nothing that names a commit} (${RUNNING_SOURCE:-none}, dirty ${RUNNING_DIRTY})"
+FORCE_REASON=""
+[ "$FORCE" = 1 ] && FORCE_REASON="$REASON"
+force_needs_reason() { # <what this artifact would lose>
+  if [ "$FORCE" = 1 ] && [ -n "$FORCE_REASON" ]; then
+    ANCESTRY_STATE=override
+    say "OVERRIDE, recorded: $1; going on because --force --reason says so"
+    say "force_requested reason=$FORCE_REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    return 0
+  fi
+  return 1
+}
+ANCESTRY_STATE=unknown
+if [ "$RUNNING_SOURCE" = record_mismatch ]; then
+  # The record beside the running binary names another sha256: its commit= says nothing about what is running.
+  if ! force_needs_reason "the install record is not these bytes"; then
+    die "downgrade_unprovable(record_not_this_binary): $(dirname "$TARGET")/installed.txt names a sha256 that is not the running binary's, so the record says nothing about what is installed here ($RUNNING_WHY). Nothing was replaced. Pass --force --reason <text> and the override is recorded in installed.txt."
+  fi
+elif [ "$RUNNING_DIRTY" = true ]; then
+  # Those bytes are a commit PLUS uncommitted edits: no commit anywhere contains them, and the ancestry
+  # question below cannot see them at all.
+  if ! force_needs_reason "the running binary reports dirty=true, so its bytes carry uncommitted work"; then
+    die "downgrade_refused(dirty_running_binary): the running binary reports commit ${RUNNING_COMMIT:0:12} with dirty=true, so those bytes are a commit PLUS edits no commit contains - installing this artifact destroys them and no rollback brings them back. Nothing was replaced. Commit them in that tree and rebuild, or pass --force --reason <text> to lose them on purpose (recorded)."
+  fi
+elif [ -z "$RUNNING_COMMIT" ]; then
+  # A FIRST INSTALL IS THE ONE FREE CASE, AND IT MEANS NOTHING IS INSTALLED (round-3 item 1). This used to be
+  # "nothing names a commit", which is also true of a binary that predates --build-info beside a record with no
+  # sha256= - so an install nothing could identify was replaced as if the directory were empty. The binary's own
+  # presence is the test, not the silence about it.
+  if wa_running_first_install && [ ! -e "$TARGET" ]; then
+    say "nothing is installed at $TARGET - a first install, not a downgrade"
+    ANCESTRY_STATE=first_install
+  else
+    if ! force_needs_reason "a binary is installed at $TARGET and nothing can prove which commit it is ($RUNNING_WHY)"; then
+      die "refused(running_commit_unprovable): ${RUNNING_WHY:-the binary at $TARGET cannot name its own commit}. Something IS installed here and nothing can show whether this artifact contains it, so replacing it could remove work that exists nowhere else. Nothing was replaced. Make it answerable (write a record whose sha256= is the binary's: sha256sum < $TARGET), or pass --force --reason <text> and the override is recorded in installed.txt."
+    fi
+  fi
+elif [ -z "$CANDIDATE_COMMIT" ]; then
+  # The artifact cannot say which commit it is, so nothing can be compared. Unknown refuses.
+  if ! force_needs_reason "the artifact cannot name its own commit, so it cannot be shown to contain what is running"; then
+    die "refused(ancestry_unknown): this artifact cannot report its own build (it predates --build-info), so nothing can show it contains the running commit $RUNNING_COMMIT. Nothing was replaced. Publish (or fetch) an artifact built with the current build.rs, or pass --force --reason <text> and the override is recorded."
+  fi
+else
+  wa_ancestry_verdict "" "$CANDIDATE_COMMIT" "$RUNNING_COMMIT" "$tmp/wa"
+  case $? in
+    0) ANCESTRY_STATE=yes
+       say "ancestry ok: this artifact contains the running commit ${RUNNING_COMMIT:0:12}" ;;
+    1) if ! force_needs_reason "this artifact does not contain the running commit ${RUNNING_COMMIT:0:12}"; then
+         die "downgrade_refused: this artifact (${CANDIDATE_COMMIT:0:12}) does not contain the RUNNING commit ${RUNNING_COMMIT:0:12} (${WA_ANCESTRY_WHY:-reason unknown}) - installing it would remove work that is running now. Nothing was replaced. To go back on purpose: 'wa update <node> --rollback' (records a pin), or --force --reason <text>"
+       fi ;;
+    *) if ! force_needs_reason "nothing could establish whether this artifact goes backwards (${WA_ANCESTRY_WHY:-unknown})"; then
+         die "refused(ancestry_unknown): nothing can establish whether this artifact goes backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing}. Nothing was replaced. Make it answerable (an artifact built by the current build.rs carries its own ancestry), or pass --force --reason <text> and the override is recorded."
+       fi ;;
+  esac
+fi
+
+PIN_TARGET="${CANDIDATE_COMMIT:-}"; PIN_TREE=""
+# THE NODE'S OWN PIN. A pin in the coordinator's store gates requests made THROUGH the coordinator; an install
+# started here never reads that store, so the node keeps its own copy (written by a rollback, see
+# lua/core/remote_update.lua and scripts/lib/node-pins.sh) and it is read before anything is replaced.
+# "Cannot tell" is not a release: only a target that IS the pinned commit, IS the awaited commit, or
+# CONTAINS it releases the pin, and that release is said out loud.
+# THE PIN IS READ, OR THE INSTALL IS REFUSED. This block used to be wrapped in
+# "$if [ -n "${NODE_PIN_LIB:-}" ]" - so a copy of this script that could not find scripts/lib/node-pins.sh
+# SKIPPED the pin, silently, which is the exact fail-open the lib exists to close (round-3 item 6). The loader at
+# the top of this file already refuses a missing lib; this is the same rule at the point of use, so the two cannot
+# drift apart. Nothing is replaced on an unreadable pin.
+if command -v wa_node_pin_gate >/dev/null 2>&1; then
+  NODE_NAME="$(wa_node_name)"
+  PIN_STATE=0; PIN_REPORT="$(wa_node_pin_gate "$NODE_NAME" "" "${PIN_TARGET:-}" "${PIN_TREE:-}" 2>&1)" || PIN_STATE=$?
+  [ -n "$PIN_REPORT" ] && say "$PIN_REPORT"
+  if [ "$PIN_STATE" != 0 ]; then
+    if [ "$FORCE" = 1 ] && [ -n "$REASON" ]; then
+      ANCESTRY_STATE=override
+      say "OVERRIDE, recorded: $NODE_NAME is pinned and this install does not release it; going on because --force --reason says so"
+      say "force_requested rule=node_pinned reason=$REASON by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      die "node_pinned: $NODE_NAME carries an active pin, so this install was refused - a pin is a record that the node was put somewhere on purpose, and an ordinary install is exactly what undoes it (measured 18/11: three hand-made rollbacks did not survive the next one). Nothing was replaced. $(wa_pin_escape "$NODE_NAME")"
+    fi
+  fi
+else
+  die "refused(node_pin_reader_missing): scripts/lib/node-pins.sh was not loaded, so nothing can read this node's own pin and this install could walk over a rollback nobody can see. Nothing was replaced. Ship the lib beside this script (or point WA_NODE_PINS_LIB at it)."
+fi
+
 # 4. backup and swap
 backup="$TARGET.prev.$(date -u +%Y%m%dT%H%M%SZ)"
 cp -p "$TARGET" "$backup" 2>/dev/null || say "no previous binary to back up"
@@ -338,4 +474,21 @@ case "$verdict" in
     ;;
 esac
 
-say "healthy (200) — installed $(basename "$TARGET") from $URL"
+# 7. the record, written FROM the binary that is now installed. This script installed bytes and cannot say
+# which commit they are; the binary can (rust/wa-host/build.rs), and a record written from anything else is the
+# belief that made an installed.txt say commit=14963b6f for other bytes on 18/11.
+record_dir="$(dirname "$TARGET")"
+{
+  [ -n "${CANDIDATE_COMMIT:-}" ] && printf 'source_commit=%s\n' "$CANDIDATE_COMMIT"
+  printf 'artifact_url=%s\n' "$URL"
+  [ -n "$SHA" ] && printf 'artifact_sha256=%s\n' "$SHA"
+  printf 'previous_binary=%s\n' "${backup:-none}"
+  printf 'ancestry=%s\n' "$ANCESTRY_STATE"
+  [ "$ANCESTRY_STATE" = override ] && printf 'ancestry_override=%s\nancestry_override_by=%s\n' "$(printf '%s' "$REASON" | tr '\r\n' '  ')" "$(id -un 2>/dev/null || echo unknown)"
+  printf 'via=fleet-install.sh\nat=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  true
+} > "$tmp/record_extra" 2>/dev/null || true
+mapfile -t RECORD_EXTRA < "$tmp/record_extra" 2>/dev/null || RECORD_EXTRA=()
+wa_record_install "$record_dir" "$TARGET" "${RECORD_EXTRA[@]}" \
+  || say "the binary is installed and healthy, but installed.txt was not rewritten: it still names the previous pair"
+say "healthy (200) — installed $(basename "$TARGET") from $URL (record: $(sed -n 's/^commit=//p' "$record_dir/installed.txt" 2>/dev/null | head -1))"

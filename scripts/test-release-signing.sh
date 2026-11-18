@@ -350,18 +350,27 @@ contains "$out" "release_unsigned" "the unsigned candidate refusal is named"
 # is end to end: no vault -> no release; a vault -> an orphan commit carrying the sums, the signature and
 # the PUBLISH.sh that uploads both.
 dropbox="$WORK/dropbox.git"; git init -q --bare "$dropbox"
+# THE COMMIT THIS FIXTURE PUBLISHES IS THE CHECKOUT'S OWN HEAD, and in a landing gate that commit is by definition
+# not pushed yet (the gate runs BEFORE the push). The publisher refuses a commit no branch on the remote has
+# (18/11) and names its exception for a set installed nowhere: ALLOW_UNPUSHED_COMMIT=1 with a reason, recorded in
+# the manifest as unpushed=yes. The refusal itself, against a real remote, is proved by
+# scripts/test-publish-shared-commit.sh and scripts/test-deploy-ancestry.sh - this row is about the signature.
 ship() { # <artifact dir> <remote> <token: with|without> -> code, output
+  local unpushed=(ALLOW_UNPUSHED_COMMIT=1
+    ALLOW_UNPUSHED_REASON="a fixture release for scripts/test-release-signing.sh: its payloads are ELF headers this test writes, and no node installs them")
   if [ "$3" = with ]; then
     # WA_RELEASE_KEYS: the transport VERIFIES the signature before it commits it (change/waland's half of the
     # rule - presence alone would ship a signature nobody can check), and in this suite the trust anchor is the
     # scratch vault's key. In production the anchor is the key in `config/release-keys.txt` or in the node's own
     # `<home>/.wasm-agent/release-keys.txt`.
-    WA_RELEASE_KEYS="$WORK/node-keys.txt" WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" WA_VAULT_ADMIN_TOKEN="$token" \
-      WA_PUBLISH_RUNNER=true bash "$ROOT/scripts/publish-artifacts-branch.sh" --from "$1" --commit "$COMMIT" \
+    env "${unpushed[@]}" WA_RELEASE_KEYS="$WORK/node-keys.txt" WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" \
+      WA_VAULT_ADMIN_TOKEN="$token" WA_PUBLISH_RUNNER=true \
+      bash "$ROOT/scripts/publish-artifacts-branch.sh" --from "$1" --commit "$COMMIT" \
       --targets "$TRIPLE" --out "$1" --remote "$2" 2>&1
   else
-    env -u WA_VAULT_ADMIN_TOKEN -u WA_VAULT_ADMIN_TOKEN_FILE WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" \
-      WA_PUBLISH_RUNNER=true bash "$ROOT/scripts/publish-artifacts-branch.sh" --from "$1" --commit "$COMMIT" \
+    env -u WA_VAULT_ADMIN_TOKEN -u WA_VAULT_ADMIN_TOKEN_FILE "${unpushed[@]}" \
+      WA_VAULT_ADMIN_URL="http://127.0.0.1:$ADMIN_PORT" WA_PUBLISH_RUNNER=true \
+      bash "$ROOT/scripts/publish-artifacts-branch.sh" --from "$1" --commit "$COMMIT" \
       --targets "$TRIPLE" --out "$1" --remote "$2" 2>&1
   fi
 }

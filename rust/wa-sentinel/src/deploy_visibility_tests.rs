@@ -138,7 +138,7 @@ fn a_failing_deploy_leaves_its_message_in_the_capture() {
     assert!(capture.ends_with("deploy.out"), "the capture is in the sentinel's state: {}", capture.display());
     assert!(capture.starts_with(fixture.state()), "the capture is in the sentinel's state: {}", capture.display());
 
-    let detail = verb_deploy_script(&stub, "", "", "", "capture fixture", &capture).expect("the deploy is accepted");
+    let detail = verb_deploy_script(&stub, "", "", "", "capture fixture", &capture, false).expect("the deploy is accepted");
     assert!(detail.contains("detached"), "the deploy is detached: {detail}");
     assert!(
         detail.contains(&capture.display().to_string()),

@@ -14,7 +14,16 @@
 #      process-wide environment);
 #   3. contract checks: prompt docs in sync with the code; the instruction files; the landing queue; and
 #      the two checks the landing baseline rests on (scripts/test-landing-baseline.mjs judges a run by
-#      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code).
+#      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code),
+#      plus the WIT seam's own two (scripts/wit-lint.sh judges wit/, scripts/test-wit-lint.sh judges the
+#      judge);
+#   4. the build time of every crate and component this run compiled, printed in the summary:
+#      measured and reported, never gated (ARCHITECTURE.md, "Modules over the monolith"). A crate's
+#      number is its 'cargo test --no-run' in the tests' own profile - the compile the row below then
+#      reuses - not a separate release build;
+#   5. the module map: per module its size, its build time and the `win` line from its manifest, the
+#      co-change pairs that should merge, and the split/merge decision record the cooldown reads -
+#      printed in the summary as FLAGS and never gated (scripts/module-report.mjs).
 #
 # Before any of that it builds the components the Lua rows need (`graph`, `hooks`, `memory`, `selfloop`,
 # `mesh`) from this tree, pinned the way a deploy installs them, and gives each row a component directory
@@ -152,9 +161,25 @@ case "${FAST_BIN_CODEMODE:-unknown}" in
 esac
 bin="$FAST_BIN"
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+# Milliseconds, portably. `date +%s%N` is a GNU extension: on BSD/macOS it prints a literal 'N', and
+# inside $(( )) that is a shell error rather than a duration, so every row time in this file was wrong
+# there. scripts/lib/build-target.sh:wa_build_now_ms answers the same question for the build scripts;
+# the fast path keeps its own copy (it does not source that file's build machinery) and EXPORTS it,
+# because the Lua rows run in an xargs child.
+fast_now_ms() {
+  local ns
+  ns=$(date +%s%N 2>/dev/null)
+  case "$ns" in ''|*[!0-9]*) printf '%s' "$(( $(date +%s) * 1000 ))" ;; *) printf '%s' "$(( ns / 1000000 ))" ;; esac
+}
+export -f fast_now_ms
 started=$(date +%s)
 work=$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-XXXXXX")
 trap 'rm -rf "$work"' EXIT
+
+# The build-time ledger: one line per build this run performs, printed in the summary
+# below, because "a module compiles faster" is a claim about a number (scripts/lib/build-times.sh).
+. "$ROOT/scripts/lib/build-times.sh"
+wa_build_times_init "$work/build-times.tsv"
 fails=0; envfails=0; skipped=0; ran=0
 
 # ---- the environment this verdict belongs to ---------------------------------------------------------
@@ -289,11 +314,22 @@ fast_components_prepare() {
   # The sandbox's WASI_SDK, when it has one, travels in the environment; otherwise build-components.sh finds
   # ~/wasi-sdk*. Cargo writes into the node's ONE build root, this tree's child of it (the same dir the
   # rows' cargo tests use): a second target dir per worktree is what 13/11 left behind 73 of.
-  if WA_COMPONENTS_DIR="$(native "$cache/set")" \
+  # A timing file beside the build, so the summary can say what each component cost to compile.
+  component_times="$work/component-times.tsv"; : > "$component_times" 2>/dev/null || true
+  if WA_COMPONENTS_DIR="$(native "$cache/set")" WA_COMPONENT_BUILD_TIMINGS="$component_times" \
        bash scripts/build-components.sh $FAST_COMPONENT_NAMES >"$log" 2>&1; then
     FAST_COMPONENT_SOURCE="$(native "$cache/set")"
     export FAST_COMPONENT_SOURCE
     echo "fast: components $(printf '%s' "$FAST_COMPONENT_NAMES") built from this tree and pinned in $cache/set"
+    # What each of those builds cost, from build-components.sh own measurement: the units it
+    # compiled say whether the row is a rebuild or a warm cache hit.
+    if [ -s "$component_times" ]; then
+      while IFS="$(printf '\t')" read -r cname cms cunits; do
+        [ -n "${cname:-}" ] || continue
+        if [ "${cunits:-0}" = 0 ]; then cnote="warm, nothing to compile"; else cnote="${cunits} unit(s) compiled"; fi
+        wa_build_time_record component "$cname" "${cms:-0}" "$cnote"
+      done < "$component_times"
+    fi
   else
     reason=$(last_line_of "$log")
     echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): ${reason:-build-components.sh failed, see $log}"
@@ -405,7 +441,7 @@ lua_run() { # <script> <home>
     timeout 120 "$FAST_BIN" --db "$2/t.db"
 }
 run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict kind
-  f=$1; s=$(date +%s%N); code=0; kind=ok
+  f=$1; s=$(fast_now_ms); code=0; kind=ok
   # A scratch home that cannot be made is the machine (the same signature the classifier reads in a
   # test's output: `mkdir ... -> nil`), never the tree. Reported as a row so it is counted, retried and
   # named rather than vanishing into a failed redirection.
@@ -438,7 +474,7 @@ run_lua() { # <script> -> one TSV row: exit, ms, script, verdict line, verdict k
     kind=$(wa_environment_kind "$c" "$last")
     cp "$out" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true
   fi
-  ms=$(( ($(date +%s%N)-s)/1000000 ))
+  ms=$(( $(fast_now_ms) - s ))
   if [ "$c" = 0 ]; then
     record_row pass lua "$f" "$c" "$ms" 0 ''
   else
@@ -456,7 +492,7 @@ if [ -n "$envrows" ]; then
   echo "fast: $(printf '%s\n' "$envrows" | grep -c .) row(s) could not run (fork/spawn): retrying them once, serially"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    h=$(mktemp -d "$FAST_WORK/h.XXXXXX"); log="$FAST_WORK/logs/$(basename "$f").retry.log"; s=$(date +%s%N); c=0
+    h=$(mktemp -d "$FAST_WORK/h.XXXXXX"); log="$FAST_WORK/logs/$(basename "$f").retry.log"; s=$(fast_now_ms); c=0
     wa_environment_retry "lua $f" "$log" lua_run "$f" "$h"; c=$?
     kind=ok; [ "$c" != 0 ] && kind=environment
     case "$WA_FAST_RETRY" in
@@ -464,12 +500,12 @@ if [ -n "$envrows" ]; then
       environment) echo "fast: ENVIRONMENT still cannot run after a serial retry: $f (exit $c)" ;;
       *) cp "$log" "$FAST_WORK/logs/$(basename "$f").log" 2>/dev/null || true ;; # a real failure: keep the retry's log
     esac
-    awk -F'\t' -v f="$f" -v c="$c" -v k="$kind" -v ms="$(( ($(date +%s%N)-s)/1000000 ))" -v l="$(last_line_of "$log" | tr '\t' ' ' | cut -c1-160)" \
+    awk -F'\t' -v f="$f" -v c="$c" -v k="$kind" -v ms="$(( $(fast_now_ms) - s ))" -v l="$(last_line_of "$log" | tr '\t' ' ' | cut -c1-160)" \
       'BEGIN{OFS="\t"} $3==f {print c,ms,$3,l,k; next} {print}' "$work/lua.tsv" > "$work/lua.new" && mv "$work/lua.new" "$work/lua.tsv"
     # The JSON row follows the retry: a row that passed alone is a pass, and one that still cannot run is
     # the machine refusing, never a verdict on the code.
-    if [ "$c" = 0 ]; then record_row pass lua "$f" "$c" "$(( ($(date +%s%N)-s)/1000000 ))" 0 ''
-    else record_row fail lua "$f" "$c" "$(( ($(date +%s%N)-s)/1000000 ))" "$([ "$kind" = environment ] && echo 1 || echo 0)" "$(first_error_of "$log")"; fi
+    if [ "$c" = 0 ]; then record_row pass lua "$f" "$c" "$(( $(fast_now_ms) - s ))" 0 ''
+    else record_row fail lua "$f" "$c" "$(( $(fast_now_ms) - s ))" "$([ "$kind" = environment ] && echo 1 || echo 0)" "$(first_error_of "$log")"; fi
   done <<< "$envrows"
 fi
 lua_total=$(wc -l < "$work/lua.list"); lua_fail=$(awk -F'\t' '$1!=0' "$work/lua.tsv" | wc -l)
@@ -576,6 +612,18 @@ else
   printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh"
   if [ -z "$crates" ]; then echo "fast: rust - no crate touched"; fi
   for crate in $crates; do
+    # THE BUILD, measured as the build the tests themselves need - never a second one. 'cargo test
+    # --no-run' in the tests' own profile compiles exactly what the row below runs, and the row then
+    # reuses that compile, so the number the module claim rests on is the cost of the crate's test build
+    # and is paid once (ARCHITECTURE.md, "Modules over the monolith"). The seconds the tests then take
+    # are the row's own measurement.
+    if [ "$crate" = wa-sentinel ]; then test_args="--manifest-path rust/wa-sentinel/Cargo.toml"
+    else test_args="--release --manifest-path rust/Cargo.toml -p $crate"; fi
+    bstart=$(fast_now_ms); build_rc=0
+    # The exit code is KEPT, not discarded: a build that failed compiled nothing, and the note must say
+    # so rather than print the warm row's sentence under a red one (scripts/lib/build-times.sh).
+    CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --no-run --offline $test_args > "$work/build-$crate.log" 2>&1 || build_rc=$?
+    wa_build_time_record crate "$crate" "$(( $(fast_now_ms) - bstart ))" "$(wa_build_time_note "$work/build-$crate.log" "$build_rc")"
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
       CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
@@ -617,9 +665,9 @@ else
 fi
 
 # ---- 3. contract checks -------------------------------------------------------------------------------
-check() { name=$1; shift; s=$(date +%s%N)
+check() { name=$1; shift; s=$(fast_now_ms)
   wa_environment_retry "$name" "$work/check-$name.log" "$@"; c=$?
-  ran=$((ran + 1)); ms=$(( ($(date +%s%N)-s)/1000000 ))
+  ran=$((ran + 1)); ms=$(( $(fast_now_ms) - s ))
   if [ "$c" = 0 ]; then echo "fast: $name ok (${ms}ms)"; record_row pass checks "$name" "$c" "$ms" 0 ''; return 0; fi
   fails=$((fails + 1))
   case "$WA_FAST_RETRY" in environment) envfails=$((envfails + 1)); echo "FAIL $name (exit $c, environment): $(last_line_of "$work/check-$name.log")"
@@ -701,6 +749,23 @@ fi
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
 check deploy-prune bash scripts/test-deploy-prune.sh
 check publish-artifacts bash scripts/test-publish-artifacts.sh
+# THE DEPLOY'S ANCESTRY AND ITS RECORD (round 4 of the deploy-ancestry review). Seven files were written with
+# that fix and named by no harness, so every gate here was green without running one of them; the full gate now
+# runs all seven (scripts/test.sh) and these are the ones measured at seconds - a landing round that touches the
+# install path should not need the hour-long gate to learn whether the machine can still tell what is running.
+# test-deploy-ancestry.sh is NOT here: it runs a real deploy.sh detached (setsid --fork) per case, 28 s measured,
+# and the guard it proves is in the full gate. The measurement and the reason are in
+# docs/missions/reports/deploy-ancestry.md.
+WA_BIN="$bin" check install-record bash scripts/test-install-record.sh
+check install-guards bash scripts/test-install-guards.sh
+WA_BIN="$bin" check node-pins bash scripts/test-node-pins.sh
+check publish-shared-commit bash scripts/test-publish-shared-commit.sh
+check bootstrap-gate bash scripts/test-bootstrap-gate.sh
+WA_BIN="$bin" check build-info bash scripts/test-build-info.sh
+# The mission loop's mechanism (docs/MISSIONS.md): stage, start, status, verify and clean against a scratch
+# repository and a stub wa. Seconds, and no node, no cargo, no model - it proves the runner's environment,
+# the done marker with its rc and the failure count without launching a session.
+check mission bash scripts/test-mission.sh
 # The fastlane's two halves, both seconds and self-contained. The row list a narrowed run executes: the core
 # rows are never dropped, an unknown row is a refusal and an empty request runs nothing (scripts/lib/fast-rows.sh,
 # the one place a plan could make a green run mean less). And the signing chain a round depends on: the
@@ -734,6 +799,39 @@ check component-pins bash scripts/test-component-pins.sh
 # that is not its pin failing by name, a per-component SKIP, and eight parallel rows fetching two pinned
 # names from one cache at once (the 13/11 race). Seconds: no toolchain, no network, no build.
 check component-pins-selftest bash scripts/test-component-pins.sh --self-test
+# The WIT seam is two shapes and a check (ARCHITECTURE.md, "Seams are WIT, and async by default"):
+# a string that carries JSON says so in its name, and nothing new exposes a status to poll. The
+# baseline file is what lets the rule bind new code without breaking the tree - and its own stale
+# lines fail, so a hole that is closed has to leave the file.
+check wit-lint bash scripts/wit-lint.sh
+# The check judged by fixtures: both rules fail where they must and NOT where they must not (a doc
+# naming hooks.json, a doc describing a RETURN value), the baseline accepts the recorded holes, and
+# the marker alone turns a polling func green. Seconds, no toolchain.
+check wit-lint-selftest bash scripts/test-wit-lint.sh
+# The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
+# manifest not at all), a win line and the flag for the modules without one, a ledger's seconds, a
+# co-change pair over 70% and a decision inside the 30-day / 100-commit cooldown - plus the exit code
+# that keeps a report a map and never a gate.
+check module-report-selftest bash scripts/test-module-report.sh
+# The Rust build row's own shape: the number it records is the compile the test row below reuses (not a
+# second release build), and every duration goes through a portable clock. Static by design, so it runs
+# where the build rows themselves are skipped for want of a toolchain.
+check fast-build-timing bash scripts/test-fast-build-timing.sh
+
+# The measured build times of everything this run compiled, before the verdict, so the claim
+# and the numbers are one screen apart (no gate: scripts/lib/build-times.sh says why).
+wa_build_time_summary
+# The module map, from the same ledger (ARCHITECTURE.md, "Modules over the monolith"): what the tree is
+# made of, what each part cost to build, which parts state a measured win, which pairs moved together in
+# >70% of the last 50 commits, and which split/merge is still inside the cooldown. FLAGS, NOT FAILURES:
+# it prints and the verdict below never reads it (scripts/module-report.mjs says why), so a module with no
+# win is a line to read, never a landing to block. WA_FAST_MODULE_ROWS keeps it to one screen; the whole
+# map is `node scripts/module-report.mjs` (its default is every module).
+if command -v node >/dev/null 2>&1; then
+  node scripts/module-report.mjs --timings "$work/build-times.tsv" --rows "${WA_FAST_MODULE_ROWS:-8}" 2>&1 || echo "fast: module report SKIPPED (scripts/module-report.mjs exited $?)"
+else
+  echo "fast: module report SKIPPED (node is not on PATH, so scripts/module-report.mjs cannot run)"
+fi
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.

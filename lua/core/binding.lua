@@ -190,10 +190,33 @@ end
 -- operator this node pinned. `removed`/`changed` mean a pinned operator lost that vouch, which is the
 -- only case admission must refuse. Compared as (node_id, public_key) pairs, never by position: the
 -- order in WASM_AGENT_NETWORK_ADMINS is presentation, not consent.
+-- The node ids the VERIFIED fleet roster revokes (host.mesh_call {revoked=true}), read only when a pin is
+-- actually missing and kept a minute. Operator 17/11 ("make nodes removable"): the fleet key revoking a
+-- node is the authority to drop it, so an operator the roster revoked may leave the service's list without
+-- that loss detaching every node that once pinned it. No roster, or one that does not verify: an empty set,
+-- and every loss counts as before.
+local revoked_cache={at=-1e9,set={}}
+local function roster_revoked()
+  local now=tonumber(host.now()) or 0
+  if now-revoked_cache.at<60 then return revoked_cache.set end
+  local set={}
+  if type(host.mesh_call)=='function' then
+    local ok,raw=pcall(host.mesh_call,json.encode({revoked=true}))
+    local answer=ok and type(raw)=='string' and (pcall(json.decode,raw) and json.decode(raw)) or nil
+    if type(answer)=='table' and answer.ok==true and type(answer.revoked)=='table' then
+      for _,id in ipairs(answer.revoked) do set[tostring(id)]=true end
+    end
+  end
+  revoked_cache.at,revoked_cache.set=now,set
+  return set
+end
+M._roster_revoked_cache=revoked_cache
 local function pins_relation(service_pins,pinned_pins)
   local service,pinned=pin_set(service_pins),pin_set(pinned_pins)
   local lost,gained=false,false
-  for k in pairs(pinned) do if not service[k] then lost=true end end
+  for k in pairs(pinned) do
+    if not service[k] and not roster_revoked()[k:sub(1,(k:find('\0',1,true) or #k+1)-1)] then lost=true end
+  end
   for k in pairs(service) do if not pinned[k] then gained=true end end
   if lost then return gained and 'changed' or 'removed' end
   return gained and 'added' or 'same'
@@ -211,7 +234,7 @@ local function authority(s)
   local current,pinned=pin_set(checked.operators),pin_set(s.operators)
   local lost,gained={},{}
   for _,p in ipairs(s.operators or {}) do
-    if not current[tostring(p.node_id)..'\0'..tostring(p.public_key)] then lost[#lost+1]=tostring(p.node_id) end
+    if not current[tostring(p.node_id)..'\0'..tostring(p.public_key)] and not roster_revoked()[tostring(p.node_id)] then lost[#lost+1]=tostring(p.node_id) end
   end
   for _,p in ipairs(checked.operators or {}) do
     if not pinned[tostring(p.node_id)..'\0'..tostring(p.public_key)] then gained[#gained+1]=tostring(p.node_id) end

@@ -257,6 +257,18 @@ contains "$(cat "$WORK/record.sh")" "binary_inputs=" "the install record names t
 # The record step's own digest is the commit the record names: a fixture proves the line lands with the
 # digest of that commit, and not with the empty string a failed substitution would leave behind.
 inst_record="$WORK/inst-record"; mkdir -p "$inst_record"
+# Round 4: the record's identity is the INSTALLED BINARY'S OWN ANSWER (a fast-path deploy reuses the binary it
+# already had), so the fixture installs a binary that answers --build-info with the commit under test. Without
+# one the record says commit=unknown - correctly - and nothing can name a digest; that is the rule these rounds
+# exist for, not a hole in it.
+cat > "$inst_record/wa" <<STUB
+#!/bin/sh
+case "\$1" in
+  --build-info) printf 'version=9.9.9\ncommit=$LUA_ONLY\ntree=aaaabbbbccccddddeeeeffff0000111122223333\ndirty=false\nsource=git\nbuilt_epoch=1\nancestors=1\nancestors_complete=true\n' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$inst_record/wa"
 out="$(
   cd "$REPO" || exit 1
   ROOT="$REPO" SOURCE_ROOT="$REPO" INSTALL_DIR="$inst_record" COMMIT="$LUA_ONLY" BINARY_PROVENANCE="" \
@@ -265,6 +277,7 @@ out="$(
     WA_COMPONENTS_DIR="$inst_record/components" \
     bash -c '
       . "'"$ROOT_DIR"'/scripts/lib/node-binaries.sh"
+      . "'"$ROOT_DIR"'/scripts/lib/install-record.sh"
       . "'"$WORK"'/record.sh"
       fail() { echo "FAILED: $*" >&2; exit 1; }
       note() { :; }
