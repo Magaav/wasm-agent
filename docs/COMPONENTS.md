@@ -303,6 +303,10 @@ prebuilt step, the step installs `rust/wa-sentinel/target/release/wa-sentinel` e
 is), because `request deploy` runs that installed copy: without it the copy notes "no node-binaries
 helper" and builds, which is the one thing the node this path exists for cannot do.
 
+`bash scripts/test-glibc-floor.sh` proves the floor both halves of that pin share (docs/INSTALL.md, "The
+glibc floor"): the measurement, the publisher's refusal above it, and the three installers' refusal
+against the host's own `ldd --version` before anything is swapped.
+
 `bash scripts/test-deploy-node-binaries.sh` and `bash scripts/test-node-binaries.sh` prove both halves
 with no network, no cargo, no zig, no node and no `gh` (a shim records any call): the plan, the cache,
 the cache hit with the release gone, every refusal, the disk-conditioned fallback, the publisher's
