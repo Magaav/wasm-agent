@@ -182,6 +182,8 @@ ok
 # the payload bytes and the manifest that pins them move together. The sums must then be written again, and a
 # signature over the old ones is about other bytes: it must be refused HERE, by name, and never uploaded.
 cp -f "$built/wa-$TRIPLE-$SHORT" "$WORK/wa-$TRIPLE-$SHORT.before"
+# The signature the refusal must leave alone, recorded before the set it is over is changed.
+sig_before="$(sha "$WORK/release/SHA256SUMS.sig")"
 printf 'rebuilt\n' >> "$built/wa-$TRIPLE-$SHORT"
 sentinel_sha="$(sha "$built/wa-sentinel-$TRIPLE-$SHORT")"
 sentinel_bytes="$(bytes "$built/wa-sentinel-$TRIPLE-$SHORT")"
@@ -194,13 +196,17 @@ ok
 contains "$out" "signature_stale:" "the refusal is named signature_stale"
 contains "$out" "sign the new" "and it says how to fix it"
 absent "$(cat "$WORK/gh-called" 2>/dev/null || true)" "release upload" "nothing was uploaded after the refusal"
-# Back to the set that was signed: the same re-run is green again (nothing was left in a broken state).
-# The whole state, not half of it: the refusal above moved the signature over the OLD sums aside, so
-# restoring only the payload would leave a set with the signed bytes and no signature beside them and the
-# re-run would say "signature deferred" - which is true of a directory whose signature was taken away, and
-# not what this case is about. The signature file comes back with the bytes it is a signature over.
-[ -f "$WORK/release/SHA256SUMS.sig.stale" ] || fail "the refusal did not leave the stale signature in a named place"
-cp -f "$WORK/release/SHA256SUMS.sig.stale" "$WORK/release/SHA256SUMS.sig"
+# The refusal named the CAUSE and left the directory untouched (review of 18/11, item 1). A publishing run
+# that first moved the signature aside and then refused for its absence answered release_not_signed - a
+# different reason, about a hole it had made itself - and this row passed only because the moved-aside file
+# was put back by hand here. Nothing is put back now, because nothing was taken: the signature over the old
+# sums is still where it was, byte for byte, and there is no .sig.stale anywhere.
+absent "$out" "release_not_signed" "the refusal names the cause, not the hole a move-aside would leave"
+[ -f "$WORK/release/SHA256SUMS.sig" ] || fail "the refusal took the signature away instead of refusing with it"
+[ "$(sha "$WORK/release/SHA256SUMS.sig")" = "$sig_before" ] || fail "the refusal rewrote the signature it refused"
+[ -f "$WORK/release/SHA256SUMS.sig.stale" ] && fail "a --publish run moved a signature aside (that is the build-host case)"
+ok
+# Back to the set that was signed - only the payload and the manifest this case changed are put back.
 cp -f "$WORK/wa-$TRIPLE-$SHORT.before" "$built/wa-$TRIPLE-$SHORT"
 sed -i "s|^$TRIPLE .*|$TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $sentinel_sha $sentinel_bytes|" \
   "$built/node-$SHORT.manifest" || fail "could not restore the fixture manifest"

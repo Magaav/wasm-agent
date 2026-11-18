@@ -610,7 +610,13 @@ else
   # Under deferral the signature comes afterwards from the vault's host, so one left from ANOTHER build is moved
   # aside, said, and the build goes on (17/11: the next release refused with exit 6 over the previous commit's
   # signature). Without deferral it stays a refusal: this run was meant to sign.
-  if [ -f "$OUT/SHA256SUMS.sig" ] && [ "${WA_RELEASE_SIGN_DEFER:-0}" = 1 ] && ! wa_release_verify_sums "$OUT" >/dev/null 2>&1; then
+  # NOT under --publish (review of 18/11, item 1): a publishing run ships these exact bytes, so a signature over
+  # other sums is a refusal at the check below - named signature_stale, exit 6, with the directory left exactly as
+  # it was found. Moving it aside first took the signature away and then refused for its absence
+  # (release_not_signed), which named the wrong cause and made a --publish run take a set apart it had no
+  # business touching. Moving it aside is what a build host does to get on with the build; a publisher has no
+  # build to get on with.
+  if [ -f "$OUT/SHA256SUMS.sig" ] && [ "${WA_RELEASE_SIGN_DEFER:-0}" = 1 ] && [ "${PUBLISH:-0}" != 1 ] && ! wa_release_verify_sums "$OUT" >/dev/null 2>&1; then
     mv -f "$OUT/SHA256SUMS.sig" "$OUT/SHA256SUMS.sig.stale" && say "signature_stale: $OUT/SHA256SUMS.sig is not a signature over the sums just written (they changed after it was made); moved aside as $OUT/SHA256SUMS.sig.stale - sign the new $OUT/SHA256SUMS where the vault is (bash scripts/sign-release.sh $OUT/SHA256SUMS) and run this again (WA_RELEASE_SIGN_DEFER=1: the new sums are signed on the vault's host)"
   fi
   if [ -f "$OUT/SHA256SUMS.sig" ]; then
