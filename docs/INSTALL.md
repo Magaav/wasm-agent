@@ -133,14 +133,14 @@ before anything is printed for upload (`glibc_floor_exceeded`). `--glibc <major>
 the read-back is what keeps the pin honest. docs/COMPONENTS.md has the build numbers.
 
 **The measured fleet** - `ldd --version` on each host, and the newest `GLIBC_` symbol in the `wa` that host
-actually runs (read 19/11, one command each, no build):
+actually runs (read 18/11, one command each, no build):
 
 | host | arch / OS | glibc (`ldd --version`) | installed `wa` needs | runs a 2.31-floor binary |
 | --- | --- | --- | --- | --- |
 | avell (this node) | x86_64, Arch | 2.44 | GLIBC_2.30 | yes |
 | openclaw | aarch64, Ubuntu 24.04 | 2.39 | GLIBC_2.30 | yes |
 | mail | aarch64, Ubuntu 22.04 | 2.35 | GLIBC_2.30 | yes |
-| nextcloud | - | not measured (node offline 19/11) | - | unknown; its git is of the 2.25 era, i.e. **below the floor** |
+| nextcloud | - | not measured (node offline 18/11) | - | unknown; its git is of the 2.25 era, i.e. **below the floor** |
 
 So the floor covers every host that could be measured, with margin, and 2.30 is what the fleet is actually
 running today. A host older than 2.31 - the nextcloud box, on the one reading available for it - cannot run
@@ -154,9 +154,9 @@ The install side asks the question of the bytes in front of it and of the host i
 
 | step | when it refuses | what is left behind |
 | --- | --- | --- |
-| `scripts/fleet-install.sh` | after the download and its sha/signature, **before** the exec test, the backup and the swap | the installed binary, byte for byte, and no `.prev` |
+| `scripts/fleet-install.sh` | after the download and its sha/signature, **before** the exec test, the backup and the swap (the script carries the four functions itself, so a copy fetched on its own still makes the check) | the installed binary, byte for byte, and no `.prev` |
 | `scripts/upgrade.sh` | after the signature gate, **before** the scratch proof, the `.pre-upgrade` backup and the swap | the running node and its binary |
-| `scripts/deploy.sh` | **before** the prove phase, for the node *and* its supervisor (a sentinel that cannot start cannot roll a node back either) | the running node, its binary and its record |
+| `scripts/deploy.sh` | **before it executes the candidate at all** (`--capability-digest`, `--lua-tree`, the graph proof all run it) and so before the prove phase, for the node *and* its supervisor (a sentinel that cannot start cannot roll a node back either) | the running node, its binary and its record |
 
 The sentence names both versions and where the host's came from:
 
@@ -171,16 +171,27 @@ A host whose libc is **not glibc** (musl, and every non-Linux host a deploy runs
 compare with, so the check stands aside rather than guessing - `ldd --version` answering "musl libc" is
 "unknown", not "satisfied" - and the exec/health proof downstream is what answers there.
 
+A host with no **version-sorting `sort`** (`-V` is GNU coreutils; a busybox `sort` on a glibc host rejects
+it, and a `sort` that ignores the flag answers byte order, which puts 2.9 above 2.10) is "unknown" for the
+same reason, and stands aside the same way: the comparison prints `glibc_floor_unknown:` and the bytes go
+through to the exec/health proof. It never did refuse the *right* binaries - it refused **every** binary on
+such a host, a tool that could not read itself turned into a fleet-wide refusal.
+
 A host below the floor is not left without options: publish the same commit with a lower floor
 (`--glibc 2.27`), or install the static musl bundle from `releases/index-linux.json` (the `-musl` rows),
 which needs no glibc at all.
 
-`bash scripts/test-glibc-floor.sh` pins all of it (52 checks, no network, no node, no cargo): the
-measurement reads `GLIBC_2.2.5` as *older* than `GLIBC_2.31`; a fixture artifact that needs 2.39 is refused
-by all three installers with both versions in the output and the installed binary unchanged; the same
-artifact at 2.31 gets *past* that step (so the guard is not a blanket refusal); a script copy without its lib
-refuses instead of installing blind; and the guard's line in `deploy.sh`/`upgrade.sh` is checked to be
-before the proof, the backup and the swap.
+`bash scripts/test-glibc-floor.sh` pins all of it (96 checks, no network, no node, no cargo; 100 with the
+built artifacts, see below): the measurement reads `GLIBC_2.2.5` as *older* than `GLIBC_2.31`; a fixture
+artifact that needs 2.39 is refused by all three installers with both versions in the output and the
+installed binary unchanged; the same artifact at 2.31 gets *past* that step (so the guard is not a blanket
+refusal); a host without a version-sorting `sort` is "unknown" and allowed, not refused; the copy of
+`fleet-install.sh` fetched on its own makes the check, and the two copies of the four functions are diffed
+byte for byte; the guard in `deploy.sh` is checked to be **before the candidate is first executed** as well
+as before the proof, the backup and the swap (the block is read out of `deploy.sh` by its markers and run
+against fixtures); and the byte scan is compared with `readelf -V`'s `.gnu.version_r` on real linked binaries
+- and on the built artifacts when `WA_GLIBC_ARTIFACT_DIR` names them - which is what would catch a
+`GLIBC_x.y` string in a payload that is not a version need at all.
 
 ## What this replaced, and what went away with it
 

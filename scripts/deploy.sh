@@ -1002,6 +1002,36 @@ fi
 #    that is serving.
 fi
 
+# THE BYTES AGAINST THIS HOST'S LIBC, before they are EXECUTED, proved, swapped or recorded - here, right
+# after NEW and NEW_SENTINEL are final on all three paths (Lua fast, published binary, built here) and
+# before the first line that runs either of them. A binary whose symbol versions name a newer glibc than
+# this host runs cannot start here at all: 18/11, mail (glibc 2.35) ran a published binary built against
+# 2.39, the sentinel retried 424 times on "GLIBC_2.39 not found", and the node was down for two days with no
+# channel left to fix it. This deploy can be the one that INSTALLS such a binary - from a release another
+# machine published - so it asks the question the release's manifest promises (`glibc_floor=`) but cannot
+# prove for THIS host, in the bytes, before anything is replaced. The supervisor is checked too: a node whose
+# sentinel cannot start cannot be rolled back either.
+#
+# WHY HERE AND NOT AFTER THE PROOFS (found in the review of a9b60cc9): the checks below RUN the candidate -
+# `--capability-digest` a few lines down, then `--lua-tree`, then the graph proof - and a binary that needs a
+# newer glibc dies at the first of them with "the binary being installed cannot state its capability digest".
+# That sentence is true and useless: it reports a broken artifact where the cause is a host that is too old,
+# and it hides the one refusal an operator can act on (publish this commit with a lower floor). The guard
+# answers first, so `glibc_floor_exceeded` is what a too-new binary gets.
+# wa-deploy-glibc-guard: begin
+if command -v wa_glibc_guard >/dev/null 2>&1; then
+  for glibc_candidate in "$NEW" "${NEW_SENTINEL:-}"; do
+    [ -n "$glibc_candidate" ] || continue
+    [ -f "$glibc_candidate" ] || continue
+    if ! glibc_refusal="$(wa_glibc_guard "$glibc_candidate" "$(basename "$glibc_candidate")")"; then
+      fail "refused(glibc_floor_exceeded): $glibc_refusal"
+    fi
+  done
+else
+  note "scripts/lib/glibc-floor.sh is not beside this deploy, so the artifact's glibc floor was not measured against this host; the scratch proof below still refuses a binary this host cannot run"
+fi
+# wa-deploy-glibc-guard: end
+
 # 3d. The Lua tree, on every deploy (fast or full): lua/core + lua/vendor (.lua, .sql) and the two
 #     embedded AGENTS docs, pinned, with the capability digest of the binary being installed. The binary
 #     prefers it over its compiled-in copy only when everything verifies; installing it on full builds
@@ -1133,25 +1163,6 @@ COMPONENT_PROOF="$(grep -c 'graph component ok' "$COMPONENT_PROOF_HOME/proof.log
 rm -rf "$COMPONENT_PROOF_HOME"
 [ "$COMPONENT_PROOF" = "1" ] || fail "refused(component_proof_failed): the graph proof did not print its verdict; nothing installed"
 echo "deploy: the candidate binary answers graph calls through the staged component"
-
-# THE BYTES AGAINST THIS HOST'S LIBC, before they are proved, swapped or recorded. A binary whose symbol
-# versions name a newer glibc than this host runs cannot start here at all: 18/11, mail (glibc 2.35) ran a
-# published binary built against 2.39, the sentinel retried 424 times on "GLIBC_2.39 not found", and the node
-# was down for two days with no channel left to fix it. This deploy can be the one that INSTALLS such a
-# binary - from a release another machine published - so it asks the question the release's manifest promises
-# (`glibc_floor=`) but cannot prove for THIS host, in the bytes, before anything is replaced. The supervisor
-# is checked too: a node whose sentinel cannot start cannot be rolled back either.
-if command -v wa_glibc_guard >/dev/null 2>&1; then
-  for glibc_candidate in "$NEW" "${NEW_SENTINEL:-}"; do
-    [ -n "$glibc_candidate" ] || continue
-    [ -f "$glibc_candidate" ] || continue
-    if ! glibc_refusal="$(wa_glibc_guard "$glibc_candidate" "$(basename "$glibc_candidate")")"; then
-      fail "refused(glibc_floor_exceeded): $glibc_refusal"
-    fi
-  done
-else
-  note "scripts/lib/glibc-floor.sh is not beside this deploy, so the artifact's glibc floor was not measured against this host; the scratch proof below still refuses a binary this host cannot run"
-fi
 
 wa_phase proving
 SCRATCH=$((PORT + 40))

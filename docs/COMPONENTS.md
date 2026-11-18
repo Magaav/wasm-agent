@@ -176,7 +176,13 @@ symbol newer than glibc 2.31, so the binary runs on Ubuntu 20.04 and everything 
 reads the floor back out of the bytes (`GLIBC_2.x` symbol versions, `wa_glibc_max_symbol` in
 `scripts/lib/glibc-floor.sh`) and refuses a binary that needs more than the manifest claims. The same
 function, in the same lib, is what `scripts/fleet-install.sh`, `scripts/upgrade.sh` and `scripts/deploy.sh`
-refuse a binary with against the host's own `ldd --version` (docs/INSTALL.md, "The glibc floor"). Every
+refuse a binary with against the host's own `ldd --version` (docs/INSTALL.md, "The glibc floor").
+`scripts/fleet-install.sh` carries the four functions inside itself, because that script is also handed out
+as one file (over `curl`, or on a node with no lib beside it) and a floor check that refused for want of its
+lib would be off exactly where it is needed: `scripts/test-glibc-floor.sh` diffs the two copies and fails on
+one differing byte, so there is one implementation and not a second one that drifts. A host whose `sort`
+has no `-V`, or ignores it, is "unknown" there - the comparison is printed as `glibc_floor_unknown:` and the
+bytes are allowed through, rather than the whole fleet being refused by a tool that cannot order versions. Every
 member is verified before anything is printed for upload: sha256,
 size, ELF machine (`b7` aarch64, `3e` x86_64). The candidate is executed when the host can run it
 (natively, or through `--runner 'wsl -d Ubuntu --'`); when it cannot, the line says `run: SKIPPED`, and
@@ -305,7 +311,10 @@ helper" and builds, which is the one thing the node this path exists for cannot 
 
 `bash scripts/test-glibc-floor.sh` proves the floor both halves of that pin share (docs/INSTALL.md, "The
 glibc floor"): the measurement, the publisher's refusal above it, and the three installers' refusal
-against the host's own `ldd --version` before anything is swapped.
+against the host's own `ldd --version` before anything is swapped or - in `deploy.sh` - before the candidate
+is executed at all. It also measures the byte scan against `readelf -V`'s `.gnu.version_r` on real linked
+binaries (and on the built artifacts when `WA_GLIBC_ARTIFACT_DIR` names them), which is the check that a
+`GLIBC_x.y` string sitting in the payload as text would fail.
 
 `bash scripts/test-deploy-node-binaries.sh` and `bash scripts/test-node-binaries.sh` prove both halves
 with no network, no cargo, no zig, no node and no `gh` (a shim records any call): the plan, the cache,
