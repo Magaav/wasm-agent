@@ -41,4 +41,6 @@ Numbers are "checks / failed"; a Lua row's number is its own check count.
 `upgrade.sh` and `linux/bootstrap.sh` were not run end to end (each installs a node); the test asserts they route
 through the same functions and refusals. A deep (non-shallow) build reporting `ancestors_complete=true` was not
 observed here, because this worktree is itself a shallow clone. `source_shared=` is recorded but no rule reads it
-yet. Nothing was pushed, deployed or restarted.
+yet. `deploy.sh` now asks the remote before it builds, so an offline checkout (or one with no `origin`) refuses
+without `--force --reason` where it used to deploy - the fail-closed rule as stated, named here as a behaviour
+change. Nothing was pushed, deployed or restarted.

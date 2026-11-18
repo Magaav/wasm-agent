@@ -296,6 +296,9 @@ ready receipt for an unshared commit.
   `lib/fast-binary.sh`), so no install path refuses on it yet; no rule reads it.
 - The exit-path of the release (`kind=released`) was verified by the store's own test, not by a live deploy that
   released a pin.
+- `deploy.sh` now asks the REMOTE before it builds, so a checkout with no `origin` at all (or one that cannot be
+  reached) refuses without `--force --reason`, where it used to deploy. That is the fail-closed rule as the review
+  stated it, but it is a behaviour change on an offline machine and it is named here rather than discovered.
 
 ## Not done / left as it was
 
