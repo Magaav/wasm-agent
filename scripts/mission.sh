@@ -240,19 +240,42 @@ age_of() { # <epoch seconds, maybe fractional> -> whole seconds ago, or -1
 # /proc/1758185/cwd = /home/victor/Work/missions/mission-fabric - a writer in the very directory this
 # mission launches into that no run.lock named and no title marker matched, because the harness started
 # it rather than 'mission.sh stage/start'.
-# rc 2 when the node's memory db cannot be read: "no writer" and "cannot tell" are never collapsed.
+# THREE answers, never two (round 5): rc 0 with the writers, rc 1 with nothing (the processes are gone), rc 2
+# with NP_WHY - the node's memory db cannot be read, or a live pid's cwd cannot be read. writers_check passes
+# rc 2 through and mission_run calls it 'unknown', because "no writer" and "cannot tell" are never collapsed:
+# before round 5 that rc 2 became "no writer", the verdict became 'released', and start launched past a read
+# this script could not make.
+# The reason travels on STDOUT, not in a variable: its caller reads it through $( ), and a global set inside a
+# command substitution never reaches that caller (measured while writing this round: the refusal printed
+# "cannot be read:  - so ...", with the reason gone). A reason line starts with '! cannot-tell ', so it can
+# never be mistaken for a writer row - those start with the session id.
+cannot_tell() { printf '! cannot-tell %s\n' "$1"; }
 node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><age><TAB><cwd>"
   local home db rows sid pid age cwd
   home=${MISSION_NODE_HOME:-$HOME/.wasm-agent}
   db=$home/memory.db
-  command -v sqlite3 >/dev/null 2>&1 || return 2
-  [ -r "$db" ] || return 2
+  command -v sqlite3 >/dev/null 2>&1 || {
+    cannot_tell "no sqlite3 on PATH, so $db and its session_presence rows cannot be read"; return 2; }
+  [ -r "$db" ] || {
+    cannot_tell "$db is missing or unreadable, so which process serves which session cannot be told"; return 2; }
   rows=$(sqlite3 -readonly "$db" \
-    "select session_id, pid, cast(strftime('%s','now')-heartbeat_at as int) from session_presence" 2>/dev/null) || return 2
+    "select session_id, pid, cast(strftime('%s','now')-heartbeat_at as int) from session_presence" 2>/dev/null) || {
+    cannot_tell "$db could not be queried for session_presence (locked, or no such table)"; return 2; }
   [ -n "$rows" ] || return 0
   while IFS='|' read -r sid pid age; do
     [ -n "$sid" ] && [ -n "$pid" ] || continue
-    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue   # the process is gone: no writer
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+    if [ -z "$cwd" ]; then
+      # NOT the same fact as "the process is gone". /proc/<pid> still there means the process is running and
+      # its cwd is the one thing that says WHERE it works; unreadable (another user's process, hidepid, a
+      # kernel without /proc/<pid>/cwd) leaves it working somewhere this read cannot see - which is 'unknown',
+      # not 'no writer' (round 5: '|| continue' let such a live process through as if it had exited).
+      if [ -d "/proc/$pid" ]; then
+        cannot_tell "pid $pid (session $sid) is running and /proc/$pid/cwd cannot be read - another user's process, or hidepid - so the directory it works in cannot be told"
+        return 2
+      fi
+      continue                        # the process is gone: no writer
+    fi
     case $cwd in
       "$1"|"$1"/*|"$2"|"$2"/*) printf '%s\t%s\t%s\t%s\n' "$sid" "$pid" "${age:--1}" "$cwd" ;;
     esac
@@ -270,12 +293,22 @@ node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><
 # it rather than 'mission.sh stage/start'.
 # Round 4 asks ONE question here and no age: the process exists (its cwd reads), so it is a writer. A
 # heartbeat age was a guess, and a guess that let a quiet writer through once.
-# Sets MR_W_SESSION MR_W_PID MR_W_AGE MR_W_CWD; rc 0 when it found a writer, rc 1 when it found none.
+# Round 5: rc 0 with a writer, rc 1 with none, and rc 2 (with NP_WHY) when the node's own record could not be
+# read. The three are never collapsed here: a caller that reads rc 2 as "no writer" launches beside a process
+# it cannot see, which is exactly what this round fixes.
+# Sets MR_W_SESSION MR_W_PID MR_W_AGE MR_W_CWD; on rc 2 it leaves them empty and sets NP_WHY, taken from the
+# '! cannot-tell' line node_presence printed.
 writers_check() { # <mission dir>
-  local M=$1 wt out sid pid age cwd
+  local M=$1 wt out sid pid age cwd wrc=0
   MR_W_SESSION=''; MR_W_PID=''; MR_W_AGE='-'; MR_W_CWD=''
   wt=$(wt_of "$M")
-  out=$(node_presence "$M" "$wt") || return 1        # cannot tell: the node's own reads decide
+  out=$(node_presence "$M" "$wt"); wrc=$?
+  if [ "$wrc" -eq 2 ]; then
+    NP_WHY=$(printf '%s\n' "$out" | sed -n 's/^! cannot-tell //p' | head -1)
+    [ -n "$NP_WHY" ] || NP_WHY="the node's session_presence read failed and said no reason"
+    return 2
+  fi
+  [ "$wrc" -eq 0 ] || return 1                      # 1: no writer - the caller asks the run leases next
   [ -n "$out" ] || return 1
   while IFS=$'\t' read -r sid pid age cwd; do
     [ -n "$sid" ] || continue
@@ -316,12 +349,24 @@ mission_run() { # <mission dir>
 
   # 1. The node's own record of what is writing WHERE. This read is memory.db, not the CLI, so it also
   #    answers when the node cannot be asked at all (round 4: unknown, plus a writer the harness started).
-  writers_check "$M" && {
+  #    Round 5: three answers here, not two. A writer is 'active'; no writer sends the question on to the run
+  #    leases; and a presence read that could not be made (memory.db missing or unreadable, a live pid whose cwd
+  #    cannot be read) is 'unknown' - the same never-free answer the other two reads already give.
+  local wrc=0
+  writers_check "$M"; wrc=$?
+  if [ "$wrc" -eq 0 ]; then
     MR_VERDICT=active; MR_SESSION=$MR_W_SESSION
     MR_WHY="session $MR_W_SESSION is served by pid $MR_W_PID, whose cwd is $MR_W_CWD - this mission's own directory - and whose last heartbeat was ${MR_W_AGE}s ago: a launch now is a second writer in $wt"
     MR_CLEAR="look at it (ps -o pid=,cmd= -p $MR_W_PID; wa steer $MR_W_SESSION --status) and let it exit - nothing here kills a process; a launch is allowed when that process is gone"
     return 0
-  }
+  fi
+  if [ "$wrc" -ne 1 ]; then
+    MR_VERDICT=unknown
+    MR_WHY="the node's own record of which process works where cannot be read: $NP_WHY - so whether a process is writing in $wt cannot be told, and a launch now could be a second writer there"
+    [ -n "$sid" ] && MR_WHY="$MR_WHY; this mission records session $sid"
+    MR_CLEAR="read that record by hand (sqlite3 -readonly $nodehome/memory.db \"select session_id, pid from session_presence\", then readlink /proc/<pid>/cwd) and run 'scripts/mission.sh status $name' once it answers; nothing here launches past a read it could not make"
+    return 0
+  fi
 
   # 2. The node's word about every session this mission owns: the one it recorded, and every session the
   #    node lists under this mission's title (the first line of prompt.md, which the node shows as the
@@ -571,7 +616,30 @@ cmd_start() {
     nohup bash "$M/run.sh" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
   fi
   pid=$!
-  while [ "$i" -lt 50 ]; do [ -s "$M/run.pid" ] && break; sleep 0.1; i=$((i + 1)); done
+  # THE WINDOW CLOSES WHEN THE RUNNER HAS ITS run.pid, never on a clock (round 5). While that runner lives this
+  # start waits and keeps the flock: a runner that is slow to write run.pid has launched nothing yet, and
+  # printing "started" for it is a launch that did not happen. A runner that ENDS without writing one (95 wrong
+  # node, 96 cannot cd, 97 no mission dir, 98 no env) launched nothing at all, so its own exit is the refusal.
+  # Measured 18/11: the 5 s cap printed "started" and returned 0 for such a runner, and the mission looked
+  # launched while nothing was writing in its worktree.
+  while [ ! -s "$M/run.pid" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1; i=$((i + 1))
+    [ "$i" -lt 6000 ] || break       # 10 min: a runner slower than that is not a launch, and one flock must not hold forever
+  done
+  if [ ! -s "$M/run.pid" ]; then
+    exec 9>&-
+    if kill -0 "$pid" 2>/dev/null; then
+      refuse launcher \
+        "the runner of $name is alive (pid $pid) but has written no $M/run.pid in 10 minutes, so this start cannot say that a launch happened, and a launch beside it would be a second writer in $wt" \
+        "look at it (ps -o pid=,cmd= -p $pid) and at what it printed (tail -5 $M/out.log; tail -5 $M/err.log); nothing here kills a process"
+    fi
+    local wrc=0
+    wait "$pid" 2>/dev/null; wrc=$?
+    refuse launcher \
+      "the runner of $name ended rc=$wrc before it wrote $M/run.pid, so this was NOT a launch: no session was named and nothing is writing in $wt (95 = wrong node, 96 = cannot cd to the mission dir, 97 = cannot find it, 98 = no env file; any other rc means it was killed before its first write)" \
+      "read what it said (tail -5 $M/err.log; tail -5 $M/out.log) and fix what it names, then run 'scripts/mission.sh start $name' again - there is no lock or pid file to clear, the run never began"
+  fi
   # The launch has its run.pid: the check-and-launch window is over, and the run's own lock (run.lock,
   # owned by the node's run) is what holds from here.
   exec 9>&-
@@ -751,7 +819,14 @@ cmd_clean() {
   local M wt; M=$(m_dir "$name")
   [ -d "$M" ] || die "no mission at $M"
   mission_run "$M"
-  [ "$MR_VERDICT" = active ] && die "a run is in flight ($MR_WHY): wait for the node to settle it; nothing here kills a process"
+  # ONE answer permits a clean - released - and every other one refuses by name (round 5). 'active' was the
+  # only refusal, so a 'stale' row (a leftover record) and 'unknown' (a read that could not be made) went
+  # straight to 'git worktree remove': a clean retired a mission that might still have had a writer, which is
+  # the same guess this round removes from 'start'. A leftover is settled by hand first, and the refusal names
+  # the command; --force still discards uncommitted work, and still decides nothing about the run.
+  [ "$MR_VERDICT" = released ] || refuse "$MR_VERDICT" \
+    "a clean removes the worktree and retires this mission, and its run is not released: $MR_WHY" \
+    "$MR_CLEAR"
   wt=$(sed -n "s/^WT='\(.*\)'$/\1/p" "$M/env" 2>/dev/null)
   if [ -n "$wt" ] && [ -d "$wt" ]; then
     local dirty; dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l)

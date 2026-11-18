@@ -61,6 +61,12 @@ HOLD=$!
 exec 9> "$WORK/lease.fifo"
 printf 'BEGIN EXCLUSIVE;\n' >&9
 : > "$STUB_STATE/sessions.tsv"
+# The node's own presence table, built with the rest of the node. Before round 5 it was created only where the
+# first presence row was planted - well past the first launch - so every early case read a node whose memory.db
+# did not exist, and round 5 turns that into an 'unknown' refusal instead of a launch permission.
+sqlite3 "$NODEHOME/memory.db" \
+  "create table if not exists session_presence(session_id text primary key, pid integer, boot text, role text, started_at real, heartbeat_at real)" \
+  || fail 'cannot build the node presence table'
 
 now() { date +%s; }
 node_session() { # <id> <state> <age-seconds-or-dash> <title>
@@ -120,9 +126,18 @@ run() { # <args...> with the fixture's environment
     WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NODEHOME bash "$MISSION" "$@" 2>&1
 }
 status_of() { run status "$1"; }
+run_node() { # <node home> <args...> - the same script, against a node home of the case's choosing
+  local nh=$1; shift
+  MISSION_REPO=$REPO MISSIONS_DIR=$MISSIONS MISSIONS_TARGET_ROOT=$TARGET MISSIONS_TOOLCHAIN=$WORK/toolchain \
+    WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$nh bash "$MISSION" "$@" 2>&1
+}
 # The same read from a node whose lease store does not exist: "cannot tell" must not become "released".
+# Round 5: that node still carries a readable memory.db, or the presence read (which now refuses when it cannot
+# tell) would answer for the lease store too, and this would stop being a test of one read.
+NOCLAIMS=$WORK/node-noclaims; mkdir -p "$NOCLAIMS"
+cp "$NODEHOME/memory.db" "$NOCLAIMS/memory.db"
 run_nonode() { MISSION_REPO=$REPO MISSIONS_DIR=$MISSIONS MISSIONS_TARGET_ROOT=$TARGET MISSIONS_TOOLCHAIN=$WORK/toolchain \
-  WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$WORK/no-such-node bash "$MISSION" "$@" 2>&1; }
+  WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NOCLAIMS bash "$MISSION" "$@" 2>&1; }
 export STUB_ID=11111111-2222-3333-4444-555555555555
 export STUB_RC=0 STUB_RESULT=ok STUB_NODE_KEEPS_RUN=no
 # The launch is over when every take in lease.log has its cli-exit. Waiting on the done marker alone
@@ -219,9 +234,6 @@ has "$out" 'previous launch finished' 'start says the previous launch finished, 
 # a heartbeat 0s old. A 'start' that asks only about its recorded session launches a second writer there,
 # so the node's own presence table (session_presence: session_id, pid, heartbeat_at) is read as well and
 # the process's cwd is what ties it to this mission.
-sqlite3 "$NODEHOME/memory.db" \
-  "create table if not exists session_presence(session_id text primary key, pid integer, boot text, role text, started_at real, heartbeat_at real)" \
-  || fail 'cannot build the node presence table'
 presence() { # <session> <pid> <heartbeat-age-seconds>
   sqlite3 "$NODEHOME/memory.db" \
     "insert into session_presence(session_id,pid,boot,role,started_at,heartbeat_at) values('$1',$2,'boot-free','master',strftime('%s','now'),strftime('%s','now')-$3) on conflict(session_id) do update set pid=$2, heartbeat_at=strftime('%s','now')-$3" \
@@ -263,7 +275,10 @@ sqlite3 "$NODEHOME/resources/claims.sqlite" "delete from claims where key='sessi
 
 # the process is gone: a row with a dead pid is not a writer, and a launch is allowed again
 kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
-presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$OTHER" 5
+# A pid the kernel cannot hand out again: this row is about a process that is GONE, and a real pid the fixture
+# later re-uses would make the row mean something else (round 5 reads /proc/<pid> to tell the two cases apart).
+DEADPID=2147483647
+presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$DEADPID" 5
 s=$(status_of demo)
 case "$(field "$s" run)" in released*) ok ;; *) fail "a presence row whose pid is gone must not refuse a launch, got: '$(field "$s" run)'" ;; esac
 out=$(run start demo); has "$out" 'started demo' 'with the stray process gone, a launch is allowed'
@@ -396,6 +411,12 @@ has "$out" 'wa sessions 100' 'and gives the exact command that makes the node an
 rm -f "$nodead/run.lock"
 out=$(run start nodead) && fail 'an unanswerable node refuses even with nothing recorded' || ok
 has "$out" 'refusing [unknown]' 'and it is the same unknown'
+# round 5, item 4: a clean is refused on the same answer. 'active' was its only refusal, so an unknown verdict
+# went straight to 'git worktree remove' - a cleanup of a mission whose node could not even be asked.
+out=$(run clean nodead) && fail 'clean must refuse when the node cannot be asked' || ok
+has "$out" 'refusing [unknown]' 'the unknown refusal names its state'
+has "$out" 'a clean removes the worktree' 'and says what it would have done'
+[ -d "$nodead/wt" ] && ok || fail 'a refused clean removed the worktree'
 export STUB_SESSIONS_FAIL=no
 
 # ================================================================ round 3, item 2: quiet is not gone
@@ -583,5 +604,114 @@ rm -f "$badid/run.lock"
 printf 'wa: session zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz ok\n' > "$badid/out.log"
 s=$(status_of badid)
 [ "$(field "$s" session)" = '-' ] && ok || fail "a log line that is not a session id must not be read as one: '$(field "$s" session)'"
+
+# ================================================================ round 5, item 1: the presence read's "cannot
+# tell" is 'unknown', never 'no writer'. node_presence answers rc 2 when the node's memory.db cannot be read,
+# and round 4's writers_check turned that rc 2 into "no writer": mission_run said 'released' and start LAUNCHED
+# past a read it could not make.
+out=$(run stage nomem main "$WORK/brief.md"); [ $? = 0 ] || fail "stage nomem: $out"
+nomem=$MISSIONS/nomem
+NOMEM=$WORK/node-nomem; mkdir -p "$NOMEM/resources"       # a node with a claim store and NO memory.db at all
+cp "$NODEHOME/resources/claims.sqlite" "$NOMEM/resources/claims.sqlite"
+s=$(run_node "$NOMEM" status nomem)
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "a node with no memory.db must read unknown, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" 'memory.db' 'the reason names the file it could not read'
+has "$(field "$s" run)" 'cannot be told' 'and says what it cannot tell: where the writers are'
+out=$(run_node "$NOMEM" start nomem) && fail 'start must refuse when the presence read cannot be made' || ok
+has "$out" 'refusing [unknown]' 'the refusal names the state'
+has "$out" 'cannot be read' 'and quotes the read that failed'
+has "$out" 'memory.db' 'and the file it names'
+[ -f "$nomem/done" ] && fail 'a refused start must not have launched anything' || ok
+[ -f "$nomem/run.lock" ] && fail 'a refused start must not have taken the run lock' || ok
+# the same node, with a memory.db this user cannot read - the shape the brief's row names
+if [ "$(id -u)" = 0 ]; then
+  printf 'note: running as root, so chmod 000 is still readable - the unreadable-memory.db case is skipped\n'
+else
+  DENIED=$WORK/node-denied; mkdir -p "$DENIED/resources"
+  cp "$NODEHOME/memory.db" "$DENIED/memory.db"; chmod 000 "$DENIED/memory.db"
+  cp "$NODEHOME/resources/claims.sqlite" "$DENIED/resources/claims.sqlite"
+  s=$(run_node "$DENIED" status nomem)
+  case "$(field "$s" run)" in unknown*) ok ;; *) fail "an unreadable memory.db must read unknown, got: '$(field "$s" run)'" ;; esac
+  has "$(field "$s" run)" 'unreadable' 'the reason says the file is unreadable'
+  out=$(run_node "$DENIED" start nomem) && fail 'start must refuse on an unreadable memory.db' || ok
+  has "$out" 'refusing [unknown]' 'and that refusal is unknown too'
+  chmod 644 "$DENIED/memory.db"
+fi
+# and with a memory.db that reads and holds no writer, the same mission is released: the refusal was the read
+s=$(status_of nomem)
+case "$(field "$s" run)" in released*) ok ;; *) fail "with a readable memory.db and no writer, nomem must be released, got: '$(field "$s" run)'" ;; esac
+
+# ================================================================ round 5, item 2: a live process whose cwd
+# cannot be read. /proc/<pid> still existing means the process is there, so readlink failing is NOT "it exited".
+# pid 1 is another user's process: its /proc entry exists and its cwd is unreadable for a normal user - the same
+# shape hidepid gives every other user's process.
+if readlink /proc/1/cwd >/dev/null 2>&1; then
+  printf 'note: /proc/1/cwd is readable here (root?) - the unreadable-cwd case is skipped\n'
+else
+  out=$(run stage noread main "$WORK/brief.md"); [ $? = 0 ] || fail "stage noread: $out"
+  noread=$MISSIONS/noread
+  presence ffffffff-2222-3333-4444-555555555555 1 0
+  s=$(status_of noread)
+  case "$(field "$s" run)" in unknown*) ok ;; *) fail "a live pid whose cwd cannot be read must read unknown, got: '$(field "$s" run)'" ;; esac
+  has "$(field "$s" run)" 'pid 1' 'the reason names the pid it could not place'
+  has "$(field "$s" run)" 'cannot be read' 'and says its cwd could not be read'
+  out=$(run start noread) && fail 'start must refuse while a live process it cannot place is running' || ok
+  has "$out" 'refusing [unknown]' 'the refusal names the state'
+  has "$out" 'pid 1' 'and the pid it could not place'
+  [ -f "$noread/done" ] && fail 'a refused start must not have launched anything' || ok
+  sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id='ffffffff-2222-3333-4444-555555555555'" \
+    || fail 'cannot drop the unreadable-cwd row'
+  out=$(run start noread); has "$out" 'started noread' 'with the unplaceable process gone, the launch happens'
+  wait_done noread || fail 'the launch after the unreadable-cwd row wrote no done marker'
+fi
+
+# ================================================================ round 5, item 3: the start window closes on
+# run.pid, never on a clock. A runner that ENDS before writing one (95 wrong node, 96 cannot cd, 98 no env)
+# launched nothing, and round 4 printed "started" for it after 5 s and returned 0.
+out=$(run stage early main "$WORK/brief.md"); [ $? = 0 ] || fail "stage early: $out"
+early=$MISSIONS/early
+sed -i '2i exit 95' "$early/run.sh"
+bash -n "$early/run.sh" || fail 'the early-exit runner does not parse'
+out=$(run start early) && fail 'a runner that exits before writing run.pid must not be reported as started' || ok
+has "$out" 'refusing [launcher]' 'the refusal names the state'
+has "$out" 'rc=95' "and carries the runner's own exit"
+lacks "$out" 'started early' 'and never says the mission started'
+[ -f "$early/done" ] && fail 'the refused launch wrote a done marker' || ok
+[ -s "$early/run.pid" ] && fail 'the refused launch left a run.pid' || ok
+# a runner that is SLOW to write it: start waits for the marker instead of calling the launch done after 5 s
+out=$(run stage slow main "$WORK/brief.md"); [ $? = 0 ] || fail "stage slow: $out"
+slow=$MISSIONS/slow
+sed -i '2i sleep 6' "$slow/run.sh"
+bash -n "$slow/run.sh" || fail 'the slow runner does not parse'
+out=$(run start slow) || fail "the slow runner's start failed: $out"
+has "$out" 'started slow' 'a slow runner is still a launch'
+[ -s "$slow/run.pid" ] && ok || fail 'start printed started before the runner had written run.pid (the 5 s cap)'
+wait_done slow || fail 'the slow launch wrote no done marker'
+
+# ================================================================ round 5, item 4: clean refuses anything that
+# is not 'released'. 'active' was its only refusal, so a leftover row (stale) and a read that could not be made
+# (unknown, above) went through to 'git worktree remove'.
+out=$(run stage leftover main "$WORK/brief.md"); [ $? = 0 ] || fail "stage leftover: $out"
+leftover=$MISSIONS/leftover
+node_session 12121212-3434-5656-7878-909090909090 unfinished 0 "mission leftover in $leftover/wt"
+printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master","run_id":"run-of-leftover","session_id":"12121212-3434-5656-7878-909090909090","state":"active","updated_at":%s}}\n' "$(now)" \
+  > "$STUB_STATE/steer.12121212-3434-5656-7878-909090909090"
+sqlite3 "$NODEHOME/resources/claims.sqlite" "insert into claims(key,boot) values('session:12121212-3434-5656-7878-909090909090','boot-free') on conflict(key) do update set boot=excluded.boot" \
+  || fail 'cannot give the leftover row a free boot'
+s=$(status_of leftover)
+case "$(field "$s" run)" in stale*) ok ;; *) fail "the leftover mission must read stale, got: '$(field "$s" run)'" ;; esac
+out=$(run clean leftover) && fail 'clean must refuse a leftover (stale) run' || ok
+has "$out" 'refusing [stale]' 'the refusal names the leftover'
+has "$out" 'clear it by hand' 'and gives the command that clears it by hand'
+has "$out" 'steering_runs' 'the exact row an operator settles, named'
+[ -d "$leftover/wt" ] && ok || fail 'a refused clean removed the worktree of a leftover mission'
+out=$(run clean leftover --force) && fail '--force must not clean past a leftover either' || ok
+[ -d "$leftover/wt" ] && ok || fail 'clean --force removed the worktree of a leftover mission'
+# the operator settles the row by hand: then a clean is allowed, and it is the clean that removes the worktree
+printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master","run_id":"run-of-leftover","session_id":"12121212-3434-5656-7878-909090909090","state":"settled","updated_at":%s}}\n' "$(now)" \
+  > "$STUB_STATE/steer.12121212-3434-5656-7878-909090909090"
+out=$(run clean leftover) || fail "the clean after the row was settled failed: $out"
+has "$out" 'removed worktree' 'and it is the clean that removes it'
+[ -d "$leftover/wt" ] && fail 'the clean left the worktree' || ok
 
 printf 'mission fixture: %s checks ok\n' "$checks"
