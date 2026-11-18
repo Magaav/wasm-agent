@@ -12,7 +12,11 @@
 --   reason     the sentence an operator would say out loud
 --   by / at    who recorded it and when
 --   until      an optional condition or date; a date that has passed is OVERDUE and is reported as such
---   await      an optional commit whose landing releases the pin: a target that contains it is not blocked
+--   await      an optional commit whose landing releases the pin: a target that contains it is not blocked.
+--              NEVER DEFAULTED. It used to be filled in with the commit a rollback went back from, which is the
+--              history that contains the change being held off - so the next ordinary deploy of main carried
+--              the "awaited" commit and released the pin on the very move it was written to stop (round-3
+--              item 2). Only an operator names it, and a pin without one is released by --unpin alone.
 --
 -- WHERE IT LIVES AND WHY THERE. The store is on the node that runs "wa update <node>", because that is the
 -- party that decides to move a node - the same node that keeps the request audit records this module sits
@@ -259,10 +263,20 @@ end
 
 -- How to get out of a pin, in the words the CLI accepts. One sentence, because the refusal that quotes it is the
 -- only place an operator meets a pin they did not write.
-function M.escape_hatch(node)
+--
+-- IT NAMES WHAT RELEASES *THIS* PIN. It used to promise that a deploy of a target that contains "the awaited
+-- commit" releases any pin; with no default await (item 2) a pin that names none can never be released that way,
+-- so the sentence said a thing that was not true of the record in front of the reader. The record decides now.
+function M.escape_hatch(node, record)
   local name = trim(node) ~= '' and trim(node) or '<node>'
-  return "wa update " .. name .. " --unpin --reason <text> (releases it and records why); "
-    .. "or deploy a target that contains the awaited commit (that releases it by itself); "
+  local await = trim(type(record) == 'table' and record.await or '')
+  local by_landing
+  if await ~= '' then
+    by_landing = "or deploy a target that contains the awaited commit " .. await:sub(1, 12) .. " (that releases it by itself); "
+  else
+    by_landing = "this pin names no awaited commit, so no ordinary deploy releases it; "
+  end
+  return "wa update " .. name .. " --unpin --reason <text> (releases it and records why); " .. by_landing
     .. "or --force --reason <text> on the move you mean (recorded)"
 end
 

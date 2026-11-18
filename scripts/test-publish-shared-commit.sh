@@ -94,10 +94,39 @@ shows "...and says the question could not be answered" "$publish_out" "could not
 shows "...and names the way to make it answerable" "$publish_out" "git fetch origin"
 git -C "$REPO" remote set-url origin "$REMOTE"
 
-echo "test-publish-shared-commit: the named development override"
-out="$(ALLOW_UNPUSHED_COMMIT=1 bash "$PUBLISH" --repo "$REPO" --commit "$UNPUSHED" --check 2>&1)"
-shows "it is allowed only when named, and says so" "$out" "ALLOW_UNPUSHED_COMMIT=1"
+echo "test-publish-shared-commit: the named development override, and its reason (item 8)"
+out="$(ALLOW_UNPUSHED_COMMIT=1 bash "$PUBLISH" --repo "$REPO" --commit "$UNPUSHED" --check 2>&1)"; out_rc=$?
+[ "$out_rc" != 0 ] && ok "the override alone is refused (exit $out_rc)" || bad "ALLOW_UNPUSHED_COMMIT=1 without a reason published"
+shows "the refusal is by name" "$out" "override_reason_required(allow_unpushed_commit)"
+shows "...and names what it needs" "$out" "ALLOW_UNPUSHED_REASON"
+out="$(ALLOW_UNPUSHED_COMMIT=1 ALLOW_UNPUSHED_REASON='a development artifact for one test node' bash "$PUBLISH" --repo "$REPO" --commit "$UNPUSHED" --check 2>&1)"
+shows "with a reason it is allowed, and says so" "$out" "ALLOW_UNPUSHED_COMMIT=1"
 shows "...and calls the artifact what it is" "$out" "a development artifact"
+shows "...and prints the reason" "$out" "a development artifact for one test node"
+
+echo "test-publish-shared-commit: a fast-moving main is fetched once, not refused (item 7)"
+# MEASURED shape: ls-remote reports a head this clone has never fetched - the normal state of a fast-moving main -
+# and the answer used to be "cannot tell" for every head at once, so a publish that was perfectly shared was
+# refused. The lib now fetches the heads ONCE and decides with the objects here. Only a failed fetch is unknown.
+CLONE="$WORK/clone"; git clone -q "$REMOTE" "$CLONE" 2>/dev/null
+git -C "$REPO" checkout -q main
+printf 'd
+' > "$REPO/i"; git -C "$REPO" add i; git -C "$REPO" commit -qm 'fourth: main has moved'
+MOVED="$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" push -q origin main
+if git -C "$CLONE" cat-file -e "$MOVED^{commit}" 2>/dev/null; then
+  bad "the fixture clone already has the newer commit; the case cannot be told"
+else
+  ok "the fixture clone has never fetched the newer head"
+  out="$(bash "$SHARED" "$CLONE" "$BASE" origin 2>&1)"; rc=$?
+  same "an unfetched head is fetched once and answered, not refused" "$rc" "0"
+  shows "...naming the branch the remote reported" "$out" "main"
+  shows "...and saying what it fetched" "$out" "fetched origin once"
+  git -C "$CLONE" cat-file -e "$MOVED^{commit}" 2>/dev/null && ok "the head really is here now" || bad "the fetch did not bring the head"
+fi
+git -C "$CLONE" remote set-url origin "$WORK/no-such-remote.git"
+out="$(bash "$SHARED" "$CLONE" "$BASE" origin 2>&1)"; rc=$?
+same "a remote that cannot be reached is still 'cannot tell'" "$rc" "2"
 
 echo "test-publish-shared-commit: the manifest carries where the commit lives"
 grep -q 'pushed_branches=' "$PUBLISH" && ok "the manifest records the branches that contain the build" || bad "the manifest does not say where the commit lives"

@@ -318,7 +318,7 @@ if [ "$state" != current ] || [ "$check" = 1 ]; then
   fi
   ANCESTRY_CHECKED=unknown
   if [ "$check" = 1 ]; then
-    say "check only: the ancestry question needs the install; on a real run this bundle would be checked against what $prefix runs (\${RUNNING_COMMIT:-nothing that names a commit})"
+    say "check only: the ancestry question needs the install; on a real run this bundle would be checked against what ${prefix} runs (${RUNNING_COMMIT:-nothing that names a commit}; ${RUNNING_WHY:-no detail})"
   elif [ "$RUNNING_SOURCE" = record_mismatch ]; then
     if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
       ANCESTRY_CHECKED=override
@@ -336,9 +336,21 @@ if [ "$state" != current ] || [ "$check" = 1 ]; then
       fail "downgrade_refused(dirty_running_binary): the binary at $prefix/wa reports commit ${RUNNING_COMMIT:0:12} with dirty=true, so those bytes are a commit PLUS edits no commit contains - installing this bundle destroys them and no rollback brings them back. Nothing was installed. Commit them in that tree and rebuild, or say --force --reason <text> to lose them on purpose (recorded)."
     fi
   elif [ -z "$RUNNING_COMMIT" ]; then
-    # Nothing here names a commit and nothing claims to: a first install, which is not a downgrade.
-    say "nothing at $prefix/wa names a commit (${RUNNING_WHY:-no detail}) - a first install, not a downgrade"
-    ANCESTRY_CHECKED=first_install
+    # A FIRST INSTALL MEANS NOTHING IS INSTALLED (round-3 item 1). A binary that IS here and cannot name its
+    # commit - an install older than --build-info, or a record with commit= and no sha256= - used to be
+    # announced as "a first install, not a downgrade" and replaced with no ancestry question at all.
+    if wa_running_first_install && [ ! -e "$prefix/wa" ]; then
+      say "nothing is installed at ${prefix}/wa - a first install, not a downgrade"
+      ANCESTRY_CHECKED=first_install
+    else
+      if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
+        ANCESTRY_CHECKED=override
+        say "OVERRIDE, recorded: a binary is installed at ${prefix}/wa and nothing can prove which commit it is (${RUNNING_WHY:-no detail}); going on because --force --reason says so"
+        say "force_requested rule=running_commit_unprovable reason=${reason} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      else
+        fail "refused(running_commit_unprovable): ${RUNNING_WHY:-the binary at ${prefix}/wa cannot name its own commit}. A binary IS installed here and nothing can show whether this bundle contains it, so installing could remove work that exists nowhere else. Nothing was installed. Make it answerable (write a record whose sha256= is the binary's: sha256sum < ${prefix}/wa), or pass --force --reason <text> and the override is recorded."
+      fi
+    fi
   elif [ "$RUNNING_COMMIT" != "$candidate_commit" ]; then
     wa_ancestry_verdict "" "$candidate_commit" "$RUNNING_COMMIT" "$bundle/wa"
     case $? in
@@ -375,9 +387,14 @@ if [ "$state" != current ] || [ "$check" = 1 ]; then
   PIN_STATE=0; PIN_REPORT="$(wa_node_pin_gate "$NODE_NAME" "" "${PIN_TARGET:-}" "${PIN_TREE:-}" 2>&1)" || PIN_STATE=$?
   [ -n "$PIN_REPORT" ] && say "$PIN_REPORT"
   if [ "$PIN_STATE" != 0 ]; then
-    if [ "force" = 1 ] && [ -n "reason" ]; then
+    # THE OVERRIDE THAT COULD NEVER HAPPEN. This tested the LITERAL strings "force" and "reason"
+    # ([ "force" = 1 ] is false, always) and then printed ${reasonVar}, a variable that does not exist - so
+    # --force --reason on a pinned node refused every time, with a message that could not say why, and there was
+    # no way to install over a pin with this script at all (round-3 item 4). It reads its own variables now.
+    if [ "$force" = 1 ] && [ -n "${reason:-}" ]; then
+      ANCESTRY_CHECKED=override
       say "OVERRIDE, recorded: $NODE_NAME is pinned and this install does not release it; going on because --force --reason says so"
-      say "force_requested rule=node_pinned reason=${reasonVar} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      say "force_requested rule=node_pinned reason=${reason} by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     else
       fail "node_pinned: $NODE_NAME carries an active pin, so this install was refused - a pin is a record that the node was put somewhere on purpose, and an ordinary install is exactly what undoes it (measured 18/11: three hand-made rollbacks did not survive the next one). Nothing was replaced. $(wa_pin_escape "$NODE_NAME")"
     fi

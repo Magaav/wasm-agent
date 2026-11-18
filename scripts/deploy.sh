@@ -84,6 +84,8 @@ WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
 [ -f "$WA_LIB" ] && . "$WA_LIB"
 # The build's progress file and its requirement check (29/10): the sentinel owns the one rebuild path, so
 # whoever asked for it sees the same progress, and a missing toolchain is named (or fetched) before a build.
+# node-pins is the NODE's own pin record (what a rollback left here), read before anything is replaced:
+# a deploy that builds first and asks later has already spent the build (round-3 item 6).
 for wa_lib_part in build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding; do
   [ -f "$(dirname "$0")/lib/$wa_lib_part.sh" ] && . "$(dirname "$0")/lib/$wa_lib_part.sh"
 done
@@ -593,6 +595,21 @@ if [ "$RUNNING_SOURCE" = record_mismatch ]; then
   RUNNING_COMMIT=""
   ANCESTRY_UNVERIFIED=yes
 fi
+# A BINARY IS INSTALLED AND NOTHING PROVES WHICH COMMIT IT IS (round-3 item 1). This used to fall through to
+# the "first install" branch below, because the identity was empty - so an install whose binary predates
+# --build-info, or whose record named a commit and no sha256=, was replaceable with no ancestry question at all.
+# "Nothing is running here" and "nothing can say what is running here" are different answers, and only the first
+# is free: a machine that never had an install has nothing to lose, while an install nobody can identify may
+# carry work that exists nowhere else.
+if [ "$RUNNING_SOURCE" = unprovable ]; then
+  if [ "${FORCE:-0}" = 1 ] && [ -n "${REASON:-}" ]; then
+    ANCESTRY_UNVERIFIED=yes
+    note "ancestry_unverified=yes overrode=running_commit_unprovable ancestry_target=$COMMIT ancestry_by=$(id -un 2>/dev/null || echo unknown) ancestry_note=$(printf '%s' "$RUNNING_WHY" | tr '\r\n' '  ')"
+    note "OVERRIDE, recorded: nothing here can prove which commit is installed ($RUNNING_WHY); the deploy goes on because --force --reason says so"
+  else
+    fail "refused(running_commit_unprovable): $RUNNING_WHY, so nothing can show whether this tree $COMMIT contains what is installed - replacing it could remove work that exists nowhere else. Nothing was built and nothing was installed. Make it answerable (rebuild or roll back the node first, ask it directly with wa --build-info, or write a record whose sha256= is the binary's: sha256sum < $INSTALL_DIR/wa), or pass --force --reason <text> and the override is recorded in deploy.log and installed.txt."
+  fi
+fi
 # A --force that is used is recorded with everything a reader needs: who, when, why, and what it overrode.
 # It is written before the decision, so a deploy that dies between here and the record step still answers
 # "who let this through" (deploy.log is append-only and survives the swap).
@@ -600,10 +617,14 @@ if [ "${FORCE:-0}" = 1 ]; then
   note "force_requested reason=$(printf '%s' "${REASON:-}" | tr '\r\n' '  ') by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
 if [ -z "$RUNNING_COMMIT" ]; then
-  # Neither a downgrade nor a refusal: no record at all is a first install, and a binary that cannot name
-  # its commit on a machine that has no record either is a machine that has nothing to lose. (A record whose
-  # bytes are not these was refused above.)
-  echo "deploy: nothing running here names a commit ($RUNNING_WHY) - this is a first install, not a downgrade"
+  # A FIRST INSTALL IS THE ONE CASE THAT IS NOT IGNORANCE, and it is the only case that reaches this line now:
+  # nothing is installed in $INSTALL_DIR at all. An install that exists but cannot name its commit was refused
+  # (or overridden, and recorded) above - it is not a first install (round-3 item 1).
+  if wa_running_first_install; then
+    echo "deploy: nothing is installed in $INSTALL_DIR - this is a first install, not a downgrade"
+  else
+    echo "deploy: nothing here names the commit that is installed ($RUNNING_WHY); the override above was recorded as ancestry_unverified=yes, and no ancestry question can be asked"
+  fi
 else
   # A RUNNING BINARY THAT WAS BUILT FROM A DIRTY TREE. Its bytes are a commit PLUS uncommitted changes, and no
   # commit anywhere contains those changes - so replacing it loses work that exists on that machine only. The
@@ -670,6 +691,32 @@ Nothing was built and nothing was installed. To go back on purpose use 'wa updat
         fail "refused(ancestry_unknown): nothing here can establish whether this deploy would go backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing}. The running commit is ${RUNNING_COMMIT:-unknown} ($RUNNING_WHY) and this tree is $COMMIT. An unknown is refused, not assumed away: nothing was built and nothing was installed. Make it answerable (fetch the history that carries the running commit: git -C $ROOT fetch --unshallow; or ask the node: wa --build-info on $RUNNING_BIN), or pass --force --reason <text> and the override is recorded in deploy.log and installed.txt."
       fi ;;
   esac
+fi
+
+# 3b. THE NODE'S OWN PIN, BEFORE THE BUILD.
+#
+# A pin is the record an operator wrote when they put this node somewhere on purpose (lua/core/pins.lua),
+# and a rollback writes the same record into THIS node's own store. It is read here, before anything is
+# built, because the order is the difference between a refusal and an hour of compilation followed by a
+# refusal: upgrade.sh reads the same pin (scripts/lib/node-pins.sh) but it runs after the build. Only a
+# target that IS the pinned commit, IS the awaited commit, or CONTAINS an awaited commit this pin names
+# releases it - a pin with no awaited commit never releases by a deploy, and that is said, not implied.
+if command -v wa_node_pin_gate >/dev/null 2>&1; then
+  WA_PIN_NODE="$(wa_node_name)"
+  PIN_STATE=0; PIN_REPORT="$(wa_node_pin_gate "$WA_PIN_NODE" "" "$COMMIT" "$ROOT" 2>&1)" || PIN_STATE=$?
+  [ -n "$PIN_REPORT" ] && note "$PIN_REPORT"
+  if [ "$PIN_STATE" != 0 ]; then
+    if [ "${FORCE:-0}" = 1 ] && [ -n "${REASON:-}" ]; then
+      pin_override="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
+      note "OVERRIDE, recorded: $WA_PIN_NODE is pinned and this deploy does not release it; going on because --force --reason says so"
+      note "force_requested rule=node_pinned reason=$pin_override by=$(id -un 2>/dev/null || echo unknown) at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      PIN_OVERRIDDEN=yes
+    else
+      fail "node_pinned: $WA_PIN_NODE carries an active pin, so this deploy was refused before it built anything - a pin is a record that the node was put somewhere on purpose, and an ordinary deploy is exactly what undoes it (measured 18/11: three hand-made rollbacks did not survive the next one). Nothing was built and nothing was installed. $(wa_pin_escape "$WA_PIN_NODE")"
+    fi
+  fi
+else
+  fail "refused(node_pin_reader_missing): scripts/lib/node-pins.sh is not beside this deploy, so nothing can read this node's own pin and a deploy could walk over a rollback nobody can see. Nothing was built and nothing was installed. Install this deploy from a tree that ships the lib, or set WA_NODE_PINS_LIB_OVERRIDE to it."
 fi
 
 # 3c. Lua fast path (docs/KERNEL.md, 05/11). Half of all changes touch only files nothing compiles
@@ -1524,7 +1571,14 @@ fi
 # belongs to whoever spawned it - so when that parent went away, a write into the pipe raised SIGPIPE and
 # upgrade.sh died with exit 141 before it could say what it was doing. That transcript is also the evidence
 # that was missing: the failure was reported and nothing could say why.
-WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+#
+# AND A FORCE REACHES THE SCRIPT THAT INSTALLS. Every gate in this script that --force --reason opens
+# (the ancestry question, the pin, a record that is not these bytes) is asked AGAIN by upgrade.sh, which is
+# the process that actually swaps the pair. Handing it the reason is what carries the operator's decision
+# across that boundary: without it, a deploy accepted with --force --reason was refused by the next line -
+# "refused(node_pinned)" in the log of an install the operator had just authorised (round-3 item 3).
+WA_UPGRADE_FORCE_REASON="$([ "${FORCE:-0}" = 1 ] && printf '%s' "${REASON:-}")" \
+  WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh WA_UPGRADE_EMBEDDED_PROVEN="$EMBEDDED_PROVEN" \
   bash "$UPGRADE" "$CANDIDATE" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
 # wa-deploy-upgrade-invocation: end
@@ -1958,6 +2012,7 @@ fi
 # rollback-node.sh: a rollback runs on a node with no checkout, no network and possibly no healthy node, and it
 # still has to write a record that is the restored binary's own answer.
 ship_file "$ROOT/scripts/lib/install-record.sh" "$INSTALL_DIR/scripts/lib/install-record.sh" "scripts/lib/install-record.sh beside deploy.sh and rollback-node.sh (the record written from the binary, and the ancestry verdict)"
+ship_file "$ROOT/scripts/lib/node-pins.sh" "$INSTALL_DIR/scripts/lib/node-pins.sh" "scripts/lib/node-pins.sh beside deploy.sh (this node's own pin, read before anything is built)"
 ship_file "$ROOT/scripts/lib/turn-guard.sh" "$INSTALL_DIR/scripts/lib/turn-guard.sh" "scripts/lib/turn-guard.sh beside deploy.sh"
 # ...and the build's progress file and requirement check, which it sources too (29/10).
 ship_file "$ROOT/scripts/lib/build-status.sh" "$INSTALL_DIR/scripts/lib/build-status.sh" "scripts/lib/build-status.sh beside deploy.sh"

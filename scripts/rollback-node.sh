@@ -118,7 +118,19 @@ if [ -f "$FROM/installed.txt" ]; then
     rm -f "$INSTALL/installed.txt.carried"
   fi
 fi
-say "record: installed.txt now names the restored binary's own build ($(sed -n 's/^commit=//p' "$INSTALL/installed.txt" | head -1))"
+restored_commit="$(sed -n 's/^commit=//p' "$INSTALL/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]')"
+say "record: installed.txt now names the restored binary's own build (${restored_commit:-unknown})"
+case "$restored_commit" in
+  ''|unknown)
+    # A ROLLBACK CAN LEAVE A NODE NOTHING CAN IDENTIFY, AND THE NEXT INSTALL WILL REFUSE IT.
+    # A pair whose record names no commit (a release install older than the record that names one), or a binary
+    # older than --build-info, is restored and cannot say what it is. That is honest - the record is the binary's
+    # own answer, never a guess - and it is also a state the operator must not discover from the NEXT command: an
+    # ordinary install now refuses this node as running_commit_unprovable rather than replacing bytes nobody can
+    # name (round-3 item 1). Said here, with the one override, while the operator is still looking at it.
+    say "warning: the restored binary cannot name its own commit, so the next ordinary install on this node will refuse it as running_commit_unprovable until it is rebuilt from a build that carries --build-info (or installed with --force --reason <text>, which is recorded). What IS running is recorded: sha256=$(sha256sum < "$INSTALL/wa" 2>/dev/null | cut -c1-12) in $INSTALL/installed.txt"
+    ;;
+esac
 say "restored: $VERSION"
 
 if [ "$RESTART" = 1 ]; then

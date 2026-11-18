@@ -56,6 +56,32 @@ wa_build_info() {
   return 1
 }
 
+# wa_contains <binary> <commit> -> 0 it contains the commit, 1 it does not, 2 cannot tell.
+#
+# WHY THIS IS A FUNCTION AND NOT A LINE. `wa --contains <commit>` is compiled in by rust/wa-host/build.rs, and
+# a binary older than the flag does not refuse it: the host hands unknown arguments to the Lua core, which may
+# open the interpreter, the database and the node. So the probe is bounded, its environment is scrubbed (no
+# WASM_AGENT_HOME, no WASM_AGENT_DB, no WASM_AGENT_LUA_ROOT) and it runs with a scratch HOME under a timeout, so
+# the worst case is one bounded process that cannot touch this node's state. A probe that cannot be made at all
+# (no timeout tool, no binary) answers 2 - and the callers refuse on 2, they never read it as "no".
+WA_CONTAINS_TIMEOUT="${WA_CONTAINS_TIMEOUT:-20}"
+wa_contains() {
+  local binary="${1:-}" commit="${2:-}" guard='' scratch status
+  [ -n "$binary" ] && [ -x "$binary" ] || return 2
+  [ -n "$commit" ] || return 2
+  command -v timeout >/dev/null 2>&1 && guard=timeout
+  [ -n "$guard" ] || return 2
+  scratch="$(mktemp -d 2>/dev/null)" || return 2
+  env -u WASM_AGENT_HOME -u WASM_AGENT_DB -u WASM_AGENT_LUA_ROOT -u WASM_AGENT_VAULT_URL       -u WASM_AGENT_VAULT_DIR -u WASM_AGENT_VAULT_KEYSTORE -u WASM_AGENT_VAULT_PASSPHRASE       HOME="$scratch" TMPDIR="$scratch"       "$guard" "$WA_CONTAINS_TIMEOUT" "$binary" --contains "$commit" >/dev/null 2>&1
+  status=$?
+  rm -rf "$scratch" 2>/dev/null
+  case "$status" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # wa_build_field <document> <key> -> the value, or nothing when the document does not carry it.
 wa_build_field() {
   printf '%s\n' "${1:-}" | sed -n "s/^$2=//p" | head -1 | tr -d '\r'
@@ -209,7 +235,9 @@ wa_ancestry_fetch_missing() {
 # Sets, and prints nothing:
 #   WA_RUNNING_BIN              the installed binary ("$dir/wa" or "$dir/wa.exe"), "" when there is none
 #   WA_RUNNING_COMMIT           the commit that is running, per the binary, else per the record, "" if neither
-#   WA_RUNNING_SOURCE           binary | record | none      (who named it)
+#   WA_RUNNING_SOURCE           binary | record | record_mismatch | unprovable | none   (who named it, or why
+#                               nobody can: unprovable = a binary IS installed and nothing proves which commit
+#                               it is, which is UNKNOWN and refuses; none = nothing is installed at all)
 #   WA_RUNNING_DIRTY            true | false | unknown      (the binary's own answer only)
 #   WA_RUNNING_RECORD_COMMIT    the record's commit= as written ("" when the record has none)
 #   WA_RUNNING_RECORD_IS_BYTES  yes | no | unknown          (is the record about THESE bytes?)
@@ -256,18 +284,39 @@ wa_running_identity() {
       1) WA_RUNNING_RECORD_IS_BYTES=no
          if [ -n "$recorded" ]; then
            WA_RUNNING_WHY="the install record names commit $recorded for sha256 $(sed -n 's/^sha256=//p' "$dir/installed.txt" 2>/dev/null | head -1 | cut -c1-12), but the binary is $(sha256sum < "$WA_RUNNING_BIN" 2>/dev/null | cut -c1-12) - the record is about other bytes"
+         else
+           WA_RUNNING_WHY="the install record carries no commit= and no sha256= for the binary at $WA_RUNNING_BIN"
          fi ;;
-      *) : ;;
+      *) WA_RUNNING_RECORD_IS_BYTES=unproven
+         # A RECORD WITH commit= AND NO sha256= IS A BELIEF, NOT EVIDENCE. Before this, the record was used as
+         # the fallback whenever the binary could not answer - and sha256= was only ever checked when it was
+         # present, so a record that named no bytes at all was trusted precisely where trust is most expensive:
+         # the install whose binary predates --build-info. Round 3, item 1.
+         if [ -n "$recorded" ]; then
+           WA_RUNNING_WHY="the install record names commit $recorded and carries no sha256=, so nothing ties that commit to the bytes at $WA_RUNNING_BIN"
+         fi ;;
     esac
   elif [ -z "$recorded" ]; then
     WA_RUNNING_WHY="nothing is installed in $dir"
     return 0
   fi
-  if [ -n "$recorded" ] && [ "$WA_RUNNING_RECORD_IS_BYTES" = no ]; then
+  if [ -n "$WA_RUNNING_BIN" ] && [ "$WA_RUNNING_RECORD_IS_BYTES" != yes ]; then
+    # A BINARY IS INSTALLED AND NOTHING PROVES WHICH COMMIT IT IS. This used to be "source=none, commit empty",
+    # and every caller read that as a FIRST INSTALL: deploy.sh printed "this is a first install, not a
+    # downgrade", fleet-install.sh and bootstrap.sh said "a first install", and upgrade.sh had no else branch
+    # at all - so an old binary that cannot report its build was replaceable for free, with no ancestry
+    # question asked (round-3 item 1). It is not a first install: something is installed. It is UNKNOWN, and
+    # UNKNOWN REFUSES unless the operator says --force --reason.
+    #
     # The record names other bytes, so its commit= is NOT what is running. Saying it is would be the 18/11
     # mistake with the opposite sign: a commit that looks safe because it is old, for bytes nobody can name.
     WA_RUNNING_COMMIT=""
-    WA_RUNNING_SOURCE="record_mismatch"
+    if [ "$WA_RUNNING_RECORD_IS_BYTES" = no ]; then
+      WA_RUNNING_SOURCE="record_mismatch"
+    else
+      WA_RUNNING_SOURCE="unprovable"
+      [ -n "$recorded" ] || WA_RUNNING_WHY="the binary at $WA_RUNNING_BIN cannot name its own commit and there is no install record beside it"
+    fi
     return 0
   fi
   if [ -n "$recorded" ]; then
@@ -275,6 +324,13 @@ wa_running_identity() {
     WA_RUNNING_SOURCE="record"
   fi
   return 0
+}
+
+# wa_running_first_install -> 0 when NOTHING is installed here: no binary at all. That is the only case that is
+# a first install (round-3 item 1). A record with no binary names no bytes, so it is not an install either; a
+# binary with no provable commit is "unprovable", which refuses.
+wa_running_first_install() {
+  [ -z "${WA_RUNNING_BIN:-}" ] && [ -z "${WA_RUNNING_COMMIT:-}" ]
 }
 
 # ---- may this replace that? ------------------------------------------------------------------------
@@ -317,7 +373,7 @@ wa_ancestry_verdict() {
     #     never seen the node's build, and the node's own binary could have told it.
     asked=''
     if [ -n "$target" ] && [ -n "$running_binary" ] && [ -x "$running_binary" ]; then
-      "$running_binary" --contains "$target" >/dev/null 2>&1
+      wa_contains "$running_binary" "$target"
       asked=$?
     fi
     if [ "$asked" = 0 ]; then
@@ -365,7 +421,7 @@ wa_ancestry_verdict() {
   fi
   # 2. the target binary's own embedded ancestry (a release install: the node has no checkout at all).
   if [ -n "$binary" ] && [ -x "$binary" ]; then
-    "$binary" --contains "$running" >/dev/null 2>&1
+    wa_contains "$binary" "$running"
     status=$?
     case "$status" in
       0) return 0 ;;

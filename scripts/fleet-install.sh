@@ -346,10 +346,18 @@ elif [ "$RUNNING_DIRTY" = true ]; then
     die "downgrade_refused(dirty_running_binary): the running binary reports commit ${RUNNING_COMMIT:0:12} with dirty=true, so those bytes are a commit PLUS edits no commit contains - installing this artifact destroys them and no rollback brings them back. Nothing was replaced. Commit them in that tree and rebuild, or pass --force --reason <text> to lose them on purpose (recorded)."
   fi
 elif [ -z "$RUNNING_COMMIT" ]; then
-  # Nothing here names a commit and nothing claims to: a first install, which is not a downgrade. (A record
-  # naming another sha256 was refused above.)
-  say "nothing at $TARGET names a commit ($RUNNING_WHY) - a first install, not a downgrade"
-  ANCESTRY_STATE=first_install
+  # A FIRST INSTALL IS THE ONE FREE CASE, AND IT MEANS NOTHING IS INSTALLED (round-3 item 1). This used to be
+  # "nothing names a commit", which is also true of a binary that predates --build-info beside a record with no
+  # sha256= - so an install nothing could identify was replaced as if the directory were empty. The binary's own
+  # presence is the test, not the silence about it.
+  if wa_running_first_install && [ ! -e "$TARGET" ]; then
+    say "nothing is installed at $TARGET - a first install, not a downgrade"
+    ANCESTRY_STATE=first_install
+  else
+    if ! force_needs_reason "a binary is installed at $TARGET and nothing can prove which commit it is ($RUNNING_WHY)"; then
+      die "refused(running_commit_unprovable): ${RUNNING_WHY:-the binary at $TARGET cannot name its own commit}. Something IS installed here and nothing can show whether this artifact contains it, so replacing it could remove work that exists nowhere else. Nothing was replaced. Make it answerable (write a record whose sha256= is the binary's: sha256sum < $TARGET), or pass --force --reason <text> and the override is recorded in installed.txt."
+    fi
+  fi
 elif [ -z "$CANDIDATE_COMMIT" ]; then
   # The artifact cannot say which commit it is, so nothing can be compared. Unknown refuses.
   if ! force_needs_reason "the artifact cannot name its own commit, so it cannot be shown to contain what is running"; then
@@ -375,7 +383,12 @@ PIN_TARGET="${CANDIDATE_COMMIT:-}"; PIN_TREE=""
 # lua/core/remote_update.lua and scripts/lib/node-pins.sh) and it is read before anything is replaced.
 # "Cannot tell" is not a release: only a target that IS the pinned commit, IS the awaited commit, or
 # CONTAINS it releases the pin, and that release is said out loud.
-if [ -n "${NODE_PIN_LIB:-}" ]; then
+# THE PIN IS READ, OR THE INSTALL IS REFUSED. This block used to be wrapped in
+# "$if [ -n "${NODE_PIN_LIB:-}" ]" - so a copy of this script that could not find scripts/lib/node-pins.sh
+# SKIPPED the pin, silently, which is the exact fail-open the lib exists to close (round-3 item 6). The loader at
+# the top of this file already refuses a missing lib; this is the same rule at the point of use, so the two cannot
+# drift apart. Nothing is replaced on an unreadable pin.
+if command -v wa_node_pin_gate >/dev/null 2>&1; then
   NODE_NAME="$(wa_node_name)"
   PIN_STATE=0; PIN_REPORT="$(wa_node_pin_gate "$NODE_NAME" "" "${PIN_TARGET:-}" "${PIN_TREE:-}" 2>&1)" || PIN_STATE=$?
   [ -n "$PIN_REPORT" ] && say "$PIN_REPORT"
@@ -388,6 +401,8 @@ if [ -n "${NODE_PIN_LIB:-}" ]; then
       die "node_pinned: $NODE_NAME carries an active pin, so this install was refused - a pin is a record that the node was put somewhere on purpose, and an ordinary install is exactly what undoes it (measured 18/11: three hand-made rollbacks did not survive the next one). Nothing was replaced. $(wa_pin_escape "$NODE_NAME")"
     fi
   fi
+else
+  die "refused(node_pin_reader_missing): scripts/lib/node-pins.sh was not loaded, so nothing can read this node's own pin and this install could walk over a rollback nobody can see. Nothing was replaced. Ship the lib beside this script (or point WA_NODE_PINS_LIB at it)."
 fi
 
 # 4. backup and swap

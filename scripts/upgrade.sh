@@ -156,10 +156,24 @@ fi
 # directory in that path. The candidate binary still points back to its source
 # checkout: use that checkout for UI assets and for a downgrade guard.
 SOURCE_ROOT="$(git -C "$(dirname "$NEW")" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$SOURCE_ROOT" ] && [ -z "${WA_SOURCE_UI_DIR:-}" ] && [ -d "$SOURCE_ROOT/ui" ]; then SOURCE_UI="$SOURCE_ROOT/ui"; fi
+# WHAT IS BEING INSTALLED IS THE CANDIDATE BINARY'S OWN COMMIT, NOT THE CHECKOUT'S HEAD.
+#
+# The ancestry question below is about bytes: "does what I am installing contain what is running?". The checkout
+# that happens to sit beside the candidate answers a different question ("what is checked out there now"), and it
+# moves: a landing can fast-forward that tree between the build and this line, and the candidate was built from
+# an earlier commit (measured 18/11 in the other direction: the deployer's clone had never seen the node's build
+# at all). A candidate that is the same file as the installed one (an operator re-running the same pair) has no
+# checkout beside it either. So the commit is asked of the candidate, which is the only witness of its own bytes
+# (rust/wa-host/build.rs), and a candidate that cannot name itself leaves the question unknown - refused, not
+# guessed from a tree that may be about to move (round-3 item 8).
 SOURCE_COMMIT=""
-if [ -n "$SOURCE_ROOT" ]; then
-  SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
-  if [ -z "${WA_SOURCE_UI_DIR:-}" ] && [ -d "$SOURCE_ROOT/ui" ]; then SOURCE_UI="$SOURCE_ROOT/ui"; fi
+if SOURCE_INFO="$(wa_build_info "$NEW" 2>/dev/null)"; then
+  SOURCE_COMMIT="$(wa_build_field "$SOURCE_INFO" commit)"
+  case "$SOURCE_COMMIT" in unknown|'') SOURCE_COMMIT="" ;; esac
+fi
+if [ -z "$SOURCE_COMMIT" ]; then
+  say "the candidate $(basename "$NEW") cannot name its own commit (wa --build-info answered nothing: a build older than the flag), so what is being installed cannot be compared with what is running"
 fi
 # WHO SAYS WHAT IS INSTALLED: the installed binary, asked for its own build (wa --build-info, compiled in
 # by rust/wa-host/build.rs). The record is only a fallback for an install older than that flag, and it is
@@ -211,7 +225,7 @@ UPGRADE_REASON_WANTED="${WA_UPGRADE_REASON:-}"
 unset WA_UPGRADE_VIA WA_UPGRADE_REASON
 if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] \
     && [ -z "$SOURCE_COMMIT" ] && [ "${WA_ALLOW_UNVERIFIED_UPGRADE:-}" != 1 ]; then
-  say "candidate has no source checkout to compare with installed commit $PREVIOUS_COMMIT; set WA_ALLOW_UNVERIFIED_UPGRADE=1 only for an intentional operator override"
+  say "refused(candidate_commit_unknown): the candidate $(basename "$NEW") cannot report its own build, so nothing can show whether it contains the installed commit $PREVIOUS_COMMIT - and the installed tree's HEAD is not that answer (it can be another commit entirely). Nothing was installed, and the running pair is untouched. Install a build made by the current rust/wa-host/build.rs (wa --build-info answers on it), or set WA_ALLOW_UNVERIFIED_UPGRADE=1 for an intentional operator override."
   exit 2
 fi
 # A candidate that does not contain what is RUNNING is a downgrade, and the refusal lists what it would
@@ -240,6 +254,16 @@ if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ]; then
       # verdict it could not reach, and that is the 18/11 hole in one line.
       pre_upgrade_refuse "ancestry_unknown" "nothing can establish whether this candidate goes backwards: ${WA_ANCESTRY_WHY:-the verdict answered nothing} (running commit ${PREVIOUS_COMMIT:-unknown}, ${PREVIOUS_WHY:-source unknown})" ;;
   esac
+else
+  # THERE IS NO ELSE IN THE OLD VERSION, AND THAT WAS THE HOLE (round-3 item 1): when nothing named the running
+  # commit the ancestry question was not asked at all and the candidate was installed. A first install is the one
+  # case that is not ignorance - nothing is installed here - and an install that exists but cannot identify
+  # itself is UNKNOWN, which refuses unless the operator says WA_UPGRADE_FORCE_REASON=<text>.
+  if wa_running_first_install; then
+    say "nothing is installed at $INSTALLED - a first install, not a downgrade"
+  else
+    pre_upgrade_refuse "running_commit_unprovable" "${PREVIOUS_WHY:-the installed binary cannot name its own commit}, so nothing can show whether this candidate contains what is installed"
+  fi
 fi
 
 # A PINNED NODE DOES NOT MOVE FORWARD FOR AN ORDINARY UPGRADE. The coordinator's gate covers `wa update <node>`;

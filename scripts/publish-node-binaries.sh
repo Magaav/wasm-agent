@@ -236,9 +236,17 @@ fi
 #
 # ALLOW_UNPUSHED_COMMIT=1 exists for a development artifact that is installed nowhere. It is named here, it is
 # printed when it is used, and the manifest records it as unpushed=yes so a node can refuse it by reading.
+#
+# AND IT CARRIES A REASON. Every other override in this tree is "--force --reason": an override nobody can read
+# later is not a decision anyone can review, and this one ships an artifact no landed branch can reproduce. So
+# ALLOW_UNPUSHED_COMMIT=1 without ALLOW_UNPUSHED_REASON=<text> is refused by name, and the reason is written into
+# the manifest beside unpushed=yes (round-3 item 8).
 # The one shared answer about "does the remote have this commit?" (scripts/lib/shared-commit.sh). Sourced from
 # THIS script's own tree, not from --repo: the tree being published may be a fixture or another checkout, and a
 # missing lib there would silently leave the question unasked (a "command not found" that went on to publish).
+if [ "${ALLOW_UNPUSHED_COMMIT:-}" = 1 ] && [ -z "${ALLOW_UNPUSHED_REASON:-}" ]; then
+  fail "override_reason_required(allow_unpushed_commit): ALLOW_UNPUSHED_COMMIT=1 publishes a commit no branch on the remote has, and an override nobody can read later is not a decision anyone can review. Say why: ALLOW_UNPUSHED_REASON=<text> (it is recorded in the manifest as unpushed_reason=, beside unpushed=yes). Nothing was published."
+fi
 SHARED_COMMIT_LIB=""
 for shared_lib in "$(dirname "$0")/lib/shared-commit.sh" "$ROOT/scripts/lib/shared-commit.sh"; do
   [ -f "$shared_lib" ] && { SHARED_COMMIT_LIB="$shared_lib"; break; }
@@ -264,7 +272,7 @@ elif [ "${ALLOW_UNPUSHED_COMMIT:-}" != 1 ]; then
   esac
   PUSHED_BRANCHES="$(printf '%s' "$PUSHED_BRANCHES" | tr ' ' '\n' | grep -v '^$' | head -5 | tr '\n' ' ')"
 else
-  say "ALLOW_UNPUSHED_COMMIT=1: publishing ${COMMIT:0:12} without proof that it is on a pushed branch (a development artifact; the manifest records unpushed=yes)"
+  say "ALLOW_UNPUSHED_COMMIT=1: publishing ${COMMIT:0:12} without proof that it is on a pushed branch (a development artifact; the manifest records unpushed=yes and why: ${ALLOW_UNPUSHED_REASON})"
   PUSHED_BRANCHES="unpushed"
 fi
 if [ -z "$(git -C "$ROOT" branch --show-current 2>/dev/null)" ]; then
@@ -419,6 +427,7 @@ emit_manifest() { # <out dir> -> manifest path, after every member is checked
     # refs/remotes/* ref is a memory of a fetch, not an answer from the repository that holds the artifact).
     echo "pushed_branches=$PUSHED_BRANCHES"
     echo "unpushed=${ALLOW_UNPUSHED_COMMIT:+yes}"
+    [ -n "${ALLOW_UNPUSHED_REASON:-}" ] && echo "unpushed_reason=${ALLOW_UNPUSHED_REASON}"
     echo "compiled_inputs=$digest"
     echo "rustc_version=$(rustc --version 2>/dev/null | sed 's/^rustc //')"
     echo "zig_version=$(zig version 2>/dev/null || echo unknown)"

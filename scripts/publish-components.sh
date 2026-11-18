@@ -56,6 +56,11 @@ commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
 # reproduce or review, and shipping one is the 18/11 failure in its original form - an artifact indistinguishable
 # from a landed one that carried work on no branch. ALLOW_UNPUSHED_COMMIT=1 is the named, printed exception.
 . "$ROOT/scripts/lib/shared-commit.sh"
+# An override nobody can read later is not a decision anyone can review: ALLOW_UNPUSHED_COMMIT=1 names a bundle no
+# landed branch can reproduce, so it needs ALLOW_UNPUSHED_REASON=<text> (round-3 item 8).
+if [ "${ALLOW_UNPUSHED_COMMIT:-}" = 1 ] && [ -z "${ALLOW_UNPUSHED_REASON:-}" ]; then
+  fail "override_reason_required(allow_unpushed_commit): ALLOW_UNPUSHED_COMMIT=1 publishes a bundle for a commit no branch on the remote has. Say why: ALLOW_UNPUSHED_REASON=<text>, recorded in the notes beside unpushed=yes. Nothing was published." 7
+fi
 if [ "$commit" = unknown ]; then
   say "this bundle's repository has no commit ($REPO_ROOT is not a checkout); the notes will say source unknown"
 elif [ "${ALLOW_UNPUSHED_COMMIT:-}" != 1 ]; then
@@ -67,7 +72,7 @@ elif [ "${ALLOW_UNPUSHED_COMMIT:-}" != 1 ]; then
     *) fail "commit_not_on_pushed_branch: could not ask the remote whether ${commit:0:12} is on a branch it has (git ls-remote --heads origin failed, or a head it reported has never been fetched here). An unanswerable question is a refusal. Fix the remote (git remote -v; git fetch origin), or set ALLOW_UNPUSHED_COMMIT=1 for a development bundle." 7 ;;
   esac
 else
-  say "ALLOW_UNPUSHED_COMMIT=1: publishing a bundle for ${commit:0:12} with no proof that any branch on the remote contains it (a development bundle)"
+  say "ALLOW_UNPUSHED_COMMIT=1: publishing a bundle for ${commit:0:12} with no proof that any branch on the remote contains it (a development bundle; reason: ${ALLOW_UNPUSHED_REASON})"
 fi
 
 # Which components: exactly the names components.lock pins, in the lock's own order. Nothing here

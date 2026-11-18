@@ -107,11 +107,22 @@ wa_pin_released() {
   return 1
 }
 
-# wa_pin_escape <node> -> how to get out of a pin, in the words the CLI accepts.
+# wa_pin_escape <node> [<pin block>] -> how to get out of a pin, in the words the CLI accepts.
+# It names what releases THIS pin: a pin with no awaited commit is never released by an install (round-3
+# item 2: await used to be defaulted to the commit a rollback went back from, so the next deploy of main
+# released the pin on the move it was written to stop, and this sentence promised that).
 wa_pin_escape() {
-  local name="${1:-}"
+  local name="${1:-}" block="${2:-}" await=""
   [ -n "$name" ] || name='<node>'
-  printf "wa update %s --unpin --reason <text> (releases it and records why); or install a target that contains the awaited commit (that releases it by itself); or pass --force --reason <text> and it is recorded" "$name"
+  # No block handed over? Read the one that is in force, so the sentence is about THIS node's pin and not
+  # about a pin in general.
+  [ -n "$block" ] || block="$(wa_node_pin_active "$name" "")"
+  [ -n "$block" ] && await="$(wa_pin_field "$block" await)"
+  if [ -n "$await" ]; then
+    printf "wa update %s --unpin --reason <text> (releases it and records why); or install a target that contains the awaited commit %s (that releases it by itself); or pass --force --reason <text> and it is recorded"       "$name" "$(printf '%s' "$await" | cut -c1-12)"
+  else
+    printf "wa update %s --unpin --reason <text> (releases it and records why); this pin names no awaited commit, so no ordinary install releases it; or pass --force --reason <text> and it is recorded" "$name"
+  fi
 }
 
 # wa_node_pin_gate <name> [<node_id>] [<target-commit>] [<tree>]

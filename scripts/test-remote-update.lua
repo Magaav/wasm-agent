@@ -56,6 +56,8 @@ local ff_fails = false
 local dirty = ""
 local sentinel_pid = 4242
 
+local function trim(value) return (tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')) end
+
 local function escaped(text)
   return (tostring(text or ""):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\r", "\\r"):gsub("\n", "\\n"))
 end
@@ -399,7 +401,10 @@ ok(pins_text:find("state=active", 1, true) ~= nil, "as an active pin")
 -- the commit the rollback goes BACK FROM is the one the install record names before it runs (the deploy above
 -- moved it to TARGET), and that is what the pin must name: "unknown" is what this used to say.
 ok(pins_text:find("rolled_back_from=" .. TARGET, 1, true) ~= nil, "which names the commit it went back from", pins_text:sub(1, 220))
-ok(pins_text:find("await=" .. TARGET, 1, true) ~= nil, "and awaits it by default, so it can release")
+ok(pins_text:find("await=", 1, true) == nil,
+  "and awaits NOTHING by default: the commit it went back from contains the change being held off", pins_text:sub(1, 260))
+ok(pins_text:find("rolled_back_from=" .. TARGET, 1, true) ~= nil,
+  "the commit it went back from is kept for the reader", pins_text:sub(1, 260))
 ok(pins_text:find("node_id=", 1, true) ~= nil, "and carries the node's id, so a pin is found by either spelling")
 
 -- ---- 7c. the coordinator's own pin says the same thing ------------------------------------------------
@@ -414,7 +419,8 @@ ok(moved.pin ~= nil, "and the coordinator writes its own pin",
   tostring(moved.pin_problem and moved.pin_problem.error))
 ok(moved.pin and moved.pin.rolled_back_from == TARGET, "which names the commit it went back from",
   moved.pin and tostring(moved.pin.rolled_back_from))
-ok(moved.pin and moved.pin.await == TARGET, "and defaults its awaited commit to that commit",
+ok(moved.pin and trim(moved.pin.await) == "",
+  "and does NOT default its awaited commit to that commit (item 2: that is the history containing the bad change)",
   moved.pin and tostring(moved.pin.await))
 ok(moved.pin_next ~= nil and moved.pin_next:find("--unpin", 1, true) ~= nil,
   "and says how to get out of it", tostring(moved.pin_next))
@@ -430,6 +436,93 @@ local forced = remote.request(loopback, "peer", { commit = TARGET, force = true 
 ok(forced.error == "override_reason_required", "--force without a reason does not move a pinned node",
   tostring(forced.error))
 host.getenv = real_host.getenv
+
+-- ---- 7d. round-3 item 2: the pin does not release on the commit it rolled back from ------------------
+-- The released-by-ancestry rule is the operator's own statement: a target that CONTAINS the commit an operator
+-- NAMED with --await. A rollback pin names none, so the ordinary deploy of main - which contains the very commit
+-- the rollback went back from - must not release it.
+local pins_mod = dofile('lua/core/pins.lua')
+local held_back = pins_mod.active("peer")
+ok(held_back ~= nil, "the pinned node is still pinned before the case")
+local released_by_from = pins_mod.released(held_back, TARGET, install)
+ok(released_by_from and released_by_from.released == false,
+  "a target that contains the commit it went back from does NOT release the pin",
+  released_by_from and tostring(released_by_from.why))
+ok(tostring(released_by_from and released_by_from.why):find("names no awaited commit", 1, true) ~= nil,
+  "and says why: the pin names no awaited commit", released_by_from and tostring(released_by_from.why))
+local named = pins_mod.set({ node = "peer2", commit = "unknown", rolled_back_from = TARGET,
+  await = TARGET, reason = "held until the fix lands" })
+local released_by_named = pins_mod.released(named, TARGET, install)
+ok(released_by_named and released_by_named.released == true,
+  "the awaited commit an operator NAMED releases the pin",
+  released_by_named and tostring(released_by_named.why))
+pins_mod.clear("peer2", { reason = "case done" })
+
+-- ---- 7e. round-3 item 6: a plain update does not claim it releases a pin ------------------------------
+local plain = remote.request(loopback, "peer", { reason = "an ordinary deploy, no commit named" })
+ok(plain.error == "node_pinned", "a plain update of a pinned node is refused", tostring(plain.error))
+ok(tostring(plain.message):find("releases nothing", 1, true) ~= nil,
+  "and the message says it releases nothing", tostring(plain.message))
+ok(tostring(plain.message):find("names no target to compare", 1, true) ~= nil,
+  "...because it names no target to compare", tostring(plain.message))
+ok(tostring(plain.next):find("no ordinary deploy releases it", 1, true) ~= nil,
+  "and the way out does not promise a deploy releases a pin that names no awaited commit", tostring(plain.next))
+
+-- ---- 7f. round-3 item 5: --unpin names the node, needs a reason, and reaches the node's own store ----
+-- Two halves, tested separately because they run on different machines. The CLI clears THIS coordinator's store
+-- and then asks the node; the peer action clears the node's OWN store. In this fixture there is no peer called
+-- "peer", so the CLI's call comes back refused - which is exactly the case the message has to describe without
+-- pretending: "this coordinator's store: released; the node refused (...), so its own pin is still in force".
+ok(remote.cli({ "update", "peer", "--unpin" }) == 1,
+  "an unpin with no reason is refused by the CLI", "no reason given")
+ok(pins_mod.active("peer") ~= nil, "and the pin is still in force")
+local unreachable_unpin = remote.cli({ "update", "peer", "--unpin", "--reason", "release-glibc landed" })
+ok(unreachable_unpin == 1, "a release that cannot reach the node fails, and says so",
+  tostring(unreachable_unpin))
+ok(pins_mod.active("peer") == nil, "this coordinator's copy was released")
+local node_name = tostring(dofile('lua/core/nodes.lua').node_name() or "")
+ok(node_name ~= "", "the fixture node has a name", node_name)
+pins_mod.set({ node = node_name, commit = TARGET, reason = "held where the operator put it" })
+ok(pins_mod.active(node_name) ~= nil, "the node carries its own pin")
+local bare = remote.serve({ action = "unpin" }, MASTER)
+ok(bare.error == "unpin_reason_required",
+  "the peer action refuses an unpin with no reason", tostring(bare.error))
+ok(pins_mod.active(node_name) ~= nil, "and the node's pin is untouched")
+local released = remote.serve({ action = "unpin", reason = "release-glibc landed" }, MASTER)
+ok(released.ok == true and released.released == true,
+  "the peer action releases the node's OWN pin", tostring(released.error or released.status))
+ok(released.node == node_name, "and names the node it released", tostring(released.node))
+ok(tostring(released.message):find("released the pin on this node", 1, true) ~= nil,
+  "saying what it released", tostring(released.message))
+ok(pins_mod.active(node_name) == nil, "and the node is no longer pinned")
+local cleared_text = host.read_file(pins_mod.path()) or ""
+ok(cleared_text:find("state=cleared", 1, true) ~= nil, "the release is a record, not a deletion")
+ok(cleared_text:find("released on request by", 1, true) ~= nil, "which names who asked")
+local caller_only = remote.serve({ action = "unpin", reason = "someone below the master asks" },
+  { role = "guest", node_id = "guest-1", name = "guest" })
+ok(caller_only.error == "forbidden_role", "and a guest may not release a pin", tostring(caller_only.error))
+
+-- ---- 7g. round-3 item 5: the NODE honours a forced deploy only with a reason, and records it -------
+local force_bare = remote.serve({ action = "request", commit = TARGET, force_note = "forced past pin x" }, MASTER)
+ok(force_bare.error == "override_reason_required",
+  "a forced deploy with no reason is refused on the NODE", tostring(force_bare.error))
+local forced_ok = remote.serve({ action = "request", commit = TARGET, force_note = "forced past pin x",
+  reason = "the operator overrode the pin" }, MASTER)
+ok(forced_ok.ok == true, "a forced deploy WITH a reason is admitted",
+  tostring(forced_ok.error or forced_ok.status))
+local forced_record = forced_ok.record and remote.record(forced_ok.record) or {}
+ok(forced_record.forced == true, "and the node's own record says it was forced")
+ok(forced_record.force_note == "forced past pin x", "with the note the coordinator sent",
+  tostring(forced_record.force_note))
+ok(forced_record.override_reason == "the operator overrode the pin",
+  "and the reason, in the node's own words", tostring(forced_record.override_reason))
+local forced_deploy = issued_matching("request deploy")
+local forced_command = ""
+for _, line in ipairs(forced_deploy) do
+  if tostring(line):find("--force", 1, true) ~= nil then forced_command = tostring(line) end
+end
+ok(forced_command ~= "", "and the force reaches the installer's own command line", tostring(#forced_deploy))
+ok(forced_command:find("--reason", 1, true) ~= nil, "with its reason beside it", forced_command)
 
 -- ---- 8. `wa update` with no node still means this node -----------------------------------------
 ok(remote.cli({ "update", "--check" }) == nil, "`wa update --check` is not the remote form")

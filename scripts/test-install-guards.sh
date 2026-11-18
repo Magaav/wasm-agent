@@ -160,6 +160,48 @@ shows "...saying the override out loud" "$FLEET_OUT" "OVERRIDE, recorded"
 shows "...and the install record carries it" "$(cat "$E/installed.txt" 2>/dev/null)" "ancestry=override"
 FLEET_HOME=""
 
+echo "test-install-guards: fleet-install.sh - a binary that cannot name its commit is UNKNOWN (item 1)"
+# Round 3 of the review: "nothing names a commit" was read as "a first install", so an install whose binary
+# predates --build-info (and whose record carries no sha256=) was replaced with no ancestry question at all.
+C="$WORK/c"; mkdir -p "$C"
+printf '#!/bin/sh\nexit 1\n' > "$C/wa"; chmod +x "$C/wa"
+fleet "$C" "$WORK/artifact-ok" --reason "an ordinary fleet install"
+[ "$FLEET_RC" != 0 ] && ok "it refused (exit $FLEET_RC)" || bad "fleet-install replaced a binary nothing could identify"
+shows "the refusal is by name" "$FLEET_OUT" "refused(running_commit_unprovable)"
+shows "it says something IS installed" "$FLEET_OUT" "Something IS installed here"
+hides "...and it does not call it a first install" "$FLEET_OUT" "a first install, not a downgrade"
+same "nothing was installed" "$(head -1 "$C/wa")" "#!/bin/sh"
+
+echo "test-install-guards: fleet-install.sh - a record with commit= and no sha256= is not evidence (item 1)"
+D="$WORK/d"; mkdir -p "$D"
+printf '#!/bin/sh\nexit 1\n' > "$D/wa"; chmod +x "$D/wa"
+printf 'commit=%s\nvia=linux-bootstrap\n' "$(printf 'e%.0s' $(seq 1 40))" > "$D/installed.txt"
+D_BEFORE="$(cat "$D/installed.txt")"
+fleet "$D" "$WORK/artifact-ok" --reason "an ordinary fleet install"
+[ "$FLEET_RC" != 0 ] && ok "it refused (exit $FLEET_RC)" || bad "a record with no sha256= was trusted"
+shows "the refusal is by name" "$FLEET_OUT" "refused(running_commit_unprovable)"
+shows "it names the missing sha256" "$FLEET_OUT" "no sha256="
+same "the record was not touched" "$(cat "$D/installed.txt")" "$D_BEFORE"
+fleet "$D" "$WORK/artifact-ok" --force --reason "the rebuilt artifact is newer than anything on that box"
+hides "with --force --reason it goes on" "$FLEET_OUT" "refused(running_commit_unprovable)"
+shows "the record names the artifact's own build" "$(sed -n 's/^commit=//p' "$D/installed.txt" 2>/dev/null)" "$(printf 'd%.0s' $(seq 1 40))"
+
+echo "test-install-guards: fleet-install.sh - a missing pin reader is a refusal, not a skip (item 6)"
+# The gate used to be wrapped in "if [ -n "$NODE_PIN_LIB" ]": a copy of this script that could not find
+# scripts/lib/node-pins.sh SKIPPED the pin silently. It refuses now, before anything is replaced.
+ALONE="$WORK/alone"; mkdir -p "$ALONE"
+cp "$ROOT/scripts/fleet-install.sh" "$ALONE/fleet-install.sh"
+E="$WORK/e"; mkdir -p "$E"
+printf '#!/bin/sh\nexit 1\n' > "$E/wa"; chmod +x "$E/wa"
+E_OUT="$(env HEALTH="http://127.0.0.1:9/health" HEALTH_WAIT=1 WA_NODE_PINS_LIB=/nonexistent/node-pins.sh \
+  bash "$ALONE/fleet-install.sh" "file://$WORK/artifact-ok" --bin "$E/wa" --reason "an ordinary fleet install" 2>&1)"; E_RC=$?
+[ "$E_RC" != 0 ] && ok "a copy with no pin reader refuses (exit $E_RC)" || bad "a copy with no pin reader installed anyway"
+shows "the refusal is by name" "$E_OUT" "node_pins_lib_missing"
+shows "...and says nothing was installed" "$E_OUT" "nothing was installed"
+same "the running binary was not replaced" "$(head -1 "$E/wa")" "#!/bin/sh"
+grep -qF 'NODE_PIN_LIB:-}" ]; then' "$ROOT/scripts/fleet-install.sh" \
+  && bad "the pin gate is still wrapped in a skip" || ok "the pin gate no longer has a skip path"
+
 echo "test-install-guards: upgrade.sh and bootstrap.sh ask the same question (structural)"
 # These two cannot be run here without building a node (they install one), so what is asserted is that they route
 # through the same identity function and the same refusals - and that neither still says "carrying on".

@@ -390,7 +390,7 @@ function M.verdict(facts, options)
           ok = false, status = "override_reason_required", error = "override_reason_required", tree = facts.tree, pin = pin,
           observed = pins.summary_line(pin),
           message = "this node carries an active pin, and --force overrides a record that says it was put somewhere on purpose: say why.",
-          next = "say why (recorded): --force --reason <text>, or " .. pins.escape_hatch(local_name),
+          next = "say why (recorded): --force --reason <text>, or " .. pins.escape_hatch(local_name, pin),
           installed_commit = facts.installed_commit, candidate = facts.candidate,
         }
       end
@@ -399,7 +399,7 @@ function M.verdict(facts, options)
           ok = false, status = "node_pinned", error = "node_pinned", tree = facts.tree, pin = pin,
           observed = pins.summary_line(pin) .. (released and released.why and ("; " .. tostring(released.why)) or ""),
           message = "this node carries an active pin, so its own update was refused.",
-          next = pins.escape_hatch(local_name),
+          next = pins.escape_hatch(local_name, pin),
           installed_commit = facts.installed_commit, candidate = facts.candidate,
         }
       end
@@ -478,7 +478,7 @@ end
 -- The exact command line handed to the shell for a queued install. Pure, so a test can read it:
 -- every path and the reason are single-quoted (this node runs commands through `bash -c`), and a
 -- quote inside a reason must not be able to end the quoting early.
-function M.request_command(facts, reason, continuation)
+function M.request_command(facts, reason, continuation, force)
   -- A deploy, not an `upgrade --binary`: the gate builds the tree itself, so there is no candidate
   -- to name, and it is the only path that installs the sentinel, the scripts and the job templates
   -- and records a commit it verified.
@@ -486,6 +486,12 @@ function M.request_command(facts, reason, continuation)
     quote(facts.sentinel), "request", "deploy", "--if-no-pending",
     "--reason", quote(reason),
   }
+  -- A FORCE THAT STOPPED HERE WAS NOT A FORCE (round-3 item 5). The Sentinel is what runs deploy.sh, and
+  -- deploy.sh refuses a pinned node before it builds anything; a request that leaves the reason behind asks for
+  -- an ordinary deploy one step later. The flag travels with the reason it needs, or it is not sent at all.
+  if force == true and trim(reason) ~= "" then
+    command[#command + 1] = "--force"
+  end
   local session_id = trim(continuation and continuation.session_id)
   if session_id ~= "" then
     command[#command + 1] = "--session"
@@ -552,6 +558,31 @@ end
 -- One command, one path: the check is `install.sh --check`, the install is `install.sh --update` (the
 -- same code path as a first install), and both are the neighbour process - never the running node
 -- replacing its own image.
+-- WHAT AN UPDATER'S PLAN SAYS, OR THAT IT CANNOT BE READ.
+--
+-- This used to be two patterns inline: `plan:match("bootstrap: install ...: (%a+)")` and, when that answered
+-- nothing, every `state == "current"` test was false and the code fell through to "install it". So a plan
+-- nobody could read - a bootstrap that changed its wording, a truncated capture, a proxy's error page - was read
+-- as "a newer bundle is available", and the updater ran. Unknown is not yes: the four states this updater knows
+-- are named here, and anything else is a refusal that quotes what it got (round-3, run_release and
+-- run_release_updater).
+--
+-- Returns state, target, refusal; refusal is nil for a plan we understood.
+function M.release_plan(plan, reread_command)
+  local text = tostring(plan or "")
+  local target = text:match("would install ([^%s)]+)")
+  local state = text:match("bootstrap: install [^\r\n]-: (%a+)")
+  local known = { current = true, update = true, adopt = true, fresh = true }
+  if state and known[state] then return state, target, nil end
+  return nil, target, {
+    ok = false, status = "release_state_unknown", error = "release_state_unknown", observed = text,
+    message = "the updater's own plan could not be read (expected 'bootstrap: install <dir>: current|update|adopt|fresh'), " ..
+      "so whether this node is behind is unknown - and an unknown does not run an installer. Nothing was installed, " ..
+      "and the running pair is untouched.",
+    next = "read what the updater says before asking again: " .. tostring(reread_command),
+  }
+end
+
 function M.run_release_updater(options, facts, record, updater)
   local base = { install = facts.install, installed_commit = facts.installed_commit, installed_release = record.release,
                  channel = "release-bundle", updater = "installed" }
@@ -563,9 +594,9 @@ function M.run_release_updater(options, facts, record, updater)
     return with({ ok = false, status = "release_check_failed", error = "release_check_failed", observed = plan,
       message = "the installed updater could not verify the published bundle, so nothing was installed." })
   end
-  local state = plan:match("bootstrap: install [^\r\n]-: (%a+)")
-  local target = plan:match("would install ([^%s]+)")
+  local state, target, unknown = release_plan(plan, "sh " .. quote(updater) .. " --check --prefix " .. quote(facts.install))
   base.target_release = target
+  if unknown then return with(unknown) end
   if state == "current" then
     return with({ ok = true, status = "current", observed = plan,
       message = "this node already runs the newest published bundle" .. (target and (" (" .. target .. ")") or "") .. "; nothing to do." })
@@ -622,9 +653,9 @@ function M.run_release(options, facts, record)
     return with({ ok = false, status = "release_check_failed", error = "release_check_failed", observed = plan,
       message = "the published bundle did not verify for this node, so nothing was installed." })
   end
-  local state = plan:match("bootstrap: install [^\r\n]-: (%a+)")
-  local target = plan:match("would install ([^%s]+)")
+  local state, target, unknown = release_plan(plan, "bash " .. quote(script) .. " --check --prefix " .. quote(facts.install))
   base.target_release = target
+  if unknown then return with(unknown) end
   if state == "current" then
     return with({ ok = true, status = "current", observed = plan,
       message = "this node already runs the newest published bundle" .. (target and (" (" .. target .. ")") or "") .. "; nothing to do." })
@@ -805,7 +836,7 @@ function M.run(options)
   local command = M.request_command(facts, reason, {
     session_id = session_id,
     prompt = M.CONTINUATION_PROMPT,
-  })
+  }, options.force == true)
   -- WHOSE REQUEST THIS IS. `wa-sentinel request` refuses to act for a child task
   -- (`sentinel_coordinator_only`), and the node's host stamps `WASM_AGENT_PROVENANCE=child` on every
   -- shell it runs on behalf of an inbound peer call. For most paths that is exactly right: a peer's

@@ -22,6 +22,7 @@ ok()   { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }
 bad()  { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$*"; }
 same() { [ "$2" = "$3" ] && ok "$1 ($2)" || bad "$1: got '$2' want '$3'"; }
 shows() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: '$3' not found" ;; esac; }
+hides() { case "$2" in *"$3"*) bad "$1: '$3' should not be there" ;; *) ok "$1" ;; esac; }
 
 if [ ! -x "$WABIN" ]; then
   echo "SKIP test-node-pins: no binary at $WABIN (build it: cd rust && cargo build -p wa-host)"
@@ -74,6 +75,15 @@ same "the awaited commit itself releases it" "$(value released_by_the_awaited_co
 same "with no checkout the answer is unknown, never released" "$(value no_tree_is_unknown)" "unknown"
 same "the escape hatch names --unpin" "$(value escape_mentions_unpin)" "yes"
 
+echo "test-node-pins: a rollback pin releases on what the OPERATOR named, not on what it rolled back from (item 2)"
+same "a rollback pin carries no awaited commit by default" "$(value rollback_has_no_default_await)" "yes"
+same "...it keeps what it went back from, for the reader" "$(value rollback_keeps_rolled_back_from)" "$(value contain_pin_from)"
+same "a target that CONTAINS the commit it went back from does NOT release it" "$(value rollback_not_released_by_the_commit_it_went_back_from)" "false"
+same "the pinned commit itself still releases it" "$(value rollback_released_by_its_own_commit)" "true"
+same "the way out of a pin with no await does not promise a deploy" "$(value escape_no_await_does_not_promise_a_deploy)" "yes"
+same "...and names --unpin" "$(value escape_no_await_names_unpin)" "yes"
+same "a pin that HAS an await names the commit that releases it" "$(value escape_with_await_names_it)" "yes"
+
 echo "test-node-pins: the fleet view"
 same "the report lists the pins" "$(value fleet_pins)" "1"
 same "and flags the overdue ones" "$(value fleet_overdue)" "1"
@@ -113,12 +123,29 @@ case "$(cat "$WORK/deploy.out")" in
   *) ok "nothing reached the transport: the gate refused first" ;;
 esac
 
-echo "test-node-pins: --unpin"
+echo "test-node-pins: --unpin names what it released, and needs a reason (items 5 and 6)"
+wa update mail --unpin > "$WORK/unpin-bare.out" 2>&1
+rc=$?
+[ "$rc" != 0 ] && ok "an unpin with no reason is refused (exit $rc)" || bad "an unpin with no reason released a pin"
+shows "the refusal is by name" "$(cat "$WORK/unpin-bare.out")" "unpin_reason_required"
+same "and the pin is still in force" "$(value edge_by_name)" "true"
 wa update mail --unpin --reason "release-glibc landed" > "$WORK/unpin.out" 2>&1
-same "wa update mail --unpin -> 0" "$?" "0"
-shows "it says the node may move again" "$(cat "$WORK/unpin.out")" "may move it again"
+rc=$?
+unpin_out="$(cat "$WORK/unpin.out")"
+shows "the answer names this coordinator's store" "$unpin_out" "this coordinator's store"
+shows "...and the node's own store separately" "$unpin_out" "the node's own store"
+hides "...without promising the node may move when its own pin stands" "$unpin_out" "may move it again"
 shows "the store records the clear, not a deletion" "$(cat "$PINFILE")" "state=cleared"
 shows "...with its reason" "$(cat "$PINFILE")" "reason=release-glibc landed"
+if [ "$(printf '%s' "$unpin_out" | grep -c 'node_pin_not_released')" != 0 ]; then
+  # There is no peer called "mail" in this fixture, so the node's own copy could not be reached - and the answer
+  # says exactly that instead of claiming the node is free.
+  [ "$rc" != 0 ] && ok "a release that could not reach the node fails, and says so" || bad "an unreachable node was reported as released"
+  shows "...naming the rule" "$unpin_out" "node_pin_not_released"
+  shows "...and how to release it there" "$unpin_out" "ON that node"
+else
+  bad "the answer did not report whether the node's own pin was released"
+fi
 
 printf 'test-node-pins: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1

@@ -3,6 +3,7 @@
 -- fleet view are tested against the same bytes a node runs.
 local pins = dofile('lua/core/pins.lua')
 local function say(key, value) print(key .. '=' .. tostring(value)) end
+local function trim0(value) return (tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')) end
 
 say('path', pins.path())
 say('initial_active', pins.active('work') == nil and 'none' or 'pinned')
@@ -99,6 +100,26 @@ if ok_git() then
   say('no_tree_is_unknown', no_tree == nil and 'unknown' or tostring(no_tree.released))
   -- the escape hatch is one sentence an operator can act on
   say('escape_mentions_unpin', tostring(pins.escape_hatch('edge')):find('--unpin', 1, true) ~= nil and 'yes' or 'no')
+
+  -- ---- round-3 item 2: a rollback pin has NO default awaited commit ----------------------------
+  -- The awaited commit used to default to the one the rollback went BACK FROM - the history that contains the
+  -- change being held off - so the next ordinary deploy of main contained it and released the pin on exactly the
+  -- move it was written to stop.
+  local held_back = pins.set({ node = 'rb', commit = 'unknown', rolled_back_from = first,
+    reason = 'rolled back from that commit', kind = 'rollback' })
+  say('rollback_has_no_default_await', (held_back and trim0(held_back.await) == '') and 'yes' or 'no')
+  say('rollback_keeps_rolled_back_from', held_back and held_back.rolled_back_from or 'missing')
+  local by_from = pins.released(held_back, second, repo)
+  say('rollback_not_released_by_the_commit_it_went_back_from', by_from and tostring(by_from.released) or 'unknown')
+  say('rollback_released_by_its_own_commit', tostring((pins.released(held_back, 'unknown', repo) or {}).released))
+  -- round-3 item 6: the way out says what releases THIS pin
+  local escape_no_await = tostring(pins.escape_hatch('rb', held_back))
+  say('escape_no_await_does_not_promise_a_deploy',
+    escape_no_await:find('no ordinary deploy releases it', 1, true) ~= nil and 'yes' or 'no')
+  say('escape_no_await_names_unpin', escape_no_await:find('--unpin', 1, true) ~= nil and 'yes' or 'no')
+  local escape_with_await = tostring(pins.escape_hatch('edge2', held))
+  say('escape_with_await_names_it',
+    escape_with_await:find('contains the awaited commit', 1, true) ~= nil and 'yes' or 'no')
 else
   say('contain_repo', 'no git')
 end

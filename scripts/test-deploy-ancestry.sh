@@ -26,12 +26,15 @@ checks=0; failed=0
 ok()   { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }
 bad()  { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$*"; }
 same() { [ "$2" = "$3" ] && ok "$1 ($2)" || bad "$1: got '$2' want '$3'"; }
-shows() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: '$3' not found" ;; esac; }
+shows() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: '$3' not found in: $(printf '%s' "$2" | tail -4 | tr '\n' '|')" ;; esac; }
 hides() { case "$2" in *"$3"*) bad "$1: '$3' should not be there" ;; *) ok "$1" ;; esac; }
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 TREE="$WORK/tree"; INSTALL="$WORK/install"; SHIM="$WORK/bin"
-mkdir -p "$INSTALL" "$SHIM"
+# The node's own config directory: deploy.sh reads its pin store (scripts/lib/node-pins.sh) from here, so a case
+# can put a pin in front of a deploy without touching this machine's ~/.wasm-agent.
+AGENT_HOME="$WORK/agent-home"
+mkdir -p "$INSTALL" "$SHIM" "$AGENT_HOME/.wasm-agent"
 # A machine with no service: the fixture is a directory, not this machine's install, and deploy.sh asks systemd
 # and the port who owns the node. systemctl answering nothing is the honest fixture for "no service here".
 printf '#!/bin/sh\nexit 1\n' > "$SHIM/systemctl"; chmod +x "$SHIM/systemctl"
@@ -67,6 +70,7 @@ deploy() { # <install-dir> <args...> -> sets DEPLOY_OUT, DEPLOY_RC
   rm -f "$WORK/out" "$WORK/rc"
   setsid --fork env -u WASM_AGENT_IN_TURN -u WA_SESSION_ID PATH="$SHIM:$PATH" \
     WA_PORT=18799 WA_CLIENT_PORT=18800 WA_INSTALL_DIR="$dir" WA_DEPLOY_PREBUILT_ONLY=1 \
+    WASM_AGENT_HOME="$AGENT_HOME" \
     bash -c 'timeout 300 bash "$1" "${@:2}" >"'$WORK'/out" 2>&1; echo $? > "'$WORK'/rc"' runner \
       "$TREE/scripts/deploy.sh" "$@" >/dev/null 2>&1
   # wait for the detached run to settle (bounded), then read what it left
@@ -180,6 +184,7 @@ if git clone -q --depth 1 "file://$ROOT" "$SHALLOWTREE" 2>/dev/null; then
     rm -f "$WORK/out" "$WORK/rc"
     setsid --fork env -u WASM_AGENT_IN_TURN -u WA_SESSION_ID PATH="$SHIM:$PATH" \
       WA_PORT=18799 WA_CLIENT_PORT=18800 WA_INSTALL_DIR="$dir" WA_DEPLOY_PREBUILT_ONLY=1 \
+      WASM_AGENT_HOME="$AGENT_HOME" \
       bash -c 'timeout 300 bash "$1" "${@:2}" >"'$WORK'/out" 2>&1; echo $? > "'$WORK'/rc"' runner \
         "$tree/scripts/deploy.sh" "$@" >/dev/null 2>&1
     local waited=0
@@ -256,6 +261,63 @@ if git clone -q --shared "$ROOT" "$SHAREDTREE" 2>/dev/null; then
 else
   bad "could not clone this checkout for the unshared-commit case"
 fi
+
+echo "test-deploy-ancestry: a binary that cannot name its commit is UNKNOWN, not a first install (item 1)"
+# Round 3 of the review: an install whose binary predates --build-info, beside no record (or beside a record with
+# commit= and no sha256=), left RUNNING_COMMIT empty - and this script printed "this is a first install, not a
+# downgrade" and replaced it with no ancestry question at all. A binary is the test: nothing installed means the
+# directory is empty, not that the binary has nothing to say.
+NOPROOF="$WORK/noproof-install"; mkdir -p "$NOPROOF"
+printf '#!/bin/sh\nexit 1\n' > "$NOPROOF/wa"; chmod +x "$NOPROOF/wa"; cp "$NOPROOF/wa" "$NOPROOF/wa-sentinel"
+deploy "$NOPROOF" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "an install nothing can identify was replaced as if empty"
+shows "the refusal is by name" "$DEPLOY_OUT" "refused(running_commit_unprovable)"
+shows "it says nothing can show whether the tree contains it" "$DEPLOY_OUT" "so nothing can show whether this tree"
+hides "...and it does not call it a first install" "$DEPLOY_OUT" "this is a first install"
+deploy "$NOPROOF" --force --reason "the node's rebuild is not here yet"
+hides "with --force --reason it goes on" "$DEPLOY_OUT" "refused(running_commit_unprovable)"
+shows "...and the override names what it overrode" "$(cat "$NOPROOF/deploy.log" 2>/dev/null)" "overrode=running_commit_unprovable"
+shows "...and is a record with the reason" "$(cat "$NOPROOF/deploy.log" 2>/dev/null)" "nothing here can prove which commit is installed"
+
+echo "test-deploy-ancestry: a record with commit= and no sha256= is a belief, not evidence (item 1)"
+NOSHA="$WORK/nosha-install"; mkdir -p "$NOSHA"
+printf '#!/bin/sh\nexit 1\n' > "$NOSHA/wa"; chmod +x "$NOSHA/wa"; cp "$NOSHA/wa" "$NOSHA/wa-sentinel"
+printf 'commit=1111111111111111111111111111111111111111\nvia=deploy.sh\n' > "$NOSHA/installed.txt"
+NOSHA_BEFORE="$(cat "$NOSHA/installed.txt")"
+deploy "$NOSHA" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "a record with no sha256= was trusted as the running commit"
+shows "the refusal is by name" "$DEPLOY_OUT" "refused(running_commit_unprovable)"
+shows "it names the missing sha256" "$DEPLOY_OUT" "no sha256="
+same "the record was not touched" "$(cat "$NOSHA/installed.txt")" "$NOSHA_BEFORE"
+
+echo "test-deploy-ancestry: the node's pin is read BEFORE the build (item 6)"
+# A pin is a record that this node was put somewhere on purpose (a rollback writes it). Reading it after the
+# build spends an hour of compilation to learn what a two-millisecond file read would have said.
+printf 'fixture-node\n' > "$AGENT_HOME/.wasm-agent/node.name"
+cat > "$AGENT_HOME/.wasm-agent/pins.txt" <<'PINS'
+schema=wasm-agent-pins/1
+id=pin00001
+node=fixture-node
+kind=rollback
+state=active
+commit=2222222222222222222222222222222222222222
+rolled_back_from=3333333333333333333333333333333333333333
+reason=held on the build the operator wants
+by=operator
+at=2026-11-18T10:00:00Z
+PINS
+PINFRESH="$WORK/pinned-install"; mkdir -p "$PINFRESH"
+deploy "$PINFRESH" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "the deploy is refused (exit $DEPLOY_RC)" || bad "a deploy walked over the node's own pin"
+shows "the refusal is by name" "$DEPLOY_OUT" "node_pinned"
+shows "it quotes the pin" "$DEPLOY_OUT" "held on the build the operator wants"
+hides "nothing was built" "$DEPLOY_OUT" "deploy: building"
+shows "and it says so" "$DEPLOY_OUT" "Nothing was built and nothing was installed"
+shows "the way out names --unpin" "$DEPLOY_OUT" "--unpin --reason"
+deploy "$PINFRESH" --force --reason "the operator released this pin on purpose"
+hides "with --force --reason the gate opens" "$DEPLOY_OUT" "node_pinned"
+shows "...and the force is recorded with its rule" "$(cat "$PINFRESH/deploy.log" 2>/dev/null)" "force_requested rule=node_pinned"
+rm -f "$AGENT_HOME/.wasm-agent/pins.txt"
 
 echo "test-deploy-ancestry: the source of the rule is one file, shipped beside the running copy"
 grep -q 'install-record.sh' "$ROOT/scripts/deploy.sh" && ok "deploy.sh ships and sources the one ancestry verdict" || bad "deploy.sh does not use scripts/lib/install-record.sh"

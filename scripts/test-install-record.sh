@@ -222,5 +222,72 @@ same "the replaced commit is named" "$(wa_build_field "$RECORD" rollback_of)" "9
 shows "the reason is recorded" "$RECORD" "rollback_reason=back to the working pair"
 shows "the older record's other fields are carried over" "$RECORD" "release=v0.0.1"
 
+echo "test-install-record: a binary with no provable commit is UNKNOWN, not a first install (item 1)"
+# Round 3 of the review: an old binary that cannot report its build, beside no record (or beside a record that
+# names a commit and no sha256=), answered "source=none, commit empty" - and every caller read THAT as a first
+# install and replaced it with no ancestry question at all. A binary is the test, not the silence about it.
+BARE="$WORK/identity-bare"; mkdir -p "$BARE"
+printf '#!/bin/sh\nexit 1\n' > "$BARE/wa"; chmod +x "$BARE/wa"
+wa_running_identity "$BARE"
+same "a binary that cannot answer, and no record: unprovable" "$WA_RUNNING_SOURCE" "unprovable"
+same "...with no commit claimed" "$WA_RUNNING_COMMIT" ""
+shows "...and the sentence says nobody can say" "$WA_RUNNING_WHY" "cannot name its own commit"
+if wa_running_first_install; then bad "a binary with no provable commit was called a first install"; else ok "it is NOT a first install"; fi
+NOREC="$WORK/identity-norecord"; mkdir -p "$NOREC"
+printf 'commit=%s\n' "$(printf 'd%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)" > "$NOREC/installed.txt"
+wa_running_identity "$NOREC"
+same "a record with no binary and no sha256: named, but not bytes" "$WA_RUNNING_SOURCE" "record"
+wa_running_identity "$BARE"
+UNPROVEN="$WORK/identity-unproven"; mkdir -p "$UNPROVEN"
+printf '#!/bin/sh\nexit 1\n' > "$UNPROVEN/wa"; chmod +x "$UNPROVEN/wa"
+printf 'commit=%s\nvia=deploy.sh\n' "$(printf 'e%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)" > "$UNPROVEN/installed.txt"
+wa_running_identity "$UNPROVEN"
+same "a record with commit= and NO sha256= is not evidence" "$WA_RUNNING_RECORD_IS_BYTES" "unproven"
+same "...so its commit is not claimed" "$WA_RUNNING_COMMIT" ""
+same "...and the source says the commit is unprovable" "$WA_RUNNING_SOURCE" "unprovable"
+shows "...naming the missing sha256" "$WA_RUNNING_WHY" "no sha256="
+if wa_running_first_install; then bad "an unprovable record was called a first install"; else ok "an unprovable record is not a first install"; fi
+EMPTY="$WORK/identity-empty"; mkdir -p "$EMPTY"
+wa_running_identity "$EMPTY"
+if wa_running_first_install; then ok "only an empty directory is a first install"; else bad "an empty directory is not a first install"; fi
+
+echo "test-install-record: the --contains probe is bounded and scrubbed (item 8)"
+# The probe asks a binary older than --contains to do something it does not know: the host hands the argument to
+# the Lua core, which can open the interpreter, the database and the node. It must be bounded, and it must not run
+# with this node's home, database or Lua root in its environment.
+PROBE="$WORK/probe-wa"
+cat > "$PROBE" <<'PROBEEOF'
+#!/bin/sh
+case "$1" in
+  --contains)
+    printf 'home=%s\nagent_home=%s\ndb=%s\nlua=%s\n' "$HOME" "${WASM_AGENT_HOME:-}" "${WASM_AGENT_DB:-}" "${WASM_AGENT_LUA_ROOT:-}" >> "$PROBE_LOG"
+    sleep 30 ;;
+  *) exit 0 ;;
+esac
+PROBEEOF
+chmod +x "$PROBE"
+export PROBE_LOG="$WORK/probe.log"; : > "$PROBE_LOG"
+started="$(date +%s)"
+WASM_AGENT_HOME="$WORK/node-home" WASM_AGENT_DB="$WORK/node.db" WASM_AGENT_LUA_ROOT="/should/not/be/seen" \
+  WA_CONTAINS_TIMEOUT=2 wa_contains "$PROBE" "$(printf 'f%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
+same "a probe that never answers is 'cannot tell' (2), never 'no'" "$" "2"
+spent=$(( $(date +%s) - started ))
+if [ "$spent" -le 10 ]; then ok "the probe is bounded ($spent s on a binary that never answers)"; else bad "the probe ran $spent s: an old binary would hang a deploy"; fi
+LOG="$(cat "$PROBE_LOG" 2>/dev/null)"
+shows "it ran with a scratch HOME" "$LOG" "home=$WORK/contains."
+hides "...and no WASM_AGENT_HOME" "$LOG" "agent_home=$WORK/node-home"
+hides "...no WASM_AGENT_DB" "$LOG" "db=$WORK/node.db"
+hides "...and no WASM_AGENT_LUA_ROOT" "$LOG" "/should/not/be/seen"
+SAYER="$WORK/contains-wa"
+printf '#!/bin/sh\ncase "$1" in --contains) exit 0 ;; *) exit 1 ;; esac\n' > "$SAYER"; chmod +x "$SAYER"
+wa_contains "$SAYER" "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
+same "a binary that contains the commit answers 0" "$" "0"
+NOPE="$WORK/contains-no"
+printf '#!/bin/sh\nexit 1\n' > "$NOPE"; chmod +x "$NOPE"
+wa_contains "$NOPE" "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
+same "...and one that does not answers 1" "$" "1"
+wa_contains "$WORK/no-such-binary" "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
+same "no binary at all is 'cannot tell' (2)" "$" "2"
+
 printf 'test-install-record: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1
