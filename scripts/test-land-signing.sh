@@ -131,7 +131,7 @@ built_utc=2026-11-13T00:00:00Z
 $TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $(sha "$built/wa-sentinel-$TRIPLE-$SHORT") $(bytes "$built/wa-sentinel-$TRIPLE-$SHORT")
 MANIFEST
 
-out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
+out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
 expect_status 0 "$?" "the artifacts step accepts a set built elsewhere"
 contains "$out" "identity taken from" "the identity travels with the bytes"
 contains "$out" "checksums $WORK/release/SHA256SUMS" "the sums are written once"
@@ -149,7 +149,7 @@ contains "$(cat "$WORK/release/SHA256SUMS.sig")" "key $(cat "$WORK/key-id")" "th
 # ---- 3. THE FIX: the ship step's re-run of the publisher must not invalidate it ------------------------
 # `scripts/publish-artifacts-branch.sh` runs the publisher again over the same directory (that is how a set
 # built on one host is shipped from another), so this is the exact step that broke on 13/11.
-out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
+out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
 expect_status 0 "$?" "the publisher re-runs over a signed set"
 contains "$out" "manifest kept byte-for-byte" "the manifest is not rewritten when it already names this commit"
 contains "$out" "checksums reused" "the sums are not rewritten either"
@@ -168,7 +168,7 @@ grep -q "source_commit=$FIXTURE_SHA" "$WORK/release/build-stamp.txt" || fail "th
 ok
 
 # ---- 4. publishing uses the signed bytes, without any hand-frozen build --------------------------------
-out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --from "$built" --out "$WORK/release" --target "$TRIPLE" --publish 2>&1)"
+out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --publish 2>&1)"
 [ "$?" = 0 ] || { printf '%s\n' "$out" | tail -5; fail "a signed set publishes without freezing anything by hand"; }
 ok
 called="$(cat "$WORK/gh-called" 2>/dev/null || true)"
@@ -187,7 +187,7 @@ sentinel_sha="$(sha "$built/wa-sentinel-$TRIPLE-$SHORT")"
 sentinel_bytes="$(bytes "$built/wa-sentinel-$TRIPLE-$SHORT")"
 sed -i "s|^$TRIPLE .*|$TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $sentinel_sha $sentinel_bytes|" \
   "$built/node-$SHORT.manifest" || fail "could not rebuild the fixture manifest"
-out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --from "$built" --out "$WORK/release" --target "$TRIPLE" --publish 2>&1)"
+out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --publish 2>&1)"
 status=$?
 [ "$status" = 6 ] || fail "a set whose sums no longer match its signature was not refused by name (status $status): $out"
 ok
@@ -195,10 +195,16 @@ contains "$out" "signature_stale:" "the refusal is named signature_stale"
 contains "$out" "sign the new" "and it says how to fix it"
 absent "$(cat "$WORK/gh-called" 2>/dev/null || true)" "release upload" "nothing was uploaded after the refusal"
 # Back to the set that was signed: the same re-run is green again (nothing was left in a broken state).
+# The whole state, not half of it: the refusal above moved the signature over the OLD sums aside, so
+# restoring only the payload would leave a set with the signed bytes and no signature beside them and the
+# re-run would say "signature deferred" - which is true of a directory whose signature was taken away, and
+# not what this case is about. The signature file comes back with the bytes it is a signature over.
+[ -f "$WORK/release/SHA256SUMS.sig.stale" ] || fail "the refusal did not leave the stale signature in a named place"
+cp -f "$WORK/release/SHA256SUMS.sig.stale" "$WORK/release/SHA256SUMS.sig"
 cp -f "$WORK/wa-$TRIPLE-$SHORT.before" "$built/wa-$TRIPLE-$SHORT"
 sed -i "s|^$TRIPLE .*|$TRIPLE $(sha "$built/wa-$TRIPLE-$SHORT") $(bytes "$built/wa-$TRIPLE-$SHORT") $sentinel_sha $sentinel_bytes|" \
   "$built/node-$SHORT.manifest" || fail "could not restore the fixture manifest"
-out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
+out="$(WA_RELEASE_SIGN_DEFER=1 WA_PUBLISH_RUNNER=true bash "$PUBLISH" --repo "$fixture" --target-dir "$WORK/target" --from "$built" --out "$WORK/release" --target "$TRIPLE" --local 2>&1)"
 expect_status 0 "$?" "the untouched set is accepted again"
 # The bytes, not the wording: the restored set is exactly the signed one, so the sums come out identical and
 # the signature over them is true again. (A rewrite that produces the same bytes is harmless; what must never

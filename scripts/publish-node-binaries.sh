@@ -611,7 +611,7 @@ else
   # aside, said, and the build goes on (17/11: the next release refused with exit 6 over the previous commit's
   # signature). Without deferral it stays a refusal: this run was meant to sign.
   if [ -f "$OUT/SHA256SUMS.sig" ] && [ "${WA_RELEASE_SIGN_DEFER:-0}" = 1 ] && ! wa_release_verify_sums "$OUT" >/dev/null 2>&1; then
-    mv -f "$OUT/SHA256SUMS.sig" "$OUT/SHA256SUMS.sig.stale" && say "moved a signature over other sums aside: $OUT/SHA256SUMS.sig.stale (WA_RELEASE_SIGN_DEFER=1: the new sums are signed on the vault's host)"
+    mv -f "$OUT/SHA256SUMS.sig" "$OUT/SHA256SUMS.sig.stale" && say "signature_stale: $OUT/SHA256SUMS.sig is not a signature over the sums just written (they changed after it was made); moved aside as $OUT/SHA256SUMS.sig.stale - sign the new $OUT/SHA256SUMS where the vault is (bash scripts/sign-release.sh $OUT/SHA256SUMS) and run this again (WA_RELEASE_SIGN_DEFER=1: the new sums are signed on the vault's host)"
   fi
   if [ -f "$OUT/SHA256SUMS.sig" ]; then
     wa_release_verify_sums "$OUT" || fail \
