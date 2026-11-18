@@ -1198,3 +1198,135 @@ No new test fails. `wa-mesh-core`, `wa-mesh` and the script suites were not run:
   already had, and closing it is a change to the write order, not to this vocabulary — not done here, and not
   measured.
 - **No live watcher** was run against a real node: every claim above is from tests in a scratch `WASM_AGENT_HOME`.
+
+---
+
+# green-main — the landing gate on avell (mission `change/green-main`)
+
+Branch `change/green-main`, base `change/harness-land` at `97ef887f`. Everything below was built and run in this
+worktree (`/home/victor/Work/missions/green-main/wt`) on this node, with
+`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-green-main`. Nothing was pushed, no landing-queue run, no gate,
+no deploy, no node state touched. Every row keeps its own `mktemp -d` home.
+
+**The task.** `wa land`'s gate (`bash scripts/fast.sh` + the cargo rows + `prompt-docs`) stops on `gate_failed`
+and cannot tell a pre-existing failure from a new one, so the gate had to be able to PASS on this node: each of
+the reds attributed to its real cause and fixed in the code, or made robust to an honest environment difference -
+never skipped, deleted or weakened.
+
+## The baseline: 12 red of 261, measured on the base commit before any change
+
+```
+$ bash scripts/fast.sh --jobs 16            # at 97ef887f, this node, this tree
+fast: lua 221/227 passed (56 excluded: scripts/fast-path.exclude)
+fast result FAILED (261 checks, 12 failed, 0 skipped)
+fast path FAILED (12 of 261 checks, 0 skipped, 149s)
+```
+
+The harness-land report (this file, above) counted 13 on the same node with `--jobs 8`. The difference is
+`test-codemode-native`: that node had no wasi-sdk, so `fast.sh` could not build the `codemode` component and the row
+skipped the half that needs it; **this** node has wasi-sdk 34.0, the component is built from this tree, and the row
+runs - and passes. Every row below was measured BEFORE (on `97ef887f`, before any change here) and AFTER.
+
+## What each red was, and what changed
+
+| # | check | the measured BEFORE | the cause | the change | the measured AFTER |
+|---|---|---|---|---|---|
+| 1 | `test-observability` | `opt-in short index retains every full tool schema` | `lua/core/raw_code.lua`'s `M.DEFAULT` is `only` since 17/11, so a node with nothing in its environment declares NO tool: the row asserted a schema the surface no longer had | the row pins `WASM_AGENT_RAW_CODE='codemode'` through `host.getenv` - the pattern `scripts/test-envelope.lua` and `test-codemode-default.lua` already use for this exact change | `observability ok: 78 assertions; zero model calls` |
+| 2 | `test-remote-call-shape` | `preamble guideline in the progressive prompt` | same | same pin (in its existing `overrides` table) | `remote call shape ok (59 checks, 0 skipped)` |
+| 3 | `test-skill-discovery` | `ripgrep shell fallback disclosure rule` | same | same pin | `skill discovery ok (49 checks, 0 skipped; no provider or paid calls)` |
+| 4 | `test-orchestration-mode` | `mode-on declares subagent and route_task from the start` | same | same pin | `orchestration mode ok (66 checks, 0 skipped; no inference)` |
+| 5 | `test-codemode-model-boundary` | `MODEL_BOUNDARY_CONTENT_REQUIRED: complete must not display empty or missing data` | same: the JSON `codemode` call the row drives is not declared under CodeAct | same pin, in the row's own `host.getenv` override | `{"artifact_retrievals":5,"checks":664,"ok":true,"paid_calls":0,"phase":"seed","write_calls":1}` |
+| 6 | `test-host-return-docs` | `FAIL every capability that answers JSON text says so: ["http_stream"]` | a real documentation defect: `host.http_stream` was the one capability that pushes JSON (`push_json`) with no doc comment at all, and the row exists because a caller that iterates that string with `ipairs` reads exactly like "there are none" (the 12/11 `list_dir` cycle) | the doc comment it was missing, naming the encoding, the record's shape and its fifth argument | `host return docs ok (10 checks; 35 JSON-text capabilities documented)` |
+| 7a | `wa-sentinel node_script_tests` (both) | `called Result::unwrap() on an Err value: Os { code: 2, kind: NotFound }` (reading the receipt the failed run never wrote), and the operation's own `state.json` says `code=1` with **mise's usage text** in its stdout | `script_runner::resolve_node` canonicalized the interpreter it found, and a version manager's shim **is** a symlink to the manager: this node's `~/.local/share/mise/shims/node -> /usr/bin/mise`, so every approved JS script ran `mise -- <script>` | `launch_path()` returns an absolute path and never resolves the last component (an absolute path is all canonicalization bought: the file checked is the file launched; a shim picks the interpreter by its OWN name). The crate's resolver test gained the shim case | `cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1` -> `test result: ok. 132 passed; 0 failed` |
+| 7b | `wa-sentinel deploy_visibility_tests::a_failing_deploy_leaves_its_message_in_the_capture`, `deploy_outcome_tests::the_sentinel_spawns_waits_and_reports_a_deploy_end_to_end`, `role_tests::the_watcher_records_its_own_owner_where_a_later_stop_reads_it` | `this watcher is inside wa-serve.service, which cannot be shown to own it` / `inside wa-serve.service, which this cannot claim as its supervisor` / `the record is written where identity() reads it: Os { code: 2 }` | the fixtures stated no supervisor, so they inherited the control group of whoever ran the suite - and this node runs it inside its own systemd user unit `wa-serve.service` (`/proc/self/cgroup` = `/user.slice/.../wa-serve.service`). `owner_of` then answers `Unrecognised{wa-serve.service}`, which is the CORRECT answer for a process the unit handed nothing to | each fixture declares `WA_SENTINEL_SUPERVISOR=none` - the code's own documented name for "nothing outside owns the watcher" (`main.rs`, `record_owner`). The unit cases set their own supervisor and are unaffected | (same run) 132 passed; 0 failed (was 121 passed, 5 failed) |
+| 8 | `wa-mesh tests_relay` (both) | `relay_answer_unreadable: unknown field 'error', expected one of 'schema', 'ts', 'from_node_id', 'reply', 'signature'` and `t has not been pushed a roster yet` | two causes. (a) A real defect: the relay carries the target's unsigned refusal as the body it answered with - `{"error":"unknown_caller"}` - which is not a `RelayAnswer`; the `Err` arm of `RelayAnswer::open` returned that verification error first, so a relayed refusal read as `mesh_relay_failed`, and the arm below it (whose comment says "a refusal the target could not sign is a diagnosis, never a result: only its allow-listed code is kept") was unreachable - the compiler's `unreachable_patterns` warning on that match was the same defect. (b) one row inherited this session's `WA_MESH=1`, and `gate::decide_with_roster` reads the environment's word before the policy's | (a) the body is read for an allow-listed pre-auth code BEFORE the verification error is the verdict; a refusal keeps its code with `verified:false`, and a body that names no allow-listed code still reports the verification's own reason. The `[probe]` eprintln that leaked that reason to the crate's stderr is gone. (b) the row clears `WA_MESH`/`WASM_AGENT_MESH` through `testkit::EnvGuard`, as its sibling row already did | `cargo test --offline -p wa-mesh` -> `76 passed; 0 failed; 1 ignored` (was 74 passed, 2 failed) |
+| 9 | `prompt-docs` | `sync-prompt-docs: stale generated blocks (run scripts/sync-prompt-docs.sh --write):   docs/ENVELOPE.md: tool-catalogue` | the committed generated block no longer matched the catalogue | `bash scripts/sync-prompt-docs.sh --write` - the repo's own script; one row changes (`recall`'s parameters are `limit? query? scope?`) | `prompt-docs ok` in the final run |
+| 10 | `fast-binary` | `9 of 28 checks failed`, first: `a fresh tree binary is used, got action=refuse (build 97ef887f544a is not this tree (d042c8606fb1); WA_FAST_SKIP_BUILD=1 forbids building one)` | the row's fixtures build their own stub tree, but an inherited `CARGO_TARGET_DIR` makes `scripts/lib/fast-binary.sh` look in the CALLER's directory first ("a caller that names CARGO_TARGET_DIR keeps it"), find a binary from another tree, and refuse. `env -u CARGO_TARGET_DIR node scripts/test-fast-binary.mjs` -> 28/28 on the same tree | `plan()` clears `CARGO_TARGET_DIR` for the scenarios that are not about it (the same way it already clears `WA_BIN`), and **scenario 7 passes one back in** and asserts the rule itself | `fast binary: 32 checks`, green with and without the variable exported |
+| 11 | `publish-artifacts` | `publish artifacts FAILED: the commit holds 'node-97ef887f544a.manifest PUBLISH.sh SHA256SUMS …', expected exactly 'PUBLISH.sh SHA256SUMS …'` | the check compares a file SET to a literal written in byte order, and read the ref back sorted in the ambient collation `en_US.UTF-8`, whose sort ignores case and puts `node-…` before `PUBLISH.sh` | `LC_ALL=C sort` on the readback: the order is the one the literal names, whatever the operator's locale is - the commit's contents are what the check is about | `publish artifacts: ok (55 checks)` under the same `LANG=en_US.UTF-8` |
+| 12 | `land-signing` | `land signing FAILED: the refusal is named signature_stale: 'signature_stale:' not in: … release_not_signed: WA_RELEASE_SIGN_DEFER=1 and …/SHA256SUMS.sig does not exist …` plus, on every run, `publish-node-binaries.sh: line 161: …/scripts/lib/build-target.sh: No such file or directory` | **not a vault at all** - this row signs with an offline fixture signer over this tree's own `vault/wa_vault.py` and never touches one. (a) the 17/11 change ("a signature left from ANOTHER build is moved aside, said, and the build goes on") had dropped the *named* reason the row greps for; (b) the row's fixture checkout does not carry `scripts/lib/build-target.sh`, which the publisher sources unconditionally; (c) step 5's restore put the payload bytes back but not the signature the refusal had just moved aside, so "the signature over them verifies again" asked it of a directory whose signature had been taken away - a case the row never reached before (a) | the moved-aside line now carries `signature_stale:` and the fix instruction (no assertion changed: exit 6, the name, the instruction and "nothing was uploaded" are all still required); the fixture names its target directory with the publisher's own documented `--target-dir` (it publishes `--from` a built set and never builds); the restore puts the signature back with the bytes, and asserts the stale one was left in a named place | `land signing ok (44 checks)` |
+
+**No row needed a named SKIP**, so `fast.sh`'s skip grammar was not extended and no check was excused: the last
+row of the mission's list (`land-signing` → "no vault here") turned out not to need a vault, and the two reds the
+harness-land report called "the machine" (`fast-binary`, `publish-artifacts`) were fixed at their real cause.
+
+## The environment these verdicts belong to (stated, not assumed)
+
+```
+fast: env: node v26.13.1 (node:sqlite yes), cargo 1.100.0, wasi-sdk 34.0, lua 5.4.9
+```
+* **wasi-sdk 34.0 is present** on this node, so the seven component rows build and run here (the harness-land run
+  skipped them). That is also why `test-codemode-native` passes here.
+* **node comes from mise shims** (`~/.local/share/mise/shims/node -> /usr/bin/mise`): the cause of 7a.
+* **the session runs inside the systemd user unit `wa-serve.service`**: the cause of 7b.
+* **`WA_MESH=1`** and **`WASM_AGENT_RAW_CODE`** are in the ambient environment of every child a node session
+  spawns; `LANG=en_US.UTF-8`, `TMPDIR=/home/victor/.wasm-agent/tmp` and an exported `CARGO_TARGET_DIR` too.
+`fast.sh` already clears the vault, identity and mode variables for its LUA rows (`env -u …`); the two rows that
+needed more state that themselves, which is the runner's documented contract ("a row that tests one of these sets
+it itself").
+
+## What this did not do, and what it did not verify
+
+* **Nothing was pushed**, and the landing path was not exercised: no `scripts/landing-queue.mjs`, no gate run, no
+  deploy, no node state touched. Commits are local on `change/green-main`.
+* **The harness-land `component-pins` red is out of scope here** and was green in both runs on this node
+  (`fast: component-pins ok`), because wasi-sdk is here and the components build.
+* **`wa-sentinel` and `wa-mesh` were run as `fast.sh` runs them** (`--test-threads=1` for wa-sentinel) and also by
+  hand for the failing names; the numbers quoted are from the whole crate.
+* **No new test was added for the mesh relay fix** beyond the two rows that already exercise it (they are exactly
+  the two that were red, and they assert both the code (`unknown_caller`, `verified:false`) and the wording that
+  follows it). The sentinel's shim fix has its own case in the crate's resolver test.
+* **A falsification was not run for every fix**: the "BEFORE" column is the base commit `97ef887f` measured on this
+  node with no change of mine applied, which is the falsification for each row (revert the fix and the row is red
+  again). The two rows where the before is also a code defect (`http_stream`, the relay arm) are the ones where
+  the compiler or the source shows the defect directly.
+
+## The extra red the gate could not see before, and why it appeared
+
+Selecting the crate rows by what a change touches (scripts/fast.sh) means a crate nobody touches is never tested, so
+its drift is invisible - the harness-land report measured the same shape with `orphan-tests`. This branch made the
+change that revealed one: commit `2ef62c99` touched `rust/wa-capabilities/src/host.rs` (a doc comment), which is what
+selects the `rust wa-capabilities` row. It came back
+
+```
+FAIL rust wa-capabilities (exit 101):
+test capabilities::tests::documented_inventory_matches_the_live_registry ... FAILED
+registered but undocumented in docs/HOST.md: ["transcript_expand"]
+```
+
+which is red at `97ef887f` too - the capability is registered there (`git show 97ef887f:rust/wa-capabilities/src/capabilities.rs | grep -c transcript_expand` -> 1) and the inventory row is not (`git show 97ef887f:docs/HOST.md | grep -c transcript_expand` -> 0), and it arrived with
+`1af78376` ("cli: a long result is one row that opens on a click") without one. `docs/HOST.md` now documents it
+(`transcript_expand    device`, in the block's own order and column, the class `capabilities.rs` registers), and the
+crate's row is green: `fast: rust wa-capabilities ok (30s)`, 281 + 1 tests.
+
+## The final gate run: 262 checks, 0 failed, 0 skipped
+
+```
+$ bash scripts/fast.sh --jobs 16            # at 5b542393, this node, this tree
+fast: binary /home/victor/wasm-agent/target/m-green-main/release/wa (build 5b5423934abd, tree 5b5423934abd, fresh: built from this tree)
+fast: env: node v26.13.1 (node:sqlite yes), cargo 1.100.0, wasi-sdk 34.0, lua 5.4.9
+fast: components graph hooks memory selfloop mesh codemode svc-echo built from this tree and pinned in …
+fast: lua 227/227 passed (56 excluded: scripts/fast-path.exclude)
+fast: rust wa-capabilities ok (30s)
+fast: rust wa-sentinel ok (28s)
+fast: rust wa-mesh ok (1s)
+fast result ok (262 checks, 0 failed, 0 skipped): …/wa-fast-result.json
+fast path ok (262 checks, 0 skipped, 178s)
+```
+
+Before: `fast path FAILED (12 of 261 checks, 0 skipped, 149s)`. After: `fast path ok (262 checks, 0 skipped, 178s)`,
+exit 0. The gate's own skip grammar was not touched: nothing is skipped, nothing is excused, and every check the
+landing gate runs - the Lua rows, the three Rust crates, `prompt-docs`, and the contract rows - is green on this node.
+
+## Commits (local, on change/green-main, not pushed)
+
+```
+974e30fc lua rows name the tool surface they assert: CodeAct is the default since 17/11
+2ef62c99 host.http_stream says it answers JSON text: only undocumented push_json capability
+598737c8 docs/ENVELOPE.md: regenerate (recall's parameters are query? limit? scope?)
+8d41c561 wa-sentinel: a version manager's shim is launched by its own name, and a fixture states its owner
+7d7eeb9e wa-mesh: a relayed refusal that could not be signed is a refusal, not an unreadable answer
+2ebec818 fast-binary: the row does not inherit the caller's CARGO_TARGET_DIR (and scenario 7 keeps the rule it covers)
+b318b894 publish-artifacts: the file list is compared in byte order (LC_ALL=C sort)
+e3cfeb61 land-signing: the moved-aside signature is named signature_stale, and the row restores the state it took apart
+5b542393 docs/HOST.md: document transcript_expand, a registered capability with no inventory row
+```
