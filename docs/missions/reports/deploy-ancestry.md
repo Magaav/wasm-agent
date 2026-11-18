@@ -12,6 +12,7 @@ MEASURED 18/11 (the mission's premises, re-checked on the live nodes while doing
 | mail | `commit=842868c1`, `sha256=71094f2a` | sha256 `71094f2a` ✓, but the binary predates `--build-info` |
 | nextcloud | `commit=unknown`, `sha256=38d31dd0` | sha256 `586b244c` — **the record's sha256 is not these bytes** |
 | work | `commit=14963b6f`, `sha256=4248d61b` | sha256 `fc6a9d80` — **the record is not these bytes** (the codeact build) |
+| **avell (this node)** | commit=14963b6f, sha256=4248d61b | sha256 fc6a9d80 - **the same bytes as work**, on the coordinator itself |
 
 That table is the whole argument for rule 1: a record written by the installing party was wrong on two of three
 nodes, and the previous guard compared the tree against that record.
