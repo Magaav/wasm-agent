@@ -6,7 +6,10 @@ local json=dofile('lua/vendor/json.lua')
 local real_getenv=host.getenv
 local overrides={WASM_AGENT_PROVIDER='opencode-go',WASM_AGENT_LLM_API_KEY='fixture-key',
   WASM_AGENT_LLM_MODEL='deepseek-v4.1-flash',WASM_AGENT_PI_MODELS_STORE='missing-test-store',
-  WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_MAX_TOOL_ROUNDS='3',WASM_AGENT_ENVELOPE_MODE='full'}
+  WASM_AGENT_CONTEXT_BUDGET='0',WASM_AGENT_MAX_TOOL_ROUNDS='3',WASM_AGENT_ENVELOPE_MODE='full',
+  -- The prompt guideline this row asserts is about the declared tool surface; CodeAct is the default
+  -- since 17/11 and declares nothing, so the row names the surface it is written against.
+  WASM_AGENT_RAW_CODE='codemode'}
 host.getenv=function(k) if overrides[k]~=nil then return overrides[k] or nil end return real_getenv(k) end
 host.http=function() error('network forbidden in this fixture') end
 host.http_stream=host.http

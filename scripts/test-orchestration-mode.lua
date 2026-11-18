@@ -1,4 +1,7 @@
 -- Mode permission is deterministic; delegation decisions belong to coordinator inference.
+-- The declared-tool surface is what `mode-on declares subagent and route_task` is about; CodeAct is
+-- the default since 17/11 (lua/core/raw_code.lua, M.DEFAULT), which declares nothing.
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local mode=dofile('lua/core/orchestration_mode.lua')

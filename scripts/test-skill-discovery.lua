@@ -1,4 +1,8 @@
 -- Metadata discovery is not execution; complete skill bodies and policy remain.
+-- The declared-tool (codemode) surface is what this row is about: the prompt's guidelines and its
+-- skill contract exist beside the tools a run is given. CodeAct is the default since 17/11
+-- (lua/core/raw_code.lua, M.DEFAULT), so the row names the surface it is written against.
+do local real=host.getenv; host.getenv=function(k) if k=='WASM_AGENT_RAW_CODE' then return 'codemode' end return real(k) end end
 local json=dofile('lua/vendor/json.lua')
 local memory=dofile('lua/core/memory.lua');memory.setup()
 local tools=dofile('lua/core/tools.lua')
