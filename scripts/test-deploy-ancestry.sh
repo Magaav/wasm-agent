@@ -106,14 +106,23 @@ shows "...with the commit it replaced" "$(cat "$LOG" 2>/dev/null)" "ancestry_rep
 shows "...and who did it" "$(cat "$LOG" 2>/dev/null)" "ancestry_by="
 
 echo "test-deploy-ancestry: the record is a fallback, not the witness"
-# With the binary unable to answer, the guard falls back to installed.txt and SAYS SO - it does not refuse on
-# its own ignorance, and it does not pretend the record is the binary's answer.
+# With the binary unable to answer, the guard falls back to installed.txt and SAYS SO - and the fallback is
+# allowed only when the record is provably about THESE bytes, which means a sha256= that is the binary's
+# (round-3 item 1 made the missing-sha256 case a refusal; the case below has one, and is still a fallback).
 DEADINSTALL="$WORK/dead-install"; mkdir -p "$DEADINSTALL"
 printf '#!/bin/sh\nexit 1\n' > "$DEADINSTALL/wa"; chmod +x "$DEADINSTALL/wa"; cp "$DEADINSTALL/wa" "$DEADINSTALL/wa-sentinel"
-printf 'commit=%s\nvia=deploy.sh\n' "$LOST" > "$DEADINSTALL/installed.txt"
+printf 'commit=%s\nsha256=%s\nvia=deploy.sh\n' "$LOST" "$(sha256sum < "$DEADINSTALL/wa" | cut -d' ' -f1)" > "$DEADINSTALL/installed.txt"
 deploy "$DEADINSTALL"
 shows "with no answer from the binary the record is used, and named" "$DEPLOY_OUT" "could not be asked"
 shows "...and it still refuses, because the record is newer than this tree" "$DEPLOY_OUT" "downgrade refused(node_not_contained)"
+# ...and the same record with the sha256= filed off is not a fallback at all.
+NOSHADEAD="$WORK/nosha-dead"; mkdir -p "$NOSHADEAD"
+printf '#!/bin/sh\nexit 1\n' > "$NOSHADEAD/wa"; chmod +x "$NOSHADEAD/wa"; cp "$NOSHADEAD/wa" "$NOSHADEAD/wa-sentinel"
+printf 'commit=%s\nvia=deploy.sh\n' "$LOST" > "$NOSHADEAD/installed.txt"
+deploy "$NOSHADEAD" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "a record with no sha256= is refused (exit $DEPLOY_RC)" || bad "a record with no sha256= was used as if it described the bytes"
+shows "the refusal is by name" "$DEPLOY_OUT" "refused(running_commit_unprovable)"
+hides "...and the record is NOT named as a witness" "$DEPLOY_OUT" "for THESE bytes"
 
 echo "test-deploy-ancestry: a record that is not about these bytes is not evidence"
 # The shape measured on this machine and on work on 18/11: the record says commit=14963b6f and sha256=4248d61b,
