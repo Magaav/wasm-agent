@@ -1332,3 +1332,146 @@ b318b894 publish-artifacts: the file list is compared in byte order (LC_ALL=C so
 e3cfeb61 land-signing: the moved-aside signature is named signature_stale, and the row restores the state it took apart
 5b542393 docs/HOST.md: document transcript_expand, a registered capability with no inventory row
 ```
+
+## Round 2: the review of 97ef887f..02f1782a, item by item (18/11)
+
+The review was right on item 1, right on item 2, and right that the CodeAct surface had no coverage - with one
+correction to my own first reading of items 2 and 3, recorded below rather than quietly dropped. Three commits,
+each with a failing-before case; then the gate.
+
+### 1. Land signing: a --publish run refuses with the real cause and leaves the directory alone
+
+The row's `signature_stale:` came from the informational `say` on line 614 of `scripts/publish-node-binaries.sh`,
+while the exit came from `release_not_signed` on line 640: under `WA_RELEASE_SIGN_DEFER=1 --publish` the 17/11
+move-aside renamed the stale signature to `.sig.stale` first and the run then refused for its absence. The row
+passed because it grepped a name printed on the way past, and because it put `.sig.stale` back by hand
+(`scripts/test-land-signing.sh:202-203`) - so its own comment, "nothing was left in a broken state", was true
+only because the row made it true.
+
+Moving a stale signature aside is a build-host courtesy: the build has something to get on with. A publishing run
+does not - it ships these exact bytes. The condition now excludes it (`[ "${PUBLISH:-0}" != 1 ]` at 619), so the
+stale signature reaches the check below and is refused there by its real name: `signature_stale`, exit 6, nothing
+moved, nothing uploaded, the directory untouched. The row's hand restore is gone; it asserts instead that the
+signature is still there byte for byte, that no `.sig.stale` exists, and that `release_not_signed` is never printed.
+Its payload/manifest restore stays - that mutation is the case's own.
+
+BEFORE (the publisher's condition narrowed back to the old one, the new row unchanged):
+
+```
+land signing FAILED: the refusal names the cause, not the hole a move-aside would leave:
+  'release_not_signed' unexpectedly in: ... signature_stale: .../SHA256SUMS.sig is not a signature over
+  the sums just written ... moved aside as .../SHA256SUMS.sig.stale ... release_not_signed:
+  WA_RELEASE_SIGN_DEFER=1 and .../SHA256SUMS.sig does not exist ...
+```
+
+AFTER: `land signing ok (46 checks)`, was 44.
+
+### 2. wa-mesh: the unverified_reply arm audits its deny again
+
+`7d7eeb9e` split the relay path's refusal arm in two: the allow-listed code kept its code and its audit `Event`,
+and the early return beside it - an answer that opened, verified, and names no allow-listed code, i.e. another
+call's answer - kept only the `Refused` shape. It is the same verdict about the same call, so a node's
+`mesh.jsonl` said nothing at all about an answer that arrived signed, verified and belonged to somebody else.
+
+The arm now emits the deny `Event` it replaced (`verdict deny`, code `unverified_reply`, transport `relay`)
+before returning, exactly as the branch below it does.
+
+The row is a stub relay that carries one answer the test chose - the two fields a real relay hands on (`status`
+and `body`, headers dropped) - so the caller's own verification is the only thing that decides. t's key seals the
+answer and the roster has that key, so `RelayAnswer::open` verifies; the request id inside belongs to another
+call, which is the one path that reaches this arm.
+
+```
+BEFORE: panicked at wa-mesh/src/tests_relay.rs:897: the unverified refusal is audited as a deny,
+        like every other refusal: []          (no events at all)
+AFTER:  cargo test --offline -p wa-mesh -> 77 passed; 0 failed; 1 ignored   (was 76/0/1)
+```
+
+### 3. The DEFAULT CodeAct surface: three variants, and a correction to my own first reading
+
+Rows 4, 3 and 2 of round 1 named their surface with a file-wide `WASM_AGENT_RAW_CODE='codemode'` pin. That
+fixed those rows and left the surface the node actually runs untested by the very rows that named it: CodeAct
+(`raw_code.M.DEFAULT` is `only`) declares nothing and a run block is the only way to act. Each row now names its
+surface in one variable (`raw_surface`) and carries a CodeAct variant at the end:
+
+| row | the CodeAct variant | result |
+|---|---|---|
+| `test-orchestration-mode` | `route_task` is callable from a run block and records the route there; `subagent` is refused from a script BY NAME with the fix it carries, because it is on `codemode.DIRECT_ONLY`; the direct call it is pointed at reaches the tool itself, not a script wrapper | 66 -> 76 checks, green |
+| `test-skill-discovery` | a stubbed-provider run on the default surface (no pin, 0 tools declared, no network, no paid call); the ripgrep fallback rule read out of the system message the provider was actually given | 49 -> 53, green |
+| `test-remote-call-shape` | the same run shape for the step-preamble rule | 59 -> 62, green |
+
+Row 4's answer is honest rather than convenient: of the coordinator's two named routes, `route_task` runs inside
+the script (`attempt.admitted == true`) and `subagent` does not
+(`codemode_target_not_available: subagent runs outside code mode`, fix: "call it as an ordinary tool call") - it is
+one reviewable call by design. The variant asserts both, plus that the direct `subagent` call that refusal points
+at is dispatched to the tool itself (`its own guard answers: orchestration_mode_not_enabled`) and is not wrapped
+into a script.
+
+**A first reading of items 2 and 3 was wrong, and how it was wrong is worth recording.** I built the CodeAct
+prompt by calling `agent.system_prompt(...)` directly with an empty tool list, found neither the ripgrep rule nor
+the preamble rule in it, and started writing an `agent.lua` fix. A run does not build its prompt that way:
+`M:build_context` passes session options, and `raw_code.first(policy)` is true for `only` as well as `first`, so
+`guidelines_for` already fills the core names on the default surface. A stubbed-provider run on the default surface
+carried both rules before and after that change - the same 19,024-byte system message. The change was reverted
+(`lua/core/agent.lua` is untouched by this round) and the variants are written against a real run instead of a
+hand-built prompt.
+
+Falsification instead of a fix: mutating `if raw_first then have.codemode = true end` to `if false then ...` (the
+code surface no longer fills the core names) turns both variants red on exactly their own assertion, and restoring
+it turns them green:
+
+```
+lua error: [string "scripts/test-skill-discovery.lua"]:14: ripgrep shell fallback disclosure rule on the DEFAULT CodeAct surface
+lua error: [string "scripts/test-remote-call-shape.lua"]:24: preamble guideline on the DEFAULT CodeAct surface
+```
+
+A coverage variant that cannot fail is not coverage.
+
+### Correction to row 12's claim in this report
+
+The round-1 table says of `land-signing`: "no assertion changed: exit 6, the name, the instruction and 'nothing
+was uploaded' are all still required". That was wrong, and the review was right to say so. The exit came from
+`release_not_signed` (640), not from `signature_stale` (618); the name the row greps for came from the
+informational `say` on 614; and the row ended by restoring `.sig.stale` itself, so the set was taken apart and
+put back by the test. The row asserted a phrase printed on the way past a refusal, not the refusal. What is claimed
+now is what item 1 above measures, and the claim is made by the row's own assertions rather than by the wording it
+happens to print.
+
+### The gate: 262 checks, 0 failed, 0 skipped
+
+```
+$ CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-green-main bash scripts/fast.sh
+fast: binary .../m-green-main/release/wa (build f529e61d7edf, tree f529e61d7edf, fresh: built from this tree)
+fast: lua 227/227 passed (56 excluded: scripts/fast-path.exclude)
+fast: rust wa-capabilities ok (31s)
+fast: rust wa-sentinel ok (28s)
+fast: rust wa-mesh ok (4s)
+fast: prompt-docs ok (13296ms)
+fast: land-signing ok (1231ms)
+fast result ok (262 checks, 0 failed, 0 skipped): .../wa-fast-result.json
+fast path ok (262 checks, 0 skipped, 186s)
+```
+
+The same 262 as round 1 and no new red: the additions are checks INSIDE rows (the gate counts rows and contract
+checks, not a row's internal assertions), so a row-level count that stayed at 262 is the expected shape, not a
+measurement that skipped anything. The run measured this tree's content (the working tree at the time); the commits
+below change no bytes of it, and `git status` is clean after them. One compiler warning remains and is not this
+round's: `warning: function connect is never used --> wa-mesh/src/http.rs:475` (a file this round did not touch).
+
+### What this round did not do
+
+- **Not pushed, not landed.** The branch is local; `wa land` / the landing queue is the operator's step.
+- **No real inference.** Every new assertion runs through a stubbed `host.http_stream`; no model call was made and
+  no child was started (`subagent`'s reachability is asserted at the dispatch level; starting one spends model
+  calls, which a row must not do).
+- **`subagent` is still not callable from inside a script** on the default surface - by design
+  (`codemode.DIRECT_ONLY`), and now asserted rather than assumed. If the coordinator is expected to call it from a
+  run block, that is a design change for the operator, not a defect this round should have patched.
+
+## Commits (round 2, local, on change/green-main, not pushed)
+
+```
+a2452666 lua rows: the DEFAULT CodeAct surface has its own cases (surface, not file-wide pin)
+c83ced23 wa-mesh: the unverified_reply arm audits its deny again
+e0ca5acc land-signing: --publish refuses a stale signature instead of moving it aside
+```
