@@ -14,10 +14,19 @@ ROOT=$(pwd -P)
 MISSION=$ROOT/scripts/mission.sh
 WORK=$(mktemp -d)
 HOLD=''
+KIDS=''
 cleanup() {
   if [ -n "${KEEP-}" ]; then printf 'kept %s\n' "$WORK"; return; fi
   exec 9>&- 2>/dev/null || true
   [ -n "$HOLD" ] && kill "$HOLD" 2>/dev/null
+  # Everything this fixture started, and every runner it launched. A child that outlives the script keeps
+  # the CALLER's stdout open, so a piped run ('bash scripts/test-mission.sh | tail -3') never sees EOF
+  # even though the fixture has already printed its verdict. Measured 18/11 on this node: a mutated run
+  # failed after the presence case, left its 'sleep 600' holding the pipe, and two harness shells sat on
+  # that line for ten minutes; one of them then ran its own restore step over uncommitted work in this
+  # tree. A fixture that fails must exit, not wedge the caller.
+  for p in ${KIDS-}; do kill "$p" 2>/dev/null; done
+  for f in "$MISSIONS"/*/run.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done
   chmod -R u+w "$WORK" 2>/dev/null
   rm -rf "$WORK"
 }
@@ -216,8 +225,9 @@ presence() { # <session> <pid> <heartbeat-age-seconds>
     "insert into session_presence(session_id,pid,boot,role,started_at,heartbeat_at) values('$1',$2,'boot-free','master',strftime('%s','now'),strftime('%s','now')-$3) on conflict(session_id) do update set pid=$2, heartbeat_at=strftime('%s','now')-$3" \
     || fail 'cannot write a presence row'
 }
-( cd "$MISSIONS/demo" && exec sleep 600 ) &   # a process working IN the mission dir, as the CLI does
+( cd "$MISSIONS/demo" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &   # a process working IN the mission dir, as the CLI does
 OTHER=$!
+KIDS="$KIDS $OTHER"
 sleep 0.2
 presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$OTHER" 5
 s=$(status_of demo)
