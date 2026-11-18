@@ -483,7 +483,7 @@ that it has no --force`, and `start takes no flag, not even with a writer in the
 | `bash -n scripts/mission.sh`, `bash -n scripts/test-mission.sh` | clean |
 | `bash scripts/test-mission.sh` (twice) | `mission fixture: 158 checks ok` in 7 s and 8 s |
 | five mutants against the fixture | each caught, with the check that caught it (below) |
-| `bash scripts/fast.sh` | refuses at `stale_binary` in this environment; see below |
+| `bash scripts/fast.sh` (toolchain on `PATH`) | `fast path FAILED (11 of 253 checks, 0 skipped, 186s)`; this round's row `fast: mission ok`; all 11 reds reproduced on the base |
 
 Mutants, each a saved copy run through `MISSION_UNDER_TEST`:
 
@@ -495,24 +495,44 @@ Mutants, each a saved copy run through `MISSION_UNDER_TEST`:
 | `m8` - `alive_launcher` never seen | `a live launcher that has not named its session must refuse a launch` |
 | `m9` - the `--force` argument accepted again | `start says in as many words that it has no --force: 'no --force' not in: mission: refusing [active]: ...` |
 
-The fast path stops before any row runs: `fast: stale_binary: build 2e6fab41e7be is not this tree
-(3a256a6f1dff); cargo is not on PATH`. Two things are true here and neither is this round's change:
-`cargo` is not on `PATH` in a plain shell on this node (it is at `/wasm-agent/toolchain/cargo/bin`,
-the toolchain `mission.sh` itself exports), and the `wa` on `PATH` was built from `2e6fab41`, not
-from this tree. Rerun with the toolchain on `PATH` builds the tree binary first; that run had not finished
-when this section was written, and it is the fast path's own precondition rather than a red in it.
+The fast path, with the toolchain on `PATH` (`PATH=$HOME/wasm-agent/toolchain/cargo/bin:$PATH`; the plain
+shell on this node has no `cargo`), built this tree's binary and ran the whole path:
+
+    fast path FAILED (11 of 253 checks, 0 skipped, 186s)
+    fast: mission ok (7965ms)          <- this round's row
+    fast: rust - no crate touched      <- nothing in rust/ changed
+
+All 11 reds are in rows this round does not touch, and each was reproduced on the base: a second worktree
+at `3a256a6f` (`/tmp/m4/base`, no round-4 files), the same command, the same `PATH`:
+
+| red | on this tree | on the base (`3a256a6f`) |
+| --- | --- | --- |
+| `scripts/test-observability.lua`, `test-skill-discovery.lua`, `test-orchestration-mode.lua`, `test-remote-call-shape.lua`, `test-codemode-model-boundary.lua`, `test-prompt-cache.lua`, `test-wave-closure-reporting.lua`, `test-host-return-docs.lua` | fail | fail (identical) |
+| `prompt-docs` (`docs/ENVELOPE.md: tool-catalogue` is a stale generated block) | fail | fail (`bash scripts/sync-prompt-docs.sh --check` run alone in the base worktree) |
+| `publish-artifacts` (the artifact list's order in the commit) | fail | fail (identical) |
+| `land-signing` (`WA_RELEASE_SIGN_DEFER=1`, nothing to publish) | fail | fail (identical) |
+| `session-liveness` | **ok** (125 ms) | fail (`owner_stale: ... presence heartbeat is 4001s old`) |
+
+The base reports 12 of 253 and this tree 11 of 253: the one row that failed only on the base,
+`scripts/test-session-liveness.mjs`, is untouched by this round (no JS, no Lua changed), so it is flaky on
+this machine and not something this round fixed. Everything else is pre-existing and named here so the next
+round does not have to rediscover it.
 
 ## Not done, and not verified
 
-* The full fast path (`scripts/fast.sh`) did not grade this tree in this round. Its refusal compares the
-  `wa` build commit against the tree's `HEAD` before any row runs, and neither this round's files nor the
-  base's change either side, so it is the same refusal on the base.
 * `verify` and `clean` still refuse only on `active`. `stale`/`unknown` are refused for a *launch*,
   not for a cleanup: `clean` is how a leftover mission is retired, so making it refuse a leftover would
   leave no way out. That asymmetry is deliberate, and it is the one place where a state does not refuse
   everything.
 * The `update steering_runs` recipe is the last resort and is named as such in the docs. I did not run it
-  against the live node; this round wrote nothing to `/.wasm-agent`.
+  against the live node; this round wrote nothing to `~/.wasm-agent`.
+* The presence read has a hole the other session on this mission measured live while the round was open (its
+  section below, and the row it added to the measurements table): a turn served by the node's own process
+  (`wa serve`, pid 616163) writes in this worktree while `session_presence` names a pid whose cwd is never
+  the mission's, so `writers_check` reports no writer while one is writing. My fixtures model the CLI's exit,
+  not the server's own turn, and this round does not fix it. What the gate still guarantees is narrower than
+  "no second writer": no launcher alive, no *mission-cwd* process, and every session of this mission settled
+  on the node's word at the moment of the check.
 * `mission.sh status` reads `REPORT.md` in the worktree root first, then
   `docs/missions/reports/<name>.md` (the second path is new, and the fixture's demo mission checks it).
   `report` still quotes only `REPORT.md`.
