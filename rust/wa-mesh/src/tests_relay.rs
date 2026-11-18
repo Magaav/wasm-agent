@@ -451,6 +451,15 @@ fn now() -> u64 {
 #[test]
 fn the_roster_decides_on_the_relay_path_too_and_an_existing_operator_bootstraps_it() {
     let _lock = testkit::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Nothing in the environment states the mesh switch: this row is about the POLICY (a node that has
+    // never been pushed a roster decides by its pins, and one that has decides by the roster). A session
+    // started through a node inherits that node's WA_MESH, and the gate reads the environment's word
+    // before the policy's (gate::decide_with_roster) - measured on avell 18/11, where this row ran with
+    // WA_MESH=1 in its environment and failed on 't has not been pushed a roster yet'. The sibling row
+    // (a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url) clears the same two
+    // names for the same reason.
+    let _env = testkit::EnvGuard::set(&[("WA_MESH", None), ("WASM_AGENT_MESH", None)]);
+    crate::gate::reset_cache();
     let fleet = fleet();
     let roster_json = serde_json::to_string_pretty(&fleet.roster).unwrap();
 

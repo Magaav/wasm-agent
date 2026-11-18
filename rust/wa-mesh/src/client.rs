@@ -431,18 +431,14 @@ impl<'a> Client<'a> {
         match outcome {
             crate::relay::RelayOutcome::Answered { status: _, body: text, .. } => {
                 let now_s = wire::now_seconds();
-                match crate::relay::RelayAnswer::open(
+                let opened = crate::relay::RelayAnswer::open(
                     &text,
                     &target.node_id,
                     &target.public_key,
                     &caller.node_id,
                     now_s,
-                ) {
-                    Err(error) => {
-                        // PROBE: the raw reason the caller's verification of the answer gives.
-                        eprintln!("[probe] answer_open_failed reason={error} raw_head={}", &text[..text.len().min(90)]);
-                        return Err((attempt, error));
-                    }
+                );
+                match opened {
                     Ok(reply) if reply.request_id == request_id => {
                         if reply.ok {
                             let inner_status = reply.status.unwrap_or(200);
@@ -485,10 +481,33 @@ impl<'a> Client<'a> {
                             detail,
                         })
                     }
-                    Ok(_) | Err(_) => {
+                    other => {
                         // A refusal the target could not sign (it never authenticated us) is a
-                        // diagnosis, never a result: only its allow-listed code is kept.
-                        let code = wire::pre_auth_code(&text).unwrap_or("unverified_reply");
+                        // diagnosis, never a result: only its allow-listed code is kept. It arrives as
+                        // the body the target ANSWERED with - `{"error":"unknown_caller"}` - which is not
+                        // a RelayAnswer at all, so the body is read for its code BEFORE the answer's
+                        // verification is treated as the verdict. Measured on avell 18/11: returning the
+                        // verification error first made a relayed, unsigned refusal read as
+                        // `mesh_relay_failed: relay_answer_unreadable: unknown field error`, and the two
+                        // roster rows (tests_relay) never saw `unknown_caller`; the compiler's
+                        // unreachable_patterns warning on this very match was the same defect, one arm
+                        // later. A body that names no allow-listed code keeps the verification's own
+                        // reason, which is what an unreadable or forged answer must report.
+                        let Some(code) = wire::pre_auth_code(&text) else {
+                            // Nothing allow-listed in the body: the verification's own reason is the
+                            // verdict on an answer that could not be read, and an answer that is simply
+                            // another call's is an unverified refusal with no code to keep.
+                            return match other {
+                                Err(error) => Err((attempt, error)),
+                                Ok(_) => Ok(Outcome::Refused {
+                                    node: target.clone(),
+                                    code: "unverified_reply".into(),
+                                    verified: false,
+                                    status: 200,
+                                    detail: String::new(),
+                                }),
+                            };
+                        };
                         Event::new("call", &caller.node_id, &target.node_id)
                             .levels(Some(caller.level), Some(target.level))
                             .verb(verb.as_str())
