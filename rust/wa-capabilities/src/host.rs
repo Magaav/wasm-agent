@@ -2130,6 +2130,10 @@ unsafe fn call_lua_stream_event(l: *mut LuaState, payload: &str) {
     lua_settop(l, base);
 }
 
+/// Answers JSON text (one string the caller decodes with `lua/vendor/json.lua`), never a Lua table:
+/// `{status, content, commentary, tool_calls, termination, chunks, ...}` for a stream that ended, or
+/// `{error}` for one that could not be read. Same arguments as `host.http`, plus an optional fifth
+/// argument `{"first_response_seconds": N}` that gives this call its own deadline.
 pub extern "C-unwind" fn http_stream(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
