@@ -840,6 +840,7 @@ terminal_write       device
 ticker               device
 transcript_block     device
 transcript_copy      device
+transcript_expand    device
 transcript_fold      device
 transcript_head      device
 transcript_hold      device
