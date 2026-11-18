@@ -1663,6 +1663,11 @@ WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown 
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+# /keybindings prints the table the console dispatches on (rust/wa-term/src/keymap.rs): the rows come
+# from host.keybindings, the module names no key itself, /help points at it, and the REPL, the mid-run
+# view and the node's route exist. The other direction - that every row is dispatched and nothing else
+# is - is Rust's (keymap.rs), so a missing row and an orphan row are both failures, not drift.
+WA_SCRIPT=scripts/test-keybindings.lua "$BIN" --db "$DB.keybindings" | grep "checks, 0 failed"
 WA_SCRIPT=scripts/test-continue.lua "$BIN" --db "$DB.continue" | grep "continue ok"
 
 # The status line must keep moving while the interpreter is blocked, and the timer therefore
