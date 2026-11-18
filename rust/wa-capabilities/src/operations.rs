@@ -23,15 +23,123 @@ fn ensure_cached<T>(slot: &std::sync::Mutex<Option<T>>, open: impl FnOnce() -> O
 /// One vault entry's value for a child's environment. The entry NAME travels through Lua and the
 /// definition; the value is put in the child's environment here and never returned to the
 /// interpreter, a request file or a transcript.
+///
+/// It opens the slot through `ensure_cached`, the one function the retry rule is tested on. This
+/// function used to carry its own copy of that rule, so `vault_cache_tests` proved something about a
+/// helper the launch path never called (review, 19/11). One rule, one function - and the test that
+/// runs the launch path itself is `the_launch_path_opens_the_vault_through_the_one_retry_rule`.
 fn vault_value(entry: &str) -> Result<String, String> {
-    let mut guard = match VAULT.lock() { Ok(guard) => guard, Err(poisoned) => poisoned.into_inner() };
-    if guard.is_none() {
-        if let Ok(service) = wa_kernel_runtime::vault_host::VaultService::from_env() { *guard = Some(service); }
+    vault_value_with(&VAULT, || wa_kernel_runtime::vault_host::VaultService::from_env().ok(), |service| {
+        service.use_by_ref(entry).map(|value| value.to_string())
+            .ok_or_else(|| format!("vault_entry_missing:{entry}: store it with `wa vault set {entry} --stdin`"))
+    })
+}
+
+/// The launch path's vault read, with its opener and its lookup injected, so the retry rule is tested
+/// on the function that injects the value and not on a helper beside it: a failed open is not
+/// remembered (the vault may be created a moment later) and an open vault is not reopened.
+fn vault_value_with<T>(slot: &std::sync::Mutex<Option<T>>, open: impl FnOnce() -> Option<T>,
+                       read: impl FnOnce(&T) -> Result<String, String>) -> Result<String, String> {
+    if !ensure_cached(slot, open) {
+        return Err("vault_unavailable: this node's vault does not open (wa vault status)".into());
     }
+    let guard = match slot.lock() { Ok(guard) => guard, Err(poisoned) => poisoned.into_inner() };
     let service = guard.as_ref()
         .ok_or("vault_unavailable: this node's vault does not open (wa vault status)")?;
-    service.use_by_ref(entry).map(|value| value.to_string())
-        .ok_or_else(|| format!("vault_entry_missing:{entry}: store it with `wa vault set {entry} --stdin`"))
+    read(service)
+}
+
+// ---- the approval a connector that names a vault entry carries -------------------------------
+//
+// (docs/VAULT.md, 18/11.) A `vault_env` definition is the operator's, and the approval is a digest over
+// what the launch IS: the program, its arguments, EVERY script file the connector runs, and the
+// environment names it asks for. Until this existed the approval was one boolean in memory.db while
+// the scripts it runs live in a directory the agent can write, so an approved connector's script could
+// be replaced afterwards and the value handed to the new code. The digest is recomputed HERE, from the
+// bytes on disk, immediately before a value is read; a mismatch refuses the launch.
+//
+// The canonical text is shared with `lua/core/mcp.lua` (`M.vault_approval_text`): one form, two
+// implementations, and each side's tests pin the same digest of the same fixture. Every field is
+// percent-escaped (a `%` and two uppercase hex digits for any byte outside [A-Za-z0-9._~/:@+,=-]) so a
+// newline, a space or a tab inside an argument cannot forge a line.
+fn approval_field(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'.' | b'_' | b'~' | b'/' | b':' | b'@' | b'+' | b',' | b'=' | b'-');
+        if keep { out.push(byte as char) } else { out.push_str(&format!("%{byte:02X}")) }
+    }
+    out
+}
+
+fn approval_text(program: &str, args: &[String], files: &[(String, String)], vault: &[String]) -> String {
+    let mut text = String::from("mcp-vault-approval/v1\n");
+    text.push_str(&format!("program {}\n", approval_field(program)));
+    for arg in args { text.push_str(&format!("arg {}\n", approval_field(arg))); }
+    for (path, sha) in files { text.push_str(&format!("file {} {}\n", approval_field(path), sha.to_lowercase())); }
+    for name in vault { text.push_str(&format!("vault {}\n", approval_field(name))); }
+    text
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use ring::digest::{digest, SHA256};
+    digest(&SHA256, bytes).as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// An absolute path whose extension says it is a script: the launch's own arguments the approval must
+/// cover. An extension is a name and this is the only thing it is used as - the digest is over BYTES.
+fn is_script_path(value: &str) -> bool {
+    const SCRIPTS: [&str; 11] = ["mjs", "cjs", "js", "lua", "sh", "bash", "py", "rb", "pl", "ps1", "bat"];
+    let bytes = value.as_bytes();
+    let absolute = value.starts_with('/')
+        || (bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/'));
+    if !absolute { return false; }
+    std::path::Path::new(value).extension().and_then(|ext| ext.to_str())
+        .is_some_and(|ext| SCRIPTS.iter().any(|known| ext.eq_ignore_ascii_case(known)))
+}
+
+/// Nothing is launched and no value is read unless the launch matches the approval the operator gave.
+/// Each refusal names what is wrong and what to do, because the reader of a refusal is the one who can
+/// approve the connector again.
+fn approval_problem(approval: &Value, launch: &Spec) -> Result<(), String> {
+    let expected = approval["sha256"].as_str().unwrap_or_default().trim().to_string();
+    if expected.is_empty() {
+        return Err("vault_approval_required: this connector names a vault entry but carries no approval digest, so no value was read and nothing was launched. A vault connector is approved at the operator's own terminal: /mcp <id> probe, then /mcp <id> on".into());
+    }
+    let program = approval["program"].as_str().unwrap_or_default().to_string();
+    let args: Vec<String> = approval["args"].as_array()
+        .map(|list| list.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let mut vault: Vec<String> = approval["vault"].as_array()
+        .map(|list| list.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    vault.sort();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in approval["files"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let path = entry.as_str().unwrap_or_default();
+        if path.is_empty() {
+            return Err("vault_approval_required: this connector carries an approval with no script list, so no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on".into());
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            return Err(format!("vault_approval_unreadable:{path}: a script this connector was approved with cannot be read now, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
+        };
+        files.push((path.to_string(), sha256_hex(&bytes)));
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    // The digest is only worth something if it covers what is being STARTED: every script on this
+    // launch's own command line must be one of the files it names.
+    for arg in launch.args.iter() {
+        if !is_script_path(arg) { continue; }
+        if !files.iter().any(|(path, _)| path == arg) {
+            return Err(format!("vault_approval_script_not_covered:{arg}: this launch runs a script the approval does not cover, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
+        }
+    }
+    let digest = sha256_hex(approval_text(&program, &args, &files, &vault).as_bytes());
+    if !digest.eq_ignore_ascii_case(&expected) {
+        return Err(format!("vault_approval_mismatch: this connector's program, arguments or scripts changed after the operator approved it, so nothing was launched and no value was read (approved {expected}, now {digest}). Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on"));
+    }
+    Ok(())
 }
 
 fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
@@ -449,6 +557,9 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // callers send it (the MCP client and session); the generic operation route strips it.
             let mut launch = launch;
             if let Some(map) = args.get("vault_env").and_then(|value| value.as_object()) {
+                // The approval comes FIRST: a launch whose program, arguments or scripts no longer
+                // match what the operator approved reads no value at all (docs/VAULT.md).
+                approval_problem(args.get("vault_approval").unwrap_or(&Value::Null), &launch)?;
                 for (name, entry) in map {
                     let valid = !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -804,5 +915,151 @@ mod vault_cache_tests {
         assert!(ensure_cached(&slot, open));
         assert_eq!(attempts.load(Ordering::SeqCst), 0, "an open vault is reused, never reopened");
         assert_eq!(*slot.lock().unwrap(), Some(1), "and the second opener never runs");
+    }
+
+    // The launch path itself, not a helper beside it: `vault_value` opens the slot through
+    // `ensure_cached`, so a failure is retried on the next launch and an open vault is reused.
+    #[test]
+    fn the_launch_path_opens_the_vault_through_the_one_retry_rule() {
+        let slot: std::sync::Mutex<Option<u8>> = std::sync::Mutex::new(None);
+        let attempts = AtomicUsize::new(0);
+        let missing = super::vault_value_with(&slot,
+            || { attempts.fetch_add(1, Ordering::SeqCst); None }, |value: &u8| Ok(value.to_string()));
+        assert!(missing.unwrap_err().starts_with("vault_unavailable"), "a launch with no vault says so");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let opened = super::vault_value_with(&slot,
+            || { attempts.fetch_add(1, Ordering::SeqCst); Some(7u8) }, |value: &u8| Ok(format!("v{value}")));
+        assert_eq!(opened.unwrap(), "v7", "the next launch opens the vault: no restart needed");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let reused = super::vault_value_with(&slot,
+            || { attempts.fetch_add(1, Ordering::SeqCst); Some(9u8) }, |value: &u8| Ok(value.to_string()));
+        assert_eq!(reused.unwrap(), "7", "an open vault is reused, never reopened");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+}
+
+/// The approval a connector that names a vault entry carries (docs/VAULT.md): the digest covers the
+/// program, the arguments, every script file the connector runs, and the environment names it asks for.
+/// These are the adversarial directions the review named: a script edited after the approval, changed
+/// arguments, a launch running a script the approval does not name, and a missing approval.
+#[cfg(test)]
+mod vault_approval_tests {
+    use super::{approval_problem, approval_text, is_script_path, sha256_hex};
+    use serde_json::{json, Value};
+
+    fn scratch(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wa-vault-approval-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("scratch script");
+        path
+    }
+
+    fn spec(program: &str, args: &[String]) -> wa_operation::Spec {
+        wa_operation::Spec::command(program.to_string(), args.to_vec())
+    }
+
+    // The ONE canonical text: a newline, a space or a tab inside a field cannot forge a line, and the
+    // same fixture hashes to the same digest on both sides (see the Lua pin in
+    // scripts/test-mcp-vault-approval.lua).
+    #[test]
+    fn the_canonical_text_escapes_fields_and_matches_the_lua_side() {
+        let text = approval_text(
+            "/usr/bin/node",
+            &["/home/agent/scripts/fixture.mjs".into(), "--token".into(), "a b".into()],
+            &[("/home/agent/scripts/fixture.mjs".into(), "aa".repeat(32)),
+              ("/home/agent/scripts/lib/other.mjs".into(), "bb".repeat(32))],
+            &["FIXTURE_TOKEN".into(), "SECOND_ONE".into()],
+        );
+        assert!(text.starts_with("mcp-vault-approval/v1\nprogram /usr/bin/node\n"), "{text}");
+        assert!(text.contains("\narg a%20b\n"), "a space is escaped, not a separator: {text}");
+        assert_eq!(sha256_hex(text.as_bytes()),
+            "0423d0cb712e6441592ef2a8d04f8179ba03d7d797bfb233b3f07939ae450da8",
+            "the digest the Lua side pins for the same fixture");
+    }
+
+    #[test]
+    fn an_approved_launch_is_accepted_and_an_edited_script_is_not() {
+        let script = scratch("plain.mjs", "export const ok = 1;\n");
+        let program = "/usr/bin/node".to_string();
+        let client = scratch("client.mjs", "import './plain.mjs';\n");
+        let args = vec![client.to_string_lossy().to_string(), "--request-file".into(), "/tmp/request.json".into()];
+        let approval = |files: &[&std::path::Path]| {
+            let list: Vec<(String, String)> = files.iter().map(|path| {
+                let body = std::fs::read(path).expect("a script the approval covers");
+                (path.to_string_lossy().to_string(), sha256_hex(&body))
+            }).collect();
+            let digest = sha256_hex(approval_text(&program, &args, &list, &["TOKEN".to_string()]).as_bytes());
+            json!({"sha256": digest, "program": program,
+                "args": args, "files": files.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+                "vault": ["TOKEN"]})
+        };
+        let ok: Value = approval(&[&client, &script]);
+        assert!(approval_problem(&ok, &spec("/usr/bin/node", &args)).is_ok(),
+            "what the operator approved launches: {:?}", approval_problem(&ok, &spec("/usr/bin/node", &args)));
+
+        // The attack the review measured: the script of an approved connector is rewritten afterwards.
+        std::fs::write(&script, "export const ok = 2; // replaced after the approval\n").expect("rewrite");
+        let refused = approval_problem(&ok, &spec("/usr/bin/node", &args)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_mismatch:"), "{refused}");
+        assert!(refused.contains("/mcp <id> probe"), "the refusal says how to approve it again: {refused}");
+
+        // Approving the OLD bytes again still does not help now: the digest is over what is on disk.
+        std::fs::write(&script, "export const ok = 1;\n").expect("restore");
+        assert!(approval_problem(&ok, &spec("/usr/bin/node", &args)).is_ok(), "the approved bytes are back");
+        // ARGUMENTS are in the digest too: an approval minted for one command line does not cover
+        // another. (The connector's own arguments travel in the request file, not on this launch's
+        // command line, so here the record is what names them - the console gate is what compares a
+        // LIVE definition against the recorded one, `mcp_vault_approval_stale`.)
+        let mut other = ok.clone();
+        let mut moved: Vec<String> = args.clone();
+        moved.push("--extra".into());
+        other["args"] = json!(moved);
+        let refused = approval_problem(&other, &spec("/usr/bin/node", &args)).unwrap_err();
+        assert!(refused.starts_with("vault_approval_mismatch:"), "{refused}");
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&client);
+    }
+
+    #[test]
+    fn a_launch_running_a_script_the_approval_does_not_name_is_refused() {
+        let client = scratch("uncovered-client.mjs", "export const c = 1;\n");
+        let smuggled = scratch("smuggled.sh", "echo value\n");
+        let program = "/usr/bin/node".to_string();
+        let approved_args = vec![client.to_string_lossy().to_string()];
+        let list = vec![(client.to_string_lossy().to_string(), sha256_hex(&std::fs::read(&client).unwrap()))];
+        let digest = sha256_hex(approval_text(&program, &approved_args, &list, &[]).as_bytes());
+        let ok = json!({"sha256": digest, "program": program, "args": approved_args,
+            "files": [client.to_string_lossy().to_string()], "vault": []});
+        let running = spec("/usr/bin/node",
+            &[client.to_string_lossy().to_string(), smuggled.to_string_lossy().to_string()]);
+        let refused = approval_problem(&ok, &running).unwrap_err();
+        assert!(refused.starts_with("vault_approval_script_not_covered:"), "{refused}");
+        assert!(refused.contains("smuggled.sh"), "{refused}");
+        let _ = std::fs::remove_file(&client);
+        let _ = std::fs::remove_file(&smuggled);
+    }
+
+    #[test]
+    fn a_missing_approval_or_a_missing_script_reads_nothing() {
+        let running = spec("/usr/bin/node", &["/tmp/client.mjs".to_string()]);
+        for empty in [Value::Null, json!({}), json!({"sha256": "  "})] {
+            let refused = approval_problem(&empty, &running).unwrap_err();
+            assert!(refused.starts_with("vault_approval_required:"), "{refused}");
+        }
+        let vanished = json!({"sha256": "00".repeat(32), "program": "/usr/bin/node", "args": [],
+            "files": ["/nonexistent/wasm-agent/connector.mjs"], "vault": []});
+        let refused = approval_problem(&vanished, &spec("/usr/bin/node", &[])).unwrap_err();
+        assert!(refused.starts_with("vault_approval_unreadable:/nonexistent/wasm-agent/connector.mjs"), "{refused}");
+    }
+
+    #[test]
+    fn only_absolute_script_paths_are_covered_by_the_launch_cross_check() {
+        assert!(is_script_path("/home/agent/scripts/mcp-client.mjs"));
+        assert!(is_script_path("C:\\Users\\agent\\scripts\\connector.py"));
+        assert!(!is_script_path("mcp-client.mjs"), "a bare name is resolved by PATH, not by us");
+        assert!(!is_script_path("/tmp/request.json"), "a request file is not a script");
+        assert!(!is_script_path("--request-file"));
+        assert!(!is_script_path("/usr/bin/node"), "the platform binary is not the connector's script");
     }
 }

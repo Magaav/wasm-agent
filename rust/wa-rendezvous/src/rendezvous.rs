@@ -897,6 +897,25 @@ fn env_operators() -> Vec<String> {
         .filter(|s| !s.is_empty()).map(str::to_string).collect()
 }
 
+/// The administrators' public keys as the ENVIRONMENT names them: `WASM_AGENT_NETWORK_ADMIN_KEYS`, a
+/// comma-separated list of `node_id=public_key` pairs. A stored retirement is verified against these and
+/// not against the registry's own `nodes` table (which is what `public_key_of` reads): the stored row and
+/// the key that approves it used to come from the same database, so anyone able to write the database
+/// could retire an environment operator by putting their own key under an administrator's id. The
+/// environment is the root of trust for the operator list; it is the root of trust for their keys too.
+///
+/// A node whose keys are not here keeps every stored retirement unapplied - the safe direction, because
+/// the whole point of the proof is that a row alone retires nobody.
+fn env_admin_keys() -> Vec<(String, String)> {
+    std::env::var("WASM_AGENT_NETWORK_ADMIN_KEYS").unwrap_or_default()
+        .split(',').filter_map(|pair| {
+            let (id, key) = pair.split_once('=')?;
+            let (id, key) = (id.trim(), key.trim());
+            if id.is_empty() || key.is_empty() { return None; }
+            Some((id.to_string(), key.to_lowercase()))
+        }).collect()
+}
+
 /// The message a second administrator signs to approve one retirement. It names the target, the
 /// administrator that asked, the request nonce and the approval's own timestamp: an approval cannot be
 /// replayed for another target, another caller, or after its window.
@@ -958,7 +977,8 @@ fn last_operator_problem(environment: &[String], retired: &[String], target: &st
 /// A stored retirement, and whether its own proof still holds. A row without a verifiable approval is
 /// ignored: the database alone retires nothing, so a leaked or edited registry cannot take an
 /// environment operator out of the list.
-fn stored_retirement_holds(connection: &Connection, target: &str, retired_by: &str, approver: &str, approval: &str) -> bool {
+fn stored_retirement_holds(target: &str, retired_by: &str, approver: &str, approval: &str,
+                           retired_at: i64, environment: &[String], keys: &[(String, String)]) -> bool {
     if approver.is_empty() || approval.is_empty() { return false; }
     let Ok(value) = serde_json::from_str::<Value>(approval) else { return false };
     if value["node_id"].as_str().unwrap_or_default() != approver { return false; }
@@ -967,8 +987,15 @@ fn stored_retirement_holds(connection: &Connection, target: &str, retired_by: &s
     let ts = value["ts"].as_i64().unwrap_or(0);
     let signature = value["signature"].as_str().unwrap_or_default();
     if nonce.is_empty() || signature.is_empty() { return false; }
-    let Some(key) = public_key_of(connection, approver) else { return false };
-    node::verify(&key, &retirement_message(target, retired_by, nonce, ts), signature)
+    // Three facts come from the ENVIRONMENT, never from the row's own database (review, 18/11): the
+    // approver must be one of the environment's administrators, its public key must be the one the
+    // environment names for it, and the approval must be contemporary with the retirement it approved -
+    // inside the window `approval_problem` enforces when the retirement is MADE, measured against the
+    // row's own `retired_at`. A signature over a stored row otherwise outlives every decision around it.
+    if !environment.iter().any(|id| id == approver) { return false; }
+    let Some(key) = keys.iter().find(|(id, _)| id == approver).map(|(_, key)| key.as_str()) else { return false };
+    if (ts - retired_at).abs() > APPROVAL_WINDOW_SECONDS { return false; }
+    node::verify(key, &retirement_message(target, retired_by, nonce, ts), signature)
 }
 
 fn load_runtime_operators(connection: &Connection) {
@@ -988,13 +1015,18 @@ fn load_runtime_operators(connection: &Connection) {
     }
     // Only a retirement that carries a verifiable second signature is applied. A row without one - a
     // registry edited by hand, or one written before the proof existed - retires nobody.
+    // The proof is checked against the ENVIRONMENT's administrators and their keys, so a row's own
+    // database cannot vouch for itself (review, 18/11).
+    let environment = env_operators();
+    let keys = env_admin_keys();
     let retired: Vec<String> = connection
-        .prepare("SELECT node_id, retired_by, approver, approval FROM retired_operators")
+        .prepare("SELECT node_id, retired_by, approver, approval, retired_at FROM retired_operators")
         .and_then(|mut statement| {
             let rows = statement.query_map([], |row| Ok((
                 row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<i64>>(4)?.unwrap_or_default(),
             )))?;
             let mut kept = Vec::new();
             for row in rows.flatten() { kept.push(row); }
@@ -1002,9 +1034,19 @@ fn load_runtime_operators(connection: &Connection) {
         })
         .unwrap_or_default()
         .into_iter()
-        .filter(|(target, retired_by, approver, approval)| stored_retirement_holds(connection, target, retired_by, approver, approval))
-        .map(|(target, _, _, _)| target)
+        .filter(|(target, retired_by, approver, approval, retired_at)| stored_retirement_holds(
+            target, retired_by, approver, approval, *retired_at, &environment, &keys))
+        .map(|(target, _, _, _, _)| target)
         .collect();
+    if keys.is_empty() {
+        // The operator needs to know why a retirement it already recorded is not being applied: a
+        // stored approval is verified against the environment's keys and against nothing else.
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM retired_operators", [], |row| row.get(0)).unwrap_or(0);
+        if rows > 0 {
+            eprintln!("[rendezvous] WASM_AGENT_NETWORK_ADMIN_KEYS is empty: {} stored retirement(s) cannot be verified and are NOT applied", rows);
+        }
+    }
     if let Ok(mut list) = RETIRED_OPERATORS.lock() { *list = retired; }
 }
 fn body_hash(bytes: &[u8]) -> String {
@@ -1370,24 +1412,85 @@ mod retirement_tests {
             "c is still standing, so the list is not empty");
     }
 
+    /// A real key pair, because a signature is the only thing that can make a stored row count.
+    struct Signer { key: ring::signature::Ed25519KeyPair }
+    impl Signer {
+        fn new() -> Self {
+            use ring::signature::Ed25519KeyPair;
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("a fresh key");
+            Self { key: Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("a usable key") }
+        }
+        fn public(&self) -> String { use ring::signature::KeyPair; node::hex(self.key.public_key().as_ref()) }
+        fn approval(&self, approver: &str, target: &str, caller: &str, nonce: &str, ts: i64) -> String {
+            let signature = node::hex(self.key.sign(retirement_message(target, caller, nonce, ts).as_bytes()).as_ref());
+            json!({"node_id": approver, "ts": ts, "signature": signature, "caller": caller, "nonce": nonce}).to_string()
+        }
+    }
+
+    fn stored(signer: &Signer, target: &str, caller: &str, environment: &[String], keys: &[(String, String)],
+              at: i64, ts: i64) -> bool {
+        let approval = signer.approval("approver", target, caller, "nonce-1", ts);
+        stored_retirement_holds(target, caller, "approver", &approval, at, environment, keys)
+    }
+
     #[test]
     fn a_stored_retirement_without_its_proof_is_not_applied() {
-        let connection = rusqlite::Connection::open_in_memory().expect("a database in memory");
-        connection.execute_batch("CREATE TABLE nodes (node_id TEXT PRIMARY KEY, public_key TEXT)").unwrap();
+        let signer = &Signer::new();
+        let environment = ids(&["approver", "operator-a"]);
+        let keys = vec![("approver".to_string(), signer.public())];
+        let at = 1_762_000_000;
         // No approval at all (a row written by hand, or one from before the proof existed).
-        assert!(!stored_retirement_holds(&connection, "a", "b", "", ""));
-        // An approval naming a key the registry does not know.
-        assert!(!stored_retirement_holds(&connection, "a", "b", "c",
-            r#"{"node_id":"c","ts":1,"signature":"00","caller":"b","nonce":"n"}"#));
-        // A registered approver with a signature that is not one.
-        connection.execute("INSERT INTO nodes VALUES ('c','11'.repeat(32))", []).ok();
-        let key = "11".repeat(32);
-        connection.execute("INSERT OR REPLACE INTO nodes VALUES ('c', ?1)", rusqlite::params![key]).ok();
-        assert!(!stored_retirement_holds(&connection, "a", "b", "c",
-            r#"{"node_id":"c","ts":1,"signature":"00ff","caller":"b","nonce":"n"}"#),
+        assert!(!stored_retirement_holds("operator-a", "caller", "", "", at, &environment, &keys));
+        assert!(!stored_retirement_holds("operator-a", "caller", "approver", "", at, &environment, &keys));
+        // An approval with a signature that is not one.
+        let not_a_signature = r#"{"node_id":"approver","ts":1762000000,"signature":"00ff","caller":"caller","nonce":"n"}"#;
+        assert!(!stored_retirement_holds("operator-a", "caller", "approver", not_a_signature, at, &environment, &keys),
             "a signature that does not verify retires nobody");
-        // An approval whose stored caller does not match the row it sits in.
-        assert!(!stored_retirement_holds(&connection, "a", "other", "c",
-            r#"{"node_id":"c","ts":1,"signature":"00ff","caller":"b","nonce":"n"}"#));
+        // An approval whose stored caller does not match the row it sits in: the signature covers the
+        // caller, so one row's approval cannot be moved onto another row.
+        let for_caller = signer.approval("approver", "operator-a", "caller", "nonce-1", at);
+        assert!(!stored_retirement_holds("operator-a", "somebody-else", "approver", &for_caller, at, &environment, &keys),
+            "the signature names the caller, so one row cannot be moved to another");
+        // The genuine article.
+        assert!(stored(signer, "operator-a", "caller", &environment, &keys, at, at),
+            "a valid second signature is applied");
+    }
+
+    // The MEDIUM the review measured (18/11): the approver came from whatever the row said, with a key
+    // read from the same database - so a database write retired an environment operator.
+    #[test]
+    fn an_approver_the_environment_does_not_name_retires_nobody_whatever_the_database_says() {
+        let signer = &Signer::new();
+        let at = 1_762_000_000;
+        let saved = vec![("approver".to_string(), signer.public())];
+        // The right key and a valid signature, but the approver is not an environment administrator.
+        let environment = ids(&["approver-was-removed", "operator-a"]);
+        assert!(!stored(signer, "operator-a", "caller", &environment, &saved, at, at),
+            "an approver outside WASM_AGENT_NETWORK_ADMINS cannot retire an environment operator");
+        // The key the environment names is the only one that counts: a key the DATABASE holds for the
+        // same id (an attacker who could write the nodes table) proves nothing about who holds the
+        // private half.
+        let environment = ids(&["approver", "operator-a"]);
+        assert!(!stored(signer, "operator-a", "caller", &environment, &[], at, at),
+            "a key the environment does not name is not a key");
+        let stranger = vec![("approver".to_string(), "11".repeat(32))];
+        assert!(!stored(signer, "operator-a", "caller", &environment, &stranger, at, at),
+            "another key under the administrator's id does not verify this signature");
+    }
+
+    // The window: an approval is contemporary with the retirement it approved, not good forever.
+    #[test]
+    fn an_approval_outside_the_retirement_window_is_not_applied() {
+        let signer = &Signer::new();
+        let environment = ids(&["approver", "operator-a"]);
+        let keys = vec![("approver".to_string(), signer.public())];
+        let at = 1_762_000_000;
+        assert!(stored(signer, "operator-a", "caller", &environment, &keys, at, at - APPROVAL_WINDOW_SECONDS),
+            "an approval made just before the retirement is inside the window");
+        assert!(!stored(signer, "operator-a", "caller", &environment, &keys, at, at - APPROVAL_WINDOW_SECONDS - 1),
+            "an old signature over the same words is not this retirement's approval");
+        assert!(!stored(signer, "operator-a", "caller", &environment, &keys, at, at + APPROVAL_WINDOW_SECONDS + 1),
+            "and neither is one minted long after it");
     }
 }

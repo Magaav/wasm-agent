@@ -83,7 +83,9 @@ assert(host.write_file(install .. "/installed.txt",
   .. "binary_source=prebuilt-release\nbinary_release=node-111111111111\nvia=deploy.sh\n"),
   "cli notice: could not write the install record")
 
-local NOTICE = "Update available! Run: wa update"
+-- The sentence `update_banner` owns (M.LINE), with the sha of the fixture release below: one
+-- definition, and this test reads the same one the CLI prints.
+local NOTICE = "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal"
 
 -- ---- (a) a real `wa chat`, from outside ----------------------------------------------------------
 -- The child is run from the scratch directory rather than from the tree: `update.lua`'s "buildable
@@ -187,9 +189,9 @@ else
       binary_release = "node-111111111111" })
     ok(prebuilt ~= nil and banner.compare(prebuilt, list, nil, true) == "older",
       "and the install record the child was given is behind it, so a notice really was due")
-    ok(string.format(banner.LINE, list[1].sha12) == NOTICE, "in the sentence the test then looks for")
+    ok(banner.line(list[1].sha12) == NOTICE, "in the sentence the test then looks for")
     -- The bug, from outside the process: on the tree before #106 this line was a `print`, and it
-    -- appears in the capture (`Update available (cccccccccccc): run wa update or /update`). After it,
+    -- appears in the capture (`Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal`). After it,
     -- the notice is the footer's session row and nothing of it reaches the transcript.
     ok(not has(child.stdout, "Update available"), "the started CLI prints no notice into its transcript")
     ok(not has(child.stdout, "Run: wa update"), "in either wording: nothing about an update")

@@ -267,6 +267,17 @@ function M.import_here(args, caller)
   for _, file in ipairs(mcp.RUNTIME) do shipped[file] = true end
   local files = type(args.files) == 'table' and args.files or {}
   if #files > SHARE_FILES_MAX then return { ok = false, error = 'share_too_many_files' } end
+  -- replace is the receiving operator's decision, and it is checked HERE, before anything else looks at
+  -- the files: it used to be checked inside the per-file loop, so `files: []` skipped it entirely and
+  -- reached the connector-id branch below - overwriting this node's definition of a connector (a peer
+  -- replacing what an enabled connector runs) with no file to check and nobody's approval (18/11,
+  -- review). One condition, one place, whatever the file list holds.
+  if args.replace and not (type(caller) == 'table' and caller.operator == true) then
+    return { ok = false, error = 'share_replace_requires_operator',
+      note = 'replace overwrites what this node already has (a definition, or a script it runs), so it is a '
+        .. 'decision for the operator here: remove the connector (/mcp ' .. definition.id .. ' off, then '
+        .. 'remove) and let it be shared again, or share it under another id' }
+  end
   -- Which scripts does a REGISTERED connector already run? A share may add scripts; it may never take
   -- over one another connector runs (18/11: a peer's import with replace: true rewrote the script of a
   -- connector this node had already enabled, so the enabled connector ran the peer's code), and replace
@@ -300,11 +311,6 @@ function M.import_here(args, caller)
     if not content or #content > SHARE_FILE_MAX or host.sha256(content) ~= file.sha256 then return { ok = false, error = 'share_file_unverified', name = name } end
     local used = in_use(name)
     if used then return used end
-    if args.replace and not (type(caller) == 'table' and caller.operator == true) then
-      return { ok = false, error = 'share_replace_requires_operator', name = name,
-        note = 'replace overwrites a script this node already has, so it is a decision for the operator here: '
-          .. 'remove the connector (/mcp ' .. definition.id .. ' off, then remove) and let it be shared again' }
-    end
     local target = directory .. '/' .. name
     local existing = host.read_file(target)
     if existing and existing ~= content and not args.replace then

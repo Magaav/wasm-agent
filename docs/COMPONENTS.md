@@ -341,7 +341,7 @@ actually install, in the two channels the updater has. A **tree** install compar
 `commit=` with the tree's local `origin/main` (a build), and never reads a release feed. A
 **no-tree release** install picks the newest `node-<sha12>` release that carries this machine's
 manifest, node and sentinel assets, so an aarch64-only release is never offered to x86_64. It then
-shows `Update available (<sha12>): run wa update or /update` in the CLI footer, once at session
+shows `Update available (<sha12>) — /update here, or wa update in a terminal` in the CLI footer, once at session
 start, and as one yellow line above the composer footer plus a topbar badge in the window (one line,
 in the layout - not a toast over the text area, and never hidden by `ui-resting`). It is not the
 deploy and it changes nothing: no fetch, no merge, one cached feed read per fifteen minutes on the

@@ -465,8 +465,18 @@ impl Editor {
         if notice.is_empty() { return String::new(); }
         let text = clip_cells(notice, self.width);
         if std::env::var_os("NO_COLOR").is_some() { return text; }
-        // The command the reader types is bold, the way Claude Code words it: `Run: **wa update**`.
-        let text = text.replacen("wa update", &format!("\x1b[1mwa update\x1b[22m{NOTICE_ROW}"), 1);
+        // The commands in the sentence are bold - BOTH of them (Victor, 18/11): the notice reads
+        // `Update available (<sha>) — /update here, or wa update in a terminal`, and the two things a
+        // reader can do with it are those two. The words are `update_banner.COMMANDS`' list on the Lua
+        // side, and this is the same emphasis in the renderer that owns the row when the native editor
+        // does (a plain row, one colour, two bold words).
+        let mut text = text.to_string();
+        for word in ["/update", "wa update"] {
+            if let Some(at) = text.find(word) {
+                let end = at + word.len();
+                text = format!("{}\x1b[1m{word}\x1b[22m{}", &text[..at], &text[end..]);
+            }
+        }
         format!("{NOTICE_ROW}{text}{RESET}")
     }
     /// The output region's last row: everything the bottom furniture draws is above it. The run's
@@ -1641,7 +1651,9 @@ mod tests {
     // session notices; the build loader replaces the notice on that same line; empty takes no line at
     // all. These are the twin of `lua/core/cli_view.lua`'s render tests (`scripts/test-cli-view.lua`)
     // and of the `build_status` ones: three renderers, one layout rule.
-    const SESSION_NOTICE: &str = "Update available (cccccccccccc): run wa update or /update";
+    // The sentence `lua/core/update_banner.lua` owns (M.LINE), with a sha in it.
+    const SESSION_NOTICE: &str =
+        "Update available (cccccccccccc) — /update here, or wa update in a terminal";
 
     #[test]
     fn no_notice_is_no_row_and_the_box_keeps_it() {
@@ -1656,7 +1668,9 @@ mod tests {
 
     #[test]
     fn the_notice_is_one_yellow_row_below_the_text_area_and_above_the_status_bar() {
-        let mut e = Editor::default(); e.row = 29; e.width = 60; e.height = 3;
+        // Wide enough for the whole sentence: at 60 columns the second command is clipped away, and
+        // this test is about the emphasis, not the clip (a_narrow_row_truncates_and_never_wraps).
+        let mut e = Editor::default(); e.row = 29; e.width = 90; e.height = 3;
         e.session_notice = SESSION_NOTICE.into();
         assert_eq!((e.bottom(), e.session_row(), e.out_bottom()), (28, 29, 25),
             "the row under the box, the box one row higher, the chat one row shorter");
@@ -1664,6 +1678,11 @@ mod tests {
         assert!(row.starts_with(crate::build_status::NOTICE), "painted the warning yellow: {row:?}");
         assert!(row.ends_with("\x1b[0m"));
         assert!(crate::selection::plain(&row) == SESSION_NOTICE, "the sentence is unchanged");
+        // Both commands are bold, and nothing else is (Victor, 18/11): `/update` here, `wa update` in a
+        // terminal. The list is `update_banner.COMMANDS` on the Lua side; this is the same emphasis.
+        assert!(row.contains("\x1b[1m/update\x1b[22m"), "the /update word is bold: {row:?}");
+        assert!(row.contains("\x1b[1mwa update\x1b[22m"), "and so is wa update: {row:?}");
+        assert_eq!(row.matches("\x1b[1m").count(), 2, "two bold words, not three: {row:?}");
         let frame = e.render();
         assert!(frame.contains(&format!("\x1b[29;1H\x1b[2K{row}")), "drawn on the row under the box");
         assert_eq!(e.footer_row(), 30, "with the status bar still on the last row");

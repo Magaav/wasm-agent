@@ -21,8 +21,9 @@ local skillslib = dofile("lua/core/skills.lua")
 local redact = dofile("lua/core/redact.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local updater = dofile("lua/core/update.lua")
--- The "Update available (<sha>): run wa update or /update" banner: the installed commit against the
--- newest `node-<sha12>` release, cached for fifteen minutes (`lua/core/update_banner.lua`).
+-- The update banner: the installed commit against the newest `node-<sha12>` release, cached for
+-- fifteen minutes. `lua/core/update_banner.lua` owns the sentence (`M.LINE`) and the two words in it
+-- that are bolded (`M.COMMANDS`); nothing here restates either.
 local update_banner = dofile("lua/core/update_banner.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
 -- A module is one directory under `modules/`, and this is the route that lists what is on disk and
@@ -590,8 +591,10 @@ function wa_operation(body, session)
   if args.action == "start" then return json.encode({error="start_requires_tool"}) end
   if args.action == "await" then return json.encode({error="await_requires_tool; use bounded wait on the control route"}) end
   args.owner = user.id
-  -- A vault entry reaches a child only from the kernel's own MCP launch, never through this route.
+  -- A vault entry reaches a child only from the kernel's own MCP launch, never through this route -
+  -- and neither does the approval that accompanies it (docs/VAULT.md).
   args.vault_env = nil
+  args.vault_approval = nil
   return host.operation(args.action or "list", json.encode(args))
 end
 

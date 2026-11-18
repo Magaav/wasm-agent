@@ -822,9 +822,12 @@ editor_view:event({ type = "tool", name = "bash", arguments = { command = "true"
 local session_total = { prompt = 120400, completion = 1000, cached = 90540 }
 editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
+-- Victor, 18/11: the delta AND the session's input total, right after it ("only delta is not
+-- enough"). 27.2k was added; 120.4k is what the session has sent in total.
 ok(has(running, "\240\159\145\1636\194\183") and not has(running, "\226\154\146\239\184\143")
-  and has(running, "\206\14827.2k \226\134\1471.0k"),
-  "the status line shows the step, the run's tools, what it added to the context and its output")
+  and has(running, "\206\14827.2k \226\134\145120.4k \226\134\1471.0k"),
+  "the status line shows the step, the run's tools, what it added to the context, the session's"
+    .. " input total and its output")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
 ok(summary and has(summary, "\226\134\1871 ") and has(summary, "\226\151\13575.20%"),
@@ -845,8 +848,8 @@ session_total.prompt = session_total.prompt + 30000
 session_total.completion = session_total.completion + 450
 editor_view:event({ type = "usage", total = session_total, prompt = 30000 })
 local second = table.concat(editor_out, "", second_mark)
-ok(has(second, "\206\1482.8k \226\134\147450"),
-  "a later run counts its own context growth and output, not zero")
+ok(has(second, "\206\1482.8k \226\134\145150.4k \226\134\147450"),
+  "a later run counts its own context growth, the session's input total and its own output, not zero")
 editor_view:answered("ok")
 editor_view:screen_off()
 host.input_editor = real_editor
@@ -977,7 +980,7 @@ do
   eq(boxed_view.shown_cols, 0, "so the next frame pads from column zero")
 
   -- The session-status-content line keeps its own row, above the status line, and is erased there.
-  local notice = "Update available (cccccccccccc): run wa update or /update"
+  local notice = "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal"
   boxed_view.session_notice = notice
   local notice_mark = #boxed_written + 1
   boxed_view:event({ type = "round", n = 11 })
@@ -1163,7 +1166,7 @@ do
     .. " border has that row")
   ok(box.status < box.input_top, "the run-status line stays above the box, where it was")
   ok(box.region < box.input_top, "so the output region ends above the whole bottom furniture")
-  local notice = "Update available (cccccccccccc): run wa update or /update"
+  local notice = "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal"
   -- A framed 24-row console, set up the way `prompt`/`paint` do it, with everything after the setup
   -- readable on its own.
   local function framed(extra)
@@ -1325,7 +1328,7 @@ end
 -- INSIDE that call's block, under its heading, rewritten in place while the host's ticker is the
 -- only painter awake (`wa_term::transcript::Transcript::live`, pinned in that crate's own tests).
 do
-  local notice = "Update available (cccccccccccc): run wa update or /update"
+  local notice = "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal"
   local saved = { host.transcript_write, host.transcript_block, host.transcript_live, host.transcript_head }
   local fake = fake_transcript()
   host.transcript_block, host.transcript_write = fake.block, fake.write
@@ -1715,6 +1718,60 @@ do
   host.transcript_write, host.transcript_block = saved[1], saved[2]
   host.transcript_live, host.transcript_head = saved[3], saved[4]
   host.transcript_copy = saved[5]
+end
+
+-- ---- the update sentence: ONE definition, and the words it asks you to type are bold ---------
+-- Victor, 18/11: `Update available (<sha>) \226\128\148 /update here, or wa update in a terminal`, with
+-- /update and wa update BOLD, on the same warning-yellow line. `update_banner` owns the sentence AND the
+-- list of bold words; this row and the native editor both read it, so the two cannot drift.
+do
+  local banner = dofile("lua/core/update_banner.lua")
+  eq(banner.line("abc123456789"),
+    "Update available (abc123456789) \226\128\148 /update here, or wa update in a terminal",
+    "the sentence is the one Victor approved, with the sha in it")
+  eq(#banner.COMMANDS, 2, "and it names the two commands a reader can type")
+  local shown = function() return banner.session_content({ notice = banner.line("abc123456789") }) end
+  local view = view_lib.new({ live = true, limit = 100 })
+  view.session_status = shown
+  local line = view:session_line()
+  local bold = view_lib.style("bold")
+  ok(has(line, bold .. "/update" .. "\27[22m"), "the CLI's row bolds /update")
+  ok(has(line, bold .. "wa update" .. "\27[22m"), "and wa update")
+  eq(visible(line), "Update available (abc123456789) \226\128\148 /update here, or wa update in a terminal",
+    "and the text between the bold words is the sentence itself")
+  ok(has(line, view_lib.style("warning")), "in the notice's warning yellow, as before")
+  -- A captured transcript stays plain: bold is a rendering decision, not a fact.
+  local plain = view_lib.new({ live = false, limit = 100 })
+  plain.session_status = shown
+  eq(visible(plain:session_line()),
+    "Update available (abc123456789) \226\128\148 /update here, or wa update in a terminal",
+    "a transcript gets the same words, uncoloured and unbolded")
+  -- A line the view is handed as plain text (an older host's notice) is unchanged, un-bolded.
+  local legacy = view_lib.new({ live = true, limit = 100 })
+  legacy.session_notice = "Update available (abc123456789) \226\128\148 /update here, or wa update in a terminal"
+  ok(not has(legacy:session_line(), bold), "a notice with no command list is drawn as it came")
+end
+
+-- ---- the run line: what the run ADDED, and the session's input TOTAL --------------------------
+-- Victor, 18/11: "only delta is not enough" - keep the delta from 727a99eb and put the input-token
+-- total right after it. Delta is what this run added to the context; the up arrow is the session's
+-- input total, the same number the footer prints as a sum.
+do
+  local view = view_lib.new({ live = true, limit = 100 })
+  view.turn = { rounds = 2, context = 12000, started = 0 }
+  view.context = 24300
+  view.totals = { prompt = 4600000, completion = 310 }
+  eq(view:run_numbers("5s", "1:51"),
+    "\240\159\145\1632\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \226\151\1831:51",
+    "the run line: steps, the delta added, the input total, output, clock")
+  -- A run that has added nothing yet still says both numbers: nothing added, the total it sent.
+  local fresh = view_lib.new({ live = true, limit = 100 })
+  fresh.turn = { rounds = 1, context = 9000 }
+  fresh.context = 9000
+  fresh.totals = { prompt = 9000, completion = 30 }
+  local first = fresh:run_numbers("0s", "0:01")
+  ok(has(first, "\206\1480 ") and has(first, "\226\134\1459.0k"),
+    "a first step says nothing added and the total it sent: " .. first)
 end
 
 if failed > 0 then

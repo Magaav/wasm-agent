@@ -216,8 +216,8 @@ ok(view_lib.session_role("tool") ~= "borderAccent" and view_lib.session_role("st
 
 -- The notice owns the row, and a loader outranks the notice - the same precedence as before, with
 -- the call no longer among the claimants.
-view.session_notice = "Update available (cccccccccccc): run wa update or /update"
-eq((view:session_content() or {}).text, "Update available (cccccccccccc): run wa update or /update",
+view.session_notice = "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal"
+eq((view:session_content() or {}).text, "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal",
   "the update notice owns the row")
 view.session_status = function() return { text = "\u{27F3} building wasm-agent compiling serde", kind = "building" } end
 eq((view:session_content() or {}).kind, "building", "and a build loader replaces it")

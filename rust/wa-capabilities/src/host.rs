@@ -4293,10 +4293,29 @@ pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
 /// them, so a huge drop is refused rather than sent.
 const IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
-/// The directories an attached image may come from: this node's home (which is WASM_AGENT_HOME when
-/// set), the user's home, the working directory and the temporary directory. Anything else is
-/// outside, and a symlink is followed before the question is asked - which is the point, since a link
-/// is exactly how a path that looks local reads a private file.
+/// The one directory a dropped image may come from when it is not inside the session's own folders:
+/// `WA_IMAGE_DROP_DIR` when the operator names one, else `<state>/attachments` (`docs/ONEROOT.md` - one
+/// root everything an agent creates lives under, so one `wa clean` covers it). It is the explicit place
+/// to drop a screenshot the agent should attach.
+fn image_drop_dir_with(configured: Option<&str>) -> std::path::PathBuf {
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => wa_host_support::paths::state_root().join("attachments"),
+    }
+}
+
+fn image_drop_dir() -> std::path::PathBuf {
+    image_drop_dir_with(std::env::var("WA_IMAGE_DROP_DIR").ok().as_deref())
+}
+
+/// The directories an attached image may come from: the SESSION's own folders and one explicit drop
+/// directory. It used to be all of HOME plus the temporary directory, which is every file the user owns
+/// and every scratch file on the machine - a dropped path was a way to read any of them into a message
+/// (review, 18/11). What a session actually needs is where it was started (the tree it works in, and a
+/// screenshot of it), the node's own state root (scratch and tool-results), and the drop directory.
+///
+/// A symlink is still followed before the question is asked - that is the point of resolving first,
+/// since a link is exactly how a path that looks local reads a private file.
 fn image_roots() -> Vec<std::path::PathBuf> {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     let mut add = |root: String| {
@@ -4305,19 +4324,21 @@ fn image_roots() -> Vec<std::path::PathBuf> {
         let resolved = std::fs::canonicalize(&path).unwrap_or(path);
         if !roots.contains(&resolved) { roots.push(resolved); }
     };
-    add(wa_host_support::paths::resolve_home());
-    add(std::env::var("HOME").unwrap_or_default());
     if let Ok(cwd) = std::env::current_dir() { add(cwd.to_string_lossy().to_string()); }
-    add(std::env::temp_dir().to_string_lossy().to_string());
+    add(wa_host_support::paths::state_root().to_string_lossy().to_string());
+    add(image_drop_dir().to_string_lossy().to_string());
     roots
 }
 
-/// The path an attachment may read, or None. Symlinks are resolved first (so a link out of an
-/// allowed directory is refused by where it LANDS, not by where it appears to be), then the resolved
-/// path must sit inside one of [image_roots].
-fn attachment_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+/// The path an attachment may read, or None, inside `roots`. Symlinks are resolved first (so a link
+/// out of an allowed directory is refused by where it LANDS, not by where it appears to be).
+fn attachment_path_in(path: &std::path::Path, roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
     let resolved = std::fs::canonicalize(path).ok()?;
-    if image_roots().iter().any(|root| resolved.starts_with(root)) { Some(resolved) } else { None }
+    if roots.iter().any(|root| resolved.starts_with(root)) { Some(resolved) } else { None }
+}
+
+fn attachment_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    attachment_path_in(path, &image_roots())
 }
 
 /// A pasted (or dropped) single path to an image file: its mime and bytes, or None. Quotes,
@@ -4328,10 +4349,16 @@ fn attachment_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
 /// JPEG, WebP or GIF ([sniff_image]). The last one is what the extension used to stand for, and an
 /// extension is only a name.
 fn dropped_image(text: &str) -> Option<(String, Vec<u8>)> {
+    dropped_image_in(text, &image_roots())
+}
+
+/// The same, with the allowed directories injected: the tests need a directory they created, and the
+/// launch path needs the real list. One reader, one set of refusals.
+fn dropped_image_in(text: &str, roots: &[std::path::PathBuf]) -> Option<(String, Vec<u8>)> {
     let mut path = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
     if path.contains('\n') || path.is_empty() { return None; }
     if let Some(rest) = path.strip_prefix("file://") { path = rest.replace("%20", " "); }
-    let resolved = attachment_path(std::path::Path::new(&path))?;
+    let resolved = attachment_path_in(std::path::Path::new(&path), roots)?;
     let meta = std::fs::metadata(&resolved).ok()?;
     if !meta.is_file() || meta.len() == 0 || meta.len() > IMAGE_MAX_BYTES { return None; }
     let bytes = std::fs::read(&resolved).ok()?;
@@ -5571,55 +5598,99 @@ mod image_and_token_tests {
         assert_eq!(sniff_image(b""), None);
     }
 
-    fn scratch(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("wa-attach-{}-{name}", std::process::id()));
+    /// A directory this test owns, used as the ONLY allowed root: the real list is the node's own, and a
+    /// test that wrote into it would be a test that polluted the machine it ran on.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wa-attach-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+    fn scratch(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, bytes).expect("scratch file");
         path
     }
+    fn allowed(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        vec![std::fs::canonicalize(dir).expect("a real directory")]
+    }
 
     #[test]
     fn a_dropped_path_is_read_when_it_is_an_image_in_an_allowed_directory() {
-        let path = scratch("shot.png", PNG);
-        let (mime, bytes) = dropped_image(&path.to_string_lossy()).expect("an attached image");
+        let dir = scratch_dir("read");
+        let path = scratch(&dir, "shot.png", PNG);
+        let roots = allowed(&dir);
+        let (mime, bytes) = dropped_image_in(&path.to_string_lossy(), &roots).expect("an attached image");
         assert_eq!(mime, "image/png");
         assert_eq!(bytes, PNG);
         let quoted = format!("'{}'", path.to_string_lossy());
-        assert!(dropped_image(&quoted).is_some(), "a shell-quoted path is the same path");
+        assert!(dropped_image_in(&quoted, &roots).is_some(), "a shell-quoted path is the same path");
         let uri = format!("file://{}", path.to_string_lossy());
-        assert!(dropped_image(&uri).is_some(), "so is a file:// URI");
+        assert!(dropped_image_in(&uri, &roots).is_some(), "so is a file:// URI");
     }
 
     #[test]
     fn a_file_whose_bytes_are_not_an_image_is_refused_whatever_it_is_called() {
-        let path = scratch("lie.png", b"#!/bin/sh\nrm -rf /\n");
-        assert!(dropped_image(&path.to_string_lossy()).is_none(), "the extension is not evidence");
+        let dir = scratch_dir("lie");
+        let path = scratch(&dir, "lie.png", b"#!/bin/sh\nrm -rf /\n");
+        assert!(dropped_image_in(&path.to_string_lossy(), &allowed(&dir)).is_none(),
+            "the extension is not evidence");
     }
 
     #[test]
     fn an_empty_or_absent_path_is_refused() {
-        assert!(dropped_image("").is_none());
-        assert!(dropped_image("two\nlines").is_none());
-        assert!(dropped_image("/nonexistent/wasm-agent/shot.png").is_none());
+        let roots: Vec<std::path::PathBuf> = Vec::new();
+        assert!(dropped_image_in("", &roots).is_none());
+        assert!(dropped_image_in("two\nlines", &roots).is_none());
+        assert!(dropped_image_in("/nonexistent/wasm-agent/shot.png", &roots).is_none());
+    }
+
+    // The review's LOW (18/11): the roots were all of HOME plus the machine's temp dir, so a dropped
+    // path was a way to read any of them into a message. They are now the session's folders and one
+    // explicit, configurable drop directory.
+    #[test]
+    fn the_allowed_directories_are_the_sessions_folders_and_one_drop_dir() {
+        let canonical = |path: std::path::PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
+        let roots = image_roots();
+        let cwd = canonical(std::env::current_dir().expect("a working directory"));
+        let state = canonical(wa_host_support::paths::state_root());
+        let home = canonical(std::path::PathBuf::from(wa_host_support::paths::resolve_home()));
+        let temp = canonical(std::env::temp_dir());
+        assert!(roots.iter().any(|root| root == &cwd), "the session's own folder is allowed: {roots:?}");
+        assert!(roots.iter().any(|root| root == &state), "the node's state root is allowed: {roots:?}");
+        assert!(roots.iter().any(|root| root == &canonical(image_drop_dir())), "the drop dir is allowed");
+        assert!(!roots.iter().any(|root| root == &home) || home == cwd || home == state,
+            "all of HOME is not an image root any more: {roots:?}");
+        assert!(!roots.iter().any(|root| root == &temp) || temp == cwd || temp.starts_with(&state),
+            "nor is the machine's temp directory: {roots:?}");
+    }
+
+    #[test]
+    fn the_drop_directory_is_configurable_and_defaults_under_the_state_root() {
+        assert_eq!(image_drop_dir_with(Some("/srv/wa-drop")), std::path::PathBuf::from("/srv/wa-drop"));
+        assert_eq!(image_drop_dir_with(Some("   ")), wa_host_support::paths::state_root().join("attachments"),
+            "a blank setting is no setting");
+        assert_eq!(image_drop_dir_with(None), wa_host_support::paths::state_root().join("attachments"));
+        // Whatever it is configured to, it is an allowed root on its own: that is what it is for.
+        let dir = scratch_dir("drop");
+        let path = scratch(&dir, "dropped.png", PNG);
+        assert!(dropped_image_in(&path.to_string_lossy(), &allowed(&dir)).is_some());
     }
 
     #[cfg(unix)]
     #[test]
     fn a_symlink_that_lands_outside_the_allowed_directories_is_refused() {
-        let secret = scratch("outside.png", PNG);
-        let link = std::env::temp_dir().join(format!("wa-attach-link-{}.png", std::process::id()));
-        let _ = std::fs::remove_file(&link);
+        let dir = scratch_dir("link");
+        let secret = scratch(&dir, "outside.png", PNG);
+        let roots = allowed(&dir);
+        let link = dir.join("link.png");
         std::os::unix::fs::symlink("/etc/hostname", &link).expect("symlink");
-        assert!(dropped_image(&link.to_string_lossy()).is_none(),
+        assert!(dropped_image_in(&link.to_string_lossy(), &roots).is_none(),
             "a link out of the allowed directories is refused by where it lands");
-        let inside = std::env::temp_dir().join(format!("wa-attach-inside-{}.png", std::process::id()));
-        let _ = std::fs::remove_file(&inside);
-        std::os::unix::fs::symlink(&secret, &inside).expect("symlink");
-        assert!(dropped_image(&inside.to_string_lossy()).is_some(),
+        std::fs::remove_file(&link).expect("remove the link");
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink");
+        assert!(dropped_image_in(&link.to_string_lossy(), &roots).is_some(),
             "a link that lands inside them is the image it points at");
         let _ = std::fs::remove_file(&link);
-        let _ = std::fs::remove_file(&inside);
     }
 
     #[test]

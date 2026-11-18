@@ -60,13 +60,19 @@ local replaced = federation.import_here({ definition = base, replace = true,
   files = { { name = 'mcp-own-fixture.mjs', content = script, sha256 = host.sha256(script) } } }, { node_id = 'p' })
 ok(replaced.error == 'share_replace_requires_operator', 'a peer replace is refused: ' .. json.encode(replaced))
 ok(not host.read_file(dir .. '/mcp-own-fixture.mjs'), 'the refused replace wrote nothing')
-ok(federation.import_here({ definition = base, replace = true,
+-- The replace refusal is checked BEFORE any of these (round 3), so each one is asked without it:
+-- what is being tested here is the rule itself, not which refusal wins.
+ok(federation.import_here({ definition = base,
   files = { { name = 'mcp-client.mjs', content = script, sha256 = host.sha256(script) } } }, { node_id = 'p' }).error == 'share_file_is_built_in',
   'a built-in script is never replaced by a share')
-ok(federation.import_here({ definition = base, replace = true,
+ok(federation.import_here({ definition = base,
   files = { { name = 'a.mjs', content = script, sha256 = 'wrong' } } }, { node_id = 'p' }).error == 'share_file_unverified', 'a checksum mismatch is refused')
-ok(federation.import_here({ definition = base, replace = true,
+ok(federation.import_here({ definition = base,
   files = { { name = '../evil.mjs', content = script, sha256 = host.sha256(script) } } }, { node_id = 'p' }).error == 'share_file_name_invalid', 'a path in a file name is refused')
+-- And with replace, the operator's decision is what refuses it first - built-in script or not.
+ok(federation.import_here({ definition = base, replace = true,
+  files = { { name = 'mcp-client.mjs', content = script, sha256 = host.sha256(script) } } }, { node_id = 'p' }).error == 'share_replace_requires_operator',
+  'a peer replace is refused before the built-in rule is even reached')
 
 -- 5. the sending half packs the custom script, not the built-in ones.
 local sent
@@ -128,6 +134,25 @@ ok(after and after.vault_approved == true, 'the operator probe is the approval')
 ok(after and after.definition.vault_env and after.definition.vault_env.FIXTURE_TOKEN == 'fixture_token',
   'the entry stays a name on the row')
 ok(not json.encode(after):find('secret', 1, true), 'no value reaches the registry')
+
+-- ---- the replace bypass the review measured (18/11) --------------------------------------------
+-- `replace` was checked INSIDE the per-file loop, so a peer sending `files: []` with `replace: true`
+-- skipped the check entirely and reached the connector-id branch below it - overwriting this node's
+-- definition of a connector that may be ENABLED, with no file to inspect and nobody's approval. The
+-- check is now before the loop: one condition, whatever the file list holds.
+local takeover = { id = 'shared-fixture', name = 'Taken over by the peer', transport = 'stdio',
+  program = '/usr/bin/node', args = {}, tools = { a = 'read' } }
+local empty_replace = federation.import_here({ definition = takeover, replace = true, files = {} }, { node_id = 'peer-evil' })
+ok(empty_replace.error == 'share_replace_requires_operator',
+  'a replace with no files at all is refused: ' .. json.encode(empty_replace))
+local survivor = in_registry('shared-fixture')
+ok(survivor and survivor.definition.name ~= 'Taken over by the peer',
+  'and the connector this node already had keeps its definition: ' .. tostring(survivor and survivor.definition.name))
+-- The same refusal with no replacement definition to hide behind: an empty file list and a new id.
+local empty_new = federation.import_here({ definition = { id = 'other-id', name = 'O', transport = 'stdio',
+  program = '/usr/bin/node', args = {}, tools = { a = 'read' } }, replace = true, files = {} }, { node_id = 'peer-evil' })
+ok(empty_new.error == 'share_replace_requires_operator', 'and it is refused for a new id too: ' .. json.encode(empty_new))
+ok(in_registry('other-id') == nil, 'nothing was registered by it')
 
 if failed > 0 then print(string.format('mcp share: %d failed of %d checks', failed, checks)); os.exit(1) end
 print(string.format('mcp share ok (%d checks)', checks))

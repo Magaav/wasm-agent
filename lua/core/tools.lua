@@ -1547,8 +1547,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
     args.owner = ctx.session_id or user_id
     -- A vault entry reaches a child only through the kernel's own MCP launch (lua/core/mcp.lua), never a
-    -- tool call: a model that could name an entry here could start a program that prints it.
+    -- tool call: a model that could name an entry here could start a program that prints it. The
+    -- approval that goes with it (docs/VAULT.md) is stripped for the same reason - it is the operator's
+    -- record, not a field a caller supplies.
     args.vault_env = nil
+    args.vault_approval = nil
     if args.action == "start" then
       args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
       if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end

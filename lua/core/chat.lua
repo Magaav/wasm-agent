@@ -714,8 +714,8 @@ function M.run(argv)
   -- because "I could not ask" repeated at every prompt is noise, not information.
   --
   -- Two checks, one line. `update_banner.lua` compares the installed *commit* with the newest
-  -- `node-<sha12>` release and prints `Update available (<sha>): run wa update or /update` - the
-  -- sentence the footer and the window show. When it cannot decide (a release-bundle install records
+  -- `node-<sha12>` release and prints the sentence IT owns (`M.LINE`; not restated here, so the
+  -- footer, this start line and the window cannot drift). When it cannot decide (a release-bundle install records
   -- a version tag, not a published binary release), `release.lua`'s tag feed answers exactly as it did
   -- before; only one of them ever prints, so the reader is told one fact in one wording.
   -- The session-status-content line has two producers and one row, so it is resolved here in one place:

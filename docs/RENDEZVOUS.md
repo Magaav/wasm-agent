@@ -141,7 +141,18 @@ registry can enforce for every caller, so one compromised or leaked administrato
 fleet's own operator list. A caller that is *not* one of the environment's operators needs an environment
 operator's signature for that reason, and a caller never counts as "who is left behind". The stored row
 carries the approval, and a row whose approval does not verify is ignored on start: the database alone
-retires nobody. The operator collects the second signature on another administrator node:
+retires nobody.
+
+A stored retirement is checked against the ENVIRONMENT, not against the row's own database (18/11): the
+approver must be one of `WASM_AGENT_NETWORK_ADMINS`, its public key must be the one
+`WASM_AGENT_NETWORK_ADMIN_KEYS` names for it (`<node-id>=<hex public key>`, comma-separated), and the
+approval's timestamp must be inside the same 900 s window of the retirement's own `retired_at`. Before
+that, the approver's key came from the `nodes` table — the same database the row lives in — so anyone who
+could write the registry could retire an environment operator by putting their own key under an
+administrator's id. With `WASM_AGENT_NETWORK_ADMIN_KEYS` unset, no stored approval can be verified and no
+retirement is applied (the log says so once at start): the safe direction, because the point of the proof
+is that a row alone retires nobody. An upgrade therefore needs the key list in the registry's environment
+file beside the admin ids. The operator collects the second signature on another administrator node:
 `wa network approve <node-id> --for <asking-node-id> --nonce <nonce>` prints it, and
 `wa network remove <node-id> --nonce <nonce> --approval '<json>'` sends it. The unit file's
 `WASM_AGENT_NETWORK_ADMINS` stays the root of trust - a retirement only subtracts - so no hand edit of

@@ -121,6 +121,33 @@ entries to store there (`wa vault set <entry> --stdin`), then `/mcp <key> probe`
 `/mcp`'s first page says which connectors are built-in (they run a shipped script, e.g. Gmail's
 `mcp-mail.mjs`) and which are custom.
 
+### What an approval covers, and what the kernel re-checks
+
+An operator's `/mcp <key> probe` (or `on`) is the approval, and it is a digest rather than a boolean since
+18/11: the row records a SHA-256 over the launch - the program, its arguments in order, **every script file
+the connector runs** (this node's MCP runtime in the script directory, plus each `.mjs`/`.js`/`.sh`/
+`.py`... the definition names) and the vault environment names it asks for (`M.vault_manifest` in
+`lua/core/mcp.lua`).
+
+Two checks use it, and either one refuses:
+
+* the console gate recomputes it before a call or an enable - `mcp_vault_approval_stale` when a script or an
+  argument changed after the operator approved it, `mcp_vault_approval_missing` for a row approved before
+  digests existed;
+* `rust/wa-capabilities/src/operations.rs` recomputes it from the bytes on disk immediately before it reads
+  a value - `vault_approval_required`, `vault_approval_unreadable:<path>`,
+  `vault_approval_script_not_covered:<path>`, `vault_approval_mismatch`. Nothing is launched and no value is
+  read.
+
+Editing a connector's script or an argument after the approval therefore voids it, and so does a deploy that
+replaces the MCP runtime: a vault connector asks for the operator's probe/on again after an upgrade.
+
+**What this does not fix.** The agent runs as the node's uid, so the row itself is still reachable by a
+route the tool-level guard does not see (a deliberately obfuscated shell write; the plain routes are
+refused, `lua/core/secret_guard.lua`) and an approval can be FORGED with a matching digest. The complete fix
+is an operator-SIGNED approval, verified against a key that does not live in the store under check (the
+separate-uid vault) - a follow-up, named in [VAULT.md](VAULT.md), not claimed here.
+
 ## WhatsApp first
 
 2026-10-17: [operator-directed management](WHATSAPP-OPERATOR-MANAGEMENT.md) was a

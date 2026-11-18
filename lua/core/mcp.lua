@@ -74,6 +74,66 @@ end
 -- scripts/test-mcp-runtime-closure.mjs fails when any of them, or the real import graph, disagrees.
 M.RUNTIME={'mcp-client.mjs','mcp-client-core.mjs','mcp-server-core.mjs','mcp-session.mjs','mcp-web.mjs',
  'mcp-mail.mjs','web-core.mjs','web-http-outcomes.mjs'}
+-- ---- what an approval IS, and what the kernel re-checks before it hands a value over ------------
+--
+-- The approval a connector that names a vault entry carries is a DIGEST over what its launch is: the
+-- program, its arguments, every script file it runs and the environment names it asks for
+-- (docs/VAULT.md, 18/11). Until it existed the approval was one boolean in memory.db, while the
+-- scripts it runs live in a directory the agent can write - so an approved connector's script could be
+-- replaced afterwards and the vault value handed to the new code. The digest is recomputed twice: here,
+-- when a call is decided on (a change since the operator approved it refuses `mcp_vault_approval_stale`),
+-- and again in rust/wa-capabilities/src/operations.rs, from the bytes on disk, immediately before a
+-- value is read. Editing a script or an argument after the approval therefore voids it.
+--
+-- ONE canonical text, shared with the Rust side (`approval_text`): one form, two implementations, and
+-- each side's test pins the same fixture digest (scripts/test-mcp-vault-approval.lua). Every field is
+-- percent-escaped, so a newline, a space or a tab inside an argument cannot forge a line of it.
+local function approval_field(text)
+ return (tostring(text):gsub('[^%w%._~/:@+,=%-]', function(ch) return string.format('%%%02X', ch:byte()) end))
+end
+function M.vault_approval_text(manifest)
+ manifest=type(manifest)=='table' and manifest or {}
+ local lines={'mcp-vault-approval/v1','program '..approval_field(manifest.program or '')}
+ for _,arg in ipairs(manifest.args or {})do lines[#lines+1]='arg '..approval_field(arg) end
+ for _,file in ipairs(manifest.files or {})do lines[#lines+1]='file '..approval_field(file.path)..' '..tostring(file.sha256 or ''):lower() end
+ for _,name in ipairs(manifest.vault or {})do lines[#lines+1]='vault '..approval_field(name) end
+ return table.concat(lines,'\n')..'\n'
+end
+-- The script files a connector runs: this node's MCP runtime (the client it launches and everything that
+-- client can import) plus every script its own definition names. A program binary is covered only when
+-- it IS a script: /usr/bin/node is the platform's, not the connector's.
+local SCRIPT_EXT={mjs=true,cjs=true,js=true,lua=true,sh=true,bash=true,py=true,rb=true,pl=true,ps1=true,bat=true}
+local function script_file(path)
+ if type(path)~='string' or path=='' then return false end
+ if not (path:sub(1,1)=='/' or path:match('^%a:[/\\]')) then return false end
+ local ext=path:match('%.([%w]+)$')
+ return ext~=nil and SCRIPT_EXT[ext:lower()]==true
+end
+-- The manifest an approval records, and the one a launch is checked against: paths in a stable order,
+-- each file's sha256 as it is NOW, the arguments in order, the vault names sorted.
+function M.vault_manifest(definition,directory)
+ local list=type(definition)=='table' and definition or {}
+ local files,seen={}, {}
+ local function add(path)
+  if not script_file(path) or seen[path] then return end
+  if host.path_kind(path)~='file' then return end
+  local content=host.read_file(path)
+  if type(content)~='string' then return end
+  seen[path]=true;files[#files+1]={path=path,sha256=host.sha256(content)}
+ end
+ if type(directory)=='string' and directory~='' then
+  for _,name in ipairs(M.RUNTIME)do add(directory..'/'..name) end
+ end
+ add(list.program)
+ for _,arg in ipairs(type(list.args)=='table' and list.args or {})do add(arg) end
+ table.sort(files,function(a,b)return a.path<b.path end)
+ local args={};for _,arg in ipairs(type(list.args)=='table' and list.args or {})do args[#args+1]=tostring(arg) end
+ local names={};for name in pairs(type(list.vault_env)=='table' and list.vault_env or {})do names[#names+1]=tostring(name) end
+ table.sort(names)
+ local manifest={program=tostring(list.program or ''),args=args,files=files,vault=names}
+ manifest.sha256=host.sha256(M.vault_approval_text(manifest))
+ return manifest
+end
 local function complete(dir)
  for _,file in ipairs(M.RUNTIME) do if host.path_kind(dir..'/'..file)~='file' then return false end end
  return true
@@ -153,6 +213,15 @@ local function dense(list,maximum)if type(list)~='table' or #list>maximum then r
 -- its value from the receiving node's vault (/mcp <key> share <node>), which is what the operator then
 -- approves.
 local VAULT_ENV_OPERATOR = 'mcp_vault_env_requires_operator'
+-- The two ways an approval stops covering its connector: it was recorded before approvals recorded what
+-- they cover, or the program, an argument or a script changed after the operator gave it.
+local VAULT_APPROVAL_MISSING = 'mcp_vault_approval_missing'
+local VAULT_APPROVAL_STALE = 'mcp_vault_approval_stale'
+-- How to give the approval again, in the one wording every refusal here uses: the operator's own
+-- terminal, probe then on - and never a model's call.
+local function approve_again(id)
+ return ' Approve it again at the operator\'s own terminal: /mcp '..tostring(id)..' probe, then /mcp '..tostring(id)..' on.'
+end
 
 function M.names_vault(definition)
  return type(definition)=='table' and type(definition.vault_env)=='table' and next(definition.vault_env)~=nil
@@ -161,10 +230,27 @@ end
 -- The refusal every unapproved launch of a vault connector answers. One sentence, because the model that
 -- reads it must not be able to change the outcome: the operator approves at the terminal.
 local function vault_gate(row, ctx, id)
- if not M.names_vault(row and row.definition) or (row and row.vault_approved==true) or (ctx and ctx.operator) then return nil end
- return fail(VAULT_ENV_OPERATOR,{id=id,outcome='not_submitted',tool_call_issued=false,
-  note='this connector names a vault entry (vault_env), so only the operator can start it: /mcp '..tostring(id)
-    ..' probe (or on) at the operator\'s own terminal. Nothing was launched.'})
+ if not M.names_vault(row and row.definition) or (ctx and ctx.operator) then return nil end
+ if not (row and row.vault_approved==true) then
+  return fail(VAULT_ENV_OPERATOR,{id=id,outcome='not_submitted',tool_call_issued=false,
+   note='this connector names a vault entry (vault_env), so only the operator can start it: /mcp '..tostring(id)
+     ..' probe (or on) at the operator\'s own terminal. Nothing was launched.'})
+ end
+ -- The approval is a digest over what the launch IS (M.vault_manifest), so a script or an argument
+ -- edited after the operator approved the connector no longer matches it. The kernel checks the same
+ -- digest from the bytes on disk before it reads a value; this check is what turns that into a refusal
+ -- the model can read, before a process is started at all.
+ local approved=row.vault_approval
+ if type(approved)~='table' or type(approved.sha256)~='string' or approved.sha256=='' then
+  return fail(VAULT_APPROVAL_MISSING,{id=id,outcome='not_submitted',tool_call_issued=false,
+   note='this connector\'s approval predates the digest that says what it covers, so nothing was launched and no value was read.'..approve_again(id)})
+ end
+ local now=M.vault_manifest(row.definition,M.script_dir())
+ if now.sha256~=approved.sha256 then
+  return fail(VAULT_APPROVAL_STALE,{id=id,outcome='not_submitted',tool_call_issued=false,approved=approved.sha256,now=now.sha256,
+   note='this connector\'s program, arguments or scripts changed after the operator approved it, so nothing was launched and no value was read.'..approve_again(id)})
+ end
+ return nil
 end
 function M.validate(def)
  if type(def)~='table' or not valid_id(def.id) then return 'invalid_mcp_id' end
@@ -344,9 +430,13 @@ function M.invoke(input,ctx)
  local request=paths.data()..'/mcp/requests/'..host.uuid()..'.json'
  input.result_file=request..'.result.json'
  local vault_env;input.server,vault_env=M.vault_launch(input.server)
+ -- A launch that injects a vault value carries the approval it was given. The operator's own probe has
+ -- no recorded one yet - it is what records it - so the manifest of this launch is its expectation, and
+ -- the kernel still re-reads every byte before it reads a value.
+ if vault_env and not input.vault_approval then input.vault_approval=M.vault_manifest(input.server,M.script_dir()) end
  if not host.write_file(request,json.encode(input))then return fail('mcp_request_not_written',{tool_call_issued=false,outcome='not_submitted'}) end
  local timeout=input.server.timeout_seconds or 30
- local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control',vault_env=vault_env})))
+ local start=decode(host.operation('start',json.encode({program=node_program(),args={client,'--request-file',request},cwd=ctx.cwd or platform.cwd(),timeout_seconds=math.min(86400,timeout+3),owner=ctx.session_id or 'mcp-control',vault_env=vault_env,vault_approval=input.vault_approval})))
  if not start or start.error or not start.operation_id then return fail('mcp_operation_not_started',{detail=start,tool_call_issued=false,outcome='not_submitted',request=request}) end
  local id=start.operation_id
  local settled=decode(host.operation('await',json.encode({id=id,wait_for='settled'})))
@@ -470,8 +560,12 @@ function M.control(args,ctx)
    current.servers[args.id].enabled=action=='enable'
    if action=='enable' then
     current.servers[args.id].probe_stale=nil
-    -- The operator's own "on" is the approval a vault connector waits for.
-    if ctx.operator and M.names_vault(row.definition) then current.servers[args.id].vault_approved=true end
+    -- The operator's own "on" is the approval a vault connector waits for - and it records WHAT it
+    -- approves (M.vault_manifest), so a script or an argument changed later voids it.
+    if ctx.operator and M.names_vault(row.definition) then
+     current.servers[args.id].vault_approved=true
+     current.servers[args.id].vault_approval=M.vault_manifest(current.servers[args.id].definition,M.script_dir())
+    end
    end
    return {ok=true,id=args.id,enabled=action=='enable',vault_approved=current.servers[args.id].vault_approved==true or nil}
   end)
@@ -484,7 +578,10 @@ function M.control(args,ctx)
   -- staleness note: the next call is measured against the list this probe just read.
   local saved=mutate(raw,function(current)
    current.servers[args.id].probe=answer;current.servers[args.id].probe_stale=nil;current.servers[args.id].enabled=false
-   if ctx.operator and M.names_vault(row.definition) then current.servers[args.id].vault_approved=true end
+   if ctx.operator and M.names_vault(row.definition) then
+    current.servers[args.id].vault_approved=true
+    current.servers[args.id].vault_approval=M.vault_manifest(current.servers[args.id].definition,M.script_dir())
+   end
    return {ok=true}
   end)
   if not saved.ok then answer.registry_observation_error=saved.error end
@@ -606,6 +703,9 @@ function M.call(name,args,ctx)
  -- approved by an operator - unless the registry was written before this gate existed. Then it refuses.
  local unapproved=vault_gate(row,ctx,id);if unapproved then return unapproved end
  local options={action='call',server=row.definition,tool=tool.name,schema_hash=row.probe.schema_hash}
+ -- The approval the kernel re-checks (docs/VAULT.md): the STORED digest, never one recomputed here, so an
+ -- edit between this check and the launch is still caught by the bytes on disk.
+ if M.names_vault(row.definition) then options.vault_approval=row.vault_approval end
  if row.definition.tools[tool.name]=='read' then
   options.persistent_read=true;options.read_tools={}
   for allowed,effect in pairs(row.definition.tools)do if effect=='read' then options.read_tools[#options.read_tools+1]=allowed end end

@@ -398,3 +398,296 @@ reason the list cannot drift.
   as the console itself does.
 * The list is long (110 rows, ~204 lines, 15 pages at 80x24). That is the complete list the mission
   asked for; the grouping by surface is what keeps it navigable.
+
+# Round 3 - the security verification of ac95a73d
+
+Seven items from the review of round 1, each fixed with an adversarial test and each proven against the
+base tree. The verbatim list of every model-visible refusal/note string of all three rounds is the last
+section (`Every model-visible string, rounds 1-3`), for Victor's approval.
+
+## 1. HIGH - the vault approval was a writable boolean, and the scripts it covers are writable too
+
+**The hole.** `vault_approved` lived as one boolean in `memory.db` (`lua/core/mcp.lua`), which the
+model's own `bash`/`write`/... could reach: `secret_guard.ROOTS` did not name `memory.db`, and
+`path_guard` only refuses recursive deletes. So `sqlite3 ~/.wasm-agent/memory.db "update meta set
+value=..."` turned an unapproved connector into an approved one, and `mcp.lua` :164 (now
+`vault_gate`) then let the probe launch it. The second half is worse and independent of the database:
+an already-approved connector's program lives in a script directory the agent can write
+(`<data>/scripts`, `~/.local/bin/scripts`), so the approval could be kept and the CODE replaced.
+
+**The fix, two halves.**
+
+(a) An approval now records WHAT it approves. When the operator's own probe/on approves a vault
+connector, the row keeps a manifest (`M.vault_manifest`, `lua/core/mcp.lua`) and its SHA-256 over:
+the program, its arguments in order, **every script file the connector runs** (this node's MCP runtime
+in the script directory, plus each `.mjs`/`.js`/`.cjs`/`.lua`/`.sh`/`.bash`/`.py`/`.rb`/`.pl`/`.ps1`/
+`.bat` the definition names, each with the hash of its bytes NOW) and the vault environment names it
+asks for. Two places check it:
+
+* the console gate recomputes it before a call or an enable and refuses `mcp_vault_approval_stale`
+  (a script or an argument changed since the operator approved it) or `mcp_vault_approval_missing`
+  (an approval recorded before digests existed);
+* `rust/wa-capabilities/src/operations.rs` recomputes it from the bytes on disk immediately BEFORE it
+  reads a value, and refuses `vault_approval_required`, `vault_approval_unreadable:<path>`,
+  `vault_approval_script_not_covered:<path>` or `vault_approval_mismatch`. Nothing is launched and no
+  value is read. It also refuses a launch whose own command line runs a script the approval does not
+  name (`script_not_covered`), which is what ties the digest to the process being started.
+
+One canonical text, two implementations (`M.vault_approval_text` / `approval_text`), and each side's
+test pins the SAME fixture digest
+(`0423d0cb712e6441592ef2a8d04f8179ba03d7d797bfb233b3f07939ae450da8`), so neither escaping rule can
+drift. Every field is percent-escaped, so a newline or a space inside an argument cannot forge a line.
+
+(b) `lua/core/secret_guard.lua` refuses `memory.db` (and its `-wal`/`-shm`) and the connector script
+directories - `<data>/scripts`, `~/.local/bin/scripts`, `wasm-agent-sandbox/scripts`, plus whatever
+`WA_MCP_SCRIPT_DIR` / `WA_INSTALL_DIR` / `WASM_AGENT_LUA_ROOT` resolve at load - for `read`/`write`/
+`edit`/`ls`/`grep` and for a `bash` that names them (`secret_path_denied`, 403).
+
+**Tests.** `scripts/test-mcp-vault-approval.lua` (new, 29 checks): the cross-language digest pin, the
+field escaping, the manifest covering the runtime and the connector script, the operator's "on"
+recording the digest, the launch carrying it to the kernel, then the attack - the script rewritten after
+the approval is refused `mcp_vault_approval_stale` with `tool_call_issued: false`, no process started,
+both digests named in the answer, and the approved bytes restoring the approval; an approval with no
+digest answers `mcp_vault_approval_missing`; a model's put carrying `vault_env` is still refused.
+`operations.rs` `vault_approval_tests` (5) prove the kernel side: an approved launch accepted, a rewritten
+script and changed arguments refused, a launch running an uncovered script refused, a missing
+approval/missing script refused by name, and the script-path test. `scripts/test-secret-guard.lua`
+grew the memory.db and script-directory refusals (10 more checks, and the three that assert an
+ordinary temp file and the node's own state root are still reachable as before).
+
+**Base.** `/tmp/base-probe.lua` on the stashed tree: `memory_db_write: ALLOWED`,
+`scripts_write: ALLOWED`, `vault_manifest: ABSENT`. The new test does not even load on base.
+
+**Named, in the docs (docs/VAULT.md, docs/MCP.md):** the agent runs as the node's uid, so a
+deliberately obfuscated shell write can still reach `memory.db` and an approval row can still be FORGED
+with a matching digest - the digest cannot tell a forged approval from a real one, because both are rows
+in a store the agent can reach. The complete fix is an operator-SIGNED approval verified against a key
+that does not live in the store under check (the separate-uid vault): a follow-up, not claimed here.
+
+## 2. MEDIUM - an empty file list skipped the replace check (lua/core/federation.lua)
+
+`share_replace_requires_operator` was checked INSIDE the per-file loop, so `files: []` with
+`replace: true` skipped it and reached the connector-id branch: the peer overwrote this node's
+definition of a connector - one that may be enabled - with no file to inspect and nobody's approval.
+The check now runs before the loop, whatever the file list holds, and its sentence says it covers a
+definition as well as a script.
+
+**Test.** `scripts/test-mcp-share.lua`: a replace with no files is refused for an existing id (and the
+definition this node had keeps its name) and for a new id (nothing is registered). Base:
+`replace_with_no_files: ACCEPTED, definition replaced`, `name_after: "TAKEN OVER"`; branch:
+`share_replace_requires_operator`, `name_after: "T"`. The three name/checksum/built-in assertions that
+used `replace = true` now ask their question without it, and one new assertion pins that a peer replace
+is refused before the built-in rule is even reached (39 -> 44 checks).
+
+## 3. MEDIUM - a stored retirement was verified against a key from its own database (rust/wa-rendezvous)
+
+`stored_retirement_holds` did not check that the approver is in `WASM_AGENT_NETWORK_ADMINS`, did not
+check the approval's window, and took the approver's public key from `public_key_of` - the same SQLite
+database the row lives in. Anyone able to write the registry could retire an environment operator by
+inserting their own key under an administrator's id and signing.
+
+Now (`stored_retirement_holds(target, retired_by, approver, approval, retired_at, environment, keys)`):
+the approver must be one of the ENVIRONMENT's administrators, its key must be the one the environment
+names for it - new `WASM_AGENT_NETWORK_ADMIN_KEYS`, `<node-id>=<hex public key>` pairs, comma-separated -
+and the approval must be contemporary with the retirement it approved (inside `APPROVAL_WINDOW_SECONDS`
+of the row's own `retired_at`, the same 900 s window `approval_problem` enforces when the retirement is
+made). With the key list unset, no stored approval can be verified and no retirement is applied - the
+safe direction, and the log says so once at start.
+
+**Tests** (`retirement_tests`, 4 tests / 15 in the crate): a valid second signature is applied; no
+approval, a bad signature and a row moved to another caller are not; **an approver the environment does
+not name retires nobody whatever the database says** (the right key with a valid signature, the
+approver absent from `WASM_AGENT_NETWORK_ADMINS`; then the same signature with the environment naming no
+key, and with a different key under the same id); and an approval outside the window is not applied in
+either direction. Real Ed25519 keys are generated in the test, so a signature is the only thing that can
+make a row count.
+
+Docs: `docs/RENDEZVOUS.md` (the rule and the upgrade note), `deploy/wa-rendezvous.service` (the
+variable, beside the admin list).
+
+## 4. LOW - the vault cache test tested a helper the launch path did not call
+
+`vault_value` had its own copy of the retry rule, so `vault_cache_tests` proved the rule about a
+function nothing called. `vault_value` now opens the slot through `ensure_cached` (through
+`vault_value_with`, which takes the opener and the read as parameters), and
+`the_launch_path_opens_the_vault_through_the_one_retry_rule` runs THE launch path: a failed open is
+retried on the next launch, an open vault is reused and never reopened.
+
+## 5. LOW - image_roots was all of HOME (rust/wa-capabilities/src/host.rs)
+
+`image_roots` was `WASM_AGENT_HOME`/`HOME`, the working directory and the machine's temp directory - every
+file the user owns, reachable by dropping a path into the composer. It is now the session's own folder
+(where the run was started), the node's state root (scratch, tool-results) and ONE explicit drop
+directory: `WA_IMAGE_DROP_DIR`, else `<state>/attachments`. `image_drop_dir_with` is the tested seam.
+
+**Tests** (`image_and_token_tests`): a path in an allowed directory is read (quoted and `file://` too), a
+file whose bytes are not an image is refused, a symlink is refused by where it lands, and the new
+`the_allowed_directories_are_the_sessions_folders_and_one_drop_dir` asserts the drop dir is a root while
+all of HOME and the machine's temp directory are NOT; `the_drop_directory_is_configurable_and_defaults_under_the_state_root`
+pins the knob. The tests pass their own directory in (`dropped_image_in`), so nothing writes into the
+node's state.
+
+## 6. The update banner: one definition, and its two commands in bold
+
+`update_banner.M.LINE` is now the sentence Victor approved (18/11), and `M.COMMANDS` is the list of
+words in it that are rendered bold:
+
+    Update available (<sha>) \u2014 /update here, or wa update in a terminal
+
+with **/update** and **wa update** in bold, on the same warning-yellow line. `M.line(sha)` is the one
+place the `%s` is filled. The comments that used to restate a different sentence now point at the
+module: `lua/core/chat.lua`, `lua/core/cli_view.lua` (two), `lua/core/server.lua`. The renderers read the
+list rather than keeping their own: `cli_view.M.emphasise` for the CLI's row, and
+`wa_term::terminal_editor::Editor::session_content` for the native row (which bolded only `wa update`
+before). The docs that quoted the old sentence were updated with it (RELEASE-UPDATE.md, TOOL-PROGRESS.md,
+COMPONENTS.md).
+
+**Tests:** `scripts/test-update-banner.lua` 227 checks (the sentence, and the drawn row now expects the
+emphasised line: `notice_drawn()`); `scripts/test-cli-view.lua` adds the drawn row with both bold
+spans, the transcript staying plain, and a plain notice (no command list) unchanged;
+`wa-term`'s editor test asserts both words are bold and nothing else is.
+
+TODO hook: deploy-ancestry pins are not on this branch, so the pinned sentence
+(`Pinned to <build> (<reason>) - update held; /update --unpin to release`) is not added. When pins land,
+it belongs beside `M.LINE` in the same module and its `COMMANDS`-style list carries `/update --unpin`.
+
+## 7. The run status bar keeps Δ and gets ↑ back
+
+Victor: "only delta is not enough". `METHODS:run_numbers` now reads
+`👣steps·step-time Δadded ↑input-total ↓output ◷run-time` - Δ (what the run added to the context,
+from 727a99eb) kept, and ↑ (the SESSION's input-token total, the number the footer prints as Σ↑) right
+after it: `Δ12.3k ↑4.6M ↓310`. The per-turn footer line (`M.footer`) already had its ↑ (the run's own
+prompt) and is unchanged.
+
+**Tests:** `scripts/test-cli-view.lua` - `METHODS:run_numbers` exactly (`Δ12.3k ↑4.6M ↓310`), a first
+step that says Δ0 and the total it sent, and the two RENDERED status lines through the editor path now
+expect `Δ27.2k ↑120.4k ↓1.0k` and `Δ2.8k ↑150.4k ↓450`.
+
+## Also in this commit, and not one of the seven
+
+`docs/ENVELOPE.md`'s generated tool-catalogue block, regenerated with the built binary. The pre-commit
+hook refused the commit ("stale generated blocks ... docs/ENVELOPE.md: tool-catalogue") and the block was
+ALREADY stale at HEAD: the same check over the stashed tree with the node's installed binary reports the
+same line. The whole diff is one row - `recall`'s parameters are `limit? query? scope?`, not
+`query limit? scope?`. It is here because the guard refuses a stale block; no rule was bypassed.
+
+## Every model-visible string, rounds 1-3 (for Victor's approval)
+
+Everything here is text a MODEL reads (a tool answer, a `note` field, a refusal). Operator-only and
+user-only strings are in their own two lists at the end, because they never reach a model. Strings the
+round did not change are marked "unchanged" and are repeated for approval all the same; a string round 3
+replaced is shown as it is NOW with the old wording named.
+
+### Round 1 (commit ac95a73d) - the vault gate and the share half
+
+1. Refusal code `mcp_vault_env_requires_operator` (unchanged in 3) with
+
+       this connector names a vault entry (vault_env), so only the operator can start it: /mcp <id> probe (or on) at the operator's own terminal. Nothing was launched.
+
+2. The `put` answer's note when the definition names a vault entry (unchanged in 3):
+
+       names a vault entry: inert until the operator approves it (/mcp <id> probe, then on)
+
+3. Refusal code `share_file_in_use` (unchanged in 3) with `name`, `connector` and
+
+       a registered connector (<connector id>) runs that script: this node replaces it only by the operator's own hand - turn that connector off and remove it (/mcp <connector id> off), or share under another file name
+
+4. Refusal code `share_replace_requires_operator` - **sentence CHANGED in round 3** (the check moved out
+   of the loop, and it now covers a definition as well as a script). Round 1-2 wording:
+
+       replace overwrites a script this node already has, so it is a decision for the operator here: remove the connector (/mcp <id> off, then remove) and let it be shared again
+
+   Round 3 (now):
+
+       replace overwrites what this node already has (a definition, or a script it runs), so it is a decision for the operator here: remove the connector (/mcp <id> off, then remove) and let it be shared again, or share it under another id
+
+5. Refusal codes with no note of their own (unchanged in 3): `share_definition_missing`,
+   `share_too_many_files`, `share_file_name_invalid`, `share_file_is_built_in`, `share_file_unverified`,
+   `share_file_not_written`, `share_file_unreadable`, `mcp_script_directory_unbound`.
+
+6. Notes (unchanged in 3), each with the code above it:
+
+       share_file_exists_differs: share again with replace to overwrite it
+       share_connector_exists:   share again with replace to overwrite it
+
+7. The successful import's note (unchanged in 3; the parenthesised half appears only when the definition
+   names vault entries):
+
+       registered disabled. On that node: wa vault set <entry> / <entry> --stdin, then /mcp <id> probe, then /mcp <id> on.
+
+8. `mcp_vault_env_requires_stdio` and `invalid_mcp_vault_env` (unchanged in 3): the codes `validate`
+   answers for a vault reference on a non-stdio transport or with a malformed name.
+
+9. The model's `mcp` list note (unchanged in 3):
+
+       One row per connector. Tool schemas: searchTools("select:<names>"); a connector's full row: mcp({action:"list",id}).
+
+10. Round 1's other text change, `invalid_tool_search_names`'s fix line (unchanged in 3):
+
+        send `{names:["read","bash"]}` - a list of exact tool names, as many as the script needs.
+
+### Round 2 (commit faaf1d0b) - /keybindings
+
+No new or changed model-visible refusal or note string: round 2 recorded Victor's decisions about texts
+that already existed (the FIRST_GUIDANCE fence clause, the "Use full paths, as given (programs and
+files); never ~." line, the tool_search names limit, the `unknown_mcp_connector` refusal, the mcp summary
+note above) and added a capability, a view and a route. The only edits to text a model reads were
+mechanical (the regenerated `refusal_codes` map).
+
+### Round 3 - the approval digest, both sides
+
+11. Refusal code `mcp_vault_approval_missing` (new) with `id`, `outcome: "not_submitted"`,
+    `tool_call_issued: false` and
+
+        this connector's approval predates the digest that says what it covers, so nothing was launched and no value was read. Approve it again at the operator's own terminal: /mcp <id> probe, then /mcp <id> on.
+
+12. Refusal code `mcp_vault_approval_stale` (new) with `id`, `outcome: "not_submitted"`,
+    `tool_call_issued: false`, `approved: <hex>`, `now: <hex>` and
+
+        this connector's program, arguments or scripts changed after the operator approved it, so nothing was launched and no value was read. Approve it again at the operator's own terminal: /mcp <id> probe, then /mcp <id> on.
+
+13. The kernel's refusals (new; `rust/wa-capabilities/src/operations.rs`, the answer of the launch):
+
+        vault_approval_required: this connector names a vault entry but carries no approval digest, so no value was read and nothing was launched. A vault connector is approved at the operator's own terminal: /mcp <id> probe, then /mcp <id> on
+
+        vault_approval_required: this connector carries an approval with no script list, so no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on
+
+        vault_approval_unreadable:<path>: a script this connector was approved with cannot be read now, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on
+
+        vault_approval_script_not_covered:<path>: this launch runs a script the approval does not cover, so nothing was launched and no value was read. Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on
+
+        vault_approval_mismatch: this connector's program, arguments or scripts changed after the operator approved it, so nothing was launched and no value was read (approved <hex>, now <hex>). Approve it again at the operator's terminal: /mcp <id> probe, then /mcp <id> on
+
+    (The hidden parameter names the connector's id, not one the model chooses; `<id>` is that id and
+    `<path>` the script path in the manifest.)
+
+14. From round 3 on, the SAME `mcp_vault_env_requires_operator` sentence (item 1) is also what a model
+    reads for a vault definition it writes itself - the check now runs after the digest checks, and the
+    sentence did not change.
+
+### Operator-only strings (never a model's answer), round 3
+
+15. The rendezvous log line, once at start, when a retirement cannot be verified because the key list is
+    not in the environment:
+
+        [rendezvous] WASM_AGENT_NETWORK_ADMIN_KEYS is empty: <n> stored retirement(s) cannot be verified and are NOT applied
+
+    and the existing `[rendezvous] environment operator <id> retired by administrator <id>, approved by <id>`.
+
+16. `secret_path_denied` (`lua/core/secret_guard.lua`) is unchanged in wording and now also covers
+    `memory.db`, its `-wal`/`-shm` and the connector script directories, with its note
+
+        credentials are reachable only through their connectors (mcp_google_*, mcp_whatsapp_*, email tools); an agent tool never reads them
+
+    (that note is the pre-existing one for every root; the new roots reuse it rather than inventing a
+    second sentence.)
+
+### User-visible strings (the terminal, the window), round 3
+
+17. The update banner - ONE definition, `update_banner.M.LINE`, with `/update` and `wa update` bold:
+
+        Update available (<sha>) — /update here, or wa update in a terminal
+
+18. The run status bar (CLI): `👣steps·step-time Δadded ↑input-total ↓output ◷run-time`, e.g.
+
+        👣2·5s Δ12.3k ↑4.6M ↓310 ◷1:51

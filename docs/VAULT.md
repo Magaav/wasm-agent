@@ -464,3 +464,40 @@ leaves the vault. Rotating the fleet key is `wa fleet rotate`; the old key is de
   bundle's tag is the lock's sha), so deploy was left alone: the recipe is in `REPORT.md`.
 * `wa fleet revoke|rotate|anchor` do **not** push: `wa fleet push-roster` stays the per-node act
   (`docs/MESH.md` §7), so a change is reviewable before it reaches a node.
+
+## Connector credentials: what an approval covers, and what it does not
+
+A stdio MCP connector may name vault entries (`vault_env`) instead of a key file; the kernel opens this
+node's vault and puts each value in the child's environment at launch, by reference
+(`rust/wa-capabilities/src/operations.rs`, `docs/MCP.md`). The entry NAME travels through Lua, the
+definition and the request file; the value never does.
+
+**The approval is a digest, not a flag (18/11).** Only the operator may start such a connector
+(`/mcp <id> probe`, then `/mcp <id> on` at their own terminal), and that act records a SHA-256 over what
+the launch IS: the program, its arguments in order, every script file the connector runs (this node's MCP
+runtime plus every `.mjs`/`.js`/`.sh`/`.py`... the definition names) and the vault names it asks for.
+Two places check it, and either one refuses:
+
+* `lua/core/mcp.lua` recomputes it before a call or an enable - `mcp_vault_approval_stale` when a script or
+  an argument changed after the operator approved it, `mcp_vault_approval_missing` for a row approved
+  before digests existed;
+* the kernel recomputes it from the bytes on disk immediately before it reads a value -
+  `vault_approval_required`, `vault_approval_unreadable:<path>`, `vault_approval_script_not_covered:<path>`
+  or `vault_approval_mismatch`. Nothing is launched and no value is read.
+
+So editing a connector's script or an argument after the approval voids the approval. A deploy that
+replaces the MCP runtime changes those bytes too, which is why a vault connector asks for the operator's
+probe/on again after an upgrade: that is the cost of the check, and it is the point of it.
+
+**The residual hole, stated rather than hidden.** The agent and the node run as the same uid. The agent's
+own tools refuse `memory.db` (and its `-wal`/`-shm`) and the connector script directories
+(`lua/core/secret_guard.lua`: `read`/`write`/`edit`/`ls`/`grep` and a `bash` that names them), but that
+guard is a path rule: a deliberately obfuscated shell command can still write either. So an approval ROW
+can still be forged by hand - a `vault_approved: true` and a digest computed over whatever the forger
+intends to run - and the digest check cannot tell a forged approval from a real one, because both are
+just rows in a store the agent can reach.
+
+The complete fix is an approval the registry cannot mint: the operator SIGNS the definition (its digest)
+with a key that lives in the separate-uid vault, and the launch verifies that signature against a public
+key it reads from the environment or from the operator's own file, never from the store under check. That
+is a follow-up design, not something this change claims to have done.
