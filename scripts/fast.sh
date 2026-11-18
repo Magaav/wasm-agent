@@ -13,6 +13,8 @@
 #      working tree); --all-rust runs every crate. wa-sentinel runs single-threaded (its tests share
 #      process-wide environment);
 #   3. contract checks: prompt docs in sync with the code; the instruction files; the landing queue; and
+#   4. the build time of every crate and component this run compiled, printed in the summary:
+#      measured and reported, never gated (ARCHITECTURE.md, "Modules over the monolith");
 #      the two checks the landing baseline rests on (scripts/test-landing-baseline.mjs judges a run by
 #      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code).
 #
@@ -155,6 +157,11 @@ native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else pri
 started=$(date +%s)
 work=$(mktemp -d "${TMPDIR:-/tmp}/wa-fast-XXXXXX")
 trap 'rm -rf "$work"' EXIT
+
+# The build-time ledger: one line per build this run performs, printed in the summary
+# below, because "a module compiles faster" is a claim about a number (scripts/lib/build-times.sh).
+. "$ROOT/scripts/lib/build-times.sh"
+wa_build_times_init "$work/build-times.tsv"
 fails=0; envfails=0; skipped=0; ran=0
 
 # ---- the environment this verdict belongs to ---------------------------------------------------------
@@ -289,11 +296,22 @@ fast_components_prepare() {
   # The sandbox's WASI_SDK, when it has one, travels in the environment; otherwise build-components.sh finds
   # ~/wasi-sdk*. Cargo writes into the node's ONE build root, this tree's child of it (the same dir the
   # rows' cargo tests use): a second target dir per worktree is what 13/11 left behind 73 of.
-  if WA_COMPONENTS_DIR="$(native "$cache/set")" \
+  # A timing file beside the build, so the summary can say what each component cost to compile.
+  component_times="$work/component-times.tsv"; : > "$component_times" 2>/dev/null || true
+  if WA_COMPONENTS_DIR="$(native "$cache/set")" WA_COMPONENT_BUILD_TIMINGS="$component_times" \
        bash scripts/build-components.sh $FAST_COMPONENT_NAMES >"$log" 2>&1; then
     FAST_COMPONENT_SOURCE="$(native "$cache/set")"
     export FAST_COMPONENT_SOURCE
     echo "fast: components $(printf '%s' "$FAST_COMPONENT_NAMES") built from this tree and pinned in $cache/set"
+    # What each of those builds cost, from build-components.sh own measurement: the units it
+    # compiled say whether the row is a rebuild or a warm cache hit.
+    if [ -s "$component_times" ]; then
+      while IFS="$(printf '\t')" read -r cname cms cunits; do
+        [ -n "${cname:-}" ] || continue
+        if [ "${cunits:-0}" = 0 ]; then cnote="warm, nothing to compile"; else cnote="${cunits} unit(s) compiled"; fi
+        wa_build_time_record component "$cname" "${cms:-0}" "$cnote"
+      done < "$component_times"
+    fi
   else
     reason=$(last_line_of "$log")
     echo "fast: components SKIPPED ($FAST_COMPONENT_NAMES): ${reason:-build-components.sh failed, see $log}"
@@ -576,6 +594,14 @@ else
   printf '%s\n' "$changed" | grep -qE '^rust/(Cargo\.(toml|lock))$' && [ "$all_rust" = 0 ] && crates=" wa-sqlite wa-host wa-host-support wa-governance wa-term wa-rendezvous wa-kernel-runtime wa-capabilities wa-operation wa-jobs wa-graph wa-mesh"
   if [ -z "$crates" ]; then echo "fast: rust - no crate touched"; fi
   for crate in $crates; do
+    # THE BUILD, measured as a build: what a change to this crate costs to compile, kept apart
+    # from the seconds its tests take (the row below) so the summary can print the number the
+    # module claim rests on (ARCHITECTURE.md, "Modules over the monolith").
+    if [ "$crate" = wa-sentinel ]; then build_args="--manifest-path rust/wa-sentinel/Cargo.toml"
+    else build_args="--release --manifest-path rust/Cargo.toml -p $crate"; fi
+    bstart=$(date +%s%N)
+    CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo build --offline $build_args > "$work/build-$crate.log" 2>&1 || true
+    wa_build_time_record crate "$crate" "$(( ($(date +%s%N)-bstart)/1000000 ))" "$(wa_build_time_note "$work/build-$crate.log")"
     s=$(date +%s)
     if [ "$crate" = wa-sentinel ]; then
       CARGO_TARGET_DIR="${fast_build_target:-$ROOT/rust/target}" cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1 > "$work/rust-$crate.log" 2>&1
@@ -734,6 +760,19 @@ check component-pins bash scripts/test-component-pins.sh
 # that is not its pin failing by name, a per-component SKIP, and eight parallel rows fetching two pinned
 # names from one cache at once (the 13/11 race). Seconds: no toolchain, no network, no build.
 check component-pins-selftest bash scripts/test-component-pins.sh --self-test
+# The WIT seam is two shapes and a check (ARCHITECTURE.md, "Seams are WIT, and async by default"):
+# a string that carries JSON says so in its name, and nothing new exposes a status to poll. The
+# baseline file is what lets the rule bind new code without breaking the tree - and its own stale
+# lines fail, so a hole that is closed has to leave the file.
+check wit-lint bash scripts/wit-lint.sh
+# The check judged by fixtures: both rules fail where they must and NOT where they must not (a doc
+# naming hooks.json, a doc describing a RETURN value), the baseline accepts the recorded holes, and
+# the marker alone turns a polling func green. Seconds, no toolchain.
+check wit-lint-selftest bash scripts/test-wit-lint.sh
+
+# The measured build times of everything this run compiled, before the verdict, so the claim
+# and the numbers are one screen apart (no gate: scripts/lib/build-times.sh says why).
+wa_build_time_summary
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.
