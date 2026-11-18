@@ -21,6 +21,10 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PUBLISH="$ROOT/scripts/publish-node-binaries.sh"
 . "$ROOT/scripts/lib/node-binaries.sh"
+# The floor this suite names for the host's own /bin/true is measured with the SAME function the publisher
+# refuses on (scripts/lib/glibc-floor.sh), not a second copy of the scan: a fixture whose floor is computed
+# one way and checked another way proves nothing about the check.
+. "$ROOT/scripts/lib/glibc-floor.sh"
 
 WORK="$(mktemp -d)"
 trap 'test_release_vault_stop; chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
@@ -86,7 +90,7 @@ OTHER_TRIPLE=aarch64-unknown-linux-gnu
 # ---- a git fixture: a clean repo on "main", and one behind main --------------------------------------
 fixture="$WORK/fixture"
 mkdir -p "$fixture/scripts/lib"
-cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh" "$fixture/scripts/lib/"
+cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/build-requirements.sh" "$ROOT/scripts/lib/glibc-floor.sh" "$fixture/scripts/lib/"
 # The signature gate lives beside it, and the fixture stands in for a checkout: both files, or a release
 # could not be verified at all (which the lib refuses by name, correctly).
 cp "$ROOT/scripts/lib/release-signing.sh" "$fixture/scripts/lib/"
@@ -348,7 +352,7 @@ else
   mkelf "$built_n/wa-sentinel-$other_triple-$SHORT" "$other_hex"
   # The host's own /bin/true needs this host's glibc, so the floor is named as the value the check is given
   # (a fixture is not a release: a release's floor is 2.31, linked by zig).
-  floor="$(grep -a -o 'GLIBC_2\.[0-9]\+' /bin/true 2>/dev/null | sed 's/^GLIBC_//' | sort -uV | tail -1)"
+  floor="$(wa_glibc_max_symbol /bin/true)"
   [ -n "$floor" ] || floor=2.31
   cat > "$built_n/node-$SHORT.manifest" <<MANIFEST
 schema=wasm-agent-node-binaries/1
