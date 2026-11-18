@@ -421,7 +421,7 @@ every gate in this repository was green without running one of them). Now:
 
 | test | full gate (`scripts/test.sh`) | fast path (`scripts/fast.sh`) | measured standalone |
 | --- | --- | --- | --- |
-| `test-install-record.sh` | yes, `WA_BIN=$BIN` | yes | 5 s, 81 checks |
+| `test-install-record.sh` | yes, `WA_BIN=$BIN` | yes | 5 s, 84 checks |
 | `test-install-guards.sh` | yes | yes | 1 s, 70 checks |
 | `test-deploy-ancestry.sh` | yes | **no, and here is why** | 31 s, 89 checks |
 | `test-node-pins.sh` | yes, `WA_BIN=$BIN` | yes | 3 s, 87 checks |
@@ -443,7 +443,7 @@ install: `test-deploy-ancestry.sh` needs `setsid` and `git`, `test-install-guard
 
 | case | before | after |
 | --- | --- | --- |
-| item 1, `test-install-record.sh` | `so the source is unprovable, not none: got none want unprovable`; `a blank commit= beside these bytes is unprovable too: got none`; and the sentence came out as `nothing is installed in ...` | 81 / 0 failed |
+| item 1, `test-install-record.sh` | `so the source is unprovable, not none: got none want unprovable`; `a blank commit= beside these bytes is unprovable too: got none`; and the sentence came out as `nothing is installed in ...` | 84 / 0 failed |
 | item 1, `test-deploy-ancestry.sh` | the fixture runs the committed code, so the first run of the new case ran the OLD library and showed the hole exactly: no refusal, `the override above was recorded` with no override, then `refused(no_prebuilt_binary)` further down | 89 / 0 failed |
 | item 7, `test-node-pins.sh` | with `HEAD~1:lua/core/pins.lua` in place: `its await is ignored, not honoured: got no want yes`, `so a target CONTAINING that commit does NOT release it: got true want false`, and three more - the pin was RELEASED by the move it exists to stop | 87 / 0 failed |
 | item 5, `test-install-guards.sh` | a copy with the two exports removed, run against a fabricated real home that carries a pin store: `refused(test_needs_scratch_home) ... (rc=2)` | 70 / 0 failed, and the fabricated home is never read |
@@ -454,7 +454,7 @@ install: `test-deploy-ancestry.sh` needs `setsid` and `git`, `test-install-guard
 
 | suite | verdict |
 | --- | --- |
-| `test-install-record.sh` | 81 checks, 0 failed |
+| `test-install-record.sh` | 84 checks, 0 failed (three of them used to be a missing `hides` command: the run said 0 failed and the assertions never ran, found while wiring it) |
 | `test-install-guards.sh` | 70 checks, 0 failed |
 | `test-deploy-ancestry.sh` | 89 checks, 0 failed |
 | `test-node-pins.sh` | 87 checks, 0 failed |

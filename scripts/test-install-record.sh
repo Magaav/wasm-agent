@@ -19,6 +19,10 @@ ok()   { checks=$((checks + 1)); printf '  ok   %s\n' "$*"; }
 bad()  { checks=$((checks + 1)); failed=$((failed + 1)); printf '  FAIL %s\n' "$*"; }
 same() { [ "$2" = "$3" ] && ok "$1 ($2)" || bad "$1: got '$2' want '$3'"; }
 shows() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: '$3' not in '$(printf '%s' "$2" | head -3 | tr '\n' ' ')'" ;; esac; }
+# The complement: a string that must NOT be there. It was missing, and three assertions below called it anyway -
+# bash printed `hides: command not found`, the checks did not run, and the run still said 0 failed. A test whose
+# assertion is a missing command is a test that passes by not looking (found while wiring this file, round 4).
+hides() { case "$2" in *"$3"*) bad "$1: '$3' should not be there" ;; *) ok "$1" ;; esac; }
 [ -f "$LIB" ] || { echo "test-install-record: missing $LIB" >&2; exit 1; }
 . "$LIB"
 
