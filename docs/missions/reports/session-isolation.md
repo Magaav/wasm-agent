@@ -62,7 +62,10 @@ the record names the same session; two nameless callers (a script, the node's ow
 are not two sessions and keep working. `list` filters and reports `operations_elsewhere`;
 `status`/`read`/`wait`/`await`/`cancel` refuse by name (`operation_not_yours`, with the sentence that
 says whose it is and that `scope:"node"` is the only way in); `read` refuses **before** opening the file;
-`relevant` with `cwd:"*"` and `reconcile` need the node scope. The engine route
+`relevant` with `cwd:"*"` and `reconcile` need the node scope **for a session**; a sessionless caller
+(the workspace release path, the node's own reconciler process, a script) is not a session and keeps both,
+which is what the two-process reconciliation test (`scripts/test-operation-reconcile-json.cjs`, 27 checks)
+pins. The engine route
 (`lua/core/server.lua`'s `wa_operation`) now reads ONE session's operations - the conversation it is
 told - and the node's only through `scope:"node"`; the window passes its session.
 

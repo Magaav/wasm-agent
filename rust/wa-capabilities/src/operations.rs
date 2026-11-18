@@ -1196,7 +1196,9 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         // the operator's alone (session isolation, findings 2 and 8).
         "relevant" => {
             let cwd = args["cwd"].as_str().unwrap_or("");
-            if cwd == "*" && !caller.node_wide() {
+            // `"*"` is the whole node. A session may not ask it; the node's own tooling (a sessionless
+            // caller: the workspace release path, a script) is not a session and keeps working.
+            if cwd == "*" && !caller.node_wide() && !caller.session.is_empty() {
                 return Ok(json!({"ok":false,"error":"relevant_node_scope_required","effect":"none",
                     "note":"relevant with cwd:\"*\" asks about every path on the node: it needs an explicit node scope (scope:\"node\", operator only)"}));
             }
@@ -1215,7 +1217,9 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // left to compare against, and the caller is deciding about effects it did not run. That is
             // the operator's action, so it needs the explicit node scope, which is audited in Lua
             // (session isolation, finding 2).
-            if !caller.node_wide() {
+            // A SESSION may not reconcile work it did not run; the node's own recovery path (a sessionless
+            // caller, which is how a reconciler process is started) keeps the action.
+            if !caller.node_wide() && !caller.session.is_empty() {
                 return Ok(json!({"ok":false,"error":"reconcile_node_scope_required","effect":"none",
                     "note":"reconciling settles an operation whose owner process is gone, so the request names no live session: it needs an explicit node scope (scope:\"node\", operator only)"}));
             }
