@@ -80,7 +80,8 @@ mission dir, never the repo). `run.sh` exports, before it launches anything:
     export PATH="$TOOLCHAIN/cargo/bin:$PATH"
     export CARGO_TARGET_DIR="$TARGET"     # ~/wasm-agent/target/m-<name>, this mission's own
 
-**`start` refuses while the NODE has an unfinished, recently active session for this mission**, and it
+**`start` refuses while the NODE has a session for this mission that is unfinished and not
+provably gone**, and it
 names that session. The launcher's pid is not the evidence and cannot be (see the provenance below): a
 launch is refused from what the node says about the session, in four reads.
 
@@ -100,10 +101,24 @@ How they combine, and why in this order:
   `--force` may pass it;
 * **run active + the store unreadable** -> refuse. "Cannot tell" is never "released", because that answers
   `released` for a live 25-minute run;
-* **run settled/cancelled/failed/unknown** -> released: no writer is left;
+* **run settled/cancelled/failed** -> released: no writer is left. A run row that answers `unknown` is the
+  node saying it cannot tell, and that is not a release either - the boot lease decides it (held = refuse);
 * **the recorded session is over and another one is working here** -> refuse. The presence read is asked
-  whenever the recorded session settles, because one session ending says nothing about the next: measured\n  on avell, 18/11, the mission dir's session was `failed` while 6cdf7ddf was writing in that same directory,\n  and a `start` that asked only about its recorded session would have launched a second writer. A live pid with\n  the mission dir (or its worktree) as its cwd and a heartbeat inside the window refuses; the same pid quiet for\n  longer reads `stale` and `--force` may pass it; a row whose pid is gone is not a writer at all;\n* **no run row at all** -> the session list decides: unfinished and last message within
-  `MISSION_ACTIVE_SECONDS` (default 300) refuses; unfinished and quiet for longer is reported, not obeyed.
+  whenever the recorded session settles, because one session ending says nothing about the next: measured
+  on avell, 18/11, the mission dir's session was `failed` while 6cdf7ddf was writing in that same directory,
+  and a `start` that asked only about its recorded session would have launched a second writer. A live pid with
+  the mission dir (or its worktree) as its cwd and a heartbeat inside the window refuses; the same pid quiet for
+  longer refuses too when the node still HOLDS its boot lease, and reads `stale` (which `--force` may pass)
+  only when that lease can be TAKEN; a row whose pid is gone is not a writer at all;
+* **no run row at all** -> the boot lease decides first, then the session list. A boot lease the node still
+  holds is `active` at ANY age - quiet is not gone, and round 2's window called a live run stale at 969 s. A
+  lease the probe can take is `stale`: a leftover row, refused unless `--force`. A lease that cannot be
+  probed - no `sqlite3`, no store, an unreadable one - is `active`: the same "cannot tell", and the same
+  refusal. Only when the node answered and lists no session for this mission at all is the verdict
+  `released`, and a fresh mission's first launch is exactly that case;
+* **the node cannot be asked at all** (`wa sessions` prints nothing) -> `unknown`, which REFUSES and names
+  the session this mission recorded. `--force` passes it only when no session was ever recorded: there is
+  nothing then for a second writer to duplicate. Nothing here answers `released` for want of an answer.
 
 The session is matched to the mission three ways. Every `stage` writes the marker `mission <name> in <wt>` as
 the **first line of `prompt.md`**, and the node shows a session's first line as its title
@@ -111,6 +126,12 @@ the **first line of `prompt.md`**, and the node shows a session's first line as 
 found by the title the node prints, whether or not the launcher survived to record anything. The second way
 is the id in `run.lock`, then in `err.log` where the CLI prints it (`wa: session <id> ok|failed` - on
 stderr, which round 1 read from the wrong stream). The third way needs neither a title nor a log: the directory the session works in, from the\nprocess the node names for it - which is how a session the harness started (no `stage`, no lock, a brief\nfor a title) is still refused.
+
+**One `start` at a time, and the check plus the launch is one step.** `mkdir $M/start.lock` is atomic;
+the lock is held until the launch has a `run.pid` and is removed then. A second `start` that finds a live
+holder refuses and names its pid, and `--force` does not step past it either - the launch it would race
+is already in that window. Without it two starts read "nothing running" in the same breath and both launched
+(measured: 10 of 10 simultaneous pairs, each writing `run.lock` with `>`).
 
 `--force` never kills and never cancels, and there is no `wa` verb that cancels a run (`wa help`): force
 skips the local launcher check and a lease the node itself calls a leftover, and it refuses in the face of
