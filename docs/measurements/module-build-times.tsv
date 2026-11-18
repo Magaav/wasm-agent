@@ -1,0 +1,19 @@
+# Per-module build times for the module report (ARCHITECTURE.md, "Modules over the monolith"), in the
+# same shape scripts/lib/build-times.sh writes and scripts/module-report.mjs reads: kind, name, ms, note.
+#
+# HOW EACH ROW WAS MEASURED. One source file of the module was touched, then
+# `cargo build --release --offline --manifest-path rust/Cargo.toml -p <crate>` was timed, with
+# CARGO_TARGET_DIR=$HOME/wasm-agent/target/m-architecture-rules and WA_CODEMODE_ALLOW_EMPTY=1
+# (rust/wa-capabilities/build.rs refuses to build without prepared code-mode assets). The note says how many
+# compilation units the compiler actually built: ONE unit is the cost of a change IN that module on a warm
+# dependency graph, and more units mean its dependency graph was cold, so that row is an upper bound and not
+# that module's own cost.
+#
+# WHAT THIS IS NOT. Not a gate - scripts/module-report.mjs only prints it - and not yet the whole tree: 4 of
+# 76 modules are measured here. A second session was compiling into the same CARGO_TARGET_DIR while these
+# ran, so the multi-unit rows are upper bounds twice over. A fast run fills the rest of the shape with its
+# own numbers for whatever it compiles (`node scripts/module-report.mjs --timings <that ledger>`).
+crate	wa-operation	1029	1 unit compiled, warm dependency graph
+crate	wa-kernel-runtime	70129	25 units, cold dependency graph (upper bound)
+crate	wa-capabilities	103081	12 units, cold dependency graph (upper bound), WA_CODEMODE_ALLOW_EMPTY=1
+component	memory	7994	42 units, from scripts/build-components.sh WA_COMPONENT_BUILD_TIMINGS
