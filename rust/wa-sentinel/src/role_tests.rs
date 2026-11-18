@@ -60,6 +60,14 @@ impl Fixture {
         std::fs::create_dir_all(&dir).expect("fixture directory");
         let mut fixture = Fixture { dir, restore: Vec::new() };
         fixture.set("WASM_AGENT_HOME", fixture.dir.display().to_string());
+        // Nothing outside owns the watcher here: the `none` case `role::stated_owner` names. Without it the
+        // fixture inherits the control group of whoever ran the suite, and this node runs it inside
+        // `wa-serve.service`: `owner_of` then answers `Unrecognised { unit: "wa-serve.service" }` - which
+        // is the correct answer for a process the unit did not hand anything to - `record_owner` writes
+        // nothing, and the row fails on the missing record (measured on avell 18/11). A test that states
+        // its own ownership is what makes the machine it runs on part of the environment rather than the
+        // verdict; the unit cases below set their own supervisor and are unaffected.
+        fixture.set("WA_SENTINEL_SUPERVISOR", "none".to_string());
         fixture
     }
 

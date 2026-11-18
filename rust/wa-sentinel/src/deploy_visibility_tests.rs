@@ -46,6 +46,12 @@ impl Fixture {
         std::fs::create_dir_all(&dir).expect("fixture directory");
         let mut fixture = Fixture { dir, restore: Vec::new() };
         fixture.set("WASM_AGENT_HOME", fixture.dir.display().to_string());
+        // Nothing outside owns the watcher here: this fixture is the `none` case the code names
+        // (main.rs, `record_owner`), and the alternative is the fact of who ran the test. A watcher started
+        // through a node's unit inherits that unit's control group, so on this machine the deploy is
+        // (correctly) refused as "inside wa-serve.service, which cannot be shown to own it" - measured on
+        // avell 18/11, where these rows run inside the node's own service.
+        fixture.set("WA_SENTINEL_SUPERVISOR", "none".to_string());
         fixture
     }
 
