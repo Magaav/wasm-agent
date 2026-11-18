@@ -2,7 +2,7 @@
 # The mission loop as one entry point: stage -> start -> status -> report -> verify -> clean.
 #
 #   scripts/mission.sh stage  <name> <base> <brief>  # mission dir, worktree, env, prompt.md, run.sh
-#   scripts/mission.sh start  <name> [--force]       # ONE fresh session, detached; never a resume
+#   scripts/mission.sh start  <name>                 # ONE fresh session, detached; never a resume
 #   scripts/mission.sh status [name]                 # every mission, or one: the node's run, counts
 #   scripts/mission.sh report <name>                 # status + the evidence a handover needs
 #   scripts/mission.sh verify <name> <cmd...>        # run <cmd> in the worktree, record its rc
@@ -11,26 +11,25 @@
 # Every rule below is a mechanism here because of a measured failure (measurements: docs/MISSIONS.md):
 #   * LIVENESS IS THE NODE'S RUN, NOT THE LAUNCHER'S PID. Measured 18/11 on this node: session
 #     830fa92f printed "provider_stalled" and its CLI exited rc=1, while the node-side run kept
-#     writing; the relaunch from that rc made TWO writers in one worktree. So "start" asks the node -
-#     "wa sessions" for the sessions this mission owns, and the run lease "wa steer <session>
-#     --status --json" for whether one is in flight - and refuses while a session is unfinished with a
-#     boot lease the node still holds, or unfinished and recently active, naming the session id. A pid is
-#     used for one thing only: the local launcher that has not named its session yet, a window of a few
-#     hundred milliseconds after a launch.
-#   * CANNOT TELL IS NEVER FREE (round 3). If "wa sessions" prints nothing, or the boot lease cannot be
-#     probed, "start" refuses and names the recorded session; --force passes an unanswerable node only
-#     when no session was ever recorded. Nothing here answers "released" for want of an answer.
-#   * A HELD BOOT LEASE IS ALWAYS ACTIVE (round 3). The MISSION_ACTIVE_SECONDS window may never release a
-#     session whose boot lease the node holds: it called a live run stale at 969 s, and --force launched
-#     past it. Stale means the lease could be TAKEN, which is the owner saying it exited.
-#   * ONE START AT A TIME (round 3). The check and the launch are one step: mkdir $M/start.lock is
-#     atomic and held until the launch has a run.pid, so two starts a breath apart make one launch.
+#     writing; the relaunch from that rc made TWO writers in one worktree. So a launch is decided from
+#     the node's own word - "wa sessions" for the sessions this mission owns, the run lease
+#     "wa steer <session> --status --json" for whether one is in flight, the boot lease for whether its
+#     owner still exists - and from the node's session_presence row for the process working in the
+#     mission directory. A pid is used for one thing only: the local launcher that has not named its
+#     session yet, a window of a few hundred milliseconds after a launch.
+#   * ONE ANSWER: settled, or no launch (round 4). "start" launches when, and only when, no launcher is
+#     alive, no process the node records is working in the mission's directory, and the node says every
+#     session of this mission is settled. Every other answer - alive, unknown, unreachable, starting (a
+#     session with no run row or no boot claim yet), held, stale - REFUSES by name, with the reason and
+#     the manual command that clears it. There is no --force: unknown is never free and a leftover is
+#     not a launch permission (rounds 3-4).
+#   * ONE START AT A TIME (round 4). The check and the launch are one step under "flock -n" on one lock
+#     file, held until the launch has a run.pid. The kernel drops it when the shell exits, so a start
+#     that dies leaves nothing to clear, and two starts cannot both get past the check (round 3's mkdir
+#     lock plus a dead-owner "rm -rf" could: the clearer and the taker raced each other).
 #   * THE LOCK BELONGS TO THAT RUN. run.lock is taken before the CLI asks the node for a session and
 #     released when the NODE says the run settled - never because a process exited. Every take, bind,
 #     cli-exit and release is a line in lease.log.
-#   * --force NEVER KILLS AND NEVER CANCELS. There is no wa verb that cancels a run (wa help), so
-#     force skips only the local launcher check and a lease the node itself reports as not moving; it
-#     never starts alongside a run the node reports active.
 #   * the session id is read where the CLI prints it - STDERR ("wa: session <id> ok",
 #     lua/core/chat.lua) - with stdout left as the run's own output. Round 1 read stdout, which on a
 #     real launch never carries the id.
@@ -53,14 +52,17 @@ TOOLCHAIN=${MISSIONS_TOOLCHAIN:-$HOME/wasm-agent/toolchain}
 TARGET_ROOT=${MISSIONS_TARGET_ROOT:-$HOME/wasm-agent/target}
 WA_BIN=${WA_BIN:-}
 NODE_NAME=$(hostname -s 2>/dev/null || uname -n)
-# How recently a run must have moved for an unfinished session to count as a writer that blocks a
-# launch. The node moves a run's updated_at at every context boundary, so this is a gap between
-# boundaries, not the length of a run (lua/core/session_watch.lua uses the same idea at 90 s for
-# "alive without a live witness"). Override with MISSION_ACTIVE_SECONDS.
-ACTIVE_SECONDS=${MISSION_ACTIVE_SECONDS:-300}
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'mission: %s\n' "$*" >&2; exit 1; }
+# Every refusal is one shape: the state by name, the reason, and the command that clears it by hand.
+# Round 4: 'start' has exactly one permitting answer (mission_run: released), so every other state comes
+# through here - alive, held, stale, starting, unknown, unreachable.
+refuse() { # <state> <reason> <command that clears it by hand>
+  printf 'mission: refusing [%s]: %s\n' "$1" "$2" >&2
+  printf 'mission: clear it by hand: %s\n' "$3" >&2
+  exit 1
+}
 usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 m_dir() { printf '%s/%s' "$MISSIONS" "$1"; }
@@ -258,192 +260,120 @@ node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><
   return 0
 }
 
-# Refuse on a writer the recorded session does not cover. Called wherever the RECORDED session has
-# settled: one session can be over while another still works in the same directory - the case measured
-# here on 18/11, where the mission dir's own session was 'failed' and a second session was writing in it.
-# rc 0 when it decided (MR_VERDICT active or stale), rc 1 when it found no such writer.
+# The writer the mission never recorded. The node keeps, per session, the OS process serving it and a
+# heartbeat ('session_presence' in memory.db: session_id, pid, boot, heartbeat_at), and that process's
+# own cwd is the node's answer to "which directory is this session working in": the runner cds to the
+# mission dir before it starts the CLI, so a session working for this mission has the mission dir or its
+# worktree as its cwd. Measured on this node, 18/11: session 6cdf7ddf, pid 1758185, heartbeat 0s old,
+# /proc/1758185/cwd = /home/victor/Work/missions/mission-fabric - a writer in the very directory this
+# mission launches into that no run.lock named and no title marker matched, because the harness started
+# it rather than 'mission.sh stage/start'.
+# Round 4 asks ONE question here and no age: the process exists (its cwd reads), so it is a writer. A
+# heartbeat age was a guess, and a guess that let a quiet writer through once.
+# Sets MR_W_SESSION MR_W_PID MR_W_AGE MR_W_CWD; rc 0 when it found a writer, rc 1 when it found none.
 writers_check() { # <mission dir>
   local M=$1 wt out sid pid age cwd
-  local qsid='' qpid='' qage='' qcwd='' qboot='' qsboot=''
+  MR_W_SESSION=''; MR_W_PID=''; MR_W_AGE='-'; MR_W_CWD=''
   wt=$(wt_of "$M")
-  out=$(node_presence "$M" "$wt") || return 1          # cannot tell: the recorded answer stands
+  out=$(node_presence "$M" "$wt") || return 1        # cannot tell: the node's own reads decide
   [ -n "$out" ] || return 1
   while IFS=$'\t' read -r sid pid age cwd; do
     [ -n "$sid" ] || continue
-    [ "$sid" = "$MR_SESSION" ] && continue             # the recorded session was already ruled on
-    if [ "${age:--1}" -ge 0 ] && [ "$age" -le "$ACTIVE_SECONDS" ]; then
-      MR_VERDICT=active; MR_SESSION=$sid
-      MR_WHY="session $sid: the node records pid $pid serving it, that process's cwd is $cwd - this mission's own directory - and its last heartbeat was ${age}s ago, so a launch now is a second writer in $wt"
-      return 0
-    fi
-    # Quiet is not gone. A heartbeat older than the window can still belong to a process whose boot
-    # lease the node holds - and a lease this script CANNOT take is that process saying it is still
-    # there (review round 3, item 2: the 300 s window alone called a live run stale at 969 s). So the
-    # lease decides here too, and the age is only what the message reports.
-    qboot=$(node_boot_lease "$sid")
-    case $qboot in
-      held*)
-        MR_VERDICT=active; MR_SESSION=$sid
-        MR_WHY="session $sid: the node records pid $pid serving it with cwd $cwd - this mission's own directory - and $qboot, so a launch now is a second writer in $wt (its heartbeat was ${age}s ago: quiet, not gone)"
-        return 0 ;;
-      free*) : ;;
-      *)
-        # Cannot tell whether the owner is alive: a refusal, never a release (round 3, item 3).
-        MR_VERDICT=active; MR_SESSION=$sid
-        MR_WHY="session $sid: pid $pid still has $cwd as its cwd and $qboot, so nothing here can show the owner is gone; a launch now could be a second writer in $wt"
-        return 0 ;;
-    esac
-    [ -n "$qsid" ] || { qsid=$sid; qpid=$pid; qage=$age; qcwd=$cwd; qsboot=$qboot; }
+    MR_W_SESSION=$sid; MR_W_PID=$pid; MR_W_AGE=${age:--1}; MR_W_CWD=$cwd
+    return 0
   done <<<"$out"
-  [ -n "$qsid" ] || return 1
-  MR_VERDICT=stale; MR_SESSION=$qsid
-  MR_WHY="session $qsid: pid $qpid still has $qcwd as its cwd but its last heartbeat was ${qage}s ago (> ${ACTIVE_SECONDS}s), and $qsboot: a leftover process, not a moving run"
-  return 0
+  return 1
 }
 
-# The verdict this script believes, and the only liveness it has:
-#   MR_VERDICT  active   a run is in flight and recently moved: a launch now is a second writer
-#               stale    the node still lists the run active, but it has not moved for ACTIVE_SECONDS
-#               released the node says the run settled, or no run exists: nothing is writing
-#               unknown  the node could not be asked, or no session is recorded for this mission
-#   MR_SESSION, MR_RUN, MR_AGE, MR_WHY
+# The verdict this script believes, and the only liveness it has. Round 4 keeps four names and ONE rule:
+# only 'released' permits a launch, and every other answer refuses with MR_CLEAR - the exact command an
+# operator runs to clear it by hand.
+#   released  every session this mission owns is settled by the node's own word, and no process the node
+#             records is working in the mission's directory: a launch cannot duplicate a writer
+#   active    a live process the node records is working in this mission's directory, or a run is in
+#             flight with its boot lease held: the owner has not exited
+#   stale     the node lists a run in flight and the boot lease can be TAKEN: the owner exited, the row
+#             is a leftover. A leftover is refused too, and cleared by hand - never forced past
+#   unknown   the node could not be asked, a session has no run row yet (it is starting: no claim row,
+#             no lease file), or a lease cannot be probed: "cannot tell" is never free
+# MR_SESSION, MR_RUN, MR_AGE, MR_BOOT, MR_WHY, MR_CLEAR
 mission_run() { # <mission dir>
   MR_VERDICT=unknown; MR_SESSION='-'; MR_RUN='-'; MR_AGE='-'; MR_BOOT='-'
-  MR_WHY='no session is recorded for this mission (no run.lock, and no "wa: session" line in its logs)'
-  local M=$1 name wt marker sid lease state upd run age boot id rowstate rowtitle rowage found='' agedesc=''
+  MR_WHY='the node could not be asked: "wa sessions" printed nothing (no wa on PATH, or no answer)'
+  MR_CLEAR="make the node answer ('wa sessions 100' on $NODE_NAME), then 'scripts/mission.sh status $name' once; a launch is allowed when it answers and every session of this mission is settled"
+  local M=$1 name wt marker sid id rowstate rowtitle rowage lease state upd run boot ids=() i nodehome
+  nodehome=${MISSION_NODE_HOME:-$HOME/.wasm-agent}
   name=$(basename "$M"); wt=$(wt_of "$M"); marker=$(marker_of "$name" "$wt")
   sid=$(lock_field "$M" SESSION)
   [ -n "$sid" ] || sid=$(recorded_session "$M")
+  if [ -n "$sid" ] && ! session_id_ok "$sid"; then
+    MR_VERDICT=unknown
+    MR_WHY="the session this mission records is not a session id: [$sid] (36 characters of [0-9a-f-], or nothing)"
+    MR_CLEAR="read $M/run.lock: if its SESSION line is not a session id, remove that file once you have checked it (rm $M/run.lock)"
+    return 0
+  fi
   [ -n "$sid" ] && MR_SESSION=$sid
-  load_node || { MR_WHY='the node could not be asked: "wa sessions" printed nothing (no wa on PATH?)'; return 1; }
 
-  # How the two node reads combine. The run lease says a run is in flight; the boot lease says whether
-  # the process that owns that run is still there. Both are the node's own facts, and neither is a pid
-  # this script remembers:
-  #   run active + boot held     -> active, whatever the age says. A long tool call moves nothing for
-  #                                 minutes and is still a writer: measured on this node 18/11, a live
-  #                                 run whose last boundary was 969 s old, and an age window alone
-  #                                 would have let a second launch in.
-  #   run active + boot gone     -> stale: the row is a leftover of a process that exited
-  #   run active + cannot tell   -> active: nothing can show the owner is gone, so a launch is refused
-  #   run settled/cancelled/...  -> released, boot or no boot
-  if [ -n "$sid" ]; then
-    lease=$(steer_row "$sid")
-    state=${lease%% *}
-    upd=$(printf '%s' "$lease" | cut -d' ' -f2)
-    run=$(printf '%s' "$lease" | cut -d' ' -f3)
-    boot=$(node_boot_lease "$sid")
-    MR_RUN=$run; MR_AGE=$(age_of "$upd"); MR_BOOT=$boot
+  # 1. The node's own record of what is writing WHERE. This read is memory.db, not the CLI, so it also
+  #    answers when the node cannot be asked at all (round 4: unknown, plus a writer the harness started).
+  writers_check "$M" && {
+    MR_VERDICT=active; MR_SESSION=$MR_W_SESSION
+    MR_WHY="session $MR_W_SESSION is served by pid $MR_W_PID, whose cwd is $MR_W_CWD - this mission's own directory - and whose last heartbeat was ${MR_W_AGE}s ago: a launch now is a second writer in $wt"
+    MR_CLEAR="look at it (ps -o pid=,cmd= -p $MR_W_PID; wa steer $MR_W_SESSION --status) and let it exit - nothing here kills a process; a launch is allowed when that process is gone"
+    return 0
+  }
+
+  # 2. The node's word about every session this mission owns: the one it recorded, and every session the
+  #    node lists under this mission's title (the first line of prompt.md, which the node shows as the
+  #    title - lua/core/memory.lua title_from). ONE criterion decides a session: its run lease says the
+  #    run is over. Nothing else is settled: not an age, not a pid, not a lease the probe can take.
+  if ! load_node; then                   # MR_VERDICT=unknown, with MR_WHY/MR_CLEAR set above
+    [ -n "$sid" ] && MR_WHY="$MR_WHY, and this mission records session $sid, which nothing here can show is over"
+    return 0
+  fi
+  [ -n "$sid" ] && ids+=("$sid")
+  while IFS=$'\t' read -r id rowstate rowtitle rowage; do
+    [ -n "$id" ] || continue
+    [ "$id" = "$sid" ] && continue
+    [ "${#rowtitle}" -ge 20 ] || continue
+    case $marker in "${rowtitle%…}"*) ids+=("$id") ;; esac    # the node truncates at 60 chars
+  done <<<"$NODE_ROWS"
+  if [ ${#ids[@]} -eq 0 ]; then
+    MR_VERDICT=released
+    MR_WHY="the node answered and lists no session for this mission (no run.lock, no 'wa: session' line, no title match)"
+    return 0
+  fi
+  for i in "${ids[@]}"; do
+    lease=$(steer_row "$i"); state=${lease%% *}
+    case $state in settled|failed|cancelled) continue ;; esac  # the node's word: that run is over
+    upd=$(printf '%s' "$lease" | cut -d' ' -f2); run=$(printf '%s' "$lease" | cut -d' ' -f3)
+    MR_SESSION=$i; MR_RUN=$run; MR_AGE=$(age_of "$upd")
+    boot=$(node_boot_lease "$i"); MR_BOOT=$boot
     case $state in
       active)
         case $boot in
           held*)
             MR_VERDICT=active
-            MR_WHY="session $sid: the node's run $run is in flight and $boot (last boundary ${MR_AGE}s ago)"
-            return 0 ;;
+            MR_WHY="session $i: the node's run $run is in flight and $boot (last boundary ${MR_AGE}s ago), so a launch now is a second writer in $wt"
+            MR_CLEAR="wait for that run to end (wa steer $i --status shows it; nothing here cancels a run). If you have checked that its process is gone, settle the leftover row: sqlite3 $nodehome/memory.db \"update steering_runs set state='settled' where session_id='$i'\"" ;;
           free*)
             MR_VERDICT=stale
-            MR_WHY="session $sid: the node still lists run $run as active, but $boot, so the row is a leftover"
-            return 0 ;;
+            MR_WHY="session $i: the node still lists run $run in flight, but $boot - the owner exited, so this row is a leftover, not a launch permission: a launch now would be a launch beside a record nothing here can settle"
+            MR_CLEAR="the owner has exited, so this row is a leftover: finish that one session by hand (wa resume --session $i --once \"<what is left>\") or settle its row (sqlite3 $nodehome/memory.db \"update steering_runs set state='settled' where session_id='$i'\"); then rm $M/run.lock once you have checked it" ;;
           *)
-            # Cannot tell whether the owner is alive. This is a refusal, not a release: the age is NOT
-            # evidence here. Measured by the other session on this mission, 18/11: a live run 25 minutes
-            # in reported state=active with updated_at 1533 s old (it is the run's start, not its last
-            # context boundary), so any "active but older than N seconds means gone" rule releases a run
-            # that is writing right now. Only a lease that can be TAKEN says the owner exited.
-            MR_VERDICT=active
-            MR_WHY="session $sid: the node reports run $run in flight and $boot, so nothing here can show the owner is gone (updated_at ${MR_AGE}s ago is the run's start, not its recency)"
-            return 0 ;;
+            MR_VERDICT=unknown
+            MR_WHY="session $i: the node reports run $run in flight and $boot, so nothing here can show the owner is gone, and a launch now could be a second writer in $wt"
+            MR_CLEAR="probe the boot lease by hand (sqlite3 -readonly $nodehome/resources/claims.sqlite \"select boot from claims where key='session:$i'\", then 'BEGIN EXCLUSIVE; ROLLBACK;' on $nodehome/resources/<boot>.lease.sqlite) and read again: a lease that can be taken means the owner exited" ;;
         esac ;;
-      settled|failed|cancelled)
-        writers_check "$M" && return 0
-        MR_VERDICT=released
-        MR_WHY="the node says run $run is $state (${MR_AGE}s ago, session $sid): no writer is left"
-        return 0 ;;
       *)
-        # The run lease answered nothing usable for the recorded session: 'none - -' is the node's word
-        # for "no row", 'unknown' is it saying it cannot tell, an empty answer is the read failing. None
-        # of them is a release - the boot lease is asked, and only a lease the probe can TAKE lets the
-        # session list decide (round 3, items 2-3).
-        case $boot in
-          held*)
-            MR_VERDICT=active
-            MR_WHY="session $sid: the run lease answered '$state' but $boot, so the owner is still there"
-            return 0 ;;
-          free*) : ;;
-          *)
-            MR_VERDICT=active
-            MR_WHY="session $sid: the run lease answered '$state' and $boot, so nothing here can show the owner is gone"
-            return 0 ;;
-        esac ;;
+        MR_VERDICT=unknown
+        MR_WHY="session $i: the run lease answered '$state' - a session with no run row yet is a session that is STARTING (no claim row, no lease file yet), and nothing here can show it is settled: a launch now could be a second writer in $wt"
+        MR_CLEAR="wait a moment and read it again (wa steer $i --status; scripts/mission.sh status $name). If that session belongs to no run here, remove the record once you have checked it (rm $M/run.lock)" ;;
     esac
-  fi
-
-  # 2. no lease row: the session list's own state, with the age it printed beside it. A session that is
-  #    unfinished and moved recently is a writer whether or not it kept a run row.
-  while IFS=$'\t' read -r id rowstate rowtitle rowage; do
-    [ -n "$id" ] || continue
-    if [ -n "$sid" ]; then
-      [ "$id" = "$sid" ] || continue
-    else
-      # matched by the title the marker gave it: the node truncates at 60 chars, so the title is a
-      # prefix of the marker minus its ellipsis, and the marker is what carries name and worktree.
-      [ "${#rowtitle}" -ge 20 ] || continue
-      case $marker in "${rowtitle%…}"*) : ;; *) continue ;; esac
-      [ -n "$found" ] && continue          # the list is newest first: the first match is the newest
-      found=$id; MR_SESSION=$id
-    fi
-    case $rowstate in
-      unfinished)
-        boot=$(node_boot_lease "$id"); MR_BOOT=$boot
-        if [ "$rowage" -lt 0 ]; then agedesc='the node printed no age for it'
-        else agedesc="its last message was ${rowage}s ago"; fi
-        case $boot in
-          held*)
-            # A HELD BOOT LEASE IS ALWAYS ACTIVE, at any age. The age window is a guess about the gap
-            # between context boundaries; the lease is the owner's own statement that it has not exited.
-            # Measured on this node, 18/11: a live run whose last boundary was 969 s old, which a 300 s
-            # window called stale - and --force then launched past a live writer (round 3, item 2).
-            MR_VERDICT=active; MR_AGE=$rowage
-            MR_WHY="session $id is unfinished, $agedesc, and $boot: quiet is not gone, so a launch now is a second writer in $wt"
-            return 0 ;;
-          free*)
-            # The probe could TAKE the boot lease, which is the owner's statement that it exited: the row
-            # is a leftover. Stale, never released on the transcript age alone.
-            MR_VERDICT=stale; MR_AGE=$rowage
-            MR_WHY="session $id is unfinished, $agedesc, and $boot: a leftover row, not a moving run"
-            return 0 ;;
-          *)
-            # Cannot tell whether the owner is alive: a refusal, never a release (review round 3, item 3).
-            # An unreadable store or no sqlite3 used to answer 'released' right here.
-            MR_VERDICT=active; MR_AGE=$rowage
-            MR_WHY="session $id is unfinished, $agedesc, and $boot, so nothing here can show the owner is gone"
-            return 0 ;;
-        esac
-        ;;
-      *)
-        writers_check "$M" && return 0
-        MR_VERDICT=released; MR_AGE=$rowage
-        MR_WHY="session $id is $rowstate: no run is in flight"
-        return 0
-        ;;
-    esac
-  done <<<"$NODE_ROWS"
-  [ -n "$found" ] || {
-    writers_check "$M" && return 0
-    if [ "$NODE_ANSWER" = yes ]; then
-      # The node answered and lists no session for this mission: with nothing recorded and nothing listed
-      # there is no run of this mission to be a second writer of a launch now. (No answer at all stays
-      # 'unknown' and refuses - see cmd_start.)
-      MR_VERDICT=released
-      MR_WHY="the node answered and lists no session for this mission (no run.lock, no 'wa: session' line, no title match)"
-      return 0
-    fi
     return 0
-  }
-  writers_check "$M" && return 0
+  done
   MR_VERDICT=released
-  MR_WHY="session $found: the node lists no run in flight"
+  MR_WHY="the node says every session of this mission is settled (${ids[*]}) and no process the node records is working in $M"
   return 0
 }
 
@@ -590,107 +520,61 @@ RUNNER
 }
 
 # ---------------------------------------------------------------- start
+# A launch happens here and only here, and only on one answer (mission_run): everything settled. There is
+# no --force - a state this script cannot prove free is a state an operator clears by hand.
 cmd_start() {
-  local name=${1-} force=no
-  [ -n "$name" ] || die "usage: mission.sh start <name> [--force]"
+  local name=${1-}
+  [ -n "$name" ] || die "usage: mission.sh start <name>"
   shift || true
-  case ${1-} in --force|-f) force=yes ;; esac
+  [ "$#" -eq 0 ] || die "start takes a name and nothing else: there is no --force (a launch is refused on the node's word; a stuck mission is cleared by hand - docs/MISSIONS.md)"
   check_name "$name"
   local M; M=$(m_dir "$name")
   [ -f "$M/env" ] || die "not staged: $M/env missing (stage $name <base> <brief>)"
   [ -d "$M/wt" ] || die "no worktree at $M/wt - clean and re-stage"
   [ -x "$M/run.sh" ] || die "no runner at $M/run.sh - re-stage"
+  command -v flock >/dev/null 2>&1 || die "no flock on PATH (util-linux): one start at a time is a kernel lock, not a directory this script has to clean up"
   source_env "$M"
   [ "$NODE_NAME" = "$NODE" ] || die "staged on '$NODE', this is '$NODE_NAME': build where the mission was staged"
 
-  # 0. ONE start at a time, and the check plus the launch is ONE step. Measured with the fixture (round
-  #    3, item 4): two starts a breath apart both read "nothing running" and both launched, and run.lock
-  #    was taken twice - each launcher's '>' overwrote the other's claim - so two writers landed in one
-  #    worktree. mkdir is atomic on every filesystem this runs on; the loser never reaches mission_run,
-  #    and --force does not step past it either, because a launch already in this window is exactly what
-  #    force cannot know anything about. The lock is held until the launch has a run.pid and never after.
-  local STARTLOCK=$M/start.lock owner i=0
-  if ! mkdir "$STARTLOCK" 2>/dev/null; then
-    # The holder writes its pid immediately after creating the directory, so a loser that reads an empty
-    # pid is not looking at a dead start: measured here, it read '' inside that instant and took the
-    # directory over. Wait for the pid before deciding - 1 s, after which it is a start that died.
-    while [ "$i" -lt 20 ] && [ ! -s "$STARTLOCK/pid" ] && [ -d "$STARTLOCK" ]; do
-      sleep 0.05; i=$((i + 1))
-    done
-    owner=$(cat "$STARTLOCK/pid" 2>/dev/null || true)
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-      die "refusing: another 'start' of $name is in this moment checking the node and launching (pid $owner holds $STARTLOCK). Two starts must not both get past that check: wait for this one to name its session (scripts/mission.sh status $name) and for $M/done, then start again. --force does not help: the launch it would race is already happening."
-    fi
-    # No holder alive: the window it named is over, so the directory is a leftover, not a launch in flight.
-    # (It may also have been released while we waited, in which case there is nothing left to remove.)
-    rm -rf "$STARTLOCK"
-    mkdir "$STARTLOCK" 2>/dev/null || die "cannot take $STARTLOCK (another start took it in this instant)"
+  # 0. ONE start at a time, and the check plus the launch is ONE step. flock -n on one file, held by this
+  #    shell until the launch has a run.pid and closed then. The kernel drops it when the holder exits, so
+  #    a start that dies leaves NOTHING to clear by hand, and two starts cannot both get past the check
+  #    (round 3 measured 10 of 10 simultaneous pairs launching, each writing run.lock with '>'; the mkdir
+  #    lock that followed could be cleared by one start while another took it - round 4, item 2).
+  local LOCK=$M/start.flock pid lpid wt i=0
+  wt=$(wt_of "$M")
+  exec 9>>"$LOCK" || die "cannot open $LOCK"
+  flock -n 9 || die "refusing: another 'start' of $name is inside its check-and-launch right now (flock -n on $LOCK). Wait for it: 'scripts/mission.sh status $name' names the session once the launch has one, and $M/done says it finished. There is nothing to clear - the kernel releases that lock when that start exits."
+  # 1. THE ONE GATE: a launcher still standing, or any verdict but 'released', refuses by name. Unknown is
+  #    never free: an answer this script cannot get is an answer it cannot act on.
+  if alive_launcher "$M"; then
+    lpid=$(cat "$M/run.pid" 2>/dev/null)
+    refuse launcher \
+      "a launch is standing in $M (launcher pid $lpid) and has not named its session yet, so a launch now is a second writer in $wt" \
+      "wait for $M/done, or for 'scripts/mission.sh status $name' to name that session; if 'ps -o pid=,cmd= -p $lpid' shows that pid is not this mission's runner, remove the stale pid file (rm $M/run.pid) and start again"
   fi
-  printf '%s' "$$" > "$STARTLOCK/pid"
-  trap 'rm -rf "$STARTLOCK"' EXIT
-
-  # 1. The node's word first, and that is the one that cannot be forced: a run in flight is a writer.
   mission_run "$M"
-  case $MR_VERDICT in
-    active)
-      die "refusing: $MR_WHY. One launch at a time - a second launch now is a second writer in $WT (measured 18/11). --force does not help: there is no wa verb that cancels a run, so nothing here can end it; 'wa steer $MR_SESSION --status' shows the run, and the lock is released when the node reports it settled." ;;
-    stale)
-      if [ "$force" != yes ]; then
-        die "refusing: $MR_WHY. One launch at a time: wait for it to move or settle, or --force on the node's word that nothing is moving"
-      fi
-      say "--force: $MR_WHY"
-      release_lock "$M" start "forced past a stale lease: $MR_WHY"
-      ;;
-    released)
-      if [ -f "$M/run.lock" ]; then
-        release_lock "$M" start "$MR_WHY"
-        say "released a lock the node says is settled: $MR_WHY"
-      fi
-      ;;
-    unknown)
-      # "Cannot tell" is not "free". Measured in the fixture (round 3, item 1): a 'wa sessions' that
-      # printed nothing left mission_run at 'unknown', this branch did nothing without --force, and
-      # start launched - step 2 only refuses while the launcher pid lives, and the launcher of the
-      # previous launch had already exited. So unknown REFUSES and names any recorded session; --force
-      # passes it only when no session was ever recorded, because then there is nothing a second writer
-      # could be a duplicate of.
-      if [ "$force" = yes ] && [ "$MR_SESSION" = '-' ]; then
-        say "--force: no node answer and no session was ever recorded for this mission - $MR_WHY"
-        [ -f "$M/run.lock" ] && release_lock "$M" start "forced with no node answer and no session recorded"
-      elif [ "$MR_SESSION" = '-' ]; then
-        die "refusing: the node could not be asked ($MR_WHY), so nothing here can show that no writer is left, and no session is recorded that could be checked by hand. Get the node to answer ('wa sessions' on $NODE_NAME) and start again."
-      else
-        die "refusing: the node could not be asked ($MR_WHY), and this mission has recorded session $MR_SESSION, which nothing here can show is over: a launch now could be a second writer in $WT. --force does not help - there is no wa verb that cancels a run, so nothing here can end session $MR_SESSION; 'wa steer $MR_SESSION --status' shows it, and a launch is allowed again once the node answers and reports it settled."
-      fi
-      ;;
-  esac
-
-  # 2. The local launcher window: the milliseconds between "run.sh starts" and "the node named the
-  #    session". Only --force steps past it, and it says so.
-  if [ -f "$M/run.lock" ] && alive_launcher "$M"; then
-    if [ "$force" = yes ]; then
-      say "--force: a launcher (pid $(cat "$M/run.pid")) is still standing in $M; starting anyway"
-    else
-      die "refusing: a launch is starting in $M (launcher pid $(cat "$M/run.pid")) and has not named its session yet: wait for $M/done, or for 'mission.sh status $name' to show the run"
-    fi
-  fi
+  [ "$MR_VERDICT" = released ] || refuse "$MR_VERDICT" "$MR_WHY" "$MR_CLEAR"
 
   [ -f "$M/done" ] && say "previous launch finished: $(cat "$M/done") - this is a NEW session (wa chat --once), not a resume"
+  if [ -f "$M/run.lock" ]; then
+    release_lock "$M" start "$MR_WHY"
+    say "released a lock the node says is settled: $MR_WHY"
+  fi
   # The previous launch's pid file is cleared here, not by the runner it is about to start: a stale one
   # satisfied the wait below and let start return before the new runner had taken the lock.
   rm -f "$M/run.pid"
-  local pid
+  # 9>&- : the launcher must not inherit the start lock, or the lock would live as long as the run.
   if command -v setsid >/dev/null 2>&1; then
-    setsid nohup bash "$M/run.sh" >>"$M/out.log" 2>>"$M/err.log" </dev/null &
+    setsid nohup bash "$M/run.sh" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
   else
-    nohup bash "$M/run.sh" >>"$M/out.log" 2>>"$M/err.log" </dev/null &
+    nohup bash "$M/run.sh" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
   fi
   pid=$!
-  local i=0
   while [ "$i" -lt 50 ]; do [ -s "$M/run.pid" ] && break; sleep 0.1; i=$((i + 1)); done
-  # The launch has its run.pid: the check+launch window is over, and the run's own lock (run.lock, owned
-  # by the node's run) is what holds from here.
-  rm -rf "$STARTLOCK"; trap - EXIT
+  # The launch has its run.pid: the check-and-launch window is over, and the run's own lock (run.lock,
+  # owned by the node's run) is what holds from here.
+  exec 9>&-
   say "started $name (launcher pid $pid); the run is the node's - watch: scripts/mission.sh status $name"
 }
 
@@ -772,7 +656,14 @@ one_status() { # <name>
   printf '%-10s %s\n' done "$done"
   printf '%-10s %s\n' failures "$failures"
   [ -n "$last" ] && printf '%-10s %s\n' last "$last"
-  [ -n "$wt" ] && [ -f "$wt/REPORT.md" ] && printf '%-10s %s\n' report "$wt/REPORT.md ($(wc -c <"$wt/REPORT.md") bytes)"
+  # The handover file, where a session is told to write it (REPORT.md in the worktree root)
+  # and where the repo keeps a round report for a branch that has already landed
+  # (docs/missions/reports/<name>.md). Either one is the handover.
+  if [ -n "$wt" ] && [ -f "$wt/REPORT.md" ]; then
+    printf '%-10s %s\n' report "$wt/REPORT.md ($(wc -c <"$wt/REPORT.md") bytes)"
+  elif [ -n "$wt" ] && [ -f "$wt/docs/missions/reports/$name.md" ]; then
+    printf '%-10s %s\n' report "$wt/docs/missions/reports/$name.md ($(wc -c <"$wt/docs/missions/reports/$name.md") bytes)"
+  fi
   return 0
 }
 
@@ -878,7 +769,7 @@ cmd_clean() {
   fi
   release_lock "$M" clean "$MR_WHY"
   rm -f "$M/run.sh" "$M/run.pid"
-  rm -rf "$M/start.lock"
+  rm -f "$M/start.flock"   # the file may stay; the LOCK is the kernel's, not the file's
   git -C "$REPO" worktree prune 2>/dev/null || true
   say "kept: $M (env, brief, prompt.md, out.log, err.log, lease.log, started, done, verify.log) and branch $(sed -n "s/^BRANCH='\(.*\)'$/\1/p" "$M/env" 2>/dev/null || echo '?') - its commits are the mission's result"
 }

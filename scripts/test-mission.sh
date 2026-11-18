@@ -191,9 +191,9 @@ out=$(run start demo) && fail 'a second start must refuse while the node still r
 has "$out" 'refusing' 'the refusal says it refuses'
 has "$out" '22222222-3333-4444-5555-666666666666' 'the refusal NAMES the session id'
 has "$out" 'second writer' 'the refusal says what a second launch would be'
-out=$(run start demo --force) && fail '--force must not launch alongside a run the node reports active' || ok
-has "$out" 'refusing' '--force refuses too'
-has "$out" 'no wa verb that cancels' 'and says what it cannot do: there is no wa verb that cancels a run'
+out=$(run start demo --force) && fail 'start must not take --force at all' || ok
+has "$out" 'no --force' 'start says in as many words that it has no --force'
+has "$out" 'cleared by hand' 'and that a stuck mission is cleared by hand, not forced past'
 out=$(run verify demo true) && fail 'verify must refuse while the node runs that session' || ok
 has "$out" 'in flight' 'verify refuses with the reason'
 out=$(run clean demo --force) && fail 'clean must refuse while the node runs that session' || ok
@@ -240,29 +240,26 @@ has "$s" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' 'status prints the writer, disti
 out=$(run start demo) && fail 'start must refuse while another session works in this mission directory' || ok
 has "$out" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' 'that refusal NAMES the session the mission never recorded'
 has "$out" 'second writer' 'and says what a launch now would be'
-out=$(run start demo --force) && fail '--force must not launch next to a live process in the mission dir' || ok
-has "$out" 'refusing' '--force refuses a live writer too'
+out=$(run start demo --force) && fail 'start takes no flag, not even with a writer in the directory' || ok
+has "$out" 'no --force' 'and it says so instead of reading a flag that no longer exists'
 
-# the same process, quiet for longer than the window: stale, refused without --force, still named
+# Round 4: the heartbeat age is not asked any more. A presence row whose pid still has the mission dir as
+# its cwd is a process working here NOW - it refuses whether it beat a second ago or an hour ago, and so
+# does a row whose boot lease is held. No age, no lease, no flag.
 presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$OTHER" 4000
 s=$(status_of demo)
-case "$(field "$s" run)" in stale*) ok ;; *) fail "a quiet leftover process must read stale, got: '$(field "$s" run)'" ;; esac
-out=$(run start demo) && fail 'a quiet leftover must refuse without --force' || ok
-has "$out" 'refusing' 'the leftover refusal refuses'
-
-# round 3, item 2: the same quiet process, but the node still HOLDS its boot lease. Quiet is not gone:
-# a lease the probe cannot take is the owner saying it is there, so this is active, and --force refuses.
+case "$(field "$s" run)" in active*) ok ;; *) fail "a quiet process in the mission dir must still read active, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" '4000s ago' 'the heartbeat age is reported, not obeyed'
+# the same row, but the node still HOLDS its boot lease: the writer is named for the live pid either way
 sqlite3 "$NODEHOME/resources/claims.sqlite" \
   "insert into claims(key,boot) values('session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee','boot-held') on conflict(key) do update set boot=excluded.boot" \
   || fail 'cannot give the quiet presence row a held boot'
-s=$(status_of demo)
-case "$(field "$s" run)" in active*) ok ;; *) fail "a quiet presence row whose boot lease is held must read active, got: '$(field "$s" run)'" ;; esac
-has "$(field "$s" run)" 'quiet, not gone' 'and says which fact beat the heartbeat age'
-out=$(run start demo) && fail 'a quiet writer with a held lease must refuse without --force' || ok
-out=$(run start demo --force) && fail '--force must not pass a quiet writer whose boot lease is held' || ok
-has "$out" 'refusing' 'the forced start refuses it too'
+out=$(run start demo) && fail 'a writer whose boot lease is held must refuse too' || ok
+has "$out" 'clear it by hand' 'and gives the command that clears it by hand'
+has "$out" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' 'naming the session it refuses for'
 sqlite3 "$NODEHOME/resources/claims.sqlite" "delete from claims where key='session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'" \
   || fail 'cannot free the quiet presence row'
+
 
 # the process is gone: a row with a dead pid is not a writer, and a launch is allowed again
 kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
@@ -272,7 +269,9 @@ case "$(field "$s" run)" in released*) ok ;; *) fail "a presence row whose pid i
 out=$(run start demo); has "$out" 'started demo' 'with the stray process gone, a launch is allowed'
 wait_done demo || fail 'the launch after the stray process wrote no done marker'
 
-# ================================================================ a run row left behind: stale, and --force
+# ================================================================ a run row left behind: stale, and a refusal
+# Round 4: a leftover is NOT a launch permission. The node lists the run in flight and its boot lease can
+# be taken, so the owner has exited - and that is a state an operator clears with a command, not a flag.
 export STUB_ID=44444444-5555-6666-7777-888888888888 STUB_RC=0 STUB_RESULT=ok STUB_NODE_KEEPS_RUN=no
 run start demo >/dev/null; wait_done demo || fail 'the fourth launch wrote no done marker'
 node_session 44444444-5555-6666-7777-888888888888 unfinished 0 "mission demo in $MISSIONS/demo/wt"
@@ -281,14 +280,19 @@ printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master",
 sqlite3 "$NODEHOME/resources/claims.sqlite" "insert into claims(key,boot) values('session:44444444-5555-6666-7777-888888888888','boot-free') on conflict(key) do update set boot=excluded.boot"
 s=$(status_of demo)
 case "$(field "$s" run)" in stale*) ok ;; *) fail "a run row whose process is gone must read stale, got: '$(field "$s" run)'" ;; esac
-out=$(run start demo) && fail 'a stale run row must refuse without --force' || ok
-has "$out" 'refusing' 'the stale refusal refuses'
-out=$(run start demo --force) && ok || fail '--force must pass a run row the node says is a leftover'
-has "$out" '--force:' 'and says what it is forcing past'
-has "$(cat "$MISSIONS/demo/lease.log")" 'forced past a stale lease' 'lease.log records what the force stepped past'
+out=$(run start demo) && fail 'a stale run row must refuse' || ok
+has "$out" 'refusing [stale]' 'the leftover refusal names its state'
+has "$out" 'leftover' 'and says the row is a leftover, not a launch permission'
+has "$out" 'clear it by hand' 'and gives the command that clears it by hand'
+has "$out" 'steering_runs' 'the exact row an operator settles, named'
+has "$out" '44444444-5555-6666-7777-888888888888' 'naming the session'
+# the operator does exactly that, and the launch is allowed again
+printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master","run_id":"run-of-44444444","session_id":"44444444-5555-6666-7777-888888888888","state":"settled","updated_at":%s}}\n' "$(now)" \
+  > "$STUB_STATE/steer.44444444-5555-6666-7777-888888888888"
+out=$(run start demo); has "$out" 'started demo' 'once the leftover row is settled by hand, the launch is allowed'
 
 # ================================================================ status/verify/report/clean on a quiet mission
-wait_done demo || fail 'the forced launch wrote no done marker'
+wait_done demo || fail 'the launch after the leftover wrote no done marker'
 s=$(status_of demo)
 [ "$(field "$s" commits)" = 0 ] && ok || fail "status counted $(field "$s" commits) commits, there are none"
 [ "$(field "$s" dirty)" = 0 ] && ok || fail 'status called a clean worktree dirty'
@@ -308,6 +312,11 @@ out=$(run report demo)
 has "$out" '-- lease' 'report has a lease section'
 has "$out" 'cli-exit' 'report quotes the CLI exit from lease.log'
 has "$out" 'no REPORT.md' 'report says the handover file is missing'
+mkdir -p "$MISSIONS/demo/wt/docs/missions/reports"
+printf '# demo, round 4
+' > "$MISSIONS/demo/wt/docs/missions/reports/demo.md"
+has "$(status_of demo)" 'docs/missions/reports/demo.md' 'status reads a round report kept under docs/missions/reports/<name>.md'
+rm -rf "$MISSIONS/demo/wt/docs"
 printf 'dirty\n' >> "$MISSIONS/demo/wt/thing.txt"
 out=$(run clean demo) && fail 'clean on a dirty worktree must refuse' || ok
 has "$out" 'uncommitted' 'the refusal names the uncommitted paths'
@@ -317,6 +326,7 @@ git -C "$REPO" show-ref --verify -q refs/heads/change/demo && ok || fail 'clean 
 [ -f "$MISSIONS/demo/lease.log" ] && ok || fail 'clean deleted the lease log'
 [ -f "$MISSIONS/demo/done" ] && ok || fail 'clean deleted the done marker'
 out=$(run clean demo) && ok || fail "the second clean should be a no-op: $out"
+[ -f "$MISSIONS/demo/start.flock" ] && fail 'clean left the start lock file' || ok
 has "$out" 'already clean' 'the second clean says there is nothing to remove'
 
 # ================================================================ a mission staged before this script
@@ -361,16 +371,15 @@ node_session 77777777-8888-9999-aaaa-bbbbbbbbbbbb unfinished 1533 "mission quiet
 printf '{"note":"x","receipts":[],"target":{"boot":"boot-unprobeable","owner":"master","run_id":"run-of-quiet","session_id":"77777777-8888-9999-aaaa-bbbbbbbbbbbb","state":"active","updated_at":%s}}\n' "$(( $(now) - 1533 ))" \
   > "$STUB_STATE/steer.77777777-8888-9999-aaaa-bbbbbbbbbbbb"
 s=$(run_nonode status quiet)
-case "$(field "$s" run)" in active*) ok ;; *) fail "active with an unreadable lease store must refuse, got: '$(field "$s" run)'" ;; esac
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "active with an unreadable lease store must refuse, got: '$(field "$s" run)'" ;; esac
 has "$(field "$s" run)" 'nothing here can show the owner is gone' 'and says why it cannot release it'
 case "$(field "$s" boot)" in unknown*) ok ;; *) fail "an unreadable store must say unknown, got: '$(field "$s" boot)'" ;; esac
 
-# ================================================================ round 3, item 1: an unreachable node
-# Measured in this fixture before the fix: a 'wa sessions' that fails leaves mission_run at 'unknown'; the
-# '*)' branch of start did nothing without --force, and step 2 only refuses while the launcher pid lives -
-# which, for a launch whose CLI has already exited, it does not. So start launched. 'Unknown' is a refusal
-# now, and --force passes it only when no session was ever recorded: there is nothing then for a second
-# writer to be a duplicate of.
+# ================================================================ an unreachable node: unknown, and nothing else
+# Measured in this fixture before round 3: a 'wa sessions' that fails left mission_run at 'unknown' and
+# start launched, because the launcher of the previous launch had already exited. Round 4 removes the last
+# way past it: unknown refuses whether or not a session was ever recorded, and the manual command it names
+# is the one that makes the node answer. There is no --force left to try.
 out=$(run stage nodead main "$WORK/brief.md"); [ $? = 0 ] || fail "stage nodead: $out"
 export STUB_SESSIONS_FAIL=yes
 nodead=$MISSIONS/nodead
@@ -379,19 +388,14 @@ printf '%s\n' "MISSION='nodead'" "SESSION='aaaaaaaa-1111-2222-3333-444444444444'
 s=$(status_of nodead)
 case "$(field "$s" run)" in unknown*) ok ;; *) fail "a node that cannot be asked must read unknown, got: '$(field "$s" run)'" ;; esac
 out=$(run start nodead) && fail 'start must refuse when the node cannot be asked' || ok
-has "$out" 'refusing' 'the unknown refusal refuses'
+has "$out" 'refusing [unknown]' 'the unknown refusal names its state'
 has "$out" 'could not be asked' 'and says the node could not be asked'
 has "$out" 'aaaaaaaa-1111-2222-3333-444444444444' 'the unknown refusal NAMES the recorded session'
-out=$(run start nodead --force) && fail '--force must not pass an unanswerable node while a session is recorded' || ok
-has "$out" 'aaaaaaaa-1111-2222-3333-444444444444' 'the forced refusal names the session too'
-has "$out" 'no wa verb that cancels' 'and says why force cannot end it'
+has "$out" 'wa sessions 100' 'and gives the exact command that makes the node answer'
 [ -f "$nodead/done" ] && fail 'a refused start must not have launched anything' || ok
 rm -f "$nodead/run.lock"
-out=$(run start nodead) && fail 'without --force an unanswerable node refuses even with nothing recorded' || ok
-has "$out" 'no session is recorded' 'and says there is nothing recorded to check by hand'
-out=$(run start nodead --force) && ok || fail "--force must pass an unanswerable node when no session was ever recorded: $out"
-has "$out" 'started nodead' 'the forced launch happens'
-wait_done nodead || fail 'the forced launch wrote no done marker'
+out=$(run start nodead) && fail 'an unanswerable node refuses even with nothing recorded' || ok
+has "$out" 'refusing [unknown]' 'and it is the same unknown'
 export STUB_SESSIONS_FAIL=no
 
 # ================================================================ round 3, item 2: quiet is not gone
@@ -405,23 +409,27 @@ node_session bbbbbbbb-1111-2222-3333-444444444444 unfinished 4000 "mission qheld
 sqlite3 "$NODEHOME/resources/claims.sqlite" \
   "insert into claims(key,boot) values('session:bbbbbbbb-1111-2222-3333-444444444444','boot-held') on conflict(key) do update set boot=excluded.boot" \
   || fail 'cannot claim a held boot for the quiet session'
+printf '{"note":"x","receipts":[],"target":{"boot":"boot-held","owner":"master","run_id":"run-of-qheld","session_id":"bbbbbbbb-1111-2222-3333-444444444444","state":"active","updated_at":%s}}\n' "$(( $(now) - 4000 ))" \
+  > "$STUB_STATE/steer.bbbbbbbb-1111-2222-3333-444444444444"
 s=$(status_of qheld)
 case "$(field "$s" run)" in active*) ok ;; *) fail "a quiet session whose boot lease is held must read active, got: '$(field "$s" run)'" ;; esac
-has "$(field "$s" run)" 'quiet is not gone' 'and says which fact decided it'
+has "$(field "$s" run)" 'held boot' 'and says which fact decided it: the boot lease is held'
 has "$(field "$s" run)" 'bbbbbbbb-1111-2222-3333-444444444444' 'the verdict names the session it matched by title'
-out=$(run start qheld) && fail 'a quiet session with a held lease must refuse without --force' || ok
-out=$(run start qheld --force) && fail '--force must not pass a held boot lease' || ok
-has "$out" 'refusing' 'the forced start refuses a held lease'
+out=$(run start qheld) && fail 'a quiet session with a held lease must refuse' || ok
+has "$out" 'refusing [active]' 'the refusal names the held lease as active'
 has "$out" 'bbbbbbbb-1111-2222-3333-444444444444' 'and names the session'
 # the same row, with a lease the probe can take: the owner exited, so the row is a leftover: stale
 sqlite3 "$NODEHOME/resources/claims.sqlite" "update claims set boot='boot-free' where key='session:bbbbbbbb-1111-2222-3333-444444444444'"
 s=$(status_of qheld)
 case "$(field "$s" run)" in stale*) ok ;; *) fail "a quiet session whose lease can be taken must read stale, got: '$(field "$s" run)'" ;; esac
-out=$(run start qheld) && fail 'a stale row must refuse without --force' || ok
+out=$(run start qheld) && fail 'a stale row must refuse' || ok
+has "$out" 'refusing [stale]' 'a lease the probe can take is a leftover, and a leftover refuses'
 export STUB_ID=eeeeeeee-1111-2222-3333-444444444444 STUB_RC=0 STUB_RESULT=ok STUB_NODE_KEEPS_RUN=no
-out=$(run start qheld --force) && ok || fail "--force must pass a lease it can take: $out"
-has "$out" '--force:' 'and says what it is forcing past (qheld never launched, so it has no lock to release)'
-wait_done qheld || fail 'the forced launch of qheld wrote no done marker'
+printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master","run_id":"run-of-qheld","session_id":"bbbbbbbb-1111-2222-3333-444444444444","state":"settled","updated_at":%s}}\n' "$(now)" \
+  > "$STUB_STATE/steer.bbbbbbbb-1111-2222-3333-444444444444"
+out=$(run start qheld) && ok || fail "the launch after the operator settled the row failed: $out"
+has "$out" 'started qheld' 'and then the launch happens'
+wait_done qheld || fail 'the launch of qheld wrote no done marker'
 
 # ================================================================ round 3, item 3: cannot tell is not released
 # The session list's unfinished branch answered 'released' when the boot lease could not be probed (no
@@ -432,11 +440,11 @@ git -C "$REPO" worktree add -q -b change/noage "$noage/wt" main
 printf '%s\n' "mission noage in $noage/wt" > "$noage/prompt.md"
 node_session cccccccc-1111-2222-3333-444444444444 unfinished - "mission noage in $noage/wt"
 s=$(run_nonode status noage)
-case "$(field "$s" run)" in active*) ok ;; *) fail "an unfinished session with no age and an unprobeable lease must read active, got: '$(field "$s" run)'" ;; esac
-has "$(field "$s" run)" 'nothing here can show the owner is gone' 'and says so instead of releasing it'
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "an unfinished session with no age and an unprobeable lease must refuse, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" 'nothing here can show it is settled' 'and says so instead of releasing it'
 node_session cccccccc-1111-2222-3333-444444444444 unfinished 4000 "mission noage in $noage/wt"
 s=$(run_nonode status noage)
-case "$(field "$s" run)" in active*) ok ;; *) fail "a quiet unfinished session with an unprobeable lease must read active, got: '$(field "$s" run)'" ;; esac
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "a quiet unfinished session with an unprobeable lease must refuse, got: '$(field "$s" run)'" ;; esac
 case "$(field "$s" boot)" in unknown*) ok ;; *) fail "the boot read must say unknown: '$(field "$s" boot)'" ;; esac
 
 # the same class from the run lease: a state of 'unknown' is the node saying it cannot tell, not a release
@@ -446,13 +454,14 @@ sqlite3 "$NODEHOME/resources/claims.sqlite" \
   "insert into claims(key,boot) values('session:77777777-8888-9999-aaaa-bbbbbbbbbbbb','boot-held') on conflict(key) do update set boot=excluded.boot" \
   || fail 'cannot claim a boot for the unknown-state session'
 s=$(status_of quiet)
-case "$(field "$s" run)" in active*) ok ;; *) fail "a run lease that answers 'unknown' must not release a held boot, got: '$(field "$s" run)'" ;; esac
-has "$(field "$s" run)" 'the owner is still there' 'and says the owner is still there'
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "a run lease that answers 'unknown' must not release a held boot, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" "answered 'unknown'" 'and says the run lease answered nothing usable'
 
-# ================================================================ round 3, item 4: two starts, one launch
-# Before the fix: two starts read "nothing running" inside the same window and both launched, each writing
-# run.lock with '>'. The check and the launch are ONE step now - mkdir start.lock, atomic - and the lock is
-# held until the launch has a run.pid.
+# ================================================================ ONE START AT A TIME: flock -n, one launch
+# Round 3 held the check-and-launch window with 'mkdir $M/start.lock' and cleared a dead holder with
+# 'rm -rf'. Two starts could then both clear it and both take it. Round 4 uses one kernel lock instead:
+# flock -n on $M/start.flock, held until the launch has a run.pid and dropped by the kernel when the holder
+# exits. There is no dead lock left behind to clear, and two starts cannot both get past the check.
 out=$(run stage race main "$WORK/brief.md"); [ $? = 0 ] || fail "stage race: $out"
 race=$MISSIONS/race
 # A runner that takes 300 ms to write run.pid: the window an operator's second start opens anyway (bash
@@ -460,32 +469,102 @@ race=$MISSIONS/race
 sed -i '2i sleep 0.3' "$race/run.sh"
 bash -n "$race/run.sh" || fail 'the slowed runner does not parse'
 export STUB_ID=ffffffff-1111-2222-3333-444444444444 STUB_RC=0 STUB_RESULT=ok STUB_NODE_KEEPS_RUN=no
-( MISSION_REPO=$REPO MISSIONS_DIR=$MISSIONS MISSIONS_TARGET_ROOT=$TARGET MISSIONS_TOOLCHAIN=$WORK/toolchain \
-  WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NODEHOME bash "$MISSION" start race >"$WORK/race-1" 2>&1 ) &
-r1=$!
+start_bg() { # <mission> <log>
+  ( MISSION_REPO=$REPO MISSIONS_DIR=$MISSIONS MISSIONS_TARGET_ROOT=$TARGET MISSIONS_TOOLCHAIN=$WORK/toolchain \
+    WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NODEHOME bash "$MISSION" start "$1" >"$2" 2>&1 ) &
+}
+start_bg race "$WORK/race-1"; r1=$!
 sleep 0.1
-( MISSION_REPO=$REPO MISSIONS_DIR=$MISSIONS MISSIONS_TARGET_ROOT=$TARGET MISSIONS_TOOLCHAIN=$WORK/toolchain \
-  WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NODEHOME bash "$MISSION" start race >"$WORK/race-2" 2>&1 ) &
-r2=$!
+start_bg race "$WORK/race-2"; r2=$!
 wait "$r1" "$r2"
 wins=$(grep -l 'started race' "$WORK/race-1" "$WORK/race-2" 2>/dev/null | wc -l)
 [ "$wins" = 1 ] && ok || fail "two starts 100 ms apart must make ONE launch, made $wins: $(cat "$WORK/race-1") | $(cat "$WORK/race-2")"
 loser=$(grep -L 'started race' "$WORK/race-1" "$WORK/race-2" | head -1)
-has "$(cat "$loser")" 'start.lock' 'the start that lost says which lock stopped it'
+has "$(cat "$loser")" 'start.flock' 'the start that lost says which lock stopped it'
 has "$(cat "$loser")" 'refusing' 'and refuses instead of launching'
+has "$(cat "$loser")" 'nothing to clear' 'and says the kernel releases it: no dead lock to clear by hand'
 wait_done race || fail 'the winning launch wrote no done marker'
-[ -d "$race/start.lock" ] && fail 'start left its window lock behind' || ok
-# a start already inside its window, named by the pid that holds it: refused, and --force does not step past
-sleep 30 & HOLDER=$!
+
+# round 4, item 2: two starts clearing a DEAD lock. A leftover lock FILE - a start killed before it could
+# launch - is not a lock any more: the kernel dropped it with the process. Planted, it must neither stop a
+# launch nor let two launches through.
+: > "$race/start.flock"
+start_bg race "$WORK/dead-1"; d1=$!
+sleep 0.1
+start_bg race "$WORK/dead-2"; d2=$!
+wait "$d1" "$d2"
+wins=$(grep -l 'started race' "$WORK/dead-1" "$WORK/dead-2" 2>/dev/null | wc -l)
+[ "$wins" = 1 ] && ok || fail "a leftover lock FILE must not let two starts launch, made $wins: $(cat "$WORK/dead-1") | $(cat "$WORK/dead-2")"
+wait_done race || fail 'the launch beside the leftover lock file wrote no done marker'
+
+# a start already inside its window: a real holder of the lock. The second start refuses, names the file,
+# and there is nothing to pass it with.
+( exec 9>>"$race/start.flock"; flock -n 9 || exit 9; sleep 30 ) & HOLDER=$!
 KIDS="$KIDS $HOLDER"
-mkdir "$race/start.lock" && printf '%s' "$HOLDER" > "$race/start.lock/pid" || fail 'cannot plant a start lock'
+sleep 0.2
 out=$(run start race) && fail 'a start must refuse while another start holds the window' || ok
-has "$out" 'start.lock' 'the refusal names the lock'
-has "$out" "$HOLDER" 'and the pid that holds it'
-out=$(run start race --force) && fail '--force must not step past a launch that is already in its window' || ok
-has "$out" 'already happening' 'and says why: that launch is happening, not a stale record'
-rm -rf "$race/start.lock"
+has "$out" 'start.flock' 'the refusal names the lock file'
+has "$out" 'refusing' 'and refuses instead of launching'
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+out=$(run start race) && ok || fail "once the holder exits, the kernel has released it and the launch happens: $out"
+wait_done race || fail 'the launch after the holder exited wrote no done marker'
+
+# ================================================================ round 4, item 3(a): a live launcher whose
+# new session is not yet named. The runner has taken run.lock (SESSION='' until the node names one) and
+# run.pid names the process standing in the window, so nothing but alive_launcher can catch it.
+out=$(run stage launch main "$WORK/brief.md"); [ $? = 0 ] || fail "stage launch: $out"
+launch=$MISSIONS/launch
+printf '%s\n' "MISSION='launch'" "SESSION=''" "WORKTREE='$launch/wt'" "NODE='$(hostname -s)'" \
+  "LAUNCHER='0'" "LOCKED='$(date -u +%FT%TZ)'" > "$launch/run.lock"
+( cd "$launch" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &    # the launcher, cwd = the mission dir
+LPID=$!
+KIDS="$KIDS $LPID"
+sleep 0.2
+printf '%s\n' "$LPID" > "$launch/run.pid"
+out=$(run start launch) && fail 'a live launcher that has not named its session must refuse a launch' || ok
+has "$out" 'refusing [launcher]' 'the launcher refusal names its state'
+has "$out" "$LPID" 'and names the pid standing in the window'
+has "$out" "rm $launch/run.pid" 'and gives the exact file an operator removes after checking'
+[ -f "$launch/done" ] && fail 'the refused launch must not have started anything' || ok
+kill "$LPID" 2>/dev/null; wait "$LPID" 2>/dev/null
+rm -f "$launch/run.pid" "$launch/run.lock"
+out=$(run start launch); has "$out" 'started launch' 'with the launcher gone and nothing recorded, it launches'
+wait_done launch || fail 'the launch after the planted launcher wrote no done marker'
+
+# ================================================================ round 4, item 3(d): a session that is
+# STARTING - listed unfinished, no run row yet, no claim row and no lease file. Round 3 read a boot claim it
+# could not find as a boot the probe could take, so it said 'stale' and --force launched through it.
+out=$(run stage starting main "$WORK/brief.md"); [ $? = 0 ] || fail "stage starting: $out"
+starting=$MISSIONS/starting
+node_session dddddddd-1111-2222-3333-444444444444 unfinished 0 "mission starting in $starting/wt"
+printf '%s\n' "MISSION='starting'" "SESSION='dddddddd-1111-2222-3333-444444444444'" "WORKTREE='$starting/wt'" \
+  "NODE='$(hostname -s)'" "LAUNCHER='0'" "LOCKED='$(date -u +%FT%TZ)'" > "$starting/run.lock"
+rm -f "$STUB_STATE/steer.dddddddd-1111-2222-3333-444444444444"   # the CLI has not got as far as a run row
+s=$(status_of starting)
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "a starting session must refuse a launch, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" 'STARTING' 'and says the session is starting: no run row, no claim, no lease file'
+out=$(run start starting) && fail 'a session that is starting must refuse a launch' || ok
+has "$out" 'refusing [unknown]' 'the refusal names its state'
+has "$out" 'wa steer dddddddd-1111-2222-3333-444444444444 --status' 'and gives the exact command to read it again'
+
+# ================================================================ round 4, item 3(c): unknown AND a writer
+# the harness started. The node cannot be asked at all, and memory.db still names a live process working in
+# the mission dir. It must refuse, and name the writer rather than only the silence.
+export STUB_SESSIONS_FAIL=yes
+( cd "$starting" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &
+HPID=$!
+KIDS="$KIDS $HPID"
+sleep 0.2
+presence eeeeeeee-ffff-0000-1111-222222222222 "$HPID" 0
+out=$(run start starting) && fail 'unknown plus a writer in the mission dir must refuse' || ok
+has "$out" 'refusing [active]' 'the writer is the reason, and not the silence of the node'
+has "$out" 'eeeeeeee-ffff-0000-1111-222222222222' 'and the refusal names the session the harness started'
+has "$out" "$starting" 'and the directory that process works in'
+export STUB_SESSIONS_FAIL=no
+kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null
+sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id='eeeeeeee-ffff-0000-1111-222222222222'" \
+  || fail 'cannot drop the harness writer presence row'
+rm -f "$starting/run.lock"
 
 # ================================================================ round 3, item 6: a log is not a session id
 # The id goes from run.lock / err.log / out.log into SQL (claims.sqlite). 36 characters of [0-9a-f-], or
@@ -497,7 +576,7 @@ INJ="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
 printf '%s\n' "MISSION='badid'" "SESSION='$INJ'" "WORKTREE='$badid/wt'" "NODE='$(hostname -s)'" \
   "LAUNCHER='0'" "LOCKED='2026-11-18T00:00:00Z'" > "$badid/run.lock"
 s=$(status_of badid)
-case "$(field "$s" run)" in active*) ok ;; *) fail "a recorded session id that is not an id must refuse, got: '$(field "$s" run)'" ;; esac
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "a recorded session id that is not an id must refuse, got: '$(field "$s" run)'" ;; esac
 has "$(field "$s" run)" 'not a session id' 'and the reason is the id: it never becomes part of a query'
 case "$(field "$s" boot)" in unknown*) ok ;; *) fail "the boot read must be unknown for a non-id: '$(field "$s" boot)'" ;; esac
 rm -f "$badid/run.lock"
