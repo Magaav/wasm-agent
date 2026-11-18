@@ -136,6 +136,19 @@ out=$(run clean demo) && ok || fail "the second clean should be a no-op, not an 
 has "$out" 'already clean' 'the second clean says there is nothing to remove'
 has "$(run status)" 'name       demo' 'status with no name lists the mission'
 
+# --- a mission staged before this script (no env file): status reads the facts off the worktree and
+#     admits the one thing it cannot know - whether the old launcher's session is still alive.
+legacy=$MISSIONS/legacy; mkdir -p "$legacy"
+git -C "$REPO" worktree add -q -b change/legacy "$legacy/wt" main
+printf '! run_failed: legacy_provider - a failure in a mission staged by the old launcher\n' > "$legacy/out.log"
+s=$(status_of legacy)
+[ "$(field "$s" worktree)" = "$legacy/wt" ] && ok || fail "legacy status worktree: '$(field "$s" worktree)'"
+[ "$(field "$s" commits)" = 0 ] && ok || fail "legacy status commits: '$(field "$s" commits)'"
+[ "$(field "$s" dirty)" = 0 ] && ok || fail "legacy status dirty: '$(field "$s" dirty)'"
+[ "$(field "$s" failures)" = 1 ] && ok || fail "legacy status failures: '$(field "$s" failures)'"
+case "$(field "$s" running)" in unknown*) ok ;; *) fail "legacy running must be unknown, not '$(field "$s" running)'" ;; esac
+has "$(run status)" 'name       legacy' 'status with no name lists a mission that has only a worktree'
+
 printf 'mission fixture: %s checks ok\n' "$checks"
 
 

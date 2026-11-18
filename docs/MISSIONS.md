@@ -1,7 +1,7 @@
 # Missions — the loop, the command for each step, and the measurement behind every rule
 
 > The mechanism is `scripts/mission.sh`; this file is the knowledge behind it. Where the two disagree, the
-> script is what runs. Its fixture is `bash scripts/test-mission.sh` (52 checks, a scratch repository and a
+> script is what runs. Its fixture is `bash scripts/test-mission.sh` (58 checks, a scratch repository and a
 > stub `wa`; no network, no model, no node). The fixture runs in the fast path: `check mission` in
 > `scripts/fast.sh`.
 
@@ -89,6 +89,11 @@ after it with the rc, so a launch that died is distinguishable from one that fin
 (`git rev-list --count`, `git diff --name-only`), dirty paths, the live launch, `done`, the last session id,
 and `failures` = `grep -c '^! run_failed' out.log`, with the newest failure quoted. A real failure is a
 `run_failed` line from `lua/core/run_failure.lua`; the word "failed" in prose is not one.
+
+A mission staged **before** this script (no `env` file - every mission under `~/Work/missions` on 18/11) is read
+from its worktree instead: branch, commits/files/dirty against the `origin/main` merge base, and
+`running: unknown (launcher before this script recorded no pid)` - because the old runner recorded no pid and
+`no` would be a claim nobody made.
 
     wa watch <node> <session>             # a session on another node, read-only
     wa steer <session> "<note>"           # queue a note into a run that is still in flight
