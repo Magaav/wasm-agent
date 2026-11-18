@@ -4,6 +4,61 @@ Branch `change/release-glibc` in this worktree (`/home/victor/Work/missions/rele
 `origin/main`. Built and tested HERE (avell, x86_64, 16 cores, host glibc 2.44). Committed locally; **never
 pushed, never published**.
 
+## Round 3 - the verification review's two nits (verdict: land)
+
+| # | finding | where it was | what changed |
+| --- | --- | --- | --- |
+| 1 | under `curl \| bash` `$0` is `bash`, so the lib lookup resolved to `./lib/glibc-floor.sh` and SOURCED a file in the caller's working directory | `scripts/fleet-install.sh` 209-212 | the lookup is removed: the script sources no lib at all, and a test plants `./lib/glibc-floor.sh` in the cwd and proves it is never read |
+| 2 | the test asserted one guard block for the lib only | `scripts/test-glibc-floor.sh` section 8 | both files are now proved to carry exactly one begin/end pair |
+
+### 1. The hole, measured before and after
+
+The old line, run by hand in a directory holding a planted `lib/glibc-floor.sh`:
+
+    cd $d && WA_GLIBC_HOST=2.35 TARGET=$d/bin/wa bash -s "file://$d/art/newer" < fleet-install.sh
+
+- **3b01caea**: the plant printed `PLANTED: the cwd lib was sourced`, its `wa_glibc_guard` (return 0)
+  replaced the real one, and the run went straight past the floor check to the exec test - a **2.39**
+  artifact on a declared **2.35** host, unrefused. That is the guard off, silently, in exactly the shape the
+  fleet install is handed out in;
+- **8d98aa11**: no plant line, `glibc_floor_exceeded` with both versions named, the target bytes untouched.
+
+Removed rather than narrowed on purpose: resolving $0/BASH_SOURCE leaves the same hole for `bash
+fleet-install.sh` (a bare relative path) and for a bare name on PATH, and there is nothing to gain from the
+source at all - the block in the script is the lib's text byte for byte and the suite fails on one differing
+line, so sourcing it on top was either a no-op or a bug.
+
+### 2. The two tests, failing before and passing after
+
+- suite: **109 checks** (113 with the four built artifacts from round 2, still on disk), against 96 (100) on
+  3b01caea;
+- **mutation 1** - the 3b01caea `fleet-install.sh` put back under the new test:
+  `glibc floor FAILED: the planted ./lib/glibc-floor.sh was NOT sourced under bash -s: 'PLANTED_LIB_SOURCED'
+  unexpectedly in: PLANTED_LIB_SOURCED: a cwd lib was sourced by fleet-install.sh`;
+- **mutation 2** - a second `# wa-glibc-floor-begin` / `# wa-glibc-floor-end` pair appended to `fleet-install.sh`:
+  `glibc floor FAILED: scripts/fleet-install.sh carries 2 wa-glibc-floor blocks, not 1`;
+- both new cases run in the two shapes a node gets (`bash -s`, the pipe, and `bash fleet-install.sh`, a bare
+  relative path), the plant is asserted to exist before the case runs (`[ -s ]`, so the check cannot pass for
+  want of a fixture), and the planted file speaks **at source time**, so being read at all is the failure
+  whatever order the definitions would have made of the functions.
+
+### Also measured, not changed (outside the two nits)
+
+`scripts/upgrade.sh` 34-37 carries the same cwd-relative fallback (`$(dirname "$0")/lib/glibc-floor.sh`,
+and `$(dirname "$0")/lib/turn-guard.sh` beside it). It is not piped from curl - it runs from a checkout or an
+install directory - so the hole is not reachable the way the fleet install's was, and closing it needs a
+decision about how an installed copy finds its libs. Left as it is and named here rather than changed
+unreviewed on the last round.
+
+### Not verified / not done (round 3)
+
+- **not pushed**: one local commit, `8d98aa11`, plus this report's commit. Nothing was published.
+- the fleet install was **not run against a live node** (it would restart the node this session runs on): the
+  refusal is proved end to end with fixture artifacts, which is what the suite does for every installer but
+  `deploy.sh`/`upgrade.sh`, whose blocks are read out of the files and run.
+- the full `scripts/test.sh` gate was not run in this round; the suite this change touches was, plus the two
+  mutations above.
+
 ## Round 2 - the independent review of a9b60cc9: four findings, four changes
 
 | # | finding | where it was | what changed |
