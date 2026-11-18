@@ -580,6 +580,20 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
     sandbox.document.body.classList.add("term");
     fireDocument("keydown", { key: "Escape", ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, target: null, preventDefault() {} });
     check(!sandbox.document.body.classList.contains("term"), "Esc closes the shell: windowKey -> key-escape -> the handler");
+
+    // The window's own /keybindings command: it draws the console's half (the node's route; the stub
+    // answers with no error) and this window's, from the table above.
+    const commands = vm.runInContext("COMMANDS", sandbox);
+    const entry = commands.find((command) => command.name === "/keybindings");
+    check(Boolean(entry), "the window offers /keybindings");
+    const messages = byId("messages");
+    const before = messages.children.length;
+    await entry.run();
+    const panel = messages.children[messages.children.length - 1];
+    check(messages.children.length > before, "/keybindings draws a panel in the transcript");
+    check(String(panel.textContent).includes("This window"), "and its window half is the table's rows");
+    check(String(panel.textContent).includes("Ctrl+E"), "with the engine view's key in it");
+
   }
 
   console.log("---");
