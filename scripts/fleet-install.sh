@@ -9,9 +9,10 @@
 # 2. **the signature (optional)** — a manifest signed by the operator's `fleet-release` key, verified
 #    offline with the node's own ed25519 (`wa` + `host.verify`), the same pattern the roster uses.
 # 3. **the glibc floor, named** — the newest `GLIBC_<version>` symbol in the artifact against this host's
-#    `ldd --version` (`scripts/lib/glibc-floor.sh`). The exec test below catches this class too, but it
-#    catches it as "the artifact does not run here: GLIBC_2.39 not found", one line of a failure that took
-#    two days to read on mail (18/11). This step names both versions before anything is executed.
+#    `ldd --version`. The measurement is the block carried inline below, the lib's own text. The
+#    exec test below catches this class too, but it catches it as "the artifact does not run here:
+#    GLIBC_2.39 not found", one line of a failure that took two days to read on mail (18/11). This step
+#    names both versions before anything is executed.
 # 3b. **it runs here, before anything is replaced** — `--version` on the downloaded file. On 17/11 a
 #    native build (glibc 2.39) was installed on two hosts whose glibc is 2.31 and 2.35; both nodes died
 #    on restart and could not be reached at all, because the node *is* the channel you would fix it
@@ -50,9 +51,17 @@ die() { printf 'fleet-install: %s\n' "$*" >&2; exit 1; }
 # lib between the markers below (scripts/test-glibc-floor.sh diffs the two blocks and fails on one
 # differing line, so there is one behaviour and provably one implementation). A copy without the lib used
 # to refuse every install with `glibc_floor_lib_missing`, which is a floor check that is off exactly where
-# it is needed - and the fleet install is the one that killed mail. When the lib IS beside us (a shipped
-# install), it is sourced on top: a fix to the lib then reaches this script without a second edit, and the
-# diff keeps the copy equal in the meantime.
+# it is needed - and the fleet install is the one that killed mail.
+#
+# AND IT SOURCES NOTHING, ON PURPOSE. 3b01caea sourced the lib from `$(dirname -- "$0")/lib` when that
+# file was there - and under `curl ... | bash` `$0` is `bash`, so the path was
+# `./lib/glibc-floor.sh`: a file in whatever directory the operator happened to be standing in. A
+# floor check - the one gate that keeps a node alive across a restart, on the node that IS the channel you
+# would fix it through - must not be replaceable by a file in the cwd. The lookup bought nothing: the block
+# below IS the lib's text, byte for byte (scripts/test-glibc-floor.sh fails on one differing line), so
+# sourcing it on top could only ever be a no-op or a bug. There is no lib read here at all: not relatively,
+# not from $0, not from BASH_SOURCE. A test plants a `./lib/glibc-floor.sh` in the cwd, runs this file as
+# `bash -s` (the curl shape) and as a bare relative path, and proves the plant is never read.
 # wa-glibc-floor-begin
 # THE MEASUREMENT AND THE GUARD - four functions, ONE behaviour, copied verbatim into
 # scripts/fleet-install.sh between the same two markers (see the header of this file). Nothing in here may
@@ -206,10 +215,6 @@ wa_glibc_guard() {
   return 3
 }
 # wa-glibc-floor-end
-glibc_floor_lib="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/glibc-floor.sh"
-if [ -f "$glibc_floor_lib" ]; then
-  . "$glibc_floor_lib"
-fi
 
 # The staging directory is beside the target, not in /tmp: a node whose /tmp is mounted `noexec` would
 # refuse every binary as "does not run here", and the guard would cry wolf until nobody believed it.

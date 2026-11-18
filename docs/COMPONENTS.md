@@ -180,7 +180,10 @@ refuse a binary with against the host's own `ldd --version` (docs/INSTALL.md, "T
 `scripts/fleet-install.sh` carries the four functions inside itself, because that script is also handed out
 as one file (over `curl`, or on a node with no lib beside it) and a floor check that refused for want of its
 lib would be off exactly where it is needed: `scripts/test-glibc-floor.sh` diffs the two copies and fails on
-one differing byte, so there is one implementation and not a second one that drifts. A host whose `sort`
+one differing byte, so there is one implementation and not a second one that drifts. It sources no lib at
+all - not relatively, not from `$0`, not from `BASH_SOURCE` - because under `curl ... | bash` `$0` is
+`bash` and a `$(dirname "$0")/lib` lookup is a read of the caller's current directory; the test
+plants a `./lib/glibc-floor.sh` in the cwd and proves it is never read. A host whose `sort`
 has no `-V`, or ignores it, is "unknown" there - the comparison is printed as `glibc_floor_unknown:` and the
 bytes are allowed through, rather than the whole fleet being refused by a tool that cannot order versions. Every
 member is verified before anything is printed for upload: sha256,

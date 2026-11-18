@@ -181,13 +181,16 @@ A host below the floor is not left without options: publish the same commit with
 (`--glibc 2.27`), or install the static musl bundle from `releases/index-linux.json` (the `-musl` rows),
 which needs no glibc at all.
 
-`bash scripts/test-glibc-floor.sh` pins all of it (96 checks, no network, no node, no cargo; 100 with the
+`bash scripts/test-glibc-floor.sh` pins all of it (109 checks, no network, no node, no cargo; 113 with the
 built artifacts, see below): the measurement reads `GLIBC_2.2.5` as *older* than `GLIBC_2.31`; a fixture
 artifact that needs 2.39 is refused by all three installers with both versions in the output and the
 installed binary unchanged; the same artifact at 2.31 gets *past* that step (so the guard is not a blanket
 refusal); a host without a version-sorting `sort` is "unknown" and allowed, not refused; the copy of
 `fleet-install.sh` fetched on its own makes the check, and the two copies of the four functions are diffed
-byte for byte; the guard in `deploy.sh` is checked to be **before the candidate is first executed** as well
+byte for byte, with each file carrying exactly one of them; and that script sources nothing from the
+directory it happens to be run in - a planted `./lib/glibc-floor.sh` in the cwd is proved unread under
+`bash -s` (the `curl | bash` shape) and under a bare relative path, a lib lookup that used to
+resolve to `./lib` precisely because `$0` is `bash` there; the guard in `deploy.sh` is checked to be **before the candidate is first executed** as well
 as before the proof, the backup and the swap (the block is read out of `deploy.sh` by its markers and run
 against fixtures); and the byte scan is compared with `readelf -V`'s `.gnu.version_r` on real linked binaries
 - and on the built artifacts when `WA_GLIBC_ARTIFACT_DIR` names them - which is what would catch a

@@ -9,6 +9,11 @@
 #     not glibc is "unknown" rather than "satisfied" or "refused";
 #   * scripts/fleet-install.sh refuses an artifact that needs a newer glibc than the host, names BOTH
 #     versions, and leaves the installed binary byte-identical with no backup and no swap;
+#   * a planted `./lib/glibc-floor.sh` in the installer's CURRENT DIRECTORY is never read: the fleet
+#     install sources no lib at all, proved under `bash -s` (the `curl | bash` shape) and under a
+#     bare relative invocation - 3b01caea sourced `$(dirname $0)/lib` there, which under the pipe is `./lib`;
+#   * each of the two copies of the block is the ONLY one in its file: a second begin/end pair would be a
+#     second behaviour hiding below the first, where the byte-for-byte diff never reads;
 #   * the same artifact whose floor this host satisfies gets PAST that step (the next refusal is the exec
 #     test, which is a different sentence), so the guard is not a blanket refusal;
 #   * scripts/upgrade.sh refuses the candidate before the proof and before the backup, with the running
@@ -381,6 +386,56 @@ ok
 contains "$(cat "$WORK/block-lib")" "wa_glibc_guard()" "the shared block holds the guard itself"
 contains "$(cat "$WORK/block-lib")" "wa_glibc_max_symbol()" "and the measurement it guards with"
 [ "$(count_of "$LIB" "# wa-glibc-floor-begin")" = 1 ] || fail "the lib has more than one wa-glibc-floor block"
+ok
+# ...and exactly one copy in the fleet install too: the diff above reads only the text between the FIRST
+# begin marker and the next end marker, so a second copy lower in the file - a fix applied to one and not
+# the other - would be invisible to it.
+[ "$(count_of "$FLEET" "# wa-glibc-floor-begin")" = 1 ] \
+  || fail "scripts/fleet-install.sh carries $(count_of "$FLEET" "# wa-glibc-floor-begin") wa-glibc-floor blocks, not 1: one behaviour means one copy, and the diff above reads only the first"
+ok
+# ...and the closing marker is single in both, so the block the diff reads is the whole block: a stray end
+# marker would cut it short and leave the rest of the guard uncompared.
+for marked in "$LIB" "$FLEET"; do
+  [ "$(count_of "$marked" "# wa-glibc-floor-end")" = 1 ] \
+    || fail "$(basename "$marked") carries $(count_of "$marked" "# wa-glibc-floor-end") wa-glibc-floor-end markers, not 1"
+  ok
+done
+
+# ---- 8b. nothing in the cwd can reach into the guard: the installer sources no lib at all -------------
+# 3b01caea sourced the lib from `$(dirname "$0")/lib` when the file was there. Under `curl ... | bash` `$0` is
+# `bash`, so that resolved to `./lib/glibc-floor.sh` - a file in the directory the operator happened to be
+# standing in. A shell that ran the installer after a `cd` somewhere untrusted (an unpacked tarball, a
+# shared build host) would have had its floor check - the one gate that keeps a node alive across a
+# restart, on the node that IS the channel you would fix it through - replaced by whatever was lying there.
+# The file below is that plant, and it speaks the moment it is sourced: being READ at all is the failure,
+# whatever the order of definition would then make of the functions. Neither shape a node gets may read it:
+# the pipe (`bash -s`, the `curl | bash` shape) and a bare relative invocation (`bash fleet-install.sh`,
+# the same `./` hole by another door).
+mkdir -p "$WORK/plant/lib"
+cat > "$WORK/plant/lib/glibc-floor.sh" <<'PLANT'
+# The guard a cwd can put in front of the real one: it says it was read, and it lets everything through.
+printf 'PLANTED_LIB_SOURCED: a cwd lib was sourced by fleet-install.sh\n' >&2
+wa_glibc_sort_orders_versions() { return 0; }
+wa_glibc_max_symbol() { :; }
+wa_glibc_covers() { return 0; }
+wa_glibc_host_version() { :; }
+wa_glibc_guard() { printf 'PLANTED_LIB_SOURCED: the cwd lib replaced the guard\n'; return 0; }
+PLANT
+cp "$FLEET" "$WORK/plant/fleet-install.sh"
+out="$(cd "$WORK/plant" && WA_GLIBC_HOST=2.35 TARGET="$step/bin/wa" bash -s "file://$step/art/wa-needs-2.39" 2>&1 < fleet-install.sh)"; rc=$?
+[ -s "$WORK/plant/lib/glibc-floor.sh" ] || fail "the plant was not written, so this case proves nothing"
+ok
+expect_status 1 "$rc" "the curl shape (bash -s, cwd holding a planted ./lib/glibc-floor.sh, a 2.39 artifact on a 2.35 host)"
+absent "$out" "PLANTED_LIB_SOURCED" "the planted ./lib/glibc-floor.sh was NOT sourced under bash -s"
+contains "$out" "glibc_floor_exceeded:" "the inline block refused, so the planted guard was not the one that ran"
+contains "$out" "needs GLIBC_2.39" "and it names the version the artifact needs"
+[ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the planted-lib run replaced the installed binary"
+ok
+out="$(cd "$WORK/plant" && WA_GLIBC_HOST=2.35 TARGET="$step/bin/wa" bash fleet-install.sh "file://$step/art/wa-needs-2.39" 2>&1)"; rc=$?
+expect_status 1 "$rc" "a bare relative path (bash fleet-install.sh) in the same cwd"
+absent "$out" "PLANTED_LIB_SOURCED" "the planted cwd lib is not sourced by a relative invocation either"
+contains "$out" "glibc_floor_exceeded:" "the inline block refuses there too"
+[ "$(sha "$step/bin/wa")" = "$old_sha" ] || fail "the relative-path run replaced the installed binary"
 ok
 
 # ---- 9. the scan against the ELF's own answer ------------------------------------------------------

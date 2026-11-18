@@ -23,7 +23,9 @@
 # off exactly where it is needed (found in review of a9b60cc9: a standalone copy refused every install with
 # `glibc_floor_lib_missing` instead of checking anything). scripts/test-glibc-floor.sh diffs the two blocks
 # by their markers and fails on one differing line, so there is one implementation and not two that drift.
-# Every other caller sources this file.
+# Every other caller sources this file; the fleet install sources NOTHING, not even this lib when it lies
+# beside it - under `curl ... | bash` `$0` is `bash`, so a `$(dirname "$0")/lib` lookup is a read of
+# the caller's working directory, and the copy inside it is this file's text byte for byte anyway.
 #
 # WHAT THE MEASUREMENT IS, AND WHAT IT COSTS, is written down inside that block, so a standalone copy
 # carries its own explanation.
