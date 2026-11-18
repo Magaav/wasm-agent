@@ -42,8 +42,10 @@ bin="$(native "$bin")"; core="$(native "$core")"; root_native="$(native "$ROOT")
 work="$(mktemp -d "${TMPDIR:-/tmp}/wa-parity-XXXXXX")"
 trap '[ "$keep" = 1 ] || rm -rf "$work"' EXIT
 
-excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
-for f in scripts/test-*.lua; do printf '%s\n' "$excluded" | grep -qxF "$f" || printf '%s\n' "$f"; done > "$work/list"
+# The row set is the runner's own inventory (scripts/lib/fast-rows.sh, wa_fast_row_candidates), so this
+# harness cannot drift from scripts/fast.sh about which rows exist.
+. "$ROOT/scripts/lib/fast-rows.sh"
+wa_fast_row_candidates > "$work/list"
 
 # One script in one mode: its own home, its own ledger, no node and no network.
 run_mode() {

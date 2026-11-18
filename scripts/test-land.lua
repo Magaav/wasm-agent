@@ -1043,6 +1043,11 @@ eq(gate_for({ "lua/core/codemode.lua" }), "fast,prompt-docs,codemode-component,c
 
 -- A changed module maps to rows: the fixture carries one row that names `lua/core/agent.lua` and one that does
 -- not, and only the first may be planned.
+-- The fixture carries the REAL row inventory (scripts/lib/fast-rows.sh): the planner reads the rows a round may
+-- request from it (the function scripts/fast.sh builds its lua.list with), so a fixture without it can prove
+-- nothing about narrowing.
+must("mkdir -p scripts/lib", "fixture lib dir", repo)
+write_file(repo .. "/scripts/lib/fast-rows.sh", read_file(tree_root .. "/scripts/lib/fast-rows.sh") or "")
 must("mkdir -p scripts lua/core", "fixture dirs", repo)
 write_file(repo .. "/lua/core/agent.lua", "return {}\n")
 write_file(repo .. "/scripts/test-agent-thing.lua", "-- mentions lua/core/agent.lua\n")
@@ -1056,6 +1061,67 @@ eq(rows[1], "scripts/test-agent-thing.lua", "and it is the one the grep found")
 eq(#land.gate_rows(row_run, { "lua/core/agent.lua", "scripts/test-unrelated-thing.lua" }), 2,
   "a changed row is planned too")
 eq(#land.gate_rows(row_run, { "docs/LAND.md" }), 0, "no row maps to a document, which makes the run whole")
+-- 18c-2. ONE row inventory. The planner requests only rows this fast path would run, and a row the ledger
+-- declares not run is REPORTED with its reason, never requested - requesting it is `fast_narrow:unknown_row`
+-- and a round gated on zero tests (measured twice: land-20261118T172243Z-666a59cf, land-20261118T173351Z-2a481142).
+write_file(repo .. "/scripts/fast-path.exclude",
+  "scripts/test-agent-thing.lua  # needs a ledger the fast path has not got\n" ..
+  "scripts/test-agent-unrunnable.lua  # needs a real raw terminal\n")
+write_file(repo .. "/scripts/test-agent-live.lua", "-- mentions lua/core/agent.lua\n")
+write_file(repo .. "/scripts/test-agent-unrunnable.lua", "-- mentions lua/core/agent.lua\n")
+must("git add -A && git commit -q -m inventory", "commit the inventory", repo)
+local planned, not_planned = land.gate_rows(row_run, { "lua/core/agent.lua" })
+eq(#planned, 1, "only a row this fast path would run is requested")
+eq(planned[1], "scripts/test-agent-live.lua", "and it is the live one")
+eq(#not_planned, 2, "the declared rows are reported as not a gate row")
+local why_of = {}
+for _, entry in ipairs(not_planned) do why_of[entry.path] = entry.why end
+contains(why_of["scripts/test-agent-thing.lua"] or "", "needs a ledger", "the report carries the ledger's reason")
+contains(why_of["scripts/test-agent-unrunnable.lua"] or "", "raw terminal", "and the reason of a row found by name")
+-- A changed path that IS a test the ledger declares not run: not requested, reported with the reason.
+local only_declared, declared_report = land.gate_rows(row_run, { "scripts/test-agent-thing.lua" })
+eq(#only_declared, 0, "a changed test the ledger declares not run is never requested")
+eq(#declared_report, 1, "it is reported instead")
+contains(declared_report[1] and declared_report[1].why or "", "needs a ledger", "with the ledger's reason")
+local narrowed_text = land.plan_text({ plan = { files = 1, category = "lua-scripts-only", counts = {},
+  classifier = "land-classify.sh", checks = { "fast" }, rows = planned, not_rows = not_planned, full = false } })
+contains(narrowed_text, "not a gate row: scripts/test-agent-thing.lua (needs a ledger", "the plan reports it by name")
+contains(narrowed_text, "over 1 Lua row(s)", "and asks for exactly one row")
+-- The list the plan produces is a request `scripts/fast.sh` ACCEPTS: the real filter, the real candidate list,
+-- over the rows this plan chose.
+write_file(fixture .. "/rows.txt", table.concat(planned, "\n") .. "\n")
+must("bash -c '. scripts/lib/fast-rows.sh && wa_fast_row_candidates' > " .. fixture .. "/candidates.txt",
+  "candidate list", repo)
+local accepted, accepted_out, accepted_err = shell("bash -c '. scripts/lib/fast-rows.sh && wa_fast_row_filter " ..
+  fixture .. "/candidates.txt " .. fixture .. "/rows.txt'", repo)
+eq(accepted, 0, "the planned rows are a request fast.sh accepts (" .. tostring(accepted_err) .. ")")
+contains(accepted_out, "scripts/test-agent-live.lua", "the run would execute the planned row")
+contains(accepted_out, "scripts/test-fast-row-environment.lua", "with the always-on core rows the runner adds")
+-- The request the planner used to make - a declared row in it - is the refusal those two landings met, so the
+-- two lists differ by a verdict and not by taste.
+write_file(fixture .. "/rows-declared.txt", "scripts/test-agent-thing.lua\n")
+local refused, _, refused_err = shell("bash -c '. scripts/lib/fast-rows.sh && wa_fast_row_filter " ..
+  fixture .. "/candidates.txt " .. fixture .. "/rows-declared.txt'", repo)
+eq(refused, 2, "a request naming the declared row is refused, so nothing runs")
+contains(refused_err, "fast_narrow:unknown_row", "by the name the two measured landings hit")
+
+-- 18c-3. `--full` means the whole suite: no WA_FAST_ROWS file, and every check.
+must("mkdir -p " .. land.run_dir("rows-narrowed") .. " " .. land.run_dir("rows-full"), "rows dirs")
+local narrowed_run = { id = "rows-narrowed", journal = { plan = { rows = { "scripts/test-agent-live.lua" }, full = false } } }
+local rows_file = land.gate_rows_file(narrowed_run, {})
+ok(rows_file ~= nil, "a narrowed round gets a WA_FAST_ROWS file")
+contains(read_file(rows_file) or "", "scripts/test-agent-live.lua", "holding the rows the plan chose")
+eq(land.gate_rows_file({ id = "rows-full", journal = narrowed_run.journal }, { full = true }), nil,
+  "--full writes no rows file")
+eq(read_file(land.run_dir("rows-full") .. "/gate-rows.txt"), nil, "and none exists on disk for that round")
+eq(land.gate_rows_file({ id = "rows-plan-full", journal = { plan = { rows = {}, full = true } } }, {}), nil,
+  "a plan that already runs the whole suite writes none either")
+eq(land.gate_rows_file({ id = "rows-docs", journal = { plan = { rows = {}, full = false } } }, {}), nil,
+  "so does a plan with no row at all")
+local full_checks, full_why = land.gate_checks({ journal = { plan = { checks = { "fast" } } } }, { full = true })
+eq(#full_checks, #land.DEFAULT_CHECKS, "--full runs every gate check, not the narrowed set")
+contains(full_why, "--full", "and the gate says so")
+
 
 -- 18d. The deploy's waves: canary alone, the middle together, the account node last.
 local function wave_names(plan)

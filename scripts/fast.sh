@@ -303,14 +303,17 @@ fast_components_prepare() {
 fast_components_prepare
 
 # ---- 1. Lua -----------------------------------------------------------------------------------------
-excluded=$(sed -n 's/^\(scripts\/test-[^ #]*\.lua\).*/\1/p' scripts/fast-path.exclude 2>/dev/null)
-for f in scripts/test-*.lua; do printf '%s\n' "$excluded" | grep -qxF "$f" || printf '%s\n' "$f"; done > "$work/lua.list"
+# The candidate rows come from the ONE inventory (scripts/lib/fast-rows.sh, wa_fast_row_candidates): the same
+# function the landing planner (lua/core/land.lua, M.row_inventory) draws the rows it requests from, so a plan
+# can only name a row this run lists - and a row scripts/fast-path.exclude declares not run is reported by the
+# plan, not requested here.
+. "$ROOT/scripts/lib/fast-rows.sh"
+wa_fast_row_candidates > "$work/lua.list"
 # WA_FAST_ROWS narrows the run to the rows a planned round's changed paths touch (scripts/lib/fast-rows.sh,
 # the caller is `wa land`). It is a REQUEST, not an authority: the always-on core rows are added here, an
 # unknown row is a refusal by name (exit 2, nothing runs), and the contract `check` lines below are not
 # narrowable at all. The count and the reason are printed, so a narrowed run never reads like a full one.
 if [ -n "${WA_FAST_ROWS:-}" ]; then
-  . "$ROOT/scripts/lib/fast-rows.sh"
   lua_before=$(wc -l < "$work/lua.list")
   if ! wa_fast_row_filter "$work/lua.list" "$WA_FAST_ROWS" > "$work/lua.narrow" 2> "$work/lua.narrow.err"; then
     echo "fast: narrowed run REFUSED by $WA_FAST_ROWS: $(tr '\n' ' ' < "$work/lua.narrow.err")" >&2
@@ -474,7 +477,7 @@ envleft=$(awk -F'\t' '$1!=0 && $5=="environment"' "$work/lua.tsv" | wc -l)
 [ -n "$timings" ] && cp "$work/lua.tsv" "$timings" 2>/dev/null || true
 ran=$((ran + lua_total)); fails=$((fails + lua_fail));
 awk -F'\t' '$1!=0{ if ($5=="environment") printf "FAIL lua %s (exit %s, environment): %s\n",$3,$1,$4; else printf "FAIL lua %s (exit %s): %s\n",$3,$1,$4 }' "$work/lua.tsv"
-echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(printf '%s\n' "$excluded" | grep -c . ) excluded: scripts/fast-path.exclude)"
+echo "fast: lua $((lua_total - lua_fail))/$lua_total passed ($(wa_fast_row_skips | grep -c . ) excluded: scripts/fast-path.exclude)"
 [ "$envleft" -gt 0 ] && echo "fast: $envleft of them never ran: the machine ran out of processes (fork/spawn), see scripts/lib/fast-environment.sh"
 # A component this runner PROMISED cannot be missing in the row that asked for it. The row names the
 # artifact in its own text (`WA_<NAME>_COMPONENT_WASM`), `lua_run` installs that artifact in the row's own
