@@ -430,7 +430,8 @@ M.admin = {
     command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. `await` on work adopted by foreground bash defaults to the shell command result after output reaches EOF or is idle for 100ms; descendants remain supervised and may still produce output. Set wait_for=`settled` to await their full operation. Explicitly started operations always await full settlement. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
-    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
+    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel", "background"},
+      description = "background only lowers a running operation's CPU priority once nobody is waiting for it; code mode does that by itself when a call goes pending." },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
@@ -1553,6 +1554,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     args.vault_env = nil
     args.vault_approval = nil
     if args.action == "start" then
+      -- An explicit start is backgrounded by definition - the caller gets a receipt and moves on - so
+      -- it runs at low CPU priority unless a caller that DOES wait for a while says otherwise
+      -- (18/11 round 2, finding 9).
+      if args.background == nil then args.background = true end
       args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
       if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end
       -- The same two walls `bash` has had since the 11/11 home wipe: the text is refused before
@@ -1752,7 +1757,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       -- model chose this call group; policy, session cwd and the commit review still run here.
       -- The `operation` start is this same bash call, not a second one: `same_call`.
       return M.dispatch(memory, "operation", { action = "start", command = args.command,
-        cwd = cwd, timeout_seconds = timeout }, role, ctx, launch_cwd(memory,ctx,requested_cwd), true)
+        cwd = cwd, timeout_seconds = timeout,
+        -- Low CPU priority is for work nobody is waiting for (18/11 round 2, finding 9): the code-mode
+        -- pending layer says whether this call is backgrounded, and a call the script is actively
+        -- awaiting keeps the node's own priority.
+        background = ctx.background_operation == true }, role, ctx, launch_cwd(memory,ctx,requested_cwd), true)
     end
     local provenance = launch_cwd(memory,ctx,requested_cwd)
     -- The name the reader knows this call by, for the session-status-content row while the command

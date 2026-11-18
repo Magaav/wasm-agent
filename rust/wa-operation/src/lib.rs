@@ -22,6 +22,15 @@ use std::{
 };
 
 const CLEANUP_MS: u64 = 1000;
+/// How many operations one node tracks at once, live or not yet retired (18/11 round 2, finding 6).
+///
+/// The registry used to grow until nothing could be retired and then answer no bound at all: a settled
+/// operation stayed in the map until an admission happened to find 128 entries, and 128 unsettled ones
+/// had no ceiling. Now every admission retires the settled entries whose state is already on disk, and
+/// past this many tracked operations the answer is a named refusal BEFORE anything is created - so work
+/// is never half-admitted, and 16 code-mode handles per session, each starting a few operations, fit
+/// with room for the node's own shells.
+const MAX_TRACKED: usize = 128;
 pub const COMMAND_OUTPUT_IDLE_MS: u64 = 100;
 const VIEW_BYTES: usize = 24 * 1024;
 const MAX_ACTIVE: usize = 8;
@@ -44,6 +53,10 @@ pub struct Spec {
     /// operation instead of failing. Off by default: a deliberately started operation is
     /// already background, and only the `bash` tool wants this.
     pub promote_descendants: bool,
+    /// Is this operation backgrounded - work nobody is waiting for? Only a backgrounded command runs at
+    /// low CPU priority (18/11 round 2, finding 9): a call the caller actively awaits keeps the node's
+    /// own priority, because it is competing with nothing but the work that asked for it.
+    pub background: bool,
 }
 impl Spec {
     pub fn command(program: impl Into<String>, args: Vec<String>) -> Self {
@@ -59,13 +72,92 @@ impl Spec {
             output_limit: 8 * 1024 * 1024,
             owner: String::new(),
             promote_descendants: false,
+            background: false,
         }
+    }
+}
+/// The node's running operations, and the gate a new one waits on (18/11, item 1.6 of
+/// change/harness-next-a).
+///
+/// MAX_ACTIVE is the node's CPU cap: past it a new operation used to be REFUSED with
+/// operation_capacity, which threw away work the caller had already planned while the process it
+/// wanted was only waiting for a core. It now QUEUES: the operation is admitted (durably, with its
+/// receipt) and its supervisor waits here for a slot, recording state:"queued" and queued_ms so the
+/// wait is visible, and giving the wait back to its own deadline so a queued command is not already
+/// half-expired when it starts. Only a cancel or a queue wait longer than the operation's own deadline
+/// ends a queued operation, and each of those is named.
+static RUNNING: Mutex<usize> = Mutex::new(0);
+static FREED: Condvar = Condvar::new();
+struct Slot;
+impl Slot {
+    /// Take one of the node's slots, waiting for one if all of them are busy. The entry carries the
+    /// cancel flag and the deadline, and the wait is recorded on the operation as it happens.
+    fn acquire(entry: &Arc<Entry>, dir: &Path) -> io::Result<Slot> {
+        let queued_at = Instant::now();
+        let mut announced = false;
+        loop {
+            let mut running = RUNNING.lock().map_err(error)?;
+            if *running < MAX_ACTIVE {
+                *running += 1;
+                drop(running);
+                let queued_ms = queued_at.elapsed().as_millis() as u64;
+                if queued_ms > 0 {
+                    // The queue is not the command's fault: give the wait back to its deadline so a
+                    // command that sat in the queue still gets the time it was promised.
+                    entry.deadline_ms.fetch_add(queued_ms, Ordering::AcqRel);
+                    let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state["queued_ms"] = json!(queued_ms);
+                    if state["state"] == "queued" {
+                        state["state"] = json!("accepted");
+                    }
+                    let snapshot = state.clone();
+                    drop(state);
+                    let _ = atomic_json(&dir.join("state.json"), &snapshot);
+                    let _ = entry.index.record(&snapshot);
+                }
+                return Ok(Slot);
+            }
+            if !announced {
+                announced = true;
+                let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                state["state"] = json!("queued");
+                state["queued_because"] = json!("operation_capacity");
+                state["queue_depth"] = json!(*running);
+                state["queue_limit"] = json!(MAX_ACTIVE);
+                let snapshot = state.clone();
+                drop(state);
+                let _ = atomic_json(&dir.join("state.json"), &snapshot);
+                let _ = entry.index.record(&snapshot);
+            }
+            if entry.cancel.load(Ordering::Acquire) {
+                return Err(error("cancelled"));
+            }
+            if entry.started.elapsed()
+                >= Duration::from_millis(entry.deadline_ms.load(Ordering::Acquire))
+            {
+                return Err(error("operation_queue_timeout"));
+            }
+            drop(FREED.wait_timeout(running, Duration::from_millis(250)).map_err(error)?);
+        }
+    }
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut running) = RUNNING.lock() {
+            *running = running.saturating_sub(1);
+        }
+        FREED.notify_all();
     }
 }
 struct Entry {
     owned_child: Mutex<Option<Value>>,
     index: Arc<index::Index>,
     cancel: AtomicBool,
+    /// Lower this operation's CPU priority as soon as it is spawned (18/11 round 3, item 5). A code
+    /// mode call that goes pending asks for this before the supervisor has necessarily spawned the
+    /// child - a wait_s:0 call goes pending at once - so the request is a flag the spawn site reads,
+    /// not a call that has to win a race with the start.
+    demote: AtomicBool,
     state: Mutex<Value>,
     settled: Condvar,
     started: Instant,
@@ -84,6 +176,8 @@ pub struct Manager {
     /// The directory a shell may start in when the caller's directory is gone. `None` means the
     /// environment's home, resolved when a substitution is actually needed.
     fallback: Option<PathBuf>,
+    /// The registry ceiling this manager enforces (MAX_TRACKED unless a test asks for a smaller one).
+    tracked_limit: usize,
 }
 fn error(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
@@ -345,7 +439,16 @@ impl Manager {
             entries: Arc::new(Mutex::new(HashMap::new())),
             secrets: Arc::new(Vec::new()),
             fallback: None,
+            tracked_limit: MAX_TRACKED,
         }
+    }
+    /// A manager with a smaller registry ceiling, so a test can reach the ceiling and the refusal
+    /// without starting MAX_TRACKED real operations (which would hold every CPU slot the node has and
+    /// starve the other tests that run in the same process).
+    pub fn with_tracked_limit(root: impl Into<PathBuf>, limit: usize) -> Self {
+        let mut manager = Self::new(root);
+        manager.tracked_limit = limit.clamp(2, MAX_TRACKED);
+        manager
     }
     /// Redact the node's own secret values from every operation's output. The values come
     /// from the process environment, which the host resolved from the config file, so this
@@ -400,25 +503,30 @@ impl Manager {
         // real-directory distinction is carried by cwd_requested and effective_cwd.
         let recorded_cwd = if start_directory.requested.is_empty() { String::new() } else { spec.cwd.clone() };
         let index = self.index()?;
+        // Past MAX_ACTIVE running operations a new one QUEUES in its supervisor (Slot::acquire below)
+        // instead of being refused: the caller's work is admitted, recorded and run when a core frees,
+        // and the wait is named on the operation. The registry itself stays bounded.
+        let limit = self.tracked_limit;
         let mut entries = self.entries.lock().map_err(error)?;
-        if entries
-            .values()
-            .filter(|v| {
-                !v.state.lock().unwrap()["settled"]
-                    .as_bool()
-                    .unwrap_or(false)
-            })
-            .count()
-            >= MAX_ACTIVE
-        {
-            return Err(error("operation_capacity"));
-        }
-        if entries.len() >= 128 {
-            entries.retain(|_, v| {
-                !v.state.lock().unwrap()["settled"]
-                    .as_bool()
-                    .unwrap_or(false)
-            });
+        // A settled operation is retired on the next admission (its state is on disk, so snapshot, wait,
+        // read and cancel keep answering), and the registry has a ceiling that REFUSES BY NAME instead of
+        // growing (18/11 round 2, finding 6). Retiring only entries whose state was persisted means a
+        // settle whose write failed is never dropped from the record that still holds it.
+        entries.retain(|_, entry| {
+            let state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state["settled"].as_bool().unwrap_or(false) != true {
+                return true;
+            }
+            // A settle whose own record could not be written is the one state the registry is the LAST
+            // copy of: it is kept until a caller has read it (snapshot marks persistence_error_reported
+            // when it answers one) and retired at the next admission after that (18/11 round 3, item 6),
+            // instead of holding a registry slot for ever the first time a disk write failed.
+            // Retire unless this is the one entry the registry must still hand out: a settle whose own
+            // record could not be written and that nobody has read yet.
+            !(state.get("persistence_error").is_none() || state["persistence_error_reported"] == true)
+        });
+        if entries.len() >= limit {
+            return Err(error("operation_registry_full"));
         }
         let id = format!(
             "op-{}-{}-{}",
@@ -430,7 +538,7 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"cpu_priority":Process::priority(spec.background),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
         if let Some(requested) = &spec.cwd_requested {
             state["cwd_requested"] = json!(requested);
         }
@@ -449,6 +557,7 @@ impl Manager {
             owned_child: Mutex::new(None),
             index,
             cancel: AtomicBool::new(false),
+            demote: AtomicBool::new(false),
             state: Mutex::new(state),
             settled: Condvar::new(),
             started: Instant::now(),
@@ -475,10 +584,16 @@ impl Manager {
                     if entry.cancel.load(Ordering::Acquire) {
                         return Err(error("cancelled"));
                     }
-                    if entry.started.elapsed() >= spec.timeout {
+                    // One of the node's slots, waited for if the node is busy (and the command runs at
+                    // low CPU priority: Process::spawn). Acquired here, after admission, so the caller
+                    // holds its receipt immediately and the wait belongs to the operation.
+                    let slot = Slot::acquire(&entry, &dir)?;
+                    if entry.started.elapsed() >= Duration::from_millis(entry.deadline_ms.load(Ordering::Acquire)) {
                         return Err(error("deadline_exceeded"));
                     }
-                    execute(&spec, &dir, &entry, &secrets)
+                    let outcome = execute(&spec, &dir, &entry, &secrets);
+                    drop(slot);
+                    outcome
                 }));
                 let failure = match outcome {
                     Ok(Ok(())) => None,
@@ -486,6 +601,8 @@ impl Manager {
                     Err(_) => Some("operation_supervisor_panicked".into()),
                 };
                 if let Some(reason) = failure {
+                    let waited_ms = entry.started.elapsed().as_millis() as u64;
+                    let queued_out = reason == "operation_queue_timeout";
                     let mut s = entry
                         .state
                         .lock()
@@ -501,6 +618,17 @@ impl Manager {
                     s["error"] = json!(reason);
                     s["cleanup"] = json!("unknown");
                     s["output_complete"] = json!(false);
+                    if queued_out {
+                        // A queued operation that never got a slot settles BY NAME, with the queue facts
+                        // on the record (18/11 round 2, finding 6): error names the reason, queue_state
+                        // says it was the queue, and queue_waited_ms is how long it waited. The script
+                        // that holds the handle reads this through wait(op), and a reader who opens the
+                        // operation later reads the same fields - nothing about it is lost.
+                        s["queue_state"] = json!("timed_out");
+                        s["queue_waited_ms"] = json!(waited_ms);
+                        s["queue_note"] = json!(format!(
+                            "this operation was admitted and queued for a free slot for {waited_ms} ms; its own deadline ran out first, so it never started"));
+                    }
                     let total_ms = entry.started.elapsed().as_millis() as u64;
                     s["elapsed_ms"] = json!(total_ms);
                     finish_timing(&mut s, total_ms);
@@ -554,6 +682,17 @@ impl Manager {
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id).cloned() {
             let mut state = entry.state.lock().map_err(error)?.clone();
             let elapsed = entry.started.elapsed();
+            // THIS answer is the report (18/11 round 3, item 6): a settle whose own record could not be
+            // written lives only in the registry, so it is kept until somebody has read it and retired at
+            // the next admission after that. The flag is set on the entry, not only on this copy.
+            if state["settled"] == true && state.get("persistence_error").is_some()
+                && state["persistence_error_reported"] != true
+            {
+                state["persistence_error_reported"] = json!(true);
+                if let Ok(mut held) = entry.state.lock() {
+                    held["persistence_error_reported"] = json!(true);
+                }
+            }
             if state["settled"] != true {
                 state["elapsed_ms"] = json!(elapsed.as_millis() as u64);
                 state["remaining_ms"] = json!(entry
@@ -596,6 +735,11 @@ impl Manager {
         }
         Ok(state)
     }
+    /// How many operations this node currently tracks (running, queued or settled-but-not-yet-retired).
+    /// Diagnostics and tests: the bound is MAX_TRACKED and it is enforced at admission.
+    pub fn tracked(&self) -> usize {
+        self.entries.lock().map(|entries| entries.len()).unwrap_or(0)
+    }
     pub fn list(&self) -> Value {
         let ids: Vec<String> = self.entries.lock().unwrap().keys().cloned().collect();
         json!(ids
@@ -615,6 +759,52 @@ impl Manager {
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id) {
             entry.cancel.store(true, Ordering::Release);
         }
+        self.snapshot(id)
+    }
+    /// Lower a running operation's CPU priority now that nobody is waiting for it (18/11 round 3,
+    /// item 5). Code mode calls this the moment a call GOES PENDING, so the fact is decided after the
+    /// start instead of guessed before it: a wait_s:0 call that the script resumes at once keeps the
+    /// node's own priority, and a call left to run on its own yields one step.
+    ///
+    /// Best effort, and said: the request is a flag the spawn site applies (a wait_s:0 call goes
+    /// pending before its child exists), a command that already exited keeps the priority it had, and a
+    /// node that refuses the renice records it under cpu_priority_error - the work itself is never
+    /// disturbed by any of it. Answers the operation's state, which now names the priority it runs at.
+    pub fn background(&self, id: &str) -> io::Result<Value> {
+        validate_id(id)?;
+        let entry = self
+            .entries
+            .lock()
+            .map_err(error)?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| error("operation_not_attached"))?;
+        entry.demote.store(true, Ordering::Release);
+        let pid = entry
+            .owned_child
+            .lock()
+            .map_err(error)?
+            .as_ref()
+            .and_then(|child| child.get("process_id"))
+            .and_then(Value::as_u64);
+        let mut failure = None;
+        if let Some(pid) = pid {
+            if let Err(error) = Process::demote(pid as u32) {
+                failure = Some(error.to_string());
+            }
+        }
+        {
+            let mut held = entry.state.lock().map_err(error)?;
+            if held["settled"] != true {
+                held["cpu_priority"] = json!(Process::demoted_priority());
+                held["background"] = json!(true);
+                if let Some(why) = failure {
+                    held["cpu_priority_error"] = json!(why);
+                }
+            }
+        }
+        // Persisted by the settle that is already going to write this record (it reads the same state),
+        // never by a second writer that could race it.
         self.snapshot(id)
     }
     pub fn read(&self, id: &str, stream: &str, offset: u64, limit: usize) -> io::Result<Value> {
@@ -781,6 +971,17 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     if let Some(pid)=process.owned_id() {
         if let Ok(Some(stamp))=legacy::creation(pid) {
             *entry.owned_child.lock().unwrap()=Some(json!({"process_id":pid,"creation_stamp":stamp}));
+        }
+        // Nobody was waiting for this work before it started (Manager::background): the priority is
+        // lowered here, at the one moment the pid exists. A failure is recorded on the operation, never
+        // thrown at the work: the command runs either way.
+        if entry.demote.load(Ordering::Acquire) {
+            match Process::demote(pid) {
+                Ok(()) => entry.state.lock().unwrap()["cpu_priority"] = json!(Process::demoted_priority()),
+                Err(error) => {
+                    entry.state.lock().unwrap()["cpu_priority_error"] = json!(error.to_string())
+                }
+            }
         }
     }
     let execution_started = Instant::now();

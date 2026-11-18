@@ -572,7 +572,9 @@ local function native_run(policy,memory,args,role,ctx,catalog,current_catalog,di
  local journal=session_results.load(memory,scope)
  local store_key='codemode-store.v1:'..scope
  local raw=memory.meta_get(store_key);local store=raw and json.decode(raw) or {}
- local spec={owner=scope,tools=descriptors,globals=globals,store=store,code=args.code,timeout_ms=args.timeout_ms or 30000}
+ -- No default budget: a script is bounded by each call's own wait (lua/core/codemode_pending.lua) and
+ -- by the CPU guard, never by a wall clock this harness picked for it (18/11, the operator's rule).
+ local spec={owner=scope,tools=descriptors,globals=globals,store=store,code=args.code,timeout_ms=args.timeout_ms}
  spec.wasm_path=policy.wasm_path;spec.prelude_path=policy.prelude_path
  local cached,cache=pcall(function()return dofile('lua/core/paths.lua').cache()end)
  if cached and type(cache)=='string' then spec.module_cache=cache..'/codemode' end
@@ -692,7 +694,7 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
    execution=entry.execution,entry_json=json.encode(entry)}
  end
  local opened,open_reason=seam({op='open',session=session,owner=scope,code=args.code,
-  timeout_ms=args.timeout_ms or 30000,catalogue=entries,builtins=builtins,store=store,
+  timeout_ms=args.timeout_ms,catalogue=entries,builtins=builtins,store=store,
   wasm_path=policy.wasm_path,prelude_path=policy.prelude_path,module_cache=cache})
  -- Nothing has run yet: the native path is still a valid answer, and the router logs the reason.
  if not opened then return nil,open_reason end
@@ -758,7 +760,10 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
       -- The component's own fence decision, handed back as a record; the node words the refusal.
       settle.refused=refusal_value(step.refusal)
      else settle.tool=step.name;settle.hash=hashes[step.name] end
-     local value,success=settle_call(state,settle)
+     -- A raise from a settlement (the wait bound of one op that never settles, 18/11 round 2) ends the
+     -- script by name AND releases the sandbox: it is caught here so the guest is still finished below.
+     local settled,value,success=pcall(settle_call,state,settle)
+     if not settled then loop_error=tostring(value) break end
      reply={call_id=step.id,ok=success and true or false,payload_json=json.encode(value)}
     else loop_error='codemode_protocol_unknown_step'
     end
@@ -823,19 +828,41 @@ end
 local function explain(result,source,budget)
  if type(result)~='table' or result.ok~=false or type(result.error)~='string' or type(source)~='string' then return result end
  local raw=result.error
- -- A script that ran out of time says so, with its budget and the way on (14/11 replay: two email
- -- scripts died on 'codemode_sandbox: sandbox deadline or cancellation' and the model retried variants).
+ -- A script that ran out of CPU says so, with the way on (14/11 replay: two email scripts died on
+ -- 'codemode_sandbox: sandbox deadline or cancellation' and the model retried variants). Two shapes:
+ -- the CPU guard (wasmtime's fuel - an endless loop, or too much work for one script) arrives as an
+ -- execution error, and an explicit COMPUTING budget arrives as the deadline. Waiting on a tool is
+ -- neither: since 18/11 the script's clock stops while a call is in the host
+ -- (rust/wa-capabilities/src/quickjs.rs), so a script that waits is never stopped for waiting.
  local stopped=raw:find('codemode_sandbox: error while executing',1,true)
+ -- One op that never settles is a bound of its own (18/11 round 2, finding 7), and it is neither a
+ -- CPU stop nor a wall clock: the sentence says what it is, and the fix is the handle's next step.
+ if raw:find(pending_calls.WAIT_BOUND_CODE,1,true) then
+  local out={};for k,v in pairs(result) do out[k]=v end
+  out.code=pending_calls.WAIT_BOUND_CODE
+  out.error=raw:sub(1,300)
+  out.message=raw:sub(1,900)
+  local finished={}
+  for _,call in ipairs(result.calls or {}) do if call.ok then finished[#finished+1]=tostring(call.name) end end
+  out.fix=('The call is still running and its handle is not lost: pending() lists it and wait(op) resumes '
+    ..'it in a new script, or cancel(op) stops it. Nothing was undone. ')
+    ..(#finished>0 and ('Already done, not undone: '..table.concat(finished,', '):sub(1,200)..'.')
+      or 'No call had succeeded yet.')
+  out.input=out.input or 'codemode'
+  return out
+ end
  if raw:find('sandbox deadline or cancellation',1,true) or stopped then
   local ran={}
   for _,call in ipairs(result.calls or {}) do if call.ok==true then ran[#ran+1]=tostring(call.name) end end
   local out={};for k,v in pairs(result) do out[k]=v end
-  local ms=tonumber(budget) or 30000
-  out.error=stopped and ('TimeoutError: the script was stopped while computing - an endless loop, or too much work for its '..ms..' ms budget')
-   or ('TimeoutError: the script ran past its '..ms..' ms budget (or the run was stopped)')
+  local ms=tonumber(budget)
+  out.error=stopped and ('TimeoutError: the script was stopped while computing - an endless loop, or too much work for one script'
+      ..(ms and (' ('..ms..' ms of computing)') or ''))
+   or ('TimeoutError: the script ran past the '..(ms and (ms..' ms of computing') or 'budget')
+      ..' it was given (or the run was stopped)')
   out.code='TimeoutError'
   out.message=out.error
-  out.fix='Split the work across scripts, or pass timeout_ms (up to 300000) to codemode. '..(#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.')
+  out.fix='Split the work across scripts: waiting on a tool is not charged to the script. '..(#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.')
   out.input=out.input or 'codemode'
   return out
  end
@@ -910,13 +937,16 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
  local scope=host.sha256(json.encode({session=ctx.session_id,user=ctx.user_id,role=role,workspace=workspace,profile=ctx.subagent and ctx.subagent.allowed or nil}))
  args={code=harness.decorate(args.code,session_vars(memory,scope)),timeout_ms=args.timeout_ms}
  -- One handle table for this script, on either loop: a call that outlives its wait answers
- -- {state:"pending", op}, `wait(op)`/`cancel(op)` answer it, and every wait is bounded by what is
- -- left of the script (a wait never outlives the script that started it).
- local started_at=host.now()
+ -- {state:"pending", op} and wait(op)/cancel(op) answer it. A wait is bounded by its own wait_s and by
+ -- the sandbox's CPU guard, never by a wall clock (18/11: a script is not killed for waiting).
  local popts={ctx=ctx,scope=scope,session=ctx.session_id,dispatch=dispatch}
- local budget=tonumber(args.timeout_ms) or 30000
- popts.remaining_ms=budget
- popts.remaining=function() return budget-math.floor(((tonumber(host.now()) or started_at)-started_at)*1000) end
+ -- A budget exists only when the caller asked for one, and it bounds COMPUTING: the sandbox pauses it
+ -- while a call is in the host (rust/wa-capabilities/src/quickjs.rs). It is deliberately NOT used to
+ -- bound a wait any more (18/11): a wall clock cannot say how much of a script's budget a wait spent,
+ -- because a wait spends none of it, so clamping wait_s by what is "left" of the budget turned a
+ -- legitimate wait into an immediate {state:"pending"} - the same bug as killing the script, one layer
+ -- down. A call's wait is its own: wait_s, default 60, up to 300 (lua/core/codemode_pending.lua).
+ local budget=tonumber(args.timeout_ms)
  -- Handles outlive the script, so an operation that finished while nobody waited is settled here
  -- (a status read each, never a wait) and reported once, on the next script of this scope.
  pending_calls.begin(dispatch,popts)
@@ -926,6 +956,12 @@ local function run_script(memory,args,role,ctx,catalog,current_catalog,dispatch,
   if type(result)=='table' and result.summary==nil then result.summary=summary_of(result.calls) end
   local settled=pending_calls.announce(scope)
   if settled then result.pending_settled=settled end
+  -- Every handle this script stops waiting for is work nobody is waiting for any more: its CPU
+  -- priority is lowered HERE, once, at the boundary where the harness stops waiting (18/11 round 3,
+  -- item 5). Never at the spawn (the wait_s a caller named is a guess about the future) and never on
+  -- the way to pending (a wait_s:0 call the script resumes at once is foreground work throughout).
+  local lowered=pending_calls.background(scope,dispatch,popts)
+  if lowered then result.pending_backgrounded=lowered end
   -- What the session holds after this script (its writes committed, or none if it failed).
   local vars=session_vars(memory,scope)
   if #vars>0 then result.vars=vars end
@@ -948,11 +984,13 @@ end
 -- into a dead script, the one outcome worse than `pending`. Restored afterwards, so a ctx shared by
 -- later calls carries no stale deadline.
 function M.run(memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
-  local budget_ms=tonumber(args and args.timeout_ms) or 30000
-  budget_ms=math.max(1,math.min(300000,budget_ms))
+  local budget_ms=tonumber(args and args.timeout_ms)
+  if budget_ms then budget_ms=math.max(1,math.min(300000,budget_ms)) end
   local previous=type(ctx)=='table' and ctx.codemode_deadline or nil
   if type(ctx)=='table' then
-    ctx.codemode_deadline=(tonumber(host.now()) or 0)+budget_ms/1000
+    -- No budget, no deadline: a nested effect that waited only until this instant would turn a queued
+    -- message into a dead script for a clock nobody set.
+    ctx.codemode_deadline=budget_ms and ((tonumber(host.now()) or 0)+budget_ms/1000) or nil
   end
   local ok,answer=pcall(run_script,memory,args,role,ctx,catalog,current_catalog,dispatch,execution)
   if type(ctx)=='table' then ctx.codemode_deadline=previous end
