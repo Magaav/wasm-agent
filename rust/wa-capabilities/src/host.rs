@@ -2643,6 +2643,25 @@ impl ToolCallAssembly {
     }
 }
 
+/// Is this send() error a STALL, and therefore safe to replay?
+///
+/// A stall is one fact (18/11 round 2, finding 5): the request was written and no byte of the response
+/// - not even its status line - arrived before the per-call deadline. ureq names that case exactly,
+/// and nothing else does, so a refused connection, a TLS failure, an unresolvable host and a connect
+/// timeout keep their own names and are never replayed as stalls (a connect that timed out never sent
+/// the request; it belongs to the patient connection bucket, lua/core/provider.lua).
+///
+/// The marker is added ONLY for that case. It used to be added to every send() error, which turned
+/// every transport failure into provider_stalled and made the failure layer's name a lie.
+fn stall_marker(error: &ureq::Error, first_response_seconds: u64) -> Option<String> {
+    if first_response_seconds == 0 { return None; }
+    match error {
+        ureq::Error::Timeout(ureq::Timeout::RecvResponse) => Some(format!(
+            " (provider_stalled: no response within {first_response_seconds}s)")),
+        _ => None,
+    }
+}
+
 fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str, first_response_seconds: u64) -> Result<Value, String> {
     use std::io::BufRead;
     let started = std::time::Instant::now();
@@ -2664,12 +2683,11 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         request = request.header(key, value);
     }
     let response = request.send(body.as_bytes()).map_err(|error| {
-        // Keep the transport's own words (the retry predicates match on them), and add the one fact
-        // they cannot carry: this call had a deadline of its own, and it expired.
-        if first_response_seconds > 0 {
-            format!("{error} (provider_stalled: no response within {first_response_seconds}s)")
-        } else {
-            error.to_string()
+        // Keep the transport's own words - the retry predicates and the failure layer match on them -
+        // and add the stall marker only where it is true (stall_marker above).
+        match stall_marker(&error, first_response_seconds) {
+            Some(marker) => format!("{error}{marker}"),
+            None => error.to_string(),
         }
     })?;
     let status = response.status().as_u16();
@@ -5171,6 +5189,30 @@ mod tool_call_assembly_tests {
             vec!["{\"command\":\"echo ok\"}".to_string(), "{\"path\":\"/etc/hostname\"}".to_string()]);
         assert_eq!(calls[0]["id"], json!("call_idkey_a"));
         assert_eq!(calls[1]["id"], json!("call_idkey_b"));
+    }
+
+    /// 18/11 round 2, finding 5: only a RecvResponse timeout is a stall.
+    #[test]
+    fn only_a_response_header_timeout_is_a_stall() {
+        let stall = ureq::Error::Timeout(ureq::Timeout::RecvResponse);
+        assert_eq!(stall_marker(&stall, 90).as_deref(),
+            Some(" (provider_stalled: no response within 90s)"),
+            "no response headers before the deadline is the one stall, and it is safe to replay");
+        // Every other transport failure keeps its own name and is never replayed as a stall.
+        let others = [
+            ureq::Error::Timeout(ureq::Timeout::Connect),
+            ureq::Error::Timeout(ureq::Timeout::SendRequest),
+            ureq::Error::Timeout(ureq::Timeout::RecvBody),
+            ureq::Error::Timeout(ureq::Timeout::Global),
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")),
+        ];
+        for error in others {
+            assert_eq!(stall_marker(&error, 90), None, "not a stall: {error}");
+        }
+        // The operator's off switch (0 = no per-call deadline) marks nothing at all.
+        assert_eq!(stall_marker(&stall, 0), None, "no deadline, no stall");
     }
 
     #[test]

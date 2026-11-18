@@ -47,9 +47,11 @@ impl Process {
         for (k, v) in &spec.env {
             command.env(k, v);
         }
-        // Low CPU priority for the command (see operation_nice). Best effort on purpose: an environment
-        // that refuses the call leaves the command at the node's own priority rather than failing it.
-        let nice = operation_nice();
+        // Low CPU priority for the command (see operation_nice), and ONLY for a backgrounded one
+        // (18/11 round 2, finding 9): a call the caller is actively awaiting keeps the node's own
+        // priority, so a foreground build runs as fast as the node can run it. Best effort on purpose:
+        // an environment that refuses the call leaves the command at the node's own priority.
+        let nice = if spec.background { operation_nice() } else { 0 };
         if nice > 0 {
             unsafe {
                 command.pre_exec(move || {
@@ -115,9 +117,10 @@ impl Process {
     pub fn containment() -> &'static str {
         "posix_process_group"
     }
-    /// What the operation's own record says about the CPU priority it ran at.
-    pub fn priority() -> String {
-        match operation_nice() {
+    /// What the operation's own record says about the CPU priority it runs at: the node's own for a
+    /// call somebody waits for, one step lower for a backgrounded one.
+    pub fn priority(background: bool) -> String {
+        match if background { operation_nice() } else { 0 } {
             0 => "default".to_string(),
             nice => format!("nice+{nice}"),
         }

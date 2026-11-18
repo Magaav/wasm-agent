@@ -112,8 +112,11 @@ local streak_bot=agentlib.new(streak,function() end,'master','master','')
 local streak_calls=0
 provider.complete_with=function()
   streak_calls=streak_calls+1
-  local shape=SHAPES[((streak_calls-1)%#SHAPES)+1]
-  return {content=shape.text,tool_calls={},finish_reason='stop',usage=usage}
+  -- ONE shape, repeated (18/11 round 2, finding 2): a real tool call now ends the streak, and one of
+  -- the three shapes (the <tool_call> one) is turned into a real codemode call by the raw-code channel,
+  -- so cycling through them no longer measures "a model that only imitates". The reset itself - run
+  -- start and after every real tool call - is pinned in scripts/test-fake-answer-repeat-reset.lua.
+  return {content=SHAPES[1].text,tool_calls={},finish_reason='stop',usage=usage}
 end
 local ok,problem=pcall(streak_bot.run,streak_bot,'keep going')
 check(not ok,"a model that only imitates tool results cannot end the turn as answered")

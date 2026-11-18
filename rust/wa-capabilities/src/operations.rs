@@ -112,13 +112,14 @@ fn command_launch(program: &str, flag: &str, command: &str) -> Result<Launch, St
     let path = stage_command(command)?;
     Ok(Launch { program: program.into(), args: vec![path.to_string_lossy().into_owned()], staged: Some(path) })
 }
-fn spec(launch: &Launch, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
+fn spec(launch: &Launch, cwd: &str, seconds: u64, owner: String, promote: bool, background: bool) -> Spec {
     configure_spec(
         Spec::command(launch.program.clone(), launch.args.clone()),
         cwd,
         seconds,
         owner,
         promote,
+        background,
     )
 }
 /// The kinds an operation can be, and what each one's default deadline is when the caller gives none.
@@ -162,12 +163,15 @@ pub(crate) fn operation_kind(args: &Value, command: &str) -> Result<&'static str
     Ok("command")
 }
 
-fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
+fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promote: bool, background: bool) -> Spec {
     spec.cwd = cwd.into();
     spec.timeout = Duration::from_secs(seconds);
     // A foreground `bash` adopts a descendant tree it cannot wait for; a deliberately
     // started operation is already background and never needs to.
     spec.promote_descendants = promote;
+    // Low CPU priority is for work nobody waits for (18/11 round 2, finding 9): the caller says which
+    // this is, because the fact has to be known before the process is created.
+    spec.background = background;
     // A child's operation is owned by the child session/run, not by whatever
     // interpreter slot happens to be on this thread, so settlement is attributable.
     spec.owner = crate::subagents::current_owner().unwrap_or(owner);
@@ -291,6 +295,9 @@ pub fn foreground(
             seconds,
             format!("worker:{}", crate::serve::node_thread_id()),
             true,
+            // A foreground shell: the run waits for this call, so it runs at the node own priority
+            // (18/11 round 2, finding 9).
+            false,
         ), context))
         .map_err(|e| e.to_string())?;
     // The name the reader knows this call by: the `bash` tool's own name, sent with the launch
@@ -369,6 +376,11 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         "start" => {
             if args.get("replay_of").is_some(){return Err("operation_replay_forbidden: inspect original and make a separately authorized decision".into());}
             let owner = args["owner"].as_str().unwrap_or("").to_string();
+            // Backgrounded unless the caller says it waits for this call: an explicit start hands back a
+            // receipt and the caller moves on, and a code-mode pending call the script is actively
+            // awaiting passes background=false so it keeps the node own priority (18/11 round 2,
+            // finding 9).
+            let background = args["background"].as_bool().unwrap_or(true);
             let command_hint = args["command"].as_str().unwrap_or("");
             let requested_seconds = args["timeout_seconds"].as_u64();
             let default_kind = if requested_seconds.is_none() {
@@ -399,7 +411,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 let argv=args["args"].as_array().ok_or("program_args_required")?.iter()
                     .map(|arg|arg.as_str().map(String::from).ok_or("program_args_must_be_strings"))
                     .collect::<Result<Vec<_>,_>>()?;
-                configure_spec(Spec::command(executable,argv),cwd,seconds,owner,false)
+                configure_spec(Spec::command(executable,argv),cwd,seconds,owner,false,background)
             } else {
                 let command=args["command"].as_str().filter(|s|!s.is_empty()).ok_or("command_required")?;
                 let prepared = command_launch(&shell.0, &shell.1, command)?;
@@ -410,6 +422,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     seconds,
                     owner,
                     false,
+                    background,
                 )
             };
             let id = manager()
@@ -582,7 +595,7 @@ mod deadline_note_tests {
         use std::sync::{Arc,atomic::AtomicBool};
         crate::subagents::enter_task(TaskContext{cancel:Arc::new(AtomicBool::new(false)),deadline:None,
             sockets:SocketSlot::default(),owner:"child-fixture".into(),provenance:Provenance::Child});
-        let spec=super::configure_spec(wa_operation::Spec::command("fixture",vec![]),"",1,"".into(),false);
+        let spec=super::configure_spec(wa_operation::Spec::command("fixture",vec![]),"",1,"".into(),false,false);
         crate::subagents::leave_task();
         assert!(spec.env.contains(&("WASM_AGENT_IN_TURN".into(),"1".into())));
         assert!(spec.env.contains(&("WASM_AGENT_PROVENANCE".into(),"child".into())));

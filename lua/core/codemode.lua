@@ -760,7 +760,10 @@ local function component_run(policy,memory,args,role,ctx,catalog,current_catalog
       -- The component's own fence decision, handed back as a record; the node words the refusal.
       settle.refused=refusal_value(step.refusal)
      else settle.tool=step.name;settle.hash=hashes[step.name] end
-     local value,success=settle_call(state,settle)
+     -- A raise from a settlement (the wait bound of one op that never settles, 18/11 round 2) ends the
+     -- script by name AND releases the sandbox: it is caught here so the guest is still finished below.
+     local settled,value,success=pcall(settle_call,state,settle)
+     if not settled then loop_error=tostring(value) break end
      reply={call_id=step.id,ok=success and true or false,payload_json=json.encode(value)}
     else loop_error='codemode_protocol_unknown_step'
     end
@@ -832,6 +835,22 @@ local function explain(result,source,budget)
  -- neither: since 18/11 the script's clock stops while a call is in the host
  -- (rust/wa-capabilities/src/quickjs.rs), so a script that waits is never stopped for waiting.
  local stopped=raw:find('codemode_sandbox: error while executing',1,true)
+ -- One op that never settles is a bound of its own (18/11 round 2, finding 7), and it is neither a
+ -- CPU stop nor a wall clock: the sentence says what it is, and the fix is the handle's next step.
+ if raw:find(pending_calls.WAIT_BOUND_CODE,1,true) then
+  local out={};for k,v in pairs(result) do out[k]=v end
+  out.code=pending_calls.WAIT_BOUND_CODE
+  out.error=raw:sub(1,300)
+  out.message=raw:sub(1,900)
+  local finished={}
+  for _,call in ipairs(result.calls or {}) do if call.ok then finished[#finished+1]=tostring(call.name) end end
+  out.fix=('The call is still running and its handle is not lost: pending() lists it and wait(op) resumes '
+    ..'it in a new script, or cancel(op) stops it. Nothing was undone. ')
+    ..(#finished>0 and ('Already done, not undone: '..table.concat(finished,', '):sub(1,200)..'.')
+      or 'No call had succeeded yet.')
+  out.input=out.input or 'codemode'
+  return out
+ end
  if raw:find('sandbox deadline or cancellation',1,true) or stopped then
   local ran={}
   for _,call in ipairs(result.calls or {}) do if call.ok==true then ran[#ran+1]=tostring(call.name) end end
@@ -839,7 +858,8 @@ local function explain(result,source,budget)
   local ms=tonumber(budget)
   out.error=stopped and ('TimeoutError: the script was stopped while computing - an endless loop, or too much work for one script'
       ..(ms and (' ('..ms..' ms of computing)') or ''))
-   or ('TimeoutError: the script ran past the '..(ms and (ms..' ms') or 'wall-clock')..' budget it was given (or the run was stopped)')
+   or ('TimeoutError: the script ran past the '..(ms and (ms..' ms of computing') or 'budget')
+      ..' it was given (or the run was stopped)')
   out.code='TimeoutError'
   out.message=out.error
   out.fix='Split the work across scripts: waiting on a tool is not charged to the script. '..(#ran>0 and ('Already done, not undone: '..table.concat(ran,', '):sub(1,200)..'.') or 'No call had succeeded yet.')

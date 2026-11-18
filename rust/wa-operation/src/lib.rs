@@ -22,6 +22,15 @@ use std::{
 };
 
 const CLEANUP_MS: u64 = 1000;
+/// How many operations one node tracks at once, live or not yet retired (18/11 round 2, finding 6).
+///
+/// The registry used to grow until nothing could be retired and then answer no bound at all: a settled
+/// operation stayed in the map until an admission happened to find 128 entries, and 128 unsettled ones
+/// had no ceiling. Now every admission retires the settled entries whose state is already on disk, and
+/// past this many tracked operations the answer is a named refusal BEFORE anything is created - so work
+/// is never half-admitted, and 16 code-mode handles per session, each starting a few operations, fit
+/// with room for the node's own shells.
+const MAX_TRACKED: usize = 128;
 pub const COMMAND_OUTPUT_IDLE_MS: u64 = 100;
 const VIEW_BYTES: usize = 24 * 1024;
 const MAX_ACTIVE: usize = 8;
@@ -44,6 +53,10 @@ pub struct Spec {
     /// operation instead of failing. Off by default: a deliberately started operation is
     /// already background, and only the `bash` tool wants this.
     pub promote_descendants: bool,
+    /// Is this operation backgrounded - work nobody is waiting for? Only a backgrounded command runs at
+    /// low CPU priority (18/11 round 2, finding 9): a call the caller actively awaits keeps the node's
+    /// own priority, because it is competing with nothing but the work that asked for it.
+    pub background: bool,
 }
 impl Spec {
     pub fn command(program: impl Into<String>, args: Vec<String>) -> Self {
@@ -59,6 +72,7 @@ impl Spec {
             output_limit: 8 * 1024 * 1024,
             owner: String::new(),
             promote_descendants: false,
+            background: false,
         }
     }
 }
@@ -157,6 +171,8 @@ pub struct Manager {
     /// The directory a shell may start in when the caller's directory is gone. `None` means the
     /// environment's home, resolved when a substitution is actually needed.
     fallback: Option<PathBuf>,
+    /// The registry ceiling this manager enforces (MAX_TRACKED unless a test asks for a smaller one).
+    tracked_limit: usize,
 }
 fn error(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
@@ -418,7 +434,16 @@ impl Manager {
             entries: Arc::new(Mutex::new(HashMap::new())),
             secrets: Arc::new(Vec::new()),
             fallback: None,
+            tracked_limit: MAX_TRACKED,
         }
+    }
+    /// A manager with a smaller registry ceiling, so a test can reach the ceiling and the refusal
+    /// without starting MAX_TRACKED real operations (which would hold every CPU slot the node has and
+    /// starve the other tests that run in the same process).
+    pub fn with_tracked_limit(root: impl Into<PathBuf>, limit: usize) -> Self {
+        let mut manager = Self::new(root);
+        manager.tracked_limit = limit.clamp(2, MAX_TRACKED);
+        manager
     }
     /// Redact the node's own secret values from every operation's output. The values come
     /// from the process environment, which the host resolved from the config file, so this
@@ -476,13 +501,18 @@ impl Manager {
         // Past MAX_ACTIVE running operations a new one QUEUES in its supervisor (Slot::acquire below)
         // instead of being refused: the caller's work is admitted, recorded and run when a core frees,
         // and the wait is named on the operation. The registry itself stays bounded.
+        let limit = self.tracked_limit;
         let mut entries = self.entries.lock().map_err(error)?;
-        if entries.len() >= 128 {
-            entries.retain(|_, v| {
-                !v.state.lock().unwrap()["settled"]
-                    .as_bool()
-                    .unwrap_or(false)
-            });
+        // A settled operation is retired on the next admission (its state is on disk, so snapshot, wait,
+        // read and cancel keep answering), and the registry has a ceiling that REFUSES BY NAME instead of
+        // growing (18/11 round 2, finding 6). Retiring only entries whose state was persisted means a
+        // settle whose write failed is never dropped from the record that still holds it.
+        entries.retain(|_, entry| {
+            let state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+            !(state["settled"].as_bool().unwrap_or(false) && state.get("persistence_error").is_none())
+        });
+        if entries.len() >= limit {
+            return Err(error("operation_registry_full"));
         }
         let id = format!(
             "op-{}-{}-{}",
@@ -494,7 +524,7 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"cpu_priority":Process::priority(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"cpu_priority":Process::priority(spec.background),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
         if let Some(requested) = &spec.cwd_requested {
             state["cwd_requested"] = json!(requested);
         }
@@ -556,6 +586,8 @@ impl Manager {
                     Err(_) => Some("operation_supervisor_panicked".into()),
                 };
                 if let Some(reason) = failure {
+                    let waited_ms = entry.started.elapsed().as_millis() as u64;
+                    let queued_out = reason == "operation_queue_timeout";
                     let mut s = entry
                         .state
                         .lock()
@@ -571,6 +603,17 @@ impl Manager {
                     s["error"] = json!(reason);
                     s["cleanup"] = json!("unknown");
                     s["output_complete"] = json!(false);
+                    if queued_out {
+                        // A queued operation that never got a slot settles BY NAME, with the queue facts
+                        // on the record (18/11 round 2, finding 6): error names the reason, queue_state
+                        // says it was the queue, and queue_waited_ms is how long it waited. The script
+                        // that holds the handle reads this through wait(op), and a reader who opens the
+                        // operation later reads the same fields - nothing about it is lost.
+                        s["queue_state"] = json!("timed_out");
+                        s["queue_waited_ms"] = json!(waited_ms);
+                        s["queue_note"] = json!(format!(
+                            "this operation was admitted and queued for a free slot for {waited_ms} ms; its own deadline ran out first, so it never started"));
+                    }
                     let total_ms = entry.started.elapsed().as_millis() as u64;
                     s["elapsed_ms"] = json!(total_ms);
                     finish_timing(&mut s, total_ms);
@@ -665,6 +708,11 @@ impl Manager {
             state["cleanup"] = json!("unknown");
         }
         Ok(state)
+    }
+    /// How many operations this node currently tracks (running, queued or settled-but-not-yet-retired).
+    /// Diagnostics and tests: the bound is MAX_TRACKED and it is enforced at admission.
+    pub fn tracked(&self) -> usize {
+        self.entries.lock().map(|entries| entries.len()).unwrap_or(0)
     }
     pub fn list(&self) -> Value {
         let ids: Vec<String> = self.entries.lock().unwrap().keys().cloned().collect();

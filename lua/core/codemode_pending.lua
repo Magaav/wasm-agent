@@ -70,6 +70,22 @@ M.KEEP_CLOSED = 256
 -- The longest single blocking slice. The node does the blocking natively, so this is not a relay
 -- limit; it is what keeps a wait interruptible by a stop/steer without a long call to unwind.
 M.SLICE_MS = 1000
+-- How many times ONE script may be told the same op is still pending before the script ends by name
+-- (18/11 round 2, finding 7). A script that re-waited on an op that never settles used to loop for as
+-- long as the op lived and held one of the sandbox's four session slots the whole time: it now ends
+-- with a named reason and the slot is released. This is NOT a wall clock on waiting (the approved rule
+-- stands: a script is never killed for waiting, and the CPU guard is the only hard stop for computing)
+-- - it counts pending ANSWERS for one op, so a script that waits on four different calls for five
+-- minutes each is untouched.
+M.PENDING_ANSWER_LIMIT = 20
+-- The name the script's end carries, so the failure layer, the explainer and a test agree on it.
+M.WAIT_BOUND_CODE = "codemode_wait_never_settles"
+function M.pending_answer_limit()
+  local raw = (host.getenv and host.getenv("WASM_AGENT_CODEMODE_WAIT_ANSWERS")) or nil
+  local value = tonumber(raw)
+  if value and value >= 1 then return math.floor(value) end
+  return M.PENDING_ANSWER_LIMIT
+end
 
 -- ---------------------------------------------------------------------------- the record on disk
 --
@@ -301,9 +317,14 @@ do
       -- and `host.exec` answer.
       local ctx = opts.ctx or {}
       local saved = ctx.parallel_start
+      local saved_background = ctx.background_operation
       ctx.parallel_start = true
+      -- The CPU priority of the operation this starts: low only for a call nobody waits for
+      -- (18/11 round 2, finding 9).
+      ctx.background_operation = opts.background == true
       local ok, result = pcall(dispatch, "bash", copy, raw)
       ctx.parallel_start = saved
+      ctx.background_operation = saved_background
       if not ok then return { result = { error = tostring(result), effect = "unknown", replay_allowed = false } } end
       if type(result) == "table" and type(result.operation_id) == "string" and result.operation_id ~= "" then
         return { op = result.operation_id }
@@ -547,7 +568,15 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
         M.MAX_OPEN .. " pending calls per session; pending() lists them)" }
   end
   local started_at = now_seconds()
+  local budget = M.effective_ms(wait_s, remaining_of(opts))
+  -- Is this call backgrounded? A call the script does not wait for at all (wait_s 0) is, and only a
+  -- backgrounded operation runs at low CPU priority (18/11 round 2, finding 9): the priority belongs to
+  -- the spawned process, so the fact has to be known before the start, and "does the caller wait" is
+  -- the one thing knowable then.
+  local saved_background = opts.background
+  opts.background = budget == 0
   local started = executor.start(dispatch, opts, params, raw)
+  opts.background = saved_background
   if type(started) ~= "table" then return dispatch(name, params, raw) end
   if started.result ~= nil then
     -- The call finished as it always did: a refusal, a guarded command, an immediate answer.
@@ -562,7 +591,6 @@ function M.invoke(dispatch, opts, name, params, raw, wait_s)
     started_at = started_at, state = "running", reported = false, id = started.id,
     session = tostring(opts.session or ""), args = tostring(host.sha256(raw or "{}")) }
   index.ops[record.op] = record
-  local budget = M.effective_ms(wait_s, remaining_of(opts))
   local state, reason = executor_poll(executor, dispatch, opts, record, budget)
   if not state then
     record.state = "unknown"
@@ -686,6 +714,22 @@ function M.wait(dispatch, opts, asked, wait_opts)
           entry = { op = id, tool = record.tool, state = "pending",
             waited_s = math.floor((budget - remaining()) / 1000), progress = record.progress }
           if reason and reason ~= "still_running" then entry.reason = reason end
+          -- One op that never settles is bounded (18/11 round 2, finding 7): after the limit the
+          -- script ends BY NAME instead of looping on a handle that will not change, and the sandbox
+          -- slot comes back. The handle itself is untouched and still resumable - nothing is lost but
+          -- this script's loop.
+          local answers = opts.pending_answers
+          if type(answers) ~= "table" then answers = {}; opts.pending_answers = answers end
+          answers[id] = (tonumber(answers[id]) or 0) + 1
+          local limit = M.pending_answer_limit()
+          if answers[id] >= limit then
+            error(string.format("%s: op %s (%s) answered pending %d times in this script without "
+              .. "settling; the call itself is still running and its handle is kept. This is not a CPU "
+              .. "stop and not a wall-clock limit on waiting: it is the bound on ONE op that never "
+              .. "settles. Take the handle to a new step (pending() lists it, wait(op) resumes it "
+              .. "there) or stop it with cancel(%s).",
+              M.WAIT_BOUND_CODE, id, tostring(record.tool or "call"), answers[id], id), 0)
+          end
         end
       end
     end
@@ -809,7 +853,7 @@ end
 -- in one place.
 M.WAIT_HELP = {
   name = "wait",
-  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked: {state:\"done\", op, tool, result} with the call's normal result, {state:\"failed\", op, reason} when it failed, {state:\"pending\", op, progress, waited_s} while it is still running. It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60, is capped at 300 and at the script's remaining time. until:\"any\" stops waiting at the first op that settled and still answers every op, finished or not, so a step can drop the finished, add new calls and wait again - a work pool that grows and shrinks, e.g. const open = (await pending()).ops.map(o => o.op); const done = (await Promise.all(open.map(op => wait(op, {wait_s:0})))).filter(e => e.state !== 'pending').map(e => e.op);",
+  description = "Resume one pending call, or a batch of up to 20, that answered {state:\"pending\", op}. Answers one entry per op in the order asked: {state:\"done\", op, tool, result} with the call's normal result, {state:\"failed\", op, reason} when it failed, {state:\"pending\", op, progress, waited_s} while it is still running. It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60 and is capped at 300 (a script has no clock for a wait to outlive). A wait on one op that never settles ends the script by name (codemode_wait_never_settles, after " .. tostring(M.PENDING_ANSWER_LIMIT) .. " pending answers in one script) and the handle survives, so the next script resumes it. until:\"any\" stops waiting at the first op that settled and still answers every op, finished or not, so a step can drop the finished, add new calls and wait again - a work pool that grows and shrinks, e.g. const open = (await pending()).ops.map(o => o.op); const done = (await Promise.all(open.map(op => wait(op, {wait_s:0})))).filter(e => e.state !== 'pending').map(e => e.op);",
   code = "const first = await tools.bash({command:'bash scripts/fast.sh'});\nif (first.state === 'pending') {\n  const [log, resumed] = await Promise.all([tools.read({path:'fast.log'}), wait(first.op, {wait_s:120})]);\n  return {resumed: resumed.state, tail: first.progress && first.progress.tail};\n}\nreturn {code: first.code};",
 }
 

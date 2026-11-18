@@ -1544,6 +1544,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
     args.owner = ctx.session_id or user_id
     if args.action == "start" then
+      -- An explicit start is backgrounded by definition - the caller gets a receipt and moves on - so
+      -- it runs at low CPU priority unless a caller that DOES wait for a while says otherwise
+      -- (18/11 round 2, finding 9).
+      if args.background == nil then args.background = true end
       args._launch_cwd = cwd_provenance or launch_cwd(memory,ctx,requested_cwd)
       if args.cwd == nil or args.cwd == "" then args.cwd = session_cwd(memory,ctx) end
       -- The same two walls `bash` has had since the 11/11 home wipe: the text is refused before
@@ -1743,7 +1747,11 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
       -- model chose this call group; policy, session cwd and the commit review still run here.
       -- The `operation` start is this same bash call, not a second one: `same_call`.
       return M.dispatch(memory, "operation", { action = "start", command = args.command,
-        cwd = cwd, timeout_seconds = timeout }, role, ctx, launch_cwd(memory,ctx,requested_cwd), true)
+        cwd = cwd, timeout_seconds = timeout,
+        -- Low CPU priority is for work nobody is waiting for (18/11 round 2, finding 9): the code-mode
+        -- pending layer says whether this call is backgrounded, and a call the script is actively
+        -- awaiting keeps the node's own priority.
+        background = ctx.background_operation == true }, role, ctx, launch_cwd(memory,ctx,requested_cwd), true)
     end
     local provenance = launch_cwd(memory,ctx,requested_cwd)
     -- The name the reader knows this call by, for the session-status-content row while the command

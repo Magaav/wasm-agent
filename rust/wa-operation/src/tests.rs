@@ -231,6 +231,70 @@ fn remove_fixture(root: PathBuf) {
         }
     }
 }
+/// 18/11 round 2, finding 6: a settled operation is retired at the next admission, so a long-lived
+/// node's registry tracks work and not its history.
+#[test]
+fn a_settled_operation_is_retired_at_the_next_admission() {
+    let (m, root) = fixture();
+    fs::create_dir_all(&root).unwrap();
+    // What the registry tracks, read through its public list so this test measures the same thing a
+    // caller sees.
+    let tracked = |m: &Manager| m.list().as_array().map(|rows| rows.len()).unwrap_or(0);
+    let first = m.start(shell("printf one")).unwrap();
+    settled(&m, &first);
+    assert_eq!(tracked(&m), 1, "one operation, settled and still tracked");
+    let second = m.start(shell("printf two")).unwrap();
+    // The admission of the second retires the first: the registry tracks work, not history. Without
+    // that retirement this reads 2, then 3, and only at 128 entries did base ever prune.
+    assert_eq!(tracked(&m), 1, "the settled one was retired at admission, tracked={}", tracked(&m));
+    settled(&m, &second);
+    let third = m.start(shell("printf three")).unwrap();
+    assert_eq!(tracked(&m), 1, "and it stays at one: history never accumulates, tracked={}", tracked(&m));
+    settled(&m, &third);
+    drop(m);
+    remove_fixture(root);
+}
+
+/// 18/11 round 2, finding 6: past the registry ceiling the answer is a refusal BY NAME, and nothing is
+/// admitted or created for it.
+#[test]
+fn the_registry_ceiling_refuses_by_name_and_creates_nothing() {
+    // A small ceiling for THIS manager, not the node's 128: filling 128 live operations would take
+    // every CPU slot the process has and make the other tests' short commands wait behind them.
+    // Spelled as a literal so this test also compiles against a tree with no ceiling at all (which is
+    // what it measures).
+    const CEILING: usize = 2;
+    let root = std::env::temp_dir().join(format!(
+        "wa-operation-ceiling-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let m = Manager::with_tracked_limit(&root, CEILING);
+    fs::create_dir_all(&root).unwrap();
+    let mut live: Vec<String> = Vec::new();
+    for _ in 0..CEILING {
+        let mut spec = shell("sleep 5");
+        spec.timeout = Duration::from_secs(60);
+        match m.start(spec) {
+            Ok(id) => live.push(id),
+            Err(error) => panic!("admission {}/{} failed before the ceiling: {error}", live.len(), CEILING),
+        }
+    }
+    assert_eq!(live.len(), CEILING, "the registry is full of live operations");
+    let refused = m.start(shell("printf never"));
+    assert!(refused.is_err(), "an operation past the ceiling is refused");
+    assert_eq!(refused.unwrap_err().to_string(), "operation_registry_full",
+        "and the refusal is named, not an anonymous io error");
+    // Nothing was created for the refused one: the directory holds exactly the tracked operations.
+    let created = fs::read_dir(&root).map(|entries| entries.filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("op-")).count()).unwrap_or(0);
+    assert!(created <= CEILING + 1, "no record was written for the refused operation: {created}");
+    for id in live.iter() { let _ = m.cancel(id); }
+    drop(m);
+    std::thread::sleep(Duration::from_millis(400));
+    remove_fixture(root);
+}
+
 #[test]
 fn accepted_output_before_initialization_is_pending_not_a_launch_failure() {
     let (m, root) = fixture();

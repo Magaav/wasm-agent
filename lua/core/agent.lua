@@ -1829,6 +1829,10 @@ function M:run_body(text, images)
   -- with a compacted context, and a second failure is surfaced rather than looped.
   self.overflow_recovery_attempted = false
   self.stream_cuts = 0 -- re-drives of a cut stream in this run (provider.stream_cut_retries)
+  -- The imitation streak is per run, and a run is one turn (18/11 round 2, finding 2): a counter that
+  -- survived its run failed a model for imitations it had already answered for, on evidence that only
+  -- existed in the previous turn.
+  self.fake_answer_repeats = 0
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   -- A full disk fails in the middle of a turn (SQLITE_FULL, a torn write). Say so before it does, but do
@@ -2207,6 +2211,10 @@ function M:run_body(text, images)
     return #rows
   end
   local round = 0
+  -- Between the step that was a fabrication and the turn row that records it: the notice goes into the
+  -- ledger AFTER the stripped message it is about (18/11 round 2, finding 4), and the removed markup
+  -- rides with that row as the evidence (finding 3).
+  local fake_notice, fabricated_step
   while true do
     round = round + 1
     -- The deploy pause (lua/core/deploy_pause.lua). This is the step boundary: between decisions,
@@ -2763,13 +2771,20 @@ function M:run_body(text, images)
       if fabricated then
         self.fake_answer_repeats = (self.fake_answer_repeats or 0) + 1
         local repeats = self.fake_answer_repeats
+        -- The evidence is the markup itself, verbatim (18/11 round 2, finding 3): the event and the
+        -- step's trace entry carry what was taken out of the message, not only a bounded quote, so a
+        -- reader of the run record can see exactly what the model wrote.
+        local removed = fabricated.removed or ""
         telemetry.event(self.session_id, self.run_id, "", "fake_tool_result", "step", {
           round = round, repeats = repeats, limit = fake_answer.MAX_REPEATS,
           tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
-          excerpt = fabricated.excerpt:sub(1, 200) })
+          excerpt = fabricated.excerpt:sub(1, 200), removed = removed,
+          removed_count = #(fabricated.removed_blocks or {}),
+          removed_bytes = #removed, tool = fabricated.tool })
         trace[#trace + 1] = { kind = "fake_tool_result", ok = false, round = round, repeats = repeats,
           tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
-          excerpt = fabricated.excerpt:sub(1, 200) }
+          excerpt = fabricated.excerpt:sub(1, 200), removed = removed,
+          removed_bytes = #removed, tool = fabricated.tool }
         result.content = fabricated.stripped
         reply = ""
         decision_phase = "fake_tool_result"
@@ -2783,11 +2798,34 @@ function M:run_body(text, images)
             { outcome = "failed", repeats = repeats })
           error(fake_answer.failure(repeats), 0)
         end
+        -- How THIS session can call the tool the markup named: the same spelling rule the prompt uses
+        -- (tool_ref above), read from this request's own tool list and this role's catalogue. nil when
+        -- the markup names no tool we can place, and the notice then says "the tool" instead of
+        -- naming a door that is not here (18/11 round 2, finding 8).
+        local ref
+        if fabricated.tool then
+          local declared, available = {}, {}
+          for _, schema in ipairs(self.tool_list or {}) do
+            if type(schema) == "table" and type(schema["function"]) == "table" then
+              declared[schema["function"].name] = true
+            end
+          end
+          for _, schema in ipairs(tools.all(self.role) or {}) do
+            if type(schema) == "table" and type(schema["function"]) == "table" then
+              available[schema["function"].name] = true
+            end
+          end
+          ref = tool_ref(fabricated.tool, declared, available)
+        end
+        local notice = fake_answer.notice(fabricated, ref)
         -- The notice is a durable row, not only a transient message: a reader who opens this session
         -- later (or a resumed run that rebuilds its context from the ledger) must see why the run
-        -- continued past the model's own stop, and the phase marks it as the harness speaking.
-        local notice = fake_answer.notice(fabricated)
-        record_turn(self, { role = "user", content = notice, phase = fake_answer.CODE, debug = self.debug })
+        -- continued past the model's own stop, and the phase marks it as the harness speaking. It is
+        -- written with the assistant row it is about, not before it (finding 4).
+        fake_notice = notice
+        -- This step's row carries the run trace, because that is where the removed markup is kept
+        -- verbatim (finding 3): a normal step does not store its trace, and this one must.
+        fabricated_step = true
         messages[#messages + 1] = { role = "user", content = notice }
         goto after_answer
       end
@@ -2971,7 +3009,18 @@ function M:run_body(text, images)
       id = assistant_id, role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
       reasoning=result.reasoning or "", phase=decision_phase ~= "" and decision_phase or result.final_phase or "",
       reasoning_items=result.reasoning_items,
+      -- The removed markup rides in this row's trace, verbatim: messages.trace and the journal row
+      -- both carry it, so the evidence is in the run record and not only in the status line
+      -- (18/11 round 2, finding 3). A column of its own would be a schema change for one field.
+      trace = fabricated_step and trace or nil,
     })
+    fabricated_step = nil
+    -- The harness notice about that row, in the order it happened: the stripped message first, then
+    -- the sentence the model was handed (18/11 round 2, finding 4).
+    if fake_notice then
+      record_turn(self, { role = "user", content = fake_notice, phase = fake_answer.CODE, debug = self.debug })
+      fake_notice = nil
+    end
     -- The same classification, live. The window has already drawn this step's streamed text in the
     -- answer's place; this tells it to move that text into the run topic that holds the decision
     -- rows, at the moment the step's completion is known - not a round later, and not only when the
@@ -3054,10 +3103,16 @@ function M:run_body(text, images)
           batching_guidance=batching_mode,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
       pcall(memory.presence_beat, self.session_id)
+      -- Was the tool actually reached? A call the harness refused before dispatch (a repair, a fence,
+      -- a steering veto) did not run, so it does not end the imitation streak below.
+      local dispatched = false
       local handled, output = pcall(function() if name_error then return name_error end
         if raw_refusal then return raw_refusal end
         if argument_error then return argument_error end
         if parallel_op then
+          -- The batch was launched, so this call really ran: it ends the imitation streak like any
+          -- other (18/11 round 2, finding 2).
+          dispatched = true
           if parallel_op.operation_id then
             return tools.await_parallel_bash(parallel_op.operation_id, self.role, dispatch_ctx)
           end
@@ -3090,9 +3145,15 @@ function M:run_body(text, images)
         -- The name the model called, so the dispatcher can tell the model's own call from the inner calls
         -- a facade (tool_call) makes with this same ctx (lua/core/tools.lua, one pathway).
         dispatch_ctx.tool_call_name=function_.name
+        dispatched = true
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)
       host.beat()
+      if dispatched then
+        -- A real tool call is the model doing what the notice asked it to do, so the imitation streak
+        -- ends here instead of counting against the next step (18/11 round 2, finding 2).
+        self.fake_answer_repeats = 0
+      end
       if not handled then
         -- A raise is not a refusal with a code: the message carries the tool's own words and names the
         -- line that raised (refusal.lua renders it as a cause, never as an unknown code).

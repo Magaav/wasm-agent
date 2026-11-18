@@ -197,10 +197,11 @@ impl Process {
                 1,
                 CREATE_SUSPENDED
                     | CREATE_NO_WINDOW
-                    // Low CPU priority for the command (18/11, item 1.6): a background operation must
-                    // not starve the session waiting on it. Below normal, never idle, so a command with
-                    // nothing else to compete with still runs at full speed.
-                    | BELOW_NORMAL_PRIORITY_CLASS
+                    // Low CPU priority for a BACKGROUNDED command (18/11 round 2, finding 9): work
+                    // nobody waits for must not starve the session that is waiting on something else.
+                    // A call the caller actively awaits is created with no priority flag at all, so it
+                    // runs at the node's own priority. Below normal, never idle.
+                    | if spec.background { BELOW_NORMAL_PRIORITY_CLASS } else { 0 }
                     | CREATE_UNICODE_ENVIRONMENT
                     | EXTENDED_STARTUPINFO_PRESENT,
                 env_wide.as_ptr() as _,
@@ -345,9 +346,9 @@ impl Process {
         "windows_job_object"
     }
     /// What the operation's own record says about the CPU priority it ran at (see the creation flags
-    /// in spawn: BELOW_NORMAL_PRIORITY_CLASS).
-    pub fn priority() -> String {
-        "below_normal".to_string()
+    /// in spawn: BELOW_NORMAL_PRIORITY_CLASS for a backgrounded command, the node's own otherwise).
+    pub fn priority(background: bool) -> String {
+        if background { "below_normal".to_string() } else { "default".to_string() }
     }
     pub fn read(&mut self, stderr: bool, buffer: &mut [u8]) -> io::Result<Option<usize>> {
         let pipe = if stderr { self.stderr.0 } else { self.stdout.0 };

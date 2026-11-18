@@ -351,3 +351,240 @@ test-provider-stall-replay.lua        a large request gets more: 90, rc=1       
 test-operation-queue-priority.lua     (no base row: the refusal it replaced is gone) {"checks":29,"ok":true}
 fast path (this tree)                 -                                              ok (267 checks, 0 skipped, 188s)
 ```
+
+---
+
+## Round 2 - the review's nine findings (18/11 17:20)
+
+Base @ change/harness-next-a e8b5da87 (round 1). Branch @ change/harness-next-a + this round, nothing
+pushed. Every row below ran in its own @mktemp -d@ home with @WASM_AGENT_LUA_ROOT@ pointing at the tree
+under test, no vault, no relay, no rendezvous, provider replaced before any model call (no paid
+inference). The "before" column is the SAME row run against a clean worktree of e8b5da87
+(@git worktree add /tmp/base-wt e8b5da87@) with a release binary built from it (@/tmp/wa-base@), so
+both sides measure the code, not the harness.
+
+### The nine findings, each with the row that proves it
+
+| # | finding | row | before (e8b5da87) | after (this tree) |
+|---|---------|-----|-------------------|-------------------|
+| 1 | fake_answer cuts from the code-stripped copy | @scripts/test-fake-answer-original-span.lua@ (19 checks) | @lua error: ...:14: an unterminated fence is still code: A fixture, unterminated:@ then the message ends inside the code fence | @ok fake-answer-original-span: 19 checks@ |
+| 2 | @self.fake_answer_repeats@ never reset | @scripts/test-fake-answer-repeat-reset.lua@ (13 checks) | @lua error: ...:29: three imitations with a real tool call between them are not three in a row: fake_tool_result: the model imitated a tool result instead of calling one 3 times in a row@ | @ok fake-answer-repeat-reset: 13 checks@ |
+| 3 | the removed markup is dropped | @scripts/test-fake-answer-evidence.lua@ (13 checks) | @lua error: ...:19: the row carries the fake_tool_result trace entry@ | @ok fake-answer-evidence: 13 checks@ |
+| 4 | ledger order inverted (notice before the message) | @scripts/test-fake-answer-ledger-order.lua@ (8 checks) | @lua error: ...:18: the stripped message comes BEFORE the notice it provoked (message at 3, notice at 2)@ | @ok fake-answer-ledger-order: 8 checks@ |
+| 5 | the stall marker is added to every send() error | @scripts/test-provider-stall-marker.lua@ (6 checks) + rust @only_a_response_header_timeout_is_a_stall@ | @{"error":"io: Connection refused (provider_stalled: no response within 2s)"}@ | @ok provider-stall-marker: 6 checks@ |
+| 6 | the queue can lose work / the registry is unbounded | @scripts/test-codemode-queue-timeout.lua@ (19 checks) + rust @a_settled_operation_is_retired_at_the_next_admission@, @the_registry_ceiling_refuses_by_name_and_creates_nothing@ | @lua error: ...:21: the record says the QUEUE is what ran out, not the command: {"error":"operation_queue_timeout", ...}@ (no @queue_state@) | @ok codemode-queue-timeout: 19 checks@; @cargo test -p wa-operation@: 42 passed |
+| 7 | @while(1) await wait(op)@ has no bound | @scripts/test-codemode-wait-bound.lua@ (13 checks) | @lua error: ...:23: a script that only re-waits on one op does not run forever: {"error":"nil","ok":true,"value":"{\"answers\":60}"}@ | @ok codemode-wait-bound: 13 checks@ |
+| 8 | stale model-facing text (WAIT_HELP, explain, the notice) | @scripts/test-model-facing-texts.lua@ (16 checks) | @lua error: ...:19: it no longer promises a bound the code does not have ("at the script remaining time")@ | @ok model-facing-texts: 16 checks@ |
+| 9 | nice is applied to every operation | @scripts/test-operation-cpu-priority.lua@ (9 checks) | @lua error: ...:24: a call the run waits for keeps the node own priority: nice+10@ | @ok operation-cpu-priority: 9 checks@ |
+
+The exact "before" lines, as the rows printed them (paths shortened to the row name):
+
+@
+[base] test-fake-answer-original-span.lua   rc=1  lua error: [string "/tmp/base-wt/scripts/test-fake-answer-original-span.lua"]:14: an unterminated fence is still code: A fixture, unterminated:
+```xml
+[base] test-fake-answer-repeat-reset.lua    rc=1  lua error: ...:29: three imitations with a real tool call between them are not three in a row: fake_tool_result: the model imitated a tool result instead of calling one 3 times in a row; no fabricated output was recorded as the answer, and the turn is failed rather than finished
+[base] test-fake-answer-evidence.lua       rc=1  lua error: ...:19: the row carries the fake_tool_result trace entry
+[base] test-fake-answer-ledger-order.lua   rc=1  lua error: ...:18: the stripped message comes BEFORE the notice it provoked (message at 3, notice at 2)
+[base] test-codemode-wait-bound.lua        rc=1  lua error: ...:23: a script that only re-waits on one op does not run forever: {"error":"nil","ok":true,"value":"{"answers":60}"}
+[base] test-codemode-queue-timeout.lua     rc=1  lua error: ...:21: the record says the QUEUE is what ran out, not the command: {"cleanup":"unknown",...,"error":"operation_queue_timeout","fix":"clear the condition `operation_queue_timeout` ...}
+[base] test-operation-cpu-priority.lua     rc=1  lua error: ...:24: a call the run waits for keeps the node own priority: nice+10
+[base] test-model-facing-texts.lua         rc=1  lua error: ...:19: it no longer promises a bound the code does not have ("at the script remaining time"): Resume one pending call, or a batch of up to 20, ...
+[base] test-provider-stall-marker.lua      rc=1  lua error: ...:14: a refused connection is NOT a stall: {"error":"io: Connection refused (provider_stalled: no response within 2s)"}
+@
+
+### What changed, per finding
+
+1. **@lua/core/fake_answer.lua@** - code is now MASKED IN PLACE (closed fences, an unterminated fence to
+   the end, inline spans, four-space/tab indented blocks): only the visible bytes become spaces, every
+   newline stays, so a span found in the masked copy is a span of the ORIGINAL. @M.scan@ finds every
+   element on the masked copy and cuts those spans **from the original**, so the model's own code and
+   the rest of its message survive the cut. Markup inside code is never fake.
+2. **@lua/core/agent.lua@** - @self.fake_answer_repeats = 0@ at the start of @run_body@ (a run is one
+   turn), and again after every call that actually reached the dispatcher (@dispatched@ is set where the
+   call enters @tools.dispatch@, or where a launched parallel batch is collected - a call the harness
+   refused before dispatch does not reset it).
+3. **the evidence** - @M.scan@ returns @removed@ (the markup verbatim) and @removed_blocks@. The step's
+   trace entry carries @removed@, @removed_bytes@ and @tool@; the row for that step now stores its
+   trace (@messages.trace@ and the journal row), and @harness_events@ carries the same fields. Nothing
+   about the fabrication is only in a status line any more.
+4. **ledger order** - the notice is staged and written AFTER the stripped assistant row it is about, so
+   the ledger reads message-then-notice, the order they happened in.
+5. **@rust/wa-capabilities/src/host.rs@** - @stall_marker(&error, first_response_seconds)@ marks exactly
+   @ureq::Error::Timeout(ureq::Timeout::RecvResponse)@ (nothing of the response arrived before the
+   deadline, so no tool call can have come back and the replay is safe) and nothing else: a refused
+   connection, a TLS failure, an unresolvable host, a connect/send/body timeout keep their own words and
+   are not replayed as stalls. Unit test: @only_a_response_header_timeout_is_a_stall@.
+6. **@rust/wa-operation/src/lib.rs@** - every admission retires settled entries whose state was persisted
+   (the registry tracks work, not history) and past @MAX_TRACKED@ (128) unsettled operations the answer
+   is @operation_registry_full@ BEFORE anything is created. A queued operation whose own deadline runs
+   out settles @failed@ with @error: "operation_queue_timeout"@ plus @queue_state: "timed_out"@,
+   @queue_waited_ms@ and a @queue_note@, so "it never started" is on the record; the script reads it
+   through @wait(op)@ (@entry.reason == "operation_queue_timeout"@) and @pending.retained@ re-reads it.
+7. **@lua/core/codemode_pending.lua@ + @lua/core/codemode.lua@** - a per-script count of pending ANSWERS
+   per op (@M.PENDING_ANSWER_LIMIT@, 20; @WASM_AGENT_CODEMODE_WAIT_ANSWERS@ overrides it for a test).
+   At the limit the script ends by name (@codemode_wait_never_settles@) and the sandbox is closed, so the
+   slot comes back (six scripts in a row, six > the four slots, each end the same way in the row). The
+   approved rule is untouched: no wall clock on waiting, the CPU guard is the only hard stop for
+   computing, and the error says which bound it is. The handle is kept (@pending()@ still lists it,
+   @cancel(op)@ still stops it).
+8. **model-facing text** - @M.WAIT_HELP@ no longer promises the script's remaining time and names the
+   never-settles bound; @explain@ names the new ending and says what to do, and its budget sentence says
+   "of computing" instead of "wall-clock"; the notice names the tool the way THIS session can call it
+   (@tool_ref@: @tools.x()@ in code mode, @tool_call(name="x")@ for an on-demand tool, the bare name for
+   a declared one) or says "the tool you were describing" when it cannot tell - never @tools.<name>@.
+9. **@rust/wa-operation@ + @lua/core/tools.lua@** - @Spec.background@ decides the priority: @false@ for a
+   foreground shell (@host.exec@), @true@ for an explicit @operation start@; the code-mode pending layer
+   sets it from the one thing knowable before the process exists, "does this caller wait at all"
+   (@wait_s 0@ = backgrounded, any wait above 0 = the script is awaiting it). The record's
+   @cpu_priority@ is @default@ or @nice+10@ accordingly. Windows (@BELOW_NORMAL_PRIORITY_CLASS@) compiles
+   only on Windows and was not built here.
+
+### Texts to approve
+
+Every model-facing string this round adds or changes, verbatim. (1) and (2) are two of round 1's five
+proposed strings; the finding forced a change in both, so old and new are shown.
+
+**(1) @M.WAIT_HELP@ (the @wait@ builtin's help, what @searchTools("select:wait")@ answers) - changed.**
+
+old: @... It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60, is capped at 300 and at the script's remaining time. until:"any" stops waiting ...@
+
+new: @... It dispatches nothing and never re-runs an effect, so it batches with anything. wait_s defaults to 60 and is capped at 300 (a script has no clock for a wait to outlive). A wait on one op that never settles ends the script by name (codemode_wait_never_settles, after 20 pending answers in one script) and the handle survives, so the next script resumes it. until:"any" stops waiting ...@
+
+**(2) the harness notice (@fake_answer.notice@) - its last sentence changed.**
+
+old: @Take your next step: call the tool you were describing with tools.<name>(args) and wait for its real result.@
+
+new: @Take your next step: call <ref> and wait for its real result.@
+
+where @<ref>@ is one of, from the session's own catalogue and the same rule the prompt uses
+(@lua/core/agent.lua@, @tool_ref@):
+
+@
+`tools.bash()`          (code mode: the tool is in the catalogue)
+tool_call(name="bash")   (an on-demand tool)
+`bash`                   (a tool this request declares)
+the tool you were describing   (the markup named no tool we can place, or one this session cannot call)
+@
+
+**(3) NEW: the named ending of a script that waits on one op that never settles** (@codemode_pending.lua@;
+it reaches the model as the script's error, @code = "codemode_wait_never_settles"@):
+
+@
+codemode_wait_never_settles: op <op> (<tool>) answered pending <n> times in this script without settling; the call itself is still running and its handle is kept. This is not a CPU stop and not a wall-clock limit on waiting: it is the bound on ONE op that never settles. Take the handle to a new step (pending() lists it, wait(op) resumes it there) or stop it with cancel(<op>).
+@
+
+**(4) NEW: @explain@'s fix for that ending** (@lua/core/codemode.lua@):
+
+@
+The call is still running and its handle is not lost: pending() lists it and wait(op) resumes it in a new script, or cancel(op) stops it. Nothing was undone. Already done, not undone: <names>. | No call had succeeded yet.
+@
+
+**(5) CHANGED: @explain@'s budget sentence** (a tool result, not a prompt: the deadline a script is given
+now bounds COMPUTING only):
+
+old: @TimeoutError: the script ran past the 3000 ms budget it was given (or the run was stopped)@ /
+@TimeoutError: the script ran past the wall-clock budget it was given (or the run was stopped)@
+
+new: @TimeoutError: the script ran past the 3000 ms of computing it was given (or the run was stopped)@ /
+@TimeoutError: the script ran past the budget it was given (or the run was stopped)@
+
+**(6) NEW: two refusal names and one record field a model can read** - @operation_registry_full@ (the
+@operation start@ refusal past 128 tracked operations, with no operation created) and, on a queued
+operation that ran out of time, @queue_state: "timed_out"@, @queue_waited_ms@ and:
+
+@
+this operation was admitted and queued for a free slot for <n> ms; its own deadline ran out first, so it never started
+@
+
+Nothing else model-facing changed: no prompt layer, no tool schema, no description of another tool.
+
+### One row from round 1 changed, and why
+
+@scripts/test-answer-not-fake-tool-result.lua@ (round 1's row) cycled through its three imitation
+shapes in the streak block, i.e. it depended on "nothing between two imitations ends the streak". Finding
+2 says the opposite - a real tool call DOES end it - and one of those three shapes (the @<tool_call>@ one)
+is turned into a real @codemode@ call by the raw-code channel, so with the reset in place that block
+looped until the fast-path timeout (measured: exit 124, twice). The block now repeats ONE shape, which is
+what "a model that only imitates" means, and the two halves of finding 2 (reset at run start, reset after
+a real tool call) are pinned in @scripts/test-fake-answer-repeat-reset.lua@. Every other check in the
+row is unchanged, and it still passes in both envelopes (code mode and raw-code-only), 31 checks.
+
+### The envelope matters, and one row reads it
+
+The fast path runs rows with @WASM_AGENT_RAW_CODE@ unset, which is raw-code @only@ mode: the request
+declares no tools at all, so "call tools.bash()" would be a door that is not there. The notice says "the
+tool you were describing" there and @tools.bash()@ in code mode; @scripts/test-model-facing-texts.lua@
+reads the session's own tool list and checks that whatever the notice offers is offered only because this
+session can use it (and that @tools.<name>@ is gone in both), instead of pinning one envelope's spelling.
+
+### Files touched
+
+@
+lua/core/fake_answer.lua              (1: mask in place, cut from the original, removed/removed_blocks, tool; 3, 8: ref)
+lua/core/agent.lua                    (2: the two resets; 3: trace/event evidence; 4: notice after the row; 8: tool_ref)
+lua/core/codemode_pending.lua         (7: the never-settles bound; 9: the background fact; 8: WAIT_HELP)
+lua/core/codemode.lua                 (7, 8: explain() names the bound and says "of computing")
+lua/core/tools.lua                    (9: background on the operation start the pending layer asks for)
+rust/wa-capabilities/src/host.rs      (5: stall_marker + its unit test)
+rust/wa-capabilities/src/operations.rs (9: Spec.background threading; foreground is not background)
+rust/wa-operation/src/lib.rs          (6: registry ceiling, queue facts, tracked_limit; 9: cpu_priority(background))
+rust/wa-operation/src/process.rs      (9: nice only for a backgrounded command; priority(background))
+rust/wa-operation/src/windows.rs      (9: BELOW_NORMAL_PRIORITY_CLASS only for a backgrounded command)
+rust/wa-operation/src/tests.rs        (6: retirement + ceiling tests)
+scripts/test-fake-answer-original-span.lua, -repeat-reset.lua, -evidence.lua, -ledger-order.lua   (1, 2, 3, 4)
+scripts/test-provider-stall-marker.lua       (5)
+scripts/test-codemode-queue-timeout.lua      (6)
+scripts/test-codemode-wait-bound.lua         (7)
+scripts/test-model-facing-texts.lua          (8)
+scripts/test-operation-cpu-priority.lua      (9)
+scripts/test-answer-not-fake-tool-result.lua (the streak fixture, see "One row from round 1 changed")
+@
+
+### Fast suite: green
+
+@CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-harness-next-a WA_BIN=<this tree's release wa> bash scripts/fast.sh --jobs 6@
+
+@
+fast: lua 240/240 passed (56 excluded: scripts/fast-path.exclude)
+fast: rust wa-capabilities ok (9s)
+fast: rust wa-operation ok (2s)
+fast: fast result ok (274 checks, 0 failed, 0 skipped, 180s)
+@
+
+(274 checks, up from round 1's 267: this round's nine rows and their assertions. The fast path runs rows
+with @WASM_AGENT_RAW_CODE@ unset, i.e. raw-code @only@ mode - the envelope the two "envelope" notes above
+are about.)
+
+Rust, run directly: @cargo test --release -p wa-capabilities@ -> 288 passed, 0 failed;
+@cargo test --release -p wa-operation@ -> 42 passed, 0 failed (both include this round's new tests).
+
+### Pre-existing failure on this node, named
+
+@scripts/test-provider-stall.lua@ fails when run on the BASE tree on this node, not because of this
+branch: an interactive shell here carries @WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS=300@, so the BASE
+row's first check reads 300 where it expects the 90 s default. Round 1 changed that row to clear the
+variable for the check it pins, so this tree's row passes (@ok provider-stall: 17 checks@, run here with
+the variable still set) and the fast path is green. Nothing in this round touches it.
+
+### Costs and limits, named
+
+* The two @wa-operation@ tests are new source that cannot compile against e8b5da87 (neither @MAX_TRACKED@
+  nor @Manager::with_tracked_limit@ nor the retirement nor the queue facts exist there), so their
+  "before" is quoted from that tree's own source instead of run: @if entries.len() >= 128 { retain(settled) }@ with no ceiling and no refusal,
+  and @return Err(error("operation_queue_timeout"))@ with no queue facts on the record. The lua row above
+  measures the same two facts from outside, against the real base binary, and fails there.
+* The ceiling test uses a per-manager ceiling (@Manager::with_tracked_limit@, a test/diagnostic seam, not
+  an operator knob) so it can reach the refusal with 2 operations: filling all 128 live ones would take
+  every CPU slot the test process has and made a pre-existing row
+  (@parallel_launches_do_not_inherit_each_others_pipes@) wait behind them - measured once, then fixed and
+  re-run green.
+* Finding 9's Windows half (@BELOW_NORMAL_PRIORITY_CLASS@ only for a backgrounded command) compiles only
+  on Windows and was not built or tested on this Linux node.
+* @scripts/test-codemode-wait-bound.lua@ runs six sandboxes in sequence to prove the slot comes back; it
+  is fast (each script ends after the 20th pending answer, which is immediate for a @wait_s:0@ loop) but
+  it does start and stop six guests.
+* The stall marker's positive case (a receive-response timeout on a real socket) is not in the row: the
+  row pins the negative case live (connection refused, no marker) and the positive one at the predicate
+  and unit-test level. Nothing here opens a second listener.
+* A model-facing sentence that only a live model can judge (does the notice make it call the tool?) is
+  not verifiable in a hermetic row, same as round 1.
