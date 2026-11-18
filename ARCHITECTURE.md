@@ -268,3 +268,13 @@ budget; a run has no wall-clock deadline. Other tools do not inherit the shell's
 because they are tool calls. `docs/OPERATIONS.md` names the actual mechanisms and their limits. Measured, not assumed: a single `bash` of 993 seconds in the ledger, and a run of 47
 steps that lasted 56 minutes. Neither number appears in `docs/` today, so the next reader learns it by watching
 it happen - which is the expensive way.
+
+## Seams are WIT, and async by default
+A boundary between parts of wa (host ↔ component, component ↔ component, a node ↔ the fabric API) is defined in `wit/`. Work that takes time returns a `future`; output that keeps coming is a `stream`; dropping either cancels interest. Nothing new exposes a status to poll. JSON stays only where it is the outside world's format (provider HTTP, MCP, the browser, files on disk) or a value that is JSON by nature, and such a field says so in its name (`*-json`). WIT has no recursive types, so "any JS value" stays a `*-json` string.
+
+## Modules over the monolith
+A part that changes at its own pace, or that a node may need to replace, is a module behind a WIT seam: built, pinned and hot-swapped on its own, so a change compiles and ships without rebuilding the core (`docs/CORE-SPLIT.md` decides what leaves the turn loop, `docs/MODULES.md` how a module is laid out, `docs/HOTRELOAD.md` what reloads live). The core keeps only what must never be swapped mid-run: identity, guards, the keystore, the scheduler. A new seam is justified by a measured win (build time, swap without restart, a second implementation), not by symmetry.
+
+**The sweet spot.** A module is a unit someone would build, deploy or replace on its own: a feature, a connector, a policy, a runtime. It is never a helper, a type or a single function. Prefer few, cohesive modules: when two modules change together in most commits, or one exists only to serve another, merge them. Every module states its measured win in its manifest (build time saved, swapped without restart, a second implementation); a module without one is folded back.
+
+**No flip-flopping.** Split by shape before size: fix dependency direction (stable code at the bottom, volatile on top) before adding a module. Splitting and merging use different thresholds (split: ≥30% less rebuild for the files that change often, or a swap without restart; merge: co-change in >70% of the last 50 commits and no recorded win), every split or merge records its measurement in the module's manifest, and reversing one needs a new measurement showing that win is gone, never sooner than 30 days or 100 commits unless something is broken.

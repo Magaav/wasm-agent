@@ -1,0 +1,57 @@
+# The module baseline's build times, read by scripts/module-report.mjs when it is run without --timings
+# (scripts/fast.sh passes the run's own ledger instead). Columns: kind, name, milliseconds, note.
+#
+# Measured on avell (this node), 2026-11-18, cargo 1.100.0 (release profile,
+# CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-architecture-rules): a warm --workspace build first
+# (113 s), then each crate's own .rs files touched and 'cargo build --release -p <crate>' timed, so the
+# number is that crate's own rebuild - the metric ARCHITECTURE.md's split threshold names - and not a
+# cold dependency graph. The note says how many units the compiler built; there is no 0-unit row here.
+#
+# The nested fixture packages and the 25 WASM components are not in this pass: a component is built for
+# wasm32 by scripts/build-components.sh under components.lock pins, and the fast path times it when it
+# builds one for a row. The report prints '-' for both - an unmeasured module is not a fast one.
+# Rows whose first measurement waited on a concurrent build's target-directory lock were re-measured on a
+# quiet tree before being written here (wa-mesh read 160 s under the lock and 4.5 s alone).
+crate	wa-host	73060	11 unit(s) compiled
+crate	wa-capabilities	14620	1 unit(s) compiled
+crate	wa-cli-views	2403	8 unit(s) compiled
+crate	wa-email-index	1448	7 unit(s) compiled
+crate	wa-email-outbox	556	1 unit(s) compiled
+crate	wa-queue	708	1 unit(s) compiled
+crate	wa-features	5991	2 unit(s) compiled
+crate	wa-host-support	5919	1 unit(s) compiled
+crate	wa-grant-policy	1192	1 unit(s) compiled
+crate	wa-governance	3455	7 unit(s) compiled
+crate	wa-bounded	513	1 unit(s) compiled
+crate	wa-mesh-core	860	1 unit(s) compiled
+crate	wa-telemetry	1097	1 unit(s) compiled
+crate	wa-jobs	861	1 unit(s) compiled
+crate	wa-sqlite	230	1 unit(s) compiled
+crate	wa-kernel-runtime	63878	2 unit(s) compiled
+crate	wa-bus	833	1 unit(s) compiled
+crate	wa-fabric	1079	1 unit(s) compiled
+crate	wa-keystore	1874	15 unit(s) compiled
+crate	wa-kv	9292	5 unit(s) compiled
+crate	wa-state	1379	1 unit(s) compiled
+crate	wa-stt-remote	1450	1 unit(s) compiled
+crate	wa-vault	3256	16 unit(s) compiled
+crate	wa-local-tz	1229	1 unit(s) compiled
+crate	wa-mesh	4454	1 unit(s) compiled
+crate	wa-operation	3411	1 unit(s) compiled
+crate	wa-rendezvous	3687	2 unit(s) compiled
+crate	wa-term	2230	1 unit(s) compiled
+crate	wa-tool-progress	649	1 unit(s) compiled
+crate	wa-whatsapp-archive	1702	3 unit(s) compiled
+crate	wa-whatsapp-index	1648	1 unit(s) compiled
+crate	wa-whatsapp-outbox	851	1 unit(s) compiled
+crate	wa-graph	5184	1 unit(s) compiled
+crate	wa-fake-kernel	10979	1 unit(s) compiled
+crate	wa-watchdog	1265	1 unit(s) compiled
+crate	wa-core-pool-bench	4714	1 unit(s) compiled
+crate	wa-remap-rustc	395	1 unit(s) compiled
+crate	wa-snapshot	1298	2 unit(s) compiled
+crate	wa-telemetry-sink	974	1 unit(s) compiled
+crate	wa-memory-bench	8387	1 unit(s) compiled
+crate	wa-model-gateway	2914	1 unit(s) compiled
+crate	wa-model-router	917	1 unit(s) compiled
+crate	wa-fleetview	1100	1 unit(s) compiled

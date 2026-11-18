@@ -22,6 +22,52 @@ host does not grant, so a refusal is visible rather than silent.
 | `entry` | the file the host loads for the module, relative to the module directory. |
 | `capabilities` | what the module declares it needs. Everything not granted is refused **in the listing**, which is what the host page renders as a badge. |
 | `enabled` | optional. `true` means the module asks for itself; a module nobody asked for changes nothing on screen. |
+| `win` | optional, and the one field ARCHITECTURE.md ("Modules over the monolith") requires of a module that stays: its measured win in one line - the build time it saved, the swap it needs no restart for, the second implementation it allowed. `scripts/module-report.mjs` prints it and flags a module without one. |
+| `decision` | optional. The last split or merge of this module, with its measurement: `{"kind": "split"|"merge", "date": "YYYY-MM-DD", "commit": "<sha>", "measurement": "..."}`. The report reads it to make the 30-day / 100-commit cooldown visible. |
+
+## The module map, and the win a module states
+
+ARCHITECTURE.md ("Modules over the monolith", "The sweet spot", "No flip-flopping") is an argument about
+numbers: a module is kept for a measured win, two modules that move together should be one, and a split or a
+merge is not reversed inside 30 days or 100 commits. `node scripts/module-report.mjs` prints those numbers,
+and the fast path prints it after its checks.
+
+**What the report counts as a module**, because a count nobody defines cannot be checked:
+
+| kind | what it is | where its manifest is |
+| --- | --- | --- |
+| crate | every `Cargo.toml` under `rust/` except the workspace root; a **nested** one is a module of its own, and its lines are not also its parent's | `rust/<name>/Cargo.toml`; the `win` and `decision` go in a `module.json` beside it |
+| component | every directory under `rust/components/` (also a crate; counted once, here, because a component is what a deploy pins and swaps) | `rust/components/<name>/manifest.json` |
+| feature | every `modules/<id>/` that carries a `module.json` (a directory without one is not a module) | `modules/<id>/module.json` |
+
+On this tree that is **76 modules: 50 crates, 25 components, 1 feature** - the 75 crates the brief names are the
+50 plus the 25 components, counted by kind so no unit is counted twice.
+
+**What it prints, per module:** its source lines (rs, lua, js/mjs/cjs/ts, html, css, wit), what it cost to
+build in the run that printed it (`-` when nothing compiled it: an unmeasured module is not a fast one), and
+the win line from its manifest, or `FLAG no win`. Then the module count, the co-change pairs that moved
+together in over 70% of the commits that touched **either** of them (a merge candidate - the share is of the
+commits that could have moved the pair, never of the 50-commit window), and the decision record with the
+cooldown it enforces, in days and in commits.
+
+Two limits on that half are deliberate and printed: a pair needs at least two shared commits to be a merge
+flag (one shared commit is 1/1, and no pattern), and no merge is argued where either module records a win -
+a module that states what it is worth is not one a report hands to a merge.
+
+**Flags, not failures.** Nothing in the report can fail a landing: a module with no win, a pair that always
+moves together and a split three days old are all printed, and the exit code stays 0. A report that could block
+would be argued with instead of read, which is what `scripts/lib/build-times.sh` says about build times too.
+
+```bash
+node scripts/module-report.mjs                  # every module, from the baseline build-time ledger
+node scripts/module-report.mjs --timings <tsv>  # from a fast run's own ledger (scripts/fast.sh does this)
+node scripts/module-report.mjs --rows 8         # one screen
+node scripts/module-report.mjs --no-git         # no co-change half
+bash scripts/test-module-report.sh              # the report's own fixtures (fast path row module-report-selftest)
+```
+
+The recorded build times live in `docs/measurements/module-build-times.tsv` (the same `kind/name/ms/note`
+shape `scripts/lib/build-times.sh` writes) and `REPORT.md` holds the baseline they were measured for.
 
 ## Discovery, by convention and with no per-module code
 
