@@ -189,8 +189,10 @@ shows "the record names the artifact's own build" "$(sed -n 's/^commit=//p' "$D/
 echo "test-install-guards: fleet-install.sh - a missing pin reader is a refusal, not a skip (item 6)"
 # The gate used to be wrapped in "if [ -n "$NODE_PIN_LIB" ]": a copy of this script that could not find
 # scripts/lib/node-pins.sh SKIPPED the pin silently. It refuses now, before anything is replaced.
-ALONE="$WORK/alone"; mkdir -p "$ALONE"
+ALONE="$WORK/alone"; mkdir -p "$ALONE/lib"
 cp "$ROOT/scripts/fleet-install.sh" "$ALONE/fleet-install.sh"
+# the record lib is there; the PIN reader is what is missing, which is the case this is about
+cp "$ROOT/scripts/lib/install-record.sh" "$ALONE/lib/install-record.sh"
 E="$WORK/e"; mkdir -p "$E"
 printf '#!/bin/sh\nexit 1\n' > "$E/wa"; chmod +x "$E/wa"
 E_OUT="$(env HEALTH="http://127.0.0.1:9/health" HEALTH_WAIT=1 WA_NODE_PINS_LIB=/nonexistent/node-pins.sh \

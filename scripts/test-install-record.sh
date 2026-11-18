@@ -270,24 +270,28 @@ export PROBE_LOG="$WORK/probe.log"; : > "$PROBE_LOG"
 started="$(date +%s)"
 WASM_AGENT_HOME="$WORK/node-home" WASM_AGENT_DB="$WORK/node.db" WASM_AGENT_LUA_ROOT="/should/not/be/seen" \
   WA_CONTAINS_TIMEOUT=2 wa_contains "$PROBE" "$(printf 'f%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
-same "a probe that never answers is 'cannot tell' (2), never 'no'" "$" "2"
+same "a probe that never answers is 'cannot tell' (2), never 'no'" "$?" "2"
 spent=$(( $(date +%s) - started ))
 if [ "$spent" -le 10 ]; then ok "the probe is bounded ($spent s on a binary that never answers)"; else bad "the probe ran $spent s: an old binary would hang a deploy"; fi
 LOG="$(cat "$PROBE_LOG" 2>/dev/null)"
-shows "it ran with a scratch HOME" "$LOG" "home=$WORK/contains."
+case "$LOG" in
+  *"home=$WORK"*) bad "the probe ran with the caller's HOME" ;;
+  *"home="*) ok "it ran with a HOME of its own (a scratch directory, not this node's)" ;;
+  *) bad "the probe did not record its HOME: $LOG" ;;
+esac
 hides "...and no WASM_AGENT_HOME" "$LOG" "agent_home=$WORK/node-home"
 hides "...no WASM_AGENT_DB" "$LOG" "db=$WORK/node.db"
 hides "...and no WASM_AGENT_LUA_ROOT" "$LOG" "/should/not/be/seen"
 SAYER="$WORK/contains-wa"
 printf '#!/bin/sh\ncase "$1" in --contains) exit 0 ;; *) exit 1 ;; esac\n' > "$SAYER"; chmod +x "$SAYER"
 wa_contains "$SAYER" "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
-same "a binary that contains the commit answers 0" "$" "0"
+same "a binary that contains the commit answers 0" "$?" "0"
 NOPE="$WORK/contains-no"
 printf '#!/bin/sh\nexit 1\n' > "$NOPE"; chmod +x "$NOPE"
 wa_contains "$NOPE" "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
-same "...and one that does not answers 1" "$" "1"
+same "...and one that does not answers 1" "$?" "1"
 wa_contains "$WORK/no-such-binary" "$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)"
-same "no binary at all is 'cannot tell' (2)" "$" "2"
+same "no binary at all is 'cannot tell' (2)" "$?" "2"
 
 printf 'test-install-record: %s checks, %s failed\n' "$checks" "$failed"
 [ "$failed" = 0 ] || exit 1

@@ -133,7 +133,7 @@ wa update mail --unpin --reason "release-glibc landed" > "$WORK/unpin.out" 2>&1
 rc=$?
 unpin_out="$(cat "$WORK/unpin.out")"
 shows "the answer names this coordinator's store" "$unpin_out" "this coordinator's store"
-shows "...and the node's own store separately" "$unpin_out" "the node's own store"
+shows "...and says whether the node's own pin was released" "$unpin_out" "its own pin"
 hides "...without promising the node may move when its own pin stands" "$unpin_out" "may move it again"
 shows "the store records the clear, not a deletion" "$(cat "$PINFILE")" "state=cleared"
 shows "...with its reason" "$(cat "$PINFILE")" "reason=release-glibc landed"
