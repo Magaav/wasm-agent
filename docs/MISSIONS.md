@@ -23,6 +23,7 @@ On disk a mission is `$MISSIONS_DIR/<name>` (default `~/Work/missions/<name>`):
 | `run.lock` | the mission's lock, owned by the NODE's run: `SESSION WORKTREE NODE LAUNCHER LOCKED`, taken before the CLI asks for a session and released when the node says the run settled |
 | `lease.log` | every `take`, `bind`, `cli-exit` and `release` with its reason - so a missing lock is always explained |
 | `run.pid` | the CLI process of this launch. Evidence, never liveness: on 18/11 the CLI exited rc=1 while the node kept writing |
+| `launch.pid` | the runner `start` launched (`$!`), written before the runner can write anything. It is what makes the cap below safe: while that process is this mission's `run.sh`, `mission_run` answers `active`, even with no `run.pid`, no presence row and no session (round 6) |
 | `out.log`, `err.log` | the session's output and errors, appended across launches |
 | `verify.log` | every `verify` command with its cwd and rc |
 | `wt/` | the git worktree on `change/<name>`; the session's code, and where `REPORT.md` goes - the handover, which removing the worktree takes with it. The round report that survives is the repo's `docs/missions/reports/<name>.md` (this mission's: `docs/missions/reports/mission-fabric.md`), and `status` reads either |
@@ -85,7 +86,8 @@ mission dir, never the repo). `run.sh` exports, before it launches anything:
 three of these hold. They are checked under one lock (below), and any other answer refuses by name:
 
 1. **no launcher is alive** - `run.pid` holds a live pid whose cwd is the mission dir: the few hundred ms
-   after a launch, before the node has named the session (`alive_launcher`);
+   after a launch, before the node has named the session (`alive_launcher`); and, while there is no
+   `run.pid` at all, `launch.pid` must not name a live `run.sh` of this mission (`launch_alive`, round 6);
 2. **no process the node records is working in the mission's directory** - `session_presence` in
    `memory.db`, with `/proc/<pid>/cwd` as the answer to *where* (`writers_check`);
 3. **the node says every session of this mission is settled** - the session list, the run lease and the
@@ -123,13 +125,15 @@ command):
 | --- | --- | --- |
 | every session of this mission has a run lease of `settled`, `failed` or `cancelled` | `released` | **yes** |
 | the node answered and lists no session for this mission (nothing recorded, nothing present) | `released` | **yes** - a fresh mission's first launch, and a mission whose node rows are all settled |
-| `session_presence` names a live pid whose cwd is the mission dir or its worktree | `active` | no - a live process is working here, whoever recorded it, and no age is asked |
+| `session_presence` names a live pid whose cwd is the mission dir or its worktree | `active` | no - a live process is working here, whoever recorded it, and no age is asked. A writer row decides even when another row in the same read cannot be placed (round 6) |
 | `session_presence` **cannot be read** - no `memory.db`, an unreadable one, no `sqlite3`, a query that fails - or a live pid whose `/proc/<pid>/cwd` cannot be read | `unknown` | no - the presence read is one of the three reads, so a read that cannot be made is the same "cannot tell" as an unprobeable boot lease (round 5) |
 | a run in flight and its boot lease is **held** | `active` | no - the owner has not exited, at any age |
 | a run in flight and its boot lease can be **taken** | `stale` | no - the owner exited, so the row is a leftover: settle it by hand |
 | a run in flight and the boot lease **cannot be probed** (no `sqlite3`, no store, an unreadable one) | `unknown` | no - "cannot tell" is never free |
 | `wa steer` answers `none` (no run row) for a session that exists | `unknown` | no - the session is **starting** (no claim row, no lease file yet), or nothing here can show it settled |
 | `wa sessions` prints nothing | `unknown` | no - and the refusal names the session the mission records |
+| a `session_presence` row with no pid (or a pid that is not a number) | `unknown` | no - "no pid" is not "no writer": the process serving that session, and so where it works, cannot be told (round 6) |
+| `launch.pid` names a live pid that is this mission's `run.sh`, and there is no `run.pid` yet | `active` | no - the runner `start` launched is standing: it has launched nothing yet or is about to, and it is the process the 10-minute cap used to leave unrecorded (round 6) |
 
 Why each of those is refused instead of guessed at:
 
@@ -162,8 +166,13 @@ take it, which is why the directory is gone (round 4, item 2). Without any exclu
 `run.lock` with `>`.
 
 `start` never resumes either: there is no `--resume` in the runner, and one launch is one fresh session.
-`done` is removed before the launch and written after it with the rc, and `run.pid` is cleared by `start`
-before it launches, so a stale pid file cannot make `start` return before the new runner has taken the lock.
+`done` is removed before the launch and written after it with the rc, and `run.pid` and `launch.pid` are
+cleared by `start` before it launches (after the gate above has read them), so a stale pid file cannot make
+`start` return before the new runner has taken the lock. The wait for `run.pid` is capped at 600 s
+(`MISSION_START_WAIT_SECONDS`, a seam the fixture shortens): a runner that is alive and has written no
+`run.pid` when the cap is reached is a refusal, and it stays named in `launch.pid` for the next `start`
+(round 6: before that record existed, the next `start` found no `run.pid`, no presence row and no session
+and launched a SECOND runner beside the live one).
 
 #### Clearing a stuck mission by hand
 
@@ -175,6 +184,7 @@ before it launches, so a stale pid file cannot make `start` return before the ne
 | state | look | clear |
 | --- | --- | --- |
 | `launcher` | `ps -o pid=,cmd= -p "$(cat <mission>/run.pid)"` | wait for `<mission>/done`; if that pid is not this mission's runner, `rm <mission>/run.pid` |
+| `launcher`, the runner is alive and wrote no `run.pid` in 600 s (`launch.pid`) | `ps -o pid=,cmd= -p "$(cat <mission>/launch.pid)"`; `tail -5 <mission>/out.log <mission>/err.log` | nothing here kills a process: look at what it is doing and let it end. While it lives every later `start` refuses `[active]`; once it is gone the file names a dead pid and refuses nothing (round 6) |
 | `launcher`, "the runner ended rc=95" | `tail -5 <mission>/err.log; tail -5 <mission>/out.log` | nothing to clear: the runner exited before it wrote `run.pid` (95 wrong node, 96 cannot cd, 97 no mission dir, 98 no env), so nothing was launched. Fix what the rc names and `start` again (round 5) |
 | `active`, a writer in the directory | the refusal names the session, the pid and the cwd: `ps -o pid=,cmd= -p <pid>`, `wa steer <session> --status` | nothing here kills a process: let it exit, or kill it yourself once you know what it is. The launch is allowed when it is gone |
 | `active`, a run in flight with its boot held | `wa steer <session> --status`; `sqlite3 -readonly ~/.wasm-agent/memory.db "select pid, heartbeat_at from session_presence where session_id='<session>'"` | the run ends when its process exits. If you have checked that the process is gone and the row still says `active`: `sqlite3 ~/.wasm-agent/memory.db "update steering_runs set state='settled' where session_id='<session>'"` |
@@ -201,7 +211,8 @@ a clean-looking record.
 Its `run` line is the verdict from `mission_run` - `active`, `stale`, `released` or `unknown` - with the
 reason behind it and the command that clears it, so `status` and a refused `start` say the same thing in the same
 words. It is **not** derived from `run.pid`: the `launcher` line reports that pid and says in the line itself
-that it is not liveness. Only `released` permits a launch. `status` is an observer of the node's word, so a lock
+that it is not liveness - and, before the runner has written a `run.pid`, it reports the runner recorded in
+`launch.pid` instead, which is a launcher of this mission and still not liveness (round 6). Only `released` permits a launch. `status` is an observer of the node's word, so a lock
 the node says is settled is released by the read that saw it, with a `release` line in `lease.log` naming
 `by=status`. `verify` refuses while the verdict is `active` - a live writer in the directory - and `clean` refuses every
 verdict but `released` (round 5: a leftover row and a read that could not be made both reached

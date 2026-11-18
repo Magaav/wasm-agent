@@ -26,7 +26,9 @@ cleanup() {
   # that line for ten minutes; one of them then ran its own restore step over uncommitted work in this
   # tree. A fixture that fails must exit, not wedge the caller.
   for p in ${KIDS-}; do kill "$p" 2>/dev/null; done
-  for f in "$MISSIONS"/*/run.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done
+  for f in "$MISSIONS"/*/run.pid "$MISSIONS"/*/launch.pid; do
+    [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null
+  done
   chmod -R u+w "$WORK" 2>/dev/null
   rm -rf "$WORK"
 }
@@ -122,8 +124,11 @@ chmod +x "$WORK/bin/wa"
 printf '# demo brief\n\nBuild the demo thing. Report what you verified.\n' > "$WORK/brief.md"
 
 run() { # <args...> with the fixture's environment
+  # MISSION_START_WAIT_SECONDS is mission.sh's wait-for-run.pid cap (600 s by default), shortened by WAIT_SECONDS
+  # for the round-6 cap case only: a shorter wait can only refuse sooner, never permit.
   MISSION_REPO=$REPO MISSIONS_DIR=$MISSIONS MISSIONS_TARGET_ROOT=$TARGET MISSIONS_TOOLCHAIN=$WORK/toolchain \
-    WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NODEHOME bash "$MISSION" "$@" 2>&1
+    WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NODEHOME MISSION_START_WAIT_SECONDS=${WAIT_SECONDS-} \
+    bash "$MISSION" "$@" 2>&1
 }
 status_of() { run status "$1"; }
 run_node() { # <node home> <args...> - the same script, against a node home of the case's choosing
@@ -261,7 +266,12 @@ has "$out" 'no --force' 'and it says so instead of reading a flag that no longer
 presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$OTHER" 4000
 s=$(status_of demo)
 case "$(field "$s" run)" in active*) ok ;; *) fail "a quiet process in the mission dir must still read active, got: '$(field "$s" run)'" ;; esac
-has "$(field "$s" run)" '4000s ago' 'the heartbeat age is reported, not obeyed'
+# the age is the node's own arithmetic (now - heartbeat_at, both seconds), so a row written and read across a
+# second boundary answers 4000 or 4001: the fixture asks that the age is REPORTED, not that a clock agrees
+case "$(field "$s" run)" in
+  *"4000s ago"*|*"4001s ago"*) ok ;;
+  *) fail "the heartbeat age is reported, not obeyed: '$(field "$s" run)'" ;;
+esac
 # the same row, but the node still HOLDS its boot lease: the writer is named for the live pid either way
 sqlite3 "$NODEHOME/resources/claims.sqlite" \
   "insert into claims(key,boot) values('session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee','boot-held') on conflict(key) do update set boot=excluded.boot" \
@@ -713,5 +723,135 @@ printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master",
 out=$(run clean leftover) || fail "the clean after the row was settled failed: $out"
 has "$out" 'removed worktree' 'and it is the clean that removes it'
 [ -d "$leftover/wt" ] && fail 'the clean left the worktree' || ok
+
+# ================================================================ round 6, item 1: the 10-minute cap is not a
+# launch permission. A runner that is alive and slow (the sleep stands in for a node call that never answers)
+# has written no run.pid. start then closes the lock and refuses [launcher] - correct - but round 5 recorded
+# that runner NOWHERE, so the next start found no run.pid, no presence row and no session, called the mission
+# released, and started a SECOND runner beside the live one. start now writes $! to launch.pid before it waits,
+# and mission_run answers active for as long as that process is this mission's runner.
+out=$(run stage capped main "$WORK/brief.md"); [ $? = 0 ] || fail "stage capped: $out"
+capped=$MISSIONS/capped
+sed -i '2i sleep 600' "$capped/run.sh"          # alive, and never gets as far as run.pid
+bash -n "$capped/run.sh" || fail 'the hung runner does not parse'
+export WAIT_SECONDS=2                          # 2 s in place of 600 s: the same branch, one code path
+out=$(run start capped) && fail 'a runner that writes no run.pid before the cap must refuse' || ok
+has "$out" 'refusing [launcher]' 'the cap refuses as a launcher'
+lacks "$out" 'started capped' 'and never says the mission started'
+[ -f "$capped/done" ] && fail 'a refused launch wrote a done marker' || ok
+[ -s "$capped/run.pid" ] && fail 'the hung runner wrote a run.pid: the case is not the cap' || ok
+runners() { ps -eo pid=,args= | grep "[b]ash $capped/run.sh" | awk '{print $1}'; }   # [b]ash: grep must not match itself
+# Every runner this case starts goes into KIDS as soon as it exists, so a fixture that FAILS here still leaves no
+# hung runner behind: the second start below is what a mutant launches, and launch.pid then names only THAT one.
+KIDS="$KIDS $(runners)"
+before=$(printf '%s' "$(runners)" | grep -c . )
+[ "$before" = 1 ] && ok || fail "the cap left $before runner(s) of $capped/run.sh, not 1: $out"
+# THE BUG, in one count: round 5 launched a SECOND runner here. The second start's own exit code is no evidence
+# either way - it hits the same cap and refuses too - so the number of runners is what this asserts.
+out2=$(run start capped); rc2=$?
+KIDS="$KIDS $(runners)"
+after=$(printf '%s' "$(runners)" | grep -c . )
+[ "$before" = "$after" ] && ok || fail "the second start launched a runner beside the live one: $before -> $after: $out2"
+has "$out2" 'refusing [active]' 'and the second start refuses: the first launch is still standing'
+has "$out2" 'launch.pid' 'naming the file the standing runner is recorded in'
+[ "$rc2" = 1 ] && ok || fail "the second start exited $rc2, not 1: $out2"
+[ -s "$capped/launch.pid" ] && ok || fail 'start must record the runner it launched in launch.pid'
+RPID=$(cat "$capped/launch.pid")
+kill -0 "$RPID" 2>/dev/null && ok || fail "the runner named in launch.pid ($RPID) is not running"
+has "$out" 'launch.pid' 'the cap refusal names the file that runner is recorded in'
+has "$out" 'refuses [active]' 'and says what the next start will answer while it lives'
+s=$(status_of capped)
+case "$(field "$s" run)" in active*) ok ;; *) fail "a live runner with no run.pid must read active, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" "$capped/launch.pid" 'the verdict names the file the runner is recorded in'
+has "$(field "$s" run)" 'second runner' 'and says what a launch now would be'
+has "$(field "$s" launcher)" "$RPID" 'status names that runner as the launcher'
+unset WAIT_SECONDS
+# the runner is gone: the same file names a dead pid, which is not a launcher
+kill "$RPID" 2>/dev/null; sleep 0.3
+s=$(status_of capped)
+case "$(field "$s" run)" in released*) ok ;; *) fail "a launch.pid naming a dead pid must not refuse, got: '$(field "$s" run)'" ;; esac
+# a number the kernel hands out again: launch.pid names a live process of ours that is NOT this mission's runner,
+# so the file is stale and must not refuse this mission for ever
+( exec sleep 600 ) </dev/null >/dev/null 2>&1 &
+NOTRUN=$!
+KIDS="$KIDS $NOTRUN"
+sleep 0.2
+printf '%s\n' "$NOTRUN" > "$capped/launch.pid"
+s=$(status_of capped)
+case "$(field "$s" run)" in released*) ok ;; *) fail "a launch.pid whose number belongs to another program must not refuse, got: '$(field "$s" run)'" ;; esac
+# the same, even when that other program works IN the mission dir: a readable cmdline that names another
+# program decides (a runner always names <mission>/run.sh), which is what keeps a re-used number from refusing
+# this mission because of where that unrelated process happens to sit
+kill "$NOTRUN" 2>/dev/null; sleep 0.2
+( cd "$capped" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &
+CWDW=$!
+KIDS="$KIDS $CWDW"
+sleep 0.2
+printf '%s\n' "$CWDW" > "$capped/launch.pid"
+s=$(status_of capped)
+case "$(field "$s" run)" in released*) ok ;; *) fail "a launch.pid naming another program must not refuse, even when its cwd is the mission dir, got: '$(field "$s" run)'" ;; esac
+kill "$CWDW" 2>/dev/null; sleep 0.2
+sed -i '2d' "$capped/run.sh"                    # the hang was this case's, not the mission's
+bash -n "$capped/run.sh" || fail 'the restored runner does not parse'
+export STUB_ID=30303030-4040-5050-6060-707070707070 STUB_RC=0 STUB_RESULT=ok STUB_NODE_KEEPS_RUN=no
+out=$(run start capped); has "$out" 'started capped' 'with the hung runner gone, the stale launch.pid does not refuse'
+wait_done capped || fail 'the launch after the hung runner wrote no done marker'
+
+# ================================================================ round 6, item 2: a presence row with no pid is
+# 'cannot tell', never 'no writer'. node_presence's '[ -n "$pid" ] || continue' skipped such a row, so the read
+# answered "no writer", mission_run answered 'released' and start launched beside a session the node still
+# records. A row with no pid cannot say WHERE that session works, so the read cannot tell - and cannot tell is
+# never free.
+out=$(run stage nopid main "$WORK/brief.md"); [ $? = 0 ] || fail "stage nopid: $out"
+nopid=$MISSIONS/nopid
+NOPID=abababab-2222-3333-4444-555555555555
+sqlite3 "$NODEHOME/memory.db" \
+  "insert into session_presence(session_id,pid,boot,role,started_at,heartbeat_at) values('$NOPID',NULL,'boot-free','master',strftime('%s','now'),strftime('%s','now'))" \
+  || fail 'cannot plant a presence row with no pid'
+s=$(status_of nopid)
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "a presence row with an empty pid must read unknown, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" "$NOPID" 'the reason names the session whose pid is missing'
+has "$(field "$s" run)" 'empty pid' 'and says what is empty: the pid'
+out=$(run start nopid) && fail 'start must refuse while a presence row with no pid exists' || ok
+has "$out" 'refusing [unknown]' 'the refusal names the state'
+has "$out" "$NOPID" 'and names the session'
+[ -f "$nopid/done" ] && fail 'a refused start must not have launched anything' || ok
+[ -s "$nopid/launch.pid" ] && fail 'a refused start must not have launched a runner' || ok
+# the row never named a writer: give it a pid the kernel cannot hand out and the same mission is released, which
+# is what makes the refusal the empty pid and not the row itself
+sqlite3 "$NODEHOME/memory.db" "update session_presence set pid=$DEADPID where session_id='$NOPID'" \
+  || fail 'cannot give the empty-pid row a dead pid'
+s=$(status_of nopid)
+case "$(field "$s" run)" in released*) ok ;; *) fail "a row with a dead pid must not refuse, got: '$(field "$s" run)'" ;; esac
+sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id='$NOPID'" || fail 'cannot drop the row'
+out=$(run start nopid); has "$out" 'started nopid' 'with the row gone, the same mission launches'
+wait_done nopid || fail 'the launch after the empty-pid row wrote no done marker'
+
+# ================================================================ round 6, item 3: a writer row and a row that
+# cannot be placed, in ONE read. Round 5 sent that read's rc 2 straight to 'unknown' and threw away the writer it
+# had already named. The writer is the node's own word about a live process working in this mission's directory,
+# so it is the answer. The unplaceable half here is the empty-pid row of item 2, which is the same rc 2 whatever
+# order the scan meets the rows in.
+out=$(run stage mixed main "$WORK/brief.md"); [ $? = 0 ] || fail "stage mixed: $out"
+mixed=$MISSIONS/mixed
+( cd "$mixed" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &   # a real writer, working IN the mission dir
+MPID=$!
+KIDS="$KIDS $MPID"
+sleep 0.2
+presence abababab-3333-4444-5555-666666666666 "$MPID" 0
+UNPLACE=abababab-4444-5555-6666-777777777777
+sqlite3 "$NODEHOME/memory.db" \
+  "insert into session_presence(session_id,pid,boot,role,started_at,heartbeat_at) values('$UNPLACE',NULL,'boot-free','master',strftime('%s','now'),strftime('%s','now'))" \
+  || fail 'cannot plant the unplaceable row'
+s=$(status_of mixed)
+case "$(field "$s" run)" in active*) ok ;; *) fail "a writer beside a row that cannot be placed must read active, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" 'abababab-3333-4444-5555-666666666666' 'the verdict names the writer, not only the row it could not place'
+lacks "$(field "$s" run)" "$UNPLACE" 'and the row it could not place is not what decides'
+out=$(run start mixed) && fail 'start must refuse beside that writer' || ok
+has "$out" 'refusing [active]' 'the refusal names the writer as the reason'
+has "$out" 'abababab-3333-4444-5555-666666666666' 'and names that session'
+kill "$MPID" 2>/dev/null; wait "$MPID" 2>/dev/null
+sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id in ('abababab-3333-4444-5555-666666666666','$UNPLACE')" \
+  || fail 'cannot drop the mixed-case presence rows'
 
 printf 'mission fixture: %s checks ok\n' "$checks"

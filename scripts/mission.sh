@@ -15,8 +15,10 @@
 #     the node's own word - "wa sessions" for the sessions this mission owns, the run lease
 #     "wa steer <session> --status --json" for whether one is in flight, the boot lease for whether its
 #     owner still exists - and from the node's session_presence row for the process working in the
-#     mission directory. A pid is used for one thing only: the local launcher that has not named its
-#     session yet, a window of a few hundred milliseconds after a launch.
+#     mission directory. A pid is used for one thing only, twice: the local launcher that has not named
+#     its session yet (run.pid: a window of a few hundred milliseconds after a launch), and the runner
+#     start recorded in launch.pid before it could write anything (round 6: at the 10-minute cap that
+#     runner was named nowhere, and the next start launched a second one beside it).
 #   * ONE ANSWER: settled, or no launch (round 4). "start" launches when, and only when, no launcher is
 #     alive, no process the node records is working in the mission's directory, and the node says every
 #     session of this mission is settled. Every other answer - alive, unknown, unreachable, starting (a
@@ -263,7 +265,19 @@ node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><
     cannot_tell "$db could not be queried for session_presence (locked, or no such table)"; return 2; }
   [ -n "$rows" ] || return 0
   while IFS='|' read -r sid pid age; do
-    [ -n "$sid" ] && [ -n "$pid" ] || continue
+    [ -n "$sid" ] || continue
+    case $pid in
+      '')
+        # A row the node keeps with no process in it. Which process serves that session - and so WHERE it
+        # works - cannot be told, and "no pid" is not "no writer": round 6 measured that '|| continue' here
+        # skipped such a row, node_presence answered "no writer", mission_run answered 'released', and
+        # start launched beside a session the node still records.
+        cannot_tell "session $sid has a session_presence row with an empty pid, so the process serving it - and the directory it works in - cannot be told"
+        return 2 ;;
+      *[!0-9]*)
+        cannot_tell "session $sid has a session_presence row whose pid is not a number [$pid], so the process serving it cannot be looked up at all"
+        return 2 ;;
+    esac
     cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
     if [ -z "$cwd" ]; then
       # NOT the same fact as "the process is gone". /proc/<pid> still there means the process is running and
@@ -299,23 +313,29 @@ node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><
 # Sets MR_W_SESSION MR_W_PID MR_W_AGE MR_W_CWD; on rc 2 it leaves them empty and sets NP_WHY, taken from the
 # '! cannot-tell' line node_presence printed.
 writers_check() { # <mission dir>
-  local M=$1 wt out sid pid age cwd wrc=0
+  local M=$1 wt out line sid pid age cwd wrc=0
   MR_W_SESSION=''; MR_W_PID=''; MR_W_AGE='-'; MR_W_CWD=''
   wt=$(wt_of "$M")
   out=$(node_presence "$M" "$wt"); wrc=$?
+  # A writer row is read FIRST, whatever else the read said (round 6, item 3). One read can name a writer AND
+  # meet a row it cannot place (an empty pid, or a live pid whose cwd will not read); the writer is the node's
+  # own word about a live process working in this mission's directory, it refuses a launch either way, and
+  # answering 'unknown' there would throw away the one fact the read did get. Round 5 sent that read's rc 2
+  # straight to 'unknown'. A reason line starts with '! cannot-tell ' and is never mistaken for a writer row -
+  # those start with the session id.
+  while IFS= read -r line; do
+    case $line in '! cannot-tell '*) continue ;; esac
+    IFS=$'\t' read -r sid pid age cwd <<<"$line"
+    [ -n "$sid" ] || continue
+    MR_W_SESSION=$sid; MR_W_PID=$pid; MR_W_AGE=${age:--1}; MR_W_CWD=$cwd
+    return 0
+  done <<<"$out"
   if [ "$wrc" -eq 2 ]; then
     NP_WHY=$(printf '%s\n' "$out" | sed -n 's/^! cannot-tell //p' | head -1)
     [ -n "$NP_WHY" ] || NP_WHY="the node's session_presence read failed and said no reason"
     return 2
   fi
-  [ "$wrc" -eq 0 ] || return 1                      # 1: no writer - the caller asks the run leases next
-  [ -n "$out" ] || return 1
-  while IFS=$'\t' read -r sid pid age cwd; do
-    [ -n "$sid" ] || continue
-    MR_W_SESSION=$sid; MR_W_PID=$pid; MR_W_AGE=${age:--1}; MR_W_CWD=$cwd
-    return 0
-  done <<<"$out"
-  return 1
+  return 1                        # no writer row, and the read answered: nothing the node records works here
 }
 
 # The verdict this script believes, and the only liveness it has. Round 4 keeps four names and ONE rule:
@@ -359,6 +379,28 @@ mission_run() { # <mission dir>
     MR_WHY="session $MR_W_SESSION is served by pid $MR_W_PID, whose cwd is $MR_W_CWD - this mission's own directory - and whose last heartbeat was ${MR_W_AGE}s ago: a launch now is a second writer in $wt"
     MR_CLEAR="look at it (ps -o pid=,cmd= -p $MR_W_PID; wa steer $MR_W_SESSION --status) and let it exit - nothing here kills a process; a launch is allowed when that process is gone"
     return 0
+  fi
+  # 1b. The launch this mission's own start started, recorded in launch.pid before the runner could write
+  #     run.pid (round 6, item 1). One live runner is one writer of the worktree whatever the node has been
+  #     told yet, and the 10-minute cap below is exactly the moment nothing else names it. This branch is for
+  #     the window BEFORE run.pid exists and nothing else: once the runner has written it, alive_launcher
+  #     (the CLI whose cwd is the mission dir) and the node's word decide, exactly as before.
+  local lrc=0 lpid=''
+  if [ ! -s "$M/run.pid" ]; then
+    launch_alive "$M"; lrc=$?
+    [ -s "$M/launch.pid" ] && lpid=$(cat "$M/launch.pid" 2>/dev/null)
+    if [ "$lrc" -eq 0 ]; then
+      MR_VERDICT=active
+      MR_WHY="the launch this mission recorded in $M/launch.pid is still running (pid $lpid, 'bash $M/run.sh'): it has launched or is about to, so a launch now would be a second runner in $wt"
+      MR_CLEAR="wait for it ('scripts/mission.sh status $name'; $M/done is written when its CLI exits); if 'ps -o pid=,cmd= -p $lpid' shows a program that is not $M/run.sh, that number was re-used and the file is stale: rm $M/launch.pid"
+      return 0
+    fi
+    if [ "$lrc" -ne 1 ]; then
+      MR_VERDICT=unknown
+      MR_WHY="the launch this mission recorded in $M/launch.pid is a live pid ($lpid) whose cmdline and cwd cannot be read, so whether it is $M/run.sh - a runner about to write in $wt - cannot be told"
+      MR_CLEAR="read it by hand (ps -o pid=,cmd= -p $lpid), then 'scripts/mission.sh status $name' once it is gone; or rm $M/launch.pid once you have checked that pid is not $M/run.sh"
+      return 0
+    fi
   fi
   if [ "$wrc" -ne 1 ]; then
     MR_VERDICT=unknown
@@ -443,6 +485,34 @@ alive_launcher() { # <mission dir>
   kill -0 "$pid" 2>/dev/null || return 1
   cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || return 0
   [ "$cwd" = "$1" ]
+}
+
+# The launch THIS mission's start started, recorded as $! before the runner could write anything. The runner
+# writes run.pid only once its CLI is up, and until round 6 the window before that was recorded nowhere: at
+# the 10-minute cap start closed the start lock and refused, and the next start found no run.pid, no presence
+# row and no session - all three answered "nothing is writing here" - so it called the mission released and
+# started a SECOND runner beside a live one. launch.pid is that runner's pid.
+# The cmdline decides when it can be read: start launches `bash <mission>/run.sh`, so a runner always names
+# it, and that is what protects a mission from a number the kernel handed out again - a READABLE cmdline naming
+# another program is a stale file, even when that process happens to work in the mission dir. The cwd is the
+# second witness, reached only when the cmdline cannot be read at all.
+#   rc 0  a live pid that is this mission's runner ($1/run.sh in its cmdline, or - cmdline unreadable - the
+#         mission dir as its cwd)
+#   rc 1  no launch.pid, the pid is gone, or the number now belongs to another program (a recycled pid: the
+#         file is stale, and a stale number must not refuse a launch forever)
+#   rc 2  a live pid whose cmdline AND cwd cannot be read: whether it is this mission's runner cannot be told
+launch_alive() { # <mission dir>
+  local pid cmd cwd
+  [ -s "$1/launch.pid" ] || return 1
+  pid=$(cat "$1/launch.pid" 2>/dev/null) || return 1
+  case $pid in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+  case $cmd in *"$1/run.sh"*) return 0 ;; esac
+  [ -n "$cmd" ] && return 1        # alive, but another program holds that number: the file is stale
+  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+  [ "$cwd" = "$1" ] && return 0
+  return 2
 }
 
 # The environment a launch and a verify share, so there is one place for it: the mission's env file.
@@ -606,9 +676,10 @@ cmd_start() {
     release_lock "$M" start "$MR_WHY"
     say "released a lock the node says is settled: $MR_WHY"
   fi
-  # The previous launch's pid file is cleared here, not by the runner it is about to start: a stale one
-  # satisfied the wait below and let start return before the new runner had taken the lock.
-  rm -f "$M/run.pid"
+  # The previous launch's pid files are cleared here - AFTER the gate above has read them - and not by the
+  # runner this start is about to launch: a stale run.pid satisfied the wait below and let start return before
+  # the new runner had taken the lock, and a stale launch.pid would be read as a runner that is still standing.
+  rm -f "$M/run.pid" "$M/launch.pid"
   # 9>&- : the launcher must not inherit the start lock, or the lock would live as long as the run.
   if command -v setsid >/dev/null 2>&1; then
     setsid nohup bash "$M/run.sh" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
@@ -616,22 +687,37 @@ cmd_start() {
     nohup bash "$M/run.sh" >>"$M/out.log" 2>>"$M/err.log" </dev/null 9>&- &
   fi
   pid=$!
+  # The runner's own pid, recorded before it can write anything: from here on this mission has a launcher even
+  # while no run.pid, no presence row and no session name one, and mission_run answers 'active' for it (round 6,
+  # item 1). Refusing to go on without that record is the honest answer: a launched runner nobody can name is
+  # exactly the state that let a second start launch beside it.
+  if ! printf '%s\n' "$pid" > "$M/launch.pid" 2>/dev/null; then
+    exec 9>&-
+    refuse launcher \
+      "the runner of $name was started (pid $pid) but its pid could not be recorded in $M/launch.pid, so no later start could tell that a launch is standing here" \
+      "watch it (ps -o pid=,cmd= -p $pid; tail -5 $M/out.log; tail -5 $M/err.log), then run 'scripts/mission.sh start $name' once it is gone"
+  fi
   # THE WINDOW CLOSES WHEN THE RUNNER HAS ITS run.pid, never on a clock (round 5). While that runner lives this
   # start waits and keeps the flock: a runner that is slow to write run.pid has launched nothing yet, and
   # printing "started" for it is a launch that did not happen. A runner that ENDS without writing one (95 wrong
   # node, 96 cannot cd, 97 no mission dir, 98 no env) launched nothing at all, so its own exit is the refusal.
   # Measured 18/11: the 5 s cap printed "started" and returned 0 for such a runner, and the mission looked
   # launched while nothing was writing in its worktree.
+  # MISSION_START_WAIT_SECONDS (default 600 = 10 min) is a seam for scripts/test-mission.sh, which cannot wait
+  # ten minutes for that cap. It can only SHORTEN this wait, and a shorter wait permits nothing: it arrives
+  # sooner at the refusal below, where the runner is named by launch.pid, and a runner that has ended is a
+  # refusal either way.
+  local cap=${MISSION_START_WAIT_SECONDS:-600}
   while [ ! -s "$M/run.pid" ]; do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1; i=$((i + 1))
-    [ "$i" -lt 6000 ] || break       # 10 min: a runner slower than that is not a launch, and one flock must not hold forever
+    [ "$i" -lt $((cap * 10)) ] || break
   done
   if [ ! -s "$M/run.pid" ]; then
     exec 9>&-
     if kill -0 "$pid" 2>/dev/null; then
       refuse launcher \
-        "the runner of $name is alive (pid $pid) but has written no $M/run.pid in 10 minutes, so this start cannot say that a launch happened, and a launch beside it would be a second writer in $wt" \
+        "the runner of $name is alive (pid $pid) but has written no $M/run.pid in ${cap}s, so this start cannot say that a launch happened, and a launch beside it would be a second writer in $wt. That pid is recorded in $M/launch.pid, so a new start refuses [active] until this process is gone" \
         "look at it (ps -o pid=,cmd= -p $pid) and at what it printed (tail -5 $M/out.log; tail -5 $M/err.log); nothing here kills a process"
     fi
     local wrc=0
@@ -686,6 +772,8 @@ one_status() { # <name>
   local launcher='none recorded'
   if [ -s "$M/run.pid" ]; then
     launcher="pid $(cat "$M/run.pid") (the CLI process; not liveness - the node's run outlives it)"
+  elif launch_alive "$M"; then
+    launcher="pid $(cat "$M/launch.pid") (the runner this mission's start launched; it has written no run.pid yet, and it is not liveness either)"
   fi
 
   local done='-' failures=0 last='' boot='-'
@@ -843,7 +931,7 @@ cmd_clean() {
     say "no worktree at ${wt:-$M/wt} (already clean)"
   fi
   release_lock "$M" clean "$MR_WHY"
-  rm -f "$M/run.sh" "$M/run.pid"
+  rm -f "$M/run.sh" "$M/run.pid" "$M/launch.pid"
   rm -f "$M/start.flock"   # the file may stay; the LOCK is the kernel's, not the file's
   git -C "$REPO" worktree prune 2>/dev/null || true
   say "kept: $M (env, brief, prompt.md, out.log, err.log, lease.log, started, done, verify.log) and branch $(sed -n "s/^BRANCH='\(.*\)'$/\1/p" "$M/env" 2>/dev/null || echo '?') - its commits are the mission's result"
