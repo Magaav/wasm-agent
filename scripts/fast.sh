@@ -13,10 +13,15 @@
 #      working tree); --all-rust runs every crate. wa-sentinel runs single-threaded (its tests share
 #      process-wide environment);
 #   3. contract checks: prompt docs in sync with the code; the instruction files; the landing queue; and
+#      the two checks the landing baseline rests on (scripts/test-landing-baseline.mjs judges a run by
+#      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code),
+#      plus the WIT seam's own two (scripts/wit-lint.sh judges wit/, scripts/test-wit-lint.sh judges the
+#      judge);
 #   4. the build time of every crate and component this run compiled, printed in the summary:
 #      measured and reported, never gated (ARCHITECTURE.md, "Modules over the monolith");
-#      the two checks the landing baseline rests on (scripts/test-landing-baseline.mjs judges a run by
-#      name, scripts/test-fast-environment.mjs proves a fork failure is the machine and not the code).
+#   5. the module map: per module its size, its build time and the `win` line from its manifest, the
+#      co-change pairs that should merge, and the split/merge decision record the cooldown reads -
+#      printed in the summary as FLAGS and never gated (scripts/module-report.mjs).
 #
 # Before any of that it builds the components the Lua rows need (`graph`, `hooks`, `memory`, `selfloop`,
 # `mesh`) from this tree, pinned the way a deploy installs them, and gives each row a component directory
@@ -769,10 +774,26 @@ check wit-lint bash scripts/wit-lint.sh
 # naming hooks.json, a doc describing a RETURN value), the baseline accepts the recorded holes, and
 # the marker alone turns a polling func green. Seconds, no toolchain.
 check wit-lint-selftest bash scripts/test-wit-lint.sh
+# The module map's own fixtures: the counts by kind (a component counted once, a modules/ dir without a
+# manifest not at all), a win line and the flag for the modules without one, a ledger's seconds, a
+# co-change pair over 70% and a decision inside the 30-day / 100-commit cooldown - plus the exit code
+# that keeps a report a map and never a gate.
+check module-report-selftest bash scripts/test-module-report.sh
 
 # The measured build times of everything this run compiled, before the verdict, so the claim
 # and the numbers are one screen apart (no gate: scripts/lib/build-times.sh says why).
 wa_build_time_summary
+# The module map, from the same ledger (ARCHITECTURE.md, "Modules over the monolith"): what the tree is
+# made of, what each part cost to build, which parts state a measured win, which pairs moved together in
+# >70% of the last 50 commits, and which split/merge is still inside the cooldown. FLAGS, NOT FAILURES:
+# it prints and the verdict below never reads it (scripts/module-report.mjs says why), so a module with no
+# win is a line to read, never a landing to block. WA_FAST_MODULE_ROWS keeps it to one screen; the whole
+# map is `node scripts/module-report.mjs` (its default is every module).
+if command -v node >/dev/null 2>&1; then
+  node scripts/module-report.mjs --timings "$work/build-times.tsv" --rows "${WA_FAST_MODULE_ROWS:-8}" 2>&1 || echo "fast: module report SKIPPED (scripts/module-report.mjs exited $?)"
+else
+  echo "fast: module report SKIPPED (node is not on PATH, so scripts/module-report.mjs cannot run)"
+fi
 
 elapsed=$(( $(date +%s) - started ))
 # The exit code is decided first so the JSON result and the printed verdict can never disagree.
