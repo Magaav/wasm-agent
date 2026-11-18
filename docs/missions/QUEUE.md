@@ -30,3 +30,20 @@ Approved 18/11 (Victor "ok"): land harness-fixes first, rebase vault-one on it; 
 - Proposal (later): baseline-aware gate - fail only on reds not present on the base, so a red main never deadlocks
   landing again.
 - Running: green-main, vault-one r2, mission-fabric r2, guard-wait. Done, waiting: fleet-wire (rebase on vault-one r2).
+
+## Victor 18/11 ~10:30: the mastermind direction
+- Quota: opencode-go 7d at 99% (5h 13%, 30d 60%). No new launches until Victor's bigger key is wired (vaults on
+  avell + laptop, via the write-only /login door, never read). Then relaunch green-main (died: guard on a codemode
+  wait, 0 files changed), and anything the cap kills.
+- New: change/fleet-view (Fleet View: `<` panel of nodes + sessions, enter/back, read-only live view) and
+  change/mastermind: refine the EXISTING fork/spawn/subagent machinery (brutal refinement, meticulous tests, polish), every subsession visible in Fleet View; prompt text verbatim to Victor first.
+- Order: round 1 land (harness-land + release-glibc + green-main + guard-wait + mission-fabric + missions-docs)
+  -> fleet-view (UI, can run beside vault-one) -> mastermind (needs mission.sh, guard-wait, fleet-view landed)
+  -> from then on Claude talks to wa's master instead of driving missions itself, and measures the parity.
+- New (Victor 18/11): change/fabric-bridge - wa serves its fabric API as an MCP server (`wa bridge serve`) so
+  other harnesses (Claude Code first) drive it; ONE fabric API shared by in-CLI orchestration, Fleet View and the
+  bridge. Order: fleet-view -> mastermind (defines the fabric API) -> fabric-bridge -> Claude connects to it.
+- Order decided 18/11: mastermind (fabric API + fork/spawn refinement) -> in parallel fleet-view (CLI face) and
+  fabric-bridge (MCP face `wa-fabric`, full orchestration tool set) -> Claude connects to wa-fabric.
+- Approved 18/11 (Victor "go"): change/ab-actions - JSON vs codemode vs CodeAct on 4 read-only real tasks, 3 runs
+  each, decision rule fixed up front; runs right after landing round 1 is deployed; baseline for python-codeact.

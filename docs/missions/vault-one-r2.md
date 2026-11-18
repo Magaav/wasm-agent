@@ -37,3 +37,5 @@ to REPORT.md. Commit locally; never push.
    wiring, an operator `import-legacy` path proven against a Python-store fixture, and fix the two scripts.
 9. Minor: migration trims only one trailing \n (old: all whitespace - CRLF leaks \r); first_start_at_boot runs in
    every wa process with no cross-process lock.
+
+10. /login stored a key with a leading UTF-8 BOM (\ufeff) and whitespace; the proxy then crashed on every request (UnicodeEncodeError latin-1 at "Bearer \ufeff...") and the node reported "network appears down". Strip a leading BOM and surrounding whitespace at /login (and at import), or refuse it by name; never store a value that cannot be sent as a header. Test with a BOM+CRLF key.
