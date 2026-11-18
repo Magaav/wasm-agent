@@ -5,10 +5,11 @@ Branch `change/deploy-ancestry`, now based on `origin/main` **e5ba9089** (round 
 Built and tested HERE on avell (`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-deploy-ancestry`).
 
 This is the mission report and it lives here, per the review of 18/11 (round 4, item 3). Rounds 1 and 2 are
-below, then round 3, then round 4 in full. **There is no report of this mission at the repository root.** The
-root `REPORT.md` on this branch is `main`'s (`# land-gate-fix`), byte-identical to `e5ba9089` and deliberately
-untouched: it is another mission's file, and a branch that changes the review's mind about a root REPORT.md
-deletes someone else's work to satisfy a naming rule.
+below, then rounds 3 and 4 in full, then round 5 (the round-1b merge of change/mission-fabric into this
+branch). **There is no report of this mission at the repository root.** The root `REPORT.md` on this branch
+is `main`'s (`# land-gate-fix`), byte-identical to `e5ba9089` and deliberately untouched: it is another
+mission's file, and a branch that changes the review's mind about a root REPORT.md deletes someone else's
+work to satisfy a naming rule.
 
 ## What was measured, and what it produced
 
@@ -530,3 +531,63 @@ refused(test_needs_scratch_home): HOME is <dir>, which is the real home of this 
 refused(test_needs_scratch_home): WASM_AGENT_HOME is <dir>, which is the real agent home of this machine. Set it to a scratch directory. Nothing was installed.
 ```
 
+
+## Round 5 (round 1b merge, 18/11 22:05): `scripts/fast.sh` is the union of both row blocks
+
+This round was one merge and nothing else: `git merge --no-ff change/mission-fabric` (62d91cf8) into this branch
+(cba5415c) in the worktree. Merge commit **c5adc28c**, parents `cba5415c` + `62d91cf8`. Nothing was pushed, no
+node was built on, deployed to or restarted, and no other file was changed.
+
+### The conflict, and how it was resolved
+
+The one conflicting file was `scripts/fast.sh`, and the conflict was one insertion point: both sides added rows
+directly after `check publish-artifacts bash scripts/test-publish-artifacts.sh`. This branch added the
+install/record block (6 `check` rows: `install-record`, `install-guards`, `node-pins`,
+`publish-shared-commit`, `bootstrap-gate`, `build-info`); `change/mission-fabric` added one row (`mission`).
+
+Resolved as the union, in that order: the deploy/record block first, then the `mission` row with its three
+comment lines, then the `fast-rows` block that already followed both sides. Relative to the first parent the
+merge adds exactly 4 lines to `scripts/fast.sh` (the mission comment's three lines and its row); nothing else in
+that file moved.
+
+### Verified (commands run, results read back)
+
+- **The union is exact, mechanically.** Row names extracted with
+  `git show <ref>:scripts/fast.sh | grep -oP 'check \K[a-z0-9-]+(?= bash )' | sort`: base `e5ba9089` 10 rows,
+  this branch `cba5415c` 16 rows (+6), `change/mission-fabric` `62d91cf8` 11 rows (+1), merged `HEAD` **17 rows**.
+  `diff union(mine,theirs) HEAD` is **empty** - the merged row set is exactly the union. `comm -23` both sides
+  against the merged set prints nothing (no row lost from either side). `uniq -d` over the row names prints
+  nothing (no duplicated row). The conflict markers are gone (`grep -n '^<<<<<<<\|^=======\|^>>>>>>>'` empty).
+- **`bash -n scripts/fast.sh`: rc=0.**
+- **The two suites that touch the merged area**, each in its own scratch `HOME` (`mktemp -d`) with
+  `WASM_AGENT_LUA_ROOT=/home/victor/Work/missions/deploy-ancestry/wt`:
+  - `scripts/test-mission.sh` (the row the other side added): **273 checks, 0 failed, rc=0**.
+  - `scripts/test-deploy-ancestry.sh` (this branch's subject, whose seven files the added rows name):
+    **89 checks, 0 failed, rc=0**. Every case green, including the 18/11 shape, the record-vs-bytes cases and
+    the pin-before-build case.
+- **The merge is clean against everything it must land with**, `git merge-tree --write-tree <ref> HEAD`, exit 0
+  and a tree id, no conflict output, for each:
+
+| ref | sha | rc | merged tree |
+|---|---|---|---|
+| `origin/main` | e5ba9089 | 0 | `83b7306c` |
+| `change/land-gate-fix` | d7fa6d4f | 0 | `88069bff` |
+| `change/architecture-rules` | 75ca3be8 | 0 | `61544cd8` |
+| `change/codeact-fix` | 8384ccf5 | 0 | `a3ebacef` |
+| `change/harness-next-a` | 81bef541 | 0 | `484633cd` |
+
+The five checks were also re-run at the branch tip with the report commit on top: all five still exit 0. Their
+tree ids differ from the table because that commit changes HEAD and a merged tree id is a function of all three
+inputs; the ids above are the merge commit's own (c5adc28c), which is what a round-1b merge takes. A branch tip
+cannot record its own tree ids without changing them, so that re-run is stated here rather than numbered.
+
+### Not verified (stated, not hidden)
+
+- The `origin/main` sha above is the **local** `origin/main` ref (`e5ba9089`), read without a `git fetch` in
+  this round: if the remote tip moved after the last fetch, the main check is against the ref this branch was
+  rebased on, not against the live tip.
+- `scripts/fast.sh` was not run as a whole (it builds a binary and runs ~140 rows, and the full fast path is not
+  what this round changed). What was proved is that the file parses, that the row set is the exact union, and
+  that the two suites naming the merged rows pass standalone with the same `WA_BIN` a fast run would hand them.
+- No other suite was run (`scripts/test.sh`, the hour-long gate, included).
+- Nothing was pushed; no remote was written to.
