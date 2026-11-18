@@ -90,6 +90,23 @@ same "a release install: the candidate binary answers for itself -> 0" "$?" "0"
 wa_ancestry_verdict "" "" 9999888877776666555544443333222211110000 "$STUB"
 same "a candidate that does not contain it -> 1" "$?" "1"
 
+echo "test-install-record: the real binary, written through the writer, reads back as its own --build-info"
+# The stub above states the rule; this states that the rule and the SHIPPED binary agree - the equality a reader
+# of a node depends on (the record says what the binary says, field for field).
+REALBIN="${WA_BIN:-${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/wa}"
+[ -x "$REALBIN" ] || REALBIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/release/wa"
+if [ -x "$REALBIN" ]; then
+  RB="$WORK/real-install"; mkdir -p "$RB"
+  wa_record_install "$RB" "$REALBIN" 'via=test'
+  REALREC="$(cat "$RB/installed.txt")"
+  for key in commit tree dirty; do
+    same "installed.txt $key equals the binary's --build-info" "$(wa_build_field "$REALREC" $key)" "$("$REALBIN" --build-info | sed -n "s/^$key=//p" | head -1)"
+  done
+  same "and the record says the binary answered" "$(wa_build_field "$REALREC" build_info)" "yes"
+else
+  echo "  skip the real binary (none at $REALBIN)"
+fi
+
 echo "test-install-record: every install path writes through this library"
 for path in scripts/deploy.sh scripts/upgrade.sh scripts/fleet-install.sh scripts/linux/bootstrap.sh scripts/rollback-node.sh; do
   if grep -q 'wa_build_info\|wa_record_install' "$ROOT/$path"; then ok "$path asks the binary"; else bad "$path writes a record without asking the binary"; fi

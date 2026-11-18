@@ -10,7 +10,8 @@
 # downgrade or block every install of an old release), and that both commands work with no usable HOME, since
 # a rollback runs exactly there.
 #
-# Usage:  bash scripts/test-build-info.sh
+# Usage:  bash scripts/test-build-info.sh            (against a binary built from THIS checkout: the test
+#         asserts the commit it reports is this checkout's HEAD, which is the property a deploy relies on)
 #         WA_BIN=/path/to/wa bash scripts/test-build-info.sh     (a release binary, for instance)
 set -uo pipefail
 
