@@ -698,3 +698,171 @@ named here so the next round does not read it as a green.
   `/proc/1/cwd` reads. Neither skip fired on this node; both print a note when they do.
 * nothing was written to the live node: the only live read is `status` on the mission directory, which has no
   `run.lock` to release, and `sqlite3 -readonly` on `memory.db` and `claims.sqlite`.
+
+
+# REPORT — round 6: verification of round 5's head — two "cannot tell" paths that read as free
+
+Branch `change/mission-fabric`, verified head `ce7d774f`; this round adds one code commit (`1e9fa29a`)
+and this file. Nothing was pushed, and nothing was written to the live node: the only live command is a
+read-only `scripts/mission.sh status mission-fabric` (no `run.lock`, no `launch.pid` there, so it released
+nothing).
+
+| # | where | what round 5 did | what it does now |
+| --- | --- | --- | --- |
+| 1 | `scripts/mission.sh:625-640` (`cmd_start`, the wait cap) | at the cap `start` closed the start lock (`exec 9>&-`) and refused. The runner it had launched was recorded NOWHERE, so the next `start` found no `run.pid`, no presence row and no session, called the mission `released` and started a **second runner** beside the live one | `start` writes `$!` to `launch.pid` before it waits; `mission_run` answers `active` (or `unknown`) while that pid is this mission's `run.sh` |
+| 2 | `scripts/mission.sh:266` (`node_presence`) | `[ -n "$sid" ] && [ -n "$pid" ] || continue`: a presence row with an empty pid was skipped as "no writer", so the read answered `released` for a session the node still records | an empty pid (or a pid that is not a number) is `cannot tell`: the read returns 2, and `mission_run` answers `unknown` naming the session |
+| 3 | `scripts/mission.sh:314` (`writers_check`) | a read that named a writer and then met a row it could not place answered rc 2, and rc 2 went straight to `unknown` - the writer it had already named was thrown away | the writer rows are read first: a writer is `active` whatever else the same read said, because it is the node's own word about a live process in the directory |
+
+## Item 1 — the cap was a launch permission for the next start
+
+`cmd_start` waits for the runner to write `run.pid` and keeps the flock meanwhile; a runner still alive at
+the cap is refused as `[launcher]` ("it has written no run.pid in 600s"). That refusal is right - nothing proves
+a launch happened - but the lock fd is closed and the `start` exits, so the exclusion is gone with it. What a
+second `start` then reads is: `alive_launcher` (`run.pid` absent - true), `writers_check` (the
+runner has not started the CLI yet, so the node has no session and no presence row - true), the session list (nothing
+under this mission's title - true). Three true reads, one wrong verdict: the runner is *starting*, and it was
+recorded nowhere.
+
+`launch_alive` closes that window and nothing else:
+
+    launch_alive() {                      # <mission dir> -> 0 ours and alive, 1 not, 2 cannot tell
+      [ -s "$1/launch.pid" ] || return 1
+      pid=$(cat "$1/launch.pid") || return 1
+      case $pid in ''|*[!0-9]*) return 1 ;; esac
+      kill -0 "$pid" || return 1
+      cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+      case $cmd in *"$1/run.sh"*) return 0 ;; esac
+      [ -n "$cmd" ] && return 1          # another program holds that number: the file is stale
+      cwd=$(readlink "/proc/$pid/cwd"); [ "$cwd" = "$1" ] && return 0
+      return 2                           # alive, cmdline and cwd both unreadable
+    }
+
+Four decisions in it, each with a reason:
+
+* **the cmdline decides when it can be read.** `start` launches `bash <mission>/run.sh`, so a runner always
+  names it. That is also what keeps a number the kernel handed out again from refusing this mission for ever -
+  and it is why the cwd is only the second witness: a *readable* cmdline naming another program is a stale file
+  even if that process happens to work in the mission dir (the fixture asserts exactly that).
+* **rc 2, not rc 0**, when the cmdline *and* the cwd cannot be read: "cannot tell whose that pid is" is the same
+  never-free answer the other reads give.
+* **the branch is gated on `[ ! -s "$M/run.pid" ]`.** Once the runner has written `run.pid`, `alive_launcher`
+  (the CLI whose cwd is the mission dir) and the node's word decide, exactly as before. Without that gate a
+  `start` landing in the millisecond between the CLI's exit and the runner's own exit would read `active`
+  for a run that has finished - a refusal with no fact behind it, and a fixture flake of its own.
+* **`launch.pid` is cleared by `start` before it launches** (after the gate has read it) and by `clean`
+  with the runner it names. A stale file that names a dead pid refuses nothing; the fixture checks that too.
+
+The fixture's evidence is one count, because the exit code is no evidence either way - the second `start` hits
+the same cap and refuses as well:
+
+    mission fixture FAILED: the second start launched a runner beside the live one: 1 -> 2: ...
+
+## Item 2 — "no pid" is not "no writer"
+
+A `session_presence` row with no pid cannot say which process serves that session, and therefore cannot say
+where it works. Round 5's `[ -n "$pid" ] || continue` dropped such a row silently, `node_presence` returned 0
+("no writer"), and `mission_run` said `released` for a session the node still lists. It is now
+`cannot_tell` + rc 2, and the reason names the session. The same applies to a pid that is not a number: it can
+be neither looked up nor placed, and it goes into the same `! cannot-tell` line the callers already parse.
+
+## Item 3 — a writer row outranks a row that cannot be placed
+
+One read can hold both facts. Round 5's `writers_check` sent rc 2 to `unknown` before looking at the rows, so
+a live writer the read had already named was discarded. The scan now runs first and returns `active` with that
+writer; only a read with no writer row at all can still answer rc 2. 'active' is a refusal either way, so this
+changes no permission - it changes which fact the refusal rests on, and the fixture asserts that the unplaceable
+row is not what decides.
+
+## Before and after, measured
+
+Every "before" is a saved copy run through `MISSION_UNDER_TEST=`, so no red was produced by editing this tree.
+The head copy is `git show ce7d774f:scripts/mission.sh` with ONE change - the same `MISSION_START_WAIT_SECONDS`
+seam this round added - because the fixture cannot wait ten minutes for the cap; it arrives at the same refusal,
+sooner, and decides nothing else.
+
+| copy | first failure |
+| --- | --- |
+| the round-5 head (`ce7d774f`) + the cap seam | `the second start launched a runner beside the live one: 1 -> 2` |
+| `m1`: this tree with the `launch.pid` record removed (item 1 reverted) | `the second start launched a runner beside the live one: 1 -> 2` |
+| `m2`: `[ -n "$sid" ] && [ -n "$pid" ] || continue` restored (item 2 reverted) | `a presence row with an empty pid must read unknown, got: 'released: the node answered and lists no session for this mission ...'` |
+| `m3`: rc 2 answered before the writer rows are read (item 3 reverted) | `a writer beside a row that cannot be placed must read active, got: 'unknown: ... has a session_presence row with an empty pid ...'` |
+| this tree | `mission fixture: 240 checks ok` (twice on the final tree, `24s`) |
+
+The copies live under `/tmp/mf6/{before,m1,m2,m3}/mission.sh` and are run as
+`MISSION_UNDER_TEST=/tmp/mf6/<copy>/mission.sh bash scripts/test-mission.sh`.
+
+The new cases, and what each pins (38 checks, from 202 to 240):
+
+* **item 1** - a staged runner with `sleep 600` spliced in before it can write anything, and
+  `WAIT_SECONDS=2` in place of the 600 s cap: `start` refuses `[launcher]`, prints that the runner is
+  recorded in `launch.pid` and that a new start will refuse `[active]`, leaves no `done` and no
+  `run.pid`; then **the count**: a second `start` must leave exactly one runner of that `run.sh` alive,
+  and it does (round 5 left two); then `status` reads `active`, names `launch.pid`, says "second runner",
+  and the `launcher` line carries the runner's pid. Then the file's own staleness: a dead pid refuses nothing,
+  a pid that is now another program refuses nothing, and the same when that program's cwd is the mission dir; the
+  hang is removed and the mission launches.
+* **item 2** - a `session_presence` row with a NULL pid: `status` reads `unknown`, the reason names the
+  session and says the pid is empty, `start` refuses and launches nothing (no `done`, no `launch.pid`);
+  the same row with a pid the kernel cannot hand out is released, which is what makes the refusal the empty pid
+  and not the row itself.
+* **item 3** - a live writer whose cwd is a mission dir, plus the empty-pid row, in one read: `status` reads
+  `active`, names the writer, does not name the row it could not place, and `start` refuses `[active]`.
+
+Three things worth the next reader's time:
+
+* **a pre-existing flake, pinned.** The round-4 presence case asserted the literal string `4000s ago` in the
+  verdict. The age is the node's own arithmetic (`now - heartbeat_at`, whole seconds), so a row written and read
+  across a second boundary answers `4001s ago` - it fired here on one of the four mutant runs, on a copy that
+  does not touch the age at all. The assertion now accepts `4000` or `4001`; it still asserts that the age is
+  *reported*, which is the round-4 rule.
+* **a failing fixture leaked the runner a mutant launched.** The cap case registers the runner it finds in
+  `KIDS`, which is what `cleanup` kills; on the four *failing* mutant runs (before/m1) the second runner was in
+  `launch.pid` and the first one no longer was, so two `sleep 600` runners survived each run (four in total, found
+  and killed by hand, and nothing in the fixture depends on them). The case now registers every runner it sees,
+  right after each `start`, so a red leaves none behind - re-checked by running m1 again and counting.
+* **the patched `printf` format strings** in the two new `launch.pid` cases first landed as a format with a real
+  newline in it (a `\n~ eaten by the patch script). It parsed and the cases passed, which is exactly why it was
+  worth fixing: `bash -n` is not a proof of what a line does.
+
+## What I ran
+
+| command | result |
+| --- | --- |
+| `bash -n scripts/mission.sh`, `bash -n scripts/test-mission.sh` | clean |
+| `bash scripts/test-mission.sh` on this tree (five times, the last two on the final tree) | `mission fixture: 240 checks ok`, 23-24 s |
+| the four copies above | each red at its own item's check (table above) |
+| `bash scripts/fast.sh` on this tree | see below |
+| `scripts/mission.sh status mission-fabric` against the live node (read only) | `run active`: session `6b65758b`, pid 234618, cwd `/home/victor/Work/missions/mission-fabric`, heartbeat 0 s ago; `launcher none recorded` (no `run.pid`, no `launch.pid` in that dir) - the presence read still answering on the live node, and `launch_alive` correctly silent |
+
+| `bash scripts/fast.sh` on this tree twice: mid-round, and once more on the code commit `c8dc7667` - which is this round's
+code apart from the fixture-cleanup hardening added after it, and the fixture reports the same 240 checks ok
+on both | `fast path FAILED (13 of 253 checks, 0 skipped, 150s)` and `... 148s`; **`fast: mission ok`** in both (23.8 s and 20.7 s), and the same 13 names each time (below) |
+
+## Not done, and not verified
+
+* **the real 600 s cap was never waited for.** No fixture sits through ten minutes; `MISSION_START_WAIT_SECONDS`
+  reaches the same branch in 2 s. The seam can only *shorten* the wait, and a shorter wait cannot permit a launch:
+  it arrives sooner at the refusal, the refusal names the runner in `launch.pid`, and a runner that has ended is
+  a refusal on its own rc. The 600 s default itself is unchanged and still unmeasured.
+* **`launch_alive`'s rc 2 is not exercised by any fixture.** It needs a live pid whose `/proc/<pid>/cmdline`
+  *and* `/proc/<pid>/cwd` are both unreadable - hidepid, or another user's process - and a fixture cannot make
+  that of its own child. The two directions that are reachable (a dead pid, and a pid that is now another program,
+  with and without the mission dir as its cwd) are covered. Nothing on this node reaches rc 2 today: the live
+  presence pids all read.
+* **`launch.pid` is left behind after a launch finishes.** It then names a dead pid (or, after a very long time,
+  a re-used one, which the cmdline check rejects), so it refuses nothing; `start` and `clean` both remove it.
+  I did not add a sweep that deletes it when the runner exits: the runner is the process that would have to do it,
+  and a runner that dies early would then leave the record it is supposed to leave. The remaining hole is
+  microseconds wide and stated rather than hidden: a `start` killed between the launch (`&`) and its
+  `printf > launch.pid` leaves that runner unrecorded again.
+* **the 13 fast-path reds are pre-existing and untouched by this commit.** `scripts/test-observability.lua`,
+  `test-skill-discovery.lua`, `test-orchestration-mode.lua`, `test-remote-call-shape.lua`,
+  `test-codemode-model-boundary.lua`, `test-prompt-cache.lua`, `test-wave-closure-reporting.lua`,
+  `test-host-return-docs.lua`, `test-provider-stall.lua`, `prompt-docs`, `publish-artifacts`,
+  `land-signing`, `fast-binary` - the same thirteen round 5 reproduced on a base worktree at `c147ee78`
+  (this round's diff is `scripts/mission.sh`, `scripts/test-mission.sh`, `docs/MISSIONS.md` and this file:
+  no Lua, no JS, no release script), and `fast: mission ok` is green in the same run.
+* **unchanged by design, from round 5:** `verify` still refuses only on `active` (`clean` refuses everything
+  but `released`), and the round-4 hole stands - a session settled on the node's word and then woken by
+  `wa serve` writes with a pid whose cwd is never the mission's, so no presence read in this design sees it.
+  This round neither fixes nor widens that.
