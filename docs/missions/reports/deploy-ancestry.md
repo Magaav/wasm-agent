@@ -1,7 +1,14 @@
 # change/deploy-ancestry — a deploy never silently goes backwards
 
-Branch `change/deploy-ancestry`, base `origin/main` 74d48431. Committed locally on this branch; nothing was
-pushed. Built and tested on avell (`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-deploy-ancestry`).
+Branch `change/deploy-ancestry`, now based on `origin/main` **e5ba9089** (round 4 rebased it; round 1 was based on
+74d48431). Committed locally on this branch; nothing was pushed, nothing was deployed, no node was restarted.
+Built and tested HERE on avell (`CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-deploy-ancestry`).
+
+This is the mission report and it lives here, per the review of 18/11 (round 4, item 3). Rounds 1 and 2 are
+below, then round 3, then round 4 in full. **There is no report of this mission at the repository root.** The
+root `REPORT.md` on this branch is `main`'s (`# land-gate-fix`), byte-identical to `e5ba9089` and deliberately
+untouched: it is another mission's file, and a branch that changes the review's mind about a root REPORT.md
+deletes someone else's work to satisfy a naming rule.
 
 ## What was measured, and what it produced
 
@@ -306,3 +313,220 @@ ready receipt for an unshared commit.
 - The three pins seeded in round 1 in this node's store are untouched.
 - `wa update <node>` against a live peer was not run: the transport needs a real peer and this round changed what
   happens BEFORE it (the gate).
+
+---
+
+## Round 3 (already on this branch; summary)
+
+Round 2's review asked for one thing in eight shapes: **unknown is not yes**. The eight, and what each became,
+are in the round-3 item table that used to head this file's root copy, and in the commits `47e3ad01`,
+`ff427897`, `8f1d202d`, `c21f1499`: a binary that cannot name its commit is `unprovable` (refuses) instead of
+a first install; a rollback pin has no default `await`; `--unpin` needs a reason and reaches the node's own
+store; `deploy.sh --force` carries `WA_UPGRADE_FORCE_REASON` into the installer; the pin is read before the
+build; `wa_commit_shared` asks the remote (bounded fetch); the `--contains` probe is bounded and scrubbed;
+`ALLOW_UNPUSHED_COMMIT` needs `ALLOW_UNPUSHED_REASON`. Round 3 also closed a set of fail-opens found while
+reading (rollback-node.sh saying nothing about an unidentifiable restore, upgrade.sh's plan parser, the
+sentinel's deploy door). One of those - the sentinel script-pin rule - is reverted in round 4, item 8.
+
+## Round 4 (review of 18/11 21:40): the eight items
+
+### Item 2 first: the rebase onto e5ba9089
+
+43 commits behind, 26 replayed, three conflicts, all resolved by hand:
+
+| file | conflict | resolution |
+| --- | --- | --- |
+| `scripts/deploy.sh` (twice) | the library `for` list | **union**: `build-status build-requirements deploy-components node-binaries glibc-floor retire-unshipped install-record node-pins runtime-binding` |
+| `REPORT.md` (twice) | add/add with main's `# land-gate-fix` report | main's file kept byte-identical; this mission's report is this file (item 3) |
+
+Where the two checks the review named now sit, on the rebased file (line numbers as of the last commit here):
+
+| check | line | why there |
+| --- | --- | --- |
+| canonical runtime binding preflight | 0c, 406-427 (the empty assignment at 415) | before the build: it is a fact about THIS tree and its ~4-minute cost is paid once, not after a build. The answer is kept in `WA_RUNTIME_PREFLIGHT` and NOT exported, so step 6's install-time re-check still asks again |
+| glibc floor guard | 1230-1249, the call at 1243 | after the candidate binary exists and **before it is executed** (`--capability-digest` at ~1257): a binary that needs a newer glibc dies at that line with a sentence about a broken artifact, which is true and useless |
+| the ancestry gate (this mission) | 549-700 | before the build: a deploy that would go backwards refuses without compiling |
+| the node's own pin gate (this mission) | 3b, ~705 | before the build, for the same reason |
+
+So the order on a deploy is: what is running (ancestry) -> where this node was put on purpose (pin) -> may this
+tree run at all (runtime binding) -> is the artifact runnable here (glibc) -> build -> prove -> install.
+
+**The rebase broke two of main's own fixtures, and both breakages were this branch's rules surfacing.** Fixed
+here, because a fixture that stops at an earlier refusal measures the wrong rule:
+
+| fixture | what it assumed | what it does now |
+| --- | --- | --- |
+| `scripts/test-glibc-floor.sh` (standalone + curl shapes) | a copy of `fleet-install.sh` with no libs can install | the fixture ships `install-record.sh` and `node-pins.sh` (round 3: not optional) and withholds only `glibc-floor.sh`; **and a new case asserts the libless copy refuses `install_record_lib_missing`, exit 2** |
+| `scripts/test-update-ring.sh` (the record step) | `record_installed` writes `binary_inputs=` for the caller's `COMMIT` | the fixture installs a binary that answers `--build-info` with the commit under test and sources `install-record.sh`: the digest is of the commit the RECORD names, as before, but the record's identity now comes from the bytes |
+| `scripts/test-deploy-ancestry.sh` (this mission's) | the fixture clone was on whatever branch this worktree is on | first case to fail after the rebase: main's runtime-binding preflight refused all 46 ancestry assertions with `found 0 on branch refs/heads/main`. The fixture now puts its own clone on branch `main` (the shape the rule asks for) and keeps the preflight running |
+
+### Item 1: fail-open in `wa_running_identity` (the one that installed and claimed an override)
+
+The rule was `record is not about these bytes` -> `unprovable`. A record whose `sha256=` IS the binary's and
+whose `commit=` is empty or `unknown` therefore fell through to the fallback, found nothing to claim, and left
+`source=none, commit=`, which `deploy.sh` reads as a first install: it installed over the node and printed
+`the override above was recorded as ancestry_unverified=yes` with **no override given**.
+
+Fixed in two places, because the sentence and the verdict are two different lies:
+
+- `scripts/lib/install-record.sh`, the line the review names (303; 311 now that this round's comment sits above it): the test is now `record IS NOT about these bytes **or** the record names no commit`. `source=unprovable`, with a `WA_RUNNING_WHY` that says which of the two it is: a record about these very bytes that names no `commit=` (either spelling, `unknown` is blanked by the read above), versus no record at all.
+- `scripts/deploy.sh:625`: the sentence is printed **only when an override was given** (`ANCESTRY_UNVERIFIED=yes`). Any other empty running commit at that line is `refused(ancestry_override_unrecorded)` - a guard, not a path: it refuses rather than telling the operator an override was recorded.
+
+Proved by two new cases, in two files, written before the fix:
+
+- `test-install-record.sh`: `commit=unknown` + the binary's sha256, and `commit=` blank + the binary's sha256 -> `source=unprovable`, not a first install, and the sentence says `names no commit`.
+- `test-deploy-ancestry.sh`: the same install through `deploy.sh`: refused `running_commit_unprovable`, no first-install sentence, **no override sentence**; and with `--force --reason` the override sentence appears *and* `overrode=running_commit_unprovable` is in `deploy.log`.
+
+### Item 5: the guards test read the real home
+
+`test-install-guards.sh` set `FLEET_HOME=` empty for the cases that needed no pin store, and empty means `pass
+no WASM_AGENT_HOME` - so `fleet-install.sh` fell back to the operator's `~/.wasm-agent`: the real pin store and
+the real node name. Now: a scratch `HOME` and `WASM_AGENT_HOME` are exported at the top, `FLEET_HOME` starts
+from that scratch home, no case can unset it, and `scratch_home_required` runs before **every** `fleet-install.sh`
+invocation and refuses `refused(test_needs_scratch_home)` if the effective home is this machine's real one.
+
+### Item 6: `WA_ALLOW_UNVERIFIED_UPGRADE=1` was an override with no reason
+
+It is now a two-part override, like every other one in these scripts: the switch says WHAT is waived, and
+`WA_UPGRADE_FORCE_REASON` says WHY. Alone it is `refused(override_reason_required)`; together the reason reaches
+`installed.txt` as `ancestry_override=` and `deploy.log` gets `force_requested rule=candidate_commit_unknown`.
+
+### Item 7: pins already on live nodes carry `await=rolled_back_from`
+
+No migration: the store is append-only and a new build silently rewriting it is a worse risk than a rule at the
+read. On read - in **both** readers, `lua/core/pins.lua` (one `M.parse`, which every Lua reader goes through)
+and `scripts/lib/node-pins.sh` (the install side) - an `await` equal to `rolled_back_from` is treated as no await,
+and says so in one line: `await <12> IGNORED (...)`. A record that NAMED that commit explicitly is kept: the
+writer now stamps `await_explicit=yes` when the caller passes an await, so a statement and a default are not the
+same input any more (legacy records have no marker and get the rule).
+
+### Item 8: the sentinel `shipped_wins` change, reverted
+
+Round 3 replaced the mtime comparison in `resolve_script` with a three-valued `shipped_wins` in which
+**cannot compare -> the shipped copy wins**. That is a behaviour change nobody asked for, it was outside this
+mission's brief, and the article that carried it (script-pin staleness) already has a rule on this branch: the
+audit line names the case whenever the comparison says the shipped copy is newer. The test it arrived with
+asserted the new behaviour, which is not evidence that the behaviour was required. Reverted to main's code
+verbatim (with a comment saying why); the Rust suite passes, 134 tests.
+
+### Item 3: the report
+
+This file. The root `REPORT.md` on this branch is main's `# land-gate-fix`, untouched and byte-identical to
+`e5ba9089` - see the header. The round-2 and round-3 text that used to live at the root is folded in above.
+
+### Item 4: the seven tests are wired
+
+`scripts/test-orphan-tests.mjs` reported five of them as orphans before this round (the ledger doing its job:
+every gate in this repository was green without running one of them). Now:
+
+| test | full gate (`scripts/test.sh`) | fast path (`scripts/fast.sh`) | measured standalone |
+| --- | --- | --- | --- |
+| `test-install-record.sh` | yes, `WA_BIN=$BIN` | yes | 4 s, 81 checks |
+| `test-install-guards.sh` | yes | yes | 2 s, 70 checks |
+| `test-deploy-ancestry.sh` | yes | **no, and here is why** | 28 s, 89 checks |
+| `test-node-pins.sh` | yes, `WA_BIN=$BIN` | yes | 2 s, 87 checks |
+| `test-publish-shared-commit.sh` | yes | yes | 2 s, 43 checks |
+| `test-bootstrap-gate.sh` | yes | yes | 1 s, 35 checks |
+| `test-build-info.sh` | yes, `WA_BIN=$BIN` | yes | 0 s, 24 checks |
+
+`test-deploy-ancestry.sh` is deliberately not a fast-path row: it runs a real `deploy.sh` detached (`setsid
+--fork`) once per case, 28 s measured, and it is the only one of the seven whose cost is not seconds. The fast
+path is the landing gate; 28 s per round for a rule the full gate already owns is the wrong trade, and the
+number is here so the choice can be reviewed rather than discovered. The merge lane runs `scripts/test.sh`, so
+it inherits all seven.
+
+Three of the seven need a tool the host may not have, and now say so instead of failing inside a half-run
+install: `test-deploy-ancestry.sh` needs `setsid` and `git`, `test-install-guards.sh` needs `curl` and
+`python3` (the bootstrap gate already skipped for a missing C compiler).
+
+### Failing-then-passing, measured
+
+| case | before | after |
+| --- | --- | --- |
+| item 1, `test-install-record.sh` | `so the source is unprovable, not none: got none want unprovable`; `a blank commit= beside these bytes is unprovable too: got none`; and the sentence came out as `nothing is installed in ...` | 81 / 0 failed |
+| item 1, `test-deploy-ancestry.sh` | the fixture runs the committed code, so the first run of the new case ran the OLD library and showed the hole exactly: no refusal, `the override above was recorded` with no override, then `refused(no_prebuilt_binary)` further down | 89 / 0 failed |
+| item 7, `test-node-pins.sh` | with `HEAD~1:lua/core/pins.lua` in place: `its await is ignored, not honoured: got no want yes`, `so a target CONTAINING that commit does NOT release it: got true want false`, and three more - the pin was RELEASED by the move it exists to stop | 87 / 0 failed |
+| item 5, `test-install-guards.sh` | a copy with the two exports removed, run against a fabricated real home that carries a pin store: `refused(test_needs_scratch_home) ... (rc=2)` | 70 / 0 failed, and the fabricated home is never read |
+| item 6, `upgrade.sh` | `WA_ALLOW_UNVERIFIED_UPGRADE=1` alone installed the unidentifiable candidate | refused `override_reason_required`; with the reason: `force_requested rule=candidate_commit_unknown`, and the stub stops at the scratch proof with nothing installed |
+| item 2, the rebase | `test-glibc-floor.sh`: two shapes stopped at `install_record_lib_missing` (exit 2), `test-update-ring.sh`: `installed.txt binary_inputs=, wanted 84a44c73...` | 112 / 0 and 26 / 0 |
+
+### Verified (commands run here, results read back)
+
+| suite | verdict |
+| --- | --- |
+| `test-install-record.sh` | 81 checks, 0 failed |
+| `test-install-guards.sh` | 70 checks, 0 failed |
+| `test-deploy-ancestry.sh` | 89 checks, 0 failed |
+| `test-node-pins.sh` | 87 checks, 0 failed |
+| `test-publish-shared-commit.sh` | 43 checks, 0 failed |
+| `test-bootstrap-gate.sh` | 35 checks, 0 failed |
+| `test-build-info.sh` | 24 checks, 0 failed (against a debug `wa` rebuilt from this tree) |
+| `test-glibc-floor.sh` | 112 checks, 0 failed (built-artifact sweep skipped: `WA_GLIBC_ARTIFACT_DIR` unset) |
+| `test-update-ring.sh` | 26 checks, 0 failed |
+| `test-deploy-downgrade.sh` | 0 failed (it delegates to `test-deploy-ancestry.sh`: one rule, one test) |
+| `test-fast-rows.sh` | 30 checks, ok |
+| `test-orphan-tests.mjs` | 266 wired, 60 orphaned and declared with a reason (all seven wired) |
+| `cargo test --manifest-path rust/wa-sentinel/Cargo.toml` | 134 passed, 0 failed (item 8 revert compiles and changes nothing else) |
+| `test-remote-update.lua` (the pins Lua row) | 106 checks, ok |
+| `test-update-release-updater.lua` | 22 checks, ok |
+| `cargo build -p wa-host` | ok, 11 s warm |
+
+### Pre-existing failures (reproduced on the base, worktree `/tmp/r4/base` at `e5ba9089`, no changes of mine)
+
+| suite | on the base | on this branch |
+| --- | --- | --- |
+| `test-deploy-record.sh` | fails: its own fixture, `run-record.sh: line 44: ROOT: unbound variable` | same failure, unchanged |
+| `test-deploy-node-binaries.sh` | fails: `the installed prebuilt supervisor is not executable` | same failure, unchanged |
+| `test-deploy-service-target.sh` | fails: 15 of 33 | same failure, unchanged |
+| `test-deploy-downgrade.sh` (main's own copy) | fails 11 of 20 in this environment: `deploy.sh` refuses `deploying from a CLI turn needs a sentinel supervisor` (the turn guard), so its assertions never reach the rule | this branch's file delegates to `test-deploy-ancestry.sh`, which strips `WASM_AGENT_IN_TURN` and detaches with `setsid`: 89 / 0 |
+
+### Not verified (stated, not hidden)
+
+- `scripts/test.sh` was not run end to end (the hour-long gate). Its seven new lines are `gate_run` calls, and each was run standalone with the same `WA_BIN` a gate run would hand it.
+- The whole fast path was not re-run end to end (it builds a binary and runs ~140 Lua rows). The six new rows were run standalone (timings above), `test-fast-rows.sh` passes, and the orphan ledger is clean. The 28 s row is the one excluded, and that is a decision, not an omission.
+- `test-deploy-components.sh` / `test-deploy-components-shipped.sh` were not run (they need wasi-sdk); neither is touched by this round.
+- No node was deployed, restarted, upgraded or pinned in this round. Every command ran with a scratch `HOME`/`WASM_AGENT_HOME`/`WASM_AGENT_LUA_ROOT`; the tests that build a pin store build it under `mktemp -d`.
+- Nothing was pushed; no remote was written to.
+
+### Texts to approve (verbatim, the strings an operator or a log reader will see)
+
+New, `scripts/deploy.sh`:
+
+```
+deploy: refused(ancestry_override_unrecorded): nothing here names the commit that is installed (<why>) and no override was recorded, so no ancestry question can be asked and no record could say why this deploy went on. Nothing was built and nothing was installed. This is a hole in the callers' bookkeeping, not something to work around: make the running bytes name themselves (wa --build-info, or a record whose sha256= is the binary's), or pass --force --reason <text> and the override is recorded in deploy.log and installed.txt.
+```
+
+New, `scripts/lib/install-record.sh` (the `WA_RUNNING_WHY` for this case):
+
+```
+the install record beside <binary> is about these very bytes (its sha256= is the binary's) but names no commit=, and the binary cannot name its own commit either - so nothing ties these bytes to a place in history
+```
+
+Changed, `scripts/upgrade.sh`:
+
+```
+refused(override_reason_required): WA_ALLOW_UNVERIFIED_UPGRADE=1 installs a candidate that cannot report its own build, so nothing can show whether it contains the installed commit <commit> - and an override nobody can read later is not a decision anyone can review. Say why: WA_ALLOW_UNVERIFIED_UPGRADE=1 WA_UPGRADE_FORCE_REASON=<text> (the reason is recorded in installed.txt). Nothing was installed, and the running pair is untouched. Install a build made by the current rust/wa-host/build.rs instead (wa --build-info answers on it) and no override is needed.
+OVERRIDE, recorded: the candidate <name> cannot report its own build, so nothing can show whether it contains the installed commit <commit>; going on because WA_ALLOW_UNVERIFIED_UPGRADE=1 and WA_UPGRADE_FORCE_REASON say so
+force_requested rule=candidate_commit_unknown reason=<text> by=<user> at=<utc>
+```
+
+...and its `refused(candidate_commit_unknown)` sentence now ends:
+
+```
+... or set WA_ALLOW_UNVERIFIED_UPGRADE=1 together with WA_UPGRADE_FORCE_REASON=<text> for an intentional operator override, and the reason is recorded in installed.txt.
+```
+
+New, the legacy-await note - `lua/core/pins.lua` (summary line) and `scripts/lib/node-pins.sh` (the install-side gate):
+
+```
+await <12 hex> IGNORED (a legacy record defaulted it to the commit the pin rolled back from, which is not a release)
+node-pin: await=<12 hex> is IGNORED on this record: it is the commit the pin rolled back from, which is not a release (a legacy pin; nothing was rewritten)
+```
+
+New, the fixture fence in `scripts/test-install-guards.sh` (a test-facing refusal, not a product string):
+
+```
+refused(test_needs_scratch_home): HOME is <dir>, which is the real home of this machine. This test reads a node pin store and must never read <home>/.wasm-agent. Nothing was installed.
+refused(test_needs_scratch_home): WASM_AGENT_HOME is <dir>, which is the real agent home of this machine. Set it to a scratch directory. Nothing was installed.
+```
+
