@@ -568,7 +568,7 @@ end
 -- run_release_updater).
 --
 -- Returns state, target, refusal; refusal is nil for a plan we understood.
-function M.release_plan(plan, reread_command)
+local function release_plan(plan, reread_command)
   local text = tostring(plan or "")
   local target = text:match("would install ([^%s)]+)")
   local state = text:match("bootstrap: install [^\r\n]-: (%a+)")
@@ -582,6 +582,8 @@ function M.release_plan(plan, reread_command)
     next = "read what the updater says before asking again: " .. tostring(reread_command),
   }
 end
+-- Exported for a caller (and a test) that wants to read a plan without an install.
+M.release_plan = release_plan
 
 function M.run_release_updater(options, facts, record, updater)
   local base = { install = facts.install, installed_commit = facts.installed_commit, installed_release = record.release,
