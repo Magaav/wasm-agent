@@ -12,6 +12,9 @@ use wa_capabilities::{capabilities, client_bridge, core_bridge, core_component, 
 use wa_capabilities::host::Host;
 use rusqlite::Connection;
 // `wa dev` (docs/SERVICE-COMPONENTS.md): build a component crate and swap the running instance.
+// The binary's own identity: `wa --build-info` and `wa --contains <commit>` (build_info.rs). Declared with
+// the other CLI modules because main dispatches it, before the node is touched.
+mod build_info;
 mod dev;
 mod mesh_transport;
 // `wa release verify` (rust/wa-host/src/release.rs): signed releases, checked before this node installs
@@ -240,6 +243,22 @@ fn load_env_file() -> Vec<(String, String)> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The binary answering for itself, before anything else can fail: `--build-info` is what every install
+    // path writes its record from, and `--contains` is what a deploy asks the running binary before it
+    // replaces it. Both must work on a node whose home, env file, database or Lua tree is broken - a
+    // rollback runs exactly there - so they are dispatched here, above the home resolution.
+    if args.first().is_some_and(|arg| arg == "--build-info") {
+        print!("{}", build_info::render());
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "--contains") {
+        let asked = args.get(1).cloned().unwrap_or_default();
+        if asked.is_empty() || asked.starts_with("--") {
+            eprintln!("usage: wa --contains <commit>    does this build contain that commit? 0 yes, 1 no, 2 unknown");
+            std::process::exit(2);
+        }
+        std::process::exit(build_info::contains_command(&asked));
+    }
     // `wa dev` before anything that touches the node. It builds and runs a component crate from its
     // own `.wa-dev/` directory, so it needs no database, no graph, no Lua tree, and - since it is a
     // development loop - no node environment file either: a dev run must not pick up a node's

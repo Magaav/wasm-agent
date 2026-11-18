@@ -108,13 +108,33 @@ export function preflight(root,dir=assetPath(root),target=null){
   requireValue(zig.status===0,'cargo_zigbuild_unavailable:'+String(zig.error||zig.stderr));
  }
  const ripgrep=resolveRipgrep();
- return {ok:true,ripgrep,root:fs.realpathSync(root),source_commit:git(root,'rev-parse','HEAD'),source_tree:git(root,'rev-parse','HEAD^{tree}'),source_dirty:git(root,'status','--porcelain')!=='',cargo:cargo.stdout.trim(),assets};
+ // IS THIS COMMIT ON A BRANCH THE REMOTE HAS? Asked of the remote itself through the ONE shared answer
+ // (scripts/lib/shared-commit.sh, which uses `git ls-remote`); this used to be an equality test against
+ // origin/main in the body of the build's finally block, so "shared" meant "exactly main" and a build from any
+ // other pushed branch recorded nothing at all. The answer travels in the receipt, and a receipt that says the
+ // commit is shared is the only one this module treats as ready to ship.
+ const shared=commitShared(root,git(root,'rev-parse','HEAD'));
+ return {ok:true,ripgrep,root:fs.realpathSync(root),source_commit:git(root,'rev-parse','HEAD'),source_tree:git(root,'rev-parse','HEAD^{tree}'),source_dirty:git(root,'status','--porcelain')!=='',source_shared:shared.state,source_shared_branches:shared.branches,cargo:cargo.stdout.trim(),assets};
 }
 function waveChecker(root,evidence,commit,tree,generation){
  const file=path.join(evidence,'wave-native-check.lua');
  const prefix=`do local j=dofile('lua/vendor/json.lua');local i=j.decode(host.runtime_info());assert(i.build_source_commit==${JSON.stringify(commit)},'native compiled source mismatch');assert(i.build_source_tree==${JSON.stringify(tree)},'native compiled tree mismatch');assert(i.build_wave_generation==${JSON.stringify(generation||'')},'native compiled generation mismatch');print('native compiled source/tree/wave identity ok') end\n`;
  fs.writeFileSync(file,prefix+fs.readFileSync(path.join(root,'scripts/check-embedded-runtime.lua'),'utf8'));return file;
 }
+// "Is this commit on a branch anybody else can see?" - scripts/lib/shared-commit.sh is the one implementation
+// (it asks the remote: git ls-remote; a local refs/remotes/* ref is a memory of a fetch), and this is the node
+// side of it. Never throws: an unanswerable question is state 'unknown', and the caller decides whether it may
+// still ship. A build that says 'no' is a development build, and it must not be recorded as a ready one.
+function commitShared(root,commit){
+ try{
+  const result=cp.spawnSync('bash',[path.join(root,'scripts/lib/shared-commit.sh'),root,commit,'origin'],{encoding:'utf8',windowsHide:true});
+  const branches=(result.stdout||'').trim().split(/\s+/).filter(Boolean);
+  if(result.status===0)return{state:'yes',branches};
+  if(result.status===1)return{state:'no',branches:[],why:(result.stderr||'').trim()};
+  return{state:'unknown',branches:[],why:(result.stderr||String(result.error||'')).trim()};
+ }catch(error){return{state:'unknown',branches:[],why:String(error)};}
+}
+
 export function build(root,dir=assetPath(root),waveGeneration=null,target=null){
  const before=preflight(root,dir,target);
  const evidence=fs.mkdtempSync(path.join(git(root,'rev-parse','--path-format=absolute','--git-dir'),'codemode-build-'));
@@ -165,9 +185,14 @@ export function build(root,dir=assetPath(root),waveGeneration=null,target=null){
   receipt.logs=Object.fromEntries(['cargo.stdout','cargo.stderr','embedded.stdout','embedded.stderr'].filter(name=>fs.existsSync(path.join(evidence,name))).map(name=>[name,sha(fs.readFileSync(path.join(evidence,name)))]));
   let published=false;
   if(receipt.ok&&!receipt.target&&!receipt.source_dirty&&process.env.WA_JOB_EVENT_FILE===undefined&&process.env.WA_JOB_DELIVERY_ID===undefined){
-   try{published=git(root,'status','--porcelain')===''&&git(root,'branch','--show-current')==='main'
-    &&git(root,'rev-parse','HEAD')===before.source_commit&&git(root,'rev-parse','origin/main')===before.source_commit
-    &&git(root,'ls-remote','origin','refs/heads/main').split(/\s+/)[0]===before.source_commit;}
+   // A ready receipt is for bytes another machine may install: the commit must be on a branch the REMOTE has
+   // (before.source_shared, asked before the build), the tree must be clean, and the build must be of the commit
+   // that is still checked out. It used to require "exactly origin/main", which is a narrower rule that also
+   // answered "not ready" with no record of why.
+   try{published=before.source_shared==='yes'
+    &&git(root,'status','--porcelain')===''
+    &&git(root,'rev-parse','HEAD')===before.source_commit
+    &&commitShared(root,before.source_commit).state==='yes';}
    catch(error){receipt.readiness_not_published=String(error);} // build success is not conditional on publication
   }
   const receiptFile=path.join(evidence,'receipt.json');fs.writeFileSync(receiptFile,JSON.stringify(receipt,null,2));

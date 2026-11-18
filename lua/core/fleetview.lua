@@ -33,6 +33,9 @@ M.DISK_DEGRADED_PERCENT = 90
 
 -- The fields every node record answers (or names as missing). The test asserts this exact list, so a
 -- field cannot be dropped from the answer by accident.
+-- 'pins' is deliberately NOT in this list. A field every node record answers is a fact about THAT node; a
+-- pin is a fact about the coordinator's own store (lua/core/pins.lua), so a peer that does not carry the store
+-- names 'pins' in its own missing list instead of failing to answer a field it was never given.
 M.FIELDS = {
   'online', 'last_seen_ms', 'role', 'version', 'commit', 'health', 'disk',
   'components', 'features', 'operations', 'jobs', 'incidents',
@@ -177,6 +180,32 @@ function M.node(observation, opts)
   end
   row.version = present('version', observation.version and tostring(observation.version) or nil)
   row.commit = present('commit', observation.commit and tostring(observation.commit) or nil)
+  -- Pins are the fleet's own statement about where a node is held (lua/core/pins.lua): a node with an active
+  -- pin is not a node to update, and one whose "until" has passed is overdue - named as overdue here, so a
+  -- reader of the report does not have to compare dates by eye.
+  if type(observation.pins) == 'table' then
+    local pinned, overdue = {}, {}
+    for _, entry in ipairs(observation.pins) do
+      local pin = {
+        node = tostring(entry.node or row.name),
+        commit = tostring(entry.commit or 'unknown'),
+        reason = trim(entry.reason or '', 200),
+        by = tostring(entry.by or ''), at = tostring(entry.at or ''),
+        until_ = tostring(entry.until_ or ''), await = tostring(entry.await or ''),
+        overdue = entry.overdue == true,
+        summary = trim(entry.summary or '', 300),
+      }
+      pinned[#pinned + 1] = pin
+      if pin.overdue then overdue[#overdue + 1] = pin.node end
+    end
+    row.pins = pinned
+    if #overdue > 0 then row.pins_overdue = overdue end
+  else
+    -- Not in 'missing': that list names a fact this report tried to read and could not, and a peer's pins were
+    -- never this node's to read. The absence is still stated, in its own field, so nobody reads a blank as
+    -- 'nothing is pinned'.
+    row.pins_absent = true
+  end
 
   local health = health_of(observation)
   if not health then
@@ -381,6 +410,11 @@ function M.local_observation(opts)
       observation.operations = operations.operations or operations.list or (operations[1] and operations) or {}
     end
   end
+  -- The pins this coordinator holds (lua/core/pins.lua): where nodes are held and which pins are overdue,
+  -- read from the one store that decides those things. A store that cannot be read is named in the node's
+  -- "missing" list rather than reported as "no pins", which would read as "nothing is held".
+  local pins_ok, pins_list = pcall(function() return dofile('lua/core/pins.lua').list() end)
+  if pins_ok and type(pins_list) == 'table' then observation.pins = pins_list end
   if type(host.jobs) == 'function' then
     local jobs = decode((try(host.jobs, 'list', '{}')) or nil)
     if type(jobs) == 'table' then

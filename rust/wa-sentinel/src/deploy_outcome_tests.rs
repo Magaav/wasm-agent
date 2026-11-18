@@ -387,7 +387,7 @@ exit 0
     fixture.open(id, SESSION, "verify the install landed");
 
     let capture = deploy_capture_path();
-    verb_deploy_script(&stub, id, SESSION, "verify the install landed", "end-to-end fixture", &capture)
+    verb_deploy_script(&stub, id, SESSION, "verify the install landed", "end-to-end fixture", &capture, false)
         .expect("the deploy is accepted");
 
     // The pid is recorded before the wait, so a notice can say whether the installer is still alive.

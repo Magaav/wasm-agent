@@ -38,7 +38,7 @@ host.write_file(install .. "/scripts/install.sh", table.concat({
   "# fixture front door: prints what the core would print, so the parse is what is under test",
   "for a in \"$@\"; do case \"$a\" in --check) check=1 ;; esac; done",
   "if [ -n \"${check:-}\" ]; then",
-  "  echo 'bootstrap: install /fixture: behind (installed 01234567)'",
+  "  echo 'bootstrap: install /fixture: update (installed 01234567)'",
   "  echo 'bootstrap: check only: would install v0.1.0-alpha.15 into /fixture'",
   "  exit 0",
   "fi",
@@ -61,6 +61,20 @@ host.write_file(install .. "/scripts/install.sh", "#!/bin/sh\nprintf '%s\\n' 'bo
 shell_ok("chmod 755 '" .. install .. "/scripts/install.sh'")
 local current = update.run_release({ check = true }, facts, record)
 ok(current.ok == true and current.status == "current", "a current node is reported current (got " .. tostring(current.status) .. ")")
+
+-- ---- a plan nobody can read is a refusal, not "a newer bundle is available" (round-3, run_release) ----
+-- The updater's plan used to be matched with a pattern, and a plan that did not match fell through every
+-- "current" test into "install it". An unreadable plan is an unknown, and an unknown does not run an installer.
+host.write_file(install .. "/scripts/install.sh",
+  "#!/bin/sh\nprintf '%s\\n' 'progress: downloading something, no verdict here'\nexit 0\n")
+shell_ok("chmod 755 '" .. install .. "/scripts/install.sh'")
+local unreadable = update.run_release({ check = false }, facts, record)
+ok(unreadable.ok == false, "a plan nobody can read is not a success (got " .. tostring(unreadable.status) .. ")")
+ok(unreadable.status == "release_state_unknown", "and is named release_state_unknown")
+ok(type(unreadable.observed) == "string" and unreadable.observed:find("no verdict here", 1, true) ~= nil,
+  "with the plan it could not read as the observation")
+ok(unreadable.message:find("does not run an installer", 1, true) ~= nil,
+  "and a sentence that says why nothing was installed", tostring(unreadable.message))
 
 -- ---- a core that refuses is reported with its own output, and installs nothing -------------------
 host.write_file(install .. "/scripts/install.sh", "#!/bin/sh\necho 'bootstrap: index_unreachable: https://example.invalid/index.json'\nexit 1\n")
