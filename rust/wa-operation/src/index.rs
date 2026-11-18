@@ -89,10 +89,13 @@ impl Index {
     }
     /// Operations that may be relevant to `cwd`, from the durable index.
     ///
-    /// `session` is the session asking, and `node_wide` says whether it holds the node scope. An
-    /// operation that recorded no directory used to be relevant to *every* path - so another session's
-    /// empty-cwd operation blocked this session's worktree release (session isolation, finding 8). Such a
-    /// row is now relevant only to the session that ran it, unless the caller holds the node scope.
+    /// `session` is the session asking, and `node_wide` says whether it holds the node scope. An operation
+    /// that recorded no directory used to be relevant to *every* path - so another session's empty-cwd
+    /// operation blocked this session's worktree release (session isolation, finding 8). A row with no
+    /// directory is now relevant only to the session that ran it, unless the caller holds the node scope,
+    /// and a caller that is NOT a session keeps the old conservative answer (every path): the round-1
+    /// change skipped those rows for a sessionless caller too, which quietly turned the release fence off
+    /// for exactly the caller that uses it (item 8, round 2).
     pub fn relevant(&self, cwd: &str, after: &str, limit: usize, session: &str, node_wide: bool) -> io::Result<Value> {
         if cwd.is_empty() { return Err(error("effective_cwd_required")); }
         let target = path_key(cwd);
@@ -112,12 +115,19 @@ impl Index {
         for row in rows {
             let (id, state, originals, recorded_cwd) = row.map_err(error)?;
             examined+=1;last=id.clone();
-            if recorded_cwd.is_empty() && !node_wide {
-                // An operation that recorded no directory names no path, so it is relevant to the session
-                // that ran it and to nothing else (finding 8). Reading it is still possible through its id.
+            // AN OPERATION THAT RECORDED NO DIRECTORY names no path. It stays relevant to every path for
+            // a caller that is not a session (the workspace release path, the node's own reconciler, a
+            // script): the conservative answer is "you cannot prove it is unrelated", and the release
+            // fence must not be talked out of that by an empty field.
+            //
+            // For a caller that IS a session, it is relevant only to the session that ran it. That is the
+            // half finding 8 measured (another session's empty-cwd operation blocked this session's
+            // worktree release); the other half is the recording, which now writes the session worktree
+            // into the row so this branch is a fallback for legacy and ownerless rows, not the rule.
+            if recorded_cwd.is_empty() && !node_wide && !session.is_empty() {
                 let owned = serde_json::from_str::<Value>(&state).ok()
                     .and_then(|value| value["session"].as_str().map(str::to_string));
-                if owned.as_deref() != Some(session) || session.is_empty() { continue; }
+                if owned.as_deref() != Some(session) { continue; }
             }
             let risk=db.query_row("SELECT args FROM risk_quarantine WHERE id=? AND expected=?",params![id,state],|r|r.get::<_,String>(0)).optional().map_err(error)?;
             if let Some(raw)=risk {

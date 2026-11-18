@@ -201,7 +201,10 @@ function wa_admission(session, node, body)
   -- No thread: the run resumes the newest open conversation for (user, node), exactly as `agent_for`
   -- will. Returning the real id is what lets the scheduler enforce affinity; without it the key would be
   -- empty and two unnamed runs could write one transcript.
-  local chosen, thread_note = memory.ensure_session(user.id, node, "chat")
+  -- ADMISSION IS A RUN-SHAPED QUESTION (item 6, round 2). Every request here is one run, and inside one
+  -- `wa serve` they all share one pid: the lease is minted per admission so a conversation another run is
+  -- already serving is answered as busy - a new thread - instead of being handed to this one as well.
+  local chosen, thread_note = memory.ensure_session(user.id, node, "chat", { lease = "admission:" .. host.uuid() })
   -- A run with no thread id never resumes a conversation a live process is serving: it starts its own and
   -- says which one was busy (session isolation, finding 6).
   return json.encode({ ok = true, user = users.public(user), role = role, conversation = chosen, remote = false,
@@ -278,8 +281,30 @@ local function run_control(command, arg, session, word)
   end
   return table.concat(lines, "\n")
 end
+-- /mastermind: the OPERATOR's mark on ONE conversation (session isolation, item 7 round 2).
+--
+-- The node scope belongs to the operator's surfaces, and an agent conversation is not one - unless the
+-- operator says so. This is that word: a human typing /mastermind in the node's own UI, which a model turn
+-- cannot type (a served control is answered before the prompt reaches the agent, see wa_reply), and which
+-- is journalled with who set it. It is the only way a conversation gets the scope by being a model's.
+function wa_mastermind_control(argument, session, thread)
+  local user, problem = users.resolve(session)
+  if not user then return "mastermind: " .. tostring(problem or "invalid_session") end
+  if not users.is_master(user.role) then return "mastermind: only the operator may mark a conversation" end
+  local target = tostring(thread or "")
+  if target == "" then
+    return "mastermind: name the conversation: send this from the conversation you mean (its thread), not from a nameless run"
+  end
+  if not memory.session(target) then return "mastermind: no such conversation " .. target end
+  local on = tostring(argument or ""):gsub("%s+$", "") ~= "off"
+  local value = memory.set_session_mastermind(target, on, user.id)
+  if value == nil then return "mastermind: the mark was not recorded" end
+  return "mastermind: conversation " .. target ..
+    (value and " may hold the node scope (audited)" or " may not hold the node scope (audited)")
+end
+
 -- Returns the control's own text for a message that is one, and nil for ordinary conversation.
-function wa_served_control(text, session)
+function wa_served_control(text, session, thread)
   session = session or "default"
   local line = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if line == "" then return nil end
@@ -301,13 +326,14 @@ function wa_served_control(text, session)
   if first == "demote" then return run_control("demote", rest, session, nil) end
   if first == "revoke" then return run_control("revoke", rest, session, nil) end
   if first == "nodes" and rest:match("^pending") then return run_control("nodes", "pending", session, nil) end
+  if first == "mastermind" then return wa_mastermind_control(rest, session, thread) end
   return nil
 end
 
 function wa_reply(text, session, node)
   local prompt, images, problem, thread, resume_seq = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
-  local control = wa_served_control(prompt, session)
+  local control = wa_served_control(prompt, session, thread)
   if control then return json.encode({ reply = control, local_control = true }) end
   if remote_target(node) then
     if resume_seq ~= nil then return json.encode({ error = "resume_requires_local_node" }) end
@@ -332,7 +358,7 @@ function wa_reply_stream(text, session, node)
     emit({ type = "error", error = redact.text(problem) })
     return ""
   end
-  local control = wa_served_control(prompt, session)
+  local control = wa_served_control(prompt, session, thread)
   if control then emit({ type = "reply", text = control }); return "" end
   if remote_target(node) then
     if resume_seq ~= nil then
@@ -585,7 +611,7 @@ function wa_jobs(body, session)
   return host.jobs(action, json.encode(args))
 end
 
-function wa_operation(body, session)
+function wa_operation(body, session, routing)
   local user = require_master(session)
   if not user then return json.encode({error="forbidden"}) end
   local ok, args = pcall(json.decode, body or "{}")
@@ -597,9 +623,14 @@ function wa_operation(body, session)
   -- the node's only when it explicitly asks for the node scope, which is the operator's, is audited, and
   -- is what a fleet view uses (session isolation, findings 2 and 9). Without that it answered with every
   -- operation on the node, and the ids are guessable.
-  local session_id = type(args.session_id) == "string" and args.session_id or ""
+  -- THE SESSION COMES FROM THE AUTHENTICATED REQUEST, NEVER FROM THE BODY (item 7, round 2). The body
+  -- used to name any session_id it liked, so this route was the way around the ownership check the tool
+  -- side had just gained. routing is what the listener resolved for this request; a body that names its
+  -- own session_id is ignored, not honoured.
+  local session_id = type(routing) == "string" and routing or ""
+  args.session_id = nil
   local grant, refusal = dofile('lua/core/session_scope.lua').grant(memory, args,
-    { session_id = session_id }, user.role, user.id, "operation")
+    { session_id = session_id, surface = "window" }, user.role, user.id, "operation")
   if refusal then return json.encode(refusal) end
   args.session = grant.session or ""
   args.node_scope = grant.node == true
@@ -990,13 +1021,24 @@ local function node_capability(capability, args, caller)
       placement=args.placement,
     })
   end
-  -- A peer acts in ITS OWN peer-session scope (session isolation, finding 3).
-  --
-  -- This dispatch used to carry no session at all: so every operation, memory write and workspace a peer
-  -- asked for on this node was recorded with no session, and - once surfaces are owned by a session -
-  -- belonged to nobody in particular. The peer's scope is derived from the VERIFIED caller, never from the
-  -- request: a peer that names a `session_id` here cannot adopt another conversation on this node, which
-  -- is exactly the leak the finding measured. One thread per peer is by design and stays so.
+  return wa_peer_dispatch(capability, args, caller, author)
+end
+
+-- A peer acts in ITS OWN peer-session scope (session isolation, finding 3).
+--
+-- This dispatch used to carry no session at all: so every operation, memory write and workspace a peer
+-- asked for on this node was recorded with no session, and - once surfaces are owned by a session -
+-- belonged to nobody in particular. The peer's scope is derived from the VERIFIED caller, never from the
+-- request: a peer that names a session_id here cannot adopt another conversation on this node, which is
+-- exactly the leak the finding measured. One thread per peer is by design and stays so.
+--
+-- It is a NAMED function so it can be tested at all (item 11, round 2): a peer call needs a signed
+-- caller on the mesh, and nothing on this node fabricates one, so the branch nothing exercised was the
+-- branch everything rests on. Called with a caller table (node_id, role) it is the same code a verified
+-- peer reaches; `from` and the signature are checked by `wa_verify_peer` above it, never here.
+function wa_peer_dispatch(capability, args, caller, author)
+  args = args or {}
+  caller = caller or {}
   local peer_session = "peer:" .. tostring(caller.node_id or "unknown")
   -- Node scope over the mesh is not ours to give: it is this node's policy's (a grant that names the peer),
   -- and no such grant surface exists yet - so a peer asking for one is refused by name rather than served,

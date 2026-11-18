@@ -31,6 +31,26 @@ M.MAX_OPERATIONS = 25
 M.MAX_INCIDENTS = 5
 M.DISK_DEGRADED_PERCENT = 90
 
+-- FLEET VIEW IS AN OPERATOR SURFACE, and it says so (session isolation, item 7 round 2).
+--
+-- A fleet view answers about EVERY node's work, which is one node's whole operation set on this one: the
+-- node scope. Round 1 gave that scope to the operator ROLE, and every session carries that credential, so
+-- the only thing between a model's tool call and every other session's operations was its own restraint.
+-- The surface name below is what a tool call cannot set; the role check and the audit line still run
+-- inside session_scope.grant, and a node whose Fleet View is called by a non-operator is refused there.
+local NODE_OPERATIONS = function()
+  if type(host.operation) ~= 'function' then return nil end
+  local grant = dofile('lua/core/session_scope.lua').grant(nil, { scope = 'node' },
+    { surface = 'fleetview', session_id = '' }, 'master', '', 'fleetview')
+  if type(grant) ~= 'table' or grant.node ~= true then return nil end
+  -- decode/try are declared further down this file; a local is only visible after its declaration, so
+  -- this asks the host the same way they do instead of reaching for a name that is not in scope yet.
+  local ok, raw = pcall(host.operation, 'list', json.encode({ limit = M.MAX_OPERATIONS * 4 }))
+  if not ok or type(raw) ~= 'string' then return nil end
+  local decoded, value = pcall(json.decode, raw)
+  return decoded and type(value) == 'table' and value or nil
+end
+
 -- The fields every node record answers (or names as missing). The test asserts this exact list, so a
 -- field cannot be dropped from the answer by accident.
 -- 'pins' is deliberately NOT in this list. A field every node record answers is a fact about THAT node; a
@@ -404,11 +424,12 @@ function M.local_observation(opts)
   if ok and type(services) == 'table' and not services.error then
     observation.components = services.services or {}
   end
-  if type(host.operation) == 'function' then
-    local operations = decode((try(host.operation, 'status', '{}')) or nil)
-    if type(operations) == 'table' then
-      observation.operations = operations.operations or operations.list or (operations[1] and operations) or {}
-    end
+  local operations = NODE_OPERATIONS()
+  if type(operations) == 'table' then
+    -- `list` answers with the node scope's own set (every operation, as the view's grant says), and an
+    -- error is left absent rather than reported as "no operations".
+    observation.operations = operations.operations or operations.list or (operations[1] and operations) or {}
+    if operations.error then observation.health_reason = observation.health_reason or tostring(operations.error) end
   end
   -- The pins this coordinator holds (lua/core/pins.lua): where nodes are held and which pins are overdue,
   -- read from the one store that decides those things. A store that cannot be read is named in the node's
@@ -443,7 +464,7 @@ function M.telemetry_incidents(opts)
   opts = opts or {}
   local out = {}
   if type(host.operation) == 'function' then
-    local operations = decode((try(host.operation, 'status', '{}')) or nil) or {}
+    local operations = NODE_OPERATIONS() or {}
     for _, entry in ipairs(type(operations) == 'table' and (operations.operations or operations.list or {}) or {}) do
       local state = tostring(type(entry) == 'table' and entry.state or '')
       if state == 'failed' or state == 'unknown' or state == 'cancelled' then

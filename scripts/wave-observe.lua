@@ -1,7 +1,10 @@
 local json=dofile('lua/vendor/json.lua')
 local request=json.decode(assert(host.getenv('WA_WAVE_OBSERVATION')))
 if request.kind=='operations' then
-  print(host.operation('relevant',json.encode({cwd=request.cwd or '*',after=request.after or '',limit=256})))
+  -- The node's own observation tool: it asks about a path or about the whole node, and cwd '*' is a
+  -- node-wide question that needs the node scope (session isolation, item 7 round 2). This is the
+  -- supervisor, not a session, so it says so itself; the scope is not a session's to claim.
+  print(host.operation('relevant',json.encode({cwd=request.cwd or '*',after=request.after or '',limit=256,node_scope=true})))
 elseif request.kind=='legacy' then
   print(host.operation('legacy_adjudicate',json.encode(request.bundle)))
 elseif request.kind=='claims' then

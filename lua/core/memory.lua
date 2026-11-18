@@ -292,6 +292,11 @@ local function migrate()
   add_column("sessions", "fork_parent_seq", "INTEGER")
   add_column("sessions", "title", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "mode", "TEXT NOT NULL DEFAULT 'default'")
+  -- The operator's own mark on one conversation: a session they have made the MASTERMIND may hold the
+  -- node scope, because an agent that IS the mastermind is the operator's own surface. Set only by the
+  -- operator (the /mastermind control, or M.set_session_mastermind from an operator path), journalled,
+  -- and never by a model tool call (session isolation, item 7 round 2).
+  add_column("sessions", "mastermind", "INTEGER NOT NULL DEFAULT 0")
   add_column("sessions", "summary", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "summarized_until", "INTEGER NOT NULL DEFAULT 0")
   add_column("sessions", "updated_at", "REAL NOT NULL DEFAULT 0")
@@ -684,7 +689,8 @@ end
 -- the same reason, from the other side: it belongs to the master that asked for it, and a bare
 -- `wa chat` on this node asking for "the newest open thread" must not silently adopt work it did not
 -- request. It is still an ordinary session - `wa chat --session <id>` reaches it by name.
-function M.ensure_session(user_id, node_id, title)
+function M.ensure_session(user_id, node_id, title, opts)
+  opts = opts or {}
   user_id = user_id or "master"
   node_id = node_id or ""
   local rows = query(
@@ -702,6 +708,29 @@ function M.ensure_session(user_id, node_id, title)
     -- their messages interleaved and each one's tool results landed under the other's turns.
     local live = M.presence_live(newest, 900)
     if not live then return newest end
+    -- WHO holds it: the RUN, not the process. Inside one `wa serve` every run shares one pid, so the
+    -- round-1 rule ("another pid is another writer") answered "mine" to every run of the server, and two
+    -- unnamed runs wrote ONE transcript - the leak finding 6 exists to stop, still open under the only
+    -- runtime this node actually serves conversations with (item 6 round 2).
+    local mine = tostring(opts.lease or "")
+    local held = tostring(live.lease or "")
+    if held ~= "" or mine ~= "" then
+      -- A lease is decisive when either side has one, and the sentence names the run. A row written
+      -- before the column existed ('' on both sides) falls through to the old pid+boot rule.
+      if held ~= "" and held == mine then return newest end
+      if held == "" and mine ~= "" then
+        local holder = M.process_identity()
+        if holder.pid ~= 0 and tonumber(live.pid) == holder.pid
+            and (live.boot == nil or live.boot == holder.boot) then
+          -- A row with no lease held by THIS process is this process's own older claim.
+          return newest
+        end
+      end
+      local started = M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })
+      local held_by = held ~= "" and ("run " .. held) or ("pid " .. tostring(live.pid))
+      return started, "thread_busy: the newest open conversation " .. tostring(newest) ..
+        " is being served by " .. held_by .. ", so this run started " .. tostring(started)
+    end
     local who = M.process_identity()
     -- The caller's own process may already hold it (a second turn in the same interpreter): that is not
     -- a second writer, so it keeps its thread.
@@ -714,6 +743,27 @@ function M.ensure_session(user_id, node_id, title)
       " is being served by pid " .. tostring(live.pid) .. ", so this run started " .. tostring(started)
   end
   return M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })
+end
+
+-- The operator's mark on one conversation (item 7 round 2). It is a session COLUMN, written by an
+-- operator path and journalled, so a model tool call cannot set it and a marked session does not have to
+-- assert anything in its own arguments.
+function M.session_mastermind(session_id)
+  if type(session_id) ~= "string" or session_id == "" then return false end
+  local rows = query("SELECT mastermind FROM sessions WHERE id=?", {session_id})
+  return rows[1] ~= nil and tonumber(rows[1].mastermind) == 1
+end
+
+-- Mark (or unmark) a session as the mastermind. by is the operator who decided it, and the change is
+-- journalled: a node-wide capability that leaves no line is a capability nobody can review.
+function M.set_session_mastermind(session_id, on, by)
+  if type(session_id) ~= "string" or session_id == "" then return nil, "session_required" end
+  if not M.session(session_id) then return nil, "unknown_session" end
+  exec("UPDATE sessions SET mastermind=? WHERE id=?", {on and 1 or 0, session_id})
+  M.journal("session_mastermind", session_id, {
+    id = session_id, mastermind = on and true or false, by = tostring(by or ""), at = host.now(),
+  })
+  return M.session_mastermind(session_id)
 end
 
 function M.session(session_id)
@@ -990,12 +1040,18 @@ function M.presence_begin(session_id, opts)
   if not presence_table() then return nil, "no_presence_table" end
   local who = process_identity()
   if who.pid == 0 then return nil, "presence_requires_process_id" end
+  -- Add the lease column where the table predates it: a scratch ledger, or a database a node wrote before
+  -- this round. A row with '' is not trusted for the run rule and falls back to pid+boot.
+  add_column("session_presence", "lease", "TEXT NOT NULL DEFAULT ''")
   local now = host.now()
-  exec("INSERT INTO session_presence(session_id,pid,boot,role,started_at,heartbeat_at) VALUES(?,?,?,?,?,?) "
+  -- The lease is the RUN, not the process (item 6 round 2): inside one `wa serve` every run shares a pid,
+  -- so the pid cannot tell "my own run" from "another run in this same process".
+  local lease = tostring(opts.lease or "")
+  exec("INSERT INTO session_presence(session_id,pid,boot,role,lease,started_at,heartbeat_at) VALUES(?,?,?,?,?,?,?) "
     .. "ON CONFLICT(session_id) DO UPDATE SET pid=excluded.pid,boot=excluded.boot,role=excluded.role,"
-    .. "started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at",
-    {session_id, who.pid, who.boot, tostring(opts.role or ""), now, now})
-  return { pid = who.pid, boot = who.boot, at = now }
+    .. "lease=excluded.lease,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at",
+    {session_id, who.pid, who.boot, tostring(opts.role or ""), lease, now, now})
+  return { pid = who.pid, boot = who.boot, lease = lease, at = now }
 end
 
 function M.presence_beat(session_id)
@@ -1019,7 +1075,8 @@ end
 
 function M.presence(session_id)
   if not presence_table() then return nil end
-  local rows = query("SELECT session_id,pid,boot,role,started_at,heartbeat_at FROM session_presence WHERE session_id=?",
+  add_column("session_presence", "lease", "TEXT NOT NULL DEFAULT ''")
+  local rows = query("SELECT session_id,pid,boot,role,lease,started_at,heartbeat_at FROM session_presence WHERE session_id=?",
     {session_id})
   return rows[1]
 end

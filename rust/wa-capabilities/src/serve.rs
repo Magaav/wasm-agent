@@ -3099,7 +3099,9 @@ fn process_relay_job(
     }
 
     let session = header_of(&job.headers, "x-wa-session");
-    match dispatch(lua, &ui, &job.method, &job.path, &job.headers, &job.body, &session) {
+    // A relayed job never reaches /operations or /operation (the route list above refuses everything
+    // else), and the relay carries no conversation: it names none rather than inventing one.
+    match dispatch(lua, &ui, &job.method, &job.path, &job.headers, &job.body, &session, "") {
         Some((status, _content_type, body)) => (status, String::from_utf8_lossy(&body).to_string()),
         None => (404, "{\"error\":\"not_found\"}".to_string()),
     }
@@ -3531,7 +3533,8 @@ fn handle(lua: &Core, ui: &std::path::Path, stream: &mut TcpStream, request: &Re
         return Ok(());
     }
 
-    match dispatch(lua, ui, &method, &path, &node_headers, &String::from_utf8_lossy(&body), &session) {
+    match dispatch(lua, ui, &method, &path, &node_headers, &String::from_utf8_lossy(&body), &session,
+        &request.routing_session) {
         Some((status, content_type, payload)) => respond(stream, status, content_type, &payload),
         None => respond(stream, 404, "text/plain; charset=utf-8", b"not found"),
     }
@@ -3547,6 +3550,7 @@ fn dispatch(
     node_headers: &[(String, String)],
     body: &str,
     session: &str,
+    routing_session: &str,
 ) -> Option<Reply> {
     let (route, query) = split_path(path);
     // `session` is passed in: the socket parser consumes x-wa-session before the
@@ -3635,8 +3639,12 @@ fn dispatch(
         }
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
-        "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),
-        "/operation" if method == "POST" => (200,"application/json",call("wa_operation", &[body,session]).into_bytes()),
+        // The conversation comes from the authenticated request context, never from the body (session
+        // isolation, item 7 round 2): a body that names another session is not a way into that session's
+        // operations. Unlike a run route this is not resolved by admission, so the routing session is
+        // empty unless one was resolved - and then only the node scope reaches past it.
+        "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session,&routing_session]).into_bytes()),
+        "/operation" if method == "POST" => (200,"application/json",call("wa_operation", &[body,session,&routing_session]).into_bytes()),
         // Local subagents. This is a control call, never a run admission: `start` launches a native
         // background child, so the route itself must not occupy an interactive or background run slot.
         // The HTTP `await` is bounded so one control slot cannot be held indefinitely.

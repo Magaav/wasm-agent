@@ -39,14 +39,70 @@ pub const DENY_ENV: &[&str] = &[
     "WASM_AGENT_LLM_API_KEY",
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    // Also denied by shape ("*_TOKEN"), and kept here so the report can name it exactly: a provider that
+    // hands its credential in ANTHROPIC_AUTH_TOKEN must not be readable from a tool child.
+    "ANTHROPIC_AUTH_TOKEN",
 ];
+
+/// The deny SHAPES: a name this node's policy has not re-granted is withheld when it ends in one of these.
+///
+/// A list of exact names is a list that is always one release behind: every new provider invents a
+/// variable ("*_API_KEY", "*_TOKEN"), and a session could read a model's own key by printing "env" in a
+/// bash child. The shape is the rule; DENY_ENV only names what the shape cannot reach (a "*_KEY" that is
+/// not an API key) and what must stay listed for a reader and for the report.
+pub const DENY_ENV_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+
+/// The node's own re-grant: the names its policy lists under "tool_env_allow" in policy.json.
+///
+/// Process-wide because the policy is: one node, one file, one answer for every child it starts
+/// (rust/wa-capabilities reads the file and calls set_env_allow once, on the manager it builds).
+static ENV_ALLOW: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_env_allow(names: Vec<String>) {
+    let normalized: Vec<String> = names.iter().map(|name| name.trim().to_ascii_uppercase())
+        .filter(|name| !name.is_empty()).collect();
+    let _ = ENV_ALLOW.set(normalized);
+}
+
+fn env_allow() -> &'static [String] {
+    ENV_ALLOW.get().map(Vec::as_slice).unwrap_or(&[])
+}
 
 /// Is this environment name one the node keeps to itself? Exact names above, plus every provider key,
 /// which is the one shape that keeps working when a new provider appears.
 pub(crate) fn denied_env(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    if upper == "API_KEY" || upper.ends_with("_API_KEY") { return true; }
-    DENY_ENV.iter().any(|denied| *denied == upper)
+    let named = upper == "API_KEY"
+        || DENY_ENV_SUFFIXES.iter().any(|suffix| upper.ends_with(suffix))
+        || DENY_ENV.iter().any(|denied| *denied == upper);
+    // A per-node allow-list re-grants the exact names its operator listed, and nothing by shape: an
+    // allowed GH_TOKEN does not allow every *_TOKEN name.
+    named && !env_allow().iter().any(|allowed| *allowed == upper)
+}
+
+/// The names this node's own environment carries that a tool child will NOT inherit, in a stable order.
+///
+/// The notice a caller reads has to name the variable and where to re-grant it, or an openclaw node whose
+/// "gh" needs GH_TOKEN sees only "it is set in my shell and not in the child" and has nothing to act on.
+/// Empty when the node has no secret in its environment (the ordinary case).
+pub fn withheld_env() -> Vec<String> {
+    let mut names: Vec<String> = std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty() && denied_env(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The sentence an operation carries when the node withheld something from it.
+pub fn withheld_note(names: &[String]) -> String {
+    let what = if names.len() == 1 {
+        "this node's own environment carries it, and it matches the tool environment deny rule"
+    } else {
+        "this node's own environment carries them, and they match the tool environment deny rule"
+    };
+    format!("withheld_from_tool_children: {} - {}. To hand one to tool children on this node, list its exact name in policy.json under tool_env_allow (a shape is never re-granted, only the name you list).", names.join(", "), what)
 }
 
 /// Remove the denied names from a child's inherited environment. Called by both platform spawns before
@@ -76,11 +132,18 @@ const MAX_ACTIVE: usize = 8;
 ///
 /// The cap was node-wide only, so a single session could take all 8 and every other session's shell was
 /// refused `operation_capacity` until one of them settled - and a read-MCP session holds a slot for up to
-/// 3600 s (session isolation, finding 7). Two slots stay out of every session's reach: they are what the
-/// node's own control and short reads run in, which is the property that makes "cancel the runaway" still
-/// possible while the runaway holds its share. The queue itself is untouched: this is an admission check,
-/// not a scheduler.
-const PER_SESSION_MAX: usize = MAX_ACTIVE - 2;
+/// 3600 s (session isolation, finding 7).
+///
+/// TWO THINGS, and the first round implemented only the first: (a) a share of 6 for the session that asks
+/// (a sessionless start counts against its runtime owner instead of against nobody), and (b) two slots that
+/// no workload may occupy at all (CONTROL_RESERVE), admitted only for a start marked control - which is
+/// how "cancel the runaway" is still possible while every session holds its share. The queue itself is
+/// untouched: this is an admission check, not a scheduler.
+const PER_SESSION_MAX: usize = MAX_ACTIVE - CONTROL_RESERVE;
+
+/// The slots a workload may never take and a control call may: the node's own status/list/cancel and its
+/// short reads are admitted into these two while every other start is refused.
+const CONTROL_RESERVE: usize = 2;
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct Spec {
@@ -112,6 +175,11 @@ pub struct Spec {
     /// low CPU priority (18/11 round 2, finding 9): a call the caller actively awaits keeps the node's
     /// own priority, because it is competing with nothing but the work that asked for it.
     pub background: bool,
+    /// This start is a CONTROL call: the node's own short read (an MCP connector read, a catalogue
+    /// probe), not a workload. It is the only kind of start admitted into the two reserved slots, so a
+    /// session that holds its whole share cannot stop the node from asking a question
+    /// (session isolation, finding 7). Set by the node's own read paths, never by a model argument.
+    pub control: bool,
 }
 impl Spec {
     pub fn command(program: impl Into<String>, args: Vec<String>) -> Self {
@@ -129,6 +197,7 @@ impl Spec {
             session: String::new(),
             promote_descendants: false,
             background: false,
+            control: false,
         }
     }
 }
@@ -148,12 +217,19 @@ struct Slot;
 impl Slot {
     /// Take one of the node's slots, waiting for one if all of them are busy. The entry carries the
     /// cancel flag and the deadline, and the wait is recorded on the operation as it happens.
-    fn acquire(entry: &Arc<Entry>, dir: &Path) -> io::Result<Slot> {
+    fn acquire(entry: &Arc<Entry>, dir: &Path, control: bool) -> io::Result<Slot> {
         let queued_at = Instant::now();
         let mut announced = false;
+        // TWO SLOTS NO WORKLOAD MAY TAKE, decided in the queue rather than by refusing the start: the
+        // per-session share alone did not keep the node able to ask a question (two sessions at four each
+        // fill all eight while neither is over its share), and refusing a workload at admission threw
+        // away work the queue exists to keep. So a workload waits while only CONTROL_RESERVE slots are
+        // left, and a CONTROL start - the node's own short read - may take them (session isolation,
+        // item 7 round 2). This is the reserve's one home: it is the same gate for every caller.
+        let ceiling = if control { MAX_ACTIVE } else { MAX_ACTIVE - CONTROL_RESERVE };
         loop {
             let mut running = RUNNING.lock().map_err(error)?;
-            if *running < MAX_ACTIVE {
+            if *running < ceiling {
                 *running += 1;
                 drop(running);
                 let queued_ms = queued_at.elapsed().as_millis() as u64;
@@ -179,7 +255,12 @@ impl Slot {
                 state["state"] = json!("queued");
                 state["queued_because"] = json!("operation_capacity");
                 state["queue_depth"] = json!(*running);
-                state["queue_limit"] = json!(MAX_ACTIVE);
+                state["queue_limit"] = json!(ceiling);
+                if !control && *running >= MAX_ACTIVE - CONTROL_RESERVE {
+                    state["queue_reserve"] = json!(CONTROL_RESERVE);
+                    state["queue_reserve_note"] = json!(format!(
+                        "{} of {MAX_ACTIVE} operation slots are in use and {CONTROL_RESERVE} of them are kept for control calls (status, list, cancel, short reads); this operation waits for a workload slot to free", *running));
+                }
                 let snapshot = state.clone();
                 drop(state);
                 let _ = atomic_json(&dir.join("state.json"), &snapshot);
@@ -214,6 +295,10 @@ struct Entry {
     /// child - a wait_s:0 call goes pending at once - so the request is a flag the spawn site reads,
     /// not a call that has to win a race with the start.
     demote: AtomicBool,
+    /// Was this start the node's own short read? Only such a start may take the two slots a workload
+    /// waits for (session isolation, item 7 round 2). Read by the queue, which runs on the supervisor
+    /// thread after the Spec is gone.
+    control: bool,
     state: Mutex<Value>,
     settled: Condvar,
     started: Instant,
@@ -557,12 +642,25 @@ impl Manager {
         // contract (scripts/test-start-directory.lua): a call that named no directory records
         // "", and a call that named one records where it ran. The explicit-request and
         // real-directory distinction is carried by cwd_requested and effective_cwd.
-        let recorded_cwd = if start_directory.requested.is_empty() { String::new() } else { spec.cwd.clone() };
+        // ONE exception, and it is the point of it: a call that named no directory but started in the
+        // SESSION'S OWN worktree records that worktree. It ran in a real path that another session's
+        // release has to know about, and recording "" threw that path away - the row then matched every
+        // path or none, depending on who asked (session isolation, item 8 round 2).
+        let recorded_cwd = if !start_directory.requested.is_empty() || spec.cwd_source.as_deref() == Some("session_workspace") {
+            spec.cwd.clone()
+        } else {
+            String::new()
+        };
         let index = self.index()?;
         // Past MAX_ACTIVE running operations a new one QUEUES in its supervisor (Slot::acquire below)
         // instead of being refused: the caller's work is admitted, recorded and run when a core frees,
         // and the wait is named on the operation. The registry itself stays bounded.
         let limit = self.tracked_limit;
+        // WHOSE share this start counts against: the session that asked, or - for a start that names no
+        // session (a read-MCP session, a worker, the node's own tooling) - the runtime OWNER it did name.
+        // Counting every sessionless start against one bucket, or against nobody, let those starts bypass
+        // the share entirely (session isolation, item 7 round 2).
+        let cap_key = if !spec.session.is_empty() { spec.session.clone() } else { spec.owner.clone() };
         let mut entries = self.entries.lock().map_err(error)?;
         // A settled operation is retired on the next admission (its state is on disk, so snapshot, wait,
         // read and cancel keep answering), and the registry has a ceiling that REFUSES BY NAME instead of
@@ -584,19 +682,25 @@ impl Manager {
         if entries.len() >= limit {
             return Err(error("operation_registry_full"));
         }
+        let mut live = 0usize;
         let mut mine = 0usize;
         for entry in entries.values() {
             let state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
             if state["settled"].as_bool().unwrap_or(false) { continue; }
-            if !spec.session.is_empty() && state["session"].as_str() == Some(spec.session.as_str()) {
-                mine += 1;
-            }
+            live += 1;
+            let key = match state["session"].as_str().filter(|session| !session.is_empty()) {
+                Some(session) => session,
+                None => state["owner"].as_str().unwrap_or(""),
+            };
+            if !cap_key.is_empty() && key == cap_key { mine += 1; }
         }
-        // Node capacity is the supervisor's queue (Slot::acquire below): a new operation waits there
-        // instead of being refused. What is refused HERE is one session taking more than its share, so
-        // the rest of the node keeps working while it holds one - and the refusal says whose share it
-        // is (session isolation, finding 7). One admission path: retire, ceiling, share, then queue.
-        if mine >= PER_SESSION_MAX {
+        // The node's cap is the supervisor's QUEUE (Slot::acquire below): a start past MAX_ACTIVE is
+        // admitted and waits there instead of being refused, so `live >= MAX_ACTIVE` is never an
+        // admission answer here. What is decided at admission is whose share this is: one session - or
+        // one runtime owner, for a start that names no session - may not take more than
+        // PER_SESSION_MAX of the node's slots, running or queued, and the refusal says whose share it
+        // is (session isolation, finding 7). One admission path: retire, ceiling, share, then the queue.
+        if !spec.control && !cap_key.is_empty() && mine >= PER_SESSION_MAX {
             return Err(error(format!(
                 "operation_capacity_shared: this session already holds {mine} operation slots (its share is {PER_SESSION_MAX} of {MAX_ACTIVE}); settle or cancel one, or wait for it to finish"
             )));
@@ -618,6 +722,14 @@ impl Manager {
         if let Some(source) = &spec.cwd_source {
             state["cwd_source"] = json!(source);
         }
+        // Which of the node's own variables this child will NOT inherit, and where to re-grant one: a deny
+        // list a caller cannot see looks like a bug ("gh says the token is empty") rather than a policy
+        // (session isolation, finding 5 round 2).
+        let withheld = withheld_env();
+        if !withheld.is_empty() {
+            state["env_withheld"] = json!(withheld);
+            state["env_withheld_note"] = json!(withheld_note(&withheld));
+        }
         state["owner_boot"] = json!(index.boot);
         state["owner_process_id"] = json!(std::process::id());
         state["effective_cwd"] = json!(fs::canonicalize(&spec.cwd)?.to_string_lossy().replace('\\', "/"));
@@ -631,6 +743,7 @@ impl Manager {
             index,
             cancel: AtomicBool::new(false),
             demote: AtomicBool::new(false),
+            control: spec.control,
             state: Mutex::new(state),
             settled: Condvar::new(),
             started: Instant::now(),
@@ -660,7 +773,7 @@ impl Manager {
                     // One of the node's slots, waited for if the node is busy (and the command runs at
                     // low CPU priority: Process::spawn). Acquired here, after admission, so the caller
                     // holds its receipt immediately and the wait belongs to the operation.
-                    let slot = Slot::acquire(&entry, &dir)?;
+                    let slot = Slot::acquire(&entry, &dir, entry.control)?;
                     if entry.started.elapsed() >= Duration::from_millis(entry.deadline_ms.load(Ordering::Acquire)) {
                         return Err(error("deadline_exceeded"));
                     }

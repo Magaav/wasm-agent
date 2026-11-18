@@ -641,9 +641,23 @@ fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
     ));
     state
 }
+/// The names this node's policy re-grants to tool children: "tool_env_allow": ["GH_TOKEN", ...] in the
+/// grant policy file (wa_features::policy_path). Read here, once, because this is where the one manager
+/// every tool child crosses is built; the deny list itself lives in wa-operation.
+fn tool_env_allow() -> Vec<String> {
+    let path = wa_features::policy_path();
+    let Ok(raw) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { return Vec::new() };
+    value["tool_env_allow"].as_array().map(|items| items.iter()
+        .filter_map(|item| item.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
 pub fn manager() -> &'static Manager {
     static MANAGER: OnceLock<Manager> = OnceLock::new();
     MANAGER.get_or_init(|| {
+        // A name the operator lists is handed to tool children again; every other name the deny rule
+        // matches stays withheld (session isolation, finding 5 round 2).
+        wa_operation::set_env_allow(tool_env_allow());
         let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
         Manager::new(home.join(".wasm-agent/operations"))
             // A shell whose recorded directory is gone starts in the agent home, and says so in
@@ -1001,13 +1015,17 @@ pub fn foreground(
 /// find it" was not a boundary either (session isolation, finding 2). Lua decides *who* the session is
 /// and whether it holds a node scope (`lua/core/session_scope.lua`); this decides what the runtime does
 /// with that answer, which is the half that must not be skippable by a caller that forgets.
-pub(crate) struct Caller { session: String, node: bool }
+pub(crate) struct Caller { session: String, node: bool, owner: String }
 
 impl Caller {
     pub(crate) fn from(args: &Value) -> Self {
         Self {
             session: args["session"].as_str().unwrap_or("").to_string(),
             node: args["node_scope"] == true,
+            // The runtime owner this caller started work under (lua/core/tools.lua stamps
+            // ctx.session_id or the user id; a node tool names its own). It is the cap key and the
+            // ownership key for a caller that is not a session (item 7, round 2).
+            owner: args["owner"].as_str().unwrap_or("").to_string(),
         }
     }
     /// The node's own supervisor (the sentinel's node-wide reads) names no session and no node scope:
@@ -1022,11 +1040,26 @@ impl Caller {
         // A session may act on what it recorded, and on nothing else - and a session can never claim an
         // operation that recorded no session at all.
         if self.session.is_empty() {
-            // Two nameless callers are not two sessions: an operation that recorded no session belongs to
-            // the caller that also has none (a script, the node's own supervisor at a terminal, a route
-            // that is not a conversation). Isolating them from each other would break the node's own
-            // tooling without protecting anybody.
-            return owner.is_empty();
+            // A SESSIONLESS CALLER IS NOT A NODE-WIDE CALLER (item 7, round 2). Round 1 answered "every
+            // operation that recorded no session is mine", which is the same "everything on the node"
+            // answer this finding removed, only spelled with an empty session. The honest rule is the
+            // runtime OWNER: a sessionless caller owns the work started under its own owner (worker:N, a
+            // read-MCP session, a user id) and nothing else. A caller that names no owner at all owns the
+            // rows that also name none - which is the node's own supervisor and nothing wider.
+            let runtime_owner = state["owner"].as_str().unwrap_or("");
+            if self.owner.is_empty() {
+                // A caller that names NO owner is this process's own tooling (a script, host.exec, the
+                // sentinel). It owns the rows nobody named: an empty owner, and the runtime's own
+                // foreground identity (worker:<n>), which no caller can choose and no session can be. It
+                // still does not own a row a session named, nor one another NAMED owner started (a
+                // read-MCP session, a user id, a worker of another process).
+                // The runtime's own foreground identity counts only for a row that named NO session: a
+                // bash a session started is promoted with owner worker:<n> AND its session, and it is that
+                // session's row, not the node tooling's.
+                return runtime_owner.is_empty()
+                    || (runtime_owner.starts_with("worker:") && owner.is_empty());
+            }
+            return runtime_owner == self.owner;
         }
         owner == self.session
     }
@@ -1132,6 +1165,10 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // read (the first hole of this round, docs/VAULT.md).
             seal_request(&mut launch, args.get("vault_approval").unwrap_or(&Value::Null), vault_launch)?;
             let mut admitted = launch_context(launch, &args["_launch_cwd"]);
+            // A CONTROL start (the node's own short read) is the only kind admitted into the two slots
+            // no workload may hold (item 7, round 2). lua/core/tools.lua clears this key on a model
+            // call, so it comes from the node's read paths only.
+            admitted.control = args["control"] == true;
             // The session that asked owns what it started, even when the launch context did not carry it
             // (`launch_cwd` does; a caller that passes its own provenance may not).
             if admitted.session.is_empty() {
@@ -1196,9 +1233,10 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         // the operator's alone (session isolation, findings 2 and 8).
         "relevant" => {
             let cwd = args["cwd"].as_str().unwrap_or("");
-            // `"*"` is the whole node. A session may not ask it; the node's own tooling (a sessionless
-            // caller: the workspace release path, a script) is not a session and keeps working.
-            if cwd == "*" && !caller.node_wide() && !caller.session.is_empty() {
+            // `"*"` is the whole node, so it is the node scope's question and nobody else's - not a
+            // session's, and not a sessionless caller's either: a caller that is not a session is not
+            // node-wide (item 7, round 2). The release path asks about ONE path and needs no scope.
+            if cwd == "*" && !caller.node_wide() {
                 return Ok(json!({"ok":false,"error":"relevant_node_scope_required","effect":"none",
                     "note":"relevant with cwd:\"*\" asks about every path on the node: it needs an explicit node scope (scope:\"node\", operator only)"}));
             }
@@ -1217,9 +1255,11 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             // left to compare against, and the caller is deciding about effects it did not run. That is
             // the operator's action, so it needs the explicit node scope, which is audited in Lua
             // (session isolation, finding 2).
-            // A SESSION may not reconcile work it did not run; the node's own recovery path (a sessionless
-            // caller, which is how a reconciler process is started) keeps the action.
-            if !caller.node_wide() && !caller.session.is_empty() {
+            // NOT EVEN A SESSIONLESS CALLER reconciles without the scope (item 7, round 2): settling an
+            // operation nobody is left to answer for is the operator's act, and the node's own reconciler
+            // process holds the scope on its own behalf (it passes node_scope itself, and the audit line
+            // names the tool). What the empty session bought was a path around the decision.
+            if !caller.node_wide() {
                 return Ok(json!({"ok":false,"error":"reconcile_node_scope_required","effect":"none",
                     "note":"reconciling settles an operation whose owner process is gone, so the request names no live session: it needs an explicit node scope (scope:\"node\", operator only)"}));
             }
@@ -1350,7 +1390,10 @@ pub fn health() -> Value {
 /// (session isolation, finding 9). The aggregate is a count: no id, no owner, no session of anybody
 /// else's.
 pub fn health_scope(session: &str) -> Value {
-    let caller = Caller { session: session.to_string(), node: session.is_empty() };
+    // No conversation named IS the node supervisor's own view here, and that is the one place it is: this
+    // is /health, the sentinel's "is anything overdue?" question, not a tool call. A sessionless TOOL caller
+    // is not node-wide (item 7, round 2) - which is why the operation tool does not construct this.
+    let caller = Caller { session: session.to_string(), node: session.is_empty(), owner: String::new() };
     let mut mine = Vec::new();
     let mut elsewhere = 0usize;
     if let Some(items) = manager().list().as_array() {

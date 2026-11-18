@@ -232,9 +232,14 @@ fn in_session_tree(tasks: &std::collections::HashMap<String, Task>, task: &Task,
     for _ in 0..64 {
         if cursor.is_empty() { return false; }
         if cursor == session { return true; }
-        match tasks.get(&cursor) {
-            Some(parent) if parent.owner_user == owner => cursor = parent.parent_session_id.clone(),
-            _ => return false,
+        // THE KEY IS THE CHILD ID, NOT THE SESSION ID. This used to climb with tasks.get(&cursor), where
+        // cursor is a SESSION id and the map is keyed by SUBAGENT id: the first step off a child never
+        // resolved, so a session could reach its own child and never a grandchild - the exact case the
+        // finding is about (item 4, round 2). The parent of this chain is the task whose own CHILD SESSION
+        // is the cursor.
+        match tasks.values().find(|parent| parent.session_id == cursor && parent.owner_user == owner) {
+            Some(parent) => cursor = parent.parent_session_id.clone(),
+            None => return false,
         }
     }
     false
@@ -1355,6 +1360,46 @@ mod tests {
         assert!(manager.find(&id, "alice", "").is_ok());
         // A different user is refused on both counts.
         assert!(manager.find(&id, "mallory", "session-a").is_err());
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    #[test]
+    fn a_grandchild_is_reachable_from_the_session_at_the_root() {
+        // THREE LEVELS, the shape the finding is about: the orchestrator starts a child, the child starts a
+        // grandchild. The map is keyed by SUBAGENT id and the chain carries SESSION ids, so the climb has
+        // to find the parent task BY ITS CHILD SESSION. The round-1 code looked a session id up in the map
+        // of child ids, failed on the first step off a child, and left every grandchild unreachable while
+        // its own one-level test still passed (item 4, round 2).
+        let manager = Arc::new(Manager::with_root(temp_root("session-tree-three"), 4, 8));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let wait = gate.clone();
+        let _ = manager.runner.set(Arc::new(move |_| {
+            let mut open = wait.0.lock().unwrap();
+            while !*open { open = wait.1.wait(open).unwrap(); }
+            Ok(json!({"state":"completed"}))
+        }));
+        let mut child = spec("root-child", "alice", "");
+        child["parent_session_id"] = json!("session-root");
+        let child = manager.start(&child).expect("the child starts");
+        let child_id = child["subagent_id"].as_str().unwrap().to_string();
+        let child_session = child["session_id"].as_str().unwrap().to_string();
+        let mut grandchild = spec("root-grandchild", "alice", "");
+        grandchild["parent_session_id"] = json!(child_session);
+        let grandchild_id = manager.start(&grandchild).expect("the grandchild starts")["subagent_id"]
+            .as_str().unwrap().to_string();
+        // The orchestrator sees both of them: its own child, and the child's child.
+        assert_eq!(manager.list("alice", "session-root")["count"], json!(2), "the root session lists its subtree");
+        assert!(manager.find(&child_id, "alice", "session-root").is_ok());
+        assert!(manager.find(&grandchild_id, "alice", "session-root").is_ok(), "the root reaches its grandchild");
+        assert!(manager.await_task(&grandchild_id, "alice", "session-root", 1).is_ok(), "and awaits it");
+        assert!(manager.cancel(&grandchild_id, "alice", "session-root").is_ok(), "and cancels it");
+        // The child itself reaches its own child, and nothing above it.
+        assert!(manager.find(&grandchild_id, "alice", &child_session).is_ok());
+        assert!(manager.find(&child_id, "alice", &child_session).is_err(), "a child cannot reach its parent");
+        // A sibling session of the same user sees neither.
+        assert_eq!(manager.list("alice", "session-sibling")["count"], json!(0));
+        assert!(manager.find(&grandchild_id, "alice", "session-sibling").is_err());
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
     }

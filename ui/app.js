@@ -2684,8 +2684,12 @@ async function refreshOperationProgress(health, running) {
       const response = await fetch("operation", {
         method: "POST",
         headers: apiHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({ action: "read", id: operation.operation_id, stream: "stdout",
-          session_id: chatSession, offset: Math.max(0, bytes - 2048), limit: 2048 }),
+        // The window is an OPERATOR SURFACE and asks for the node scope by name (session isolation,
+        // item 7 round 2): /operation no longer takes a session from the body, and a scope-less operator
+        // credential is answered as a sessionless caller (its own work only). The grant is audited on the
+        // node; the conversation a row belongs to is still matched below, by session.
+        body: JSON.stringify({ action: "read", id: operation.operation_id, stream: "stdout", scope: "node",
+          offset: Math.max(0, bytes - 2048), limit: 2048 }),
       });
       if (response.ok) {
         const page = await response.json();

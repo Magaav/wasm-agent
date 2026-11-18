@@ -436,7 +436,9 @@ M.admin = {
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 },
-    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." }
+    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." },
+    scope = { type = "string", enum = { "node" },
+      description = "Only for an operator surface or a session the operator has marked mastermind: scope=\"node\" reaches every session's operations on this node, and is written to the audit journal. A model call in an ordinary session is refused (scope_node_forbidden) and does not get it; read your own operations without a scope." }
   }, {"action"}),
   schema("read", "Read text with line/byte continuation, or a PNG/JPEG/WebP/GIF (up to 4 MB) as an image. Ask for the range you need and follow next_offset/next_column with `version` until eof. A whole-line page returns `selection` and `edit_lines`, the receipt edit's range_edits form takes.", {
     path = { type = "string" },
@@ -1557,6 +1559,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- `scope:"node"` - the operator's alone, audited - is the one way to act beyond it.
     local grant, refusal = dofile('lua/core/session_scope.lua').grant(memory, args, ctx, role, user_id, name)
     if refusal then return refusal end
+    -- A CONTROL start is the node's own short read and is the only kind admitted into the two slots no
+    -- workload may hold (finding 7). It is a property of the read path, never of the model's arguments:
+    -- dropped here, so no tool call can claim the reserve (item 7, round 2).
+    args.control = nil
     args.owner = ctx.session_id or user_id
     -- A vault entry reaches a child only through the kernel's own MCP launch (lua/core/mcp.lua), never a
     -- tool call: a model that could name an entry here could start a program that prints it. The
@@ -1696,7 +1702,10 @@ function M.dispatch(memory, name, args, role, ctx, cwd_provenance)
     -- Deleting is reading's sibling: an id is not an authorization (session isolation, finding 10). The
     -- scope the fact lives in decides, and a guest may only delete what it could have read - its own
     -- `user:<id>`. An id that names no live row answers the same way a wrong one does.
-    local allowed, why = memory.may_delete and memory.may_delete(args.id, guest_scope) or true, nil
+    -- NOT a collapsed conditional: "a and f() or true" is true whenever f() returns false, so the
+    -- refusal could never fire - the one line this whole finding rested on (item 1, round 2).
+    local allowed, why = true, nil
+    if memory.may_delete then allowed, why = memory.may_delete(args.id, guest_scope) end
     if not allowed then
       return { error = why or "forget_forbidden_scope", effect = "none", id = args.id,
         note = "this memory is not in a scope you may delete from; a scoped caller deletes only its own facts" }

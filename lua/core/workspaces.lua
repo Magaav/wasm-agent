@@ -730,7 +730,9 @@ function M.release(memory,id,user_id,expected_head)
     -- Only unresolved operations relevant to the actual canonical cwd are read;
     -- unknown legacy attribution remains a blocker, never a cleanup exemption.
     if not host.operation then return nil,'workspace_release_operations_unavailable' end
-    local lookup_ok,raw=pcall(host.operation,'relevant',json.encode({cwd=canonical,limit=1}))
+    -- Asked AS THE SESSION whose tree this is (session isolation, item 8 round 2): a query that names no
+    -- session is answered conservatively about the whole node, which cannot decide about this path.
+    local lookup_ok,raw=pcall(host.operation,'relevant',json.encode({cwd=canonical,limit=1,session=id}))
     local decoded_ok,operations=pcall(json.decode,raw or '')
     if not lookup_ok or not decoded_ok or type(operations)~='table' or operations.ok~=true then
       return nil,'workspace_release_operations_unavailable:'..tostring(type(operations)=='table' and operations.error or raw)
@@ -832,7 +834,11 @@ function M.reconcile_release(memory,id,user_id,evidence)
       if not pinned then return nil,'workspace_reconcile_missing_ref_without_pinned_tip' end
       if not run('git merge-base --is-ancestor '..assert(quote(pinned))..' refs/remotes/origin/main',source) then return nil,'workspace_release_unmerged_commits' end
     end
-    local lookup=json.decode(host.operation('relevant',json.encode({cwd=expected,limit=1})))
+    -- THE FENCE ASKS AS THE SESSION IT IS PROTECTING. A sessionless caller is not node-wide (item 7 round
+    -- 2), so a query that names no session is answered with the conservative "every empty-cwd row is
+    -- relevant" rule and with nothing that says whose work it is; naming the session is what makes this a
+    -- real fence for this tree rather than a guess about the whole node.
+    local lookup=json.decode(host.operation('relevant',json.encode({cwd=expected,limit=1,session=id})))
     if type(lookup)~='table' or lookup.ok~=true or type(lookup.operations)~='table' then return nil,'workspace_release_operations_unavailable' end
     if #lookup.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(lookup.operations[1].operation_id) end
     if lookup.truncated then return nil,'workspace_release_operations_incomplete' end
@@ -875,7 +881,7 @@ function M.reconcile_park(memory,id,user_id,expected_head,evidence,perform_detac
       local valid,why=verify_binding(memory,id,workspace)
       if not valid then return nil,why end
       if not run('git merge-base --is-ancestor '..assert(quote(expected_head))..' refs/remotes/origin/main',expected) then return nil,'workspace_release_unmerged_commits' end
-      local active=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1})))
+      local active=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1,session=id})))
       if type(active)~='table' or active.ok~=true or type(active.operations)~='table' or active.truncated then return nil,'workspace_release_operations_unavailable' end
       if #active.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(active.operations[1].operation_id) end
       workspace.state='parking';memory.set_session_workspace(id,workspace)
@@ -891,7 +897,7 @@ function M.reconcile_park(memory,id,user_id,expected_head,evidence,perform_detac
     if not head or trimmed(head.stdout)~=expected_head then return nil,'workspace_park_head_moved' end
     local merged=run('git merge-base --is-ancestor '..assert(quote(expected_head))..' refs/remotes/origin/main',expected)
     if not merged then return nil,'workspace_release_unmerged_commits' end
-    local lookup=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1})))
+    local lookup=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1,session=id})))
     if type(lookup)~='table' or lookup.ok~=true or type(lookup.operations)~='table' then return nil,'workspace_release_operations_unavailable' end
     if #lookup.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(lookup.operations[1].operation_id) end
     if lookup.truncated then return nil,'workspace_release_operations_incomplete' end
@@ -940,7 +946,7 @@ function M.quarantine_park(memory,id,principal,authorization_sha256)
     local head=run('git rev-parse HEAD',expected_path);local branch=run('git rev-parse --abbrev-ref HEAD',expected_path)
     if not head or trimmed(head.stdout)~=item.head or not branch or trimmed(branch.stdout)~=item.actual_branch then return nil,'quarantine_tip_or_branch_moved' end
     if not run('git merge-base --is-ancestor '..assert(quote(item.head))..' refs/remotes/origin/main',expected_path) then return nil,'workspace_release_unmerged_commits' end
-    local lookup=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1})))
+    local lookup=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1,session=id})))
     if lookup.ok~=true or type(lookup.operations)~='table' or #lookup.operations>0 or lookup.truncated then return nil,'quarantine_operation_fence_unresolved' end
     -- Preserve all original binding bytes and authorized branch/source differences.
     local latest=memory.session_workspace(id)

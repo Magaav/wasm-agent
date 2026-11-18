@@ -35,10 +35,16 @@ fn an_operation_that_recorded_no_directory_is_relevant_only_to_its_session() {
     // The operator's node scope is what reaches the others.
     let node = ids(index.relevant("/work/tree", "", 16, "session-a", true).unwrap());
     assert!(node.contains(&"op-bno".to_string()), "a node scope sees every session's: {node:?}");
-    // A sessionless caller sees neither session's rows, and a caller with no session claims nothing.
+    // A caller that is NOT a session keeps the OLD, conservative answer: a row with no directory may be
+    // about this path, so it is relevant to every path. Round 1 skipped those rows for a sessionless
+    // caller too, which turned the release fence off for exactly the caller that uses it (item 8, round 2).
     let anonymous = ids(index.relevant("/work/tree", "", 16, "", false).unwrap());
-    assert!(!anonymous.contains(&"op-ano".to_string()) && !anonymous.contains(&"op-bno".to_string()),
-        "an unnamed caller is not handed a session's operation: {anonymous:?}");
+    assert!(anonymous.contains(&"op-ano".to_string()) && anonymous.contains(&"op-bno".to_string()),
+        "a sessionless caller is answered conservatively, not handed nothing: {anonymous:?}");
+    // ... while a caller that IS some other session is not shown a sessionless row it cannot name.
+    let stranger = ids(index.relevant("/work/tree", "", 16, "session-c", false).unwrap());
+    assert!(!stranger.contains(&"op-ano".to_string()) && !stranger.contains(&"op-bno".to_string()),
+        "another session is not blocked by a row it did not run: {stranger:?}");
     let _ = fs::remove_dir_all(&root);
 }
 

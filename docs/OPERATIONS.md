@@ -19,6 +19,33 @@ No user/login profiles or global PATH edits. Missing required utilities refuse
 before effects. Other shells/non-Windows behavior and CREATE_NO_WINDOW containment
 remain unchanged. See [SENTINEL.md](SENTINEL.md).
 
+## What a tool child never inherits (the environment deny rule)
+
+Every tool child - `bash`, `operation start`, a build, a test, a deploy - inherits the node's environment
+minus a policy list. The rule is in `rust/wa-operation` (`DENY_ENV`, `DENY_ENV_SUFFIXES`), and it is
+applied at the one boundary every child crosses, before `spec.env` is added, so a child that is granted a
+name still gets it:
+
+- exact names: `WA_VAULT_ADMIN_TOKEN`, `WASM_AGENT_VAULT_ADMIN_TOKEN`, `WASM_AGENT_PROMPT_CACHE_KEY`,
+  `WASM_AGENT_LLM_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `API_KEY`;
+- by shape, so a new provider is covered without a release: any name ending `_API_KEY`, `_TOKEN`,
+  `_SECRET` or `_PASSWORD`.
+
+A node re-grants named variables in its own policy file: `"tool_env_allow": ["GH_TOKEN"]` in `policy.json`
+(`WA_GRANT_POLICY`). The allow-list re-grants **exact names only** - allowing `GH_TOKEN` does not allow
+every `*_TOKEN`, which is the point of listing them.
+
+**openclaw publishes releases with `gh`.** `gh` reads `GH_TOKEN` from its environment, so that node's
+`policy.json` must list it:
+
+    { "tool_env_allow": ["GH_TOKEN"] }
+
+Without that line the token is withheld (correctly) and a `gh release` inside a tool child fails with an
+authentication error. Every operation record says what was withheld, so the failure is diagnosable rather
+than mysterious: an operation carries `"env_withheld": ["GH_TOKEN"]` and `env_withheld_note` naming the
+variable and the key to add (`withheld_from_tool_children: GH_TOKEN - ...`). The list is computed once per
+process from the node's own environment, so it names only variables this node actually holds.
+
 ## Contract and implementation
 
 `rust/wa-operation` owns shell process lifetime and output independently of Lua.

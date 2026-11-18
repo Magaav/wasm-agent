@@ -29,11 +29,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- piped `wa chat` closed its caller's own row). The row is written by the process that serves the
 -- session, refreshed while it works and deleted by its owner; a reader (scripts/lib/landing-queue.mjs)
 -- treats it as one more claim, never as the only evidence.
+-- @@lease@@ is the RUN that holds the row, not the process: inside one @@wa serve@@ every run shares one
+-- pid, so a pid cannot tell "this run is already serving it" from "another run is" (session isolation,
+-- item 6 round 2). A row written before this column existed has '' and the old pid+boot rule still
+-- decides about it.
 CREATE TABLE IF NOT EXISTS session_presence (
   session_id TEXT PRIMARY KEY,
   pid INTEGER NOT NULL,
   boot TEXT NOT NULL DEFAULT '',
   role TEXT NOT NULL DEFAULT '',
+  lease TEXT NOT NULL DEFAULT '',
   started_at REAL NOT NULL,
   heartbeat_at REAL NOT NULL);
 
