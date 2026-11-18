@@ -66,6 +66,10 @@ transport.
 | `node scripts/check-deploy-docs.mjs` | 6 | ok |
 | `cargo test -p wa-host build_info` | 4 | ok |
 
+A bug the tests found, and fixed: `build.rs` read an empty `git status --porcelain` (a CLEAN tree) as a git
+failure, so every clean build reported `dirty=unknown` - the wrong answer in the one field a deploy could use to
+ask "are these bytes exactly this commit?". `test-build-info.sh` caught it on its first run against a clean tree.
+
 Also verified by hand: the built binary reports `commit=74d48431…`, `tree=8a946b5c…`, `dirty=true` (the tree was
 being edited), `ancestors=137`; `--contains` answers 0 for itself and 1 for an absent commit.
 
