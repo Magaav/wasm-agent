@@ -253,7 +253,7 @@ age_of() { # <epoch seconds, maybe fractional> -> whole seconds ago, or -1
 # never be mistaken for a writer row - those start with the session id.
 cannot_tell() { printf '! cannot-tell %s\n' "$1"; }
 node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><age><TAB><cwd>"
-  local home db rows sid pid age cwd
+  local home db rows sid pid age cwd mdir wtdir why=''
   home=${MISSION_NODE_HOME:-$HOME/.wasm-agent}
   db=$home/memory.db
   command -v sqlite3 >/dev/null 2>&1 || {
@@ -264,6 +264,13 @@ node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><
     "select session_id, pid, cast(strftime('%s','now')-heartbeat_at as int) from session_presence" 2>/dev/null) || {
     cannot_tell "$db could not be queried for session_presence (locked, or no such table)"; return 2; }
   [ -n "$rows" ] || return 0
+  # THE PATHS THIS READ COMPARES ARE RESOLVED FIRST (round 7). /proc/<pid>/cwd reports where a process really
+  # is, so a mission tree reached through a symlink (MISSIONS_DIR a link, or one under a linked directory) read
+  # back as the path it points at, the bare string compare below said "another directory", and a writer was
+  # scored as no writer at all: a launch beside it. 'cd ... && pwd -P' asks the kernel the same question the
+  # kernel answered.
+  mdir=$(cd "$1" 2>/dev/null && pwd -P) || mdir=$1
+  wtdir=$(cd "$2" 2>/dev/null && pwd -P) || wtdir=$2
   while IFS='|' read -r sid pid age; do
     [ -n "$sid" ] || continue
     case $pid in
@@ -271,12 +278,13 @@ node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><
         # A row the node keeps with no process in it. Which process serves that session - and so WHERE it
         # works - cannot be told, and "no pid" is not "no writer": round 6 measured that '|| continue' here
         # skipped such a row, node_presence answered "no writer", mission_run answered 'released', and
-        # start launched beside a session the node still records.
-        cannot_tell "session $sid has a session_presence row with an empty pid, so the process serving it - and the directory it works in - cannot be told"
-        return 2 ;;
+        # start launched beside a session the node still records. Round 7: the row is REMEMBERED and the scan
+        # goes ON - a row this read cannot place must not hide the writer rows further down the table.
+        why="$why session $sid has a session_presence row with an empty pid, so the process serving it - and the directory it works in - cannot be told;"
+        continue ;;
       *[!0-9]*)
-        cannot_tell "session $sid has a session_presence row whose pid is not a number [$pid], so the process serving it cannot be looked up at all"
-        return 2 ;;
+        why="$why session $sid has a session_presence row whose pid is not a number [$pid], so the process serving it cannot be looked up at all;"
+        continue ;;
     esac
     cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
     if [ -z "$cwd" ]; then
@@ -285,18 +293,21 @@ node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><
       # kernel without /proc/<pid>/cwd) leaves it working somewhere this read cannot see - which is 'unknown',
       # not 'no writer' (round 5: '|| continue' let such a live process through as if it had exited).
       if [ -d "/proc/$pid" ]; then
-        cannot_tell "pid $pid (session $sid) is running and /proc/$pid/cwd cannot be read - another user's process, or hidepid - so the directory it works in cannot be told"
-        return 2
+        why="$why pid $pid (session $sid) is running and /proc/$pid/cwd cannot be read - another user's process, or hidepid - so the directory it works in cannot be told;"
       fi
       continue                        # the process is gone: no writer
     fi
     case $cwd in
-      "$1"|"$1"/*|"$2"|"$2"/*) printf '%s\t%s\t%s\t%s\n' "$sid" "$pid" "${age:--1}" "$cwd" ;;
+      "$mdir"|"$mdir"/*|"$wtdir"|"$wtdir"/*) printf '%s\t%s\t%s\t%s\n' "$sid" "$pid" "${age:--1}" "$cwd" ;;
     esac
   done <<<"$rows"
+  # EVERY ROW READ, then one answer for the rows that could not be placed (round 7). Returning 2 at the first
+  # of them answered 'unknown' for a read that had a writer further down the table - and that writer is the
+  # node's own word about a live process working in this mission's directory, so 'unknown' threw away the one
+  # fact the read did get.
+  [ -z "$why" ] || { cannot_tell "${why# }"; return 2; }
   return 0
 }
-
 # The writer the mission never recorded. The node keeps, per session, the OS process serving it and a
 # heartbeat ('session_presence' in memory.db: session_id, pid, boot, heartbeat_at), and that process's
 # own cwd is the node's answer to "which directory is this session working in": the runner cds to the
@@ -478,13 +489,17 @@ release_lock() { # <mission dir> <by> <why>
 # run the node has already settled. It closes the window in which two starts could both find no
 # session. It is never the reason a mission is called running, and it is never killed.
 alive_launcher() { # <mission dir>
-  local pid cwd
+  local pid cwd mdir
   [ -s "$1/run.pid" ] || return 1
   pid=$(cat "$1/run.pid" 2>/dev/null) || return 1
   case $pid in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
   cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || return 0
-  [ "$cwd" = "$1" ]
+  # /proc reports the directory a process is really in, and $1 may be that same directory reached through a
+  # symlink. Resolved before the compare, or a launcher standing in the mission dir reads as some other
+  # process and the launch beside it goes ahead (round 7).
+  mdir=$(cd "$1" 2>/dev/null && pwd -P) || mdir=$1
+  [ "$cwd" = "$mdir" ]
 }
 
 # The launch THIS mission's start started, recorded as $! before the runner could write anything. The runner
@@ -502,16 +517,20 @@ alive_launcher() { # <mission dir>
 #         file is stale, and a stale number must not refuse a launch forever)
 #   rc 2  a live pid whose cmdline AND cwd cannot be read: whether it is this mission's runner cannot be told
 launch_alive() { # <mission dir>
-  local pid cmd cwd
+  local pid cmd cwd mdir
   [ -s "$1/launch.pid" ] || return 1
   pid=$(cat "$1/launch.pid" 2>/dev/null) || return 1
   case $pid in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
+  # Both witnesses are compared with the resolved directory as well as the given one (round 7): the runner's
+  # cmdline names the path start was handed, /proc reports the path that points at, and a mission tree reached
+  # through a symlink is one directory with two spellings.
+  mdir=$(cd "$1" 2>/dev/null && pwd -P) || mdir=$1
   cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-  case $cmd in *"$1/run.sh"*) return 0 ;; esac
+  case $cmd in *"$1/run.sh"*|*"$mdir/run.sh"*) return 0 ;; esac
   [ -n "$cmd" ] && return 1        # alive, but another program holds that number: the file is stale
   cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
-  [ "$cwd" = "$1" ] && return 0
+  case $cwd in "$1"|"$mdir") return 0 ;; esac
   return 2
 }
 
@@ -888,7 +907,13 @@ cmd_verify() {
   check_name "$name"
   local M; M=$(m_dir "$name")
   mission_run "$M"
-  [ "$MR_VERDICT" = active ] && die "a run is in flight ($MR_WHY): verify after it settles, or it competes for the worktree"
+  # ONE ANSWER HERE TOO (round 7). verify runs a command in the worktree, so it competes with a writer exactly
+  # as a launch does, and 'active' was its only refusal: an 'unknown' read (a presence row that cannot be
+  # placed, a node that could not be asked) and a 'stale' leftover both ran cargo beside a possible writer in
+  # that worktree. Unknown is never yes - the same rule start and clean already keep.
+  [ "$MR_VERDICT" = released ] || refuse "$MR_VERDICT" \
+    "a verify runs a command in $M/wt, and this mission's run is not released: $MR_WHY" \
+    "$MR_CLEAR"
   enter "$M"                            # cd $WT, toolchain, codemode, this mission's target dir
   local log="$M/verify.log" rc
   printf -- '--- verify %s %s (cwd %s)\n' "$(date -u +%FT%TZ)" "$*" "$PWD" >>"$log"
@@ -906,6 +931,14 @@ cmd_clean() {
   check_name "$name"
   local M wt; M=$(m_dir "$name")
   [ -d "$M" ] || die "no mission at $M"
+  # ONE CLEAN AT A TIME, AND NEVER BESIDE A START (round 7). clean deleted the worktree and the mission's files
+  # while a start could be inside its check-and-launch on the same mission: that start's gate had already read
+  # the files this removal then took away, and it launched into a tree being cleaned. The same kernel lock
+  # start uses is taken first, over the whole check-and-remove, and a held lock refuses.
+  command -v flock >/dev/null 2>&1 || die "no flock on PATH (util-linux): a clean beside a start is a kernel lock, not a guess"
+  local LOCK=$M/start.flock
+  exec 9>>"$LOCK" || die "cannot open $LOCK"
+  flock -n 9 || die "refusing: another 'start' or 'clean' of $name is inside its check-and-launch right now (flock -n on $LOCK). Wait for it: 'scripts/mission.sh status $name' shows what that run did, and the kernel releases that lock when that start exits. There is nothing to clear."
   mission_run "$M"
   # ONE answer permits a clean - released - and every other one refuses by name (round 5). 'active' was the
   # only refusal, so a 'stale' row (a leftover record) and 'unknown' (a read that could not be made) went
@@ -932,7 +965,9 @@ cmd_clean() {
   fi
   release_lock "$M" clean "$MR_WHY"
   rm -f "$M/run.sh" "$M/run.pid" "$M/launch.pid"
-  rm -f "$M/start.flock"   # the file may stay; the LOCK is the kernel's, not the file's
+  # start.flock is NOT removed: this clean HOLDS that lock (fd 9 above), and deleting the file it holds leaves
+  # the next start locking a different inode - no exclusion at all. The file may stay; the lock is the kernel's,
+  # not the file's, and the kernel drops it when this clean exits (round 7).
   git -C "$REPO" worktree prune 2>/dev/null || true
   say "kept: $M (env, brief, prompt.md, out.log, err.log, lease.log, started, done, verify.log) and branch $(sed -n "s/^BRANCH='\(.*\)'$/\1/p" "$M/env" 2>/dev/null || echo '?') - its commits are the mission's result"
 }

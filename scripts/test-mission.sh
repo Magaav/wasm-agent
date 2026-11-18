@@ -15,6 +15,28 @@ MISSION=${MISSION_UNDER_TEST:-$ROOT/scripts/mission.sh}   # a saved head runs th
 WORK=$(mktemp -d)
 HOLD=''
 KIDS=''
+# WHAT THIS SWEEP MAY KILL (round 7): the processes this fixture started, and nothing else. Round 6 also killed
+# the number written in every $MISSIONS/*/run.pid and launch.pid without asking whose it was: a run killed
+# mid-flight leaves those files behind, the kernel hands the number out again, and the sweep SIGTERMed whatever
+# held it - on this node that can be a 'wa serve' of another session, a process nothing here is allowed to
+# touch. A pid is this fixture's when its own cmdline names this run's scratch dir ($WORK: a runner launched
+# here always does), or - for a pid this shell registered in KIDS - when the shell that forked it is this one.
+pid_sweep() { # the kill list: this fixture's own processes
+  local p cmd ppid
+  for p in ${KIDS-}; do
+    case $p in ''|*[!0-9]*) continue ;; esac
+    cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+    ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$p/status" 2>/dev/null)
+    case $cmd in *"$WORK"*) kill "$p" 2>/dev/null; continue ;; esac
+    [ -n "$ppid" ] && [ "$ppid" = "$$" ] && kill "$p" 2>/dev/null
+  done
+  for p in $(cat "$MISSIONS"/*/run.pid "$MISSIONS"/*/launch.pid 2>/dev/null); do
+    case $p in ''|*[!0-9]*) continue ;; esac
+    cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null) || continue
+    case $cmd in *"$WORK"*) kill "$p" 2>/dev/null ;; esac
+  done
+  return 0
+}
 cleanup() {
   if [ -n "${KEEP-}" ]; then printf 'kept %s\n' "$WORK"; return; fi
   exec 9>&- 2>/dev/null || true
@@ -25,10 +47,7 @@ cleanup() {
   # failed after the presence case, left its 'sleep 600' holding the pipe, and two harness shells sat on
   # that line for ten minutes; one of them then ran its own restore step over uncommitted work in this
   # tree. A fixture that fails must exit, not wedge the caller.
-  for p in ${KIDS-}; do kill "$p" 2>/dev/null; done
-  for f in "$MISSIONS"/*/run.pid "$MISSIONS"/*/launch.pid; do
-    [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null
-  done
+  pid_sweep
   chmod -R u+w "$WORK" 2>/dev/null
   rm -rf "$WORK"
 }
@@ -351,7 +370,9 @@ git -C "$REPO" show-ref --verify -q refs/heads/change/demo && ok || fail 'clean 
 [ -f "$MISSIONS/demo/lease.log" ] && ok || fail 'clean deleted the lease log'
 [ -f "$MISSIONS/demo/done" ] && ok || fail 'clean deleted the done marker'
 out=$(run clean demo) && ok || fail "the second clean should be a no-op: $out"
-[ -f "$MISSIONS/demo/start.flock" ] && fail 'clean left the start lock file' || ok
+# round 7: clean HOLDS start.flock while it removes the worktree, and a lock is the kernel's, not the file's -
+# deleting the file it holds would hand the next start a different inode. The file stays; the lock is gone.
+[ -f "$MISSIONS/demo/start.flock" ] && ok || fail 'clean deleted the start lock file it held'
 has "$out" 'already clean' 'the second clean says there is nothing to remove'
 
 # ================================================================ a mission staged before this script
@@ -827,22 +848,24 @@ sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id='$N
 out=$(run start nopid); has "$out" 'started nopid' 'with the row gone, the same mission launches'
 wait_done nopid || fail 'the launch after the empty-pid row wrote no done marker'
 
-# ================================================================ round 6, item 3: a writer row and a row that
-# cannot be placed, in ONE read. Round 5 sent that read's rc 2 straight to 'unknown' and threw away the writer it
-# had already named. The writer is the node's own word about a live process working in this mission's directory,
-# so it is the answer. The unplaceable half here is the empty-pid row of item 2, which is the same rc 2 whatever
-# order the scan meets the rows in.
+# ================================================================ round 6, item 3 + round 7, item 3: a writer row
+# and a row that cannot be placed, in ONE read. Round 5 sent that read's rc 2 straight to 'unknown' and threw away
+# the writer it had already named. The writer is the node's own word about a live process working in this
+# mission's directory, so it is the answer. The unplaceable half here is the empty-pid row of item 2, and it is
+# planted BEFORE the writer row on purpose: the node returns these rows in the order they were written, round 6
+# stopped the scan at the first row it could not place (so this same case passed only because the writer happened
+# to come first), and round 7 reads every row before it answers.
 out=$(run stage mixed main "$WORK/brief.md"); [ $? = 0 ] || fail "stage mixed: $out"
 mixed=$MISSIONS/mixed
 ( cd "$mixed" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &   # a real writer, working IN the mission dir
 MPID=$!
 KIDS="$KIDS $MPID"
 sleep 0.2
-presence abababab-3333-4444-5555-666666666666 "$MPID" 0
 UNPLACE=abababab-4444-5555-6666-777777777777
 sqlite3 "$NODEHOME/memory.db" \
   "insert into session_presence(session_id,pid,boot,role,started_at,heartbeat_at) values('$UNPLACE',NULL,'boot-free','master',strftime('%s','now'),strftime('%s','now'))" \
   || fail 'cannot plant the unplaceable row'
+presence abababab-3333-4444-5555-666666666666 "$MPID" 0
 s=$(status_of mixed)
 case "$(field "$s" run)" in active*) ok ;; *) fail "a writer beside a row that cannot be placed must read active, got: '$(field "$s" run)'" ;; esac
 has "$(field "$s" run)" 'abababab-3333-4444-5555-666666666666' 'the verdict names the writer, not only the row it could not place'
@@ -853,5 +876,117 @@ has "$out" 'abababab-3333-4444-5555-666666666666' 'and names that session'
 kill "$MPID" 2>/dev/null; wait "$MPID" 2>/dev/null
 sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id in ('abababab-3333-4444-5555-666666666666','$UNPLACE')" \
   || fail 'cannot drop the mixed-case presence rows'
+
+# ================================================================ round 7, item 2: verify runs a command in the
+# worktree, so it needs the permission a launch needs - 'released' - and nothing else. Round 6 refused only
+# 'active', so an 'unknown' read (a presence row that cannot be placed, a node that could not be asked) and a
+# 'stale' leftover both ran the command beside a possible writer in that worktree.
+out=$(run stage vunk main "$WORK/brief.md"); [ $? = 0 ] || fail "stage vunk: $out"
+vunk=$MISSIONS/vunk
+UNKROW=abababab-9999-8888-7777-666666666666
+sqlite3 "$NODEHOME/memory.db" \
+  "insert into session_presence(session_id,pid,boot,role,started_at,heartbeat_at) values('$UNKROW',NULL,'boot-free','master',strftime('%s','now'),strftime('%s','now'))" \
+  || fail 'cannot plant the unplaceable row for the verify case'
+s=$(status_of vunk)
+case "$(field "$s" run)" in unknown*) ok ;; *) fail "the verify case must read unknown first, got: '$(field "$s" run)'" ;; esac
+out=$(run verify vunk touch "$WORK/verify-unknown-ran") && fail 'verify ran its command on an unknown read' || ok
+has "$out" 'refusing [unknown]' 'verify names the state it refuses'
+has "$out" 'verify runs a command' 'and says what it would have run'
+[ -f "$WORK/verify-unknown-ran" ] && fail 'verify ran the command beside an unknown read' || ok
+[ -f "$vunk/verify.log" ] && fail 'a refused verify wrote its log' || ok
+sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id='$UNKROW'" || fail 'cannot drop the unplaceable row'
+out=$(run verify vunk touch "$WORK/verify-released-ran") && ok || fail "verify on a released mission must run its command: $out"
+[ -f "$WORK/verify-released-ran" ] && ok || fail 'the released verify did not run its command'
+# the leftover half: the node lists a run in flight and its boot lease can be taken, so the row is 'stale'
+node_session 13131313-2424-3535-4646-575757575757 unfinished 0 "mission vunk in $vunk/wt"
+printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master","run_id":"run-of-vstale","session_id":"13131313-2424-3535-4646-575757575757","state":"active","updated_at":%s}}\n' "$(now)" \
+  > "$STUB_STATE/steer.13131313-2424-3535-4646-575757575757"
+sqlite3 "$NODEHOME/resources/claims.sqlite" "insert into claims(key,boot) values('session:13131313-2424-3535-4646-575757575757','boot-free') on conflict(key) do update set boot=excluded.boot" \
+  || fail 'cannot give the leftover row a free boot'
+s=$(status_of vunk)
+case "$(field "$s" run)" in stale*) ok ;; *) fail "the verify case must read stale, got: '$(field "$s" run)'" ;; esac
+out=$(run verify vunk touch "$WORK/verify-stale-ran") && fail 'verify ran its command on a leftover (stale) run' || ok
+has "$out" 'refusing [stale]' 'the leftover refusal names its state'
+has "$out" 'clear it by hand' 'and gives the command that clears it by hand'
+[ -f "$WORK/verify-stale-ran" ] && fail 'verify ran the command beside a leftover run' || ok
+# the operator settles the row by hand: then, and only then, verify runs
+printf '{"note":"x","receipts":[],"target":{"boot":"boot-free","owner":"master","run_id":"run-of-vstale","session_id":"13131313-2424-3535-4646-575757575757","state":"settled","updated_at":%s}}\n' "$(now)" \
+  > "$STUB_STATE/steer.13131313-2424-3535-4646-575757575757"
+out=$(run verify vunk touch "$WORK/verify-settled-ran") && ok || fail "verify after the row was settled by hand: $out"
+[ -f "$WORK/verify-settled-ran" ] && ok || fail 'the settled verify did not run its command'
+
+# ================================================================ round 7, item 4: the mission tree reached through
+# a symlink. /proc/<pid>/cwd reports the path a directory really is, so the bare string compare against
+# MISSIONS_DIR answered "another directory" for a process working in this mission's own dir: a launch beside a
+# writer, and a launcher standing in the mission dir read as some other program.
+ln -s "$MISSIONS" "$WORK/link"
+runsym() { MISSION_REPO=$REPO MISSIONS_DIR=$WORK/link MISSIONS_TARGET_ROOT=$TARGET MISSIONS_TOOLCHAIN=$WORK/toolchain \
+  WA_BIN=$WORK/bin/wa MISSION_NODE_HOME=$NODEHOME bash "$MISSION" "$@" 2>&1; }
+out=$(runsym stage symm main "$WORK/brief.md"); [ $? = 0 ] || fail "stage symm through a symlinked missions dir: $out"
+symm=$MISSIONS/symm
+[ -d "$symm" ] && [ ! -L "$MISSIONS" ] && ok || fail 'the symlinked stage did not create the real mission dir'
+( cd "$symm" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &   # a writer IN the real mission dir
+SPID=$!
+KIDS="$KIDS $SPID"
+sleep 0.2
+presence aaaaaaaa-1212-3434-5656-787878787878 "$SPID" 0
+s=$(runsym status symm)
+case "$(field "$s" run)" in active*) ok ;; *) fail "a writer in the real mission dir must read active through a symlinked MISSIONS_DIR, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" 'aaaaaaaa-1212-3434-5656-787878787878' 'the verdict names that writer'
+out=$(runsym start symm) && fail 'a start through a symlinked missions dir must refuse beside that writer' || ok
+has "$out" 'refusing [active]' 'the symlinked start refusal names the writer'
+kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
+sqlite3 "$NODEHOME/memory.db" "delete from session_presence where session_id='aaaaaaaa-1212-3434-5656-787878787878'" \
+  || fail 'cannot drop the symlink-case presence row'
+# the launcher witness: run.pid names a process standing in the real mission dir
+( cd "$symm" && exec sleep 600 ) </dev/null >/dev/null 2>&1 &
+LP=$!
+KIDS="$KIDS $LP"
+sleep 0.2
+printf '%s\n' "$LP" > "$symm/run.pid"
+out=$(runsym start symm) && fail 'a launcher standing in the real mission dir must refuse a launch through a symlinked MISSIONS_DIR' || ok
+has "$out" 'refusing [launcher]' 'the launcher refusal names its state'
+has "$out" "$LP" 'and names the pid standing in the mission dir'
+kill "$LP" 2>/dev/null; wait "$LP" 2>/dev/null
+rm -f "$symm/run.pid"
+
+# ================================================================ round 7, item 5: clean takes the start lock before
+# it deletes anything, and never deletes the lock it holds. Round 6 removed the worktree while a start could be
+# inside its check-and-launch on the same mission - that start's gate had already read the files the removal then
+# took away - and then removed start.flock, the file the lock lives on, from under any holder.
+out=$(run stage cleank main "$WORK/brief.md"); [ $? = 0 ] || fail "stage cleank: $out"
+cleank=$MISSIONS/cleank
+( exec 9>>"$cleank/start.flock"; flock -n 9 || exit 9; sleep 30 ) &   # a start inside its window
+CKHOLD=$!
+KIDS="$KIDS $CKHOLD"
+sleep 0.2
+out=$(run clean cleank) && fail 'clean removed the worktree while a start held the start lock' || ok
+has "$out" 'start.flock' 'the refusal names the lock file'
+has "$out" 'refusing' 'and refuses instead of removing'
+[ -d "$cleank/wt" ] && ok || fail 'the refused clean removed the worktree anyway'
+[ -f "$cleank/run.sh" ] && ok || fail 'the refused clean deleted the mission files anyway'
+kill "$CKHOLD" 2>/dev/null; wait "$CKHOLD" 2>/dev/null
+out=$(run clean cleank) && ok || fail "the clean after the holder exited: $out"
+[ -d "$cleank/wt" ] && fail 'the clean left the worktree' || ok
+[ -f "$cleank/start.flock" ] && ok || fail 'clean deleted the lock file it holds'
+
+# ================================================================ round 7, item 1: the EXIT sweep kills what this
+# fixture started and nothing else. Round 6 killed the number written in every $MISSIONS/*/run.pid and launch.pid:
+# a killed run leaves those files behind, the kernel hands the number to another program, and the sweep
+# SIGTERMed it - on this node that can be a 'wa serve' of another session. The sweep is run here through the very
+# cleanup the trap calls, against a scratch dir of its own.
+SWEEP=$WORK/sweep
+mkdir -p "$SWEEP/missions/old"
+( exec -a "bash $SWEEP/missions/old/run.sh" sleep 600 ) </dev/null >/dev/null 2>&1 &   # this fixture's runner: its cmdline names the scratch dir
+OURS=$!
+( cd /tmp && exec sleep 600 ) </dev/null >/dev/null 2>&1 &                             # NOT this fixture's: no path of the scratch dir in it
+FOREIGN=$!
+sleep 0.3
+printf '%s\n' "$FOREIGN" > "$SWEEP/missions/old/run.pid"
+printf '%s\n' "$OURS" > "$SWEEP/missions/old/launch.pid"
+( WORK=$SWEEP MISSIONS=$SWEEP/missions KIDS='' HOLD=''; cleanup )
+kill -0 "$OURS" 2>/dev/null && fail "the EXIT sweep left the runner it started (pid $OURS) alive" || ok
+kill -0 "$FOREIGN" 2>/dev/null && ok || fail "the EXIT sweep killed pid $FOREIGN, which no pid file can prove is its own (a number the kernel re-used)"
+kill "$FOREIGN" 2>/dev/null
 
 printf 'mission fixture: %s checks ok\n' "$checks"

@@ -38,7 +38,7 @@ was measured; "measured on avell, 18/11" means it was reproduced while writing t
 | **toolchain missing, so the build moved to the laptop** | A mission on `work` reported "this node has no Rust toolchain - `cargo --version` answers `bash: line 1: cargo: command not found`, there is no `~/.cargo` and no `rust/target`", and delivered nothing for its three cargo items. The build moved to a 4-core laptop that has no cargo either (measured on avell, 18/11: `work` = 4 cores, `no-cargo`, load 8.15/10.47/11.86; the brief records load 27 when it happened). | `harness-fixes-rust` REPORT.md, items 6-8 |
 | **CodeAct loop on `session_worktree`** | The model called `session_worktree({"action":"status"})` three rounds in a row, `guard_repeated_calls` ended the turn, `rc=1`: the session was looking for a worktree the brief never named. | `~/Work/missions/harness-fixes/out.log` |
 | **wave registration refusal that named nothing** | The wave's registration answered "attempt to call a nil value (field 'wave_admission_outcome')" - a refusal no operator can act on. It refuses by name now: `wave registration unavailable: <why>`. | commit `62c3c064`, item 4; `scripts/lib/wave-guard.mjs:12` |
-| **a fixture that fails can wedge its caller for minutes** | `bash scripts/test-mission.sh | tail -3` printed its `FAILED` line and then never returned: the presence case's `( cd demo && exec sleep 600 )` child had inherited the caller's stdout, so the pipe stayed open after the fixture exited. Two harness shells from session `6cdf7ddf` sat on that line for ten minutes, and one of them then ran its own restore step (`cp /tmp/mission.bak scripts/mission.sh`) over the worktree, reverting 66 uncommitted lines of `scripts/mission.sh`. Measured here: a piped run of a mutated fixture gave `rc=124` at a 20 s cap before the fix, 2 s after it, and a clean piped run 158 checks in 7 s. A fixture's verdict has to be the last thing its caller waits for. | `docs/missions/reports/mission-fabric.md` (round 2, "a fixture that fails must exit"); `scripts/test-mission.sh` (`KIDS` and the `run.pid` sweep in `cleanup`) |
+| **a fixture that fails can wedge its caller for minutes** | `bash scripts/test-mission.sh | tail -3` printed its `FAILED` line and then never returned: the presence case's `( cd demo && exec sleep 600 )` child had inherited the caller's stdout, so the pipe stayed open after the fixture exited. Two harness shells from session `6cdf7ddf` sat on that line for ten minutes, and one of them then ran its own restore step (`cp /tmp/mission.bak scripts/mission.sh`) over the worktree, reverting 66 uncommitted lines of `scripts/mission.sh`. Measured here: a piped run of a mutated fixture gave `rc=124` at a 20 s cap before the fix, 2 s after it, and a clean piped run 158 checks in 7 s. A fixture's verdict has to be the last thing its caller waits for. | `docs/missions/reports/mission-fabric.md` (round 2, "a fixture that fails must exit"); `scripts/test-mission.sh` (`KIDS` and the reaped sweep in `cleanup`; round 7: the sweep kills only a pid whose own cmdline names the run's scratch dir, or a process this shell forked, so a pid file left by a killed run cannot make it SIGTERM a number the kernel handed to something else - a `wa serve` was the measured candidate) |
 | **the progress guard killed a legitimate wait** | `! run_failed: guard_repeated_calls ... codemode({"code":"const r = await tools.operation({action:await, id:op-..., wait_for:settled})"` - a turn that awaited one long build was stopped as a loop after 126 rounds. A wait is one await of an operation id, never a poll. | `~/Work/missions/harness-fixes-rust/out.log` |
 | **`pkill -f` / `pgrep -f` matched their own command line** | Measured on avell, 18/11: `bash -c "pkill -f <pattern>"` printed `Terminated`, exited `143`, and never ran the next line - it killed the shell that carried the pattern. `bash -c "pgrep -af <pattern>"` listed its own shell (`bash -c pgrep -af <pattern>; echo rc=$?` -> `rc=0`, one match: itself). | reproduced; see the `alive()` comment in `scripts/mission.sh` |
 | **a duplicate main worktree blocked a deploy** | `runtime-worktree.txt` pointed at the node's own worktree, "so a deploy would have built a tree missing the whole batch and the guard would have refused it". Git refuses the second one outright, measured on avell, 18/11: `git worktree add ../two main` -> `fatal: 'main' is already used by worktree at '/tmp/wtprobe/one'`. | `docs/FACTORY.md`; `scripts/test-runtime-binding-preflight.mjs` ("exactly one canonical main checkout is required") |
@@ -89,7 +89,10 @@ three of these hold. They are checked under one lock (below), and any other answ
    after a launch, before the node has named the session (`alive_launcher`); and, while there is no
    `run.pid` at all, `launch.pid` must not name a live `run.sh` of this mission (`launch_alive`, round 6);
 2. **no process the node records is working in the mission's directory** - `session_presence` in
-   `memory.db`, with `/proc/<pid>/cwd` as the answer to *where* (`writers_check`);
+   `memory.db`, with `/proc/<pid>/cwd` as the answer to *where* (`writers_check`). `/proc` reports the
+   path a directory really is, so both sides of that compare are resolved with `cd ... && pwd -P` first: a
+   missions tree reached through a symlink is one directory with two spellings, and a bare string compare
+   called a writer in it "another directory" (round 7);
 3. **the node says every session of this mission is settled** - the session list, the run lease and the
    boot lease, three reads (`mission_run`).
 
@@ -116,7 +119,7 @@ window is read from the node, in three reads.
 | the session list | `wa sessions` | which sessions exist and their state (`unfinished`, `answered`, `empty`), and for an unfinished one how long ago its last message was. It decides WHICH sessions are this mission's (the title marker), not whether they are settled |
 | the run lease | `wa steer <session> --status --json` | whether a run is in flight for that session, and its `run_id`. This is what settles a session: `settled`, `failed` or `cancelled`, and nothing else |
 | the boot lease | `sqlite3 -readonly ~/.wasm-agent/resources/claims.sqlite "select boot from claims where key='session:<id>'"`, then `BEGIN EXCLUSIVE; ROLLBACK;` on `resources/<boot>.lease.sqlite` | whether the process that owns that boot still exists: a lock that can be taken is an owner that exited, a locked one is an owner that has not (`rust/wa-capabilities/src/resources.rs`, `lease_released`). The probe writes nothing. It separates `held` from `stale`, and it never permits a launch |
-| the presence row | `sqlite3 -readonly ~/.wasm-agent/memory.db "select session_id, pid, cast(strftime('%s','now')-heartbeat_at as int) from session_presence"`, then `readlink /proc/<pid>/cwd` | which process serves each session and **which directory it works in**. The runner cds to the mission dir before it starts the CLI, so a session working for this mission has the mission dir or its worktree as its cwd - measured on avell, 18/11: session 6cdf7ddf, pid 1758185, heartbeat 0 s old, cwd `/home/victor/Work/missions/mission-fabric`, a writer no `run.lock` named. The heartbeat is REPORTED, never obeyed (round 4). A `/proc/<pid>` that exists with an unreadable cwd (another user's process, hidepid) is *cannot tell*, not a process that exited (round 5) |
+| the presence row | `sqlite3 -readonly ~/.wasm-agent/memory.db "select session_id, pid, cast(strftime('%s','now')-heartbeat_at as int) from session_presence"`, then `readlink /proc/<pid>/cwd` | which process serves each session and **which directory it works in**. The runner cds to the mission dir before it starts the CLI, so a session working for this mission has the mission dir or its worktree as its cwd - measured on avell, 18/11: session 6cdf7ddf, pid 1758185, heartbeat 0 s old, cwd `/home/victor/Work/missions/mission-fabric`, a writer no `run.lock` named. The heartbeat is REPORTED, never obeyed (round 4). A `/proc/<pid>` that exists with an unreadable cwd (another user's process, hidepid) is *cannot tell*, not a process that exited (round 5). The mission dir and its worktree are resolved with `pwd -P` before that compare, so a symlinked missions path still matches (round 7) |
 
 How they combine, and which of them permits a launch (`mission_run`: one verdict, one reason, one clear
 command):
@@ -125,7 +128,7 @@ command):
 | --- | --- | --- |
 | every session of this mission has a run lease of `settled`, `failed` or `cancelled` | `released` | **yes** |
 | the node answered and lists no session for this mission (nothing recorded, nothing present) | `released` | **yes** - a fresh mission's first launch, and a mission whose node rows are all settled |
-| `session_presence` names a live pid whose cwd is the mission dir or its worktree | `active` | no - a live process is working here, whoever recorded it, and no age is asked. A writer row decides even when another row in the same read cannot be placed (round 6) |
+| `session_presence` names a live pid whose cwd is the mission dir or its worktree | `active` | no - a live process is working here, whoever recorded it, and no age is asked. The whole table is read before the answer is given, so a writer row decides even when another row of the same read cannot be placed - in either order (round 6 named the writer; round 7 stopped the read from returning at the unplaceable row that came first) |
 | `session_presence` **cannot be read** - no `memory.db`, an unreadable one, no `sqlite3`, a query that fails - or a live pid whose `/proc/<pid>/cwd` cannot be read | `unknown` | no - the presence read is one of the three reads, so a read that cannot be made is the same "cannot tell" as an unprobeable boot lease (round 5) |
 | a run in flight and its boot lease is **held** | `active` | no - the owner has not exited, at any age |
 | a run in flight and its boot lease can be **taken** | `stale` | no - the owner exited, so the row is a leftover: settle it by hand |
@@ -191,7 +194,7 @@ and launched a SECOND runner beside the live one).
 | `stale`, the owner exited | the boot lease can be taken, so nothing is writing | finish that one session by hand (`wa resume --session <session> --once "<what is left>"`) or settle its row with the same `update steering_runs`, then `rm <mission>/run.lock` once you have checked it |
 | `unknown`, the node cannot be asked | `wa sessions 100` and `wa status` on the node | make the node answer, then `scripts/mission.sh status <name>` once. Nothing is cleared by guessing |
 | `unknown`, a session that is starting (no run row, no claim, no lease file) | `wa steer <session> --status` | wait a moment and read again: a launch is refused only while that session is not settled |
-| another `start` holds the lock | its refusal names `start.flock` | nothing: the kernel releases it when that `start` exits. A leftover *file* is not a lock, and is not cleared by hand either |
+| another `start` - or a `clean` - holds the lock | its refusal names `start.flock` | nothing: the kernel releases it when that `start` (or `clean`) exits. A leftover *file* is not a lock, and is not cleared by hand either |
 
 Two of those rows write into the node's own store (`memory.db`). They are the last resort, and they are named
 because nothing in `wa` can settle a run: `wa help` has no cancel, and `steer` only queues a note into a run that
@@ -214,9 +217,11 @@ words. It is **not** derived from `run.pid`: the `launcher` line reports that pi
 that it is not liveness - and, before the runner has written a `run.pid`, it reports the runner recorded in
 `launch.pid` instead, which is a launcher of this mission and still not liveness (round 6). Only `released` permits a launch. `status` is an observer of the node's word, so a lock
 the node says is settled is released by the read that saw it, with a `release` line in `lease.log` naming
-`by=status`. `verify` refuses while the verdict is `active` - a live writer in the directory - and `clean` refuses every
-verdict but `released` (round 5: a leftover row and a read that could not be made both reached
-`git worktree remove`); neither kills a process.
+`by=status`. `verify` and `clean` keep the same rule as `start`: both refuse every verdict but `released`
+(`clean` since round 5 - a leftover row and a read that could not be made both reached `git worktree remove`;
+`verify` since round 7 - it runs a command in `wt/`, so `unknown` and `stale` let it run cargo beside a
+possible writer). `verify` never kills a process, and `clean` takes `start.flock` before it removes anything and
+keeps the file: deleting the lock a clean holds would hand the next `start` a different inode to lock (round 7).
 
 A mission staged **before** this script (no `env` file - every mission under `~/Work/missions` on 18/11) is read
 from its worktree instead: branch, commits/files/dirty against the `origin/main` merge base, and
@@ -233,7 +238,9 @@ from its worktree instead: branch, commits/files/dirty against the `origin/main`
 
 Runs the command in `wt/` with codemode, the toolchain and the mission's `CARGO_TARGET_DIR`; appends
 `--- verify <utc> <command> (cwd ...)`, the output and `rc=<n>` to `verify.log`; exits with the command's rc.
-It refuses while a launch is alive, so a verify never competes with a session for the same tree.
+It refuses every verdict but `released` (round 7: `active` was its only refusal before, so an `unknown` read or a
+`stale` leftover ran the command beside a possible writer), so a verify never competes with a session for the
+same tree. A refusal writes nothing: no `verify.log` line, and the command is not run.
 
 ### 6. Independent review
 
@@ -270,9 +277,10 @@ left clean. Never by hand in the canonical checkout. Then:
     scripts/mission.sh clean <name>            # worktree goes; branch, logs, done, verify.log stay
 
 `clean` refuses a dirty worktree (commit it, or `clean --force` to discard), refuses any verdict but
-`released` - a live launch, a leftover row, a node it cannot ask -
-removes only the worktree and the runner, prunes, and keeps the branch - its commits are the mission's
-result. `status` for a cleaned mission still reads `out.log`, `done` and `verify.log`.
+`released` - a live launch, a leftover row, a node it cannot ask - takes `start.flock` before it removes
+anything and refuses while a `start` holds it (round 7: the removal used to take the worktree a start was
+launching into), removes only the worktree and the runner, prunes, and keeps the branch - its commits are the
+mission's result. `start.flock` stays on disk: the lock is the kernel's, not the file's. `status` for a cleaned mission still reads `out.log`, `done` and `verify.log`.
 
 ### 10. Deploy canary, then the fleet
 
