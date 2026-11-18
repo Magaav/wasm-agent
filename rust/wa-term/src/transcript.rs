@@ -869,29 +869,46 @@ pub enum NavKey { None, Up, Down, Right, Left, Pin, Exit, PageUp, PageDown, Bott
 #[derive(Default)]
 pub struct NavDecoder { escape: Vec<u8> }
 
+impl From<crate::keymap::NavAct> for NavKey {
+    /// The transcript's acts, as this decoder's caller names them - the one place the two spellings
+    /// of the same act meet. The match is exhaustive, so an act the table adds cannot be forgotten.
+    fn from(act: crate::keymap::NavAct) -> NavKey {
+        use crate::keymap::NavAct as A;
+        match act {
+            A::Prev => NavKey::Up,
+            A::Next => NavKey::Down,
+            A::Expand => NavKey::Right,
+            A::Fold => NavKey::Left,
+            A::PageUp => NavKey::PageUp,
+            A::PageDown => NavKey::PageDown,
+            A::Bottom => NavKey::Bottom,
+            A::Pin => NavKey::Pin,
+            A::Back => NavKey::Exit,
+        }
+    }
+}
+
 impl NavDecoder {
     pub fn feed(&mut self, byte: u8) -> NavKey {
         if !self.escape.is_empty() {
             self.escape.push(byte);
-            let seq = self.escape.clone();
-            if seq.len() == 2 && byte != b'[' && byte != b'O' { self.escape.clear(); return if byte == 0x1b { NavKey::Exit } else { NavKey::Other(vec![byte]) }; }
-            if seq.len() >= 3 && (0x40..=0x7e).contains(&byte) {
+            let sequence = self.escape.clone();
+            // Two Escapes are the key twice, not a sequence: Esc leaves the blocks.
+            if sequence.len() == 2 && byte != b'[' && byte != b'O' {
                 self.escape.clear();
-                return match (byte, &seq[2..seq.len() - 1]) {
-                    (b'A', _) => NavKey::Up, (b'B', _) => NavKey::Down, (b'C', _) => NavKey::Right, (b'D', _) => NavKey::Left,
-                    (b'~', b"5") => NavKey::PageUp, (b'~', b"6") => NavKey::PageDown, (b'~', b"6;5") => NavKey::Bottom,
-                    _ => NavKey::None,
-                };
+                return match crate::keymap::nav_byte(byte) { Some(act) => NavKey::from(act), None => NavKey::Other(vec![byte]) };
             }
-            if seq.len() > 16 { self.escape.clear(); }
+            if sequence.len() >= 3 && (0x40..=0x7e).contains(&byte) {
+                self.escape.clear();
+                return match crate::keymap::nav_seq(&sequence) { Some(act) => NavKey::from(act), None => NavKey::None };
+            }
+            if sequence.len() > 16 { self.escape.clear(); }
             return NavKey::None;
         }
-        match byte {
-            0x1b => { self.escape.push(byte); NavKey::None }
-            b'\r' | 3 => NavKey::Exit,
-            0x0f => NavKey::Pin,
-            _ => NavKey::Other(vec![byte]),
-        }
+        // Esc can begin a sequence, so it only starts the buffer: what a lone one means is the
+        // console's question (`lone_escape`).
+        if byte == 0x1b { self.escape.push(byte); return NavKey::None; }
+        match crate::keymap::nav_byte(byte) { Some(act) => NavKey::from(act), None => NavKey::Other(vec![byte]) }
     }
     /// A lone Esc (nothing followed it).
     pub fn lone_escape(&mut self) -> bool { let lone = self.escape.as_slice() == b"\x1b"; if lone { self.escape.clear(); } lone }

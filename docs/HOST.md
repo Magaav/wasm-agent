@@ -794,6 +794,7 @@ input_take           device
 invoke               runs a process
 isatty               device
 jobs                 writes files
+keybindings          read-only
 list_dir             read-only
 link_span            read-only
 local_view           device

@@ -92,6 +92,7 @@ local UI = {
   "lua/core/cli_view.lua",         -- the render: status bar, wake line, tool titles, result views, banner
   "lua/core/balloon.lua",          -- every command's overlay
   "lua/core/commands.lua",         -- the slash-command registry and `/help`
+  "lua/core/keybindings.lua",      -- `/keybindings`: the rows host.keybindings answers, laid out
   "lua/core/status.lua",           -- `/status`
   "lua/core/markdown.lua",         -- output formatting (fenced blocks, inline styles, wrapping)
   "lua/core/command_output.lua",   -- a command's output as rows

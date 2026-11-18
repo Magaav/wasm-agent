@@ -1439,6 +1439,17 @@ function wa_efficiency(session_id, session)
   return json.encode({ session_id = record.id, text = text })
 end
 
+-- The window's /keybindings: the same rows the CLI prints, laid out by the same module
+-- (lua/core/keybindings.lua), which reads them from host.keybindings - the table the console
+-- dispatches on (rust/wa-term/src/keymap.rs). The window has no Lua, so it asks here, and the two
+-- surfaces cannot disagree about a key because neither of them knows one.
+function wa_keybindings()
+  local keys = dofile("lua/core/keybindings.lua")
+  local rows, problem = keys.rows()
+  if not rows then return json.encode({ error = "keybindings_unavailable", detail = tostring(problem) }) end
+  return json.encode({ text = keys.text(rows), rows = rows })
+end
+
 -- A message's file changes: "can this still be undone?" and "do it".
 --
 -- The check and the action are the same route on purpose. Asking whether a patch can be

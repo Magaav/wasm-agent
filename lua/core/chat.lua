@@ -766,6 +766,14 @@ function M.run(argv)
       local rows = {}
       for row in (help() .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
       ui.show(balloon.paged("Help", rows, { per = 14, nowrap = true }))
+    elseif line == "/keybindings" then
+      -- Every special key the console handles, in the surfaces it handles them in. The rows are not
+      -- written here: lua/core/keybindings.lua asks host.keybindings, which answers from the table
+      -- the editor and the console dispatch on, so the list cannot disagree with the keys.
+      local keys = reload.require("lua/core/keybindings.lua")
+      local rows, problem = keys.rows()
+      if not rows then ui.say(redact.text(tostring(problem)))
+      else ui.show(keys.view(rows)) end
     elseif line == "/bind" or line:sub(1, 6) == "/bind " then
       reload.require('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,ui.print)
     elseif line == "/unbind" then

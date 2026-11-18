@@ -3201,102 +3201,150 @@ fn clear_selection(state: &mut ConsoleInput) {
 
 /// One mouse report from the terminal. Ignored while a panel is open (it owns the screen's bottom).
 fn handle_mouse(state: &mut ConsoleInput, event: wa_term::selection::Mouse) {
+    use wa_term::keymap::{self, Gesture, Pose};
     use wa_term::selection::Mouse;
     if state.panel.is_some() { return; }
     let Some(editor) = state.editor.as_ref().filter(|editor| editor.row > 0) else { return };
     let (width, rows) = (editor.width, output_rows(None, editor));
+    // Which gestures a pointer event means, and in which order they are tried, is the table's answer
+    // (wa_term::keymap, the Mouse surface) - the same table /keybindings prints. A press a link
+    // claims is a link copy because the table lists LinkCopy before the transcript's selection.
     match event {
-        Mouse::WheelUp => { clear_selection(state); state.transcript.page(3); }
-        Mouse::WheelDown => { clear_selection(state); state.transcript.page(-3); }
-        Mouse::Press(row, col) => {
-            clear_selection(state);
-            // The scrollbar's own gesture, before the selection's: a press in the bar's column
-            // (the screen's last one, while the bar is drawn there) jumps the view there and grabs
-            // the thumb, and a press anywhere else is still a selection. `scroll::bar` holds the
-            // arithmetic; this is only the routing.
-            if state.transcript.bar_press(row, col, width) { return; }
-            // A press in the input box places the cursor; a drag from there selects (operator 17/11).
-            if row > rows && state.nav.is_none() {
-                let hit = state.editor.as_mut().and_then(|input| {
-                    let index = input.index_at(row, col)?;
-                    input.click(index);
-                    Some(index)
-                });
-                if let Some(index) = hit {
-                    state.box_drag = Some(index);
-                    let frame = layout_frame(state);
-                    let _ = wa_term::terminal_editor::write(&frame);
-                }
-                return;
-            }
-            if row > rows || state.nav.is_some() { return; }
-            // The copy icon of a fenced block (#114): the transcript knows which cell it drew the
-            // affordance on, so a press there is a copy and a press anywhere else is a selection -
-            // one gesture, one meaning, no mode to learn.
-            // An expandable line (a folded code-mode result): the press opens or folds it.
-            if state.transcript.expand_at(row) {
-                let frame = layout_frame(state);
-                let _ = wa_term::terminal_editor::write(&frame);
-                return;
-            }
-            // A link under the pointer: copied (operator 17/11 - "copy it to the clipboard"), same notice.
-            if !state.transcript.bar_active() {
-                let shown = state.transcript.view(width, rows);
-                if let Some(url) = shown.get(row.saturating_sub(1)).and_then(|line| wa_term::links::at(&wa_term::selection::plain(line), col)) {
-                    let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&url));
-                    let count = url.chars().count();
-                    if let Some(editor) = state.editor.as_mut() {
-                        editor.notice = format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" });
-                    }
-                    let frame = layout_frame(state);
-                    let _ = wa_term::terminal_editor::write(&frame);
+        Mouse::WheelUp | Mouse::WheelDown => {
+            let up = matches!(event, Mouse::WheelUp);
+            for gesture in keymap::gestures(Pose::Wheel) {
+                if let Gesture::Wheel = gesture {
+                    clear_selection(state);
+                    state.transcript.page(if up { 3 } else { -3 });
                     return;
                 }
             }
-            if let Some(text) = state.transcript.copy_at(row, col) {
-                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
-                let count = text.chars().count();
-                if let Some(editor) = state.editor.as_mut() {
-                    editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+        }
+        Mouse::Press(row, col) => {
+            clear_selection(state);
+            let over_transcript = row <= rows && state.nav.is_none();
+            for gesture in keymap::gestures(Pose::Press) {
+                match gesture {
+                    // The scrollbar's own gesture, before the selection's: a press in the bar's column
+                    // (the screen's last one, while the bar is drawn there) jumps the view there and
+                    // grabs the thumb, and a press anywhere else is still a selection.
+                    Gesture::BarJump => { if state.transcript.bar_press(row, col, width) { return; } }
+                    // A press in the input box places the cursor; a drag from there selects
+                    // (operator 17/11).
+                    Gesture::DraftPress => {
+                        if row > rows && state.nav.is_none() {
+                            let hit = state.editor.as_mut().and_then(|input| {
+                                let index = input.index_at(row, col)?;
+                                input.click(index);
+                                Some(index)
+                            });
+                            if let Some(index) = hit {
+                                state.box_drag = Some(index);
+                                let frame = layout_frame(state);
+                                let _ = wa_term::terminal_editor::write(&frame);
+                            }
+                            return;
+                        }
+                    }
+                    // An expandable line (a folded code-mode result): the press opens or folds it.
+                    Gesture::ExpandToggle => {
+                        if !over_transcript { return; }
+                        if state.transcript.expand_at(row) {
+                            let frame = layout_frame(state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            return;
+                        }
+                    }
+                    // A link under the pointer: copied (operator 17/11 - "copy it to the clipboard").
+                    Gesture::LinkCopy => {
+                        if !over_transcript { return; }
+                        if !state.transcript.bar_active() {
+                            let shown = state.transcript.view(width, rows);
+                            if let Some(url) = shown.get(row.saturating_sub(1))
+                                .and_then(|line| wa_term::links::at(&wa_term::selection::plain(line), col))
+                            {
+                                let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&url));
+                                let count = url.chars().count();
+                                if let Some(editor) = state.editor.as_mut() {
+                                    editor.notice = format!("Copied link ({count} character{})", if count == 1 { "" } else { "s" });
+                                }
+                                let frame = layout_frame(state);
+                                let _ = wa_term::terminal_editor::write(&frame);
+                                return;
+                            }
+                        }
+                    }
+                    // The copy icon of a fenced block (#114): the transcript knows which cell it drew
+                    // the affordance on, so a press there is a copy and a press anywhere else is a
+                    // selection - one gesture, one meaning, no mode to learn.
+                    Gesture::BlockCopy => {
+                        if !over_transcript { return; }
+                        if let Some(text) = state.transcript.copy_at(row, col) {
+                            let _ = wa_term::terminal_editor::write(&wa_term::selection::osc52(&text));
+                            let count = text.chars().count();
+                            if let Some(editor) = state.editor.as_mut() {
+                                editor.notice = format!("Copied {count} character{}", if count == 1 { "" } else { "s" });
+                            }
+                            let frame = layout_frame(state);
+                            let _ = wa_term::terminal_editor::write(&frame);
+                            return;
+                        }
+                    }
+                    Gesture::TranscriptSelection => {
+                        if !over_transcript { return; }
+                        let following = state.transcript.following();
+                        state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
+                        let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| wa_term::selection::plain(r)).collect();
+                        state.selection = Some(Selection { anchor: (row, col), head: (row, col), rows: shown, following });
+                        state.transcript.dirty = true;
+                        return;
+                    }
+                    _ => {}
                 }
-                let frame = layout_frame(state);
-                let _ = wa_term::terminal_editor::write(&frame);
-                return;
             }
-            let following = state.transcript.following();
-            state.transcript.page(0); // freeze: what is selected must not scroll away under the pointer
-            let shown: Vec<String> = state.transcript.view(width, rows).iter().map(|r| wa_term::selection::plain(r)).collect();
-            state.selection = Some(Selection { anchor: (row, col), head: (row, col), rows: shown, following });
-            state.transcript.dirty = true;
         }
-        // Motion with no button down (`SGR` 35, which `1003` reports): the pointer is on the bar or
-        // it is not. Only that flip sets `dirty`, so a moving pointer costs no frame.
+        // Motion with no button down (SGR 35, which 1003 reports): the pointer is on the bar or it is
+        // not. Only that flip sets dirty, so a moving pointer costs no frame.
         Mouse::Motion(row, col) => {
-            state.transcript.bar_hover(row, col, width);
-            let expand = row <= rows && state.transcript.expand_hover(row);
-            let copy = row <= rows && state.transcript.copy_hover(row, col);
-            if expand || copy {
-                let frame = layout_frame(state);
-                let _ = wa_term::terminal_editor::write(&frame);
+            for gesture in keymap::gestures(Pose::Motion) {
+                if let Gesture::Hover = gesture {
+                    state.transcript.bar_hover(row, col, width);
+                    let expand = row <= rows && state.transcript.expand_hover(row);
+                    let copy = row <= rows && state.transcript.copy_hover(row, col);
+                    if expand || copy {
+                        let frame = layout_frame(state);
+                        let _ = wa_term::terminal_editor::write(&frame);
+                    }
+                    return;
+                }
             }
-        }
-        Mouse::Drag(row, col) | Mouse::Release(row, col) if state.box_drag.is_some() => {
-            let anchor = state.box_drag.unwrap_or(0);
-            if let Some(input) = state.editor.as_mut() {
-                if let Some(index) = input.index_at(row, col) { input.select(anchor, index); }
-            }
-            // (the editor borrow ends here; the frame below reads the whole state)
-            if matches!(event, Mouse::Release(..)) { state.box_drag = None; }
-            let frame = layout_frame(state);
-            let _ = wa_term::terminal_editor::write(&frame);
         }
         Mouse::Drag(row, col) | Mouse::Release(row, col) => {
-            // A drag that began on the bar scrolls it, and the button coming up lets the thumb go;
-            // anything else is the selection it has always been.
-            if matches!(event, Mouse::Release(..)) {
-                if state.transcript.bar_release() { return; }
-            } else if state.transcript.bar_drag(row) {
-                return;
+            // The draft's own drag comes first (it began in the box), then the bar's thumb; anything
+            // else is the transcript's selection, which is the gesture that always applies.
+            for gesture in keymap::gestures(if matches!(event, Mouse::Release(..)) { Pose::Release } else { Pose::Drag }) {
+                match gesture {
+                    Gesture::SelectDrag if state.box_drag.is_some() => {
+                        let anchor = state.box_drag.unwrap_or(0);
+                        if let Some(input) = state.editor.as_mut() {
+                            if let Some(index) = input.index_at(row, col) { input.select(anchor, index); }
+                        }
+                        // (the editor borrow ends here; the frame below reads the whole state)
+                        if matches!(event, Mouse::Release(..)) { state.box_drag = None; }
+                        let frame = layout_frame(state);
+                        let _ = wa_term::terminal_editor::write(&frame);
+                        return;
+                    }
+                    // A drag that began on the bar scrolls it, and the button coming up lets the thumb go.
+                    Gesture::BarJump => {
+                        if matches!(event, Mouse::Release(..)) {
+                            if state.transcript.bar_release() { return; }
+                        } else if state.transcript.bar_drag(row) {
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
             }
             let Some(selection) = state.selection.as_mut() else { return; };
             selection.head = (row.clamp(1, selection.rows.len().max(1)), col);
@@ -3566,15 +3614,18 @@ fn console_reader() {
                         if let Some(panel) = state.panel.as_mut() { panel.feed(byte); continue; }
                         // Ctrl+O pins a block expanded, so the code-mode block that follows cannot
                         // collapse it (and the same key lets it go). It is the transcript's key: the
-                        // draft has no binding for it, so it is taken here before the editor.
-                        if byte == 0x0f && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
+                        // draft has no row for it, so it is taken here before the editor. Which byte
+                        // that is, is the keymap's answer (Console surface), not this loop's.
+                        if wa_term::keymap::console_byte(byte) == Some(wa_term::keymap::HostAct::Pin)
+                            && state.selection.is_none() && state.transcript.pin_toggle().is_some() {
                             let frame = layout_frame(&mut state);
                             let _ = wa_term::terminal_editor::write(&frame);
                             continue;
                         }
                         // Ctrl+C with a selection copies it; any other key ends the selection first.
                         if state.selection.is_some() {
-                            if byte == 3 && copy_selection(&mut state) { continue; }
+                            if wa_term::keymap::console_byte(byte) == Some(wa_term::keymap::HostAct::CopySelection)
+                                && copy_selection(&mut state) { continue; }
                             clear_selection(&mut state);
                         }
                         if let Some(nav) = state.nav.as_mut() {
@@ -3708,7 +3759,8 @@ fn console_reader() {
                     // that is really the start of its end marker would leave the draft stuck in paste mode.
                     let pasting = state.panel.as_ref().map(|panel| panel.pasting())
                         .or_else(|| state.editor.as_ref().map(|input| input.pasting())).unwrap_or(false);
-                    if !state.eof && keys.last() == Some(&0x1b) && !pasting && !byte_ready(120) {
+                    let escape = wa_term::keymap::console_escape();
+                    if !state.eof && escape.is_some() && keys.last().copied() == escape && !pasting && !byte_ready(120) {
                         if let Some(panel) = state.panel.as_mut() { panel.escape(); }
                         else if let Some(nav) = state.nav.as_mut() {
                             if nav.lone_escape() { state.transcript.sync(); state.nav = None; }
@@ -4329,6 +4381,18 @@ pub extern "C-unwind" fn link_span(l: *mut LuaState) -> c_int {
         }
         None => unsafe { wa_host_support::lua::lua_pushnil(l) },
     }
+    1
+}
+
+/// `host.keybindings()`: every special key the console handles, as JSON - one row per binding,
+/// `{surface, title, group, key, does}`, in the order `/keybindings` prints them. The rows come from
+/// `wa_term::keymap`, which is the table the editor, the slash menu, the transcript's blocks, a
+/// panel, the pointer and this reader thread all dispatch on, and the fullscreen console's rows come
+/// from the settings it obeys (`WA_TUI_KEYS`) - so the list a reader is shown is generated from the
+/// behaviour, never written beside it.
+pub extern "C-unwind" fn keybindings(l: *mut LuaState) -> c_int {
+    let answer = wa_term::keymap::json();
+    unsafe { lua_pushlstring(l, answer.as_ptr() as *const c_char, answer.len()) };
     1
 }
 

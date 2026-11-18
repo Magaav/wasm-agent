@@ -307,6 +307,7 @@ pub const REGISTRY: &[Capability] = &[
     plain!("input_take", Device, crate::host::input_take, "Take lines the reader buffered while a run was in flight"),
     plain!("transcript_copy_first", Device, crate::host::transcript_copy_first, "Make the current transcript block's first line copyable (a code block's script)"),
     plain!("link_span", ReadOnly, crate::host::link_span, "The first bare URL in a line as start,stop (1-based byte offsets): the one detector the renderer underlines and a click copies"),
+    plain!("keybindings", ReadOnly, crate::host::keybindings, "Every special key the editor and console handle, generated from the table they dispatch on: surface, group, key and what it does"),
     plain!("input_image", Device, crate::host::input_image, "The image pasted with Ctrl+V as [Image #n] in this session (mime + base64)"),
     plain!("input_stop", Device, crate::host::input_stop, "Stop the console line reader"),
     plain!("input_idle", Device, crate::host::input_idle, "Whether the CLI could restart now: empty draft, no panel, nothing queued, no selection"),

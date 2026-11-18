@@ -3645,6 +3645,9 @@ fn dispatch(
         // now fetches it while node-thread 0 is wedged, which catches both a missing handler (404) and a
         // handler that is not a read.
         "/efficiency" => (200, "application/json", call("wa_efficiency", &[query_value(&query, "session_id").as_str(), session]).into_bytes()),
+        // The window's `/keybindings`: the same rows the CLI prints, from the same table
+        // (`wa_term::keymap`) - a plain read of a constant, so no session and no run slot.
+        "/keybindings" => (200, "application/json", call("wa_keybindings", &[]).into_bytes()),
         "/session/fork" if method == "POST" => (200, "application/json", call("wa_session_fork", &[body, session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
         "/session/worktree" if method == "POST" => (200, "application/json", call("wa_session_worktree", &[body, session]).into_bytes()),

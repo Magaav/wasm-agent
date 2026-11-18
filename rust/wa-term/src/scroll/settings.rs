@@ -60,6 +60,30 @@ impl Action {
          Action::Top, Action::Bottom, Action::ToggleTools, Action::ToggleThinking]
             .into_iter().find(|action| action.name() == name)
     }
+
+    /// One sentence per action, for `/keybindings`: the list is generated from the same
+    /// `bindings` table the console dispatches on, so it cannot describe a key that does something else.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Action::PageUp => "scroll a page up",
+            Action::PageDown => "scroll a page down",
+            Action::HalfPageUp => "scroll half a page up",
+            Action::HalfPageDown => "scroll half a page down",
+            Action::LineUp => "scroll one row up",
+            Action::LineDown => "scroll one row down",
+            Action::Top => "the start of the session",
+            Action::Bottom => "back to the live bottom",
+            Action::ToggleTools => "fold or open every tool call's block",
+            Action::ToggleThinking => "fold or open the model's thinking",
+        }
+    }
+
+    /// Every action an operator can bind, for the rows a node has not bound.
+    pub const ALL: &'static [Action] = &[
+        Action::PageUp, Action::PageDown, Action::HalfPageUp, Action::HalfPageDown,
+        Action::LineUp, Action::LineDown, Action::Top, Action::Bottom,
+        Action::ToggleTools, Action::ToggleThinking,
+    ];
 }
 
 /// The key names a binding may carry: exactly the ones `keys::Decoder` can produce a name for.
