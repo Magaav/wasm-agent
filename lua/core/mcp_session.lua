@@ -121,11 +121,17 @@ function M.invoke(input,ctx,directory)
  local slot=pool[key];local request_dir=paths.data()..'/mcp/requests'
  if not slot then
   local id=host.uuid();local seed_file=request_dir..'/'..id..'.seed.json';local ready_file=seed_file..'.ready.json'
+  -- Before the seed is written: the server's env must reference the vault names the kernel injects.
+  local vault_env;input.server,vault_env=dofile('lua/core/mcp.lua').vault_launch(input.server)
+  -- The approval this launch was decided on (docs/VAULT.md): a read session starts the same runtime, so
+  -- it carries the same digest the kernel re-checks from the bytes on disk before it reads a value.
+  local vault_approval=input.vault_approval
+  if vault_env and not vault_approval then vault_approval=dofile('lua/core/mcp.lua').vault_manifest(input.server,directory) end
   local seed={server=input.server,read_tools=input.read_tools,token=host.uuid()..host.uuid(),ready_file=ready_file,request_dir=request_dir,credential_hashes=refs,idle_ms=30000}
   if not host.write_file(seed_file,json.encode(seed)) then return failure('mcp_seed_not_written') end
   -- The runtime is the one mcp.lua resolves (it sets M.node_program); never a guess at `node` on PATH.
   if not M.node_program then return failure('mcp_node_runtime_unresolved') end
-  local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=ctx.session_id or 'mcp-read-session'})))
+  local start=decode(host.operation('start',json.encode({program=M.node_program(),args={directory..'/mcp-session.mjs','--seed-file',seed_file},cwd=ctx.cwd or platform.cwd(),timeout_seconds=3600,owner=ctx.session_id or 'mcp-read-session',vault_env=vault_env,vault_approval=vault_approval})))
   if not start or start.error or not start.operation_id then return failure('mcp_session_not_started',{detail=start}) end
   slot={operation_id=start.operation_id,seed_file=seed_file,ready_file=ready_file,token=seed.token};pool[key]=slot
   for _=1,math.min(36000,20+math.ceil((input.server.timeout_seconds or 30)*10)) do

@@ -84,7 +84,19 @@ the erase back makes four of those checks fail, with one erase per tool call.
 
 ## Keys
 
-Bound by default:
+**The list is a command, and it is generated.** `/keybindings` prints every special key the console
+handles - the draft's, the slash menu's, the transcript's blocks, a panel page, the pointer and the two
+the reader thread takes before the draft - grouped by surface, with what each one does. It is not a
+document kept beside the code: the rows come from `rust/wa-term/src/keymap.rs`, the table the
+dispatchers themselves read (`Editor::feed` answers through `keymap::draft_byte`/`draft_seq`,
+`NavDecoder` through `nav_seq`, `Panel::feed` through `panel_seq`, the reader thread's pointer routing
+through `keymap::gestures`), and the fullscreen console's rows are generated from the settings that
+console obeys. So a key cannot be listed without being obeyed, or obeyed without being listed:
+`every_row_is_dispatched` and `every_act_has_a_row` assert one direction each, and
+`no_key_outside_the_table_does_anything` asserts the other - every control byte without a row leaves
+the draft untouched. Ctrl+X is redo, by design (operator 18/11), and it says so in the list.
+
+The fullscreen console's own keys, bound by default:
 
 | key | action |
 | --- | --- |

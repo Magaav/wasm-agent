@@ -88,7 +88,7 @@ In the block the call opened when it **started**, as the row under its heading:
 
 The row it is **not** on has two claimants and one line: a **build loader** (`⟳ building wasm-agent …`),
 which replaces everything because it is what the terminal is doing right now, and the **standing update
-notice** (`Update available (<sha>): run wa update or /update`). Empty is no row at all: the element/row
+notice** (`Update available (<sha>) — /update here, or wa update in a terminal`). Empty is no row at all: the element/row
 is removed, so there is never a blank gap above the status bar. `session_content` in
 `lua/core/cli_view.lua`, `rust/wa-term/src/terminal_editor.rs` and `ui/app.js` refuse a tool's line by
 construction - the caller is not there any more - and `scripts/test-cli-view.lua` asserts it.

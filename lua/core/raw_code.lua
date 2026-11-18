@@ -47,7 +47,7 @@ M.GUIDANCE = "You may also run a script by ending your message with one ```js ru
 
 -- Model-facing (operator-reviewed, verbatim). With `first` it opens the code-mode guidance in place of
 -- the codemode-call sentence (lua/core/codemode_policy.lua, `guidance_for`).
-M.FIRST_GUIDANCE = "Work in code: end your message with one ```js run block; it runs as one script in which every tool is `tools.<name>(args)`, and what it returns comes back to you. A message without a run block is your answer."
+M.FIRST_GUIDANCE = "Work in code: end your message with one ```js run block (nothing after its closing fence: the result replaces it); it runs as one script in which every tool is `tools.<name>(args)`, and what it returns comes back to you. A message without a run block is your answer."
 
 -- With `first`, the marker a raw-channel result is sent back under (a user message, no tool pairing).
 M.OBSERVATION = "Observation:\n"

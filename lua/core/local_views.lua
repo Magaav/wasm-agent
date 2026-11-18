@@ -57,6 +57,15 @@ local builders = {
   -- a reader must never write into the chat it is drawing over. They keep their arm, and between runs they
   -- are balloons like everything else; during a run they answer when the turn ends, and the host says so on
   -- its queue row ("Queued - after the run: /stats").
+  -- The keys, mid-run and in the window: the same rows, from the same table, laid out by the same
+  -- module the REPL's arm uses (lua/core/keybindings.lua). Nothing is read from the terminal, so a
+  -- snapshot taken while a turn is in flight is exactly as true as one taken at the prompt.
+  ["/keybindings"] = function()
+    local keys = dofile("lua/core/keybindings.lua")
+    local rows = keys.rows()
+    if not rows then return nil end
+    return { command = "/keybindings", captured_at = host.now(), views = keys.view(rows) }
+  end,
   ["/help"] = function(opts)
     local balloon = dofile("lua/core/balloon.lua")
     local help = dofile("lua/core/commands.lua").help()

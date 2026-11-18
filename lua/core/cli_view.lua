@@ -77,7 +77,7 @@ local PALETTE = {
   -- A code-mode script's inner calls (operator 17/11): waiting ⏳ light yellow, done ✓ light green,
   -- failed ✗ a soft red - never the alarm red for a call that is only waiting.
   callWait = "e8d58a", callOk = "8fd19e", callFail = "e57373",
-  mdHeading = "ffffff", mdLink = "b1b9f9", mdLinkUrl = "777777", mdCode = "b1b9f9",
+  mdHeading = "ffffff", mdLink = "8ab4f8", mdLinkUrl = "8ab4f8", mdCode = "b1b9f9",
   mdCodeBlock = "d4d4d4", mdCodeBlockBorder = "777777", mdQuote = "999999",
   mdQuoteBorder = "777777", mdHr = "777777", mdListBullet = "999999",
   toolDiffAdded = "4eba65", toolDiffRemoved = "ff6b80", toolDiffContext = "999999",
@@ -254,16 +254,59 @@ function M.run_clock(seconds)
   return string.format("%d:%02d:%02d", math.floor(s / 3600), math.floor(s % 3600 / 60), s % 60)
 end
 
--- The footer's session numbers: `↻runs ⚒️tools ↑in ↓out ◔ctx%/window ◇cache-hit%`.
+-- ---- the status bar's glyphs -------------------------------------------------------
+--
+-- A glyph is a FONT fact, not a rendering choice, so every one the terminal's two status rows draw is
+-- named here, once. Victor measured the set these replace in his own terminal (18/11, JetBrainsMono
+-- Nerd Font): U+25D1 (`◑`) and U+25F7 (`◷`) are NOT in that font, so the terminal takes them from a
+-- fallback face and draws them at another size, and `👣` is a colour emoji - it ignores the row's
+-- colour and takes two cells. What is here instead is Nerd Fonts' Material Design set: in the font,
+-- one cell per glyph, drawn in the row's own colour, one glyph per fact. The width is asserted by the
+-- two functions that actually lay these rows out - `M.columns` (the count `clip` and the status line
+-- use) and `wa-term`'s `cell_width_of` for the box the row sits in - because a glyph two cells
+-- wide moves every number after it.
+local GLYPH = {
+  -- The context ball: five Material Design circles, one per band of the model's window.
+  ballEmpty = "\243\176\157\166",         -- U+F0766
+  ballStarted = "\243\176\170\159",       -- U+F0A9F
+  ballHalf = "\243\176\170\161",          -- U+F0AA1
+  ballThreeQuarters = "\243\176\170\163", -- U+F0AA3
+  ballFull = "\243\176\170\165",          -- U+F0AA5
+  steps = "\243\176\183\186",             -- U+F0DFA, the run's steps
+  clock = "\243\176\148\155",             -- U+F051B, the run's elapsed clock
+  turns = "\243\176\145\144",             -- U+F0450, the session's turns
+  cache = "\243\176\134\188",             -- U+F01BC, the cache-hit rate
+}
+M.GLYPH = GLYPH
+
+-- ONE function decides which ball a context percentage wears: five bands, each starting at its own
+-- floor - 3% is the second ball, 50% the third, 75% the fourth, 100% the full one. A context measured
+-- past its window (it happens across a compaction boundary) is the full ball, and a percentage nobody
+-- measured is the empty one - the same ball 0% wears, because "nothing measured" is not "nearly full".
+function M.context_ball(percent)
+  local p = tonumber(percent) or 0
+  if p < 3 then return GLYPH.ballEmpty end
+  if p < 50 then return GLYPH.ballStarted end
+  if p < 75 then return GLYPH.ballHalf end
+  if p < 100 then return GLYPH.ballThreeQuarters end
+  return GLYPH.ballFull
+end
+
+-- The footer's session numbers: `󰑐runs Σ↑in ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
+-- request's input summed (each step resends the context), so it is marked apart from the run line's
+-- `Δ` - what one run ADDED to the context (operator 17/11: "why do these differ?"). No tool count:
+-- with code mode one script makes many calls, so the number said nothing (operator 17/11). The ball is
+-- the one `M.context_ball` chose, so the band and the percentage beside it cannot disagree.
 function M.session_summary(t)
   t = t or {}
-  local parts = { "\226\134\187" .. (t.runs or 0), "\226\154\146\239\184\143" .. (t.tools or 0),
-    "\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
+  local parts = { GLYPH.turns .. (t.runs or 0),
+    "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
   if (tonumber(t.budget) or 0) > 0 then
-    parts[#parts + 1] = string.format("\226\151\148%.1f%%/%s", 100 * (t.context or 0) / t.budget, M.tokens(t.budget))
+    local percent = 100 * (tonumber(t.context) or 0) / t.budget
+    parts[#parts + 1] = M.context_ball(percent) .. string.format("%.1f%%/%s", percent, M.tokens(t.budget))
   end
   if (tonumber(t.prompt) or 0) > 0 then
-    parts[#parts + 1] = string.format("\226\151\135%.2f%%", 100 * (t.cached or 0) / t.prompt)
+    parts[#parts + 1] = GLYPH.cache .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
   end
   return table.concat(parts, " ")
 end
@@ -861,8 +904,9 @@ function M.new(opts)
     -- The self-wake fact as last read (`⏰ 2 wakes · next 14:05`), "" when nothing is scheduled.
     wakes = "",
     logged = "", logged_session = nil, turn = nil, totals = nil, deltas = 0, warned = nil,
-    -- `Update available (<sha>): run wa update or /update` while a newer release is published
-    -- (`lua/core/update_banner.lua`). It is the standing text of the **session-status-content** area:
+    -- the update sentence while a newer release is published - `lua/core/update_banner.lua` owns it
+    -- (`M.LINE`, and `M.COMMANDS` for the two words it asks the reader to type; never restated here).
+    -- It is the standing text of the **session-status-content** area:
     -- ONE line directly above the session status bar, never a transcript line and never a prefix on
     -- the status bar's own content, and the same sentence the window shows.
     session_notice = nil,
@@ -1040,9 +1084,11 @@ function METHODS:status_template()
   end
   local function compose(shown, live)
     if boxed and self.turn then
-      -- `✶ 👣2·5s ⚒️3 ↑12.4k ↓310 ◷1:51`: the step this run is on and how long it has taken, the
-      -- run's tool calls, its input and output tokens, and its whole time. `{s}` and `{T}` are
-      -- clocks the host keeps moving while Lua is blocked.
+      -- `✶ 󰷺2·5s Δ12.4k ↑4.6M ↓310 󰔛1:51`: the step this run is on and how long it has taken, what
+      -- it ADDED to the context (`Δ`) and the session's input total (`↑`), its output tokens and its
+      -- whole time. `{s}` and `{T}` are clocks the host keeps moving while Lua is blocked. ONE muted
+      -- span, the step pair included: the count is secondary text like the numbers beside it, so it
+      -- wears that gray and cannot drift into a colour of its own (Victor, 18/11).
       return with_source("{m}" .. paint(self:run_numbers("{s}", "{T}"), "muted", live), live)
     end
     local line = "{m}" .. shown
@@ -1246,8 +1292,10 @@ end
 --
 -- What the line says now is `update_banner.session_content`'s decision, not this module's:
 --
---   notice     the standing sentence, in the warning yellow - `Update available (<sha>): run wa
---              update or /update`, the wording the window shows too;
+--   notice     the standing sentence in the warning yellow, which `update_banner` owns
+--              (`M.LINE`) - `Update available (<sha>) \226\128\148 /update here, or wa update in a
+--              terminal` - with the two commands it names in bold (`M.COMMANDS`), the same sentence
+--              and the same emphasis the native editor draws;
 --   building   the rebuild loader REPLACES the notice on the same line - while a build is in flight
 --              the terminal says what it is doing, and the notice would be a stale instruction - and
 --              a finished build shows its result for a moment;
@@ -1264,7 +1312,8 @@ function METHODS:session_content()
   if type(status) == "function" then
     local ok, value = pcall(status)
     if ok and type(value) == "table" and value.text and tostring(value.text) ~= "" then
-      return { text = tostring(value.text), kind = tostring(value.kind or "notice") }
+      return { text = tostring(value.text), kind = tostring(value.kind or "notice"),
+        commands = type(value.commands) == "table" and value.commands or nil }
     end
   end
   if self.session_notice and self.session_notice ~= "" then
@@ -1273,6 +1322,20 @@ function METHODS:session_content()
   -- No third claimant: a tool call's progress is not a session notice, and this row is not where a
   -- tool speaks (Victor, 2026-11-10).
   return nil
+end
+
+-- Bold the commands a sentence asks the reader to type, and only those: `words` is the list the
+-- sentence's own module owns (`update_banner.COMMANDS`), so no renderer keeps a copy of it. Renderers
+-- that can do colour only (the fallback row) call this; the native editor bolds the same two words.
+function M.emphasise(text, words)
+  if type(words) ~= "table" then return text end
+  for _, word in ipairs(words) do
+    if type(word) == "string" and word ~= "" then
+      local pattern = word:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0")
+      text = text:gsub(pattern, STYLE.bold .. word .. "\27[22m", 1)
+    end
+  end
+  return text
 end
 
 -- The colour of each kind of line: the notice is the warning yellow, a loader (a build) is the
@@ -1290,7 +1353,13 @@ end
 function METHODS:session_line()
   local content = self:session_content()
   if not content then return nil end
-  return paint(clip(content.text, math.max(1, self.limit)), M.session_role(content.kind), self.live), content.kind
+  local text = clip(content.text, math.max(1, self.limit))
+  -- The words the sentence asks the reader to TYPE are bold (Victor, 18/11), inside the same warning
+  -- yellow line: `/update` and `wa update`, the list the sentence's own module owns
+  -- (`update_banner.COMMANDS`). Clipped first and emphasised second, so no escape sequence is ever
+  -- counted as a column.
+  if content.commands and self.live then text = M.emphasise(text, content.commands) end
+  return paint(text, M.session_role(content.kind), self.live), content.kind
 end
 
 -- The layout as it reads *now*: `screen_rows` reserves the worst case once, and the self-wake fact is the
@@ -1463,19 +1532,25 @@ function METHODS:live_footer()
   self:footer_draw()
 end
 
--- `👣steps·step-time ⚒️tools ↑input ↓output ◷run-time` for the current run: input is what the run
--- added to the context (the last call's prompt against the one the run started on), not the sum
--- of every call's prompt, which re-counts the whole context each step. The two clocks are
--- passed in (tokens for the host's ticker, or the stopped values once the run has ended). With no
--- step clock (the line left under a finished run) the step count stands alone: `👣8`.
+-- `󰷺steps·step-time Δadded ↑in ↓out 󰔛run-time` for the current run.
+--
+-- TWO input numbers, deliberately (Victor, 18/11: "only delta is not enough"). `Δ` is what the run
+-- ADDED to the context - the last call's prompt against the one the run started on, not the sum of
+-- every call's prompt, which re-counts the whole context each step. `↑` is the session's input-token
+-- TOTAL, right after it: every step resends the context, so it is the number that says what the session
+-- has cost, and it is the same total the footer prints as `Σ↑`. They are different facts and both are
+-- wanted; one without the other was wrong in both directions.
+--
+-- The two clocks are passed in (tokens for the host's ticker, or the stopped values once the run has
+-- ended). With no step clock (the line left under a finished run) the step count stands alone: `󰷺8`.
 function METHODS:run_numbers(step_clock, run_clock)
   local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
-  return "\240\159\145\163" .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
-    .. " \226\154\146\239\184\143" .. (run.tools or 0)
-    .. " \226\134\145" .. M.tokens(input) .. " \226\134\147" .. M.tokens(output)
-    .. " \226\151\183" .. run_clock
+  return GLYPH.steps .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
+    .. " \206\148" .. M.tokens(input) .. " \226\134\145" .. M.tokens(totals.prompt)
+    .. " \226\134\147" .. M.tokens(output)
+    .. " " .. GLYPH.clock .. run_clock
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
@@ -1692,13 +1767,20 @@ function METHODS:accepted(text)
   -- `❯ what you typed`, greyed, the way Claude Code keeps your message in the transcript.
   -- White on a grey bar the width of the screen, the way the message stands out from the replies.
   local shown, first = {}, true
+  -- Every word the reader sent, wrapped - never clipped with `…` (operator 17/11: "user input sent to the
+  -- cli chat content should render fully 100% what he said"). One column is left for the scrollbar.
+  local width = math.max(10, self.limit - 3)
   for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-    local body = (first and PROMPT or "  ") .. clip(line, math.max(10, self.limit - 2))
-    if self.live then
-      body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - columns(body))) .. RESET
+    local pieces = codemode_block.wrap(line, width, { columns = columns })
+    if #pieces == 0 then pieces = { "" } end
+    for _, piece in ipairs(pieces) do
+      local body = (first and PROMPT or "  ") .. piece
+      if self.live then
+        body = "\27[38;2;255;255;255m\27[48;2;68;68;68m" .. body .. string.rep(" ", math.max(0, self.limit - 1 - columns(body))) .. RESET
+      end
+      shown[#shown + 1] = body
+      first = false
     end
-    shown[#shown + 1] = body
-    first = false
   end
   self:topic(false)
   self:write(table.concat(shown, "\n") .. "\n\n")
@@ -1814,12 +1896,14 @@ function METHODS:say_table_end()
 end
 
 function METHODS:say_emit(text)
+  -- The held newlines go out FIRST: `markdown` hands the host a fence's copy marker for the NEXT write
+  -- (transcript_copy), and a newline written after it took the marker - no copy icon on fences (17/11).
+  if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)); self.flow_held = 0 end
   local rendered = self:markdown(text, {
     paint = function(plain, style) return paint(plain, style, self.live) end,
     width = self.limit - 2, indent = "", reflow = self:transcript(), style = "commentaryText",
   })
   if rendered == "" then rendered = paint(text, "commentaryText", self.live) end
-  if (self.flow_held or 0) > 0 then self:write(string.rep("\n", self.flow_held)) end
   self:write(rendered)
   self.flow_held = 1
 end
@@ -1848,12 +1932,22 @@ function METHODS:delta_piece(text)
   self.dstream = d
   -- Hidden text is still kept: if the step turns out to be the answer, `delta_reset(true)` writes it.
   d.buf = d.buf .. text
-  if d.hidden then return end
+  if d.hidden then
+    if d.code then self:code_stream(d) end
+    return
+  end
   local at = markup_at(d.buf)
   if at then
     if at - 1 > d.shown then self:flow("say", d.buf:sub(d.shown + 1, at - 1)) end
     d.shown = math.max(d.shown, at - 1)
     d.hidden = true
+    -- A run block streams AS CODE (operator 17/11: "codeact does not stream, it just prints"): its block
+    -- opens now and every line is drawn on its band as it completes; the call event that follows finds
+    -- the block already on screen and only adds its call rows.
+    if fence_at(d.buf) == at and self:transcript() then
+      d.code = { pos = at, opened = false }
+      self:code_stream(d)
+    end
     return
   end
   -- hold a tail that may still become a marker: `<...` without `>`, or a last line that is a fence prefix
@@ -1864,11 +1958,44 @@ function METHODS:delta_piece(text)
   local upto = #d.buf - held
   if upto > d.shown then self:flow("say", d.buf:sub(d.shown + 1, upto)); d.shown = upto end
 end
+-- The streaming run block: complete lines after the opening fence, each drawn as band rows; the closing
+-- fence ends it (what follows it is dropped by the step, so it is not drawn either).
+function METHODS:code_stream(d)
+  local c = d.code
+  if not c or c.closed then return end
+  while true do
+    local nl = d.buf:find("\n", c.pos, true)
+    if not nl then return end
+    local line = d.buf:sub(c.pos, nl - 1):gsub("\r$", "")
+    c.pos = nl + 1
+    if not c.opened then
+      -- the fence line itself: open the block, one blank line above it
+      c.opened = true
+      self:flow_end()
+      self:gap(1)
+      if host.transcript_block then pcall(host.transcript_block, true, true) end
+      self.code_streamed = true
+    elseif line:match("^%s*```%s*$") then
+      c.closed = true
+      return
+    else
+      local o = self:codemode_opts()
+      for _, row in ipairs(codemode_block.rows(codemode_block.new({ code = line }, self.now()), self.limit, o)) do
+        self:write(row .. "\n")
+      end
+    end
+  end
+end
+
 -- `answer`: the step ended as the reply, so whatever was held back (a code block that did not run, a
 -- held tail) is the reader's and is written now. Otherwise (a call ran) the held text was the call.
 function METHODS:delta_reset(answer)
   local d = self.dstream
-  if d and (answer or not d.hidden) and #d.buf > d.shown then self:flow("say", d.buf:sub(d.shown + 1)) end
+  if d and d.code and d.code.opened then
+    -- the code is already on screen; an answer keeps only what it wrote after the closing fence
+    if answer and d.code.closed and #d.buf >= d.code.pos then self:flow("say", d.buf:sub(d.code.pos)) end
+  elseif d and (answer or not d.hidden) and #d.buf > d.shown then self:flow("say", d.buf:sub(d.shown + 1)) end
+  if answer then self.code_streamed = nil end
   self.dstream = nil
 end
 
@@ -2079,14 +2206,20 @@ function METHODS:codemode_start(event)
   -- block marker is still asked for (it is what lets a newer block fold this one).
   -- One blank line above the block, written into the block before it (a code block is a topic, and a
   -- topic's own trailing blank rows are not drawn).
-  self:flow_end()
-  self:gap(1)
-  if host.transcript_block then pcall(host.transcript_block, true, true) end
   self.pending.block, self.pending.shown = true, true
   local o = self:codemode_opts()
-  for _, row in ipairs(codemode_block.rows(self.code, self.limit, o)) do self:write(row .. "\n") end
-  local live = self:tool_line()
-  if live then self:tool_live(live.text) end
+  if self.code_streamed then
+    -- The script streamed into its block already (code_stream): only the call rows follow.
+    self.code_streamed = nil
+  else
+    self:flow_end()
+    self:gap(1)
+    if host.transcript_block then pcall(host.transcript_block, true, true) end
+    for _, row in ipairs(codemode_block.rows(self.code, self.limit, o)) do self:write(row .. "\n") end
+  end
+  -- No live progress row inside a code block (operator 17/11: "it wages up and down all the cli content ...
+  -- and breaks the right scroll"): that row was taken away and put back around every inner call's row,
+  -- moving everything under it. The block's own call rows already say ⏳/✓/✗ in place.
 end
 
 -- The script's answer: the value under the calls, the heading rewritten with the call's whole time,
@@ -2100,6 +2233,11 @@ function METHODS:codemode_settle(event)
   local o = self:codemode_opts()
   if self:transcript() then
     self:codemode_sync()
+    -- The copy icon on the block's first row (operator 17/11 "a copy icon on its top"): the script is
+    -- whole only now, so the marker is set here, on the block's first line, never on a later write.
+    local a = model.args or {}
+    local script = (type(a.code) == "string" and a.code) or (type(a.script) == "string" and a.script) or nil
+    if script and script ~= "" and host.transcript_copy_first then pcall(host.transcript_copy_first, script) end
     local tail = codemode_block.tail_rows(model, self.limit, o)
     for index, row in ipairs(tail) do
       local full = tail.expand and tail.expand[index]

@@ -501,7 +501,21 @@ function M.run(argv)
     -- will be drawn from, and the reader is not waiting on anything but this turn.
     publish_views({ max_age = local_views.MAX_AGE, session_id = agent.session_id, ctx = { user_id = USER, role = "master", session_id = agent.session_id } })
     view:run_started()
-    local ok, reply = pcall(agent.run, agent, line)
+    -- Images pasted with Ctrl+V (`[Image #n]` in the line, the host keeps the bytes): stored as attachments
+    -- and sent with the message, the same path the UI's pictures take (operator 17/11).
+    local images = {}
+    if host.input_image then
+      for n in tostring(line):gmatch("%[Image #(%d+)%]") do
+        local raw = host.input_image(tonumber(n))
+        local decoded_ok, entry = pcall(json.decode, raw or "")
+        if decoded_ok and type(entry) == "table" then
+          local reference, problem = memory.store_image(entry)
+          if reference then images[#images + 1] = reference
+          else view:line(cli_view.paint("  [Image #" .. n .. "] not sent: " .. tostring(problem), "warning", view.live)) end
+        end
+      end
+    end
+    local ok, reply = pcall(agent.run, agent, line, #images > 0 and images or nil)
     if not ok then
       view:failed(redact.text(tostring(reply)))
     else
@@ -700,8 +714,8 @@ function M.run(argv)
   -- because "I could not ask" repeated at every prompt is noise, not information.
   --
   -- Two checks, one line. `update_banner.lua` compares the installed *commit* with the newest
-  -- `node-<sha12>` release and prints `Update available (<sha>): run wa update or /update` - the
-  -- sentence the footer and the window show. When it cannot decide (a release-bundle install records
+  -- `node-<sha12>` release and prints the sentence IT owns (`M.LINE`; not restated here, so the
+  -- footer, this start line and the window cannot drift). When it cannot decide (a release-bundle install records
   -- a version tag, not a published binary release), `release.lua`'s tag feed answers exactly as it did
   -- before; only one of them ever prints, so the reader is told one fact in one wording.
   -- The session-status-content line has two producers and one row, so it is resolved here in one place:
@@ -752,6 +766,14 @@ function M.run(argv)
       local rows = {}
       for row in (help() .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = row end
       ui.show(balloon.paged("Help", rows, { per = 14, nowrap = true }))
+    elseif line == "/keybindings" then
+      -- Every special key the console handles, in the surfaces it handles them in. The rows are not
+      -- written here: lua/core/keybindings.lua asks host.keybindings, which answers from the table
+      -- the editor and the console dispatch on, so the list cannot disagree with the keys.
+      local keys = reload.require("lua/core/keybindings.lua")
+      local rows, problem = keys.rows()
+      if not rows then ui.say(redact.text(tostring(problem)))
+      else ui.show(keys.view(rows)) end
     elseif line == "/bind" or line:sub(1, 6) == "/bind " then
       reload.require('lua/core/binding_cli.lua').run('bind',line:sub(7),read_line,ui.print)
     elseif line == "/unbind" then
@@ -1004,7 +1026,14 @@ function M.run(argv)
       -- told by the existing [session update] note.
       local done, problem = pcall(reload.require("lua/core/mcp_cli.lua").run, line:sub(5), {
         print = ui.print, io = ui,
-        ctx = { user_id = USER, role = "master", session_id = agent.session_id },
+        -- operator = true: this is the human at this terminal typing /mcp, and one thing the registry
+        -- lets only them do is start a connector that makes the kernel inject a vault value
+        -- (lua/core/mcp.lua, vault_gate). A model's own mcp tool never carries this flag.
+        ctx = { user_id = USER, role = "master", session_id = agent.session_id, operator = true },
+        -- From the caches, like /status (operator 17/11 "/mcp should be instant"): a full read refreshed
+        -- the federation catalogue when it was older than ten minutes, and offline peers made that 35 s
+        -- on work. The catalogue keeps its own refresh rule; the pages say how old the peers' rows are.
+        cache_only = true,
       })
       if not done then ui.say(redact.text(tostring(problem))) end
     elseif line:match("^/[%w_-]+$") or line:match("^/[%w_-]+%s") then

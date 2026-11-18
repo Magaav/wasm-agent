@@ -248,11 +248,16 @@ const byId = (id) => {
   return registry.get(id);
 };
 
+// The document's own listeners are recorded, not dropped: the window's keys (Esc, Ctrl+`, Ctrl+E,
+// Ctrl+D) are decided there, and a handler nobody can fire is a handler nobody can test.
+const docListeners = {};
+const fireDocument = (type, event) => (docListeners[type] || []).map((fn) => fn(event));
+
 const documentStub = {
   getElementById: byId,
   // A `wa-*` component exposes its container as `.body` (ui/components.js), as the engine panel uses.
   createElement: (tag) => { const el = new El(tag); if (String(tag).toLowerCase().startsWith("wa-")) el.body = new El("div"); return upgrade(el); },
-  addEventListener: () => {},
+  addEventListener: (type, fn) => { (docListeners[type] ||= []).push(fn); },
   querySelector: () => null,
   querySelectorAll: () => [],
   body: new El("body"),
@@ -528,6 +533,68 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   check(input.value === "", "a send clears the input");
   check(canUndo() === false, "a send clears undo (an already-sent draft must not come back)");
   check(canRedo() === false, "a send clears redo");
+
+
+  // ---- the window's key table (/keybindings' window half) ------------------------------------
+  //
+  // The window's keys are decided in one table (WINDOW_KEYS) and one function (windowKey), and the
+  // handlers switch on the ids it answers. Asserted here: every key the table lists is a key
+  // windowKey answers with that row's id; a key the table does not name answers "" (not a
+  // shortcut); every id in the table is used by a handler in ui/app.js, so a row cannot describe a
+  // key nothing does; /keybindings prints the table; and one of them reaches a handler (Esc closes
+  // the shell through windowKey, the document listener and setTerm).
+  {
+    const windowKeys = vm.runInContext("WINDOW_KEYS", sandbox);
+    const windowKey = (event) => vm.runInContext("windowKey(" + JSON.stringify(event) + ")", sandbox);
+    const appSource = fs.readFileSync("ui/app.js", "utf8");
+    check(Array.isArray(windowKeys) && windowKeys.length >= 8, "the window has a key table, and it is not empty");
+    for (const row of windowKeys) {
+      for (const piece of row.key.split(",").map((text) => text.trim())) {
+        const event = { key: piece, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, code: "" };
+        const parts = piece.split("+");
+        if (parts.length > 1) {
+          const held = parts.slice(0, -1);
+          event.key = parts[parts.length - 1];
+          event.ctrlKey = held.includes("Ctrl");
+          event.metaKey = held.includes("Cmd");
+          event.shiftKey = held.includes("Shift");
+          if (event.shiftKey && event.key === "Z") event.key = "Z";
+        }
+        if (event.key === "Esc") event.key = "Escape";
+        if (event.key === "Space") event.key = " ";
+        const answer = windowKey(event);
+        check(answer === row.id, "the table's " + piece + " answers " + row.id + " (got " + JSON.stringify(answer) + ")");
+      }
+      const uses = appSource.split('"' + row.id + '"').length - 1;
+      check(uses >= 2, "a handler uses " + row.id + " (it is not only a row in the list: " + uses + ")");
+    }
+    check(windowKey({ key: "q" }) === "", "a key the table does not name is not a shortcut");
+    check(windowKey({ key: "ArrowLeft" }) === "", "and neither is a bare arrow the table never mentions");
+    const list = vm.runInContext("windowKeyList()", sandbox);
+    for (const row of windowKeys) {
+      check(list.includes(row.key), "/keybindings prints the window's " + row.key);
+      check(list.includes(row.does), "/keybindings prints what " + row.key + " does");
+    }
+    // One key, all the way through: Esc closes the shell because the table says Esc is key-escape
+    // and the document's handler acts on that id.
+    sandbox.document.body.classList.add("term");
+    fireDocument("keydown", { key: "Escape", ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, target: null, preventDefault() {} });
+    check(!sandbox.document.body.classList.contains("term"), "Esc closes the shell: windowKey -> key-escape -> the handler");
+
+    // The window's own /keybindings command: it draws the console's half (the node's route; the stub
+    // answers with no error) and this window's, from the table above.
+    const commands = vm.runInContext("COMMANDS", sandbox);
+    const entry = commands.find((command) => command.name === "/keybindings");
+    check(Boolean(entry), "the window offers /keybindings");
+    const messages = byId("messages");
+    const before = messages.children.length;
+    await entry.run();
+    const panel = messages.children[messages.children.length - 1];
+    check(messages.children.length > before, "/keybindings draws a panel in the transcript");
+    check(String(panel.textContent).includes("This window"), "and its window half is the table's rows");
+    check(String(panel.textContent).includes("Ctrl+E"), "with the engine view's key in it");
+
+  }
 
   console.log("---");
   console.log(failures === 0 ? "ALL PASS" : failures + " FAILURE(S)");

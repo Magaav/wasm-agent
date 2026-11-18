@@ -30,7 +30,7 @@ The reasons are named (`feed_unreachable`, `feed_status_404`, `feed_invalid`, `c
 `not_checked`, `no_recorded_release`, `uncomparable_versions`). A node whose check failed must not
 read as "up to date" - that is the silent success this module exists to prevent.
 
-## The commit banner: `Update available (<short sha>): run wa update or /update`
+## The commit banner: `Update available (<short sha>) — /update here, or wa update in a terminal`
 
 `lua/core/update_banner.lua` answers the question `wa update` can actually answer, in the **two
 channels the updater has**. It compares the **installed commit** (`installed.txt` `commit=`, plus
@@ -46,7 +46,7 @@ channels the updater has**. It compares the **installed commit** (`installed.txt
 
 | state | when | what is drawn |
 | --- | --- | --- |
-| `behind` | tree: local `origin/main` descends from the installed commit. release: the newest installable release is newer, by ancestry or by the published window | `Update available (<candidate sha12>): run wa update or /update` on the CLI's **session-status-content** line (yellow, directly above the session status bar), once at session start, and on the window's own **session-status-content** line (same yellow, directly above the composer footer, one line, ellipsised) plus a topbar badge - never an overlay |
+| `behind` | tree: local `origin/main` descends from the installed commit. release: the newest installable release is newer, by ancestry or by the published window | `Update available (<candidate sha12>) — /update here, or wa update in a terminal` on the CLI's **session-status-content** line (yellow, directly above the session status bar), once at session start, and on the window's own **session-status-content** line (same yellow, directly above the composer footer, one line, ellipsised) plus a topbar badge - never an overlay |
 | `current` | installed == the candidate | nothing; an existing badge and line are cleared on the next load |
 | `ahead` | local git proves the installed commit descends from the candidate | nothing - a tree ahead of `origin/main`, or an install newer than the feed, is not told to update |
 | `unknown` | no recorded commit, no feed, a dirty tree, or no release with an asset for this machine (`no_installable_asset`) | nothing (the reason is in the cache and the JSON; `wa update` still explains its own refusal) |
@@ -163,7 +163,7 @@ still writes an interim record with no tag - the deploy owns the final record.
 ## Where it surfaces
 
 - **CLI**, on start: one line, only when actually behind. The commit banner prints
-  `Update available (<latest sha12>): run wa update or /update` and puts the same sentence on the
+  `Update available (<latest sha12>) — /update here, or wa update in a terminal` and puts the same sentence on the
   session-status-content line above the status bar (see above); when the commit feed cannot decide,
   the tag line above is the fallback -
   `update available: installed v0.1.0-alpha.11 is behind the latest release v0.2.0 - /update installs it`.

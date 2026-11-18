@@ -102,7 +102,13 @@ M.commands = {
     usage = "/mcp [<key>] [on|off]",
     hint = "every MCP connector, here and from peers: state, tools, and the exact names the model is given; on/off changes one",
   },
-  { name = "/help", usage = "/help", hint = "this help" },
+  {
+    name = "/keybindings",
+    usage = "/keybindings",
+    local_view = true, -- a read-only view: the window draws it mid-run from the published rows
+    hint = "every special key the console handles: what it does and where, generated from the table the editor dispatches on",
+  },
+  { name = "/help", usage = "/help", hint = "this help, and /keybindings for the keys" },
   { name = "/exit", usage = "/exit", alias = { "/quit" }, hint = "quit" },
 }
 
@@ -133,6 +139,9 @@ function M.help()
     lines[#lines + 1] = string.format("%-" .. width .. "s%s", row[1], row[2])
   end
   lines[#lines + 1] = "anything else is sent to the model."
+  -- The keys are not this list's business, and a reader asking "how do I copy this" needs them here:
+  -- /keybindings is generated from the table the editor dispatches on, so it is the answer.
+  lines[#lines + 1] = "the keys: /keybindings lists every special key, what it does and where it applies."
   return table.concat(lines, "\n")
 end
 

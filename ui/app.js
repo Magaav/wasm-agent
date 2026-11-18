@@ -549,8 +549,11 @@ function anchorAnswer(node, smooth = false) {
       if(answerMotions.has(container))releaseAnswerAnchor(container);
     },{passive:true});
     container.addEventListener('keydown', event => {
-      if (['PageUp','PageDown','ArrowUp','ArrowDown','Home','End',' '].includes(event.key) &&
-        !event.target.closest('input,textarea,[contenteditable]')) releaseAnswerAnchor(container);
+      // A key that scrolls, by the window's own table: the ids, not the key names, so a binding
+      // added there reaches every panel at once.
+      const key = windowKey(event);
+      const scrolls = key === 'key-scroll' || key === 'key-arrow-up' || key === 'key-arrow-down';
+      if (scrolls && !event.target.closest('input,textarea,[contenteditable]')) releaseAnswerAnchor(container);
     });
     container.addEventListener('scroll', () => {
       const expected=answerScrollPositions.get(container);
@@ -719,10 +722,12 @@ function bindJump(container, element) {
     }, { passive: true });
   }
   container.addEventListener("keydown", (event) => {
+    // The keys are the window's table's (windowKey); this is what a scroll means here.
+    const key = windowKey(event);
     cancelJumpMotion(container);
-    if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", " "].includes(event.key)) releaseAnswerAnchor(container);
-    if (["PageUp", "ArrowUp", "Home"].includes(event.key)) followFor(false);
-    if (["PageDown", "ArrowDown", "End"].includes(event.key)) followFor(shortOfBottom(40));
+    if (key === "key-scroll" || key === "key-arrow-up" || key === "key-arrow-down") releaseAnswerAnchor(container);
+    if (key === "key-scroll" || key === "key-arrow-up") followFor(false);
+    if (key === "key-scroll" || key === "key-arrow-down") followFor(shortOfBottom(40));
     syncJump(container);
   });
   // Content can grow without an append (markdown re-render, a topic opening,
@@ -5557,19 +5562,78 @@ chatShell.addEventListener("chat-send", (event) => {
   send(text);
 });
 
+// ---- the window's own keys: one table, read by every handler --------------------------------
+//
+// The node's console has one table for its keys - rust/wa-term/src/keymap.rs, which /keybindings
+// prints - and the window has its own: the composer's Enter, the overlays' Esc, the panel shortcuts.
+// Before this table they were decided in five places (a keydown on the composer, one on the document,
+// one on the shell's field, one inside each scrollable panel, and the command list's arrows), and a
+// list written beside five handlers is a list that is wrong the first time one of them changes. So
+// the keys are named here and nowhere else: windowKey(event) answers an id, the handlers switch on
+// that id, and /keybindings prints this table verbatim (windowKeyList). A key this table does not
+// name gets "" - the handlers do nothing with it, which is what "not a shortcut" means.
+const WINDOW_KEYS = [
+  { id: "key-enter", key: "Enter", where: "the composer, the command list", does: "send the draft; in the command list, take the selected command (Shift+Enter keeps a new line)" },
+  { id: "key-accelerated-enter", key: "Ctrl+Enter, Cmd+Enter", where: "the composer", does: "send the draft into the running turn (steering), or send it when nothing is running" },
+  { id: "key-undo", key: "Ctrl+Z, Cmd+Z", where: "the composer", does: "undo the draft" },
+  { id: "key-redo", key: "Ctrl+Shift+Z, Ctrl+Y, Cmd+Shift+Z", where: "the composer", does: "redo the draft" },
+  { id: "key-arrow-up", key: "ArrowUp", where: "the command list, the shell, a scrollable panel", does: "the command above; the previous command run in the shell; scroll up" },
+  { id: "key-arrow-down", key: "ArrowDown", where: "the command list, the shell, a scrollable panel", does: "the command below; the next command run in the shell; scroll down" },
+  { id: "key-tab", key: "Tab", where: "the command list", does: "take the selected command" },
+  { id: "key-scroll", key: "PageUp, PageDown, Home, End, Space", where: "a scrollable panel", does: "scroll it a page, to an end, or a screenful" },
+  { id: "key-escape", key: "Esc", where: "an overlay", does: "close the engine view, the shell or the control menu" },
+  { id: "key-shell", key: "Ctrl+`", where: "the window", does: "open or close the shell" },
+  { id: "key-engine", key: "Ctrl+E", where: "the window", does: "open or close the engine view (a text field keeps its own Ctrl+E)" },
+  { id: "key-orchestrator", key: "Ctrl+D", where: "the window", does: "open the orchestrator (a text field keeps its own Ctrl+D)" },
+];
+
+// What key this event is, by the table above: an id, or "" for a key that is not a shortcut here.
+// Modifier rules live in this one function, so two handlers cannot disagree about what Ctrl+Z is.
+function windowKey(event) {
+  const accel = Boolean(event.ctrlKey || event.metaKey);
+  const key = String(event.key || "");
+  const lower = key.toLowerCase();
+  if (accel && lower === "enter") return "key-accelerated-enter";
+  if (accel && lower === "z") return event.shiftKey ? "key-redo" : "key-undo";
+  if (accel && lower === "y") return "key-redo";
+  if (accel && (key === "`" || event.code === "Backquote")) return "key-shell";
+  if (accel && lower === "e") return "key-engine";
+  if (accel && lower === "d") return "key-orchestrator";
+  if (event.altKey) return "";
+  if (key === "Escape") return "key-escape";
+  if (key === "Enter") return "key-enter";
+  if (key === "Tab") return "key-tab";
+  if (key === "ArrowUp") return "key-arrow-up";
+  if (key === "ArrowDown") return "key-arrow-down";
+  if (["PageUp", "PageDown", "Home", "End", " "].includes(key)) return "key-scroll";
+  return "";
+}
+
+// The table as the lines /keybindings prints for this window. Generated, so it cannot describe a key
+// the handlers do not use: the ids it prints are the ids windowKey answers.
+function windowKeyList() {
+  const lines = ["This window"];
+  const width = Math.max(...WINDOW_KEYS.map((row) => row.key.length)) + 4;
+  let where = null;
+  for (const row of WINDOW_KEYS) {
+    if (row.where !== where) { where = row.where; lines.push("  " + where); }
+    const label = "    " + row.key;
+    lines.push(label + " ".repeat(Math.max(1, width - label.length)) + row.does);
+  }
+  return lines.join("\n");
+}
+
 input.addEventListener("keydown", (event) => {
-  const accel = event.ctrlKey || event.metaKey;
+  const key = windowKey(event);
   // While the command list is up it owns the arrows, Enter and Tab: a menu that offered choices
   // and then sent the half-typed command on Enter would be worse than no menu. Escape is left to
   // the overlay itself (§3), which is where the close rule lives.
-  if (commandMenu.open && !accel) {
-    if (event.key === "ArrowDown") { event.preventDefault(); commandMenu.move(1); return; }
-    if (event.key === "ArrowUp") { event.preventDefault(); commandMenu.move(-1); return; }
-    if (event.key === "Enter" || event.key === "Tab") {
-      if (commandMenu.activate()) { event.preventDefault(); return; }
-    }
+  if (commandMenu.open && (key === "key-arrow-down" || key === "key-arrow-up" || key === "key-tab" || key === "key-enter")) {
+    if (key === "key-arrow-down") { event.preventDefault(); commandMenu.move(1); return; }
+    if (key === "key-arrow-up") { event.preventDefault(); commandMenu.move(-1); return; }
+    if (commandMenu.activate()) { event.preventDefault(); return; }
   }
-  if(accel && event.key==='Enter') {
+  if (key === "key-accelerated-enter") {
     event.preventDefault();
     if (composerBusy()) steerActiveRun();
     else if (input.value.trim() || attachments.length) send(input.value.trim());
@@ -5578,18 +5642,18 @@ input.addEventListener("keydown", (event) => {
   // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, the three spellings people actually use.
   // Only while the composer has focus, so we never shadow an undo a browser
   // context (a dialog, a native field) is entitled to handle itself.
-  if (accel && event.key.toLowerCase() === "z") {
+  if (key === "key-undo") {
     event.preventDefault();
     if (event.shiftKey) redoDraft();
     else undoDraft();
     return;
   }
-  if (accel && event.key.toLowerCase() === "y") {
+  if (key === "key-redo") {
     event.preventDefault();
     redoDraft();
     return;
   }
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (key === "key-enter" && !event.shiftKey) {
     // The shell sent it already: a plain Enter in a healthy composer is the shell's gesture, and it
     // says so by consuming the event. This branch is what a run in flight does with that key.
     if (event.defaultPrevented) return;
@@ -5852,6 +5916,14 @@ const COMMANDS = [
     name: "/mcp",
     hint: "every MCP connector here and from peers — state, tools, and the exact names the model is given; turn one on or off",
     run: openMcps,
+  },
+  // The keys, on both surfaces: the node's console from its own table (rust/wa-term/src/keymap.rs,
+  // through the node's read route) and this window's from WINDOW_KEYS. Two lists because there are two
+  // dispatchers, each generated from the one it obeys.
+  {
+    name: "/keybindings",
+    hint: "every special key this window and the node's console handle — what it does and where",
+    run: keybindingsReport,
   },
 ];
 
@@ -6224,6 +6296,35 @@ async function hooksReport() {
     panel.textContent = "/hooks could not be read: " + String(error && error.message || error);
     panel.dataset.state = "refused";
   }
+  pin();
+}
+
+// /keybindings: the console's keys from the node, this window's from its own table.
+//
+// The console half is not written in JavaScript and never could be: it is the table the editor, the
+// slash menu, the transcript, a panel, the pointer and the reader thread dispatch on
+// (rust/wa-term/src/keymap.rs), read through the node's `/keybindings` route, which formats the same
+// rows the CLI's `/keybindings` prints. The window half is WINDOW_KEYS, the table its own handlers
+// read. Both halves are generated, so neither can list a key its surface does not obey.
+async function keybindingsReport() {
+  const panel = document.createElement("pre");
+  panel.className = "efficiency-report";
+  panel.textContent = "/keybindings — reading the console's key table…";
+  messages.append(panel);
+  pin();
+  let console_part = "";
+  try {
+    const response = await apiFetch("keybindings", { headers: apiHeaders() });
+    const payload = await response.json();
+    panel.dataset.state = payload && payload.error ? "refused" : "current";
+    console_part = payload && payload.error
+      ? "the console's keys could not be read: " + String(payload.detail || payload.error)
+      : String(payload && payload.text || "");
+  } catch (error) {
+    panel.dataset.state = "refused";
+    console_part = "the console's keys could not be read: " + String(error && error.message || error);
+  }
+  panel.textContent = (console_part ? console_part + "\n\n" : "") + windowKeyList();
   pin();
 }
 
@@ -9615,23 +9716,26 @@ function setTerm(open) {
 termBtn.addEventListener("click", () => setTerm(!document.body.classList.contains("term")));
 termClose.addEventListener("click", () => setTerm(false));
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
+  // Which key this is, is windowKey's answer (the table above); what it does here is this handler's.
+  const key = windowKey(event);
+  if (key === "key-escape") {
     if (document.body.classList.contains("engine")) { event.preventDefault(); setEngine(false); input.focus(); return; }
     if (document.body.classList.contains("term")) { event.preventDefault(); setTerm(false); input.focus(); return; }
     if (document.body.classList.contains("control")) { event.preventDefault(); closeControl(); return; }
+    return;
   }
   // Ctrl+E and Ctrl+D are line editing keys inside a text field (end of line, delete forward on macOS and
   // in readline-style fields); the panel shortcuts apply only outside one.
   const editing = event.target && (event.target.isContentEditable || /^(INPUT|TEXTAREA)$/.test(event.target.tagName || ""));
-  if (event.ctrlKey && (event.key === "`" || event.code === "Backquote")) {
+  if (key === "key-shell") {
     event.preventDefault();
     setTerm(!document.body.classList.contains("term"));
-  } else if (editing && event.ctrlKey && /^[eEdD]$/.test(event.key)) {
+  } else if (editing && (key === "key-engine" || key === "key-orchestrator")) {
     // leave the key to the field
-  } else if (event.ctrlKey && (event.key === "e" || event.key === "E")) {
+  } else if (key === "key-engine") {
     event.preventDefault();
     setEngine(!document.body.classList.contains("engine"));
-  } else if (event.ctrlKey && (event.key === "d" || event.key === "D")) {
+  } else if (key === "key-orchestrator") {
     // Ctrl+D would otherwise be the browser's bookmark gesture.
     event.preventDefault();
     openOrchestrator();
@@ -9648,11 +9752,12 @@ termForm.addEventListener("submit", (event) => {
   runShell(command);
 });
 termCmd.addEventListener("keydown", (event) => {
-  if (event.key === "ArrowUp" && termHistory.length) {
+  const key = windowKey(event);
+  if (key === "key-arrow-up" && termHistory.length) {
     event.preventDefault();
     termIndex = Math.max(0, termIndex - 1);
     termCmd.value = termHistory[termIndex] || "";
-  } else if (event.key === "ArrowDown") {
+  } else if (key === "key-arrow-down") {
     event.preventDefault();
     termIndex = Math.min(termHistory.length, termIndex + 1);
     termCmd.value = termHistory[termIndex] || "";

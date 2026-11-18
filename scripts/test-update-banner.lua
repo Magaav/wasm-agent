@@ -221,7 +221,7 @@ local tree_verdict = banner.check({
 })
 eq(tree_verdict.channel, "tree", "a runtime tree takes the build channel")
 eq(tree_verdict.state, "behind", "and is behind origin/main")
-eq(tree_verdict.line, "Update available! Run: wa update",
+eq(tree_verdict.line, "Update available (73b63548cba1) \226\128\148 /update here, or wa update in a terminal",
   "the line names origin/main, never the aarch64 release")
 eq(tree_verdict.latest and tree_verdict.latest.sha12, "73b63548cba1", "and that is the latest fact")
 eq(tree_calls, 0, "the release feed is not even requested on a tree install")
@@ -299,7 +299,7 @@ end
 
 local behind = banner.verdict(build, { LATEST, OLDER }, "older", "installed_release_in_window", { repo = "o/r" })
 eq(behind.state, "behind", "older is behind")
-eq(behind.line, "Update available! Run: wa update",
+eq(behind.line, "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal",
    "the line is the one the CLI footer and the window print")
 eq(banner.verdict(build, { LATEST }, "equal", "same_commit", {}).line, nil, "current prints no line")
 eq(banner.verdict(build, { LATEST }, "newer", "local_ancestry", {}).line, nil, "ahead prints no line")
@@ -351,7 +351,7 @@ end
 
 local first = banner.check(base({ now = 1000 }))
 eq(first.state, "behind", "the check answers behind from the fixture")
-eq(first.line, "Update available! Run: wa update", "with the banner line")
+eq(first.line, "Update available (cccccccccccc) \226\128\148 /update here, or wa update in a terminal", "with the banner line")
 eq(calls, 1, "the first check makes exactly one request")
 eq(first.cached, false, "the first check is not a cache hit")
 eq(first.attempted, true, "and it did ask")
@@ -496,7 +496,7 @@ eq(string.format("%d;%d;%d", tonumber("ff", 16), tonumber("c1", 16), tonumber("0
    "which is the truecolor triple the Rust renderer must use")
 ok(rust:find("255;193;7", 1, true) ~= nil, "and build_status::NOTICE is that triple")
 
-local NOTICE_LINE = "Update available! Run: wa update"
+local NOTICE_LINE = banner.line("cccccccccccc")   -- the sentence the module publishes
 local BUILDING = { state = "building", phase = "compiling", done = 143, total = 412, crate = "serde_json",
   started_at = 1000, at = 1123 }
 eq(banner.session_content({ notice = NOTICE_LINE, build = false, now = 100 }).kind, "notice",
@@ -546,7 +546,12 @@ banner.reset_build()
 -- The area is ONE line directly above the session status bar; the notice is yellow; the status bar
 -- keeps its own content (the notice no longer prefixes it); a build REPLACES the notice on that same
 -- line and hands it back when it is over; an empty area takes no line at all.
-local NOTICE_LINE = "Update available! Run: wa update"
+local NOTICE_LINE = banner.line("cccccccccccc")   -- the sentence the module publishes
+-- What the CLI draws for it: the notice colour, and the two commands it names in bold
+-- (Victor, 18/11: /update and wa update). ONE list owns which words those are.
+local function notice_drawn()
+  return cli_view.paint(cli_view.emphasise(NOTICE_LINE, banner.COMMANDS), "warning", true)
+end
 local writes = {}
 local clock = 100
 -- A 21-row framed console without the native editor: `cli_view.screen_rows(21)`.
@@ -579,6 +584,10 @@ shown.session_notice = NOTICE_LINE
 shown:session_draw()
 local out = drawn()
 ok(out:find("\27[19;1H", 1, true) ~= nil, "the notice is drawn on row 19: directly above the status bar on 20")
+-- A notice handed to the view as plain text carries no command list, so it is drawn exactly as it
+-- came: the bold words are the ones the sentence's own module names (`M.COMMANDS`), and a row with no
+-- list is not guessed at. The block further down draws the same sentence through `session_status`
+-- (which does carry them) and asserts the bold.
 ok(out:find(cli_view.paint(NOTICE_LINE, "warning", true), 1, true) ~= nil,
    "in the warning yellow, the same sentence")
 ok(out:find("\27[20;1H", 1, true) == nil, "and not on the status bar's own row")
@@ -602,7 +611,7 @@ bar:footer_draw()
 eq(footer_text, "3 runs", "the status bar carries its own content only, left-aligned as before")
 eq(footer_right, "test-model", "and its right side is still the model")
 eq(handed, NOTICE_LINE, "the notice is handed to the editor's own row")
-ok(drawn():find(cli_view.paint(NOTICE_LINE, "warning", true), 1, true) == nil, "and the view does not also paint it")
+ok(drawn():find(notice_drawn(), 1, true) == nil, "and the view does not also paint it")
 bar.session_notice = nil
 bar:footer_draw()
 eq(handed, "", "and when it goes away the editor is told to take the row back")
@@ -639,7 +648,7 @@ local back = framed({ session_status = function() return banner.session_content(
   build = { state = "failed", phase = "exit 101", at = 95 }, now = clock }) end })
 back.session_notice = NOTICE_LINE
 back:session_draw()
-ok(drawn():find(cli_view.paint(NOTICE_LINE, "warning", true), 1, true) ~= nil,
+ok(drawn():find(notice_drawn(), 1, true) ~= nil,
    "once the failure is no longer fresh the notice is back, in yellow, on the same row")
 -- A build that died without saying so hands the line back too.
 clock = 95 + banner.BUILDING_FOR + 1
@@ -647,7 +656,7 @@ local died = framed({ session_status = function() return banner.session_content(
   build = { state = "building", phase = "compiling", at = 95 }, now = clock }) end })
 died.session_notice = NOTICE_LINE
 died:session_draw()
-ok(drawn():find(cli_view.paint(NOTICE_LINE, "warning", true), 1, true) ~= nil,
+ok(drawn():find(notice_drawn(), 1, true) ~= nil,
    "a stale 'building' is not a line: the notice is")
 
 -- (e) width 20 (the sentence is 32 columns): exactly 20 columns, an ellipsis at the end, one row.

@@ -102,16 +102,32 @@ end
 -- Underscore emphasis is not a pattern: CommonMark forbids it inside a word, and that is
 -- exactly where a tool name lives (`peer_openclaw__mcp_whatsapp_native_read_newest_...`).
 -- `find_underscore` below applies the flanking rule the patterns cannot express.
+-- The bare URL is not a pattern here: it is the HOST detector, the same function that answers which
+-- link a click copies (rust/wa-term/src/links.rs, host.rs url_at). One implementation, so the two can no
+-- longer disagree about where a link ends - they did: this table pattern kept a trailing dot that the
+-- click dropped, and its character class stopped at a + that the click accepted.
+local LINK = { style = { "underline", "mdLinkUrl" } }
+local function link_span(rest)
+  if type(host) ~= "table" or type(host.link_span) ~= "function" then return nil end
+  local ok, raw = pcall(host.link_span, rest)
+  if not ok or type(raw) ~= "string" then return nil end
+  local first, stop = raw:match("^(%d+),(%d+)$")
+  if not first then return nil end
+  return tonumber(first), tonumber(stop)
+end
+
 local INLINE = {
   { pattern = "`([^`]+)`", style = "mdCode" },
+  -- `***x***` first (17/11: it rendered as `*x*` in italic - the italic rule took the inner pair).
+  { pattern = "%*%*%*(.-)%*%*%*", style = { "bold", "italic", "text" } },
   { pattern = "%*%*(.-)%*%*", style = { "bold", "text" } },
   { underscore = 2, style = { "bold", "text" } },
   { pattern = "~~(.-)~~", style = "dim" },
   { pattern = "%*([^%*]-)%*", style = "italic" },
   { underscore = 1, style = "italic" },
   { pattern = "%[([^%]]*)%]%(([^%)]*)%)", link = true },
-  { pattern = "<(https?://[^>]+)>", style = "mdLinkUrl" },
-  { pattern = "https?://[%w%._%-/~%?%%&=:#%+@]+", style = "mdLinkUrl" },
+  -- A link reads as one: underlined, light blue (17/11); a click on it copies it (the host).
+  { pattern = "<(https?://[^>]+)>", style = { "underline", "mdLinkUrl" } },
 }
 
 -- One `_` is a word character here, never a delimiter: a run is a delimiter only when at least
@@ -173,16 +189,23 @@ local function inline(text, base)
         at, found = start, { start = start, stop = stop, first = first, second = second, form = form }
       end
     end
+    -- The bare URL, on the same footing as the patterns above: it wins only when it starts earlier.
+    do
+      local start, stop = link_span(rest)
+      if start and (at == nil or start < at) then
+        at, found = start, { start = start, stop = stop, form = LINK }
+      end
+    end
     if not at then break end
     if at > 1 then
       out[#out + 1] = { text = rest:sub(1, at - 1), style = base }
     end
     local form = found.form
     if form.link then
-      out[#out + 1] = { text = found.first, style = "mdLink" }
+      out[#out + 1] = { text = found.first, style = { "underline", "mdLink" } }
       if found.second and found.second ~= "" then
         out[#out + 1] = { text = " ", style = base }
-        out[#out + 1] = { text = found.second, style = "mdLinkUrl" }
+        out[#out + 1] = { text = found.second, style = { "underline", "mdLinkUrl" } }
       end
     else
       -- A pattern with no capture (a bare url, an autolink's brackets) has no `first`:
@@ -623,14 +646,30 @@ function M.render(text, opts)
       out[#out + 1] = paint(indent .. "\226\148\140\226\148\128" .. label, "mdCodeBlockBorder")
       copies[#copies + 1] = { at = #out - 1, text = table.concat(body, "\n") }
       local bar = paint(indent .. "\226\148\130 ", "mdCodeBlockBorder")
+      -- A line longer than the card wraps INSIDE it (operator 17/11 "the fence printing breaks"): the
+      -- terminal used to wrap it to column 0, outside the border. Each continuation keeps the border and
+      -- says it continues (`│↪`), so a reader never mistakes a wrapped half for a line of its own.
+      local more = paint(indent .. "\226\148\130", "mdCodeBlockBorder") .. paint("\226\134\170", "dim")
+      local room = math.max(8, width - columns(indent) - 2)
       for _, code_line in ipairs(body) do
-        local parts = { bar }
-        scan_code(code_line, lang, function(piece, style)
-          if piece == "" then return end
-          -- A code block's own colour is the base; a token adds its syntax colour on top.
-          parts[#parts + 1] = paint(piece, style or "mdCodeBlock")
-        end)
-        out[#out + 1] = table.concat(parts)
+        code_line = code_line:gsub("\t", "    ")
+        local pieces, from, used, start = {}, 1, 0, 1
+        while from <= #code_line do
+          local size, cells = char_at(code_line, from)
+          if used + cells > room then pieces[#pieces + 1] = code_line:sub(start, from - 1); start, used = from, 0 end
+          used = used + cells
+          from = from + size
+        end
+        pieces[#pieces + 1] = code_line:sub(start)
+        for number, piece_line in ipairs(pieces) do
+          local parts = { number == 1 and bar or more }
+          scan_code(piece_line, lang, function(piece, style)
+            if piece == "" then return end
+            -- A code block's own colour is the base; a token adds its syntax colour on top.
+            parts[#parts + 1] = paint(piece, style or "mdCodeBlock")
+          end)
+          out[#out + 1] = table.concat(parts)
+        end
       end
       out[#out + 1] = paint(indent .. "\226\148\148\226\148\128", "mdCodeBlockBorder")
       if #out > 0 then out[#out + 1] = "" end

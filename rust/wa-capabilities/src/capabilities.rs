@@ -113,6 +113,9 @@ pub const REGISTRY: &[Capability] = &[
     plain!("mark_db_ready", WritesFiles, crate::host::mark_db_ready, "Record that the ledger schema migration has run"),
     // ---- paths, environment and the process --------------------------------------------------
     plain!("getenv", ReadOnly, crate::host::getenv, "Read one environment value as the host resolved it (config file first, then the process)"),
+    // The PATH a spawned child gets is the process's, not the config's: the approval has to name the
+    // interpreter the kernel actually starts (docs/VAULT.md, round 7).
+    plain!("executable_on_path", ReadOnly, crate::host::executable_on_path, "The file a bare program name resolves to on the PATH a spawned child inherits"),
     plain!("paths", ReadOnly, crate::host::paths, "The resolved home/config/data/cache/temp directories; never build a path by hand"),
     plain!("canonical_path", ReadOnly, crate::host::canonical_path, "Canonicalise a path without requiring it to exist"),
     plain!("platform", ReadOnly, crate::host::platform, "This node's platform, architecture and executable family"),
@@ -132,6 +135,12 @@ pub const REGISTRY: &[Capability] = &[
     plain!("read_image_base64", ReadOnly, crate::host::read_image_base64, "Read a bounded PNG/JPEG/WebP/GIF as base64 with its MIME type"),
     plain!("write_file", WritesFiles, crate::host::write_file, "Create or overwrite a text file"),
     plain!("path_kind", ReadOnly, crate::host::path_kind, "Classify a path as file/dir/missing/other without reading it"),
+    // What a path IS, for the one decision that must not be made from a name: whether a program is the
+    // platform's (root-owned, not group/other-writable) or the connector's own code. and the sha256 of a
+    // file read in chunks, so an approval can name a binary's bytes without loading them into Lua
+    // (docs/VAULT.md, the vault approval).
+    plain!("path_facts", ReadOnly, crate::host::path_facts, "A path's realpath, kind, size and (on unix) owner and mode bits, as JSON"),
+    plain!("file_sha256", ReadOnly, crate::host::file_sha256, "SHA-256 of a file's bytes, read in chunks; nil plus a named reason when it cannot be read"),
     plain!("list_dir", ReadOnly, crate::host::list_dir, "List one directory's entries"),
     plain!("grep", ReadOnly, crate::host::grep, "Literal substring search over a directory or file with bounded, counted results"),
     // ---- the code graph ----------------------------------------------------------------------
@@ -305,6 +314,10 @@ pub const REGISTRY: &[Capability] = &[
     plain!("input_commands", Device, crate::host::input_commands, "Set the commands the CLI's slash menu offers"),
     plain!("input_held", Device, crate::host::input_held, "List lines the CLI took but holds as still queued above its status line"),
     plain!("input_take", Device, crate::host::input_take, "Take lines the reader buffered while a run was in flight"),
+    plain!("transcript_copy_first", Device, crate::host::transcript_copy_first, "Make the current transcript block's first line copyable (a code block's script)"),
+    plain!("link_span", ReadOnly, crate::host::link_span, "The first bare URL in a line as start,stop (1-based byte offsets): the one detector the renderer underlines and a click copies"),
+    plain!("keybindings", ReadOnly, crate::host::keybindings, "Every special key the editor and console handle, generated from the table they dispatch on: surface, group, key and what it does"),
+    plain!("input_image", Device, crate::host::input_image, "The image pasted with Ctrl+V as [Image #n] in this session (mime + base64)"),
     plain!("input_stop", Device, crate::host::input_stop, "Stop the console line reader"),
     plain!("input_idle", Device, crate::host::input_idle, "Whether the CLI could restart now: empty draft, no panel, nothing queued, no selection"),
     plain!("binary_changed", ReadOnly, crate::host::binary_changed, "Whether this process's wa binary was replaced on disk since it started"),
