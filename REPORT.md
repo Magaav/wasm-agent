@@ -4,6 +4,10 @@ Branch `change/harness-fixes`, base origin/main `74d48431`. Nothing pushed; no r
 every row runs in its own `mktemp -d` home with no rendezvous, no relay and no vault, and each row stubs the
 provider stream (no paid call).
 
+Three sessions' work is recorded here, in the order it was measured: round 1 and round 2 on
+change/harness-fixes, items 6-8 on change/harness-fixes-rust, and - at the end - the integration that
+merged the two branches into change/harness-land and the full re-run of every row both of them named.
+
 ## How the rows were run, and the one thing that could not be run
 
 ```
@@ -96,6 +100,9 @@ writes the failed assistant row and the failure record, so `wa chat --once` exit
   it again, and the test asserts the ordering inside the script as well as the message.
 
 ## Not delivered: items 6, 7, 8 (Rust, no toolchain on this node)
+
+> Delivered later, on a node with a toolchain - see "Items 6, 7, 8 - delivered" below. The text stays as it
+> was written: it is what this session measured, and why it could not measure the rest.
 
 All three live in Rust and both a fix and a failing-then-passing test need a compiler:
 `rust/wa-sentinel/src/main.rs` (6: `request withdraw <id>`; 7: the once-per-`(id, error)` return-observation log
@@ -707,3 +714,208 @@ All 14, classified, with how each was decided:
   also measured directly against the stashed base, not only read from this run.
 - Nothing was pushed, deployed or run against a live node or watcher; every row is a scratch home.
 
+
+---
+
+# Integration — `change/harness-land` (18/11, avell, this node)
+
+One landable branch out of two: `change/harness-fixes` at `e31704d1` (round 1 `62c3c064` + round 2), with
+the three commits of `change/harness-fixes-rust` cherry-picked onto it. Nothing else was added, and nothing
+in the tree changed except `REPORT.md` and the one orphan row below.
+
+```
+git log --oneline -6        # change/harness-land
+be6cdb91 harness: the runtime binding preflight is a row of the fast path, not an orphan
+ec62cf4c REPORT: the fast suite re-run, and fast-binary classified as the runner's self-test  (was 91bd2380)
+d85f9347 harness-fixes 6-8, second pass: the direct-address rule holds for an unknown peer …   (was e658eebf)
+6c2a4bdd harness-fixes items 6-8: request withdraw, one observation line per (id, problem) …   (was 2d2c0e2d)
+e31704d1 harness-fixes round 2: a remote session is not the operator, …
+62c3c064 harness-fixes: default CodeAct acts, …      # the common base of both branches
+```
+
+`REPORT.md` was the only file both branches touched, and both appended after the same line 141. The
+conflict was resolved by keeping round 2's report whole and appending items 6-8's sections behind it, so the
+document reads: round 1 (items 1-5, 9), round 2, items 6-8 (delivered), items 6-8 second pass, this
+integration. No paragraph of either report was dropped; the round-1 section "Not delivered: items 6, 7, 8"
+stays, with a pointer to the section that delivers them, because that is what that session measured.
+
+## How the base was measured — a detached worktree, not `git stash`
+
+`git worktree add --detach /tmp/hl-base 62c3c064`, own `CARGO_TARGET_DIR`
+(`/home/victor/wasm-agent/target/m-harness-land-base`). A stash in this worktree can no longer reach the
+base — the cherry-picks are **committed**, so `git stash` leaves `HEAD` with items 6-8 in it. The second
+pass above also lost one measurement to a stash raced by another session in the same worktree, and this node
+was running three other missions while this one measured (`release-glibc`, `vault-one`). The base state was
+verified before every base run, not assumed:
+
+```
+$ grep -c 'mod withdraw_tests' rust/wa-sentinel/src/main.rs   -> 0
+$ grep -c is_direct_address rust/wa-mesh-core/src/roster.rs    -> 0
+$ ls rust/wa-sentinel/src/observation.rs                       -> No such file
+```
+
+## Every row either branch named, re-run against this branch
+
+Lua rows, each in its own `mktemp -d` home, this tree's Lua (`WASM_AGENT_LUA_ROOT`), no rendezvous, no
+relay, no vault, provider stubbed — the same runner the sections above used:
+
+```
+test-codeact-default           {"checks":12,"ok":true,"paid_calls":0}
+test-session-worktree-status   {"checks":15,"ok":true}
+test-wave-registration-refusal {"checks":15,"ok":true}
+test-run-claim-release         {"checks":10,"ok":true}
+test-wave-operator-session     {"checks":28,"ok":true}
+test-raw-code-answer           {"checks":11,"ok":true,"paid_calls":0}
+test-run-claim-release-live    ok run-claim-release: 7 checks
+test-raw-code                  {"checks":34,"ok":true,"paid_calls":0}
+test-raw-first                 {"checks":47,"ok":true,"paid_calls":0}
+test-raw-native                {"checks":23,"ok":true,"paid_calls":0}
+test-codemode-default          {"checks":39,"ok":true,"paid_calls":0,"rounds":2}
+test-codemode-blocks           codemode blocks ok (31 checks)
+test-codemode-promises         codemode natural promises ok (31 checks; real sandbox)
+test-codemode-boundary         {"checks":33,"ok":true}
+test-envelope                  envelope ok (97 checks)
+test-toolname-repair           toolname repair: 33 checks, 0 failed, 0 skipped
+test-resume-tool-registry      resume tool registry: 77 checks
+test-prompt-tool-names         prompt tool names ok (286 checks, 0 skipped)
+test-codemode-native           rc=1  red — and red on 62c3c064, same message (below)
+```
+
+Node and shell rows both branches named:
+
+```
+node scripts/check-deploy-shipped.mjs        deploy shipped ok (179 checks; 58 rules …, 44 from ship-wave.mjs)
+node scripts/check-deploy-docs.mjs           deploy docs check ok (6 checks)
+bash scripts/test-deploy-runtime-recheck.sh  deploy runtime re-check ok (11 checks)
+node scripts/test-runtime-binding-preflight.mjs  {"ok":true,"checks":8}
+node scripts/test-orphan-tests.mjs           ok (196 wired, 47 orphaned and declared)
+```
+
+## The cargo suites, base against branch
+
+```
+cargo test                       # rust/wa-sentinel, its own workspace, CARGO_TARGET_DIR=…/m-harness-land
+cargo test -p wa-mesh-core -p wa-mesh   # in rust/
+```
+
+| suite | base `62c3c064` | this branch |
+|---|---|---|
+| wa-sentinel, `cargo test` (parallel), run 1 | 110 passed, **5 failed** | 120 passed, **6 failed** |
+| wa-sentinel, `cargo test` (parallel), run 2 | 110 passed, **5 failed** | 120 passed, **6 failed** |
+| wa-sentinel, `-- --test-threads=1` | 110 passed, **5 failed** | **121 passed**, **5 failed** |
+| wa-sentinel parallel, `--skip withdraw_tests:: --skip observation_tests::` | — | 110 passed, **5 failed** (the base's five, by name) |
+| wa-mesh-core | 27 passed, 0 failed | **29 passed**, 0 failed (+2: the two cache tests of item 8) |
+| wa-mesh | 73 passed, **2 failed**, 1 ignored | 74 passed, **2 failed**, 1 ignored (+1: the seam test of item 8) |
+
+The five wa-sentinel failures and the two wa-mesh ones are the ones the second-pass section already named,
+and they fail **identically on the base**, same names, same messages:
+
+```
+deploy_outcome_tests::the_sentinel_spawns_waits_and_reports_a_deploy_end_to_end
+deploy_visibility_tests::a_failing_deploy_leaves_its_message_in_the_capture
+node_script_tests::javascript_requests_run_native_node_and_preflight_before_any_operation
+node_script_tests::job_run_prepare_and_pipeline_use_the_same_native_node_dispatch
+role_tests::the_watcher_records_its_own_owner_where_a_later_stop_reads_it
+tests_relay::a_caller_enabled_only_by_its_policy_reaches_the_roster_through_a_service_url
+tests_relay::the_roster_decides_on_the_relay_path_too_and_an_existing_operator_bootstraps_it
+```
+
+**The sixth parallel failure, settled.** `reap_tests::a_killed_unreaped_child_is_not_alive` failed both
+parallel runs of this branch and neither parallel run of the base (two runs each), so it is not dismissed by
+saying "flaky" and it is not left open either — it was measured three ways:
+
+- alone: `cargo test reap_tests` -> `1 passed` on this branch;
+- serial: `--test-threads=1` -> passes on the branch **and** on the base (121/5 and 110/5);
+- and the parallel run with the eleven new tests filtered out returns exactly the base: 110 passed, 5 failed.
+
+`rust/wa-sentinel/src/reap.rs` is byte-identical to the base (`git diff --stat 62c3c064 HEAD -- …/reap.rs`
+is empty), so what changed is the schedule — eleven more tests running at once, two modules of which spawn
+processes — not the reaping code. Anyone landing this should expect that row to be red in a parallel full run
+on a loaded node and green serially.
+
+## `test-codemode-native`: red before this work
+
+Red on this branch, and red with the **base tree's own Lua** (`/tmp/hl-base`, installed `wa` 2e6fab41):
+`test-codemode-native.lua:24: opt-in adds one tool, direct tools retained`. It is a proof-environment row
+(`WA_CODEMODE_PROOF_*`, `scripts/test-codemode-component.sh`), unchanged by both branches. Not fixed here.
+
+## The orphan, wired (mission item 2)
+
+`scripts/test-runtime-binding-preflight.mjs` arrived with item 9 and no harness named it. The ledger said
+so and nothing else ran it:
+
+```
+$ node scripts/test-orphan-tests.mjs            # before
+FAIL scripts/test-runtime-binding-preflight.mjs: orphaned and not declared in scripts/test-orphans.json - wire it into a harness or declare why not
+orphan-tests: FAIL (195 wired, 48 orphaned, 47 declared)      exit 1
+```
+
+It needs no toolchain, no build and no network (two worktrees in a `mktemp -d`), so it is wired as a row of
+the fast path, next to `install-front-door`, in `scripts/fast.sh` — not declared as an orphan with a reason,
+because the reason would have been false: it can run on a landing. After:
+
+```
+$ node scripts/test-orphan-tests.mjs            # after
+orphan-tests ok (196 wired, 47 orphaned and declared with a reason)      exit 0
+$ grep -n runtime-binding-preflight scripts/fast.sh
+672:  check runtime-binding-preflight node scripts/test-runtime-binding-preflight.mjs
+```
+
+and in the fast run below: `fast: runtime-binding-preflight ok (87ms)`.
+
+## `scripts/fast.sh`, once: 261 checks, 13 failed, 438s
+
+`bash scripts/fast.sh --jobs 8` on this node, this tree, at `ec62cf4c` with the row above still uncommitted.
+
+```
+fast: binary /home/victor/.local/bin/wa (build 2e6fab41e7be, tree ec62cf4c6d07, stale: …) sha256=fc6a9d8034f4
+fast: binary /home/victor/wasm-agent/target/m-harness-land/release/wa (build ec62cf4c6d07, tree ec62cf4c6d07, fresh: built from this tree) sha256=3bb48b14fa34
+fast: build root /home/victor/.wasm-agent/build/target/wt-20ab8fb1729d (4.0K of a 27.9G cap)
+fast: env: node v26.13.1 (node:sqlite yes), cargo 1.100.0, wasi-sdk absent, lua 5.4.9
+fast: components SKIPPED (graph hooks memory selfloop mesh codemode svc-echo): error: component graph needs wasi-sdk
+fast: lua 221/227 passed (56 excluded: scripts/fast-path.exclude)
+fast result FAILED (261 checks, 13 failed, 0 skipped)
+fast path FAILED (13 of 261 checks, 0 skipped, 438s)
+```
+
+Every one of the 13, classified, with the base result that decides it:
+
+| check | verdict | the base result |
+|---|---|---|
+| `test-codemode-model-boundary` | **pre-existing** | run with the base tree's Lua: `agent.lua:2471 … MODEL_BOUNDARY_CONTENT_REQUIRED: complete must not display empty or missing data` — the same sentence, on the same line of the same script |
+| `test-host-return-docs` | **pre-existing** | base: `host return docs: 1 of 10 checks failed` (branch prints `FAIL every capability that answers JSON text says so: ["http_stream"]`) |
+| `test-orchestration-mode` | **pre-existing** | base: `test-orchestration-mode.lua:7: mode-on declares subagent and route_task from the start` |
+| `test-observability` | **pre-existing** | base: `test-observability.lua:17: opt-in short index retains every full tool schema` |
+| `test-remote-call-shape` | **pre-existing** | base: `test-remote-call-shape.lua:19: preamble guideline in the progressive prompt` |
+| `test-skill-discovery` | **pre-existing** | base: `test-skill-discovery.lua:7: ripgrep shell fallback disclosure rule` |
+| rust `wa-sentinel` | **pre-existing** | serial in the runner: 121 passed, **5 failed** — the base's five, same names (base: 110/5) |
+| rust `wa-mesh` | **pre-existing** | 74 passed, **2 failed** — the base's two, same names (base: 73/2) |
+| `prompt-docs` | **pre-existing** | `bash scripts/sync-prompt-docs.sh --check` in `/tmp/hl-base`: `docs/ENVELOPE.md: tool-catalogue` stale, the same message |
+| `publish-artifacts` | **the check, not the branch** | `LC_ALL=C bash scripts/test-publish-artifacts.sh` -> `publish artifacts: ok (55 checks)`; in the ambient `LANG=en_US.UTF-8` the same commit's names sort in the other order and the row fails. Nothing here touches `releases/` |
+| `land-signing` | **the machine** | the same failure in `/tmp/hl-base`: `release_not_signed: WA_RELEASE_SIGN_DEFER=1 and …/SHA256SUMS.sig does not exist` — no vault on this node |
+| `fast-binary` | **this node's environment, not the tree** | the row is `scripts/test-fast-binary.mjs`; `CARGO_TARGET_DIR` is exported in this node's session, and `scripts/fast.sh:144` says what that costs ("the row would then resolve the fast path against this run's build dir"). Measured pairwise on the same trees: with the variable -> rc=1 (9 of 28 checks); `env -u CARGO_TARGET_DIR node scripts/test-fast-binary.mjs` -> **rc=0, 28 checks** — once with `scripts/fast.sh` still uncommitted (tree `3be2c7e6`) and once on the commit that wires it (`be6cdb91`, tree `b103847f`) - so the row is red for as long as a binary stamped at an older tree sits in that exported directory, and green when the row is left to build its own fixture |
+| `component-pins` | **introduced by this integration, and not clearable here** | base: `11 of 11 pinned component(s) verified: the bytes this node would install ARE the pin`. On this branch: `FAIL component-pins: mesh source changed and its pin did not — rust/wa-mesh-core/src/cache.rs, rust/wa-mesh-core/src/roster.rs` |
+
+The ledger above is the difference between the rust branch's 14 and this run's 13: `orphan-tests` is green
+here because the row is wired (`fast: orphan-tests ok (982ms)`), which is the only check this integration
+changes.
+
+**The one red that is ours.** `component-pins` is right, and it is the price of bringing items 6-8 in:
+`rust/components/mesh` path-depends on `wa-mesh-core`, so changing `cache.rs` and `roster.rs` moves the
+mesh pin in `components.lock` (`42872bbc…`, 209612 bytes) — and rebuilding it needs wasi-sdk, which this
+node does not have (`WASI_SDK` unset, no wasi-sdk directory). I did **not** write a
+`Components-Unchanged: mesh …` trailer: I cannot show the guest's bytes are the same, and that trailer would
+be a claim I did not measure. So the branch is landable as code and **red on that gate** until someone with
+wasi-sdk runs `scripts/build-components.sh mesh` and `scripts/publish-components.sh --from <artifact-dir>`.
+
+## What this integration did not verify
+
+- **The mesh component pin** (above): not rebuilt, not repinned, not excused.
+- **`scripts/fast.sh` ran once**, as the mission asked. Its 13 failures are each attributed above; I did not
+  re-run the whole suite after the last two commits (the row, the report), because no row reads its own
+  history — the two rows that do depend on the tree state (`fast-binary`, `publish-artifacts`) were re-run on
+  their own, quoted above.
+- **The landing path was not exercised**: no `scripts/landing-queue.mjs`, no gate, no push, no deploy, no
+  node state touched. Commits are local, on `change/harness-land`.
+- `scripts/fast.sh`'s component rows (6 components) were skipped for want of wasi-sdk, exactly as on both
+  source branches; nothing about them was measured here.
