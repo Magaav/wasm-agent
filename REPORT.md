@@ -671,6 +671,19 @@ fast result FAILED (257 checks, 14 failed, 0 skipped)
 fast path FAILED (14 of 257 checks, 0 skipped, 297s)
 ```
 
+re-run on the committed tree (e658eebf, after the two holes above were fixed and committed), so the
+binary the rows run is built from this commit and nothing is uncommitted:
+
+~~~
+fast: env: root .../wt at e658eebf on change/harness-fixes-rust; binary .../release/wa (sha256 3644c9bc07c6...)
+fast: components SKIPPED (graph hooks memory selfloop mesh codemode svc-echo): wasi-sdk absent
+fast result FAILED (257 checks, 14 failed, 0 skipped)
+fast path FAILED (14 of 257 checks, 0 skipped, 147s)
+~~~
+
+The same 14 both times, with the same names - which is what makes them a property of the base and the
+machine rather than of one run.
+
 All 14, classified, with how each was decided:
 
 | check | verdict |
@@ -682,7 +695,7 @@ All 14, classified, with how each was decided:
 | orphan-tests (scripts/test-runtime-binding-preflight.mjs orphaned) | **pre-existing**: that file is 62c3c064's (item 9 of the section above), which declares no harness entry |
 | publish-artifacts | **the check, not the branch**: it compares `ls-tree | sort` in the ambient locale against a list written in C order. LANG=en_US.UTF-8 here, so `sort` answers "node-2d2c0e2dfe3d.manifest PUBLISH.sh ..." while the expected string starts "PUBLISH.sh SHA256SUMS ..."; with `LC_ALL=C` the same two names sort the other way round. Nothing in this branch touches releases/ |
 | land-signing | **the machine**: WA_RELEASE_SIGN_DEFER=1 and no vault here, so there is no signature to publish (the row says so itself) |
-| fast-binary (`build 2d2c0e2dfe3d is not this tree (d9911177d0c7)`) | **this run's fault, not the tree's**: the two commits of this second pass were still uncommitted while the suite ran, so the tree hash was not the binary's. Re-run after the commit below |
+| fast-binary (`build e658eebf5b90 is not this tree (3870cdd35c24)`) | **pre-existing**: this row is `scripts/test-fast-binary.mjs`, a self-test of the binary planner over a fixture repo (it writes `lua/core/agent.lua` into a clone and asks that the refusal name the file it saw). The assertion that fails is `and names a file it saw`: the planner answers "build <commit> is not this tree (<tree>)" instead of naming the uncommitted file. It is not about this worktree - the first run said it while the tree was dirty, the re-run said it with a clean tree committed at the very commit the binary was stamped with, and `scripts/` is byte-identical to the base commit |
 | component-pins | **open, and the only one that is ours to answer.** rust/components/mesh declares `wa-mesh-core = { path = "../../wa-mesh-core" }`, so a change to wa-mesh-core is a change to a pinned component's inputs and components.lock's mesh pin (42872bbc..., 209612 bytes) must move. Rebuilding it needs wasi-sdk, which this node does not have (`WASI_SDK` unset, no wasi-sdk directory, and the suite reports "components SKIPPED (graph hooks memory selfloop mesh codemode svc-echo): error: component graph needs wasi-sdk"). I did **not** write `Components-Unchanged: mesh ...`: I cannot show the guest's bytes are the same, and a trailer that says so would be a claim I did not measure. So the pin is stale until someone with wasi-sdk runs `scripts/publish-components.sh` for mesh |
 
 ## What is still open
@@ -690,6 +703,7 @@ All 14, classified, with how each was decided:
 - **The mesh component pin** (above): the only landing gate this change leaves red for a real reason, and it
   cannot be cleared on this node.
 - The 13 other failures are pre-existing on 62c3c064 or properties of this machine, each named above; none
-  is fixed here, because none is item 6, 7 or 8.
+  is fixed here, because none is item 6, 7 or 8. Seven of them (the wa-sentinel five, the wa-mesh two) were
+  also measured directly against the stashed base, not only read from this run.
 - Nothing was pushed, deployed or run against a live node or watcher; every row is a scratch home.
 
