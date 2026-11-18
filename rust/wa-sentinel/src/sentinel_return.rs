@@ -83,12 +83,21 @@ fn validated_ack(binding:&Value,now:u64) -> Result<(Value,u64,Option<Value>)> {
     let ack:Value=serde_json::from_slice(&std::fs::read(dir.join("ack.json")).context("ack_missing; unknown, never replay")?)
         .context("ack_corrupt; unknown, never replay")?;
     let object=ack.as_object().context("ack_not_object; unknown, never replay")?;
+    // The phase is ONE word, defined once: deploy_protocol::record writes the same value into ack.json and
+    // state.json, so every phase that function may record has to be readable here. "withdrawn" is the one a
+    // watcher never writes and an operator's withdrawal does - main::withdraw_request calls record() before any
+    // tick has run, so this file does not exist yet and record() creates it with that phase. Refusing the word
+    // here rejected the deploy's own immutable acknowledgement on every pass ("ack_identity_or_revision_mismatch;
+    // unknown, never replay"): observe_due wrote an unknown journal, delivered nothing, and the session that
+    // asked waited for ever for a deploy that could never happen. Accepting the phase is not this function
+    // deciding an outcome - observed_phase maps a withdrawn directory to the same terminal report it gives a
+    // failed one, and that report is what the session is owed.
     if object.len()!=9 || object.keys().any(|k| !["schema","id","expected_sha","session","owner","queued_at","phase","detail","at"].contains(&k.as_str()))
         || ack["schema"]!=1 || ack["id"]!=binding["id"] || ack["expected_sha"]!=intent["expected_sha"]
         || ack["session"]!=intent["session"] || ack["session"]!=binding["parent"]
         || ack["owner"]!=intent["owner"] || (intent.get("owner").is_some() && ack["owner"]!=binding["owner"])
         || ack["queued_at"]!=intent["queued_at"] || !ack["detail"].is_string()
-        || !["held","spawned","failed","unknown","verified"].contains(&ack["phase"].as_str().unwrap_or("")) {
+        || !["held","spawned","failed","unknown","verified","withdrawn"].contains(&ack["phase"].as_str().unwrap_or("")) {
         bail!("ack_identity_or_revision_mismatch; unknown, never replay");
     }
     let at=ack["at"].as_u64().context("ack_timestamp_unsupported; unknown, never replay")?;

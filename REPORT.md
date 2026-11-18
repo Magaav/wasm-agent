@@ -1083,3 +1083,118 @@ Lua and harness rows run this round: `scripts/test-wave-operator-session.lua` 35
   rebuilding/reinstalling the node is a deploy, not a test.
 - **The sentinel binary was not exercised against a live watcher**: every claim about the lane is from its own tests
   in a scratch `WASM_AGENT_HOME`, plus the engine's own suite (`observation_io_tests`, `return_engine_tests`).
+
+## Round 4 — a protocol withdrawal that lands before the first intake now reports
+
+Measured on avell, in this worktree (`wt`, branch `change/harness-land`, head `1a7bfaa8` + this commit). Local
+commit only: nothing pushed, no node state touched, no deploy.
+
+### The edge case
+
+A protocol deploy (one carrying `--expected-sha`) that the operator withdraws **before the watcher ever ticked**
+never got its terminal return:
+
+1. `request withdraw <id>` → `main::withdraw_request` → `deploy_protocol::record(&request, id, "withdrawn", …)`
+   (`rust/wa-sentinel/src/main.rs:2109`, `rust/wa-sentinel/src/deploy_protocol.rs:53-57`). Because no tick ran,
+   `intent.json` and `ack.json` do not exist, so `record` **creates the ack itself** with `phase: "withdrawn"`;
+   `state.json` gets the same word in the same call;
+2. `sentinel_return::validated_ack` accepted only `held/spawned/failed/unknown/verified`
+   (`sentinel_return.rs:91`), so the deploy's own immutable acknowledgement was refused as
+   `ack_identity_or_revision_mismatch; unknown, never replay`;
+3. `observe_due` therefore wrote a `returns/<id>-0.json` with `phase: "unknown"` and returned the error — it never
+   reached the emit that delivers the event - and every later pass took the same path, because the ack never
+   changes. The session that asked waited for ever for a deploy that could never happen.
+
+### The fix, and why this one of the two
+
+`rust/wa-sentinel/src/sentinel_return.rs:91` — `withdrawn` is now one of the phases `validated_ack` accepts, with the
+reason written beside it.
+
+The other candidate was to write the ack as `held` when it is absent while the state says `withdrawn`. Rejected:
+`deploy_protocol::record` writes **one** phase word into both files, and that is the single definition these two
+readers share. Writing `held` into the ack and `withdrawn` into the state would put two different answers to "what
+phase is this request in?" in one directory — and the ack would be the false one, because nothing is holding a
+withdrawn deploy. Accepting the word keeps `record`'s `phase` argument the only place the vocabulary is chosen; the
+validator reads what that function may write, and `observed_phase` still decides what the session is *told*
+(`state.phase == "withdrawn"` → terminal `failed` + the withdrawal detail, the mapping round 3 already added). No
+new phase word reaches a return journal.
+
+### The test, and that it fails without the fix
+
+`rust/wa-sentinel/src/withdraw_tests.rs`, test 7: `a_withdrawal_before_any_intake_reports_once`. Queue a protocol
+request, **withdraw it with no intake at all** (no `intent.json`, no `ack.json`, no `binding.json`), then run the real
+observation pass (`observation::Observations::load(); lane.pass()`) — the lane the watcher runs on every tick, with
+the real queue, withdrawal, engine and job store; only the owner lookup (a private 127.0.0.1 listener) and the job
+store are stood in for. It asserts the ack and the state carry the same phase; that `returns/<id>-0.json` is
+`phase: "failed"` with a detail naming the withdrawal (and not an `ack_…` refusal); that `pending-return.json` is
+queued for the parent; that 20 further passes rewrite nothing; and that the directory holds **exactly one terminal
+return**, in the one immutable slot (`returns/<id>-0.json`).
+
+Falsified by hand, as recorded in the test file: dropping `withdrawn` from `validated_ack` and re-running this one
+test fails it at the phase assertion with exactly the reported defect —
+
+```
+assertion `left == right` failed: terminal, not an unknown ack problem:
+  {"detail":"ack_identity_or_revision_mismatch; unknown, never replay", "event_key":"…-0", "phase":"unknown"}
+  left: String("unknown")   right: "failed"
+```
+
+The same edit leaves the older protocol-withdrawal test green, which is the point: that one runs intake first, so its
+ack exists with `held`.
+
+The private listener test 6 carried inline is now `owner_lookup()` in the same file, used by tests 6 and 7 — the only
+change to an existing test, and it is a move, not a rewrite (test 6 still passes).
+
+### The suite, and the `WASM_AGENT_PROVENANCE` note
+
+```
+cd rust/wa-sentinel && CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-harness-land \
+  env -u WASM_AGENT_PROVENANCE cargo test -- --test-threads=1
+→ 127 passed; 5 failed; 0 ignored   (27.79s)
+```
+
+`WASM_AGENT_PROVENANCE` **must be unset** when the sentinel suite runs. It is set to `child` inside a `wa` call,
+where the sentinel refuses supervisor effects by name, and three *older* withdraw tests go through the CLI door
+(`request(&["withdraw", …])`) that gate guards. Measured here rather than assumed:
+
+```
+WASM_AGENT_PROVENANCE=child cargo test withdraw_tests -- --test-threads=1
+→ 4 passed; 3 failed
+   a_claimed_request_is_refused_by_name_and_nothing_moves      sentinel_coordinator_only: workers may implement/merge/report, never request supervisor effects
+   a_queued_request_is_withdrawn_once_with_one_audit_line      (same refusal)
+   every_other_answer_is_refused_by_name                       (same refusal)
+```
+
+Those three are environment, not code (`main.rs:2692`), they pass with the variable unset (7/7 for this module,
+parallel and serial), and the new test 7 passes either way because it calls `withdraw_request` directly.
+
+The five wa-sentinel failures are the five already named in this report (two need the systemd unit identity of a
+watcher this machine does not run under, two need a native `node` on the child PATH, one is a missing record), same
+names, same messages, and they fail identically on the base (see "The base, re-measured"):
+
+```
+deploy_outcome_tests::the_sentinel_spawns_waits_and_reports_a_deploy_end_to_end
+deploy_visibility_tests::a_failing_deploy_leaves_its_message_in_the_capture
+node_script_tests::javascript_requests_run_native_node_and_preflight_before_any_operation
+node_script_tests::job_run_prepare_and_pipeline_use_the_same_native_node_dispatch
+role_tests::the_watcher_records_its_own_owner_where_a_later_stop_reads_it
+```
+
+No new test fails. `wa-mesh-core`, `wa-mesh` and the script suites were not run: this change touches only
+`wa-sentinel` (one validator line and one test file).
+
+### What this does not do
+
+- **Directories already stuck before this commit** have their `returns/<id>-0.json` written with
+  `phase: "unknown"` (the bug), and a written journal is immutable. After this fix such a directory no longer
+  spins: the ack validates, the terminal phase is delivered — but the event the session receives is the stored
+  `unknown` ("ack_identity_or_revision_mismatch; reconcile, never replay"), not the withdrawal. The session's wait
+  ends either way; the answer for those pre-existing directories is the weaker one, and rewriting a journal to
+  improve it would break the immutability the rest of this engine is built on. No such directory exists in this
+  scratch-state proof; this is reasoning from the code path, not a measurement of a real stuck directory.
+- **Ordering within `record`**: the ack is written before the state. A watcher tick landing between those two writes
+  of a withdrawal would see a valid ack and a state that is not yet `withdrawn`, and would report one non-terminal
+  `held` slot before the terminal one. It is a two-write window inside one locked call, it is the shape `record`
+  already had, and closing it is a change to the write order, not to this vocabulary — not done here, and not
+  measured.
+- **No live watcher** was run against a real node: every claim above is from tests in a scratch `WASM_AGENT_HOME`.
