@@ -17,7 +17,10 @@
 //!   4. a request that is already done, failed or withdrawn is refused by the lane it is in, and an id that
 //!      names nothing is refused as such;
 //!   5. a withdrawn deploy settles its own outcome record, so the session is told it was withdrawn instead of
-//!      the watchdog reporting the deploy silent an hour later.
+//!      the watchdog reporting the deploy silent an hour later;
+//!   6. a withdrawn *protocol* deploy (one carrying --expected-sha, which its own return engine reports and the
+//!      legacy outcome record never does) reaches the engine instead of leaving the session waiting for ever: the
+//!      withdrawal is recorded as its state phase, and the observation lane turns it into the one terminal event.
 //!
 //! Falsification, each run by hand:
 //!
@@ -26,7 +29,10 @@
 //!   * drop the claimed-lane check - `a_claimed_request_is_refused_by_name_and_nothing_moves` fails with the
 //!     file in `withdrawn/` and a running effect abandoned;
 //!   * drop `next_step` from `pending_lines` - the status test fails on the missing id and the missing
-//!     withdraw command, which is the reported line.
+//!     withdraw command, which is the reported line;
+//!   * settle a withdrawn protocol deploy through the legacy outcome record only - the state this door was in
+//!     before the review of 18/11 - and the protocol test fails with the deploy still `held`, no terminal phase
+//!     anywhere and nothing queued for the session that asked.
 
 use super::*;
 
@@ -56,6 +62,8 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         std::env::remove_var("WASM_AGENT_HOME");
+        std::env::remove_var("WASM_AGENT_PORT");
+        std::env::remove_var("WASM_SENTINEL_OBSERVE_GRACE");
         let _ = std::fs::remove_dir_all(&self.home);
     }
 }
@@ -214,4 +222,92 @@ fn withdrawing_a_deploy_settles_its_outcome_instead_of_leaving_it_silent() {
     assert_eq!(notice["verb"], "wake");
     assert_eq!(notice["session"], "session-77");
     assert!(notice["prompt"].as_str().unwrap_or("").contains("withdrawn"), "the session is told it was withdrawn: {}", notice["prompt"]);
+}
+
+/// 6. A withdrawn PROTOCOL deploy is reported by its own return engine, and the withdrawal is what it reports.
+///
+/// The defect this pins (review of 18/11, item 6): withdraw_request settled a legacy deploy's outcome record only,
+/// and a protocol deploy has none - deploy_outcome::open is deliberately not called for one. So a withdrawn
+/// protocol deploy kept acting like a live one: state.json stayed held/accepted, the return engine observed a
+/// deploy that could never happen, and the session that asked never received a terminal answer. Only the owner
+/// lookup and the job store are stood in for here (a private listener, never the node this machine really runs);
+/// the queue, the intake, the withdrawal, the lane and the engine are the real ones.
+#[test]
+fn withdrawing_a_protocol_deploy_gives_its_session_a_terminal_report() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = Scratch::new("protocol-withdraw");
+    // A directory holding an owed report is never retired, and this proves it with no grace at all.
+    std::env::set_var("WASM_SENTINEL_OBSERVE_GRACE", "0");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a private owner lookup");
+    listener.set_nonblocking(true).expect("nonblocking accept");
+    let port = listener.local_addr().unwrap().port();
+    std::env::set_var("WASM_AGENT_PORT", port.to_string());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let serving = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !serving.load(std::sync::atomic::Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut buffer = [0; 4096];
+                    let _ = std::io::Read::read(&mut stream, &mut buffer);
+                    let body = r#"{"session":{"id":"parent","user_id":"owner"}}"#;
+                    let _ = std::io::Write::write_all(&mut stream, format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+    // The hook the engine delivers through: a protocol deploy is reported by it and by nothing else.
+    let store = jobs::store();
+    let definition: Value = serde_json::from_str(include_str!("../../../jobs/on-sentinel-return.json")).unwrap();
+    store.put(&definition).unwrap();
+    store.enable("onSentinelReturn", true).unwrap();
+
+    let asked = json!({
+        "verb": "deploy", "id": ID, "expected_sha": "a".repeat(40), "queued_at": now_epoch(),
+        "session": "parent", "owner": "owner", "reason": "install the fix",
+    });
+    scratch.queue(ID, &asked);
+    // The real intake: intent.json and ack.json, and a held state. Nothing writes binding.json until admit.
+    deploy_protocol::intake(&asked, ID).expect("intake accepts the protocol request");
+    let dir = sentinel_dir().join("deploy-protocol").join(ID);
+    assert!(!dir.join("binding.json").exists(), "a withdrawable protocol deploy was never admitted");
+    let held: Value = serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
+    assert_eq!(held["phase"], "held", "the state the defect left behind: {held}");
+
+    withdraw_request(ID, "the install is no longer wanted").expect("a queued protocol deploy can be withdrawn");
+
+    // 1. The withdrawal is recorded in the deploy's own directory, which is what makes it durable.
+    let state: Value = serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
+    assert_eq!(state["phase"], "withdrawn", "the deploy stops claiming to be waiting: {state}");
+    assert!(state["detail"].as_str().unwrap_or("").contains("no longer wanted"), "{}", state["detail"]);
+
+    // 2. The lane turns it into a terminal return event instead of observing a deploy that cannot happen.
+    let mut lane = observation::Observations::load();
+    lane.pass();
+    let journal_path = dir.join("returns").join(format!("{ID}-0.json"));
+    let journal: Value = serde_json::from_slice(&std::fs::read(&journal_path).expect("the session is owed a return")).unwrap();
+    assert_eq!(journal["phase"], "failed", "terminal, not another held: {journal}");
+    assert_eq!(journal["parent"], "parent");
+    assert!(journal["detail"].as_str().unwrap_or("").contains("withdrawn"), "the report says what happened: {journal}");
+    let observed: Value = serde_json::from_slice(&std::fs::read(dir.join("installation-observation.json")).unwrap()).unwrap();
+    assert_eq!(observed["phase"], "failed", "the installation observation is terminal too: {observed}");
+    assert!(dir.join("pending-return.json").is_file(), "and the one event is queued for the parent that asked");
+
+    // 3. One report, one immutable slot: further ticks observe the same deploy and never add a second report, and
+    //    the directory is not retired - what was asked and withdrawn stays where a reader can find it.
+    let before = std::fs::read(&journal_path).unwrap();
+    for _ in 0..20 {
+        lane.pass();
+    }
+    assert_eq!(std::fs::read(&journal_path).unwrap(), before, "an immutable return is never rewritten");
+    let slots = std::fs::read_dir(dir.join("returns")).unwrap().count();
+    assert_eq!(slots, 1, "one deploy, one return slot, found {slots}");
+    assert!(dir.is_dir(), "a directory that owes a report is never retired: {}", dir.display());
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().unwrap();
 }

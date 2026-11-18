@@ -2095,11 +2095,30 @@ pub(crate) fn withdraw_request(id: &str, reason: &str) -> Result<String> {
     // has to hear: the deploy it asked for was never started. Done outside the queue lock on purpose - settling
     // writes the notice into the box, which takes the same lock.
     let mut note=String::new();
-    if verb=="deploy" && request.get("expected_sha").is_none() {
-        match deploy_outcome::settle(id,"failure",&format!("withdrawn by the operator before the sentinel performed it: {reason}; nothing was installed")) {
-            Ok(true)=>note="; its session was told the deploy was withdrawn, not silently left pending".into(),
-            Ok(false)=>{},
-            Err(error)=>{audit("withdraw-outcome-failed",id,&format!("{error:#}"));note=format!("; the deploy outcome record could not be settled: {error:#}");}
+    if verb=="deploy" {
+        if request.get("expected_sha").is_some() {
+            // A protocol deploy is reported by its own return engine (`sentinel_return` plus the onSentinelReturn
+            // hook), never by the legacy outcome record - `deploy_outcome::open` is deliberately not called for one -
+            // so a withdrawal has to reach that engine or the session that asked waits for ever: the state stayed
+            // `held`/`accepted`, the engine kept observing a deploy that could never happen, and no code wrote a
+            // terminal answer. The phase recorded here is the durable half of the fix: `observed_phase` reads it as
+            // a terminal outcome, the engine delivers the one return event the session is owed, and the observation
+            // lane establishes the binding admit never wrote - a claimed request cannot be withdrawn, so a
+            // withdrawable protocol deploy was never admitted and has no binding.
+            let detail = format!("withdrawn by the operator before the sentinel performed it: {reason}; nothing was installed");
+            match deploy_protocol::record(&request,id,"withdrawn",&detail) {
+                Ok(())=>note="; its own return engine reports the withdrawal to the session that asked".into(),
+                Err(error)=>{
+                    audit("withdraw-protocol-record-failed",id,&format!("{error:#}"));
+                    note=format!("; the withdrawal could not be recorded in its protocol directory, so the session that asked may still be waiting: {error:#}");
+                }
+            }
+        } else {
+            match deploy_outcome::settle(id,"failure",&format!("withdrawn by the operator before the sentinel performed it: {reason}; nothing was installed")) {
+                Ok(true)=>note="; its session was told the deploy was withdrawn, not silently left pending".into(),
+                Ok(false)=>{},
+                Err(error)=>{audit("withdraw-outcome-failed",id,&format!("{error:#}"));note=format!("; the deploy outcome record could not be settled: {error:#}");}
+            }
         }
     }
     audit("withdraw",id,reason);

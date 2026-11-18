@@ -5,9 +5,15 @@
 // harness at all - so they could rot (and two WhatsApp operator tests did) while every gate stayed green.
 // A test nobody runs is not coverage; it is a claim with no witness.
 //
-// The rule this check enforces is deliberately mechanical: a JS/CJS test is WIRED when its own file name
+// The rule this check enforces is deliberately mechanical: a test script is WIRED when its own file name
 // appears in another script, skill, workflow or the root documents (the harnesses name their rows that
 // way: `scripts/fast.sh`, `scripts/test.sh`, `scripts/wave-release.mjs`), and ORPHANED otherwise.
+//
+// Shell test scripts count too (review of 18/11, item 5). The ledger used to look at .mjs/.cjs/.js only,
+// so `scripts/test-deploy-runtime-recheck.sh` - a real fixture for the install-time runtime re-check - was
+// named by no harness and the ledger said nothing: the gap this file exists to close had moved to the
+// shell half of `scripts/`. A test is a test whatever runs it, and the reason must be written down for
+// either kind.
 //
 //   * an orphaned script must be declared in `scripts/test-orphans.json` with the reason it is not wired;
 //   * a declared entry whose file is gone is a failure (delete the entry);
@@ -24,7 +30,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const INVENTORY = 'scripts/test-orphans.json';
 const CHECKER = 'scripts/test-orphan-tests.mjs';
-const TEST_FILE = /^test[-.].*\.(mjs|cjs|js)$/;
+const TEST_FILE = /^test[-.].*\.(mjs|cjs|js|sh)$/;
 const SCAN_DIRS = ['scripts', 'skills', '.github'];
 const SCAN_FILES = ['package.json', 'AGENTS.md', 'DESIGN.md'];
 const SCAN_EXT = /\.(sh|mjs|cjs|js|lua|ps1|json|yml|yaml|md)$/;
@@ -71,7 +77,7 @@ const failures = [];
 for (const entry of declared) {
   const file = String(entry.file || '');
   const name = path.basename(file);
-  if (!TEST_FILE.test(name)) failures.push(`${file}: not a JavaScript test script`);
+  if (!TEST_FILE.test(name)) failures.push(`${file}: not a test script (test-*.mjs|cjs|js|sh)`);
   if (!String(entry.reason || '').trim() || String(entry.reason).trim().length < 20) failures.push(`${file}: needs a reason (one sentence, at least 20 characters)`);
   if (!fs.existsSync(path.join(root, file))) failures.push(`${file}: declared, but the file is gone - delete the entry`);
   if (named.has(name)) failures.push(`${file}: declared orphaned, but a harness now names it - delete the entry (the list only shrinks)`);

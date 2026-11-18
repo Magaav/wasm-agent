@@ -15,12 +15,26 @@
 //!     is new information and is said again. Nothing in between is written - not a repeat, not a counter, not
 //!     a heartbeat;
 //!   * **a directory that cannot be observed leaves the lane**. A *structural* problem is one that cannot clear
-//!     on its own: a protocol directory missing the files intake writes (`intent.json`, `ack.json`,
-//!     `binding.json`), which nothing will ever write into a deploy that has passed by. It is *retired* -
-//!     renamed into `deploy-protocol-retired/` - after a grace period, so the next tick does not observe it
-//!     again, and its evidence is kept rather than deleted. A *runtime* problem (`parent_owner_unavailable`,
-//!     a disabled return hook) is retried and never retired: the observation is the thing that would notice it
-//!     clearing, and retiring a live deploy's directory would throw its report away to make a log quieter.
+//!     on its own. What makes a missing file structural is **not that it is missing**: `binding.json` is written
+//!     at admit (`deploy_protocol.rs`, `admit`) while `intent.json` and `ack.json` are rewritten on every tick
+//!     for a request still in the box, so a deploy held for an hour (a busy node, a protocol that is not ready, a
+//!     parent whose owner cannot be read) has `intent.json` and `ack.json` and no binding at all - and that is
+//!     healthy, not dead. Measured consequence of the earlier rule ("missing a file intake writes"): a held
+//!     protocol deploy was judged structural, retired into `deploy-protocol-retired/` with its evidence after the
+//!     grace, recreated by the next intake under the same id, and then *retired into an occupied lane* on every
+//!     tick for ever - the same unbounded log this lane exists to remove, in a new sentence. So the structural
+//!     test is about what is in flight, not about which file is absent. A directory is structural only when the
+//!     id is in neither `requests/` nor `claimed/` (nothing will write into it again) **and** its state does not
+//!     say `withdrawn` (a withdrawal still owes the asking session its one return event, and establishing the
+//!     binding is how that report reaches it - `main::withdraw_request`). It is *retired* - renamed into
+//!     `deploy-protocol-retired/` - after a grace period, so the next tick does not observe it again, and its
+//!     evidence is kept rather than deleted. A *runtime* problem (`parent_owner_unavailable`, a disabled
+//!     return hook) is retried and never retired: the observation is the thing that would notice it clearing,
+//!     and retiring a live deploy's directory would throw its report away to make a log quieter;
+//!   * **a retirement that could not happen is said once**. The retired lane refuses to overwrite evidence, so an
+//!     id already retired cannot be retired again - and a rule that kept answering "retire" wrote
+//!     `return-observation-retire-failed` on every tick, which is the first defect one lane over. The failure is
+//!     remembered with the problem, and that id stays quiet until the problem itself changes.
 //!
 //! What is remembered is on disk (`observation-problems.json`), because the defect this fixes must not come
 //! back on the next restart: a watcher restarted every minute would otherwise re-report every stale directory
@@ -51,6 +65,25 @@ pub(crate) fn grace_secs() -> u64 {
         .unwrap_or(300)
 }
 
+/// What the lane remembers about one request id: the problem it last reported, when it first reported it, and
+/// whether it already tried to retire the directory and could not. The last flag is what makes a failed
+/// retirement a *settled* fact rather than a per-tick line: [`verdict`] cannot answer `Retire` again for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Said {
+    /// The problem text, verbatim, as it was last reported.
+    pub(crate) problem: String,
+    /// When that problem was first reported: the clock the grace is measured from.
+    pub(crate) first_seen: u64,
+    /// The directory was retired and the move failed (the retired lane already holds this id).
+    pub(crate) retire_failed: bool,
+}
+
+impl Said {
+    pub(crate) fn reported(problem: &str, at: u64) -> Said {
+        Said { problem: problem.to_string(), first_seen: at, retire_failed: false }
+    }
+}
+
 /// What the lane must do about one directory, given what it said last time.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -65,24 +98,28 @@ pub(crate) enum Verdict {
 /// The rule of the lane, as a function of what was recorded and what was just seen - readable and testable
 /// without a watcher and without a clock.
 ///
-/// `previous` is what was reported for this id: the problem text and when it was first reported.
-/// `structural` says whether the problem is one that cannot clear on its own; only those are retired.
-pub(crate) fn verdict(previous: Option<(&str, u64)>, problem: &str, now: u64, grace: u64, structural: bool) -> Verdict {
+/// `previous` is what was reported for this id: the problem text, when it was first reported, and whether a
+/// retirement already failed. `structural` says whether the problem is one that cannot clear on its own; only
+/// those are retired, and only until the retirement itself has been proved impossible.
+pub(crate) fn verdict(previous: Option<&Said>, problem: &str, now: u64, grace: u64, structural: bool) -> Verdict {
     match previous {
         // Nothing has been said about this directory: say it once.
         None => Verdict::Report,
         // A changed problem is a changed fact, and a fact nobody is told is a fact nobody can act on.
-        Some((said, _)) if said != problem => Verdict::Report,
+        Some(said) if said.problem != problem => Verdict::Report,
+        // A retirement that already failed is settled, however long the same problem persists: asking again is
+        // the same question, and the answer (the retired lane holds this id) cannot change by itself.
+        Some(said) if said.retire_failed => Verdict::Quiet,
         // The same sentence again is not evidence; past the grace, a structural one means "stop looking".
-        Some((_, first)) if structural && now.saturating_sub(first) >= grace => Verdict::Retire,
+        Some(said) if structural && now.saturating_sub(said.first_seen) >= grace => Verdict::Retire,
         Some(_) => Verdict::Quiet,
     }
 }
 
 /// One watcher's view of the lane: what it has already said, by request id.
 pub(crate) struct Observations {
-    /// id -> (the problem last reported, when it was first reported).
-    problems: std::collections::BTreeMap<String, (String, u64)>,
+    /// id -> what was said about it (the problem, when, and whether a retirement already failed).
+    problems: std::collections::BTreeMap<String, Said>,
 }
 
 impl Observations {
@@ -93,7 +130,9 @@ impl Observations {
             if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&bytes) {
                 for (id, record) in map {
                     if let (Some(problem), Some(first)) = (record["problem"].as_str(), record["first_seen"].as_u64()) {
-                        problems.insert(id, (problem.to_string(), first));
+                        // A record written before a retirement could fail carries no flag; absence is "not tried".
+                        let retire_failed = record["retire_failed"] == true;
+                        problems.insert(id, Said { problem: problem.to_string(), first_seen: first, retire_failed });
                     }
                 }
             }
@@ -107,7 +146,9 @@ impl Observations {
         let map: serde_json::Map<String, Value> = self
             .problems
             .iter()
-            .map(|(id, (problem, first))| (id.clone(), json!({"problem": problem, "first_seen": first})))
+            .map(|(id, said)| {
+                (id.clone(), json!({"problem": said.problem, "first_seen": said.first_seen, "retire_failed": said.retire_failed}))
+            })
             .collect();
         let _ = wa_operation::atomic_json(&problems_path(), &Value::Object(map));
     }
@@ -148,12 +189,25 @@ impl Observations {
             self.forget(id);
             return;
         }
-        // The files intake writes, first: a directory missing one of them cannot be observed at all, and asking
-        // anyway is how the io error became the only thing this lane ever said.
+        // The files intake and admit write, first: a directory missing one of them cannot be observed at all, and
+        // asking anyway is how the io error became the only thing this lane ever said.
         let missing = sentinel_return::missing_observation_files(&dir);
-        let (problem, structural) = if !missing.is_empty() {
-            (format!("cannot be observed: missing {}", missing.join(", ")), true)
+        // ...but a missing file is only evidence when nothing is going to write it. Two things can still write
+        // into this directory: the queue holding the request (intake rewrites intent/ack every tick, admit writes
+        // the binding), and a withdrawal that still owes the asking session its return event.
+        let in_flight = Self::in_the_box(id);
+        let owed = Self::owes_a_report(&dir);
+        let (problem, structural) = if !missing.is_empty() && !owed {
+            // The line says what is missing; whether it is structural is decided by whether anything is still
+            // coming. A held deploy is one line, once, and it keeps its directory however long it is held.
+            (format!("cannot be observed: missing {}", missing.join(", ")), !in_flight)
         } else {
+            // The engine keeps its own schedule, and says nothing while a directory is deferred. A deferral is not
+            // an observation: forgetting here would make the next real attempt report the same problem again, which
+            // is this lane's defect at a term's length instead of a tick's.
+            if !sentinel_return::due(id, now) {
+                return;
+            }
             match sentinel_return::observe(id) {
                 Ok(()) => {
                     self.forget(id);
@@ -162,16 +216,16 @@ impl Observations {
                 Err(error) => (format!("{error:#}"), false),
             }
         };
-        let previous = self.problems.get(id).map(|(said, first)| (said.as_str(), *first));
+        let previous = self.problems.get(id);
         match verdict(previous, &problem, now, grace_secs(), structural) {
             Verdict::Report => {
                 let grace = grace_secs();
                 audit(
                     "return-observation-problem",
                     id,
-                    &format!("{problem} (said once per request id and problem; a directory missing the files intake writes is retired to {} after {grace}s, a runtime problem is retried)", retired_root().display()),
+                    &format!("{problem} (said once per request id and problem; a directory no request in the queue will fill, and that owes no report, is retired to {} after {grace}s; a runtime problem and a held deploy are retried and never retired)", retired_root().display()),
                 );
-                self.problems.insert(id.to_string(), (problem, now));
+                self.problems.insert(id.to_string(), Said::reported(&problem, now));
                 self.save();
             }
             Verdict::Quiet => {}
@@ -193,7 +247,7 @@ impl Observations {
         };
         match moved {
             Ok(()) => {
-                let waited = now.saturating_sub(self.problems.get(id).map(|(_, first)| *first).unwrap_or(now));
+                let waited = now.saturating_sub(self.problems.get(id).map(|said| said.first_seen).unwrap_or(now));
                 audit(
                     "return-observation-retired",
                     id,
@@ -202,12 +256,42 @@ impl Observations {
                 self.problems.remove(id);
             }
             // A retirement that could not happen is not a new problem: the line already written stands, and the
-            // next pass tries again without saying it again.
+            // failure is remembered so this id is quiet - not retried and re-reported on every tick, which is the
+            // same unbounded log one lane over. A *changed* problem resets it: that is a new fact, and the retry
+            // that decides whether the new one can be retired is worth one line.
             Err(why) => {
-                audit("return-observation-retire-failed", id, &format!("{problem}; could not be retired ({why}); it stays in the lane and is not re-reported"));
+                audit(
+                    "return-observation-retire-failed",
+                    id,
+                    &format!("{problem}; could not be retired ({why}); it stays in the lane, is not re-reported, and no further retirement is attempted while this problem stands"),
+                );
+                self.problems.insert(id.to_string(), Said {
+                    problem: problem.to_string(),
+                    first_seen: self.problems.get(id).map(|said| said.first_seen).unwrap_or(now),
+                    retire_failed: true,
+                });
             }
         }
         self.save();
+    }
+
+    /// Whether the queue still holds this request: requests/ (waiting to be dispatched) or claimed/ (being
+    /// performed). Read from the box itself, which is the only thing that knows - a directory's own files cannot
+    /// say whether more are coming.
+    fn in_the_box(id: &str) -> bool {
+        ["requests", "claimed"]
+            .iter()
+            .any(|lane| sentinel_dir().join(lane).join(format!("{id}.json")).exists())
+    }
+
+    /// Whether this directory still owes its parent a report, which is what a withdrawn protocol deploy is: the
+    /// withdrawal is recorded as the state phase, and the observation that follows is what establishes the
+    /// binding admit never wrote and delivers the one event the asking session is waiting for.
+    fn owes_a_report(dir: &Path) -> bool {
+        std::fs::read(dir.join("state.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|state| state["phase"] == "withdrawn")
     }
 
     /// Forget an id that observed cleanly (or no longer exists), so a later problem is reported again.

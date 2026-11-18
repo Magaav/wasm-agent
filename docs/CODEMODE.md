@@ -20,6 +20,32 @@ VMs/handles stay interpreter-thread local and require a scope hash for every act
 
 Admission rechecks deadline/cancellation before every queued native call, including after a slow prior tool. A native dispatcher exception has an explicitly unknown effect and forbids replay. All call attempts, including refusals, retain raw argument/result references and a separate journal; admitted native tool spans remain distinguishable from attempts. Nested full originals are hash-addressed and nested tool start/end events are durable. Only selected script output enters the model-facing result; ordinary50KiB output projection remains. Filtering is an opt-in awareness risk, not lossless compression; hidden acceptance and late-caveat fixtures must demonstrate task outcomes. Stores are snapshot/scoped derived state and commit only on successful script completion.
 
+## A run block, and the fences that are only text
+
+A turn acts by writing a fence: a line-initial `js run` (or `javascript run`) block, which the loop turns into one
+code-mode call. Nothing else in a reply runs, and a reply that ends without one is the answer. `lua/core/raw_code.lua`
+decides which fences are actions; everything else in a reply is the model's prose, and the loop must not fail an
+answer because of a sample in it.
+
+Three shapes are TEXT and are deliberately neither executed nor reported as a miss (review of 18/11, finding 4;
+each is a case in `scripts/test-raw-code-answer.lua`):
+
+1. **a fence inside a block the parser already read** - a `js run` example inside an `md` block is that block's
+   content, so the answer is decided by `M.parse`, not by a line scan;
+2. **a fence inside a list item** - valid CommonMark, where a block sits up to three spaces inside its container.
+   The parser does not track containers, and `list_content_column` answers that question for the one reader that
+   needs it;
+3. **a plain `js` fence when the node's code mode is off** - nothing could run it, so it was never an action
+   (`M.only(policy)`, not `M.mode()`).
+
+**The list-item case is an accepted trade-off, stated so it is not a surprise.** A model that writes a list item
+and then an indented `js run` block under it means the block as an action, and this loop will neither run it nor
+flag it: the turn ends with that block as its answer. The other choice is worse - it fails every answer that
+contains an indented example, which was the measured defect (a normal answer with an `md` sample was refused as
+`run_block_not_executed`), and a sample is far more common in prose than an action is inside a list item. What is
+still flagged is a fence the parser could have seen and did not: indented four or more spaces at the top level, or
+never closed. That is the shape of a real miss, and it keeps its named refusal.
+
 ## Natural promises (11/11, #119)
 
 A script is one async function, and the node wraps the model's text in a small ergonomics layer before

@@ -157,6 +157,14 @@ fn observed_phase(binding:&Value,state:&Value,now:u64) -> (String,String) {
         return ("unknown".into(),"state_identity_or_timestamp_mismatch; reconcile, never replay".into());
     }
     if state["phase"]=="failed" {return ("failed".into(),state["detail"].as_str().unwrap_or("effect failed").into());}
+    // A protocol deploy the operator withdrew before it ran (main::withdraw_request records the phase). Nothing was
+    // attempted and nothing ever will be, so the asking session has to hear a TERMINAL answer: anything else leaves
+    // it waiting for a deploy that cannot happen. The phase a return event carries is a closed vocabulary - the
+    // hook that consumes it (scripts/sentinel-return-hook.mjs) refuses any other word - so the terminal word here
+    // is "failed", and the detail says exactly what happened, in the words the legacy deploy door already uses.
+    if state["phase"]=="withdrawn" {
+        return ("failed".into(),state["detail"].as_str().unwrap_or("withdrawn by the operator before the sentinel performed it; nothing was installed").into());
+    }
     let dir=sentinel_dir().join("deploy-protocol").join(id);
     if dir.join("result.json").exists() {
         let result:Value=std::fs::read(dir.join("result.json")).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
@@ -278,6 +286,25 @@ pub(crate) fn observe_all() -> Value {
     let results:Vec<Value>=entries.iter().map(|id|observe_one(id)).collect();
     let skipped:Vec<&Value>=results.iter().filter(|record|record["ok"]!=true).collect();
     json!({"ok": skipped.is_empty(), "observed": results.len()-skipped.len(), "skipped": skipped, "records": results})
+}
+
+/// Whether the engine's own schedule would observe this directory at `now`.
+///
+/// `observe_at` answers `Ok(())` both when it observed a directory and when it deliberately did nothing because
+/// the directory's ten-second cadence - or its backoff after a failure - is not due yet. A caller that cannot tell
+/// those apart learns the wrong fact: the observation lane used to *forget* a problem on every deferral, so the
+/// next real attempt found nothing remembered and reported the same problem again, and a runtime problem that
+/// never cleared wrote a line every backoff period for ever - "one line per (id, problem)" at a term's length
+/// instead of a tick's. This is that distinction, computed from the same two files and the same rule.
+pub(crate) fn due(id:&str,now:u64) -> bool {
+    let dir=sentinel_dir().join("deploy-protocol").join(id);
+    if let Ok(Some(cursor))=read_schedule(&dir.join("observation.json")) {
+        if cursor["next_at"].as_u64().unwrap_or(0)>now {return false;}
+    }
+    if let Ok(Some(poll))=read_schedule(&dir.join("observation-poll.json")) {
+        if poll["id"]==id && poll["next_at"].as_u64().unwrap_or(0)>now {return false;}
+    }
+    true
 }
 
 pub(crate) fn observe_at(id:&str,now:u64) -> Result<()> {

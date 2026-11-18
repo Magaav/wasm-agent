@@ -59,7 +59,10 @@ pub(crate) fn record(request: &Value, id: &str, phase: &str, detail: &str) -> Re
     }
     if phase=="held" && dir.join("state.json").exists() {
         let state:Value=serde_json::from_slice(&std::fs::read(dir.join("state.json"))?)?;
-        if ["spawned","failed","verified","unknown"].contains(&state["phase"].as_str().unwrap_or("")) {return Ok(());}
+        // A terminal state is not rewritten by a later hold. "withdrawn" belongs here for the same reason as the
+        // four: the operator's withdrawal (main::withdraw_request) settled this deploy, and a tick that re-recorded
+        // it as held would reopen a report the session has already been given.
+        if ["spawned","failed","verified","unknown","withdrawn"].contains(&state["phase"].as_str().unwrap_or("")) {return Ok(());}
     }
     wa_operation::atomic_json(&dir.join("state.json"), &json!({"schema":1,"id":id,
         "expected_sha":request["expected_sha"],"session":request["session"],

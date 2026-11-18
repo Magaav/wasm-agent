@@ -13,6 +13,13 @@
 --
 -- The repository is real (a scratch git repo, real `git worktree add`); only the wave entrypoint is stubbed,
 -- because the case is a node with NO registration and asking the real store would be node state, not a test.
+--
+-- Review of 18/11, round 3: the operator cases used `memory.start_session('','')`, a session with an EMPTY
+-- objective - a shape no code in this tree produces. Every real operator session is created with objective
+-- "chat" (`chat.lua`, `commands.new_session` for `/new`, `agent.lua` for a named thread, `memory.ensure_session`,
+-- `subagents.lua` for a parent thread), so the admission rule accepted the test's hand-built session and refused
+-- the node's own `wa chat`. The operator cases below are therefore built by the real constructors, and the test
+-- asserts the objective they carry, so a rule that only understands the empty objective fails here.
 local json=dofile('lua/vendor/json.lua')
 local base=host.paths() or {}
 local scratch=tostring(base.temp or '/tmp')..'/wa-operator-session-'..host.uuid()
@@ -67,6 +74,7 @@ host.exec=function(command,cwd,timeout)
 end
 
 local memory=dofile('lua/core/memory.lua');memory.setup()
+local commands=dofile('lua/core/commands.lua')
 local workspaces=dofile('lua/core/workspaces.lua')
 local users=dofile('lua/core/users.lua')
 local owner=users.default_user()
@@ -102,7 +110,16 @@ local guest_ws,guest_err=workspaces.ensure(memory,guest,nil,{})
 refused(guest_ws,guest_err,'ITEM 4 (allocated): a root session of a principal that is not the node owner')
 
 -- 3. the control for the site above: the OPERATOR session, bound the same way, is admitted ----------------
-local operator=memory.start_session('','',{user_id=owner.id,node_id='',title='operator'})
+-- Built by the door `wa chat` uses for `/new` (`commands.new_session`), because THAT is the session the
+-- exception is for: the review of 18/11 found the rule reachable only from a hand-built empty-objective session.
+local operator,operator_notice=commands.new_session({user=owner.id,node=''})
+check(type(operator)=='string' and operator~='','ITEM 4 (allocated): the real constructor returns a session id')
+local operator_row=memory.session(operator)
+check(tostring(operator_row and operator_row.objective)=='chat',
+  'ITEM 4 (allocated): the session a real operator starts carries objective "chat", not "": '..
+  json.encode({id=operator,objective=operator_row and operator_row.objective,notice=operator_notice}))
+check(tostring(operator_row and operator_row.user_id)==owner.id,
+  'ITEM 4 (allocated): and the node owner is its principal')
 bind(operator)
 local operator_bound,bound_err=workspaces.ensure(memory,operator,nil,{})
 check(operator_bound~=nil,'ITEM 4 (allocated): the operator session is admitted in place of the wave: '..tostring(bound_err))
@@ -111,9 +128,26 @@ check(operator_bound and operator_bound.start_state and
   'ITEM 4 (allocated): and the binding records the absent registration: '..
   json.encode(operator_bound and operator_bound.start_state and operator_bound.start_state.wave_admission))
 
+-- 3b. and the OTHER accepted shape: a hand-started session with an empty objective. No code in this tree makes
+-- one (that is the finding), but memory.start_session can, so the rule must keep admitting it - the fix widened
+-- the rule to include the shape real code produces, it did not trade one shape for the other.
+local hand=memory.start_session('','',{user_id=owner.id,node_id='',title='hand'})
+check(tostring(memory.session(hand).objective)=='','ITEM 4 (allocated): the fixture session carries an empty objective')
+bind(hand)
+local hand_ws,hand_err=workspaces.ensure(memory,hand,nil,{})
+check(hand_ws~=nil,'ITEM 4 (allocated): an empty-objective operator session is still admitted: '..tostring(hand_err))
+check(hand_ws and tostring(hand_ws.start_state and hand_ws.start_state.wave_admission)=='absent_operator_unregistered',
+  'ITEM 4 (allocated): and it records the absent registration too: '..
+  json.encode(hand_ws and hand_ws.start_state and hand_ws.start_state.wave_admission))
+
 -- 4. the NEW-ALLOCATION admission site, operator: it must not throw, and it must record what it decided -----
 -- On 62c3c064 this is where `ensure` threw: the exception was recorded before `local start_state` existed.
-local fresh=memory.start_session('','',{user_id=owner.id,node_id='',title='fresh'})
+-- Built by the door a bare `wa chat` uses (`memory.ensure_session`): the newest open thread for this principal
+-- and node, or a new one - either way with objective "chat" (`title or "chat"` in memory.lua). A distinct node id
+-- keeps this case a NEW thread, so it exercises the allocation site rather than the binding one.
+local fresh=memory.ensure_session(owner.id,'node-second')
+check(tostring(memory.session(fresh).objective)=='chat',
+  'ITEM 4 (allocate): the session ensure_session starts carries objective "chat": '..json.encode(memory.session(fresh)))
 local ok_fresh,fresh_ws,fresh_err=pcall(workspaces.ensure,memory,fresh,nil,{})
 check(ok_fresh,'ITEM 4 (allocate): the operator path does not throw: '..tostring(fresh_ws))
 check(fresh_ws~=nil,'ITEM 4 (allocate): the operator session allocates: '..tostring(fresh_err))
@@ -152,4 +186,6 @@ if ra_ws then
 end
 
 pcall(host.exec,'rm -rf '..quote(scratch),'',120)
+-- The line a harness greps, in the idiom of the other Lua rows (scripts/test.sh), then the count.
+print('wave operator session ok')
 print(json.encode({ok=true,checks=checks}))

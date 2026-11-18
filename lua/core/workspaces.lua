@@ -74,7 +74,12 @@ end
 --   - `objective` names the starter. It was read as `~= 'subagent'`, which admits every OTHER value too -
 --     including `remote`, the objective `lua/core/session_watch.lua` gives a session another node started.
 --     That session is the other node's operator asking over the mesh, and it skipped wave admission on this
---     node's shared repository. Only an empty objective is this node's own conversation.
+--     node's shared repository. The first fix then demanded an EMPTY objective, and that refused the node's own
+--     conversation: every real operator session is created with objective "chat" (`chat.lua` for a bare
+--     `wa chat`, `commands.new_session` for `/new`, `agent.lua` for `--session` start-if-missing,
+--     `memory.ensure_session`'s title, `subagents.lua` for a parent thread), so the exception could not be
+--     reached by any code - only by the review's own hand-built `objective = ''` session. It is "chat" (or the
+--     empty objective of a hand-started session) that is this node's own conversation, and nothing else.
 --   - the principal was never checked at all, so a root session of ANY account (a guest, or a principal
 --     another node sent) was the operator as far as this rule could tell. It is the node's owner - the same
 --     rule `memory.ensure_session` already applies from the other side, when it refuses to adopt a `remote`
@@ -82,7 +87,8 @@ end
 local function operator_session(session)
   if not session then return false end
   if tostring(session.parent_session_id or '') ~= '' or tostring(session.fork_parent_id or '') ~= '' then return false end
-  if tostring(session.objective or '') ~= '' then return false end
+  local objective = tostring(session.objective or '')
+  if objective ~= '' and objective ~= 'chat' then return false end
   local owner = node_owner()
   if not owner then return false end
   return tostring(session.user_id or '') == owner

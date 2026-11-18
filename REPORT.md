@@ -919,3 +919,167 @@ wasi-sdk runs `scripts/build-components.sh mesh` and `scripts/publish-components
   node state touched. Commits are local, on `change/harness-land`.
 - `scripts/fast.sh`'s component rows (6 components) were skipped for want of wasi-sdk, exactly as on both
   source branches; nothing about them was measured here.
+
+---
+
+# Round 3 — the independent review of round 2, and items 6-8 again (avell, this node)
+
+Same worktree and branch, head `3ce1a95f` before this round, base `change/harness-fixes`. This node has a Rust
+toolchain (`cargo`, 16 cores, `CARGO_TARGET_DIR=/home/victor/wasm-agent/target/m-harness-land`) and a release
+`wa` built from this tree, which is what the Lua rows below run against with `WASM_AGENT_LUA_ROOT=$PWD`.
+Nothing pushed. `components.lock` and finding 3 (the mesh pin) untouched, as instructed: that one belongs to the
+components-toolchain mission.
+
+## 1. Item 7 retires a held deploy, then spams again
+
+**Defect.** `Observation::observe` treated "missing a file intake writes" as structural, and `binding.json` is
+written at `admit` (`deploy_protocol.rs`) while `intent.json`/`ack.json` are rewritten on every tick. A protocol
+deploy held past the 300 s grace (busy node, protocol not ready, `parent_owner_unavailable`) was therefore judged
+structural, moved to `deploy-protocol-retired/` with its evidence, recreated by the next intake under the same id
+- and then `retire` failed forever because the target exists, while `verdict` kept answering `Retire`: one
+`return-observation-retire-failed` line per tick, for as long as the machine runs.
+
+**Fix.** `observation.rs`: the structural test is about what is in flight, not about which file is absent. A
+directory is structural only when the id is in neither `requests/` nor `claimed/` (new `Observations::in_the_box`)
+**and** its state does not say `withdrawn` (new `Observations::owes_a_report`, item 4 below). A failed retirement is
+remembered: `Said { problem, first_seen, retire_failed }` replaces the old tuple, `verdict` answers `Quiet` for a
+settled retirement, and the flag is persisted in `observation-problems.json` so a restart does not re-ask either.
+
+**Test.** `observation_tests::a_held_deploy_survives_the_grace_with_one_line` - a request written where
+`request deploy --expected-sha` writes it, then the real `deploy_protocol::intake` (intent + ack, no binding),
+then 50 real lane passes with `WASM_SENTINEL_OBSERVE_GRACE=0`: the directory survives, nothing is retired, one line
+naming `binding.json`, and no retirement is attempted.
+`observation_tests::a_retirement_that_cannot_happen_is_said_once` - the retired lane already holds that id, 20
+passes with grace 0, exactly one `return-observation-retire-failed` line and the earlier evidence byte-identical.
+
+**Falsified.** Reverting the fix in place (the tuple type change means the base tree cannot compile these tests, so
+the reversion is of the code the test exercises, not a `git stash`):
+- "structural from the missing files alone" (the pre-review rule) → `a_held_deploy_survives_the_grace_with_one_line` FAILED;
+- "`verdict` keeps answering Retire after a failed retirement" → `a_retirement_that_cannot_happen_is_said_once` FAILED, `left: 19` lines against `right: 1`.
+
+**One more defect found while writing those tests, and fixed with its own test.** `sentinel_return::observe_at`
+answers `Ok(())` both when it observed a directory and when it deliberately did nothing because its own
+ten-second cadence (or its backoff after a failure) is not due. The lane read that silence as "observed cleanly" and
+*forgot* the problem, so the next real attempt found nothing remembered and reported the same sentence again: "one
+line per (id, problem)" at a term's length instead of a tick's - the same defect class, one lane down. `due(id, now)`
+is now a fact the lane can ask (same two schedule files, same rule), and a deferral says nothing and forgets
+nothing. `observation_tests::a_deferred_observation_does_not_forget_the_problem` fails without the gate with two
+identical lines and passes with it (`left: 2` against `right: 1`).
+
+## 2. Operator exception unreachable (round-1 #1/#2)
+
+**Defect.** `workspaces.lua`'s `operator_session` required an empty `objective`, and every real operator session
+carries `objective = "chat"` (`chat.lua` for a bare `wa chat`, `commands.new_session` for `/new`, `agent.lua`
+for a named thread, `memory.ensure_session`'s `title or "chat"`, `subagents.lua` for a parent thread). So the
+exception could be reached by no code that exists - and the test passed only because it built its own
+`objective = ''` session, a shape no code produces. On a node without wave registration, `wa chat` was refused.
+
+**Fix.** `lua/core/workspaces.lua`: accept `''` or `'chat'`, exclude `remote` and `subagent` (any other objective
+still refuses), and keep the owner-principal check. The comment now records why `'chat'` is the shape that matters.
+
+**Test.** `scripts/test-wave-operator-session.lua` (the review's own file) now builds its operator sessions through
+the real constructors: `commands.new_session({user=owner.id,node=''})` for the allocated-admission site and
+`memory.ensure_session(owner.id,'node-second')` for the new-allocation site, asserting the objective each carries
+(`"chat"`); a third case keeps the `''` shape admitted, so the fix widens the rule instead of swapping one shape for
+the other. The remote session and the root session of another principal still refuse by name.
+
+**Falsified.** With the new test and the *unfixed* rule: `lua error ...:34: ITEM 4 (allocated): the operator session is
+admitted in place of the wave: workspace_wave_admission_refused:wave_registration_required - the shared wave store
+exists without a registration for this repository`. With the fix: `wave operator session ok`,
+`{"checks":35,"ok":true}`. The old file on the same tree passed with 28 checks, which is the point: the only session
+it admitted was its own fixture.
+
+**Wired, because it was named by no harness.** The row is now in `scripts/test.sh` next to the other session rows:
+`WA_SCRIPT=.../test-wave-operator-session.lua "$BIN" --db "$DB.wave-operator-session" | grep 'wave operator session ok'`
+(the script prints that line, in the idiom of the Lua rows). A test nobody runs is a comment.
+
+## 3. The mesh pin
+
+Not touched, as instructed (`components.lock` is unchanged in this round's diff).
+
+## 4. Item 6 is silent for protocol deploys
+
+**Defect.** `withdraw_request` settled a deploy's outcome record only when the request carried no `expected_sha` -
+and a protocol deploy has no outcome record (`deploy_outcome::open` is deliberately not called for one). A withdrawn
+protocol deploy therefore stayed `held`/`accepted` in its own `state.json`, the return engine kept observing a
+deploy that could never happen, and the session that asked waited for a terminal answer no code would write.
+
+**Fix.**
+- `main.rs` `withdraw_request`: for a request carrying `expected_sha`, record the `withdrawn` phase in the deploy's
+  own directory through `deploy_protocol::record`, with the same words the legacy door uses, and say in the answer
+  that its own return engine reports it. A record failure is audited (`withdraw-protocol-record-failed`) and named
+  in the answer instead of being swallowed.
+- `sentinel_return.rs` `observed_phase`: a `withdrawn` state is a **terminal** outcome. It is reported as phase
+  `failed` on purpose: the phase a return event may carry is a closed vocabulary (`scripts/sentinel-return-hook.mjs`
+  refuses any other word), and the detail says exactly what happened. Terminal is what stops the engine from
+  observing it for ever and what stops the requesting session from waiting.
+- `deploy_protocol.rs` `record`: `withdrawn` joined the list of states a later `held` record cannot overwrite.
+- `observation.rs`: a directory whose state says `withdrawn` owes a report, so its missing `binding.json` is not
+  structural - the observation that follows is what establishes the binding admit never wrote (a claimed request
+  cannot be withdrawn, so a withdrawable protocol deploy was never admitted).
+
+**Test.** `withdraw_tests::withdrawing_a_protocol_deploy_gives_its_session_a_terminal_report`: a real queued request,
+the real `deploy_protocol::intake`, the real `withdraw_request`, then the real lane and the real return engine. Only
+the owner lookup (a private listener on 127.0.0.1) and the job store are stood in for. It asserts the state is
+`withdrawn`, that `returns/<id>-0.json` carries phase `failed` with the withdrawal in its detail,
+`installation-observation.json` is terminal, the one event is `pending-return.json` for the parent that asked, and
+that 20 further ticks do not rewrite the journal, do not add a second slot, and do not retire the directory.
+`observation_tests::a_withdrawn_deploy_is_not_retired_before_its_report` pins the other half with no node at all
+(`WASM_AGENT_PORT=1`): 20 passes, grace 0, the directory survives, one line naming `parent_owner_unavailable`.
+
+**Falsified.** With the protocol door not told and a `withdrawn` state not terminal:
+`assertion left == right failed: the deploy stops claiming to be waiting: {"phase":"held", ...}`.
+
+## 5. Minor: the unwired shell test, the ledger's blind spot, the list-item fence
+
+- **`scripts/test-deploy-runtime-recheck.sh` is wired** into `scripts/test.sh` beside the deploy-record and
+  self-ship rows. It runs here: `deploy runtime re-check ok (11 checks)`.
+- **The orphan ledger now sees shell tests**: `TEST_FILE` in `scripts/test-orphan-tests.mjs` is
+  `^test[-.].*\.(mjs|cjs|js|sh)$`, and its header says why. Extending it found **14** unreferenced shell test scripts,
+  not one: the named one is now wired, and the other **13** are declared in `scripts/test-orphans.json` with a
+  specific reason each (what it needs and why it is not a landing row). Two of them - `test-build-cap-skip.sh` and
+  `test-linux-launcher.sh` - are hermetic and cheap and are unwired only because no gate row was ever added; their
+  entries say exactly that, which is the visible form of that debt.
+  Evidence both ways: with the row removed, `FAIL scripts/test-deploy-runtime-recheck.sh: orphaned and not declared in
+  scripts/test-orphans.json - wire it into a harness or declare why not` (`257 wired, 61 orphaned, 60 declared`);
+  with it, `orphan-tests ok (258 wired, 60 orphaned and declared with a reason)`.
+- **The list-item fence trade-off is documented, not flagged.** Which of the two the item allowed is a decision, and
+  it is the first: failing every answer that contains an indented sample was the measured defect, and a sample is far
+  more common in prose than an action is inside a list item. `docs/CODEMODE.md` has a new section, "A run block, and
+  the fences that are only text", listing the three shapes that are text and stating the accepted trade-off with its
+  price, so a reader meets it before a model does.
+
+## The suites, before and after
+
+`cargo test --offline --manifest-path rust/wa-sentinel/Cargo.toml -- --test-threads=1` (`CARGO_TARGET_DIR` as above):
+
+| tree | result |
+|---|---|
+| base, head `3ce1a95f` (before any edit of this round) | `121 passed; 5 failed` |
+| this round | `126 passed; 5 failed` |
+
+The five failures are the same five, they are in the base, and they are environment, not code: this machine runs the
+watcher outside systemd, and two of them need a native `node` on the child PATH.
+
+```
+deploy_outcome_tests::the_sentinel_spawns_waits_and_reports_a_deploy_end_to_end        (this watcher is inside wa-serve.service, which cannot be shown to own it)
+deploy_visibility_tests::a_failing_deploy_leaves_its_message_in_the_capture            (same unit-identity refusal)
+node_script_tests::javascript_requests_run_native_node_and_preflight_before_any_operation  (operation code=1)
+node_script_tests::job_run_prepare_and_pipeline_use_the_same_native_node_dispatch      (operation code=1)
+role_tests::the_watcher_records_its_own_owner_where_a_later_stop_reads_it               (Os { code: 2, NotFound })
+```
+
+Lua and harness rows run this round: `scripts/test-wave-operator-session.lua` 35 checks,
+`scripts/test-wave-registration-refusal.lua` 15 checks, `scripts/test-session-worktree-status.lua` 15 checks,
+`bash scripts/test-deploy-runtime-recheck.sh` 11 checks, `node scripts/test-orphan-tests.mjs` ok,
+`node scripts/check-instructions.mjs` PASS (79 checks, 231 files), `bash -n scripts/test.sh` ok.
+
+## What this round did not verify
+
+- **No landing, no push, no deploy, no node state**: commits are local on `change/harness-land`.
+- **`scripts/test.sh` as a whole was not run** (it builds this tree and takes the better part of an hour); the two
+  rows added or changed were run on their own, and `bash -n` checks the file parses.
+- **The installed `wa` does not carry the Lua fix** - `lua/core/workspaces.lua` is embedded at build time, and
+  rebuilding/reinstalling the node is a deploy, not a test.
+- **The sentinel binary was not exercised against a live watcher**: every claim about the lane is from its own tests
+  in a scratch `WASM_AGENT_HOME`, plus the engine's own suite (`observation_io_tests`, `return_engine_tests`).
