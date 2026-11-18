@@ -232,6 +232,31 @@ case "$DEPLOY_OUT" in
   *) ok "it refused before touching the install (no ancestry work was done)" ;;
 esac
 
+
+echo "test-deploy-ancestry: a commit no branch on the remote has (item 7, on the deploy path)"
+# MEASURED 18/11: the artifact came from a helper that had fetched a ref into a detached HEAD, and nothing on the
+# publishing side asked whether the commit was one anybody else could see. The same question is asked here, before
+# the build, so that a refusal leaves the node untouched instead of stopping halfway through an install.
+EMPTYREMOTE="$WORK/empty.git"; git init -q --bare "$EMPTYREMOTE"
+SHAREDTREE="$WORK/shared-tree"
+if git clone -q --shared "$ROOT" "$SHAREDTREE" 2>/dev/null; then
+  git -C "$SHAREDTREE" config user.email test@example.com; git -C "$SHAREDTREE" config user.name test
+  git -C "$SHAREDTREE" remote set-url origin "$EMPTYREMOTE"
+  git -C "$SHAREDTREE" update-ref refs/remotes/origin/main "$(git -C "$SHAREDTREE" rev-parse HEAD)"
+  FRESH="$WORK/fresh-install"; mkdir -p "$FRESH"
+  deploy_in "$SHAREDTREE" "$FRESH" --reason "an ordinary deploy"
+  [ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "a deploy installed a commit no branch on the remote has"
+  shows "the refusal is by name" "$DEPLOY_OUT" "refused(commit_not_on_pushed_branch)"
+  shows "it says the remote was asked and answered no" "$DEPLOY_OUT" "no branch contains it"
+  shows "it says nothing was built or installed" "$DEPLOY_OUT" "Nothing was built and nothing was installed"
+  same "nothing was installed" "$([ -x "$FRESH/wa" ] && echo yes || echo no)" "no"
+  deploy_in "$SHAREDTREE" "$FRESH" --force --reason "a test node, this branch is mine"
+  hides "with --force --reason it goes on" "$DEPLOY_OUT" "commit_not_on_pushed_branch"
+  shows "...and the override is recorded" "$(cat "$FRESH/deploy.log" 2>/dev/null)" "commit_not_on_pushed_branch accepted with --force --reason"
+else
+  bad "could not clone this checkout for the unshared-commit case"
+fi
+
 echo "test-deploy-ancestry: the source of the rule is one file, shipped beside the running copy"
 grep -q 'install-record.sh' "$ROOT/scripts/deploy.sh" && ok "deploy.sh ships and sources the one ancestry verdict" || bad "deploy.sh does not use scripts/lib/install-record.sh"
 grep -q 'wa_ancestry_verdict' "$ROOT/scripts/upgrade.sh" && ok "upgrade.sh asks the same verdict" || bad "upgrade.sh has its own idea of a downgrade"
