@@ -95,6 +95,11 @@ fixture="$WORK/fixture"
 mkdir -p "$fixture/scripts/lib" "$fixture/config" "$fixture/lua/core" "$fixture/lua/vendor"
 cp "$ROOT/scripts/lib/node-binaries.sh" "$ROOT/scripts/lib/lua-tree.sh" "$ROOT/scripts/lib/release-signing.sh" \
    "$ROOT/scripts/lib/release_verify.py" "$ROOT/scripts/lib/build-requirements.sh" "$fixture/scripts/lib/"
+# ...and the glibc floor, which publish-node-binaries.sh sources before it will read a manifest's
+# glibc_floor= back out of the artifact it is publishing (change/release-glibc). A fixture without it is
+# refused as glibc_floor_lib_missing before this row's first assertion, which then reads as a signing failure
+# that is really a missing file - measured on change/release-glibc alone, 18/11, where this row was red.
+cp "$ROOT/scripts/lib/glibc-floor.sh" "$fixture/scripts/lib/"
 cp "$ROOT/scripts/publish-node-binaries.sh" "$ROOT/scripts/publish-lua-tree.sh" "$fixture/scripts/"
 cp "$ROOT/scripts/check-disk-floor.sh" "$fixture/scripts/"
 printf 'return {}\n' > "$fixture/lua/core/init.lua"

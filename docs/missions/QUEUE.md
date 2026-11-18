@@ -19,6 +19,8 @@ Order chosen 18/11: unblock missions first, then the vault, then the folder mode
 Rules: one mission per area at a time (missions 1/3/4 touch the same Lua); max 3 on avell; launcher puts
 the toolchain on PATH, runs codemode from the mission dir, says "build here only".
 
+Mission reports live in docs/missions/reports/<mission>.md, never at the repo root.
+
 Approved 18/11 (Victor "ok"): land harness-fixes first, rebase vault-one on it; after deploy migrate avell's and the laptop's live vault keys with `wa vault import-legacy`, switch nodes to `wa vault serve`, only then stop the Python service. Real-node fleet enrollment still per node with Victor's go.
 
 ## Status 18/11 ~10:10 BRT
