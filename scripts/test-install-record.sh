@@ -247,6 +247,39 @@ same "...so its commit is not claimed" "$WA_RUNNING_COMMIT" ""
 same "...and the source says the commit is unprovable" "$WA_RUNNING_SOURCE" "unprovable"
 shows "...naming the missing sha256" "$WA_RUNNING_WHY" "no sha256="
 if wa_running_first_install; then bad "an unprovable record was called a first install"; else ok "an unprovable record is not a first install"; fi
+# ROUND 4, ITEM 1. A record that IS about these bytes and names NO commit (commit=unknown, or commit= written
+# blank - line 277 of scripts/lib/install-record.sh blanks "unknown"). The record proves it is about the binary and
+# says nothing about where those bytes come from, so the answer is UNKNOWN. It used to be "source=none, commit
+# empty", which deploy.sh read as a FIRST INSTALL: it installed over the node and printed an override
+# ("ancestry_unverified=yes") that nobody had given. Fail-open, in the one sentence that is supposed to say why.
+NOCOMMIT="$WORK/identity-nocommit"; mkdir -p "$NOCOMMIT"
+printf '#!/bin/sh
+exit 1
+' > "$NOCOMMIT/wa"; chmod +x "$NOCOMMIT/wa"
+printf 'commit=unknown
+sha256=%s
+via=deploy.sh
+' "$(sha256sum < "$NOCOMMIT/wa" | awk '{print $1}')" > "$NOCOMMIT/installed.txt"
+wa_running_identity "$NOCOMMIT"
+same "a record about THESE bytes with commit=unknown is still about these bytes" "$WA_RUNNING_RECORD_IS_BYTES" "yes"
+same "...and it names no commit" "$WA_RUNNING_RECORD_COMMIT" ""
+same "...so the source is unprovable, not none" "$WA_RUNNING_SOURCE" "unprovable"
+same "...and no commit is claimed" "$WA_RUNNING_COMMIT" ""
+shows "...and the sentence says the record names no commit" "$WA_RUNNING_WHY" "names no commit"
+if wa_running_first_install; then bad "a record about these bytes with no commit was called a first install"; else ok "it is NOT a first install"; fi
+# The same record with commit= written blank rather than commit=unknown. Both spellings are the same fact and the
+# reader cannot be allowed to answer one of them with "nothing here" and the other with "unknown".
+BLANK="$WORK/identity-blankcommit"; mkdir -p "$BLANK"
+printf '#!/bin/sh
+exit 1
+' > "$BLANK/wa"; chmod +x "$BLANK/wa"
+printf 'commit=
+sha256=%s
+' "$(sha256sum < "$BLANK/wa" | awk '{print $1}')" > "$BLANK/installed.txt"
+wa_running_identity "$BLANK"
+same "a blank commit= beside these bytes is unprovable too" "$WA_RUNNING_SOURCE" "unprovable"
+if wa_running_first_install; then bad "a blank commit= beside these bytes was called a first install"; else ok "...and it is NOT a first install either"; fi
+
 EMPTY="$WORK/identity-empty"; mkdir -p "$EMPTY"
 wa_running_identity "$EMPTY"
 if wa_running_first_install; then ok "only an empty directory is a first install"; else bad "an empty directory is not a first install"; fi

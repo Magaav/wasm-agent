@@ -622,8 +622,17 @@ if [ -z "$RUNNING_COMMIT" ]; then
   # (or overridden, and recorded) above - it is not a first install (round-3 item 1).
   if wa_running_first_install; then
     echo "deploy: nothing is installed in $INSTALL_DIR - this is a first install, not a downgrade"
-  else
+  elif [ "${ANCESTRY_UNVERIFIED:-no}" = yes ]; then
+    # ONLY WHEN AN OVERRIDE WAS GIVEN (round-4 item 1). This sentence used to be printed for every empty running
+    # commit that was not a first install, and the one path that reached it with no override was the round-4 hole
+    # in wa_running_identity (a record about these bytes naming no commit answered source=none): the deploy
+    # installed and claimed "the override above was recorded as ancestry_unverified=yes" with nothing above it.
+    # The identity function no longer answers that way, and this line no longer claims an override it cannot see.
     echo "deploy: nothing here names the commit that is installed ($RUNNING_WHY); the override above was recorded as ancestry_unverified=yes, and no ancestry question can be asked"
+  else
+    # A GUARD, NOT A PATH: an empty running commit with no recorded override is a deploy that would replace bytes
+    # nobody can name while telling the operator the override was recorded. It refuses rather than deciding for them.
+    fail "refused(ancestry_override_unrecorded): nothing here names the commit that is installed ($RUNNING_WHY) and no override was recorded, so no ancestry question can be asked and no record could say why this deploy went on. Nothing was built and nothing was installed. This is a hole in the callers' bookkeeping, not something to work around: make the running bytes name themselves (wa --build-info, or a record whose sha256= is the binary's), or pass --force --reason <text> and the override is recorded in deploy.log and installed.txt."
   fi
 else
   # A RUNNING BINARY THAT WAS BUILT FROM A DIRTY TREE. Its bytes are a commit PLUS uncommitted changes, and no

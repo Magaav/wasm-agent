@@ -46,6 +46,12 @@ HEAD="$(git -C "$TREE" rev-parse HEAD)"
 # The fixture's main IS the commit under test: this checkout is on its main, which is what deploy.sh's rule 2
 # asks, and it keeps the test about the ancestry rule rather than about the branch this work happens to be on.
 git -C "$TREE" update-ref refs/remotes/origin/main "$HEAD"
+# ...and on branch main, because main's runtime-binding preflight (deploy.sh step 0c) refuses a deploy from a tree
+# no checkout has on branch main, BEFORE the build and therefore before the ancestry gate this test is about.
+# The fixture states the shape the rule asks for (this checkout is the one main checkout) instead of bypassing the
+# preflight, so the preflight itself still runs here. Round 4: the rebase onto main brought the preflight, and 46
+# assertions of this file stopped reaching the gate they were written for.
+git -C "$TREE" checkout -q -B main "$HEAD"
 TREE_SHA="$(git -C "$TREE" rev-parse 'HEAD^{tree}')"
 # The commit the node is RUNNING and this tree does not contain, made with commit-tree: no worktree, no branch,
 # no push, and it is exactly the shape of the incident (newer than the tree, absent from it).
@@ -124,6 +130,32 @@ deploy "$NOSHADEAD" --reason "an ordinary deploy"
 shows "the refusal is by name" "$DEPLOY_OUT" "refused(running_commit_unprovable)"
 hides "...and the record is NOT named as a witness" "$DEPLOY_OUT" "for THESE bytes"
 
+echo "test-deploy-ancestry: a record about these bytes that names no commit is UNKNOWN (round-4 item 1)"
+# The fail-open this closes: the binary cannot answer, the record IS about these bytes, and its commit= is
+# unknown (or blank). wa_running_identity answered source=none with no commit, deploy.sh read that as a FIRST
+# INSTALL, installed over the node, and printed "the override above was recorded as ancestry_unverified=yes" -
+# a record nobody made, in the sentence an operator would later quote as their own decision.
+NOCOMMIT="$WORK/nocommit-install"; mkdir -p "$NOCOMMIT"
+printf '#!/bin/sh
+exit 1
+' > "$NOCOMMIT/wa"; chmod +x "$NOCOMMIT/wa"; cp "$NOCOMMIT/wa" "$NOCOMMIT/wa-sentinel"
+printf 'commit=unknown
+sha256=%s
+via=deploy.sh
+' "$(sha256sum < "$NOCOMMIT/wa" | cut -d' ' -f1)" > "$NOCOMMIT/installed.txt"
+NOCOMMIT_BEFORE="$(cat "$NOCOMMIT/installed.txt")"
+deploy "$NOCOMMIT" --reason "an ordinary deploy"
+[ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "a record about these bytes with no commit was replaced with no ancestry question"
+shows "the refusal is by name" "$DEPLOY_OUT" "refused(running_commit_unprovable)"
+shows "it says the record names no commit=" "$DEPLOY_OUT" "names no commit="
+hides "it does not call it a first install" "$DEPLOY_OUT" "this is a first install"
+hides "it does not claim an override nobody gave" "$DEPLOY_OUT" "the override above was recorded"
+same "the install record was not touched" "$(cat "$NOCOMMIT/installed.txt")" "$NOCOMMIT_BEFORE"
+deploy "$NOCOMMIT" --force --reason "a dev box we are moving anyway"
+hides "with --force --reason the gate opens" "$DEPLOY_OUT" "refused(running_commit_unprovable)"
+shows "...and only THEN is the override named" "$DEPLOY_OUT" "the override above was recorded as ancestry_unverified=yes"
+shows "...and it is recorded against the rule it overrode" "$(cat "$NOCOMMIT/deploy.log" 2>/dev/null)" "overrode=running_commit_unprovable"
+
 echo "test-deploy-ancestry: a record that is not about these bytes is not evidence"
 # The shape measured on this machine and on work on 18/11: the record says commit=14963b6f and sha256=4248d61b,
 # the bytes are fc6a9d80, and 14963b6f is an ancestor of main - so a record-based guard let a deploy of main
@@ -178,6 +210,8 @@ if git clone -q --depth 1 "file://$ROOT" "$SHALLOWTREE" 2>/dev/null; then
   same "the fixture checkout is shallow" "$(git -C "$SHALLOWTREE" rev-parse --is-shallow-repository)" "true"
   SHEAD="$(git -C "$SHALLOWTREE" rev-parse HEAD)"
   git -C "$SHALLOWTREE" update-ref refs/remotes/origin/main "$SHEAD"
+  # the same statement as the full fixture above: the shallow clone IS the main checkout for this run
+  git -C "$SHALLOWTREE" checkout -q -B main "$SHEAD"
   UNKNOWN="$WORK/unknown-install"; mkdir -p "$UNKNOWN"
   { echo '#!/bin/sh'; echo 'case "$1" in';
     echo "  --build-info) printf 'version=9.9.9\\ncommit=$FOREIGN\\ntree=$TREE_SHA\\ndirty=false\\nsource=git\\nbuilt_epoch=1\\nancestors=8\\nancestors_complete=false\\n' ;;";
@@ -257,6 +291,10 @@ if git clone -q --shared "$ROOT" "$SHAREDTREE" 2>/dev/null; then
   git -C "$SHAREDTREE" config user.email test@example.com; git -C "$SHAREDTREE" config user.name test
   git -C "$SHAREDTREE" remote set-url origin "$EMPTYREMOTE"
   git -C "$SHAREDTREE" update-ref refs/remotes/origin/main "$(git -C "$SHAREDTREE" rev-parse HEAD)"
+  # the same statement as the fixtures above: this clone IS the main checkout, so the runtime-binding preflight
+  # (deploy.sh step 0c) lets the run reach the rule under test. Round 4: the rebase brought that preflight, and
+  # without this line every case of this file stopped at "found 0 on branch refs/heads/main" instead.
+  git -C "$SHAREDTREE" checkout -q -B main HEAD
   FRESH="$WORK/fresh-install"; mkdir -p "$FRESH"
   deploy_in "$SHAREDTREE" "$FRESH" --reason "an ordinary deploy"
   [ "$DEPLOY_RC" != 0 ] && ok "it refused (exit $DEPLOY_RC)" || bad "a deploy installed a commit no branch on the remote has"

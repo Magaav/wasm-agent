@@ -300,7 +300,15 @@ wa_running_identity() {
     WA_RUNNING_WHY="nothing is installed in $dir"
     return 0
   fi
-  if [ -n "$WA_RUNNING_BIN" ] && [ "$WA_RUNNING_RECORD_IS_BYTES" != yes ]; then
+  # A RECORD ABOUT THESE BYTES THAT NAMES NO COMMIT IS STILL NOT EVIDENCE (round-4 item 1). The test below used to
+  # be "the record is not about these bytes", so a record whose sha256= IS the binary's and whose commit= is
+  # empty or unknown (the two spellings are one fact; the read above blanks "unknown") fell THROUGH to the
+  # fallback, found nothing to claim, and left source=none with no commit - and source=none is what every caller
+  # reads as "a first install": deploy.sh installed over the node and printed "the override above was recorded as
+  # ancestry_unverified=yes" with no override given. Fail-open, inside the sentence that is meant to explain a
+  # refusal. The record proves it is about these bytes and says nothing about where they come from, which is
+  # exactly UNKNOWN, and UNKNOWN refuses.
+  if [ -n "$WA_RUNNING_BIN" ] && { [ "$WA_RUNNING_RECORD_IS_BYTES" != yes ] || [ -z "$recorded" ]; }; then
     # A BINARY IS INSTALLED AND NOTHING PROVES WHICH COMMIT IT IS. This used to be "source=none, commit empty",
     # and every caller read that as a FIRST INSTALL: deploy.sh printed "this is a first install, not a
     # downgrade", fleet-install.sh and bootstrap.sh said "a first install", and upgrade.sh had no else branch
@@ -315,7 +323,13 @@ wa_running_identity() {
       WA_RUNNING_SOURCE="record_mismatch"
     else
       WA_RUNNING_SOURCE="unprovable"
-      [ -n "$recorded" ] || WA_RUNNING_WHY="the binary at $WA_RUNNING_BIN cannot name its own commit and there is no install record beside it"
+      if [ -z "$recorded" ]; then
+        if [ "$WA_RUNNING_RECORD_IS_BYTES" = yes ]; then
+          WA_RUNNING_WHY="the install record beside $WA_RUNNING_BIN is about these very bytes (its sha256= is the binary's) but names no commit=, and the binary cannot name its own commit either - so nothing ties these bytes to a place in history"
+        else
+          WA_RUNNING_WHY="the binary at $WA_RUNNING_BIN cannot name its own commit and there is no install record beside it"
+        fi
+      fi
     fi
     return 0
   fi
