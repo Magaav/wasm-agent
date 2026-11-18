@@ -936,7 +936,7 @@ function M.cli(argv)
     elseif flag == '--force' then options.force = true; index = index + 1
     elseif flag == '--unpin' then options.unpin = true; index = index + 1
     elseif flag == '--pin' then options.pin = true; index = index + 1
-    elseif flag == '--to' or flag == '--until' or flag == '--await' then
+    elseif flag == '--to' or flag == '--until' or flag == '--await' or flag == '--bytes' then
       local value = argv[index + 1]
       if type(value) ~= 'string' or value == '' or value:sub(1, 2) == '--' then
         print('wa update: ' .. flag .. ' needs a value')
@@ -944,6 +944,7 @@ function M.cli(argv)
       end
       if flag == '--to' then options.commit = value; options.pin = 'to'
       elseif flag == '--until' then options.until_ = value
+      elseif flag == '--bytes' then options.bytes = value
       else options.await = value end
       index = index + 2
     elseif flag == '--status' or flag == '--watch' then options.status = true; index = index + 1
@@ -993,6 +994,9 @@ function M.cli(argv)
     local written, problem = pins.set({
       node = selector, kind = 'pin',
       commit = trim(options.commit),
+      -- A binary older than --build-info cannot name a commit, and the record it left beside itself is a
+      -- claim. The bytes can still be named by their sha256, so a pin that cannot name a commit names those.
+      binary_sha256 = trim(options.bytes),
       reason = trim(options.reason),
       until_ = trim(options.until_), await = trim(options.await),
     })
@@ -1021,7 +1025,10 @@ function M.cli(argv)
       print('next: ask again with the same --id; queued is not installed')
     end
   else
-    print(M.summary(reply))
+    -- A reply that wrote a pin carries the pin's own sentence (lua/core/pins.lua's summary_line): "pinned X: ...
+    -- until ... (OVERDUE)" says more than the generic deploy summary, and the message says what did NOT happen.
+    print(reply.summary or M.summary(reply))
+    if reply.pin and reply.message then print(reply.message) end
     if reply.record then print('record ' .. tostring(reply.record) .. (options.session and (' for session ' .. options.session) or '')) end
     if reply.next then print('next: ' .. tostring(reply.next)) end
   end

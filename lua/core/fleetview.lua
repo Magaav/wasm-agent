@@ -33,9 +33,12 @@ M.DISK_DEGRADED_PERCENT = 90
 
 -- The fields every node record answers (or names as missing). The test asserts this exact list, so a
 -- field cannot be dropped from the answer by accident.
+-- 'pins' is deliberately NOT in this list. A field every node record answers is a fact about THAT node; a
+-- pin is a fact about the coordinator's own store (lua/core/pins.lua), so a peer that does not carry the store
+-- names 'pins' in its own missing list instead of failing to answer a field it was never given.
 M.FIELDS = {
   'online', 'last_seen_ms', 'role', 'version', 'commit', 'health', 'disk',
-  'components', 'features', 'operations', 'jobs', 'incidents', 'pins',
+  'components', 'features', 'operations', 'jobs', 'incidents',
 }
 
 local function trim(text, limit)
@@ -198,7 +201,10 @@ function M.node(observation, opts)
     row.pins = pinned
     if #overdue > 0 then row.pins_overdue = overdue end
   else
-    missing[#missing + 1] = 'pins'
+    -- Not in 'missing': that list names a fact this report tried to read and could not, and a peer's pins were
+    -- never this node's to read. The absence is still stated, in its own field, so nobody reads a blank as
+    -- 'nothing is pinned'.
+    row.pins_absent = true
   end
 
   local health = health_of(observation)
