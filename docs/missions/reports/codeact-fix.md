@@ -239,3 +239,162 @@ Against the base (the "fails before" half):
   after; where it is not (a cached vault failure, an extension trusted over bytes), the evidence is the
   code citation plus the test of the rule.
 * nothing was pushed, no branch was merged, no other node was built or tested on.
+
+# Round 2 - Victor's decisions (18/11) and /keybindings
+
+Same worktree and branch (change/codeact-fix), base origin/change/codeact @ 9713a020. Built and tested
+on avell only; nothing was pushed. Commit faaf1d0b.
+
+## 0. The decisions, recorded (not re-argued)
+
+Approved as they are, and left exactly as they are: the FIRST_GUIDANCE fence clause, the "Use full
+paths, as given (programs and files); never ~." guidance line, tool_search names without the 8 limit,
+the unknown_mcp_connector refusal, and the mcp summary note. Ctrl+X = REDO is by design: nothing was
+remapped, the existing test still asserts it, and the new table says so in the row itself ("redo as
+well - by design (operator 18/11); Ctrl+Y does the same, and a test asserts it"), so a reader of
+/keybindings learns the reason with the key.
+
+## 1. /keybindings - one table, and the dispatchers read it
+
+**The problem.** The console's keys were decided in five places and listed nowhere:
+`terminal_editor::Editor::feed_key` (a match over control bytes and escape sequences), its
+`menu_key`, `transcript::NavDecoder`, `terminal_editor::Panel::feed`, and the pointer routing in
+`rust/wa-capabilities/src/host.rs`. Nothing anywhere said what Ctrl+X does. A list written by hand
+beside five dispatchers is wrong the first time one of them changes.
+
+**The fix.** `rust/wa-term/src/keymap.rs` is the table: one row per binding - the surface it applies
+in (Draft, Menu, Transcript, Fullscreen, Panel, Mouse, Console), its group inside that surface, the key
+as a reader says it, the trigger the dispatcher matches (bytes, a pointer gesture, or the "any other
+character" fall-through), the act, and one sentence of what it does. The acts are enums
+(`DraftAct`, `MenuAct`, `NavAct`, `PanelAct`, `Gesture`, `HostAct`) whose consumers match them
+exhaustively, so a row cannot name behaviour that does not exist and a behaviour cannot be reached by a
+key that has no row.
+
+Each dispatcher now reads it:
+
+| dispatcher | reads |
+|---|---|
+| `Editor::feed` / `perform` | `draft_byte`, `draft_seq`, `draft_prefix` - one code path per act |
+| `Editor::menu_key` | `menu_seq`, `menu_byte` |
+| `transcript::NavDecoder` | `nav_seq`, `nav_byte` |
+| `Panel::feed` / `perform` | `panel_seq`, `panel_byte`, `panel_digit`, `panel_letter` |
+| the reader thread's pointer routing (`handle_mouse`) | `gestures(pose)` - the order a press is tried in is the table's (a link claims a press before a selection does) |
+| the reader thread's own keys (Ctrl+O, Ctrl+C on a transcript selection, the lone Esc) | `console_byte`, `console_escape` |
+| the fullscreen console | generated from the settings it obeys (`WA_TUI_KEYS`), not copied from the defaults |
+
+The draft's decoder changed shape with it: an exact row performs its act, a prefix of a row waits for
+the rest, and anything else is swallowed to its final byte - so an unknown escape sequence still never
+reaches the prompt, and "is this a key?" is answered by the table rather than by a chain of `if seq ==`.
+
+**What the list contains** (all of it in `keymap.rs`, 110 rows): Enter, Ctrl+J/Shift+Enter (five
+terminal spellings), Esc and Esc twice, Ctrl+C (copy the selection / interrupt / leave bash mode /
+quit), Ctrl+Insert, Backspace and DEL, Delete, Ctrl+D, Ctrl+K/U/W (selection first), Ctrl+A,
+Shift+arrows, Shift+Home/End, arrows, Home/End, Ctrl+Home/End, Ctrl+E, Ctrl+P/N, Ctrl+Z/Ctrl+Y/Ctrl+X
+and their kitty forms, Ctrl+Shift+Z, Ctrl+V and kitty's, the two paste markers, Ctrl+Up, PageUp/PageDown,
+Ctrl+PageDown, the slash menu's Up/Down/Tab/Enter, the transcript's blocks (arrows, Ctrl+O, PageUp/Down,
+Ctrl+PageDown, Enter/Ctrl+C, Esc), a panel page (Up/Down, 1-9, a page's own letters, Enter, Esc, Left,
+Backspace, Ctrl+U), the pointer (bar press, draft press, expand toggle, link copy, block copy,
+transcript selection, drag, release, wheel, hover), and the console's three.
+
+**How /keybindings is printed.** One capability, one formatter, three surfaces:
+`host.keybindings()` (`rust/wa-capabilities/src/host.rs`) answers `keymap::json()`;
+`lua/core/keybindings.lua` lays the rows out (a key column, a sentence wrapped under it - never cut at
+the screen's edge) and names no key itself; `lua/core/chat.lua` has the REPL arm (balloon pages),
+`lua/core/local_views.lua` publishes the same pages mid-run, and `wa_keybindings()` in
+`lua/core/server.lua` plus a `/keybindings` route in `serve.rs` give the window the same text. `/help`
+names it three times: the registry row, the row's own hint, and a closing line in the help text
+("the keys: /keybindings lists every special key, what it does and where it applies").
+
+## 2. The window's own keys
+
+The window had its own five places: a `keydown` on the composer, one on the document, one on the
+shell's field, one inside each scrollable panel, and the command list's arrows. They now read one table
+too: `WINDOW_KEYS` and `windowKey(event)` in `ui/app.js` (12 rows: Enter, Ctrl/Cmd+Enter, Ctrl+Z,
+Ctrl+Shift+Z/Ctrl+Y, arrows, Tab, the page keys, Esc, Ctrl+backtick, Ctrl+E, Ctrl+D), and the handlers
+switch on the ids it answers. `/keybindings` in the window shows both halves: the node's console rows
+(the route above) and this window's table, generated by `windowKeyList()`.
+
+## 3. Tests, and what each proves
+
+| test | what it proves |
+|---|---|
+| `keymap::every_act_has_a_row` | an act with no row is a key nobody can look up (all six surfaces) |
+| `keymap::every_row_is_dispatched` | a row with no dispatch is a list that lies: every row is looked up by its surface's own dispatcher function |
+| `keymap::no_key_has_two_acts_in_the_same_surface` | a second row for one key would be unreachable |
+| `terminal_editor::no_key_outside_the_table_does_anything` | the other direction: every control byte with no row leaves the draft untouched, every other character types |
+| `terminal_editor::an_escape_sequence_nobody_binds_is_swallowed` | five unbindable sequences leave nothing in the draft |
+| `keymap::the_list_is_the_table` | the rendered rows are the table's rows, in order, plus the live fullscreen ones |
+| `keymap::the_fullscreen_rows_follow_the_operators_keys` | `WA_TUI_KEYS=pageup=none,ctrl+u=line-up` changes the list, and the unbound actions are listed with the knob |
+| `keymap::the_json_carries_every_row` | the capability's answer carries every surface and every sentence |
+| `scripts/test-keybindings.lua` (53 checks) | the rows come from the capability and not from Lua (the module is asserted to name no key at all), the column aligns, a long sentence wraps, /help names it, the registry row, the REPL arm, the mid-run view and the node's handler exist; and, with the real binary, the rows carry Ctrl+X-as-redo, Home/End, Ctrl+Home/End, Ctrl+A, Shift+arrows, the three kills, Ctrl+V's image, Ctrl+C/Ctrl+Insert, the drag, Ctrl+O and Esc |
+| `tests/composer-input.js` (100 checks) | the window's table: every key answers its row's id, a key the table does not name answers "", every id is used by a handler, the list prints the table, and Esc closes the shell through windowKey -> the document's handler |
+| `scripts/test-command-parity.cjs` | the CLI and the window offer the same commands (now including /keybindings), and the REPL has an arm for each |
+| `scripts/test-serve-concurrency.sh` (added check) | the `/keybindings` route answers 200 with the console's rows - the same regression the `/efficiency` check was added for |
+
+The editor's existing behaviour is unchanged: 147 of the 157 wa-term tests are the ones that were
+there before (including Ctrl+X redoing, Ctrl+K/U/W on a selection, mouse drag, wide characters), and
+they pass against the new dispatchers.
+
+## 4. What was run
+
+On this tree, today:
+
+* `cargo test -p wa-term --lib`: 157 passed (147 before this round: +8 keymap, +2 editor).
+* `cargo test -p wa-capabilities --lib`: 299 passed.
+* `cargo check --workspace --all-targets`: EXIT=0 (so nothing else in the workspace broke).
+* Through the built binary (`WA_SCRIPT=...`, `WASM_AGENT_LUA_ROOT=<this tree>`):
+  test-keybindings 53, test-cli-view 369, test-cli-balloon 75, test-nodes-instant 26,
+  test-mcp-command 132, test-capability-inventory 428 checks / 136 capabilities, test-command-parity 62.
+* `node --test tests/composer-input.js`: 100 ok.
+* **End to end, the CLI**: `/keybindings` typed into a real `wa chat` on a pty (dev tree) prints
+  "Keys (1/15)", the surface headings ("Text area (the draft)", "Sending", "Running a turn", ...) and
+  one row per key with the sentence wrapped under its column.
+* **End to end, the node**: the handler `wa_keybindings()` in a real interpreter answers 110 rows /
+  204 text lines; the route over HTTP (`wa serve`, then `curl /keybindings`) answers 200 with 28 430
+  bytes, carrying "Ctrl+X", "redo as well", "Ctrl+Home" and "WA_TUI_KEYS".
+
+**The base has none of this** - the table, the capability, the command and the route do not exist at
+9713a020 - so the "fails before" half of every test above is an absence rather than a wrong answer.
+The half that could have been wrong instead (a key the dispatcher handles that the table omits, or one
+the table lists that nothing dispatches) is what the four Rust tests above are for, and they are the
+reason the list cannot drift.
+
+## 5. Pre-existing failures on this node (not this branch)
+
+* `scripts/test-nodes-cli.lua`: 3 of 12 ("the list is a panel of nodes", "an unbound node says it has no
+  cluster...", "an unbound node suggests no fabric") - identical before this round.
+* `scripts/test-hotreload.lua`: 6 of 217, every one of them the fixture payload's release signature
+  (`release_unsigned_or_forged: ... is signed by release-signing-<id>, which this node does not
+  trust`). Round 1 measured 5 of 215 on the same class. The counts moved because this branch adds one
+  module to the reloadable UI list and that scenario iterates those modules; none of the six failures
+  names a keybindings file, and the class is the node's trust file, which no change here touches.
+* A binary built WITHOUT `WA_CODEMODE_BUILD_ASSETS` cannot run `test-capability-inventory` or anything
+  else that needs the code-mode sandbox: `the sandbox answered capabilities()` fails through
+  `rust/wa-capabilities/build.rs`'s "debug builds may embed nothing" path. With the pinned assets this
+  node has, the suite is 428 checks, ok. Every number above comes from a binary built with them.
+
+## 6. Not verified, and why
+
+* `scripts/test-serve-concurrency.sh`: I added the `/keybindings` check to it and tried to run it here;
+  the fixture's server did not answer `/health` (its log is retained, no product error in it), so that
+  script's new check has not been exercised by the script itself. The route was verified directly
+  instead (section 4).
+* The window's `/keybindings` in a real browser or the WebView companion: not run (no browser here).
+  Its two halves were verified separately - the node's route over HTTP, and the window's table through
+  the stub-DOM harness that loads `ui/app.js`.
+* The Windows/Cmd spellings of the window's keys: same code path, not exercised on this node.
+* No other node was built, tested or synced on; nothing was pushed or merged.
+
+## 7. Residual, named
+
+* The pointer's *order* is the table's, but the geometry inside each gesture is still the host's: a
+  press that is on no link, bar or box is a selection. The table says what the pointer does, not where;
+  making that data would be a second table pretending to describe layout.
+* A panel's lone Esc is dispatched by the console's Esc row and reaches `Panel::escape` directly; the
+  Panel surface's own row is Esc twice (`\x1b\x1b`), which the panel's decoder dispatches. Two rows,
+  one act, and the row says so.
+* The fullscreen rows are generated from `Settings::from_env` at the moment the capability is called,
+  so an operator's `WA_TUI_KEYS` is reflected; a *change* to the env file needs a new process, exactly
+  as the console itself does.
+* The list is long (110 rows, ~204 lines, 15 pages at 80x24). That is the complete list the mission
+  asked for; the grouping by surface is what keeps it navigable.
