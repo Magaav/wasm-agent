@@ -48,10 +48,17 @@ TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
 if [ "$(field source)" = git ]; then
   same "commit is this checkout's HEAD" "$(field commit)" "$HEAD"
   same "tree is this commit's tree" "$(field tree)" "$TREE"
+  # dirty is a fact about the tree AT BUILD TIME, so it can only be compared with the tree's state now when the
+  # tree has not moved since: a binary built from a clean commit reports false, and the edits made after it was
+  # built are not its business. What must never happen is a field that says "unknown" for a tree git could read.
+  case "$(field dirty)" in
+    true|false) ok "dirty is a git answer ($(field dirty))" ;;
+    *) bad "dirty is $(field dirty): a build in a checkout git could read must say true or false" ;;
+  esac
   if [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-    same "dirty is false on a clean tree" "$(field dirty)" "false"
+    same "a clean tree at build time reports dirty=false" "$(field dirty)" "false"
   else
-    same "dirty is true on a tree with uncommitted changes" "$(field dirty)" "true"
+    ok "the tree has uncommitted changes now (the build recorded $(field dirty) for the moment it read)"
   fi
 else
   ok "source=$(field source): this build was stamped, so git is not the witness (skipped the HEAD comparison)"
@@ -79,10 +86,11 @@ same "contains an abbreviated own commit -> 0" "$?" "0"
 # a commit that no history can contain: the verdict a deploy refuses on - when the ancestry the binary carries
 # is complete. From an incomplete one the honest answer is 2, and this asserts whichever the binary says of itself.
 "$WABIN" --contains 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1
+absent_rc=$?
 if [ "$(field ancestors_complete)" = true ]; then
-  same "does not contain an absent commit -> 1" "$?" "1"
+  same "does not contain an absent commit -> 1" "$absent_rc" "1"
 else
-  same "does not contain an absent commit, from an incomplete list -> 2 (unknown, never 'no')" "$?" "2"
+  same "does not contain an absent commit, from an incomplete list -> 2 (unknown, never 'no')" "$absent_rc" "2"
 fi
 "$WABIN" --contains not-a-commit >/dev/null 2>&1
 same "a malformed id is unknown -> 2" "$?" "2"
@@ -94,7 +102,12 @@ BROKEN="$(mktemp -d)"
 OUT="$(env -i PATH=/usr/bin:/bin HOME="$BROKEN/none" WASM_AGENT_HOME="$BROKEN/none" "$WABIN" --build-info 2>/dev/null)"
 [ -n "$OUT" ] && ok "answers with no HOME and no state directory" || bad "--build-info needs a working node"
 OUT2="$(env -i PATH=/usr/bin:/bin HOME="$BROKEN/none" WASM_AGENT_HOME="$BROKEN/none" "$WABIN" --contains 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1; echo $?)"
-same "--contains answers with no HOME either" "$OUT2" "1"
+# ...and it answers the same thing it answers with a HOME: 1 from a complete ancestry, 2 from an incomplete one.
+if [ "$(field ancestors_complete)" = true ]; then
+  same "--contains answers with no HOME either" "$OUT2" "1"
+else
+  same "--contains answers with no HOME either (2, the same as with one)" "$OUT2" "2"
+fi
 rm -rf "$BROKEN"
 
 printf 'test-build-info: %s checks, %s failed\n' "$checks" "$failed"

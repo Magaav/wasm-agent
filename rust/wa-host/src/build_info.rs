@@ -132,9 +132,15 @@ mod tests {
         }
         assert_eq!(contains(COMMIT), Contains::Yes(COMMIT.to_string()));
         assert_eq!(contains(&COMMIT[..12]), Contains::Yes(COMMIT.to_string()));
-        // An id this history cannot contain, in a build that carries its ancestry: NO, which is the
-        // verdict a deploy refuses on.
+        // An id this history cannot contain: NO only when the ancestry this build carries is COMPLETE, which is
+        // the verdict a deploy refuses on. From a truncated list (a shallow build clone) the same question is
+        // UNKNOWN, because the commit may simply be below the cut - and "no" from an incomplete list is how every
+        // install of an old release would have been refused.
         let absent = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(contains(absent), Contains::No);
+        if ANCESTORS_COMPLETE {
+            assert_eq!(contains(absent), Contains::No);
+        } else {
+            assert_eq!(contains(absent), Contains::Unknown("no_ancestry_embedded"));
+        }
     }
 }

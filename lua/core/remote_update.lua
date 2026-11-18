@@ -839,8 +839,8 @@ function M.request(call, selector, options)
   -- under either (a rollback records the node the operator named; the node's own store records the id). Resolve
   -- the selector first and gate on both, or a pin written under one spelling would not gate a request made with
   -- the other - which is exactly how a pin becomes a decoration.
-  local resolved = nodes.find and nodes.find(selector) or nil
-  local node_id = resolved and tostring(resolved.node_id or '') or ''
+  local ok_find, resolved = pcall(function() return nodes.find(selector) end)
+  local node_id = (ok_find and type(resolved) == 'table') and tostring(resolved.node_id or '') or ''
   local pin_in_force = pins.active(node_key, node_id)
   local wants_back = options.rollback == true or trim(options.mode) == 'rollback'
   local force_note = nil

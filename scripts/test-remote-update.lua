@@ -377,6 +377,60 @@ ok(unconfigured.error == "rendezvous_scripts_unconfigured", "an unconfigured run
 scripts_env = scripts_dir
 host.getenv = real_host.getenv
 
+-- ---- 7b. a rollback writes the pin ON THE NODE, naming the commit it went back from -------------------------
+-- A pin that lives only in the coordinator's store protects the node from requests made through that coordinator
+-- and from nothing else: an install started ON the node (its sentinel's tree deploy, a hand-run upgrade.sh or
+-- fleet-install.sh) read nothing at all. So the rollback records the same move in the node's own store, named by
+-- its own name AND its id, with the commit it went back from as the awaited commit - a pin that can never release
+-- is a pin that has to be lifted by hand, which is the failure this whole round is about.
+-- the rollback door runs a script from WA_SENTINEL_SCRIPTS, so the stub above is put back for it
+host.getenv = function(name)
+  if name == "WA_SENTINEL_SCRIPTS" then return scripts_dir end
+  return os.getenv(name)
+end
+local rollback = remote.serve({ action = "request", rollback = true, reason = "back to the pair that worked" }, MASTER)
+ok(rollback.ok == true and rollback.kind == "rollback", "a rollback is queued",
+  rollback and (rollback.error or rollback.kind))
+ok(rollback.pin ~= nil, "and it writes the node's own pin",
+  tostring(rollback.pin_problem and rollback.pin_problem.error))
+local pins_text = host.read_file(dofile('lua/core/pins.lua').path()) or ""
+ok(pins_text:find("kind=rollback", 1, true) ~= nil, "the node's store carries a rollback record")
+ok(pins_text:find("state=active", 1, true) ~= nil, "as an active pin")
+-- the commit the rollback goes BACK FROM is the one the install record names before it runs (the deploy above
+-- moved it to TARGET), and that is what the pin must name: "unknown" is what this used to say.
+ok(pins_text:find("rolled_back_from=" .. TARGET, 1, true) ~= nil, "which names the commit it went back from", pins_text:sub(1, 220))
+ok(pins_text:find("await=" .. TARGET, 1, true) ~= nil, "and awaits it by default, so it can release")
+ok(pins_text:find("node_id=", 1, true) ~= nil, "and carries the node's id, so a pin is found by either spelling")
+
+-- ---- 7c. the coordinator's own pin says the same thing ------------------------------------------------
+local loopback = function(selector, capability, args) return remote.serve(args, MASTER) end
+host.getenv = function(name)
+  if name == "WA_SENTINEL_SCRIPTS" then return scripts_dir end
+  return os.getenv(name)
+end
+local moved = remote.request(loopback, "peer", { rollback = true, reason = "and the coordinator records it too" })
+ok(moved.ok == true, "the coordinator's rollback request is admitted", tostring(moved.error))
+ok(moved.pin ~= nil, "and the coordinator writes its own pin",
+  tostring(moved.pin_problem and moved.pin_problem.error))
+ok(moved.pin and moved.pin.rolled_back_from == TARGET, "which names the commit it went back from",
+  moved.pin and tostring(moved.pin.rolled_back_from))
+ok(moved.pin and moved.pin.await == TARGET, "and defaults its awaited commit to that commit",
+  moved.pin and tostring(moved.pin.await))
+ok(moved.pin_next ~= nil and moved.pin_next:find("--unpin", 1, true) ~= nil,
+  "and says how to get out of it", tostring(moved.pin_next))
+-- ...and a plain deploy of a pinned node is refused, with the ways out named. (The pin below is written for the
+-- SELECTOR the request uses; in the field the node's own record names the node and this one names the operator's
+-- alias for it, which is why pins.active matches both spellings.)
+dofile('lua/core/pins.lua').set({ node = "peer", commit = NEWER, reason = "held where the operator put it" })
+local gate = remote.request(loopback, "peer", { commit = TARGET, reason = "an ordinary deploy" })
+ok(gate.error == "node_pinned", "a pinned node refuses an ordinary deploy", tostring(gate.error))
+ok(gate.next ~= nil and gate.next:find("--unpin", 1, true) ~= nil, "and names the way out", tostring(gate.next))
+-- ...while --force without a reason is not an override at all.
+local forced = remote.request(loopback, "peer", { commit = TARGET, force = true })
+ok(forced.error == "override_reason_required", "--force without a reason does not move a pinned node",
+  tostring(forced.error))
+host.getenv = real_host.getenv
+
 -- ---- 8. `wa update` with no node still means this node -----------------------------------------
 ok(remote.cli({ "update", "--check" }) == nil, "`wa update --check` is not the remote form")
 ok(remote.cli({ "update" }) == nil, "`wa update` is not the remote form")
