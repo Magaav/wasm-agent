@@ -36,7 +36,7 @@ and the fast path prints it after its checks.
 
 | kind | what it is | where its manifest is |
 | --- | --- | --- |
-| crate | every `Cargo.toml` under `rust/` except the workspace root | `rust/<name>/Cargo.toml`; the `win` and `decision` go in a `module.json` beside it |
+| crate | every `Cargo.toml` under `rust/` except the workspace root; a **nested** one is a module of its own, and its lines are not also its parent's | `rust/<name>/Cargo.toml`; the `win` and `decision` go in a `module.json` beside it |
 | component | every directory under `rust/components/` (also a crate; counted once, here, because a component is what a deploy pins and swaps) | `rust/components/<name>/manifest.json` |
 | feature | every `modules/<id>/` that carries a `module.json` (a directory without one is not a module) | `modules/<id>/module.json` |
 
@@ -45,9 +45,14 @@ On this tree that is **76 modules: 50 crates, 25 components, 1 feature** - the 7
 
 **What it prints, per module:** its source lines (rs, lua, js/mjs/cjs/ts, html, css, wit), what it cost to
 build in the run that printed it (`-` when nothing compiled it: an unmeasured module is not a fast one), and
-the win line from its manifest, or `FLAG no win`. Then the module count, the co-change pairs over 70% of the
-last 50 commits (a merge candidate), and the decision record with the cooldown it enforces, in days and in
-commits.
+the win line from its manifest, or `FLAG no win`. Then the module count, the co-change pairs that moved
+together in over 70% of the commits that touched **either** of them (a merge candidate - the share is of the
+commits that could have moved the pair, never of the 50-commit window), and the decision record with the
+cooldown it enforces, in days and in commits.
+
+Two limits on that half are deliberate and printed: a pair needs at least two shared commits to be a merge
+flag (one shared commit is 1/1, and no pattern), and no merge is argued where either module records a win -
+a module that states what it is worth is not one a report hands to a merge.
 
 **Flags, not failures.** Nothing in the report can fail a landing: a module with no win, a pair that always
 moves together and a split three days old are all printed, and the exit code stays 0. A report that could block

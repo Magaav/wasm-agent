@@ -13,8 +13,9 @@
 // build times), and then nobody would look at it.
 //
 // WHAT IS A MODULE (the definition the counts use, so they can be checked):
-//   * a Rust crate     - every Cargo.toml under rust/ except the workspace root (a nested one counts:
-//                        rust/wa-fake-kernel/fixture is a package of its own);
+//   * a Rust crate     - every Cargo.toml under rust/ except the workspace root (a nested one counts
+//                        AS ITSELF: rust/wa-fake-kernel/fixture is a package of its own, it is the
+//                        module its files belong to, and its lines are not also the parent's);
 //   * a WASM component - every directory under rust/components/ (it is also a crate; it is counted
 //                        ONCE, here, because a component is what a deploy pins and swaps);
 //   * a feature        - every directory under modules/ that carries a module.json (docs/MODULES.md).
@@ -32,8 +33,13 @@
 //   * "build time" is the wall clock of a build THIS run performed for that module
 //     (--timings, the ledger scripts/lib/build-times.sh fills). A module nothing rebuilt prints "-":
 //     an unmeasured module is not a fast one.
-//   * co-change is path-based: two modules whose files a commit touches. A commit that touches a crate
-//     and its test fixture under another path still counts as one module each.
+//   * co-change is path-based, and a pair's share is the commits that touched EITHER of the two: two
+//     modules that always move together read 100%, not n/50. A pair needs two shared commits to be a
+//     merge flag at all (one shared commit is 1/1 = 100% and no pattern - measured on this tree's own
+//     wa-mesh + wa-rendezvous), and a commit that touches a nested crate counts for that crate (the
+//     deepest module holding the file), not for its parent.
+//   * a merge is argued only where NEITHER module records a win - a module that states what it is
+//     worth is not one a report hands to a merge, however it moves.
 //   * the size is source lines (rs, lua, js/mjs/cjs/ts, html, css, wit) - not what the code does.
 //
 //   node scripts/module-report.mjs [--timings <tsv>] [--root <dir>] [--rows N] [--no-git]
@@ -68,6 +74,12 @@ const USE_GIT = !process.argv.includes('--no-git');
 const SOURCE = /\.(rs|lua|mjs|cjs|js|ts|html|css|wit)$/;
 const CO_CHANGE_WINDOW = 50;
 const CO_CHANGE_THRESHOLD = 0.70;
+// Measured on this tree when the denominator moved to "the commits that touch either module": the
+// only pair over the line was wa-mesh + wa-rendezvous, in ONE commit of fifty - 1/1 under the new
+// denominator, 100%, and no pattern at all. A pair that moved together once is one commit, so a merge
+// needs at least two shared commits; the share of every pair is still reported, and the flagged ones
+// print the raw count next to it.
+const CO_CHANGE_MIN_COMMITS = 2;
 const COOLDOWN_DAYS = 30;
 const COOLDOWN_COMMITS = 100;
 
@@ -89,6 +101,9 @@ function walkCargoToml(dir, out) {
   }
   return out;
 }
+// A nested module is counted ONCE, as itself. Without this, rust/wa-fake-kernel's size included
+// rust/wa-fake-kernel/fixture and rust/wa-fake-kernel/fixture's size counted the same lines again -
+// two rows quoting one set of files.
 function measureSize(dir) {
   let lines = 0, bytes = 0;
   const stack = [dir];
@@ -99,7 +114,10 @@ function measureSize(dir) {
     for (const entry of entries) {
       if (entry.name.startsWith('.') || entry.name === 'target' || entry.name === 'node_modules') continue;
       const p = path.join(cur, entry.name);
-      if (entry.isDirectory()) { stack.push(p); continue; }
+      if (entry.isDirectory()) {
+        if (p !== dir && moduleDirs.has(p)) continue;   // its own row counts it
+        stack.push(p); continue;
+      }
       if (!SOURCE.test(entry.name)) continue;
       let text;
       try { text = fs.readFileSync(p, 'utf8'); } catch { continue; }
@@ -135,6 +153,16 @@ for (const toml of walkCargoToml(path.join(ROOT, 'rust'), [])) {
   modules.push({ kind: 'crate', name: rel, dir, manifest: path.join(dir, 'module.json') });
 }
 
+// Every module's directory, before anything walks the tree: a file is attributed to the DEEPEST
+// module that holds it, and a nested module's lines are not also its parent's.
+const moduleDirs = new Set();
+const moduleDirKey = new Map();
+for (const mod of modules) {
+  moduleDirKey.set(path.relative(ROOT, mod.dir).split(path.sep).join('/'), mod.kind + ':' + mod.name);
+  moduleDirs.add(path.resolve(mod.dir));
+}
+const moduleDirsByDepth = [...moduleDirKey.keys()].sort((a, b) => b.length - a.length);
+
 // ---- what each one states and what it cost -------------------------------------------------------
 const timings = new Map();
 if (TIMINGS && fs.existsSync(TIMINGS)) {
@@ -163,12 +191,12 @@ for (const mod of modules) {
 function git(args_) {
   return execFileSync('git', ['-C', ROOT, ...args_], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 }
+// The module a file belongs to is the DEEPEST module directory it sits under, not the first path
+// component: rust/wa-fake-kernel/fixture/src/lib.rs belongs to the nested crate and not to its parent
+// (which is how nested crates used to be counted under the parent and never on their own).
 function moduleOfPath(rel) {
-  const parts = rel.split('/');
-  if (parts[0] === 'modules' && parts.length > 1) return 'feature:' + parts[1];
-  if (parts[0] === 'rust' && parts.length > 2) {
-    if (parts[1] === 'components') return 'component:' + parts[2];
-    return 'crate:' + parts[1];
+  for (const dir of moduleDirsByDepth) {
+    if (rel === dir || rel.startsWith(dir + '/')) return moduleDirKey.get(dir);
   }
   return '';
 }
@@ -186,9 +214,16 @@ if (USE_GIT) {
     gitNote = 'no git history here (' + String(e.message || e).split('\n')[0] + ')';
   }
 }
+// A pair's share is measured against the commits that COULD have moved it - the ones touching either
+// module - never against all 50. Dividing by the window made a pair that moved in every relevant
+// commit read as 1/50, which is the number that buried the rule's own question. And a merge is only
+// argued where neither module records a win: a module that states what it is worth is not one the
+// report should hand to a merge.
 const pairs = new Map();
+const touched = new Map();
 for (const files of commits) {
   const mods = [...new Set(files.map(moduleOfPath).filter(Boolean))].sort();
+  for (const mod of mods) touched.set(mod, (touched.get(mod) || 0) + 1);
   for (let i = 0; i < mods.length; i++) {
     for (let j = i + 1; j < mods.length; j++) {
       const key = mods[i] + ' + ' + mods[j];
@@ -196,10 +231,20 @@ for (const files of commits) {
     }
   }
 }
-const mergeCandidates = [...pairs.entries()]
-  .filter(([, n]) => commits.length && n / commits.length > CO_CHANGE_THRESHOLD)
-  .sort((a, b) => b[1] - a[1]);
-const hottest = [...pairs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+// Commits touching both count once: |A ∪ B| = |A| + |B| - |A ∩ B|.
+const ofEither = (pair, n) => pair.split(' + ').reduce((sum, m) => sum + (touched.get(m) || 0), 0) - n;
+const winOf = new Map(modules.map((m) => [m.kind + ':' + m.name, m.win]));
+const recordsWin = (pair) => pair.split(' + ').some((m) => (winOf.get(m) || '').length > 0);
+const ranked = [...pairs.entries()]
+  .map(([pair, n]) => {
+    const of = ofEither(pair, n);
+    return { pair, n, of, share: of > 0 ? n / of : 0, win: recordsWin(pair) };
+  })
+  .sort((a, b) => b.share - a.share || b.n - a.n);
+const overLine = ranked.filter((r) => commits.length && r.n >= CO_CHANGE_MIN_COMMITS && r.share > CO_CHANGE_THRESHOLD);
+const mergeCandidates = overLine.filter((r) => !r.win);
+const heldBack = overLine.filter((r) => r.win);
+const hottest = ranked.slice(0, 3);
 
 // ---- the decision record: the cooldown, made visible ---------------------------------------------
 function daysSince(date) {
@@ -216,7 +261,10 @@ for (const mod of modules) {
   if (!mod.decision) continue;
   const days = mod.decision.date ? daysSince(mod.decision.date) : null;
   const since = commitsSince(mod.decision.commit);
-  const tooSoon = days !== null && days < COOLDOWN_DAYS && since !== null && since < COOLDOWN_COMMITS;
+  // Both ends of the cooldown have to be short for a reversal to be too soon - but an UNKNOWN commit
+  // count is not a satisfied one: without git (or without a commit in the record) the count is
+  // unverified, and a report that reads that as "clear" is the fail-open this flag exists to stop.
+  const tooSoon = days !== null && days < COOLDOWN_DAYS && (since === null || since < COOLDOWN_COMMITS);
   decisions.push({ mod: mod.kind + ':' + mod.name, days, since, tooSoon, decision: mod.decision });
 }
 
@@ -252,13 +300,18 @@ if (noWin.length) {
   p('module-report:   FLAG no-win: ' + names + (noWin.length > 6 ? ', (+' + (noWin.length - 6) + ' more)' : ''));
 }
 p('module-report: co-change ' + mergeCandidates.length + ' pair(s) over ' +
-  Math.round(CO_CHANGE_THRESHOLD * 100) + '% of the last ' + CO_CHANGE_WINDOW + ' commit(s) (' + gitNote + ')');
-for (const [pair, n] of mergeCandidates) {
-  p('module-report:   FLAG merge-candidate: ' + pair + ' (' + n + '/' + commits.length + ' commits, ' +
-    Math.round((n / commits.length) * 100) + '%)');
+  Math.round(CO_CHANGE_THRESHOLD * 100) + '% of the commits touching either module, in at least ' +
+  CO_CHANGE_MIN_COMMITS + ' of them, neither recording a win (' + gitNote + ')');
+for (const r of mergeCandidates) {
+  p('module-report:   FLAG merge-candidate: ' + r.pair + ' (' + r.n + '/' + r.of +
+    ' commits that touch either, ' + Math.round(r.share * 100) + '%)');
+}
+if (heldBack.length) {
+  p('module-report:   ' + heldBack.length + ' pair(s) over the line record a win, so no merge is argued: ' +
+    heldBack.slice(0, 3).map((r) => r.pair).join('; ') + (heldBack.length > 3 ? ' (+' + (heldBack.length - 3) + ' more)' : ''));
 }
 if (!mergeCandidates.length && hottest.length) {
-  p('module-report:   hottest: ' + hottest.map(([pair, n]) => pair + ' ' + n + '/' + commits.length).join('; '));
+  p('module-report:   hottest: ' + hottest.map((r) => r.pair + ' ' + r.n + '/' + r.of).join('; '));
 }
 p('module-report: decision  ' + decisions.length + ' recorded; cooldown ' + COOLDOWN_DAYS + ' day(s) or ' +
   COOLDOWN_COMMITS + ' commit(s) (a reversal needs a new measurement before then)');
