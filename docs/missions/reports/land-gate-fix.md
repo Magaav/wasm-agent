@@ -4,10 +4,12 @@ Branch `change/land-gate-fix` in this worktree (`/home/victor/Work/missions/land
 `change/land-r1` (`4145b7f7`); round 2 starts on this branch's own head `17da9ef0`. Built and tested HERE
 (avell, x86_64, 16 cores). Committed locally; **never pushed**.
 
-Two rounds, one mission. **Round 1** (sections 1-5) made the plan request only rows the runner accepts.
+Three rounds, one mission. **Round 1** (sections 1-5) made the plan request only rows the runner accepts.
 **Round 2** (sections 6-11) proves that list in the merged tree the gate actually runs in - so a branch's own new
 test runs and an exclude the branch adds cannot re-create `fast_narrow:unknown_row` - and stops an inherited
-`WA_FAST_ROWS` from narrowing a `--full` run.
+`WA_FAST_ROWS` from narrowing a `--full` run. **Round 3** (sections 12-15) rebases onto `origin/main` `e5ba9089`,
+leaves the root `REPORT.md` exactly as main has it (this file is the whole report), and makes a `git diff` that
+fails name itself instead of narrowing a gate in silence.
 
 ## 1. The failure, as it was measured
 
@@ -212,3 +214,99 @@ flake, not as a pass.
   tree;
 - `luac` on this box is 5.5 and rejects a pre-existing construct in `M.changed_paths`; syntax was checked with
   `lua5.4 -e 'loadfile(...)'` for both touched Lua files.
+
+---
+
+# Round 3: the rebase onto main, the root report, and a `git diff` that fails
+
+## 12. The two instructed changes, and how each was verified
+
+**The rebase.** `git rebase origin/main` onto `e5ba9089` ("land land5/final: merge change/land-gate-fix") replayed
+the branch's one commit `7a83e263` as `03bc9322` with no conflict and no change of content; the rebase reported
+"Successfully rebased and updated refs/heads/change/land-gate-fix". `e5ba9089` already contains round 2's base
+`17da9ef0`, so the merge base was `17da9ef0` and the branch now stands on `origin/main` as two commits - round 2's
+replayed `03bc9322` and this round's on top - and its diff against `origin/main` is those two and nothing else.
+
+**The root `REPORT.md`.** At `7a83e263` the root `REPORT.md` and this file were byte-identical (214 lines each;
+`diff <(git show HEAD:REPORT.md) <(git show HEAD:docs/missions/reports/land-gate-fix.md)` printed nothing), so
+everything the branch added to the root file was already here, word for word. The root file was therefore restored
+to `origin/main`'s copy (`git checkout origin/main -- REPORT.md`) rather than rewritten: nothing was paraphrased
+or dropped, and `git diff --numstat origin/main` no longer lists `REPORT.md` at all.
+
+## 13. The LOW: `M.changed_paths` answers with a name, not with silence
+
+`M.changed_paths` parsed `git diff --name-only` stdout and never looked at `listing.code`. A diff that failed - a
+base that is not an object, a missing branch tip, a git that errors - returned an empty list, and "no paths" is
+the same answer as "nothing changed" for both of its narrowing callers:
+
+- `impl.plan` read it as `plan_no_changes` and refused the round ("the collected branches introduce no path"),
+  which is a lie about a branch that does change files;
+- `M.gate_rows_file` calls the same function to catch a row the branch ADDS or DELETES (the round-2 fix), so a
+  broken diff quietly asked for one row fewer - a narrowed gate that drops coverage, with no line anywhere.
+
+What changed: `M.changed_paths` returns `paths, notes`, one note per branch whose diff could not be read, naming
+the branch, the exact `git diff` and git's own first stderr line. Every caller that narrows on the list treats a
+note as a stop and takes the whole thing:
+
+| caller | before | now |
+| --- | --- | --- |
+| `impl.plan` / `M.plan_preview` | "no changes", round refused | the plan is the FULL path: category `compiled`, classifier `unreadable`, every check, no rows file, and the plan's own `why` line names every failed diff |
+| `M.gate_rows_file` | one row fewer, silently | no rows file; the evidence carries the failure and `the whole suite runs` |
+
+`impl.plan` now refuses with `plan_no_changes` only when there is neither a path nor a note, and the plan's first
+line stops printing a file count it does not have:
+
+    land: plan: the changed paths could not be read -> compiled
+    land:   compiled 0, component 0, lua 0, docs 0 (classified by unreadable)
+    land:   the changed paths of change/unreadable could not be read (git diff 0000000000000000000000000000000000000000 0fa613515ce8c97bc518cee808f5e74f3ccca95f: fatal: bad object 0000000000000000000000000000000000000000), so the paths this round changes are unknown
+    land:   gate: cargo-codemode cargo-wa-whatsapp codemode-component fast prompt-docs (the whole suite)
+    land:   no row inventory: the paths this round changes could not be read, so no row is proved sufficient
+
+Those lines are the round's own evidence file (`plan.log` of the `plan-unreadable` case in `scripts/test-land.lua`,
+read back after the run), not a sketch of it.
+
+## 14. What was run, and against what
+
+The rows ran the way `scripts/fast.sh` runs a row: own scratch `HOME`/`WASM_AGENT_HOME`, the node's credential
+lane and identity variables removed, `WA_FAST_ROWS` cleared, `WASM_AGENT_LUA_ROOT` = this worktree - never the
+live `~/.wasm-agent`.
+
+All three columns were measured this round, each in its own extracted tree (`git archive <commit>` into a scratch
+directory) with its own scratch home - the round-2 numbers this report carried before were not taken on trust:
+
+| row | `origin/main` `e5ba9089` | this branch before round 3 (`03bc9322`) | this change |
+| --- | --- | --- | --- |
+| `scripts/test-land.lua` | `land ok (266 checks)` | `land ok (294 checks)` | `land ok (313 checks)` |
+| `scripts/test-fast-rows.sh` | `fast-rows ok (30 checks)` | `fast-rows ok (30 checks)` | `fast-rows ok (30 checks)` (file untouched) |
+| `scripts/sync-prompt-docs.sh --check` | not run there | not run there | `ok (4 blocks current)` |
+
+`origin/main` measures 266 and not 294 because **main does not contain round 2's commit**: `e5ba9089` merged
+`17da9ef0`, so the `scripts/test-land.lua` it carries is round 1's. The 19 checks between 294 and 313 are the new
+**18c-6** cases - two measured counts, not an estimate - and they assert the note list, the gate's refusal to
+write a rows file, the plan's full path and its printed first line, `impl.plan`'s answer and evidence, and - as
+the control - that a diff which works still reports no note.
+
+**The new checks are not vacuous.** With `HEAD`'s `lua/core/land.lua` (`2606985e…`) restored and the same new
+`scripts/test-land.lua`, the row stops at its first new assertion:
+
+    lua error: [string "scripts/test-land.lua"]:1282: attempt to get length of a nil value (local 'broken_notes')
+
+which is the defect itself - the pre-change function returns one value and there is no note list to read. The file
+was then restored (`e5360fe3…`, unchanged afterwards) and the row went green again.
+
+## 15. What is not done / open
+
+- not pushed, not landed, no deploy - per the mission;
+- the root `REPORT.md` carries no round-3 text **by instruction**: the standing harness note asks for a
+  `REPORT.md` in the worktree root, and this round's instruction is narrower (the root file must have no diff to
+  main). The root file is main's copy, byte for byte, and this file is the whole report;
+- `bash scripts/fast.sh` as a whole was not run; the row was run through its own environment contract, which is
+  the step the gate narrows;
+- the failing-diff case is proved with a base that is not a git object (`fatal: bad object`). The per-branch half
+  of the case - one branch readable, one not - is covered by construction (the note list is built per branch) but
+  was not driven end to end;
+- no real `wa land` round was run with a broken diff: `test-land.lua` drives `impl.plan` and `M.gate_rows_file`
+  directly, not a live gate;
+- `luac` 5.5.1 rejects this tree at `lua/core/land.lua:723: attempt to assign to const variable 'path'`, which is
+  pre-existing (the same rejection at `HEAD`, line 711, on a loop this round only indented); syntax was checked
+  with `lua5.4 -e 'loadfile(...)'` for both touched Lua files.

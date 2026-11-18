@@ -117,6 +117,12 @@ reason), and runs the whole suite when nothing is left. The fast check always ca
 assignment - the file, or an empty value when the round narrowed nothing - so a `WA_FAST_ROWS` inherited from the
 environment cannot narrow a `--full` run that wrote no file.
 
+A `git diff` that fails is not a round that changed nothing. The changed-path list the plan and the rows file are
+built from now carries a note naming the branch whose diff could not be read, and every caller that would narrow
+work on it takes the whole thing: the plan is the full path with every check and no rows file, and the gate writes
+no rows file at all - the whole suite runs, and the evidence says which diff failed, so an unreadable git costs
+time, never coverage.
+
 `scripts/lib/fast-rows.sh` is where a narrowing is stopped from meaning less than a full run: the always-on
 core rows are added whatever the request says (the row-environment probe, and `scripts/test-land.lua`), the
 contract checks inside `scripts/fast.sh` are not narrowable at all, an unknown row is a refusal by name, and an

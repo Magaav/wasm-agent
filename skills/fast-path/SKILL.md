@@ -44,7 +44,9 @@ The list is proved in the merged tree, where this runner actually runs: `wa land
 the operator's checkout, so the gate re-reads `wa_fast_row_candidates` in the tree it is about to test and asks
 for the plan's rows plus every changed `scripts/test-*.lua` that tree has - a branch's own new test therefore
 runs - while a row the tree's `scripts/fast-path.exclude` now excludes is dropped by name in the gate's evidence
-instead of being requested (`fast_narrow:unknown_row`).
+instead of being requested (`fast_narrow:unknown_row`). A `git diff` that fails is not a round that changed
+nothing: the list carries a note naming the branch whose diff could not be read, the plan takes the full path, and
+no rows file is written - the whole suite runs, and the evidence says why.
 
 A pass with a `SKIP` row is reported as skipped, never as a run that tested it: the reasons are
 printed under the counts. A machine-only failure (`cannot fork`, exit 125/126) is retried once,

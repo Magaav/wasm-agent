@@ -696,25 +696,38 @@ end
 -- run, and what the round should cost. Read-only: no fetch, no merge, no build. It runs after `collect`
 -- because the tips are what make "what changed" answerable at all.
 
--- <journal> -> the round's changed paths (base..tip of every collected branch), deduplicated.
--- Renames are not followed (`--no-renames`): the planner asks which paths the merge introduces, and a rename
--- is two paths - the old one gone and the new one here - exactly as `git diff --name-status` reports it.
+-- <journal> -> paths, notes: the round's changed paths (base..tip of every collected branch), deduplicated, and
+-- a note naming every branch whose diff could NOT be read. Renames are not followed (`--no-renames`): the
+-- planner asks which paths the merge introduces, and a rename is two paths - the old one gone and the new one
+-- here - exactly as `git diff --name-status` reports it.
+--
+-- A git that fails is NOT a round that changed nothing. This list is what the plan narrows on and what the gate's
+-- rows file is proved against, so a broken `git diff` must never come back as an empty answer: an empty list is
+-- read as "nothing to land", and a missing path is a row the gate then never asks for. The failure is therefore
+-- returned by name in `notes`, and every caller that would narrow work on this list runs the whole suite instead.
 function M.changed_paths(run)
   local repo = run.journal.repo or M.repo()
   local base = run.journal.base
-  local seen, paths = {}, {}
+  local seen, paths, notes = {}, {}, {}
   for _, branch in ipairs(run.journal.branches or {}) do
     if base and branch.sha then
       local listing = M.exec("git -C " .. quote(slashes(repo)) .. " diff --name-only --no-renames " ..
         quote(base) .. " " .. quote(branch.sha), repo, 120)
-      for path in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
-        path = trim(path)
-        if path ~= "" and not seen[path] then seen[path] = true; paths[#paths + 1] = path end
+      if (listing.code or 1) ~= 0 then
+        notes[#notes + 1] = "the changed paths of " .. tostring(branch.name or branch.sha) ..
+          " could not be read (git diff " .. tostring(base) .. " " .. tostring(branch.sha) .. ": " ..
+          first_line(tostring(listing.stderr ~= "" and listing.stderr or listing.stdout)) ..
+          "), so the paths this round changes are unknown"
+      else
+        for path in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+          path = trim(path)
+          if path ~= "" and not seen[path] then seen[path] = true; paths[#paths + 1] = path end
+        end
       end
     end
   end
   table.sort(paths)
-  return paths
+  return paths, notes
 end
 
 -- <run> <paths> -> {category, counts, classifier} from `scripts/lib/land-classify.sh` (the ONE classification:
@@ -954,11 +967,22 @@ function M.journal_average(runs)
   return { average = math.floor(sum / count), runs = count }
 end
 
--- <run> <paths> -> the plan table (the shape `journal.plan` holds), built the same way for a real round and
--- for `--dry-run`: one implementation, so a printed plan and the plan a round obeys cannot differ.
-function M.build_plan(run, paths)
-  local classified = M.classify(run, paths)
-  local rows, not_rows, rows_why = M.gate_rows(run, paths)
+-- <run> <paths> [notes] -> the plan table (the shape `journal.plan` holds), built the same way for a real round
+-- and for `--dry-run`: one implementation, so a printed plan and the plan a round obeys cannot differ.
+--
+-- A non-empty `notes` (M.changed_paths could not read a diff) proves no narrowing: the plan is the FULL path,
+-- with every check and no rows file, and `unknown_paths` carries the failure so the printed plan says so instead
+-- of claiming a file count it does not have.
+function M.build_plan(run, paths, notes)
+  local unknown = (notes and #notes > 0) and notes or nil
+  local classified = unknown and { category = "compiled", counts = {}, files = {}, classifier = "unreadable",
+    why = table.concat(unknown, "; ") } or M.classify(run, paths)
+  local rows, not_rows, rows_why = {}, {}, nil
+  if unknown then
+    rows_why = "the paths this round changes could not be read, so no row is proved sufficient"
+  else
+    rows, not_rows, rows_why = M.gate_rows(run, paths)
+  end
   -- A round with no provable row - and a round whose row inventory could not be read at all - runs the whole
   -- suite. A docs-only change narrows nothing either way: its gate is the suite, without a rows file.
   local full = (classified.category ~= "docs-only") and (#rows == 0 or rows_why ~= nil)
@@ -979,6 +1003,7 @@ function M.build_plan(run, paths)
   return { category = classified.category, files = #paths, counts = classified.counts or {},
     classifier = classified.classifier, why = classified.why, steps = M.plan_steps(classified.category),
     checks = names, rows = rows, not_rows = not_rows, rows_why = rows_why, full = full,
+    unknown_paths = unknown and tostring(unknown[1]) or nil,
     expected_seconds = estimate.seconds,
     expected_from = estimate.from, per_step = estimate.per_step }
 end
@@ -986,12 +1011,15 @@ end
 impl.plan = function(run, options)
   local evidence = sink(run, "plan")
   local repo = run.journal.repo or M.repo()
-  local paths = M.changed_paths(run)
-  if #paths == 0 then
+  local paths, path_notes = M.changed_paths(run)
+  -- A broken diff is evidence, not an empty round: M.build_plan takes the notes, names every one of them in the
+  -- plan's own `why` line (which is printed and kept in the evidence below), and plans the FULL path - so an
+  -- unreadable git costs time, never coverage.
+  if #paths == 0 and #path_notes == 0 then
     return false, { error = "plan_no_changes", observed = "the collected branches introduce no path this tree does not already have",
       next = "nothing to land: check the branches with `git -C " .. tostring(repo) .. " log --oneline <base>..<tip>`" }
   end
-  local plan = M.build_plan(run, paths)
+  local plan = M.build_plan(run, paths, path_notes)
   run.journal.plan = plan
   -- The plan, printed BEFORE any step that changes anything, and kept in the journal so a later reader (or
   -- the report) knows which path this round took and why.
@@ -1027,9 +1055,12 @@ function M.plan_preview(options, run)
   end
   if #branches == 0 then return nil, notes end
   local shell = { id = (run and run.id) or "dry-run", journal = { repo = repo, base = base, branches = branches } }
-  local paths = M.changed_paths(shell)
-  if #paths == 0 then return nil, { "the named branches introduce no path this tree does not already have" } end
-  return M.build_plan(shell, paths), notes
+  local paths, path_notes = M.changed_paths(shell)
+  for _, note in ipairs(path_notes) do notes[#notes + 1] = note end
+  if #paths == 0 and #path_notes == 0 then
+    return nil, { "the named branches introduce no path this tree does not already have" }
+  end
+  return M.build_plan(shell, paths, path_notes), notes
 end
 
 -- The plan as text: what changed, which path, which steps run or are skipped and why, and what it should cost.
@@ -1038,7 +1069,11 @@ function M.plan_text(journal)
   local lines = {}
   local function add(line) lines[#lines + 1] = line end
   local counts = plan.counts or {}
-  add(string.format("land: plan: %d path(s) changed -> %s", tonumber(plan.files or 0), tostring(plan.category or "unknown")))
+  -- A round whose diff could not be read has no file count to print, and printing 0 would be a false statement.
+  add(string.format("land: plan: %s -> %s",
+    (plan.unknown_paths and "the changed paths could not be read")
+      or (tostring(tonumber(plan.files or 0)) .. " path(s) changed"),
+    tostring(plan.category or "unknown")))
   add(string.format("land:   compiled %d, component %d, lua %d, docs %d (classified by %s)",
     tonumber(counts.compiled or 0), tonumber(counts.component or 0), tonumber(counts.lua or 0), tonumber(counts.docs or 0),
     tostring(plan.classifier or "?")))
@@ -1462,8 +1497,17 @@ function M.gate_rows_file(run, options)
     rows[#rows + 1] = path
   end
   for _, row in ipairs(plan.rows or {}) do keep(row, "the plan asked for it") end
-  -- A row the branch ADDS or DELETES is only visible here: the planner's checkout has the old list.
-  for _, path in ipairs(M.changed_paths(run)) do keep(path, "this round changes it") end
+  -- A row the branch ADDS or DELETES is only visible here: the planner's checkout has the old list. A diff that
+  -- cannot be read proves nothing about this tree's rows, and the file it would write is a request the merged
+  -- tree REFUSES by name (fast_narrow:unknown_row, zero tests run) - so it runs the whole suite and says why.
+  local changed, changed_notes = M.changed_paths(run)
+  if #changed_notes > 0 then
+    local why = {}
+    for _, note in ipairs(changed_notes) do why[#why + 1] = note end
+    why[#why + 1] = "so no row is proved runnable: the whole suite runs"
+    return nil, false, why
+  end
+  for _, path in ipairs(changed) do keep(path, "this round changes it") end
   table.sort(rows)
   local notes = {}
   for _, entry in ipairs(dropped) do

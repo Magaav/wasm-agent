@@ -1268,6 +1268,53 @@ contains(read_file(land.evidence_path("rows-added", "gate")) or "", "WA_FAST_ROW
 land.exec = saved_gate_exec
 land.weight_decorator = saved_weight
 
+do
+  -- 18c-6. A `git diff` that FAILS is not a round that changed nothing. M.changed_paths answered an empty list
+  -- for a broken diff, which the plan read as "nothing to land" and the rows file as "no row to add" - so an
+  -- unreadable git could refuse a landing, or narrow a gate, with no line anywhere saying so. The list now carries
+  -- a named note, and every caller that would narrow on it runs the whole suite instead.
+  local broken_sha = "0000000000000000000000000000000000000000"
+  local function broken_journal()
+    return { repo = repo, base = broken_sha, branches = { { name = "change/unreadable", sha = rows_base } } }
+  end
+  local broken_paths, broken_notes = land.changed_paths({ journal = broken_journal() })
+  eq(#broken_paths, 0, "a diff that cannot be read yields no path")
+  eq(#broken_notes, 1, "and one note instead of a silence")
+  contains(broken_notes[1] or "", "change/unreadable", "the note names the branch whose diff failed")
+  contains(broken_notes[1] or "", "could not be read", "and says what happened to it")
+  -- The gate: the rows file it would have written is a request the merged tree refuses (18c-4), so the whole
+  -- suite runs and the evidence names the failure.
+  must("mkdir -p " .. land.run_dir("rows-unreadable") .. " " .. land.run_dir("plan-unreadable"), "unreadable run dirs")
+  local unreadable_run = { id = "rows-unreadable", tree = repo, journal = broken_journal() }
+  unreadable_run.journal.plan = { rows = { "scripts/test-agent-live.lua" }, checks = { "fast" }, full = false }
+  local unreadable_file, _, unreadable_why = land.gate_rows_file(unreadable_run, {})
+  eq(unreadable_file, nil, "an unreadable diff writes no rows file")
+  eq(read_file(land.run_dir("rows-unreadable") .. "/gate-rows.txt"), nil, "and none exists on disk")
+  local unreadable_text = table.concat(unreadable_why or {}, " | ")
+  contains(unreadable_text, "could not be read", "the gate names the failure in its evidence")
+  contains(unreadable_text, "the whole suite runs", "and says the whole suite runs")
+  -- The plan: not the "nothing to land" refusal a broken git used to produce, and not a narrowed plan either.
+  local broken_plan = land.build_plan({ journal = broken_journal() }, {}, broken_notes)
+  eq(broken_plan.full, true, "a plan built on an unreadable diff runs the whole suite")
+  eq(#broken_plan.checks, #land.DEFAULT_CHECKS, "with every gate check")
+  eq(#broken_plan.rows, 0, "and no row it cannot prove")
+  contains(tostring(broken_plan.unknown_paths or ""), "could not be read", "the plan records why")
+  local broken_text = land.plan_text({ plan = broken_plan })
+  contains(broken_text, "the changed paths could not be read", "the printed plan says the count is unknown")
+  ok(broken_text:find("0 path(s) changed", 1, true) == nil, "and prints no file count it does not have")
+  -- The door the operator uses: impl.plan answers a plan (and an evidence line), never "no changes".
+  local plan_run = { id = "plan-unreadable", journal = broken_journal() }
+  eq(land.impl.plan(plan_run, {}), true, "a round whose diff cannot be read still plans")
+  eq(plan_run.journal.plan and plan_run.journal.plan.full, true, "onto the full path")
+  contains(read_file(land.evidence_path("plan-unreadable", "plan")) or "", "could not be read",
+    "and the failure is in the plan's own evidence")
+  -- A diff that CAN be read is untouched: no note, and no path invented.
+  local readable_paths, readable_notes = land.changed_paths({ journal = { repo = repo, base = rows_base,
+    branches = { { name = "change/readable", sha = rows_base } } } })
+  eq(#readable_paths, 0, "the base against itself changes no path")
+  eq(#readable_notes, 0, "and a diff that worked has nothing to report")
+end
+
 -- 18d. The deploy's waves: canary alone, the middle together, the account node last.
 local function wave_names(plan)
   local parts = {}
