@@ -701,6 +701,10 @@ fi
 # 2026-11-11: the removed Node WhatsApp bridge stayed installed beside the new set).
 check deploy-prune bash scripts/test-deploy-prune.sh
 check publish-artifacts bash scripts/test-publish-artifacts.sh
+# The mission loop's mechanism (docs/MISSIONS.md): stage, start, status, verify and clean against a scratch
+# repository and a stub wa. Seconds, and no node, no cargo, no model - it proves the runner's environment,
+# the done marker with its rc and the failure count without launching a session.
+check mission bash scripts/test-mission.sh
 # The fastlane's two halves, both seconds and self-contained. The row list a narrowed run executes: the core
 # rows are never dropped, an unknown row is a refusal and an empty request runs nothing (scripts/lib/fast-rows.sh,
 # the one place a plan could make a green run mean less). And the signing chain a round depends on: the
