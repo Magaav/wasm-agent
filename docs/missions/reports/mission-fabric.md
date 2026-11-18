@@ -590,3 +590,111 @@ the real mission dir instead of a fixture's own `mktemp -d` root. Follow-up, not
 
 The tree was clean at `fd751adb` from 13:38 on; while the other run was active this session wrote only under
 `/tmp/mf-r4/`, and this section plus one measurements row in `docs/MISSIONS.md` are its only edits.
+
+
+# REPORT — round 5: verification of round 4 — "unknown is not yes", on every read
+
+Branch `change/mission-fabric`, round 4's head `c147ee48`. This round verifies that head and fixes five
+places where a read that could not answer was read as a yes. Nothing was pushed.
+
+| # | where | what round 4 did | what it does now |
+| --- | --- | --- | --- |
+| 1 | `scripts/mission.sh:278` (`writers_check`) | `out=$(node_presence ...) || return 1` turned the presence read's rc 2 ("cannot tell") into "no writer", so `mission_run` answered `released` and `start` launched past a `memory.db` it could not read | rc 2 is passed through; `mission_run` answers `unknown` with the reason quoted, and the fixture builds `memory.db` with the rest of the node (before the first launch) |
+| 2 | `mission.sh:257` (`node_presence`) | `readlink /proc/$pid/cwd || continue` skipped a LIVE process whose cwd could not be read (another user's process, hidepid) | a `/proc/<pid>` that exists with an unreadable cwd is `unknown`: the process is there, where it works cannot be told |
+| 3 | `mission.sh:574-577` (`cmd_start`) | the check-and-launch window closed after 5 s whatever the runner did, and `started` was printed even when the runner had already exited 95/98 | the window closes when the runner HAS `run.pid`; while that runner lives `start` waits; if it ends without one, `start` refuses `[launcher]` and carries that rc |
+| 4 | `mission.sh:753` (`cmd_clean`) | `clean` refused only on `active`, so a `stale` row and an `unknown` read went through to `git worktree remove` | `clean` refuses every verdict but `released`, with the same reason and clear-by-hand command `start` gives |
+| 5 | `docs/MISSIONS.md:28,40,44` | three citations pointed at the worktree's `REPORT.md`, which removing the worktree takes with it | they point at `docs/missions/reports/mission-fabric.md`; the verdict table gains the "memory.db unreadable" row (and a live pid with an unreadable cwd), and the `clean`/`verify` sentences say what each now refuses |
+
+## Before and after, measured
+
+Every "before" is a saved copy of the script run through `MISSION_UNDER_TEST`, so no red was produced by
+editing this tree. Each copy is broken in exactly one way, and each is red at its own item's check:
+
+| copy | first failure |
+| --- | --- |
+| the round-4 script itself (`git show c147ee48:scripts/mission.sh`) | `clean must refuse when the node cannot be asked` |
+| `m1`: the presence read's rc 2 collapsed back to "no writer" | `a node with no memory.db must read unknown, got: 'released: the node answered and lists no session for this mission ...'` |
+| `m2`: an unreadable cwd taken as a process that is gone | `a live pid whose cwd cannot be read must read unknown, got: 'released: ...'` |
+| `m3`: the 5 s cap and "started" printed without a `run.pid` | `a runner that exits before writing run.pid must not be reported as started` |
+| `m4b`: `clean` permits `stale` again | `clean must refuse a leftover (stale) run` |
+| this tree | `mission fixture: 202 checks ok` (15.4 s, twice) |
+
+The item-1 and item-2 "before" answers are the bug in one line: `released: the node answered and lists no
+session for this mission` - a launch permission derived from a read that returned nothing. The mutants live
+under `/tmp/m5/mut/` and are `MISSION_UNDER_TEST=<copy> bash scripts/test-mission.sh`; the round-4 script was
+saved with `git show`, not edited by hand.
+
+The new cases, and what each pins:
+
+* **item 1** - a node home with a claim store and no `memory.db` (`unknown`, the refusal naming the file),
+  the same with a `chmod 000 memory.db` (skipped as root, never here), and then the same mission with a
+  readable, writer-free `memory.db` reading `released`: the refusal is the read, not the mission. The
+  fixture's own early cases now build `session_presence` before the first launch, or round 5 would refuse them;
+  `run_nonode` (the node with no lease store) keeps a readable `memory.db` so it still tests one read.
+* **item 2** - a presence row naming pid 1: `/proc/1` exists, `/proc/1/cwd` is unreadable to a normal user
+  (the shape hidepid gives every other user's process). `unknown`, the reason naming the pid; the row is
+  dropped and the same mission then launches.
+* **item 3** - a staged runner with `exit 95` spliced in as its first statement: `start` refuses
+  `[launcher]`, prints `rc=95`, never prints `started`, leaves no `done` and no `run.pid`; and a runner
+  that sleeps 6 s before writing `run.pid`: `start` waits for it and returns with the file in place (the
+  5 s cap could not).
+* **item 4** - a leftover row (`stale`): `clean` and `clean --force` both refuse it, the worktree stays, and
+  the same `clean` removes it after the row is settled by hand. The `unknown` half is in the unreachable-node
+  block: `clean` refuses there too and leaves the worktree.
+* the "gone process" presence row now names a pid the kernel cannot hand out (`2147483647`), because round 5
+  asks `/proc/<pid>` before answering and a re-used pid would make that row mean something else.
+
+Two things went wrong while writing this, and both are worth the next reader's time:
+
+* **the reason was lost in a subshell.** The first version set `NP_WHY` inside `node_presence`, which its
+  caller runs in `$( )` - so the refusal read "cannot be read:  - so whether a process is writing ..." with the
+  reason gone. A global set inside a command substitution never reaches the caller. The reason now travels on
+  stdout as a `! cannot-tell ...` line (the shape `node_boot_lease` already uses), and `writers_check`
+  lifts it back out.
+* **a bash parse that fails 140 lines later.** `: "${NP_WHY:=the node's ...}"` - an apostrophe inside a
+  double-quoted parameter expansion - made `bash -n` report a syntax error at line 450, in a function this
+  round never touched. `bash -n` on the two scripts is now part of what I ran, and the line is a plain
+  `[ -n "$NP_WHY" ] || NP_WHY="..."` instead.
+
+## What I ran
+
+| command | result |
+| --- | --- |
+| `bash -n scripts/mission.sh`, `bash -n scripts/test-mission.sh` | clean |
+| `bash scripts/test-mission.sh` (five times, the last two on the final tree) | `mission fixture: 202 checks ok`, 15.4 s and 15.4 s |
+| the five "before" copies above | each red, at its own item's check (table above) |
+| `bash scripts/fast.sh` on this tree, twice | `13 of 253 checks` (129 s) and `14 of 253` (207 s); `fast: mission ok` in 15.6 s and 18.9 s |
+| `bash scripts/fast.sh` on a base worktree at `c147ee48` (`/tmp/m5/base`, detach) | `13 of 253 checks` (252 s, cold build) |
+| `scripts/mission.sh status mission-fabric` against the live node (read only: that mission has no `run.lock`) | `run active`: session `d05086c8`, pid 3595698, cwd `/home/victor/Work/missions/mission-fabric` - this session, named as the writer, which is the presence read still answering on the live node |
+| every pid in the live `session_presence`, `/proc/<pid>` checked by hand | 5 gone, 7 live, every live cwd readable (`/home/victor`, six mission dirs); no live row trips the new unreadable-cwd rule today |
+
+The fast path's reds are all pre-existing and identical on the base: `scripts/test-observability.lua`,
+`test-skill-discovery.lua`, `test-orchestration-mode.lua`, `test-remote-call-shape.lua`,
+`test-codemode-model-boundary.lua`, `test-prompt-cache.lua`, `test-wave-closure-reporting.lua`,
+`test-host-return-docs.lua`, `test-provider-stall.lua`, `prompt-docs`, `publish-artifacts`,
+`land-signing`, `fast-binary` - 13 on this tree and 13 on the base, the same names. The one red that made
+run 1 report 14, `scripts/test-release-sign.lua` (`release signing: 2 of 5 checks failed`, it shells out to
+`python3 scripts/test-vault-sign.py`), passed in run 2 on the same tree with no change to it: flaky, and it
+touches nothing this round edits. `fast-binary` is the same row on both trees: the tree binary was built at
+`c147ee48` and `WA_FAST_SKIP_BUILD=1` forbids building a fresh one, so it refuses a binary it calls stale -
+named here so the next round does not read it as a green.
+
+## Not done, and not verified
+
+* `verify` still refuses only on `active`. I changed `clean` because the brief names it; `verify` is left
+  as it was, and the asymmetry is deliberate: a `clean` removes the worktree, a `verify` only runs a command
+  in it. If the next round wants "no verdict but `released`" everywhere, `verify` is the remaining place.
+* **the round-4 hole is unchanged**: a session settled on the node's word and then woken by `wa serve` writes
+  with a pid whose cwd is never the mission's, so no presence read in this design sees it. Round 4's report
+  measured it (`6a48d01d`, pid 616163 = `wa serve`, cwd `/home/victor`); this round neither fixes it nor
+  pretends to. The gate still means what round 4 said it means: no launcher alive, no *mission-cwd* process,
+  and every session of this mission settled at the moment of the check.
+* **the 10-minute bound** in `cmd_start` is mine, not measured: while the runner lives, `start` waits, and
+  only a runner that writes no `run.pid` for 10 minutes is refused as "alive but not a launch". No fixture
+  reaches that branch (it would take 10 minutes); the checked paths are the two that matter - the runner that
+  exits (95/98) and the runner that is slow (6 s).
+* the two "cannot construct it here" cases are skipped, not passed: the unreadable-`memory.db` case when the
+  suite runs as root (`chmod 000` would still be readable) and the unreadable-cwd case when
+  `/proc/1/cwd` reads. Neither skip fired on this node; both print a note when they do.
+* nothing was written to the live node: the only live read is `status` on the mission directory, which has no
+  `run.lock` to release, and `sqlite3 -readonly` on `memory.db` and `claims.sqlite`.
