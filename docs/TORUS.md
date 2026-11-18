@@ -115,10 +115,12 @@ one declared shape), not a test of one side's internals; the ones that run in
   Out: an installed binary the listener pid proves is *this* install (`deploy.sh` compares the
   listener's pid with `serve.pid`/`sentinel/node.json`), and a record. Failures:
   `candidate_does_not_answer` (no `/health` on the scratch port), `identity_mismatch` (the pid that
-  answers is not the pid this install recorded), `downgrade` (this tree does not contain the commit
-  `installed.txt` names), `swap_failed` (the rename did not happen — restore the backup and say so).
+  answers is not the pid this install recorded), `downgrade_refused(node_not_contained)` (this tree does not
+  contain the commit the RUNNING binary reports — the list of commits that would be lost is printed with the
+  refusal; docs/DEPLOY-ANCESTRY.md), `swap_failed` (the rename did not happen — restore the backup and say so).
 - **Contract test.** `scripts/test-deploy-node-binaries.sh`, `test-deploy-preconditions.sh`,
-  `test-deploy-record.sh`, `test-deploy-downgrade.sh`, `test-deploy-staging-sweep.sh`,
+  `test-deploy-record.sh`, `test-deploy-ancestry.sh` (which `test-deploy-downgrade.sh` hands over to),
+  `test-deploy-staging-sweep.sh`,
   `test-deploy-self-ship.sh`, `test-deploy-on-main.sh`, `test-deploy-build-status.sh` (**gate**);
   `scripts/test-deploy-policy-order.sh` is the model for a structural test — it reads the script and
   fails when the install drifts back below the restart.

@@ -58,7 +58,8 @@ same "and the refusal is by name" "$(value no_reason_error)" "pin_reason_require
 echo "test-node-pins: the fleet view"
 same "the report lists the pins" "$(value fleet_pins)" "1"
 same "and flags the overdue ones" "$(value fleet_overdue)" "1"
-same "a pin the report cannot read is named in missing, not reported as none" "$(value fleet_missing_names_pins)" "yes"
+same "a peer that does not carry the store says the field is absent" "$(value fleet_peer_pins_absent)" "yes"
+same "...and does not report it as a fact it failed to read" "$(value fleet_peer_pins_not_missing)" "not-listed"
 
 echo "test-node-pins: the CLI"
 wa update mail --pin --commit 0123456789012345678901234567890123456789 --reason "glibc 2.30 binary until release-glibc lands" --until release-glibc > "$WORK/pin.out" 2>&1

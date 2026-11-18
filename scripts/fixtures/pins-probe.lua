@@ -52,7 +52,10 @@ local row = fleetview.node({ name = 'this', local_node = true, online = true, pi
 say('fleet_pins', #(row.pins or {}))
 say('fleet_overdue', #(row.pins_overdue or {}))
 say('fleet_summary_has_reason', (row.pins and row.pins[1] and row.pins[1].reason ~= '') and 'yes' or 'no')
+-- A peer does not carry this coordinator's store, so its record says the field is absent - and it does NOT
+-- report it in 'missing', which is for a fact that this report tried to read and could not.
 local bare = fleetview.node({ name = 'peer', online = false })
-local flagged = false
-for _, field in ipairs(bare.missing or {}) do if field == 'pins' then flagged = true end end
-say('fleet_missing_names_pins', flagged and 'yes' or 'no')
+local in_missing = false
+for _, field in ipairs(bare.missing or {}) do if field == 'pins' then in_missing = true end end
+say('fleet_peer_pins_absent', bare.pins_absent == true and 'yes' or 'no')
+say('fleet_peer_pins_not_missing', in_missing and 'listed' or 'not-listed')

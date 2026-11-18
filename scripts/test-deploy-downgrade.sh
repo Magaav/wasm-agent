@@ -1,192 +1,25 @@
 #!/usr/bin/env bash
-# Does the gate refuse to replace a newer install with an older tree?
+# The downgrade rule, tested once: this file now hands over to the test that owns it.
 #
-# The failure this exists for: a deploy from main replaced an install built from a branch that was AHEAD of
-# main, and silently undid three fixes - the in-turn refusal, installed.txt's provenance fields, and the
-# sentinel's capture of the upgrade's own output. deploy.sh refused a dirty tree and a tree behind main, and
-# had no opinion about the install being replaced, so both deploys were the same command.
+# WHY THIS IS A SHIM. Until 18/11 the rule was decided from installed.txt - the record the installing party wrote,
+# which on that day said commit=14963b6f for a binary built from 8 commits that were on no landed branch. The
+# guard compared this tree against that record, saw an ancestor, and let a deploy replace work that was running.
+# The rule is the same rule (a deploy may not replace a commit the target does not contain) and it is now decided
+# from the RUNNING BINARY's own answer, with the record as a named fallback.
 #
-# The fixture is a commit this tree does not contain, made with `git commit-tree`: its *parent* is HEAD,
-# which is exactly the shape of the real incident - the install was ahead of the tree being deployed - and
-# it needs nothing outside the repository it runs in.
+# Two tests for one rule drift apart, and the one that is not maintained is the one that lies. So the cases this
+# file used to drive - a newer install refused, an ancestor accepted, and the three "cannot tell" shapes (no
+# record, a record naming no commit, a commit this tree does not have) - live in
+# scripts/test-deploy-ancestry.sh, which drives them through the same deploy.sh. The name stays because
+# docs/TORUS.md and the gate measurement list it, and a pointer is cheaper than a stale assertion.
 #
-# The test asserts both directions, because a check that refuses everything is as wrong as one that refuses
-# nothing: an install that IS an ancestor must get past the check, and the three cases where the gate cannot
-# tell (no record, a record with no commit=, a commit this tree does not have) must say so rather than
-# refuse. Refusing because the answer is unknown would block the first install on a machine that never had
-# one, and "never refuse because you cannot tell" is the rule the check was written to.
-#
-# Usage:  bash scripts/test-deploy-downgrade.sh
-# Needs:  a clean tree that is not behind origin/main (the gate checks both first), and git. No build: every
-#         case stops at or before the build, so this runs in about a second.
+# Usage:  bash scripts/test-deploy-downgrade.sh [--help]
 set -uo pipefail
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
-DEPLOY="${WA_DEPLOY_SH:-$ROOT/scripts/deploy.sh}"
-LIVE_INSTALL="${WA_LIVE_INSTALL_DIR:-${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}}"
-[ -d "$LIVE_INSTALL" ] || LIVE_INSTALL="$HOME/.local/share/wasm-agent"
-# Snapshotted before anything runs, so the isolation assertion compares against the state this test found.
-LIVE_HASH_BEFORE="$(sha256sum < "$LIVE_INSTALL/wa.exe" 2>/dev/null | awk '{print $1}')"
-LIVE_RECORD_BEFORE="$(cat "$LIVE_INSTALL/installed.txt" 2>/dev/null)"
-live_diagnostics() {
-  for file in deploy.log deploy-result.json; do
-    if [ -f "$LIVE_INSTALL/$file" ]; then sha256sum < "$LIVE_INSTALL/$file"; else printf 'absent:%s\n' "$file"; fi
-  done
-}
-LIVE_DIAGNOSTICS_BEFORE="$(live_diagnostics)"
-
-checks=0
-failed=0
-ok() { checks=$((checks + 1)); if [ "$1" = "1" ]; then printf '  ok   %s\n' "$2"; else failed=$((failed + 1)); printf '  FAIL %s%s\n' "$2" "${3:+ - $3}"; fi; }
-
-# The gate asks about the tree before it asks about the install, so this test needs a tree that passes those
-# questions. Exit 3, not 1: this is "the check could not be reached in this tree", which is a skip and is
-# reported as one - the suite counts it instead of printing the verdict a run that tested something prints.
-# It is not inferred from a missing tool; it is the tree's own state.
-#
-# `HEAD on origin/main` joined that list with the residue pass: the on-main rule used to be waived whenever
-# WA_INSTALL_DIR was set, so a private-install fixture on a lane branch could reach the downgrade check. The
-# rule is unconditional now (finding F5 of the review of change/deploy-unbound), so on a lane branch this
-# suite refuses at that rule before it can ask anything about an installed record - and a fixture that worked
-# around it with an environment variable is exactly what the finding removed. The branch state is a SKIP with
-# the reason, not nine red checks; the rule itself is pinned from both directions, on a scratch repository,
-# by scripts/test-deploy-on-main.sh, which runs in either state.
-DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
-BEHIND="$(git rev-list --count HEAD..origin/main 2>/dev/null || echo unknown)"
-if git rev-parse --verify -q origin/main >/dev/null; then
-  if ! git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then ON_MAIN=0; else ON_MAIN=1; fi
-else
-  ON_MAIN=1
-fi
-if [ "$DIRTY" != "0" ] || { [ "$BEHIND" != "unknown" ] && [ "$BEHIND" != "0" ]; } || [ "$ON_MAIN" != "1" ]; then
-  echo "deploy downgrade gate SKIPPED - needs a clean tree that is on (and not behind) origin/main (here: $DIRTY uncommitted file(s), $BEHIND commit(s) behind, on-main: $([ "$ON_MAIN" = "1" ] && echo yes || echo no))"
-  echo "  note: the on-main rule that refused this tree is tested in both directions by scripts/test-deploy-on-main.sh"
-  exit 3
-fi
-
-S="$(mktemp -d)"
-FIXTURE_REF="refs/wasm-agent-test/downgrade-$$"
-cleanup() {
-  # The fixture commit is kept reachable by a ref while the test runs, so no gc can prune it mid-run; the
-  # ref goes away with the test.
-  git update-ref -d "$FIXTURE_REF" 2>/dev/null
-  rm -rf "$S"
-}
-trap cleanup EXIT
-
-mkdir -p "$S/install" "$S/home" "$S/bin"
-# The narrowed PATH below keeps cargo out, so a case that gets past the check reaches the build and stops.
-# ripgrep is a requirement checked first; where it lives outside /usr/bin (openclaw: ~/.local/bin) every
-# case was refused as rg_unavailable instead, so link just that one tool in.
-! command -v rg >/dev/null 2>&1 || ln -s "$(command -v rg)" "$S/bin/rg"
-
-# An explicit identity: a host with no git user.email (openclaw, 29/10) made commit-tree fail, NEWER came
-# back empty and every "ahead" case read as a record that names no commit.
-NEWER="$(printf 'fixture: an install ahead of this tree\n' | GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@invalid \
-  GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@invalid git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD)"
-git update-ref "$FIXTURE_REF" "$NEWER"
-HEAD_COMMIT="$(git rev-parse --short HEAD)"
-ANCESTOR="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
-UNKNOWN_COMMIT="0123456789abcdef0123456789abcdef01234567"
-
-# The installed binary is a placeholder and deliberately not executable. If the check is missing, the run
-# continues into the build and then stops at upgrade.sh's "nothing installed" - so a missing check makes this
-# test fail on its assertions instead of starting a node and swapping a binary underneath it.
-printf 'placeholder installed binary\n' > "$S/install/wa.exe"
-PLACEHOLDER_HASH="$(sha256sum < "$S/install/wa.exe" | awk '{print $1}')"
-
-write_record() { printf 'commit=%s\nbranch=fixture\nsha256=deadbeef\nat=1970-01-01T00:00:00Z\nreason=fixture\n' "$1" > "$S/install/installed.txt"; }
-
-# Run the gate against the fixture install. `env -u WASM_AGENT_IN_TURN` because this test is often run from
-# inside a turn, and the gate refuses there first - the subject here is the downgrade check, not that one.
-# The narrowed PATH keeps the cases that legitimately get past the check from spending a real cargo build:
-# they must reach the build, not complete it.
-last_exit=0
-last_out=""
-# No service, whatever this machine runs: on a host whose wa-serve.service runs a real node (openclaw, 29/10)
-# deploy.sh stopped at "the service runs the node from ..." before the downgrade check and 10 cases failed.
-run_deploy() {
-  ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):$S/bin:/usr/bin:/bin" \
-      WA_SERVICE_UNIT_FILE="$S/no-such-service.unit" WA_SERVICE_PID=0 \
-      WA_INSTALL_DIR="$S/install" WASM_AGENT_HOME="$S/home" WA_PORT=18991 WA_CLIENT_PORT=18992 \
-      bash "$DEPLOY" --reason "downgrade gate test" ) >"$S/out.txt" 2>&1
-  last_exit=$?
-  last_out="$(cat "$S/out.txt")"
-}
-
-# --- 1. the install is ahead of this tree: refuse, and name both commits --------------------------
-printf 'fixture commit ahead of this tree: %s (this tree: %s)\n' "$(git rev-parse --short "$NEWER")" "$HEAD_COMMIT"
-write_record "$NEWER"
-: > "$S/install/deploy.log"
-run_deploy
-# The refusal line itself is what gets asserted against, not the whole output: the banner line prints this
-# tree's commit on every run, so a test that greps the output as a whole passes without the check.
-REFUSAL="$(grep -m1 'downgrade refused' <<<"$last_out")"
-ok "$([ "$last_exit" != "0" ] && grep -q 'downgrade refused' <<<"$last_out" && echo 1 || echo 0)" \
-  "a tree that does not contain the installed commit is refused, for that reason" "exit $last_exit"
-ok "$([ -n "$REFUSAL" ] && echo 1 || echo 0)" "the refusal says what it is" "${REFUSAL:0:120}"
-ok "$(grep -q "$(git rev-parse --short "$NEWER")" <<<"$REFUSAL" && echo 1 || echo 0)" "it names the installed commit"
-ok "$(grep -q "$HEAD_COMMIT" <<<"$REFUSAL" && echo 1 || echo 0)" "it names this tree's commit"
-ok "$(grep -q 'running turn' <<<"$last_out" && echo 0 || echo 1)" "and it is the downgrade check that refused, not the turn guard"
-ok "$(grep -q 'downgrade refused' "$S/install/deploy.log" 2>/dev/null && echo 1 || echo 0)" "the refusal is recorded in deploy.log" "$(tail -1 "$S/install/deploy.log" 2>/dev/null | cut -c1-90)"
-ok "$([ "$(sha256sum < "$S/install/wa.exe" | awk '{print $1}')" = "$PLACEHOLDER_HASH" ] && echo 1 || echo 0)" "the installed binary was not touched"
-ok "$(grep -q 'deploy: building' <<<"$last_out" && echo 0 || echo 1)" "and nothing was built" "it refused before the build"
-
-# --- 2. the install is an ancestor: this must get past the check -----------------------------------
-write_record "$ANCESTOR"
-run_deploy
-ok "$(grep -q 'downgrade refused' <<<"$last_out" && echo 0 || echo 1)" "an ancestor in the record is not a downgrade" "record $ANCESTOR"
-ok "$(grep -q 'deploy: building' <<<"$last_out" && echo 1 || echo 0)" "it got past the check and reached the build"
-ok "$([ "$(sha256sum < "$S/install/wa.exe" | awk '{print $1}')" = "$PLACEHOLDER_HASH" ] && echo 1 || echo 0)" "the installed binary is still untouched"
-
-# --- 3. no record at all: a first install, not a downgrade ----------------------------------------
-rm -f "$S/install/installed.txt"
-: > "$S/install/deploy.log"
-run_deploy
-ok "$(grep -q 'downgrade refused' <<<"$last_out" && echo 0 || echo 1)" "a missing record is not a downgrade"
-ok "$(grep -q 'first install, not a downgrade' <<<"$last_out" && echo 1 || echo 0)" "it says which case it is" "$(grep -m1 'first install' <<<"$last_out")"
-
-# --- 4. a record with no commit= line: say so, do not guess ---------------------------------------
-printf 'branch=fixture\nsha256=deadbeef\nat=1970-01-01T00:00:00Z\n' > "$S/install/installed.txt"
-: > "$S/install/deploy.log"
-run_deploy
-ok "$(grep -q 'downgrade refused' <<<"$last_out" && echo 0 || echo 1)" "a record without commit= is not a downgrade"
-ok "$(grep -q 'names no commit' <<<"$last_out" && echo 1 || echo 0)" "it says the record does not say" "$(grep -m1 'names no commit' <<<"$last_out" | cut -c1-100)"
-ok "$(grep -q 'note: ' "$S/install/deploy.log" 2>/dev/null && echo 1 || echo 0)" "and the note is recorded, so a blind gate is visible afterwards"
-
-# --- 5. a commit this tree does not have: say which case, do not refuse on ignorance ---------------
-write_record "$UNKNOWN_COMMIT"
-: > "$S/install/deploy.log"
-run_deploy
-ok "$(grep -q 'downgrade refused' <<<"$last_out" && echo 0 || echo 1)" "an unresolvable commit is not a downgrade" "record $UNKNOWN_COMMIT"
-ok "$(grep -q 'does not have' <<<"$last_out" && echo 1 || echo 0)" "it names the case (shallow clone, other repo, unfetched branch)" "$(grep -m1 'does not have' <<<"$last_out" | cut -c1-110)"
-ok "$(grep -q 'note: ' "$S/install/deploy.log" 2>/dev/null && echo 1 || echo 0)" "and it is recorded as a note, not as a refusal"
-
-# --- 5b. a tree ahead of main: the rule now lives in its own test ---------------------------------
-# This case used to live here, because a private install exempted the tree from the on-main rule and
-# `--require-main` was the only way to get the refusal measured. The rule is unconditional now, and a tree
-# that is not on origin/main never reaches this file's other cases at all (see the skip above) - so the rule
-# is pinned where it can be exercised in either state, from both directions, on a scratch repository:
-# scripts/test-deploy-on-main.sh. Kept as a pointer so the missing case is not read as an oversight.
-echo "  note: the ahead-of-main refusal is pinned by scripts/test-deploy-on-main.sh (scratch repository, both directions)"
-
-# --- 6. isolation: the real install was never the fixture's business -------------------------------
-if [ -x "$LIVE_INSTALL/wa.exe" ] || [ -f "$LIVE_INSTALL/installed.txt" ]; then
-  ok "$([ "$(sha256sum < "$LIVE_INSTALL/wa.exe" 2>/dev/null | awk '{print $1}')" = "$LIVE_HASH_BEFORE" ] && echo 1 || echo 0)" \
-    "the live install's binary is unchanged" "$LIVE_INSTALL"
-  ok "$([ "$(cat "$LIVE_INSTALL/installed.txt" 2>/dev/null)" = "$LIVE_RECORD_BEFORE" ] && echo 1 || echo 0)" \
-    "and so is its record"
-else
-  echo "  note: no live install at $LIVE_INSTALL - the isolation assertion is about the fixture only"
-fi
-
-ok "$([ "$(live_diagnostics)" = "$LIVE_DIAGNOSTICS_BEFORE" ] && echo 1 || echo 0)" \
-  "live deployment log/result remain unchanged by refusal fixtures, including absence"
-printf '\n'
-if [ "$failed" -eq 0 ]; then
-  echo "deploy downgrade gate ok ($checks checks)"
-else
-  echo "deploy downgrade gate FAILED ($failed of $checks)"
-fi
-exit "$([ "$failed" -eq 0 ] && echo 0 || echo 1)"
+case "${1:-}" in
+  ''|--run) ;;
+  -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "test-deploy-downgrade: unknown argument $1" >&2; exit 2 ;;
+esac
+echo "test-deploy-downgrade: the rule moved; running the test that owns it (scripts/test-deploy-ancestry.sh)"
+exec bash "$ROOT/scripts/test-deploy-ancestry.sh"
