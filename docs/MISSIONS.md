@@ -1,7 +1,7 @@
 # Missions — the loop, the command for each step, and the measurement behind every rule
 
 > The mechanism is `scripts/mission.sh`; this file is the knowledge behind it. Where the two disagree, the
-> script is what runs. Its fixture is `bash scripts/test-mission.sh` (58 checks, a scratch repository and a
+> script is what runs. Its fixture is `bash scripts/test-mission.sh` (98 checks, a scratch repository and a
 > stub `wa`; no network, no model, no node). The fixture runs in the fast path: `check mission` in
 > `scripts/fast.sh`.
 
@@ -81,13 +81,14 @@ mission dir, never the repo). `run.sh` exports, before it launches anything:
 
 **`start` refuses while the NODE has an unfinished, recently active session for this mission**, and it
 names that session. The launcher's pid is not the evidence and cannot be (see the provenance below): a
-launch is refused from what the node says about the session, in three reads.
+launch is refused from what the node says about the session, in four reads.
 
 | read | command | what it answers |
 | --- | --- | --- |
 | the session list | `wa sessions` | which sessions exist, their state (`unfinished`, `answered`, `empty`) and, for an unfinished one, how long ago its last message was |
 | the run lease | `wa steer <session> --status --json` | whether a run is in flight for that session, and its `run_id` |
 | the boot lease | `sqlite3 -readonly ~/.wasm-agent/resources/claims.sqlite "select boot from claims where key='session:<id>'"`, then `BEGIN EXCLUSIVE; ROLLBACK;` on `resources/<boot>.lease.sqlite` | whether the process that owns that boot still exists: a lock that can be taken is an owner that exited, a locked one is an owner that has not (`rust/wa-capabilities/src/resources.rs`, `lease_released`). The probe writes nothing |
+| the presence row | `sqlite3 -readonly ~/.wasm-agent/memory.db "select session_id, pid, cast(strftime('%s','now')-heartbeat_at as int) from session_presence"`, then `readlink /proc/<pid>/cwd` | which process serves each session, when it last said so, and **which directory it works in**. The runner cds to the mission dir before it starts the CLI, so a session working for this mission has the mission dir or its worktree as its cwd - measured on avell, 18/11: session 6cdf7ddf, pid 1758185, heartbeat 0 s old, cwd `/home/victor/Work/missions/mission-fabric`, a writer no `run.lock` named |
 
 How they combine, and why in this order:
 
@@ -99,15 +100,16 @@ How they combine, and why in this order:
 * **run active + the store unreadable** -> refuse. "Cannot tell" is never "released", because that answers
   `released` for a live 25-minute run;
 * **run settled/cancelled/failed/unknown** -> released: no writer is left;
-* **no run row at all** -> the session list decides: unfinished and last message within
+* **the recorded session is over and another one is working here** -> refuse. The presence read is asked
+  whenever the recorded session settles, because one session ending says nothing about the next: measured\n  on avell, 18/11, the mission dir's session was `failed` while 6cdf7ddf was writing in that same directory,\n  and a `start` that asked only about its recorded session would have launched a second writer. A live pid with\n  the mission dir (or its worktree) as its cwd and a heartbeat inside the window refuses; the same pid quiet for\n  longer reads `stale` and `--force` may pass it; a row whose pid is gone is not a writer at all;\n* **no run row at all** -> the session list decides: unfinished and last message within
   `MISSION_ACTIVE_SECONDS` (default 300) refuses; unfinished and quiet for longer is reported, not obeyed.
 
-The session is matched to the mission two ways. Every `stage` writes the marker `mission <name> in <wt>` as
+The session is matched to the mission three ways. Every `stage` writes the marker `mission <name> in <wt>` as
 the **first line of `prompt.md`**, and the node shows a session's first line as its title
 (`lua/core/memory.lua` `title_from`: furniture stripped, 60 chars, then an ellipsis) - so a session is
 found by the title the node prints, whether or not the launcher survived to record anything. The second way
 is the id in `run.lock`, then in `err.log` where the CLI prints it (`wa: session <id> ok|failed` - on
-stderr, which round 1 read from the wrong stream).
+stderr, which round 1 read from the wrong stream). The third way needs neither a title nor a log: the directory the session works in, from the\nprocess the node names for it - which is how a session the harness started (no `stage`, no lock, a brief\nfor a title) is still refused.
 
 `--force` never kills and never cancels, and there is no `wa` verb that cancels a run (`wa help`): force
 skips the local launcher check and a lease the node itself calls a leftover, and it refuses in the face of

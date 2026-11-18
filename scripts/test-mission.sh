@@ -202,6 +202,50 @@ out=$(run start demo); has "$out" 'started demo' 'once the node has settled it, 
 wait_done demo || fail 'the third launch wrote no done marker'
 has "$out" 'previous launch finished' 'start says the previous launch finished, and that this is a new session'
 
+# ================================================================ the writer nobody recorded
+# Measured on this node 18/11, mission-fabric: the session the mission dir recorded was 'failed', and a
+# second session named by no run.lock - 6cdf7ddf, pid 1758185 - had the mission dir itself as its cwd with
+# a heartbeat 0s old. A 'start' that asks only about its recorded session launches a second writer there,
+# so the node's own presence table (session_presence: session_id, pid, heartbeat_at) is read as well and
+# the process's cwd is what ties it to this mission.
+sqlite3 "$NODEHOME/memory.db" \
+  "create table if not exists session_presence(session_id text primary key, pid integer, boot text, role text, started_at real, heartbeat_at real)" \
+  || fail 'cannot build the node presence table'
+presence() { # <session> <pid> <heartbeat-age-seconds>
+  sqlite3 "$NODEHOME/memory.db" \
+    "insert into session_presence(session_id,pid,boot,role,started_at,heartbeat_at) values('$1',$2,'boot-free','master',strftime('%s','now'),strftime('%s','now')-$3) on conflict(session_id) do update set pid=$2, heartbeat_at=strftime('%s','now')-$3" \
+    || fail 'cannot write a presence row'
+}
+( cd "$MISSIONS/demo" && exec sleep 600 ) &   # a process working IN the mission dir, as the CLI does
+OTHER=$!
+sleep 0.2
+presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$OTHER" 5
+s=$(status_of demo)
+case "$(field "$s" run)" in active*) ok ;; *) fail "a live process with the mission dir as its cwd must read active, got: '$(field "$s" run)'" ;; esac
+has "$(field "$s" run)" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' 'the verdict names the session the node records for that pid'
+has "$(field "$s" run)" "$MISSIONS/demo" 'the verdict says which directory that process works in'
+has "$s" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' 'status prints the writer, distinct from the session this mission records'
+out=$(run start demo) && fail 'start must refuse while another session works in this mission directory' || ok
+has "$out" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' 'that refusal NAMES the session the mission never recorded'
+has "$out" 'second writer' 'and says what a launch now would be'
+out=$(run start demo --force) && fail '--force must not launch next to a live process in the mission dir' || ok
+has "$out" 'refusing' '--force refuses a live writer too'
+
+# the same process, quiet for longer than the window: stale, refused without --force, still named
+presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$OTHER" 4000
+s=$(status_of demo)
+case "$(field "$s" run)" in stale*) ok ;; *) fail "a quiet leftover process must read stale, got: '$(field "$s" run)'" ;; esac
+out=$(run start demo) && fail 'a quiet leftover must refuse without --force' || ok
+has "$out" 'refusing' 'the leftover refusal refuses'
+
+# the process is gone: a row with a dead pid is not a writer, and a launch is allowed again
+kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
+presence aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee "$OTHER" 5
+s=$(status_of demo)
+case "$(field "$s" run)" in released*) ok ;; *) fail "a presence row whose pid is gone must not refuse a launch, got: '$(field "$s" run)'" ;; esac
+out=$(run start demo); has "$out" 'started demo' 'with the stray process gone, a launch is allowed'
+wait_done demo || fail 'the launch after the stray process wrote no done marker'
+
 # ================================================================ a run row left behind: stale, and --force
 export STUB_ID=44444444-5555-6666-7777-888888888888 STUB_RC=0 STUB_RESULT=ok STUB_NODE_KEEPS_RUN=no
 run start demo >/dev/null; wait_done demo || fail 'the fourth launch wrote no done marker'

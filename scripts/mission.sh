@@ -201,6 +201,60 @@ age_of() { # <epoch seconds, maybe fractional> -> whole seconds ago, or -1
   printf '%s' $(( $(date +%s) - ${1%%.*} ))
 }
 
+# The writer the mission never recorded. The node keeps, per session, the OS process serving it and a
+# heartbeat ('session_presence' in memory.db: session_id, pid, boot, heartbeat_at), and that process's
+# own cwd is the node's answer to "which directory is this session working in": the runner cds to the
+# mission dir before it starts the CLI, so a session working for this mission has the mission dir or its
+# worktree as its cwd. Measured on this node, 18/11: session 6cdf7ddf, pid 1758185, heartbeat 0s old,
+# /proc/1758185/cwd = /home/victor/Work/missions/mission-fabric - a writer in the very directory this
+# mission launches into that no run.lock named and no title marker matched, because the harness started
+# it rather than 'mission.sh stage/start'.
+# rc 2 when the node's memory db cannot be read: "no writer" and "cannot tell" are never collapsed.
+node_presence() { # <mission dir> <worktree> -> lines "<session><TAB><pid><TAB><age><TAB><cwd>"
+  local home db rows sid pid age cwd
+  home=${MISSION_NODE_HOME:-$HOME/.wasm-agent}
+  db=$home/memory.db
+  command -v sqlite3 >/dev/null 2>&1 || return 2
+  [ -r "$db" ] || return 2
+  rows=$(sqlite3 -readonly "$db" \
+    "select session_id, pid, cast(strftime('%s','now')-heartbeat_at as int) from session_presence" 2>/dev/null) || return 2
+  [ -n "$rows" ] || return 0
+  while IFS='|' read -r sid pid age; do
+    [ -n "$sid" ] && [ -n "$pid" ] || continue
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue   # the process is gone: no writer
+    case $cwd in
+      "$1"|"$1"/*|"$2"|"$2"/*) printf '%s\t%s\t%s\t%s\n' "$sid" "$pid" "${age:--1}" "$cwd" ;;
+    esac
+  done <<<"$rows"
+  return 0
+}
+
+# Refuse on a writer the recorded session does not cover. Called wherever the RECORDED session has
+# settled: one session can be over while another still works in the same directory - the case measured
+# here on 18/11, where the mission dir's own session was 'failed' and a second session was writing in it.
+# rc 0 when it decided (MR_VERDICT active or stale), rc 1 when it found no such writer.
+writers_check() { # <mission dir>
+  local M=$1 wt out sid pid age cwd
+  local qsid='' qpid='' qage='' qcwd=''
+  wt=$(wt_of "$M")
+  out=$(node_presence "$M" "$wt") || return 1          # cannot tell: the recorded answer stands
+  [ -n "$out" ] || return 1
+  while IFS=$'\t' read -r sid pid age cwd; do
+    [ -n "$sid" ] || continue
+    [ "$sid" = "$MR_SESSION" ] && continue             # the recorded session was already ruled on
+    if [ "${age:--1}" -ge 0 ] && [ "$age" -le "$ACTIVE_SECONDS" ]; then
+      MR_VERDICT=active; MR_SESSION=$sid
+      MR_WHY="session $sid: the node records pid $pid serving it, that process's cwd is $cwd - this mission's own directory - and its last heartbeat was ${age}s ago, so a launch now is a second writer in $wt"
+      return 0
+    fi
+    [ -n "$qsid" ] || { qsid=$sid; qpid=$pid; qage=$age; qcwd=$cwd; }
+  done <<<"$out"
+  [ -n "$qsid" ] || return 1
+  MR_VERDICT=stale; MR_SESSION=$qsid
+  MR_WHY="session $qsid: pid $qpid still has $qcwd as its cwd but its last heartbeat was ${qage}s ago (> ${ACTIVE_SECONDS}s): a leftover process, not a moving run"
+  return 0
+}
+
 # The verdict this script believes, and the only liveness it has:
 #   MR_VERDICT  active   a run is in flight and recently moved: a launch now is a second writer
 #               stale    the node still lists the run active, but it has not moved for ACTIVE_SECONDS
@@ -256,6 +310,7 @@ mission_run() { # <mission dir>
             return 0 ;;
         esac ;;
       settled|failed|cancelled|unknown)
+        writers_check "$M" && return 0
         MR_VERDICT=released
         MR_WHY="the node says run $run is $state (${MR_AGE}s ago, session $sid): no writer is left"
         return 0 ;;
@@ -304,18 +359,21 @@ mission_run() { # <mission dir>
             MR_WHY="session $id is unfinished and its last message was ${rowage}s ago (> ${ACTIVE_SECONDS}s), but $boot"
             return 0 ;;
         esac
+        writers_check "$M" && return 0
         MR_VERDICT=released; MR_AGE=$rowage
         MR_WHY="session $id is unfinished but quiet for ${rowage}s (> ${ACTIVE_SECONDS}s), and $boot: no writer is moving"
         return 0
         ;;
       *)
+        writers_check "$M" && return 0
         MR_VERDICT=released; MR_AGE=$rowage
         MR_WHY="session $id is $rowstate: no run is in flight"
         return 0
         ;;
     esac
   done <<<"$NODE_ROWS"
-  [ -n "$found" ] || return 0
+  [ -n "$found" ] || { writers_check "$M" && return 0; return 0; }
+  writers_check "$M" && return 0
   MR_VERDICT=released
   MR_WHY="session $found: the node lists no run in flight"
   return 0
@@ -593,6 +651,11 @@ one_status() { # <name>
   printf '%-10s %s\n' dirty "$dirty"
   printf '%-10s %s\n' run "$MR_VERDICT: $MR_WHY"
   printf '%-10s %s\n' session "$session"
+  # 'session' is the id this mission records; 'writer' is the session the node says is working in the
+  # mission's directory when that is somebody else - the two are different facts and both are printed.
+  if [ -n "$MR_SESSION" ] && [ "$MR_SESSION" != '-' ] && [ "$MR_SESSION" != "$session" ]; then
+    printf '%-10s %s\n' writer "$MR_SESSION (the session the node shows working in this mission's directory)"
+  fi
   printf '%-10s %s\n' boot "$boot"
   printf '%-10s %s\n' lock "$lockstate"
   printf '%-10s %s\n' launcher "$launcher"
