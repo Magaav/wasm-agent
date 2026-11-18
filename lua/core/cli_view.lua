@@ -254,19 +254,59 @@ function M.run_clock(seconds)
   return string.format("%d:%02d:%02d", math.floor(s / 3600), math.floor(s % 3600 / 60), s % 60)
 end
 
--- The footer's session numbers: `↻runs Σ↑in ↓out ◔ctx%/window ◇cache-hit%`. `Σ↑` is every request's
--- input summed (each step resends the context), so it is marked apart from the run line's `Δ` - what
--- one run ADDED to the context (operator 17/11: "why do these differ?"). No tool count: with code mode
--- one script makes many calls, so the number said nothing (operator 17/11).
+-- ---- the status bar's glyphs -------------------------------------------------------
+--
+-- A glyph is a FONT fact, not a rendering choice, so every one the terminal's two status rows draw is
+-- named here, once. Victor measured the set these replace in his own terminal (18/11, JetBrainsMono
+-- Nerd Font): U+25D1 (`◑`) and U+25F7 (`◷`) are NOT in that font, so the terminal takes them from a
+-- fallback face and draws them at another size, and `👣` is a colour emoji - it ignores the row's
+-- colour and takes two cells. What is here instead is Nerd Fonts' Material Design set: in the font,
+-- one cell per glyph, drawn in the row's own colour, one glyph per fact. The width is asserted by the
+-- two functions that actually lay these rows out - `M.columns` (the count `clip` and the status line
+-- use) and `wa-term`'s `cell_width_of` for the box the row sits in - because a glyph two cells
+-- wide moves every number after it.
+local GLYPH = {
+  -- The context ball: five Material Design circles, one per band of the model's window.
+  ballEmpty = "\243\176\157\166",         -- U+F0766
+  ballStarted = "\243\176\170\159",       -- U+F0A9F
+  ballHalf = "\243\176\170\161",          -- U+F0AA1
+  ballThreeQuarters = "\243\176\170\163", -- U+F0AA3
+  ballFull = "\243\176\170\165",          -- U+F0AA5
+  steps = "\243\176\183\186",             -- U+F0DFA, the run's steps
+  clock = "\243\176\148\155",             -- U+F051B, the run's elapsed clock
+  turns = "\243\176\145\144",             -- U+F0450, the session's turns
+  cache = "\243\176\134\188",             -- U+F01BC, the cache-hit rate
+}
+M.GLYPH = GLYPH
+
+-- ONE function decides which ball a context percentage wears: five bands, each starting at its own
+-- floor - 3% is the second ball, 50% the third, 75% the fourth, 100% the full one. A context measured
+-- past its window (it happens across a compaction boundary) is the full ball, and a percentage nobody
+-- measured is the empty one - the same ball 0% wears, because "nothing measured" is not "nearly full".
+function M.context_ball(percent)
+  local p = tonumber(percent) or 0
+  if p < 3 then return GLYPH.ballEmpty end
+  if p < 50 then return GLYPH.ballStarted end
+  if p < 75 then return GLYPH.ballHalf end
+  if p < 100 then return GLYPH.ballThreeQuarters end
+  return GLYPH.ballFull
+end
+
+-- The footer's session numbers: `󰑐runs Σ↑in ↓out 󰪟ctx%/window 󰆼cache-hit%`. `Σ↑` is every
+-- request's input summed (each step resends the context), so it is marked apart from the run line's
+-- `Δ` - what one run ADDED to the context (operator 17/11: "why do these differ?"). No tool count:
+-- with code mode one script makes many calls, so the number said nothing (operator 17/11). The ball is
+-- the one `M.context_ball` chose, so the band and the percentage beside it cannot disagree.
 function M.session_summary(t)
   t = t or {}
-  local parts = { "\226\134\187" .. (t.runs or 0),
+  local parts = { GLYPH.turns .. (t.runs or 0),
     "\206\163\226\134\145" .. M.tokens(t.prompt) .. " \226\134\147" .. M.tokens(t.completion) }
   if (tonumber(t.budget) or 0) > 0 then
-    parts[#parts + 1] = string.format("\226\151\148%.1f%%/%s", 100 * (t.context or 0) / t.budget, M.tokens(t.budget))
+    local percent = 100 * (tonumber(t.context) or 0) / t.budget
+    parts[#parts + 1] = M.context_ball(percent) .. string.format("%.1f%%/%s", percent, M.tokens(t.budget))
   end
   if (tonumber(t.prompt) or 0) > 0 then
-    parts[#parts + 1] = string.format("\226\151\135%.2f%%", 100 * (t.cached or 0) / t.prompt)
+    parts[#parts + 1] = GLYPH.cache .. string.format("%.2f%%", 100 * (t.cached or 0) / t.prompt)
   end
   return table.concat(parts, " ")
 end
@@ -1044,9 +1084,11 @@ function METHODS:status_template()
   end
   local function compose(shown, live)
     if boxed and self.turn then
-      -- `✶ 👣2·5s Δ12.4k ↑4.6M ↓310 ◷1:51`: the step this run is on and how long it has taken, what
+      -- `✶ 󰷺2·5s Δ12.4k ↑4.6M ↓310 󰔛1:51`: the step this run is on and how long it has taken, what
       -- it ADDED to the context (`Δ`) and the session's input total (`↑`), its output tokens and its
-      -- whole time. `{s}` and `{T}` are clocks the host keeps moving while Lua is blocked.
+      -- whole time. `{s}` and `{T}` are clocks the host keeps moving while Lua is blocked. ONE muted
+      -- span, the step pair included: the count is secondary text like the numbers beside it, so it
+      -- wears that gray and cannot drift into a colour of its own (Victor, 18/11).
       return with_source("{m}" .. paint(self:run_numbers("{s}", "{T}"), "muted", live), live)
     end
     local line = "{m}" .. shown
@@ -1490,7 +1532,7 @@ function METHODS:live_footer()
   self:footer_draw()
 end
 
--- `👣steps·step-time Δadded ↑in ↓out ◷run-time` for the current run.
+-- `󰷺steps·step-time Δadded ↑in ↓out 󰔛run-time` for the current run.
 --
 -- TWO input numbers, deliberately (Victor, 18/11: "only delta is not enough"). `Δ` is what the run
 -- ADDED to the context - the last call's prompt against the one the run started on, not the sum of
@@ -1500,15 +1542,15 @@ end
 -- wanted; one without the other was wrong in both directions.
 --
 -- The two clocks are passed in (tokens for the host's ticker, or the stopped values once the run has
--- ended). With no step clock (the line left under a finished run) the step count stands alone: `👣8`.
+-- ended). With no step clock (the line left under a finished run) the step count stands alone: `󰷺8`.
 function METHODS:run_numbers(step_clock, run_clock)
   local run, base, totals = self.turn or {}, (self.turn and self.turn.baseline) or {}, self.totals or {}
   local input = math.max(0, (self.context or 0) - (run.context or 0))
   local output = math.max(0, (totals.completion or 0) - (base.completion or 0))
-  return "\240\159\145\163" .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
+  return GLYPH.steps .. math.max(1, run.rounds or 0) .. (step_clock and ("\194\183" .. step_clock) or "")
     .. " \206\148" .. M.tokens(input) .. " \226\134\145" .. M.tokens(totals.prompt)
     .. " \226\134\147" .. M.tokens(output)
-    .. " \226\151\183" .. run_clock
+    .. " " .. GLYPH.clock .. run_clock
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is

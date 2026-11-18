@@ -691,3 +691,83 @@ mechanical (the regenerated `refusal_codes` map).
 18. The run status bar (CLI): `👣steps·step-time Δadded ↑input-total ↓output ◷run-time`, e.g.
 
         👣2·5s Δ12.3k ↑4.6M ↓310 ◷1:51
+
+## Round 4 - the status bar's glyphs (18/11), and what the font actually has
+
+`lua/core/cli_view.lua` names every glyph its two status rows draw in one table (`GLYPH`) and uses
+Nerd Fonts' Material Design set, measured in Victor's terminal (JetBrainsMono Nerd Font) with fontconfig
+on this node:
+
+    4/4 font files: U+F0766 󰝦  U+F0A9F 󰪟  U+F0AA1 󰪡  U+F0AA3 󰪣  U+F0AA5 󰪥   (the context ball, 5 bands)
+    4/4 font files: U+F0DFA 󰷺  U+F051B 󰔛  U+F0450 󰑐  U+F01BC 󰆼               (steps, clock, turns, cache)
+    0/4 font files: U+25D1 ◑   U+25F7 ◷   U+1F463 👣   U+21BB ↻              (the four replaced)
+    0/4 font files: U+2692 ⚒   U+2733 ✳   U+2737 ✷   U+2738 ✸   U+2739 ✹   U+23F0 ⏰
+    4/4 font files: U+25D4 ◔   U+25C7 ◇   U+25C8 ◈   U+00B7 ·   U+0394 Δ   U+03A3 Σ   U+2191 ↑
+                    U+2193 ↓   U+276F ❯   U+2014 —   and the box drawing
+
+### Before / after, rendered through the view's own writer
+
+A boxed `wa chat` at 100 columns, a run of three steps, the same probe script against both trees
+(`WASM_AGENT_LUA_ROOT` selects the Lua tree, so the binary is the same and only the code differs):
+
+    BEFORE (e8e9cd63)
+      RUN  = 👣2·5s Δ24.3k ↑120.4k ↓1.0k ◷1:51
+      BAR  = ✳ 👣2·0s Δ0 ↑0 ↓0 ◷0:00
+      BAR^ = <ESC>[38;2;215;119;87m✳<ESC>[0m <ESC>[38;2;153;153;153m👣2·0s Δ0 ↑0 ↓0 ◷0:00<ESC>[0m<ESC>[K
+      SUM  = ↻3 Σ↑120.4k ↓1.0k ◔12.2%/200.0k ◇75.20%
+
+    AFTER
+      RUN  = 󰷺2·5s Δ24.3k ↑120.4k ↓1.0k 󰔛1:51
+      BAR  = ✳ 󰷺2·0s Δ0 ↑0 ↓0 󰔛0:00
+      BAR^ = <ESC>[38;2;215;119;87m✳<ESC>[0m <ESC>[38;2;153;153;153m󰷺2·0s Δ0 ↑0 ↓0 󰔛0:00<ESC>[0m<ESC>[K
+      SUM  = 󰑐3 Σ↑120.4k ↓1.0k 󰪟12.2%/200.0k 󰆼75.20%
+
+The whole numbers line is ONE muted span (0x999999, the palette's secondary text) - the step pair was
+already gray on this branch, so the brief's "today it renders blue" does not hold here; what is new is
+that the gray is asserted. `Δ` and `↑` stay together, `Δ` first, as decided in round 3.
+
+### The context ball, every band edge (rendered through `session_summary`)
+
+    BEFORE                                          AFTER
+     0     ↻3 Σ↑120.4k ↓1.0k ◔0.0%/200.0k ◇75.20%      0     󰑐3 ... 󰝦0.0%/200.0k 󰆼75.20%
+     2.9   ↻3 Σ↑120.4k ↓1.0k ◔2.9%/200.0k ◇75.20%      2.9   󰑐3 ... 󰝦2.9%/200.0k 󰆼75.20%
+     3     ↻3 Σ↑120.4k ↓1.0k ◔3.0%/200.0k ◇75.20%      3     󰑐3 ... 󰪟3.0%/200.0k 󰆼75.20%
+     49.9  ↻3 Σ↑120.4k ↓1.0k ◔49.9%/200.0k ◇75.20%     49.9  󰑐3 ... 󰪟49.9%/200.0k 󰆼75.20%
+     50    ↻3 Σ↑120.4k ↓1.0k ◔50.0%/200.0k ◇75.20%     50    󰑐3 ... 󰪡50.0%/200.0k 󰆼75.20%
+     74.9  ↻3 Σ↑120.4k ↓1.0k ◔74.9%/200.0k ◇75.20%     74.9  󰑐3 ... 󰪡74.9%/200.0k 󰆼75.20%
+     75    ↻3 Σ↑120.4k ↓1.0k ◔75.0%/200.0k ◇75.20%     75    󰑐3 ... 󰪣75.0%/200.0k 󰆼75.20%
+     99.9  ↻3 Σ↑120.4k ↓1.0k ◔99.9%/200.0k ◇75.20%     99.9  󰑐3 ... 󰪣99.9%/200.0k 󰆼75.20%
+     100   ↻3 Σ↑120.4k ↓1.0k ◔100.0%/200.0k ◇75.20%    100   󰑐3 ... 󰪥100.0%/200.0k 󰆼75.20%
+
+(`...` is `Σ↑120.4k ↓1.0k`, unchanged; the full lines are in REPORT.md's captured output.) The band is
+decided by ONE function, `M.context_ball(percent)`: 3%, 50%, 75% belong to the HIGHER band, and anything
+at or over 100% - including a context measured past its window after a compaction - is the full ball. An
+unmeasured percentage is the empty ball, not the full one.
+
+### Tests, and what each proves
+
+* `scripts/test-cli-view.lua` (415 checks, 379 before): the nine characters by codepoint; each at exactly
+  one cell through `view_lib.columns` (the count `clip` and the status line use); the nine band edges plus
+  140 and nil; the RENDERED boxed status row (glyph, clock, `Δ` < `↑` < `↓`, the step pair inside the
+  secondary gray's SGR, no replaced character left); the RENDERED session bar in full.
+* `rust/wa-term/src/terminal_editor.rs` `the_status_bar_glyphs_are_one_cell_each`: the same nine through
+  `cell_width_of`, the function the box is laid out with, then the sample row's cell count == its
+  character count and `clip_cells` keeps it whole at 40 cells. `cargo test -p wa-term`: 158 passed.
+* On the base (a throwaway worktree at e8e9cd63, removed after the run, with this same test file): 33
+  of 415 failed.
+
+### Pre-existing, not this round
+
+* `scripts/test-cli-wake-row.lua` 1 of 30 (`the snapshot matches what is drawn now`): the stored
+  `tests/snapshots/balloon/wakes-80x24.txt` still says `↻0 ⚒️0 ↑0 ↓0`, which is older than `Σ↑` itself.
+  Same failure on the base. Left alone on purpose (regenerating it would hide a pre-existing failure
+  inside this commit).
+* `scripts/test-cli-input.lua` 2 of 16, also identical on the base.
+
+### Not changed, and why
+
+* the SPINNER (`✶ ✳ ✷ ✸ ✹`): only `✶` is in his font, so four frames of five still fall back - the same
+  size jump, once per tick. He picks the glyphs; one Material glyph per frame ends it.
+* the self-wake row's `⏰` (U+23F0): not in the font either.
+* the window (`ui/`, `scripts/probe-*.js`): it draws with its own font stack and already forces the text
+  presentation of `👣`, so nothing there is drawn by a fallback face.

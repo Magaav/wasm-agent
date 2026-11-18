@@ -824,17 +824,17 @@ editor_view:event({ type = "usage", total = session_total, prompt = 27200 })
 local running = table.concat(editor_out)
 -- Victor, 18/11: the delta AND the session's input total, right after it ("only delta is not
 -- enough"). 27.2k was added; 120.4k is what the session has sent in total.
-ok(has(running, "\240\159\145\1636\194\183") and not has(running, "\226\154\146\239\184\143")
+ok(has(running, "\243\176\183\1866\194\183") and not has(running, "\226\154\146\239\184\143")
   and has(running, "\206\14827.2k \226\134\145120.4k \226\134\1471.0k"),
   "the status line shows the step, the run's tools, what it added to the context, the session's"
     .. " input total and its output")
 editor_view:answered("## Done")
 local summary = editor_view.last_summary
-ok(summary and has(summary, "\226\134\1871 ") and has(summary, "\226\151\13575.20%"),
+ok(summary and has(summary, "\243\176\145\1441 ") and has(summary, "\243\176\134\18875.20%"),
   "completion leaves the session's numbers: runs, and the cache hit rate")
 local idle_mark = #editor_out + 1
 editor_view:prompt()
-ok(has(since(editor_out, idle_mark), "\226\134\1871 ") and has(since(editor_out, idle_mark), "\27[12;1H"),
+ok(has(since(editor_out, idle_mark), "\243\176\145\1441 ") and has(since(editor_out, idle_mark), "\27[12;1H"),
   "the session summary stays in the footer while idle")
 local before_submit = #editor_out
 editor_view:submitted()
@@ -934,7 +934,7 @@ do
   -- `session` first is the difference between asserting the notice's own row and passing by accident
   -- because the status line happened to be written on `content` too.
   local notice_row = boxed_view.screen.session or content_row
-  local steps = "\240\159\145\163" -- `👣`, the boxed status line's step count: on it the whole run
+  local steps = "\243\176\183\186" -- U+F0DFA, the boxed status line's step count: on it the whole run
 
   local mark = #boxed_written + 1
   boxed_view:run_started()
@@ -1473,7 +1473,7 @@ do
   -- (2) The run status is what that row holds at the end of EVERY frame of the pair. A frame that
   -- does not touch the row leaves it as it was, which is why `held` carries over rather than being
   -- reset per frame: this is the operator's "the row goes blank and never comes back".
-  local steps = "\240\159\145\163" -- the step count `\U0001f463`, the run-status line's own mark
+  local steps = "\243\176\183\186" -- U+F0DFA, the run-status line's own step mark
   local blanked, first_blank = 0, nil
   for index, body in ipairs(bodies) do
     local drawn = row_held(body)
@@ -1762,7 +1762,7 @@ do
   view.context = 24300
   view.totals = { prompt = 4600000, completion = 310 }
   eq(view:run_numbers("5s", "1:51"),
-    "\240\159\145\1632\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \226\151\1831:51",
+    "\243\176\183\1862\194\1835s \206\14812.3k \226\134\1454.6M \226\134\147310 \243\176\148\1551:51",
     "the run line: steps, the delta added, the input total, output, clock")
   -- A run that has added nothing yet still says both numbers: nothing added, the total it sent.
   local fresh = view_lib.new({ live = true, limit = 100 })
@@ -1772,6 +1772,99 @@ do
   local first = fresh:run_numbers("0s", "0:01")
   ok(has(first, "\206\1480 ") and has(first, "\226\134\1459.0k"),
     "a first step says nothing added and the total it sent: " .. first)
+end
+
+-- ---- the status bar's glyphs: his font, five bands, one cell each, and the gray -----------------
+-- Victor, 18/11 (round 4), measured in his own terminal (JetBrainsMono Nerd Font): U+25D1 (`◑`) and
+-- U+25F7 (`◷`) are NOT in that font, so the terminal falls back to another face and draws them at
+-- another size, and `👣` is a colour emoji that ignores the row's colour and takes two cells. The
+-- two status rows therefore wear Nerd Fonts' Material Design set - EXACTLY the nine characters below -
+-- and the run line's step pair is the secondary gray, not a colour of its own.
+do
+  -- EXACTLY these: the codepoint beside each name is the one Victor chose, so a plausible-looking
+  -- neighbour is a failure and not a substitution.
+  local chosen = {
+    { "ballEmpty", "\243\176\157\166", "U+F0766" },
+    { "ballStarted", "\243\176\170\159", "U+F0A9F" },
+    { "ballHalf", "\243\176\170\161", "U+F0AA1" },
+    { "ballThreeQuarters", "\243\176\170\163", "U+F0AA3" },
+    { "ballFull", "\243\176\170\165", "U+F0AA5" },
+    { "steps", "\243\176\183\186", "U+F0DFA" },
+    { "clock", "\243\176\148\155", "U+F051B" },
+    { "turns", "\243\176\145\144", "U+F0450" },
+    { "cache", "\243\176\134\188", "U+F01BC" },
+  }
+  local named = view_lib.GLYPH or {}
+  for _, glyph in ipairs(chosen) do
+    eq(named[glyph[1]], glyph[2], "GLYPH." .. glyph[1] .. " is the glyph Victor chose (" .. glyph[3] .. ")")
+    -- ONE CELL, measured by the function this view counts its rows with (`markdown.columns` here, the
+    -- same rule as `wa-term`'s `cell_width_of`, which measures the box the row sits in): a glyph two
+    -- cells wide moves every number after it.
+    eq(view_lib.columns(glyph[2]), 1, glyph[3] .. " takes exactly one terminal cell")
+  end
+
+  -- Every band edge, from both sides: the floor belongs to the higher band (3% is the second ball) and
+  -- the number just under it to the lower one - 0, 2.9, 3, 49.9, 50, 74.9, 75, 99.9, 100.
+  local edges = {
+    { 0, "\243\176\157\166", "0%" }, { 2.9, "\243\176\157\166", "2.9%" },
+    { 3, "\243\176\170\159", "3%" }, { 49.9, "\243\176\170\159", "49.9%" },
+    { 50, "\243\176\170\161", "50%" }, { 74.9, "\243\176\170\161", "74.9%" },
+    { 75, "\243\176\170\163", "75%" }, { 99.9, "\243\176\170\163", "99.9%" },
+    { 100, "\243\176\170\165", "100%" },
+  }
+  -- A base tree has no ball function at all: reading it as a table of answers reports a failed check
+  -- for every band instead of dying in the middle of the list.
+  local ball_of = view_lib.context_ball or function() return nil end
+  for _, edge in ipairs(edges) do
+    eq(ball_of(edge[1]), edge[2], "the context ball at " .. edge[3])
+  end
+  eq(ball_of(140), "\243\176\170\165", "a context measured past its window is the full ball")
+  eq(ball_of(nil), "\243\176\157\166", "a percentage nobody measured is the empty ball")
+
+  -- The RENDERED rows, not the pieces: the boxed run-status row during a run, and the session bar under
+  -- the box (the last write addressed to each row, because both are rewritten in place).
+  local real_input_editor = host.input_editor
+  host.input_editor = function() return true end
+  local rendered_view, rendered = capture({ live = true, limit = 100, rows = function() return 30 end })
+  rendered_view.editor = true
+  rendered_view:prompt("wa> ")
+  rendered_view:run_started()
+  rendered_view:event({ type = "round", n = 2 })
+  rendered_view.runs = 3
+  rendered_view.totals = { prompt = 120400, completion = 1000, cached = 90540 }
+  rendered_view.context, rendered_view.budget = 24300, 200000
+  rendered_view:live_footer()
+  host.input_editor = real_input_editor
+  local function last_row_write(text, row)
+    local address, at, held = "\27[" .. row .. ";1H", 1, nil
+    while true do
+      local found = text:find(address, at, true)
+      if not found then return held end
+      local rest = text:sub(found + #address)
+      local stop = rest:find("\27[u", 1, true) or #rest
+      held = rest:sub(1, stop - 1)
+      at = found + 1
+    end
+  end
+  ok(rendered_view.screen ~= nil, "the boxed layout is up, so the status row exists")
+  local raw = last_row_write(table.concat(rendered), rendered_view.screen and rendered_view.screen.status) or ""
+  local bar = visible(raw)
+  ok(has(bar, "\243\176\183\1862"), "the run-status row draws the step pair with the chosen glyph: " .. bar)
+  ok(has(bar, " \243\176\148\155"), "and the elapsed clock with its own: " .. bar)
+  -- Round 3's decision stands: delta (what the run added) and the session's input total, together.
+  local delta, up, down = bar:find("\206\148", 1, true), bar:find("\226\134\145", 1, true), bar:find("\226\134\147", 1, true)
+  ok(delta and up and down and delta < up and up < down,
+    "delta, then the input total, then the output, in that order: " .. bar)
+  -- The GRAY is a rendering decision, so it is asserted on the bytes (`visible` removes exactly that): the
+  -- secondary role opens at the step glyph, so the count wears the same gray as the numbers beside it.
+  ok(has(raw, view_lib.style("muted") .. "\243\176\183\1862"),
+    "the step count and its glyph are drawn in the secondary gray: " .. raw)
+  ok(not has(bar, "\240\159\145\163") and not has(bar, "\226\151\183"),
+    "neither of the two replaced glyphs is on the row any more: " .. bar)
+  eq(rendered_view.last_summary,
+    "\243\176\145\1443 \206\163\226\134\145120.4k \226\134\1471.0k "
+      .. "\243\176\170\15912.2%/200.0k \243\176\134\18875.20%",
+    "the session bar: turns, tokens, the context ball for 12.2%, and the cache-hit rate")
 end
 
 if failed > 0 then

@@ -1334,19 +1334,19 @@ mod tests {
     #[test]
     fn at_80x24_the_fact_is_on_its_own_row_and_the_status_bar_keeps_its_numbers() {
         let mut editor = editor_at(80);
-        editor.footer = "\u{21bb}3 \u{2692}2 \u{2191}9 \u{2193}4 \u{25c7}0.31%".into();
+        editor.footer = "\u{f0450}3 \u{2692}2 \u{2191}9 \u{2193}4 \u{f01bc}0.31%".into();
         editor.footer_right = "stub-model".into();
         // Without a wake: no wake text anywhere, and the status bar keeps its numbers and its model.
         let plain = rows_by_number(&editor.render());
         assert!(plain.values().all(|row| !row.contains("wakes")), "no wake text anywhere: {plain:?}");
         let bar = plain.get(&editor.footer_row()).cloned().unwrap_or_default();
-        assert!(bar.contains("\u{21bb}3") && bar.contains("stub-model"), "the status bar: {bar:?}");
+        assert!(bar.contains("\u{f0450}3") && bar.contains("stub-model"), "the status bar: {bar:?}");
 
         // With a wake: one more row, directly above the status bar, and the numbers are untouched.
         editor.wakes = "\u{23f0} 2 wakes \u{b7} next 14:05".into();
         let with = rows_by_number(&editor.render());
         let bar = with.get(&24).cloned().unwrap_or_default();
-        assert!(bar.contains("\u{21bb}3") && bar.contains("stub-model"),
+        assert!(bar.contains("\u{f0450}3") && bar.contains("stub-model"),
             "the status bar keeps the numbers and the model: {bar:?}");
         assert!(!bar.contains("wakes"), "and no wake text on it: {bar:?}");
         let above = with.get(&23).cloned().unwrap_or_default();
@@ -1546,6 +1546,39 @@ mod tests {
         type_bytes(&mut e, b"abc");
         assert!(e.render().contains("\x1b[19;1H\x1b[2K\u{276f} abc"));
         assert_eq!(e.cursor_frame(), "\x1b[19;6H", "the cursor counts cells, not bytes");
+    }
+    /// The CLI's two status rows name their glyphs in `lua/core/cli_view.lua`'s `GLYPH` table, and this
+    /// crate is the one that LAYS THOSE ROWS OUT - the box, its divider, the footer - so the widths that
+    /// matter are the ones this function gives. Victor's terminal (18/11, JetBrainsMono Nerd Font) has
+    /// every one of these, and draws it in ONE cell: a character measured two here moves every number
+    /// after it, and a character the font does NOT have (the `\u{25d1}` and `\u{25f7}` these replaced) is
+    /// drawn from a fallback face at another size, which is the defect this test keeps out.
+    #[test]
+    fn the_status_bar_glyphs_are_one_cell_each() {
+        let glyphs = [
+            ("\u{f0766}", "the context ball, 0% to 3%"),
+            ("\u{f0a9f}", "the context ball, 3% to 50%"),
+            ("\u{f0aa1}", "the context ball, 50% to 75%"),
+            ("\u{f0aa3}", "the context ball, 75% to 100%"),
+            ("\u{f0aa5}", "the full context ball, 100% and past the window"),
+            ("\u{f0dfa}", "the run's steps"),
+            ("\u{f051b}", "the run's elapsed clock"),
+            ("\u{f0450}", "the session's turns"),
+            ("\u{f01bc}", "the cache-hit rate"),
+        ];
+        for (glyph, what) in glyphs {
+            assert_eq!(glyph.chars().count(), 1, "{what}: one character, not a sequence");
+            assert_eq!(cell_width_of(glyph.chars().next().unwrap()), 1,
+                "{what} takes exactly one terminal cell: {glyph:?}");
+        }
+        // The row they sit on is one cell per character, so its column count is its character count -
+        // which is what keeps `\u{394}` and `\u{2191}` in the columns the next redraw expects, whatever
+        // the clocks are doing.
+        let bar = "\u{f0dfa}2\u{b7}5s \u{394}12.3k \u{2191}4.6k \u{2193}310 \u{f051b}1:51";
+        assert_eq!(bar.chars().count(), 29, "the sample row: {bar:?}");
+        assert_eq!(bar.chars().map(cell_width_of).sum::<usize>(), bar.chars().count(),
+            "no character of the status row is zero or two cells: {bar:?}");
+        assert_eq!(clip_cells(bar, 40), bar, "and it fits the 40 cells it asks for, whole");
     }
     #[test]
     fn a_queued_steer_sits_above_the_status_line() {
