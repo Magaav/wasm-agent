@@ -197,6 +197,10 @@ impl Process {
                 1,
                 CREATE_SUSPENDED
                     | CREATE_NO_WINDOW
+                    // Low CPU priority for the command (18/11, item 1.6): a background operation must
+                    // not starve the session waiting on it. Below normal, never idle, so a command with
+                    // nothing else to compete with still runs at full speed.
+                    | BELOW_NORMAL_PRIORITY_CLASS
                     | CREATE_UNICODE_ENVIRONMENT
                     | EXTENDED_STARTUPINFO_PRESENT,
                 env_wide.as_ptr() as _,
@@ -339,6 +343,11 @@ impl Process {
     }
     pub fn containment() -> &'static str {
         "windows_job_object"
+    }
+    /// What the operation's own record says about the CPU priority it ran at (see the creation flags
+    /// in spawn: BELOW_NORMAL_PRIORITY_CLASS).
+    pub fn priority() -> String {
+        "below_normal".to_string()
     }
     pub fn read(&mut self, stderr: bool, buffer: &mut [u8]) -> io::Result<Option<usize>> {
         let pipe = if stderr { self.stderr.0 } else { self.stdout.0 };

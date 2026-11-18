@@ -1,6 +1,19 @@
 //! Nonblocking output and process containment. No reader threads, read_to_end, or unbounded wait.
 use crate::Spec;
 use std::io;
+/// The niceness an operation's command runs at (18/11, item 1.6): one step below the node's own, so a
+/// long build, a test suite or a promoted background call cannot starve the session that is waiting on
+/// it. It is a niceness, so raising it never needs privilege and an idle node still runs the command at
+/// full speed - the command only yields when something else wants the CPU. WASM_AGENT_OPERATION_NICE
+/// overrides it; 0 keeps the inherited priority.
+#[cfg(unix)]
+pub fn operation_nice() -> i32 {
+    std::env::var("WASM_AGENT_OPERATION_NICE")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .map(|nice| nice.clamp(0, 19))
+        .unwrap_or(10)
+}
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod platform;
@@ -33,6 +46,17 @@ impl Process {
         }
         for (k, v) in &spec.env {
             command.env(k, v);
+        }
+        // Low CPU priority for the command (see operation_nice). Best effort on purpose: an environment
+        // that refuses the call leaves the command at the node's own priority rather than failing it.
+        let nice = operation_nice();
+        if nice > 0 {
+            unsafe {
+                command.pre_exec(move || {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+                    Ok(())
+                });
+            }
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take();
@@ -90,6 +114,13 @@ impl Process {
     pub fn auxiliary_cleanup(&self) -> &[String] { &[] }
     pub fn containment() -> &'static str {
         "posix_process_group"
+    }
+    /// What the operation's own record says about the CPU priority it ran at.
+    pub fn priority() -> String {
+        match operation_nice() {
+            0 => "default".to_string(),
+            nice => format!("nice+{nice}"),
+        }
     }
     pub fn read(&mut self, stderr: bool, buffer: &mut [u8]) -> io::Result<Option<usize>> {
         use std::io::Read;

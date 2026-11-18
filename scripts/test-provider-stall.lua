@@ -13,8 +13,13 @@
 --
 -- Run from the repo root:  WA_SCRIPT=scripts/test-provider-stall.lua wa --db /tmp/x.db
 local real_getenv = host.getenv
+-- A node's own provider tuning is not this row's: with WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS=300 in
+-- the ambient environment (it is set on avell, 18/11, for the operator's own sessions) the first check
+-- read 300 and the row failed on a machine whose code was right. The row defines the deadline it pins.
+local CLEARED = { WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS = true }
 host.getenv = function(key)
   if key == 'WASM_AGENT_LLM_API_KEY' then return 'test-only' end
+  if CLEARED[key] then return nil end
   if key == 'WASM_AGENT_PROVIDER_RETRIES' then return '0' end
   if key == 'WASM_AGENT_PROVIDER_RESPONSE_TIMEOUT_RETRIES' then return '0' end
   return real_getenv(key)
@@ -46,7 +51,9 @@ end
 
 -- --------------------------------------------------------------- the deadline's shape
 eq(provider.first_response_seconds(), 90, "a provider call gets its own 90s first-response deadline")
-local saved = real_getenv("WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS")
+-- The row restores this after its own overrides: restore the row's base, never the node's value (see
+-- CLEARED above - a node that sets 300 would otherwise decide what the last check reads).
+local saved = nil
 host.getenv = (function(previous)
   return function(key)
     if key == "WASM_AGENT_PROVIDER_FIRST_RESPONSE_SECONDS" then return "45" end

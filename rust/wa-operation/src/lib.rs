@@ -62,6 +62,79 @@ impl Spec {
         }
     }
 }
+/// The node's running operations, and the gate a new one waits on (18/11, item 1.6 of
+/// change/harness-next-a).
+///
+/// MAX_ACTIVE is the node's CPU cap: past it a new operation used to be REFUSED with
+/// operation_capacity, which threw away work the caller had already planned while the process it
+/// wanted was only waiting for a core. It now QUEUES: the operation is admitted (durably, with its
+/// receipt) and its supervisor waits here for a slot, recording state:"queued" and queued_ms so the
+/// wait is visible, and giving the wait back to its own deadline so a queued command is not already
+/// half-expired when it starts. Only a cancel or a queue wait longer than the operation's own deadline
+/// ends a queued operation, and each of those is named.
+static RUNNING: Mutex<usize> = Mutex::new(0);
+static FREED: Condvar = Condvar::new();
+struct Slot;
+impl Slot {
+    /// Take one of the node's slots, waiting for one if all of them are busy. The entry carries the
+    /// cancel flag and the deadline, and the wait is recorded on the operation as it happens.
+    fn acquire(entry: &Arc<Entry>, dir: &Path) -> io::Result<Slot> {
+        let queued_at = Instant::now();
+        let mut announced = false;
+        loop {
+            let mut running = RUNNING.lock().map_err(error)?;
+            if *running < MAX_ACTIVE {
+                *running += 1;
+                drop(running);
+                let queued_ms = queued_at.elapsed().as_millis() as u64;
+                if queued_ms > 0 {
+                    // The queue is not the command's fault: give the wait back to its deadline so a
+                    // command that sat in the queue still gets the time it was promised.
+                    entry.deadline_ms.fetch_add(queued_ms, Ordering::AcqRel);
+                    let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state["queued_ms"] = json!(queued_ms);
+                    if state["state"] == "queued" {
+                        state["state"] = json!("accepted");
+                    }
+                    let snapshot = state.clone();
+                    drop(state);
+                    let _ = atomic_json(&dir.join("state.json"), &snapshot);
+                    let _ = entry.index.record(&snapshot);
+                }
+                return Ok(Slot);
+            }
+            if !announced {
+                announced = true;
+                let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                state["state"] = json!("queued");
+                state["queued_because"] = json!("operation_capacity");
+                state["queue_depth"] = json!(*running);
+                state["queue_limit"] = json!(MAX_ACTIVE);
+                let snapshot = state.clone();
+                drop(state);
+                let _ = atomic_json(&dir.join("state.json"), &snapshot);
+                let _ = entry.index.record(&snapshot);
+            }
+            if entry.cancel.load(Ordering::Acquire) {
+                return Err(error("cancelled"));
+            }
+            if entry.started.elapsed()
+                >= Duration::from_millis(entry.deadline_ms.load(Ordering::Acquire))
+            {
+                return Err(error("operation_queue_timeout"));
+            }
+            drop(FREED.wait_timeout(running, Duration::from_millis(250)).map_err(error)?);
+        }
+    }
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut running) = RUNNING.lock() {
+            *running = running.saturating_sub(1);
+        }
+        FREED.notify_all();
+    }
+}
 struct Entry {
     owned_child: Mutex<Option<Value>>,
     index: Arc<index::Index>,
@@ -400,19 +473,10 @@ impl Manager {
         // real-directory distinction is carried by cwd_requested and effective_cwd.
         let recorded_cwd = if start_directory.requested.is_empty() { String::new() } else { spec.cwd.clone() };
         let index = self.index()?;
+        // Past MAX_ACTIVE running operations a new one QUEUES in its supervisor (Slot::acquire below)
+        // instead of being refused: the caller's work is admitted, recorded and run when a core frees,
+        // and the wait is named on the operation. The registry itself stays bounded.
         let mut entries = self.entries.lock().map_err(error)?;
-        if entries
-            .values()
-            .filter(|v| {
-                !v.state.lock().unwrap()["settled"]
-                    .as_bool()
-                    .unwrap_or(false)
-            })
-            .count()
-            >= MAX_ACTIVE
-        {
-            return Err(error("operation_capacity"));
-        }
         if entries.len() >= 128 {
             entries.retain(|_, v| {
                 !v.state.lock().unwrap()["settled"]
@@ -430,7 +494,7 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"cpu_priority":Process::priority(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
         if let Some(requested) = &spec.cwd_requested {
             state["cwd_requested"] = json!(requested);
         }
@@ -475,10 +539,16 @@ impl Manager {
                     if entry.cancel.load(Ordering::Acquire) {
                         return Err(error("cancelled"));
                     }
-                    if entry.started.elapsed() >= spec.timeout {
+                    // One of the node's slots, waited for if the node is busy (and the command runs at
+                    // low CPU priority: Process::spawn). Acquired here, after admission, so the caller
+                    // holds its receipt immediately and the wait belongs to the operation.
+                    let slot = Slot::acquire(&entry, &dir)?;
+                    if entry.started.elapsed() >= Duration::from_millis(entry.deadline_ms.load(Ordering::Acquire)) {
                         return Err(error("deadline_exceeded"));
                     }
-                    execute(&spec, &dir, &entry, &secrets)
+                    let outcome = execute(&spec, &dir, &entry, &secrets);
+                    drop(slot);
+                    outcome
                 }));
                 let failure = match outcome {
                     Ok(Ok(())) => None,

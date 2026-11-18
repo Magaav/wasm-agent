@@ -45,6 +45,12 @@ local CLASSES = {
   { code = "provider_stalled", retryable = true,
     why = "the provider did not answer within its deadline",
     match = { "provider_stalled", "timeout: receive response", "timeout: connect", "connect: timeout" } },
+  -- A message that imitates a tool result is not an answer: the model has to call the tool it was
+  -- describing. Nothing was dispatched and nothing was answered, so a rerun can plausibly finish it
+  -- (18/11, session 100c54ab, where the fabricated block ended the turn as if it had answered).
+  { code = "fake_tool_result", retryable = true,
+    why = "the model wrote a tool result instead of calling one",
+    match = { "fake_tool_result" } },
   { code = "provider_empty", retryable = true,
     why = "the provider answered with nothing",
     match = { "empty_reply", "returned nothing" } },

@@ -47,8 +47,10 @@ local paths = dofile("lua/core/paths.lua")
 local output = dofile("lua/core/pure.lua")("lua/core/tool_output.lua")
 local M = {}
 
--- The wait a call gets when it names none, and the ceiling on any wait. A script's own remaining time
--- is the third bound (`M.effective_ms`): a wait never outlives the script that started it.
+-- The wait a call gets when it names none, and the ceiling on any wait. There is no third bound from
+-- bound any more (18/11): a script is never killed for waiting, so there is no "remaining
+-- script time" for a wait to outlive (the loop sets neither remaining_ms nor remaining). A caller
+-- that passes one still gets the old clamp (M.effective_ms); the only other stop is the CPU guard.
 M.DEFAULT_WAIT_S = 60
 M.MAX_WAIT_S = 300
 -- Reserved for the answer itself, the delivery into the guest and the script's return: a wait that

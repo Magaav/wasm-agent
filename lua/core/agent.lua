@@ -25,6 +25,9 @@ local hooks = dofile("lua/core/hooks.lua")
 local done_gate = dofile("lua/core/done_gate.lua")
 local progress_guard = dofile("lua/core/progress_guard.lua")
 local run_failure = dofile("lua/core/run_failure.lua")
+-- A tool result is a fact the harness produces (18/11, session 100c54ab): the detector that keeps a
+-- message imitating one from becoming the answer.
+local fake_answer = dofile("lua/core/fake_answer.lua")
 -- WASM_AGENT_RAW_CODE (default off): a ```js run block in the reply becomes a codemode call.
 local raw_code = dofile("lua/core/pure.lua")("lua/core/raw_code.lua")
 
@@ -2326,11 +2329,26 @@ function M:run_body(text, images)
       local retry_child = child_status()
       if retry_child and retry_child.cancelled then result = "subagent_cancelled"; break end
       response_attempt = response_attempt + 1
-      self.emit({ type = "status", text = "provider did not start a response in time - retrying " ..
-        tostring(response_attempt) .. "/" .. tostring(response_retries) })
+      -- The replay waits (18/11): it used to leave immediately, hit the same dead gateway within
+      -- milliseconds and read as if nothing had been retried at all. The wait is said in the run, so a
+      -- reader sees the retry happening instead of only its outcome.
+      local wait_ms = provider.response_timeout_backoff_ms(response_attempt)
+      self.emit({ type = "status", text = string.format(
+        "provider did not start a response in time - retrying in %ds (%d/%d)",
+        math.floor(wait_ms / 1000), response_attempt, response_retries) })
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
-        reason="receive_response_timeout",attempt=response_attempt,limit=response_retries,
+        reason="receive_response_timeout",attempt=response_attempt,limit=response_retries,wait_ms=wait_ms,
+        deadline_seconds=provider.first_response_seconds(context_tokens),
         context_estimate=context_tokens})
+      local waited_ms = 0
+      while waited_ms < wait_ms do
+        if foreground_cancelled() then result = "run_cancelled" break end
+        local retry_child = child_status()
+        if retry_child and retry_child.cancelled then result = "subagent_cancelled" break end
+        host.sleep(math.min(250, wait_ms - waited_ms))
+        waited_ms = waited_ms + 250
+      end
+      if result == "run_cancelled" or result == "subagent_cancelled" then break end
       if consume_steering()>0 then
         context_tokens,context_source=self:context_tokens(messages)
         if capacity>0 and context_tokens>=capacity then error('context_overflow: steering exceeds capacity; transcript preserved') end
@@ -2340,6 +2358,12 @@ function M:run_body(text, images)
       end
       call_opts.attempt = response_attempt + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+    end
+    -- Bounded and COUNTED: a stall that survived its replays says so in the failure itself, instead of
+    -- looking like the first stalled request of the run.
+    if not ok and response_attempt > 0 and provider.is_response_timeout(tostring(result)) then
+      result = tostring(result) .. string.format(
+        " [first-response deadline expired again after %d bounded replay(s) of the same request]", response_attempt)
     end
     -- Rate limits, 5xx, dropped connections and streams that died before showing anything are
     -- replayed with exponential backoff. A stream that ended early *after* visible text or with tool
@@ -2729,6 +2753,47 @@ function M:run_body(text, images)
     messages[#messages + 1] = assistant
 
     if #calls == 0 then
+      -- A tool result is a fact the harness produces, never text a model writes (18/11, session
+      -- 100c54ab: three times in one session the turn's *answer* was markup imitating one). A message
+      -- that contains that markup is not an answer: the markup is stripped from the recorded content,
+      -- the model is handed its next step, and the event is recorded. A model that repeats it
+      -- MAX_REPEATS times in a row fails the turn BY NAME instead of "answering" with the fabrication
+      -- (lua/core/fake_answer.lua).
+      local fabricated = fake_answer.scan(result.content)
+      if fabricated then
+        self.fake_answer_repeats = (self.fake_answer_repeats or 0) + 1
+        local repeats = self.fake_answer_repeats
+        telemetry.event(self.session_id, self.run_id, "", "fake_tool_result", "step", {
+          round = round, repeats = repeats, limit = fake_answer.MAX_REPEATS,
+          tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
+          excerpt = fabricated.excerpt:sub(1, 200) })
+        trace[#trace + 1] = { kind = "fake_tool_result", ok = false, round = round, repeats = repeats,
+          tags = table.concat(fabricated.tags, ","), blocks = fabricated.blocks,
+          excerpt = fabricated.excerpt:sub(1, 200) }
+        result.content = fabricated.stripped
+        reply = ""
+        decision_phase = "fake_tool_result"
+        self.emit({ type = "status", text = string.format(
+          "the model wrote a tool result instead of calling one (%s) - that is not an answer; continuing (%d/%d)",
+          table.concat(fabricated.tags, ", "), repeats, fake_answer.MAX_REPEATS) })
+        if repeats >= fake_answer.MAX_REPEATS then
+          self.pending_failure = { trace = trace, round = round, attempts = repeats,
+            changes = changeset.summary(self.changes) }
+          telemetry.event(self.session_id, self.run_id, "", "fake_tool_result", "end",
+            { outcome = "failed", repeats = repeats })
+          error(fake_answer.failure(repeats), 0)
+        end
+        -- The notice is a durable row, not only a transient message: a reader who opens this session
+        -- later (or a resumed run that rebuilds its context from the ledger) must see why the run
+        -- continued past the model's own stop, and the phase marks it as the harness speaking.
+        local notice = fake_answer.notice(fabricated)
+        record_turn(self, { role = "user", content = notice, phase = fake_answer.CODE, debug = self.debug })
+        messages[#messages + 1] = { role = "user", content = notice }
+        goto after_answer
+      end
+      -- NOT reset here: a round that is neither an answer nor a detected fake (a steering continuation,
+      -- a step the provider re-drove) must not hand the counter back, or a model that alternates markers
+      -- would never reach the bound. The counter is per run, and a run is one turn.
       reply = result.content or ""
       reply_reasoning = result.reasoning or ""
       reply_reasoning_items = result.reasoning_items
@@ -2901,6 +2966,7 @@ function M:run_body(text, images)
         end
       end
     end
+    ::after_answer::
     record_turn(self, {
       id = assistant_id, role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
       reasoning=result.reasoning or "", phase=decision_phase ~= "" and decision_phase or result.final_phase or "",
